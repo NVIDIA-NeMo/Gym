@@ -15,7 +15,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from resources_servers.browser_gym.schemas import BrowserAction, CUATrajectory
+from resources_servers.browser_gym.schemas import BrowserAction, CUAStep, CUATrajectory
 from responses_api_agents.browser_agent.adapters.base import CUAAdapterResponse
 
 
@@ -655,6 +655,258 @@ class TestCUAAdapterUsage:
     def test_adapter_response_default_no_usage(self):
         resp = CUAAdapterResponse()
         assert resp.usage is None
+
+
+class TestExtractTokenIds:
+    def test_extracts_from_output_items(self):
+        from responses_api_agents.browser_agent.adapters.base import extract_token_ids_from_response
+
+        response = {
+            "output": [
+                {"type": "reasoning", "text": "thinking..."},
+                {
+                    "type": "message",
+                    "prompt_token_ids": [1, 2, 3],
+                    "generation_token_ids": [4, 5, 6],
+                    "generation_log_probs": [-0.1, -0.2, -0.3],
+                },
+            ]
+        }
+        result = extract_token_ids_from_response(response)
+        assert result["prompt_token_ids"] == [1, 2, 3]
+        assert result["generation_token_ids"] == [4, 5, 6]
+        assert result["generation_log_probs"] == [-0.1, -0.2, -0.3]
+
+    def test_extracts_from_provider_specific_fields(self):
+        from responses_api_agents.browser_agent.adapters.base import extract_token_ids_from_response
+
+        response = {
+            "provider_specific_fields": {
+                "prompt_token_ids": [10, 20],
+                "generation_token_ids": [30, 40],
+                "generation_log_probs": [-1.0, -2.0],
+            }
+        }
+        result = extract_token_ids_from_response(response)
+        assert result["prompt_token_ids"] == [10, 20]
+        assert result["generation_token_ids"] == [30, 40]
+
+    def test_extracts_from_top_level(self):
+        from responses_api_agents.browser_agent.adapters.base import extract_token_ids_from_response
+
+        response = {
+            "prompt_token_ids": [7, 8],
+            "generation_token_ids": [9, 10],
+            "generation_log_probs": [-0.5, -0.6],
+        }
+        result = extract_token_ids_from_response(response)
+        assert result["prompt_token_ids"] == [7, 8]
+        assert result["generation_token_ids"] == [9, 10]
+
+    def test_returns_empty_when_missing(self):
+        from responses_api_agents.browser_agent.adapters.base import extract_token_ids_from_response
+
+        result = extract_token_ids_from_response({"output": [{"type": "message"}]})
+        assert result["prompt_token_ids"] == []
+        assert result["generation_token_ids"] == []
+        assert result["generation_log_probs"] == []
+
+    def test_returns_empty_for_empty_response(self):
+        from responses_api_agents.browser_agent.adapters.base import extract_token_ids_from_response
+
+        result = extract_token_ids_from_response({})
+        assert result["prompt_token_ids"] == []
+        assert result["generation_token_ids"] == []
+        assert result["generation_log_probs"] == []
+
+    def test_output_items_take_priority_over_top_level(self):
+        from responses_api_agents.browser_agent.adapters.base import extract_token_ids_from_response
+
+        response = {
+            "prompt_token_ids": [99],
+            "generation_token_ids": [99],
+            "generation_log_probs": [-99.0],
+            "output": [
+                {
+                    "type": "message",
+                    "prompt_token_ids": [1],
+                    "generation_token_ids": [2],
+                    "generation_log_probs": [-1.0],
+                }
+            ],
+        }
+        result = extract_token_ids_from_response(response)
+        assert result["prompt_token_ids"] == [1]
+        assert result["generation_token_ids"] == [2]
+
+
+class TestOpenAITokenIdExtraction:
+    def test_parse_actions_extracts_token_ids(self):
+        from responses_api_agents.browser_agent.adapters.openai_adapter import OpenAICUAAdapter
+
+        adapter = OpenAICUAAdapter()
+        response = {
+            "id": "resp_123",
+            "output": [
+                {
+                    "type": "computer_call",
+                    "call_id": "call_1",
+                    "action": {"type": "click", "coordinate": [100, 200]},
+                    "prompt_token_ids": [1, 2, 3],
+                    "generation_token_ids": [4, 5],
+                    "generation_log_probs": [-0.1, -0.2],
+                }
+            ],
+        }
+        result = adapter._parse_actions(response)
+        assert result.prompt_token_ids == [1, 2, 3]
+        assert result.generation_token_ids == [4, 5]
+        assert result.generation_log_probs == [-0.1, -0.2]
+
+    def test_parse_actions_empty_when_no_token_ids(self):
+        from responses_api_agents.browser_agent.adapters.openai_adapter import OpenAICUAAdapter
+
+        adapter = OpenAICUAAdapter()
+        response = {
+            "id": "resp_123",
+            "output": [
+                {
+                    "type": "computer_call",
+                    "call_id": "call_1",
+                    "action": {"type": "click", "coordinate": [100, 200]},
+                }
+            ],
+        }
+        result = adapter._parse_actions(response)
+        assert result.prompt_token_ids == []
+        assert result.generation_token_ids == []
+        assert result.generation_log_probs == []
+
+
+class TestGeminiTokenIdExtraction:
+    def test_parse_response_extracts_token_ids(self):
+        adapter = _make_gemini_adapter()
+        data = {
+            "candidates": [
+                {
+                    "content": {
+                        "role": "model",
+                        "parts": [{"text": "Done"}],
+                    }
+                }
+            ],
+            "prompt_token_ids": [10, 20, 30],
+            "generation_token_ids": [40, 50],
+            "generation_log_probs": [-0.5, -0.6],
+        }
+        result = adapter._parse_response(data)
+        assert result.prompt_token_ids == [10, 20, 30]
+        assert result.generation_token_ids == [40, 50]
+        assert result.generation_log_probs == [-0.5, -0.6]
+
+    def test_parse_response_empty_when_no_token_ids(self):
+        adapter = _make_gemini_adapter()
+        data = {
+            "candidates": [
+                {
+                    "content": {
+                        "role": "model",
+                        "parts": [{"text": "Done"}],
+                    }
+                }
+            ],
+        }
+        result = adapter._parse_response(data)
+        assert result.prompt_token_ids == []
+        assert result.generation_token_ids == []
+
+
+class TestBuildNemoResponseTokenIds:
+    def test_uses_training_variant_with_token_ids(self):
+        from nemo_gym.openai_utils import NeMoGymResponseOutputMessageForTraining
+        from resources_servers.browser_gym.schemas import BrowserAction, CUAStep, CUATrajectory
+        from responses_api_agents.browser_agent.app import _build_nemo_response
+
+        steps = [
+            CUAStep(
+                action=BrowserAction(action_type="click", coordinate=[100, 200]),
+                screenshot_after="img1",
+                current_url="https://example.com",
+                prompt_token_ids=[1, 2, 3],
+                generation_token_ids=[4, 5],
+                generation_log_probs=[-0.1, -0.2],
+            ),
+            CUAStep(
+                action=BrowserAction(action_type="type", text="hello"),
+                screenshot_after="img2",
+                current_url="https://example.com",
+                prompt_token_ids=[10, 20],
+                generation_token_ids=[30, 40],
+                generation_log_probs=[-0.3, -0.4],
+            ),
+        ]
+        traj = CUATrajectory(steps=steps, task_prompt="test", initial_screenshot="init", final_message="Done")
+        resp = _build_nemo_response(traj, "env-1", None, "test-model")
+
+        output_msg = resp.output[0]
+        assert isinstance(output_msg, NeMoGymResponseOutputMessageForTraining)
+        assert output_msg.prompt_token_ids == [1, 2, 3, 10, 20]
+        assert output_msg.generation_token_ids == [4, 5, 30, 40]
+        assert output_msg.generation_log_probs == [-0.1, -0.2, -0.3, -0.4]
+
+    def test_uses_base_variant_without_token_ids(self):
+        from nemo_gym.openai_utils import NeMoGymResponseOutputMessage, NeMoGymResponseOutputMessageForTraining
+        from responses_api_agents.browser_agent.app import _build_nemo_response
+
+        traj = CUATrajectory(steps=[], task_prompt="test", initial_screenshot="")
+        resp = _build_nemo_response(traj, "env-1", None, "test-model")
+
+        output_msg = resp.output[0]
+        assert isinstance(output_msg, NeMoGymResponseOutputMessage)
+        assert not isinstance(output_msg, NeMoGymResponseOutputMessageForTraining)
+
+
+class TestCUAStepTokenIds:
+    def test_step_stores_token_ids(self):
+        step = CUAStep(
+            action=BrowserAction(action_type="click"),
+            screenshot_after="img",
+            current_url="https://example.com",
+            prompt_token_ids=[1, 2],
+            generation_token_ids=[3, 4],
+            generation_log_probs=[-0.1, -0.2],
+        )
+        assert step.prompt_token_ids == [1, 2]
+        assert step.generation_token_ids == [3, 4]
+        assert step.generation_log_probs == [-0.1, -0.2]
+
+    def test_step_defaults_empty(self):
+        step = CUAStep(
+            action=BrowserAction(action_type="click"),
+            screenshot_after="img",
+            current_url="https://example.com",
+        )
+        assert step.prompt_token_ids == []
+        assert step.generation_token_ids == []
+        assert step.generation_log_probs == []
+
+
+class TestCUAAdapterResponseTokenIds:
+    def test_default_empty(self):
+        resp = CUAAdapterResponse()
+        assert resp.prompt_token_ids == []
+        assert resp.generation_token_ids == []
+        assert resp.generation_log_probs == []
+
+    def test_with_token_ids(self):
+        resp = CUAAdapterResponse(
+            prompt_token_ids=[1, 2],
+            generation_token_ids=[3, 4],
+            generation_log_probs=[-0.5, -0.6],
+        )
+        assert resp.prompt_token_ids == [1, 2]
+        assert resp.generation_token_ids == [3, 4]
+        assert resp.generation_log_probs == [-0.5, -0.6]
 
 
 class TestAnthropicUsageExtraction:
