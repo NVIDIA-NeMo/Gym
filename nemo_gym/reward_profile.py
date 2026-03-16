@@ -14,7 +14,7 @@
 # limitations under the License.
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
@@ -164,6 +164,153 @@ class RewardProfiler:
         agent_level_metrics_fpath.write_bytes(orjson.dumps(self.prepare_for_serialization(agent_level_metrics)))
 
         return reward_profiling_fpath, agent_level_metrics_fpath
+
+
+def compute_pass_majority_metrics(
+    tasks: List[List[Dict[str, Any]]],
+    score_fn: Optional[Any] = None,
+    answer_key: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Compute pass@k, majority@k, no_answer, and variance statistics from grouped task results.
+
+    Shared utility for any resource server's compute_metrics() override.
+
+    Args:
+        tasks: tasks[i] is a list of rollout dicts for task i.
+        score_fn: Callable(result_dict) -> Dict[str, float|bool] returning named scores.
+            Defaults to ``lambda r: {"accuracy": r["reward"]}``.
+        answer_key: Field name for extracted answer (enables majority@k and no_answer).
+            If None, majority@k and no_answer are skipped.
+
+    Returns:
+        Flat dict of metrics keyed as ``{agg_mode}/{score_name}``:
+        - ``pass@{k}/{name}``: combinatorial pass@k (binary) or max-of-k (continuous)
+        - ``pass@1[avg-of-{k}]/{name}``: mean score across first k rollouts, averaged across tasks
+        - ``majority@{k}/{name}``: majority-vote accuracy (only if answer_key is set)
+        - ``pass@{k}/no_answer``, ``majority@{k}/no_answer``: fraction with no extracted answer
+        - ``pass@1[avg-of-{k}]/{name}_statistics``: dict with std_dev/std_err across runs
+
+        All accuracy values are percentages (0-100).
+    """
+    import math as _math
+
+    if not tasks:
+        return {}
+
+    if score_fn is None:
+        score_fn = lambda r: {"accuracy": r["reward"]}  # noqa: E731
+
+    max_k = max(len(rollouts) for rollouts in tasks)
+    n_tasks = len(tasks)
+    metrics: Dict[str, Any] = {}
+
+    # Extract per-task score dicts and answers
+    all_score_dicts: List[List[Dict[str, float]]] = []
+    all_answers: List[List[Optional[str]]] = []
+    for rollouts in tasks:
+        task_scores = []
+        task_answers = []
+        for r in rollouts:
+            raw = score_fn(r)
+            task_scores.append({k: (int(v) if isinstance(v, bool) else v) for k, v in raw.items()})
+            if answer_key is not None:
+                task_answers.append(r.get(answer_key))
+        all_score_dicts.append(task_scores)
+        if answer_key is not None:
+            all_answers.append(task_answers)
+
+    # Collect score names
+    score_names = sorted({name for task_scores in all_score_dicts for s in task_scores for name in s})
+
+    for k in range(1, max_k + 1):
+        for name in score_names:
+            # --- pass@k ---
+            pass_values = []
+            for task_scores in all_score_dicts:
+                vals = [s.get(name) for s in task_scores if name in s]
+                if not vals or k > len(vals):
+                    continue
+                is_binary = all(v in (0, 1, 0.0, 1.0) for v in vals)
+                if is_binary:
+                    n_total = len(vals)
+                    n_incorrect = sum(1 for v in vals if not v)
+                    if n_incorrect < k:
+                        pass_values.append(1.0)
+                    else:
+                        pass_values.append(1.0 - _math.comb(n_incorrect, k) / _math.comb(n_total, k))
+                else:
+                    pass_values.append(max(vals[:k]))
+
+            if pass_values:
+                metrics[f"pass@{k}/{name}"] = 100.0 * sum(pass_values) / len(pass_values)
+
+            # --- pass@1[avg-of-k] ---
+            avg_values = []
+            for task_scores in all_score_dicts:
+                vals = [s.get(name) for s in task_scores[:k] if name in s]
+                if vals:
+                    avg_values.append(sum(vals) / len(vals))
+
+            if avg_values:
+                metrics[f"pass@1[avg-of-{k}]/{name}"] = 100.0 * sum(avg_values) / len(avg_values)
+
+            # --- majority@k ---
+            if answer_key is not None:
+                majority_values = []
+                for task_scores, task_answers in zip(all_score_dicts, all_answers):
+                    valid = [
+                        (a, s.get(name))
+                        for a, s in zip(task_answers[:k], task_scores[:k])
+                        if a is not None and name in s
+                    ]
+                    if not valid:
+                        continue
+                    counter = Counter(valid)
+                    max_count = counter.most_common(1)[0][1]
+                    tied = [(a, s) for (a, s), c in counter.items() if c == max_count]
+                    majority_values.append(sum(s for _, s in tied) / len(tied))
+
+                if majority_values:
+                    metrics[f"majority@{k}/{name}"] = 100.0 * sum(majority_values) / len(majority_values)
+
+        # --- no_answer (per agg mode, not per score method) ---
+        if answer_key is not None:
+            no_answer_count = sum(1 for task_answers in all_answers if all(a is None for a in task_answers[:k]))
+            no_answer_pct = 100.0 * no_answer_count / n_tasks
+            metrics[f"pass@{k}/no_answer"] = no_answer_pct
+            metrics[f"pass@1[avg-of-{k}]/no_answer"] = (
+                100.0
+                * sum(
+                    sum(1 for a in task_answers[:k] if a is None) / min(k, len(task_answers))
+                    for task_answers in all_answers
+                )
+                / n_tasks
+            )
+            metrics[f"majority@{k}/no_answer"] = no_answer_pct
+
+    # --- Variance statistics for pass@1[avg-of-k] ---
+    if max_k > 1:
+        for k in range(2, max_k + 1):
+            for name in score_names:
+                run_averages = []
+                for run_idx in range(k):
+                    run_scores = [
+                        task_scores[run_idx].get(name)
+                        for task_scores in all_score_dicts
+                        if run_idx < len(task_scores) and name in task_scores[run_idx]
+                    ]
+                    if run_scores:
+                        run_averages.append(sum(run_scores) / len(run_scores))
+
+                if len(run_averages) >= 2:
+                    mean_val = sum(run_averages) / len(run_averages)
+                    variance = sum((x - mean_val) ** 2 for x in run_averages) / (len(run_averages) - 1)
+                    std_dev = _math.sqrt(variance)
+                    std_err = std_dev / _math.sqrt(len(run_averages))
+                    metrics[f"pass@1[avg-of-{k}]/{name}/std_dev_across_runs"] = 100.0 * std_dev
+                    metrics[f"pass@1[avg-of-{k}]/{name}/std_err_across_runs"] = 100.0 * std_err
+
+    return metrics
 
 
 class AggregateMetricsMixin:

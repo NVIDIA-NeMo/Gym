@@ -23,6 +23,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.reward_profile import compute_pass_majority_metrics
 from nemo_gym.server_utils import ServerClient
 
 
@@ -195,6 +196,216 @@ class TestComputeMetricsHook:
         result = await server.aggregate_metrics(body)
 
         assert result.agent_metrics["custom_metric"] == 42.0
+
+
+class TestComputePassMajorityMetrics:
+    def test_pass_at_k_binary(self) -> None:
+        """Combinatorial pass@k for binary rewards."""
+        tasks = [
+            [{"reward": 1.0}, {"reward": 1.0}, {"reward": 1.0}, {"reward": 1.0}],
+            [{"reward": 0.0}, {"reward": 0.0}, {"reward": 0.0}, {"reward": 0.0}],
+            [{"reward": 1.0}, {"reward": 0.0}, {"reward": 1.0}, {"reward": 0.0}],
+        ]
+        m = compute_pass_majority_metrics(tasks)
+
+        assert m["pass@1/accuracy"] == pytest.approx(50.0)
+        assert m["pass@4/accuracy"] == pytest.approx(200.0 / 3.0, abs=0.01)
+
+    def test_pass_at_1_avg_of_k(self) -> None:
+        """Mean of individual scores across k rollouts."""
+        tasks = [
+            [{"reward": 1.0}, {"reward": 0.0}],
+            [{"reward": 0.0}, {"reward": 1.0}],
+            [{"reward": 1.0}, {"reward": 1.0}],
+        ]
+        m = compute_pass_majority_metrics(tasks)
+
+        assert m["pass@1[avg-of-2]/accuracy"] == pytest.approx(200.0 / 3.0, abs=0.01)
+
+    def test_majority_at_k(self) -> None:
+        """Majority voting with extracted_answer."""
+        tasks = [
+            [
+                {"reward": 1.0, "extracted_answer": "A"},
+                {"reward": 1.0, "extracted_answer": "A"},
+                {"reward": 0.0, "extracted_answer": "B"},
+            ],
+            [
+                {"reward": 0.0, "extracted_answer": "C"},
+                {"reward": 0.0, "extracted_answer": "C"},
+                {"reward": 1.0, "extracted_answer": "D"},
+            ],
+        ]
+        m = compute_pass_majority_metrics(tasks, answer_key="extracted_answer")
+
+        assert m["majority@3/accuracy"] == pytest.approx(50.0)
+
+    def test_no_answer(self) -> None:
+        """no_answer tracks tasks where all rollouts failed to extract an answer."""
+        tasks = [
+            [{"reward": 1.0, "extracted_answer": "A"}, {"reward": 0.0, "extracted_answer": "B"}],
+            [{"reward": 0.0, "extracted_answer": None}, {"reward": 0.0, "extracted_answer": None}],
+        ]
+        m = compute_pass_majority_metrics(tasks, answer_key="extracted_answer")
+
+        assert m["majority@2/no_answer"] == pytest.approx(50.0)
+
+    def test_std_dev_across_runs(self) -> None:
+        """Variance statistics are flat keys matching AIME format."""
+        tasks = [
+            [{"reward": 1.0}, {"reward": 0.0}],
+            [{"reward": 0.0}, {"reward": 0.0}],
+            [{"reward": 1.0}, {"reward": 1.0}],
+        ]
+        m = compute_pass_majority_metrics(tasks)
+
+        assert m["pass@1[avg-of-2]/accuracy/std_dev_across_runs"] > 0
+        assert m["pass@1[avg-of-2]/accuracy/std_err_across_runs"] > 0
+
+    def test_empty_input(self) -> None:
+        assert compute_pass_majority_metrics([]) == {}
+
+    def test_no_answer_key_skips_majority(self) -> None:
+        """Without answer_key, majority@k and no_answer are not computed."""
+        tasks = [
+            [{"reward": 1.0, "extracted_answer": "A"}, {"reward": 0.0, "extracted_answer": "B"}],
+        ]
+        m = compute_pass_majority_metrics(tasks)
+
+        assert not any(k.startswith("majority@") for k in m)
+        assert not any("no_answer" in k for k in m)
+
+    def test_multiple_score_methods(self) -> None:
+        """Multiple score methods produce separate keys under each agg mode."""
+        tasks = [
+            [{"reward": 1.0, "library_reward": 1.0}, {"reward": 0.0, "library_reward": 0.0}],
+            [{"reward": 0.0, "library_reward": 1.0}, {"reward": 1.0, "library_reward": 1.0}],
+        ]
+
+        def score_fn(r):
+            return {"accuracy": r["reward"], "symbolic_accuracy": r["library_reward"]}
+
+        m = compute_pass_majority_metrics(tasks, score_fn=score_fn)
+
+        assert "pass@1/accuracy" in m
+        assert "pass@1/symbolic_accuracy" in m
+        assert "pass@1[avg-of-2]/accuracy" in m
+        assert "pass@1[avg-of-2]/symbolic_accuracy" in m
+
+
+class TestMCQAComputeMetrics:
+    @pytest.mark.asyncio
+    async def test_mcqa_server_returns_pass_majority_metrics(self) -> None:
+        """MCQA server overrides compute_metrics to compute pass@k and majority@k."""
+        from resources_servers.mcqa.app import MCQAResourcesServer, MCQAResourcesServerConfig
+
+        config = MCQAResourcesServerConfig(host="127.0.0.1", port=12345, entrypoint="app.py", name="mcqa")
+        server = MCQAResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+        responses = [
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0, "extracted_answer": "A"},
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 1, "reward": 1.0, "extracted_answer": "A"},
+            {TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 0.0, "extracted_answer": "B"},
+            {TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 1, "reward": 1.0, "extracted_answer": "C"},
+        ]
+        body = AggregateMetricsRequest(verify_responses=responses)
+        result = await server.aggregate_metrics(body)
+
+        assert "pass@2/accuracy" in result.agent_metrics
+        assert "pass@1[avg-of-2]/accuracy" in result.agent_metrics
+        assert "majority@2/accuracy" in result.agent_metrics
+        assert "pass@2/accuracy" in result.key_metrics
+        assert "majority@2/accuracy" in result.key_metrics
+        assert "mean/reward" in result.key_metrics
+
+
+_has_math_verify = True
+try:
+    import math_verify  # noqa: F401
+except ImportError:
+    _has_math_verify = False
+
+
+class TestMathWithJudgeComputeMetrics:
+    @pytest.mark.asyncio
+    @pytest.mark.skipif(not _has_math_verify, reason="math_verify not installed")
+    async def test_math_server_produces_symbolic_and_judge_accuracy(self) -> None:
+        from resources_servers.math_with_judge.app import (
+            LibraryJudgeMathResourcesServer,
+            LibraryJudgeMathResourcesServerConfig,
+        )
+
+        config = LibraryJudgeMathResourcesServerConfig(
+            host="127.0.0.1",
+            port=12345,
+            entrypoint="app.py",
+            name="math_with_judge",
+            judge_model_server={"type": "responses_api_models", "name": "judge"},
+            judge_responses_create_params={"model": "m", "input": []},
+        )
+        server = LibraryJudgeMathResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+        responses = [
+            # Task 0, rollout 0: symbolic correct, judge correct
+            {
+                TASK_INDEX_KEY_NAME: 0,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+                "reward": 1.0,
+                "library_reward": 1.0,
+                "judge_evaluations": [{"verdict": "A=B"}],
+                "extracted_answer": "42",
+            },
+            # Task 0, rollout 1: symbolic wrong, judge wrong
+            {
+                TASK_INDEX_KEY_NAME: 0,
+                ROLLOUT_INDEX_KEY_NAME: 1,
+                "reward": 0.0,
+                "library_reward": 0.0,
+                "judge_evaluations": [{"verdict": "A!=B"}],
+                "extracted_answer": "43",
+            },
+            # Task 1, rollout 0: symbolic correct, no judge
+            {
+                TASK_INDEX_KEY_NAME: 1,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+                "reward": 1.0,
+                "library_reward": 1.0,
+                "judge_evaluations": None,
+                "extracted_answer": "7",
+            },
+            # Task 1, rollout 1: symbolic wrong, no judge
+            {
+                TASK_INDEX_KEY_NAME: 1,
+                ROLLOUT_INDEX_KEY_NAME: 1,
+                "reward": 0.0,
+                "library_reward": 0.0,
+                "judge_evaluations": None,
+                "extracted_answer": "8",
+            },
+        ]
+        body = AggregateMetricsRequest(verify_responses=responses)
+        result = await server.aggregate_metrics(body)
+        am = result.agent_metrics
+
+        # Should have accuracy and symbolic_accuracy for all agg modes
+        assert "pass@1/accuracy" in am
+        assert "pass@1/symbolic_accuracy" in am
+        assert "pass@1[avg-of-2]/accuracy" in am
+        assert "pass@1[avg-of-2]/symbolic_accuracy" in am
+        assert "majority@2/accuracy" in am
+        assert "majority@2/symbolic_accuracy" in am
+
+        # judge_accuracy only for task 0 (task 1 has judge_evaluations=None)
+        assert "pass@1/judge_accuracy" in am
+
+        # Variance stats at k=2
+        assert "pass@1[avg-of-2]/accuracy/std_dev_across_runs" in am
+        assert "pass@1[avg-of-2]/symbolic_accuracy/std_dev_across_runs" in am
+
+        # Key metrics should include pass@, majority@, mean/reward
+        assert "pass@2/accuracy" in result.key_metrics
+        assert "majority@2/accuracy" in result.key_metrics
+        assert "mean/reward" in result.key_metrics
 
 
 class TestDefaultAgentAggregateMetrics:

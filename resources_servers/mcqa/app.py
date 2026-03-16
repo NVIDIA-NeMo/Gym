@@ -24,6 +24,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.reward_profile import compute_pass_majority_metrics
 
 
 class MCQAResourcesServerConfig(BaseResourcesServerConfig):
@@ -208,6 +209,24 @@ class MCQAResourcesServer(SimpleResourcesServer):
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
         return app
+
+    def compute_metrics(self, tasks):
+        return compute_pass_majority_metrics(
+            tasks,
+            score_fn=lambda r: {"accuracy": r["reward"]},
+            answer_key="extracted_answer",
+        )
+
+    def get_key_metrics(self, agent_metrics):
+        # Surface the highest-k metrics as headlines
+        key_metrics = {}
+        for k in sorted(agent_metrics):
+            if k.startswith(("pass@", "majority@")):
+                key_metrics[k] = agent_metrics[k]
+        # Always include mean/reward from RewardProfiler baseline
+        if "mean/reward" in agent_metrics:
+            key_metrics["mean/reward"] = agent_metrics["mean/reward"]
+        return key_metrics
 
     async def verify(self, body: MCQAVerifyRequest) -> MCQAVerifyResponse:
         text = _extract_last_assistant_text(body)
