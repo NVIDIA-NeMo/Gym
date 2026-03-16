@@ -25,11 +25,11 @@ rdkit_chemistry_simple_agent:
         - name: train
           type: train
           jsonl_fpath: resources_servers/rdkit_chemistry/data/train.jsonl
-          license: "NVIDIA Proprietary (derived from ChEMBL — CC-BY-SA 3.0)"
+          license: "TBD"
         - name: validation
           type: validation
           jsonl_fpath: resources_servers/rdkit_chemistry/data/validation.jsonl
-          license: "NVIDIA Proprietary (derived from ChEMBL — CC-BY-SA 3.0)"
+          license: "TBD"
         - name: example
           type: example
           jsonl_fpath: resources_servers/rdkit_chemistry/data/example.jsonl
