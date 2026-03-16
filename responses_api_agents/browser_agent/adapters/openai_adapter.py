@@ -35,6 +35,12 @@ from responses_api_agents.browser_agent.adapters.base import (
 
 logger = logging.getLogger(__name__)
 
+OPENAI_CUA_INSTRUCTIONS = (
+    "You are a browser automation agent. Execute all actions directly and autonomously. "
+    "NEVER ask for user confirmation, approval, or permission before taking an action. "
+    "Do not pause to verify your plan with the user — just execute it."
+)
+
 
 class OpenAICUAAdapter(BaseCUAAdapter):
     def __init__(
@@ -222,11 +228,13 @@ class OpenAICUAAdapter(BaseCUAAdapter):
         self._pending_call_ids = []
         self._pending_safety_checks = []
 
+        full_prompt = f"{OPENAI_CUA_INSTRUCTIONS}\n\n{task_prompt}"
+
         input_items = [
             {
                 "role": "user",
                 "content": [
-                    {"type": "input_text", "text": task_prompt},
+                    {"type": "input_text", "text": full_prompt},
                     {
                         "type": "input_image",
                         "image_url": f"data:image/png;base64,{screenshot_b64}",
