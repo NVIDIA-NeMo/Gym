@@ -29,7 +29,12 @@ import logging
 from typing import Any, Callable, Coroutine, Dict, List, Optional
 
 from resources_servers.browser_gym.schemas import BrowserAction
-from responses_api_agents.browser_agent.adapters.base import BaseCUAAdapter, CUAAdapterResponse, CUAAdapterUsage
+from responses_api_agents.browser_agent.adapters.base import (
+    BaseCUAAdapter,
+    CUAAdapterResponse,
+    CUAAdapterUsage,
+    extract_token_ids_from_response,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -90,6 +95,7 @@ class AnthropicCUAAdapter(BaseCUAAdapter):
         self._messages: List[Dict[str, Any]] = []
         self._system_prompt: str = ""
         self._pending_tool_use_ids: List[str] = []
+        self._last_raw_response: Dict[str, Any] = {}
 
     # ── Tool / beta helpers ──────────────────────────────────────
 
@@ -302,9 +308,11 @@ class AnthropicCUAAdapter(BaseCUAAdapter):
             raise RuntimeError("AnthropicCUAAdapter requires an api_caller (model server proxy). No direct API calls.")
         raw = await self._api_caller(api_params)
         if isinstance(raw, dict):
+            self._last_raw_response = raw
             from anthropic.types.beta import BetaMessage
 
             return BetaMessage.model_validate(raw)
+        self._last_raw_response = {}
         return raw
 
     def _update_history_from_response(self, response):
@@ -346,7 +354,18 @@ class AnthropicCUAAdapter(BaseCUAAdapter):
                 total_tokens=getattr(resp_usage, "input_tokens", 0) + getattr(resp_usage, "output_tokens", 0),
             )
 
-        return CUAAdapterResponse(actions=actions, message=message, raw_response=raw, done=done, usage=usage)
+        token_ids = extract_token_ids_from_response(getattr(self, "_last_raw_response", {}))
+
+        return CUAAdapterResponse(
+            actions=actions,
+            message=message,
+            raw_response=raw,
+            done=done,
+            usage=usage,
+            prompt_token_ids=token_ids["prompt_token_ids"],
+            generation_token_ids=token_ids["generation_token_ids"],
+            generation_log_probs=token_ids["generation_log_probs"],
+        )
 
     def _map_anthropic_action(self, action: Dict[str, Any]) -> Optional[BrowserAction]:
         action_type = action.get("action", "")
@@ -484,3 +503,4 @@ class AnthropicCUAAdapter(BaseCUAAdapter):
         self._messages = []
         self._pending_tool_use_ids = []
         self._system_prompt = ""
+        self._last_raw_response = {}

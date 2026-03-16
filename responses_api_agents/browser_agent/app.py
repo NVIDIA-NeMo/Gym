@@ -27,6 +27,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseInputTokensDetails,
     NeMoGymResponseOutputMessage,
+    NeMoGymResponseOutputMessageForTraining,
     NeMoGymResponseOutputText,
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
@@ -90,17 +91,41 @@ def _build_nemo_response(
     model_name: str,
     usage: Optional[Any] = None,
 ) -> CUANeMoGymResponse:
-    """Construct a CUANeMoGymResponse with all required Response fields."""
-    response_id = f"cua_{uuid.uuid4().hex[:24]}"
+    """Construct a CUANeMoGymResponse with all required Response fields.
 
+    When trajectory steps contain RL token ID data (prompt_token_ids,
+    generation_token_ids, generation_log_probs), the output message uses
+    NeMoGymResponseOutputMessageForTraining with concatenated token arrays
+    across all steps.
+    """
+    response_id = f"cua_{uuid.uuid4().hex[:24]}"
     final_text = trajectory.final_message or "Task completed"
-    output_message = NeMoGymResponseOutputMessage(
-        id=f"msg_{uuid.uuid4().hex[:16]}",
-        content=[NeMoGymResponseOutputText(annotations=[], text=final_text)],
-        role="assistant",
-        status="completed",
-        type="message",
-    )
+
+    all_prompt_ids: list[int] = []
+    all_gen_ids: list[int] = []
+    all_gen_logprobs: list[float] = []
+    for step in trajectory.steps:
+        all_prompt_ids.extend(step.prompt_token_ids)
+        all_gen_ids.extend(step.generation_token_ids)
+        all_gen_logprobs.extend(step.generation_log_probs)
+
+    msg_kwargs = {
+        "id": f"msg_{uuid.uuid4().hex[:16]}",
+        "content": [NeMoGymResponseOutputText(annotations=[], text=final_text)],
+        "role": "assistant",
+        "status": "completed",
+        "type": "message",
+    }
+
+    if all_gen_ids:
+        output_message = NeMoGymResponseOutputMessageForTraining(
+            **msg_kwargs,
+            prompt_token_ids=all_prompt_ids,
+            generation_token_ids=all_gen_ids,
+            generation_log_probs=all_gen_logprobs,
+        )
+    else:
+        output_message = NeMoGymResponseOutputMessage(**msg_kwargs)
 
     return CUANeMoGymResponse(
         id=response_id,
@@ -356,6 +381,9 @@ class BrowserAgent(SimpleResponsesAPIAgent):
                                 screenshot_after=step_data.screenshot,
                                 current_url=step_data.current_url,
                                 raw_provider_response=adapter_resp.raw_response,
+                                prompt_token_ids=adapter_resp.prompt_token_ids,
+                                generation_token_ids=adapter_resp.generation_token_ids,
+                                generation_log_probs=adapter_resp.generation_log_probs,
                             )
                         )
 

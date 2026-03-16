@@ -140,6 +140,9 @@ class CUAStep(BaseModel):
     screenshot_after: str  # base64
     current_url: str
     raw_provider_response: Dict[str, Any] = Field(default_factory=dict)
+    prompt_token_ids: List[int] = Field(default_factory=list)
+    generation_token_ids: List[int] = Field(default_factory=list)
+    generation_log_probs: List[float] = Field(default_factory=list)
 
 
 class CUATrajectory(BaseModel):

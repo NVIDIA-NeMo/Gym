@@ -40,6 +40,46 @@ class CUAAdapterResponse(BaseModel):
     raw_response: Dict[str, Any] = Field(default_factory=dict)
     done: bool = False
     usage: Optional[CUAAdapterUsage] = None
+    prompt_token_ids: List[int] = Field(default_factory=list)
+    generation_token_ids: List[int] = Field(default_factory=list)
+    generation_log_probs: List[float] = Field(default_factory=list)
+
+
+def extract_token_ids_from_response(response: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract RL-specific token ID fields from a model server response.
+
+    Checks multiple locations where token IDs may appear:
+    1. On the last output item (vLLM /v1/responses format)
+    2. In provider_specific_fields
+    3. At the top level of the response
+
+    Returns a dict with prompt_token_ids, generation_token_ids, generation_log_probs
+    (all defaulting to empty lists if not found).
+    """
+    result: Dict[str, Any] = {
+        "prompt_token_ids": [],
+        "generation_token_ids": [],
+        "generation_log_probs": [],
+    }
+    keys = list(result.keys())
+
+    for item in reversed(response.get("output", [])):
+        if isinstance(item, dict) and any(k in item for k in keys):
+            for k in keys:
+                result[k] = item.get(k, [])
+            return result
+
+    psf = response.get("provider_specific_fields", {})
+    if isinstance(psf, dict) and any(k in psf for k in keys):
+        for k in keys:
+            result[k] = psf.get(k, [])
+        return result
+
+    if any(k in response for k in keys):
+        for k in keys:
+            result[k] = response.get(k, [])
+
+    return result
 
 
 class BaseCUAAdapter(ABC):

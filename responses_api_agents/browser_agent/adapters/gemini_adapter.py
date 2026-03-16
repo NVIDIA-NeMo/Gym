@@ -30,7 +30,12 @@ import logging
 from typing import Any, Callable, Coroutine, Dict, List, Optional
 
 from resources_servers.browser_gym.schemas import BrowserAction
-from responses_api_agents.browser_agent.adapters.base import BaseCUAAdapter, CUAAdapterResponse, CUAAdapterUsage
+from responses_api_agents.browser_agent.adapters.base import (
+    BaseCUAAdapter,
+    CUAAdapterResponse,
+    CUAAdapterUsage,
+    extract_token_ids_from_response,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -434,7 +439,18 @@ class GeminiCUAAdapter(BaseCUAAdapter):
             usage = CUAAdapterUsage(input_tokens=in_tok, output_tokens=out_tok, total_tokens=in_tok + out_tok)
 
         raw = {"model": self._model}
-        return CUAAdapterResponse(actions=actions, message=message, raw_response=raw, done=done, usage=usage)
+        token_ids = extract_token_ids_from_response(response_data)
+
+        return CUAAdapterResponse(
+            actions=actions,
+            message=message,
+            raw_response=raw,
+            done=done,
+            usage=usage,
+            prompt_token_ids=token_ids["prompt_token_ids"],
+            generation_token_ids=token_ids["generation_token_ids"],
+            generation_log_probs=token_ids["generation_log_probs"],
+        )
 
     # ── Function response building ───────────────────────────────
 
