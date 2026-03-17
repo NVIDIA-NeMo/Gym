@@ -36,8 +36,14 @@ from nemo_gym.openai_utils import NeMoGymResponse
 
 class BrowserGymResourcesServerConfig(BaseResourcesServerConfig):
     max_concurrent_browsers: int = 16
+    browser_pool_size: int = 4
     default_viewport_width: int = 1280
     default_viewport_height: int = 720
+    verify_connector_limit: int = 512
+    verify_connector_limit_per_host: int = 128
+    verify_timeout_seconds: float = 300.0
+    session_ttl_seconds: float = 7200.0
+    session_reaper_interval_seconds: float = 300.0
 
 
 ########################################

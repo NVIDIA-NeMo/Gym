@@ -11,13 +11,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from nemo_gym.server_utils import ServerClient
 from resources_servers.browser_gym.app import BrowserGymResourcesServer
-from resources_servers.browser_gym.browser_pool import BrowserPool, _normalize_key
+from resources_servers.browser_gym.browser_pool import BrowserPool, BrowserSession, _normalize_key
 from resources_servers.browser_gym.schemas import (
     BrowserAction,
     BrowserGymResourcesServerConfig,
@@ -57,6 +58,26 @@ class TestBrowserPool:
         pool = BrowserPool(max_concurrent=4, default_viewport_width=1024, default_viewport_height=768)
         assert pool._default_viewport_width == 1024
         assert pool._default_viewport_height == 768
+
+    def test_pool_size_default(self):
+        pool = BrowserPool()
+        assert len(pool._slots) == 4
+
+    def test_pool_size_custom(self):
+        pool = BrowserPool(pool_size=8)
+        assert len(pool._slots) == 8
+
+    def test_pool_size_minimum_one(self):
+        pool = BrowserPool(pool_size=0)
+        assert len(pool._slots) == 1
+
+    def test_slot_initial_state(self):
+        pool = BrowserPool(pool_size=2)
+        for slot in pool._slots:
+            assert slot.browser is None
+            assert slot.playwright is None
+            assert slot.session_count == 0
+            assert not slot.is_alive()
 
     def test_get_session_not_found(self):
         pool = BrowserPool()
@@ -256,12 +277,11 @@ class TestVerifyEndpoint:
             mock_response.__aenter__ = AsyncMock(return_value=mock_response)
             mock_response.__aexit__ = AsyncMock(return_value=None)
 
-            mock_session = AsyncMock()
+            mock_session = MagicMock()
             mock_session.post = MagicMock(return_value=mock_response)
-            mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-            mock_session.__aexit__ = AsyncMock(return_value=None)
+            mock_session.closed = False
 
-            with patch("aiohttp.ClientSession", return_value=mock_session):
+            with patch.object(server, "_get_verify_session", return_value=mock_session):
                 result = await server.verify(body)
                 assert result.reward == 1.0
 
@@ -300,14 +320,84 @@ class TestVerifyEndpoint:
             mock_response.__aenter__ = AsyncMock(return_value=mock_response)
             mock_response.__aexit__ = AsyncMock(return_value=None)
 
-            mock_session = AsyncMock()
+            mock_session = MagicMock()
             mock_session.post = MagicMock(return_value=mock_response)
-            mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-            mock_session.__aexit__ = AsyncMock(return_value=None)
+            mock_session.closed = False
 
-            with patch("aiohttp.ClientSession", return_value=mock_session):
+            with patch.object(server, "_get_verify_session", return_value=mock_session):
                 result = await server.verify(body)
                 assert result.reward == 0.0
+
+    @pytest.mark.asyncio
+    async def test_get_verify_session_creates_once(self):
+        with patch("resources_servers.browser_gym.app.ensure_playwright"):
+            config = _make_config()
+            server = BrowserGymResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+            assert server._verify_session is None
+
+            with (
+                patch("resources_servers.browser_gym.app.aiohttp.ClientSession") as mock_cls,
+                patch("resources_servers.browser_gym.app.aiohttp.TCPConnector"),
+            ):
+                mock_instance = MagicMock()
+                mock_instance.closed = False
+                mock_cls.return_value = mock_instance
+
+                session1 = server._get_verify_session()
+                session2 = server._get_verify_session()
+
+                mock_cls.assert_called_once()
+                assert session1 is session2
+
+    @pytest.mark.asyncio
+    async def test_get_verify_session_recreates_if_closed(self):
+        with patch("resources_servers.browser_gym.app.ensure_playwright"):
+            config = _make_config()
+            server = BrowserGymResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+            with (
+                patch("resources_servers.browser_gym.app.aiohttp.ClientSession") as mock_cls,
+                patch("resources_servers.browser_gym.app.aiohttp.TCPConnector"),
+            ):
+                mock_instance = MagicMock()
+                mock_instance.closed = False
+                mock_cls.return_value = mock_instance
+
+                server._get_verify_session()
+                mock_instance.closed = True
+
+                mock_cls.reset_mock()
+                mock_new = MagicMock()
+                mock_new.closed = False
+                mock_cls.return_value = mock_new
+
+                session2 = server._get_verify_session()
+
+                mock_cls.assert_called_once()
+                assert session2 is mock_new
+
+    @pytest.mark.asyncio
+    async def test_shutdown_closes_verify_session(self):
+        with patch("resources_servers.browser_gym.app.ensure_playwright"):
+            config = _make_config()
+            server = BrowserGymResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+            app = server.setup_webserver()
+
+            mock_session = AsyncMock()
+            mock_session.closed = False
+            server._verify_session = mock_session
+
+            mock_pool = AsyncMock()
+            mock_pool.start_reaper = MagicMock()
+            server.browser_pool = mock_pool
+
+            lifespan = app.router.lifespan_context
+
+            async with lifespan(app):
+                pass
+
+            mock_session.close.assert_awaited_once()
 
 
 class TestNormalizeKey:
@@ -398,6 +488,7 @@ class TestShutdownHook:
             server = BrowserGymResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
             server.browser_pool = MagicMock(spec=BrowserPool)
             server.browser_pool.shutdown = AsyncMock()
+            server.browser_pool.start_reaper = MagicMock()
 
             app = server.setup_webserver()
             lifespan = app.router.lifespan_context
@@ -415,6 +506,7 @@ class TestShutdownHook:
             server = BrowserGymResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
             server.browser_pool = MagicMock(spec=BrowserPool)
             server.browser_pool.shutdown = AsyncMock(side_effect=RuntimeError("browser crash"))
+            server.browser_pool.start_reaper = MagicMock()
 
             app = server.setup_webserver()
             lifespan = app.router.lifespan_context
@@ -424,6 +516,123 @@ class TestShutdownHook:
                     pass
 
             server.browser_pool.shutdown.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_lifespan_starts_reaper(self):
+        """Verify that the lifespan startup calls browser_pool.start_reaper()."""
+        with patch("resources_servers.browser_gym.app.ensure_playwright"):
+            config = _make_config()
+            server = BrowserGymResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+            server.browser_pool = MagicMock(spec=BrowserPool)
+            server.browser_pool.shutdown = AsyncMock()
+            server.browser_pool.start_reaper = MagicMock()
+
+            app = server.setup_webserver()
+            lifespan = app.router.lifespan_context
+
+            async with lifespan(app):
+                server.browser_pool.start_reaper.assert_called_once()
+
+
+class TestSessionReaper:
+    def test_session_has_last_accessed(self):
+        session = BrowserSession(
+            context=MagicMock(),
+            page=MagicMock(),
+            viewport_width=1280,
+            viewport_height=720,
+        )
+        assert isinstance(session.last_accessed, float)
+        assert session.last_accessed > 0
+
+    def test_get_session_touches_last_accessed(self):
+        pool = BrowserPool(session_ttl_seconds=60.0)
+        mock_session = BrowserSession(
+            context=MagicMock(),
+            page=MagicMock(),
+            viewport_width=1280,
+            viewport_height=720,
+        )
+        old_ts = mock_session.last_accessed - 100
+        mock_session.last_accessed = old_ts
+        pool._sessions["test-env"] = mock_session
+
+        retrieved = pool.get_session("test-env")
+        assert retrieved.last_accessed > old_ts
+
+    @pytest.mark.asyncio
+    async def test_reap_stale_sessions_closes_expired(self):
+        pool = BrowserPool(session_ttl_seconds=60.0)
+
+        stale_session = BrowserSession(
+            context=MagicMock(),
+            page=MagicMock(),
+            viewport_width=1280,
+            viewport_height=720,
+        )
+        stale_session.last_accessed = time.monotonic() - 120
+
+        fresh_session = BrowserSession(
+            context=MagicMock(),
+            page=MagicMock(),
+            viewport_width=1280,
+            viewport_height=720,
+        )
+
+        pool._sessions["stale-env"] = stale_session
+        pool._sessions["fresh-env"] = fresh_session
+
+        with patch.object(pool, "close_session", new_callable=AsyncMock) as mock_close:
+            await pool._reap_stale_sessions()
+
+            mock_close.assert_called_once_with("stale-env")
+
+    @pytest.mark.asyncio
+    async def test_reap_stale_sessions_skips_fresh(self):
+        pool = BrowserPool(session_ttl_seconds=60.0)
+
+        fresh_session = BrowserSession(
+            context=MagicMock(),
+            page=MagicMock(),
+            viewport_width=1280,
+            viewport_height=720,
+        )
+        pool._sessions["fresh-env"] = fresh_session
+
+        with patch.object(pool, "close_session", new_callable=AsyncMock) as mock_close:
+            await pool._reap_stale_sessions()
+            mock_close.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_start_and_stop_reaper(self):
+        pool = BrowserPool(session_ttl_seconds=60.0, reaper_interval_seconds=0.05)
+        assert pool._reaper_task is None
+
+        pool.start_reaper()
+        assert pool._reaper_task is not None
+        assert not pool._reaper_task.done()
+
+        await pool.stop_reaper()
+        assert pool._reaper_task is None
+
+    @pytest.mark.asyncio
+    async def test_shutdown_stops_reaper(self):
+        pool = BrowserPool(session_ttl_seconds=60.0, reaper_interval_seconds=0.05)
+        pool.start_reaper()
+        assert pool._reaper_task is not None
+
+        await pool.shutdown()
+        assert pool._reaper_task is None
+
+    def test_config_ttl_defaults(self):
+        pool = BrowserPool()
+        assert pool._session_ttl == 7200.0
+        assert pool._reaper_interval == 300.0
+
+    def test_config_ttl_custom(self):
+        pool = BrowserPool(session_ttl_seconds=3600.0, reaper_interval_seconds=120.0)
+        assert pool._session_ttl == 3600.0
+        assert pool._reaper_interval == 120.0
 
 
 class TestBrowserActionClearBeforeTyping:
