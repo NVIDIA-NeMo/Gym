@@ -188,7 +188,7 @@ def compute_pass_majority_metrics(
         - ``pass@1[avg-of-{k}]/{name}``: mean score across first k rollouts, averaged across tasks
         - ``majority@{k}/{name}``: majority-vote accuracy (only if answer_key is set)
         - ``pass@{k}/no_answer``, ``majority@{k}/no_answer``: fraction with no extracted answer
-        - ``pass@1[avg-of-{k}]/{name}_statistics``: dict with std_dev/std_err across runs
+        - ``pass@1[avg-of-{k}]/{name}/std_dev_across_runs``, ``…/std_err_across_runs``: variance stats
 
         All accuracy values are percentages (0-100).
     """
