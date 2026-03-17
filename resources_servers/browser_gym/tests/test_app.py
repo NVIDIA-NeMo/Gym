@@ -381,6 +381,51 @@ class TestNormalizeKey:
         assert _normalize_key("  ctrl  ") == "Control"
 
 
+class TestShutdownHook:
+    def test_lifespan_context_is_set(self):
+        """Verify that setup_webserver installs a custom lifespan that will call browser_pool.shutdown."""
+        with patch("resources_servers.browser_gym.app.ensure_playwright"):
+            config = _make_config()
+            server = BrowserGymResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+            app = server.setup_webserver()
+            assert app.router.lifespan_context is not None
+
+    @pytest.mark.asyncio
+    async def test_shutdown_calls_browser_pool_shutdown(self):
+        """Verify that the lifespan teardown actually invokes browser_pool.shutdown()."""
+        with patch("resources_servers.browser_gym.app.ensure_playwright"):
+            config = _make_config()
+            server = BrowserGymResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+            server.browser_pool = MagicMock(spec=BrowserPool)
+            server.browser_pool.shutdown = AsyncMock()
+
+            app = server.setup_webserver()
+            lifespan = app.router.lifespan_context
+
+            async with lifespan(app):
+                pass
+
+            server.browser_pool.shutdown.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_shutdown_logs_on_error(self):
+        """Verify that shutdown is called even if it raises — the error propagates."""
+        with patch("resources_servers.browser_gym.app.ensure_playwright"):
+            config = _make_config()
+            server = BrowserGymResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+            server.browser_pool = MagicMock(spec=BrowserPool)
+            server.browser_pool.shutdown = AsyncMock(side_effect=RuntimeError("browser crash"))
+
+            app = server.setup_webserver()
+            lifespan = app.router.lifespan_context
+
+            with pytest.raises(RuntimeError, match="browser crash"):
+                async with lifespan(app):
+                    pass
+
+            server.browser_pool.shutdown.assert_awaited_once()
+
+
 class TestBrowserActionClearBeforeTyping:
     def test_default_none(self):
         action = BrowserAction(action_type="type", text="hello")
