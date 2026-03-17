@@ -196,7 +196,7 @@ class GlobalConfigDictParser(BaseModel):
 
         if duplicate_config_paths:
             duplicate_config_paths_str = "".join(f"- {p}\n" for p in duplicate_config_paths)
-            print(f"""Found some config paths that reference the same source config path. You may want to double check whether the configs you have need to use different configs for the same server.
+            print(f"""Found configs that reference the same source config path. You may want to double check whether the configs you have need to use different configs for the same server.
 In cases like these, you may want to consider using the `swap_key` OmegaConf directive e.g. '++my_specific_server=${{swap_key:generic_server}}' and then overriding config parameters in `my_specific_server`.
 Duplicate config paths:
 {duplicate_config_paths_str}""")
