@@ -7,14 +7,14 @@
 This benchmark uses the `mcqa` resource server with the `mcqa_simple_agent`.
 
 - **num_repeats**: 8
-- **Sampling**: temperature=1.0, max_output_tokens=65536
-- **Grading mode**: strict_single_letter_boxed
+- **Grading mode**: `lenient_answer_colon_md` (markdown-aware `Answer: X` extraction, matching NeMo-Skills evaluator behavior)
+- **Prompt**: `Answer the following multiple choice question. The last line of your response should be in the following format: 'Answer: A/B/C/D' ...`
 
 ## Usage
 
 ```bash
 # Prepare data
-python benchmarks/gpqa/prepare.py
+ng_prepare_benchmark "+config_paths=[benchmarks/gpqa/config.yaml]"
 
 # Start servers
 ng_run "+config_paths=[benchmarks/gpqa/config.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
