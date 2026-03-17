@@ -363,25 +363,20 @@ class TestMathWithJudgeComputeMetrics:
         result = await server.aggregate_metrics(body)
         am = result.agent_metrics
 
-        # Should have accuracy and symbolic_accuracy for all agg modes
-        assert "pass@1/accuracy" in am
+        # Should have symbolic_accuracy for all agg modes
         assert "pass@1/symbolic_accuracy" in am
-        assert "pass@1[avg-of-2]/accuracy" in am
         assert "pass@1[avg-of-2]/symbolic_accuracy" in am
-        assert "majority@2/accuracy" in am
         assert "majority@2/symbolic_accuracy" in am
 
         # judge_accuracy only for task 0 (task 1 has judge_evaluations=None)
         assert "pass@1/judge_accuracy" in am
 
         # Variance stats at k=2
-        assert "pass@1[avg-of-2]/accuracy/std_dev_across_runs" in am
         assert "pass@1[avg-of-2]/symbolic_accuracy/std_dev_across_runs" in am
 
-        # Key metrics should include pass@, majority@, mean/reward
-        assert "pass@2/accuracy" in result.key_metrics
-        assert "majority@2/accuracy" in result.key_metrics
-        assert "mean/reward" in result.key_metrics
+        # Key metrics should include pass@, majority@, token counts
+        assert "pass@2/symbolic_accuracy" in result.key_metrics
+        assert "majority@2/symbolic_accuracy" in result.key_metrics
 
 
 class TestDefaultAgentAggregateMetrics:

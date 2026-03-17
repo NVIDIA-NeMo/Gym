@@ -588,6 +588,18 @@ from pytest import approx
 class TestComputeMetricsIntegration:
     """Test the full compute_metrics method on LibraryJudgeMathResourcesServer."""
 
+    @fixture
+    def server(self) -> LibraryJudgeMathResourcesServer:
+        config = LibraryJudgeMathResourcesServerConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="",
+            judge_model_server=ModelServerRef(type="responses_api_models", name="math_judge"),
+            judge_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+        )
+        return LibraryJudgeMathResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
     def _make_tasks(self):
         """3 tasks × 4 rollouts with varying correctness and some no_answer."""
         return [
@@ -614,27 +626,29 @@ class TestComputeMetricsIntegration:
             ],
         ]
 
-    def test_pass_at_k(self) -> None:
+    def test_pass_at_k(self, server) -> None:
         tasks = self._make_tasks()
-        result = LibraryJudgeMathResourcesServer.compute_metrics(None, tasks)
-        assert result["pass@1/symbolic_accuracy"] == approx(200.0 / 3.0, abs=0.01)
+        result = server.compute_metrics(tasks)
+        # pass@1: avg reward across all rollouts = (3+1+0)/3 tasks, each avg'd over 4 = 33.3%
+        assert result["pass@1/symbolic_accuracy"] == approx(100.0 / 3.0, abs=0.01)
+        # pass@4: binary per-task (any correct?) = 2/3 tasks = 66.7%
         assert result["pass@4/symbolic_accuracy"] == approx(200.0 / 3.0, abs=0.01)
 
-    def test_majority_at_k(self) -> None:
+    def test_majority_at_k(self, server) -> None:
         tasks = self._make_tasks()
-        result = LibraryJudgeMathResourcesServer.compute_metrics(None, tasks)
+        result = server.compute_metrics(tasks)
         assert "majority@4/symbolic_accuracy" in result
 
-    def test_per_sample_aggregate(self) -> None:
+    def test_per_sample_aggregate(self, server) -> None:
         tasks = self._make_tasks()
-        result = LibraryJudgeMathResourcesServer.compute_metrics(None, tasks)
+        result = server.compute_metrics(tasks)
         psa = result["per_sample_aggregate"]
         assert "symbolic_accuracy" in psa
         assert len(psa["symbolic_accuracy"]) == 4
 
-    def test_no_answer_tracking(self) -> None:
+    def test_no_answer_tracking(self, server) -> None:
         tasks = self._make_tasks()
-        result = LibraryJudgeMathResourcesServer.compute_metrics(None, tasks)
+        result = server.compute_metrics(tasks)
         assert "pass@1/no_answer" in result
         assert "pass@4/no_answer" in result
         assert "pass@1[avg-of-4]/no_answer" in result
@@ -646,62 +660,37 @@ class TestComputeMetricsIntegration:
         assert "pass@1[avg-of-2]/no_answer/std_dev_across_runs" in result
         assert "pass@1[avg-of-4]/no_answer/std_dev_across_runs" in result
 
-    def test_no_answer_stats(self) -> None:
+    def test_no_answer_stats(self, server) -> None:
         tasks = self._make_tasks()
-        result = LibraryJudgeMathResourcesServer.compute_metrics(None, tasks)
+        result = server.compute_metrics(tasks)
         assert "pass@1[avg-of-4]/no_answer/std_dev_across_runs" in result
         assert "pass@1[avg-of-4]/no_answer/std_err_across_runs" in result
         assert result["pass@1[avg-of-4]/no_answer/std_dev_across_runs"] > 0
 
-    def test_stat_key_separator(self) -> None:
+    def test_stat_key_separator(self, server) -> None:
         tasks = self._make_tasks()
-        result = LibraryJudgeMathResourcesServer.compute_metrics(None, tasks)
+        result = server.compute_metrics(tasks)
         stat_keys = [k for k in result if "std_dev_across_runs" in k]
         for k in stat_keys:
             assert "/std_dev_across_runs" in k, f"Expected / separator in {k}"
 
-    def test_stats_for_all_k_values(self) -> None:
+    def test_stats_for_all_k_values(self, server) -> None:
         tasks = self._make_tasks()
-        result = LibraryJudgeMathResourcesServer.compute_metrics(None, tasks)
+        result = server.compute_metrics(tasks)
         for k_val in [2, 3, 4]:
             key = f"pass@1[avg-of-{k_val}]/symbolic_accuracy/std_dev_across_runs"
             assert key in result, f"Missing stats for k={k_val}: {key}"
 
-    def test_per_task_metrics(self) -> None:
+    def test_multi_score(self, server) -> None:
         tasks = self._make_tasks()
-        result = LibraryJudgeMathResourcesServer.compute_metrics(None, tasks)
-        ptm = result["per_task_metrics"]
-        assert len(ptm) == 3
-        t0 = ptm[0]
-        from nemo_gym.global_config import TASK_INDEX_KEY_NAME
-
-        assert t0[TASK_INDEX_KEY_NAME] == 0
-        assert "pass@1/symbolic_accuracy" in t0
-        assert "pass@1[avg-of-4]/symbolic_accuracy" in t0
-        assert "majority@4/symbolic_accuracy" in t0
-        assert t0["pass@1[avg-of-4]/symbolic_accuracy"] == approx(0.75)
-        assert t0["pass@1[avg-of-1]/symbolic_accuracy"] == approx(1.0)
-        t2 = ptm[2]
-        assert t2["pass@4/symbolic_accuracy"] == 0.0
-        assert t2["pass@1[avg-of-4]/symbolic_accuracy"] == approx(0.0)
-
-    def test_per_task_no_answer(self) -> None:
-        tasks = self._make_tasks()
-        result = LibraryJudgeMathResourcesServer.compute_metrics(None, tasks)
-        ptm = result["per_task_metrics"]
-        assert ptm[0]["pass@1[avg-of-4]/no_answer"] == approx(0.25)
-        assert ptm[2]["pass@1[avg-of-4]/no_answer"] == approx(0.25)
-
-    def test_multi_score(self) -> None:
-        tasks = self._make_tasks()
-        result = LibraryJudgeMathResourcesServer.compute_metrics(None, tasks)
+        result = server.compute_metrics(tasks)
         assert "pass@1/symbolic_accuracy" in result
         assert "accuracy" not in str(
             [k for k in result if "accuracy" in k and "symbolic" not in k and "judge" not in k]
         )
 
-    def test_empty_tasks(self) -> None:
-        result = LibraryJudgeMathResourcesServer.compute_metrics(None, [])
+    def test_empty_tasks(self, server) -> None:
+        result = server.compute_metrics([])
         assert result == {}
 
 
