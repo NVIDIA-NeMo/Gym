@@ -117,8 +117,7 @@ class GeminiModelServer(SimpleResponsesAPIModel):
         for attempt in range(max_attempts):
             try:
                 response = await asyncio.wait_for(
-                    asyncio.to_thread(
-                        self._client.models.generate_content,
+                    self._client.aio.models.generate_content(
                         model=model_name,
                         contents=contents,
                         config=gen_config,
