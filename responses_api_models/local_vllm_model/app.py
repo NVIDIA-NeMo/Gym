@@ -165,7 +165,7 @@ class LocalVLLMModelActor:
             metrics_logger.setLevel(ERROR)
 
     def _patch_init_data_parallel(self) -> None:
-        from vllm.v1.engine.core import DPEngineCoreProc, logger
+        from vllm.v1.engine.core import DPMoEEngineCoreActor, logger
 
         def new_init_data_parallel(self, vllm_config):
             # Configure GPUs and stateless process group for data parallel.
@@ -209,7 +209,7 @@ class LocalVLLMModelActor:
 
             self.dp_group = vllm_config.parallel_config.stateless_init_dp_group()
 
-        DPEngineCoreProc._init_data_parallel = new_init_data_parallel
+        DPMoEEngineCoreActor._init_data_parallel = new_init_data_parallel
 
     def _patch_create_dp_placement_groups(self) -> None:
         head_node_placement_group = self.head_node_placement_group
