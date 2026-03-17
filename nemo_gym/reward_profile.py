@@ -309,6 +309,20 @@ def compute_pass_majority_metrics(
                     metrics[f"pass@1[avg-of-{k}]/{name}/std_dev_across_runs"] = std_dev
                     metrics[f"pass@1[avg-of-{k}]/{name}/std_err_across_runs"] = std_err
 
+                # avg_sample_std_dev: average of per-task standard deviations
+                # Measures within-task variance across k rollouts (complement of across-run variance)
+                sample_std_devs = []
+                for task_scores in all_score_dicts:
+                    vals = [s.get(name) for s in task_scores[:k] if name in s]
+                    if len(vals) >= 2:
+                        task_mean = sum(vals) / len(vals)
+                        task_var = sum((v - task_mean) ** 2 for v in vals) / (len(vals) - 1)
+                        sample_std_devs.append(_math.sqrt(task_var))
+                if sample_std_devs:
+                    metrics[f"pass@1[avg-of-{k}]/{name}/avg_sample_std_dev"] = sum(sample_std_devs) / len(
+                        sample_std_devs
+                    )
+
     return metrics
 
 

@@ -29,6 +29,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.reward_profile import compute_pass_majority_metrics
 
 
 # ----------------------------
@@ -68,6 +69,7 @@ class CompCodingVerifyResponse(BaseVerifyResponse):
     metadata: Optional[Dict[str, Any]] = None
     unit_tests_time_taken: Optional[float] = None
     reasoning_format_violation_rate: float = 0.0
+    difficulty: Optional[str] = None
 
 
 # ----------------------------
@@ -102,13 +104,108 @@ class CompCodingResourcesServer(SimpleResourcesServer):
 
         return False
 
+    @staticmethod
+    def _code_score_fn(r: dict) -> Dict[str, float]:
+        return {"accuracy": float(r["reward"] > 0)}
+
+    def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
+        """Compute code generation metrics: pass@k, majority@k, per-sample statistics.
+
+        Produces overall metrics and per-difficulty-subset metrics (matching Skills'
+        subset_for_metrics behavior). Subset metrics are prefixed with the difficulty
+        name, e.g. ``easy/pass@1/accuracy``, ``medium/pass@10/accuracy``.
+        """
+        metrics = compute_pass_majority_metrics(
+            tasks,
+            score_fn=self._code_score_fn,
+            answer_key="extracted_model_code",
+        )
+
+        # Per-difficulty-subset metrics (matching Skills' subset_for_metrics)
+        subsets: Dict[str, List[List[Dict[str, Any]]]] = {}
+        for task_rollouts in tasks:
+            difficulty = task_rollouts[0].get("difficulty") if task_rollouts else None
+            if difficulty:
+                subsets.setdefault(difficulty, []).append(task_rollouts)
+
+        for subset_name, subset_tasks in subsets.items():
+            subset_metrics = compute_pass_majority_metrics(
+                subset_tasks,
+                score_fn=self._code_score_fn,
+                answer_key="extracted_model_code",
+            )
+            for key, value in subset_metrics.items():
+                if key == "per_sample_aggregate":
+                    continue
+                metrics[f"{subset_name}/{key}"] = value
+
+        return metrics
+
+    def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
+        """Select headline metrics for code generation benchmarks.
+
+        Includes overall pass@k/majority@k plus per-difficulty-subset pass@1[avg-of-k].
+        """
+        import re
+
+        key: Dict[str, Any] = {}
+
+        for name in ("mean/input_tokens", "mean/output_tokens"):
+            if name in agent_metrics:
+                key[name] = agent_metrics[name]
+
+        # Highest-k pass@1[avg-of-*] for accuracy (no statistics)
+        avg_keys = [
+            k
+            for k in agent_metrics
+            if k.startswith("pass@1[avg-of-")
+            and k.endswith("/accuracy")
+            and "std_dev" not in k
+            and "std_err" not in k
+            and "avg_sample" not in k
+        ]
+        if avg_keys:
+            highest_k = max(int(k.split("pass@1[avg-of-")[1].split("]")[0]) for k in avg_keys)
+            key[f"pass@1[avg-of-{highest_k}]/accuracy"] = agent_metrics[f"pass@1[avg-of-{highest_k}]/accuracy"]
+
+        # Highest-k pass@k for accuracy (not no_answer)
+        pass_keys = [k for k in agent_metrics if re.match(r"^pass@\d+/accuracy$", k)]
+        if pass_keys:
+            highest_k = max(int(k.split("@")[1].split("/")[0]) for k in pass_keys)
+            key[f"pass@{highest_k}/accuracy"] = agent_metrics[f"pass@{highest_k}/accuracy"]
+
+        # Highest-k majority for accuracy (not no_answer)
+        maj_keys = [k for k in agent_metrics if re.match(r"^majority@\d+/accuracy$", k)]
+        if maj_keys:
+            highest_k = max(int(k.split("@")[1].split("/")[0]) for k in maj_keys)
+            key[f"majority@{highest_k}/accuracy"] = agent_metrics[f"majority@{highest_k}/accuracy"]
+
+        # Per-difficulty-subset pass@1[avg-of-k] headline metrics
+        subset_avg_keys = [k for k in agent_metrics if re.match(r"^[a-z]+/pass@1\[avg-of-\d+\]/accuracy$", k)]
+        if subset_avg_keys:
+            # Group by subset prefix
+            subsets: Dict[str, List[str]] = {}
+            for k in subset_avg_keys:
+                prefix = k.split("/pass@")[0]
+                subsets.setdefault(prefix, []).append(k)
+            for prefix, keys in subsets.items():
+                highest_k = max(int(k.split("avg-of-")[1].split("]")[0]) for k in keys)
+                metric_key = f"{prefix}/pass@1[avg-of-{highest_k}]/accuracy"
+                if metric_key in agent_metrics:
+                    key[metric_key] = agent_metrics[metric_key]
+
+        return key
+
     async def verify(self, body: CompCodingVerifyRequest) -> CompCodingVerifyResponse:
         model_out = body.response.output_text
+        difficulty = (body.verifier_metadata or {}).get("difficulty")
+
         if not model_out or not model_out.strip():
             # A response existed but had no usable text -> model failure
             return CompCodingVerifyResponse(
                 **body.model_dump(),
                 reward=0.0,
+                difficulty=difficulty,
             )
 
         tests = UnitTests.model_validate(body.verifier_metadata["unit_tests"])
@@ -120,6 +217,7 @@ class CompCodingResourcesServer(SimpleResourcesServer):
                 **body.model_dump(),
                 reward=0.0,
                 extracted_model_output=model_out,
+                difficulty=difficulty,
             )
 
         # 4) run (no sandbox)
@@ -179,6 +277,7 @@ class CompCodingResourcesServer(SimpleResourcesServer):
             metadata=metadata,
             unit_tests_time_taken=unit_tests_time_taken,
             reasoning_format_violation_rate=1.0 if has_violation else 0.0,
+            difficulty=difficulty,
         )
 
 
