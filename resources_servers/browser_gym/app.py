@@ -14,6 +14,7 @@
 import asyncio
 import logging
 import uuid
+from contextlib import asynccontextmanager
 
 import aiohttp
 from fastapi import FastAPI
@@ -60,6 +61,18 @@ class BrowserGymResourcesServer(SimpleResourcesServer):
         app.post("/step")(self.step)
         app.post("/dump_local_storage")(self.dump_local_storage)
         app.post("/close")(self.close)
+
+        parent_lifespan = app.router.lifespan_context
+
+        @asynccontextmanager
+        async def _lifespan_with_shutdown(app):
+            async with parent_lifespan(app) as maybe_state:
+                yield maybe_state
+            logger.info("Server shutting down — closing all browser sessions")
+            await self.browser_pool.shutdown()
+
+        app.router.lifespan_context = _lifespan_with_shutdown
+
         return app
 
     async def seed_session(self, body: CUASeedSessionRequest) -> CUASeedSessionResponse:

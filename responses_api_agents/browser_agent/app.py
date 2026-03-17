@@ -68,7 +68,7 @@ class BrowserAgentConfig(BaseResponsesAPIAgentConfig):
     cua_turns_to_keep: int = 8
     cua_screenshot_turn_limit: int = 8
     cua_max_conversation_turns: int = 8
-    max_steps: int = 50
+    max_steps: int = 250
     viewport_width: int = 1280
     viewport_height: int = 720
 
