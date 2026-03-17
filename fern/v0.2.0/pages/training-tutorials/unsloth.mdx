@@ -1,0 +1,32 @@
+---
+title: "RL Training with Unsloth"
+description: ""
+---
+This tutorial demonstrates how to use [Unsloth](https://github.com/unslothai/unsloth) to fine-tune models with NeMo Gym environments.
+
+**Unsloth** is a fast, memory-efficient library for fine-tuning large language models. It provides optimized implementations that significantly reduce memory usage and training time, making it possible to fine-tune larger models on consumer hardware.
+
+## Prerequisites
+
+- A Google account (for Colab) or a local GPU with 16GB+ VRAM
+- Familiarity with NeMo Gym concepts ([Quickstart](/get-started/index))
+
+The NeMo Gym integration with Unsloth is tested on {{unsloth_pinned}}. Other versions are not guaranteed to work.
+
+---
+
+## Getting Started
+
+Follow these interactive notebooks to train models with Unsloth and NeMo Gym:
+
+:::{button-link} https://colab.research.google.com/github/unslothai/notebooks/blob/main/nb/NeMo-Gym-Sudoku.ipynb
+:color: primary
+
+Sudoku
+
+:::{button-link} https://colab.research.google.com/github/unslothai/notebooks/blob/main/nb/NeMo-Gym-Multi-Environment.ipynb
+:color: secondary
+
+Multi-Environment Training
+
+Check out [Unsloth's documentation](https://docs.unsloth.ai/models/nemotron-3#reinforcement-learning--nemo-gym) for more details.
