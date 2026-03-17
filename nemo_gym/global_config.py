@@ -178,6 +178,7 @@ class GlobalConfigDictParser(BaseModel):
         config_paths = config_paths.copy()
 
         extra_configs: List[DictConfig] = []
+        duplicate_config_paths: List[str] = []
         for config_path in config_paths:
             config_path = Path(config_path)
             # Check cwd first for user's local configs, then install location
@@ -189,7 +190,16 @@ class GlobalConfigDictParser(BaseModel):
             for new_config_path in extra_config.get(CONFIG_PATHS_KEY_NAME) or []:
                 if new_config_path not in config_paths:
                     config_paths.append(new_config_path)
+                else:
+                    duplicate_config_paths.append(new_config_path)
             extra_configs.append(extra_config)
+
+        if duplicate_config_paths:
+            duplicate_config_paths_str = "".join(f"- {p}\n" for p in duplicate_config_paths)
+            print(f"""Found some config paths that reference the same source config path. You may want to double check whether the configs you have need to use different configs for the same server.
+In cases like these, you may want to consider using the `swap_key` OmegaConf directive e.g. '++my_specific_server=${{swap_key:generic_server}}' and then overriding config parameters in `my_specific_server`.
+Duplicate config paths:
+{duplicate_config_paths_str}""")
 
         return config_paths, extra_configs
 
