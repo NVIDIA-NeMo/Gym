@@ -6,6 +6,7 @@ config_paths:
 agent_name: mcqa_simple_agent
 input_jsonl_fpath: benchmarks/gpqa/data/gpqa_diamond_validation.jsonl
 prompt_config: benchmarks/gpqa/prompts/default.yaml
+num_repeats: 8
 
 # Override mcqa server grading mode to match the prompt format (Answer: X)
 mcqa:

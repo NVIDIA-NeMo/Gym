@@ -470,3 +470,108 @@ class TestTaskIndexInGroupMetrics:
 
         indices = [g[TASK_INDEX_KEY_NAME] for g in result.group_level_metrics]
         assert indices == [100, 200, 300]
+
+
+class TestMajorityNoAnswerCounting:
+    """majority@k should count tasks with no valid answers as incorrect (score 0)."""
+
+    def test_no_answer_tasks_count_as_incorrect(self) -> None:
+        tasks = [
+            # Task 0: all answers present, majority correct
+            [{"reward": 1.0, "extracted_answer": "A"}, {"reward": 1.0, "extracted_answer": "A"}],
+            # Task 1: no answers at all
+            [{"reward": 0.0, "extracted_answer": None}, {"reward": 0.0, "extracted_answer": None}],
+        ]
+        m = compute_pass_majority_metrics(tasks, answer_key="extracted_answer")
+        # Task 0 correct (100), Task 1 no-answer should be 0 → average = 50
+        assert m["majority@2/accuracy"] == pytest.approx(50.0)
+
+    def test_all_no_answer_is_zero(self) -> None:
+        tasks = [
+            [{"reward": 0.0, "extracted_answer": None}, {"reward": 0.0, "extracted_answer": None}],
+            [{"reward": 0.0, "extracted_answer": None}, {"reward": 0.0, "extracted_answer": None}],
+        ]
+        m = compute_pass_majority_metrics(tasks, answer_key="extracted_answer")
+        assert m["majority@2/accuracy"] == pytest.approx(0.0)
+
+
+def _make_mcqa_verify_request(text: str, expected: str = "B", grading_mode: str = "strict_single_letter_boxed"):
+    """Helper to build a MCQAVerifyRequest with proper schema."""
+    from nemo_gym.base_resources_server import NeMoGymResponse
+    from resources_servers.mcqa.app import MCQAVerifyRequest
+
+    response = NeMoGymResponse(
+        id="resp_test",
+        created_at=0.0,
+        model="dummy",
+        object="response",
+        output=[
+            {
+                "id": "msg_test",
+                "content": [{"annotations": [], "text": text, "type": "output_text"}],
+                "role": "assistant",
+                "status": "completed",
+                "type": "message",
+            }
+        ],
+        parallel_tool_calls=True,
+        tool_choice="auto",
+        tools=[],
+    )
+    return MCQAVerifyRequest(
+        responses_create_params={"input": [{"role": "user", "content": "Q?"}]},
+        response=response,
+        options=[{"A": "opt1"}, {"B": "opt2"}, {"C": "opt3"}, {"D": "opt4"}],
+        expected_answer=expected,
+        grading_mode=grading_mode,
+    )
+
+
+class TestMCQAGradingModeConfig:
+    """Test that MCQAResourcesServerConfig.grading_mode overrides per-row grading_mode."""
+
+    @pytest.mark.asyncio
+    async def test_config_grading_mode_overrides_row(self) -> None:
+        from resources_servers.mcqa.app import MCQAResourcesServer, MCQAResourcesServerConfig
+
+        config = MCQAResourcesServerConfig(
+            host="127.0.0.1",
+            port=12345,
+            entrypoint="app.py",
+            name="mcqa",
+            grading_mode="lenient_answer_colon",
+        )
+        server = MCQAResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+        # "Answer: B" with no boxed — row says strict_single_letter_boxed but config overrides
+        body = _make_mcqa_verify_request(
+            text="I think the answer is B.\n\nAnswer: B",
+            expected="B",
+            grading_mode="strict_single_letter_boxed",
+        )
+        result = await server.verify(body)
+        assert result.extracted_answer == "B"
+        assert result.reward == 1.0
+
+    @pytest.mark.asyncio
+    async def test_no_config_grading_mode_uses_row_default(self) -> None:
+        from resources_servers.mcqa.app import MCQAResourcesServer, MCQAResourcesServerConfig
+
+        # No grading_mode on config → uses per-row value
+        config = MCQAResourcesServerConfig(
+            host="127.0.0.1",
+            port=12345,
+            entrypoint="app.py",
+            name="mcqa",
+        )
+        server = MCQAResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+        # "Answer: B" without boxed — strict_single_letter_boxed should NOT match
+        body = _make_mcqa_verify_request(
+            text="I think the answer is B.\n\nAnswer: B",
+            expected="B",
+            grading_mode="strict_single_letter_boxed",
+        )
+        result = await server.verify(body)
+        assert result.extracted_answer is None
+        assert result.reward == 0.0
