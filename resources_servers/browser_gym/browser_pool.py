@@ -217,6 +217,10 @@ class BrowserPool:
     ) -> str:
         """Create a new browser session. Returns base64 screenshot of the initial page."""
         await self._semaphore.acquire()
+        slot_idx: Optional[int] = None
+        context: Optional[BrowserContext] = None
+        page: Optional[Page] = None
+        session_registered = False
         try:
             async with self._lock:
                 browser, slot_idx = await self._acquire_slot()
@@ -233,10 +237,32 @@ class BrowserPool:
             )
             async with self._lock:
                 self._sessions[env_id] = session
+                session_registered = True
 
             screenshot_bytes = await page.screenshot(type="png", full_page=False)
             return base64.b64encode(screenshot_bytes).decode("utf-8")
         except Exception:
+            if session_registered:
+                async with self._lock:
+                    self._sessions.pop(env_id, None)
+
+            if page is not None:
+                try:
+                    await asyncio.wait_for(page.close(), timeout=CLOSE_SESSION_STEP_TIMEOUT)
+                except Exception:
+                    logger.warning("Failed to close page during create_session rollback for env_id=%s", env_id)
+
+            if context is not None:
+                try:
+                    await asyncio.wait_for(context.close(), timeout=CLOSE_SESSION_STEP_TIMEOUT)
+                except Exception:
+                    logger.warning("Failed to close context during create_session rollback for env_id=%s", env_id)
+
+            if slot_idx is not None:
+                async with self._lock:
+                    slot = self._slots[slot_idx]
+                    slot.session_count = max(0, slot.session_count - 1)
+
             self._semaphore.release()
             raise
 
