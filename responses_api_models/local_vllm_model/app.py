@@ -165,7 +165,7 @@ class LocalVLLMModelActor:
             metrics_logger.setLevel(ERROR)
 
     def _patch_init_data_parallel(self) -> None:
-        from vllm.v1.engine.core import DPMoEEngineCoreActor, logger
+        from vllm.v1.engine.core import DPEngineCoreProc, logger
 
         # TODO remove
         print("hit in _patch_init_data_parallel", file=sys.stderr)
@@ -215,7 +215,7 @@ class LocalVLLMModelActor:
 
             self.dp_group = vllm_config.parallel_config.stateless_init_dp_group()
 
-        DPMoEEngineCoreActor._init_data_parallel = new_init_data_parallel
+        DPEngineCoreProc._init_data_parallel = new_init_data_parallel
 
     def _patch_create_dp_placement_groups(self) -> None:
         # TODO remove
