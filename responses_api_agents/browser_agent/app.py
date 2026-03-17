@@ -18,8 +18,9 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from fastapi import Request, Response
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict, Field, model_validator
 
+from nemo_gym import PARENT_DIR
 from nemo_gym.base_resources_server import BaseRunRequest
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
@@ -72,7 +73,14 @@ class BrowserAgentConfig(BaseResponsesAPIAgentConfig):
     viewport_height: int = 720
 
     cua_debug_trajectories: bool = False
-    cua_debug_output_dir: str = "/tmp/cua_debug_trajectories"
+    cua_debug_output_dir: str = str(PARENT_DIR / "results" / "cua_debug_trajectories")
+
+    @model_validator(mode="after")
+    def _resolve_debug_output_dir(self) -> "BrowserAgentConfig":
+        p = Path(self.cua_debug_output_dir)
+        if not p.is_absolute():
+            self.cua_debug_output_dir = str(PARENT_DIR / p)
+        return self
 
 
 class BrowserAgentRunRequest(BaseRunRequest):
