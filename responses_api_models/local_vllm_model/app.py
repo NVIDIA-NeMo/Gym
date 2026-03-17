@@ -206,7 +206,7 @@ class LocalVLLMModelActor:
             )
 
             def new_stateless_init_torch_distributed_process_group(*args, **kwargs):
-                print("HIT INSIDE NEW stateless_init_torch_distributed_process_group")
+                print("HIT INSIDE NEW stateless_init_torch_distributed_process_group", file=sys.stderr)
                 return original_stateless_init_torch_distributed_process_group(*args, **kwargs)
 
             vllm.distributed.utils.stateless_init_torch_distributed_process_group = (
