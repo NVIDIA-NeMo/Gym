@@ -160,15 +160,16 @@ The `/{path}` catch-all route **must be registered after** `super().setup_webser
 
 </Warning>
 
-:::{admonition} What does `get_tools()` return?
+<Accordion title="What does get_tools() return?">
 
 `get_tools(toolkits)` initializes a dictionary containing:
 - `"functions"`: A mapping of tool names (e.g. `"email_search_emails"`) to Python callables
 - Per-toolkit in-memory data (DataFrames for emails, calendar events, analytics, etc.)
 
 Each session gets its own independent copy of this state, so tool calls in one episode cannot affect another.
+</Accordion>
 
-:::{admonition} What does `is_correct()` do?
+<Accordion title="What does is_correct() do?">
 
 `is_correct(predicted_calls, ground_truth, env)` performs **state-based verification**:
 1. Replays the predicted tool calls against a fresh environment
@@ -176,9 +177,10 @@ Each session gets its own independent copy of this state, so tool calls in one e
 3. Compares five specific mutable DataFrames: `email._emails`, `calendar._calendar_events`, `analytics._plots_data`, `project_management._project_tasks`, and `customer_relationship_manager._crm_data` (mostly case-insensitive)
 4. Returns `1.0` if all five match, `0.0` otherwise
 
-Note that read-only state (e.g. `company_directory`) is not compared --- only mutable state that tools can modify. Tool execution errors during replay are caught and skipped rather than treated as immediate failures.
+Note that read-only state (e.g. `company_directory`) is not compared — only mutable state that tools can modify. Tool execution errors during replay are caught and skipped rather than treated as immediate failures.
 
 This is more flexible than trajectory matching because it rewards correct outcomes regardless of the specific tool call sequence.
+</Accordion>
 
 ---
 

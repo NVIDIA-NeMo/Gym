@@ -597,10 +597,9 @@ async def verify(self, body: MultiStepVerifyRequest) -> BaseVerifyResponse:
 ```
 See `resources_servers/example_multi_step/app.py` for a complete example.
 
-:<Info>
+<Info>
 The custom request model (`MultiStepVerifyRequest`) is required for extra fields like `expected_values` to survive Pydantic parsing. Using `BaseVerifyRequest` directly would silently drop any fields not defined on the base class.
-
-</Info>:
+</Info>
 </Accordion>
 
 <Accordion title="LLM-as-judge verification">

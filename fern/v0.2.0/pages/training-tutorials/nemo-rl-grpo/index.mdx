@@ -2,7 +2,7 @@
 title: "RL Training with NeMo RL using GRPO"
 description: ""
 ---
-This tutorial trains NVIDIA [Nemotron Nano 9B v2](https://huggingface.co/nvidia/NVIDIA-Nemotron-Nano-9B-v2) to improve its **{term}`multi-step <[Multi-step>` {term}`tool-calling](/Tool Use / Function Calling)`** capability using the **{term}`GRPO (Group Relative Policy Optimization) <GRPO (Group Relative Policy Optimization)>`** algorithm on the **Workplace Assistant** environment.
+This tutorial trains NVIDIA [Nemotron Nano 9B v2](https://huggingface.co/nvidia/NVIDIA-Nemotron-Nano-9B-v2) to improve its **multi-step tool-calling** capability using the **GRPO (Group Relative Policy Optimization)** algorithm on the **Workplace Assistant** environment.
 
 Workplace Assistant is a realistic office simulation (calendar, email, project management, etc.) with complex multi-step tasks, providing a strong data distribution for training enterprise-ready tool-using assistants.
 
@@ -15,7 +15,7 @@ Workplace Assistant is a realistic office simulation (calendar, email, project m
 
 **In this tutorial, you will**:
 
-1. Set up NeMo RL and NeMo Gym for {term}`reinforcement learning <RL (Reinforcement Learning)>` training
+1. Set up NeMo RL and NeMo Gym for **reinforcement learning** training
 2. Understand the Workplace Assistant environment and its multi-step tool calling tasks
 3. Configure and run GRPO training on Nemotron Nano v2 9B
 4. Monitor training progress via Weights & Biases (W&B)

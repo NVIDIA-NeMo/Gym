@@ -116,7 +116,6 @@ If your dataset doesn't have `responses_create_params`, you need to preprocess i
 The `responses_create_params` field wraps your input in the Responses API format. This typically includes a system prompt and the user content.
 
 <Accordion title="Preprocessing script (preprocess.py)">
-:open:
 
 Save this script as `preprocess.py`. It reads a raw JSONL file, adds `responses_create_params`, and splits into train/validation:
 
@@ -274,7 +273,6 @@ Invalid samples are silently skipped. If metrics show fewer examples than expect
 </Warning>
 
 <Accordion title="Find invalid samples">
-:open:
 
 ```python
 import json

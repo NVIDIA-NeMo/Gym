@@ -45,12 +45,13 @@ experimental:
   mdx-components:
     - ./components
 
-versions:
-  - display-name: v0.2.0
-    path: v0.2.0
+tabs:
+  docs:
+    display-name: Documentation
+    icon: book-open
 
 navigation:
-  - version: v0.2.0
+  - tab: docs
     layout:
       - section: Home
         contents:
