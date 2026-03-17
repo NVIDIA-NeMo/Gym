@@ -788,3 +788,27 @@ class TestGlobalConfig:
         parser = GlobalConfigDictParser()
         global_config_dict = parser.parse(GlobalConfigDictParserConfig(skip_load_from_cli=True))
         assert global_config_dict["custom_env_key"] == "from_parent"
+
+
+class TestBenchmarkConfigLoading:
+    def test_benchmark_config_loads_defaults(self) -> None:
+        """Benchmark config keys are loaded and merged as lowest-priority defaults."""
+        from nemo_gym.global_config import CONFIG_PATHS_KEY_NAME
+
+        benchmark_config_path = PARENT_DIR / "benchmarks" / "aime24" / "config.yaml"
+        assert benchmark_config_path.exists(), f"AIME24 benchmark config not found at {benchmark_config_path}"
+
+        benchmark_config = OmegaConf.load(benchmark_config_path)
+        assert benchmark_config.get("agent_name") == "math_with_judge_simple_agent"
+        assert "aime24_validation" in benchmark_config.get("input_jsonl_fpath", "")
+        assert benchmark_config.get("prompt_config") is not None
+        assert CONFIG_PATHS_KEY_NAME in benchmark_config
+
+    def test_benchmark_config_chains_via_config_paths(self) -> None:
+        """Benchmark config's config_paths are recursively loaded by load_extra_config_paths."""
+        parser = GlobalConfigDictParser()
+        config_paths, extra_configs = parser.load_extra_config_paths(["benchmarks/aime24/config.yaml"])
+
+        assert any("math_with_judge" in p for p in config_paths)
+        assert len(extra_configs) >= 2
+        assert extra_configs[0].get("agent_name") == "math_with_judge_simple_agent"

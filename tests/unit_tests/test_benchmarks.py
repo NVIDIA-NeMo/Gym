@@ -18,7 +18,14 @@ from unittest.mock import MagicMock, patch
 import pytest
 from omegaconf import OmegaConf
 
-from nemo_gym.benchmarks import BenchmarkConfig, discover_benchmarks, get_benchmark, list_benchmarks, prepare_benchmark
+from nemo_gym.benchmarks import (
+    BenchmarkConfig,
+    _find_benchmark_dirs_from_config_paths,
+    discover_benchmarks,
+    get_benchmark,
+    list_benchmarks,
+    prepare_benchmark,
+)
 
 
 class TestBenchmarkConfig:
@@ -98,12 +105,34 @@ class TestListBenchmarks:
         assert "No benchmarks found" in capsys.readouterr().out
 
 
+class TestFindBenchmarkDirs:
+    def test_finds_benchmark_from_config_paths(self, tmp_path: Path) -> None:
+        benchmarks_dir = tmp_path / "benchmarks"
+        bench_dir = benchmarks_dir / "my_bench"
+        bench_dir.mkdir(parents=True)
+        config_path = str(bench_dir / "config.yaml")
+
+        with patch("nemo_gym.benchmarks.BENCHMARKS_DIR", benchmarks_dir):
+            dirs = _find_benchmark_dirs_from_config_paths([config_path])
+        assert dirs == [bench_dir]
+
+    def test_skips_non_benchmark_paths(self) -> None:
+        dirs = _find_benchmark_dirs_from_config_paths(["resources_servers/foo/configs/foo.yaml"])
+        assert dirs == []
+
+
 class TestPrepareBenchmark:
+    def _make_bench_dir(self, tmp_path: Path, name: str = "fake_bench") -> Path:
+        benchmarks_dir = tmp_path / "benchmarks"
+        bench_dir = benchmarks_dir / name
+        bench_dir.mkdir(parents=True)
+        (bench_dir / "config.yaml").write_text("agent_name: test\n")
+        return bench_dir
+
     def test_calls_prepare(self, tmp_path: Path) -> None:
-        bench_dir = tmp_path / "fake_bench"
-        bench_dir.mkdir()
+        bench_dir = self._make_bench_dir(tmp_path)
         (bench_dir / "prepare.py").write_text("")
-        fake_bench = BenchmarkConfig(name="fake_bench", path=bench_dir, config_dict={})
+        config_path = str(bench_dir / "config.yaml")
 
         mock_module = MagicMock()
         mock_module.prepare.return_value = tmp_path / "output.jsonl"
@@ -111,44 +140,50 @@ class TestPrepareBenchmark:
         with (
             patch(
                 "nemo_gym.benchmarks.get_global_config_dict",
-                return_value=_mock_global_config({"benchmark": "fake_bench"}),
+                return_value=_mock_global_config({"config_paths": [config_path]}),
             ),
-            patch("nemo_gym.benchmarks.get_benchmark", return_value=fake_bench),
+            patch("nemo_gym.benchmarks.BENCHMARKS_DIR", bench_dir.parent),
             patch("nemo_gym.benchmarks.importlib.import_module", return_value=mock_module),
         ):
             prepare_benchmark()
             mock_module.prepare.assert_called_once()
 
     def test_missing_prepare_py(self, tmp_path: Path) -> None:
-        bench_dir = tmp_path / "fake_bench"
-        bench_dir.mkdir()
-        fake_bench = BenchmarkConfig(name="fake_bench", path=bench_dir, config_dict={})
+        bench_dir = self._make_bench_dir(tmp_path)
+        config_path = str(bench_dir / "config.yaml")
 
         with (
             patch(
                 "nemo_gym.benchmarks.get_global_config_dict",
-                return_value=_mock_global_config({"benchmark": "fake_bench"}),
+                return_value=_mock_global_config({"config_paths": [config_path]}),
             ),
-            patch("nemo_gym.benchmarks.get_benchmark", return_value=fake_bench),
+            patch("nemo_gym.benchmarks.BENCHMARKS_DIR", bench_dir.parent),
         ):
-            with pytest.raises(FileNotFoundError, match="No prepare.py found"):
+            with pytest.raises(ValueError, match="No prepare.py found"):
                 prepare_benchmark()
 
     def test_missing_prepare_function(self, tmp_path: Path) -> None:
-        bench_dir = tmp_path / "fake_bench"
-        bench_dir.mkdir()
+        bench_dir = self._make_bench_dir(tmp_path)
         (bench_dir / "prepare.py").write_text("")
-        fake_bench = BenchmarkConfig(name="fake_bench", path=bench_dir, config_dict={})
+        config_path = str(bench_dir / "config.yaml")
 
         mock_module = MagicMock(spec=[])  # empty spec = no attributes
 
         with (
             patch(
                 "nemo_gym.benchmarks.get_global_config_dict",
-                return_value=_mock_global_config({"benchmark": "fake_bench"}),
+                return_value=_mock_global_config({"config_paths": [config_path]}),
             ),
-            patch("nemo_gym.benchmarks.get_benchmark", return_value=fake_bench),
+            patch("nemo_gym.benchmarks.BENCHMARKS_DIR", bench_dir.parent),
             patch("nemo_gym.benchmarks.importlib.import_module", return_value=mock_module),
         ):
-            with pytest.raises(AttributeError, match="must define a `prepare\\(\\)` function"):
+            with pytest.raises(ValueError, match="must define a `prepare\\(\\)` function"):
+                prepare_benchmark()
+
+    def test_no_benchmark_in_config_paths(self) -> None:
+        with patch(
+            "nemo_gym.benchmarks.get_global_config_dict",
+            return_value=_mock_global_config({"config_paths": ["resources_servers/foo/configs/foo.yaml"]}),
+        ):
+            with pytest.raises(ValueError, match="No benchmark config found"):
                 prepare_benchmark()

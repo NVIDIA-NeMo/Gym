@@ -1,8 +1,8 @@
-# GPQA-Diamond Resource Server
+# GPQA-Diamond Resources Server
 
 ## Overview
 
-This resource server evaluates GPQA-Diamond multiple-choice responses with a
+This resources server evaluates GPQA-Diamond multiple-choice responses with a
 GPQA-specific verifier built on top of `resources_servers/mcqa`.
 
 - Task type: single-turn MCQ
@@ -69,7 +69,7 @@ This generates:
 - `resources_servers/gpqa_diamond/data/train.jsonl`
 
 `data/example.jsonl` is a curated repo artifact and is not modified by the
-preprocess script. There is currently no `validation.jsonl` for this resource
+preprocess script. There is currently no `validation.jsonl` for this resources
 server.
 
 ## Example Usage
@@ -113,3 +113,4 @@ the same pattern as `test_rollouts*`:
 
 Code: Apache 2.0
 Configured train dataset license metadata: MIT
+

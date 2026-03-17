@@ -12,8 +12,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from argparse import ArgumentParser
 from collections import defaultdict
 from copy import deepcopy
+from importlib import import_module
 from os import environ, getenv
 from pathlib import Path
 from platform import python_version
@@ -133,6 +135,28 @@ class GlobalConfigDictParserConfig(BaseModel):
 
 class GlobalConfigDictParser(BaseModel):
     def parse_global_config_dict_from_cli(self) -> DictConfig:
+        # We need to monkeypatch hydra here so that it doesn't use Hydra help so that we can use our own help down the line
+        hydra_main_module = import_module("hydra.main")
+        original_get_args_parser = hydra_main_module.get_args_parser
+
+        def new_get_args_parser():
+            parser: ArgumentParser = original_get_args_parser()
+            # Set the conflict handlers to resolve so we can disable the help.
+            parser.conflict_handler = "resolve"
+            for action_group in parser._action_groups:
+                action_group.conflict_handler = "resolve"
+
+            parser.add_argument("--help", "-h", action="store_false", default=False)
+
+            # Reset to the original conflict_handler error scheme
+            parser.conflict_handler = "error"
+            for action_group in parser._action_groups:
+                action_group.conflict_handler = "error"
+
+            return parser
+
+        hydra_main_module.get_args_parser = new_get_args_parser
+
         # This function is just to get the config object out of the hydra main call.
         # Need a closure. We simply use an outer ref of a list
         config_list = []

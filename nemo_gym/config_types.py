@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from argparse import ArgumentParser
 from enum import Enum
 from typing import Any, ClassVar, Dict, List, Literal, Optional, Set, Tuple, Union
 
@@ -39,7 +40,11 @@ class BaseNeMoGymCLIConfig(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def pre_process(cls, data):
-        if not (data.get("h") or data.get("help")):
+        parser = ArgumentParser(add_help=False)
+        parser.add_argument("-h", "--help", action="store_true")
+        args, _ = parser.parse_known_args()
+
+        if not (args.help or data.get("h") or data.get("help")):
             return data
 
         rich.print(f"""Displaying help for [bold]{cls.__name__}[/bold]

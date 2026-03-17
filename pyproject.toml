@@ -84,9 +84,9 @@ dependencies = [
 
     # OpenAI: We leverage OpenAI Responses, Chat Completions, and Completions schemas for Nemo Gym abstractions. It may also be used to directly query endpoints.
     # We specifically upper bound this OpenAI dependency since the version bumps so frequently.
-    # Updated Wed Oct 29, 2025 with openai==2.6.1
+    # Updated Wed Feb 17, 2026 with openai<=2.7.2
     # License: Apache 2.0 https://github.com/openai/openai-python/blob/a8258744cbecf51321587fc870e8920bd2c07809/LICENSE
-    "openai<=2.6.1",
+    "openai<=2.7.2",
 
     # tqdm: Used for progress tracking on batch operations.
     # Updated Fri Jul 25, 2025 with tqdm==4.67.1
@@ -269,7 +269,6 @@ exclude-dependencies = [
     "contourpy",
     "cryptography",
     "cycler",
-    "docker",
     "flask",
     "flask-cors",
     "graphene",
@@ -329,6 +328,10 @@ nemo_gym_collect_rollouts = "nemo_gym.rollout_collection:collect_rollouts"
 ng_collect_rollouts = "nemo_gym.rollout_collection:collect_rollouts"
 nemo_gym_e2e_collect_rollouts = "nemo_gym.cli:e2e_rollout_collection"
 ng_e2e_collect_rollouts = "nemo_gym.cli:e2e_rollout_collection"
+
+# Prompt materialization
+nemo_gym_materialize_prompts = "nemo_gym.prompt:materialize_prompts_cli"
+ng_materialize_prompts = "nemo_gym.prompt:materialize_prompts_cli"
 
 # Reward profiling
 nemo_gym_reward_profile = "nemo_gym.reward_profile:reward_profile"
