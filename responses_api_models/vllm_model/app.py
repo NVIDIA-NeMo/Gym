@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+import logging
 import re
 from copy import deepcopy
 from time import time
@@ -62,6 +63,8 @@ from nemo_gym.openai_utils import (
     TokenIDLogProbMixin,
 )
 from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
+
+LOGGER = logging.getLogger(__name__)
 
 
 class VLLMModelConfig(BaseResponsesAPIModelConfig):
@@ -347,6 +350,12 @@ class VLLMModel(SimpleResponsesAPIModel):
                 res.choices[0].finish_reason = "length"
                 return res
             else:
+                LOGGER.error(
+                    "vLLM chat-completions request rejected: status=%s body=%s payload_keys=%s",
+                    e.status,
+                    result_content_str,
+                    sorted(body_dict.keys()),
+                )
                 raise e
 
         choice_dict = chat_completion_dict["choices"][0]
@@ -575,8 +584,8 @@ class VLLMConverter(BaseModel):
             responses_create_params["max_tokens"] = max_output_tokens
 
         tools = responses_create_params.pop("tools", None)
-        if tools is not None:
-            responses_create_params["tools"] = []
+        if tools:
+            converted_tools = []
             for tool_dict in tools:
                 tool_dict = tool_dict.copy()
                 tool_dict.pop("type", None)
@@ -586,6 +595,11 @@ class VLLMConverter(BaseModel):
                 responses_create_params["tools"].append(
                     NeMoGymChatCompletionToolParam(type="function", function=NeMoGymFunctionDefinition(**tool_dict))
                 )
+            responses_create_params["tools"] = converted_tools
+        else:
+            # Avoid passing tool-control knobs when no tools are provided.
+            responses_create_params.pop("parallel_tool_calls", None)
+            responses_create_params.pop("tool_choice", None)
 
         chat_completion_create_params = NeMoGymChatCompletionCreateParamsNonStreaming(
             messages=state.messages,
