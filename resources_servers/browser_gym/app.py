@@ -15,6 +15,7 @@ import asyncio
 import logging
 import uuid
 from contextlib import asynccontextmanager
+from typing import Optional
 
 import aiohttp
 from fastapi import FastAPI
@@ -46,14 +47,18 @@ class BrowserGymResourcesServer(SimpleResourcesServer):
 
     config: BrowserGymResourcesServerConfig
     browser_pool: BrowserPool = Field(default=None, exclude=True)
+    _verify_session: Optional[aiohttp.ClientSession] = None
 
     def model_post_init(self, __context):
         super().model_post_init(__context)
         ensure_playwright()
         self.browser_pool = BrowserPool(
             max_concurrent=self.config.max_concurrent_browsers,
+            pool_size=self.config.browser_pool_size,
             default_viewport_width=self.config.default_viewport_width,
             default_viewport_height=self.config.default_viewport_height,
+            session_ttl_seconds=self.config.session_ttl_seconds,
+            reaper_interval_seconds=self.config.session_reaper_interval_seconds,
         )
 
     def setup_webserver(self) -> FastAPI:
@@ -66,10 +71,13 @@ class BrowserGymResourcesServer(SimpleResourcesServer):
 
         @asynccontextmanager
         async def _lifespan_with_shutdown(app):
+            self.browser_pool.start_reaper()
             async with parent_lifespan(app) as maybe_state:
                 yield maybe_state
             logger.info("Server shutting down — closing all browser sessions")
             await self.browser_pool.shutdown()
+            if self._verify_session and not self._verify_session.closed:
+                await self._verify_session.close()
 
         app.router.lifespan_context = _lifespan_with_shutdown
 
@@ -108,6 +116,17 @@ class BrowserGymResourcesServer(SimpleResourcesServer):
             ls_dump = ""
         return CUADumpLocalStorageResponse(local_storage_dump=ls_dump)
 
+    def _get_verify_session(self) -> aiohttp.ClientSession:
+        if self._verify_session is None or self._verify_session.closed:
+            self._verify_session = aiohttp.ClientSession(
+                connector=aiohttp.TCPConnector(
+                    limit=self.config.verify_connector_limit,
+                    limit_per_host=self.config.verify_connector_limit_per_host,
+                ),
+                timeout=aiohttp.ClientTimeout(total=self.config.verify_timeout_seconds),
+            )
+        return self._verify_session
+
     async def verify(self, body: CUAVerifyRequest) -> CUAVerifyResponse:
         vm = body.verifier_metadata or {}
         gym_url = vm.get("gym_url", "")
@@ -130,29 +149,29 @@ class BrowserGymResourcesServer(SimpleResourcesServer):
             model_response = body.response.trajectory.final_message
 
         try:
-            async with aiohttp.ClientSession() as session:
-                form_data = aiohttp.FormData()
-                form_data.add_field("taskId", task_id)
-                form_data.add_field(
-                    "localStorageDump",
-                    local_storage_dump,
-                    filename="localStorageDump.json",
-                    content_type="application/json",
-                )
-                if model_response:
-                    form_data.add_field("modelResponse", model_response)
+            session = self._get_verify_session()
+            form_data = aiohttp.FormData()
+            form_data.add_field("taskId", task_id)
+            form_data.add_field(
+                "localStorageDump",
+                local_storage_dump,
+                filename="localStorageDump.json",
+                content_type="application/json",
+            )
+            if model_response:
+                form_data.add_field("modelResponse", model_response)
 
-                async with session.post(verify_url, data=form_data, timeout=aiohttp.ClientTimeout(total=300)) as resp:
-                    if resp.status != 200:
-                        resp_text = await resp.text()
-                        logger.warning(f"Verification API returned {resp.status}: {resp_text}")
-                        return CUAVerifyResponse(
-                            **body.model_dump(),
-                            reward=0.0,
-                            verification_result={"error": resp_text, "status_code": resp.status},
-                        )
+            async with session.post(verify_url, data=form_data) as resp:
+                if resp.status != 200:
+                    resp_text = await resp.text()
+                    logger.warning(f"Verification API returned {resp.status}: {resp_text}")
+                    return CUAVerifyResponse(
+                        **body.model_dump(),
+                        reward=0.0,
+                        verification_result={"error": resp_text, "status_code": resp.status},
+                    )
 
-                    result = await resp.json()
+                result = await resp.json()
 
             assertions = result.get("assertions", [])
             if not assertions:

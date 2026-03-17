@@ -19,7 +19,8 @@ Each browser session is identified by a unique env_id.
 import asyncio
 import base64
 import logging
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from typing import Optional
 
 from playwright.async_api import Browser, BrowserContext, Page, async_playwright
@@ -132,27 +133,77 @@ class BrowserSession:
     page: Page
     viewport_width: int
     viewport_height: int
+    slot_index: int = 0
+    last_accessed: float = field(default_factory=time.monotonic)
+
+
+class _BrowserSlot:
+    """A single Chromium process and its Playwright instance."""
+
+    __slots__ = ("playwright", "browser", "session_count")
+
+    def __init__(self):
+        self.playwright = None
+        self.browser: Optional[Browser] = None
+        self.session_count: int = 0
+
+    def is_alive(self) -> bool:
+        return self.browser is not None and self.browser.is_connected()
+
+    async def ensure_launched(self):
+        if not self.is_alive():
+            self.playwright = await async_playwright().start()
+            self.browser = await self.playwright.chromium.launch(headless=True)
+            self.session_count = 0
+
+    async def close(self):
+        if self.browser:
+            try:
+                await self.browser.close()
+            except Exception as e:
+                logger.warning("Error closing browser slot: %s", e)
+            self.browser = None
+        if self.playwright:
+            try:
+                await self.playwright.stop()
+            except Exception as e:
+                logger.warning("Error stopping playwright slot: %s", e)
+            self.playwright = None
+        self.session_count = 0
 
 
 class BrowserPool:
     def __init__(
-        self, max_concurrent: int = 16, default_viewport_width: int = 1280, default_viewport_height: int = 720
+        self,
+        max_concurrent: int = 16,
+        pool_size: int = 4,
+        default_viewport_width: int = 1280,
+        default_viewport_height: int = 720,
+        session_ttl_seconds: float = 7200.0,
+        reaper_interval_seconds: float = 300.0,
     ):
         self._semaphore = asyncio.Semaphore(max_concurrent)
         self._sessions: dict[str, BrowserSession] = {}
-        self._browser: Optional[Browser] = None
-        self._playwright = None
+        self._slots: list[_BrowserSlot] = [_BrowserSlot() for _ in range(max(1, pool_size))]
         self._lock = asyncio.Lock()
         self._default_viewport_width = default_viewport_width
         self._default_viewport_height = default_viewport_height
+        self._session_ttl = session_ttl_seconds
+        self._reaper_interval = reaper_interval_seconds
+        self._reaper_task: Optional[asyncio.Task] = None
 
-    async def _ensure_browser(self) -> Browser:
-        if self._browser is None or not self._browser.is_connected():
-            async with self._lock:
-                if self._browser is None or not self._browser.is_connected():
-                    self._playwright = await async_playwright().start()
-                    self._browser = await self._playwright.chromium.launch(headless=True)
-        return self._browser
+    async def _acquire_slot(self) -> tuple[Browser, int]:
+        """Get or launch the least-loaded browser process. Must be called under self._lock."""
+        best_idx = 0
+        best_count = float("inf")
+        for i, slot in enumerate(self._slots):
+            if not slot.is_alive():
+                await slot.ensure_launched()
+                return slot.browser, i
+            if slot.session_count < best_count:
+                best_count = slot.session_count
+                best_idx = i
+        return self._slots[best_idx].browser, best_idx
 
     async def create_session(
         self,
@@ -164,7 +215,9 @@ class BrowserPool:
         """Create a new browser session. Returns base64 screenshot of the initial page."""
         await self._semaphore.acquire()
         try:
-            browser = await self._ensure_browser()
+            async with self._lock:
+                browser, slot_idx = await self._acquire_slot()
+                self._slots[slot_idx].session_count += 1
             vw = viewport_width or self._default_viewport_width
             vh = viewport_height or self._default_viewport_height
 
@@ -172,7 +225,9 @@ class BrowserPool:
             page = await context.new_page()
             await page.goto(start_url, wait_until="domcontentloaded", timeout=30000)
 
-            session = BrowserSession(context=context, page=page, viewport_width=vw, viewport_height=vh)
+            session = BrowserSession(
+                context=context, page=page, viewport_width=vw, viewport_height=vh, slot_index=slot_idx
+            )
             async with self._lock:
                 self._sessions[env_id] = session
 
@@ -185,7 +240,9 @@ class BrowserPool:
     def get_session(self, env_id: str) -> BrowserSession:
         if env_id not in self._sessions:
             raise KeyError(f"No browser session found for env_id={env_id}")
-        return self._sessions[env_id]
+        session = self._sessions[env_id]
+        session.last_accessed = time.monotonic()
+        return session
 
     async def take_screenshot(self, env_id: str) -> str:
         """Take a screenshot of the current page and return base64-encoded PNG."""
@@ -221,7 +278,6 @@ class BrowserPool:
             return False
 
         try:
-            # Step 1: close the page (60s, matching harness timeout_seconds=60)
             try:
                 await asyncio.wait_for(session.page.close(), timeout=CLOSE_SESSION_STEP_TIMEOUT)
             except asyncio.TimeoutError:
@@ -229,7 +285,6 @@ class BrowserPool:
             except Exception as e:
                 logger.warning("Error closing page for env_id=%s: %s", env_id, e)
 
-            # Step 2: close the context (60s, matching harness timeout_seconds=60)
             try:
                 await asyncio.wait_for(session.context.close(), timeout=CLOSE_SESSION_STEP_TIMEOUT)
             except asyncio.TimeoutError:
@@ -237,28 +292,57 @@ class BrowserPool:
             except Exception as e:
                 logger.warning("Error closing context for env_id=%s: %s", env_id, e)
         finally:
+            async with self._lock:
+                slot = self._slots[session.slot_index]
+                slot.session_count = max(0, slot.session_count - 1)
             self._semaphore.release()
 
         return True
 
+    def start_reaper(self) -> None:
+        """Start a background task that periodically closes stale sessions."""
+        if self._reaper_task is None or self._reaper_task.done():
+            self._reaper_task = asyncio.create_task(self._reaper_loop())
+
+    async def stop_reaper(self) -> None:
+        if self._reaper_task and not self._reaper_task.done():
+            self._reaper_task.cancel()
+            try:
+                await self._reaper_task
+            except asyncio.CancelledError:
+                pass
+            self._reaper_task = None
+
+    async def _reaper_loop(self) -> None:
+        """Periodically scan for sessions that exceeded their TTL and close them."""
+        while True:
+            await asyncio.sleep(self._reaper_interval)
+            try:
+                await self._reap_stale_sessions()
+            except Exception:
+                logger.exception("Session reaper encountered an error")
+
+    async def _reap_stale_sessions(self) -> None:
+        now = time.monotonic()
+        stale_ids: list[str] = []
+        async with self._lock:
+            for env_id, session in self._sessions.items():
+                if now - session.last_accessed >= self._session_ttl:
+                    stale_ids.append(env_id)
+
+        for env_id in stale_ids:
+            logger.warning("Reaping stale session env_id=%s (idle >= %.0fs)", env_id, self._session_ttl)
+            await self.close_session(env_id)
+
     async def shutdown(self):
-        """Close all sessions and the browser."""
+        """Close all sessions, stop the reaper, and close all browser processes."""
+        await self.stop_reaper()
         async with self._lock:
             env_ids = list(self._sessions.keys())
         for env_id in env_ids:
             await self.close_session(env_id)
-        if self._browser:
-            try:
-                await self._browser.close()
-            except Exception as e:
-                logger.warning(f"Error closing browser: {e}")
-            self._browser = None
-        if self._playwright:
-            try:
-                await self._playwright.stop()
-            except Exception as e:
-                logger.warning(f"Error stopping playwright: {e}")
-            self._playwright = None
+        for slot in self._slots:
+            await slot.close()
 
     # ──────────────────────────────────────────────────────────────
     # Action execution with per-action timeouts
