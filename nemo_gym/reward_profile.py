@@ -268,6 +268,7 @@ def compute_pass_majority_metrics(
                         if a is not None and name in s
                     ]
                     if not valid:
+                        majority_values.append(0)
                         continue
                     counter = Counter(valid)
                     max_count = counter.most_common(1)[0][1]
