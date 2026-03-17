@@ -28,7 +28,13 @@ from nemo_gym.reward_profile import compute_pass_majority_metrics
 
 
 class MCQAResourcesServerConfig(BaseResourcesServerConfig):
-    pass
+    grading_mode: Optional[
+        Literal[
+            "strict_single_letter_boxed",
+            "lenient_boxed",
+            "lenient_answer_colon",
+        ]
+    ] = None
 
 
 class MCQARunRequest(BaseRunRequest):
@@ -242,6 +248,8 @@ class MCQAResourcesServer(SimpleResourcesServer):
         # Derive allowed letters from option keys
         allowed_letters = _get_allowed_letters_from_options(options)
 
+        grading_mode = self.config.grading_mode or body.grading_mode
+
         pred: Optional[str] = None
 
         # Check for template_metadata first (highest priority)
@@ -251,9 +259,9 @@ class MCQAResourcesServer(SimpleResourcesServer):
 
         # Fallback to existing grading_mode logic if template_metadata didn't work
         if pred is None:
-            if body.grading_mode == "strict_single_letter_boxed":
+            if grading_mode == "strict_single_letter_boxed":
                 pred, _, _ = _parse_answer_letter_strict_boxed(text, allowed_letters)
-            elif body.grading_mode == "lenient_boxed":
+            elif grading_mode == "lenient_boxed":
                 # Try strict boxed first
                 pred, _, _ = _parse_answer_letter_strict_boxed(text, allowed_letters)
                 if pred is None:
@@ -261,7 +269,7 @@ class MCQAResourcesServer(SimpleResourcesServer):
                     letter_from_text = _match_option_text(text, options, allowed_letters)
                     if letter_from_text is not None:
                         pred = letter_from_text
-            elif body.grading_mode == "lenient_answer_colon":
+            elif grading_mode == "lenient_answer_colon":
                 # Look for Answer: <...>
                 m = ANSWER_COLON_PATTERN.search(text)
                 if m:

@@ -1,1 +1,1 @@
-user: "You should output your final response letter inside \\boxed{{}} and nothing else You can first think step-by-step. {question}\n{options_text}"
+user: "Answer the following multiple choice question. The last line of your response should be in the following format: 'Answer: A/B/C/D' (e.g. 'Answer: A').\n\n{question}\n{options_text}"
