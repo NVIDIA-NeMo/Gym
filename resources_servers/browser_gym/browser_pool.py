@@ -153,7 +153,10 @@ class _BrowserSlot:
     async def ensure_launched(self):
         if not self.is_alive():
             self.playwright = await async_playwright().start()
-            self.browser = await self.playwright.chromium.launch(headless=True)
+            self.browser = await self.playwright.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
+            )
             self.session_count = 0
 
     async def close(self):
