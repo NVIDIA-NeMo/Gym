@@ -33,6 +33,7 @@ class MCQAResourcesServerConfig(BaseResourcesServerConfig):
             "strict_single_letter_boxed",
             "lenient_boxed",
             "lenient_answer_colon",
+            "lenient_answer_colon_md",
         ]
     ] = None
 
@@ -95,6 +96,8 @@ CHOICE_LETTER_PATTERN = re.compile(r"(?<![A-Za-z])([A-Za-z])(?![A-Za-z])")
 # Strict boxed: capture a single UPPERCASE letter, allowing non-letter chars around it inside the box
 STRICT_BOXED_PATTERN = re.compile(r"\\boxed\{\s*[^A-Za-z]*([A-Z])[^A-Za-z]*\s*\}")
 ANSWER_COLON_PATTERN = re.compile(r"(?i)answer\s*:\s*(.+)")
+# Markdown-aware variant: tolerates **Answer: B**, __Answer__: B, etc. Captures single letter only.
+ANSWER_COLON_MD_PATTERN = re.compile(r"(?i)[*_]{0,2}Answer[*_]{0,2}\s*:[*_\s]{0,2}\s*([A-Z])(?![a-zA-Z0-9])")
 
 
 def _parse_answer_letter_strict_boxed(text: str, allowed_letters: set[str]) -> tuple[Optional[str], str, bool]:
@@ -290,6 +293,13 @@ class MCQAResourcesServer(SimpleResourcesServer):
                                     break
                             if pred is not None:
                                 break
+            elif grading_mode == "lenient_answer_colon_md":
+                # Markdown-aware Answer: extraction — handles **Answer: B**, etc.
+                md_match = ANSWER_COLON_MD_PATTERN.search(text)
+                if md_match:
+                    letter_up = md_match.group(1).strip().upper()
+                    if letter_up in allowed_letters:
+                        pred = letter_up
 
         gold = (expected_answer or "").strip().upper()
         is_correct = (pred == gold) if (pred is not None and gold) else False
