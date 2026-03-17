@@ -168,11 +168,11 @@ class LocalVLLMModelActor:
         from vllm.v1.engine.core import DPMoEEngineCoreActor, logger
 
         # TODO remove
-        print("hit in _patch_init_data_parallel")
+        print("hit in _patch_init_data_parallel", file=sys.stderr)
 
         def new_init_data_parallel(self, vllm_config):
             # TODO remove
-            print("hit in new_init_data_parallel")
+            print("hit in new_init_data_parallel", file=sys.stderr)
 
             # Configure GPUs and stateless process group for data parallel.
             dp_rank = vllm_config.parallel_config.data_parallel_rank
@@ -219,7 +219,7 @@ class LocalVLLMModelActor:
 
     def _patch_create_dp_placement_groups(self) -> None:
         # TODO remove
-        print("hit in _patch_create_dp_placement_groups")
+        print("hit in _patch_create_dp_placement_groups", file=sys.stderr)
 
         head_node_placement_group = self.head_node_placement_group
 
@@ -241,7 +241,7 @@ class LocalVLLMModelActor:
             """
 
             # TODO remove
-            print("hit in new_create_dp_placement_groups")
+            print("hit in new_create_dp_placement_groups", file=sys.stderr)
 
             import ray
             from ray._private.state import available_resources_per_node, total_resources_per_node
