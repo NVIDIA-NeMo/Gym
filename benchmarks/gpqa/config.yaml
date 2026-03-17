@@ -1,0 +1,8 @@
+# Chain to existing resource server + agent config
+config_paths:
+  - resources_servers/mcqa/configs/mcqa.yaml
+
+# Rollout collection defaults — picked up directly by RolloutCollectionConfig
+agent_name: mcqa_simple_agent
+input_jsonl_fpath: benchmarks/gpqa/data/gpqa_diamond_validation.jsonl
+prompt_config: benchmarks/gpqa/prompts/default.yaml

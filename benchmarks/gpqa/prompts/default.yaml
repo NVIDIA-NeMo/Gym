@@ -1,0 +1,1 @@
+user: "You should output your final response letter inside \\boxed{{}} and nothing else You can first think step-by-step. {question}\n{options_text}"

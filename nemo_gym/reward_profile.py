@@ -201,10 +201,11 @@ def compute_pass_majority_metrics(
         score_fn = lambda r: {"accuracy": r["reward"]}  # noqa: E731
 
     max_k = max(len(rollouts) for rollouts in tasks)
-    n_tasks = len(tasks)
     metrics: Dict[str, Any] = {}
 
-    # Extract per-task score dicts and answers
+    # Extract per-task score dicts and answers.
+    # When answer_key is set, inject "no_answer" as a binary score so it gets
+    # the same pass@k / majority@k / variance treatment as every other score.
     all_score_dicts: List[List[Dict[str, float]]] = []
     all_answers: List[List[Optional[str]]] = []
     for rollouts in tasks:
@@ -212,9 +213,12 @@ def compute_pass_majority_metrics(
         task_answers = []
         for r in rollouts:
             raw = score_fn(r)
-            task_scores.append({k: (int(v) if isinstance(v, bool) else v) for k, v in raw.items()})
+            scores = {k: (int(v) if isinstance(v, bool) else v) for k, v in raw.items()}
             if answer_key is not None:
-                task_answers.append(r.get(answer_key))
+                answer = r.get(answer_key)
+                task_answers.append(answer)
+                scores["no_answer"] = 1 if answer is None else 0
+            task_scores.append(scores)
         all_score_dicts.append(task_scores)
         if answer_key is not None:
             all_answers.append(task_answers)
@@ -273,42 +277,36 @@ def compute_pass_majority_metrics(
                 if majority_values:
                     metrics[f"majority@{k}/{name}"] = 100.0 * sum(majority_values) / len(majority_values)
 
-        # --- no_answer (per agg mode, not per score method) ---
-        if answer_key is not None:
-            no_answer_count = sum(1 for task_answers in all_answers if all(a is None for a in task_answers[:k]))
-            no_answer_pct = 100.0 * no_answer_count / n_tasks
-            metrics[f"pass@{k}/no_answer"] = no_answer_pct
-            metrics[f"pass@1[avg-of-{k}]/no_answer"] = (
-                100.0
-                * sum(
-                    sum(1 for a in task_answers[:k] if a is None) / min(k, len(task_answers))
-                    for task_answers in all_answers
-                )
-                / n_tasks
-            )
-            metrics[f"majority@{k}/no_answer"] = no_answer_pct
+    # --- per_sample_aggregate and variance statistics ---
+    # per_sample_aggregate[score_name][i] = pass@1 using only rollout i across all tasks
+    per_sample_agg: Dict[str, List[float]] = {name: [] for name in score_names}
 
-    # --- Variance statistics for pass@1[avg-of-k] ---
+    for run_idx in range(max_k):
+        for name in score_names:
+            run_scores = [
+                task_scores[run_idx].get(name)
+                for task_scores in all_score_dicts
+                if run_idx < len(task_scores) and name in task_scores[run_idx]
+            ]
+            if run_scores:
+                per_sample_agg[name].append(100.0 * sum(run_scores) / len(run_scores))
+
+    # Remove empty entries
+    per_sample_agg = {k: v for k, v in per_sample_agg.items() if v}
+    metrics["per_sample_aggregate"] = per_sample_agg
+
+    # Variance statistics for pass@1[avg-of-k]
     if max_k > 1:
         for k in range(2, max_k + 1):
             for name in score_names:
-                run_averages = []
-                for run_idx in range(k):
-                    run_scores = [
-                        task_scores[run_idx].get(name)
-                        for task_scores in all_score_dicts
-                        if run_idx < len(task_scores) and name in task_scores[run_idx]
-                    ]
-                    if run_scores:
-                        run_averages.append(sum(run_scores) / len(run_scores))
-
+                run_averages = per_sample_agg.get(name, [])[:k]
                 if len(run_averages) >= 2:
                     mean_val = sum(run_averages) / len(run_averages)
                     variance = sum((x - mean_val) ** 2 for x in run_averages) / (len(run_averages) - 1)
                     std_dev = _math.sqrt(variance)
                     std_err = std_dev / _math.sqrt(len(run_averages))
-                    metrics[f"pass@1[avg-of-{k}]/{name}/std_dev_across_runs"] = 100.0 * std_dev
-                    metrics[f"pass@1[avg-of-{k}]/{name}/std_err_across_runs"] = 100.0 * std_err
+                    metrics[f"pass@1[avg-of-{k}]/{name}/std_dev_across_runs"] = std_dev
+                    metrics[f"pass@1[avg-of-{k}]/{name}/std_err_across_runs"] = std_err
 
     return metrics
 
