@@ -69,6 +69,7 @@ class BrowserAgentConfig(BaseResponsesAPIAgentConfig):
     cua_screenshot_turn_limit: int = 8
     cua_max_conversation_turns: int = 8
     max_steps: int = 250
+    run_timeout_seconds: float = 7200.0
     viewport_width: int = 1280
     viewport_height: int = 720
 
@@ -359,6 +360,16 @@ class BrowserAgent(SimpleResponsesAPIAgent):
 
             while not adapter_resp.done and step_count < self.config.max_steps:
                 if browser_crashed:
+                    break
+                elapsed = time.time() - loop_start
+                if elapsed >= self.config.run_timeout_seconds:
+                    logger.warning(
+                        "[CUA %s] hard timeout reached (%.0fs >= %.0fs) after %d steps — ending loop",
+                        env_id,
+                        elapsed,
+                        self.config.run_timeout_seconds,
+                        step_count,
+                    )
                     break
                 for action in adapter_resp.actions:
                     try:

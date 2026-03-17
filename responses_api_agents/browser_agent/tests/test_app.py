@@ -1248,3 +1248,42 @@ class TestSaveDebugTrajectory:
                     env_id="env-permerr",
                     trajectory=trajectory,
                 )
+
+
+class TestBrowserAgentConfig:
+    def test_default_max_steps(self):
+        from responses_api_agents.browser_agent.app import BrowserAgentConfig
+
+        config = BrowserAgentConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="",
+            resources_server={"type": "resources_servers", "name": "browser_gym"},
+        )
+        assert config.max_steps == 250
+
+    def test_default_run_timeout(self):
+        from responses_api_agents.browser_agent.app import BrowserAgentConfig
+
+        config = BrowserAgentConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="",
+            resources_server={"type": "resources_servers", "name": "browser_gym"},
+        )
+        assert config.run_timeout_seconds == 7200.0
+
+    def test_custom_run_timeout(self):
+        from responses_api_agents.browser_agent.app import BrowserAgentConfig
+
+        config = BrowserAgentConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="",
+            resources_server={"type": "resources_servers", "name": "browser_gym"},
+            run_timeout_seconds=3600.0,
+        )
+        assert config.run_timeout_seconds == 3600.0
