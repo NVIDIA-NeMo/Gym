@@ -294,7 +294,7 @@ class MCQAResourcesServer(SimpleResourcesServer):
                             if pred is not None:
                                 break
             elif grading_mode == "lenient_answer_colon_md":
-                # Markdown-aware Answer: extraction — handles **Answer: B**, etc.
+                # Markdown-aware Answer: extraction handles **Answer: B**, etc.
                 md_match = ANSWER_COLON_MD_PATTERN.search(text)
                 if md_match:
                     letter_up = md_match.group(1).strip().upper()
