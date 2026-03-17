@@ -24,7 +24,7 @@ dynamic = [
     "readme",
 ]
 description = "NeMo Gym is a library for building reinforcement learning environments"
-license = {file = "LICENSE"}
+license = {text = "Apache-2.0"}
 requires-python = ">=3.12"
 authors = [{ name = "NVIDIA" }]
 maintainers = [{ name = "NVIDIA" }]
