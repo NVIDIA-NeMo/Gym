@@ -1,0 +1,84 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+import argparse
+import json
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+PROMPT_TEMPLATES_DIR = Path(__file__).parent / "prompt_templates"
+
+
+def _load_prompt_template(filename: str) -> str:
+    with open(PROMPT_TEMPLATES_DIR / filename, encoding="utf-8") as fin:
+        return yaml.safe_load(fin)["user"]
+
+
+GENSELECT_PROMPT_TEMPLATE = _load_prompt_template("genselect.yaml")
+
+DEFAULT_AGENT_NAME = "proof_genselect_simple_agent"
+
+
+def convert_genselect_rows(rows: list[dict[str, Any]], agent_name: str = DEFAULT_AGENT_NAME) -> list[dict[str, Any]]:
+    examples = []
+    for row in rows:
+        problem = row["problem"]
+        proof_1 = row["proof_1"]
+        proof_2 = row["proof_2"]
+        user_content = GENSELECT_PROMPT_TEMPLATE.format(problem=problem, proof_1=proof_1, proof_2=proof_2)
+        gym_example = {
+            "agent_ref": {"name": agent_name},
+            "responses_create_params": {
+                "input": [{"role": "user", "content": user_content}],
+            },
+            "problem": problem,
+            "proof_1": proof_1,
+            "proof_2": proof_2,
+            "correct_index": row["correct_index"],
+        }
+        if "score_1" in row:
+            gym_example["score_1"] = row["score_1"]
+        if "score_2" in row:
+            gym_example["score_2"] = row["score_2"]
+        examples.append(gym_example)
+    return examples
+
+
+def convert_genselect_jsonl(
+    input_path: str,
+    output_path: str,
+    agent_name: str = DEFAULT_AGENT_NAME,
+) -> int:
+    with open(input_path, encoding="utf-8") as fin:
+        rows = [json.loads(line) for line in fin if line.strip()]
+
+    examples = convert_genselect_rows(rows, agent_name=agent_name)
+
+    with open(output_path, "w", encoding="utf-8") as fout:
+        for example in examples:
+            fout.write(json.dumps(example, ensure_ascii=False) + "\n")
+
+    return len(examples)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Convert pairwise proof selection JSONL to Gym-compatible format")
+    parser.add_argument("--input", required=True, help="Path to pairwise proof-selection JSONL")
+    parser.add_argument("--output", required=True, help="Path to Gym-compatible output JSONL")
+    parser.add_argument(
+        "--agent-name",
+        default=DEFAULT_AGENT_NAME,
+        help=f"Agent name for agent_ref routing (default: '{DEFAULT_AGENT_NAME}')",
+    )
+    args = parser.parse_args()
+
+    count = convert_genselect_jsonl(args.input, args.output, agent_name=args.agent_name)
+    print(f"Converted {count} examples: {args.input} -> {args.output}")
+    print(f"Agent ref: {args.agent_name}")
+
+
+if __name__ == "__main__":
+    main()

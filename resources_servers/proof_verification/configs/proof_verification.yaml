@@ -1,0 +1,30 @@
+# Proof verification with ground-truth score matching and meta-verifier agreement.
+proof_verification:
+  resources_servers:
+    proof_verification:
+      entrypoint: app.py
+      judge_model_server:
+        type: responses_api_models
+        name: policy_model
+      judge_model_name: ""
+      temperature: 1.0
+      top_p: 1.0
+      max_tokens: 100000
+      assert_think_end: false
+      domain: math
+      description: Proof verification scored against ground truth and meta-verifier agreement
+
+proof_verification_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: proof_verification
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/proof_verification/data/example.jsonl
