@@ -3,7 +3,8 @@ browser_gym_resources_server:
     browser_gym:
       entrypoint: app.py
       domain: agent
-      max_concurrent_browsers: 16
+      max_concurrent_browsers: ${max_concurrent_browsers}
+      browser_pool_size: ${browser_pool_size}
       default_viewport_width: 1280
       default_viewport_height: 720
       verified: false
