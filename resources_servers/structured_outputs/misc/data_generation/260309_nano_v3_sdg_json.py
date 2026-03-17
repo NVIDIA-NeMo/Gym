@@ -103,7 +103,10 @@ DOCUMENT_TEMPLATES = [
 def template_json_schema(input_schema: Dict):
     variant = random.randint(0, 4)
     if variant == 0:
-        schema = {"type": "json_schema", "json_schema": {"name": "scene_description", "schema": deepcopy(input_schema)}}
+        schema = {
+            "type": "json_schema",
+            "json_schema": {"name": "scene_description", "schema": deepcopy(input_schema)},
+        }
     elif variant == 1:
         schema = deepcopy(input_schema)["properties"]
     else:
