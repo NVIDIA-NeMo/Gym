@@ -1,0 +1,54 @@
+{
+    "name": "train",
+    "type": "train",
+    "jsonl_fpath": "resources_servers/structured_outputs/data/structured_outputs_260309_nano_v3_sdg_json_yaml_xml_train.jsonl",
+    "num_repeats": 1,
+    "gitlab_identifier": {
+        "dataset_name": "structured_outputs_260309_nano_v3_sdg_json_yaml_xml",
+        "version": "0.0.1",
+        "artifact_fpath": "structured_outputs_260309_nano_v3_sdg_json_yaml_xml_train.jsonl"
+    },
+    "huggingface_identifier": null,
+    "license": "Apache 2.0",
+    "Number of examples": 28145,
+    "Number of tools": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 28145,
+        "Average": 694.45,
+        "Min": 101.0,
+        "Max": 2911.0,
+        "Standard deviation": 259.52
+    },
+    "Number of turns": {
+        "Total # non-null values": 28145,
+        "Average": 1.41,
+        "Min": 1.0,
+        "Max": 2.0,
+        "Standard deviation": 0.491
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "schema_str": {
+        "unique_count": 18231,
+        "total_count": 28145
+    },
+    "schema_type": {
+        "unique_count": 3,
+        "total_count": 28145
+    },
+    "schema_fields_count": {
+        "unique_count": 10,
+        "total_count": 28145
+    }
+}
