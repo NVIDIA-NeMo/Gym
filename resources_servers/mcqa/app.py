@@ -218,15 +218,22 @@ class MCQAResourcesServer(SimpleResourcesServer):
         )
 
     def get_key_metrics(self, agent_metrics):
-        # Surface the highest-k metrics as headlines
-        key_metrics = {}
-        for k in sorted(agent_metrics):
-            if k.startswith(("pass@", "majority@")):
-                key_metrics[k] = agent_metrics[k]
-        # Always include mean/reward from RewardProfiler baseline
-        if "mean/reward" in agent_metrics:
-            key_metrics["mean/reward"] = agent_metrics["mean/reward"]
-        return key_metrics
+        import re
+
+        # Find max k from pass@{k}/accuracy keys
+        max_k = max(
+            (int(m.group(1)) for k in agent_metrics if (m := re.match(r"^pass@(\d+)/accuracy$", k))),
+            default=1,
+        )
+        keys = [
+            "pass@1/accuracy",
+            f"pass@1[avg-of-{max_k}]/accuracy",
+            f"pass@1[avg-of-{max_k}]/no_answer",
+            f"majority@{max_k}/accuracy",
+            f"pass@{max_k}/no_answer",
+            "mean/reward",
+        ]
+        return {k: agent_metrics[k] for k in keys if k in agent_metrics}
 
     async def verify(self, body: MCQAVerifyRequest) -> MCQAVerifyResponse:
         text = _extract_last_assistant_text(body)

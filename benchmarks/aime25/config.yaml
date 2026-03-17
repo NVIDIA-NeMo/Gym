@@ -6,4 +6,3 @@ config_paths:
 agent_name: math_with_judge_simple_agent
 input_jsonl_fpath: benchmarks/aime25/data/aime25_validation.jsonl
 prompt_config: benchmarks/aime25/prompts/default.yaml
-num_repeats: 32

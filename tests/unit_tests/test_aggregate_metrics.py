@@ -248,7 +248,9 @@ class TestComputePassMajorityMetrics:
         ]
         m = compute_pass_majority_metrics(tasks, answer_key="extracted_answer")
 
-        assert m["majority@2/no_answer"] == pytest.approx(50.0)
+        # no_answer is a binary score: Task 0 has 0/2, Task 1 has 2/2
+        # pass@1[avg-of-2]/no_answer: Task 0: avg(0,0)=0, Task 1: avg(1,1)=1. Mean = 50%
+        assert m["pass@1[avg-of-2]/no_answer"] == pytest.approx(50.0)
 
     def test_std_dev_across_runs(self) -> None:
         """Variance statistics are flat keys matching AIME format."""
@@ -314,9 +316,15 @@ class TestMCQAComputeMetrics:
         assert "pass@2/accuracy" in result.agent_metrics
         assert "pass@1[avg-of-2]/accuracy" in result.agent_metrics
         assert "majority@2/accuracy" in result.agent_metrics
-        assert "pass@2/accuracy" in result.key_metrics
-        assert "majority@2/accuracy" in result.key_metrics
-        assert "mean/reward" in result.key_metrics
+        # Key metrics: pass@1/accuracy, avg-of-maxk, majority@maxk, no_answer, mean/reward
+        assert result.key_metrics == {
+            "pass@1/accuracy": result.agent_metrics["pass@1/accuracy"],
+            "pass@1[avg-of-2]/accuracy": result.agent_metrics["pass@1[avg-of-2]/accuracy"],
+            "pass@1[avg-of-2]/no_answer": result.agent_metrics["pass@1[avg-of-2]/no_answer"],
+            "majority@2/accuracy": result.agent_metrics["majority@2/accuracy"],
+            "pass@2/no_answer": result.agent_metrics["pass@2/no_answer"],
+            "mean/reward": result.agent_metrics["mean/reward"],
+        }
 
 
 _has_math_verify = True
