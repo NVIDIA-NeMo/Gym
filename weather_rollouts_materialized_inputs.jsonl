@@ -1,1 +1,0 @@
-{"responses_create_params":{"input":[{"role":"developer","content":"You are a helpful assistant."},{"role":"user","content":"What is the weather in Seattle?"}]},"agent_ref":{"name":"example_single_tool_call_simple_agent"},"_ng_task_index":0,"_ng_rollout_index":0}
