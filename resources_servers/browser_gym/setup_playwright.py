@@ -34,9 +34,9 @@ def ensure_playwright():
         subprocess.check_call([sys.executable, "-m", "pip", "install", "playwright"], stdout=subprocess.DEVNULL)
 
     if shutil.which("playwright") is None:
-        playwright_path = None
+        pass
     else:
-        playwright_path = shutil.which("playwright")
+        shutil.which("playwright")
 
     logger.info("Installing Playwright Chromium browser...")
     try:

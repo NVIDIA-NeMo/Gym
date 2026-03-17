@@ -104,7 +104,7 @@ class TestAnthropicModelServer:
             messages=[{"role": "user", "content": [{"type": "text", "text": "hello"}]}],
             system="You are a helpful assistant",
         )
-        result = await server.responses(body)
+        await server.responses(body)
 
         call_kwargs = server._client.beta.messages.create.call_args[1]
         assert call_kwargs["model"] == "claude-sonnet-4-20250514"
@@ -125,7 +125,7 @@ class TestAnthropicModelServer:
             messages=[{"role": "user", "content": [{"type": "text", "text": "hello"}]}],
             model="claude-opus-4-20250514",
         )
-        result = await server.responses(body)
+        await server.responses(body)
 
         call_kwargs = server._client.beta.messages.create.call_args[1]
         assert call_kwargs["model"] == "claude-opus-4-20250514"
