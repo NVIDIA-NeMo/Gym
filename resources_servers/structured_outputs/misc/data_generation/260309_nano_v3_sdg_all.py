@@ -18,6 +18,7 @@ import os
 
 from datasets import concatenate_datasets, load_dataset
 
+
 FORMATS = ["json", "yaml", "xml"]
 FILE_PREFIX = "260309_nano_v3_sdg_structured_outputs"
 
@@ -28,7 +29,7 @@ def main():
 
     for fmt in FORMATS:
         module = importlib.import_module(f"260309_nano_v3_sdg_{fmt}")
-        print(f"\n{'='*60}\nRunning {fmt} SDG...\n{'='*60}")
+        print(f"\n{'=' * 60}\nRunning {fmt} SDG...\n{'=' * 60}")
         module.main()
 
     metrics = {}
@@ -58,7 +59,7 @@ def main():
             "output_path": out_path,
         }
 
-    print(f"\n{'='*60}\nDataset Metrics\n{'='*60}")
+    print(f"\n{'=' * 60}\nDataset Metrics\n{'=' * 60}")
     for split, info in metrics.items():
         print(f"\n  {split}:")
         print(f"    total: {info['total']}")

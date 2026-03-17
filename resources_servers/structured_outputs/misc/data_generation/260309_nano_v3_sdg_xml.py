@@ -21,6 +21,7 @@ from typing import Dict, Tuple
 import pandas as pd
 from datasets import Dataset, concatenate_datasets, load_dataset
 
+
 XML_ROOT_NAMES = ["response", "data", "result", "output", "root", "document"]
 
 STRUCTURED_OUTPUT_INSTRUCTIONS = [
