@@ -6,7 +6,6 @@
 
 This benchmark uses the `mcqa` resource server with the `mcqa_simple_agent`.
 
-- **num_repeats**: 8
 - **Grading mode**: `lenient_answer_colon_md` (markdown-aware `Answer: X` extraction, matching NeMo-Skills evaluator behavior)
 - **Prompt**: `Answer the following multiple choice question. The last line of your response should be in the following format: 'Answer: A/B/C/D' ...`
 
