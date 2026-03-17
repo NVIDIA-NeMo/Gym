@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Unit tests for the chemistry_direct resources server."""
+"""Unit tests for the rdkit_chemistry resources server."""
 
 import math
 
@@ -8,6 +8,7 @@ import pytest
 
 import sys
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).parents[3]))  # repo root
 
 from resources_servers.rdkit_chemistry.app import (
@@ -20,8 +21,8 @@ from resources_servers.rdkit_chemistry.app import (
 # extract_predicted_value
 # ---------------------------------------------------------------------------
 
-class TestExtractPredictedValue:
 
+class TestExtractPredictedValue:
     def test_strict_integer(self):
         assert extract_predicted_value("42", "count") == 42.0
 
@@ -50,7 +51,6 @@ class TestExtractPredictedValue:
         assert extract_predicted_value("No, it does not.", "fragment") == 0.0
 
     def test_bool_text_ignored_for_float(self):
-        # Boolean text fallback only applies to presence/fragment
         assert extract_predicted_value("yes", "float") is None
 
     def test_empty_string(self):
@@ -64,8 +64,8 @@ class TestExtractPredictedValue:
 # compute_reward — discrete (exact-match) properties
 # ---------------------------------------------------------------------------
 
-class TestComputeRewardDiscrete:
 
+class TestComputeRewardDiscrete:
     def test_count_correct(self):
         assert compute_reward(5.0, 5.0, "count") == 1.0
 
@@ -95,8 +95,8 @@ class TestComputeRewardDiscrete:
 # compute_reward — float (negative absolute error)
 # ---------------------------------------------------------------------------
 
-class TestComputeRewardFloat:
 
+class TestComputeRewardFloat:
     def test_perfect_prediction(self):
         assert compute_reward(2.5, 2.5, "float") == pytest.approx(0.0)
 
