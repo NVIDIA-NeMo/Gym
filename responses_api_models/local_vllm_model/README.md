@@ -1,5 +1,6 @@
 - [Example run config](#example-run-config)
 - [E2E sanity testing](#e2e-sanity-testing)
+- [Notes](#notes)
 
 # Example run config
 Run this on a single GPU node! Set tensor_parallel_size * data_parallel_size to the number of GPUs on your node. For this single node config, data_parallel_size_local is equal to data_parallel_size
@@ -39,3 +40,20 @@ See the following scripts:
   - [Not supported yet] responses_api_models/local_vllm_model/test_scripts/4_nodes/2_instances_1x16.sh
 - 8 nodes
   - [Not supported yet] responses_api_models/local_vllm_model/test_scripts/8_nodes/2_instances_2x16.sh
+
+# Notes
+1. dpXppYtpZ -> X placement groups of Y * Z size each
+2. We need a "master IP" for vLLM's data parallel code to work
+
+3. Calculate the placement group size for Y * Z
+4. Request a placement group of that size from Ray. This is our "head" placement group
+5. Place LocalVLLMModelActor on this "head" placement group
+6. Set the data parallel master IP to the "head" placement group node
+7. Start vLLM server
+8. CoreActorManager.create_dp_placement_groups
+    1. For the first placement group, do nothing because we will reuse the "head" placement group
+    2. For subsequent (DP size - 1) placement groups, schedule using the same Y * Z and pack strategy
+9. Return to CoreActorManager which schedules the individual DPCoreEngineProc on each placement group
+
+First server - spins up normally and properly
+Second server - keep trying to do something but don't initialize anything
