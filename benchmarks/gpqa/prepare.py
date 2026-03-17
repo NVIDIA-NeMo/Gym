@@ -72,7 +72,6 @@ def prepare() -> Path:
             "options_text": options_text,
             "options": options,
             "expected_answer": correct_letter,
-            "grading_mode": "strict_single_letter_boxed",
             "uuid": str(uuid.uuid5(uuid.NAMESPACE_URL, example["Question"])),
         }
         rows.append(json.dumps(row) + "\n")
