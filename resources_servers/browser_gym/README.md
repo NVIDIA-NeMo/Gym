@@ -301,7 +301,13 @@ responses_api_agents/browser_agent/
 
    # Optional: override default concurrent rollouts (default: 10)
    num_samples_in_parallel: 10
+
+   # Browser concurrency
+   max_concurrent_browsers: 16   # max simultaneous browser sessions (semaphore cap)
+   browser_pool_size: 4          # number of separate Chromium processes
    ```
+
+   `max_concurrent_browsers` controls how many browser sessions can exist at once (the semaphore cap). `browser_pool_size` controls how many separate Chromium OS processes share that load — if one crashes, only the sessions on that process are affected.
 
 4. **Gym environments** deployed and accessible (e.g. `https://your-gym-url.com`)
 
