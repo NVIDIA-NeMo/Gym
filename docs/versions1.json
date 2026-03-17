@@ -2,16 +2,21 @@
     {
         "preferred": true,
         "version": "latest",
-        "url": "../latest"
+        "url": "https://docs.nvidia.com/nemo/gym/latest/"
+    },
+    {
+        "preferred": false,
+        "version": "0.2.0",
+        "url": "https://docs.nvidia.com/nemo/gym/0.2.0/"
     },
     {
         "preferred": false,
         "version": "0.1.1",
-        "url": "../0.1.1"
+        "url": "https://docs.nvidia.com/nemo/gym/0.1.1/"
     },
     {
         "preferred": false,
         "version": "0.1.0",
-        "url": "../0.1.0"
+        "url": "https://docs.nvidia.com/nemo/gym/0.1.0/"
     }
 ]
