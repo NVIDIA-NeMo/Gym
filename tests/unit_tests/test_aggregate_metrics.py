@@ -575,3 +575,90 @@ class TestMCQAGradingModeConfig:
         result = await server.verify(body)
         assert result.extracted_answer is None
         assert result.reward == 0.0
+
+
+class TestMCQAGradingModeAnswerColonMD:
+    """Test lenient_answer_colon_md grading mode (markdown-aware Answer: extraction)."""
+
+    def _make_server(self, grading_mode="lenient_answer_colon_md"):
+        from resources_servers.mcqa.app import MCQAResourcesServer, MCQAResourcesServerConfig
+
+        config = MCQAResourcesServerConfig(
+            host="127.0.0.1",
+            port=12345,
+            entrypoint="app.py",
+            name="mcqa",
+            grading_mode=grading_mode,
+        )
+        return MCQAResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+    @pytest.mark.asyncio
+    async def test_plain_answer(self) -> None:
+        server = self._make_server()
+        body = _make_mcqa_verify_request(text="The answer is B.\n\nAnswer: B", expected="B")
+        result = await server.verify(body)
+        assert result.extracted_answer == "B"
+        assert result.reward == 1.0
+
+    @pytest.mark.asyncio
+    async def test_markdown_bold_answer(self) -> None:
+        server = self._make_server()
+        body = _make_mcqa_verify_request(text="Reasoning here.\n\n**Answer: C**", expected="C")
+        result = await server.verify(body)
+        assert result.extracted_answer == "C"
+        assert result.reward == 1.0
+
+    @pytest.mark.asyncio
+    async def test_markdown_bold_no_match_old_regex(self) -> None:
+        """Verify that lenient_answer_colon does NOT extract **Answer: C** (old behavior preserved)."""
+        server = self._make_server(grading_mode="lenient_answer_colon")
+        body = _make_mcqa_verify_request(text="**Answer: C**", expected="C")
+        result = await server.verify(body)
+        # Old regex captures "C**" which is 3 chars, fails single-letter check
+        assert result.extracted_answer is None
+        assert result.reward == 0.0
+
+    @pytest.mark.asyncio
+    async def test_markdown_underscore_answer(self) -> None:
+        server = self._make_server()
+        body = _make_mcqa_verify_request(text="__Answer__: A", expected="A")
+        result = await server.verify(body)
+        assert result.extracted_answer == "A"
+        assert result.reward == 1.0
+
+    @pytest.mark.asyncio
+    async def test_no_answer_pattern(self) -> None:
+        server = self._make_server()
+        body = _make_mcqa_verify_request(text="I think it might be B but I'm not sure", expected="B")
+        result = await server.verify(body)
+        assert result.extracted_answer is None
+        assert result.reward == 0.0
+
+
+class TestComputeAggregateMetricsPerTask:
+    """Test that compute_aggregate_metrics merges per_task_metrics from compute_metrics_fn."""
+
+    def test_per_task_metrics_merged(self) -> None:
+        from nemo_gym.global_config import TASK_INDEX_KEY_NAME
+        from nemo_gym.reward_profile import compute_aggregate_metrics
+
+        responses = [
+            {TASK_INDEX_KEY_NAME: 0, "_ng_rollout_index": 0, "reward": 1.0, "response": {}},
+            {TASK_INDEX_KEY_NAME: 1, "_ng_rollout_index": 0, "reward": 0.0, "response": {}},
+        ]
+
+        def metrics_fn(tasks):
+            return {
+                "custom_agg": 99,
+                "per_task_metrics": [
+                    {TASK_INDEX_KEY_NAME: 0, "difficulty": "easy"},
+                    {TASK_INDEX_KEY_NAME: 1, "difficulty": "hard"},
+                ],
+            }
+
+        result = compute_aggregate_metrics(responses, compute_metrics_fn=metrics_fn)
+        assert result.agent_metrics["custom_agg"] == 99
+        assert "per_task_metrics" not in result.agent_metrics
+        groups_by_idx = {g[TASK_INDEX_KEY_NAME]: g for g in result.group_level_metrics}
+        assert groups_by_idx[0]["difficulty"] == "easy"
+        assert groups_by_idx[1]["difficulty"] == "hard"
