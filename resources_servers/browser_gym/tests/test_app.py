@@ -90,6 +90,47 @@ class TestBrowserPool:
         result = await pool.close_session("nonexistent")
         assert result is False
 
+    @pytest.mark.asyncio
+    async def test_create_session_failure_during_navigation_rolls_back_resources(self):
+        pool = BrowserPool(max_concurrent=1, pool_size=1)
+        mock_browser = MagicMock()
+        mock_context = AsyncMock()
+        mock_page = AsyncMock()
+        mock_context.new_page = AsyncMock(return_value=mock_page)
+        mock_browser.new_context = AsyncMock(return_value=mock_context)
+        mock_page.goto = AsyncMock(side_effect=RuntimeError("goto failed"))
+
+        with patch.object(pool, "_acquire_slot", new=AsyncMock(return_value=(mock_browser, 0))):
+            with pytest.raises(RuntimeError, match="goto failed"):
+                await pool.create_session(env_id="env-fail-goto", start_url="https://example.com")
+
+        assert "env-fail-goto" not in pool._sessions
+        assert pool._slots[0].session_count == 0
+        assert pool._semaphore._value == 1
+        mock_page.close.assert_awaited_once()
+        mock_context.close.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_create_session_failure_after_registration_rolls_back_state(self):
+        pool = BrowserPool(max_concurrent=1, pool_size=1)
+        mock_browser = MagicMock()
+        mock_context = AsyncMock()
+        mock_page = AsyncMock()
+        mock_context.new_page = AsyncMock(return_value=mock_page)
+        mock_browser.new_context = AsyncMock(return_value=mock_context)
+        mock_page.goto = AsyncMock(return_value=None)
+        mock_page.screenshot = AsyncMock(side_effect=RuntimeError("screenshot failed"))
+
+        with patch.object(pool, "_acquire_slot", new=AsyncMock(return_value=(mock_browser, 0))):
+            with pytest.raises(RuntimeError, match="screenshot failed"):
+                await pool.create_session(env_id="env-fail-screenshot", start_url="https://example.com")
+
+        assert "env-fail-screenshot" not in pool._sessions
+        assert pool._slots[0].session_count == 0
+        assert pool._semaphore._value == 1
+        mock_page.close.assert_awaited_once()
+        mock_context.close.assert_awaited_once()
+
 
 class TestBrowserAction:
     def test_click_action(self):
