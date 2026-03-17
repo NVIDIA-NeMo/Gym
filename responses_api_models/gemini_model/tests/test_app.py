@@ -96,12 +96,12 @@ class TestGeminiModelServer:
         mock_response.candidates = [mock_candidate]
         mock_response.usage_metadata = None
 
-        with patch("asyncio.to_thread", new_callable=AsyncMock, return_value=mock_response):
-            body = GeminiProxyRequest(
-                contents=[{"role": "user", "parts": [{"text": "hello"}]}],
-            )
-            result = await server.responses(body)
-            assert "candidates" in result
+        server._client.aio.models.generate_content = AsyncMock(return_value=mock_response)
+        body = GeminiProxyRequest(
+            contents=[{"role": "user", "parts": [{"text": "hello"}]}],
+        )
+        result = await server.responses(body)
+        assert "candidates" in result
 
     @pytest.mark.asyncio
     async def test_responses_prefers_body_model(self):
@@ -116,23 +116,26 @@ class TestGeminiModelServer:
         mock_response.candidates = [mock_candidate]
         mock_response.usage_metadata = None
 
-        with patch("asyncio.to_thread", new_callable=AsyncMock, return_value=mock_response) as mock_to_thread:
-            body = GeminiProxyRequest(
-                contents=[{"role": "user", "parts": [{"text": "hello"}]}],
-                model="gemini-3-pro-preview",
-            )
-            await server.responses(body)
+        server._client.aio.models.generate_content = AsyncMock(return_value=mock_response)
+        body = GeminiProxyRequest(
+            contents=[{"role": "user", "parts": [{"text": "hello"}]}],
+            model="gemini-3-pro-preview",
+        )
+        await server.responses(body)
+        server._client.aio.models.generate_content.assert_called_once()
+        call_kwargs = server._client.aio.models.generate_content.call_args[1]
+        assert call_kwargs["model"] == "gemini-3-pro-preview"
 
     @pytest.mark.asyncio
     async def test_responses_api_error_propagates(self):
         server = self._make_server()
 
-        with patch("asyncio.to_thread", new_callable=AsyncMock, side_effect=RuntimeError("API error")):
-            body = GeminiProxyRequest(
-                contents=[{"role": "user", "parts": [{"text": "hello"}]}],
-            )
-            with pytest.raises(RuntimeError, match="API error"):
-                await server.responses(body)
+        server._client.aio.models.generate_content = AsyncMock(side_effect=RuntimeError("API error"))
+        body = GeminiProxyRequest(
+            contents=[{"role": "user", "parts": [{"text": "hello"}]}],
+        )
+        with pytest.raises(RuntimeError, match="API error"):
+            await server.responses(body)
 
     @pytest.mark.asyncio
     async def test_chat_completions_not_implemented(self):
