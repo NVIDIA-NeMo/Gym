@@ -729,3 +729,67 @@ class TestGetKeyMetrics:
         assert "majority@4/no_answer" not in result
         assert "pass@1[avg-of-4]/symbolic_accuracy/std_dev_across_runs" not in result
         assert "pass@1[avg-of-4]/no_answer/std_dev_across_runs" not in result
+
+
+class TestAggregateMetrics:
+    """Test the full aggregate_metrics route on the math server."""
+
+    async def test_produces_symbolic_and_judge_accuracy(self) -> None:
+        from nemo_gym.base_resources_server import AggregateMetricsRequest
+        from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+
+        config = LibraryJudgeMathResourcesServerConfig(
+            host="127.0.0.1",
+            port=12345,
+            entrypoint="app.py",
+            name="math_with_judge",
+            judge_model_server=ModelServerRef(type="responses_api_models", name="judge"),
+            judge_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+        )
+        server = LibraryJudgeMathResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+        responses = [
+            {
+                TASK_INDEX_KEY_NAME: 0,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+                "reward": 1.0,
+                "library_reward": 1.0,
+                "judge_evaluations": [{"verdict": "A=B"}],
+                "extracted_answer": "42",
+            },
+            {
+                TASK_INDEX_KEY_NAME: 0,
+                ROLLOUT_INDEX_KEY_NAME: 1,
+                "reward": 0.0,
+                "library_reward": 0.0,
+                "judge_evaluations": [{"verdict": "A!=B"}],
+                "extracted_answer": "43",
+            },
+            {
+                TASK_INDEX_KEY_NAME: 1,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+                "reward": 1.0,
+                "library_reward": 1.0,
+                "judge_evaluations": None,
+                "extracted_answer": "7",
+            },
+            {
+                TASK_INDEX_KEY_NAME: 1,
+                ROLLOUT_INDEX_KEY_NAME: 1,
+                "reward": 0.0,
+                "library_reward": 0.0,
+                "judge_evaluations": None,
+                "extracted_answer": "8",
+            },
+        ]
+        body = AggregateMetricsRequest(verify_responses=responses)
+        result = await server.aggregate_metrics(body)
+        am = result.agent_metrics
+
+        assert "pass@1/symbolic_accuracy" in am
+        assert "pass@1[avg-of-2]/symbolic_accuracy" in am
+        assert "majority@2/symbolic_accuracy" in am
+        assert "pass@1/judge_accuracy" in am
+        assert "pass@1[avg-of-2]/symbolic_accuracy/std_dev_across_runs" in am
+        assert "pass@2/symbolic_accuracy" in result.key_metrics
+        assert "majority@2/symbolic_accuracy" in result.key_metrics
