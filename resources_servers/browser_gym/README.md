@@ -296,7 +296,7 @@ responses_api_agents/browser_agent/
    cua_anthropic_api_key: "sk-ant-..."
    cua_gemini_api_key: "AIza..."
 
-   # Debug trajectories (screenshots + JSON saved to /tmp/cua_debug_trajectories/)
+   # Debug trajectories (screenshots + JSON saved to results/cua_debug_trajectories/)
    cua_debug_trajectories: false
 
    # Optional: override default concurrent rollouts (default: 10)
@@ -334,7 +334,7 @@ ng_status
 
 Tasks can be loaded from either a **local JSONL file** or directly from a **gym URL** (via the gym's `/api/v1/get_expected_state` endpoint). The gym URL approach requires no data preparation -- just point to the gym and go.
 
-Debug trajectories (screenshots, `conversation.json`, `verification.json`) are saved to `/tmp/cua_debug_trajectories/` when `cua_debug_trajectories: true` is set in `env.yaml` (disabled by default). All agents share this single setting.
+Debug trajectories (screenshots, `conversation.json`, `verification.json`) are saved to `results/cua_debug_trajectories/` when `cua_debug_trajectories: true` is set in `env.yaml` (disabled by default). This path is relative to the project root and lives alongside other output artifacts in the gitignored `results/` directory. All agents share this single setting.
 
 #### From a Gym URL (Recommended)
 
@@ -579,7 +579,7 @@ ng_run "+config_paths=[resources_servers/browser_gym/configs/browser_gym.yaml]" 
 ### Output Structure
 
 ```
-/tmp/cua_debug_trajectories/<env_id>/
+results/cua_debug_trajectories/<env_id>/
 ├── screenshots/
 │   ├── 00_initial.png
 │   ├── 01_after.png
@@ -601,7 +601,7 @@ with open('results/cua_rollouts.jsonl') as f:
         data = json.loads(line)
         resp = data.get('response', {})
         traj = resp.get('trajectory', {})
-        out_dir = f'/tmp/cua_debug_trajectories/rollout_{i+1}/screenshots'
+        out_dir = f'results/cua_debug_trajectories/rollout_{i+1}/screenshots'
         os.makedirs(out_dir, exist_ok=True)
         for j, step in enumerate(traj.get('steps', []), 1):
             ss = step.get('screenshot_after', '')
@@ -631,7 +631,7 @@ Create `.vscode/launch.json` in the project root with the following content (rep
             "env": {
                 "PYTHONPATH": "${workspaceFolder}",
                 "NEMO_GYM_CONFIG_PATH": "browser_gym_resources_server",
-                "NEMO_GYM_CONFIG_DICT": "browser_gym_resources_server:\n  resources_servers:\n    browser_gym:\n      entrypoint: app.py\n      domain: agent\n      max_concurrent_browsers: 16\n      default_viewport_width: 1280\n      default_viewport_height: 720\n      host: 127.0.0.1\n      port: 10212\nbrowser_gym_openai_model:\n  responses_api_models:\n    openai_model:\n      entrypoint: app.py\n      openai_base_url: https://api.openai.com/v1\n      openai_api_key: YOUR_OPENAI_API_KEY\n      openai_model: computer-use-preview\n      openai_organization: YOUR_OPENAI_ORG\n      host: 127.0.0.1\n      port: 10213\nbrowser_openai_agent:\n  responses_api_agents:\n    browser_agent:\n      entrypoint: app.py\n      cua_adapter_type: openai\n      cua_model: computer-use-preview\n      max_steps: 250\n      viewport_width: 1280\n      viewport_height: 720\n      cua_debug_trajectories: true\n      cua_debug_output_dir: /tmp/cua_debug_trajectories\n      resources_server:\n        type: resources_servers\n        name: browser_gym_resources_server\n      model_server:\n        type: responses_api_models\n        name: browser_gym_openai_model\n      datasets:\n      - name: example\n        type: example\n        jsonl_fpath: resources_servers/browser_gym/data/example.jsonl\n        num_repeats: 1\n      host: 127.0.0.1\n      port: 13135\nhead_server:\n  host: 127.0.0.1\n  port: 11000\ndry_run: false"
+                "NEMO_GYM_CONFIG_DICT": "browser_gym_resources_server:\n  resources_servers:\n    browser_gym:\n      entrypoint: app.py\n      domain: agent\n      max_concurrent_browsers: 16\n      default_viewport_width: 1280\n      default_viewport_height: 720\n      host: 127.0.0.1\n      port: 10212\nbrowser_gym_openai_model:\n  responses_api_models:\n    openai_model:\n      entrypoint: app.py\n      openai_base_url: https://api.openai.com/v1\n      openai_api_key: YOUR_OPENAI_API_KEY\n      openai_model: computer-use-preview\n      openai_organization: YOUR_OPENAI_ORG\n      host: 127.0.0.1\n      port: 10213\nbrowser_openai_agent:\n  responses_api_agents:\n    browser_agent:\n      entrypoint: app.py\n      cua_adapter_type: openai\n      cua_model: computer-use-preview\n      max_steps: 250\n      viewport_width: 1280\n      viewport_height: 720\n      cua_debug_trajectories: true\n      cua_debug_output_dir: results/cua_debug_trajectories\n      resources_server:\n        type: resources_servers\n        name: browser_gym_resources_server\n      model_server:\n        type: responses_api_models\n        name: browser_gym_openai_model\n      datasets:\n      - name: example\n        type: example\n        jsonl_fpath: resources_servers/browser_gym/data/example.jsonl\n        num_repeats: 1\n      host: 127.0.0.1\n      port: 13135\nhead_server:\n  host: 127.0.0.1\n  port: 11000\ndry_run: false"
             },
             "justMyCode": false,
             "console": "integratedTerminal"
@@ -646,7 +646,7 @@ Create `.vscode/launch.json` in the project root with the following content (rep
             "env": {
                 "PYTHONPATH": "${workspaceFolder}",
                 "NEMO_GYM_CONFIG_PATH": "browser_openai_agent",
-                "NEMO_GYM_CONFIG_DICT": "browser_gym_resources_server:\n  resources_servers:\n    browser_gym:\n      entrypoint: app.py\n      domain: agent\n      max_concurrent_browsers: 16\n      default_viewport_width: 1280\n      default_viewport_height: 720\n      host: 127.0.0.1\n      port: 10212\nbrowser_gym_openai_model:\n  responses_api_models:\n    openai_model:\n      entrypoint: app.py\n      openai_base_url: https://api.openai.com/v1\n      openai_api_key: YOUR_OPENAI_API_KEY\n      openai_model: computer-use-preview\n      openai_organization: YOUR_OPENAI_ORG\n      host: 127.0.0.1\n      port: 10213\nbrowser_openai_agent:\n  responses_api_agents:\n    browser_agent:\n      entrypoint: app.py\n      cua_adapter_type: openai\n      cua_model: computer-use-preview\n      max_steps: 250\n      viewport_width: 1280\n      viewport_height: 720\n      cua_debug_trajectories: true\n      cua_debug_output_dir: /tmp/cua_debug_trajectories\n      resources_server:\n        type: resources_servers\n        name: browser_gym_resources_server\n      model_server:\n        type: responses_api_models\n        name: browser_gym_openai_model\n      datasets:\n      - name: example\n        type: example\n        jsonl_fpath: resources_servers/browser_gym/data/example.jsonl\n        num_repeats: 1\n      host: 127.0.0.1\n      port: 13135\nhead_server:\n  host: 127.0.0.1\n  port: 11000\ndry_run: false"
+                "NEMO_GYM_CONFIG_DICT": "browser_gym_resources_server:\n  resources_servers:\n    browser_gym:\n      entrypoint: app.py\n      domain: agent\n      max_concurrent_browsers: 16\n      default_viewport_width: 1280\n      default_viewport_height: 720\n      host: 127.0.0.1\n      port: 10212\nbrowser_gym_openai_model:\n  responses_api_models:\n    openai_model:\n      entrypoint: app.py\n      openai_base_url: https://api.openai.com/v1\n      openai_api_key: YOUR_OPENAI_API_KEY\n      openai_model: computer-use-preview\n      openai_organization: YOUR_OPENAI_ORG\n      host: 127.0.0.1\n      port: 10213\nbrowser_openai_agent:\n  responses_api_agents:\n    browser_agent:\n      entrypoint: app.py\n      cua_adapter_type: openai\n      cua_model: computer-use-preview\n      max_steps: 250\n      viewport_width: 1280\n      viewport_height: 720\n      cua_debug_trajectories: true\n      cua_debug_output_dir: results/cua_debug_trajectories\n      resources_server:\n        type: resources_servers\n        name: browser_gym_resources_server\n      model_server:\n        type: responses_api_models\n        name: browser_gym_openai_model\n      datasets:\n      - name: example\n        type: example\n        jsonl_fpath: resources_servers/browser_gym/data/example.jsonl\n        num_repeats: 1\n      host: 127.0.0.1\n      port: 13135\nhead_server:\n  host: 127.0.0.1\n  port: 11000\ndry_run: false"
             },
             "justMyCode": false,
             "console": "integratedTerminal"

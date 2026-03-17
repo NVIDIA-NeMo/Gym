@@ -37,7 +37,7 @@ browser_openai_agent:
       viewport_width: 1280
       viewport_height: 720
       cua_debug_trajectories: ${cua_debug_trajectories}
-      cua_debug_output_dir: /tmp/cua_debug_trajectories
+      cua_debug_output_dir: results/cua_debug_trajectories
       resources_server:
         type: resources_servers
         name: browser_gym_resources_server
@@ -63,7 +63,7 @@ browser_anthropic_sonnet_agent:
       viewport_width: 1280
       viewport_height: 720
       cua_debug_trajectories: ${cua_debug_trajectories}
-      cua_debug_output_dir: /tmp/cua_debug_trajectories
+      cua_debug_output_dir: results/cua_debug_trajectories
       resources_server:
         type: resources_servers
         name: browser_gym_resources_server
@@ -90,7 +90,7 @@ browser_anthropic_opus_agent:
       viewport_width: 1280
       viewport_height: 720
       cua_debug_trajectories: ${cua_debug_trajectories}
-      cua_debug_output_dir: /tmp/cua_debug_trajectories
+      cua_debug_output_dir: results/cua_debug_trajectories
       resources_server:
         type: resources_servers
         name: browser_gym_resources_server
@@ -119,7 +119,7 @@ browser_gemini_agent:
       viewport_width: 1280
       viewport_height: 720
       cua_debug_trajectories: ${cua_debug_trajectories}
-      cua_debug_output_dir: /tmp/cua_debug_trajectories
+      cua_debug_output_dir: results/cua_debug_trajectories
       resources_server:
         type: resources_servers
         name: browser_gym_resources_server
