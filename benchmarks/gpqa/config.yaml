@@ -9,6 +9,13 @@ gpqa_mcqa_resources_server:
     mcqa:
       # Override mcqa server grading mode to match the prompt format (Answer: X)
       grading_mode: lenient_answer_colon_md
+
+gpqa_mcqa_simple_agent:
+  _swap_key: mcqa_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: aime24_math_with_judge_resources_server
       datasets:
       - name: validation
         type: validation
@@ -17,10 +24,3 @@ gpqa_mcqa_resources_server:
         prepare_script: benchmarks/gpqa/prepare.py
         num_repeats: 8
         license: TBD
-
-gpqa_mcqa_simple_agent:
-  _swap_key: mcqa_simple_agent
-  responses_api_agents:
-    simple_agent:
-      resources_server:
-        name: aime24_math_with_judge_resources_server

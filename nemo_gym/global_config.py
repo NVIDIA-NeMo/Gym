@@ -126,11 +126,14 @@ class GlobalConfigDictParserConfig(BaseModel):
 
     hide_secrets: bool = False
 
+    # This is a shorthand we use for config resolution use cases that shouldn't require a model
+    # e.g. data loading, etc
     NO_MODEL_GLOBAL_CONFIG_DICT: ClassVar[DictConfig] = DictConfig(
         {
             POLICY_BASE_URL_KEY_NAME: "",
             POLICY_API_KEY_KEY_NAME: "",
             POLICY_MODEL_NAME_KEY_NAME: "",
+            "policy_model": {"responses_api_models": {"dummy_model": {"entrypoint": "app.py"}}},
         }
     )
 
