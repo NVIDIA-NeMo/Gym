@@ -1,92 +1,78 @@
-# chemistry_direct
+# rdkit_chemistry Resources Server
 
-Nemo-Gym RL environment for verifiable chemistry question answering
-(direct generation variant).
+## Overview
 
-## Task Description
+This resources server verifies chemistry question answering over RDKit-computable
+molecular properties drawn from the ChEMBL database.
 
-The agent receives a natural-language chemistry question about a molecule,
-paired with a SMILES string, and must respond with a **single number** (integer
-or floating-point) or a **binary 0/1 flag**.  No tool calls; the format
-instruction embedded in the prompt specifies the exact output format.
+- Task type: single-turn numeric prediction
+- Domain: `knowledge`
+- Methods: `direct` (parametric knowledge only) and `mcp-python` (model may call a
+  Python tool with RDKit available to compute the answer)
+- Dataset prompt format: user message containing a natural-language question, a
+  SMILES string, and a format instruction; the model must respond with a single
+  number or binary `0`/`1` flag
 
-Questions are drawn from a stratified sample of the [ChEMBL database][chembl]
-and cover RDKit-computable molecular properties:
+Questions cover five property types:
 
-| Property type | Examples | Format instruction |
+| Property type | Examples | Expected response |
 |---|---|---|
-| `float` | MolLogP, TPSA, MolWt | Single floating-point number |
-| `count` | HeavyAtomCount, RingCount | Single integer |
-| `bool` | PassLipinski | 0 or 1 |
-| `presence` | HasAmide, HasAromatic | 0 or 1 |
-| `fragment` | NumAmide, NumAromatic | Single integer |
+| `float` | MolLogP, TPSA, MolWt, qed | Single floating-point number |
+| `count` | HeavyAtomCount, NumValenceElectrons | Single integer |
+| `bool` | PassesRo5, PassesVeber | `0` or `1` |
+| `presence` | HasAmide | `0` or `1` |
+| `fragment` | fr_Al_COO, fr_Al_OH | Single integer |
 
 ## Reward Signal
 
 | Property type | Reward |
 |---|---|
-| `float` | `–\|predicted – actual\|`  (negative absolute error; 0.0 = perfect) |
+| `float` | `−|predicted − actual|` (negative absolute error; 0.0 = perfect) |
 | `count` / `bool` / `presence` / `fragment` | 1.0 if exact match, else 0.0 |
 
-When the model produces no parseable number, `reward = 0.0`.
+When no parseable number can be extracted from the response, `reward = 0.0`.
 
-For a mixed batch the `mean/reward` metric equals −MAE averaged over float
-questions and accuracy averaged over discrete questions.
+## Server Composition
 
-## Data Generation
+Use `rdkit_chemistry` with:
 
-Data is generated from the offline benchmark pipeline inside
-`workdir/chemistry-benchmarking-fork/`:
+- `responses_api_agents/simple_agent`
+- `responses_api_models/*` (typically `policy_model`)
+- `resources_servers/rdkit_chemistry`
+
+For `mcp-python` rows the agent must have access to `ns_tools` for Python code
+execution; use `rdkit_chemistry_with_tools.yaml` in that case.
+
+## Dataset Format
+
+Each JSONL row:
+
+- `responses_create_params.input[0].content`: user prompt (question + SMILES + format instruction)
+- `responses_create_params.tools`: `[]` for `direct`, `[stateful_python_code_exec]` for `mcp-python`
+- `expected_answer`: ground-truth numeric value (string, int, or float)
+- `property_type`: one of `float`, `count`, `bool`, `presence`, `fragment`
+- `property`: RDKit property name, e.g. `MolLogP`
+- `chembl_id`: ChEMBL molecule identifier
+- `smiles`: canonical SMILES string
+- `method`: `direct` or `mcp-python`
+
+See `data/example.jsonl` for concrete examples.
+
+## Example Usage
 
 ```bash
-# Generate stratified samples
-make generate-experiment EXPERIMENT_ID=my_exp
-
-# Export to Nemo-Gym JSONL format
-make export-nemo-gym-data EXPERIMENT_ID=my_exp
-# → nemo_gym_data/{train,validation,example}.jsonl
-
-# Copy into this environment
-cp nemo_gym_data/train.jsonl       path/to/nemo-gym/resources_servers/rdkit_chemistry/data/
-cp nemo_gym_data/validation.jsonl  path/to/nemo-gym/resources_servers/rdkit_chemistry/data/
-cp nemo_gym_data/example.jsonl     path/to/nemo-gym/resources_servers/rdkit_chemistry/data/
-```
-
-## Running
-
-```bash
-# Start all servers (resources + model)
 config_paths="resources_servers/rdkit_chemistry/configs/rdkit_chemistry.yaml,\
 responses_api_models/openai_model/configs/openai_model.yaml"
+
 ng_run "+config_paths=[${config_paths}]"
 
-# Collect verified rollouts
 ng_collect_rollouts \
     +agent_name=rdkit_chemistry_simple_agent \
-    +input_jsonl_fpath=resources_servers/rdkit_chemistry/data/train.jsonl \
-    +output_jsonl_fpath=rollouts_out.jsonl
+    +input_jsonl_fpath=resources_servers/rdkit_chemistry/data/example.jsonl \
+    +output_jsonl_fpath=resources_servers/rdkit_chemistry/data/example_rollouts.jsonl
 ```
 
-## JSONL Format
+## Licensing
 
-Each row:
-
-```json
-{
-  "responses_create_params": {
-    "input": [{"role": "user", "content": "<natural-language question>\n\n<format instruction>"}]
-  },
-  "expected_answer": 2.3,
-  "property_type": "float",
-  "property": "MolLogP",
-  "chembl_id": "CHEMBL25",
-  "smiles": "CC(=O)Oc1ccccc1C(=O)O"
-}
-```
-
-## Data License
-
-Questions are derived from ChEMBL ([CC-BY-SA 3.0][cc]).
-
-[chembl]: https://www.ebi.ac.uk/chembl/
-[cc]: https://creativecommons.org/licenses/by-sa/3.0/
+Code: Apache 2.0
+Dataset derived from ChEMBL (CC-BY-SA 3.0)
