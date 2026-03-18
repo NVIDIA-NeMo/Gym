@@ -104,6 +104,7 @@ class CUAStepRequest(BaseModel):
 class CUAStepResponse(BaseModel):
     screenshot: str  # base64-encoded PNG
     current_url: str
+    error: Optional[str] = None
 
 
 ########################################

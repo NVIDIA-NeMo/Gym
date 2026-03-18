@@ -371,6 +371,7 @@ class BrowserAgent(SimpleResponsesAPIAgent):
                         step_count,
                     )
                     break
+                last_action_error = None
                 for action in adapter_resp.actions:
                     try:
                         step_resp_raw = await self.server_client.post(
@@ -382,6 +383,15 @@ class BrowserAgent(SimpleResponsesAPIAgent):
                         cookie_jar["cookies"] = step_resp_raw.cookies
                         await raise_for_status(step_resp_raw)
                         step_data = CUAStepResponse.model_validate(await get_response_json(step_resp_raw))
+
+                        if step_data.error:
+                            last_action_error = step_data.error
+                            logger.warning(
+                                "[CUA %s] action %s returned error: %s",
+                                env_id,
+                                action.action_type,
+                                step_data.error,
+                            )
 
                         if not step_data.screenshot or step_data.current_url == "error:browser_stuck":
                             logger.error(
@@ -457,7 +467,9 @@ class BrowserAgent(SimpleResponsesAPIAgent):
                     break
                 last_url = current_url
                 try:
-                    adapter_resp = await adapter.step(screenshot_b64, action_result=last_url)
+                    adapter_resp = await adapter.step(
+                        screenshot_b64, action_result=last_url, action_error=last_action_error
+                    )
                     if adapter_resp.usage:
                         cumulative_input_tokens += adapter_resp.usage.input_tokens
                         cumulative_output_tokens += adapter_resp.usage.output_tokens

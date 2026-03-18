@@ -92,6 +92,50 @@ PLAYWRIGHT_KEY_MAP = {
     "f10": "F10",
     "f11": "F11",
     "f12": "F12",
+    # Symbol keys models commonly emit
+    "minus": "-",
+    "dash": "-",
+    "hyphen": "-",
+    "endash": "-",
+    "underscore": "_",
+    "plus": "+",
+    "equal": "=",
+    "equals": "=",
+    "period": ".",
+    "dot": ".",
+    "comma": ",",
+    "semicolon": ";",
+    "colon": ":",
+    "slash": "/",
+    "forwardslash": "/",
+    "backslash": "\\",
+    "bracketleft": "[",
+    "bracketright": "]",
+    "braceleft": "{",
+    "braceright": "}",
+    "quote": "'",
+    "doublequote": '"',
+    "backtick": "`",
+    "tilde": "~",
+    "exclamation": "!",
+    "at": "@",
+    "hash": "#",
+    "dollar": "$",
+    "percent": "%",
+    "caret": "^",
+    "ampersand": "&",
+    "asterisk": "*",
+    "parenleft": "(",
+    "parenright": ")",
+    # Multi-word modifier aliases (models sometimes emit "Right Shift" etc.)
+    "right shift": "Shift",
+    "left shift": "Shift",
+    "right ctrl": "Control",
+    "left ctrl": "Control",
+    "right alt": "Alt",
+    "left alt": "Alt",
+    "right control": "Control",
+    "left control": "Control",
 }
 
 # Per-action timeout map (seconds) — values match the rl-gym-harness-ui
@@ -377,11 +421,17 @@ class BrowserPool:
     # Action execution with per-action timeouts
     # ──────────────────────────────────────────────────────────────
 
-    async def _do_action(self, session: BrowserSession, env_id: str, action) -> None:
+    async def _do_action(self, session: BrowserSession, env_id: str, action) -> "Optional[str] | tuple[str, str]":
         """Execute the raw Playwright commands for a single BrowserAction.
 
         This is the inner helper called by execute_action, which wraps it
         in asyncio.wait_for with the appropriate per-action timeout.
+
+        Returns:
+            None — success, take a normal screenshot afterwards.
+            str  — error message (action failed but page is still usable).
+            tuple[str, str] — (screenshot_b64, current_url) for actions
+                              that produce their own screenshot (e.g. zoom).
         """
         page = session.page
         action_type = action.action_type
@@ -461,30 +511,35 @@ class BrowserPool:
                     pass
 
         elif action_type == "keypress":
-            keys = action.keys
-            if keys and len(keys) > 2:
-                unique = set(k.lower() for k in keys)
-                if len(unique) == 1:
-                    normalized = _normalize_key(keys[0])
-                    for i in range(len(keys)):
-                        await page.keyboard.press(normalized)
-                        if i < len(keys) - 1:
-                            await asyncio.sleep(0.05)
-                    keys = None
-            if keys:
-                combo = "+".join(_normalize_key(k) for k in keys)
-                await page.keyboard.press(combo)
-            elif action.key:
-                raw_key = action.key
-                if "+" in raw_key:
-                    combo = "+".join(_normalize_key(k) for k in raw_key.split("+"))
+            try:
+                keys = action.keys
+                if keys and len(keys) > 2:
+                    unique = set(k.lower() for k in keys)
+                    if len(unique) == 1:
+                        normalized = _normalize_key(keys[0])
+                        for i in range(len(keys)):
+                            await page.keyboard.press(normalized)
+                            if i < len(keys) - 1:
+                                await asyncio.sleep(0.05)
+                        keys = None
+                if keys:
+                    combo = "+".join(_normalize_key(k) for k in keys)
                     await page.keyboard.press(combo)
-                elif " " in raw_key.strip():
-                    for k in raw_key.split():
-                        await page.keyboard.press(_normalize_key(k))
-                        await asyncio.sleep(0.05)
-                else:
-                    await page.keyboard.press(_normalize_key(raw_key))
+                elif action.key:
+                    raw_key = action.key
+                    if "+" in raw_key:
+                        combo = "+".join(_normalize_key(k) for k in raw_key.split("+"))
+                        await page.keyboard.press(combo)
+                    elif " " in raw_key.strip():
+                        for k in raw_key.split():
+                            await page.keyboard.press(_normalize_key(k))
+                            await asyncio.sleep(0.05)
+                    else:
+                        await page.keyboard.press(_normalize_key(raw_key))
+            except Exception as e:
+                error_msg = f"keypress failed: {e}"
+                logger.warning("keypress failed for env_id=%s keys=%s key=%s: %s", env_id, action.keys, action.key, e)
+                return error_msg
 
         elif action_type == "scroll":
             if action.coordinate:
@@ -622,10 +677,13 @@ class BrowserPool:
         else:
             logger.warning(f"Unknown action_type: {action_type}")
 
-    async def execute_action(self, env_id: str, action) -> tuple[str, str]:
+        return None
+
+    async def execute_action(self, env_id: str, action) -> tuple[str, str, Optional[str]]:
         """Execute a BrowserAction on the page with per-action timeout.
 
-        Returns (screenshot_b64, current_url).
+        Returns (screenshot_b64, current_url, error).
+        error is None on success, or a message string if the action failed.
 
         If the action itself times out, we still attempt a screenshot so the
         agent can see the current page state and decide what to do next.
@@ -634,7 +692,8 @@ class BrowserPool:
         session = self.get_session(env_id)
         action_type = action.action_type
         timeout = ACTION_TIMEOUTS.get(action_type, 30.0)
-        action_timed_out = False
+        action_error: Optional[str] = None
+        result = None
 
         if timeout is not None:
             try:
@@ -649,14 +708,14 @@ class BrowserPool:
                     timeout,
                     env_id,
                 )
-                action_timed_out = True
-                result = None
-            if result is not None:
-                return result
+                action_error = f"Action '{action_type}' timed out after {timeout:.0f}s"
         else:
             result = await self._do_action(session, env_id, action)
-            if result is not None:
-                return result
+
+        if isinstance(result, tuple):
+            return result[0], result[1], None
+        if isinstance(result, str):
+            action_error = result
 
         await asyncio.sleep(0.3)
 
@@ -667,11 +726,11 @@ class BrowserPool:
             )
         except asyncio.TimeoutError:
             logger.error(
-                "Post-action screenshot timed out for env_id=%s (action_timed_out=%s)",
+                "Post-action screenshot timed out for env_id=%s (action_error=%s)",
                 env_id,
-                action_timed_out,
+                action_error,
             )
             raise
 
         current_url = await self.get_current_url(env_id)
-        return screenshot_b64, current_url
+        return screenshot_b64, current_url, action_error

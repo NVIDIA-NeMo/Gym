@@ -461,26 +461,33 @@ class AnthropicCUAAdapter(BaseCUAAdapter):
 
         return self._parse_response(response)
 
-    async def step(self, screenshot_b64: str, action_result: Optional[str] = None) -> CUAAdapterResponse:
+    async def step(
+        self, screenshot_b64: str, action_result: Optional[str] = None, action_error: Optional[str] = None
+    ) -> CUAAdapterResponse:
         current_tool_ids = self._pending_tool_use_ids
         self._pending_tool_use_ids = []
 
         tool_results = []
         for tool_id in current_tool_ids:
+            content: List[Dict[str, Any]] = []
+            if action_error:
+                content.append({"type": "text", "text": f"Action failed: {action_error}"})
+            content.append(
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/png",
+                        "data": screenshot_b64,
+                    },
+                }
+            )
             tool_results.append(
                 {
                     "type": "tool_result",
                     "tool_use_id": tool_id,
-                    "content": [
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": "image/png",
-                                "data": screenshot_b64,
-                            },
-                        }
-                    ],
+                    "is_error": action_error is not None,
+                    "content": content,
                 }
             )
 

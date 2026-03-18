@@ -95,15 +95,17 @@ class BrowserGymResourcesServer(SimpleResourcesServer):
 
     async def step(self, body: CUAStepRequest) -> CUAStepResponse:
         try:
-            screenshot, current_url = await self.browser_pool.execute_action(body.env_id, body.action)
-            return CUAStepResponse(screenshot=screenshot, current_url=current_url)
+            screenshot, current_url, error = await self.browser_pool.execute_action(body.env_id, body.action)
+            return CUAStepResponse(screenshot=screenshot, current_url=current_url, error=error)
         except (TimeoutError, asyncio.TimeoutError):
             logger.error(
                 "Browser stuck for env_id=%s action=%s — returning empty screenshot",
                 body.env_id,
                 body.action.action_type,
             )
-            return CUAStepResponse(screenshot="", current_url="error:browser_stuck")
+            return CUAStepResponse(
+                screenshot="", current_url="error:browser_stuck", error="Browser stuck — screenshot timed out"
+            )
 
     async def dump_local_storage(self, body: CUADumpLocalStorageRequest) -> CUADumpLocalStorageResponse:
         try:

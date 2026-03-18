@@ -95,8 +95,14 @@ class BaseCUAAdapter(ABC):
         ...
 
     @abstractmethod
-    async def step(self, screenshot_b64: str, action_result: Optional[str] = None) -> CUAAdapterResponse:
-        """Follow-up call with new screenshot after action execution. Manages context internally."""
+    async def step(
+        self, screenshot_b64: str, action_result: Optional[str] = None, action_error: Optional[str] = None
+    ) -> CUAAdapterResponse:
+        """Follow-up call with new screenshot after action execution. Manages context internally.
+
+        action_error, when set, indicates the last action failed (e.g. invalid key name).
+        Adapters should include this in the tool result so the model can adjust.
+        """
         ...
 
     @abstractmethod
