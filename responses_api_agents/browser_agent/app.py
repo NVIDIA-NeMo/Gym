@@ -11,7 +11,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import logging
+import random
 import time
 import uuid
 from pathlib import Path
@@ -466,16 +468,37 @@ class BrowserAgent(SimpleResponsesAPIAgent):
                 if adapter_resp.done or browser_crashed:
                     break
                 last_url = current_url
-                try:
-                    adapter_resp = await adapter.step(
-                        screenshot_b64, action_result=last_url, action_error=last_action_error
-                    )
-                    if adapter_resp.usage:
-                        cumulative_input_tokens += adapter_resp.usage.input_tokens
-                        cumulative_output_tokens += adapter_resp.usage.output_tokens
-                except Exception as adapter_err:
-                    logger.error("[CUA %s] Adapter step failed: %s — ending loop", env_id, adapter_err)
-                    break
+                max_model_retries = 3
+                for model_attempt in range(1, max_model_retries + 1):
+                    try:
+                        adapter_resp = await adapter.step(
+                            screenshot_b64, action_result=last_url, action_error=last_action_error
+                        )
+                        if adapter_resp.usage:
+                            cumulative_input_tokens += adapter_resp.usage.input_tokens
+                            cumulative_output_tokens += adapter_resp.usage.output_tokens
+                        break
+                    except Exception as adapter_err:
+                        if model_attempt < max_model_retries:
+                            wait = min(2**model_attempt + random.uniform(0, 1), 30)
+                            logger.warning(
+                                "[CUA %s] Adapter step failed (attempt %d/%d): %s — retrying in %.1fs",
+                                env_id,
+                                model_attempt,
+                                max_model_retries,
+                                adapter_err,
+                                wait,
+                            )
+                            await asyncio.sleep(wait)
+                        else:
+                            logger.error(
+                                "[CUA %s] Adapter step failed after %d attempts: %s — ending loop",
+                                env_id,
+                                max_model_retries,
+                                adapter_err,
+                            )
+                            browser_crashed = True
+                            break
 
             total_elapsed = time.time() - loop_start
             logger.info(
