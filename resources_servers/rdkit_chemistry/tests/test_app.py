@@ -22,36 +22,20 @@ from resources_servers.rdkit_chemistry.app import (
 # ---------------------------------------------------------------------------
 
 
-class TestExtractPredictedValue:
-    def test_strict_integer(self):
-        assert extract_predicted_value("42", "count") == 42.0
+class TestExtractPredictedValueStrict:
+    """Non-boxed mode requires ((answer)) — bare text is rejected."""
 
-    def test_strict_float(self):
-        assert extract_predicted_value("2.54", "float") == pytest.approx(2.54)
+    def test_bare_integer_rejected(self):
+        assert extract_predicted_value("42", "count") is None
 
-    def test_trailing_period(self):
-        assert extract_predicted_value("3.", "count") == 3.0
+    def test_bare_float_rejected(self):
+        assert extract_predicted_value("2.54", "float") is None
 
-    def test_negative_float(self):
-        assert extract_predicted_value("-1.23", "float") == pytest.approx(-1.23)
+    def test_bare_text_with_number_rejected(self):
+        assert extract_predicted_value("The logP is approximately -2.5.", "float") is None
 
-    def test_scientific_notation(self):
-        assert extract_predicted_value("1.5e-3", "float") == pytest.approx(1.5e-3)
-
-    def test_permissive_last_number(self):
-        assert extract_predicted_value("The logP is approximately -2.5.", "float") == pytest.approx(-2.5)
-
-    def test_permissive_mixed_text(self):
-        assert extract_predicted_value("Answer: 7", "count") == 7.0
-
-    def test_bool_true_text(self):
-        assert extract_predicted_value("yes", "presence") == 1.0
-
-    def test_bool_false_text(self):
-        assert extract_predicted_value("No, it does not.", "fragment") == 0.0
-
-    def test_bool_text_ignored_for_float(self):
-        assert extract_predicted_value("yes", "float") is None
+    def test_bool_text_rejected(self):
+        assert extract_predicted_value("yes", "presence") is None
 
     def test_empty_string(self):
         assert extract_predicted_value("", "count") is None
@@ -100,13 +84,59 @@ class TestExtractPredictedValueBoxed:
         assert extract_predicted_value(r"\boxed{hello}", "float", use_box_format=True) is None
 
     def test_boxed_not_required_when_flag_false(self):
-        assert extract_predicted_value("42", "count", use_box_format=False) == 42.0
+        assert extract_predicted_value("((42))", "count", use_box_format=False) == 42.0
 
     def test_bare_number_rejected_when_boxed_required(self):
         assert extract_predicted_value("The answer is 42", "count", use_box_format=True) is None
 
     def test_boxed_with_whitespace_inside(self):
         assert extract_predicted_value(r"\boxed{ 3.14 }", "float", use_box_format=True) == pytest.approx(3.14)
+
+
+# ---------------------------------------------------------------------------
+# extract_predicted_value — double-parentheses format (non-boxed)
+# ---------------------------------------------------------------------------
+
+
+class TestExtractPredictedValueDoubleParens:
+    def test_double_parens_integer(self):
+        assert extract_predicted_value("The answer is ((42))", "count") == 42.0
+
+    def test_double_parens_float(self):
+        assert extract_predicted_value("((0.83))", "float") == pytest.approx(0.83)
+
+    def test_double_parens_negative(self):
+        assert extract_predicted_value("((-1.5))", "float") == pytest.approx(-1.5)
+
+    def test_double_parens_zero_or_one(self):
+        assert extract_predicted_value("((1))", "bool") == 1.0
+        assert extract_predicted_value("((0))", "bool") == 0.0
+
+    def test_double_parens_with_surrounding_text(self):
+        assert extract_predicted_value("After analysis, the count is ((8)).", "fragment") == 8.0
+
+    def test_double_parens_last_occurrence_wins(self):
+        text = "First ((3)), actually ((5))"
+        assert extract_predicted_value(text, "count") == 5.0
+
+    def test_double_parens_scientific_notation(self):
+        assert extract_predicted_value("((1.5e-3))", "float") == pytest.approx(1.5e-3)
+
+    def test_double_parens_whitespace_inside(self):
+        assert extract_predicted_value("(( 3.14 ))", "float") == pytest.approx(3.14)
+
+    def test_double_parens_empty_returns_none(self):
+        assert extract_predicted_value("(())", "count") is None
+
+    def test_double_parens_non_numeric_returns_none(self):
+        assert extract_predicted_value("((hello))", "float") is None
+
+    def test_double_parens_preferred_over_bare_number(self):
+        text = "The value 99 is wrong, the correct answer is ((42))"
+        assert extract_predicted_value(text, "count") == 42.0
+
+    def test_bare_number_rejected_without_double_parens(self):
+        assert extract_predicted_value("42", "count") is None
 
 
 # ---------------------------------------------------------------------------

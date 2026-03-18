@@ -80,12 +80,9 @@ from nemo_gym.base_resources_server import (
 # Constants
 # ---------------------------------------------------------------------------
 
-_BOOL_PROPERTY_TYPES = {"presence", "fragment", "bool"}
-
 _NUMBER_RE = re.compile(r"-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?")
 _BOXED_RE = re.compile(r"\\boxed\{([^}]+)\}")
-_BOOL_TRUE_RE = re.compile(r"\b(?:yes|true)\b", re.IGNORECASE)
-_BOOL_FALSE_RE = re.compile(r"\b(?:no|false)\b", re.IGNORECASE)
+_DOUBLE_PAREN_RE = re.compile(r"\(\(([^)]+)\)\)")
 
 
 # ---------------------------------------------------------------------------
@@ -174,6 +171,29 @@ def _extract_from_boxed(text: str) -> Optional[float]:
     return None
 
 
+def _extract_from_double_parens(text: str) -> Optional[float]:
+    """Extract a numeric value from the last ``((...))`` in *text*.
+
+    Returns None if no double-parenthesised expression is found or the
+    content is not numeric.
+    """
+    matches = _DOUBLE_PAREN_RE.findall(text)
+    if not matches:
+        return None
+    inner = matches[-1].strip()
+    try:
+        return float(inner)
+    except (ValueError, TypeError):
+        pass
+    nums = _NUMBER_RE.findall(inner)
+    if nums:
+        try:
+            return float(nums[-1])
+        except ValueError:
+            pass
+    return None
+
+
 def extract_predicted_value(
     response: str,
     property_type: str,
@@ -188,10 +208,9 @@ def extract_predicted_value(
     content of the last ``\\boxed`` is considered; if none is found the
     function returns None (→ reward 0).
 
-    When *use_box_format* is False the original three-step cascade is used:
-      1. Strict parse  — treat the entire stripped response as a number
-      2. Permissive    — find the last number anywhere in the text
-      3. Boolean text  — map yes/true -> 1.0, no/false -> 0.0 (presence/fragment)
+    When *use_box_format* is False the answer **must** appear inside
+    double parentheses ``((...))``.  Only the content of the last ``((...))``
+    is considered; if none is found the function returns None (→ reward 0).
 
     Returns None if no value can be extracted.
     """
@@ -203,28 +222,7 @@ def extract_predicted_value(
     if use_box_format:
         return _extract_from_boxed(text)
 
-    # 1. Strict
-    try:
-        return float(text.rstrip("."))
-    except (ValueError, TypeError):
-        pass
-
-    # 2. Last number in text
-    nums = _NUMBER_RE.findall(text)
-    if nums:
-        try:
-            return float(nums[-1])
-        except ValueError:
-            pass
-
-    # 3. Boolean fallback for binary-valued properties
-    if property_type in _BOOL_PROPERTY_TYPES:
-        if _BOOL_TRUE_RE.search(text):
-            return 1.0
-        if _BOOL_FALSE_RE.search(text):
-            return 0.0
-
-    return None
+    return _extract_from_double_parens(text)
 
 
 # ---------------------------------------------------------------------------
