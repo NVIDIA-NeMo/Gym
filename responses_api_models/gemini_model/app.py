@@ -23,6 +23,7 @@ agent/adapter layer — this server is a pure API relay.
 
 import asyncio
 import logging
+import random
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -66,6 +67,15 @@ def _is_retryable_gemini_error(exc: Exception) -> bool:
     if isinstance(status, int) and status in _RETRYABLE_STATUS_CODES:
         return True
     return False
+
+
+def _is_rate_limit_error(exc: Exception) -> bool:
+    """Check if the error is specifically a rate-limit / resource-exhausted error."""
+    name = type(exc).__name__
+    if name in ("ResourceExhausted", "TooManyRequests"):
+        return True
+    status = getattr(exc, "code", None) or getattr(exc, "status_code", None)
+    return isinstance(status, int) and status == 429
 
 
 class GeminiModelServerConfig(BaseResponsesAPIModelConfig):
@@ -113,8 +123,9 @@ class GeminiModelServer(SimpleResponsesAPIModel):
 
         max_attempts = self.config.gemini_max_retries + 1
         last_exception: Optional[Exception] = None
+        attempt = 0
 
-        for attempt in range(max_attempts):
+        while attempt < max_attempts:
             try:
                 response = await asyncio.wait_for(
                     self._client.aio.models.generate_content(
@@ -135,21 +146,26 @@ class GeminiModelServer(SimpleResponsesAPIModel):
                     logger.error("Gemini API call failed (non-retryable): %s", repr(e))
                     raise
 
+                attempt += 1
+
+                if _is_rate_limit_error(e):
+                    max_attempts += 1
+
                 logger.warning(
                     "Gemini API call failed (attempt %d/%d): %s",
-                    attempt + 1,
+                    attempt,
                     max_attempts,
                     repr(e),
                 )
 
-                if attempt < self.config.gemini_max_retries:
-                    wait = 0.5 * (2**attempt)
+                if attempt < max_attempts:
+                    wait = min((1.0 + random.uniform(0, 1)) * (2**attempt), 60)
                     logger.info("Retrying in %.1fs...", wait)
                     await asyncio.sleep(wait)
 
         logger.error(
             "Gemini API call failed after %d attempts: %s",
-            max_attempts,
+            attempt,
             repr(last_exception),
         )
         raise last_exception  # type: ignore[misc]
