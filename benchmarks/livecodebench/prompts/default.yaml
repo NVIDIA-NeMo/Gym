@@ -1,1 +1,10 @@
-user: "You are a helpful and harmless assistant. You should think step-by-step before responding to the instruction below.\n\nPlease use python programming language only.\n\nYou must use ```python for just the final solution code block with the following format:\n```python\n# Your code here\n```\n\n{question_content}"
+user: |-
+  You are a helpful and harmless assistant. You should think step-by-step before responding to the instruction below.
+
+  ### Question:
+  {question_content}
+
+  ### Format: {formatting_message}
+  {starter_code}
+
+  ### Answer: (use the provided format with backticks)
