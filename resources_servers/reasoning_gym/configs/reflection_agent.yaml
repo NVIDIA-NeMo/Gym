@@ -3,6 +3,8 @@ reasoning_gym:
     reasoning_gym:
       entrypoint: app.py
       domain: knowledge
+      description: LangGraph reflection agent compatible with resource servers that do not use tools; provides iterative reflection for diverse agent training data and test time scaling, extensible to use tools or other agent architectures
+      value: Iterative test time scaling for improved performance in reasoning tasks
       verified: false
 
 reasoning_gym_langgraph_agent:

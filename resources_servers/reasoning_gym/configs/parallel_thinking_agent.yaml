@@ -3,6 +3,8 @@ reasoning_gym:
     reasoning_gym:
       entrypoint: app.py
       domain: knowledge
+      description: LangGraph parallel thinking agent compatible with resource servers that do not use tools; enables diverse agent training data and test time scaling vs a simple agent, extensible to use tools or other agent architectures
+      value: Iterative test time scaling for improved performance in reasoning tasks
       verified: false
 
 reasoning_gym_parallel_thinking_agent:
