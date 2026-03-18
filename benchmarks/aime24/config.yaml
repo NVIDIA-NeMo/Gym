@@ -3,16 +3,22 @@ config_paths:
   - resources_servers/math_with_judge/configs/math_with_judge.yaml
 
 # Duplicate the generic config above to ensure this benchmark config is isolated.
-aime24_math_with_judge_resources_server: ${swap_key:math_with_judge}
+aime24_math_with_judge_resources_server:
+  _swap_key: math_with_judge
+  resources_servers:
+    math_with_judge:
+      datasets:
+      - name: validation
+        type: validation
+        jsonl_fpath: benchmarks/aime24/data/aime24_validation.jsonl
+        prompt_config: benchmarks/aime24/prompts/default.yaml
+        prepare_script: benchmarks/aime24/prepare.py
+        num_repeats: 32
+        license: TBD
+
 aime24_math_with_judge_simple_agent:
   _swap_key: math_with_judge_simple_agent
   responses_api_agents:
     simple_agent:
       resources_server:
         name: aime24_math_with_judge_resources_server
-
-# Rollout collection defaults — picked up directly by RolloutCollectionConfig
-agent_name: math_with_judge_simple_agent
-input_jsonl_fpath: benchmarks/aime24/data/aime24_validation.jsonl
-prompt_config: benchmarks/aime24/prompts/default.yaml
-num_repeats: 32
