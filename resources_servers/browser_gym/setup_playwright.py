@@ -25,18 +25,44 @@ import sys
 logger = logging.getLogger(__name__)
 
 
+def _chromium_already_installed() -> bool:
+    """Check if Playwright Chromium is already downloaded."""
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "playwright", "install", "--dry-run", "chromium"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0 and "chromium" not in result.stdout.lower():
+            return True
+    except Exception:
+        pass
+
+    try:
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as p:
+            path = p.chromium.executable_path
+            if path and shutil.which(path):
+                return True
+    except Exception:
+        pass
+
+    return False
+
+
 def ensure_playwright():
-    """Ensure Playwright and Chromium browser are installed."""
+    """Ensure Playwright and Chromium browser are installed. Skips if already present."""
     try:
         import playwright  # noqa: F401
     except ImportError:
         logger.info("Installing playwright package...")
         subprocess.check_call([sys.executable, "-m", "pip", "install", "playwright"], stdout=subprocess.DEVNULL)
 
-    if shutil.which("playwright") is None:
-        pass
-    else:
-        shutil.which("playwright")
+    if _chromium_already_installed():
+        logger.info("Playwright Chromium already installed — skipping download")
+        return
 
     logger.info("Installing Playwright Chromium browser...")
     try:
@@ -44,7 +70,7 @@ def ensure_playwright():
             [sys.executable, "-m", "playwright", "install", "chromium", "--with-deps"],
             capture_output=True,
             text=True,
-            timeout=300,
+            timeout=600,
         )
         if result.returncode != 0:
             logger.warning(f"Playwright install with --with-deps failed: {result.stderr}")
@@ -52,20 +78,10 @@ def ensure_playwright():
                 [sys.executable, "-m", "playwright", "install", "chromium"],
                 capture_output=True,
                 text=True,
-                timeout=300,
+                timeout=600,
             )
         logger.info("Playwright Chromium installed successfully")
     except subprocess.TimeoutExpired:
-        logger.warning("Playwright install timed out after 300s")
+        logger.warning("Playwright install timed out after 600s")
     except Exception as e:
         logger.warning(f"Playwright install failed: {e}")
-
-    try:
-        from playwright.sync_api import sync_playwright
-
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            browser.close()
-        logger.info("Playwright Chromium verification passed")
-    except Exception as e:
-        logger.warning(f"Playwright verification failed: {e}")
