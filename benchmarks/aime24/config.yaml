@@ -2,7 +2,7 @@
 config_paths:
   - resources_servers/math_with_judge/configs/math_with_judge.yaml
 
-# Duplicate the generic config above to ensure this benchmark config is isolated.
+# We use `swap_key` directives to duplicate the generic config above to ensure this benchmark config is isolated.
 aime24_math_with_judge_resources_server: ${swap_key:math_with_judge}
 
 aime24_math_with_judge_simple_agent:
