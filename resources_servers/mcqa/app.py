@@ -251,7 +251,7 @@ class MCQAResourcesServer(SimpleResourcesServer):
         # Derive allowed letters from option keys
         allowed_letters = _get_allowed_letters_from_options(options)
 
-        grading_mode = self.config.grading_mode or body.grading_mode
+        grading_mode = body.grading_mode or self.config.grading_mode
 
         pred: Optional[str] = None
 

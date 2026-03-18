@@ -2,14 +2,22 @@
 config_paths:
   - resources_servers/mcqa/configs/mcqa.yaml
 
+# Duplicate the generic config above to ensure this benchmark config is isolated.
+gpqa_mcqa_resources_server:
+  _swap_key: mcqa
+  resources_servers:
+    mcqa:
+      # Override mcqa server grading mode to match the prompt format (Answer: X)
+      grading_mode: lenient_answer_colon_md
+gpqa_mcqa_simple_agent:
+  _swap_key: mcqa_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: aime24_math_with_judge_resources_server
+
 # Rollout collection defaults — picked up directly by RolloutCollectionConfig
 agent_name: mcqa_simple_agent
 input_jsonl_fpath: benchmarks/gpqa/data/gpqa_diamond_validation.jsonl
 prompt_config: benchmarks/gpqa/prompts/default.yaml
 num_repeats: 8
-
-# Override mcqa server grading mode to match the prompt format (Answer: X)
-mcqa:
-  resources_servers:
-    mcqa:
-      grading_mode: lenient_answer_colon_md
