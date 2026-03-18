@@ -152,28 +152,55 @@ class BrowserGymResourcesServer(SimpleResourcesServer):
 
         try:
             session = self._get_verify_session()
-            form_data = aiohttp.FormData()
-            form_data.add_field("taskId", task_id)
-            form_data.add_field(
-                "localStorageDump",
-                local_storage_dump,
-                filename="localStorageDump.json",
-                content_type="application/json",
-            )
-            if model_response:
-                form_data.add_field("modelResponse", model_response)
+            max_verify_retries = 3
+            transient_codes = {502, 503, 504}
+            resp_text = ""
+            resp_status = 0
 
-            async with session.post(verify_url, data=form_data) as resp:
-                if resp.status != 200:
+            for attempt in range(1, max_verify_retries + 1):
+                form_data = aiohttp.FormData()
+                form_data.add_field("taskId", task_id)
+                form_data.add_field(
+                    "localStorageDump",
+                    local_storage_dump,
+                    filename="localStorageDump.json",
+                    content_type="application/json",
+                )
+                if model_response:
+                    form_data.add_field("modelResponse", model_response)
+
+                async with session.post(verify_url, data=form_data) as resp:
+                    resp_status = resp.status
+                    if resp.status == 200:
+                        result = await resp.json()
+                        break
+
                     resp_text = await resp.text()
+                    if resp.status in transient_codes and attempt < max_verify_retries:
+                        wait = 1.0 * (2 ** (attempt - 1))
+                        logger.warning(
+                            "Verification API returned %d (attempt %d/%d) — retrying in %.0fs",
+                            resp.status,
+                            attempt,
+                            max_verify_retries,
+                            wait,
+                        )
+                        await asyncio.sleep(wait)
+                        continue
+
                     logger.warning(f"Verification API returned {resp.status}: {resp_text}")
                     return CUAVerifyResponse(
                         **body.model_dump(),
                         reward=0.0,
                         verification_result={"error": resp_text, "status_code": resp.status},
                     )
-
-                result = await resp.json()
+            else:
+                logger.warning(f"Verification API returned {resp_status}: {resp_text}")
+                return CUAVerifyResponse(
+                    **body.model_dump(),
+                    reward=0.0,
+                    verification_result={"error": resp_text, "status_code": resp_status},
+                )
 
             assertions = result.get("assertions", [])
             if not assertions:
