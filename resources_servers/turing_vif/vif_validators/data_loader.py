@@ -422,24 +422,14 @@ You are a few words one-sentenced definition generator for a word or phrase with
 LLM_JUDGE_QUESTION_PROMPT = """
 You are an impartial LLM-Judge. Evaluate the model response based strictly on the specific question provided below.
 
-MODEL RESPONSE TO EVALUATE:
-{model_response}
-
 QUESTION TO EVALUATE AGAINST:
 {question}
 
-Your Task:
-1. Analyze the model response above in the context of the question above.
-2. Determine if the answer to the target question is "YES" or "NO" based on the response content.
-3. Provide a concise reasoning for your determination.
+MODEL RESPONSE TO EVALUATE:
+{model_response}
 
-IMPORTANT: Your response must be a JSON object with ONLY these two fields:
-{{
-    "verdict": "YES" or "NO",
-    "reasoning": "Explanation for why the answer is Yes or No"
-}}
-
-Do NOT return the input format (model_response/question). Only return your evaluation with verdict and reasoning.
+Does the model's response satisfy the criterion described in the evaluation question?
+Analyze carefully, then respond with exactly [[YES]] or [[NO]] on the last line.
 """
 
 
