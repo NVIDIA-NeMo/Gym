@@ -465,7 +465,8 @@ exclude_also = [
     "pass",
 ]
 omit = [
-    "benchmarks/*/prepare.py",
+    "benchmarks/**/prepare.py",
+    "benchmarks/**/prepare_utils.py",
 ]
 
 ################################################
