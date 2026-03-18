@@ -256,7 +256,9 @@ class OpenAICUAAdapter(BaseCUAAdapter):
         self._last_response_id = response.get("id")
         return self._parse_actions(response)
 
-    async def step(self, screenshot_b64: str, action_result: Optional[str] = None) -> CUAAdapterResponse:
+    async def step(
+        self, screenshot_b64: str, action_result: Optional[str] = None, action_error: Optional[str] = None
+    ) -> CUAAdapterResponse:
         """Follow-up call using previous_response_id for context chaining."""
         followups = []
         safety_checks = getattr(self, "_pending_safety_checks", [])
@@ -270,6 +272,8 @@ class OpenAICUAAdapter(BaseCUAAdapter):
                     "image_url": f"data:image/png;base64,{screenshot_b64}",
                 },
             }
+            if action_error:
+                item["output"]["current_url"] = f"error: {action_error}"
             if safety_checks:
                 item["acknowledged_safety_checks"] = safety_checks
             followups.append(item)

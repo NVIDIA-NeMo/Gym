@@ -459,7 +459,9 @@ class GeminiCUAAdapter(BaseCUAAdapter):
 
     # ── Function response building ───────────────────────────────
 
-    def _build_function_responses(self, screenshot_b64: str, action_names: List[str]):
+    def _build_function_responses(
+        self, screenshot_b64: str, action_names: List[str], action_error: Optional[str] = None
+    ):
         """Build function response content with screenshot for each pending action.
 
         Gemini CUA requires every function response to include a 'url' or
@@ -475,7 +477,10 @@ class GeminiCUAAdapter(BaseCUAAdapter):
 
         parts = []
         for name in action_names:
-            response_dict: Dict[str, Any] = {"url": url, "status": "success"}
+            if action_error:
+                response_dict: Dict[str, Any] = {"url": url, "status": "error", "error": action_error}
+            else:
+                response_dict = {"url": url, "status": "success"}
             if safety_decisions.get(name):
                 response_dict["safety_acknowledgement"] = "true"
             parts.append(
@@ -641,7 +646,9 @@ class GeminiCUAAdapter(BaseCUAAdapter):
                     names.append(part.function_call.name)
         return names
 
-    async def step(self, screenshot_b64: str, action_result: Optional[str] = None) -> CUAAdapterResponse:
+    async def step(
+        self, screenshot_b64: str, action_result: Optional[str] = None, action_error: Optional[str] = None
+    ) -> CUAAdapterResponse:
         if action_result:
             self._current_url = action_result
 
@@ -651,7 +658,7 @@ class GeminiCUAAdapter(BaseCUAAdapter):
         if not current_action_names:
             current_action_names = ["click_at"]
 
-        fn_response_content = self._build_function_responses(screenshot_b64, current_action_names)
+        fn_response_content = self._build_function_responses(screenshot_b64, current_action_names, action_error)
         self._contents.append(fn_response_content)
 
         self._prepare_for_api()
