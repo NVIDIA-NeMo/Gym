@@ -323,7 +323,13 @@ class BrowserAgent(SimpleResponsesAPIAgent):
 
         try:
             loop_start = time.time()
-            adapter_resp = await adapter.initialize(task_prompt, screenshot_b64)
+            trajectory = CUATrajectory(steps=[], task_prompt=task_prompt, initial_screenshot=screenshot_b64)
+
+            try:
+                adapter_resp = await adapter.initialize(task_prompt, screenshot_b64)
+            except Exception as init_err:
+                logger.error("[CUA %s] Adapter initialize failed: %s — returning empty trajectory", env_id, init_err)
+                return trajectory, "", None, None
 
             logger.info(
                 "[CUA %s] initialize done — actions=%d done=%s",
@@ -335,8 +341,6 @@ class BrowserAgent(SimpleResponsesAPIAgent):
             if adapter_resp.usage:
                 cumulative_input_tokens += adapter_resp.usage.input_tokens
                 cumulative_output_tokens += adapter_resp.usage.output_tokens
-
-            trajectory = CUATrajectory(steps=[], task_prompt=task_prompt, initial_screenshot=screenshot_b64)
 
             if debug_enabled:
                 try:
