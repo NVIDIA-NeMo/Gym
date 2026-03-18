@@ -4,8 +4,8 @@ config_paths:
 
 # Duplicate the generic config above to ensure this benchmark config is isolated.
 aime24_math_with_judge_resources_server: ${swap_key:math_with_judge}
-aime24_math_with_judge_simple_agent: ${swap_key:math_with_judge_simple_agent}
 aime24_math_with_judge_simple_agent:
+  _swap_key: math_with_judge_simple_agent
   responses_api_agents:
     simple_agent:
       resources_server:
