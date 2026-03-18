@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+import random
 from asyncio import sleep
 from typing import (
     Any,
@@ -519,15 +520,19 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
             response = await request(**request_kwargs)
 
             if response.status in RETRY_ERROR_CODES:
-                # If we hit a rate limit, we don't want to hit max num tries, so we increment both.
                 if response.status in RATE_LIMIT_ERROR_CODES:
                     max_num_tries += 1
 
+                if response.status == 500:
+                    max_num_tries += 1
+
                 content = (await response.content.read()).decode()
+                backoff = min(2 ** (tries - 1), 30) + random.uniform(0, 1)
                 print(
-                    f"Hit a {response.status} trying to query an OpenAI endpoint (try {tries}). Sleeping 0.5s. Error message: {content}"
+                    f"Hit a {response.status} trying to query an OpenAI endpoint "
+                    f"(try {tries}/{max_num_tries}). Sleeping {backoff:.1f}s. Error message: {content}"
                 )
-                await sleep(0.5)
+                await sleep(backoff)
                 continue
             else:
                 return response
