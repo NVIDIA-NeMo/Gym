@@ -19,6 +19,7 @@ Each browser session is identified by a unique env_id.
 import asyncio
 import base64
 import logging
+import sys
 import time
 from dataclasses import dataclass, field
 from typing import Optional
@@ -162,7 +163,6 @@ ACTION_TIMEOUTS: dict[str, float] = {
     "wait": None,
 }
 
-MAX_CONSECUTIVE_ACTION_FAILURES = 3
 CLOSE_SESSION_STEP_TIMEOUT = 60.0
 
 
@@ -474,9 +474,7 @@ class BrowserPool:
                 except Exception:
                     pass
             if action.clear_before_typing:
-                import sys as _sys
-
-                mod = "Meta" if _sys.platform == "darwin" else "Control"
+                mod = "Meta" if sys.platform == "darwin" else "Control"
                 await page.keyboard.press(f"{mod}+a")
                 await page.keyboard.press("Delete")
             text = action.text or ""
@@ -621,19 +619,24 @@ class BrowserPool:
             if region and len(region) == 4:
                 x1, y1, x2, y2 = region
                 screenshot_bytes = await page.screenshot(type="png", full_page=False)
-                from io import BytesIO
 
-                from PIL import Image
+                def _crop_screenshot():
+                    from io import BytesIO
 
-                img = Image.open(BytesIO(screenshot_bytes))
-                w, h = img.size
-                x1c, y1c = max(0, min(x1, w)), max(0, min(y1, h))
-                x2c, y2c = max(0, min(x2, w)), max(0, min(y2, h))
-                cropped = img.crop((x1c, y1c, x2c, y2c))
-                buf = BytesIO()
-                cropped.save(buf, format="PNG")
+                    from PIL import Image
+
+                    img = Image.open(BytesIO(screenshot_bytes))
+                    w, h = img.size
+                    x1c, y1c = max(0, min(x1, w)), max(0, min(y1, h))
+                    x2c, y2c = max(0, min(x2, w)), max(0, min(y2, h))
+                    cropped = img.crop((x1c, y1c, x2c, y2c))
+                    buf = BytesIO()
+                    cropped.save(buf, format="PNG")
+                    return base64.b64encode(buf.getvalue()).decode("utf-8")
+
+                cropped_b64 = await asyncio.to_thread(_crop_screenshot)
                 current_url = await self.get_current_url(env_id)
-                return base64.b64encode(buf.getvalue()).decode("utf-8"), current_url
+                return cropped_b64, current_url
 
         elif action_type == "screenshot":
             pass
