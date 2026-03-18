@@ -740,7 +740,7 @@ class TestGlobalConfig:
 
         assert expected_global_config_dict == actual_global_config_dict
 
-    def test_recursively_replace_keys(self, monkeypatch: MonkeyPatch) -> None:
+    def test_recursively_replace_keys_multiple_ref_one(self, monkeypatch: MonkeyPatch) -> None:
         self._mock_versions_for_testing(monkeypatch)
 
         monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
@@ -762,10 +762,9 @@ class TestGlobalConfig:
                     "policy_model": "${swap_key:test_resource}",
                     "test_resource": {"responses_api_models": {"test_model": {"entrypoint": "app.py"}}},
                     "policy_model_2": {
-                        "_swap_key": "test_resource_2",
+                        "_swap_key": "test_resource",
                         "responses_api_models": {"test_model": {"entrypoint": "app2.py"}},
                     },
-                    "test_resource_2": {"responses_api_models": {"test_model": {"entrypoint": "app.py"}}},
                     "a": {"b": {"c": 3}},
                     "a_prime": {"b_prime": "${swap_key:a.b.c}"},
                 }
