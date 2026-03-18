@@ -733,7 +733,7 @@ class TestGlobalConfig:
             "policy_model_2": {
                 "responses_api_models": {"test_model": {"entrypoint": "app2.py", "host": "127.0.0.1", "port": 12345}}
             },
-            "disallowed_ports": [11000, 12345],
+            "disallowed_ports": [11000, 12345, 12345],
             "a": {"b": {}},
             "a_prime": {"b_prime": 3},
         }
