@@ -46,8 +46,21 @@ class BenchmarkConfig:
         return self.config_dict.get("num_repeats")
 
 
+def _register_benchmark(benchmarks: dict, bench_dir: Path) -> None:
+    """Register a single benchmark directory (must contain config.yaml)."""
+    config_path = bench_dir / "config.yaml"
+    config_dict = OmegaConf.to_container(OmegaConf.load(config_path), resolve=True)
+    name = str(bench_dir.relative_to(BENCHMARKS_DIR))
+    benchmarks[name] = BenchmarkConfig(name=name, path=bench_dir, config_dict=config_dict)
+
+
 def discover_benchmarks() -> Dict[str, BenchmarkConfig]:
-    """Scan the benchmarks/ directory for subdirectories containing config.yaml."""
+    """Scan the benchmarks/ directory for subdirectories containing config.yaml.
+
+    Supports both flat benchmarks (``benchmarks/aime24/config.yaml``) and nested
+    benchmarks (``benchmarks/livecodebench/v5_2408_2502/config.yaml``). A directory
+    without ``config.yaml`` is checked one level deeper for sub-benchmarks.
+    """
     benchmarks = {}
 
     if not BENCHMARKS_DIR.exists():
@@ -56,16 +69,13 @@ def discover_benchmarks() -> Dict[str, BenchmarkConfig]:
     for entry in sorted(BENCHMARKS_DIR.iterdir()):
         if not entry.is_dir():
             continue
-        config_path = entry / "config.yaml"
-        if not config_path.exists():
-            continue
-
-        config_dict = OmegaConf.to_container(OmegaConf.load(config_path), resolve=True)
-        benchmarks[entry.name] = BenchmarkConfig(
-            name=entry.name,
-            path=entry,
-            config_dict=config_dict,
-        )
+        if (entry / "config.yaml").exists():
+            _register_benchmark(benchmarks, entry)
+        else:
+            # Check one level deeper for sub-benchmarks
+            for sub_entry in sorted(entry.iterdir()):
+                if sub_entry.is_dir() and (sub_entry / "config.yaml").exists():
+                    _register_benchmark(benchmarks, sub_entry)
 
     return benchmarks
 
@@ -153,14 +163,16 @@ def prepare_benchmark() -> None:
     errors = []
     validated = []
     for bench_dir in benchmark_dirs:
-        benchmark_name = bench_dir.name
+        # Compute benchmark name as relative path from BENCHMARKS_DIR (e.g. "livecodebench/v5_2408_2502")
+        benchmark_name = str(bench_dir.relative_to(BENCHMARKS_DIR))
         prepare_module_path = bench_dir / "prepare.py"
 
         if not prepare_module_path.exists():
             errors.append(f"No prepare.py found for benchmark '{benchmark_name}' at {prepare_module_path}")
             continue
 
-        module_name = f"benchmarks.{benchmark_name}.prepare"
+        # Convert path separators to dots for module import (e.g. "benchmarks.livecodebench.v5_2408_2502.prepare")
+        module_name = f"benchmarks.{benchmark_name.replace('/', '.').replace(chr(92), '.')}.prepare"
         module = importlib.import_module(module_name)
 
         if not hasattr(module, "prepare"):
