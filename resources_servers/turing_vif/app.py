@@ -113,6 +113,9 @@ class TuringVIFResourcesServerConfig(BaseResourcesServerConfig):
         default=None, description="API key for the LLM judge. If not set, uses policy_api_key."
     )
     judge_model: str = Field(default="gpt-4.1-2025-04-14", description="Model to use for LLM judge evaluations.")
+    judge_temperature: float = Field(default=0.7, description="Sampling temperature for judge LLM calls.")
+    judge_top_p: float = Field(default=0.8, description="Top-p (nucleus) sampling for judge LLM calls.")
+    judge_max_tokens: int = Field(default=10_000, description="Max output tokens for judge LLM calls.")
     # Security limits for judge LLM calls (input/output length and error handling)
     judge_max_system_chars: Optional[int] = Field(
         default=200_000, description="Max character count for judge system prompt. None to disable."
@@ -352,6 +355,7 @@ class TuringVIFResourcesServer(SimpleResourcesServer):
         user_content: str,
         system_content: str,
         temperature: float,
+        top_p: float,
         max_tokens: int,
     ) -> str:
         """
@@ -377,12 +381,18 @@ class TuringVIFResourcesServer(SimpleResourcesServer):
                 model=model,
                 messages=[{"role": "system", "content": system_content}, {"role": "user", "content": user_content}],
                 temperature=temperature,
+                top_p=top_p,
                 max_tokens=max_tokens,
             )
             return result["choices"][0]["message"]["content"]
 
     async def _judge_llm_api_async(
-        self, user_content: str, system_content: str, temperature: float = 1.0, max_tokens: int = 10000
+        self,
+        user_content: str,
+        system_content: str,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+        max_tokens: Optional[int] = None,
     ) -> str:
         """
         Async wrapper for LLM judge API calls with security safeguards.
@@ -393,8 +403,13 @@ class TuringVIFResourcesServer(SimpleResourcesServer):
         - Caps output length before returning.
 
         Uses Responses API for reasoning models and Chat Completions for others.
+        Sampling parameters default to config values (judge_temperature, judge_top_p,
+        judge_max_tokens) when not explicitly provided.
         """
         cfg = self.config
+        temperature = temperature if temperature is not None else cfg.judge_temperature
+        top_p = top_p if top_p is not None else cfg.judge_top_p
+        max_tokens = max_tokens if max_tokens is not None else cfg.judge_max_tokens
         max_sys = getattr(cfg, "judge_max_system_chars", None)
         max_usr = getattr(cfg, "judge_max_user_chars", None)
         max_out = getattr(cfg, "judge_max_output_chars", None)
@@ -412,7 +427,7 @@ class TuringVIFResourcesServer(SimpleResourcesServer):
 
         try:
             client = self._get_judge_client()
-            out = await self._judge_llm_api_call_async(client, user_content, system_content, temperature, max_tokens)
+            out = await self._judge_llm_api_call_async(client, user_content, system_content, temperature, top_p, max_tokens)
             if not isinstance(out, str):
                 out = str(out) if out is not None else ""
             if max_out is not None and len(out) > max_out:
@@ -425,6 +440,10 @@ class TuringVIFResourcesServer(SimpleResourcesServer):
     async def _validate_custom_llm_judge_async(self, response: str, question_text: str) -> Tuple[bool, str]:
         """
         Validates a response against a free-form LLM Judge question.
+
+        Uses [[YES]]/[[NO]] bracket markers for robust verdict extraction.
+        Falls back to checking the last line for plain YES/NO, and defaults
+        to NO if neither marker is found.
 
         Args:
             response: The model response to evaluate
@@ -442,28 +461,19 @@ class TuringVIFResourcesServer(SimpleResourcesServer):
 
             evaluation = _strip_thinking_traces(evaluation)
 
-            # Handle Markdown code blocks
-            if evaluation.startswith("```"):
-                evaluation = re.sub(r"^```(?:\w+)?\s*", "", evaluation, flags=re.DOTALL)
-                evaluation = re.sub(r"\s*```$", "", evaluation, flags=re.DOTALL)
+            last_yes = evaluation.rfind("[[YES]]")
+            last_no = evaluation.rfind("[[NO]]")
 
-            # Extract JSON
-            json_match = re.search(r"(\{.*\})", evaluation, re.DOTALL)
-            if json_match:
-                evaluation = json_match.group(1)
+            if last_yes >= 0 or last_no >= 0:
+                flag = last_yes > last_no
+                return flag, evaluation
 
-            json_data = json.loads(evaluation)
+            last_line = evaluation.strip().rsplit("\n", 1)[-1].strip().upper()
+            if last_line in ("YES", "NO"):
+                return last_line == "YES", evaluation
 
-            # Check if judge returned wrong format
-            if "model_response" in json_data or "question" in json_data:
-                return False, "Judge returned input format instead of output format."
+            return False, f"No [[YES]]/[[NO]] marker found in judge response: {evaluation[:500]}"
 
-            judge_response = JudgeResponse(**json_data)
-            flag = judge_response.verdict == "YES"
-            return flag, judge_response.reasoning
-
-        except (json.JSONDecodeError, ValidationError) as e:
-            return False, f"Error parsing Judge response: {e}"
         except Exception as e:
             return False, f"Validation error: {str(e)}"
 

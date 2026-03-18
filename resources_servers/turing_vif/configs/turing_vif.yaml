@@ -17,6 +17,10 @@ turing_vif:
       judge_base_url: ${policy_base_url}
       judge_api_key: ${policy_api_key}
       judge_model: ${policy_model_name}
+      # Judge sampling parameters
+      judge_temperature: 0.7
+      judge_top_p: 0.8
+      judge_max_tokens: 10000
 
 turing_vif_simple_agent:
   responses_api_agents:
