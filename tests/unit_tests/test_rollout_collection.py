@@ -384,32 +384,21 @@ class TestRolloutCollection:
             num_repeats=2,
         )
 
-        actual_returned_results = RolloutCollectionHelper()._load_from_cache(config)
+        actual_input_rows, actual_rows = RolloutCollectionHelper()._load_from_cache(config)
 
-        expected_results = (
-            [
-                {"_ng_task_index": 1, "_ng_rollout_index": 0, "input": True},
-                {"_ng_task_index": 2, "_ng_rollout_index": 0, "input": True},
-                {"_ng_task_index": 2, "_ng_rollout_index": 1, "input": True},
-            ],
-            [
-                {"_ng_task_index": 0, "_ng_rollout_index": 0, "input": True},
-                {"_ng_task_index": 0, "_ng_rollout_index": 1, "input": True},
-                {"_ng_task_index": 1, "_ng_rollout_index": 1, "input": True},
-            ],
-            [
-                {"_ng_task_index": 0, "_ng_rollout_index": 0, "output": True},
-                {"_ng_task_index": 0, "_ng_rollout_index": 1, "output": True},
-                {"_ng_task_index": 1, "_ng_rollout_index": 1, "output": True},
-            ],
-            [
-                [orjson.dumps({"_ng_task_index": 0, "_ng_rollout_index": 0, "output": True})],
-                [orjson.dumps({"_ng_task_index": 0, "_ng_rollout_index": 1, "output": True})],
-                [orjson.dumps({"_ng_task_index": 1, "_ng_rollout_index": 1, "output": True})],
-            ],
-        )
+        expected_input_rows = [
+            {"_ng_task_index": 1, "_ng_rollout_index": 0, "input": True},
+            {"_ng_task_index": 2, "_ng_rollout_index": 0, "input": True},
+            {"_ng_task_index": 2, "_ng_rollout_index": 1, "input": True},
+        ]
+        expected_rows = [
+            {"_ng_task_index": 0, "_ng_rollout_index": 0, "input": True},
+            {"_ng_task_index": 0, "_ng_rollout_index": 1, "input": True},
+            {"_ng_task_index": 1, "_ng_rollout_index": 1, "input": True},
+        ]
 
-        assert expected_results == actual_returned_results
+        assert expected_input_rows == actual_input_rows
+        assert expected_rows == actual_rows
 
     async def test_call_aggregate_metrics(self, tmp_path: Path) -> None:
         """Test _call_aggregate_metrics with a mocked server client."""

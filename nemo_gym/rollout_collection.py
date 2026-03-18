@@ -311,20 +311,26 @@ class RolloutCollectionHelper(BaseModel):
 
     def _load_from_cache(
         self, config: RolloutCollectionConfig
-    ) -> Tuple[List[Dict], List[Dict], List[Dict], List[List[str]]]:
+    ) -> Tuple[List[Dict], List[Dict]]:
+        """Load cache and return (remaining_input_rows, already_completed_rows).
+
+        Only extracts the lightweight index keys from each cached result line,
+        avoiding full deserialization of large result dicts (which can contain
+        entire CUA trajectories with screenshots).
+        """
         with config.materialized_jsonl_fpath.open() as f:
             original_input_rows = list(map(orjson.loads, f))
-        with Path(config.output_jsonl_fpath).open("rb") as f:
-            result_strs = [[line.strip()] for line in f]
-        results = [orjson.loads(p[0]) for p in result_strs]
 
         get_key = lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME])
 
-        seen_rows = set(map(get_key, results))
-        input_rows = [row for row in original_input_rows if get_key(row) not in seen_rows]
+        seen_keys: set = set()
+        with Path(config.output_jsonl_fpath).open("rb") as f:
+            for line in f:
+                result_key = orjson.loads(line)
+                seen_keys.add((result_key[TASK_INDEX_KEY_NAME], result_key[ROLLOUT_INDEX_KEY_NAME]))
 
-        key_to_row = dict(zip(map(get_key, original_input_rows), original_input_rows))
-        rows = [key_to_row[get_key(result)] for result in results]
+        input_rows = [row for row in original_input_rows if get_key(row) not in seen_keys]
+        rows = [row for row in original_input_rows if get_key(row) in seen_keys]
 
         print(
             f"""Resumed from cache. Found:
@@ -333,18 +339,13 @@ class RolloutCollectionHelper(BaseModel):
 - {len(input_rows)} rows that still need to be run"""
         )
 
-        return input_rows, rows, results, result_strs
+        return input_rows, rows
 
     async def run_from_config(self, config: RolloutCollectionConfig) -> Tuple[List[Dict]]:
         output_fpath = Path(config.output_jsonl_fpath)
 
         if config.resume_from_cache and config.materialized_jsonl_fpath.exists() and output_fpath.exists():
-            (
-                input_rows,
-                rows,
-                results,
-                result_strs,
-            ) = self._load_from_cache(config)
+            input_rows, rows = self._load_from_cache(config)
         else:
             if config.resume_from_cache:
                 if not output_fpath.exists():
@@ -357,8 +358,6 @@ class RolloutCollectionHelper(BaseModel):
                 print("Clearing output fpath since `resume_from_cache=False`!")
 
             rows: List[Dict] = []
-            results: List[Dict] = []
-            result_strs: List[List[str]] = []
 
             input_rows = self._preprocess_rows_from_config(config)
             # Returned rows are sorted by (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME])
@@ -379,6 +378,8 @@ class RolloutCollectionHelper(BaseModel):
         pcts_to_print = [20, 40, 60, 80, 90, 95, 98, 99, 100]
         counts_left = Counter(r[AGENT_REF_KEY_NAME]["name"] for r in input_rows)
         results_file = output_fpath.open("ab")
+        # Track how many new results we've written in this run (rows from cache are already in rows).
+        initial_rows_len = len(rows)
         for future in self.run_examples(input_rows, semaphore=semaphore):
             row, result = await future
 
@@ -386,17 +387,21 @@ class RolloutCollectionHelper(BaseModel):
             result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
             result[AGENT_REF_KEY_NAME] = row[AGENT_REF_KEY_NAME]
 
-            rows.append(row)
-            results.append(result)
-            result_strs.append([orjson.dumps(result)])
-            results_file.write(result_strs[-1][0] + b"\n")
+            # Write immediately and release the result dict so GC can reclaim it.
+            # For CUA rollouts each result holds the full trajectory with all screenshots,
+            # so accumulating them in-memory would exhaust RAM over large collection runs.
+            result_bytes = orjson.dumps(result)
+            results_file.write(result_bytes + b"\n")
             results_file.flush()
+
+            rows.append(row)
 
             counts_left[row[AGENT_REF_KEY_NAME]["name"]] -= 1
             if counts_left[row[AGENT_REF_KEY_NAME]["name"]] <= 0:
                 counts_left.pop(row[AGENT_REF_KEY_NAME]["name"])
 
-            current_pct = 100 * len(results) / len(input_rows)
+            newly_completed = len(rows) - initial_rows_len
+            current_pct = 100 * newly_completed / len(input_rows)
             if pcts_to_print and current_pct >= pcts_to_print[0]:
                 while pcts_to_print and current_pct >= pcts_to_print[0]:
                     pcts_to_print.pop(0)
@@ -408,10 +413,15 @@ class RolloutCollectionHelper(BaseModel):
 
         results_file.close()
 
+        # Re-read all results from disk (covers both cached results from resume path and
+        # newly written results). Avoids holding large result dicts in memory during collection.
+        with output_fpath.open("rb") as f:
+            results = [orjson.loads(line) for line in f]
+
         if get_wandb_run():  # pragma: no cover
             print("Uploading rollouts to W&B. This may take a few minutes if your data is large.")
+            result_strs = [[orjson.dumps(r)] for r in results]
             get_wandb_run().log({"Rollouts": Table(data=result_strs, columns=["Rollout"])})
-        del result_strs
 
         print("Sorting results to ensure consistent ordering")
         rows.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
