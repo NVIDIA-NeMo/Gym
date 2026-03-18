@@ -14,17 +14,18 @@
 # limitations under the License.
 """Prepare LiveCodeBench evaluation data for NeMo Gym.
 
-Downloads LiveCodeBench v5 from HuggingFace and converts to Gym JSONL format
-compatible with the code_gen resource server.
+Downloads the code_gen validation dataset from HuggingFace and converts it to
+benchmark JSONL format. The source data was prepared by the LCB runner
+(``livecodebench_accuracy_test_prep.py``) using the official livecodebench
+library, so the test cases are identical to what NeMo-Skills uses.
 
-Output is raw data (no prompts baked in). Use prompt_config at rollout time
-to specify the prompt, or ng_materialize_prompts to produce RL-ready data.
+The source JSONL has pre-baked model outputs and expected rewards (used for
+grading accuracy tests). We strip those and keep only the fields needed for
+fresh benchmark evaluation: ``question_content``, ``verifier_metadata``
+(with ``unit_tests`` and ``problem_id``).
 """
 
-import base64
 import json
-import pickle
-import zlib
 from pathlib import Path
 
 
@@ -32,73 +33,81 @@ BENCHMARK_DIR = Path(__file__).parent
 DATA_DIR = BENCHMARK_DIR / "data"
 OUTPUT_FPATH = DATA_DIR / "livecodebench_v5_validation.jsonl"
 
-# LiveCodeBench date range for v5 — matches Skills' test_v5_2408_2502 split
+# HuggingFace dataset containing the code_gen validation data
+HF_REPO_ID = "nvidia/nemotron-RL-coding-competitive_coding"
+HF_FILENAME = "validation.jsonl"
+
+# Date range for filtering to match Skills' test_v5_2408_2502 split.
+# The source data covers 2024-07-01 to 2025-02-01 (322 problems).
+# Set to None to use all problems.
 DATE_FROM = "2024-08-01"
 DATE_TO = "2025-03-01"
 
 
-def _decode_test_cases(raw) -> list:
-    """Decode test cases from the refs/pr/7 HF revision.
-
-    The public_test_cases field is plain JSON. The private_test_cases field
-    is either plain JSON or base64+zlib+pickle encoded (matching the encoding
-    used by the livecodebench library).
-    """
-    if not raw:
-        return []
-    try:
-        return json.loads(raw)
-    except (json.JSONDecodeError, TypeError):
-        return json.loads(pickle.loads(zlib.decompress(base64.b64decode(raw.encode("utf-8")))))
-
-
 def prepare() -> Path:
-    """Download LiveCodeBench data and convert to Gym JSONL format."""
-    from datasets import load_dataset
+    """Download and prepare LCB benchmark data."""
+    from huggingface_hub import hf_hub_download
 
-    print("Downloading LiveCodeBench from HuggingFace...")
-    ds = load_dataset(
-        "livecodebench/code_generation_lite",
-        "release_v5",
-        split="test",
-        revision="refs/pr/7",
-    )
+    print(f"Downloading validation data from {HF_REPO_ID}...")
+    source_path = hf_hub_download(HF_REPO_ID, HF_FILENAME, repo_type="dataset")
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
+    # The source has multiple rows per problem (one per model output from the
+    # accuracy test). We deduplicate by problem_id and keep only the fields
+    # needed for benchmark evaluation.
+    seen_problems = set()
     rows = []
-    for example in ds:
-        # Filter by date range for v5
-        contest_date = example.get("contest_date", "")
-        if contest_date and (contest_date < DATE_FROM or contest_date >= DATE_TO):
-            continue
+    with open(source_path) as f:
+        for line in f:
+            row = json.loads(line)
+            problem_id = row["verifier_metadata"]["problem_id"]
+            if problem_id in seen_problems:
+                continue
+            seen_problems.add(problem_id)
 
-        # Public test cases (plain JSON list of {input, output} dicts)
-        pub = _decode_test_cases(example.get("public_test_cases", ""))
-        inputs = [tc["input"] for tc in pub]
-        outputs = [tc["output"] for tc in pub]
+            # Extract question_content from the prompt
+            prompt_input = row.get("responses_create_params", {}).get("input", [])
+            question_content = ""
+            for msg in prompt_input:
+                if msg.get("role") == "user":
+                    question_content = msg.get("content", "")
+                    break
 
-        # Private test cases (base64+zlib+pickle encoded in refs/pr/7 revision)
-        priv = _decode_test_cases(example.get("private_test_cases", ""))
-        inputs.extend(tc["input"] for tc in priv)
-        outputs.extend(tc["output"] for tc in priv)
+            out = {
+                "question_content": question_content,
+                "verifier_metadata": row["verifier_metadata"],
+            }
+            rows.append(out)
 
-        row = {
-            "question_content": example["question_content"],
-            "verifier_metadata": {
-                "unit_tests": {
-                    "inputs": inputs,
-                    "outputs": outputs,
-                    "fn_name": None,
-                },
-                "difficulty": example.get("difficulty", "unknown"),
-            },
-            "problem_id": example.get("question_id", ""),
-        }
-        rows.append(json.dumps(row) + "\n")
+    # Enrich with difficulty and filter by date range using the HF dataset
+    try:
+        from datasets import load_dataset
+
+        ds = load_dataset("livecodebench/code_generation_lite", "release_v5", split="test", revision="refs/pr/7")
+        hf_map = {ex.get("question_id", ""): ex for ex in ds}
+
+        enriched = []
+        for row in rows:
+            pid = row["verifier_metadata"]["problem_id"]
+            hf_row = hf_map.get(pid)
+            if hf_row:
+                # Add difficulty for per-subset metrics
+                row["verifier_metadata"]["difficulty"] = hf_row.get("difficulty", "unknown")
+                # Date filter
+                date = hf_row.get("contest_date", "")
+                if DATE_FROM and date < DATE_FROM:
+                    continue
+                if DATE_TO and date >= DATE_TO:
+                    continue
+            enriched.append(row)
+        rows = enriched
+    except Exception as e:
+        print(f"Warning: enrichment/filtering failed ({e}), using all {len(rows)} problems")
 
     with open(OUTPUT_FPATH, "w") as f:
-        f.writelines(rows)
+        for row in rows:
+            f.write(json.dumps(row) + "\n")
 
     print(f"Wrote {len(rows)} problems to {OUTPUT_FPATH}")
     return OUTPUT_FPATH
