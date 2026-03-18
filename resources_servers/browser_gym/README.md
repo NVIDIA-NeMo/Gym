@@ -633,7 +633,7 @@ Create `.vscode/launch.json` in the project root with the following content (rep
             "request": "launch",
             "program": "app.py",
             "cwd": "${workspaceFolder}/resources_servers/browser_gym",
-            "python": "${workspaceFolder}/env/bin/python",
+            "python": "${workspaceFolder}/.venv/bin/python",
             "env": {
                 "PYTHONPATH": "${workspaceFolder}",
                 "NEMO_GYM_CONFIG_PATH": "browser_gym_resources_server",
@@ -648,7 +648,7 @@ Create `.vscode/launch.json` in the project root with the following content (rep
             "request": "launch",
             "program": "app.py",
             "cwd": "${workspaceFolder}/responses_api_agents/browser_agent",
-            "python": "${workspaceFolder}/env/bin/python",
+            "python": "${workspaceFolder}/.venv/bin/python",
             "env": {
                 "PYTHONPATH": "${workspaceFolder}",
                 "NEMO_GYM_CONFIG_PATH": "browser_openai_agent",

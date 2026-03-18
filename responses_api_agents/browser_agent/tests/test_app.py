@@ -13,7 +13,7 @@
 # limitations under the License.
 import json
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -563,6 +563,30 @@ class TestAdapterFactory:
 
         adapter = AdapterFactory.create("openai")
         assert isinstance(adapter, OpenAICUAAdapter)
+
+    def test_create_anthropic_sonnet(self):
+        pytest.importorskip("anthropic", reason="anthropic SDK not installed")
+        from responses_api_agents.browser_agent.adapters import AdapterFactory
+        from responses_api_agents.browser_agent.adapters.anthropic_adapter import AnthropicCUAAdapter
+
+        adapter = AdapterFactory.create("anthropic_sonnet", api_caller=None)
+        assert isinstance(adapter, AnthropicCUAAdapter)
+
+    def test_create_anthropic_opus(self):
+        pytest.importorskip("anthropic", reason="anthropic SDK not installed")
+        from responses_api_agents.browser_agent.adapters import AdapterFactory
+        from responses_api_agents.browser_agent.adapters.anthropic_adapter import AnthropicCUAAdapter
+
+        adapter = AdapterFactory.create("anthropic_opus", api_caller=None)
+        assert isinstance(adapter, AnthropicCUAAdapter)
+
+    def test_create_gemini(self):
+        pytest.importorskip("google.genai", reason="google-genai SDK not installed")
+        from responses_api_agents.browser_agent.adapters import AdapterFactory
+        from responses_api_agents.browser_agent.adapters.gemini_adapter import GeminiCUAAdapter
+
+        adapter = AdapterFactory.create("gemini", api_caller=None)
+        assert isinstance(adapter, GeminiCUAAdapter)
 
     def test_create_unknown(self):
         from responses_api_agents.browser_agent.adapters import AdapterFactory
@@ -1250,40 +1274,327 @@ class TestSaveDebugTrajectory:
                 )
 
 
+def _make_agent_config(**overrides):
+    from responses_api_agents.browser_agent.app import BrowserAgentConfig
+
+    defaults = {
+        "host": "0.0.0.0",
+        "port": 8080,
+        "entrypoint": "",
+        "name": "",
+        "resources_server": {"type": "resources_servers", "name": "browser_gym"},
+        "model_server": {"type": "responses_api_models", "name": "openai_model"},
+    }
+    defaults.update(overrides)
+    return BrowserAgentConfig(**defaults)
+
+
 class TestBrowserAgentConfig:
     def test_default_max_steps(self):
-        from responses_api_agents.browser_agent.app import BrowserAgentConfig
-
-        config = BrowserAgentConfig(
-            host="0.0.0.0",
-            port=8080,
-            entrypoint="",
-            name="",
-            resources_server={"type": "resources_servers", "name": "browser_gym"},
-        )
+        config = _make_agent_config()
         assert config.max_steps == 250
 
     def test_default_run_timeout(self):
-        from responses_api_agents.browser_agent.app import BrowserAgentConfig
-
-        config = BrowserAgentConfig(
-            host="0.0.0.0",
-            port=8080,
-            entrypoint="",
-            name="",
-            resources_server={"type": "resources_servers", "name": "browser_gym"},
-        )
+        config = _make_agent_config()
         assert config.run_timeout_seconds == 7200.0
 
     def test_custom_run_timeout(self):
-        from responses_api_agents.browser_agent.app import BrowserAgentConfig
-
-        config = BrowserAgentConfig(
-            host="0.0.0.0",
-            port=8080,
-            entrypoint="",
-            name="",
-            resources_server={"type": "resources_servers", "name": "browser_gym"},
-            run_timeout_seconds=3600.0,
-        )
+        config = _make_agent_config(run_timeout_seconds=3600.0)
         assert config.run_timeout_seconds == 3600.0
+
+
+class TestBrowserAgentServer:
+    def test_server_instantiation(self):
+        from nemo_gym.server_utils import ServerClient
+        from responses_api_agents.browser_agent.app import BrowserAgent
+
+        config = _make_agent_config()
+        server = BrowserAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        assert server.config.cua_adapter_type == "openai"
+        assert server.config.max_steps == 250
+
+    def test_server_instantiation_anthropic(self):
+        from nemo_gym.server_utils import ServerClient
+        from responses_api_agents.browser_agent.app import BrowserAgent
+
+        config = _make_agent_config(cua_adapter_type="anthropic_sonnet", cua_model="claude-sonnet-4-20250514")
+        server = BrowserAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        assert server.config.cua_adapter_type == "anthropic_sonnet"
+
+    def test_server_instantiation_gemini(self):
+        from nemo_gym.server_utils import ServerClient
+        from responses_api_agents.browser_agent.app import BrowserAgent
+
+        config = _make_agent_config(cua_adapter_type="gemini", cua_model="gemini-2.5-cu")
+        server = BrowserAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        assert server.config.cua_adapter_type == "gemini"
+
+
+class TestBrowserAgentRunFlow:
+    """Tests for the CUA loop orchestration in _responses_via_adapter."""
+
+    @pytest.fixture
+    def agent(self):
+        from nemo_gym.server_utils import ServerClient
+        from responses_api_agents.browser_agent.app import BrowserAgent
+
+        config = _make_agent_config(cua_debug_trajectories=False)
+        return BrowserAgent(config=config, server_client=MagicMock(spec=ServerClient))
+
+    def _make_mock_adapter(self, init_response=None, step_responses=None):
+        adapter = AsyncMock()
+        if init_response is None:
+            init_response = CUAAdapterResponse(
+                actions=[BrowserAction(action_type="click", coordinate=[100, 200])],
+                done=False,
+            )
+        adapter.initialize.return_value = init_response
+
+        if step_responses is None:
+            step_responses = [CUAAdapterResponse(done=True, message="Task completed")]
+        adapter.step.side_effect = step_responses
+
+        adapter.reset = MagicMock()
+        return adapter
+
+    def _make_step_response(self, screenshot="c2NyZWVuc2hvdA==", url="https://example.com", error=None):
+        return {
+            "screenshot": screenshot,
+            "current_url": url,
+            "error": error,
+        }
+
+    @pytest.mark.asyncio
+    async def test_single_action_then_done(self, agent):
+        """Adapter returns one action on initialize, then done=True on step."""
+        mock_adapter = self._make_mock_adapter()
+
+        step_http_resp = AsyncMock()
+        step_http_resp.ok = True
+        step_http_resp.cookies = {}
+        step_http_resp.json = AsyncMock(return_value=self._make_step_response())
+
+        with (
+            patch.object(agent, "_create_adapter", return_value=mock_adapter),
+            patch("responses_api_agents.browser_agent.app.raise_for_status", new_callable=AsyncMock),
+            patch("responses_api_agents.browser_agent.app.get_response_json", return_value=self._make_step_response()),
+        ):
+            agent.server_client.post = AsyncMock(return_value=step_http_resp)
+
+            cookie_jar = {"cookies": {}}
+            trajectory, ls_dump, usage, debug_dir = await agent._responses_via_adapter(
+                task_prompt="Click the button",
+                env_id="test-env-1",
+                screenshot_b64="aW5pdGlhbA==",
+                cookie_jar=cookie_jar,
+            )
+
+        assert len(trajectory.steps) == 1
+        assert trajectory.steps[0].action.action_type == "click"
+        mock_adapter.initialize.assert_awaited_once()
+        mock_adapter.step.assert_awaited_once()
+        mock_adapter.reset.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_adapter_initialize_failure_returns_empty_trajectory(self, agent):
+        """When adapter.initialize() raises, return an empty trajectory gracefully."""
+        mock_adapter = AsyncMock()
+        mock_adapter.initialize.side_effect = RuntimeError("Model API unreachable")
+        mock_adapter.reset = MagicMock()
+
+        with patch.object(agent, "_create_adapter", return_value=mock_adapter):
+            cookie_jar = {"cookies": {}}
+            trajectory, ls_dump, usage, debug_dir = await agent._responses_via_adapter(
+                task_prompt="Click the button",
+                env_id="test-env-fail",
+                screenshot_b64="aW5pdGlhbA==",
+                cookie_jar=cookie_jar,
+            )
+
+        assert len(trajectory.steps) == 0
+        assert ls_dump == ""
+        assert usage is None
+        mock_adapter.reset.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_adapter_step_failure_ends_loop(self, agent):
+        """When adapter.step() raises, the loop ends and trajectory is returned."""
+        init_resp = CUAAdapterResponse(
+            actions=[BrowserAction(action_type="click", coordinate=[50, 50])],
+            done=False,
+        )
+        mock_adapter = self._make_mock_adapter(init_response=init_resp)
+        mock_adapter.step.side_effect = RuntimeError("API timeout")
+
+        step_http_resp = AsyncMock()
+        step_http_resp.ok = True
+        step_http_resp.cookies = {}
+
+        with (
+            patch.object(agent, "_create_adapter", return_value=mock_adapter),
+            patch("responses_api_agents.browser_agent.app.raise_for_status", new_callable=AsyncMock),
+            patch("responses_api_agents.browser_agent.app.get_response_json", return_value=self._make_step_response()),
+        ):
+            agent.server_client.post = AsyncMock(return_value=step_http_resp)
+
+            cookie_jar = {"cookies": {}}
+            trajectory, ls_dump, usage, debug_dir = await agent._responses_via_adapter(
+                task_prompt="Do something",
+                env_id="test-env-step-fail",
+                screenshot_b64="aW5pdGlhbA==",
+                cookie_jar=cookie_jar,
+            )
+
+        assert len(trajectory.steps) == 1
+        mock_adapter.reset.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_browser_stuck_breaks_loop(self, agent):
+        """When browser returns error:browser_stuck, the loop ends."""
+        init_resp = CUAAdapterResponse(
+            actions=[BrowserAction(action_type="click", coordinate=[10, 20])],
+            done=False,
+        )
+        mock_adapter = self._make_mock_adapter(init_response=init_resp)
+
+        stuck_response = self._make_step_response(screenshot="", url="error:browser_stuck")
+
+        step_http_resp = AsyncMock()
+        step_http_resp.ok = True
+        step_http_resp.cookies = {}
+
+        with (
+            patch.object(agent, "_create_adapter", return_value=mock_adapter),
+            patch("responses_api_agents.browser_agent.app.raise_for_status", new_callable=AsyncMock),
+            patch("responses_api_agents.browser_agent.app.get_response_json", return_value=stuck_response),
+        ):
+            agent.server_client.post = AsyncMock(return_value=step_http_resp)
+
+            cookie_jar = {"cookies": {}}
+            trajectory, ls_dump, usage, debug_dir = await agent._responses_via_adapter(
+                task_prompt="Navigate",
+                env_id="test-env-stuck",
+                screenshot_b64="aW5pdGlhbA==",
+                cookie_jar=cookie_jar,
+            )
+
+        assert len(trajectory.steps) == 0
+        mock_adapter.step.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_action_error_propagated_to_adapter(self, agent):
+        """When a step returns an error field, it's passed to adapter.step() as action_error."""
+        init_resp = CUAAdapterResponse(
+            actions=[BrowserAction(action_type="keypress", key="InvalidKey")],
+            done=False,
+        )
+        mock_adapter = self._make_mock_adapter(
+            init_response=init_resp,
+            step_responses=[CUAAdapterResponse(done=True, message="Adjusted action")],
+        )
+
+        error_step_response = self._make_step_response(error="keypress failed: Unknown key: InvalidKey")
+
+        step_http_resp = AsyncMock()
+        step_http_resp.ok = True
+        step_http_resp.cookies = {}
+
+        with (
+            patch.object(agent, "_create_adapter", return_value=mock_adapter),
+            patch("responses_api_agents.browser_agent.app.raise_for_status", new_callable=AsyncMock),
+            patch("responses_api_agents.browser_agent.app.get_response_json", return_value=error_step_response),
+        ):
+            agent.server_client.post = AsyncMock(return_value=step_http_resp)
+
+            cookie_jar = {"cookies": {}}
+            await agent._responses_via_adapter(
+                task_prompt="Press key",
+                env_id="test-env-err",
+                screenshot_b64="aW5pdGlhbA==",
+                cookie_jar=cookie_jar,
+            )
+
+        call_kwargs = mock_adapter.step.call_args
+        assert call_kwargs[1]["action_error"] == "keypress failed: Unknown key: InvalidKey"
+
+    @pytest.mark.asyncio
+    async def test_multi_step_loop(self, agent):
+        """Adapter returns actions across multiple steps before done."""
+        init_resp = CUAAdapterResponse(
+            actions=[BrowserAction(action_type="click", coordinate=[100, 100])],
+            done=False,
+        )
+        step_resps = [
+            CUAAdapterResponse(
+                actions=[BrowserAction(action_type="type", text="hello")],
+                done=False,
+            ),
+            CUAAdapterResponse(done=True, message="All done"),
+        ]
+        mock_adapter = self._make_mock_adapter(init_response=init_resp, step_responses=step_resps)
+
+        step_http_resp = AsyncMock()
+        step_http_resp.ok = True
+        step_http_resp.cookies = {}
+
+        with (
+            patch.object(agent, "_create_adapter", return_value=mock_adapter),
+            patch("responses_api_agents.browser_agent.app.raise_for_status", new_callable=AsyncMock),
+            patch("responses_api_agents.browser_agent.app.get_response_json", return_value=self._make_step_response()),
+        ):
+            agent.server_client.post = AsyncMock(return_value=step_http_resp)
+
+            cookie_jar = {"cookies": {}}
+            trajectory, ls_dump, usage, debug_dir = await agent._responses_via_adapter(
+                task_prompt="Fill form",
+                env_id="test-env-multi",
+                screenshot_b64="aW5pdGlhbA==",
+                cookie_jar=cookie_jar,
+            )
+
+        assert len(trajectory.steps) == 2
+        assert trajectory.steps[0].action.action_type == "click"
+        assert trajectory.steps[1].action.action_type == "type"
+        assert trajectory.final_message == "All done"
+        assert mock_adapter.step.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_usage_accumulation(self, agent):
+        """Token usage is accumulated across adapter calls."""
+        from responses_api_agents.browser_agent.adapters.base import CUAAdapterUsage
+
+        init_resp = CUAAdapterResponse(
+            actions=[BrowserAction(action_type="click", coordinate=[10, 10])],
+            done=False,
+            usage=CUAAdapterUsage(input_tokens=100, output_tokens=50, total_tokens=150),
+        )
+        step_resp = CUAAdapterResponse(
+            done=True,
+            message="Done",
+            usage=CUAAdapterUsage(input_tokens=200, output_tokens=80, total_tokens=280),
+        )
+        mock_adapter = self._make_mock_adapter(init_response=init_resp, step_responses=[step_resp])
+
+        step_http_resp = AsyncMock()
+        step_http_resp.ok = True
+        step_http_resp.cookies = {}
+
+        with (
+            patch.object(agent, "_create_adapter", return_value=mock_adapter),
+            patch("responses_api_agents.browser_agent.app.raise_for_status", new_callable=AsyncMock),
+            patch("responses_api_agents.browser_agent.app.get_response_json", return_value=self._make_step_response()),
+        ):
+            agent.server_client.post = AsyncMock(return_value=step_http_resp)
+
+            cookie_jar = {"cookies": {}}
+            trajectory, ls_dump, usage, debug_dir = await agent._responses_via_adapter(
+                task_prompt="Test usage",
+                env_id="test-env-usage",
+                screenshot_b64="aW5pdGlhbA==",
+                cookie_jar=cookie_jar,
+            )
+
+        assert usage is not None
+        assert usage.input_tokens == 300
+        assert usage.output_tokens == 130
+        assert usage.total_tokens == 430

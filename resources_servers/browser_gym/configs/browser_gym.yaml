@@ -3,6 +3,8 @@ browser_gym_resources_server:
     browser_gym:
       entrypoint: app.py
       domain: agent
+      description: Browser-based CUA environment using Playwright. Models interact with live web pages via screenshots and actions (click, type, scroll, keypress).
+      value: Improve computer-use and web navigation capabilities
       max_concurrent_browsers: ${max_concurrent_browsers}
       browser_pool_size: ${browser_pool_size}
       default_viewport_width: 1280
@@ -50,6 +52,7 @@ browser_openai_agent:
         type: example
         jsonl_fpath: resources_servers/browser_gym/data/example.jsonl
         num_repeats: 1
+        license: Apache 2.0
 browser_anthropic_sonnet_agent:
   responses_api_agents:
     browser_agent:
@@ -76,6 +79,7 @@ browser_anthropic_sonnet_agent:
         type: example
         jsonl_fpath: resources_servers/browser_gym/data/example.jsonl
         num_repeats: 1
+        license: Apache 2.0
 browser_anthropic_opus_agent:
   responses_api_agents:
     browser_agent:
@@ -103,6 +107,7 @@ browser_anthropic_opus_agent:
         type: example
         jsonl_fpath: resources_servers/browser_gym/data/example.jsonl
         num_repeats: 1
+        license: Apache 2.0
 browser_gym_gemini_model:
   responses_api_models:
     gemini_model:
@@ -132,3 +137,4 @@ browser_gemini_agent:
         type: example
         jsonl_fpath: resources_servers/browser_gym/data/example.jsonl
         num_repeats: 1
+        license: Apache 2.0
