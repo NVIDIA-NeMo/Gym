@@ -170,7 +170,8 @@ def compute_pass_majority_metrics(
     tasks: List[List[Dict[str, Any]]],
     score_fn: Optional[Any] = None,
     answer_key: Optional[str] = None,
-) -> Dict[str, Any]:
+    return_internals: bool = False,
+):
     """Compute pass@k, majority@k, no_answer, and variance statistics from grouped task results.
 
     Shared utility for any resource server's compute_metrics() override.
@@ -181,9 +182,12 @@ def compute_pass_majority_metrics(
             Defaults to ``lambda r: {"accuracy": r["reward"]}``.
         answer_key: Field name for extracted answer (enables majority@k and no_answer).
             If None, majority@k and no_answer are skipped.
+        return_internals: If True, returns ``(metrics, all_score_dicts, score_names, max_k)``
+            so callers can run additional post-processing (e.g. ``add_avg_sample_std_dev``).
 
     Returns:
-        Flat dict of metrics keyed as ``{agg_mode}/{score_name}``:
+        Flat dict of metrics keyed as ``{agg_mode}/{score_name}`` (or a tuple when
+        ``return_internals=True``):
         - ``pass@{k}/{name}``: combinatorial pass@k (binary) or max-of-k (continuous)
         - ``pass@1[avg-of-{k}]/{name}``: mean score across first k rollouts, averaged across tasks
         - ``majority@{k}/{name}``: majority-vote accuracy (only if answer_key is set)
@@ -309,21 +313,146 @@ def compute_pass_majority_metrics(
                     metrics[f"pass@1[avg-of-{k}]/{name}/std_dev_across_runs"] = std_dev
                     metrics[f"pass@1[avg-of-{k}]/{name}/std_err_across_runs"] = std_err
 
-                # avg_sample_std_dev: average of per-task standard deviations
-                # Measures within-task variance across k rollouts (complement of across-run variance)
-                sample_std_devs = []
-                for task_scores in all_score_dicts:
-                    vals = [s.get(name) for s in task_scores[:k] if name in s]
-                    if len(vals) >= 2:
-                        task_mean = sum(vals) / len(vals)
-                        task_var = sum((v - task_mean) ** 2 for v in vals) / (len(vals) - 1)
-                        sample_std_devs.append(_math.sqrt(task_var))
-                if sample_std_devs:
-                    metrics[f"pass@1[avg-of-{k}]/{name}/avg_sample_std_dev"] = sum(sample_std_devs) / len(
-                        sample_std_devs
-                    )
+    if return_internals:
+        return metrics, all_score_dicts, score_names, max_k
+    return metrics
+
+
+def add_avg_sample_std_dev(
+    metrics: Dict[str, Any],
+    all_score_dicts: List[List[Dict[str, float]]],
+    score_names: list,
+    max_k: int,
+) -> None:
+    """Add avg_sample_std_dev statistics to an existing metrics dict.
+
+    Computes the average of per-task standard deviations across k rollouts — a measure of
+    within-task variance that complements the across-run variance (std_dev_across_runs).
+
+    Modifies ``metrics`` in place. Intended to be called after ``compute_pass_majority_metrics``
+    with ``return_internals=True``::
+
+        metrics, all_score_dicts, score_names, max_k = compute_pass_majority_metrics(
+            tasks, score_fn=my_fn, return_internals=True,
+        )
+        add_avg_sample_std_dev(metrics, all_score_dicts, score_names, max_k)
+    """
+    import math as _math
+
+    if max_k <= 1:
+        return
+
+    for k in range(2, max_k + 1):
+        for name in score_names:
+            sample_std_devs = []
+            for task_scores in all_score_dicts:
+                vals = [s.get(name) for s in task_scores[:k] if name in s]
+                if len(vals) >= 2:
+                    task_mean = sum(vals) / len(vals)
+                    task_var = sum((v - task_mean) ** 2 for v in vals) / (len(vals) - 1)
+                    sample_std_devs.append(_math.sqrt(task_var))
+            if sample_std_devs:
+                metrics[f"pass@1[avg-of-{k}]/{name}/avg_sample_std_dev"] = sum(sample_std_devs) / len(sample_std_devs)
+
+
+def compute_subset_metrics(
+    tasks: List[List[Dict[str, Any]]],
+    subset_key: str,
+    score_fn: Optional[Any] = None,
+    answer_key: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Group tasks by a field and compute pass@k metrics per subset.
+
+    Returns flat dict with subset-prefixed keys, e.g. ``"easy/pass@1/accuracy"``.
+    Skips the ``per_sample_aggregate`` key from each subset's metrics.
+
+    Args:
+        tasks: tasks[i] is a list of rollout dicts for task i.
+        subset_key: Field name in rollout dicts to group by (e.g. ``"difficulty"``).
+        score_fn: Passed through to ``compute_pass_majority_metrics``.
+        answer_key: Passed through to ``compute_pass_majority_metrics``.
+    """
+    subsets: Dict[str, List[List[Dict[str, Any]]]] = {}
+    for task_rollouts in tasks:
+        value = task_rollouts[0].get(subset_key) if task_rollouts else None
+        if value:
+            subsets.setdefault(value, []).append(task_rollouts)
+
+    metrics: Dict[str, Any] = {}
+    for subset_name, subset_tasks in subsets.items():
+        subset_metrics = compute_pass_majority_metrics(subset_tasks, score_fn=score_fn, answer_key=answer_key)
+        for key, value in subset_metrics.items():
+            if key == "per_sample_aggregate":
+                continue
+            metrics[f"{subset_name}/{key}"] = value
 
     return metrics
+
+
+def highest_k_metrics(
+    agent_metrics: Dict[str, Any],
+    pattern: str,
+    score_names: Optional[List[str]] = None,
+    exclude_names: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """Select the highest-k entries matching a metric pattern.
+
+    Finds all keys matching ``pattern`` (with ``{k}`` as the k placeholder), determines the
+    highest k value, and returns all entries at that k.
+
+    Args:
+        agent_metrics: Full agent metrics dict.
+        pattern: Pattern with ``{k}`` placeholder, e.g. ``"pass@{k}"`` or ``"pass@1[avg-of-{k}]"``.
+        score_names: If provided, only return entries whose score name (after the last ``/``)
+            is in this list. Stat suffixes (std_dev, std_err, avg_sample) are always excluded.
+        exclude_names: Score names to exclude (e.g. ``["no_answer"]``). Applied after score_names.
+
+    Returns:
+        Dict of matching metrics at the highest k, e.g. ``{"pass@32/accuracy": 95.0}``.
+
+    Example::
+
+        # Get highest-k pass@k for accuracy only
+        highest_k_metrics(am, "pass@{k}", score_names=["accuracy"])
+        # → {"pass@32/accuracy": 95.0}
+
+        # Get highest-k pass@1[avg-of-k] for all scores except no_answer, without stats
+        highest_k_metrics(am, "pass@1[avg-of-{k}]", exclude_names=["no_answer"])
+        # → {"pass@1[avg-of-32]/accuracy": 94.5, "pass@1[avg-of-32]/symbolic_accuracy": 93.2}
+    """
+    import re
+
+    stat_suffixes = {"std_dev_across_runs", "std_err_across_runs", "avg_sample_std_dev"}
+
+    # Build regex from pattern: "pass@{k}" → r"^pass@(\d+)/(.+)$"
+    escaped = re.escape(pattern).replace(r"\{k\}", r"(\d+)")
+    regex = re.compile(f"^{escaped}/(.+)$")
+
+    # Find all matching keys and their k values
+    matches = []
+    for key in agent_metrics:
+        m = regex.match(key)
+        if not m:
+            continue
+        k_val = int(m.group(1))
+        score_name = m.group(2)
+
+        # Skip stat suffixes
+        if any(score_name.endswith(s) for s in stat_suffixes):
+            continue
+
+        if score_names is not None and score_name not in score_names:
+            continue
+        if exclude_names is not None and score_name in exclude_names:
+            continue
+
+        matches.append((k_val, key))
+
+    if not matches:
+        return {}
+
+    max_k = max(k for k, _ in matches)
+    return {key: agent_metrics[key] for k, key in matches if k == max_k}
 
 
 class AggregateMetricsMixin:

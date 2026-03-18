@@ -29,7 +29,12 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.reward_profile import compute_pass_majority_metrics
+from nemo_gym.reward_profile import (
+    add_avg_sample_std_dev,
+    compute_pass_majority_metrics,
+    compute_subset_metrics,
+    highest_k_metrics,
+)
 
 
 # ----------------------------
@@ -111,88 +116,33 @@ class CompCodingResourcesServer(SimpleResourcesServer):
     def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
         """Compute code generation metrics: pass@k, majority@k, per-sample statistics.
 
-        Produces overall metrics and per-difficulty-subset metrics (matching Skills'
-        subset_for_metrics behavior). Subset metrics are prefixed with the difficulty
-        name, e.g. ``easy/pass@1/accuracy``, ``medium/pass@10/accuracy``.
+        Produces overall metrics (with avg_sample_std_dev) and per-difficulty-subset metrics.
         """
-        metrics = compute_pass_majority_metrics(
+        metrics, all_score_dicts, score_names, max_k = compute_pass_majority_metrics(
             tasks,
             score_fn=self._code_score_fn,
             answer_key="extracted_model_code",
+            return_internals=True,
         )
-
-        # Per-difficulty-subset metrics (matching Skills' subset_for_metrics)
-        subsets: Dict[str, List[List[Dict[str, Any]]]] = {}
-        for task_rollouts in tasks:
-            difficulty = task_rollouts[0].get("difficulty") if task_rollouts else None
-            if difficulty:
-                subsets.setdefault(difficulty, []).append(task_rollouts)
-
-        for subset_name, subset_tasks in subsets.items():
-            subset_metrics = compute_pass_majority_metrics(
-                subset_tasks,
-                score_fn=self._code_score_fn,
-                answer_key="extracted_model_code",
-            )
-            for key, value in subset_metrics.items():
-                if key == "per_sample_aggregate":
-                    continue
-                metrics[f"{subset_name}/{key}"] = value
-
+        add_avg_sample_std_dev(metrics, all_score_dicts, score_names, max_k)
+        metrics.update(compute_subset_metrics(tasks, "difficulty", self._code_score_fn, "extracted_model_code"))
         return metrics
 
     def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
-        """Select headline metrics for code generation benchmarks.
-
-        Includes overall pass@k/majority@k plus per-difficulty-subset pass@1[avg-of-k].
-        """
-        import re
-
+        """Select headline metrics for code generation benchmarks."""
         key: Dict[str, Any] = {}
 
         for name in ("mean/input_tokens", "mean/output_tokens"):
             if name in agent_metrics:
                 key[name] = agent_metrics[name]
 
-        # Highest-k pass@1[avg-of-*] for accuracy (no statistics)
-        avg_keys = [
-            k
-            for k in agent_metrics
-            if k.startswith("pass@1[avg-of-")
-            and k.endswith("/accuracy")
-            and "std_dev" not in k
-            and "std_err" not in k
-            and "avg_sample" not in k
-        ]
-        if avg_keys:
-            highest_k = max(int(k.split("pass@1[avg-of-")[1].split("]")[0]) for k in avg_keys)
-            key[f"pass@1[avg-of-{highest_k}]/accuracy"] = agent_metrics[f"pass@1[avg-of-{highest_k}]/accuracy"]
+        key.update(highest_k_metrics(agent_metrics, "pass@1[avg-of-{k}]", score_names=["accuracy"]))
+        key.update(highest_k_metrics(agent_metrics, "pass@{k}", score_names=["accuracy"]))
+        key.update(highest_k_metrics(agent_metrics, "majority@{k}", score_names=["accuracy"]))
 
-        # Highest-k pass@k for accuracy (not no_answer)
-        pass_keys = [k for k in agent_metrics if re.match(r"^pass@\d+/accuracy$", k)]
-        if pass_keys:
-            highest_k = max(int(k.split("@")[1].split("/")[0]) for k in pass_keys)
-            key[f"pass@{highest_k}/accuracy"] = agent_metrics[f"pass@{highest_k}/accuracy"]
-
-        # Highest-k majority for accuracy (not no_answer)
-        maj_keys = [k for k in agent_metrics if re.match(r"^majority@\d+/accuracy$", k)]
-        if maj_keys:
-            highest_k = max(int(k.split("@")[1].split("/")[0]) for k in maj_keys)
-            key[f"majority@{highest_k}/accuracy"] = agent_metrics[f"majority@{highest_k}/accuracy"]
-
-        # Per-difficulty-subset pass@1[avg-of-k] headline metrics
-        subset_avg_keys = [k for k in agent_metrics if re.match(r"^[a-z]+/pass@1\[avg-of-\d+\]/accuracy$", k)]
-        if subset_avg_keys:
-            # Group by subset prefix
-            subsets: Dict[str, List[str]] = {}
-            for k in subset_avg_keys:
-                prefix = k.split("/pass@")[0]
-                subsets.setdefault(prefix, []).append(k)
-            for prefix, keys in subsets.items():
-                highest_k = max(int(k.split("avg-of-")[1].split("]")[0]) for k in keys)
-                metric_key = f"{prefix}/pass@1[avg-of-{highest_k}]/accuracy"
-                if metric_key in agent_metrics:
-                    key[metric_key] = agent_metrics[metric_key]
+        # Per-difficulty-subset headlines
+        for prefix in {k.split("/pass@")[0] for k in agent_metrics if "/pass@" in k and k[0].islower()}:
+            key.update(highest_k_metrics(agent_metrics, f"{prefix}/pass@1[avg-of-{{k}}]", score_names=["accuracy"]))
 
         return key
 
