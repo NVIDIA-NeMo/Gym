@@ -69,15 +69,6 @@ def _is_retryable_gemini_error(exc: Exception) -> bool:
     return False
 
 
-def _is_rate_limit_error(exc: Exception) -> bool:
-    """Check if the error is specifically a rate-limit / resource-exhausted error."""
-    name = type(exc).__name__
-    if name in ("ResourceExhausted", "TooManyRequests"):
-        return True
-    status = getattr(exc, "code", None) or getattr(exc, "status_code", None)
-    return isinstance(status, int) and status == 429
-
-
 class GeminiModelServerConfig(BaseResponsesAPIModelConfig):
     gemini_api_key: str
     gemini_model: str = "gemini-2.5-computer-use-preview-10-2025"
@@ -147,9 +138,6 @@ class GeminiModelServer(SimpleResponsesAPIModel):
                     raise
 
                 attempt += 1
-
-                if _is_rate_limit_error(e):
-                    max_attempts += 1
 
                 logger.warning(
                     "Gemini API call failed (attempt %d/%d): %s",
