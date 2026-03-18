@@ -422,12 +422,32 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
             return {}
 
         try:
-            recent = json.loads(data).get("filings", {}).get("recent", {})
+            parsed = json.loads(data)
+            filings_section = parsed.get("filings", {})
+            recent = filings_section.get("recent", {})
             acc_numbers = recent.get("accessionNumber", [])
             forms = recent.get("form", [])
             dates = recent.get("filingDate", [])
             report_dates = recent.get("reportDate", [])
             primary_docs = recent.get("primaryDocument", [])
+
+            # Append older filings from paginated overflow pages
+            for file_entry in filings_section.get("files", []):
+                page_name = file_entry.get("name", "")
+                if not page_name:
+                    continue
+                page_data = await self._fetch_with_retry(f"https://data.sec.gov/submissions/{page_name}")
+                if not page_data:
+                    continue
+                try:
+                    page = json.loads(page_data)
+                    acc_numbers.extend(page.get("accessionNumber", []))
+                    forms.extend(page.get("form", []))
+                    dates.extend(page.get("filingDate", []))
+                    report_dates.extend(page.get("reportDate", []))
+                    primary_docs.extend(page.get("primaryDocument", []))
+                except json.JSONDecodeError:
+                    logger.warning("Failed to parse paginated filing page: %s", page_name)
 
             filings: Dict[str, Dict[str, Any]] = {}
             for acc, form, fdate, rdate, pdoc in zip(acc_numbers, forms, dates, report_dates, primary_docs):

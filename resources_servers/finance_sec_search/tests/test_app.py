@@ -398,6 +398,132 @@ class TestSECFilingSearch:
 
 
 # ============================================================================
+# Test: Company Filings Pagination
+# ============================================================================
+
+
+class TestCompanyFilingsPagination:
+    @pytest.mark.asyncio
+    async def test_fetches_overflow_pages(self, server) -> None:
+        """Filings from paginated overflow pages are included alongside recent filings."""
+        main_response = json.dumps(
+            {
+                "filings": {
+                    "recent": {
+                        "accessionNumber": ["0000320193-25-000001"],
+                        "form": ["10-K"],
+                        "filingDate": ["2025-01-15"],
+                        "reportDate": ["2024-12-31"],
+                        "primaryDocument": ["aapl-10k.htm"],
+                    },
+                    "files": [
+                        {
+                            "name": "CIK0000320193-submissions-001.json",
+                            "filingCount": 1,
+                            "filingFrom": "2020-01-01",
+                            "filingTo": "2020-12-31",
+                        }
+                    ],
+                }
+            }
+        )
+        overflow_response = json.dumps(
+            {
+                "accessionNumber": ["0000320193-20-000099"],
+                "form": ["S-1"],
+                "filingDate": ["2020-06-15"],
+                "reportDate": ["2020-06-15"],
+                "primaryDocument": ["aapl-s1.htm"],
+            }
+        )
+
+        call_count = 0
+
+        async def mock_fetch(url, max_retries=3):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return main_response
+            return overflow_response
+
+        server._fetch_with_retry = mock_fetch
+
+        filings = await server._get_company_filings("0000320193", "AAPL")
+
+        assert len(filings) == 2
+        forms = {f["form"] for f in filings.values()}
+        assert "10-K" in forms
+        assert "S-1" in forms
+
+    @pytest.mark.asyncio
+    async def test_no_overflow_pages(self, server) -> None:
+        """Works normally when filings.files is empty (no pagination)."""
+        main_response = json.dumps(
+            {
+                "filings": {
+                    "recent": {
+                        "accessionNumber": ["0000320193-25-000001"],
+                        "form": ["10-K"],
+                        "filingDate": ["2025-01-15"],
+                        "reportDate": ["2024-12-31"],
+                        "primaryDocument": ["aapl-10k.htm"],
+                    },
+                    "files": [],
+                }
+            }
+        )
+
+        server._fetch_with_retry = AsyncMock(return_value=main_response)
+
+        filings = await server._get_company_filings("0000320193", "AAPL")
+
+        assert len(filings) == 1
+        assert list(filings.values())[0]["form"] == "10-K"
+        server._fetch_with_retry.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_overflow_page_fetch_failure_is_graceful(self, server) -> None:
+        """If an overflow page fails to fetch, recent filings are still returned."""
+        main_response = json.dumps(
+            {
+                "filings": {
+                    "recent": {
+                        "accessionNumber": ["0000320193-25-000001"],
+                        "form": ["10-K"],
+                        "filingDate": ["2025-01-15"],
+                        "reportDate": ["2024-12-31"],
+                        "primaryDocument": ["aapl-10k.htm"],
+                    },
+                    "files": [
+                        {
+                            "name": "CIK0000320193-submissions-001.json",
+                            "filingCount": 1,
+                            "filingFrom": "2020-01-01",
+                            "filingTo": "2020-12-31",
+                        }
+                    ],
+                }
+            }
+        )
+
+        call_count = 0
+
+        async def mock_fetch(url, max_retries=3):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return main_response
+            return None
+
+        server._fetch_with_retry = mock_fetch
+
+        filings = await server._get_company_filings("0000320193", "AAPL")
+
+        assert len(filings) == 1
+        assert list(filings.values())[0]["form"] == "10-K"
+
+
+# ============================================================================
 # Test: Download and Parse Filing
 # ============================================================================
 
