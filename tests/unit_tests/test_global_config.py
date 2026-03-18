@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import sys
 from contextlib import nullcontext as does_not_raise
 from pathlib import Path
 from socket import gethostbyname, gethostname
@@ -845,6 +846,12 @@ class TestGlobalConfig:
         parser = GlobalConfigDictParser()
         global_config_dict = parser.parse(GlobalConfigDictParserConfig(skip_load_from_cli=True))
         assert global_config_dict["custom_env_key"] == "from_parent"
+
+    def test_help(self, monkeypatch) -> None:
+        monkeypatch.setattr(sys, "argv", ["++abc=2", "--help"])
+
+        # Without the help override, this will SystemExit.
+        GlobalConfigDictParser.parse_global_config_dict_from_cli(None)
 
 
 class TestBenchmarkConfigLoading:
