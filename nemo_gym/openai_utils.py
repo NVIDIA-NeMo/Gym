@@ -513,24 +513,17 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
             "_internal": self.internal,
         }
 
-        max_num_tries = MAX_NUM_TRIES
         tries = 0
-        while tries < max_num_tries:
+        while tries < MAX_NUM_TRIES:
             tries += 1
             response = await request(**request_kwargs)
 
             if response.status in RETRY_ERROR_CODES:
-                if response.status in RATE_LIMIT_ERROR_CODES:
-                    max_num_tries += 1
-
-                if response.status == 500:
-                    max_num_tries += 1
-
                 content = (await response.content.read()).decode()
                 backoff = min(2 ** (tries - 1), 30) + random.uniform(0, 1)
                 print(
                     f"Hit a {response.status} trying to query an OpenAI endpoint "
-                    f"(try {tries}/{max_num_tries}). Sleeping {backoff:.1f}s. Error message: {content}"
+                    f"(try {tries}/{MAX_NUM_TRIES}). Sleeping {backoff:.1f}s. Error message: {content}"
                 )
                 await sleep(backoff)
                 continue
