@@ -81,29 +81,24 @@ def prepare() -> Path:
             rows.append(out)
 
     # Enrich with difficulty and filter by date range using the HF dataset
-    try:
-        from datasets import load_dataset
+    from datasets import load_dataset
 
-        ds = load_dataset("livecodebench/code_generation_lite", "release_v5", split="test", revision="refs/pr/7")
-        hf_map = {ex.get("question_id", ""): ex for ex in ds}
+    ds = load_dataset("livecodebench/code_generation_lite", "release_v5", split="test", revision="refs/pr/7")
+    hf_map = {ex.get("question_id", ""): ex for ex in ds}
 
-        enriched = []
-        for row in rows:
-            pid = row["verifier_metadata"]["problem_id"]
-            hf_row = hf_map.get(pid)
-            if hf_row:
-                # Add difficulty for per-subset metrics
-                row["verifier_metadata"]["difficulty"] = hf_row.get("difficulty", "unknown")
-                # Date filter
-                date = hf_row.get("contest_date", "")
-                if DATE_FROM and date < DATE_FROM:
-                    continue
-                if DATE_TO and date >= DATE_TO:
-                    continue
-            enriched.append(row)
-        rows = enriched
-    except Exception as e:
-        print(f"Warning: enrichment/filtering failed ({e}), using all {len(rows)} problems")
+    enriched = []
+    for row in rows:
+        pid = row["verifier_metadata"]["problem_id"]
+        hf_row = hf_map.get(pid)
+        if hf_row:
+            row["verifier_metadata"]["difficulty"] = hf_row.get("difficulty", "unknown")
+            date = hf_row.get("contest_date", "")
+            if DATE_FROM and date < DATE_FROM:
+                continue
+            if DATE_TO and date >= DATE_TO:
+                continue
+        enriched.append(row)
+    rows = enriched
 
     with open(OUTPUT_FPATH, "w") as f:
         for row in rows:
