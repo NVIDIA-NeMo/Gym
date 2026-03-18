@@ -61,6 +61,55 @@ class TestExtractPredictedValue:
 
 
 # ---------------------------------------------------------------------------
+# extract_predicted_value — boxed format
+# ---------------------------------------------------------------------------
+
+
+class TestExtractPredictedValueBoxed:
+    def test_boxed_integer(self):
+        assert extract_predicted_value(r"\boxed{42}", "count", use_box_format=True) == 42.0
+
+    def test_boxed_float(self):
+        assert extract_predicted_value(r"\boxed{0.83}", "float", use_box_format=True) == pytest.approx(0.83)
+
+    def test_boxed_negative(self):
+        assert extract_predicted_value(r"\boxed{-1.5}", "float", use_box_format=True) == pytest.approx(-1.5)
+
+    def test_boxed_zero_or_one(self):
+        assert extract_predicted_value(r"\boxed{1}", "bool", use_box_format=True) == 1.0
+        assert extract_predicted_value(r"\boxed{0}", "bool", use_box_format=True) == 0.0
+
+    def test_boxed_with_surrounding_text(self):
+        text = r"The QED score is \boxed{0.83}."
+        assert extract_predicted_value(text, "float", use_box_format=True) == pytest.approx(0.83)
+
+    def test_boxed_last_occurrence_wins(self):
+        text = r"First attempt: \boxed{1.0}. Correction: \boxed{2.5}"
+        assert extract_predicted_value(text, "float", use_box_format=True) == pytest.approx(2.5)
+
+    def test_boxed_scientific_notation(self):
+        assert extract_predicted_value(r"\boxed{1.5e-3}", "float", use_box_format=True) == pytest.approx(1.5e-3)
+
+    def test_boxed_missing_returns_none(self):
+        assert extract_predicted_value("42", "count", use_box_format=True) is None
+
+    def test_boxed_empty_braces_returns_none(self):
+        assert extract_predicted_value(r"\boxed{}", "float", use_box_format=True) is None
+
+    def test_boxed_non_numeric_returns_none(self):
+        assert extract_predicted_value(r"\boxed{hello}", "float", use_box_format=True) is None
+
+    def test_boxed_not_required_when_flag_false(self):
+        assert extract_predicted_value("42", "count", use_box_format=False) == 42.0
+
+    def test_bare_number_rejected_when_boxed_required(self):
+        assert extract_predicted_value("The answer is 42", "count", use_box_format=True) is None
+
+    def test_boxed_with_whitespace_inside(self):
+        assert extract_predicted_value(r"\boxed{ 3.14 }", "float", use_box_format=True) == pytest.approx(3.14)
+
+
+# ---------------------------------------------------------------------------
 # compute_reward — discrete (exact-match) properties
 # ---------------------------------------------------------------------------
 

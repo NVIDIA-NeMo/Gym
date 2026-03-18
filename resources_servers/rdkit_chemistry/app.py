@@ -61,7 +61,9 @@ from __future__ import annotations
 
 import math
 import re
-from typing import Any, Optional, Union
+import statistics
+from collections import defaultdict
+from typing import Any, Dict, List, Optional, Union
 
 from fastapi import FastAPI
 
@@ -81,6 +83,7 @@ from nemo_gym.base_resources_server import (
 _BOOL_PROPERTY_TYPES = {"presence", "fragment", "bool"}
 
 _NUMBER_RE = re.compile(r"-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?")
+_BOXED_RE = re.compile(r"\\boxed\{([^}]+)\}")
 _BOOL_TRUE_RE = re.compile(r"\b(?:yes|true)\b", re.IGNORECASE)
 _BOOL_FALSE_RE = re.compile(r"\b(?:no|false)\b", re.IGNORECASE)
 
@@ -106,6 +109,7 @@ class ChemistryRunRequest(BaseRunRequest):
     chembl_id: Optional[str] = None
     smiles: Optional[str] = None
     method: Optional[str] = None
+    use_box_format: bool = False
 
 
 class ChemistryVerifyRequest(ChemistryRunRequest, BaseVerifyRequest):
@@ -148,11 +152,43 @@ def _extract_last_assistant_text(body: BaseVerifyRequest) -> str:
 # ---------------------------------------------------------------------------
 
 
-def extract_predicted_value(response: str, property_type: str) -> Optional[float]:
+def _extract_from_boxed(text: str) -> Optional[float]:
+    """Extract a numeric value from the last ``\\boxed{...}`` in *text*.
+
+    Returns None if no boxed expression is found or the content is not numeric.
+    """
+    matches = _BOXED_RE.findall(text)
+    if not matches:
+        return None
+    inner = matches[-1].strip()
+    try:
+        return float(inner)
+    except (ValueError, TypeError):
+        pass
+    nums = _NUMBER_RE.findall(inner)
+    if nums:
+        try:
+            return float(nums[-1])
+        except ValueError:
+            pass
+    return None
+
+
+def extract_predicted_value(
+    response: str,
+    property_type: str,
+    *,
+    use_box_format: bool = False,
+) -> Optional[float]:
     """
     Extract a predicted numeric value from the model's response text.
 
-    Three-step cascade:
+    When *use_box_format* is True the answer **must** appear inside a
+    ``\\boxed{...}`` expression (as requested in the prompt).  Only the
+    content of the last ``\\boxed`` is considered; if none is found the
+    function returns None (→ reward 0).
+
+    When *use_box_format* is False the original three-step cascade is used:
       1. Strict parse  — treat the entire stripped response as a number
       2. Permissive    — find the last number anywhere in the text
       3. Boolean text  — map yes/true -> 1.0, no/false -> 0.0 (presence/fragment)
@@ -163,6 +199,9 @@ def extract_predicted_value(response: str, property_type: str) -> Optional[float
         return None
 
     text = response.strip()
+
+    if use_box_format:
+        return _extract_from_boxed(text)
 
     # 1. Strict
     try:
@@ -231,7 +270,7 @@ class RDKitChemistryResourcesServer(SimpleResourcesServer):
         body: ChemistryVerifyRequest,
     ) -> ChemistryVerifyResponse:
         text = _extract_last_assistant_text(body)
-        predicted = extract_predicted_value(text, body.property_type)
+        predicted = extract_predicted_value(text, body.property_type, use_box_format=body.use_box_format)
         actual = float(body.expected_answer)
 
         reward = compute_reward(predicted, actual, body.property_type)
@@ -250,9 +289,46 @@ class RDKitChemistryResourcesServer(SimpleResourcesServer):
             absolute_error=absolute_error,
         )
 
+    def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
+        rollouts = [r for task in tasks for r in task]
+
+        grouped: Dict[str, Dict[str, list]] = defaultdict(lambda: defaultdict(list))
+        for r in rollouts:
+            method = r.get("method", "unknown") or "unknown"
+            ptype = r.get("property_type", "unknown") or "unknown"
+            grouped[method][ptype].append(r)
+
+        def _ptype_stats(group: list) -> Dict[str, Any]:
+            rewards = [r["reward"] for r in group]
+            corrects = [int(r.get("correct", False)) for r in group]
+            stats: Dict[str, Any] = {
+                "count": len(group),
+                "accuracy": statistics.mean(corrects),
+                "mean_reward": statistics.mean(rewards),
+            }
+            errors = [r["absolute_error"] for r in group if r.get("absolute_error") is not None]
+            if errors:
+                stats["mean_abs_error"] = statistics.mean(errors)
+                stats["median_abs_error"] = statistics.median(errors)
+            return stats
+
+        result: Dict[str, Any] = {}
+        for method in sorted(grouped):
+            method_rollouts = [r for ptype_group in grouped[method].values() for r in ptype_group]
+            method_rewards = [r["reward"] for r in method_rollouts]
+            method_corrects = [int(r.get("correct", False)) for r in method_rollouts]
+            by_ptype = {ptype: _ptype_stats(g) for ptype, g in sorted(grouped[method].items())}
+            result[method] = {
+                "count": len(method_rollouts),
+                "accuracy": statistics.mean(method_corrects),
+                "mean_reward": statistics.mean(method_rewards),
+                "by_property_type": by_ptype,
+            }
+        return result
+
     def get_key_metrics(self, agent_metrics: dict[str, Any]) -> dict[str, Any]:
-        """Expose mean reward as the headline metric."""
-        return {k: v for k, v in agent_metrics.items() if k in ("mean/reward", "mean/correct")}
+        keys = {"mean/reward", "mean/correct"}
+        return {k: v for k, v in agent_metrics.items() if k in keys or k in ("direct", "mcp-python")}
 
 
 if __name__ == "__main__":
