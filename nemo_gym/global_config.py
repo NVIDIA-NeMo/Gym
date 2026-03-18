@@ -64,6 +64,7 @@ PORT_RANGE_HIGH_KEY_NAME = "port_range_high"
 DRY_RUN_KEY_NAME = "dry_run"
 UV_CACHE_DIR_KEY_NAME = "uv_cache_dir"
 UV_VENV_DIR_KEY_NAME = "uv_venv_dir"
+SWAP_KEY_KEY_NAME = "_swap_key"
 NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     CONFIG_PATHS_KEY_NAME,
     ENTRYPOINT_KEY_NAME,
@@ -83,6 +84,7 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     DRY_RUN_KEY_NAME,
     UV_CACHE_DIR_KEY_NAME,
     UV_VENV_DIR_KEY_NAME,
+    SWAP_KEY_KEY_NAME,
 ]
 
 # Data keys
@@ -296,20 +298,37 @@ Duplicate config paths:
                         self._recursively_swap_keys_helper(inner_v, original_dict_config, frozen_dict_config)
 
             # e.g. ${swap_key:grpo.num_prompts_per_step}
-            is_swap = isinstance(v, str) and v.startswith("${swap_key:")
+            is_swap_str = isinstance(v, str) and v.startswith("${swap_key:")
+            is_swap_property = isinstance(v, DictConfig) and SWAP_KEY_KEY_NAME in v
+            is_swap = is_swap_str or is_swap_property
             if not is_swap:
                 continue
 
-            path_to_swap = v.removeprefix("${swap_key:").removesuffix("}").split(".")
+            if is_swap_str:
+                path_to_swap = v.removeprefix("${swap_key:").removesuffix("}")
+            elif is_swap_property:
+                path_to_swap = v.pop(SWAP_KEY_KEY_NAME)
+
+            path_to_swap = path_to_swap.split(".")
+
+            # Pop the swapped value
             dict_containing_key_to_swap = self._recursive_index_dict_using_path(
                 original_dict_config, path_to_swap[:-1]
             )
-            dict_containing_key_to_swap.pop(path_to_swap[-1])
+            # Pop with a default since multiple configs may refer to the same path
+            dict_containing_key_to_swap.pop(path_to_swap[-1], None)
 
-            dict_config[k] = self._recursive_index_dict_using_path(frozen_dict_config, path_to_swap)
+            swapped_value = self._recursive_index_dict_using_path(frozen_dict_config, path_to_swap)
+            if is_swap_property:
+                swapped_value = OmegaConf.merge(swapped_value, v)
+
+            dict_config[k] = swapped_value
 
     def _recursive_index_dict_using_path(self, dict_config: DictConfig, path: List[str]) -> DictConfig:
         for k in path:
+            if k not in dict_config:
+                raise ValueError(f"Path specified does not exist in config: {path}")
+
             dict_config = dict_config[k]
 
         return dict_config
