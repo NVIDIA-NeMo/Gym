@@ -385,6 +385,13 @@ class DatasetConfig(BaseModel):
         return self
 
 
+class BenchmarkDatasetConfig(BaseModel):
+    name: str
+    type: Literal["benchmark"]
+    jsonl_fpath: str
+    prepare_script: str
+
+
 ########################################
 # Base server config classes
 ########################################
