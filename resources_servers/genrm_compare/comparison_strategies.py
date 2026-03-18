@@ -65,13 +65,13 @@ class ComparisonStrategy(Protocol):
 class GenRMStrategyConfig(BaseModel):
     """Configuration for GenRM comparison strategy.
 
-    This strategy uses the GenRM Compare Resource Server to perform pairwise
+    This strategy uses the GenRM Compare Resources Server to perform pairwise
     comparisons of multiple candidate responses.
 
     Attributes:
         agent_names: Agent names that should use GenRM comparison (e.g., ["genrm_simple_agent"])
         num_generations_per_prompt: Number of responses to generate and compare per prompt
-        genrm_compare_server_name: Name of the genrm_compare resource server
+        genrm_compare_server_name: Name of the genrm_compare resources server
         policy_model_server_name: Name of the policy model to generate responses
     """
 
@@ -85,7 +85,7 @@ class GenRMStrategy:
     """GenRM comparison strategy using pairwise comparisons.
 
     This strategy generates N responses per prompt using the policy model,
-    then calls the genrm_compare Resource Server to compute rewards via
+    then calls the genrm_compare Resources Server to compute rewards via
     pairwise comparisons using a GenRM model.
 
     Example usage:
@@ -126,7 +126,7 @@ class GenRMStrategy:
     ) -> Tuple[List[float], Dict[str, float]]:
         """Call genrm_compare server to get rewards for each response.
 
-        This method delegates to the genrm_compare Resource Server which:
+        This method delegates to the genrm_compare Resources Server which:
         1. Generates pairwise comparisons (circular or all_pairs strategy)
         2. Calls the GenRM model for each pair
         3. Aggregates scores using tiebreaker logic

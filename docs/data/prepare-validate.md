@@ -223,7 +223,7 @@ config_paths="custom_data.yaml,responses_api_models/vllm_model/configs/vllm_mode
 ng_prepare_data "+config_paths=[${config_paths}]" +mode=train_preparation +output_dirpath=data
 ```
 
-This validates your data and adds the `agent_ref` field to each row, routing samples to your resource server.
+This validates your data and adds the `agent_ref` field to each row, routing samples to your resources server.
 
 ---
 

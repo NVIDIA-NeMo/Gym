@@ -28,6 +28,7 @@ from typing import (
 from openai.types.chat import (
     ChatCompletion,
     ChatCompletionAssistantMessageParam,
+    ChatCompletionContentPartImageParam,
     ChatCompletionContentPartTextParam,
     ChatCompletionDeveloperMessageParam,
     ChatCompletionMessage,
@@ -348,9 +349,19 @@ class NeMoGymChatCompletionContentPartTextParam(ChatCompletionContentPartTextPar
     pass
 
 
+class NeMoGymChatCompletionContentPartImageParam(ChatCompletionContentPartImageParam):
+    pass
+
+
+NeMoGymChatCompletionContentPartParam = Union[
+    NeMoGymChatCompletionContentPartTextParam,
+    NeMoGymChatCompletionContentPartImageParam,
+]
+
+
 class NeMoGymChatCompletionUserMessageParam(ChatCompletionUserMessageParam):
     # Override the iterable which is annoying to work with.
-    content: Required[Union[str, List[NeMoGymChatCompletionContentPartTextParam]]]
+    content: Required[Union[str, List[NeMoGymChatCompletionContentPartParam]]]
 
 
 class NeMoGymChatCompletionSystemMessageParam(ChatCompletionSystemMessageParam):

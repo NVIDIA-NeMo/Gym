@@ -1,13 +1,13 @@
-# NewtonBench Resource Server
+# NewtonBench Resources Server
 
 NeMo Gym environment for [NewtonBench](https://github.com/HKUST-KnowComp/NewtonBench), to train and test LLM agents to discover scientific laws through interactive experimentation. The benchmark includes **324 scientific law discovery tasks** across **12 physics domains** (Gravitation, Electrostatics, Magnetostatics, Thermal Conduction, Geometrical Optics, Nuclear Physics, Oscillations, Physical Optics, Acoustics, Elasticity, Statistical Mechanics, Calorimetry).
 
 ## Prerequisites
 
 ### Automatic Setup
-The resource server automatically clones the [NewtonBench](https://github.com/HKUST-KnowComp/NewtonBench) repository into the NeMo Gym repository root on the first launch or test run. You do not need to clone it manually.
+The resources server automatically clones the [NewtonBench](https://github.com/HKUST-KnowComp/NewtonBench) repository into the NeMo Gym repository root on the first launch or test run. You do not need to clone it manually.
 
-> Note: After the first launch, you should set up the required API keys (see below) and restart the resource server to enable the `verify` functionality.
+> Note: After the first launch, you should set up the required API keys (see below) and restart the resources server to enable the `verify` functionality.
 
 ### API Keys for Symbolic Judge
 The `verify` process uses NewtonBench's internal LLM judge (defaulting to `gpt41`) to compare the agent's proposed law with the ground truth symbolically. 
@@ -17,9 +17,9 @@ This requires an API key for either OpenAI or OpenRouter. Providing either one o
 - `OPENAI_API_KEY` (Recommended for direct OpenAI access)
 - `OPENROUTER_API_KEY` (Fallback/Alternative)
 
-You should set this in your shell or in a `.env` file inside the cloned `NewtonBench` directory. Remember to restart the resource server after setting the environment variable so that it can be accessed by the process.
+You should set this in your shell or in a `.env` file inside the cloned `NewtonBench` directory. Remember to restart the resources server after setting the environment variable so that it can be accessed by the process.
 
-> Note: These are separate from the agent's model keys and must be accessible to the resource server process.
+> Note: These are separate from the agent's model keys and must be accessible to the resources server process.
 
 ## Dataset Generation
 

@@ -1,5 +1,5 @@
 # Description
-This is a resource server for training and evaluating calendar scheduling assistants. The server verifies whether an assistant correctly schedules events with time constraints in a conversational multi-turn setting.
+This is a resources server for training and evaluating calendar scheduling assistants. The server verifies whether an assistant correctly schedules events with time constraints in a conversational multi-turn setting.
 
 The assistant must:
 - Parse user requests to add events to a calendar
@@ -13,7 +13,7 @@ The conversations in the dataset are generated using personas from the [nvidia/N
 # Example usage
 
 ## Running servers
-The following is an example command for running this resource server along with an OpenAI model:
+The following is an example command for running this resources server along with an OpenAI model:
 
 ```bash
 config_paths="responses_api_models/openai_model/configs/openai_model.yaml, \

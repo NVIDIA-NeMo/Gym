@@ -7,47 +7,30 @@ This agent enables running Prime Intellect [verifiers](https://github.com/PrimeI
 ```
 git clone https://github.com/NVIDIA-NeMo/Gym
 cd Gym
-uv venv
-source .venv/bin/activate
-uv sync
+uv venv; source .venv/bin/activate; uv sync
 ```
 
 ## Test acereason-math example 
 
-First set `env.yaml` for a local model:
+First set `env.yaml`, for example for a vLLM served model:
 ```
 policy_base_url: "http://localhost:8000/v1"
-policy_api_key: <>
+policy_api_key: EMPTY
 policy_model_name: "Qwen/Qwen3-4B-Instruct-2507"
 ```
 
-Next, serve the model. 
-
-Make sure to serve the model with longer context length than the generation length in your agent config (e.g. acereason-math.yaml)
-
 ```
-uv pip install vllm 
-vllm serve Qwen/Qwen3-4B-Instruct-2507 --max-model-len 32768 --reasoning-parser qwen3 --enable-auto-tool-choice --tool-call-parser hermes
-```
-
-
-Now launch NeMo Gym servers:
-```
-uv sync
+# start nemo gym servers
 ng_run "+config_paths=[responses_api_agents/verifiers_agent/configs/acereason-math.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
-```
 
-Collect rollouts
-```
+# generate a rollout
 ng_collect_rollouts \
     +agent_name=verifiers_agent \
     +input_jsonl_fpath=responses_api_agents/verifiers_agent/data/acereason-math-example.jsonl \
     +output_jsonl_fpath=responses_api_agents/verifiers_agent/data/acereason-math-example-rollouts.jsonl \
-    +limit=5
-```
+    +limit=1
 
-View a rollout in the terminal
-```
+# view the rollout
 tail -n 1 responses_api_agents/verifiers_agent/data/acereason-math-example-rollouts.jsonl | jq | less
 ```
 
@@ -57,24 +40,29 @@ tail -n 1 responses_api_agents/verifiers_agent/data/acereason-math-example-rollo
 Some examples: `primeintellect/acereason-math`, `primeintellect/ascii-tree` and `primeintellect/alphabet-sort`.
 
 ### Install an environment
-
 ```
-uv add verifiers
-uv add tool prime 
+# deactivate the main nemo gym virtual environment
+deactivate
+
+# create a separate venv for installing prime environments
+# (avoids dependency conflicts with the Gym or server venvs)
+# for example, use ~/prime_venv
+mkdir -p /path/to/prime_venv && cd /path/to/prime_venv
+uv venv && source .venv/bin/activate
+
+# install prime CLI and the environment
+uv pip install tool prime
 prime env install primeintellect/ascii-tree
 ```
 
-### Creating a dataset
-
-A helper script to make a dataset is in `scripts/create_dataset.py`.
-
+### Create dataset
 ```
+# navigate to the verifiers_agent directory (with the prime venv still active)
+cd <gym-root>/responses_api_agents/verifiers_agent
 python3 scripts/create_dataset.py --env-id primeintellect/ascii-tree --size 5 --output data/ascii-tree-example.jsonl
 ```
 
 ### Update agent server requirements
-
-Update `requirements.txt` to: 
 ```
 -e nemo-gym[dev] @ ../../
 verifiers==0.1.9.post3
@@ -103,21 +91,28 @@ verifiers_agent:
 
 ```
 
-Now launch NeMo Gym servers:
 ```
-uv sync
-ng_run "+config_paths=[responses_api_agents/verifiers_agent/configs/ascii-tree.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
-```
+# return to Gym/ root and activate Gym/ virtual environment
+cd ../../
+deactivate
+source .venv/bin/activate
 
-Collect rollouts
-```
+# start nemo gym servers
+ng_run "+config_paths=[responses_api_agents/verifiers_agent/configs/ascii-tree.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
+
+# generate a rollout
 ng_collect_rollouts \
     +agent_name=verifiers_agent \
     +input_jsonl_fpath=responses_api_agents/verifiers_agent/data/ascii-tree-example.jsonl \
     +output_jsonl_fpath=responses_api_agents/verifiers_agent/data/ascii-tree-example-rollouts.jsonl \
-    +limit=5
+    +limit=1
 ```
 
+## Integration notes
+
+The patch to include prompt and generation token ids for preventing retokenization error when training with NeMo RL works specifically with the pinned verifiers version. In newer version of verifiers, this may have change. Thus, we need to make sure to use the pinned version of verifiers and environments that are compatible with this version.
+
+For installing new prime environments and generating datasets, use a separate venv (outside of Gym) to avoid dependency conflicts with the `exclude-dependencies` section of Gym `pyproject.toml` and the server's pinned verifiers version. After generating your dataset, deactivate the separate venv and return to the Gym venv for running servers. Make sure to restart NeMo Gym servers with `ng_run` after any environment changes to ensure the pinned version of verifiers is used.
 
 # Licensing information
 Code: Apache 2.0
