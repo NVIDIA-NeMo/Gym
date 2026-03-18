@@ -9,15 +9,17 @@ gpqa_mcqa_resources_server:
     mcqa:
       # Override mcqa server grading mode to match the prompt format (Answer: X)
       grading_mode: lenient_answer_colon_md
+      datasets:
+      - name: validation
+        type: validation
+        jsonl_fpath: benchmarks/gpqa/data/gpqa_diamond_validation.jsonl
+        prompt_config: benchmarks/gpqa/prompts/default.yaml
+        num_repeats: 8
+        license: TBD
+
 gpqa_mcqa_simple_agent:
   _swap_key: mcqa_simple_agent
   responses_api_agents:
     simple_agent:
       resources_server:
         name: aime24_math_with_judge_resources_server
-
-# Rollout collection defaults — picked up directly by RolloutCollectionConfig
-agent_name: mcqa_simple_agent
-input_jsonl_fpath: benchmarks/gpqa/data/gpqa_diamond_validation.jsonl
-prompt_config: benchmarks/gpqa/prompts/default.yaml
-num_repeats: 8
