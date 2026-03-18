@@ -28,6 +28,7 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.server_utils import get_response_json
 
+
 LOG = logging.getLogger(__name__)
 
 LOG_JSONL_PATH = os.environ.get("PROOF_VERIFICATION_LOG_JSONL_PATH", None)
@@ -68,7 +69,7 @@ def _get_judge_client_config() -> tuple[str, str, int, list[str]]:
         env_var = f"SLURM_MASTER_NODE_HET_GROUP_{het_group}"
         master_node = os.environ[env_var]
         master_nodes.append(master_node)
-    
+
     LOG.info("[proof_verification] JUDGE_SERVER_ARGS: %s", server_args_str)
 
     return model, server_type, port, master_nodes
@@ -349,9 +350,7 @@ class ProofVerificationResourcesServer(SimpleResourcesServer):
         ground_truth_verify_score: Optional[float],
         full_response: str,
     ) -> tuple[float, dict[str, Any]]:
-        parsed, reason = parse_verification_response(
-            full_response, assert_think_end=self.config.assert_think_end
-        )
+        parsed, reason = parse_verification_response(full_response, assert_think_end=self.config.assert_think_end)
         if parsed is None:
             return 0.0, {"r_format": 0.0, "reason": reason, "judge_generated_tokens": 0}
 

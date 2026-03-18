@@ -24,7 +24,6 @@ from pydantic import PrivateAttr
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
-    BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
@@ -34,10 +33,9 @@ from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
-    NeMoGymResponseOutputMessage,
-    NeMoGymResponseOutputText,
 )
 from nemo_gym.server_utils import get_response_json
+
 
 LOG = logging.getLogger(__name__)
 
@@ -61,6 +59,7 @@ META_VERIFIER_PROMPT_TEMPLATE = _load_prompt_template("meta-verifier.yaml")
 # ---------------------------------------------------------------------------
 # External judge helpers (from math-with-judge-het pattern)
 # ---------------------------------------------------------------------------
+
 
 def _get_judge_client_config() -> tuple[str, str, int, list[str]]:
     """Get base_url and model for the judge servers from environment.
@@ -170,16 +169,16 @@ def parse_response(
         return None, "missing_think_end"
     response = response.split("</think>")[-1].strip()
     if SOLUTION_HEADER not in response:
-        return None, f"missing_solution_header"
+        return None, "missing_solution_header"
     after_solution = response.split(SOLUTION_HEADER, 1)[1]
     if SELF_EVAL_HEADER not in after_solution:
-        return None, f"missing_self_eval_header"
+        return None, "missing_self_eval_header"
     proof, self_eval = after_solution.split(SELF_EVAL_HEADER, 1)
     proof = proof.strip()
     self_eval = self_eval.strip()
     s_prime = extract_boxed_score(self_eval)
     if s_prime is None:
-        return None, f"invalid_boxed_score"
+        return None, "invalid_boxed_score"
     return (proof, self_eval, s_prime), None
 
 
@@ -371,24 +370,18 @@ class ProofWithJudgeResourcesServer(SimpleResourcesServer):
             verifier_result = await self._call_judge(verifier_prompt)
             return verifier_result, None
 
-        meta_prompt = META_VERIFIER_PROMPT_TEMPLATE.format(
-            problem=problem, proof=proof, proof_analysis=self_analysis
-        )
+        meta_prompt = META_VERIFIER_PROMPT_TEMPLATE.format(problem=problem, proof=proof, proof_analysis=self_analysis)
         verifier_result, meta_result = await asyncio.gather(
             self._call_judge(verifier_prompt),
             self._call_judge(meta_prompt),
         )
         return verifier_result, meta_result
 
-    async def _judge_single(
-        self, problem: str, full_response: str
-    ) -> tuple[float, dict[str, Any]]:
+    async def _judge_single(self, problem: str, full_response: str) -> tuple[float, dict[str, Any]]:
         alpha = self.config.alpha
         beta = self.config.beta
 
-        parsed, reason = parse_response(
-            full_response, assert_think_end=self.config.assert_think_end
-        )
+        parsed, reason = parse_response(full_response, assert_think_end=self.config.assert_think_end)
         if parsed is None:
             return 0.0, {"r_format": 0.0, "reason": reason, "judge_generated_tokens": 0}
 

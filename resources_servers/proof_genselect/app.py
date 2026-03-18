@@ -16,6 +16,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 
+
 LOG = logging.getLogger(__name__)
 
 LOG_JSONL_PATH = os.environ.get("PROOF_GENSELECT_LOG_JSONL_PATH", None)
@@ -64,9 +65,7 @@ class ProofGenSelectResourcesServer(SimpleResourcesServer):
         if not full_response:
             return BaseVerifyResponse(**body.model_dump(), reward=0.0)
 
-        selected_index, reason = extract_best_solution(
-            full_response, assert_think_end=self.config.assert_think_end
-        )
+        selected_index, reason = extract_best_solution(full_response, assert_think_end=self.config.assert_think_end)
         reward = 1.0 if selected_index == body.correct_index else 0.0
         details = {
             "selected_index": selected_index,

@@ -23,11 +23,13 @@ Usage:
         --input /path/to/raw_problems_val.jsonl \
         --output data/validation.jsonl
 """
+
 import argparse
 import json
 from pathlib import Path
 
 import yaml
+
 
 PROMPT_TEMPLATES_DIR = Path(__file__).parent / "prompt_templates"
 
@@ -80,11 +82,13 @@ def main():
     parser.add_argument("--input", required=True, help="Path to input JSONL (raw proof problems)")
     parser.add_argument("--output", required=True, help="Path to output JSONL (Gym-compatible)")
     parser.add_argument(
-        "--problem-field", default="problem",
+        "--problem-field",
+        default="problem",
         help="JSON field name containing the problem text (default: 'problem')",
     )
     parser.add_argument(
-        "--agent-name", default=DEFAULT_AGENT_NAME,
+        "--agent-name",
+        default=DEFAULT_AGENT_NAME,
         help=f"Agent name for agent_ref routing (default: '{DEFAULT_AGENT_NAME}'). "
         "Must match the top-level YAML key in proof_judge.yaml.",
     )

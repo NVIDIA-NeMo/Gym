@@ -9,6 +9,7 @@ from typing import Any
 
 import yaml
 
+
 PROMPT_TEMPLATES_DIR = Path(__file__).parent / "prompt_templates"
 
 
@@ -22,7 +23,9 @@ VERIFIER_PROMPT_TEMPLATE = _load_prompt_template("verifier.yaml")
 DEFAULT_AGENT_NAME = "proof_verification_simple_agent"
 
 
-def convert_verification_rows(rows: list[dict[str, Any]], agent_name: str = DEFAULT_AGENT_NAME) -> list[dict[str, Any]]:
+def convert_verification_rows(
+    rows: list[dict[str, Any]], agent_name: str = DEFAULT_AGENT_NAME
+) -> list[dict[str, Any]]:
     examples = []
     for row in rows:
         problem = row["problem"]
