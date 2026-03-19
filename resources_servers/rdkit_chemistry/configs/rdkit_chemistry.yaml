@@ -12,6 +12,12 @@ rdkit_chemistry:
         Rows with method=mcp-python include tool definitions for sandboxed
         Python/RDKit execution; rows with method=direct do not.
       value: Train models to answer quantitative chemistry questions about molecules
+      sandbox_venv_path: ${oc.env:SANDBOX_VENV_PATH,''}
+      sandbox_extra_packages:
+        - rdkit
+        - flask
+        - wcwidth
+      sandbox_discovery_path: ${oc.env:SANDBOX_DISCOVERY_PATH,''}
 
 rdkit_chemistry_ns_tools:
   resources_servers:

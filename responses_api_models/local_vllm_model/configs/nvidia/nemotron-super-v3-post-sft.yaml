@@ -1,0 +1,43 @@
+nemotron-super-v3-post-sft:
+  responses_api_models:
+    local_vllm_model:
+      entrypoint: app.py
+      model: /lustre/fsw/portfolios/llmservice/users/abukharin/super_eval/rs-feb5/iter_0000350/hf
+      return_token_id_information: false
+      uses_reasoning_parser: true
+      replace_developer_role_with_system: false
+      debug: false
+
+      extra_body:
+        temperature: 1.0
+        top_p: 1.0
+        max_tokens: 65536
+
+      hf_home: null
+
+      vllm_serve_env_vars:
+        VLLM_RAY_DP_PACK_STRATEGY: strict
+        VLLM_FLASHINFER_ALLREDUCE_BACKEND: trtllm
+
+      vllm_serve_kwargs:
+        data_parallel_size: 4
+        tensor_parallel_size: 2
+        pipeline_parallel_size: 1
+
+        max_model_len: 90000
+        trust_remote_code: true
+        dtype: auto
+        gpu_memory_utilization: 0.9
+        swap_space: 0
+        enable_chunked_prefill: true
+        async_scheduling: false
+        compilation_config:
+          pass_config:
+            fuse_allreduce_rms: false
+        enable_auto_tool_choice: true
+        tool_call_parser: qwen3_coder
+        reasoning_parser: super_v3
+        reasoning_parser_plugin: /lustre/fsw/portfolios/llmservice/users/dcorneil/code/verifiable_chemistry/super_v3_reasoning_parser.py
+        model_loader_extra_config:
+          enable_multithread_load: true
+          num_threads: 16

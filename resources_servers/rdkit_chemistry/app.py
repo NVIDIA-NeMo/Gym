@@ -91,7 +91,9 @@ _DOUBLE_PAREN_RE = re.compile(r"\(\(([^)]+)\)\)")
 
 
 class RDKitChemistryConfig(BaseResourcesServerConfig):
-    pass
+    sandbox_venv_path: str = ""
+    sandbox_extra_packages: list[str] = ["rdkit", "flask", "wcwidth"]
+    sandbox_discovery_path: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -261,6 +263,15 @@ class RDKitChemistryResourcesServer(SimpleResourcesServer):
     config: RDKitChemistryConfig
 
     def setup_webserver(self) -> FastAPI:
+        if self.config.sandbox_venv_path:
+            import sandbox_launcher
+
+            sandbox_launcher.start_sandbox(
+                venv_path=self.config.sandbox_venv_path,
+                extra_packages=self.config.sandbox_extra_packages,
+                discovery_path=self.config.sandbox_discovery_path or None,
+            )
+
         return super().setup_webserver()
 
     async def verify(
