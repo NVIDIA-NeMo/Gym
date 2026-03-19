@@ -175,7 +175,6 @@ def prepare_benchmark() -> None:
 
     validated: List[Tuple[BenchmarkConfig, ModuleType]] = []
     for benchmark_config in benchmarks_dict.values():
-        benchmark_name = benchmark_config.name
         prepare_script_path = benchmark_config.dataset.prepare_script
         if not prepare_script_path.exists():
             prepare_script_missing.append(benchmark_config)
@@ -210,7 +209,10 @@ def prepare_benchmark() -> None:
         raise RuntimeError(errors_to_print)
 
     # Prepare after all validations pass
-    for benchmark_name, module in validated:
-        print(f"Preparing benchmark: {benchmark_name}")
-        output_path = module.prepare()
-        print(f"Benchmark data prepared at: {output_path}")
+    for benchmark_config, module in validated:
+        print(f"Preparing benchmark: {benchmark_config.name}")
+        output_fpath = module.prepare()
+        assert str(output_fpath) == str(benchmark_config.dataset.jsonl_fpath), (
+            f"Expected the actual prepared dataset output fpath to match the jsonl_fpath set in the config. Instead got {output_fpath=} jsonl_fpath={benchmark_config.dataset.jsonl_fpath}"
+        )
+        print(f"Benchmark data prepared at: {output_fpath}")
