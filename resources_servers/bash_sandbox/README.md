@@ -1,95 +1,105 @@
-# Description
+# Bash Sandbox Resources Server
 
-Data links: ?
+`bash_sandbox` is a tool-execution resources server used by `gdpval_agent`. It provides a
+Linux sandbox session per task and exposes tools like command execution, web search/fetch,
+file upload, and `finish` file persistence.
 
-# GDPVal judge: pre-computing committee outputs and running evaluation
+For GDPVal, this server can run in two modes:
+- **Passthrough mode (default):** used to collect committee-model outputs (precompute phase);
+  verification returns a passthrough reward.
+- **Judge mode (optional):** compares evaluated model outputs against precomputed committee
+  model outputs and computes reward from majority verdicts.
 
-The judge compares the evaluated model's outputs against **pre-computed** outputs from one or
-more committee models.  The two-phase workflow is:
+## Phase 1 (required): collect committee outputs in passthrough mode
 
-1. **Pre-compute** — run the committee model(s) against the full dataset offline and store
-   outputs in a directory tree the judge can read at verify time.
-2. **Configure & run** — point the judge config at those directories and enable judging.
+Before evaluating any checkpoint with judge mode, you should first run committee models and save
+their outputs with `judge.enabled: false`.
 
-## Phase 1: Pre-compute committee model outputs
-
-### Step 1 — Prepare the task JSONL
-
-Use `client.py prepare` (from `responses_api_agents/gdpval_agent/`) to convert the HuggingFace
-`openai/gdpval` dataset into a JSONL file compatible with `ng_collect_rollouts`:
+1. Keep `judge.enabled: false` in `resources_servers/bash_sandbox/configs/bash_sandbox.yaml`.
+2. Start servers with the GDPVal agent and a model server:
 
 ```bash
-python responses_api_agents/gdpval_agent/client.py prepare \
-    --output-jsonl /path/to/committee_tasks.jsonl \
-    --split train \                        # or "validation"
-    --output-dir /path/to/committee_outputs/MyCommitteeModel
+ng_run "+config_paths=[resources_servers/bash_sandbox/configs/bash_sandbox.yaml,responses_api_models/local_vllm_model/configs/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16.yaml]" \
+  ++bash_sandbox_agent.responses_api_agents.gdpval_agent.model_server.name=NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
 ```
 
-The `--output-dir` here is the root directory under which the committee model's per-task
-outputs will be written.  It must match `judge.committee_models[].output_dir` in the YAML
-(see Phase 2).
-
-Optional flags:
-- `--limit N` — use only the first N tasks (useful for smoke tests)
-- `--task-ids id1,id2,...` — restrict to specific task IDs
-- `--validate` — validate the produced JSONL before writing
-
-### Step 2 — Run the committee model (judge disabled)
-
-Start the bash-sandbox resources server with **`judge.enabled: false`** (or omit the judge
-section entirely) plus the GDPVal agent pointed at the **committee** model server (not the
-policy model), then drive the JSONL through `ng_collect_rollouts`.
-
-The agent config (`gdpval_agent.yaml`) references the policy model server by default.  For
-precomputation you must point it at the committee model's inference endpoint instead.  The
-simplest approach is to create a separate config file (e.g. `gdpval_agent_committee.yaml`)
-that overrides the `model_server` section to target the committee model:
-
-```yaml
-# gdpval_agent_committee.yaml  — overrides only the model server
-gdpval_agent:
-  responses_api_agents:
-    gdpval_agent:
-      model_server:
-        type: responses_api_models
-        name: committee_model_server   # must be defined in your global server config
-```
-
-Then run:
+3. Collect rollouts as usual:
 
 ```bash
 ng_collect_rollouts \
-    --config responses_api_agents/gdpval_agent/configs/gdpval_agent_committee.yaml \
-    --dataset-jsonl /path/to/committee_tasks.jsonl \
-    --rollouts-jsonl /path/to/committee_rollouts.jsonl
+  +agent_name=bash_sandbox_agent \
+  +input_jsonl_fpath=responses_api_agents/gdpval_agent/data/train.jsonl \
+  +output_jsonl_fpath=responses_api_agents/gdpval_agent/data/train_rollouts.jsonl
 ```
 
-Each task creates a directory:
+## Phase 2: evaluate checkpoints with judge enabled
 
+Judge mode requires a 2-phase workflow:
+
+1. **Precompute committee outputs** over the target dataset.
+2. **Enable judge** and point it at those output directories.
+
+### Phase 1: precompute committee outputs
+
+#### Step 1: prepare JSONL tasks
+
+Use the GDPVal client helper:
+
+```bash
+python responses_api_agents/gdpval_agent/client.py prepare \
+  --output-jsonl /path/to/committee_tasks.jsonl \
+  --split train \
+  --output-dir /path/to/committee_outputs/MyCommitteeModel \
+  --validate
 ```
+
+Optional filters:
+- `--limit N`
+- `--task-ids id1,id2,...`
+
+`--output-dir` must match the `judge.committee_models[].output_dir` value used in Phase 2.
+
+#### Step 2: run committee model with judge disabled
+
+Run with `judge.enabled: false`, but point `gdpval_agent.model_server.name` at the committee
+model server instance:
+
+```bash
+ng_run "+config_paths=[resources_servers/bash_sandbox/configs/bash_sandbox.yaml,responses_api_models/local_vllm_model/configs/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16.yaml]" \
+  ++bash_sandbox_agent.responses_api_agents.gdpval_agent.model_server.name=NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 \
+  ++bash_sandbox_resources_server.resources_servers.bash_sandbox.judge.enabled=false
+```
+
+Then generate committee rollouts:
+
+```bash
+ng_collect_rollouts \
+  +agent_name=bash_sandbox_agent \
+  +input_jsonl_fpath=/path/to/committee_tasks.jsonl \
+  +output_jsonl_fpath=/path/to/committee_rollouts.jsonl
+```
+
+Each task creates:
+
+```text
 /path/to/committee_outputs/MyCommitteeModel/
   task_<task_id>/
-      finish_params.json        ← written automatically by the finish tool
-      <output files …>
-      <output files …>.pdf      ← PDF siblings written automatically for office files
-      reference_files/          ← reference files, if any
+    finish_params.json
+    <output files...>
+    <office-output>.pdf
+    reference_files/
 ```
 
-Two things happen automatically inside the `finish` tool call for each task:
+Important finish behavior:
+- `finish_params.json` is used as the "committee attempted this task" sentinel.
+- Office files (`.docx`, `.pptx`, `.xlsx`) are converted to PDF siblings for judging.
 
-- **`finish_params.json`** is written — the judge uses this as a completion sentinel to decide
-  whether the committee model attempted a given task.
-- **Office files** (`.docx`, `.pptx`, `.xlsx`) are converted to PDF siblings in-place using
-  LibreOffice. The judge can only read office files via their `.pdf` sibling; without
-  conversion the file is silently excluded from the judge prompt.  Conversion failures are
-  logged as warnings and do not abort the task.
+### Enable judge and evaluate checkpoint outputs
 
-> **LibreOffice must be installed** on the machine running the resources server.  Install it
-> with `apt-get install -y libreoffice` (or equivalent).
+At this point, committee outputs should already exist on disk (from Phase 1). Judge mode is for
+checkpoint evaluation against those precomputed outputs, not for generating committee outputs.
 
-## Phase 2: Configure and run with the judge
-
-Edit `resources_servers/bash_sandbox/configs/bash_sandbox.yaml`:
+Configure `resources_servers/bash_sandbox/configs/bash_sandbox.yaml`:
 
 ```yaml
 bash_sandbox_resources_server:
@@ -97,80 +107,77 @@ bash_sandbox_resources_server:
     bash_sandbox:
       judge:
         enabled: true
-        # --- VertexAI / Gemini path (default) ---
         judge_model_name: gemini-3-pro-preview
         gcp_project_id: your-gcp-project
         gcp_location: global
         thinking_budget: 5000
         max_output_tokens: 65535
-        num_trials: 4                  # trials per committee model per task (position-swapped)
+        num_trials: 4
         max_concurrent_judgements: 10
         committee_models:
-          - name: MyCommitteeModel          # human-readable name used in logs/verdicts
+          - name: MyCommitteeModel
             output_dir: /path/to/committee_outputs/MyCommitteeModel
-          # add more committee models here if desired
 
-        # --- NVIDIA / OpenAI-compatible path (alternative to VertexAI) ---
-        # Omit both fields to use the VertexAI path above.
-        # Set both to switch to the NVIDIA OpenAI endpoint instead;
-        # when set, judge_model_name / gcp_project_id / gcp_location are ignored.
+        # Alternative to VertexAI path:
         # nvidia_openai_api_key: "sk-..."
         # nvidia_openai_model: "gcp/google/gemini-3-pro-preview"
 ```
 
-Both fields `nvidia_openai_api_key` and `nvidia_openai_model` must be set together or omitted
-together — setting only one raises a `ValueError` at startup.  When both are set,
-`judge_model_name`, `gcp_project_id`, and `gcp_location` are unused.
+NVIDIA OpenAI integration rule:
+- set both `nvidia_openai_api_key` and `nvidia_openai_model`, or set neither.
+- if both are set, `judge_model_name` / `gcp_project_id` / `gcp_location` are ignored.
 
 ### Reward semantics
 
-For each task the judge runs `num_trials` comparisons (alternating which model is "A" and
-which is "B" to reduce position bias). For each committee model the per-task reward is:
+For each committee model:
+- evaluated model wins majority of trials -> `1.0`
+- tie (equal wins or all `TIE`) -> `0.5`
+- committee model wins majority -> `0.0`
 
-| Outcome | Reward |
-|---------|--------|
-| Evaluated model wins majority of trials | 1.0 |
-| Tie (equal wins, or all TIE verdicts) | 0.5 |
-| Committee model wins majority | 0.0 |
+Final task reward is the mean across committee models with `success=True`.
 
-When multiple committee models are configured, the final reward is the **mean** across all
-committee models whose verdict `success=True`. A committee model is excluded from the mean
-(silently) in two cases:
+A committee model is excluded from the mean if:
+- `task_<task_id>/finish_params.json` is missing, or
+- all judge retries fail / verdict is unparsable (`success=False`).
 
-- it has no output for the task (`task_<task_id>/finish_params.json` is absent)
-- it ran judging but all API retries were exhausted or produced no parseable verdict
-  (`success=False`)
+If all committee models are excluded, reward falls back to `1.0`.
 
-If **all** committee models are excluded the judge falls back to `reward = 1.0`.
-
-### Fallback behaviour
+### Fallback behavior
 
 | Condition | Reward |
 |-----------|--------|
-| `judge.enabled: false` | 1.0 (passthrough) |
-| No committee models configured | 1.0 (passthrough) |
-| No committee model has output for the task | 1.0 (passthrough) |
-| All committee model verdicts excluded (missing output or `success=False`) | 1.0 (passthrough) |
+| `judge.enabled: false` | `1.0` |
+| No committee models configured | `1.0` |
+| No committee output for task | `1.0` |
+| All committee verdicts excluded | `1.0` |
 
-# Session affinity (multiple workers)
+## Session affinity for multi-worker deployments
 
-Sessions are stored in-memory per process. For multiple workers you must use **client-side session affinity** so all requests for a session hit the same worker:
+Session state is process-local. With multiple resources workers, route all requests for a
+session to the same worker.
 
-1. Run each worker on a different port (e.g. `http://host:8001`, `http://host:8002`).
-2. In the resources server config, set `worker_urls` to the list of worker base URLs:
-   ```yaml
-   worker_urls:
-     - "http://host:8001"
-     - "http://host:8002"
-   ```
-3. The GDPVal agent passes `affinity_key=session_id` on every resources server call; `ServerClient` hashes the key to choose the URL. All calls for the same session then go to the same worker.
+1. Run workers on separate URLs (example: `http://host:8001`, `http://host:8002`).
+2. Set `worker_urls` in resources server config:
 
-If you use a single worker (`num_workers: 1`), you can omit `worker_urls`.
+```yaml
+worker_urls:
+  - "http://host:8001"
+  - "http://host:8002"
+```
 
-# Licensing information
-Code: ?
-Data: ?
+3. Ensure callers pass `affinity_key=session_id` consistently (the GDPVal agent already does).
 
-Dependencies
-- nemo_gym: Apache 2.0
-?
+If `num_workers: 1`, `worker_urls` is optional.
+
+## Requirements
+
+- LibreOffice is required for office-to-PDF conversion used by judge prompts.
+  - Debian/Ubuntu example: `apt-get install -y libreoffice`
+
+## Licensing information
+
+Code: Apache 2.0  
+Data: Depends on the dataset used (for GDPVal, see the `openai/gdpval` dataset terms).
+
+Dependencies:
+- `nemo_gym`: Apache 2.0

@@ -1,0 +1,43 @@
+NVIDIA-Nemotron-3-Super-120B-A12B-BF16:
+  responses_api_models:
+    local_vllm_model:
+      entrypoint: app.py
+      model: nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16
+      return_token_id_information: false
+      uses_reasoning_parser: true
+      replace_developer_role_with_system: false
+      debug: false
+
+      # Recommended generation defaults for Nemotron models.
+      extra_body:
+        temperature: 1.0
+        top_p: 1.0
+        max_output_tokens: null
+
+      # For example, if your model is downloaded at ~/.cache/huggingface/hub/models--nvidia--NVIDIA-Nemotron-3-Super-120B-A12B-BF16,
+      # your hf_home here would be `~/.cache/huggingface`.
+      hf_home: null
+
+      vllm_serve_env_vars:
+        # Mirrors: VLLM_ATTENTION_BACKEND=FLASH_ATTN vllm serve ...
+        VLLM_ATTENTION_BACKEND: FLASH_ATTN
+        # If your tp * pp is greater than one node or one model instance spans more than one node, set this to `span`!
+        VLLM_RAY_DP_PACK_STRATEGY: strict
+
+      # If a hf_token is present in env.yaml, it will be used for HF downloads.
+      vllm_serve_kwargs:
+        # Mirrors your vllm serve parallel settings.
+        data_parallel_size: 1
+        tensor_parallel_size: 8
+        pipeline_parallel_size: 1
+
+        served_model_name: NVIDIA-Nemotron-3-Super-120B-A12B-BF16
+        trust_remote_code: true
+        mamba_ssm_cache_dtype: float32
+        gpu_memory_utilization: 0.9
+        enable_auto_tool_choice: true
+        tool_call_parser: qwen3_coder
+        reasoning_parser: nemotron_v3
+        model_loader_extra_config:
+          enable_multithread_load: true
+          num_threads: 16
