@@ -596,7 +596,7 @@ class VLLMConverter(BaseModel):
         m: dict,
         state: VLLMConverterResponsesToChatCompletionsState,
     ) -> None:
-        content = m["content"]
+        content = m.get("content") or ""
 
         if isinstance(content, list) and m["role"] != "assistant":
             converted_parts = []
