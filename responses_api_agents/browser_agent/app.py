@@ -376,7 +376,7 @@ class BrowserAgent(SimpleResponsesAPIAgent):
                     )
                     break
                 last_action_error = None
-                for action in adapter_resp.actions:
+                for action_i, action in enumerate(adapter_resp.actions):
                     try:
                         step_resp_raw = await self.server_client.post(
                             server_name=self.config.resources_server.name,
@@ -407,16 +407,17 @@ class BrowserAgent(SimpleResponsesAPIAgent):
 
                         consecutive_failures = 0
                         action_index += 1
+                        is_first_action = action_i == 0
                         trajectory.steps.append(
                             CUAStep(
                                 action=action,
                                 screenshot_before=screenshot_b64,
                                 screenshot_after=step_data.screenshot,
                                 current_url=step_data.current_url,
-                                raw_provider_response=adapter_resp.raw_response,
-                                prompt_token_ids=adapter_resp.prompt_token_ids,
-                                generation_token_ids=adapter_resp.generation_token_ids,
-                                generation_log_probs=adapter_resp.generation_log_probs,
+                                raw_provider_response=adapter_resp.raw_response if is_first_action else None,
+                                prompt_token_ids=adapter_resp.prompt_token_ids if is_first_action else [],
+                                generation_token_ids=adapter_resp.generation_token_ids if is_first_action else [],
+                                generation_log_probs=adapter_resp.generation_log_probs if is_first_action else [],
                             )
                         )
 

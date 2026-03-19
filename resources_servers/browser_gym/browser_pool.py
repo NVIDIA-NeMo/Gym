@@ -26,6 +26,8 @@ from typing import Optional
 
 from playwright.async_api import Browser, BrowserContext, Page, async_playwright
 
+from resources_servers.browser_gym.schemas import BrowserAction
+
 
 logger = logging.getLogger(__name__)
 
@@ -421,7 +423,9 @@ class BrowserPool:
     # Action execution with per-action timeouts
     # ──────────────────────────────────────────────────────────────
 
-    async def _do_action(self, session: BrowserSession, env_id: str, action) -> "Optional[str] | tuple[str, str]":
+    async def _do_action(
+        self, session: BrowserSession, env_id: str, action: BrowserAction
+    ) -> "Optional[str] | tuple[str, str]":
         """Execute the raw Playwright commands for a single BrowserAction.
 
         This is the inner helper called by execute_action, which wraps it
@@ -523,7 +527,7 @@ class BrowserPool:
                 if keys:
                     combo = "+".join(_normalize_key(k) for k in keys)
                     await page.keyboard.press(combo)
-                elif action.key:
+                elif action.key is not None:
                     raw_key = action.key
                     if "+" in raw_key:
                         combo = "+".join(_normalize_key(k) for k in raw_key.split("+"))
@@ -534,6 +538,8 @@ class BrowserPool:
                             await asyncio.sleep(0.05)
                     else:
                         await page.keyboard.press(_normalize_key(raw_key))
+                else:
+                    logger.warning("keypress action has no keys and no key for env_id=%s, skipping", env_id)
             except Exception as e:
                 error_msg = f"keypress failed: {e}"
                 logger.warning("keypress failed for env_id=%s keys=%s key=%s: %s", env_id, action.keys, action.key, e)
@@ -682,7 +688,7 @@ class BrowserPool:
 
         return None
 
-    async def execute_action(self, env_id: str, action) -> tuple[str, str, Optional[str]]:
+    async def execute_action(self, env_id: str, action: BrowserAction) -> tuple[str, str, Optional[str]]:
         """Execute a BrowserAction on the page with per-action timeout.
 
         Returns (screenshot_b64, current_url, error).

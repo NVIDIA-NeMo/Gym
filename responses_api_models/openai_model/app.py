@@ -18,6 +18,19 @@ from typing import Any, Dict, Optional
 
 from pydantic import Field
 
+from nemo_gym.base_responses_api_model import (
+    BaseResponsesAPIModelConfig,
+    Body,
+    SimpleResponsesAPIModel,
+)
+from nemo_gym.openai_utils import (
+    NeMoGymAsyncOpenAI,
+    NeMoGymChatCompletion,
+    NeMoGymChatCompletionCreateParamsNonStreaming,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+)
+
 
 logger = logging.getLogger(__name__)
 
@@ -31,20 +44,6 @@ def _sanitize_error(e: Exception) -> str:
     msg = _SENSITIVE_HEADER_RE.sub(r"\1[REDACTED]\2", msg)
     msg = _SENSITIVE_COOKIE_RE.sub(r"\1[REDACTED]\2", msg)
     return msg
-
-
-from nemo_gym.base_responses_api_model import (
-    BaseResponsesAPIModelConfig,
-    Body,
-    SimpleResponsesAPIModel,
-)
-from nemo_gym.openai_utils import (
-    NeMoGymAsyncOpenAI,
-    NeMoGymChatCompletion,
-    NeMoGymChatCompletionCreateParamsNonStreaming,
-    NeMoGymResponse,
-    NeMoGymResponseCreateParamsNonStreaming,
-)
 
 
 class SimpleModelServerConfig(BaseResponsesAPIModelConfig):

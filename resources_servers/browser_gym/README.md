@@ -299,7 +299,7 @@ responses_api_agents/browser_agent/
    # Debug trajectories (screenshots + JSON saved to results/cua_debug_trajectories/)
    cua_debug_trajectories: false
 
-   # Optional: override default concurrent rollouts (default: 10)
+   # Optional: limit concurrent rollouts (default: unlimited)
    num_samples_in_parallel: 10
 
    # Browser concurrency
@@ -418,7 +418,7 @@ ng_collect_rollouts \
 
 If any task ID is not found, the command errors with the missing IDs and a list of available ones.
 
-> **Tip:** `num_samples_in_parallel` controls how many rollouts run concurrently (default: 10). Set it to match or stay below the `max_concurrent_browsers` value in the resource server config (default: 16). Override via CLI (`+num_samples_in_parallel=20`) or set a persistent default in `env.yaml`.
+> **Tip:** `num_samples_in_parallel` controls how many rollouts run concurrently (default: unlimited). For browser-heavy CUA workloads, set it to match or stay below the `max_concurrent_browsers` value in the resource server config (default: 16). Override via CLI (`+num_samples_in_parallel=10`) or set a persistent default in `env.yaml`.
 
 **Gym URL parameters:**
 
