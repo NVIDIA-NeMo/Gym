@@ -42,7 +42,12 @@ def _temp_run(in_outs, generation, debug, result, metadata_list, timeout):
 
 
 # Using SPREAD scheduling so that Ray assigns tasks to as many distinct nodes as possible.
-@ray.remote(scheduling_strategy="SPREAD")
+@ray.remote(
+    scheduling_strategy="SPREAD",
+    runtime_env={
+        "py_executable": sys.executable,
+    },
+)
 def check_correctness_remote(sample, generation, timeout, debug=True):
     """Ray wrapper of check_correctness for remote execution."""
     return check_correctness(sample, generation, timeout, debug)
