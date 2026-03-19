@@ -82,7 +82,7 @@ class TrainDataProcessorConfig(BaseNeMoGymCLIConfig):
     @property
     def in_scope_dataset_types(self) -> List[DatasetType]:
         if self.mode == "train_preparation":
-            return ["train", "validation"]
+            return ["train", "validation", "benchmark"]
         elif self.mode == "example_validation":
             return ["example"]
         else:
@@ -733,7 +733,7 @@ This could be due to a change in how metrics are calculated, leading to outdated
                 None,
             )
             if d is not None:
-                aggregate_metrics_dict = d.model_dump() | aggregate_metrics_dict
+                aggregate_metrics_dict = d.model_dump(mode="json") | aggregate_metrics_dict
 
             parent = Path(config.output_dirpath)
             parent.mkdir(exist_ok=True, parents=True)
