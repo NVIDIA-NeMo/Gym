@@ -22,6 +22,7 @@ from typing import Dict, List, Tuple
 import rich
 from omegaconf import DictConfig, OmegaConf
 from pydantic import BaseModel
+from rich.table import Table
 
 from nemo_gym import PARENT_DIR
 from nemo_gym.config_types import BaseNeMoGymCLIConfig, BenchmarkDatasetConfig
@@ -125,12 +126,15 @@ def list_benchmarks() -> None:
         rich.print(f"Expected benchmarks directory: {BENCHMARKS_DIR}")
         return
 
-    rich.print(f"[bold]Available Benchmarks ({len(benchmarks)})[/bold]")
-    rich.print("-" * 40)
+    table = Table(title=f"Available benchmarks in NeMo Gym ({len(benchmarks)})")
+    table.add_column("Benchmark name")
+    table.add_column("Agent name")
+    table.add_column("Num repeats")
+
     for name, bench in benchmarks.items():
-        agent = bench.agent_name or "not specified"
-        repeats = bench.num_repeats or "not specified"
-        rich.print(f"  [blue]{name}[/blue]  (agent: {agent}, num_repeats: {repeats})")
+        table.add_row(name, bench.agent_name, str(bench.num_repeats))
+
+    rich.print(table)
 
 
 class PrepareBenchmarkConfig(BaseNeMoGymCLIConfig):
