@@ -38,7 +38,7 @@ ng_download_dataset_from_gitlab \
       +output_fpath=resources_servers/cvdp/data/gym_cvdp_v1.0.2_nonagentic_code_gen_no_commercial.jsonl
 ```
       
-For details on how the dataset was created, see [docs/data_lineage.md](docs/data_lineage.md).
+For details on how the dataset was created, see [docs/data-lineage.md](docs/data-lineage.md).
 
 ## Setup
 If you do not have one, copy the provided `env.yaml.example` to the repo root and fill in your credentials:
