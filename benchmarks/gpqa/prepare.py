@@ -33,7 +33,7 @@ from nemo_gym.global_config import HF_TOKEN_KEY_NAME, get_global_config_dict
 
 BENCHMARK_DIR = Path(__file__).parent
 DATA_DIR = BENCHMARK_DIR / "data"
-OUTPUT_FPATH = DATA_DIR / "gpqa_diamond_validation.jsonl"
+OUTPUT_FPATH = DATA_DIR / "gpqa_diamond_benchmark.jsonl"
 OPTION_LETTERS = ["A", "B", "C", "D"]
 
 

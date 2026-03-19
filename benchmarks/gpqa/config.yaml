@@ -19,7 +19,7 @@ gpqa_mcqa_simple_agent:
       datasets:
       - name: gpqa
         type: benchmark
-        jsonl_fpath: benchmarks/gpqa/data/gpqa_diamond_validation.jsonl
+        jsonl_fpath: benchmarks/gpqa/data/gpqa_diamond_benchmark.jsonl
         prompt_config: benchmarks/gpqa/prompts/default.yaml
         prepare_script: benchmarks/gpqa/prepare.py
         num_repeats: 8

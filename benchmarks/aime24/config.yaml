@@ -14,7 +14,7 @@ aime24_math_with_judge_simple_agent:
       datasets:
       - name: aime24
         type: benchmark
-        jsonl_fpath: benchmarks/aime24/data/aime24_validation.jsonl
+        jsonl_fpath: benchmarks/aime24/data/aime24_benchmark.jsonl
         prompt_config: benchmarks/aime24/prompts/default.yaml
         prepare_script: benchmarks/aime24/prepare.py
         num_repeats: 32

@@ -73,7 +73,7 @@ class E2ERolloutCollectionConfig(SharedRolloutCollectionConfig):
     ```
     """
 
-    split: Union[Literal["train"], Literal["validation"]]
+    split: Union[Literal["train"], Literal["validation"], Literal["benchmark"]]
 
 
 class RolloutCollectionConfig(SharedRolloutCollectionConfig):

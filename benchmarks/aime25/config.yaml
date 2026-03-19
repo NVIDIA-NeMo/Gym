@@ -14,7 +14,7 @@ aime25_math_with_judge_simple_agent:
       datasets:
       - name: aime25
         type: benchmark
-        jsonl_fpath: benchmarks/aime25/data/aime25_validation.jsonl
+        jsonl_fpath: benchmarks/aime25/data/aime25_benchmark.jsonl
         prompt_config: benchmarks/aime25/prompts/default.yaml
         prepare_script: benchmarks/aime25/prepare.py
         num_repeats: 32

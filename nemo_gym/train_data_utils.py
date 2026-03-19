@@ -645,7 +645,7 @@ class TrainDataProcessor(BaseModel):
                 aggregate_metrics = state.metrics.aggregate()
 
                 aggregate_metrics_dict = aggregate_metrics.model_dump(mode="json", by_alias=True)
-                aggregate_metrics_dict = d.model_dump() | aggregate_metrics_dict
+                aggregate_metrics_dict = d.model_dump(mode="json") | aggregate_metrics_dict
 
                 data_fpath = Path(d.jsonl_fpath)
                 metrics_fpath = data_fpath.with_name(f"{data_fpath.stem}_metrics.json")
