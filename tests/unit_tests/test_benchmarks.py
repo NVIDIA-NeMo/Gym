@@ -22,7 +22,6 @@ from nemo_gym.benchmarks import (
     BenchmarkConfig,
     _find_benchmark_dirs_from_config_paths,
     discover_benchmarks,
-    get_benchmark,
     list_benchmarks,
     prepare_benchmark,
 )
@@ -73,16 +72,6 @@ class TestDiscoverBenchmarks:
             assert "my_bench" in benchmarks
             assert benchmarks["my_bench"].agent_name == "test_agent"
             assert benchmarks["my_bench"].num_repeats == 4
-
-
-class TestGetBenchmark:
-    def test_found(self) -> None:
-        bench = get_benchmark("aime24")
-        assert bench.name == "aime24"
-
-    def test_not_found(self) -> None:
-        with pytest.raises(ValueError, match="not found"):
-            get_benchmark("nonexistent_benchmark")
 
 
 def _mock_global_config(config: dict = None):

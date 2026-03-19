@@ -96,8 +96,15 @@ def _load_benchmarks_from_config_paths(config_paths: List[Path]) -> Dict[str, Be
     return benchmarks_dict
 
 
-def discover_benchmarks() -> Dict[str, BenchmarkConfig]:
-    """Scan the benchmarks/ directory for subdirectories containing config.yaml."""
+def list_benchmarks() -> None:
+    """CLI command: list available benchmarks."""
+    global_config_dict = get_global_config_dict(
+        global_config_dict_parser_config=GlobalConfigDictParserConfig(
+            initial_global_config_dict=GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+        )
+    )
+    BaseNeMoGymCLIConfig.model_validate(global_config_dict)
+
     assert BENCHMARKS_DIR.exists(), "Missing benchmarks directory"
 
     config_paths = []
@@ -111,28 +118,7 @@ def discover_benchmarks() -> Dict[str, BenchmarkConfig]:
 
         config_paths.append(config_path)
 
-    return _load_benchmarks_from_config_paths(config_paths)
-
-
-def get_benchmark(name: str) -> BenchmarkConfig:
-    """Get a specific benchmark by name. Raises ValueError if not found."""
-    benchmarks = discover_benchmarks()
-    if name not in benchmarks:
-        available = ", ".join(benchmarks.keys()) or "(none)"
-        raise ValueError(f"Benchmark '{name}' not found. Available benchmarks: {available}")
-    return benchmarks[name]
-
-
-def list_benchmarks() -> None:
-    """CLI command: list available benchmarks."""
-    global_config_dict = get_global_config_dict(
-        global_config_dict_parser_config=GlobalConfigDictParserConfig(
-            initial_global_config_dict=GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
-        )
-    )
-    BaseNeMoGymCLIConfig.model_validate(global_config_dict)
-
-    benchmarks = discover_benchmarks()
+    benchmarks = _load_benchmarks_from_config_paths(config_paths)
 
     if not benchmarks:
         rich.print("[yellow]No benchmarks found.[/yellow]")
