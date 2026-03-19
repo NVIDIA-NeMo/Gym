@@ -46,6 +46,7 @@ from nemo_gym.global_config import (
 from nemo_gym.hf_utils import (
     download_hf_dataset_as_jsonl,
 )
+from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 
 
 class TrainDataProcessorConfig(BaseNeMoGymCLIConfig):
@@ -700,11 +701,20 @@ This could be due to a change in how metrics are calculated, leading to outdated
                 if d.type != type:
                     continue
 
+                prompt_cfg = None
+                if d.type == "benchmark" and d.prompt_config:
+                    prompt_cfg = load_prompt_config(d.prompt_config)
+
                 data_path = Path(d.jsonl_fpath)
                 prepare_path = data_path.with_name(f"{data_path.stem}_prepare.jsonl")
                 with open(prepare_path, "w") as target:
                     for line in self._iter_dataset_lines(d):
                         d = json.loads(line)
+
+                        if prompt_cfg:
+                            validate_prompt_compatibility([d], prompt_cfg)
+                            d = apply_prompt_to_row(d, prompt_cfg)
+
                         d[AGENT_REF_KEY] = AgentServerRef(type="responses_api_agents", name=c.name).model_dump()
                         target.write(f"{json.dumps(d)}\n")
 

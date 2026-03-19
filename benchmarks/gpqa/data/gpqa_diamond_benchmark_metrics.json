@@ -3,6 +3,7 @@
     "type": "benchmark",
     "jsonl_fpath": "benchmarks/gpqa/data/gpqa_diamond_benchmark.jsonl",
     "prepare_script": "benchmarks/gpqa/prepare.py",
+    "prompt_config": "benchmarks/gpqa/prompts/default.yaml",
     "num_repeats": 8,
     "Number of examples": 0,
     "Number of tools": {

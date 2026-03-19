@@ -3,6 +3,7 @@
     "type": "benchmark",
     "jsonl_fpath": "benchmarks/aime24/data/aime24_benchmark.jsonl",
     "prepare_script": "benchmarks/aime24/prepare.py",
+    "prompt_config": "benchmarks/aime24/prompts/default.yaml",
     "num_repeats": 32,
     "Number of examples": 0,
     "Number of tools": {
