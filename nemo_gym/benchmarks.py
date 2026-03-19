@@ -16,7 +16,8 @@
 
 import importlib
 from pathlib import Path
-from typing import Dict, List
+from types import ModuleType
+from typing import Dict, List, Tuple
 
 import rich
 from omegaconf import OmegaConf
@@ -43,7 +44,11 @@ class BenchmarkConfig(BaseModel):
     dataset: BenchmarkDatasetConfig
 
     @classmethod
-    def from_initial_config_dict(self, name: str, path: Path, initial_config_dict: OmegaConf) -> "BenchmarkConfig":
+    def from_config_path(cls, config_path: Path) -> "BenchmarkConfig":
+        return cls.from_initial_config_dict(path=config_path, initial_config_dict=OmegaConf.load(config_path))
+
+    @classmethod
+    def from_initial_config_dict(cls, path: Path, initial_config_dict: OmegaConf) -> "BenchmarkConfig":
         initial_config_dict = OmegaConf.merge(
             initial_config_dict, GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT
         )
@@ -67,12 +72,12 @@ class BenchmarkConfig(BaseModel):
                 datasets.append(BenchmarkDatasetConfig.model_validate(dataset))
                 candidate_agent_server_instance_names.append(server_instance_name)
 
-        assert len(datasets) == 1, f"Expected 1 benchmark dataset for {name}, but found {len(datasets)}!"
+        assert len(datasets) == 1, f"Expected 1 benchmark dataset for config {path}, but found {len(datasets)}!"
 
         dataset = datasets[0]
 
-        return BenchmarkConfig(
-            name=name,
+        return cls(
+            name=dataset.name,
             path=path,
             agent_name=candidate_agent_server_instance_names[0],
             num_repeats=dataset.num_repeats,
@@ -80,13 +85,22 @@ class BenchmarkConfig(BaseModel):
         )
 
 
+def _load_benchmarks_from_config_paths(config_paths: List[Path]) -> Dict[str, BenchmarkConfig]:
+    benchmarks_dict = dict()
+    for config_path in config_paths:
+        config_path = Path(config_path)
+
+        bc = BenchmarkConfig.from_config_path(config_path)
+        benchmarks_dict[bc.name] = bc
+
+    return benchmarks_dict
+
+
 def discover_benchmarks() -> Dict[str, BenchmarkConfig]:
     """Scan the benchmarks/ directory for subdirectories containing config.yaml."""
-    benchmarks = {}
+    assert BENCHMARKS_DIR.exists(), "Missing benchmarks directory"
 
-    if not BENCHMARKS_DIR.exists():
-        return benchmarks
-
+    config_paths = []
     for entry in sorted(BENCHMARKS_DIR.iterdir()):
         if not entry.is_dir():
             continue
@@ -95,13 +109,9 @@ def discover_benchmarks() -> Dict[str, BenchmarkConfig]:
         if not config_path.exists():
             continue
 
-        benchmarks[entry.name] = BenchmarkConfig.from_initial_config_dict(
-            name=entry.name,
-            path=entry,
-            initial_config_dict=OmegaConf.load(config_path),
-        )
+        config_paths.append(config_path)
 
-    return benchmarks
+    return _load_benchmarks_from_config_paths(config_paths)
 
 
 def get_benchmark(name: str) -> BenchmarkConfig:
@@ -152,19 +162,6 @@ class PrepareBenchmarkConfig(BaseNeMoGymCLIConfig):
     """
 
 
-def _find_benchmark_dirs_from_config_paths(config_paths) -> list[Path]:
-    """Find benchmark directories from resolved config_paths."""
-    benchmark_dirs = []
-    for cp in config_paths:
-        cp = Path(cp)
-        if not cp.is_absolute():
-            cwd_path = Path.cwd() / cp
-            cp = cwd_path if cwd_path.exists() else PARENT_DIR / cp
-        if BENCHMARKS_DIR in cp.parents or cp.parent == BENCHMARKS_DIR:
-            benchmark_dirs.append(cp.parent)
-    return benchmark_dirs
-
-
 def prepare_benchmark() -> None:
     """CLI command: prepare benchmark data."""
     global_config_dict = get_global_config_dict(
@@ -175,36 +172,52 @@ def prepare_benchmark() -> None:
     PrepareBenchmarkConfig.model_validate(global_config_dict)
 
     config_paths = global_config_dict.get("config_paths") or []
-    benchmark_dirs = _find_benchmark_dirs_from_config_paths(config_paths)
+    config_paths = list(map(Path, config_paths))
+    benchmarks_dict = _load_benchmarks_from_config_paths(config_paths)
 
-    if not benchmark_dirs:
-        raise ValueError(
-            "No benchmark config found in config_paths. "
-            'Pass a benchmark config, e.g.: "+config_paths=[benchmarks/aime24/config.yaml]"'
-        )
+    assert benchmarks_dict, (
+        'No benchmark config found in config_paths. Pass a benchmark config, e.g.: "+config_paths=[benchmarks/aime24/config.yaml]"'
+    )
 
     # Validate all benchmarks before preparing any
-    errors = []
-    validated = []
-    for bench_dir in benchmark_dirs:
-        benchmark_name = bench_dir.name
-        prepare_module_path = bench_dir / "prepare.py"
+    prepare_script_missing: List[BenchmarkConfig] = []
+    prepare_function_missing: List[BenchmarkConfig] = []
 
-        if not prepare_module_path.exists():
-            errors.append(f"No prepare.py found for benchmark '{benchmark_name}' at {prepare_module_path}")
+    validated: List[Tuple[BenchmarkConfig, ModuleType]] = []
+    for benchmark_config in benchmarks_dict.values():
+        benchmark_name = benchmark_config.name
+        prepare_script_path = benchmark_config.dataset.prepare_script
+        if not prepare_script_path.exists():
+            prepare_script_missing.append(benchmark_config)
             continue
 
-        module_name = f"benchmarks.{benchmark_name}.prepare"
-        module = importlib.import_module(module_name)
-
+        prepare_module_path = ".".join(prepare_script_path.with_suffix("").parts)
+        module = importlib.import_module(prepare_module_path)
         if not hasattr(module, "prepare"):
-            errors.append(f"benchmarks/{benchmark_name}/prepare.py must define a `prepare()` function")
+            prepare_function_missing.append(benchmark_config)
             continue
 
-        validated.append((benchmark_name, module))
+        validated.append((benchmark_config, module))
 
-    if errors:
-        raise ValueError("Benchmark validation failed:\n  " + "\n  ".join(errors))
+    errors_to_print = ""
+    if prepare_script_missing:
+        prepare_script_missing_str = "".join(
+            f"- {bc.name}: {bc.dataset.prepare_script}\n" for bc in prepare_script_missing
+        )
+        errors_to_print += f"""The following benchmarks are missing a valid prepare script:
+{prepare_script_missing_str}
+"""
+    if prepare_function_missing:
+        prepare_function_missing_str = "".join(
+            f"- {bc.name}: {bc.dataset.prepare_script}\n" for bc in prepare_function_missing
+        )
+        errors_to_print += f"""The following benchmarks have a prepare script, but are missing the prepare function:
+{prepare_function_missing_str}
+"""
+    if errors_to_print:
+        errors_to_print = f"""Did not prepare any benchmarks due to benchmark config errors.
+{errors_to_print}"""
+        raise RuntimeError(errors_to_print)
 
     # Prepare after all validations pass
     for benchmark_name, module in validated:

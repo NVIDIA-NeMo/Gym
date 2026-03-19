@@ -14,6 +14,7 @@
 # limitations under the License.
 from argparse import ArgumentParser
 from enum import Enum
+from pathlib import Path
 from typing import Any, ClassVar, Dict, List, Literal, Optional, Set, Tuple, Union
 
 import rich
@@ -389,7 +390,7 @@ class BenchmarkDatasetConfig(BaseModel):
     name: str
     type: Literal["benchmark"]
     jsonl_fpath: str
-    prepare_script: str
+    prepare_script: Path
     num_repeats: int = Field(default=1, ge=1)
 
 
