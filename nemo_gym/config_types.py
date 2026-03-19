@@ -390,6 +390,7 @@ class BenchmarkDatasetConfig(BaseModel):
     type: Literal["benchmark"]
     jsonl_fpath: str
     prepare_script: str
+    num_repeats: int = Field(default=1, ge=1)
 
 
 ########################################

@@ -16,34 +16,68 @@
 
 import importlib
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List
 
 import rich
 from omegaconf import OmegaConf
+from pydantic import BaseModel
 
 from nemo_gym import PARENT_DIR
-from nemo_gym.config_types import BaseNeMoGymCLIConfig
-from nemo_gym.global_config import GlobalConfigDictParserConfig, get_global_config_dict
+from nemo_gym.config_types import BaseNeMoGymCLIConfig, BenchmarkDatasetConfig
+from nemo_gym.global_config import (
+    GlobalConfigDictParser,
+    GlobalConfigDictParserConfig,
+    get_first_server_config_dict,
+    get_global_config_dict,
+)
 
 
 BENCHMARKS_DIR = PARENT_DIR / "benchmarks"
 
 
-class BenchmarkConfig:
-    """Represents a discovered benchmark's configuration."""
+class BenchmarkConfig(BaseModel):
+    name: str
+    path: Path
+    agent_name: str
+    num_repeats: str
+    dataset: BenchmarkDatasetConfig
 
-    def __init__(self, name: str, path: Path, config_dict: dict):
-        self.name = name
-        self.path = path
-        self.config_dict = config_dict
+    @classmethod
+    def from_initial_config_dict(self, name: str, path: Path, initial_config_dict: OmegaConf) -> "BenchmarkConfig":
+        initial_config_dict = OmegaConf.merge(
+            initial_config_dict, GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT
+        )
 
-    @property
-    def agent_name(self) -> Optional[str]:
-        return self.config_dict.get("agent_name")
+        parser = GlobalConfigDictParser()
+        global_config_dict = parser.parse_no_environment(initial_global_config_dict=initial_config_dict)
 
-    @property
-    def num_repeats(self) -> Optional[int]:
-        return self.config_dict.get("num_repeats")
+        datasets: List[BenchmarkDatasetConfig] = []
+        candidate_agent_server_instance_names: List[str] = []
+        for server_instance_name in global_config_dict:
+            server_config = global_config_dict[server_instance_name]
+            if "responses_api_agents" not in server_config:
+                continue
+
+            inner_server_config = get_first_server_config_dict(global_config_dict, server_instance_name)
+
+            for dataset in inner_server_config.get("datasets") or []:
+                if dataset["type"] != "benchmark":
+                    continue
+
+                datasets.append(BenchmarkDatasetConfig.model_validate(dataset))
+                candidate_agent_server_instance_names.append(server_instance_name)
+
+        assert len(datasets) == 1, f"Expected 1 benchmark dataset for {name}, but found {len(datasets)}!"
+
+        dataset = datasets[0]
+
+        return BenchmarkConfig(
+            name=name,
+            path=path,
+            agent_name=candidate_agent_server_instance_names[0],
+            num_repeats=dataset.num_repeats,
+            dataset=dataset,
+        )
 
 
 def discover_benchmarks() -> Dict[str, BenchmarkConfig]:
@@ -56,15 +90,15 @@ def discover_benchmarks() -> Dict[str, BenchmarkConfig]:
     for entry in sorted(BENCHMARKS_DIR.iterdir()):
         if not entry.is_dir():
             continue
+
         config_path = entry / "config.yaml"
         if not config_path.exists():
             continue
 
-        config_dict = OmegaConf.to_container(OmegaConf.load(config_path), resolve=True)
-        benchmarks[entry.name] = BenchmarkConfig(
+        benchmarks[entry.name] = BenchmarkConfig.from_initial_config_dict(
             name=entry.name,
             path=entry,
-            config_dict=config_dict,
+            initial_config_dict=OmegaConf.load(config_path),
         )
 
     return benchmarks
