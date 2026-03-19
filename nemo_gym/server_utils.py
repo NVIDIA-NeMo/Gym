@@ -159,6 +159,14 @@ async def request(
             return await client.request(method=method, url=url, **kwargs)
         except ServerDisconnectedError:
             backoff = min(2 ** (num_tries - 1), 30) + random.uniform(0, 1)
+            if not _internal:
+                print(
+                    f"ServerDisconnectedError (try {num_tries}/{MAX_NUM_TRIES}). "
+                    f"Sleeping {backoff:.1f}s and retrying...\n"
+                )
+                if num_tries >= MAX_NUM_TRIES:
+                    raise
+                num_tries += 1
             await asyncio.sleep(backoff)
         except Exception as e:
             if _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:

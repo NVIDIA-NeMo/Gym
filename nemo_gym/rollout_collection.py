@@ -53,7 +53,7 @@ from nemo_gym.server_utils import (
 class SharedRolloutCollectionConfig(BaseNeMoGymCLIConfig):
     output_jsonl_fpath: str = Field(description="The output data jsonl file path.")
     num_samples_in_parallel: Optional[int] = Field(
-        default=10,
+        default=None,
         description="Limit the number of concurrent samples running at once. Set to null/None for unlimited.",
     )
     responses_create_params: Dict[str, Any] = Field(
@@ -312,9 +312,9 @@ class RolloutCollectionHelper(BaseModel):
     def _load_from_cache(self, config: RolloutCollectionConfig) -> Tuple[List[Dict], List[Dict]]:
         """Load cache and return (remaining_input_rows, already_completed_rows).
 
-        Only extracts the lightweight index keys from each cached result line,
-        avoiding full deserialization of large result dicts (which can contain
-        entire CUA trajectories with screenshots).
+        Deserializes each cached result line to extract index keys (task_index,
+        rollout_index) for matching against the original input rows.  Full result
+        dicts are not retained — only the key set is kept in memory.
         """
         with config.materialized_jsonl_fpath.open() as f:
             original_input_rows = list(map(orjson.loads, f))
