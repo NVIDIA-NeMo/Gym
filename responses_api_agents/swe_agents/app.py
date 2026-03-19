@@ -13,6 +13,7 @@
 # limitations under the License.
 import asyncio
 import glob
+import importlib.util
 import json
 import os
 import random
@@ -593,6 +594,30 @@ cp /root/output.json /trajectories_mount/eval_results/output.json
         return required_tests <= passed_tests
 
 
+def _load_rebench_log_parsers(rebench_repo_dir: Path):
+    lp_path = rebench_repo_dir / "lib" / "agent" / "log_parsers.py"
+    if not lp_path.exists():
+        lp_path = rebench_repo_dir / "agent" / "log_parsers.py"
+
+    extra_paths = [str(rebench_repo_dir), str(rebench_repo_dir / "lib")]
+    added: list[str] = []
+    for p in extra_paths:
+        if p not in sys.path:
+            sys.path.insert(0, p)
+            added.append(p)
+    try:
+        spec = importlib.util.spec_from_file_location("_rebench_log_parsers", str(lp_path))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+    finally:
+        for p in added:
+            try:
+                sys.path.remove(p)
+            except ValueError:
+                pass
+
+
 class SWERebenchDatasetProcessor(BaseDatasetHarnessProcessor):
     def setup(self) -> Path:
         setup_dir = self.parent_dir / "swe_rebench_setup"
@@ -688,79 +713,17 @@ set +e
 {install_block}
 set -e
 
-# Run tests and capture output
+# Run tests and write output to bind-mounted path (parsed on host, no python3 needed)
+mkdir -p /trajectories_mount/eval_results
 set +e
 (
 {test_block}
-) > /root/test_output.log 2>&1
+) > /trajectories_mount/eval_results/test_output.log 2>&1
 TEST_EXIT=$?
 set -e
 
-# Parse results and write report using inline Python
-# NOTE: fail_to_pass.json and pass_to_pass.json are pre-normalized on the host
-# side (via _normalize_test_name), so only parsed test output needs normalizing.
-python3 -c '
-import sys, json, os, re
-sys.path.insert(0, "/swe_rebench_setup/SWE-rebench-V2")
-sys.path.insert(0, "/swe_rebench_setup/SWE-rebench-V2/lib")
-from agent import log_parsers
-
-TIMING_RES = [
-    re.compile(r"\\s*\\[\\s*\\d+(?:\\.\\d+)?\\s*(?:ms|s)\\s*\\]\\s*$", re.IGNORECASE),
-    re.compile(r"\\s+in\\s+\\d+(?:\\.\\d+)?\\s+(?:msec|sec)\\b", re.IGNORECASE),
-    re.compile(r"\\s*\\(\\s*\\d+(?:\\.\\d+)?\\s*(?:ms|s)\\s*\\)\\s*$", re.IGNORECASE),
-]
-
-def normalize(name):
-    for p in TIMING_RES:
-        name = p.sub("", name)
-    return name.strip()
-
-log_parser_name = {json.dumps(log_parser_name)}
-parser = log_parsers.NAME_TO_PARSER.get(log_parser_name) or getattr(log_parsers, log_parser_name, None)
-if parser is None:
-    print(f"Unknown log parser: {{log_parser_name}}", file=sys.stderr)
-    sys.exit(1)
-
-with open("/root/test_output.log") as f:
-    output = f.read()
-
-parsed = parser(output)
-parsed = {{normalize(k): v for k, v in parsed.items()}}
-passed = sorted(k for k, v in parsed.items() if v == "PASSED")
-
-with open("/eval_meta/expected_passed.json") as f:
-    expected_passed = json.load(f)
-with open("/eval_meta/fail_to_pass.json") as f:
-    fail_to_pass = json.load(f)
-with open("/eval_meta/pass_to_pass.json") as f:
-    pass_to_pass = json.load(f)
-
-# fail_to_pass and pass_to_pass are already normalized; only compare.
-passed_set = set(passed)
-fail_to_pass_set = set(fail_to_pass)
-pass_to_pass_set = set(pass_to_pass)
-
-from_fail_to_pass = sorted(passed_set & fail_to_pass_set)
-failed_from_pass_to_pass = sorted(pass_to_pass_set - passed_set)
-resolved = (fail_to_pass_set <= passed_set) and (pass_to_pass_set <= passed_set)
-
-instance_id = {json.dumps(self.config.instance_id)}
-report = {{
-    instance_id: {{
-        "resolved": resolved,
-        "patch_exists": True,
-        "patch_successfully_applied": True,
-        "from_fail_to_pass": from_fail_to_pass,
-        "failed_from_pass_to_pass": failed_from_pass_to_pass,
-        "passed_match": passed == expected_passed,
-    }}
-}}
-
-os.makedirs("/trajectories_mount/eval_results", exist_ok=True)
-with open("/trajectories_mount/eval_results/report.json", "w") as f:
-    json.dump(report, f, indent=2)
-'
+printf '{{"_test_completed": true, "exit_code": %d}}\\n' $TEST_EXIT \
+  > /trajectories_mount/eval_results/report.json
 """
 
         search_path = os.path.join(
@@ -775,6 +738,68 @@ with open("/trajectories_mount/eval_results/report.json", "w") as f:
             mode="eval",
             timeout=self.config.swebench_tests_timeout,
         )
+
+    def postprocess_after_run(self, report_file: Path) -> None:
+        """Parse test output on the host (avoids needing python3 inside the container)."""
+        report_path = Path(report_file)
+        test_output_path = report_path.parent / "test_output.log"
+
+        instance_id = self.config.instance_id
+        instance_dict = json.loads(self.config.problem_info["instance_dict"])
+        install_config = instance_dict.get("install_config", {})
+        log_parser_name = install_config.get("log_parser", "")
+
+        if not test_output_path.exists():
+            report = {instance_id: {
+                "resolved": False,
+                "patch_exists": True,
+                "patch_successfully_applied": False,
+                "error": "No test output produced inside container",
+            }}
+            report_path.write_text(json.dumps(report, indent=2))
+            return
+
+        setup_dir = self.parent_dir / "swe_rebench_setup"
+        log_parsers = _load_rebench_log_parsers(setup_dir / "SWE-rebench-V2")
+
+        parser = log_parsers.NAME_TO_PARSER.get(log_parser_name) or getattr(log_parsers, log_parser_name, None)
+        if parser is None:
+            report = {instance_id: {
+                "resolved": False,
+                "patch_exists": True,
+                "patch_successfully_applied": True,
+                "error": f"Unknown log parser: {log_parser_name}",
+            }}
+            report_path.write_text(json.dumps(report, indent=2))
+            return
+
+        test_output = test_output_path.read_text()
+        results = parser(test_output)
+        results = {self._normalize_test_name(k): v for k, v in results.items()}
+        passed = sorted(k for k, v in results.items() if v == "PASSED")
+
+        eval_meta_dir = self.config.persistent_dir / "eval_meta"
+        expected_passed = json.loads((eval_meta_dir / "expected_passed.json").read_text())
+        norm_f2p = json.loads((eval_meta_dir / "fail_to_pass.json").read_text())
+        norm_p2p = json.loads((eval_meta_dir / "pass_to_pass.json").read_text())
+
+        passed_set = set(passed)
+        fail_to_pass_set = set(norm_f2p)
+        pass_to_pass_set = set(norm_p2p)
+
+        from_fail_to_pass = sorted(passed_set & fail_to_pass_set)
+        failed_from_pass_to_pass = sorted(pass_to_pass_set - passed_set)
+        resolved = (fail_to_pass_set <= passed_set) and (pass_to_pass_set <= passed_set)
+
+        report = {instance_id: {
+            "resolved": resolved,
+            "patch_exists": True,
+            "patch_successfully_applied": True,
+            "from_fail_to_pass": from_fail_to_pass,
+            "failed_from_pass_to_pass": failed_from_pass_to_pass,
+            "passed_match": passed == expected_passed,
+        }}
+        report_path.write_text(json.dumps(report, indent=2))
 
 
 class OpenHandsHarnessProcessor(BaseDatasetHarnessProcessor):
