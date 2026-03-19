@@ -17,7 +17,7 @@
 import importlib
 from pathlib import Path
 from types import ModuleType
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import rich
 from omegaconf import DictConfig, OmegaConf
@@ -45,11 +45,11 @@ class BenchmarkConfig(BaseModel):
     dataset: BenchmarkDatasetConfig
 
     @classmethod
-    def from_config_path(cls, config_path: Path) -> "BenchmarkConfig":
+    def from_config_path(cls, config_path: Path) -> "Optional[BenchmarkConfig]":
         return cls.from_initial_config_dict(path=config_path, initial_config_dict=OmegaConf.load(config_path))
 
     @classmethod
-    def from_initial_config_dict(cls, path: Path, initial_config_dict: DictConfig) -> "BenchmarkConfig":
+    def from_initial_config_dict(cls, path: Path, initial_config_dict: DictConfig) -> "Optional[BenchmarkConfig]":
         initial_config_dict = OmegaConf.merge(
             initial_config_dict, GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT
         )
@@ -73,6 +73,9 @@ class BenchmarkConfig(BaseModel):
                 datasets.append(BenchmarkDatasetConfig.model_validate(dataset))
                 candidate_agent_server_instance_names.append(server_instance_name)
 
+        if len(datasets) < 1:
+            return
+
         assert len(datasets) == 1, f"Expected 1 benchmark dataset for config {path}, but found {len(datasets)}!"
 
         dataset = datasets[0]
@@ -91,8 +94,11 @@ def _load_benchmarks_from_config_paths(config_paths: List[Path]) -> Dict[str, Be
     for config_path in config_paths:
         config_path = Path(config_path)
 
-        bc = BenchmarkConfig.from_config_path(config_path)
-        benchmarks_dict[bc.name] = bc
+        maybe_bc = BenchmarkConfig.from_config_path(config_path)
+        if not maybe_bc:
+            continue
+
+        benchmarks_dict[maybe_bc.name] = maybe_bc
 
     return benchmarks_dict
 
@@ -211,8 +217,8 @@ def prepare_benchmark() -> None:
     # Prepare after all validations pass
     for benchmark_config, module in validated:
         print(f"Preparing benchmark: {benchmark_config.name}")
-        output_fpath = module.prepare()
-        assert str(output_fpath) == str(benchmark_config.dataset.jsonl_fpath), (
+        output_fpath: Path = module.prepare()
+        assert output_fpath.absolute() == benchmark_config.dataset.jsonl_fpath.absolute(), (
             f"Expected the actual prepared dataset output fpath to match the jsonl_fpath set in the config. Instead got {output_fpath=} jsonl_fpath={benchmark_config.dataset.jsonl_fpath}"
         )
         print(f"Benchmark data prepared at: {output_fpath}")
