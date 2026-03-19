@@ -15,12 +15,11 @@ gpqa_mcqa_simple_agent:
   responses_api_agents:
     simple_agent:
       resources_server:
-        name: aime24_math_with_judge_resources_server
+        name: gpqa_mcqa_resources_server
       datasets:
-      - name: validation
-        type: validation
+      - name: gpqa
+        type: benchmark
         jsonl_fpath: benchmarks/gpqa/data/gpqa_diamond_validation.jsonl
         prompt_config: benchmarks/gpqa/prompts/default.yaml
         prepare_script: benchmarks/gpqa/prepare.py
         num_repeats: 8
-        license: TBD

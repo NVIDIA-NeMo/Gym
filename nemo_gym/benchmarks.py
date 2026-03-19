@@ -20,7 +20,7 @@ from types import ModuleType
 from typing import Dict, List, Tuple
 
 import rich
-from omegaconf import OmegaConf
+from omegaconf import DictConfig, OmegaConf
 from pydantic import BaseModel
 
 from nemo_gym import PARENT_DIR
@@ -40,7 +40,7 @@ class BenchmarkConfig(BaseModel):
     name: str
     path: Path
     agent_name: str
-    num_repeats: str
+    num_repeats: int
     dataset: BenchmarkDatasetConfig
 
     @classmethod
@@ -48,7 +48,7 @@ class BenchmarkConfig(BaseModel):
         return cls.from_initial_config_dict(path=config_path, initial_config_dict=OmegaConf.load(config_path))
 
     @classmethod
-    def from_initial_config_dict(cls, path: Path, initial_config_dict: OmegaConf) -> "BenchmarkConfig":
+    def from_initial_config_dict(cls, path: Path, initial_config_dict: DictConfig) -> "BenchmarkConfig":
         initial_config_dict = OmegaConf.merge(
             initial_config_dict, GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT
         )
@@ -60,7 +60,7 @@ class BenchmarkConfig(BaseModel):
         candidate_agent_server_instance_names: List[str] = []
         for server_instance_name in global_config_dict:
             server_config = global_config_dict[server_instance_name]
-            if "responses_api_agents" not in server_config:
+            if not isinstance(server_config, (dict, DictConfig)) or "responses_api_agents" not in server_config:
                 continue
 
             inner_server_config = get_first_server_config_dict(global_config_dict, server_instance_name)

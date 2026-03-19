@@ -440,7 +440,7 @@ class BaseRunServerTypeConfig(BaseRunServerConfig):
     host: Optional[str] = None
     port: Optional[int] = None
 
-    datasets: Optional[List[DatasetConfig]] = None
+    datasets: Optional[List[Union[DatasetConfig, BenchmarkDatasetConfig]]] = None
 
 
 class BaseServerTypeConfig(BaseModel):

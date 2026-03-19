@@ -10,12 +10,11 @@ aime25_math_with_judge_simple_agent:
   responses_api_agents:
     simple_agent:
       resources_server:
-        name: aime24_math_with_judge_resources_server
+        name: aime25_math_with_judge_resources_server
       datasets:
-      - name: validation
-        type: validation
+      - name: aime25
+        type: benchmark
         jsonl_fpath: benchmarks/aime25/data/aime25_validation.jsonl
         prompt_config: benchmarks/aime25/prompts/default.yaml
         prepare_script: benchmarks/aime25/prepare.py
         num_repeats: 32
-        license: TBD
