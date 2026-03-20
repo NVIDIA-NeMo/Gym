@@ -1,6 +1,5 @@
-/* Environment cards filter page styles */
+/* filter bar */
 
-/* ── Filter bar ─────────────────────────────────────────────────── */
 .env-filter-bar {
   display: flex;
   flex-wrap: wrap;
@@ -62,7 +61,8 @@
   margin: 0.25rem 0 1rem;
 }
 
-/* ── Card grid ──────────────────────────────────────────────────── */
+/* card grid */
+
 .env-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
@@ -102,7 +102,8 @@
   line-height: 1.3;
 }
 
-/* ── Domain badge ───────────────────────────────────────────────── */
+/* domain badge */
+
 .env-badge {
   display: inline-block;
   padding: 0.1rem 0.5rem;
@@ -125,7 +126,8 @@
 .env-badge-other           { background: #f3f4f6; color: #374151; }
 .env-badge-games           { background: #fef9c3; color: #854d0e; }
 
-/* dark-mode overrides */
+/* dark mode */
+
 @media (prefers-color-scheme: dark) {
   .env-badge-math            { background: #1e3a5f; color: #93c5fd; }
   .env-badge-coding          { background: #14532d; color: #86efac; }
@@ -138,7 +140,8 @@
   .env-badge-games           { background: #422006; color: #fde68a; }
 }
 
-/* ── Card body ──────────────────────────────────────────────────── */
+/* card body */
+
 .env-card-desc {
   font-size: 0.82rem;
   opacity: 0.8;
@@ -147,7 +150,8 @@
   flex: 1;
 }
 
-/* ── Card footer ────────────────────────────────────────────────── */
+/* card footer */
+
 .env-card-footer {
   display: flex;
   flex-wrap: wrap;
@@ -167,15 +171,8 @@
   letter-spacing: 0.04em;
 }
 
-.env-avail.yes {
-  background: #dcfce7;
-  color: #166534;
-}
-
-.env-avail.no {
-  background: #f3f4f6;
-  color: #9ca3af;
-}
+.env-avail.yes { background: #dcfce7; color: #166534; }
+.env-avail.no  { background: #f3f4f6; color: #9ca3af; }
 
 @media (prefers-color-scheme: dark) {
   .env-avail.yes { background: #14532d; color: #86efac; }
@@ -191,7 +188,8 @@
   font-size: 0.72rem;
 }
 
-/* ── Example cards (no filter bar, simpler) ─────────────────────── */
+/* example cards */
+
 .env-grid-examples {
   grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
 }

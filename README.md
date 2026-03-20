@@ -128,13 +128,15 @@ Now that you can generate rollouts, choose your path:
 
 ## 📦 Available Environments
 
-NeMo Gym includes environments across math, coding, agent, knowledge, safety, and more domains. See the full list in the **[Environments Reference](https://docs.nvidia.com/nemo/gym/latest/environments/index.html)** docs, or run:
+NeMo Gym includes environments across math, coding, agent, knowledge, safety, and more domains.
+
+**[Browse the full list →](https://docs.nvidia.com/nemo/gym/latest/environments/index.html)**
+
+Or from the terminal:
 
 ```bash
 ng_list_envs
 ```
-
-<!-- removed tables - maintained in docs/environments/index.md -->
 
 ## 📖 Documentation & Resources
 
