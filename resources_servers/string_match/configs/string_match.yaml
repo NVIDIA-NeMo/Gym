@@ -2,7 +2,7 @@ string_match:
   resources_servers:
     string_match:
       entrypoint: app.py
-      domain: general
+      domain: knowledge
       verified: false
       description: General-purpose string matching verifier for free-form text answers
       value: Verify answers via case-insensitive string matching with multiple extraction strategies
