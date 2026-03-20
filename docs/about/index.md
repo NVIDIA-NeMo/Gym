@@ -7,37 +7,26 @@ orphan: true
 
 ## Motivation
 
-The agentic AI era has increased both the demand for RL training and the complexity of training environments:
+Building and scaling RL training environments for LLMs presents several key challenges:
 
-- More complex target model capabilities
-- More complex training patterns (e.g., multi-turn tool calling)
-- More complex orchestration between models and tools
-- More complex integrations with external systems
-- More complex integrations between environments and training frameworks
-- Scaling to high-throughput, concurrent rollout collection
-
-Embedding custom training environments directly within training frameworks is complex and often conflicts with the training loop design.
+- **Decoupling environments from training**: Many RL workflows tightly couple environment logic with the training pipeline, making it difficult to integrate complex agent loops, iterate on environment design, and run controlled ablations.
+- **Representing agentic trajectories consistently**: The community widely uses Chat Completions today, but it was designed for stateless, single-turn interactions. Agentic rollouts include interleaved reasoning, tool calls, and text across multiple turns. Without a schema that natively represents this, custom parsing and serialization is required for every environment.
+- **Managing resources**: Environments often depend on external resources such as sandboxed execution, databases, and APIs. Each rollout needs isolated instances that must be reliably initialized and cleaned up.
+- **Scaling rollout collection**: Training may require thousands of parallel rollouts. Environment instances must scale accordingly with distribution, load balancing, and fault tolerance.
 
 ## NeMo Gym
 
-[NeMo Gym](https://github.com/NVIDIA-NeMo/Gym) decouples environment development from training, letting you build and iterate on environments independently. It provides the infrastructure to develop agentic training environments and scale rollout collection, enabling seamless integration with your preferred training framework.
+[NeMo Gym](https://github.com/NVIDIA-NeMo/Gym) is an open-source library that provides infrastructure to build RL environments and scale rollout collection, enabling seamless integration with your preferred training framework.
 
-- Scaffolding and patterns to accelerate environment development: multi-step, multi-turn, and user modeling scenarios
-- Contribute environments without expert knowledge of the entire RL training loop
-- Test environments and throughput end-to-end, independent of the RL training loop
-- Interoperable with existing environments, systems, and RL training frameworks
-- Growing collection of training environments and datasets for Reinforcement Learning from Verifiable Reward (RLVR)
+NeMo Gym was designed to address these challenges and accelerate environment development:
 
-NeMo Gym achieves this through a modular, server-based architecture.
+- **Decoupled architecture**: Environment development is fully separated from training, so teams can build, test, and iterate on environments independently of the RL training loop. Interoperable with existing environments, systems, and RL training frameworks.
+- **Environment scaffolding**: Patterns and infrastructure to accelerate environment development for multi-step, multi-turn, and user modeling scenarios.
+- **Standardized trajectories**: NeMo Gym uses the OpenAI Responses API as its native format, providing a schema that natively represents multi-turn, tool-calling agentic rollouts without custom serialization.
+- **Managed resource lifecycles**: Resources servers handle initialization, isolation, and cleanup of external dependencies (sandboxes, APIs, databases) per rollout.
+- **Scalable rollout collection**: Infrastructure for distributing thousands of parallel rollouts with load balancing and fault tolerance.
+- **Growing environment hub**: NVIDIA and community-contributed environments and datasets for training and evaluation.
 
 :::{tip}
 The name "NeMo Gym" comes from historical reinforcement learning literature, where the word "Gym" refers to a collection of RL training environments!
 :::
-
-## Core Components
-
-A training environment in NeMo Gym consists of three server components:
-
-- **Agents**: Orchestrate the rollout lifecycle—calling models, executing tool calls via resources, and coordinating verification.
-- **Models**: Stateless text generation using LLM inference endpoints (OpenAI-compatible or vLLM).
-- **Resources**: Define tasks, tool implementations, and verification logic. Provide what agents need to run and score rollouts.

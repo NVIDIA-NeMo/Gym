@@ -6,7 +6,7 @@ In the previous tutorial, you set up NeMo Gym and ran your first agent interacti
 
 :::{card}
 
-**Goal**: Generate your first batch of rollouts and understand how they become training data.
+**Goal**: Generate and view your first batch of rollouts.
 
 **Time**: ~10 minutes | **Cost**: ~$0.05 (OpenAI API)
 
@@ -14,9 +14,9 @@ In the previous tutorial, you set up NeMo Gym and ran your first agent interacti
 
 **In this tutorial, you will**:
 
-1. Run batch rollout collection
-2. Examine results with the rollout viewer
-3. Learn key parameters for scaling
+1. Inspect your input data
+2. Run batch rollout collection
+3. Examine the collected rollouts
 
 :::
 
@@ -45,7 +45,7 @@ Make sure you have:
 
 ## 1. Inspect the Data
 
-Look at the example dataset included with the Simple Weather resource server:
+Look at the example dataset included with the Example Single Tool Call resources server:
 
 ```bash
 head -1 resources_servers/example_single_tool_call/data/example.jsonl | python -m json.tool
@@ -108,7 +108,26 @@ ng_collect_rollouts +agent_name=example_single_tool_call_simple_agent \
 * - `+num_samples_in_parallel`
   - `int`
   - Concurrent requests (default: `null` = unlimited)
+* - `+responses_create_params`
+  - `dict`
+  - Sampling parameter overrides (default: `null` = no overrides)
 ```
+
+
+:::{tip}
+Today's LLM endpoints are not fully deterministic, which means that running the same request multiple times will yield different results every time. However, you can improve the reproducibility of your rollouts by setting the `temperature` parameter to `0.0`. For example:
+```bash
+ng_collect_rollouts +agent_name=example_single_tool_call_simple_agent \
+    +input_jsonl_fpath=resources_servers/example_single_tool_call/data/example.jsonl \
+    +output_jsonl_fpath=results/example_single_tool_call_rollouts.jsonl \
+    +responses_create_params.temperature=0.0
+```
+
+However, using `temperature=0.0` may result in degraded performance in certain use case scenarios. If temperature is not set, the default temperature for that model endpoint will typically be used, which has been tuned to fit the average use case scenario.
+
+Using `temperature=0.0` will still not guarantee the same result when running the same request multiple times, but it will reduce the output variance considerably.
+:::
+
 
 **✅ Success Check**: You should see:
 
@@ -118,39 +137,15 @@ Collecting rollouts: 100%|████████████████| 10/1
 
 ## 4. View Rollouts
 
-Launch the rollout viewer:
-
 ```bash
-ng_viewer +jsonl_fpath=results/example_single_tool_call_rollouts.jsonl
+cat results/example_single_tool_call_rollouts.jsonl
 ```
 
-The viewer starts on port 7860 and accepts requests only from localhost by default. Visit <http://127.0.0.1:7860> in your browser.
-
-:::{tip}
-**Configuring Network Access**
-
-By default, the viewer accepts requests only from localhost (`server_host=127.0.0.1`). To make it accessible from a different machine:
-
-```bash
-# Accept requests from anywhere (e.g., for remote access)
-ng_viewer +jsonl_fpath=results/example_single_tool_call_rollouts.jsonl +server_host=0.0.0.0
-
-# Use a custom port
-ng_viewer +jsonl_fpath=results/example_single_tool_call_rollouts.jsonl +server_port=8080
-```
-:::
-
-The viewer shows each rollout with:
+Each rollout row should contain:
 
 - **Input**: The original query and tools
 - **Response**: Tool calls and agent output
 - **Reward**: Verification score (0.0–1.0)
-
-:::{important}
-**Where Do Reward Scores Come From?**
-
-Scores come from the `verify()` function in your resource server. Each rollout is automatically sent to the `/verify` endpoint during collection. The default returns 1.0, but you can implement custom logic to score based on tool usage, response quality, or task completion.
-:::
 
 ---
 
@@ -215,7 +210,7 @@ Explore environments available for training and evaluation.
 :::
 
 :::{grid-item-card} {octicon}`tools;1.5em;sd-mr-1` Build a Custom Environment
-:link: ../environment-tutorials/creating-training-environment
+:link: ../environment-tutorials/index
 :link-type: doc
 
 Implement or integrate existing tools and define task verification logic.

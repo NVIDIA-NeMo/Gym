@@ -12,18 +12,23 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import sys
 from contextlib import nullcontext as does_not_raise
+from pathlib import Path
 from socket import gethostbyname, gethostname
-from typing import Dict
 from unittest.mock import MagicMock
 
+from omegaconf import OmegaConf
 from pytest import MonkeyPatch, raises
 
 import nemo_gym.global_config
 import nemo_gym.server_utils
+from nemo_gym import CACHE_DIR, PARENT_DIR
 from nemo_gym.global_config import (
     DEFAULT_HEAD_SERVER_PORT,
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
+    GlobalConfigDictParser,
+    GlobalConfigDictParserConfig,
     find_open_port,
     get_first_server_config_dict,
     get_global_config_dict,
@@ -33,22 +38,32 @@ from nemo_gym.server_utils import (
 )
 
 
-class TestServerUtils:
-    def _mock_versions_for_testing(self, monkeypatch: MonkeyPatch) -> Dict[str, str]:
+class TestGlobalConfig:
+    def _mock_versions_for_testing(self, monkeypatch: MonkeyPatch) -> None:
         monkeypatch.setattr(nemo_gym.global_config, "openai_version", "test openai version")
         monkeypatch.setattr(nemo_gym.global_config, "ray_version", "test ray version")
 
         python_version_mock = MagicMock(return_value="test python version")
         monkeypatch.setattr(nemo_gym.global_config, "python_version", python_version_mock)
 
+    @property
+    def _default_global_config_dict_values(self) -> dict:
         return {
+            "head_server": {"host": "127.0.0.1", "port": 11000},
+            "disallowed_ports": [11000],
+            "port_range_low": 10_001,
+            "port_range_high": 20_000,
+            # From self._mock_versions_for_testing
             "head_server_deps": ["ray[default]==test ray version", "openai==test openai version"],
             "python_version": "test python version",
             "skip_venv_if_present": False,
+            "dry_run": False,
+            "uv_cache_dir": str(CACHE_DIR / "uv"),
+            "uv_venv_dir": str(PARENT_DIR),
         }
 
     def test_get_global_config_dict_sanity(self, monkeypatch: MonkeyPatch) -> None:
-        mock_versions_for_testing = self._mock_versions_for_testing(monkeypatch)
+        self._mock_versions_for_testing(monkeypatch)
 
         # Clear any lingering env vars.
         monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
@@ -71,13 +86,7 @@ class TestServerUtils:
         monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
 
         global_config_dict = get_global_config_dict()
-        assert {
-            "head_server": {"host": "127.0.0.1", "port": 11000},
-            "disallowed_ports": [11000],
-            "port_range_low": 10_001,
-            "port_range_high": 20_000,
-            **mock_versions_for_testing,
-        } == global_config_dict
+        assert self._default_global_config_dict_values == global_config_dict
 
     def test_get_global_config_dict_global_exists(self, monkeypatch: MonkeyPatch) -> None:
         # Clear any lingering env vars.
@@ -95,7 +104,7 @@ class TestServerUtils:
         assert {"a": 2} == global_config_dict
 
     def test_get_global_config_dict_config_paths_sanity(self, monkeypatch: MonkeyPatch) -> None:
-        mock_versions_for_testing = self._mock_versions_for_testing(monkeypatch)
+        self._mock_versions_for_testing(monkeypatch)
 
         # Clear any lingering env vars.
         monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
@@ -125,18 +134,17 @@ class TestServerUtils:
         monkeypatch.setattr(nemo_gym.server_utils.OmegaConf, "load", omegaconf_load_mock)
 
         global_config_dict = get_global_config_dict()
-        assert {
-            "config_paths": ["/var", "var"],
-            "extra_dot_env_key": 2,
-            "head_server": {"host": "127.0.0.1", "port": 11000},
-            "disallowed_ports": [11000],
-            "port_range_low": 10_001,
-            "port_range_high": 20_000,
-            **mock_versions_for_testing,
-        } == global_config_dict
+        assert (
+            self._default_global_config_dict_values
+            | {
+                "config_paths": ["/var", "var"],
+                "extra_dot_env_key": 2,
+            }
+            == global_config_dict
+        )
 
     def test_get_global_config_dict_config_paths_recursive(self, monkeypatch: MonkeyPatch) -> None:
-        mock_versions_for_testing = self._mock_versions_for_testing(monkeypatch)
+        self._mock_versions_for_testing(monkeypatch)
 
         # Clear any lingering env vars.
         monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
@@ -175,24 +183,23 @@ class TestServerUtils:
         monkeypatch.setattr(nemo_gym.server_utils.OmegaConf, "load", omegaconf_load_mock)
 
         global_config_dict = get_global_config_dict()
-        assert {
-            "config_paths": [
-                "/var",
-                "var",
-                "recursive_config_path_parent",
-                "recursive_config_path_child",
-            ],
-            "extra_dot_env_key": 2,
-            "recursive_config_path_child_key": 3,
-            "head_server": {"host": "127.0.0.1", "port": 11000},
-            "disallowed_ports": [11000],
-            "port_range_low": 10_001,
-            "port_range_high": 20_000,
-            **mock_versions_for_testing,
-        } == global_config_dict
+        assert (
+            self._default_global_config_dict_values
+            | {
+                "config_paths": [
+                    "/var",
+                    "var",
+                    "recursive_config_path_parent",
+                    "recursive_config_path_child",
+                ],
+                "extra_dot_env_key": 2,
+                "recursive_config_path_child_key": 3,
+            }
+            == global_config_dict
+        )
 
     def test_get_global_config_dict_server_host_port_defaults(self, monkeypatch: MonkeyPatch) -> None:
-        mock_versions_for_testing = self._mock_versions_for_testing(monkeypatch)
+        self._mock_versions_for_testing(monkeypatch)
 
         # Clear any lingering env vars.
         monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
@@ -226,19 +233,19 @@ class TestServerUtils:
         monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
 
         global_config_dict = get_global_config_dict()
-        assert {
-            "a": {"responses_api_models": {"c": {"entrypoint": "app.py", "host": "127.0.0.1", "port": 12345}}},
-            "b": {"c": {"d": {}}},
-            "c": 2,
-            "head_server": {"host": "127.0.0.1", "port": 11000},
-            "disallowed_ports": [11000, 12345],
-            "port_range_low": 10_001,
-            "port_range_high": 20_000,
-            **mock_versions_for_testing,
-        } == global_config_dict
+        assert (
+            self._default_global_config_dict_values
+            | {
+                "a": {"responses_api_models": {"c": {"entrypoint": "app.py", "host": "127.0.0.1", "port": 12345}}},
+                "b": {"c": {"d": {}}},
+                "c": 2,
+                "disallowed_ports": [11000, 12345],
+            }
+            == global_config_dict
+        )
 
     def test_get_global_config_dict_server_refs_sanity(self, monkeypatch: MonkeyPatch) -> None:
-        mock_versions_for_testing = self._mock_versions_for_testing(monkeypatch)
+        self._mock_versions_for_testing(monkeypatch)
 
         # Clear any lingering env vars.
         monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
@@ -289,37 +296,37 @@ class TestServerUtils:
         monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
 
         global_config_dict = get_global_config_dict()
-        assert {
-            "agent_name": {
-                "responses_api_agents": {
-                    "agent_type": {
-                        "entrypoint": "app.py",
-                        "d": {
-                            "type": "resources_servers",
-                            "name": "resources_name",
-                        },
-                        "e": 2,
-                        "host": "127.0.0.1",
-                        "port": 12345,
+        assert (
+            self._default_global_config_dict_values
+            | {
+                "agent_name": {
+                    "responses_api_agents": {
+                        "agent_type": {
+                            "entrypoint": "app.py",
+                            "d": {
+                                "type": "resources_servers",
+                                "name": "resources_name",
+                            },
+                            "e": 2,
+                            "host": "127.0.0.1",
+                            "port": 12345,
+                        }
                     }
-                }
-            },
-            "resources_name": {
-                "resources_servers": {
-                    "c": {
-                        "entrypoint": "app.py",
-                        "host": "127.0.0.1",
-                        "port": 123456,
-                        "domain": "other",
+                },
+                "resources_name": {
+                    "resources_servers": {
+                        "c": {
+                            "entrypoint": "app.py",
+                            "host": "127.0.0.1",
+                            "port": 123456,
+                            "domain": "other",
+                        }
                     }
-                }
-            },
-            "head_server": {"host": "127.0.0.1", "port": 11000},
-            "disallowed_ports": [11000, 12345, 123456],
-            "port_range_low": 10_001,
-            "port_range_high": 20_000,
-            **mock_versions_for_testing,
-        } == global_config_dict
+                },
+                "disallowed_ports": [11000, 12345, 123456],
+            }
+            == global_config_dict
+        )
 
     def test_get_global_config_dict_server_refs_errors_on_missing(self, monkeypatch: MonkeyPatch) -> None:
         # Clear any lingering env vars.
@@ -661,3 +668,187 @@ class TestServerUtils:
 
         assert global_config_dict["head_server"]["host"] == expected_ip
         assert global_config_dict["test_resource"]["responses_api_models"]["test_model"]["host"] == expected_ip
+
+    def test_recursively_hide_secrets(self) -> None:
+        dict_config = DictConfig(
+            {
+                "dict": {
+                    "key": "key",
+                    "not": "not",
+                },
+                "list": [
+                    {"key": "key", "not": "not"},
+                ],
+                "key": "key",
+                "not": "not",
+            }
+        )
+        GlobalConfigDictParser()._recursively_hide_secrets(dict_config)
+        assert OmegaConf.to_container(dict_config) == {
+            "dict": {"key": "****", "not": "not"},
+            "list": [{"key": "****", "not": "not"}],
+            "key": "****",
+            "not": "not",
+        }
+
+    def test_recursively_replace_keys(self, monkeypatch: MonkeyPatch) -> None:
+        self._mock_versions_for_testing(monkeypatch)
+
+        monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
+        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+
+        exists_mock = MagicMock()
+        exists_mock.return_value = False
+        monkeypatch.setattr(nemo_gym.global_config.Path, "exists", exists_mock)
+
+        find_open_port_mock = MagicMock()
+        find_open_port_mock.return_value = 12345
+        monkeypatch.setattr(nemo_gym.global_config, "_find_open_port_using_range", find_open_port_mock)
+
+        hydra_main_mock = MagicMock()
+
+        def hydra_main_wrapper(fn):
+            config_dict = DictConfig(
+                {
+                    "policy_model": "${inherit_from:test_resource}",
+                    "test_resource": {"responses_api_models": {"test_model": {"entrypoint": "app.py"}}},
+                    "policy_model_2": {
+                        "_inherit_from": "test_resource_2",
+                        "responses_api_models": {"test_model": {"entrypoint": "app2.py"}},
+                    },
+                    "test_resource_2": {"responses_api_models": {"test_model": {"entrypoint": "app.py"}}},
+                    "a": {"b": {"c": 3}},
+                    "a_prime": {"b_prime": "${inherit_from:a.b.c}"},
+                }
+            )
+            return lambda: fn(config_dict)
+
+        hydra_main_mock.return_value = hydra_main_wrapper
+        monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
+
+        actual_global_config_dict = OmegaConf.to_container(get_global_config_dict())
+        expected_global_config_dict = self._default_global_config_dict_values | {
+            "policy_model": {
+                "responses_api_models": {"test_model": {"entrypoint": "app.py", "host": "127.0.0.1", "port": 12345}}
+            },
+            "policy_model_2": {
+                "responses_api_models": {"test_model": {"entrypoint": "app2.py", "host": "127.0.0.1", "port": 12345}}
+            },
+            "disallowed_ports": [11000, 12345, 12345],
+            "a": {"b": {}},
+            "a_prime": {"b_prime": 3},
+        }
+
+        assert expected_global_config_dict == actual_global_config_dict
+
+    def test_recursively_replace_keys_multiple_ref_one(self, monkeypatch: MonkeyPatch) -> None:
+        self._mock_versions_for_testing(monkeypatch)
+
+        monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
+        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+
+        exists_mock = MagicMock()
+        exists_mock.return_value = False
+        monkeypatch.setattr(nemo_gym.global_config.Path, "exists", exists_mock)
+
+        find_open_port_mock = MagicMock()
+        find_open_port_mock.return_value = 12345
+        monkeypatch.setattr(nemo_gym.global_config, "_find_open_port_using_range", find_open_port_mock)
+
+        hydra_main_mock = MagicMock()
+
+        def hydra_main_wrapper(fn):
+            config_dict = DictConfig(
+                {
+                    "policy_model": "${inherit_from:test_resource}",
+                    "test_resource": {"responses_api_models": {"test_model": {"entrypoint": "app.py"}}},
+                    "policy_model_2": {
+                        "_inherit_from": "test_resource",
+                        "responses_api_models": {"test_model": {"entrypoint": "app2.py"}},
+                    },
+                    "a": {"b": {"c": 3}},
+                    "a_prime": {"b_prime": "${inherit_from:a.b.c}"},
+                }
+            )
+            return lambda: fn(config_dict)
+
+        hydra_main_mock.return_value = hydra_main_wrapper
+        monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
+
+        actual_global_config_dict = OmegaConf.to_container(get_global_config_dict())
+        expected_global_config_dict = self._default_global_config_dict_values | {
+            "policy_model": {
+                "responses_api_models": {"test_model": {"entrypoint": "app.py", "host": "127.0.0.1", "port": 12345}}
+            },
+            "policy_model_2": {
+                "responses_api_models": {"test_model": {"entrypoint": "app2.py", "host": "127.0.0.1", "port": 12345}}
+            },
+            "disallowed_ports": [11000, 12345, 12345],
+            "a": {"b": {}},
+            "a_prime": {"b_prime": 3},
+        }
+
+        assert expected_global_config_dict == actual_global_config_dict
+
+    def test_load_extra_config_paths_prefers_cwd(self, monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
+        parser = GlobalConfigDictParser()
+
+        (tmp_path / "my_config.yaml").write_text("my_key: from_cwd\n")
+        monkeypatch.chdir(tmp_path)
+
+        config_paths, extra_configs = parser.load_extra_config_paths(["my_config.yaml"])
+        assert extra_configs[0]["my_key"] == "from_cwd"
+
+    def test_load_extra_config_paths_falls_back_to_parent_dir(self, monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
+        parser = GlobalConfigDictParser()
+
+        parent_dir = tmp_path / "parent"
+        parent_dir.mkdir()
+        (parent_dir / "my_config.yaml").write_text("my_key: from_parent\n")
+
+        cwd_dir = tmp_path / "cwd"
+        cwd_dir.mkdir()
+        monkeypatch.chdir(cwd_dir)
+        monkeypatch.setattr(nemo_gym.global_config, "PARENT_DIR", parent_dir)
+
+        config_paths, extra_configs = parser.load_extra_config_paths(["my_config.yaml"])
+        assert extra_configs[0]["my_key"] == "from_parent"
+
+    def test_env_yaml_loaded_from_cwd(self, monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
+        self._mock_versions_for_testing(monkeypatch)
+        monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
+        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+
+        (tmp_path / "env.yaml").write_text("custom_env_key: from_cwd\n")
+        monkeypatch.chdir(tmp_path)
+        empty_parent = tmp_path / "empty_parent"
+        empty_parent.mkdir()
+        monkeypatch.setattr(nemo_gym.global_config, "PARENT_DIR", empty_parent)
+
+        parser = GlobalConfigDictParser()
+        global_config_dict = parser.parse(GlobalConfigDictParserConfig(skip_load_from_cli=True))
+        assert global_config_dict["custom_env_key"] == "from_cwd"
+
+    def test_env_yaml_falls_back_to_parent_dir(self, monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
+        self._mock_versions_for_testing(monkeypatch)
+        monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
+        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+
+        parent_dir = tmp_path / "parent"
+        parent_dir.mkdir()
+        (parent_dir / "env.yaml").write_text("custom_env_key: from_parent\n")
+
+        cwd_dir = tmp_path / "cwd"
+        cwd_dir.mkdir()
+        monkeypatch.chdir(cwd_dir)
+        monkeypatch.setattr(nemo_gym.global_config, "PARENT_DIR", parent_dir)
+
+        parser = GlobalConfigDictParser()
+        global_config_dict = parser.parse(GlobalConfigDictParserConfig(skip_load_from_cli=True))
+        assert global_config_dict["custom_env_key"] == "from_parent"
+
+    def test_help(self, monkeypatch) -> None:
+        monkeypatch.setattr(sys, "argv", ["++abc=2", "--help"])
+
+        # Without the help override, this will SystemExit.
+        GlobalConfigDictParser.parse_global_config_dict_from_cli(None)

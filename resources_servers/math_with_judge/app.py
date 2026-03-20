@@ -15,7 +15,7 @@
 import contextlib
 import logging
 from io import StringIO
-from typing import Any, ClassVar, Optional
+from typing import Any, ClassVar, Dict, List, Optional, Union
 
 from fastapi import FastAPI
 from math_verify import grader
@@ -37,6 +37,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.reward_profile import compute_pass_majority_metrics
 from nemo_gym.server_utils import get_response_json
 
 
@@ -157,9 +158,8 @@ Example output: "My final verdict is different [[A!=B]]"."""
         if not self.config.should_use_judge or library_reward > 0.5:
             return library_reward, extracted_answer, library_reward, None
 
-        judge_reward, judge_evaluations = await self._verify_answer_with_judge(
-            question, expected_answer, generated_answer
-        )
+        judge_answer = extracted_answer if extracted_answer else generated_answer
+        judge_reward, judge_evaluations = await self._verify_answer_with_judge(question, expected_answer, judge_answer)
         return judge_reward, extracted_answer, library_reward, judge_evaluations
 
     @classmethod
@@ -172,11 +172,27 @@ Example output: "My final verdict is different [[A!=B]]"."""
         ):
             yield
 
+    @staticmethod
+    def _strip_math_delimiters(s: str) -> str:
+        """Strip outer math delimiters from expected answers.
+
+        Many expected_answer values are wrapped in \\(...\\) or $...$,
+        which causes the math_verify parser to fail when we wrap them
+        in \\boxed{}.  Removing these outer delimiters fixes parsing.
+        """
+        s = s.strip()
+        if s.startswith("\\(") and s.endswith("\\)"):
+            s = s[2:-2].strip()
+        if s.startswith("$") and s.endswith("$") and len(s) > 1:
+            s = s[1:-1].strip()
+        return s
+
     def _verify_answer_with_library(self, expected_answer: str, generated_answer: str) -> tuple[float, Optional[str]]:
         # This functionality is migrated from Nemo RL.
         # https://github.com/NVIDIA-NeMo/RL/blob/e1f56c42ae175d3863ccaf4e21b7de7e9c46c2e1/nemo_rl/environments/math_environment.py
         try:
-            ground_truth_parsable = "\\boxed{" + expected_answer + "}"
+            stripped = self._strip_math_delimiters(expected_answer)
+            ground_truth_parsable = "\\boxed{" + stripped + "}"
             with self._mute_output():
                 ret_score, extracted_answer = self._library_verifier([ground_truth_parsable], [generated_answer])
 
@@ -197,7 +213,7 @@ Example output: "My final verdict is different [[A!=B]]"."""
                     # If no match is found, that means all the answers are
                     # incorrect.  The first prediction is used as the extracted
                     # answer.
-                    extracted_answer = extracted_prediction[0]
+                    extracted_answer = extracted_prediction[0] if extracted_prediction else None
 
             return reward, extracted_answer
 
@@ -235,6 +251,7 @@ Example output: "My final verdict is different [[A!=B]]"."""
     ) -> tuple[bool, JudgeEvaluation]:
         config = self.config
         responses_create_params = config.judge_responses_create_params.model_copy(deep=True)
+
         judge_prompt = self.JUDGE_PROMPT_TEMPLATE.format(
             question=question, first_answer=first_answer, second_answer=second_answer
         )
@@ -286,6 +303,63 @@ Example output: "My final verdict is different [[A!=B]]"."""
                 return True, judge_evaluation
             else:
                 return False, judge_evaluation
+
+    # ──────────────────────────────────────────────────────────
+    # Aggregate metrics overrides
+    # ──────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _math_score_fn(r: dict) -> Dict[str, Union[float, bool]]:
+        scores: Dict[str, Union[float, bool]] = {}
+        if "library_reward" in r:
+            scores["symbolic_accuracy"] = r["library_reward"]
+        if "judge_evaluations" in r and r["judge_evaluations"] is not None:
+            scores["judge_accuracy"] = r["reward"]
+        return scores
+
+    def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
+        """Compute math-specific metrics: pass@k, majority@k, per-sample statistics."""
+        return compute_pass_majority_metrics(
+            tasks,
+            score_fn=self._math_score_fn,
+            answer_key="extracted_answer",
+        )
+
+    def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
+        """Select headline metrics for this math benchmark."""
+        key: Dict[str, Any] = {}
+
+        # Token usage (not reward — that's redundant with accuracy scores)
+        for name in ("mean/input_tokens", "mean/output_tokens"):
+            if name in agent_metrics:
+                key[name] = agent_metrics[name]
+
+        # Highest-k pass@1[avg-of-*] for all score names including no_answer (no statistics)
+        avg_keys = [
+            k
+            for k in agent_metrics
+            if k.startswith("pass@1[avg-of-") and k.count("/") == 1 and "std_dev" not in k and "std_err" not in k
+        ]
+        highest_k = max(int(k.split("pass@1[avg-of-")[1].split("]")[0]) for k in avg_keys)
+        for k in avg_keys:
+            if k.startswith(f"pass@1[avg-of-{highest_k}]"):
+                key[k] = agent_metrics[k]
+
+        # Highest-k pass@k for accuracy scores only (not no_answer)
+        pass_keys = [k for k in agent_metrics if k.startswith("pass@") and "[" not in k and "/no_answer" not in k]
+        highest_k = max(int(k.split("@")[1].split("/")[0]) for k in pass_keys)
+        for k in pass_keys:
+            if k.startswith(f"pass@{highest_k}/"):
+                key[k] = agent_metrics[k]
+
+        # Highest-k majority for accuracy scores only (not no_answer)
+        maj_keys = [k for k in agent_metrics if k.startswith("majority@") and "/no_answer" not in k]
+        highest_k = max(int(k.split("@")[1].split("/")[0]) for k in maj_keys)
+        for k in maj_keys:
+            if k.startswith(f"majority@{highest_k}/"):
+                key[k] = agent_metrics[k]
+
+        return key
 
 
 if __name__ == "__main__":

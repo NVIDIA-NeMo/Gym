@@ -12,8 +12,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from argparse import ArgumentParser
 from collections import defaultdict
-from os import getenv
+from copy import deepcopy
+from importlib import import_module
+from os import environ, getenv
 from pathlib import Path
 from platform import python_version
 from random import randint
@@ -22,14 +25,18 @@ from typing import ClassVar, List, Optional, Tuple, Type
 
 import hydra
 import rich
-from omegaconf import DictConfig, OmegaConf, open_dict
+import wandb
+import wandb.util
+from omegaconf import DictConfig, ListConfig, OmegaConf, open_dict
 from openai import __version__ as openai_version
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 from ray import __version__ as ray_version
+from wandb import Run
 
-from nemo_gym import PARENT_DIR
+from nemo_gym import CACHE_DIR, PARENT_DIR, RESULTS_DIR
 from nemo_gym.config_types import (
     ServerInstanceConfig,
+    WANDBConfig,
     is_almost_server,
     is_server_ref,
     maybe_get_server_instance_config,
@@ -52,9 +59,12 @@ UV_PIP_SET_PYTHON_KEY_NAME = "uv_pip_set_python"
 SKIP_VENV_IF_PRESENT_KEY_NAME = "skip_venv_if_present"
 HF_TOKEN_KEY_NAME = "hf_token"
 RAY_HEAD_NODE_ADDRESS_KEY_NAME = "ray_head_node_address"
-TASK_INDEX_KEY_NAME = "_task_index"
 PORT_RANGE_LOW_KEY_NAME = "port_range_low"
 PORT_RANGE_HIGH_KEY_NAME = "port_range_high"
+DRY_RUN_KEY_NAME = "dry_run"
+UV_CACHE_DIR_KEY_NAME = "uv_cache_dir"
+UV_VENV_DIR_KEY_NAME = "uv_venv_dir"
+INHERIT_FROM_KEY_NAME = "_inherit_from"
 NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     CONFIG_PATHS_KEY_NAME,
     ENTRYPOINT_KEY_NAME,
@@ -71,13 +81,39 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     RAY_HEAD_NODE_ADDRESS_KEY_NAME,
     PORT_RANGE_LOW_KEY_NAME,
     PORT_RANGE_HIGH_KEY_NAME,
+    DRY_RUN_KEY_NAME,
+    UV_CACHE_DIR_KEY_NAME,
+    UV_VENV_DIR_KEY_NAME,
+    INHERIT_FROM_KEY_NAME,
 ]
+
+# Data keys
+TASK_INDEX_KEY_NAME = "_ng_task_index"
+ROLLOUT_INDEX_KEY_NAME = "_ng_rollout_index"
+RESPONSES_CREATE_PARAMS_KEY_NAME = "responses_create_params"
+RESPONSE_KEY_NAME = "response"
+AGENT_REF_KEY_NAME = "agent_ref"
 
 POLICY_BASE_URL_KEY_NAME = "policy_base_url"
 POLICY_API_KEY_KEY_NAME = "policy_api_key"  # pragma: allowlist secret
 POLICY_MODEL_NAME_KEY_NAME = "policy_model_name"
+POLICY_MODEL_KEY_NAME = "policy_model"
 
 DEFAULT_HEAD_SERVER_PORT = 11000
+
+
+# W&B
+# Increase row limit since some of our rollouts are pretty hefty
+wandb.util.VALUE_BYTES_LIMIT = 10_000_000
+_WANDB_RUN: Optional[Run] = None
+
+
+def get_wandb_run() -> Optional[Run]:
+    return _WANDB_RUN
+
+
+# OmegaConf new resolvers
+OmegaConf.register_new_resolver("inherit_from", lambda a: f"${{inherit_from:{a}}}")
 
 
 class GlobalConfigDictParserConfig(BaseModel):
@@ -90,17 +126,42 @@ class GlobalConfigDictParserConfig(BaseModel):
 
     hide_secrets: bool = False
 
+    # This is a shorthand we use for config resolution use cases that shouldn't require a model
+    # e.g. data loading, etc
     NO_MODEL_GLOBAL_CONFIG_DICT: ClassVar[DictConfig] = DictConfig(
         {
             POLICY_BASE_URL_KEY_NAME: "",
             POLICY_API_KEY_KEY_NAME: "",
             POLICY_MODEL_NAME_KEY_NAME: "",
+            "policy_model": {"responses_api_models": {"dummy_model": {"entrypoint": "app.py"}}},
         }
     )
 
 
 class GlobalConfigDictParser(BaseModel):
     def parse_global_config_dict_from_cli(self) -> DictConfig:
+        # We need to monkeypatch hydra here so that it doesn't use Hydra help so that we can use our own help down the line
+        hydra_main_module = import_module("hydra.main")
+        original_get_args_parser = hydra_main_module.get_args_parser
+
+        def new_get_args_parser():
+            parser: ArgumentParser = original_get_args_parser()
+            # Set the conflict handlers to resolve so we can disable the help.
+            parser.conflict_handler = "resolve"
+            for action_group in parser._action_groups:
+                action_group.conflict_handler = "resolve"
+
+            parser.add_argument("--help", "-h", action="store_false", default=False)
+
+            # Reset to the original conflict_handler error scheme
+            parser.conflict_handler = "error"
+            for action_group in parser._action_groups:
+                action_group.conflict_handler = "error"
+
+            return parser
+
+        hydra_main_module.get_args_parser = new_get_args_parser
+
         # This function is just to get the config object out of the hydra main call.
         # Need a closure. We simply use an outer ref of a list
         config_list = []
@@ -122,17 +183,28 @@ class GlobalConfigDictParser(BaseModel):
         config_paths = config_paths.copy()
 
         extra_configs: List[DictConfig] = []
+        duplicate_config_paths: List[str] = []
         for config_path in config_paths:
             config_path = Path(config_path)
-            # Assume relative to the parent dir
+            # Check cwd first for user's local configs, then install location
             if not config_path.is_absolute():
-                config_path = PARENT_DIR / config_path
+                cwd_path = Path.cwd() / config_path
+                config_path = cwd_path if cwd_path.exists() else PARENT_DIR / config_path
 
             extra_config = OmegaConf.load(config_path)
             for new_config_path in extra_config.get(CONFIG_PATHS_KEY_NAME) or []:
                 if new_config_path not in config_paths:
                     config_paths.append(new_config_path)
+                else:
+                    duplicate_config_paths.append(new_config_path)
             extra_configs.append(extra_config)
+
+        if duplicate_config_paths:
+            duplicate_config_paths_str = "".join(f"- {p}\n" for p in duplicate_config_paths)
+            print(f"""Found configs that reference the same source config path. You may want to double check whether the configs you have need to use different configs for the same server.
+In cases like these, you may want to consider using the `inherit_from` OmegaConf directive e.g. '++my_specific_server=${{inherit_from:generic_server}}' and then overriding config parameters in `my_specific_server`.
+Duplicate config paths:
+{duplicate_config_paths_str}""")
 
         return config_paths, extra_configs
 
@@ -204,13 +276,65 @@ class GlobalConfigDictParser(BaseModel):
         for k, v in list(dict_config.items()):
             if isinstance(v, (DictConfig, dict)):
                 self._recursively_hide_secrets_helper(v)
-            elif isinstance(v, list):
+            elif isinstance(v, (ListConfig, list)):
                 for inner_v in v:
-                    if isinstance(v, (DictConfig, dict)):
+                    if isinstance(inner_v, (DictConfig, dict)):
                         self._recursively_hide_secrets_helper(inner_v)
             else:
                 if "token" in k or "key" in k:
                     dict_config[k] = "****"
+
+    def _recursively_swap_keys(self, dict_config: DictConfig) -> None:
+        frozen_dict_config = deepcopy(dict_config)
+        with open_dict(dict_config):
+            self._recursively_swap_keys_helper(dict_config, dict_config, frozen_dict_config)
+
+    def _recursively_swap_keys_helper(
+        self, dict_config: DictConfig, original_dict_config: DictConfig, frozen_dict_config: DictConfig
+    ) -> None:
+        for k, v in list(dict_config.items()):
+            if isinstance(v, (DictConfig, dict)):
+                self._recursively_swap_keys_helper(v, original_dict_config, frozen_dict_config)
+            elif isinstance(v, (ListConfig, list)):
+                for inner_v in v:
+                    if isinstance(inner_v, (DictConfig, dict)):
+                        self._recursively_swap_keys_helper(inner_v, original_dict_config, frozen_dict_config)
+
+            # e.g. ${inherit_from:grpo.num_prompts_per_step}
+            is_swap_str = isinstance(v, str) and v.startswith("${inherit_from:")
+            is_swap_property = isinstance(v, DictConfig) and INHERIT_FROM_KEY_NAME in v
+            is_swap = is_swap_str or is_swap_property
+            if not is_swap:
+                continue
+
+            if is_swap_str:
+                path_to_swap = v.removeprefix("${inherit_from:").removesuffix("}")
+            elif is_swap_property:
+                path_to_swap = v.pop(INHERIT_FROM_KEY_NAME)
+
+            path_to_swap = path_to_swap.split(".")
+
+            # Pop the swapped value
+            dict_containing_key_to_swap = self._recursive_index_dict_using_path(
+                original_dict_config, path_to_swap[:-1]
+            )
+            # Pop with a default since multiple configs may refer to the same path
+            dict_containing_key_to_swap.pop(path_to_swap[-1], None)
+
+            swapped_value = self._recursive_index_dict_using_path(frozen_dict_config, path_to_swap)
+            if is_swap_property:
+                swapped_value = OmegaConf.merge(swapped_value, v)
+
+            dict_config[k] = swapped_value
+
+    def _recursive_index_dict_using_path(self, dict_config: DictConfig, path: List[str]) -> DictConfig:
+        for k in path:
+            if k not in dict_config:
+                raise ValueError(f"Path specified does not exist in config: {path}")
+
+            dict_config = dict_config[k]
+
+        return dict_config
 
     def parse(self, parse_config: Optional[GlobalConfigDictParserConfig] = None) -> DictConfig:
         if parse_config is None:
@@ -225,7 +349,13 @@ class GlobalConfigDictParser(BaseModel):
         global_config_dict: DictConfig = OmegaConf.merge(initial_global_config_dict, global_config_dict)
 
         # Load the env.yaml config. We load it early so that people can use it to conveniently store config paths.
-        dotenv_path = parse_config.dotenv_path or PARENT_DIR / "env.yaml"
+        # Check cwd first for user's local env.yaml, then fall back to PARENT_DIR
+        if parse_config.dotenv_path:
+            dotenv_path = parse_config.dotenv_path
+        else:
+            cwd_env_yaml = Path.cwd() / "env.yaml"
+            dotenv_path = cwd_env_yaml if cwd_env_yaml.exists() else PARENT_DIR / "env.yaml"
+
         dotenv_extra_config = DictConfig({})
         if dotenv_path.exists() and not parse_config.skip_load_from_dotenv:
             dotenv_extra_config = OmegaConf.load(dotenv_path)
@@ -248,6 +378,8 @@ class GlobalConfigDictParser(BaseModel):
         if config_paths:
             with open_dict(global_config_dict):
                 global_config_dict[CONFIG_PATHS_KEY_NAME] = config_paths
+
+        self._recursively_swap_keys(global_config_dict)
 
         # Almost-server detection and reporting
         almost_servers = self.detect_and_report_almost_servers(global_config_dict)
@@ -318,11 +450,38 @@ class GlobalConfigDictParser(BaseModel):
             global_config_dict[PYTHON_VERSION_KEY_NAME] = python_version()
 
             # Skip venv setup is opt-in and defaults to False.
-            if SKIP_VENV_IF_PRESENT_KEY_NAME not in global_config_dict:
-                global_config_dict[SKIP_VENV_IF_PRESENT_KEY_NAME] = False
+            global_config_dict.setdefault(SKIP_VENV_IF_PRESENT_KEY_NAME, False)
+
+            global_config_dict.setdefault(DRY_RUN_KEY_NAME, False)
+
+            # UV related configuration
+            # UV caching directory overrides to local folders.
+            global_config_dict.setdefault(UV_CACHE_DIR_KEY_NAME, str(CACHE_DIR / "uv"))
+            # Set the appropriate environment variable here, and matche the config
+            environ["UV_CACHE_DIR"] = global_config_dict[UV_CACHE_DIR_KEY_NAME]
+            # By default, build the directories in their individual folders using the root repository
+            # e.g. PARENT_DIR/responses_api_models/my_server
+            global_config_dict.setdefault(UV_VENV_DIR_KEY_NAME, str(PARENT_DIR))
 
         if parse_config.hide_secrets:
             self._recursively_hide_secrets(global_config_dict)
+
+        # Set up W&B
+        wandb_config = WANDBConfig.model_validate(global_config_dict)
+        if wandb_config.is_available:  # pragma: no cover
+            environ["WANDB_API_KEY"] = wandb_config.wandb_api_key
+
+            global _WANDB_RUN
+            _WANDB_RUN = wandb.init(
+                project=wandb_config.wandb_project,
+                name=wandb_config.wandb_name,
+                dir=str(RESULTS_DIR / "wandb"),
+            )
+
+            # Log params
+            config_dict_to_log = deepcopy(global_config_dict)
+            self._recursively_hide_secrets(config_dict_to_log)
+            _WANDB_RUN.config.update(OmegaConf.to_container(config_dict_to_log))
 
         return global_config_dict
 

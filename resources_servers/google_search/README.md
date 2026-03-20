@@ -1,7 +1,7 @@
-# Google Search Resource Server
+# Google Search Resources Server
 
 ## Table of Contents
-- [Google Search Resource Server](#google-search-resource-server)
+- [Google Search Resources Server](#google-search-resources-server)
   - [Table of Contents](#table-of-contents)
   - [Description](#description)
     - [Overview](#overview)
@@ -106,9 +106,6 @@ ng_collect_rollouts +agent_name=simple_agent \
     +input_jsonl_fpath=data/Nemotron-RL-knowledge-web_search-mcqa.jsonl \
     +output_jsonl_fpath=results/Nemotron-RL-knowledge-web_search-mcqa.jsonl \
     +limit=1
-
-ng_viewer +jsonl_fpath=results/Nemotron-RL-knowledge-web_search-mcqa.jsonl
-
 ```
 
 ## Samples

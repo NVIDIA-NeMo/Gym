@@ -137,10 +137,10 @@ Explore other environments available for training and evaluation.
 :::
 
 :::{grid-item-card} {octicon}`tools;1.5em;sd-mr-1` Build a Custom Training Environment
-:link: /environment-tutorials/creating-training-environment
+:link: /environment-tutorials/index
 :link-type: doc
 
-Create your own resource server with custom tools and verification logic.
+Create your own resources server with custom tools and verification logic.
 :::
 
 ::::

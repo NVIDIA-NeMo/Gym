@@ -1,6 +1,6 @@
 # Contributing To NeMo-Gym
 
-Welcome to NeMo Gym! Help advance RL training for the community by contributing to NeMo Gym.
+Welcome! We are excited to have you contribute to NeMo Gym. Whether you are adding new training environments, integrating RL frameworks, improving documentation, or fixing bugs, your contributions help advance RL training.
 
 ## High Priority Contributions
 
@@ -42,8 +42,8 @@ uv sync --extra dev --group docs
 pre-commit install
 ```
 
-**Important:** All commits must be signed with DCO sign-off (`-s`) and cryptographic signature (`-S`):
+**Important:** All commits must be signed with DCO sign-off (`-s`):
 
 ```bash
-git commit -s -S -m "Your commit message"
+git commit -s -m "Your commit message"
 ```
