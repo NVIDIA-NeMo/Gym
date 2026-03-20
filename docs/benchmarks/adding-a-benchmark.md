@@ -1,8 +1,8 @@
 (adding-a-benchmark)=
 
-# Adding a benchmark to Gym
+# Adding a benchmark to NeMo Gym
 
-The most important principle when adding benchmarks into Gym is ensuring the fidelity of the benchmark. As a result, there are additional steps and best practices to adding a benchmark that are required on top of adding just a training environment (although the steps below are still suggested for training environments).
+The most important principle when adding benchmarks into NeMo Gym is ensuring the fidelity of the benchmark. As a result, there are additional steps and best practices to adding a benchmark that are required on top of adding just a training environment (although the steps below are still suggested for training environments).
 
 ## Reward profiling
 
