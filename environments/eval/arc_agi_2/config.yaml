@@ -12,7 +12,7 @@ arc_agi_2_eval_simple_agent:
         name: policy_model
       datasets:
       - name: evaluation_2
-        type: benchmark
+        type: validation
         jsonl_fpath: resources_servers/arc_agi/data/arc_agi_2_evaluation.jsonl
         gitlab_identifier:
           dataset_name: arc_agi

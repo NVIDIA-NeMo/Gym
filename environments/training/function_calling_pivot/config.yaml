@@ -1,6 +1,6 @@
 config_paths:
 - resources_servers/single_step_tool_use_with_argument_comparison/configs/toolcall_schema_single_step_tool_use_with_argument_comparison.yaml
-toolcall_schema_single_step_tool_use_with_argument_comparison_agent:
+function_calling_pivot_simple_agent:
   responses_api_agents:
     tool_simulation_agent:
       entrypoint: app.py

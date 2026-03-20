@@ -1,6 +1,6 @@
 config_paths:
 - resources_servers/equivalence_llm_judge/configs/nl2bash-equivalency.yaml
-equivalence_llm_judge_simple_agent:
+nl2bash_equivalency_simple_agent:
   responses_api_agents:
     simple_agent:
       entrypoint: app.py

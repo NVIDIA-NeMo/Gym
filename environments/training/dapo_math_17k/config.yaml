@@ -1,6 +1,6 @@
 config_paths:
 - resources_servers/math_with_judge/configs/dapo17k.yaml
-math_with_judge_simple_agent:
+dapo_math_17k_simple_agent:
   responses_api_agents:
     simple_agent:
       entrypoint: app.py

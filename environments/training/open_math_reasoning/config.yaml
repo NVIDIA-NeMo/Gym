@@ -1,6 +1,6 @@
 config_paths:
 - resources_servers/math_with_judge/configs/math_with_judge.yaml
-math_with_judge_simple_agent:
+open_math_reasoning_simple_agent:
   responses_api_agents:
     simple_agent:
       entrypoint: app.py

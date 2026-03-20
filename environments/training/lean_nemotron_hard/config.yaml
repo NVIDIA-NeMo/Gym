@@ -1,6 +1,6 @@
 config_paths:
 - resources_servers/math_formal_lean/configs/nemotron_first_try_hard.yaml
-math_formal_lean_simple_agent:
+lean_nemotron_hard_simple_agent:
   responses_api_agents:
     simple_agent:
       entrypoint: app.py

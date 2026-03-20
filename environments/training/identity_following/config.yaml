@@ -1,6 +1,6 @@
 config_paths:
 - resources_servers/genrm_compare/configs/genrm_compare.yaml
-genrm_compare_agent:
+identity_following_simple_agent:
   responses_api_agents:
     simple_agent:
       entrypoint: app.py

@@ -1,6 +1,6 @@
 config_paths:
-- resources_servers/math_formal_lean/configs/nemotron_very_easy.yaml
-math_formal_lean_simple_agent:
+- resources_servers/math_formal_lean/configs/nemotron_clean_easy.yaml
+lean_nemotron_easy_simple_agent:
   responses_api_agents:
     simple_agent:
       entrypoint: app.py
@@ -13,5 +13,5 @@ math_formal_lean_simple_agent:
       datasets:
       - name: train
         type: train
-        jsonl_fpath: resources_servers/math_formal_lean/data/nemotron_very_easy.jsonl
+        jsonl_fpath: resources_servers/math_formal_lean/data/nemotron_clean_easy.jsonl
         license: Apache 2.0

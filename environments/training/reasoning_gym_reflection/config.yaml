@@ -1,6 +1,6 @@
 config_paths:
 - resources_servers/reasoning_gym/configs/reflection_agent.yaml
-reasoning_gym_langgraph_agent:
+reasoning_gym_reflection_agent:
   responses_api_agents:
     langgraph_agent:
       entrypoint: reflection_agent.py
