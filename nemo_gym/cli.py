@@ -1013,6 +1013,9 @@ def list_envs():  # pragma: no cover
 
     from nemo_gym.env_list import get_envs
 
+    global_config_dict = get_global_config_dict()
+    BaseNeMoGymCLIConfig.model_validate(global_config_dict)
+
     envs = get_envs(PARENT_DIR)
     example_envs = [e for e in envs if e.is_example]
     training_envs = [e for e in envs if not e.is_example]
