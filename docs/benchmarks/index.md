@@ -37,7 +37,7 @@ Best practices for design and iteration on a customer evaluation benchmark.
 
 :::{grid-item-card} {octicon}`database;1.5em;sd-mr-1` Add aggregate metrics for your benchmark
 :link: ref-aggregate-metrics
-:link-type: doc
+:link-type: ref
 Implementation tutorial for aggregate metrics.
 +++
 {bdg-primary}`benchmark`
