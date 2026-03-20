@@ -330,17 +330,6 @@ Prompt Config <data/prompt-config>
 ```
 
 ```{toctree}
-:caption: Benchmarks
-:hidden:
-:maxdepth: 1
-
-Overview <benchmarks/index>
-Run benchmarks <benchmarks/run-benchmark-suite>
-Add a benchmark <benchmarks/adding-a-benchmark>
-Design a customer evaluation <benchmarks/designing-customer-evaluation>
-```
-
-```{toctree}
 :caption: Environment Tutorials
 :hidden:
 :maxdepth: 1
@@ -352,6 +341,17 @@ Stateful Environment <environment-tutorials/stateful-environment>
 Real-World Environment <environment-tutorials/real-world-environment>
 Integrate external libraries <environment-tutorials/integrate-external-environments>
 Aggregate Metrics <environment-tutorials/aggregate-metrics>
+```
+
+```{toctree}
+:caption: Benchmarks
+:hidden:
+:maxdepth: 1
+
+Overview <benchmarks/index>
+Run benchmarks <benchmarks/run-benchmark-suite>
+Add a benchmark <benchmarks/adding-a-benchmark>
+Design a customer evaluation <benchmarks/designing-customer-evaluation>
 ```
 
 ```{toctree}
