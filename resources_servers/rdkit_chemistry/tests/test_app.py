@@ -177,7 +177,10 @@ class TestComputeRewardDiscrete:
 
 class TestComputeRewardFloat:
     def test_perfect_prediction(self):
+        # Legacy (negative absolute error): perfect prediction → 0.0
         assert compute_reward(2.5, 2.5, "float") == pytest.approx(0.0)
+        # Inverse-error properties: perfect prediction → 1.0
+        assert compute_reward(2.5, 2.5, "float", property_name="MolLogP") == pytest.approx(1.0)
 
     def test_error_of_half(self):
         assert compute_reward(1.0, 1.5, "float") == pytest.approx(-0.5)
@@ -192,8 +195,12 @@ class TestComputeRewardFloat:
         assert compute_reward(-1.0, -2.5, "float") == pytest.approx(-1.5)
 
     def test_reward_is_nonpositive(self):
+        # Legacy (negative absolute error): reward is always ≤ 0
         reward = compute_reward(3.7, 2.1, "float")
         assert reward <= 0.0
+        # Inverse-error properties: reward is always in (0, 1]
+        reward_inv = compute_reward(3.7, 2.1, "float", property_name="MolWt")
+        assert 0.0 < reward_inv <= 1.0
 
     def test_none_prediction(self):
         assert compute_reward(None, 1.0, "float") == 0.0
