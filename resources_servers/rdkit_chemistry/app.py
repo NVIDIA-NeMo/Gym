@@ -40,9 +40,12 @@ Reward signal
 -------------
 - Integer / count / bool / presence / fragment properties: exact match
   (reward = 1.0 iff round(predicted) == round(actual), else 0.0).
-- Float properties: negative absolute error — reward = -|predicted - actual|.
-  A perfect prediction scores 0.0; larger errors give more negative rewards.
-  When no numeric value can be extracted from the response, reward = 0.0.
+- Float properties: reward = 1 / (1 + |predicted - actual|) for continuous
+  properties in _INVERSE_ERROR_PROPERTIES list; reward ranges from (0, 1]
+  with 1.0 for a perfect prediction. Other float properties: reward =
+  -|predicted - actual| (negative absolute error). A perfect prediction
+  scores 0.0; larger errors give more negative rewards. When no numeric
+  value can be extracted from the response, reward = 0.0.
 
 Dataset format (JSONL)
 ----------------------
@@ -230,15 +233,22 @@ def extract_predicted_value(
 # ---------------------------------------------------------------------------
 
 
+# List of properties for which the reward is computed as 1 / (1 + |predicted - actual|)
+_INVERSE_ERROR_PROPERTIES = frozenset(
+    {"TPSA", "ExactMolWt", "FractionCSP3", "HeavyAtomMolWt", "MolLogP", "MolWt", "qed"}
+
 def compute_reward(
     predicted: Optional[float],
     actual: float,
     property_type: str,
+    property_name: str = "",
 ) -> float:
     """
     Compute a scalar reward given a prediction.
 
-    Float properties: reward = -|predicted - actual|  (negative absolute error).
+    Float properties in _INVERSE_ERROR_PROPERTIES:
+      reward = 1 / (1 + |predicted - actual|)  (ranges (0, 1], perfect = 1.0).
+    Other float properties: reward = -|predicted - actual|  (negative absolute error).
     Discrete properties (count / bool / presence / fragment):
       reward = 1.0 if round(predicted) == round(actual), else 0.0.
     No prediction (None / NaN) scores 0.0.
@@ -247,7 +257,12 @@ def compute_reward(
         return 0.0
 
     if property_type == "float":
-        return -abs(predicted - actual)
+        # Alternatively can remove the list and remove property_name from function call
+        # to run on all float properties
+        error = abs(predicted - actual)
+        if property_name in _INVERSE_ERROR_PROPERTIES:
+            return 1.0 / (1.0 + error)
+        return -error
 
     return 1.0 if round(predicted) == round(actual) else 0.0
 
@@ -271,7 +286,7 @@ class RDKitChemistryResourcesServer(SimpleResourcesServer):
         predicted = extract_predicted_value(text, body.property_type, use_box_format=body.use_box_format)
         actual = float(body.expected_answer)
 
-        reward = compute_reward(predicted, actual, body.property_type)
+        reward = compute_reward(predicted, actual, body.property_type, property_name=body.property)
 
         absolute_error: Optional[float] = None
         if body.property_type == "float" and predicted is not None and not math.isnan(predicted):
