@@ -1,0 +1,23 @@
+# grading_rule options: seq_match, weighted_seq_match (default), exact
+lc_equivalence_rule:
+  resources_servers:
+    equivalence_rule:
+      entrypoint: app.py
+      domain: knowledge
+      verified: false
+      grading_rule: weighted_seq_match
+lc_equivalence_rule_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: lc_equivalence_rule
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: mrcr
+        type: validation
+        license: TBD
+        jsonl_fpath: ../../../nano_v3/data/mrcr/processed/processed_p67_sampled_10pct_shuf_rl_fmt.val.jsonl
