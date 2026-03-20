@@ -1,0 +1,22 @@
+config_paths:
+- resources_servers/math_formal_lean/configs/math_formal_lean_multi_turn.yaml
+math_formal_lean_refinement_agent:
+  responses_api_agents:
+    proof_refinement_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: math_formal_lean
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      max_correction_turns: 2
+      include_all_attempts: true
+      datasets:
+      - name: train
+        type: train
+        jsonl_fpath: resources_servers/math_formal_lean/data/minif2f_test.jsonl
+        license: MIT
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/math_formal_lean/data/minif2f_test.jsonl

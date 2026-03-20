@@ -3,26 +3,8 @@ reasoning_gym:
     reasoning_gym:
       entrypoint: app.py
       domain: knowledge
-      description: LangGraph orchestrator agent compatible with resource servers that do not use tools; enables diverse agent training data and test time scaling vs a simple agent, extensible to use tools or other agent architectures
+      description: LangGraph orchestrator agent compatible with resource servers that
+        do not use tools; enables diverse agent training data and test time scaling
+        vs a simple agent, extensible to use tools or other agent architectures
       value: Iterative test time scaling for improved performance in reasoning tasks
       verified: false
-
-reasoning_gym_orchestrator_agent:
-  responses_api_agents:
-    langgraph_agent:
-      entrypoint: orchestrator_agent.py
-      resources_server:
-        type: resources_servers
-        name: reasoning_gym
-      model_server:
-        type: responses_api_models
-        name: policy_model
-      datasets:
-      - name: train
-        type: train
-        jsonl_fpath: resources_servers/reasoning_gym/data/train_knights_knaves.jsonl
-        gitlab_identifier:
-          dataset_name: knights_knaves_reasoning_gym
-          version: 1.0.0
-          artifact_fpath: train_knights_knaves.jsonl
-        license: Apache 2.0

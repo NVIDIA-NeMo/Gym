@@ -34,7 +34,9 @@ Your resources server must include these files:
 * - `app.py`
   - Main server implementation with `verify` function
 * - `configs/*.yaml`
-  - Configuration with valid `domain` field
+  - Server configuration with valid `domain` field (server parameters only, no datasets)
+* - `environments/training/env_name/config.yaml` or `environments/eval/env_name/config.yaml`
+  - Environment config pairing the resources server with an agent and datasets
 * - `tests/test_app.py`
   - At least one unit test
 * - `data/example.jsonl`

@@ -1,0 +1,29 @@
+config_paths:
+- resources_servers/jailbreak_detection/configs/jailbreak_detection_nemotron_combined_reward_tp8.yaml
+jailbreak_detection_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      max_steps: 1
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: jailbreak_detection
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/jailbreak_detection/data/example.jsonl
+      - name: jbb_behaviors_validation
+        type: validation
+        jsonl_fpath: resources_servers/jailbreak_detection/data/jbb_behaviors_validation.jsonl
+        huggingface_identifier:
+          repo_id: JailbreakBench/JBB-Behaviors
+        license: MIT
+      - name: jailbreakv28k_validation
+        type: validation
+        jsonl_fpath: resources_servers/jailbreak_detection/data/jailbreakv28k_validation.jsonl
+        huggingface_identifier:
+          repo_id: JailbreakV-28K/JailBreakV-28k
+        license: Apache 2.0

@@ -34,7 +34,7 @@ from nemo_gym.global_config import (
 )
 
 
-BENCHMARKS_DIR = PARENT_DIR / "benchmarks"
+BENCHMARKS_DIR = PARENT_DIR / "environments" / "eval"
 
 
 class BenchmarkConfig(BaseModel):
@@ -46,7 +46,12 @@ class BenchmarkConfig(BaseModel):
 
     @classmethod
     def from_config_path(cls, config_path: Path) -> "Optional[BenchmarkConfig]":
-        return cls.from_initial_config_dict(path=config_path, initial_config_dict=OmegaConf.load(config_path))
+        try:
+            return cls.from_initial_config_dict(path=config_path, initial_config_dict=OmegaConf.load(config_path))
+        except ValueError:
+            # environments/eval/ contains mixed configs; non-benchmark eval environments
+            # may fail parse_no_environment validation, so treat them as non-benchmarks.
+            return None
 
     @classmethod
     def from_initial_config_dict(cls, path: Path, initial_config_dict: DictConfig) -> "Optional[BenchmarkConfig]":
@@ -153,7 +158,7 @@ class PrepareBenchmarkConfig(BaseNeMoGymCLIConfig):
     Examples:
 
     ```bash
-    ng_prepare_benchmark "+config_paths=[benchmarks/aime24/config.yaml]"
+    ng_prepare_benchmark "+config_paths=[environments/eval/aime24/config.yaml]"
     ```
     """
 
@@ -172,7 +177,7 @@ def prepare_benchmark() -> None:
     benchmarks_dict = _load_benchmarks_from_config_paths(config_paths)
 
     assert benchmarks_dict, (
-        'No benchmark config found in config_paths. Pass a benchmark config, e.g.: "+config_paths=[benchmarks/aime24/config.yaml]"'
+        'No benchmark config found in config_paths. Pass a benchmark config, e.g.: "+config_paths=[environments/eval/aime24/config.yaml]"'
     )
 
     # Validate all benchmarks before preparing any

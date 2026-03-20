@@ -1,0 +1,25 @@
+config_paths:
+- resources_servers/spider2_lite/configs/spider2_lite.yaml
+spider2_lite_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: spider2_lite_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/spider2_lite/data/example.jsonl
+        license: Creative Commons Attribution-ShareAlike 4.0 International
+      - name: spider2_lite_sqlite_validation
+        type: validation
+        jsonl_fpath: resources_servers/spider2_lite/data/spider2_lite_sqlite_validation.jsonl
+        gitlab_identifier:
+          dataset_name: spider2_lite_sqlite
+          version: 0.0.1
+          artifact_fpath: spider2_lite_sqlite_validation.jsonl
+        license: Creative Commons Attribution-ShareAlike 4.0 International

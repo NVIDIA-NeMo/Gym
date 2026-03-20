@@ -1,0 +1,24 @@
+config_paths:
+- resources_servers/mcqa/configs/mcqa.yaml
+gpqa_mcqa_resources_server:
+  _inherit_from: mcqa
+  resources_servers:
+    mcqa:
+      grading_mode: lenient_answer_colon_md
+gpqa_mcqa_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: gpqa_mcqa_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: gpqa
+        type: benchmark
+        jsonl_fpath: environments/eval/gpqa/data/gpqa_diamond_benchmark.jsonl
+        prompt_config: environments/eval/gpqa/prompts/default.yaml
+        prepare_script: environments/eval/gpqa/prepare.py
+        num_repeats: 8
