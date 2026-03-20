@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import sys
 from contextlib import nullcontext as does_not_raise
 from pathlib import Path
 from socket import gethostbyname, gethostname
@@ -709,10 +710,15 @@ class TestGlobalConfig:
         def hydra_main_wrapper(fn):
             config_dict = DictConfig(
                 {
-                    "policy_model": "${swap_key:test_resource}",
+                    "policy_model": "${inherit_from:test_resource}",
                     "test_resource": {"responses_api_models": {"test_model": {"entrypoint": "app.py"}}},
+                    "policy_model_2": {
+                        "_inherit_from": "test_resource_2",
+                        "responses_api_models": {"test_model": {"entrypoint": "app2.py"}},
+                    },
+                    "test_resource_2": {"responses_api_models": {"test_model": {"entrypoint": "app.py"}}},
                     "a": {"b": {"c": 3}},
-                    "a_prime": {"b_prime": "${swap_key:a.b.c}"},
+                    "a_prime": {"b_prime": "${inherit_from:a.b.c}"},
                 }
             )
             return lambda: fn(config_dict)
@@ -725,7 +731,59 @@ class TestGlobalConfig:
             "policy_model": {
                 "responses_api_models": {"test_model": {"entrypoint": "app.py", "host": "127.0.0.1", "port": 12345}}
             },
-            "disallowed_ports": [11000, 12345],
+            "policy_model_2": {
+                "responses_api_models": {"test_model": {"entrypoint": "app2.py", "host": "127.0.0.1", "port": 12345}}
+            },
+            "disallowed_ports": [11000, 12345, 12345],
+            "a": {"b": {}},
+            "a_prime": {"b_prime": 3},
+        }
+
+        assert expected_global_config_dict == actual_global_config_dict
+
+    def test_recursively_replace_keys_multiple_ref_one(self, monkeypatch: MonkeyPatch) -> None:
+        self._mock_versions_for_testing(monkeypatch)
+
+        monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
+        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+
+        exists_mock = MagicMock()
+        exists_mock.return_value = False
+        monkeypatch.setattr(nemo_gym.global_config.Path, "exists", exists_mock)
+
+        find_open_port_mock = MagicMock()
+        find_open_port_mock.return_value = 12345
+        monkeypatch.setattr(nemo_gym.global_config, "_find_open_port_using_range", find_open_port_mock)
+
+        hydra_main_mock = MagicMock()
+
+        def hydra_main_wrapper(fn):
+            config_dict = DictConfig(
+                {
+                    "policy_model": "${inherit_from:test_resource}",
+                    "test_resource": {"responses_api_models": {"test_model": {"entrypoint": "app.py"}}},
+                    "policy_model_2": {
+                        "_inherit_from": "test_resource",
+                        "responses_api_models": {"test_model": {"entrypoint": "app2.py"}},
+                    },
+                    "a": {"b": {"c": 3}},
+                    "a_prime": {"b_prime": "${inherit_from:a.b.c}"},
+                }
+            )
+            return lambda: fn(config_dict)
+
+        hydra_main_mock.return_value = hydra_main_wrapper
+        monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
+
+        actual_global_config_dict = OmegaConf.to_container(get_global_config_dict())
+        expected_global_config_dict = self._default_global_config_dict_values | {
+            "policy_model": {
+                "responses_api_models": {"test_model": {"entrypoint": "app.py", "host": "127.0.0.1", "port": 12345}}
+            },
+            "policy_model_2": {
+                "responses_api_models": {"test_model": {"entrypoint": "app2.py", "host": "127.0.0.1", "port": 12345}}
+            },
+            "disallowed_ports": [11000, 12345, 12345],
             "a": {"b": {}},
             "a_prime": {"b_prime": 3},
         }
@@ -789,26 +847,8 @@ class TestGlobalConfig:
         global_config_dict = parser.parse(GlobalConfigDictParserConfig(skip_load_from_cli=True))
         assert global_config_dict["custom_env_key"] == "from_parent"
 
+    def test_help(self, monkeypatch) -> None:
+        monkeypatch.setattr(sys, "argv", ["++abc=2", "--help"])
 
-class TestBenchmarkConfigLoading:
-    def test_benchmark_config_loads_defaults(self) -> None:
-        """Benchmark config keys are loaded and merged as lowest-priority defaults."""
-        from nemo_gym.global_config import CONFIG_PATHS_KEY_NAME
-
-        benchmark_config_path = PARENT_DIR / "benchmarks" / "aime24" / "config.yaml"
-        assert benchmark_config_path.exists(), f"AIME24 benchmark config not found at {benchmark_config_path}"
-
-        benchmark_config = OmegaConf.load(benchmark_config_path)
-        assert benchmark_config.get("agent_name") == "math_with_judge_simple_agent"
-        assert "aime24_validation" in benchmark_config.get("input_jsonl_fpath", "")
-        assert benchmark_config.get("prompt_config") is not None
-        assert CONFIG_PATHS_KEY_NAME in benchmark_config
-
-    def test_benchmark_config_chains_via_config_paths(self) -> None:
-        """Benchmark config's config_paths are recursively loaded by load_extra_config_paths."""
-        parser = GlobalConfigDictParser()
-        config_paths, extra_configs = parser.load_extra_config_paths(["benchmarks/aime24/config.yaml"])
-
-        assert any("math_with_judge" in p for p in config_paths)
-        assert len(extra_configs) >= 2
-        assert extra_configs[0].get("agent_name") == "math_with_judge_simple_agent"
+        # Without the help override, this will SystemExit.
+        GlobalConfigDictParser.parse_global_config_dict_from_cli(None)

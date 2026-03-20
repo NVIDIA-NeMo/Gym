@@ -67,24 +67,6 @@ class MCQAVerifyResponse(BaseVerifyResponse):
     extracted_answer: Optional[str]
 
 
-def _extract_last_assistant_text(body: BaseVerifyRequest) -> str:
-    # body.response.output is a list of union types; we only want assistant message texts
-    # TODO: @fsoares should we just assume we are always receiving the last message only? Not sure if this is always true.
-    texts: list[str] = []
-    for o in body.response.output:
-        if getattr(o, "type", None) == "message" and getattr(o, "role", None) == "assistant":
-            # Each message has content which can be text parts; normalize to string
-            content = getattr(o, "content", None)
-            if isinstance(content, list):
-                for c in content:
-                    t = getattr(c, "text", None)
-                    if isinstance(t, str):
-                        texts.append(t)
-            elif isinstance(content, str):
-                texts.append(content)
-    return "\n".join(texts).strip()
-
-
 def _extract_options_and_expected(
     body: MCQARunRequest,
 ) -> tuple[Optional[list[dict[str, str]]], Optional[str]]:
@@ -245,15 +227,24 @@ class MCQAResourcesServer(SimpleResourcesServer):
         return {k: agent_metrics[k] for k in keys if k in agent_metrics}
 
     async def verify(self, body: MCQAVerifyRequest) -> MCQAVerifyResponse:
-        text = _extract_last_assistant_text(body)
         # Pull options/expected_answer from dataset-style metadata if available
         options, expected_answer = _extract_options_and_expected(body)
+        gold = (expected_answer or "").strip().upper()
         # Derive allowed letters from option keys
         allowed_letters = _get_allowed_letters_from_options(options)
 
         grading_mode = self.config.grading_mode or body.grading_mode
 
         pred: Optional[str] = None
+
+        text = body.response.output_text.strip()
+        if not text:
+            return MCQAVerifyResponse(
+                **body.model_dump(exclude={"expected_answer", "extracted_answer"}),
+                reward=0.0,
+                expected_answer=gold,
+                extracted_answer=None,
+            )
 
         # Check for template_metadata first (highest priority)
         if body.template_metadata and "output_regex" in body.template_metadata:
@@ -301,7 +292,6 @@ class MCQAResourcesServer(SimpleResourcesServer):
                     if letter_up in allowed_letters:
                         pred = letter_up
 
-        gold = (expected_answer or "").strip().upper()
         is_correct = (pred == gold) if (pred is not None and gold) else False
         reward = 1.0 if is_correct else 0.0
 
