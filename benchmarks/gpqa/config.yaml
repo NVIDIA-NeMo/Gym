@@ -2,16 +2,16 @@
 config_paths:
   - resources_servers/mcqa/configs/mcqa.yaml
 
-# Duplicate the generic config above to ensure this benchmark config is isolated.
+# We use `_inherit_from` directives to inherit from and not use the generic config above to ensure this benchmark config is isolated.
 gpqa_mcqa_resources_server:
-  _swap_key: mcqa
+  _inherit_from: mcqa
   resources_servers:
     mcqa:
       # Override mcqa server grading mode to match the prompt format (Answer: X)
       grading_mode: lenient_answer_colon_md
 
 gpqa_mcqa_simple_agent:
-  _swap_key: mcqa_simple_agent
+  _inherit_from: mcqa_simple_agent
   responses_api_agents:
     simple_agent:
       resources_server:

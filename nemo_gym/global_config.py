@@ -64,7 +64,7 @@ PORT_RANGE_HIGH_KEY_NAME = "port_range_high"
 DRY_RUN_KEY_NAME = "dry_run"
 UV_CACHE_DIR_KEY_NAME = "uv_cache_dir"
 UV_VENV_DIR_KEY_NAME = "uv_venv_dir"
-SWAP_KEY_KEY_NAME = "_swap_key"
+INHERIT_FROM_KEY_NAME = "_inherit_from"
 NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     CONFIG_PATHS_KEY_NAME,
     ENTRYPOINT_KEY_NAME,
@@ -84,7 +84,7 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     DRY_RUN_KEY_NAME,
     UV_CACHE_DIR_KEY_NAME,
     UV_VENV_DIR_KEY_NAME,
-    SWAP_KEY_KEY_NAME,
+    INHERIT_FROM_KEY_NAME,
 ]
 
 # Data keys
@@ -113,7 +113,7 @@ def get_wandb_run() -> Optional[Run]:
 
 
 # OmegaConf new resolvers
-OmegaConf.register_new_resolver("swap_key", lambda a: f"${{swap_key:{a}}}")
+OmegaConf.register_new_resolver("inherit_from", lambda a: f"${{inherit_from:{a}}}")
 
 
 class GlobalConfigDictParserConfig(BaseModel):
@@ -202,7 +202,7 @@ class GlobalConfigDictParser(BaseModel):
         if duplicate_config_paths:
             duplicate_config_paths_str = "".join(f"- {p}\n" for p in duplicate_config_paths)
             print(f"""Found configs that reference the same source config path. You may want to double check whether the configs you have need to use different configs for the same server.
-In cases like these, you may want to consider using the `swap_key` OmegaConf directive e.g. '++my_specific_server=${{swap_key:generic_server}}' and then overriding config parameters in `my_specific_server`.
+In cases like these, you may want to consider using the `inherit_from` OmegaConf directive e.g. '++my_specific_server=${{inherit_from:generic_server}}' and then overriding config parameters in `my_specific_server`.
 Duplicate config paths:
 {duplicate_config_paths_str}""")
 
@@ -300,17 +300,17 @@ Duplicate config paths:
                     if isinstance(inner_v, (DictConfig, dict)):
                         self._recursively_swap_keys_helper(inner_v, original_dict_config, frozen_dict_config)
 
-            # e.g. ${swap_key:grpo.num_prompts_per_step}
-            is_swap_str = isinstance(v, str) and v.startswith("${swap_key:")
-            is_swap_property = isinstance(v, DictConfig) and SWAP_KEY_KEY_NAME in v
+            # e.g. ${inherit_from:grpo.num_prompts_per_step}
+            is_swap_str = isinstance(v, str) and v.startswith("${inherit_from:")
+            is_swap_property = isinstance(v, DictConfig) and INHERIT_FROM_KEY_NAME in v
             is_swap = is_swap_str or is_swap_property
             if not is_swap:
                 continue
 
             if is_swap_str:
-                path_to_swap = v.removeprefix("${swap_key:").removesuffix("}")
+                path_to_swap = v.removeprefix("${inherit_from:").removesuffix("}")
             elif is_swap_property:
-                path_to_swap = v.pop(SWAP_KEY_KEY_NAME)
+                path_to_swap = v.pop(INHERIT_FROM_KEY_NAME)
 
             path_to_swap = path_to_swap.split(".")
 

@@ -710,15 +710,15 @@ class TestGlobalConfig:
         def hydra_main_wrapper(fn):
             config_dict = DictConfig(
                 {
-                    "policy_model": "${swap_key:test_resource}",
+                    "policy_model": "${inherit_from:test_resource}",
                     "test_resource": {"responses_api_models": {"test_model": {"entrypoint": "app.py"}}},
                     "policy_model_2": {
-                        "_swap_key": "test_resource_2",
+                        "_inherit_from": "test_resource_2",
                         "responses_api_models": {"test_model": {"entrypoint": "app2.py"}},
                     },
                     "test_resource_2": {"responses_api_models": {"test_model": {"entrypoint": "app.py"}}},
                     "a": {"b": {"c": 3}},
-                    "a_prime": {"b_prime": "${swap_key:a.b.c}"},
+                    "a_prime": {"b_prime": "${inherit_from:a.b.c}"},
                 }
             )
             return lambda: fn(config_dict)
@@ -760,14 +760,14 @@ class TestGlobalConfig:
         def hydra_main_wrapper(fn):
             config_dict = DictConfig(
                 {
-                    "policy_model": "${swap_key:test_resource}",
+                    "policy_model": "${inherit_from:test_resource}",
                     "test_resource": {"responses_api_models": {"test_model": {"entrypoint": "app.py"}}},
                     "policy_model_2": {
-                        "_swap_key": "test_resource",
+                        "_inherit_from": "test_resource",
                         "responses_api_models": {"test_model": {"entrypoint": "app2.py"}},
                     },
                     "a": {"b": {"c": 3}},
-                    "a_prime": {"b_prime": "${swap_key:a.b.c}"},
+                    "a_prime": {"b_prime": "${inherit_from:a.b.c}"},
                 }
             )
             return lambda: fn(config_dict)
