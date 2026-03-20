@@ -1,0 +1,16 @@
+config_paths:
+- resources_servers/openenv/configs/openenv_coding.yaml
+openenv_coding_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: openenv_coding_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/openenv/data/coding/example.jsonl

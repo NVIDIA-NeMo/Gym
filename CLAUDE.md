@@ -64,6 +64,14 @@ Three server types, all FastAPI apps communicating via aiohttp:
 - **Response API Models** (`responses_api_models/`): Implement `chat_completions()` and `responses()` — LLM inference. Four variants: openai, azure_openai, vllm, local_vllm.
 - **Response API Agents** (`responses_api_agents/`): Implement `responses()` and `run()` — orchestrate model-tool call loops. `simple_agent` is the default single-turn agent; others include `proof_refinement_agent` (multi-turn correction), `verifiers_agent`, `swe_agents`, etc.
 
+**Environments** (`environments/`): YAML configs that compose a resources server, agent, and dataset into a runnable environment. Organized into three subdirectories:
+
+- `environments/training/` — training environments (configs with `train`/`validation` datasets)
+- `environments/eval/` — evaluation benchmarks (configs with `benchmark` datasets, or validation-only)
+- `environments/example/` — smoke-test configs (example datasets only)
+
+Resources server configs (`resources_servers/*/configs/`) define server implementation parameters only. Dataset and agent pairings live in `environments/`.
+
 A **HeadServer** coordinates all server lifecycles, config, and Ray cluster init.
 
 ### Base Class Hierarchy
@@ -260,7 +268,13 @@ For multi-turn agents, propagate cookies from the incoming request through all d
 
 ### 3. Wire up the YAML config
 
-A single YAML file in `configs/` typically defines both the resources server and its agent pairings. The agent references the resources server and model server by name.
+The resources server config (`resources_servers/my_server/configs/my_server.yaml`) defines server parameters only. Create a separate environment config for the agent + dataset pairing:
+
+- **Training environment**: `environments/training/env_name/config.yaml`
+- **Evaluation benchmark**: `environments/eval/env_name/config.yaml`
+- **Example only**: `environments/example/env_name/config.yaml`
+
+The environment name reflects the dataset, not the resources server — multiple environments can share one resources server (e.g. `dapo17k` and `math_with_judge` both use the `math_with_judge` resources server). Each environment config includes a `config_paths` entry pointing to the resources server config, then defines the agent section with datasets. See existing entries in `environments/` for examples.
 
 ### 4. Prepare data
 

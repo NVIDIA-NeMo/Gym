@@ -4,30 +4,6 @@ calendar:
       entrypoint: app.py
       domain: agent
       verified: false
-      description: Multi-turn calendar scheduling dataset. User states events and constraints in natural language; model schedules events to satisfy all constraints.
+      description: Multi-turn calendar scheduling dataset. User states events and
+        constraints in natural language; model schedules events to satisfy all constraints.
       value: Improve multi-turn instruction following capabilities
-calendar_simple_agent:
-  responses_api_agents:
-    simple_agent:
-      entrypoint: app.py
-      resources_server:
-        type: resources_servers
-        name: calendar
-      model_server:
-        type: responses_api_models
-        name: policy_model
-      datasets:
-      - name: train
-        type: train
-        jsonl_fpath: resources_servers/calendar/data/Nemotron-RL-Instruction-Following-Calendar-v2_train.jsonl
-        huggingface_identifier:
-          repo_id: nvidia/Nemotron-RL-Instruction-Following-Calendar-v2
-          artifact_fpath: train.jsonl
-        license: Creative Commons Attribution 4.0 International
-      - name: validation
-        type: validation
-        jsonl_fpath: resources_servers/calendar/data/Nemotron-RL-Instruction-Following-Calendar-v2_validation.jsonl
-        huggingface_identifier:
-          repo_id: nvidia/Nemotron-RL-Instruction-Following-Calendar-v2
-          artifact_fpath: validation.jsonl
-        license: Creative Commons Attribution 4.0 International

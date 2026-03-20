@@ -1,6 +1,3 @@
-# String-match only config (no judge model needed).
-# Uses prefix-based refusal detection from the XSTest paper.
-# For better accuracy, use the default xstest.yaml config with WildGuard judge.
 xstest:
   resources_servers:
     xstest:
@@ -19,17 +16,3 @@ policy_model:
       model: ${policy_model_name}
       return_token_id_information: false
       uses_reasoning_parser: true
-xstest_simple_agent:
-  responses_api_agents:
-    simple_agent:
-      entrypoint: app.py
-      resources_server:
-        type: resources_servers
-        name: xstest
-      model_server:
-        type: responses_api_models
-        name: policy_model
-      datasets:
-      - name: example
-        type: example
-        jsonl_fpath: resources_servers/xstest/data/example.jsonl

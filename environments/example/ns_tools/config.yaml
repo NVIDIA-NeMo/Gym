@@ -1,0 +1,18 @@
+config_paths:
+- resources_servers/ns_tools/configs/ns_tools.yaml
+ns_tools_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      max_steps: 50
+      resources_server:
+        type: resources_servers
+        name: ns_tools
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        license: Apache 2.0
+        jsonl_fpath: resources_servers/ns_tools/data/example.jsonl

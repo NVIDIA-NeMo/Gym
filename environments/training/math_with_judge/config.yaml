@@ -1,0 +1,30 @@
+config_paths:
+- resources_servers/math_with_judge/configs/math_with_judge.yaml
+math_with_judge_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: math_with_judge
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: train
+        type: train
+        jsonl_fpath: resources_servers/math_with_judge/data/OpenMathReasoning_train.jsonl
+        huggingface_identifier:
+          repo_id: nvidia/Nemotron-RL-math-OpenMathReasoning
+          artifact_fpath: train.jsonl
+        license: Creative Commons Attribution 4.0 International
+      - name: validation
+        type: validation
+        jsonl_fpath: resources_servers/math_with_judge/data/OpenMathReasoning_aime24_validation.jsonl
+        huggingface_identifier:
+          repo_id: nvidia/Nemotron-RL-math-OpenMathReasoning
+          artifact_fpath: validation.jsonl
+        license: Apache 2.0
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/math_with_judge/data/example.jsonl

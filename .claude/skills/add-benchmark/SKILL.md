@@ -94,11 +94,11 @@ mlflow_tracking_token: <your-gitlab-api-token>
 **Validate** your data:
 ```bash
 # Validate example data (for PR submission)
-ng_prepare_data "+config_paths=[resources_servers/my_benchmark/configs/my_benchmark.yaml]" \
+ng_prepare_data "+config_paths=[environments/training/env_name/config.yaml]" \
     +output_dirpath=/tmp/prepare +mode=example_validation
 
 # Download and prepare train/validation from GitLab
-ng_prepare_data "+config_paths=[resources_servers/my_benchmark/configs/my_benchmark.yaml]" \
+ng_prepare_data "+config_paths=[environments/training/env_name/config.yaml]" \
     +output_dirpath=data/my_benchmark +mode=train_preparation +should_download=true +data_source=gitlab
 ```
 
@@ -131,32 +131,50 @@ Key points:
 
 ### Step 4: Wire YAML config
 
-Edit `configs/my_benchmark.yaml`. Define the resources server instance and agent pairing(s). See `references/patterns.md` § "YAML Config Pattern".
+The resources server config (`resources_servers/my_benchmark/configs/my_benchmark.yaml`) defines server parameters only. Create a separate environment config for the agent + dataset pairing.
 
-Key points:
-- `verified: false` is auto-added by pre-commit hook (set to `true` after baselining)
-- `license` is required for `train` and `validation` datasets
-- Agent references resources server and model server by instance name
+**For a training environment**: `environments/training/env_name/config.yaml`
+**For an eval benchmark**: `environments/eval/env_name/config.yaml`
 
-For multi-turn benchmarks, either use `proof_refinement_agent` or create a custom agent. See `references/patterns.md` § "Agent Patterns".
+The environment name reflects the dataset, not the resources server — multiple environments can share the same resources server (e.g. `dapo_math` and `open_math_reasoning` both use `math_with_judge`).
 
-For `train`/`validation` datasets, add `gitlab_identifier` alongside `jsonl_fpath`:
 ```yaml
-datasets:
-- name: my_dataset
-  type: train
-  jsonl_fpath: resources_servers/my_benchmark/data/my_dataset.jsonl
-  gitlab_identifier:
-    dataset_name: my_benchmark
-    version: 0.0.1
-    artifact_fpath: my_dataset.jsonl
-  license: MIT
-- name: example
-  type: example
-  jsonl_fpath: resources_servers/my_benchmark/data/example.jsonl
+# environments/training/env_name/config.yaml
+config_paths:
+- resources_servers/my_benchmark/configs/my_benchmark.yaml
+
+env_name_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: my_benchmark
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: train
+        type: train
+        jsonl_fpath: resources_servers/my_benchmark/data/my_dataset.jsonl
+        gitlab_identifier:
+          dataset_name: my_benchmark
+          version: 0.0.1
+          artifact_fpath: my_dataset.jsonl
+        license: MIT
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/my_benchmark/data/example.jsonl
 ```
 
-Both fields must coexist: `jsonl_fpath` is the local download destination, `gitlab_identifier` tells the system where to fetch from. `example` datasets don't need `gitlab_identifier` — they're committed to git directly.
+See `references/patterns.md` § "YAML Config Pattern" for the full resources server config format.
+
+Key points:
+- `verified: false` is auto-added by pre-commit hook to the resources server config (set to `true` after baselining)
+- `license` is required for `train` and `validation` datasets
+- `jsonl_fpath` and `gitlab_identifier` must coexist: `jsonl_fpath` is the local download destination, `gitlab_identifier` is the remote source. `example` datasets don't need `gitlab_identifier`.
+
+For multi-turn benchmarks, either use `proof_refinement_agent` or create a custom agent. See `references/patterns.md` § "Agent Patterns".
 
 ### Step 5: Test
 
@@ -174,7 +192,7 @@ Test coverage must be >= 95%. Write tests for: verify pass, verify fail (wrong o
 
 ```bash
 # Start servers
-ng_run "+config_paths=[resources_servers/my_benchmark/configs/my_benchmark.yaml,responses_api_models/openai_model/configs/openai_model.yaml]"
+ng_run "+config_paths=[environments/training/env_name/config.yaml,responses_api_models/openai_model/configs/openai_model.yaml]"
 
 # Quick test with example data
 ng_collect_rollouts +agent_name=my_benchmark_simple_agent \
