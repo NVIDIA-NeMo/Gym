@@ -1,4 +1,4 @@
-/* Environment card filtering and sorting for docs/environments/index.html */
+/* environment card filtering and sorting */
 (function () {
   "use strict";
 
@@ -10,16 +10,16 @@
     const filterBar = document.getElementById("env-filter-bar");
     const countLabel = document.getElementById("env-count");
 
-    // ── Collect unique domains ───────────────────────────────────────
+    /* collect unique domains */
     const domains = [...new Set(cards.map((c) => c.dataset.domain).filter(Boolean))].sort();
 
-    // ── State ────────────────────────────────────────────────────────
+    /* state */
     let activeDomain = "all";
     let filterTrain = false;
     let filterVal = false;
-    let sortKey = "name"; // "name" | "domain"
+    let sortKey = "name";
 
-    // ── Helpers ──────────────────────────────────────────────────────
+    /* helpers */
     function makeBtn(label, extraClass) {
       const btn = document.createElement("button");
       btn.textContent = label;
@@ -39,11 +39,10 @@
       return wrap;
     }
 
-    // ── Build filter bar ─────────────────────────────────────────────
+    /* build filter bar */
     if (filterBar) {
       filterBar.className = "env-filter-bar";
 
-      // Domain buttons
       const domainGroup = makeGroup("Domain:");
       const allBtn = makeBtn("All", "active");
       allBtn.addEventListener("click", () => {
@@ -66,7 +65,6 @@
       });
       filterBar.appendChild(domainGroup);
 
-      // Data type toggles
       const typeGroup = makeGroup("Data:");
       const trainBtn = makeBtn("Train");
       trainBtn.addEventListener("click", () => {
@@ -84,7 +82,6 @@
       typeGroup.appendChild(valBtn);
       filterBar.appendChild(typeGroup);
 
-      // Sort
       const sortGroup = makeGroup("Sort:");
       const sortSel = document.createElement("select");
       sortSel.className = "env-sort-select";
@@ -105,9 +102,8 @@
       filterBar.appendChild(sortGroup);
     }
 
-    // ── Apply filters + sort ─────────────────────────────────────────
+    /* apply filters and sort */
     function apply() {
-      // Filter
       cards.forEach((card) => {
         const domainMatch = activeDomain === "all" || card.dataset.domain === activeDomain;
         const trainMatch = !filterTrain || card.dataset.train === "1";
@@ -115,7 +111,6 @@
         card.style.display = domainMatch && trainMatch && valMatch ? "" : "none";
       });
 
-      // Sort visible cards in place
       const visible = cards.filter((c) => c.style.display !== "none");
       visible.sort((a, b) => {
         if (sortKey === "domain") {
@@ -126,13 +121,11 @@
       });
       visible.forEach((c) => grid.appendChild(c));
 
-      // Count
       if (countLabel) {
         countLabel.textContent = `${visible.length} environment${visible.length !== 1 ? "s" : ""}`;
       }
     }
 
-    // Initial render
     apply();
   }
 
