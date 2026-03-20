@@ -340,7 +340,11 @@ def generate_training_cards(servers: list[ServerInfo]) -> str:  # pragma: no cov
 
     servers = sorted(
         servers,
-        key=lambda s: (normalize_str(s.get_domain_or_empty()), normalize_str(s.display_name)),
+        key=lambda s: (
+            normalize_str(s.get_domain_or_empty()),
+            normalize_str(s.display_name),
+            normalize_str(s.config_filename),
+        ),
     )
     lines = [
         '<div id="env-filter-bar"></div>',
