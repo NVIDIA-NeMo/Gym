@@ -20,8 +20,8 @@ import yaml
 
 
 # Directories to scan for environment configs.
-# Agent directories are included so agent-centric environments (e.g. swe_agents) can be listed,
-# but an agent config only appears if it has `domain` set — this prevents infrastructure agents
+# Agent directories are included so agent-only environments (e.g. verifiers) can be listed,
+# but an agent config only appears if it has `domain` set. this prevents other agents
 # (simple_agent, langgraph_agent, etc.) from showing up even if they gain dataset entries.
 SCAN_FOLDERS = ["resources_servers", "responses_api_agents"]
 KNOWN_SERVER_TYPES = {"resources_servers", "responses_api_agents"}
@@ -40,7 +40,6 @@ class EnvInfo:
 
 
 def _visit_server_metadata(data: dict, level: int = 1) -> dict:
-    """Walk the nested YAML structure to extract metadata fields at level 4."""
     if level == 4 and isinstance(data, dict):
         return {k: data.get(k) for k in ("domain", "description", "verified", "value")}
     if isinstance(data, dict):
@@ -97,7 +96,7 @@ def get_envs(parent_dir: Path) -> list[EnvInfo]:
                 if not types:
                     continue
                 metadata = _visit_server_metadata(data)
-                # Agent configs require domain to opt in — keeps infrastructure agents out.
+                # skip if no domain
                 if folder_name == "responses_api_agents" and not metadata.get("domain"):
                     continue
                 envs.append(

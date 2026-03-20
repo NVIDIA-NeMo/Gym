@@ -27,7 +27,7 @@ README_PATH = Path("docs/environments/index.md")
 # Directories to scan for environment configs. Agents can also define environments.
 SCAN_FOLDERS = [Path("resources_servers"), Path("responses_api_agents")]
 
-# Kept for backward compatibility with any code that references TARGET_FOLDER directly.
+# TODO: see if we still need target folder
 TARGET_FOLDER = SCAN_FOLDERS[0]
 
 
@@ -198,7 +198,7 @@ def visit_agent_datasets(data: dict) -> AgentDatasetsMetadata:  # pragma: no cov
     for k1, v1 in data.items():
         if not isinstance(v1, dict):
             continue
-        # Look under any known server type key, not just keys ending in "_agent"
+        # Look under any server type
         for server_type in _KNOWN_SERVER_TYPES:
             v2 = v1.get(server_type)
             if not isinstance(v2, dict):
@@ -281,9 +281,6 @@ def get_example_and_training_server_info() -> tuple[list[ServerInfo], list[Serve
                 yaml_data = extract_config_metadata(yaml_file)
                 if not yaml_data.types:
                     continue
-                # Agent configs must have domain set to appear in the table.
-                # This prevents infrastructure agents (simple_agent, langgraph_agent, etc.)
-                # from being listed even if they gain dataset entries in the future.
                 if scan_folder.name == "responses_api_agents" and not yaml_data.domain:
                     continue
 
