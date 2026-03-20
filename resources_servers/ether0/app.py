@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import logging
+import re
 from typing import Any, Optional
 
 from resources_servers.ether0.setup_ether0 import ensure_ether0
@@ -70,7 +71,7 @@ class Ether0ResourcesServer(SimpleResourcesServer):
         answer_info = reward_info.answer_info
 
         text = text.replace("<|answer_start|>", "<answer>").replace("<|answer_end|>", "</answer>")
-        answer = extract_answer_loose(text).strip() or None
+        answer = _extract_answer_multi_format(text)
         if answer is None:
             return _response(body, 0.0, None, eval_fn_name, problem_type)
 
@@ -102,6 +103,30 @@ def _response(
         eval_function=eval_function,
         problem_type=problem_type,
     )
+
+
+_BOXED_RE = re.compile(r"\\boxed\{((?:[^{}]|\{(?:[^{}]|\{[^{}]*\})*\})*)\}")
+_ANSWER_LETTER_RE = re.compile(r"Answer\s*:\s*([A-Za-z])\s*$", re.MULTILINE)
+
+
+def _extract_answer_multi_format(text: str) -> str | None:
+    """Extract answer trying multiple formats: <answer>, \\boxed{}, Answer: LETTER."""
+    # 1. Try <answer> tags (original ether0 format)
+    ans = extract_answer_loose(text).strip()
+    if ans:
+        return ans
+
+    # 2. Try \boxed{...} (rightmost match)
+    boxed_matches = _BOXED_RE.findall(text)
+    if boxed_matches:
+        return boxed_matches[-1].strip() or None
+
+    # 3. Try Answer: LETTER (rightmost match)
+    letter_matches = _ANSWER_LETTER_RE.findall(text)
+    if letter_matches:
+        return letter_matches[-1].strip() or None
+
+    return None
 
 
 def _extract_last_assistant_text(body: BaseVerifyRequest) -> str:
