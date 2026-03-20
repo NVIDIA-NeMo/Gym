@@ -382,6 +382,8 @@ ng_version = "nemo_gym.cli:version"
 # Re-install Gym and dependencies
 nemo_gym_reinstall = "nemo_gym.cli:reinstall"
 ng_reinstall = "nemo_gym.cli:reinstall"
+nemo_gym_list_envs = "nemo_gym.cli:list_envs"
+ng_list_envs = "nemo_gym.cli:list_envs"
 
 [tool.setuptools.packages.find]
 where = ["."]

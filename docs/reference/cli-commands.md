@@ -12,6 +12,9 @@ Each command has both a short form (such as `ng_run`) and a full form (such as `
 # Display help
 ng_help
 
+# List all available environments
+ng_list_envs
+
 # Get detailed help for any command
 ng_run +help=true
 ng_test +h=true
@@ -129,6 +132,21 @@ Initialize a new resources server with template files and directory structure.
 
 ```bash
 ng_init_resources_server +entrypoint=resources_servers/my_server
+```
+
+---
+
+---
+
+### `ng_list_envs` / `nemo_gym_list_envs`
+
+List all available NeMo Gym environments. Scans `resources_servers/` and `responses_api_agents/`
+for configs that define datasets and prints a summary table.
+
+**Example**
+
+```bash
+ng_list_envs
 ```
 
 ---

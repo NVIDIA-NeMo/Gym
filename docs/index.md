@@ -158,6 +158,29 @@ Prepare and validate training datasets.
 
 ::::
 
+## Environments
+
+::::{grid} 1 2 2 2
+:gutter: 1 1 1 2
+
+:::{grid-item-card} {octicon}`list-unordered;1.5em;sd-mr-1` Available Environments
+:link: environments/index
+:link-type: doc
+Browse all training, evaluation, and example environments with configs and dataset links.
++++
+{bdg-secondary}`math` {bdg-secondary}`coding` {bdg-secondary}`agent` {bdg-secondary}`knowledge`
+:::
+
+::::
+
+```{button-ref} environments/index
+:ref-type: doc
+:color: secondary
+:class: sd-rounded-pill
+
+View all environments →
+```
+
 ## Environment Tutorials
 
 Learn how to build custom training environments for various RL scenarios.
@@ -327,6 +350,14 @@ Overview <data/index>
 Prepare and Validate <data/prepare-validate>
 Download from Hugging Face <data/download-huggingface>
 Prompt Config <data/prompt-config>
+```
+
+```{toctree}
+:caption: Environments
+:hidden:
+:maxdepth: 1
+
+Available Environments <environments/index>
 ```
 
 ```{toctree}
