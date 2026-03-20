@@ -11,6 +11,8 @@ proof_judge:
       temperature: 1.0
       top_p: 1.0
       max_tokens: 100000
+      zero_reward_incorrect_groups: false # Give a reward of 0 if all the proofs in a group are incorrect
+      expected_group_size: -1 # = Group size when zero_reward_incorrect_groups is true
       assert_think_end: false
       domain: math
       description: Theorem proving with verifier + meta-verifier judge (combined env)
