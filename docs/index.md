@@ -335,6 +335,7 @@ Prompt Config <data/prompt-config>
 :maxdepth: 1
 
 Overview <benchmarks/index>
+Run benchmarks <benchmarks/run-benchmark-suite>
 Add a benchmark <benchmarks/adding-a-benchmark>
 Design a customer evaluation <benchmarks/designing-customer-evaluation>
 ```

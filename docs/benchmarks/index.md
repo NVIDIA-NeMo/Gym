@@ -11,10 +11,10 @@ Looking for benchmark design tutorials? See the {ref}`environment-tutorials-inde
 ::::{grid} 1 2 2 2
 :gutter: 2
 
-:::{grid-item-card} {octicon}`tools;1.5em;sd-mr-1` Single-Step Environment
-:link: single-step-environment
+:::{grid-item-card} {octicon}`tools;1.5em;sd-mr-1` Run a benchmark or benchmark suite
+:link: run-benchmark-suite
 :link-type: doc
-Build a complete environment from scratch: scaffolding, task data, tools, verification, testing, and rollout collection.
+Tutorial to run a benchmark or benchmark suite using NeMo Gym.
 +++
 {bdg-primary}`benchmark`
 :::
