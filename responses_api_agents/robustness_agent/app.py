@@ -44,17 +44,17 @@ from nemo_gym.openai_utils import (
 from nemo_gym.server_utils import get_response_json, raise_for_status
 
 
-_REWRITE_SYSTEM_PROMPT = """\
-You are a paraphrasing assistant who preserves original meaning while slightly changing names to augment data and prevent overfitting.
+_REWRITE_INSTRUCTIONS = {
+    "rewrite_prompts": "Rewrite the user and system messages with varied phrasing (preserve meaning, change wording).",
+    "rewrite_tool_names": "Generate a synonymous name for each tool.",
+    "rewrite_arg_names": "Generate synonymous names for each tool's parameters.",
+}
 
-Given messages and tool definitions, rewrite the user and system messages with varied phrasing, generate synonymous names for each tool, and generate synonymous names for each tool's parameters.
-
-Respond with valid JSON only, no markdown, no explanation. Use this exact schema:
-{
-  "rewritten_messages": [{"role": "...", "content": "..."}],
-  "tool_name_map": {"original_tool_name": "new_tool_name"},
-  "arg_name_maps": {"original_tool_name": {"original_arg": "new_arg"}}
-}"""
+_REWRITE_SCHEMA_FIELDS = {
+    "rewrite_prompts": '  "rewritten_messages": [{"role": "...", "content": "..."}]',
+    "rewrite_tool_names": '  "tool_name_map": {"original_tool_name": "new_tool_name"}',
+    "rewrite_arg_names": '  "arg_name_maps": {"original_tool_name": {"original_arg": "new_arg"}}',
+}
 
 
 class RobustnessAgentConfig(BaseResponsesAPIAgentConfig):
@@ -83,6 +83,20 @@ class RobustnessAgentVerifyResponse(BaseVerifyResponse):
 class RobustnessAgent(SimpleResponsesAPIAgent):
     config: RobustnessAgentConfig
 
+    def _build_rewrite_system_prompt(self) -> str:
+        flags = ("rewrite_prompts", "rewrite_tool_names", "rewrite_arg_names")
+        instructions = "\n".join(
+            f"{i + 1}. {_REWRITE_INSTRUCTIONS[f]}" for i, f in enumerate(flags) if getattr(self.config, f)
+        )
+        schema_fields = ",\n".join(_REWRITE_SCHEMA_FIELDS[f] for f in flags if getattr(self.config, f))
+        return (
+            "You are a paraphrasing assistant who preserves original meaning while slightly changing names "
+            "to augment data and prevent overfitting.\n\n"
+            f"Given messages and tool definitions:\n{instructions}\n\n"
+            f"Respond with valid JSON only, no markdown, no explanation. Use this exact schema:\n"
+            f"{{\n{schema_fields}\n}}"
+        )
+
     async def _rewrite(self, messages: list, tools: list, cookies) -> tuple[list, dict, dict]:
         nothing_to_rewrite = (
             not self.config.rewrite_prompts
@@ -103,7 +117,7 @@ class RobustnessAgent(SimpleResponsesAPIAgent):
 
         rewrite_body = NeMoGymResponseCreateParamsNonStreaming(
             input=[
-                NeMoGymEasyInputMessage(role="system", content=_REWRITE_SYSTEM_PROMPT),
+                NeMoGymEasyInputMessage(role="system", content=self._build_rewrite_system_prompt()),
                 NeMoGymEasyInputMessage(
                     role="user",
                     content=f"Messages:\n{json.dumps(messages_plain, indent=2)}\n\nTools:\n{tool_defs}",
@@ -130,7 +144,6 @@ class RobustnessAgent(SimpleResponsesAPIAgent):
                             output_text = part.text
                             break
 
-            # strip thinking tags emitted by reasoning models
             output_text = re.sub(r"<think>.*?</think>", "", output_text, flags=re.DOTALL).strip()
             output_text = re.sub(r"<thinking>.*?</thinking>", "", output_text, flags=re.DOTALL).strip()
 
