@@ -130,10 +130,11 @@ class TestParseModelResponse:
         assert result is not None
         assert "module bar" in result["rtl/bar.v"]
 
-    def test_returns_none_for_no_code(self):
+    def test_plain_text_treated_as_code(self):
         text = "I cannot generate this design."
         result = _parse_model_response(text, ["rtl/foo.sv"])
-        assert result is None
+        assert result is not None
+        assert result["rtl/foo.sv"] == text
 
     def test_returns_none_for_empty_target_files(self):
         result = _parse_model_response("some text", [])
@@ -336,12 +337,18 @@ class TestCVDPServerVerify:
         assert result.container_exit_code is None
 
     @pytest.mark.asyncio
-    async def test_verify_no_code_returns_zero_reward(self):
+    async def test_verify_plain_text_goes_to_harness(self):
         body_dict = _make_body(output_text="I am unable to generate this design.")
-        result = await self.server.verify(_make_request(body_dict))
+        with patch.object(
+            self.server,
+            "_run_harness",
+            new_callable=AsyncMock,
+            return_value=(1, "FAILED", []),
+        ):
+            result = await self.server.verify(_make_request(body_dict))
         assert result.reward == 0.0
-        assert result.extracted_rtl is None
-        assert result.parse_failed is True
+        assert result.extracted_rtl is not None
+        assert result.parse_failed is False
 
     @pytest.mark.asyncio
     async def test_verify_harness_pass_returns_one_reward(self):
