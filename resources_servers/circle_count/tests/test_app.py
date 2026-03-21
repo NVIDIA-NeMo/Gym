@@ -45,14 +45,7 @@ def _make_response(text: str) -> NeMoGymResponse:
         created_at=0.0,
         model="dummy",
         object="response",
-        output=[
-            {
-                "id": "msg_1",
-                "type": "message",
-                "role": "assistant",
-                "content": [{"type": "output_text", "text": text, "annotations": []}],
-            }
-        ],
+        output=[{"id": "msg_1", "type": "message", "role": "assistant", "content": [{"type": "output_text", "text": text, "annotations": []}]}],
         parallel_tool_calls=True,
         tool_choice="auto",
         tools=[],
