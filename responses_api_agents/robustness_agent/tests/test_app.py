@@ -70,7 +70,6 @@ class TestApp:
         RobustnessAgent(config=_make_config(), server_client=MagicMock(spec=ServerClient))
 
     async def test_responses_no_rewriter(self, monkeypatch: MonkeyPatch) -> None:
-        """Without a rewriter configured, behaves identically to simple_agent."""
         server = RobustnessAgent(config=_make_config(), server_client=MagicMock(spec=ServerClient))
         app = server.setup_webserver()
         client = TestClient(app)
@@ -93,8 +92,6 @@ class TestApp:
         )
 
     async def test_responses_with_rewriter_rewrites_tools(self, monkeypatch: MonkeyPatch) -> None:
-        """With a rewriter configured, tool names and arg names are rewritten before the model call
-        and translated back to originals when calling the resources server."""
         server = RobustnessAgent(
             config=_make_config(rewriter_name="rewriter"),
             server_client=MagicMock(spec=ServerClient),
@@ -133,7 +130,6 @@ class TestApp:
             "tools": [],
         }
 
-        # Model response: emits a tool call with rewritten name "fetch_conditions"
         tool_call_response = {
             "id": "resp_tc",
             "created_at": 1753983920.0,
@@ -196,7 +192,7 @@ class TestApp:
         )
         assert res.status_code == 200
 
-        # Verify resources server was called with the ORIGINAL tool name and arg name
+        # Verify resources server was called with the original tool name and arg name
         resources_call = [
             c for c in server.server_client.post.call_args_list if c.kwargs.get("url_path") == "/get_weather"
         ]
@@ -204,7 +200,6 @@ class TestApp:
         assert resources_call[0].kwargs["json"] == {"city": "Paris"}
 
     async def test_rewriter_fallback_on_error(self, monkeypatch: MonkeyPatch) -> None:
-        """If the rewriter call fails, the agent falls back to no rewriting."""
         server = RobustnessAgent(
             config=_make_config(rewriter_name="rewriter"),
             server_client=MagicMock(spec=ServerClient),
