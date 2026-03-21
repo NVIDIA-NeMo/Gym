@@ -24,7 +24,6 @@ ensure_ether0()
 from ether0.model_prompts import extract_answer_loose  # noqa: E402
 from ether0.models import RewardFunctionInfo  # noqa: E402
 from ether0.rewards import EVAL_FUNCTIONS  # noqa: E402
-
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
     BaseRunRequest,
@@ -75,6 +74,10 @@ class Ether0ResourcesServer(SimpleResourcesServer):
         if answer is None:
             return _response(body, 0.0, None, eval_fn_name, problem_type)
 
+        choices = meta.get("choices", {})
+        if choices and len(answer) == 1 and answer.isalpha():
+            answer = choices.get(answer.upper(), answer)
+
         eval_fn = EVAL_FUNCTIONS.get(eval_fn_name)
         if eval_fn is None:
             logger.warning("Unknown eval function %r", eval_fn_name)
@@ -110,22 +113,18 @@ _ANSWER_LETTER_RE = re.compile(r"Answer\s*:\s*([A-Za-z])\s*$", re.MULTILINE)
 
 
 def _extract_answer_multi_format(text: str) -> str | None:
-    """Extract answer trying multiple formats: <answer>, \\boxed{}, Answer: LETTER."""
-    # 1. Try <answer> tags (original ether0 format)
+    # <answer> tags
     ans = extract_answer_loose(text).strip()
     if ans:
         return ans
-
-    # 2. Try \boxed{...} (rightmost match)
-    boxed_matches = _BOXED_RE.findall(text)
-    if boxed_matches:
-        return boxed_matches[-1].strip() or None
-
-    # 3. Try Answer: LETTER (rightmost match)
-    letter_matches = _ANSWER_LETTER_RE.findall(text)
-    if letter_matches:
-        return letter_matches[-1].strip() or None
-
+    # \boxed{}, rightmost
+    matches = _BOXED_RE.findall(text)
+    if matches:
+        return matches[-1].strip() or None
+    # Answer: LETTER, rightmost
+    matches = _ANSWER_LETTER_RE.findall(text)
+    if matches:
+        return matches[-1].strip() or None
     return None
 
 
