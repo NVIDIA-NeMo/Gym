@@ -7,9 +7,7 @@ SPDX-License-Identifier: Apache-2.0
 
 Environment for training VLMs to count in images. Uses images with colored circles on a white background and verifies that the model reports the correct count for the target color. Image size, circle size, number of circles, and color distribution are configurable. Binary success reward.
 
-## Verification Logic
-
-The model is shown an image containing circles of various colors and asked how many circles of a specified target color appear. It responds using a `count(n)` tool call. The verifier counts circles matching `target_color` in the `circles` list from `verifier_metadata` and awards reward 1.0 if `n` matches exactly, 0.0 otherwise.
+Expects `\boxed{}` output format. No tools.
 
 # Running
 Set `env.yaml`:
