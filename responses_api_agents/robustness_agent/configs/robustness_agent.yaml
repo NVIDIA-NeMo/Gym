@@ -8,14 +8,10 @@ robustness_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      # Optional: set to a model server name to enable rewriting.
-      # If omitted, the agent behaves identically to simple_agent.
       rewriter_model_server:
         type: responses_api_models
         name: rewriter_model
-      # Fine-grained control over what gets rewritten (all default to true).
       rewrite_prompts: true
       rewrite_tool_names: true
       rewrite_arg_names: true
-      # Probability of applying rewriting on any given rollout.
       rewrite_prob: 0.2
