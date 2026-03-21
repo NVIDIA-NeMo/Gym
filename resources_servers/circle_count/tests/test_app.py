@@ -45,7 +45,14 @@ def _make_response(text: str) -> NeMoGymResponse:
         created_at=0.0,
         model="dummy",
         object="response",
-        output=[{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": text}]}],
+        output=[
+            {
+                "id": "msg_1",
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": text, "annotations": []}],
+            }
+        ],
         parallel_tool_calls=True,
         tool_choice="auto",
         tools=[],
@@ -105,9 +112,9 @@ class TestCircleCountServer:
         assert result.reward == 0.0
         assert result.predicted_count is None
 
-    async def test_last_boxed_used(self) -> None:
+    async def test_first_boxed_used(self) -> None:
         server = _make_server()
-        result = await server.verify(_make_verify_request(r"First I thought \boxed{1} but actually \boxed{2}"))
+        result = await server.verify(_make_verify_request(r"First I thought \boxed{2} but actually \boxed{1}"))
         assert result.predicted_count == 2
         assert result.reward == 1.0
 
