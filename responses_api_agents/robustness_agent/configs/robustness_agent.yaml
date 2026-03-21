@@ -17,3 +17,5 @@ robustness_agent:
       rewrite_prompts: true
       rewrite_tool_names: true
       rewrite_arg_names: true
+      # Probability of applying rewriting on any given rollout.
+      rewrite_prob: 0.2

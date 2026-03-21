@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+import random
 import re
 from typing import List, Optional
 
@@ -43,22 +44,17 @@ from nemo_gym.openai_utils import (
 from nemo_gym.server_utils import get_response_json, raise_for_status
 
 
-_REWRITE_PROMPT_PARTS = {
-    "prompts": "1. Rewrite the user and system messages with varied phrasing (preserve meaning, change wording)",
-    "tool_names": "2. Generate synonymous names for each tool (rename the tool itself)",
-    "arg_names": "3. Generate synonymous names for each tool's parameters",
-}
+_REWRITE_SYSTEM_PROMPT = """\
+You are a paraphrasing assistant who preserves original meaning while slightly changing names to augment data and prevent overfitting.
 
-_REWRITE_SYSTEM_PROMPT_TEMPLATE = """\
-You are a paraphrasing assistant for robustness testing. Given messages and tool definitions, you will:
-{instructions}
+Given messages and tool definitions, rewrite the user and system messages with varied phrasing, generate synonymous names for each tool, and generate synonymous names for each tool's parameters.
 
 Respond with valid JSON only, no markdown, no explanation. Use this exact schema:
-{{
-  "rewritten_messages": [{{\"role\": \"...\", \"content\": \"...\"}}],
-  "tool_name_map": {{"original_tool_name": "new_tool_name"}},
-  "arg_name_maps": {{"original_tool_name": {{"original_arg": "new_arg"}}}}
-}}"""
+{
+  "rewritten_messages": [{"role": "...", "content": "..."}],
+  "tool_name_map": {"original_tool_name": "new_tool_name"},
+  "arg_name_maps": {"original_tool_name": {"original_arg": "new_arg"}}
+}"""
 
 
 class RobustnessAgentConfig(BaseResponsesAPIAgentConfig):
@@ -68,6 +64,7 @@ class RobustnessAgentConfig(BaseResponsesAPIAgentConfig):
     rewrite_prompts: bool = True
     rewrite_tool_names: bool = True
     rewrite_arg_names: bool = True
+    rewrite_prob: float = 0.2
     max_steps: int = None
 
 
@@ -86,23 +83,13 @@ class RobustnessAgentVerifyResponse(BaseVerifyResponse):
 class RobustnessAgent(SimpleResponsesAPIAgent):
     config: RobustnessAgentConfig
 
-    def _build_rewrite_system_prompt(self) -> str:
-        active = []
-        if self.config.rewrite_prompts:
-            active.append(_REWRITE_PROMPT_PARTS["prompts"])
-        if self.config.rewrite_tool_names:
-            active.append(_REWRITE_PROMPT_PARTS["tool_names"])
-        if self.config.rewrite_arg_names:
-            active.append(_REWRITE_PROMPT_PARTS["arg_names"])
-        return _REWRITE_SYSTEM_PROMPT_TEMPLATE.format(instructions="\n".join(active))
-
     async def _rewrite(self, messages: list, tools: list, cookies) -> tuple[list, dict, dict]:
         nothing_to_rewrite = (
             not self.config.rewrite_prompts
             and not self.config.rewrite_tool_names
             and not self.config.rewrite_arg_names
         )
-        if not self.config.rewriter_model_server or nothing_to_rewrite:
+        if not self.config.rewriter_model_server or nothing_to_rewrite or random.random() >= self.config.rewrite_prob:
             return messages, {}, {}
 
         tool_defs = json.dumps([dict(t) for t in (tools or [])], indent=2)
@@ -116,7 +103,7 @@ class RobustnessAgent(SimpleResponsesAPIAgent):
 
         rewrite_body = NeMoGymResponseCreateParamsNonStreaming(
             input=[
-                NeMoGymEasyInputMessage(role="system", content=self._build_rewrite_system_prompt()),
+                NeMoGymEasyInputMessage(role="system", content=_REWRITE_SYSTEM_PROMPT),
                 NeMoGymEasyInputMessage(
                     role="user",
                     content=f"Messages:\n{json.dumps(messages_plain, indent=2)}\n\nTools:\n{tool_defs}",
