@@ -185,7 +185,7 @@ class RunHelper:  # pragma: no cover
     _server_instance_display_configs: List[ServerInstanceDisplayConfig]
     _server_client: ServerClient
 
-    def start(self, global_config_dict_parser_config: GlobalConfigDictParserConfig) -> None:
+    def start(self, global_config_dict_parser_config: GlobalConfigDictParserConfig, **kwargs) -> None:
         global_config_dict = get_global_config_dict(global_config_dict_parser_config=global_config_dict_parser_config)
 
         # Initialize Ray cluster in the main process

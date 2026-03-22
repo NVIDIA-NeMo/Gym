@@ -1,0 +1,21 @@
+user: |-
+  You are given a maths problem and a reasoning attempt toward solving it. You may also be given a summary of a previous reasoning attempt for the same problem. If this is provided, you may assume that the current reasoning attempt was generated conditioned on the summary of the previous reasoning attempt.
+  Your task is to write a summary of the current reasoning attempt.
+
+  The new summary you generate should possess the following characteristics:
+  - It should provide a detailed overview of what occurred in the current reasoning attempt. This may include a summary of the high-level problem-solving strategy, a description of theorems used, verification attempts, calculations and logical deductions etc.
+  - It should summarize the current reasoning attempt in light of any previous summaries, if provided. We should be able to understand the relationship between the previous reasoning and the current reasoning by reading the summary. Make sure any important information contained in the existing summary is retained in the new one.
+  - It should be no more than two paragraphs long and written in paragraph form, without headers or subheaders.
+  - It should be written in the first person, as if though it is being written by the person solving the problem.
+  - The reasoning attempt may not be complete. In this case, the summary should still attempt to summarize the partial reasoning.
+
+  IMPORTANT: Do not under any circumstances add any additional reasoning not contained in the latest reasoning step. Your task is only to summarize what is given to you.
+
+  ### PROBLEM
+  {problem}
+
+  ### EXISTING SUMMARY
+  {existing_summary}
+
+  ### LATEST REASONING
+  {reasoning}
