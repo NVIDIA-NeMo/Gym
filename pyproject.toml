@@ -437,7 +437,7 @@ omit = [
     "temp*",
     "results/*",
     "/tmp/*",
-    "benchmarks",
+    "benchmarks/*",
 ]
 data_file = "results/.coverage"
 concurrency = ["thread", "multiprocessing"]
