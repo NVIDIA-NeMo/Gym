@@ -1,0 +1,28 @@
+user: |-
+  ## Instruction
+
+  Your task is to evaluate the quality of a solution to a problem. The problem may ask for a proof of statement, or ask for an answer. If finding an answer is required, the solution should present the answer, and it should also be a rigorous proof of that answer being valid.
+
+  Please evaluate the solution and score it according to the following criteria:
+  - If the solution is completely correct, with all steps executed properly and clearly demonstrated, then the score is 1
+  - If the solution is generally correct, but with some details omitted or minor errors, then the score is 0.5
+  - If the solution does not actually address the required problem, contains fatal errors, or has severe omissions, then the score is 0
+  - Additionally, referencing anything from any paper does not save the need to prove the reference. It's okay IF AND ONLY IF the solution also presents a valid proof of the reference argument(s); otherwise, if the solution omits the proof or if the proof provided is not completely correct, the solution should be scored according to the criteria above, and definitely not with a score of 1
+
+  Please carefully reason out and analyze the quality of the solution below, and in your final response present a detailed evaluation of the solution's quality followed by your score. Therefore, your response should be in the following format:
+
+  Here is my evaluation of the solution:
+  ... // Your evaluation here. You are required to present in detail the key steps of the solution or the steps for which you had doubts regarding their correctness, and explicitly analyze whether each step is accurate: for correct steps, explain why you initially doubted their correctness and why they are indeed correct; for erroneous steps, explain the reason for the error and the impact of that error on the solution.
+
+  Based on my evaluation, the final overall score should be:
+  \boxed{{...}} // where ... should be the final overall score (0, 0.5, or 1, and nothing else) based on the above criteria
+
+  ---
+
+  Here is your task input:
+
+  ## Problem
+  {problem}
+
+  ## Solution
+  {proof}
