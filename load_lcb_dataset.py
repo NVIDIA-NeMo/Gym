@@ -92,6 +92,11 @@ def preprocess_livecodebench_chatml_template(data_file):
 
         question += "\n\n" + code_instruction
 
+        # @bxyu-nvidia: What I think is equivalent
+        # question += (
+        #     f"{item['question_content'].strip()}\n\nSolve the problem starting with the provided function header.\n\nFunction header:\n```\n{item['starter_code']}\n```\n\nWrite Python code to solve the problem. Please place the solution code in the following format:\n```python\n# Your solution code here\n```"
+        # )
+
         final_prompt = instruction + "<|im_start|>user\n" + question + "<|im_end|>\n<|im_start|>assistant\n<think>\n"
 
         prompt_list.append(final_prompt)

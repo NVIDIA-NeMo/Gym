@@ -31,7 +31,7 @@ import json
 import pickle
 import zlib
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 
 # From LiveCodeBench lcb_runner/prompts/code_generation.py — tells the model which code style to use
@@ -60,12 +60,43 @@ def _decode_test_cases(raw) -> list:
         return json.loads(pickle.loads(zlib.decompress(base64.b64decode(raw.encode("utf-8")))))
 
 
+def _add_prompt_fields(row: dict, starter_code: str) -> None:
+    """Add formatting_message and starter_code fields for prompt templating.
+
+    Matches the logic in Skills' ``nemo_skills/dataset/livecodebench/prepare.py::clean_data()``.
+    If ``starter_code`` is non-empty, the model is told to use it (LeetCode functional style).
+    Otherwise, the model is told to read from stdin (Codeforces/Atcoder style).
+    """
+    if starter_code:
+        row["formatting_message"] = _FORMATTING_WITH_STARTER_CODE
+        row["starter_code"] = f"```python\n{starter_code}\n```"
+    else:
+        row["formatting_message"] = _FORMATTING_WITHOUT_STARTER_CODE
+        row["starter_code"] = "```python\n# YOUR CODE HERE\n```"
+
+
+def _add_prompt_fields_cascade(row: dict, starter_code: str) -> None:
+    """Add formatting_message and starter_code fields for prompt templating.
+
+    Matches the logic in Skills' ``nemo_skills/dataset/livecodebench/prepare.py::clean_data()``.
+    If ``starter_code`` is non-empty, the model is told to use it (LeetCode functional style).
+    Otherwise, the model is told to read from stdin (Codeforces/Atcoder style).
+    """
+    if starter_code:
+        row["starter_code"] = (
+            f"\n\nSolve the problem starting with the provided function header.\n\nFunction header:\n```\n{starter_code}\n```"
+        )
+    else:
+        row["starter_code"] = ""
+
+
 def prepare_from_hf_validation(
     output_path: Path,
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
     hf_repo: str = "nvidia/nemotron-RL-coding-competitive_coding",
     hf_filename: str = "validation.jsonl",
+    _add_prompt_fields_fn: Callable = _add_prompt_fields,
 ) -> Path:
     """Prepare LCB data from the pre-prepared code_gen validation dataset on HuggingFace.
 
@@ -108,7 +139,7 @@ def prepare_from_hf_validation(
         hf_row = hf_map.get(pid)
         if hf_row:
             row["verifier_metadata"]["difficulty"] = hf_row.get("difficulty", "unknown")
-            _add_prompt_fields(row, hf_row.get("starter_code", ""))
+            _add_prompt_fields_fn(row, hf_row.get("starter_code", ""))
             date = hf_row.get("contest_date", "")
             if date_from and date < date_from:
                 continue
@@ -124,6 +155,7 @@ def prepare_from_hf_raw(
     release_version: str,
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
+    _add_prompt_fields_fn: Callable = _add_prompt_fields,
 ) -> Path:
     """Prepare LCB data by decoding test cases directly from the livecodebench HF dataset.
 
@@ -164,25 +196,10 @@ def prepare_from_hf_raw(
                 },
             },
         }
-        _add_prompt_fields(row, example.get("starter_code", ""))
+        _add_prompt_fields_fn(row, example.get("starter_code", ""))
         rows.append(row)
 
     return _write_rows(rows, output_path)
-
-
-def _add_prompt_fields(row: dict, starter_code: str) -> None:
-    """Add formatting_message and starter_code fields for prompt templating.
-
-    Matches the logic in Skills' ``nemo_skills/dataset/livecodebench/prepare.py::clean_data()``.
-    If ``starter_code`` is non-empty, the model is told to use it (LeetCode functional style).
-    Otherwise, the model is told to read from stdin (Codeforces/Atcoder style).
-    """
-    if starter_code:
-        row["formatting_message"] = _FORMATTING_WITH_STARTER_CODE
-        row["starter_code"] = f"```python\n{starter_code}\n```"
-    else:
-        row["formatting_message"] = _FORMATTING_WITHOUT_STARTER_CODE
-        row["starter_code"] = "```python\n# YOUR CODE HERE\n```"
 
 
 def _write_rows(rows: list, output_path: Path) -> Path:
