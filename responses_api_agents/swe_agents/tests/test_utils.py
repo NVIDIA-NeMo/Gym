@@ -19,6 +19,11 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
+
+from nemo_gym.openai_utils import (
+    NeMoGymEasyInputMessage,
+    NeMoGymResponseCreateParamsNonStreaming,
+)
 from responses_api_agents.swe_agents.utils import (
     _extract_text_from_message,
     _get_workspace_root,
@@ -34,11 +39,6 @@ from responses_api_agents.swe_agents.utils import (
     get_model_endpoint,
     get_openhands_trajectory_from_completions,
     get_trajectory_and_tools,
-)
-
-from nemo_gym.openai_utils import (
-    NeMoGymEasyInputMessage,
-    NeMoGymResponseCreateParamsNonStreaming,
 )
 
 
