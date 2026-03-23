@@ -26,7 +26,6 @@ import uuid
 from asyncio import Semaphore
 from asyncio.subprocess import Process
 from contextlib import contextmanager
-
 from pathlib import Path
 from shutil import rmtree
 from subprocess import Popen
@@ -731,7 +730,7 @@ REBENCH_DIR={rebench_dir} \
         install_cmds = install_config.get("install", [])
         if isinstance(install_cmds, str):
             install_cmds = [install_cmds]
-        log_parser_name = install_config.get("log_parser", "")
+        # log_parser_name = install_config.get("log_parser", "")
 
         repo = instance_dict.get("repo", "")
         repo_name = repo.split("/")[1] if "/" in repo else repo

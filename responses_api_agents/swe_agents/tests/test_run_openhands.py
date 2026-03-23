@@ -18,7 +18,6 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
-
 from responses_api_agents.swe_agents.run_openhands import (
     NS_TO_OPENAI_PARAM,
     NS_TO_OPENHANDS_PARAM,
