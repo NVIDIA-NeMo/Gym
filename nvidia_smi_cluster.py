@@ -16,10 +16,13 @@ def get_gpu_info():
 
 
 # Launch one task per node
-nodes = ray.nodes()
-print(nodes[0])
-exit()
-tasks = [get_gpu_info.options(resources={f"node:{n['NodeID']}": 0.01}).remote() for n in nodes]
+node_resource_keys = []
+for node in ray.nodes():
+    node_resource_key = [k for k in node["Resources"].keys() if k.startswith("node:")][0]
+    node_resource_keys.append(node_resource_key)
+tasks = [
+    get_gpu_info.options(resources={node_resource_key: 0.01}).remote() for node_resource_key in node_resource_keys
+]
 
 results = ray.get(tasks)
 
