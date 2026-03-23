@@ -15,11 +15,14 @@
 import json
 from asyncio import Future
 from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
 
 import orjson
 import pytest
 import yaml
 
+from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
+from nemo_gym.global_config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.reward_profile import compute_aggregate_metrics
 from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
 
@@ -350,10 +353,6 @@ class TestRolloutCollection:
 
     async def test_call_aggregate_metrics(self, tmp_path: Path) -> None:
         """Test _call_aggregate_metrics with a mocked server client."""
-        from unittest.mock import AsyncMock, MagicMock
-
-        from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
-        from nemo_gym.global_config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 
         agg = AggregateMetrics(
             agent_metrics={"mean/reward": 0.5},
@@ -415,10 +414,6 @@ class TestRolloutCollection:
 
     async def test_call_aggregate_metrics_multiple_agents(self, tmp_path: Path) -> None:
         """Test _call_aggregate_metrics with multiple agents runs concurrently via as_completed."""
-        from unittest.mock import AsyncMock, MagicMock
-
-        from nemo_gym.base_resources_server import AggregateMetrics
-        from nemo_gym.global_config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 
         agg_a = AggregateMetrics(
             agent_metrics={"mean/reward": 1.0},
