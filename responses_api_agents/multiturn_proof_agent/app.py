@@ -50,6 +50,7 @@ class MultiturnProofAgentConfig(BaseResponsesAPIAgentConfig):
     max_turns: int = 2
     response_processor: str = "strip_thinking"
     include_all_attempts: bool = True
+    max_output_tokens: Optional[int] = None
 
 
 class MultiturnProofRunRequest(BaseRunRequest):
@@ -119,6 +120,8 @@ class MultiturnProofAgent(SimpleResponsesAPIAgent):
                 value = getattr(params, key, None) if hasattr(params, key) else params.get(key)
                 if value is not None:
                     current_input[key] = value
+        if self.config.max_output_tokens is not None:
+            current_input["max_output_tokens"] = self.config.max_output_tokens
         turn_index = 0
         existing_summary = "None"
         use_summary = self.config.response_processor == "summary_model"
@@ -126,15 +129,25 @@ class MultiturnProofAgent(SimpleResponsesAPIAgent):
         # effective max turns: strip_thinking → max_turns, summary_model → max_turns * 2 - 1
         effective_max = self.config.max_turns * 2 - 1 if use_summary else self.config.max_turns
 
-        while turn_index < effective_max:
-            LOG.info("Turn %d: Generating", turn_index)
+        next_is_summary_prompt = False
 
-            gen_response = await self.server_client.post(
-                server_name=self.config.name,
-                url_path="/v1/responses",
-                json=current_input,
-                cookies=cookies,
-            )
+        while turn_index < effective_max:
+            LOG.info("Turn %d: Generating (summary_prompt=%s)", turn_index, next_is_summary_prompt)
+
+            if next_is_summary_prompt:
+                gen_response = await self.server_client.post(
+                    server_name="policy_model_reasoning_off",
+                    url_path="/v1/responses",
+                    json=current_input,
+                    cookies=cookies,
+                )
+            else:
+                gen_response = await self.server_client.post(
+                    server_name=self.config.name,
+                    url_path="/v1/responses",
+                    json=current_input,
+                    cookies=cookies,
+                )
             await raise_for_status(gen_response)
             cookies = gen_response.cookies
             model_response_json = await gen_response.json()
@@ -193,7 +206,7 @@ class MultiturnProofAgent(SimpleResponsesAPIAgent):
                 existing_summary = turn_info.get("_existing_summary", existing_summary)
 
             # Build next input
-            is_summary_prompt = verify_result.get("is_summary_prompt", False)
+            next_is_summary_prompt = verify_result.get("is_summary_prompt", False)
 
             params = body.responses_create_params
             current_input = {
@@ -204,10 +217,8 @@ class MultiturnProofAgent(SimpleResponsesAPIAgent):
                 value = getattr(params, key, None) if hasattr(params, key) else params.get(key)
                 if value is not None:
                     current_input[key] = value
-
-            # Disable thinking for summary turns
-            if is_summary_prompt:
-                current_input["reasoning"] = {"effort": "none"}
+            if not next_is_summary_prompt and self.config.max_output_tokens is not None:
+                current_input["max_output_tokens"] = self.config.max_output_tokens
 
             turn_index += 1
 
