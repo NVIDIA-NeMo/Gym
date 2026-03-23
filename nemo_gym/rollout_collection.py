@@ -281,6 +281,7 @@ class RolloutCollectionHelper(BaseModel):
 
             result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
             result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
+            result[AGENT_REF_KEY_NAME] = row[AGENT_REF_KEY_NAME]
 
             rows.append(row)
             results.append(result)
