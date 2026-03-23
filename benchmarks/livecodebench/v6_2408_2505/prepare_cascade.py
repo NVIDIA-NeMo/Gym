@@ -24,7 +24,7 @@ from benchmarks.livecodebench.prepare_utils import _add_prompt_fields_cascade, p
 
 
 DATA_DIR = Path(__file__).parent / "data"
-OUTPUT_FPATH = DATA_DIR / "livecodebench_v6_validation.jsonl"
+OUTPUT_FPATH = DATA_DIR / "livecodebench_v6_cascade_validation.jsonl"
 
 
 def prepare() -> Path:
