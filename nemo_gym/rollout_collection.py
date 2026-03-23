@@ -74,6 +74,7 @@ class E2ERolloutCollectionConfig(SharedRolloutCollectionConfig):
     """
 
     split: Union[Literal["train"], Literal["validation"], Literal["benchmark"]]
+    reuse_existing_data_preparation: bool = False
 
 
 class RolloutCollectionConfig(SharedRolloutCollectionConfig):
