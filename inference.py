@@ -1,3 +1,14 @@
+"""
+Run as:
+```bash
+python inference.py \
+    --benchmark-folder /lustre/fsw/portfolios/llmservice/users/wdai/data/foundational_qa/test_benchmarks \
+    --livecodebench-path livecodebench/test_aug2024tojan2025.json \
+    --livecodebench-v6-path livecodebench/test_feb2025toApr2025.json \
+    --eval_dataset livecodebench
+```
+"""
+
 import json
 import os
 import time
