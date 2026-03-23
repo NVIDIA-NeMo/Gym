@@ -3,6 +3,65 @@ Run as:
 ```bash
 python load_lcb_dataset.py
 ```
+
+One sample looks like:
+```json
+<|im_start|>system\nYou are a helpful and harmless assistant.\n\nYou are not allowed to use any tools.<|im_end|>\n<|im_start|>user\nYou are given an integer sequence A=(A_1,\\ldots,A_N) of length N. Here, A_1, A_2, \\ldots, A_N are all distinct.\nWhich element in A is the second largest?\n\nInput\n\nThe input is given from Standard Input in the following format:\nN \r\nA_1 A_2 \\ldots A_{N}\n\nOutput\n\nPrint the integer X such that the X-th element in A is the second largest.\n\nConstraints\n\n\n- 2 \\leq N \\leq 100\n- 1 \\leq A_i \\leq 10^9\n- A_1, A_2, \\ldots, A_N are all distinct.\n- All input values are integers.\n\nSample Input 1\n\n4\r\n8 2 5 1\n\nSample Output 1\n\n3\r\n\nThe second largest element in A is A_3, so print 3.\n\nSample Input 2\n\n8\r\n1 2 3 4 5 10 9 11\n\nSample Output 2\n\n6\n\nWrite Python code to solve the problem. Please place the solution code in the following format:\n```python\n# Your solution code here\n```<|im_end|>\n<|im_start|>assistant\n<think>\n
+```
+```
+<|im_start|>system
+You are a helpful and harmless assistant.
+
+You are not allowed to use any tools.<|im_end|>
+<|im_start|>user
+You are given an integer sequence A=(A_1,\ldots,A_N) of length N. Here, A_1, A_2, \ldots, A_N are all distinct.
+Which element in A is the second largest?
+
+Input
+
+The input is given from Standard Input in the following format:
+N
+A_1 A_2 \ldots A_{N}
+
+Output
+
+Print the integer X such that the X-th element in A is the second largest.
+
+Constraints
+
+
+- 2 \leq N \leq 100
+- 1 \leq A_i \leq 10^9
+- A_1, A_2, \ldots, A_N are all distinct.
+- All input values are integers.
+
+Sample Input 1
+
+4
+8 2 5 1
+
+Sample Output 1
+
+3
+
+The second largest element in A is A_3, so print 3.
+
+Sample Input 2
+
+8
+1 2 3 4 5 10 9 11
+
+Sample Output 2
+
+6
+
+Write Python code to solve the problem. Please place the solution code in the following format:
+```python
+# Your solution code here
+```<|im_end|>
+<|im_start|>assistant
+<think>
+```
 """
 
 import json
