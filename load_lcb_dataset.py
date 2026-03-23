@@ -42,8 +42,6 @@ def preprocess_livecodebench_chatml_template(data_file):
 
 
 def get_prompt_list(args):
-    data_list = None
-
     ## get input data
     if args.eval_dataset == "livecodebench":
         input_datapath = os.path.join(args.benchmark_folder, args.livecodebench_path)
@@ -56,12 +54,7 @@ def get_prompt_list(args):
     else:
         raise ValueError("please input a correct eval_dataset name!")
 
-    print("number of total prompt_list:", len(prompt_list))
-
-    if data_list is not None:
-        return prompt_list, qid_list, data_list
-    else:
-        return prompt_list, qid_list
+    return prompt_list, qid_list
 
 
 if __name__ == "__main__":
