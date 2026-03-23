@@ -238,6 +238,7 @@ def extract_predicted_value(
 # List of properties for which the reward is computed as 1 / (1 + |predicted - actual|)
 _INVERSE_ERROR_PROPERTIES = frozenset(
     {"TPSA", "ExactMolWt", "FractionCSP3", "HeavyAtomMolWt", "MolLogP", "MolWt", "qed"}
+)
 
 def compute_reward(
     predicted: Optional[float],
