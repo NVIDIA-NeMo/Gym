@@ -36,6 +36,7 @@ Mirrors `repository.py` in the CVDP source:
 The data can be found [on Hugging Face](https://huggingface.co/datasets/nvidia/cvdp-benchmark-dataset). 
 
 ## Step 1 — Download dataset from HF
+
 ```bash
 huggingface-cli download nvidia/cvdp-benchmark-dataset \
   --include "cvdp_v1.0.2_nonagentic_code_generation_no_commercial.jsonl" \
@@ -44,6 +45,7 @@ huggingface-cli download nvidia/cvdp-benchmark-dataset \
 ```
 
 ## Step 2 — Export prompts from CVDP
+
 Use CVDP's built-in `local_export` mode to generate the exact prompts CVDP would send to a model:
 
 ```bash
@@ -59,6 +61,7 @@ python run_benchmark.py \
 This produces a JSONL with `{id, prompt, system, user}` per entry.
 
 ## Step 3 — Convert to NeMo-Gym format
+
 ```bash
 python resources_servers/cvdp/scripts/convert_to_gym.py \
     --prompts  <prompts_from_step1>.jsonl \
@@ -71,14 +74,7 @@ Each output row has `responses_create_params` (system + user prompts) and `verif
 
 ## Setup
 
-If you do not have one, copy the provided `env.yaml.example` to the repo root and fill in your credentials:
-
-```bash
-cp resources_servers/cvdp/env.yaml.example env.yaml
-# then edit env.yaml with your policy_api_key and policy_model_name as shown below
-```
-
-Configure your inference endpoint in `env.yaml` at the repo root:
+If you do not have one, create an env.yaml at the repo root and configure your inference endpoint.
 
 This example is for using the **NV inference endpoint** with the vLLM backend. This can also be run with any OpenAI-compatible endpoint with any Gym-supported backend.
 
