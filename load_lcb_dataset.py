@@ -1,16 +1,13 @@
 """
 Run as:
 ```bash
-python inference.py \
-    --benchmark-folder /lustre/fsw/portfolios/llmservice/users/wdai/data/foundational_qa/test_benchmarks \
-    --livecodebench-path livecodebench/test_aug2024tojan2025.json \
-    --livecodebench-v6-path livecodebench/test_feb2025toApr2025.json \
-    --eval_dataset livecodebench
+python load_lcb_dataset.py
 ```
 """
 
 import json
 import os
+from argparse import Namespace
 
 
 def preprocess_livecodebench_chatml_template(data_file):
@@ -60,15 +57,17 @@ def get_prompt_list(args):
         raise ValueError("please input a correct eval_dataset name!")
 
     print("number of total prompt_list:", len(prompt_list))
-    if args.start_idx != -1 and args.end_idx != -1:
-        print("getting data from %d to %d" % (args.start_idx, args.end_idx))
-        prompt_list = prompt_list[args.start_idx : args.end_idx]
-        if qid_list:
-            qid_list = qid_list[args.start_idx : args.end_idx]
-
-    print("number of test samples in the dataset:", len(prompt_list))
 
     if data_list is not None:
         return prompt_list, qid_list, data_list
     else:
         return prompt_list, qid_list
+
+
+if __name__ == "__main__":
+    args = Namespace(
+        benchmark_folder="/lustre/fsw/portfolios/llmservice/users/wdai/data/foundational_qa/test_benchmarks",
+        livecodebench_path="livecodebench/test_aug2024tojan2025.json",
+        livecodebench_v6_path="livecodebench/test_feb2025toApr2025.json",
+        eval_dataset="livecodebench",
+    )
