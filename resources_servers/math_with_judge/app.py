@@ -323,7 +323,7 @@ Example output: "My final verdict is different [[A!=B]]"."""
             tasks,
             score_fn=self._math_score_fn,
             answer_key="extracted_answer",
-        )
+        )[0]
 
     def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
         """Select headline metrics for this math benchmark."""

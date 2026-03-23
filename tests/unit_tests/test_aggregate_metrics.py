@@ -213,7 +213,7 @@ class TestComputePassMajorityMetrics:
             [{"reward": 0.0}, {"reward": 0.0}, {"reward": 0.0}, {"reward": 0.0}],
             [{"reward": 1.0}, {"reward": 0.0}, {"reward": 1.0}, {"reward": 0.0}],
         ]
-        m = compute_pass_majority_metrics(tasks)
+        m, _, _, _ = compute_pass_majority_metrics(tasks)
 
         assert m["pass@1/accuracy"] == pytest.approx(50.0)
         assert m["pass@4/accuracy"] == pytest.approx(200.0 / 3.0, abs=0.01)
@@ -225,7 +225,7 @@ class TestComputePassMajorityMetrics:
             [{"reward": 0.0}, {"reward": 1.0}],
             [{"reward": 1.0}, {"reward": 1.0}],
         ]
-        m = compute_pass_majority_metrics(tasks)
+        m, _, _, _ = compute_pass_majority_metrics(tasks)
 
         assert m["pass@1[avg-of-2]/accuracy"] == pytest.approx(200.0 / 3.0, abs=0.01)
 
@@ -243,7 +243,7 @@ class TestComputePassMajorityMetrics:
                 {"reward": 1.0, "extracted_answer": "D"},
             ],
         ]
-        m = compute_pass_majority_metrics(tasks, answer_key="extracted_answer")
+        m, _, _, _ = compute_pass_majority_metrics(tasks, answer_key="extracted_answer")
 
         assert m["majority@3/accuracy"] == pytest.approx(50.0)
 
@@ -253,7 +253,7 @@ class TestComputePassMajorityMetrics:
             [{"reward": 1.0, "extracted_answer": "A"}, {"reward": 0.0, "extracted_answer": "B"}],
             [{"reward": 0.0, "extracted_answer": None}, {"reward": 0.0, "extracted_answer": None}],
         ]
-        m = compute_pass_majority_metrics(tasks, answer_key="extracted_answer")
+        m, _, _, _ = compute_pass_majority_metrics(tasks, answer_key="extracted_answer")
 
         # no_answer is a binary score: Task 0 has 0/2, Task 1 has 2/2
         # pass@1[avg-of-2]/no_answer: Task 0: avg(0,0)=0, Task 1: avg(1,1)=1. Mean = 50%
@@ -266,20 +266,20 @@ class TestComputePassMajorityMetrics:
             [{"reward": 0.0}, {"reward": 0.0}],
             [{"reward": 1.0}, {"reward": 1.0}],
         ]
-        m = compute_pass_majority_metrics(tasks)
+        m, _, _, _ = compute_pass_majority_metrics(tasks)
 
         assert m["pass@1[avg-of-2]/accuracy/std_dev_across_runs"] > 0
         assert m["pass@1[avg-of-2]/accuracy/std_err_across_runs"] > 0
 
     def test_empty_input(self) -> None:
-        assert compute_pass_majority_metrics([]) == {}
+        assert compute_pass_majority_metrics([])[0] == {}
 
     def test_no_answer_key_skips_majority(self) -> None:
         """Without answer_key, majority@k and no_answer are not computed."""
         tasks = [
             [{"reward": 1.0, "extracted_answer": "A"}, {"reward": 0.0, "extracted_answer": "B"}],
         ]
-        m = compute_pass_majority_metrics(tasks)
+        m, _, _, _ = compute_pass_majority_metrics(tasks)
 
         assert not any(k.startswith("majority@") for k in m)
         assert not any("no_answer" in k for k in m)
@@ -294,7 +294,7 @@ class TestComputePassMajorityMetrics:
         def score_fn(r):
             return {"accuracy": r["reward"], "symbolic_accuracy": r["library_reward"]}
 
-        m = compute_pass_majority_metrics(tasks, score_fn=score_fn)
+        m, _, _, _ = compute_pass_majority_metrics(tasks, score_fn=score_fn)
 
         assert "pass@1/accuracy" in m
         assert "pass@1/symbolic_accuracy" in m
@@ -363,7 +363,7 @@ class TestMajorityNoAnswerCounting:
             # Task 1: no answers at all
             [{"reward": 0.0, "extracted_answer": None}, {"reward": 0.0, "extracted_answer": None}],
         ]
-        m = compute_pass_majority_metrics(tasks, answer_key="extracted_answer")
+        m, _, _, _ = compute_pass_majority_metrics(tasks, answer_key="extracted_answer")
         # Task 0 correct (100), Task 1 no-answer should be 0 → average = 50
         assert m["majority@2/accuracy"] == pytest.approx(50.0)
 
@@ -372,7 +372,7 @@ class TestMajorityNoAnswerCounting:
             [{"reward": 0.0, "extracted_answer": None}, {"reward": 0.0, "extracted_answer": None}],
             [{"reward": 0.0, "extracted_answer": None}, {"reward": 0.0, "extracted_answer": None}],
         ]
-        m = compute_pass_majority_metrics(tasks, answer_key="extracted_answer")
+        m, _, _, _ = compute_pass_majority_metrics(tasks, answer_key="extracted_answer")
         assert m["majority@2/accuracy"] == pytest.approx(0.0)
 
 
@@ -474,13 +474,3 @@ class TestAddAvgSampleStdDev:
         before = dict(metrics)
         add_avg_sample_std_dev(metrics, all_score_dicts, score_names, max_k)
         assert metrics == before
-
-    def test_return_internals_flag(self) -> None:
-        tasks = [[{"reward": 1.0}, {"reward": 0.0}]]
-        # Default returns just dict
-        result = compute_pass_majority_metrics(tasks)
-        assert isinstance(result, dict)
-        # With flag returns tuple
-        result = compute_pass_majority_metrics(tasks)
-        assert isinstance(result, tuple)
-        assert len(result) == 4

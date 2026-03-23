@@ -206,7 +206,7 @@ class MCQAResourcesServer(SimpleResourcesServer):
             tasks,
             score_fn=lambda r: {"accuracy": r["reward"]},
             answer_key="extracted_answer",
-        )
+        )[0]
 
     def get_key_metrics(self, agent_metrics):
         key = {}

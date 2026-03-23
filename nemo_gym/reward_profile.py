@@ -193,7 +193,7 @@ def compute_pass_majority_metrics(
     """
 
     if not tasks:
-        return {}
+        return {}, [], [], 0
 
     if score_fn is None:
         score_fn = lambda r: {"accuracy": r["reward"]}  # noqa: E731
@@ -364,7 +364,7 @@ def compute_subset_metrics(
 
     metrics: Dict[str, Any] = {}
     for subset_name, subset_tasks in subsets.items():
-        subset_metrics = compute_pass_majority_metrics(subset_tasks, score_fn=score_fn, answer_key=answer_key)
+        subset_metrics, _, _, _ = compute_pass_majority_metrics(subset_tasks, score_fn=score_fn, answer_key=answer_key)
         for key, value in subset_metrics.items():
             if key == "per_sample_aggregate":
                 continue
