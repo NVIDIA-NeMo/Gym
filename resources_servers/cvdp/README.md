@@ -104,6 +104,12 @@ uv pip install -r requirements.txt
 pre-commit install
 ```
 
+To install apptainer:
+
+
+
+
+
 ## Collect Rollouts
 
 ### Step 1 — Start servers
