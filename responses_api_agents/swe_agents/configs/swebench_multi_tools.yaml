@@ -4,7 +4,7 @@
 # SWE-bench wrapper configuration for OpenHands
 swe_agents:
   responses_api_agents:
-    swe_agents:
+    swe_agents: &swe_agents_config
       entrypoint: app.py
       
       # Agent framework configuration
@@ -12,7 +12,7 @@ swe_agents:
       agent_config: responses_api_agents/swe_agents/configs/oh_config.toml
       agent_max_turns: 100
       agent_framework_repo: https://github.com/sdevare-nv/nv-OpenHands.git
-      agent_framework_commit: cdb8150287ae49202dd5e7a434c6af91bae471be
+      agent_framework_commit: cdb8150287ae49202dd5e7a434c6af91bae471be  # pragma: allowlist secret
       
       # Container configuration
       container_formatter: ???
@@ -143,3 +143,8 @@ swe_agents:
         - name: example
           type: example
           jsonl_fpath: responses_api_agents/swe_agents/data/example.jsonl
+
+swe_agents_val:
+  responses_api_agents:
+    swe_agents:
+      <<: *swe_agents_config
