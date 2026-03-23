@@ -17,6 +17,8 @@ def get_gpu_info():
 
 # Launch one task per node
 nodes = ray.nodes()
+print(nodes[0])
+exit()
 tasks = [get_gpu_info.options(resources={f"node:{n['NodeID']}": 0.01}).remote() for n in nodes]
 
 results = ray.get(tasks)
