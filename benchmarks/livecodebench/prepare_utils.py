@@ -76,12 +76,7 @@ def _add_prompt_fields(row: dict, starter_code: str) -> None:
 
 
 def _add_prompt_fields_cascade(row: dict, starter_code: str) -> None:
-    """Add formatting_message and starter_code fields for prompt templating.
-
-    Matches the logic in Skills' ``nemo_skills/dataset/livecodebench/prepare.py::clean_data()``.
-    If ``starter_code`` is non-empty, the model is told to use it (LeetCode functional style).
-    Otherwise, the model is told to read from stdin (Codeforces/Atcoder style).
-    """
+    """Add formatting_message and starter_code fields for prompt templating using the Nemotron Cascade format"""
     if starter_code:
         row["starter_code"] = (
             f"\n\nSolve the problem starting with the provided function header.\n\nFunction header:\n```\n{starter_code}\n```"
