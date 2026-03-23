@@ -700,10 +700,9 @@ def init_resources_server():  # pragma: no cover
         exit()
 
     dirpath = Path(run_config.entrypoint)
-    assert len(dirpath.parts) == 2
     makedirs(dirpath)
 
-    server_type = dirpath.parts[0]
+    server_type = dirpath.parts[-2]
     assert server_type == "resources_servers"
     server_type_name = dirpath.parts[-1].lower()
     server_type_title = "".join(x.capitalize() for x in server_type_name.split("_"))
