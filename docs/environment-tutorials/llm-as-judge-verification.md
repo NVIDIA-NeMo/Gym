@@ -61,13 +61,15 @@ The walkthrough below uses the **co-located model server** approach — a dedica
 
 ## Walkthrough: `over_refusal_detection`
 
-[`over_refusal_detection`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/over_refusal_detection) trains models to avoid over-refusing safe prompts, (e.g. treating "How do I kill a Linux process?" as dangerous). The judge decides whether the policy model helpfully **complied** or inappropriately **refused**.
+[`over_refusal_detection`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/over_refusal_detection) trains models to avoid over-refusing safe prompts (e.g., treating "How do I kill a Linux process?" as dangerous). The judge decides whether the policy model helpfully **complied** or inappropriately **refused**.
 
-If you are new to LLM-as-a-judge, follow these four steps before reading the later sections.
+This walkthrough has two parts: first you'll read through how the config and code work, then you'll run it.
 
-### 1) YAML config: declare the judge
+### How it works
 
-From `resources_servers/over_refusal_detection/configs/over_refusal_detection.yaml` (prompt truncated for readability — see the full file for few-shot examples):
+#### YAML config: declaring the judge
+
+From `resources_servers/over_refusal_detection/configs/over_refusal_detection.yaml` (the ~70-line judge prompt is truncated below — see the full file for the complete template including worked examples):
 
 ```yaml
 # A dedicated judge model server (can also reuse policy_model instead)
@@ -110,9 +112,9 @@ Key points:
 - `complied_label` / `refused_label` are specific to `over_refusal_detection`. Other servers define their own verdict labels — e.g., `equivalence_llm_judge` uses `judge_equal_label` / `judge_not_equal_label`. The names and values are up to each server's design.
 - The bare minimum config for any LLM-as-a-judge server is `judge_model_server` (which model to call) and `judge_responses_create_params` (how to call it). Everything else — prompt templates, verdict labels, reward values — is server-specific.
 
-### 2) Build judge input in `verify()` and call `/v1/responses`
+#### Building judge input and calling `/v1/responses`
 
-From `over_refusal_detection/app.py` — the `_evaluate_compliance` method fills in the prompt template and posts to the judge:
+Inside `over_refusal_detection/app.py`, the `_evaluate_compliance` method fills in the prompt template and posts to the judge. You don't need to write this code to use the server — this is what happens under the hood when `verify()` runs:
 
 ```python
 user_prompt = cfg.judge_prompt_template.format(
@@ -134,7 +136,7 @@ response = await self.server_client.post(
 )
 ```
 
-### 3) Parse strict labels and return reward
+#### Parsing strict labels and returning reward
 
 The server looks for the configured verdict labels in the judge's text. Whichever label appears first wins; if neither appears, the output is treated as ambiguous:
 
@@ -162,7 +164,9 @@ else:
     reward = self.config.reward_if_unclear    # 0.5
 ```
 
-### 4) Smoke test with example data
+If you are building your own LLM-judge server, you will write similar code — the pattern above (fill template, POST to judge, parse labels, map to reward) is the same across all judge servers in the repo.
+
+### Try it
 
 Start the servers:
 
