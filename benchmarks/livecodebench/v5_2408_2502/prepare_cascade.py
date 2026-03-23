@@ -20,7 +20,7 @@ dataset from HuggingFace (test cases from the official LCB runner).
 
 from pathlib import Path
 
-from benchmarks.livecodebench.prepare_utils import _add_prompt_fields_cascade, prepare_from_hf_validation
+from benchmarks.livecodebench.prepare_utils import _add_prompt_fields_cascade, prepare_from_hf_raw
 
 
 DATA_DIR = Path(__file__).parent / "data"
@@ -28,8 +28,12 @@ OUTPUT_FPATH = DATA_DIR / "livecodebench_v5_cascade_validation.jsonl"
 
 
 def prepare() -> Path:
-    return prepare_from_hf_validation(
-        OUTPUT_FPATH, date_from="2024-08-01", date_to="2025-03-01", _add_prompt_fields_fn=_add_prompt_fields_cascade
+    return prepare_from_hf_raw(
+        OUTPUT_FPATH,
+        release_version="release_v5",
+        date_from="2024-08-01",
+        date_to="2025-03-01",
+        _add_prompt_fields_fn=_add_prompt_fields_cascade,
     )
 
 

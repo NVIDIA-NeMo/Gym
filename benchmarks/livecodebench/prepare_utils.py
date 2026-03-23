@@ -90,66 +90,6 @@ def _add_prompt_fields_cascade(row: dict, starter_code: str) -> None:
         row["starter_code"] = ""
 
 
-def prepare_from_hf_validation(
-    output_path: Path,
-    date_from: Optional[str] = None,
-    date_to: Optional[str] = None,
-    hf_repo: str = "nvidia/nemotron-RL-coding-competitive_coding",
-    hf_filename: str = "validation.jsonl",
-    _add_prompt_fields_fn: Callable = _add_prompt_fields,
-) -> Path:
-    """Prepare LCB data from the pre-prepared code_gen validation dataset on HuggingFace.
-
-    This dataset was built by the LCB runner (``livecodebench_accuracy_test_prep.py``)
-    and contains correct test cases with fn_name. Only covers v5 (322 problems).
-    """
-    from datasets import load_dataset
-    from huggingface_hub import hf_hub_download
-
-    print(f"Downloading validation data from {hf_repo}...")
-    source_path = hf_hub_download(hf_repo, hf_filename, repo_type="dataset")
-
-    # Deduplicate (source has multiple rows per problem from the accuracy test)
-    seen = set()
-    rows = []
-    with open(source_path) as f:
-        for line in f:
-            row = json.loads(line)
-            pid = row["verifier_metadata"]["problem_id"]
-            if pid in seen:
-                continue
-            seen.add(pid)
-
-            prompt_input = row.get("responses_create_params", {}).get("input", [])
-            question_content = ""
-            for msg in prompt_input:
-                if msg.get("role") == "user":
-                    question_content = msg.get("content", "")
-                    break
-
-            rows.append({"question_content": question_content, "verifier_metadata": row["verifier_metadata"]})
-
-    # Enrich with difficulty and filter by date range
-    ds = load_dataset("livecodebench/code_generation_lite", "release_v5", split="test", revision="refs/pr/7")
-    hf_map = {ex.get("question_id", ""): ex for ex in ds}
-
-    enriched = []
-    for row in rows:
-        pid = row["verifier_metadata"]["problem_id"]
-        hf_row = hf_map.get(pid)
-        if hf_row:
-            row["verifier_metadata"]["difficulty"] = hf_row.get("difficulty", "unknown")
-            _add_prompt_fields_fn(row, hf_row.get("starter_code", ""))
-            date = hf_row.get("contest_date", "")
-            if date_from and date < date_from:
-                continue
-            if date_to and date >= date_to:
-                continue
-        enriched.append(row)
-
-    return _write_rows(enriched, output_path)
-
-
 def prepare_from_hf_raw(
     output_path: Path,
     release_version: str,
