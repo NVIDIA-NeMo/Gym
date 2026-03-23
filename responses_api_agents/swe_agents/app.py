@@ -820,12 +820,14 @@ printf '{{"_test_completed": true, "exit_code": %d}}\\n' $TEST_EXIT \
         log_parser_name = install_config.get("log_parser", "")
 
         if not test_output_path.exists():
-            report = {instance_id: {
-                "resolved": False,
-                "patch_exists": True,
-                "patch_successfully_applied": False,
-                "error": "No test output produced inside container",
-            }}
+            report = {
+                instance_id: {
+                    "resolved": False,
+                    "patch_exists": True,
+                    "patch_successfully_applied": False,
+                    "error": "No test output produced inside container",
+                }
+            }
             report_path.write_text(json.dumps(report, indent=2))
             return
 
@@ -834,12 +836,14 @@ printf '{{"_test_completed": true, "exit_code": %d}}\\n' $TEST_EXIT \
 
         parser = log_parsers.NAME_TO_PARSER.get(log_parser_name) or getattr(log_parsers, log_parser_name, None)
         if parser is None:
-            report = {instance_id: {
-                "resolved": False,
-                "patch_exists": True,
-                "patch_successfully_applied": True,
-                "error": f"Unknown log parser: {log_parser_name}",
-            }}
+            report = {
+                instance_id: {
+                    "resolved": False,
+                    "patch_exists": True,
+                    "patch_successfully_applied": True,
+                    "error": f"Unknown log parser: {log_parser_name}",
+                }
+            }
             report_path.write_text(json.dumps(report, indent=2))
             return
 
@@ -861,14 +865,16 @@ printf '{{"_test_completed": true, "exit_code": %d}}\\n' $TEST_EXIT \
         failed_from_pass_to_pass = sorted(pass_to_pass_set - passed_set)
         resolved = (fail_to_pass_set <= passed_set) and (pass_to_pass_set <= passed_set)
 
-        report = {instance_id: {
-            "resolved": resolved,
-            "patch_exists": True,
-            "patch_successfully_applied": True,
-            "from_fail_to_pass": from_fail_to_pass,
-            "failed_from_pass_to_pass": failed_from_pass_to_pass,
-            "passed_match": passed == expected_passed,
-        }}
+        report = {
+            instance_id: {
+                "resolved": resolved,
+                "patch_exists": True,
+                "patch_successfully_applied": True,
+                "from_fail_to_pass": from_fail_to_pass,
+                "failed_from_pass_to_pass": failed_from_pass_to_pass,
+                "passed_match": passed == expected_passed,
+            }
+        }
         report_path.write_text(json.dumps(report, indent=2))
 
 

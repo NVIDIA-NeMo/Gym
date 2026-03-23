@@ -796,6 +796,7 @@ class VLLMConverter(BaseModel):
 
         return output_items
 
+
 def split_responses_input_output_items(
     items: List[NeMoGymResponseOutputItem],
 ) -> Tuple[List[NeMoGymResponseOutputItem], List[NeMoGymResponseOutputItem]]:
@@ -803,7 +804,10 @@ def split_responses_input_output_items(
         return [], []
 
     for i, item in enumerate(items):
-        if getattr(item, "role", None) == "assistant" or getattr(item, "type", None) in {"reasoning", "reasoning_item"}:
+        if getattr(item, "role", None) == "assistant" or getattr(item, "type", None) in {
+            "reasoning",
+            "reasoning_item",
+        }:
             break
 
     return items[:i], items[i:]
