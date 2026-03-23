@@ -210,6 +210,7 @@ class SWEBenchWrapperInstanceConfig(SWEBenchWrapperServerConfig, SWEBenchWrapper
 class SWEBenchMetrics(BaseModel):
     resolved: Optional[bool] = None
     patch_exists: Optional[bool] = None
+    model_patch: Optional[str] = None
 
     # Profiling time metrics to report
     ray_queue_time: Optional[float] = None
@@ -1272,6 +1273,7 @@ class RunOpenHandsAgent(BaseModel):
 
         patch = out_dict["test_result"]["git_patch"] or None
         patch = patch + "\n" if patch and not patch.endswith("\n") else patch
+        metrics.model_patch = patch
 
         # Create file in the SWE-bench evaluation format
         self.config.output_for_eval_path.parent.mkdir(parents=True, exist_ok=True)
