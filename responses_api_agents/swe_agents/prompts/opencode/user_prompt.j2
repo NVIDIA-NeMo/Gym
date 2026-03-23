@@ -1,0 +1,13 @@
+Implement the necessary changes to the repository ( {{ workspace_path }} ) so that the requirements specified in the <issue_details> are satisfied.
+The environment is already set up for you (i.e., all dependencies already installed), so you don't need to install other packages.
+
+{% set language = instance.repo_language | default('python') %}
+I've uploaded a {{ language }} repository in the directory {{ workspace_path }}.
+
+<issue_details>
+{{ instance.problem_statement }}
+</issue_details>
+
+<workspace_path>
+{{ workspace_path }}
+</workspace_path>

@@ -163,6 +163,29 @@ class TestConvertTrajectoryToOutputItems:
         assert output_items[3].call_id == "call1"
         assert output_items[3].output == "tool output"
 
+    def test_swe_agent(self) -> None:
+        trajectory = [
+            {"role": "system", "content": "sys prompt"},
+            {
+                "role": "assistant",
+                "content": "assistant reply",
+                "tool_calls": [{"id": "tc1", "function": {"name": "bash", "arguments": "{}"}}],
+                "provider_specific_fields": {
+                    "prompt_token_ids": [1, 2],
+                    "generation_token_ids": [3, 4],
+                    "generation_log_probs": [0.1, 0.2],
+                },
+            },
+            {"role": "tool", "content": "ok", "tool_call_ids": ["tc1"]},
+        ]
+
+        output_items = convert_trajectory_to_output_items(trajectory, "swe_agent")
+
+        assert output_items[0].role == "system"
+        assert output_items[1].role == "assistant"
+        assert output_items[2].name == "bash"
+        assert output_items[3].call_id == "tc1"
+
     def test_openhands_string_content(self) -> None:
         trajectory = [{"role": "user", "content": "Simple string content"}]
         output_items = convert_trajectory_to_output_items(trajectory, "openhands")
@@ -174,6 +197,30 @@ class TestConvertTrajectoryToOutputItems:
         output_items = convert_trajectory_to_output_items(trajectory, "openhands")
         assert len(output_items) == 1
         assert output_items[0].call_id == "call_abc123"
+
+    def test_swe_agent_function_as_string(self) -> None:
+        trajectory = [
+            {
+                "role": "assistant",
+                "content": "response",
+                "tool_calls": [{"id": "tc1", "function": '{"name": "bash", "arguments": "{}"}'}],
+            },
+        ]
+        output_items = convert_trajectory_to_output_items(trajectory, "swe_agent")
+        assert len(output_items) == 2
+        assert output_items[1].name == "bash"
+
+    def test_swe_agent_function_as_invalid_string(self) -> None:
+        trajectory = [
+            {
+                "role": "assistant",
+                "content": "response",
+                "tool_calls": [{"id": "tc1", "function": "invalid_function_name"}],
+            },
+        ]
+        output_items = convert_trajectory_to_output_items(trajectory, "swe_agent")
+        assert len(output_items) == 2
+        assert output_items[1].name == "invalid_function_name"
 
 
 class TestExtractMessages:

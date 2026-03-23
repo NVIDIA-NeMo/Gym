@@ -1,0 +1,145 @@
+# SWE-bench wrapper configuration for OpenHands
+
+
+# SWE-bench wrapper configuration for OpenHands
+swe_agents:
+  responses_api_agents:
+    swe_agents:
+      entrypoint: app.py
+      
+      # Agent framework configuration
+      agent_framework: openhands
+      agent_config: responses_api_agents/swe_agents/configs/oh_config.toml
+      agent_max_turns: 100
+      agent_framework_repo: https://github.com/sdevare-nv/nv-OpenHands.git
+      agent_framework_commit: cdb8150287ae49202dd5e7a434c6af91bae471be
+      
+      # Container configuration
+      container_formatter: ???
+      container_folder_path: null
+      swebench_agent_timeout: 1800
+      swebench_tests_timeout: 900
+      apptainer_memory_limit_mb: 32768
+      command_exec_timeout: 300
+      
+      dataset_path: ???
+
+      agent_prompt_overrides:
+      # Codex agent
+      - user_prompt_template: responses_api_agents/swe_agents/prompts/codex/user_prompt.j2
+        system_prompt_template: responses_api_agents/swe_agents/prompts/codex/system_prompt.j2
+        agent_cls: CodexAgent
+        diversify_tool_names: false
+
+      # OpenCode agent
+      - user_prompt_template: responses_api_agents/swe_agents/prompts/opencode/user_prompt.j2
+        system_prompt_template: responses_api_agents/swe_agents/prompts/opencode/system_prompt.j2
+        agent_cls: OpenCodeAgent
+        diversify_tool_names: false
+
+      # Terminus2 agent
+      - user_prompt_template: responses_api_agents/swe_agents/prompts/terminus/user_prompt.j2
+        system_prompt_template: responses_api_agents/swe_agents/prompts/terminus/system_prompt.j2
+        agent_cls: Terminus2Agent
+        diversify_tool_names: false
+      
+      # CodeAct agent
+      - user_prompt_template: responses_api_agents/swe_agents/prompts/openhands/user_prompt.j2
+        system_prompt_template: responses_api_agents/swe_agents/prompts/openhands/system_prompt.j2
+        agent_cls: CodeActAgent
+        diversify_tool_names: false
+      
+      # Plan and execute agent - CodeActAgent
+      - user_prompt_template: responses_api_agents/swe_agents/prompts/plan_and_execute/user_prompt.j2
+        system_prompt_template: responses_api_agents/swe_agents/prompts/plan_and_execute/system_prompt.j2
+        agent_cls: CodeActAgent
+        diversify_tool_names: true
+
+      # Explore plan execute agent - OpenCodeAgent
+      - user_prompt_template: responses_api_agents/swe_agents/prompts/explore_plan_execute/user_prompt.j2
+        system_prompt_template: responses_api_agents/swe_agents/prompts/explore_plan_execute/system_prompt.j2
+        agent_cls: OpenCodeAgent
+        diversify_tool_names: true
+
+      # Minimalist agent - CodeActAgent 
+      - user_prompt_template: responses_api_agents/swe_agents/prompts/minimalist/user_prompt.j2
+        system_prompt_template: responses_api_agents/swe_agents/prompts/minimalist/system_prompt.j2
+        agent_cls: CodeActAgent
+        diversify_tool_names: true
+
+      # Test driven agent - CodeActAgent
+      - user_prompt_template: responses_api_agents/swe_agents/prompts/test_driven/user_prompt.j2
+        system_prompt_template: responses_api_agents/swe_agents/prompts/test_driven/system_prompt.j2
+        agent_cls: CodeActAgent
+        diversify_tool_names: true
+
+      # Hypothesis driven agent - CodexAgent
+      - user_prompt_template: responses_api_agents/swe_agents/prompts/hypothesis_driven/user_prompt.j2
+        system_prompt_template: responses_api_agents/swe_agents/prompts/hypothesis_driven/system_prompt.j2
+        agent_cls: CodexAgent
+        diversify_tool_names: true
+
+      # Incremental agent - CodexAgent
+      - user_prompt_template: responses_api_agents/swe_agents/prompts/incremental/user_prompt.j2
+        system_prompt_template: responses_api_agents/swe_agents/prompts/incremental/system_prompt.j2
+        agent_cls: CodexAgent
+        diversify_tool_names: true
+
+      # Root cause agent - OpenCodeAgent
+      - user_prompt_template: responses_api_agents/swe_agents/prompts/root_cause/user_prompt.j2
+        system_prompt_template: responses_api_agents/swe_agents/prompts/root_cause/system_prompt.j2
+        agent_cls: OpenCodeAgent
+        diversify_tool_names: true
+
+      # Divide and conquer agent - OpenCodeAgent
+      - user_prompt_template: responses_api_agents/swe_agents/prompts/divide_and_conquer/user_prompt.j2
+        system_prompt_template: responses_api_agents/swe_agents/prompts/divide_and_conquer/system_prompt.j2
+        agent_cls: OpenCodeAgent
+        diversify_tool_names: true
+
+      # Breadth first agent - CodeActAgent
+      - user_prompt_template: responses_api_agents/swe_agents/prompts/breadth_first/user_prompt.j2
+        system_prompt_template: responses_api_agents/swe_agents/prompts/breadth_first/system_prompt.j2
+        agent_cls: CodeActAgent
+        diversify_tool_names: true
+
+      # Surgical agent - OpenCodeAgent
+      - user_prompt_template: responses_api_agents/swe_agents/prompts/surgical/user_prompt.j2
+        system_prompt_template: responses_api_agents/swe_agents/prompts/surgical/system_prompt.j2
+        agent_cls: OpenCodeAgent
+        diversify_tool_names: true
+
+      # Verify first agent - CodexAgent
+      - user_prompt_template: responses_api_agents/swe_agents/prompts/verify_first/user_prompt.j2
+        system_prompt_template: responses_api_agents/swe_agents/prompts/verify_first/system_prompt.j2
+        agent_cls: CodexAgent
+        diversify_tool_names: true
+      
+      # Optional model server reference
+      model_server:
+        name: policy_model # openai_model
+        type: responses_api_models
+        
+      datasets:
+        # Training dataset
+        - name: train
+          type: train
+          jsonl_fpath: responses_api_agents/swe_agents/data/swegym_for_sweagent_and_openhands.jsonl
+          gitlab_identifier:
+            dataset_name: swegym_for_sweagent_and_openhands
+            version: 0.0.2
+            artifact_fpath: swegym-converted.jsonl
+          license: Apache 2.0
+        # Validation dataset  
+        - name: validation
+          type: validation
+          jsonl_fpath: responses_api_agents/swe_agents/data/swebench_verified_for_sweagent_and_openhands.jsonl
+          gitlab_identifier:
+            dataset_name: swebench_verified_for_sweagent_and_openhands
+            version: 0.0.1
+            artifact_fpath: swebench_verified_for_sweagent_and_openhands.jsonl
+          license: TBD
+        # Example dataset for quick testing
+        - name: example
+          type: example
+          jsonl_fpath: responses_api_agents/swe_agents/data/example.jsonl
