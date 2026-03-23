@@ -6,7 +6,7 @@ import ray
 ray.init(address="auto")  # connect to cluster
 
 
-@ray.remote(num_gpus=0)  # no GPU required just to query
+@ray.remote(num_cpus=0, num_gpus=0)  # no GPU required just to query
 def get_gpu_info():
     try:
         output = subprocess.check_output(["nvidia-smi"], text=True)
@@ -17,7 +17,7 @@ def get_gpu_info():
 
 # Launch one task per node
 nodes = ray.nodes()
-tasks = [get_gpu_info.options(resources={f"node:{n['NodeID']}": 0.01, "CPU": 0}).remote() for n in nodes]
+tasks = [get_gpu_info.options(resources={f"node:{n['NodeID']}": 0.01}).remote() for n in nodes]
 
 results = ray.get(tasks)
 
