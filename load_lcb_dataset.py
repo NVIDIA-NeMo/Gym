@@ -64,3 +64,7 @@ if __name__ == "__main__":
         livecodebench_v6_path="livecodebench/test_feb2025toApr2025.json",
         eval_dataset="livecodebench",
     )
+    prompt_list, qid_list = get_prompt_list(args)
+
+    with open("temp.json", "w") as f:
+        json.dump(prompt_list, f)
