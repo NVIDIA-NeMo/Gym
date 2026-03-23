@@ -2,8 +2,20 @@
 config_paths:
   - resources_servers/code_gen/configs/code_gen.yaml
 
-# Rollout collection defaults — picked up directly by RolloutCollectionConfig
-agent_name: code_gen_simple_agent
-input_jsonl_fpath: benchmarks/livecodebench/v6_2408_2505/data/livecodebench_v6_validation.jsonl
-prompt_config: benchmarks/livecodebench/prompts/default.yaml
-num_repeats: 10
+# We use `_inherit_from` directives to inherit from and not use the generic config above to ensure this benchmark config is isolated.
+lcbv6_code_gen_resources_server:
+  _inherit_from: code_gen
+
+lcbv6_code_gen_simple_agent:
+  _inherit_from: code_gen_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: lcbv6_code_gen_resources_server
+      datasets:
+      - name: lcbv6
+        type: benchmark
+        jsonl_fpath: benchmarks/livecodebench/v6_2408_2505/data/livecodebench_v6_validation.jsonl
+        prompt_config: benchmarks/livecodebench/prompts/default.yaml
+        prepare_script: benchmarks/livecodebench/v6_2408_2505/prepare.py
+        num_repeats: 10
