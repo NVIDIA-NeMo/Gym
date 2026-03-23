@@ -477,7 +477,7 @@ class TestAddAvgSampleStdDev:
             [{"reward": 0.0}, {"reward": 0.0}],
             [{"reward": 1.0}, {"reward": 1.0}],
         ]
-        metrics, all_score_dicts, score_names, max_k = compute_pass_majority_metrics(tasks, return_internals=True)
+        metrics, all_score_dicts, score_names, max_k = compute_pass_majority_metrics(tasks)
         assert "pass@1[avg-of-2]/accuracy/avg_sample_std_dev" not in metrics
         add_avg_sample_std_dev(metrics, all_score_dicts, score_names, max_k)
         assert "pass@1[avg-of-2]/accuracy/avg_sample_std_dev" in metrics
@@ -487,7 +487,7 @@ class TestAddAvgSampleStdDev:
         from nemo_gym.reward_profile import add_avg_sample_std_dev, compute_pass_majority_metrics
 
         tasks = [[{"reward": 1.0}], [{"reward": 0.0}]]
-        metrics, all_score_dicts, score_names, max_k = compute_pass_majority_metrics(tasks, return_internals=True)
+        metrics, all_score_dicts, score_names, max_k = compute_pass_majority_metrics(tasks)
         before = dict(metrics)
         add_avg_sample_std_dev(metrics, all_score_dicts, score_names, max_k)
         assert metrics == before
@@ -500,6 +500,6 @@ class TestAddAvgSampleStdDev:
         result = compute_pass_majority_metrics(tasks)
         assert isinstance(result, dict)
         # With flag returns tuple
-        result = compute_pass_majority_metrics(tasks, return_internals=True)
+        result = compute_pass_majority_metrics(tasks)
         assert isinstance(result, tuple)
         assert len(result) == 4

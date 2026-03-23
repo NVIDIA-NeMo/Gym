@@ -122,7 +122,6 @@ class CompCodingResourcesServer(SimpleResourcesServer):
             tasks,
             score_fn=self._code_score_fn,
             answer_key="extracted_model_code",
-            return_internals=True,
         )
         add_avg_sample_std_dev(metrics, all_score_dicts, score_names, max_k)
         metrics.update(compute_subset_metrics(tasks, "difficulty", self._code_score_fn, "extracted_model_code"))

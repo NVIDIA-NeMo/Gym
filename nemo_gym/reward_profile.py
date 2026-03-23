@@ -168,8 +168,7 @@ def compute_pass_majority_metrics(
     tasks: List[List[Dict[str, Any]]],
     score_fn: Optional[Any] = None,
     answer_key: Optional[str] = None,
-    return_internals: bool = False,
-):
+) -> Tuple[Dict[str, Any], List[List[Dict[str, float]]], List[str], int]:
     """Compute pass@k, majority@k, no_answer, and variance statistics from grouped task results.
 
     Shared utility for any resource server's compute_metrics() override.
@@ -180,12 +179,10 @@ def compute_pass_majority_metrics(
             Defaults to ``lambda r: {"accuracy": r["reward"]}``.
         answer_key: Field name for extracted answer (enables majority@k and no_answer).
             If None, majority@k and no_answer are skipped.
-        return_internals: If True, returns ``(metrics, all_score_dicts, score_names, max_k)``
-            so callers can run additional post-processing (e.g. ``add_avg_sample_std_dev``).
 
     Returns:
-        Flat dict of metrics keyed as ``{agg_mode}/{score_name}`` (or a tuple when
-        ``return_internals=True``):
+        Metrics, all_score_dicts, score_names, max_k
+        Flat dict of metrics keyed as ``{agg_mode}/{score_name}``:
         - ``pass@{k}/{name}``: combinatorial pass@k (binary) or max-of-k (continuous)
         - ``pass@1[avg-of-{k}]/{name}``: mean score across first k rollouts, averaged across tasks
         - ``majority@{k}/{name}``: majority-vote accuracy (only if answer_key is set)
@@ -310,9 +307,7 @@ def compute_pass_majority_metrics(
                     metrics[f"pass@1[avg-of-{k}]/{name}/std_dev_across_runs"] = std_dev
                     metrics[f"pass@1[avg-of-{k}]/{name}/std_err_across_runs"] = std_err
 
-    if return_internals:
-        return metrics, all_score_dicts, score_names, max_k
-    return metrics
+    return metrics, all_score_dicts, score_names, max_k
 
 
 def add_avg_sample_std_dev(
@@ -326,13 +321,7 @@ def add_avg_sample_std_dev(
     Computes the average of per-task standard deviations across k rollouts — a measure of
     within-task variance that complements the across-run variance (std_dev_across_runs).
 
-    Modifies ``metrics`` in place. Intended to be called after ``compute_pass_majority_metrics``
-    with ``return_internals=True``::
-
-        metrics, all_score_dicts, score_names, max_k = compute_pass_majority_metrics(
-            tasks, score_fn=my_fn, return_internals=True,
-        )
-        add_avg_sample_std_dev(metrics, all_score_dicts, score_names, max_k)
+    Modifies ``metrics`` in place.
     """
     if max_k <= 1:
         return
