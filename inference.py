@@ -106,19 +106,35 @@ def keep_gpu_busy(wait_time_minutes=60, target_utilization=0.5):
     print(f"[GPU {gpu_rank}] Wait time completed. Exiting...")
 
 
-def add_chatml_template(prompt, detailed_thinking=False):
-    instruction = "<|im_start|>system\nYou are a helpful and harmless assistant.<|im_end|>\n"
+def preprocess_livecodebench_chatml_template(data_file):
+    instruction = "<|im_start|>system\nYou are a helpful and harmless assistant.\n\nYou are not allowed to use any tools.<|im_end|>\n"
 
-    # if detailed_thinking:
-    #     instruction = "<|im_start|>system\nYou are a helpful and harmless assistant. You should think step-by-step. Detailed thinking on.<|im_end|>\n"
-    # else:
-    #     instruction = "<|im_start|>system\nYou are a helpful and harmless assistant. You should think step-by-step. Detailed thinking off.<|im_end|>\n"
+    code_instruction = """Write Python code to solve the problem. Please place the solution code in the following format:\n```python\n# Your solution code here\n```"""
 
-    # return instruction + "<|im_start|>user\n" + prompt + "<|im_end|>\n<|im_start|>assistant\n"
-    if detailed_thinking:
-        return instruction + "<|im_start|>user\n" + prompt + " /think<|im_end|>\n<|im_start|>assistant\n<think>\n"
-    else:
-        return instruction + "<|im_start|>user\n" + prompt + " /no_think<|im_end|>\n<|im_start|>assistant\n"
+    with open(data_file, "r") as f:
+        data_list = json.load(f)
+
+    prompt_list = []
+    qid_list = []
+    for item in data_list:
+        question = item["question_content"].strip()
+        if item["starter_code"] != "":
+            question += (
+                "\n\n"
+                + "Solve the problem starting with the provided function header.\n\nFunction header:\n"
+                + "```\n"
+                + item["starter_code"]
+                + "\n```"
+            )
+
+        question += "\n\n" + code_instruction
+
+        final_prompt = instruction + "<|im_start|>user\n" + question + "<|im_end|>\n<|im_start|>assistant\n<think>\n"
+
+        prompt_list.append(final_prompt)
+        qid_list.append(item["question_id"])
+
+    return prompt_list, qid_list
 
 
 def get_prompt_list(args):
@@ -126,14 +142,10 @@ def get_prompt_list(args):
 
     ## get input data
     if args.eval_dataset == "livecodebench":
-        from data.benchmark_nanov3 import preprocess_livecodebench_chatml_template
-
         input_datapath = os.path.join(args.benchmark_folder, args.livecodebench_path)
         prompt_list, qid_list = preprocess_livecodebench_chatml_template(input_datapath)
 
     elif args.eval_dataset == "livecodebench_v6":
-        from data.benchmark_nanov3 import preprocess_livecodebench_chatml_template
-
         input_datapath = os.path.join(args.benchmark_folder, args.livecodebench_v6_path)
         prompt_list, qid_list = preprocess_livecodebench_chatml_template(input_datapath)
 
@@ -206,9 +218,6 @@ def main():
         batch_prompts = prompt_list[i : i + args.batch_size]
         if qid_list:
             batch_qids = qid_list[i : i + args.batch_size]
-
-        if args.eval_dataset in ("ifeval", "alpaca_eval"):
-            batch_prompts = [add_chatml_template(prompt, not args.disable_thinking) for prompt in batch_prompts]
 
         outputs = model_vllm.generate(batch_prompts, sampling_params)
 
