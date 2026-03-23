@@ -14,6 +14,7 @@
 # limitations under the License.
 import asyncio
 import json
+import shutil
 import tempfile
 import time
 from pathlib import Path
@@ -49,6 +50,16 @@ from responses_api_agents.swe_agents.app import (
     runner_ray_remote,
     update_metrics,
 )
+
+SWE_AGENTS_DIR = Path(__file__).resolve().parent.parent
+
+
+@pytest.fixture(autouse=True)
+def _cleanup_swebench_results():
+    """Remove swebench_results_* dirs that model_post_init creates in the source tree."""
+    yield
+    for d in SWE_AGENTS_DIR.glob("swebench_results_*"):
+        shutil.rmtree(d, ignore_errors=True)
 
 
 ########################################
