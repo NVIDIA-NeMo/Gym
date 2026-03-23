@@ -18,4 +18,4 @@ livecodebench_v5_code_gen_simple_agent:
         jsonl_fpath: benchmarks/livecodebench/v5_2408_2502/data/livecodebench_v5_validation.jsonl
         prompt_config: benchmarks/livecodebench/prompts/default.yaml
         prepare_script: benchmarks/livecodebench/v5_2408_2502/prepare.py
-        num_repeats: 10
+        num_repeats: 3

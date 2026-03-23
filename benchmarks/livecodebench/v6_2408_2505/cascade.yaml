@@ -18,4 +18,4 @@ livecodebench_v6_cascade_code_gen_simple_agent:
         jsonl_fpath: benchmarks/livecodebench/v6_2408_2505/data/livecodebench_v6_cascade_validation.jsonl
         prompt_config: benchmarks/livecodebench/prompts/cascade.yaml
         prepare_script: benchmarks/livecodebench/v6_2408_2505/prepare_cascade.py
-        num_repeats: 10
+        num_repeats: 3
