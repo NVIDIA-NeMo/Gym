@@ -14,9 +14,11 @@
 # limitations under the License.
 from __future__ import annotations
 
+import math
+import re
 from collections import Counter, defaultdict
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import orjson
 from pandas import DataFrame, Series, notna
@@ -24,17 +26,13 @@ from pandas.core.groupby.generic import DataFrameGroupBy
 from pydantic import Field
 from wandb import Histogram
 
-from nemo_gym.config_types import BaseNeMoGymCLIConfig
+from nemo_gym.config_types import AggregateMetrics, BaseNeMoGymCLIConfig
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,
     get_global_config_dict,
 )
-
-
-if TYPE_CHECKING:
-    from nemo_gym.base_resources_server import AggregateMetrics
 
 
 class RewardProfileConfig(BaseNeMoGymCLIConfig):
@@ -196,7 +194,6 @@ def compute_pass_majority_metrics(
 
         All accuracy values are percentages (0-100).
     """
-    import math as _math
 
     if not tasks:
         return {}
@@ -245,7 +242,7 @@ def compute_pass_majority_metrics(
                     if n_incorrect < k:
                         pass_values.append(1.0)
                     else:
-                        pass_values.append(1.0 - _math.comb(n_incorrect, k) / _math.comb(n_total, k))
+                        pass_values.append(1.0 - math.comb(n_incorrect, k) / math.comb(n_total, k))
                 else:
                     pass_values.append(max(vals[:k]))
 
@@ -308,8 +305,8 @@ def compute_pass_majority_metrics(
                 if len(run_averages) >= 2:
                     mean_val = sum(run_averages) / len(run_averages)
                     variance = sum((x - mean_val) ** 2 for x in run_averages) / (len(run_averages) - 1)
-                    std_dev = _math.sqrt(variance)
-                    std_err = std_dev / _math.sqrt(len(run_averages))
+                    std_dev = math.sqrt(variance)
+                    std_err = std_dev / math.sqrt(len(run_averages))
                     metrics[f"pass@1[avg-of-{k}]/{name}/std_dev_across_runs"] = std_dev
                     metrics[f"pass@1[avg-of-{k}]/{name}/std_err_across_runs"] = std_err
 
@@ -337,8 +334,6 @@ def add_avg_sample_std_dev(
         )
         add_avg_sample_std_dev(metrics, all_score_dicts, score_names, max_k)
     """
-    import math as _math
-
     if max_k <= 1:
         return
 
@@ -350,7 +345,7 @@ def add_avg_sample_std_dev(
                 if len(vals) >= 2:
                     task_mean = sum(vals) / len(vals)
                     task_var = sum((v - task_mean) ** 2 for v in vals) / (len(vals) - 1)
-                    sample_std_devs.append(_math.sqrt(task_var))
+                    sample_std_devs.append(math.sqrt(task_var))
             if sample_std_devs:
                 metrics[f"pass@1[avg-of-{k}]/{name}/avg_sample_std_dev"] = sum(sample_std_devs) / len(sample_std_devs)
 
@@ -420,8 +415,6 @@ def highest_k_metrics(
         highest_k_metrics(am, "pass@1[avg-of-{k}]", exclude_names=["no_answer"])
         # → {"pass@1[avg-of-32]/accuracy": 94.5, "pass@1[avg-of-32]/symbolic_accuracy": 93.2}
     """
-    import re
-
     stat_suffixes = {"std_dev_across_runs", "std_err_across_runs", "avg_sample_std_dev"}
 
     # Build regex from pattern: "pass@{k}" → r"^pass@(\d+)/(.+)$"
@@ -511,9 +504,6 @@ def compute_aggregate_metrics(
         intervals, cross-task statistics, pass@k). Returned dict is merged into agent_metrics.
       - get_key_metrics_fn: select headline metrics from agent_metrics
     """
-    # Import here to avoid circular dependency (AggregateMetrics is defined in base_resources_server)
-    from nemo_gym.base_resources_server import AggregateMetrics
-
     if not verify_responses:
         return AggregateMetrics()
 
