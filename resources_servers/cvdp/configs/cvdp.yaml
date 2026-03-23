@@ -9,6 +9,8 @@ cvdp:
       container_timeout: 600
       num_processes: 16
       primary_service: direct
+      description: CVDP benchmark dataset for code generation
+      value: Evaluate RTL code generation capabilities
 
 cvdp_simple_agent:
   responses_api_agents:
