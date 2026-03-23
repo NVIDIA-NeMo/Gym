@@ -17,7 +17,7 @@ import json
 import tempfile
 import time
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, mock_open, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -37,14 +37,14 @@ from responses_api_agents.swe_agents.app import (
     OpenHandsHarnessProcessor,
     R2EGymDatasetProcessor,
     RunOpenHandsAgent,
+    SweBenchDatasetProcessor,
     SWEBenchMetrics,
+    SweBenchMultilingualDatasetProcessor,
     SWEBenchVerifyResponse,
     SWEBenchWrapper,
     SWEBenchWrapperConfig,
     SWEBenchWrapperInstanceConfig,
     SWEBenchWrapperServerConfig,
-    SweBenchDatasetProcessor,
-    SweBenchMultilingualDatasetProcessor,
     SWERebenchDatasetProcessor,
     runner_ray_remote,
     update_metrics,
@@ -71,9 +71,7 @@ def _minimal_server_config() -> SWEBenchWrapperConfig:
 
 def _create_wrapper(monkeypatch) -> SWEBenchWrapper:
     """Create a SWEBenchWrapper with all setup calls mocked."""
-    monkeypatch.setattr(
-        swe_app, "get_global_config_dict", MagicMock(return_value=OmegaConf.create({}))
-    )
+    monkeypatch.setattr(swe_app, "get_global_config_dict", MagicMock(return_value=OmegaConf.create({})))
     monkeypatch.setattr(BaseDatasetHarnessProcessor, "_run_setup_command", MagicMock(return_value=None))
 
     config = _minimal_server_config()
@@ -498,27 +496,36 @@ class TestNVInternalDatasetProcessor:
 
     def test_get_run_command_env_parsing(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            processor = self._make_processor(tmpdir, {
-                "base_dockerfile": "ENV KEY=VALUE\nENV SPACE_KEY some_value",
-                "instance_dockerfile": "",
-            })
+            processor = self._make_processor(
+                tmpdir,
+                {
+                    "base_dockerfile": "ENV KEY=VALUE\nENV SPACE_KEY some_value",
+                    "instance_dockerfile": "",
+                },
+            )
             result = processor.get_run_command()
             assert "export KEY=VALUE" in result.command
             assert 'export SPACE_KEY="some_value"' in result.command
 
     def test_get_run_command_list_test_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            processor = self._make_processor(tmpdir, {
-                "selected_test_files_to_run": ["test_x.py", "test_y.py"],
-            })
+            processor = self._make_processor(
+                tmpdir,
+                {
+                    "selected_test_files_to_run": ["test_x.py", "test_y.py"],
+                },
+            )
             result = processor.get_run_command()
             assert "test_x.py,test_y.py" in result.command
 
     def test_get_run_command_no_repo_cmd(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            processor = self._make_processor(tmpdir, {
-                "before_repo_set_cmd": "",
-            })
+            processor = self._make_processor(
+                tmpdir,
+                {
+                    "before_repo_set_cmd": "",
+                },
+            )
             result = processor.get_run_command()
             assert isinstance(result, ExecuteContainerCommandArgs)
 
@@ -570,17 +577,24 @@ class TestNVInternalDatasetProcessor:
 
     def test_postprocess_after_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            processor = self._make_processor(tmpdir, {
-                "fail_to_pass": '["test_a"]',
-                "pass_to_pass": '["test_b"]',
-            })
+            processor = self._make_processor(
+                tmpdir,
+                {
+                    "fail_to_pass": '["test_a"]',
+                    "pass_to_pass": '["test_b"]',
+                },
+            )
             report_file = Path(tmpdir) / "report.json"
-            report_file.write_text(json.dumps({
-                "tests": [
-                    {"name": "test_a", "status": "PASSED"},
-                    {"name": "test_b", "status": "PASSED"},
-                ]
-            }))
+            report_file.write_text(
+                json.dumps(
+                    {
+                        "tests": [
+                            {"name": "test_a", "status": "PASSED"},
+                            {"name": "test_b", "status": "PASSED"},
+                        ]
+                    }
+                )
+            )
             processor.postprocess_after_run(report_file)
             result = json.loads(report_file.read_text())
             assert processor.config.instance_id in result
@@ -588,17 +602,24 @@ class TestNVInternalDatasetProcessor:
 
     def test_postprocess_after_run_list_f2p(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            processor = self._make_processor(tmpdir, {
-                "fail_to_pass_select": ["test_a"],
-                "pass_to_pass_select": ["test_b"],
-            })
+            processor = self._make_processor(
+                tmpdir,
+                {
+                    "fail_to_pass_select": ["test_a"],
+                    "pass_to_pass_select": ["test_b"],
+                },
+            )
             report_file = Path(tmpdir) / "report.json"
-            report_file.write_text(json.dumps({
-                "tests": [
-                    {"name": "test_a", "status": "PASSED"},
-                    {"name": "test_b", "status": "FAILED"},
-                ]
-            }))
+            report_file.write_text(
+                json.dumps(
+                    {
+                        "tests": [
+                            {"name": "test_a", "status": "PASSED"},
+                            {"name": "test_b", "status": "FAILED"},
+                        ]
+                    }
+                )
+            )
             processor.postprocess_after_run(report_file)
             result = json.loads(report_file.read_text())
             assert result[processor.config.instance_id]["resolved"] is False
@@ -1578,9 +1599,7 @@ class TestSWEBenchWrapperGetOpenhandsTrajectory:
                         }
                     ]
                 },
-                "kwargs": {
-                    "tools": [{"type": "function", "function": {"name": "execute_bash"}}]
-                },
+                "kwargs": {"tools": [{"type": "function", "function": {"name": "execute_bash"}}]},
             }
             (completions_dir / "001_completion.json").write_text(json.dumps(completion_data))
 
@@ -1695,15 +1714,17 @@ class TestSWEBenchWrapperSetupParams:
                     "base_commit": "abc",
                     "dataset_name": "nv-internal-1",
                     "split": "test",
-                    "instance_dict": json.dumps({
-                        "base_dockerfile": "",
-                        "instance_dockerfile": "",
-                        "before_repo_set_cmd": "",
-                        "selected_test_files_to_run": "[]",
-                        "run_script.sh": "#!/bin/bash",
-                        "parsing_script.py": "print('ok')",
-                        "base_commit": "abc",
-                    }),
+                    "instance_dict": json.dumps(
+                        {
+                            "base_dockerfile": "",
+                            "instance_dockerfile": "",
+                            "before_repo_set_cmd": "",
+                            "selected_test_files_to_run": "[]",
+                            "run_script.sh": "#!/bin/bash",
+                            "parsing_script.py": "print('ok')",
+                            "base_commit": "abc",
+                        }
+                    ),
                 },
             )
 
@@ -1956,9 +1977,7 @@ class TestLoadRebenchLogParsers:
             rebench_dir = Path(tmpdir)
             agent_dir = rebench_dir / "agent"
             agent_dir.mkdir()
-            (agent_dir / "log_parsers.py").write_text(
-                "NAME_TO_PARSER = {'test': lambda x: {}}\n"
-            )
+            (agent_dir / "log_parsers.py").write_text("NAME_TO_PARSER = {'test': lambda x: {}}\n")
 
             from responses_api_agents.swe_agents.app import _load_rebench_log_parsers
 
@@ -1971,9 +1990,7 @@ class TestLoadRebenchLogParsers:
             rebench_dir = Path(tmpdir)
             lib_agent_dir = rebench_dir / "lib" / "agent"
             lib_agent_dir.mkdir(parents=True)
-            (lib_agent_dir / "log_parsers.py").write_text(
-                "NAME_TO_PARSER = {'lib_test': lambda x: {}}\n"
-            )
+            (lib_agent_dir / "log_parsers.py").write_text("NAME_TO_PARSER = {'lib_test': lambda x: {}}\n")
 
             from responses_api_agents.swe_agents.app import _load_rebench_log_parsers
 
