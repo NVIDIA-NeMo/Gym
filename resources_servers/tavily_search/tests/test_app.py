@@ -169,7 +169,7 @@ class TestApp:
         }
         mock_backend = MagicMock()
         mock_backend.search = AsyncMock(return_value=mock_tavily_response)
-        server._async_tavily = mock_backend
+        server._async_tavily_clients = [mock_backend]
 
         request = TavilySearchRequest(query="NVIDIA GPU programming")
         response = await server.web_search(request)
