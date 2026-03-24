@@ -15,14 +15,16 @@
 import asyncio
 import json
 import re
+from asyncio import sleep
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from pathlib import Path
 from time import time
-from typing import ClassVar, Dict, List, Optional
+from typing import Any, ClassVar, Dict, List, Optional
 from urllib.parse import urlparse
 
 from fastapi import FastAPI, Request
+from httpx import AsyncClient
 from pydantic import BaseModel, Field, PrivateAttr, model_validator
 from tavily import AsyncTavilyClient, UsageLimitExceededError
 
@@ -35,11 +37,13 @@ from nemo_gym.base_resources_server import (
 )
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import (
+    RATE_LIMIT_ERROR_CODES,
+    RETRY_ERROR_CODES,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.server_utils import SESSION_ID_KEY
+from nemo_gym.server_utils import SESSION_ID_KEY, raise_for_status, request
 from resources_servers.tavily_search.judge_prompt import JUDGE_PROMPT_TEMPLATE
 
 
@@ -122,6 +126,65 @@ class TavilySearchVerifyResponse(BaseVerifyResponse, JudgeEvaluation):
     metrics: TavilySearchMetrics
 
 
+class TavilySearchAIOHTTPClientResponse(BaseModel):
+    status_code: int
+    data: Dict[str, Any]
+
+    def json(self) -> Dict[str, Any]:
+        return self.data
+
+
+class TavilySearchAIOHTTPClient(BaseModel):
+    headers: Dict[str, str]
+    base_url: str
+
+    async def post(self, endpoint: str, content: str, timeout: float) -> TavilySearchAIOHTTPClientResponse:
+        """
+        endpoint: str e.g. "/search" or "/extract"
+        timeout: float is not used
+        """
+        request_kwargs = {
+            "method": "POST",
+            "headers": self.headers,
+            "url": f"{self.base_url}{endpoint}",
+            "data": content,
+        }
+
+        max_num_tries = 3  # Hardcode for now
+        tries = 0
+        while tries < max_num_tries:
+            tries += 1
+            response = await request(**request_kwargs)
+
+            if response.status in RETRY_ERROR_CODES:
+                # If we hit a rate limit, we don't want to hit max num tries, so we increment both.
+                if response.status in RATE_LIMIT_ERROR_CODES:
+                    tries += 1
+
+                content = (await response.content.read()).decode()
+                print(
+                    f"Hit a {response.status} trying to query an Tavily endpoint (try {tries}). Sleeping 0.5s. Error message: {content}"
+                )
+                await sleep(0.5)
+                continue
+            else:
+                tavily_response = TavilySearchAIOHTTPClientResponse(
+                    status_code=response.status,
+                    data=await response.json(),
+                )
+                return tavily_response
+
+        # We've exited the loop
+        await raise_for_status(response)
+
+    @classmethod
+    def from_httpx_AsyncClient(cls, client: AsyncClient) -> "TavilySearchAIOHTTPClient":
+        return cls(
+            headers=client.headers,
+            base_url=str(client.base_url),
+        )
+
+
 class TavilySearchResourcesServer(SimpleResourcesServer):
     config: TavilySearchResourcesServerConfig
     MAX_RESULTS: int = 10
@@ -139,6 +202,8 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             tavily_api_keys = [tavily_api_keys]
 
         self._async_tavily_clients = [AsyncTavilyClient(api_key=k) for k in tavily_api_keys]
+        for async_tavily_client in self._async_tavily_clients:
+            async_tavily_client._client = TavilySearchAIOHTTPClient.from_httpx_AsyncClient(async_tavily_client._client)
 
         self._session_id_to_metrics = defaultdict(TavilySearchMetrics)
 
