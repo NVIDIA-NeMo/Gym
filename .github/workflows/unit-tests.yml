@@ -46,10 +46,10 @@ jobs:
           curl -LsSf https://astral.sh/uv/install.sh | sh
           uv venv --python 3.12
           source .venv/bin/activate
-          uv sync --extra dev --group docs
+          uv sync --extra dev
 
       - name: Test
         run: |
           source .venv/bin/activate
-          uv pip list
-          ng_test +entrypoint=resources_servers/example_session_state_mgmt
+          ng_dev_test
+          ng_test_all +fail_on_total_and_test_mismatch=true
