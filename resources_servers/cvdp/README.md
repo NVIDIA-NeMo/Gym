@@ -105,10 +105,10 @@ pre-commit install
 ```
 
 To install apptainer:
-
-
-
-
+```bash
+wget https://github.com/apptainer/apptainer/releases/download/v1.3.1/apptainer_1.3.1_amd64.deb                                               
+apt install -y ./apptainer_1.3.1_amd64.deb 
+```
 
 ## Collect Rollouts
 
