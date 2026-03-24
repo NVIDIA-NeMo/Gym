@@ -16,6 +16,8 @@ import asyncio
 import json
 import re
 from collections import defaultdict
+from contextlib import asynccontextmanager
+from pathlib import Path
 from time import time
 from typing import ClassVar, Dict, List, Optional
 from urllib.parse import urlparse
@@ -50,6 +52,7 @@ class TavilySearchResourcesServerConfig(BaseResourcesServerConfig):
     max_retries: int = 5  # Max retries for UsageLimitExceededError
     retry_delay_seconds: int = 30  # Delay between retries in seconds
     debug: bool = False
+    dump_session_id_to_metrics_on_exit: bool = False
 
 
 class TavilySearchRequest(BaseModel):
@@ -151,6 +154,23 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         app.post("/web_search")(self.web_search)
         app.post("/find_in_page")(self.find_in_page)
         app.post("/scroll_page")(self.scroll_page)
+
+        main_app_lifespan = app.router.lifespan_context
+
+        @asynccontextmanager
+        async def lifespan_wrapper(app):
+            async with main_app_lifespan(app) as maybe_state:
+                yield maybe_state
+
+            if self.config.dump_session_id_to_metrics_on_exit:
+                out_file = Path(__file__).parent / "session_id_metrics.json"
+                print(f"Dumping session_id metrics to {out_file}")
+
+                to_dump = {k: v.model_dump(mode="json") for k, v in self._session_id_to_metrics.items()}
+                with out_file.open("w") as f:
+                    json.dump(to_dump, f)
+
+        app.router.lifespan_context = lifespan_wrapper
 
         return app
 
