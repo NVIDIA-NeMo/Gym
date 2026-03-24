@@ -1,8 +1,10 @@
-# CVDP Benchmark
+# CVDP Benchmark 
+
+This resources server is for model evaluation purposes. It is reproducing [CVDP](https://github.com/NVlabs/cvdp_benchmark).
 
 Models are given a hardware design specification and asked to produce a SystemVerilog
 implementation. Verification is done by running the per-task cocotb test harness inside
-Apptainer (using the `ghcr.io/hdl/sim/osvb` simulator image with Icarus Verilog).
+Apptainer (using the `ghcr.io/hdl/sim/osvb` simulator image with Icarus Verilog). 
 
 ## Verification Flow
 
