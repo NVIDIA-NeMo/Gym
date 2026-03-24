@@ -15,6 +15,7 @@
 """Benchmark discovery and preparation utilities."""
 
 import importlib
+from glob import glob
 from pathlib import Path
 from types import ModuleType
 from typing import Dict, List, Optional, Tuple
@@ -114,16 +115,9 @@ def list_benchmarks() -> None:
 
     assert BENCHMARKS_DIR.exists(), "Missing benchmarks directory"
 
-    config_paths = []
-    for entry in sorted(BENCHMARKS_DIR.iterdir()):
-        if not entry.is_dir():
-            continue
-
-        config_path = entry / "config.yaml"
-        if not config_path.exists():
-            continue
-
-        config_paths.append(config_path)
+    config_paths = glob("**/config.yaml", root_dir=BENCHMARKS_DIR, recursive=True)
+    config_paths = [BENCHMARKS_DIR / p for p in config_paths]
+    config_paths = sorted(config_paths)
 
     benchmarks = _load_benchmarks_from_config_paths(config_paths)
 
