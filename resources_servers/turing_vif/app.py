@@ -427,7 +427,9 @@ class TuringVIFResourcesServer(SimpleResourcesServer):
 
         try:
             client = self._get_judge_client()
-            out = await self._judge_llm_api_call_async(client, user_content, system_content, temperature, top_p, max_tokens)
+            out = await self._judge_llm_api_call_async(
+                client, user_content, system_content, temperature, top_p, max_tokens
+            )
             if not isinstance(out, str):
                 out = str(out) if out is not None else ""
             if max_out is not None and len(out) > max_out:
