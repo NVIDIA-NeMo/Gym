@@ -498,19 +498,18 @@ Available agent names: `browser_openai_agent`, `browser_anthropic_sonnet_agent`,
 
 ```bash
 ng_reward_profile \
-  +input_jsonl_fpath=resources_servers/browser_gym/data/example.jsonl \
-  +rollouts_jsonl_fpath=results/cua_rollouts.jsonl \
-  +output_jsonl_fpath=results/cua_profiled.jsonl \
-  +materialized_inputs_jsonl_fpath=results/cua_rollouts_materialized_inputs.jsonl \
-  +pass_threshold=1.0
+  +materialized_inputs_jsonl_fpath=results/cua_rollouts_openai_materialized_inputs.jsonl \
+  +rollouts_jsonl_fpath=results/cua_rollouts_openai.jsonl
 ```
+
+Output is written to `results/cua_rollouts_openai_reward_profiling.jsonl` and `results/cua_rollouts_openai_agent_metrics.json` (auto-derived from the rollouts path).
 
 ### Viewing Results
 
 **Agent-level aggregate (overall pass@1, pass@k):**
 
 ```bash
-python scripts/print_aggregate_results.py +jsonl_fpath=results/cua_rollouts_reward_profiling.jsonl
+python scripts/print_aggregate_results.py +jsonl_fpath=results/cua_rollouts_openai_reward_profiling.jsonl
 ```
 
 **Per-task breakdown:**
@@ -518,7 +517,7 @@ python scripts/print_aggregate_results.py +jsonl_fpath=results/cua_rollouts_rewa
 ```bash
 python -c "
 import json
-with open('results/cua_rollouts_reward_profiling.jsonl') as f:
+with open('results/cua_rollouts_openai_reward_profiling.jsonl') as f:
     for line in f:
         data = json.loads(line)
         sample = data.get('sample', {})
@@ -541,7 +540,7 @@ with open('results/cua_rollouts_reward_profiling.jsonl') as f:
 ```bash
 python -c "
 import json
-with open('results/cua_rollouts_agent_metrics.json') as f:
+with open('results/cua_rollouts_openai_agent_metrics.json') as f:
     for agent in json.loads(f.read()):
         print(f'Agent: {agent[\"agent_ref\"][\"name\"]}')
         print(f'  pass@1 (mean/reward): {agent.get(\"mean/reward\", \"N/A\")}')
