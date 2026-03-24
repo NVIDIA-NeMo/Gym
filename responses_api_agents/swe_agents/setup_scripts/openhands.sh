@@ -88,8 +88,10 @@ export INSTALL_DOCKER=0
 
 
 # Remove any cached virtualenvs from previous runs
+# Use poetry's actual cache dir (respects XDG_CACHE_HOME) instead of hardcoded ~/.cache
 echo "Removing any cached poetry virtualenvs..."
-rm -rf ~/.cache/pypoetry/virtualenvs/openhands-* || true
+poetry_cache_dir="$(poetry config cache-dir 2>/dev/null || echo ~/.cache/pypoetry)"
+rm -rf "$poetry_cache_dir"/virtualenvs/openhands-* || true
 
 # CRITICAL: Unset any active virtualenv from the host .venv
 # This prevents poetry from getting confused about which venv to use

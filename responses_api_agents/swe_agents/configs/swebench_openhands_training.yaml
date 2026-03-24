@@ -8,7 +8,7 @@ swe_agents_train:
       agent_config: responses_api_agents/swe_agents/configs/oh_config.toml
       agent_max_turns: 100
       agent_framework_repo: https://github.com/sdevare-nv/nv-OpenHands.git
-      agent_framework_commit: cdb8150287ae49202dd5e7a434c6af91bae471be  # pragma: allowlist secret
+      agent_framework_commit: 72a6b1a2aea186d98dd0a0ee14269d79f8f8308b  # pragma: allowlist secret
       # Container configuration
       container_formatter: ???
       container_folder_path: null
@@ -17,6 +17,25 @@ swe_agents_train:
       apptainer_memory_limit_mb: 32768
       command_exec_timeout: 300
       dataset_path: ???
+      agent_prompt_overrides:
+      # Codex agent
+      - user_prompt_template: responses_api_agents/swe_agents/prompts/codex/user_prompt.j2
+        system_prompt_template: responses_api_agents/swe_agents/prompts/codex/system_prompt.j2
+        agent_cls: CodexAgent
+        diversify_tool_names: false
+
+      # OpenCode agent
+      - user_prompt_template: responses_api_agents/swe_agents/prompts/opencode/user_prompt.j2
+        system_prompt_template: responses_api_agents/swe_agents/prompts/opencode/system_prompt.j2
+        agent_cls: OpenCodeAgent
+        diversify_tool_names: false
+      
+      # CodeAct agent
+      - user_prompt_template: responses_api_agents/swe_agents/prompts/openhands/user_prompt.j2
+        system_prompt_template: responses_api_agents/swe_agents/prompts/openhands/system_prompt.j2
+        agent_cls: CodeActAgent
+        diversify_tool_names: false
+      
       model_server:
         name: policy_model # openai_model
         type: responses_api_models
@@ -41,7 +60,7 @@ swe_agents_val:
       agent_config: responses_api_agents/swe_agents/configs/oh_config.toml
       agent_max_turns: 100
       agent_framework_repo: https://github.com/sdevare-nv/nv-OpenHands.git
-      agent_framework_commit: cdb8150287ae49202dd5e7a434c6af91bae471be  # pragma: allowlist secret
+      agent_framework_commit: 72a6b1a2aea186d98dd0a0ee14269d79f8f8308b  # pragma: allowlist secret
       # Container configuration
       container_formatter: ???
       container_folder_path: null
@@ -50,6 +69,15 @@ swe_agents_val:
       apptainer_memory_limit_mb: 32768
       command_exec_timeout: 300
       dataset_path: ???
+      
+      agent_prompt_overrides:
+            
+      # CodeAct agent
+      - user_prompt_template: responses_api_agents/swe_agents/prompts/openhands/user_prompt.j2
+        system_prompt_template: responses_api_agents/swe_agents/prompts/openhands/system_prompt.j2
+        agent_cls: CodeActAgent
+        diversify_tool_names: false
+      
       # Optional model server reference
       model_server:
         name: policy_model # openai_model
