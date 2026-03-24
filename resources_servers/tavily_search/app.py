@@ -95,7 +95,7 @@ class JudgeEvaluation(BaseModel):
 
 
 class TavilySearchVerifyResponse(BaseVerifyResponse, JudgeEvaluation):
-    pass
+    num_tool_calls: int
 
 
 class TavilySearchResourcesServer(SimpleResourcesServer):
@@ -316,7 +316,11 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             judge_evaluation = await self._verify_answer_with_judge(question, ground_truth, last_assistant_response)
         else:
             judge_evaluation = self._verify_answer_with_regex(ground_truth, last_assistant_response)
-        return TavilySearchVerifyResponse(**body.model_dump(), **judge_evaluation.model_dump())
+        return TavilySearchVerifyResponse(
+            **body.model_dump(),
+            **judge_evaluation.model_dump(),
+            num_tool_calls=sum(o.type == "function_call" for o in body.response.output),
+        )
 
     ###### UTILITY FUNCTIONS ######
 
