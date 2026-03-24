@@ -244,12 +244,23 @@ class MultiturnProofAgent(SimpleResponsesAPIAgent):
 
     @staticmethod
     def _extract_generation_text(model_response_json: dict) -> str:
+        reasoning_parts = []
+        content_parts = []
         for output in model_response_json.get("output", []):
-            if output.get("type") == "message" and output.get("content"):
+            if output.get("type") == "reasoning":
+                for s in output.get("summary", []):
+                    s_text = s.get("text", "")
+                    if s_text:
+                        reasoning_parts.append(s_text)
+            elif output.get("type") == "message" and output.get("content"):
                 for content in output["content"]:
                     if content.get("type") == "output_text":
-                        return content.get("text", "")
-        return ""
+                        content_parts.append(content.get("text", ""))
+        result = ""
+        if reasoning_parts:
+            result = "<think>" + "\n".join(reasoning_parts) + "</think>"
+        result += "".join(content_parts)
+        return result
 
 
 if __name__ == "__main__":

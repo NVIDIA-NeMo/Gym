@@ -199,6 +199,7 @@ class MultiturnProofJudgeConfig(BaseResourcesServerConfig):
     reward_strategy: str = "final_only"
     response_processor: str = "strip_thinking"
     zero_truncated_turn_reward: bool = False
+    truncated_turn_reward_share: float = 1.0
 
 
 class MultiturnProofVerifyRequest(BaseVerifyRequest):
@@ -243,6 +244,18 @@ class MultiturnProofJudgeServer(SimpleResourcesServer):
             return MultiturnProofSeedResponse(initial_prompt=initial_prompt)
         return MultiturnProofSeedResponse()
 
+    def _effective_truncated_share(self) -> float:
+        """Resolve effective truncated_turn_reward_share from config.
+
+        New ``truncated_turn_reward_share`` (float, default 1.0) takes
+        precedence.  Falls back to legacy ``zero_truncated_turn_reward``
+        (bool) when the float has not been explicitly lowered from 1.0.
+        """
+        share = self.config.truncated_turn_reward_share
+        if share >= 1.0 and self.config.zero_truncated_turn_reward:
+            return 0.0
+        return share
+
     async def verify(self, body: MultiturnProofVerifyRequest) -> MultiturnProofVerifyResponse:
         problem = body.problem or ""
         full_response = self._extract_assistant_text(body.response)
@@ -254,6 +267,7 @@ class MultiturnProofJudgeServer(SimpleResourcesServer):
         use_summary_model = self.config.response_processor == "summary_model"
         reasoning_turn = self._count_reasoning_turns(turn_index, use_summary_model, is_summary_turn)
         is_final_reasoning = reasoning_turn >= self.config.max_turns
+        truncated_share = self._effective_truncated_share()
 
         if is_summary_turn:
             # Summary turn: model just generated a summary. Use it in reprompt.
@@ -273,6 +287,7 @@ class MultiturnProofJudgeServer(SimpleResourcesServer):
                     "is_summary_turn": True,
                     "_existing_summary": clean_summary,
                     "_stripped_assistant_content": clean_summary,
+                    "truncated_turn_reward_share": truncated_share,
                 },
             )
 
@@ -298,6 +313,7 @@ class MultiturnProofJudgeServer(SimpleResourcesServer):
                     "reasoning_turn": reasoning_turn,
                     "is_final": True,
                     "_judge_info": details,
+                    "truncated_turn_reward_share": truncated_share,
                 },
             )
         else:
@@ -323,6 +339,7 @@ class MultiturnProofJudgeServer(SimpleResourcesServer):
                         "reasoning_turn": reasoning_turn,
                         "_phase": "summarizing",
                         "_stripped_assistant_content": processed,
+                        "truncated_turn_reward_share": truncated_share,
                     },
                 )
             else:
@@ -340,6 +357,7 @@ class MultiturnProofJudgeServer(SimpleResourcesServer):
                         "turn_index": turn_index,
                         "reasoning_turn": reasoning_turn,
                         "_stripped_assistant_content": processed,
+                        "truncated_turn_reward_share": truncated_share,
                     },
                 )
 
@@ -353,6 +371,13 @@ class MultiturnProofJudgeServer(SimpleResourcesServer):
         return (turn_index // 2) + 1
 
     def _extract_assistant_text(self, response: Any) -> str:
+        """Extract full assistant text from response, including reasoning.
+
+        When vLLM uses a reasoning_parser, thinking content is split into a
+        separate ``type="reasoning"`` output item.  We reconstruct the full
+        ``<think>…</think>`` + answer string so that downstream helpers like
+        ``extract_thinking`` and ``strip_thinking`` work correctly.
+        """
         if not response:
             return ""
         if isinstance(response, dict):
@@ -361,19 +386,29 @@ class MultiturnProofJudgeServer(SimpleResourcesServer):
             outputs = getattr(response, "output", []) or []
         if not outputs:
             return ""
-        parts = []
+        reasoning_parts = []
+        content_parts = []
         for out in outputs:
             out_type = out.get("type") if isinstance(out, dict) else getattr(out, "type", None)
             out_role = out.get("role") if isinstance(out, dict) else getattr(out, "role", None)
-            if out_type != "message" or out_role != "assistant":
-                continue
-            content_list = out.get("content", []) if isinstance(out, dict) else getattr(out, "content", [])
-            for c in content_list or []:
-                c_type = c.get("type") if isinstance(c, dict) else getattr(c, "type", None)
-                c_text = c.get("text", "") if isinstance(c, dict) else getattr(c, "text", "")
-                if c_type == "output_text":
-                    parts.append(c_text or "")
-        return "".join(parts)
+            if out_type == "reasoning":
+                summaries = out.get("summary", []) if isinstance(out, dict) else getattr(out, "summary", [])
+                for s in summaries or []:
+                    s_text = s.get("text", "") if isinstance(s, dict) else getattr(s, "text", "")
+                    if s_text:
+                        reasoning_parts.append(s_text)
+            elif out_type == "message" and out_role == "assistant":
+                content_list = out.get("content", []) if isinstance(out, dict) else getattr(out, "content", [])
+                for c in content_list or []:
+                    c_type = c.get("type") if isinstance(c, dict) else getattr(c, "type", None)
+                    c_text = c.get("text", "") if isinstance(c, dict) else getattr(c, "text", "")
+                    if c_type == "output_text":
+                        content_parts.append(c_text or "")
+        result = ""
+        if reasoning_parts:
+            result = "<think>" + "\n".join(reasoning_parts) + "</think>"
+        result += "".join(content_parts)
+        return result
 
     # ------------------------------------------------------------------
     #  External judge

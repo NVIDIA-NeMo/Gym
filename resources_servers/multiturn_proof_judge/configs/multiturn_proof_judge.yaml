@@ -26,6 +26,7 @@ multiturn_proof_judge:
       reward_strategy: final_only
       response_processor: strip_thinking
       zero_truncated_turn_reward: false
+      truncated_turn_reward_share: 1.0
       domain: math
       description: Multi-turn theorem proving with verifier + meta-verifier judge
 
