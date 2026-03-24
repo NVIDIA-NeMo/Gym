@@ -15,7 +15,7 @@
 import asyncio
 import json
 import re
-from typing import ClassVar, Optional
+from typing import ClassVar, List, Optional
 from urllib.parse import urlparse
 
 from fastapi import FastAPI
@@ -39,7 +39,7 @@ from resources_servers.tavily_search.judge_prompt import JUDGE_PROMPT_TEMPLATE
 
 
 class TavilySearchResourcesServerConfig(BaseResourcesServerConfig):
-    tavily_api_key: str
+    tavily_api_key: str | List[str]
     exclude_domains_file_path: str
     use_judge: bool = True  # If False, use regex matching instead of LLM judge
     judge_model_server: Optional[ModelServerRef] = None
@@ -102,12 +102,19 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
     config: TavilySearchResourcesServerConfig
     MAX_RESULTS: int = 10
     MAX_RESULT_CHARS: int = 2000
-    _async_tavily: Optional[AsyncTavilyClient] = PrivateAttr(default=None)
+
+    _async_tavily_clients: Optional[List[AsyncTavilyClient]] = PrivateAttr(default=None)
+    _num_requests: int = 0
 
     JUDGE_PROMPT_TEMPLATE: ClassVar[str] = JUDGE_PROMPT_TEMPLATE
 
     def model_post_init(self, __context) -> None:
-        self._async_tavily = AsyncTavilyClient(api_key=self.config.tavily_api_key)
+        tavily_api_keys = self.config.tavily_api_key
+        if isinstance(tavily_api_keys, str):
+            tavily_api_keys = [tavily_api_keys]
+
+        self._async_tavily_clients = [AsyncTavilyClient(api_key=k) for k in tavily_api_keys]
+
         self._exclude_domains = self._parse_exclude_domains()
         self._page_cache: dict[str, str] = {}
         print(self._exclude_domains)
@@ -123,6 +130,11 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
 
         return app
 
+    def _select_tavily_client(self) -> AsyncTavilyClient:
+        client = self._async_tavily_clients[self._num_requests % len(self._async_tavily_clients)]
+        self._num_requests += 1
+        return client
+
     async def web_search(self, body: TavilySearchRequest) -> TavilySearchResponse:
         if self.config.debug:
             print("\n\n body.query: ", body.query)
@@ -136,8 +148,10 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         retry_delay_seconds = self.config.retry_delay_seconds
 
         for attempt in range(max_retries):
+            # @bxyu-nvidia: We put this in the attempt loop so we have a different client per attempt to better avoid rate limits.
+            async_tavily_client = self._select_tavily_client()
             try:
-                results = await self._async_tavily.search(
+                results = await async_tavily_client.search(
                     body.query,
                     max_results=self.MAX_RESULTS,
                     exclude_domains=self._exclude_domains,
@@ -176,7 +190,8 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
 
         for attempt in range(max_retries):
             try:
-                results = await self._async_tavily.extract(
+                async_tavily_client = self._select_tavily_client()
+                results = await async_tavily_client.extract(
                     urls=body.url,
                     query=body.query,
                 )
@@ -243,8 +258,9 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             retry_delay_seconds = self.config.retry_delay_seconds
 
             for attempt in range(max_retries):
+                async_tavily_client = self._select_tavily_client()
                 try:
-                    results = await self._async_tavily.extract(
+                    results = await async_tavily_client.extract(
                         urls=body.url,
                     )
                     break  # Success, exit the retry loop
