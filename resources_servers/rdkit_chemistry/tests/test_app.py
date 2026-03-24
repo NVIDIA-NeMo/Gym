@@ -2,12 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """Unit tests for the rdkit_chemistry resources server."""
 
-import math
+import sys
+from pathlib import Path
 
 import pytest
 
-import sys
-from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parents[3]))  # repo root
 
