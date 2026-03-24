@@ -1,3 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """Start and supervise a nemo_skills sandbox subprocess.
 
 Launched from ``RDKitChemistryResourcesServer.setup_webserver()`` so the
@@ -23,6 +37,7 @@ import time
 from pathlib import Path
 
 import httpx
+
 
 logger = logging.getLogger(__name__)
 
@@ -79,9 +94,7 @@ def start_sandbox(
     if discovery_path:
         _write_discovery(discovery_path, port)
 
-    watchdog = threading.Thread(
-        target=_watchdog, args=(python, port), daemon=True, name="sandbox-watchdog"
-    )
+    watchdog = threading.Thread(target=_watchdog, args=(python, port), daemon=True, name="sandbox-watchdog")
     watchdog.start()
 
     atexit.register(_stop_sandbox)
@@ -126,9 +139,7 @@ def _wait_for_venv(python: str) -> None:
         except (subprocess.CalledProcessError, FileNotFoundError):
             time.sleep(5.0)
 
-    raise TimeoutError(
-        f"nemo_skills not importable in {python} after {_VENV_TIMEOUT}s ({phase} phase)"
-    )
+    raise TimeoutError(f"nemo_skills not importable in {python} after {_VENV_TIMEOUT}s ({phase} phase)")
 
 
 def _ensure_packages(python: str, pip: str, packages: list[str]) -> None:
@@ -169,8 +180,7 @@ def _wait_for_health(port: int) -> None:
         if proc and proc.poll() is not None:
             log_tail = _tail_log(port)
             raise RuntimeError(
-                f"Sandbox died during startup (exit={proc.returncode})\n"
-                f"--- sandbox log tail ---\n{log_tail}"
+                f"Sandbox died during startup (exit={proc.returncode})\n--- sandbox log tail ---\n{log_tail}"
             )
         try:
             with httpx.Client(timeout=5.0) as client:
