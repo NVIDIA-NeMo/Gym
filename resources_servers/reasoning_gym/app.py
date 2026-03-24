@@ -84,14 +84,10 @@ class ReasoningGymResourcesServer(SimpleResourcesServer):
         for output_item in response.output:
             if output_item.type != "message":
                 continue
-
-            if isinstance(output_item.content, str):
-                assistant_responses.append(output_item.content)
-            else:
-                for content_item in output_item.content:
-                    if content_item.type != "output_text":
-                        continue
-                    assistant_responses.append(content_item.text)
+            for content_item in output_item.content:
+                if content_item.type != "output_text":
+                    continue
+                assistant_responses.append(content_item.text)
 
         full_text = "".join(assistant_responses)
 

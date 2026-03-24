@@ -15,7 +15,7 @@
 import contextlib
 import logging
 from io import StringIO
-from typing import Any, ClassVar, Dict, List, Optional, Union
+from typing import Any, ClassVar, Optional
 
 from fastapi import FastAPI
 from math_verify import grader
@@ -37,7 +37,6 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.reward_profile import compute_pass_majority_metrics
 from nemo_gym.server_utils import get_response_json
 
 
@@ -303,63 +302,6 @@ Example output: "My final verdict is different [[A!=B]]"."""
                 return True, judge_evaluation
             else:
                 return False, judge_evaluation
-
-    # ──────────────────────────────────────────────────────────
-    # Aggregate metrics overrides
-    # ──────────────────────────────────────────────────────────
-
-    @staticmethod
-    def _math_score_fn(r: dict) -> Dict[str, Union[float, bool]]:
-        scores: Dict[str, Union[float, bool]] = {}
-        if "library_reward" in r:
-            scores["symbolic_accuracy"] = r["library_reward"]
-        if "judge_evaluations" in r and r["judge_evaluations"] is not None:
-            scores["judge_accuracy"] = r["reward"]
-        return scores
-
-    def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
-        """Compute math-specific metrics: pass@k, majority@k, per-sample statistics."""
-        return compute_pass_majority_metrics(
-            tasks,
-            score_fn=self._math_score_fn,
-            answer_key="extracted_answer",
-        )
-
-    def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
-        """Select headline metrics for this math benchmark."""
-        key: Dict[str, Any] = {}
-
-        # Token usage (not reward — that's redundant with accuracy scores)
-        for name in ("mean/input_tokens", "mean/output_tokens"):
-            if name in agent_metrics:
-                key[name] = agent_metrics[name]
-
-        # Highest-k pass@1[avg-of-*] for all score names including no_answer (no statistics)
-        avg_keys = [
-            k
-            for k in agent_metrics
-            if k.startswith("pass@1[avg-of-") and k.count("/") == 1 and "std_dev" not in k and "std_err" not in k
-        ]
-        highest_k = max(int(k.split("pass@1[avg-of-")[1].split("]")[0]) for k in avg_keys)
-        for k in avg_keys:
-            if k.startswith(f"pass@1[avg-of-{highest_k}]"):
-                key[k] = agent_metrics[k]
-
-        # Highest-k pass@k for accuracy scores only (not no_answer)
-        pass_keys = [k for k in agent_metrics if k.startswith("pass@") and "[" not in k and "/no_answer" not in k]
-        highest_k = max(int(k.split("@")[1].split("/")[0]) for k in pass_keys)
-        for k in pass_keys:
-            if k.startswith(f"pass@{highest_k}/"):
-                key[k] = agent_metrics[k]
-
-        # Highest-k majority for accuracy scores only (not no_answer)
-        maj_keys = [k for k in agent_metrics if k.startswith("majority@") and "/no_answer" not in k]
-        highest_k = max(int(k.split("@")[1].split("/")[0]) for k in maj_keys)
-        for k in maj_keys:
-            if k.startswith(f"majority@{highest_k}/"):
-                key[k] = agent_metrics[k]
-
-        return key
 
 
 if __name__ == "__main__":

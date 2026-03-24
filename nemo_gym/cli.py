@@ -429,7 +429,7 @@ def e2e_rollout_collection():  # pragma: no cover
     rollout_collection_config_dict = deepcopy(global_config_dict)
     with open_dict(rollout_collection_config_dict):
         input_jsonl_fpath = data_process_output_dir / f"{e2e_rollout_collection_config.split}.jsonl"
-        assert input_jsonl_fpath.exists(), input_jsonl_fpath
+        assert input_jsonl_fpath.exists()
         rollout_collection_config_dict["input_jsonl_fpath"] = str(input_jsonl_fpath)
 
     rollout_collection_config = RolloutCollectionConfig.model_validate(

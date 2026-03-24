@@ -65,19 +65,11 @@ class InstructionFollowingResourcesServer(SimpleResourcesServer):
         self._ensure_nltk_data()
 
     def _ensure_nltk_data(self):
-        """Ensure required NLTK data is available at startup.
-
-        nltk.download() always fetches the remote package index even when the
-        data is already present. Guard with a local find() first to skip the
-        download when the data already exists.
-        """
+        """Download required NLTK data at startup."""
         try:
             import nltk
 
-            try:
-                nltk.data.find("tokenizers/punkt_tab")
-            except LookupError:
-                nltk.download("punkt_tab", quiet=True)
+            nltk.download("punkt_tab", quiet=True)
         except ImportError:
             # ifbench not available, skip
             pass

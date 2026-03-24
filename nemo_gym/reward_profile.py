@@ -14,7 +14,7 @@
 # limitations under the License.
 from __future__ import annotations
 
-from collections import Counter, defaultdict
+from collections import defaultdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
@@ -166,152 +166,6 @@ class RewardProfiler:
         return reward_profiling_fpath, agent_level_metrics_fpath
 
 
-def compute_pass_majority_metrics(
-    tasks: List[List[Dict[str, Any]]],
-    score_fn: Optional[Any] = None,
-    answer_key: Optional[str] = None,
-) -> Dict[str, Any]:
-    """Compute pass@k, majority@k, no_answer, and variance statistics from grouped task results.
-
-    Shared utility for any resource server's compute_metrics() override.
-
-    Args:
-        tasks: tasks[i] is a list of rollout dicts for task i.
-        score_fn: Callable(result_dict) -> Dict[str, float|bool] returning named scores.
-            Defaults to ``lambda r: {"accuracy": r["reward"]}``.
-        answer_key: Field name for extracted answer (enables majority@k and no_answer).
-            If None, majority@k and no_answer are skipped.
-
-    Returns:
-        Flat dict of metrics keyed as ``{agg_mode}/{score_name}``:
-        - ``pass@{k}/{name}``: combinatorial pass@k (binary) or max-of-k (continuous)
-        - ``pass@1[avg-of-{k}]/{name}``: mean score across first k rollouts, averaged across tasks
-        - ``majority@{k}/{name}``: majority-vote accuracy (only if answer_key is set)
-        - ``pass@{k}/no_answer``, ``majority@{k}/no_answer``: fraction with no extracted answer
-        - ``pass@1[avg-of-{k}]/{name}/std_dev_across_runs``, ``…/std_err_across_runs``: variance stats
-
-        All accuracy values are percentages (0-100).
-    """
-    import math as _math
-
-    if not tasks:
-        return {}
-
-    if score_fn is None:
-        score_fn = lambda r: {"accuracy": r["reward"]}  # noqa: E731
-
-    max_k = max(len(rollouts) for rollouts in tasks)
-    metrics: Dict[str, Any] = {}
-
-    # Extract per-task score dicts and answers.
-    # When answer_key is set, inject "no_answer" as a binary score so it gets
-    # the same pass@k / majority@k / variance treatment as every other score.
-    all_score_dicts: List[List[Dict[str, float]]] = []
-    all_answers: List[List[Optional[str]]] = []
-    for rollouts in tasks:
-        task_scores = []
-        task_answers = []
-        for r in rollouts:
-            raw = score_fn(r)
-            scores = {k: (int(v) if isinstance(v, bool) else v) for k, v in raw.items()}
-            if answer_key is not None:
-                answer = r.get(answer_key)
-                task_answers.append(answer)
-                scores["no_answer"] = 1 if answer is None else 0
-            task_scores.append(scores)
-        all_score_dicts.append(task_scores)
-        if answer_key is not None:
-            all_answers.append(task_answers)
-
-    # Collect score names
-    score_names = sorted({name for task_scores in all_score_dicts for s in task_scores for name in s})
-
-    for k in range(1, max_k + 1):
-        for name in score_names:
-            # --- pass@k ---
-            pass_values = []
-            for task_scores in all_score_dicts:
-                vals = [s.get(name) for s in task_scores if name in s]
-                if not vals or k > len(vals):
-                    continue
-                is_binary = all(v in (0, 1, 0.0, 1.0) for v in vals)
-                if is_binary:
-                    n_total = len(vals)
-                    n_incorrect = sum(1 for v in vals if not v)
-                    if n_incorrect < k:
-                        pass_values.append(1.0)
-                    else:
-                        pass_values.append(1.0 - _math.comb(n_incorrect, k) / _math.comb(n_total, k))
-                else:
-                    pass_values.append(max(vals[:k]))
-
-            if pass_values:
-                metrics[f"pass@{k}/{name}"] = 100.0 * sum(pass_values) / len(pass_values)
-
-            # --- pass@1[avg-of-k] ---
-            avg_values = []
-            for task_scores in all_score_dicts:
-                vals = [s.get(name) for s in task_scores[:k] if name in s]
-                if vals:
-                    avg_values.append(sum(vals) / len(vals))
-
-            if avg_values:
-                metrics[f"pass@1[avg-of-{k}]/{name}"] = 100.0 * sum(avg_values) / len(avg_values)
-
-            # --- majority@k ---
-            if answer_key is not None:
-                majority_values = []
-                for task_scores, task_answers in zip(all_score_dicts, all_answers):
-                    valid = [
-                        (a, s.get(name))
-                        for a, s in zip(task_answers[:k], task_scores[:k])
-                        if a is not None and name in s
-                    ]
-                    if not valid:
-                        majority_values.append(0)
-                        continue
-                    counter = Counter(valid)
-                    max_count = counter.most_common(1)[0][1]
-                    tied = [(a, s) for (a, s), c in counter.items() if c == max_count]
-                    majority_values.append(sum(s for _, s in tied) / len(tied))
-
-                if majority_values:
-                    metrics[f"majority@{k}/{name}"] = 100.0 * sum(majority_values) / len(majority_values)
-
-    # --- per_sample_aggregate and variance statistics ---
-    # per_sample_aggregate[score_name][i] = pass@1 using only rollout i across all tasks
-    per_sample_agg: Dict[str, List[float]] = {name: [] for name in score_names}
-
-    for run_idx in range(max_k):
-        for name in score_names:
-            run_scores = [
-                task_scores[run_idx].get(name)
-                for task_scores in all_score_dicts
-                if run_idx < len(task_scores) and name in task_scores[run_idx]
-            ]
-            if run_scores:
-                per_sample_agg[name].append(100.0 * sum(run_scores) / len(run_scores))
-
-    # Remove empty entries
-    per_sample_agg = {k: v for k, v in per_sample_agg.items() if v}
-    metrics["per_sample_aggregate"] = per_sample_agg
-
-    # Variance statistics for pass@1[avg-of-k]
-    if max_k > 1:
-        for k in range(2, max_k + 1):
-            for name in score_names:
-                run_averages = per_sample_agg.get(name, [])[:k]
-                if len(run_averages) >= 2:
-                    mean_val = sum(run_averages) / len(run_averages)
-                    variance = sum((x - mean_val) ** 2 for x in run_averages) / (len(run_averages) - 1)
-                    std_dev = _math.sqrt(variance)
-                    std_err = std_dev / _math.sqrt(len(run_averages))
-                    metrics[f"pass@1[avg-of-{k}]/{name}/std_dev_across_runs"] = std_dev
-                    metrics[f"pass@1[avg-of-{k}]/{name}/std_err_across_runs"] = std_err
-
-    return metrics
-
-
 class AggregateMetricsMixin:
     """Mixin providing compute_metrics/get_key_metrics hooks and the aggregate_metrics endpoint.
 
@@ -398,33 +252,12 @@ def compute_aggregate_metrics(
                 agent_metrics[k] = v
 
     serialized_group = rp.prepare_for_serialization(group_level_metrics)
-
-    # Re-add task index (RewardProfiler pops it during profiling, but groups are
-    # returned in sorted task index order from the pandas groupby)
-    sorted_task_indices = sorted({vr.get(TASK_INDEX_KEY_NAME, 0) for vr in verify_responses})
-    for group, task_idx in zip(serialized_group, sorted_task_indices):
-        group[TASK_INDEX_KEY_NAME] = task_idx
-
     serialized_agent = rp.prepare_for_serialization([agent_metrics])[0] if agent_metrics else {}
 
     # Custom metrics computed from all raw verify responses grouped by task
     if compute_metrics_fn:
         tasks = _group_by_task(verify_responses)
-        custom = compute_metrics_fn(tasks)
-
-        # Merge per_task_metrics into group_level_metrics (keyed by task_index)
-        per_task_metrics = custom.pop("per_task_metrics", None)
-        if per_task_metrics:
-            per_task_by_idx = {m[TASK_INDEX_KEY_NAME]: m for m in per_task_metrics}
-            for group in serialized_group:
-                task_idx = group.get(TASK_INDEX_KEY_NAME)
-                if task_idx is not None and task_idx in per_task_by_idx:
-                    ptm = per_task_by_idx[task_idx]
-                    for k, v in ptm.items():
-                        if k != TASK_INDEX_KEY_NAME:
-                            group[k] = v
-
-        serialized_agent.update(custom)
+        serialized_agent.update(compute_metrics_fn(tasks))
 
     if get_key_metrics_fn:
         key_metrics = get_key_metrics_fn(serialized_agent)

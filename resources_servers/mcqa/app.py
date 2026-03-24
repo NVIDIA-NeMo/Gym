@@ -24,18 +24,10 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.reward_profile import compute_pass_majority_metrics
 
 
 class MCQAResourcesServerConfig(BaseResourcesServerConfig):
-    grading_mode: Optional[
-        Literal[
-            "strict_single_letter_boxed",
-            "lenient_boxed",
-            "lenient_answer_colon",
-            "lenient_answer_colon_md",
-        ]
-    ] = None
+    pass
 
 
 class MCQARunRequest(BaseRunRequest):
@@ -67,6 +59,24 @@ class MCQAVerifyResponse(BaseVerifyResponse):
     extracted_answer: Optional[str]
 
 
+def _extract_last_assistant_text(body: BaseVerifyRequest) -> str:
+    # body.response.output is a list of union types; we only want assistant message texts
+    # TODO: @fsoares should we just assume we are always receiving the last message only? Not sure if this is always true.
+    texts: list[str] = []
+    for o in body.response.output:
+        if getattr(o, "type", None) == "message" and getattr(o, "role", None) == "assistant":
+            # Each message has content which can be text parts; normalize to string
+            content = getattr(o, "content", None)
+            if isinstance(content, list):
+                for c in content:
+                    t = getattr(c, "text", None)
+                    if isinstance(t, str):
+                        texts.append(t)
+            elif isinstance(content, str):
+                texts.append(content)
+    return "\n".join(texts).strip()
+
+
 def _extract_options_and_expected(
     body: MCQARunRequest,
 ) -> tuple[Optional[list[dict[str, str]]], Optional[str]]:
@@ -78,8 +88,6 @@ CHOICE_LETTER_PATTERN = re.compile(r"(?<![A-Za-z])([A-Za-z])(?![A-Za-z])")
 # Strict boxed: capture a single UPPERCASE letter, allowing non-letter chars around it inside the box
 STRICT_BOXED_PATTERN = re.compile(r"\\boxed\{\s*[^A-Za-z]*([A-Z])[^A-Za-z]*\s*\}")
 ANSWER_COLON_PATTERN = re.compile(r"(?i)answer\s*:\s*(.+)")
-# Markdown-aware variant: tolerates **Answer: B**, __Answer__: B, etc. Captures single letter only.
-ANSWER_COLON_MD_PATTERN = re.compile(r"(?i)[*_]{0,2}Answer[*_]{0,2}\s*:[*_\s]{0,2}\s*([A-Z])(?![a-zA-Z0-9])")
 
 
 def _parse_answer_letter_strict_boxed(text: str, allowed_letters: set[str]) -> tuple[Optional[str], str, bool]:
@@ -201,50 +209,14 @@ class MCQAResourcesServer(SimpleResourcesServer):
         app = super().setup_webserver()
         return app
 
-    def compute_metrics(self, tasks):
-        return compute_pass_majority_metrics(
-            tasks,
-            score_fn=lambda r: {"accuracy": r["reward"]},
-            answer_key="extracted_answer",
-        )
-
-    def get_key_metrics(self, agent_metrics):
-        import re
-
-        # Find max k from pass@{k}/accuracy keys
-        max_k = max(
-            (int(m.group(1)) for k in agent_metrics if (m := re.match(r"^pass@(\d+)/accuracy$", k))),
-            default=1,
-        )
-        keys = [
-            "pass@1/accuracy",
-            f"pass@1[avg-of-{max_k}]/accuracy",
-            f"pass@1[avg-of-{max_k}]/no_answer",
-            f"majority@{max_k}/accuracy",
-            f"pass@{max_k}/no_answer",
-            "mean/reward",
-        ]
-        return {k: agent_metrics[k] for k in keys if k in agent_metrics}
-
     async def verify(self, body: MCQAVerifyRequest) -> MCQAVerifyResponse:
+        text = _extract_last_assistant_text(body)
         # Pull options/expected_answer from dataset-style metadata if available
         options, expected_answer = _extract_options_and_expected(body)
-        gold = (expected_answer or "").strip().upper()
         # Derive allowed letters from option keys
         allowed_letters = _get_allowed_letters_from_options(options)
 
-        grading_mode = self.config.grading_mode or body.grading_mode
-
         pred: Optional[str] = None
-
-        text = body.response.output_text.strip()
-        if not text:
-            return MCQAVerifyResponse(
-                **body.model_dump(exclude={"expected_answer", "extracted_answer"}),
-                reward=0.0,
-                expected_answer=gold,
-                extracted_answer=None,
-            )
 
         # Check for template_metadata first (highest priority)
         if body.template_metadata and "output_regex" in body.template_metadata:
@@ -253,9 +225,9 @@ class MCQAResourcesServer(SimpleResourcesServer):
 
         # Fallback to existing grading_mode logic if template_metadata didn't work
         if pred is None:
-            if grading_mode == "strict_single_letter_boxed":
+            if body.grading_mode == "strict_single_letter_boxed":
                 pred, _, _ = _parse_answer_letter_strict_boxed(text, allowed_letters)
-            elif grading_mode == "lenient_boxed":
+            elif body.grading_mode == "lenient_boxed":
                 # Try strict boxed first
                 pred, _, _ = _parse_answer_letter_strict_boxed(text, allowed_letters)
                 if pred is None:
@@ -263,7 +235,7 @@ class MCQAResourcesServer(SimpleResourcesServer):
                     letter_from_text = _match_option_text(text, options, allowed_letters)
                     if letter_from_text is not None:
                         pred = letter_from_text
-            elif grading_mode == "lenient_answer_colon":
+            elif body.grading_mode == "lenient_answer_colon":
                 # Look for Answer: <...>
                 m = ANSWER_COLON_PATTERN.search(text)
                 if m:
@@ -284,14 +256,8 @@ class MCQAResourcesServer(SimpleResourcesServer):
                                     break
                             if pred is not None:
                                 break
-            elif grading_mode == "lenient_answer_colon_md":
-                # Markdown-aware Answer: extraction handles **Answer: B**, etc.
-                md_match = ANSWER_COLON_MD_PATTERN.search(text)
-                if md_match:
-                    letter_up = md_match.group(1).strip().upper()
-                    if letter_up in allowed_letters:
-                        pred = letter_up
 
+        gold = (expected_answer or "").strip().upper()
         is_correct = (pred == gold) if (pred is not None and gold) else False
         reward = 1.0 if is_correct else 0.0
 
