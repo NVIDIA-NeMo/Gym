@@ -27,7 +27,7 @@ equivalence_llm_judge:
       response_extract_regex: null
       
       # Swap check: Run second judge pass with swapped expected/generated to detect positional bias
-      check_twice_swap: true
+      check_twice_swap: false
       # Reward when the second (swap) pass fails; default 0.0, can be -1.0
       reward_if_swap_fails: 0.0
       
@@ -47,15 +47,15 @@ equivalence_llm_judge:
       # [NEW] Skip regex extraction when expected_answer length exceeds this threshold.
       # When skipped, the full generation is shown to judge instead of extracting.
       # Only applies when per-record regex is present. Set to null to disable.
-      extraction_length_threshold: 120
+      extraction_length_threshold: null
       
       # [NEW] If true, when first pass fails, retry with full generation (no regex) for partial credit.
       # Helps recover from regex extraction failures. Only activates when per-record regex exists.
-      check_full_generation_on_fail: true
+      check_full_generation_on_fail: false
       
       # [NEW] Reward when full generation check succeeds after first pass fails.
       # Default 0.5 (partial credit). Set to 1.0 for full credit or 0.0 to ignore.
-      reward_if_full_generation_succeeds: 0.5
+      reward_if_full_generation_succeeds: 0.0
       domain: knowledge
       verified: false
       description: Short answer questions with LLM-as-a-judge

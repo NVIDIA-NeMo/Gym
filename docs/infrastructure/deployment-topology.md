@@ -3,7 +3,7 @@
 
 ## Training Framework Deployment
 
-When NeMo Gym is used for RL training (not standalone rollout collection), it runs alongside a training framework. NeMo Gym's Model Server acts as an HTTP proxy for policy model inference — it translates between the Responses API and Chat Completions API formats, forwarding requests to the training framework's generation endpoint (e.g., vLLM). NeMo Gym can also run other models on GPU (e.g., reward models, judge models) through its own resource servers.
+When NeMo Gym is used for RL training (not standalone rollout collection), it runs alongside a training framework. NeMo Gym's Model Server acts as an HTTP proxy for policy model inference — it translates between the Responses API and Chat Completions API formats, forwarding requests to the training framework's generation endpoint (e.g., vLLM). NeMo Gym can also run other models on GPU (e.g., reward models, judge models) through its own resources servers.
 
 This section covers resource requirements, cluster strategies, and how to choose between them. For a detailed integration walkthrough from the training framework side, see how [NeMo RL integrated with NeMo Gym](https://github.com/NVIDIA-NeMo/RL/blob/main/docs/design-docs/nemo-gym-integration.md). For guidance on integrating a new training framework, see {doc}`/contribute/rl-framework-integration/index`.
 
@@ -13,7 +13,7 @@ NeMo Gym and the training framework have different compute profiles:
 
 | Component | Compute | Role |
 |-----------|---------|------|
-| **NeMo Gym** | CPU by default | Orchestrates rollouts, executes tools, computes rewards. Some resource servers may use GPUs (e.g., running local reward or judge models via vLLM). |
+| **NeMo Gym** | CPU by default | Orchestrates rollouts, executes tools, computes rewards. Some resources servers may use GPUs (e.g., running local reward or judge models via vLLM). |
 | **Training framework** (e.g., NeMo RL) | GPU | Holds model weights, runs policy training, serves inference via an OpenAI-compatible HTTP endpoint (e.g., vLLM) |
 
 ### Cluster Co-location Strategy

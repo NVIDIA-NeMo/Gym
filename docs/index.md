@@ -165,20 +165,12 @@ Learn how to build custom training environments for various RL scenarios.
 ::::{grid} 1 2 2 2
 :gutter: 1 1 1 2
 
-:::{grid-item-card} {octicon}`plus-circle;1.5em;sd-mr-1` Creating Environments
-:link: environment-tutorials/creating-training-environment
+:::{grid-item-card} {octicon}`plus-circle;1.5em;sd-mr-1` Building Environments
+:link: environment-tutorials/index
 :link-type: doc
 Build a complete training environment from scratch.
 +++
 {bdg-primary}`beginner` {bdg-secondary}`foundational`
-:::
-
-:::{grid-item-card} {octicon}`stack;1.5em;sd-mr-1` Multi-Environment Training
-:link: environment-tutorials/multi-environment-training
-:link-type: doc
-Run multiple training environments simultaneously for rollout collection.
-+++
-{bdg-secondary}`multi-environment` {bdg-secondary}`multi-verifier`
 :::
 
 ::::
@@ -201,9 +193,17 @@ Train models using NeMo Gym with your preferred RL framework.
 :::{grid-item-card} {octicon}`rocket;1.5em;sd-mr-1` RL (GRPO)
 :link: training-tutorials/index
 :link-type: doc
-Hands-on tutorials with NeMo RL, TRL, Unsloth, and more.
+Hands-on tutorials with NeMo RL, Unsloth, and more.
 +++
 {bdg-secondary}`grpo`
+:::
+
+:::{grid-item-card} {octicon}`stack;1.5em;sd-mr-1` Multi-Environment Training
+:link: training-tutorials/multi-environment-training
+:link-type: doc
+Run multiple training environments simultaneously for rollout collection.
++++
+{bdg-secondary}`multi-environment` {bdg-secondary}`multi-verifier`
 :::
 
 :::{grid-item-card} {octicon}`file;1.5em;sd-mr-1` SFT & DPO
@@ -326,6 +326,7 @@ Overview <resources-server/index>
 Overview <data/index>
 Prepare and Validate <data/prepare-validate>
 Download from Hugging Face <data/download-huggingface>
+Prompt Config <data/prompt-config>
 ```
 
 ```{toctree}
@@ -334,11 +335,23 @@ Download from Hugging Face <data/download-huggingface>
 :maxdepth: 1
 
 Overview <environment-tutorials/index>
-Creating Training Environment <environment-tutorials/creating-training-environment>
+Single-Step Environment <environment-tutorials/single-step-environment>
+Multi-Step Environment <environment-tutorials/multi-step-environment>
+Stateful Environment <environment-tutorials/stateful-environment>
+Real-World Environment <environment-tutorials/real-world-environment>
 Integrate external libraries <environment-tutorials/integrate-external-environments>
-Add a benchmark <environment-tutorials/adding-a-benchmark>
-Design a customer evaluation <environment-tutorials/designing-customer-evaluation>
-Multi-Environment Training <environment-tutorials/multi-environment-training>
+Aggregate Metrics <environment-tutorials/aggregate-metrics>
+```
+
+```{toctree}
+:caption: Benchmarks
+:hidden:
+:maxdepth: 1
+
+Overview <benchmarks/index>
+Run benchmarks <benchmarks/run-benchmark-suite>
+Add a benchmark <benchmarks/adding-a-benchmark>
+Design a customer evaluation <benchmarks/designing-customer-evaluation>
 ```
 
 ```{toctree}
@@ -348,8 +361,8 @@ Multi-Environment Training <environment-tutorials/multi-environment-training>
 
 Overview <training-tutorials/index>
 NeMo RL <training-tutorials/nemo-rl-grpo/index.md>
-TRL <training-tutorials/trl>
 Unsloth <training-tutorials/unsloth>
+Multi-Environment Training <training-tutorials/multi-environment-training>
 Offline Training (SFT/DPO) <training-tutorials/offline-training-w-rollouts>
 ```
 
@@ -360,6 +373,7 @@ Offline Training (SFT/DPO) <training-tutorials/offline-training-w-rollouts>
 
 Overview <model-recipes/index>
 Nemotron 3 Nano <model-recipes/nemotron-3-nano>
+Nemotron 3 Super <model-recipes/nemotron-3-super>
 ```
 
 ```{toctree}
@@ -378,6 +392,7 @@ Engineering Notes <infrastructure/engineering-notes/index>
 :maxdepth: 1
 
 Configuration <reference/configuration>
+RL Framework Compatibility <reference/rl-framework-compatibility>
 reference/cli-commands.md
 apidocs/index.rst
 FAQ <reference/faq>
