@@ -10,7 +10,7 @@ Native resources server — verification runs as an Apptainer subprocess invoked
 from `verify()`. The harness files (compose config, test scripts) are embedded in each
 JSONL entry so the server is self-contained.
 
-Mirrors `repository.py` in the CVDP source:
+Mirrors `repository.py` in the [CVDP source](https://github.com/NVlabs/cvdp_benchmark):
 
 1. Parse model response via `ModelHelpers.parse_model_response()`
 2. Write harness files to temp workspace — applies image placeholder substitutions
