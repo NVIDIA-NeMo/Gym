@@ -15,11 +15,13 @@
 import asyncio
 import json
 import re
-from typing import ClassVar, List, Optional
+from collections import defaultdict
+from time import time
+from typing import ClassVar, Dict, List, Optional
 from urllib.parse import urlparse
 
-from fastapi import FastAPI
-from pydantic import BaseModel, PrivateAttr
+from fastapi import FastAPI, Request
+from pydantic import BaseModel, Field, PrivateAttr, model_validator
 from tavily import AsyncTavilyClient, UsageLimitExceededError
 
 from nemo_gym.base_resources_server import (
@@ -35,6 +37,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.server_utils import SESSION_ID_KEY
 from resources_servers.tavily_search.judge_prompt import JUDGE_PROMPT_TEMPLATE
 
 
@@ -94,8 +97,26 @@ class JudgeEvaluation(BaseModel):
     judge_response: Optional[NeMoGymResponse] = None
 
 
+class TavilySearchSingleAsyncTavilyMetrics(BaseModel):
+    function: str
+    status: str
+    start_time: float
+    end_time: float
+    time_taken: Optional[float] = None
+
+    @model_validator(mode="after")
+    def compute_time_taken(self):
+        self.time_taken = self.end_time - self.start_time
+        return self
+
+
+class TavilySearchMetrics(BaseModel):
+    async_tavily_calls: List[TavilySearchSingleAsyncTavilyMetrics] = Field(default_factory=list)
+
+
 class TavilySearchVerifyResponse(BaseVerifyResponse, JudgeEvaluation):
     num_tool_calls: int
+    metrics: TavilySearchMetrics
 
 
 class TavilySearchResourcesServer(SimpleResourcesServer):
@@ -105,6 +126,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
 
     _async_tavily_clients: Optional[List[AsyncTavilyClient]] = PrivateAttr(default=None)
     _num_requests: int = 0
+    _session_id_to_metrics: Optional[Dict[str, TavilySearchMetrics]] = PrivateAttr(default=None)
 
     JUDGE_PROMPT_TEMPLATE: ClassVar[str] = JUDGE_PROMPT_TEMPLATE
 
@@ -114,6 +136,8 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             tavily_api_keys = [tavily_api_keys]
 
         self._async_tavily_clients = [AsyncTavilyClient(api_key=k) for k in tavily_api_keys]
+
+        self._session_id_to_metrics = defaultdict(TavilySearchMetrics)
 
         self._exclude_domains = self._parse_exclude_domains()
         self._page_cache: dict[str, str] = {}
@@ -135,7 +159,9 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         self._num_requests += 1
         return client
 
-    async def web_search(self, body: TavilySearchRequest) -> TavilySearchResponse:
+    async def web_search(self, request: Request, body: TavilySearchRequest) -> TavilySearchResponse:
+        metrics = self._session_id_to_metrics[request.session[SESSION_ID_KEY]]
+
         if self.config.debug:
             print("\n\n body.query: ", body.query)
         if body.query is None:
@@ -150,6 +176,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         for attempt in range(max_retries):
             # @bxyu-nvidia: We put this in the attempt loop so we have a different client per attempt to better avoid rate limits.
             async_tavily_client = self._select_tavily_client()
+            start_time = time()
             try:
                 results = await async_tavily_client.search(
                     body.query,
@@ -157,8 +184,21 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                     exclude_domains=self._exclude_domains,
                     search_depth="advanced",
                 )
+                metrics.async_tavily_calls.append(
+                    TavilySearchSingleAsyncTavilyMetrics(
+                        function="search", status="success", start_time=start_time, end_time=time()
+                    )
+                )
                 break  # Success, exit the retry loop
             except UsageLimitExceededError as e:
+                metrics.async_tavily_calls.append(
+                    TavilySearchSingleAsyncTavilyMetrics(
+                        function="search",
+                        status=f"UsageLimitExceededError {attempt=}",
+                        start_time=start_time,
+                        end_time=time(),
+                    )
+                )
                 if self.config.debug:
                     print(f"UsageLimitExceededError (attempt {attempt + 1}/{max_retries}): {e}")
                 if attempt < max_retries - 1:
@@ -172,7 +212,9 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         postprocessed_results = self._postprocess_search_results(results)
         return TavilySearchResponse(results_string="".join(postprocessed_results))
 
-    async def find_in_page(self, body: FindInPageRequest) -> FindInPageResponse:
+    async def find_in_page(self, request: Request, body: FindInPageRequest) -> FindInPageResponse:
+        metrics = self._session_id_to_metrics[request.session[SESSION_ID_KEY]]
+
         if self.config.debug:
             print("\n\n find_in_page ")
             print(f"url={body.url}, query={body.query}")
@@ -189,14 +231,28 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         retry_delay_seconds = self.config.retry_delay_seconds
 
         for attempt in range(max_retries):
+            async_tavily_client = self._select_tavily_client()
+            start_time = time()
             try:
-                async_tavily_client = self._select_tavily_client()
                 results = await async_tavily_client.extract(
                     urls=body.url,
                     query=body.query,
                 )
+                metrics.async_tavily_calls.append(
+                    TavilySearchSingleAsyncTavilyMetrics(
+                        function="extract", status="success", start_time=start_time, end_time=time()
+                    )
+                )
                 break  # Success, exit the retry loop
             except UsageLimitExceededError as e:
+                metrics.async_tavily_calls.append(
+                    TavilySearchSingleAsyncTavilyMetrics(
+                        function="extract",
+                        status=f"UsageLimitExceededError {attempt=}",
+                        start_time=start_time,
+                        end_time=time(),
+                    )
+                )
                 if self.config.debug:
                     print(f"UsageLimitExceededError (attempt {attempt + 1}/{max_retries}): {e}")
                 if attempt < max_retries - 1:
@@ -235,7 +291,9 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
 
         return FindInPageResponse(results_string=header + numbered + footer)
 
-    async def scroll_page(self, body: ScrollPageRequest) -> ScrollPageResponse:
+    async def scroll_page(self, request: Request, body: ScrollPageRequest) -> ScrollPageResponse:
+        metrics = self._session_id_to_metrics[request.session[SESSION_ID_KEY]]
+
         if self.config.debug:
             print("\n\n scroll_page ")
             print(f"url={body.url}, start_index={body.start_index}, n={body.n}")
@@ -259,12 +317,26 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
 
             for attempt in range(max_retries):
                 async_tavily_client = self._select_tavily_client()
+                start_time = time()
                 try:
                     results = await async_tavily_client.extract(
                         urls=body.url,
                     )
+                    metrics.async_tavily_calls.append(
+                        TavilySearchSingleAsyncTavilyMetrics(
+                            function="extract", status="success", start_time=start_time, end_time=time()
+                        )
+                    )
                     break  # Success, exit the retry loop
                 except UsageLimitExceededError as e:
+                    metrics.async_tavily_calls.append(
+                        TavilySearchSingleAsyncTavilyMetrics(
+                            function="extract",
+                            status=f"UsageLimitExceededError {attempt=}",
+                            start_time=start_time,
+                            end_time=time(),
+                        )
+                    )
                     if self.config.debug:
                         print(f"UsageLimitExceededError (attempt {attempt + 1}/{max_retries}): {e}")
                     if attempt < max_retries - 1:
@@ -307,7 +379,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             total_words=total_words,
         )
 
-    async def verify(self, body: TavilySearchVerifyRequest) -> TavilySearchVerifyResponse:
+    async def verify(self, request: Request, body: TavilySearchVerifyRequest) -> TavilySearchVerifyResponse:
         question = body.question
         ground_truth = body.ground_truth
         last_assistant_response = self._get_last_assistant_response(body.response)
@@ -320,6 +392,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             **body.model_dump(),
             **judge_evaluation.model_dump(),
             num_tool_calls=sum(o.type == "function_call" for o in body.response.output),
+            metrics=self._session_id_to_metrics[request.session[SESSION_ID_KEY]],
         )
 
     ###### UTILITY FUNCTIONS ######
