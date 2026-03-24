@@ -1,0 +1,10 @@
+user: |-
+  You are a helpful and harmless assistant. You should think step-by-step before responding to the instruction below.
+
+  ### Question:
+  {question_content}
+
+  ### Format: {formatting_message}
+  {starter_code}
+
+  ### Answer: (use the provided format with backticks)
