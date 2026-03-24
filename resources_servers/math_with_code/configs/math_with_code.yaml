@@ -5,6 +5,8 @@ math_with_code:
       max_execution_time: 10
       domain: math
       verified: false
+      description: Model solves competitive math problems using simple calculator tools
+      value: Improve math and simple tool use capabilities
 math_with_code_simple_agent:
   responses_api_agents:
     simple_agent:
@@ -27,3 +29,4 @@ math_with_code_simple_agent:
         - name: example
           type: example
           jsonl_fpath: resources_servers/math_with_code/data/example.jsonl
+      max_steps: 3  # Tighter cap to reduce long-tail rollout stragglers

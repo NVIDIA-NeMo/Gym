@@ -12,7 +12,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from argparse import ArgumentParser
 from enum import Enum
+from pathlib import Path
 from typing import Any, ClassVar, Dict, List, Literal, Optional, Set, Tuple, Union
 
 import rich
@@ -39,7 +41,11 @@ class BaseNeMoGymCLIConfig(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def pre_process(cls, data):
-        if not (data.get("h") or data.get("help")):
+        parser = ArgumentParser(add_help=False)
+        parser.add_argument("-h", "--help", action="store_true")
+        args, _ = parser.parse_known_args()
+
+        if not (args.help or data.get("h") or data.get("help")):
             return data
 
         rich.print(f"""Displaying help for [bold]{cls.__name__}[/bold]
@@ -205,7 +211,7 @@ class JsonlDatasetHuggingFaceIdentifer(BaseModel):
 
 class BaseUploadJsonlDatasetHuggingFaceConfig(BaseNeMoGymCLIConfig):
     """
-    Upload a JSONL dataset to HuggingFace Hub with automatic naming based on domain and resource server.
+    Upload a JSONL dataset to HuggingFace Hub with automatic naming based on domain and resources server.
 
     Examples:
 
@@ -224,11 +230,11 @@ class BaseUploadJsonlDatasetHuggingFaceConfig(BaseNeMoGymCLIConfig):
     hf_collection_name: str = Field(description="HuggingFace collection name for organizing datasets.")
     hf_collection_slug: str = Field(description="Alphanumeric collection slug found at the end of collection URI.")
     dataset_name: Optional[str] = Field(
-        default=None, description="Name of the dataset (will be combined with domain and resource server name)."
+        default=None, description="Name of the dataset (will be combined with domain and resources server name)."
     )
     input_jsonl_fpath: str = Field(description="Path to the local jsonl file to upload.")
     resource_config_path: str = Field(
-        description="Path to resource server config file (used to extract domain for naming convention)."
+        description="Path to resources server config file (used to extract domain for naming convention)."
     )
     hf_dataset_prefix: str = Field(
         default="Nemotron-RL", description="Prefix prepended to dataset name (default: 'NeMo-Gym')."
@@ -380,6 +386,15 @@ class DatasetConfig(BaseModel):
         return self
 
 
+class BenchmarkDatasetConfig(BaseModel):
+    name: str
+    type: Literal["benchmark"]
+    jsonl_fpath: Path
+    prepare_script: Path
+    prompt_config: Path
+    num_repeats: int = Field(default=1, ge=1)
+
+
 ########################################
 # Base server config classes
 ########################################
@@ -396,6 +411,7 @@ class Domain(str, Enum):
     GAMES = "games"
     TRANSLATION = "translation"
     E2E = "e2e"
+    RLHF = "rlhf"
     OTHER = "other"
 
 
@@ -407,7 +423,7 @@ class BaseServerConfig(BaseModel):
 
 class BaseRunServerConfig(BaseServerConfig):
     entrypoint: str
-    domain: Optional[Domain] = None  # Only required for resource servers
+    domain: Optional[Domain] = None  # Only required for resources servers
 
 
 class BaseRunServerInstanceConfig(BaseRunServerConfig):
@@ -425,7 +441,7 @@ class BaseRunServerTypeConfig(BaseRunServerConfig):
     host: Optional[str] = None
     port: Optional[int] = None
 
-    datasets: Optional[List[DatasetConfig]] = None
+    datasets: Optional[List[Union[DatasetConfig, BenchmarkDatasetConfig]]] = None
 
 
 class BaseServerTypeConfig(BaseModel):
@@ -476,10 +492,10 @@ class BaseServerInstanceConfig(BaseServerTypeConfig):
     server_type_config_dict: DictConfig = Field(exclude=True)
 
     @model_validator(mode="after")
-    def validate_domain_for_resource_server(self) -> "BaseServerInstanceConfig":
+    def validate_domain_for_resources_server(self) -> "BaseServerInstanceConfig":
         config = self.get_inner_run_server_config()
         if self.SERVER_TYPE == "resources_servers":
-            assert config.domain is not None, "A domain is required for resource servers."
+            assert config.domain is not None, "A domain is required for resources servers."
         else:
             # Remove domain field from Model and Agent servers.
             if hasattr(config, "domain"):
@@ -497,7 +513,7 @@ class BaseServerInstanceConfig(BaseServerTypeConfig):
         return list(getattr(self, self.SERVER_TYPE).values())[0]
 
     @property
-    def datasets(self) -> Optional[List[DatasetConfig]]:
+    def datasets(self) -> Optional[List[Union[DatasetConfig, BenchmarkDatasetConfig]]]:
         return self.get_inner_run_server_config().datasets
 
 
@@ -587,3 +603,39 @@ class WANDBConfig(BaseModel):
     def is_available(self) -> bool:
         # If global_config recursively hide secrets is called, the api key will be set to ****
         return self.wandb_project and self.wandb_name and self.wandb_api_key and self.wandb_api_key != "****"
+
+
+########################################
+# Weights and Biases
+########################################
+
+
+class AggregateMetricsRequest(BaseModel):
+    """POST body for /aggregate_metrics.
+
+    Each item is a stripped verify response dict containing at minimum:
+    - TASK_INDEX_KEY_NAME: int
+    - "reward": float
+    """
+
+    verify_responses: List[Dict[str, Any]]
+
+
+class AggregateMetrics(BaseModel):
+    """Response from /aggregate_metrics.
+
+    Flat string keys for direct logging to W&B/MLflow.
+    """
+
+    group_level_metrics: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="Per-task metrics (one dict per task) from RewardProfiler baseline stats.",
+    )
+    agent_metrics: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Overall metrics across all rollouts (RewardProfiler baseline + compute_metrics).",
+    )
+    key_metrics: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Headline metrics for this benchmark. Subset of agent_metrics.",
+    )

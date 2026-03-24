@@ -113,13 +113,16 @@ class LocalVLLMModelActor:
         # Pass through signal setting not allowed in threads.
         # See https://github.com/vllm-project/vllm/blob/275de34170654274616082721348b7edd9741d32/vllm/entrypoints/launcher.py#L94
         # This may be vLLM version specific!
+        #
+        # api_server.py uses `from vllm.entrypoints.launcher import serve_http`,
+        # so we must patch the name in api_server's namespace (not launcher's).
 
         import signal
         from asyncio import get_running_loop
 
-        from vllm.entrypoints import launcher
+        import vllm.entrypoints.openai.api_server as api_server
 
-        original_serve_http = launcher.serve_http
+        original_serve_http = api_server.serve_http
 
         def new_serve_http(*args, **kwargs):
             loop = get_running_loop()
@@ -127,7 +130,7 @@ class LocalVLLMModelActor:
 
             return original_serve_http(*args, **kwargs)
 
-        launcher.serve_http = new_serve_http
+        api_server.serve_http = new_serve_http
 
         # Patch signal as well.
         signal.signal = lambda *args, **kwargs: None

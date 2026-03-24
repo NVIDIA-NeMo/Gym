@@ -185,6 +185,13 @@ def _extract_text_from_response(response: NeMoGymResponse, exclude_thinking: boo
                 full_text = re.sub(r"<think>.*?</think>", "", full_text, flags=re.DOTALL)
                 # Also remove <thinking>...</thinking> blocks
                 full_text = re.sub(r"<thinking>.*?</thinking>", "", full_text, flags=re.DOTALL)
+                # Fallback: the opening <think>/<thinking> tag may have been part of
+                # the prompt template rather than the model's generation, so
+                # generated_response starts with CoT reasoning followed by </think>
+                # without a matching opening tag. Strip everything up to and
+                # including the unpaired closing tag.
+                full_text = re.sub(r"^.*?</think>", "", full_text, flags=re.DOTALL)
+                full_text = re.sub(r"^.*?</thinking>", "", full_text, flags=re.DOTALL)
 
             return full_text.strip()
     return ""
@@ -222,7 +229,6 @@ def _extract_verdict(response_text: str, yes_label: str, no_label: str) -> str:
         elif "NO" in last_line:
             return "NO"
         return "NO"  # Default to NO if unclear
-
     # Return whichever appears last (most authoritative)
     if yes_pos > no_pos:
         return "YES"
@@ -248,7 +254,6 @@ class MultiChallengeServer(SimpleResourcesServer):
         context = body.context or ""
         if not context and body.metadata and "messages" in body.metadata:
             context = _build_context_from_messages(body.metadata["messages"])
-
         # Get rubric from request
         rubric = body.rubric or []
         if not rubric and body.metadata and "rubric" in body.metadata:
@@ -275,7 +280,6 @@ class MultiChallengeServer(SimpleResourcesServer):
         payload = body.model_dump()
         payload.pop("context", None)
         payload.pop("rubric", None)
-
         return MultiChallengeVerifyResponse(
             **payload,
             reward=reward,
@@ -301,7 +305,6 @@ class MultiChallengeServer(SimpleResourcesServer):
             question=question,
             pass_criteria=pass_criteria,
         )
-
         # Build messages for judge
         msgs: List[NeMoGymEasyInputMessage] = []
         if self.config.judge_system_message:
@@ -332,7 +335,6 @@ class MultiChallengeServer(SimpleResourcesServer):
         else:
             # For other criteria, treat YES as success
             score = 1.0 if verdict == "YES" else 0.0
-
         return RubricEvaluation(
             question=question,
             pass_criteria=pass_criteria,
@@ -374,7 +376,6 @@ class MultiChallengeServer(SimpleResourcesServer):
                 return 0.0
             weighted_sum = sum(s * w for s, w in zip(scores, weights))
             return weighted_sum / total_weight
-
         return 0.0
 
 
