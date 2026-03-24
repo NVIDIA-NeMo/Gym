@@ -437,6 +437,7 @@ omit = [
     "temp*",
     "results/*",
     "/tmp/*",
+    "benchmarks/*",
 ]
 data_file = "results/.coverage"
 concurrency = ["thread", "multiprocessing"]
@@ -463,9 +464,6 @@ exclude_also = [
     "class .*\\bProtocol\\):",
     "@(abc\\.)?abstractmethod",
     "pass",
-]
-omit = [
-    "benchmarks/*/prepare.py",
 ]
 
 ################################################

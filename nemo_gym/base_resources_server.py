@@ -13,11 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from abc import abstractmethod
-from typing import Any, Dict, List
 
 from fastapi import FastAPI
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
+from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -28,37 +28,6 @@ from nemo_gym.server_utils import BaseRunServerInstanceConfig, BaseServer, Simpl
 
 class BaseResourcesServerConfig(BaseRunServerInstanceConfig):
     pass
-
-
-class AggregateMetricsRequest(BaseModel):
-    """POST body for /aggregate_metrics.
-
-    Each item is a stripped verify response dict containing at minimum:
-    - TASK_INDEX_KEY_NAME: int
-    - "reward": float
-    """
-
-    verify_responses: List[Dict[str, Any]]
-
-
-class AggregateMetrics(BaseModel):
-    """Response from /aggregate_metrics.
-
-    Flat string keys for direct logging to W&B/MLflow.
-    """
-
-    group_level_metrics: List[Dict[str, Any]] = Field(
-        default_factory=list,
-        description="Per-task metrics (one dict per task) from RewardProfiler baseline stats.",
-    )
-    agent_metrics: Dict[str, Any] = Field(
-        default_factory=dict,
-        description="Overall metrics across all rollouts (RewardProfiler baseline + compute_metrics).",
-    )
-    key_metrics: Dict[str, Any] = Field(
-        default_factory=dict,
-        description="Headline metrics for this benchmark. Subset of agent_metrics.",
-    )
 
 
 class BaseResourcesServer(BaseServer):
