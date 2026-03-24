@@ -28,7 +28,7 @@ The walkthrough uses [`over_refusal_detection`](https://github.com/NVIDIA-NeMo/G
 - The **policy model** generates the rollout output.
 - Your **resources server** receives that output in `verify()`.
 - `verify()` may call a **judge model** to score semantic quality.
-- You return a structured response object with a numeric `reward` field.
+- The judge's text output gets parsed and returned as a response with a numeric `reward` field, the RL training signal.
 
 Remember that the judge is a verifier dependency, it is **not** the policy.
 
@@ -37,7 +37,7 @@ Remember that the judge is a verifier dependency, it is **not** the policy.
 ## Prerequisites
 
 - {ref}`task-verification` — especially *What is LLM-as-a-judge?*
-- {ref}`core-components` — resources server vs model server roles
+- {ref}`core-components` — resources server vs. model server roles
 - {ref}`configuration-concepts` — Hydra composition and server references
 
 ---
@@ -56,6 +56,30 @@ Before diving into code, it helps to know the ways you can deploy a judge model:
 Tune **concurrency** (semaphores, `judge_endpoint_max_concurrency`, or similar) so verification does not overwhelm the judge endpoint during large rollout batches.
 
 The walkthrough below uses the **co-located model server** approach — a dedicated `judge_model` entry alongside the policy in the same Hydra config.
+
+---
+
+## Architecture: where the judge runs
+
+During rollout collection, the **agent** first calls the **policy model**. When the episode ends, the **resources server** runs `verify()`. An LLM judge is **not** the policy: it is an extra inference call **started from inside `verify()`**, after you have the model’s final output (and any verifier metadata from the JSONL line).
+
+```{mermaid}
+%%{init: {'theme': 'default', 'themeVariables': { 'lineColor': '#5c6bc0', 'primaryTextColor': '#333'}}}%%
+flowchart LR
+  subgraph rollout[Rollout]
+    A[Agent server] --> M[Policy model server]
+    M --> A
+    A --> R[Resources server verify]
+  end
+  R --> J[Judge model server]
+  J --> R
+```
+
+**Typical in-repo pattern (Gym-internal):** `verify()` uses `self.server_client.post(..., url_path="/v1/responses", ...)` to call a **named model server** declared in the same Hydra config. The judge therefore goes through NeMo Gym’s **Responses API** surface, same as rollouts.
+
+**Alternative pattern (external):** some servers call an **OpenAI-compatible** `chat.completions` client pointed at URLs you supply (e.g. HPC or a separate cluster). [`proof_verification`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/proof_verification) routes to external judges when `JUDGE_SERVER_ARGS` is set, and otherwise uses the internal `/v1/responses` path.
+
+For how NeMo Gym sits next to GPUs and training frameworks, see {doc}`/infrastructure/deployment-topology`.
 
 ---
 
@@ -196,31 +220,7 @@ Inspect the output JSONL to verify that `reward` values are `0.0`, `0.5`, or `1.
 | Exact match, MCQ, executable tests, known tool traces | **Deterministic verifier** | Faster, cheaper, and more stable at scale |
 | Rubric-based quality, semantic equivalence, nuanced safety/style criteria | **LLM judge** | Easier to express with instructions than writing a full checker |
 
-Tradeoffs of LLM judges: extra latency and cost, non-determinism (unless you tune/constrain generation and parsing), and possible **positional bias** (judge favors text in a fixed slot). Some servers mitigate bias with a second pass that **swaps** gold vs prediction (see [`equivalence_llm_judge`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/equivalence_llm_judge)).
-
----
-
-## Architecture: where the judge runs
-
-During rollout collection, the **agent** first calls the **policy model**. When the episode ends, the **resources server** runs `verify()`. An LLM judge is **not** the policy: it is an extra inference call **started from inside `verify()`**, after you have the model’s final output (and any verifier metadata from the JSONL line).
-
-```{mermaid}
-%%{init: {'theme': 'default', 'themeVariables': { 'lineColor': '#5c6bc0', 'primaryTextColor': '#333'}}}%%
-flowchart LR
-  subgraph rollout[Rollout]
-    A[Agent server] --> M[Policy model server]
-    M --> A
-    A --> R[Resources server verify]
-  end
-  R --> J[Judge model server]
-  J --> R
-```
-
-**Typical in-repo pattern (Gym-internal):** `verify()` uses `self.server_client.post(..., url_path="/v1/responses", ...)` to call a **named model server** declared in the same Hydra config. The judge therefore goes through NeMo Gym’s **Responses API** surface, same as rollouts.
-
-**Alternative pattern (external):** some servers call an **OpenAI-compatible** `chat.completions` client pointed at URLs you supply (e.g. HPC or a separate cluster). [`proof_verification`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/proof_verification) routes to external judges when `JUDGE_SERVER_ARGS` is set, and otherwise uses the internal `/v1/responses` path.
-
-For how NeMo Gym sits next to GPUs and training frameworks, see {doc}`/infrastructure/deployment-topology`.
+Tradeoffs of LLM judges: extra latency and cost, non-determinism (unless you tune/constrain generation and parsing), and possible **positional bias** (judge favors text in a fixed slot). Some servers mitigate bias with a second pass that **swaps** gold vs. prediction (see [`equivalence_llm_judge`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/equivalence_llm_judge)).
 
 ---
 
@@ -345,9 +345,9 @@ Use these as templates; each README and `configs/*.yaml` is the source of truth:
 | [`multichallenge`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/multichallenge) | Per-rubric-item judge calls, aggregated reward | Medium |
 | [`text_to_sql`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/text_to_sql) | SQL equivalence via LLM; optional swap | Medium |
 | [`math_with_judge`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/math_with_judge) | Library-style symbolic check plus LLM judge fallback | Medium |
-| [`finance_sec_search`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/finance_sec_search) | Optional judge vs substring fallback | Medium–High |
-| [`terminus_judge`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/terminus_judge) | String similarity vs LLM judge toggles; JSON/OpenAPI validation | High |
-| [`proof_verification`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/proof_verification) | Internal `/v1/responses` vs external chat completions | High |
+| [`finance_sec_search`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/finance_sec_search) | Optional judge vs. substring fallback | Medium–High |
+| [`terminus_judge`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/terminus_judge) | String similarity vs. LLM judge toggles; JSON/OpenAPI validation | High |
+| [`proof_verification`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/proof_verification) | Internal `/v1/responses` vs. external chat completions | High |
 | [`proof_judge`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/proof_judge) | Verifier + meta-verifier; external/internal split | High |
 
 ---
