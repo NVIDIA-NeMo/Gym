@@ -138,6 +138,8 @@ class TavilySearchAIOHTTPClient(BaseModel):
     headers: Dict[str, str]
     base_url: str
 
+    debug: bool
+
     async def post(self, endpoint: str, content: str, timeout: float) -> TavilySearchAIOHTTPClientResponse:
         """
         endpoint: str e.g. "/search" or "/extract"
@@ -172,16 +174,20 @@ class TavilySearchAIOHTTPClient(BaseModel):
                     status_code=response.status,
                     data=await response.json(),
                 )
+                if self.debug:
+                    print(f"Received the following Tavily response: {tavily_response}")
+
                 return tavily_response
 
         # We've exited the loop
         await raise_for_status(response)
 
     @classmethod
-    def from_httpx_AsyncClient(cls, client: AsyncClient) -> "TavilySearchAIOHTTPClient":
+    def from_httpx_AsyncClient(cls, client: AsyncClient, debug: bool) -> "TavilySearchAIOHTTPClient":
         return cls(
             headers=client.headers,
             base_url=str(client.base_url),
+            debug=debug,
         )
 
 
@@ -203,7 +209,9 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
 
         self._async_tavily_clients = [AsyncTavilyClient(api_key=k) for k in tavily_api_keys]
         for async_tavily_client in self._async_tavily_clients:
-            async_tavily_client._client = TavilySearchAIOHTTPClient.from_httpx_AsyncClient(async_tavily_client._client)
+            async_tavily_client._client = TavilySearchAIOHTTPClient.from_httpx_AsyncClient(
+                async_tavily_client._client, self.config.debug
+            )
 
         self._session_id_to_metrics = defaultdict(TavilySearchMetrics)
 
