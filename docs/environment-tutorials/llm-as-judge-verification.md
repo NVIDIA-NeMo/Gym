@@ -44,18 +44,17 @@ Remember that the judge is a verifier dependency, it is **not** the policy.
 
 ## Deployment options
 
-Before diving into code, it helps to know the ways you can deploy a judge model:
+Before diving into code, it helps to know the ways you can deploy a judge model. The key decision is how the judge is wired in Gym. The URL it points at can be a local GPU, a remote cluster, or a commercial API like OpenAI.
 
 | Approach | What it means | When it helps |
 |----------|----------------|---------------|
-| **Co-located model server** | Second `responses_api_models` entry in the same `ng_run` config, possibly sharing a cluster with the policy | Simple ops, moderate load |
-| **Same endpoint as policy** | `judge_model_server.name` equals `policy_model` | Fewer moving parts; judge and policy share quota and weights |
-| **Separate cluster / URL** | External chat-completions clients or dedicated hosts | Isolate load, use existing inference fleet |
-| **Managed API** | Model server config pointing at OpenAI/Azure/etc. | No self-hosted GPU for the judge |
+| **Gym model server** | A `responses_api_models` entry in your Hydra config. The `openai_base_url` can point at a co-located vLLM instance, a remote cluster, or a managed API like OpenAI. | Most common pattern; works for any backend that uses `/v1/responses` |
+| **Shared policy endpoint** | Special case of the above: set `judge_model_server.name` to `policy_model` so the judge reuses the policy's model server. | Fewer moving parts; judge and policy share quota and weights |
+| **Direct HTTP client** | No Gym model server for the judge. Your resources server code calls an external endpoint directly (e.g., `AsyncOpenAI` client to `/v1/chat/completions`). See [`proof_verification`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/proof_verification) for this pattern. | Integrate with endpoints that don't go through Gym's model server layer |
 
 Tune **concurrency** (semaphores, `judge_endpoint_max_concurrency`, or similar) so verification does not overwhelm the judge endpoint during large rollout batches.
 
-The walkthrough below uses the **co-located model server** approach — a dedicated `judge_model` entry alongside the policy in the same Hydra config.
+The walkthrough below uses the **Gym model server** approach — a dedicated `judge_model` entry in the Hydra config. You provide the endpoint URL and API key in `env.yaml`. The fastest way to get started is with a managed API (e.g., OpenAI), but the same config works with any self-hosted endpoint.
 
 ---
 
@@ -96,7 +95,7 @@ This walkthrough has two parts: first you'll read through how the config and cod
 From `resources_servers/over_refusal_detection/configs/over_refusal_detection.yaml` (the ~70-line judge prompt is truncated below — see the full file for the complete template including worked examples):
 
 ```yaml
-# A dedicated judge model server (can also reuse policy_model instead)
+# A dedicated judge model server (can also reuse policy_model as judge_model_server.name instead)
 judge_model:
   responses_api_models:
     openai_model:
