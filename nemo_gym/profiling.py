@@ -18,7 +18,9 @@ from subprocess import run
 from typing import Optional
 
 import yappi
+from gprof2dot import main as gprof2dot_main
 from pydantic import BaseModel
+from pydot import graph_from_dot_file
 
 
 class Profiler(BaseModel):
@@ -55,9 +57,6 @@ Please install dot using:
         self.dump()
 
     def dump(self) -> None:
-        from gprof2dot import main as gprof2dot_main
-        from pydot import graph_from_dot_file
-
         self.base_profile_dir.mkdir(parents=True, exist_ok=True)
         log_path = self.base_profile_dir / f"{self.name}.log"
         callgrind_path = self.base_profile_dir / f"{self.name}.callgrind"
