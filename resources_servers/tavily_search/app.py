@@ -209,7 +209,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
 
         self._exclude_domains = self._parse_exclude_domains()
         self._page_cache: dict[str, str] = {}
-        print(self._exclude_domains)
+        print(f"Excluded domains: {self._exclude_domains}")
         if self.config.debug:
             print("Debug mode enabled")
 
