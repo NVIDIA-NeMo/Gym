@@ -6,7 +6,7 @@ Apptainer (using the `ghcr.io/hdl/sim/osvb` simulator image with Icarus Verilog)
 
 ## Verification Flow
 
-Native resource server — verification runs as an Apptainer subprocess invoked
+Native resources server — verification runs as an Apptainer subprocess invoked
 from `verify()`. The harness files (compose config, test scripts) are embedded in each
 JSONL entry so the server is self-contained.
 
@@ -70,7 +70,7 @@ python resources_servers/cvdp/scripts/convert_to_gym.py \
 ```
 
 Each output row has `responses_create_params` (system + user prompts) and `verifier_metadata`
-(harness files, target files, category, difficulty) needed by the resource server.
+(harness files, target files, category, difficulty) needed by the resources server.
 
 ## Setup
 
