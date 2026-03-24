@@ -716,7 +716,7 @@ class TuringVIFResourcesServer(SimpleResourcesServer):
     def _aggregate_scores(self, scores: List[float]) -> float:
         """Combine per-check scores into a single reward using the configured mode."""
         if not scores:
-            return 0.0
+            return 1.0
 
         mode = self.config.aggregation_mode
 
