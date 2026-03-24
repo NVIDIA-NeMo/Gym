@@ -23,6 +23,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.reward_profile import compute_pass_majority_metrics
 from nemo_gym.server_utils import ServerClient
 
 
@@ -197,6 +198,103 @@ class TestComputeMetricsHook:
         assert result.agent_metrics["custom_metric"] == 42.0
 
 
+class TestComputePassMajorityMetrics:
+    def test_pass_at_k_binary(self) -> None:
+        """Combinatorial pass@k for binary rewards."""
+        tasks = [
+            [{"reward": 1.0}, {"reward": 1.0}, {"reward": 1.0}, {"reward": 1.0}],
+            [{"reward": 0.0}, {"reward": 0.0}, {"reward": 0.0}, {"reward": 0.0}],
+            [{"reward": 1.0}, {"reward": 0.0}, {"reward": 1.0}, {"reward": 0.0}],
+        ]
+        m = compute_pass_majority_metrics(tasks)
+
+        assert m["pass@1/accuracy"] == pytest.approx(50.0)
+        assert m["pass@4/accuracy"] == pytest.approx(200.0 / 3.0, abs=0.01)
+
+    def test_pass_at_1_avg_of_k(self) -> None:
+        """Mean of individual scores across k rollouts."""
+        tasks = [
+            [{"reward": 1.0}, {"reward": 0.0}],
+            [{"reward": 0.0}, {"reward": 1.0}],
+            [{"reward": 1.0}, {"reward": 1.0}],
+        ]
+        m = compute_pass_majority_metrics(tasks)
+
+        assert m["pass@1[avg-of-2]/accuracy"] == pytest.approx(200.0 / 3.0, abs=0.01)
+
+    def test_majority_at_k(self) -> None:
+        """Majority voting with extracted_answer."""
+        tasks = [
+            [
+                {"reward": 1.0, "extracted_answer": "A"},
+                {"reward": 1.0, "extracted_answer": "A"},
+                {"reward": 0.0, "extracted_answer": "B"},
+            ],
+            [
+                {"reward": 0.0, "extracted_answer": "C"},
+                {"reward": 0.0, "extracted_answer": "C"},
+                {"reward": 1.0, "extracted_answer": "D"},
+            ],
+        ]
+        m = compute_pass_majority_metrics(tasks, answer_key="extracted_answer")
+
+        assert m["majority@3/accuracy"] == pytest.approx(50.0)
+
+    def test_no_answer(self) -> None:
+        """no_answer tracks tasks where all rollouts failed to extract an answer."""
+        tasks = [
+            [{"reward": 1.0, "extracted_answer": "A"}, {"reward": 0.0, "extracted_answer": "B"}],
+            [{"reward": 0.0, "extracted_answer": None}, {"reward": 0.0, "extracted_answer": None}],
+        ]
+        m = compute_pass_majority_metrics(tasks, answer_key="extracted_answer")
+
+        # no_answer is a binary score: Task 0 has 0/2, Task 1 has 2/2
+        # pass@1[avg-of-2]/no_answer: Task 0: avg(0,0)=0, Task 1: avg(1,1)=1. Mean = 50%
+        assert m["pass@1[avg-of-2]/no_answer"] == pytest.approx(50.0)
+
+    def test_std_dev_across_runs(self) -> None:
+        """Variance statistics are flat keys matching AIME format."""
+        tasks = [
+            [{"reward": 1.0}, {"reward": 0.0}],
+            [{"reward": 0.0}, {"reward": 0.0}],
+            [{"reward": 1.0}, {"reward": 1.0}],
+        ]
+        m = compute_pass_majority_metrics(tasks)
+
+        assert m["pass@1[avg-of-2]/accuracy/std_dev_across_runs"] > 0
+        assert m["pass@1[avg-of-2]/accuracy/std_err_across_runs"] > 0
+
+    def test_empty_input(self) -> None:
+        assert compute_pass_majority_metrics([]) == {}
+
+    def test_no_answer_key_skips_majority(self) -> None:
+        """Without answer_key, majority@k and no_answer are not computed."""
+        tasks = [
+            [{"reward": 1.0, "extracted_answer": "A"}, {"reward": 0.0, "extracted_answer": "B"}],
+        ]
+        m = compute_pass_majority_metrics(tasks)
+
+        assert not any(k.startswith("majority@") for k in m)
+        assert not any("no_answer" in k for k in m)
+
+    def test_multiple_score_methods(self) -> None:
+        """Multiple score methods produce separate keys under each agg mode."""
+        tasks = [
+            [{"reward": 1.0, "library_reward": 1.0}, {"reward": 0.0, "library_reward": 0.0}],
+            [{"reward": 0.0, "library_reward": 1.0}, {"reward": 1.0, "library_reward": 1.0}],
+        ]
+
+        def score_fn(r):
+            return {"accuracy": r["reward"], "symbolic_accuracy": r["library_reward"]}
+
+        m = compute_pass_majority_metrics(tasks, score_fn=score_fn)
+
+        assert "pass@1/accuracy" in m
+        assert "pass@1/symbolic_accuracy" in m
+        assert "pass@1[avg-of-2]/accuracy" in m
+        assert "pass@1[avg-of-2]/symbolic_accuracy" in m
+
+
 class TestDefaultAgentAggregateMetrics:
     @pytest.mark.asyncio
     async def test_default_fallback(self) -> None:
@@ -221,3 +319,85 @@ class TestDefaultAgentAggregateMetrics:
         assert result.agent_metrics["mean/reward"] == pytest.approx(1.0)
         assert len(result.group_level_metrics) == 2
         assert "mean/reward" in result.key_metrics
+
+
+class TestTaskIndexInGroupMetrics:
+    def test_task_index_preserved(self) -> None:
+        from nemo_gym.reward_profile import compute_aggregate_metrics
+
+        responses = [
+            {TASK_INDEX_KEY_NAME: 5, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0, "response": {}},
+            {TASK_INDEX_KEY_NAME: 5, ROLLOUT_INDEX_KEY_NAME: 1, "reward": 0.0, "response": {}},
+            {TASK_INDEX_KEY_NAME: 10, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 0.5, "response": {}},
+            {TASK_INDEX_KEY_NAME: 10, ROLLOUT_INDEX_KEY_NAME: 1, "reward": 0.5, "response": {}},
+        ]
+        result = compute_aggregate_metrics(responses)
+
+        assert len(result.group_level_metrics) == 2
+        indices = [g[TASK_INDEX_KEY_NAME] for g in result.group_level_metrics]
+        assert indices == [5, 10]
+
+    def test_non_sequential_indices(self) -> None:
+        from nemo_gym.reward_profile import compute_aggregate_metrics
+
+        responses = [
+            {TASK_INDEX_KEY_NAME: 100, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0, "response": {}},
+            {TASK_INDEX_KEY_NAME: 200, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 0.0, "response": {}},
+            {TASK_INDEX_KEY_NAME: 300, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 0.5, "response": {}},
+        ]
+        result = compute_aggregate_metrics(responses)
+
+        indices = [g[TASK_INDEX_KEY_NAME] for g in result.group_level_metrics]
+        assert indices == [100, 200, 300]
+
+
+class TestMajorityNoAnswerCounting:
+    """majority@k should count tasks with no valid answers as incorrect (score 0)."""
+
+    def test_no_answer_tasks_count_as_incorrect(self) -> None:
+        tasks = [
+            # Task 0: all answers present, majority correct
+            [{"reward": 1.0, "extracted_answer": "A"}, {"reward": 1.0, "extracted_answer": "A"}],
+            # Task 1: no answers at all
+            [{"reward": 0.0, "extracted_answer": None}, {"reward": 0.0, "extracted_answer": None}],
+        ]
+        m = compute_pass_majority_metrics(tasks, answer_key="extracted_answer")
+        # Task 0 correct (100), Task 1 no-answer should be 0 → average = 50
+        assert m["majority@2/accuracy"] == pytest.approx(50.0)
+
+    def test_all_no_answer_is_zero(self) -> None:
+        tasks = [
+            [{"reward": 0.0, "extracted_answer": None}, {"reward": 0.0, "extracted_answer": None}],
+            [{"reward": 0.0, "extracted_answer": None}, {"reward": 0.0, "extracted_answer": None}],
+        ]
+        m = compute_pass_majority_metrics(tasks, answer_key="extracted_answer")
+        assert m["majority@2/accuracy"] == pytest.approx(0.0)
+
+
+class TestComputeAggregateMetricsPerTask:
+    """Test that compute_aggregate_metrics merges per_task_metrics from compute_metrics_fn."""
+
+    def test_per_task_metrics_merged(self) -> None:
+        from nemo_gym.global_config import TASK_INDEX_KEY_NAME
+        from nemo_gym.reward_profile import compute_aggregate_metrics
+
+        responses = [
+            {TASK_INDEX_KEY_NAME: 0, "_ng_rollout_index": 0, "reward": 1.0, "response": {}},
+            {TASK_INDEX_KEY_NAME: 1, "_ng_rollout_index": 0, "reward": 0.0, "response": {}},
+        ]
+
+        def metrics_fn(tasks):
+            return {
+                "custom_agg": 99,
+                "per_task_metrics": [
+                    {TASK_INDEX_KEY_NAME: 0, "difficulty": "easy"},
+                    {TASK_INDEX_KEY_NAME: 1, "difficulty": "hard"},
+                ],
+            }
+
+        result = compute_aggregate_metrics(responses, compute_metrics_fn=metrics_fn)
+        assert result.agent_metrics["custom_agg"] == 99
+        assert "per_task_metrics" not in result.agent_metrics
+        groups_by_idx = {g[TASK_INDEX_KEY_NAME]: g for g in result.group_level_metrics}
+        assert groups_by_idx[0]["difficulty"] == "easy"
+        assert groups_by_idx[1]["difficulty"] == "hard"

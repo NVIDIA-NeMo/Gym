@@ -16,68 +16,91 @@
 
 import importlib
 from pathlib import Path
-from typing import Dict, Optional
+from types import ModuleType
+from typing import Dict, List, Optional, Tuple
 
 import rich
-from omegaconf import OmegaConf
-from pydantic import Field
+from omegaconf import DictConfig, OmegaConf
+from pydantic import BaseModel
+from rich.table import Table
 
 from nemo_gym import PARENT_DIR
-from nemo_gym.config_types import BaseNeMoGymCLIConfig
-from nemo_gym.global_config import GlobalConfigDictParserConfig, get_global_config_dict
+from nemo_gym.config_types import BaseNeMoGymCLIConfig, BenchmarkDatasetConfig
+from nemo_gym.global_config import (
+    GlobalConfigDictParser,
+    GlobalConfigDictParserConfig,
+    get_first_server_config_dict,
+    get_global_config_dict,
+)
 
 
 BENCHMARKS_DIR = PARENT_DIR / "benchmarks"
 
 
-class BenchmarkConfig:
-    """Represents a discovered benchmark's configuration."""
+class BenchmarkConfig(BaseModel):
+    name: str
+    path: Path
+    agent_name: str
+    num_repeats: int
+    dataset: BenchmarkDatasetConfig
 
-    def __init__(self, name: str, path: Path, config_dict: dict):
-        self.name = name
-        self.path = path
-        self.config_dict = config_dict
+    @classmethod
+    def from_config_path(cls, config_path: Path) -> "Optional[BenchmarkConfig]":
+        return cls.from_initial_config_dict(path=config_path, initial_config_dict=OmegaConf.load(config_path))
 
-    @property
-    def agent_name(self) -> Optional[str]:
-        return self.config_dict.get("agent_name")
-
-    @property
-    def num_repeats(self) -> Optional[int]:
-        return self.config_dict.get("num_repeats")
-
-
-def discover_benchmarks() -> Dict[str, BenchmarkConfig]:
-    """Scan the benchmarks/ directory for subdirectories containing config.yaml."""
-    benchmarks = {}
-
-    if not BENCHMARKS_DIR.exists():
-        return benchmarks
-
-    for entry in sorted(BENCHMARKS_DIR.iterdir()):
-        if not entry.is_dir():
-            continue
-        config_path = entry / "config.yaml"
-        if not config_path.exists():
-            continue
-
-        config_dict = OmegaConf.to_container(OmegaConf.load(config_path), resolve=True)
-        benchmarks[entry.name] = BenchmarkConfig(
-            name=entry.name,
-            path=entry,
-            config_dict=config_dict,
+    @classmethod
+    def from_initial_config_dict(cls, path: Path, initial_config_dict: DictConfig) -> "Optional[BenchmarkConfig]":
+        initial_config_dict = OmegaConf.merge(
+            initial_config_dict, GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT
         )
 
-    return benchmarks
+        parser = GlobalConfigDictParser()
+        global_config_dict = parser.parse_no_environment(initial_global_config_dict=initial_config_dict)
+
+        datasets: List[BenchmarkDatasetConfig] = []
+        candidate_agent_server_instance_names: List[str] = []
+        for server_instance_name in global_config_dict:
+            server_config = global_config_dict[server_instance_name]
+            if not isinstance(server_config, (dict, DictConfig)) or "responses_api_agents" not in server_config:
+                continue
+
+            inner_server_config = get_first_server_config_dict(global_config_dict, server_instance_name)
+
+            for dataset in inner_server_config.get("datasets") or []:
+                if dataset["type"] != "benchmark":
+                    continue
+
+                datasets.append(BenchmarkDatasetConfig.model_validate(dataset))
+                candidate_agent_server_instance_names.append(server_instance_name)
+
+        if len(datasets) < 1:
+            return
+
+        assert len(datasets) == 1, f"Expected 1 benchmark dataset for config {path}, but found {len(datasets)}!"
+
+        dataset = datasets[0]
+
+        return cls(
+            name=dataset.name,
+            path=path,
+            agent_name=candidate_agent_server_instance_names[0],
+            num_repeats=dataset.num_repeats,
+            dataset=dataset,
+        )
 
 
-def get_benchmark(name: str) -> BenchmarkConfig:
-    """Get a specific benchmark by name. Raises ValueError if not found."""
-    benchmarks = discover_benchmarks()
-    if name not in benchmarks:
-        available = ", ".join(benchmarks.keys()) or "(none)"
-        raise ValueError(f"Benchmark '{name}' not found. Available benchmarks: {available}")
-    return benchmarks[name]
+def _load_benchmarks_from_config_paths(config_paths: List[Path]) -> Dict[str, BenchmarkConfig]:
+    benchmarks_dict = dict()
+    for config_path in config_paths:
+        config_path = Path(config_path)
+
+        maybe_bc = BenchmarkConfig.from_config_path(config_path)
+        if not maybe_bc:
+            continue
+
+        benchmarks_dict[maybe_bc.name] = maybe_bc
+
+    return benchmarks_dict
 
 
 def list_benchmarks() -> None:
@@ -89,33 +112,50 @@ def list_benchmarks() -> None:
     )
     BaseNeMoGymCLIConfig.model_validate(global_config_dict)
 
-    benchmarks = discover_benchmarks()
+    assert BENCHMARKS_DIR.exists(), "Missing benchmarks directory"
+
+    config_paths = []
+    for entry in sorted(BENCHMARKS_DIR.iterdir()):
+        if not entry.is_dir():
+            continue
+
+        config_path = entry / "config.yaml"
+        if not config_path.exists():
+            continue
+
+        config_paths.append(config_path)
+
+    benchmarks = _load_benchmarks_from_config_paths(config_paths)
 
     if not benchmarks:
         rich.print("[yellow]No benchmarks found.[/yellow]")
         rich.print(f"Expected benchmarks directory: {BENCHMARKS_DIR}")
         return
 
-    rich.print(f"[bold]Available Benchmarks ({len(benchmarks)})[/bold]")
-    rich.print("-" * 40)
+    table = Table(title=f"Available benchmarks in NeMo Gym ({len(benchmarks)})")
+    table.add_column("Benchmark name")
+    table.add_column("Agent name")
+    table.add_column("Num repeats")
+
     for name, bench in benchmarks.items():
-        agent = bench.agent_name or "not specified"
-        repeats = bench.num_repeats or "not specified"
-        rich.print(f"  [blue]{name}[/blue]  (agent: {agent}, num_repeats: {repeats})")
+        table.add_row(name, bench.agent_name, str(bench.num_repeats))
+
+    rich.print(table)
 
 
 class PrepareBenchmarkConfig(BaseNeMoGymCLIConfig):
     """
     Prepare benchmark data by running the benchmark's prepare.py script.
 
+    The benchmark is identified from a config_paths entry pointing to a
+    benchmarks/*/config.yaml file.
+
     Examples:
 
     ```bash
-    ng_prepare_benchmark +benchmark=aime24
+    ng_prepare_benchmark "+config_paths=[benchmarks/aime24/config.yaml]"
     ```
     """
-
-    benchmark: str = Field(description="Name of the benchmark to prepare (e.g., 'aime24').")
 
 
 def prepare_benchmark() -> None:
@@ -125,21 +165,60 @@ def prepare_benchmark() -> None:
             initial_global_config_dict=GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
         )
     )
-    config = PrepareBenchmarkConfig.model_validate(global_config_dict)
+    PrepareBenchmarkConfig.model_validate(global_config_dict)
 
-    bench = get_benchmark(config.benchmark)
-    prepare_module_path = bench.path / "prepare.py"
+    config_paths = global_config_dict.get("config_paths") or []
+    config_paths = list(map(Path, config_paths))
+    benchmarks_dict = _load_benchmarks_from_config_paths(config_paths)
 
-    if not prepare_module_path.exists():
-        raise FileNotFoundError(f"No prepare.py found for benchmark '{config.benchmark}' at {prepare_module_path}")
+    assert benchmarks_dict, (
+        'No benchmark config found in config_paths. Pass a benchmark config, e.g.: "+config_paths=[benchmarks/aime24/config.yaml]"'
+    )
 
-    # Import and run the benchmark's prepare function
-    module_name = f"benchmarks.{config.benchmark}.prepare"
-    module = importlib.import_module(module_name)
+    # Validate all benchmarks before preparing any
+    prepare_script_missing: List[BenchmarkConfig] = []
+    prepare_function_missing: List[BenchmarkConfig] = []
 
-    if not hasattr(module, "prepare"):
-        raise AttributeError(f"benchmarks/{config.benchmark}/prepare.py must define a `prepare()` function")
+    validated: List[Tuple[BenchmarkConfig, ModuleType]] = []
+    for benchmark_config in benchmarks_dict.values():
+        prepare_script_path = benchmark_config.dataset.prepare_script
+        if not prepare_script_path.exists():
+            prepare_script_missing.append(benchmark_config)
+            continue
 
-    print(f"Preparing benchmark: {config.benchmark}")
-    output_path = module.prepare()
-    print(f"Benchmark data prepared at: {output_path}")
+        prepare_module_path = ".".join(prepare_script_path.with_suffix("").parts)
+        module = importlib.import_module(prepare_module_path)
+        if not hasattr(module, "prepare"):
+            prepare_function_missing.append(benchmark_config)
+            continue
+
+        validated.append((benchmark_config, module))
+
+    errors_to_print = ""
+    if prepare_script_missing:
+        prepare_script_missing_str = "".join(
+            f"- {bc.name}: {bc.dataset.prepare_script}\n" for bc in prepare_script_missing
+        )
+        errors_to_print += f"""The following benchmarks are missing a valid prepare script:
+{prepare_script_missing_str}
+"""
+    if prepare_function_missing:
+        prepare_function_missing_str = "".join(
+            f"- {bc.name}: {bc.dataset.prepare_script}\n" for bc in prepare_function_missing
+        )
+        errors_to_print += f"""The following benchmarks have a prepare script, but are missing the prepare function:
+{prepare_function_missing_str}
+"""
+    if errors_to_print:
+        errors_to_print = f"""Did not prepare any benchmarks due to benchmark config errors.
+{errors_to_print}"""
+        raise RuntimeError(errors_to_print)
+
+    # Prepare after all validations pass
+    for benchmark_config, module in validated:
+        print(f"Preparing benchmark: {benchmark_config.name}")
+        output_fpath: Path = module.prepare()
+        assert output_fpath.absolute() == benchmark_config.dataset.jsonl_fpath.absolute(), (
+            f"Expected the actual prepared dataset output fpath to match the jsonl_fpath set in the config. Instead got {output_fpath=} jsonl_fpath={benchmark_config.dataset.jsonl_fpath}"
+        )
+        print(f"Benchmark data prepared at: {output_fpath}")
