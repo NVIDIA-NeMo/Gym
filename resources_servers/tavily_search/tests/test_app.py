@@ -18,6 +18,8 @@ from unittest.mock import AsyncMock, MagicMock, call
 
 from pytest import approx, fixture
 
+from nemo_gym.server_utils import SESSION_ID_KEY
+
 
 _TEST_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -58,6 +60,11 @@ class TestApp:
     @fixture
     def server(self, config: TavilySearchResourcesServerConfig) -> TavilySearchResourcesServer:
         return TavilySearchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+    def _create_dummy_request(self) -> MagicMock:
+        request_mock = MagicMock()
+        request_mock.session = {SESSION_ID_KEY: "abcd"}
+        return request_mock
 
     def _msg(self, text: str) -> NeMoGymResponseOutputMessage:
         """Helper to create a NeMoGymResponseOutputMessage."""
@@ -172,7 +179,7 @@ class TestApp:
         server._async_tavily_clients = [mock_backend]
 
         request = TavilySearchRequest(query="NVIDIA GPU programming")
-        response = await server.web_search(request)
+        response = await server.web_search(self._create_dummy_request(), request)
 
         mock_backend.search.assert_called_once()
         actual_call_args = mock_backend.search.call_args
@@ -191,13 +198,13 @@ class TestApp:
     async def test_web_search_none_query(self, server: TavilySearchResourcesServer) -> None:
         """Test web_search with None query returns error message."""
         request = TavilySearchRequest(query=None)
-        response = await server.web_search(request)
+        response = await server.web_search(self._create_dummy_request(), request)
         assert response.results_string == "Query is none"
 
     async def test_web_search_long_query(self, server: TavilySearchResourcesServer) -> None:
         """Test web_search with overly long query returns error message."""
         request = TavilySearchRequest(query="x" * 401)
-        response = await server.web_search(request)
+        response = await server.web_search(self._create_dummy_request(), request)
         assert response.results_string == "Query is too long"
 
     # ---- find_in_page ----
@@ -205,19 +212,19 @@ class TestApp:
     async def test_find_in_page_none_url(self, server: TavilySearchResourcesServer) -> None:
         """Test find_in_page with None URL returns error."""
         request = FindInPageRequest(url=None, query="test")
-        response = await server.find_in_page(request)
+        response = await server.find_in_page(self._create_dummy_request(), request)
         assert response.results_string == "URL is none"
 
     async def test_find_in_page_none_query(self, server: TavilySearchResourcesServer) -> None:
         """Test find_in_page with None query returns error."""
         request = FindInPageRequest(url="https://example.com", query=None)
-        response = await server.find_in_page(request)
+        response = await server.find_in_page(self._create_dummy_request(), request)
         assert response.results_string == "Query is none"
 
     async def test_find_in_page_excluded_domain(self, server: TavilySearchResourcesServer) -> None:
         """Test find_in_page with excluded domain returns error."""
         request = FindInPageRequest(url="https://blacklisteddomain.com/page", query="test")
-        response = await server.find_in_page(request)
+        response = await server.find_in_page(self._create_dummy_request(), request)
         assert response.results_string == "URL is in excluded domains"
 
     # ---- scroll_page ----
@@ -225,14 +232,14 @@ class TestApp:
     async def test_scroll_page_none_url(self, server: TavilySearchResourcesServer) -> None:
         """Test scroll_page with None URL."""
         request = ScrollPageRequest(url=None)
-        response = await server.scroll_page(request)
+        response = await server.scroll_page(self._create_dummy_request(), request)
         assert response.results_string == "URL is none"
         assert response.total_words == 0
 
     async def test_scroll_page_excluded_domain(self, server: TavilySearchResourcesServer) -> None:
         """Test scroll_page with excluded domain."""
         request = ScrollPageRequest(url="https://blacklisteddomain.com/page")
-        response = await server.scroll_page(request)
+        response = await server.scroll_page(self._create_dummy_request(), request)
         assert response.results_string == "URL is in excluded domains"
         assert response.total_words == 0
 
@@ -293,7 +300,7 @@ class TestApp:
             question="What is the capital of France?",
         )
 
-        res = await server.verify(req)
+        res = await server.verify(self._create_dummy_request(), req)
 
         assert res.reward == approx(1.0)
         assert res.extracted_final_answer == "yes"
@@ -315,7 +322,7 @@ class TestApp:
             question="What is the capital of France?",
         )
 
-        res = await server.verify(req)
+        res = await server.verify(self._create_dummy_request(), req)
 
         assert res.reward == approx(0.0)
         assert res.extracted_final_answer == "no"
@@ -347,17 +354,17 @@ class TestApp:
 
         request = TavilySearchRequest(query="NVIDIA GPU programming")
 
-        await server.web_search(request)
+        await server.web_search(self._create_dummy_request(), request)
         assert mock_backend1.search.call_count == 1
 
-        await server.web_search(request)
+        await server.web_search(self._create_dummy_request(), request)
         assert mock_backend2.search.call_count == 1
 
-        await server.web_search(request)
+        await server.web_search(self._create_dummy_request(), request)
         assert mock_backend3.search.call_count == 1
 
-        await server.web_search(request)
+        await server.web_search(self._create_dummy_request(), request)
         assert mock_backend1.search.call_count == 2
 
-        await server.web_search(request)
+        await server.web_search(self._create_dummy_request(), request)
         assert mock_backend2.search.call_count == 2
