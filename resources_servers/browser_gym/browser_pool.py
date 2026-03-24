@@ -141,8 +141,7 @@ PLAYWRIGHT_KEY_MAP = {
     "left control": "Control",
 }
 
-# Per-action timeout map (seconds) — values match the rl-gym-harness-ui
-# base_playwright.py @with_timeout decorators exactly.
+# Per-action timeout map (seconds).
 ACTION_TIMEOUTS: dict[str, float] = {
     "screenshot": 20.0,
     "click": 10.0,
