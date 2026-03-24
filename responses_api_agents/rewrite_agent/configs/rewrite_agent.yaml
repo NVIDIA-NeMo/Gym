@@ -1,0 +1,17 @@
+rewrite_agent:
+  responses_api_agents:
+    rewrite_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: ???
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      rewriter_model_server:
+        type: responses_api_models
+        name: rewriter_model
+      rewrite_prompts: true
+      rewrite_tool_names: true
+      rewrite_arg_names: true
+      rewrite_prob: 0.2

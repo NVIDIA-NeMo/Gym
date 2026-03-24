@@ -6,9 +6,9 @@ reasoning_gym:
       verified: true
       description: Over 100 tasks including algebra, arithmetic, computation, cognition, geometry, graph theory, logic, and many common games.
       value: Improve robustness, generalization, broad knowledge and reasoning
-reasoning_gym_robustness_agent:
+reasoning_gym_rewrite_agent:
   responses_api_agents:
-    robustness_agent:
+    rewrite_agent:
       entrypoint: app.py
       resources_server:
         type: resources_servers

@@ -18,6 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, call
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
+from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -25,17 +26,15 @@ from nemo_gym.openai_utils import (
     NeMoGymSummary,
 )
 from nemo_gym.server_utils import ServerClient
-from responses_api_agents.robustness_agent.app import (
-    ModelServerRef,
-    ResourcesServerRef,
-    RobustnessAgent,
-    RobustnessAgentConfig,
+from responses_api_agents.rewrite_agent.app import (
+    RewriteAgent,
+    RewriteAgentConfig,
 )
 
 
 class TestApp:
     def test_sanity(self) -> None:
-        config = RobustnessAgentConfig(
+        config = RewriteAgentConfig(
             host="0.0.0.0",
             port=8080,
             entrypoint="",
@@ -49,10 +48,10 @@ class TestApp:
                 name="",
             ),
         )
-        RobustnessAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        RewriteAgent(config=config, server_client=MagicMock(spec=ServerClient))
 
     async def test_responses(self, monkeypatch: MonkeyPatch) -> None:
-        config = RobustnessAgentConfig(
+        config = RewriteAgentConfig(
             host="0.0.0.0",
             port=8080,
             entrypoint="",
@@ -66,7 +65,7 @@ class TestApp:
                 name="",
             ),
         )
-        server = RobustnessAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        server = RewriteAgent(config=config, server_client=MagicMock(spec=ServerClient))
         app = server.setup_webserver()
         client = TestClient(app)
 
@@ -163,7 +162,7 @@ class TestApp:
         assert expected_responses_dict == actual_responses_dict
 
     async def test_responses_continues_on_reasoning_only(self, monkeypatch: MonkeyPatch) -> None:
-        config = RobustnessAgentConfig(
+        config = RewriteAgentConfig(
             host="0.0.0.0",
             port=8080,
             entrypoint="",
@@ -177,7 +176,7 @@ class TestApp:
                 name="",
             ),
         )
-        server = RobustnessAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        server = RewriteAgent(config=config, server_client=MagicMock(spec=ServerClient))
         app = server.setup_webserver()
         client = TestClient(app)
 

@@ -18,21 +18,9 @@ import re
 from typing import List, Optional
 
 from fastapi import Request, Response
-from pydantic import ConfigDict, ValidationError
+from pydantic import ValidationError
 
-from nemo_gym.base_resources_server import (
-    AggregateMetrics,
-    AggregateMetricsRequest,
-    BaseRunRequest,
-    BaseVerifyRequest,
-    BaseVerifyResponse,
-)
-from nemo_gym.base_responses_api_agent import (
-    BaseResponsesAPIAgentConfig,
-    Body,
-    SimpleResponsesAPIAgent,
-)
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -42,6 +30,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessage,
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
+from responses_api_agents.simple_agent.app import Body, SimpleAgent, SimpleAgentConfig
 
 
 _REWRITE_INSTRUCTIONS = {
@@ -57,31 +46,16 @@ _REWRITE_SCHEMA_FIELDS = {
 }
 
 
-class RobustnessAgentConfig(BaseResponsesAPIAgentConfig):
-    resources_server: ResourcesServerRef
-    model_server: ModelServerRef
+class RewriteAgentConfig(SimpleAgentConfig):
     rewriter_model_server: Optional[ModelServerRef] = None
     rewrite_prompts: bool = True
     rewrite_tool_names: bool = True
     rewrite_arg_names: bool = True
     rewrite_prob: float = 0.2
-    max_steps: int = None
 
 
-class RobustnessAgentRunRequest(BaseRunRequest):
-    model_config = ConfigDict(extra="allow")
-
-
-class RobustnessAgentVerifyRequest(BaseVerifyRequest):
-    model_config = ConfigDict(extra="allow")
-
-
-class RobustnessAgentVerifyResponse(BaseVerifyResponse):
-    model_config = ConfigDict(extra="allow")
-
-
-class RobustnessAgent(SimpleResponsesAPIAgent):
-    config: RobustnessAgentConfig
+class RewriteAgent(SimpleAgent):
+    config: RewriteAgentConfig
 
     def _build_rewrite_system_prompt(self) -> str:
         flags = ("rewrite_prompts", "rewrite_tool_names", "rewrite_arg_names")
@@ -133,8 +107,7 @@ class RobustnessAgent(SimpleResponsesAPIAgent):
                 cookies=cookies,
             )
             await raise_for_status(resp)
-            resp_json = await get_response_json(resp)
-            rewrite_response = NeMoGymResponse.model_validate(resp_json)
+            rewrite_response = NeMoGymResponse.model_validate(await get_response_json(resp))
 
             output_text = ""
             for item in rewrite_response.output:
@@ -144,6 +117,7 @@ class RobustnessAgent(SimpleResponsesAPIAgent):
                             output_text = part.text
                             break
 
+            # strip thinking tags emitted by reasoning models
             output_text = re.sub(r"<think>.*?</think>", "", output_text, flags=re.DOTALL).strip()
             output_text = re.sub(r"<thinking>.*?</thinking>", "", output_text, flags=re.DOTALL).strip()
 
@@ -294,50 +268,6 @@ class RobustnessAgent(SimpleResponsesAPIAgent):
         model_response.usage = usage
         return model_response
 
-    async def run(self, request: Request, body: RobustnessAgentRunRequest) -> RobustnessAgentVerifyResponse:
-        cookies = request.cookies
-
-        seed_session_response = await self.server_client.post(
-            server_name=self.config.resources_server.name,
-            url_path="/seed_session",
-            json=body.model_dump(),
-            cookies=cookies,
-        )
-        await raise_for_status(seed_session_response)
-        cookies = seed_session_response.cookies
-
-        response = await self.server_client.post(
-            server_name=self.config.name,
-            url_path="/v1/responses",
-            json=body.responses_create_params,
-            cookies=cookies,
-        )
-        await raise_for_status(response)
-        cookies = response.cookies
-
-        verify_request = RobustnessAgentVerifyRequest.model_validate(
-            body.model_dump() | {"response": await get_response_json(response)}
-        )
-
-        verify_response = await self.server_client.post(
-            server_name=self.config.resources_server.name,
-            url_path="/verify",
-            json=verify_request.model_dump(),
-            cookies=cookies,
-        )
-        await raise_for_status(verify_response)
-        return RobustnessAgentVerifyResponse.model_validate(await get_response_json(verify_response))
-
-    async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
-        """Proxy aggregate_metrics to the resources server."""
-        response = await self.server_client.post(
-            server_name=self.config.resources_server.name,
-            url_path="/aggregate_metrics",
-            json=body,
-        )
-        await raise_for_status(response)
-        return AggregateMetrics.model_validate(await get_response_json(response))
-
 
 if __name__ == "__main__":
-    RobustnessAgent.run_webserver()
+    RewriteAgent.run_webserver()
