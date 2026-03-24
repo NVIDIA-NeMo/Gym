@@ -35,7 +35,7 @@ class Profiler(BaseModel):
         return super().model_post_init(context)
 
     def _check_for_dot_installation(self) -> None:  # pragma: no cover
-        res = run("dot -h", shell=True, check=False)
+        res = run("dot", shell=True, check=False)
         if res.returncode == 0:
             return
 
