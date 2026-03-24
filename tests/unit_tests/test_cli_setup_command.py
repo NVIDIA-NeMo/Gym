@@ -413,3 +413,54 @@ class TestGetNemoGymVersionSpec:
         with patch("importlib.metadata.version", side_effect=importlib.metadata.PackageNotFoundError):
             version_spec = _get_nemo_gym_version_spec(is_editable_install=False)
             assert version_spec == ""
+
+
+class TestCLISetupCommandRunCommandTeeLog(TestCLISetupCommandRunCommand):
+    def test_tee_logs_with_server_name(self, monkeypatch: MonkeyPatch) -> None:
+        Popen_mock, get_global_config_dict_mock = self._setup(monkeypatch)
+
+        get_global_config_dict_mock.return_value = {
+            "uv_cache_dir": "default uv cache dir",
+            "nemo_gym_log_dir": "/tmp/gym_logs",
+        }
+
+        run_command(
+            command="my command",
+            working_dir_path=Path("/my path"),
+            server_name="my_resources/my_server",
+        )
+
+        expected_args = call(
+            "set -o pipefail; (my command) 2>&1 | tee -a /tmp/gym_logs/my_resources_my_server.log",
+            executable="/bin/bash",
+            shell=True,
+            env={"PYTHONPATH": "/my path", "UV_CACHE_DIR": "default uv cache dir"},
+            stdout="stdout",
+            stderr="stderr",
+        )
+        actual_args = Popen_mock.call_args
+        assert expected_args == actual_args
+
+    def test_tee_logs_falls_back_to_dir_name(self, monkeypatch: MonkeyPatch) -> None:
+        Popen_mock, get_global_config_dict_mock = self._setup(monkeypatch)
+
+        get_global_config_dict_mock.return_value = {
+            "uv_cache_dir": "default uv cache dir",
+            "nemo_gym_log_dir": "/tmp/gym_logs",
+        }
+
+        run_command(
+            command="my command",
+            working_dir_path=Path("/my path"),
+        )
+
+        expected_args = call(
+            "set -o pipefail; (my command) 2>&1 | tee -a /tmp/gym_logs/my path.log",
+            executable="/bin/bash",
+            shell=True,
+            env={"PYTHONPATH": "/my path", "UV_CACHE_DIR": "default uv cache dir"},
+            stdout="stdout",
+            stderr="stderr",
+        )
+        actual_args = Popen_mock.call_args
+        assert expected_args == actual_args

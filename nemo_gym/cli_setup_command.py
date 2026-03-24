@@ -24,6 +24,7 @@ from omegaconf import DictConfig
 from nemo_gym import PARENT_DIR
 from nemo_gym.global_config import (
     HEAD_SERVER_DEPS_KEY_NAME,
+    NEMO_GYM_LOG_DIR_KEY_NAME,
     PIP_INSTALL_VERBOSE_KEY_NAME,
     PYTHON_VERSION_KEY_NAME,
     SKIP_VENV_IF_PRESENT_KEY_NAME,
@@ -179,9 +180,8 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
     return f"cd {dir_path} && {env_setup_cmd}"
 
 
-def run_command(command: str, working_dir_path: Path) -> Popen:
+def run_command(command: str, working_dir_path: Path, server_name: str = "") -> Popen:
     global_config_dict = get_global_config_dict()
-    global_config_dict
 
     work_dir = f"{working_dir_path.absolute()}"
     custom_env = environ.copy()
@@ -192,6 +192,12 @@ def run_command(command: str, working_dir_path: Path) -> Popen:
         custom_env["PYTHONPATH"] = work_dir
 
     custom_env["UV_CACHE_DIR"] = global_config_dict[UV_CACHE_DIR_KEY_NAME]
+
+    log_dir = global_config_dict.get(NEMO_GYM_LOG_DIR_KEY_NAME)
+    if log_dir:
+        safe_name = (server_name or working_dir_path.name).replace("/", "_")
+        log_path = Path(log_dir) / f"{safe_name}.log"
+        command = f"set -o pipefail; ({command}) 2>&1 | tee -a {log_path}"
 
     redirect_stdout = stdout
     redirect_stderr = stderr
