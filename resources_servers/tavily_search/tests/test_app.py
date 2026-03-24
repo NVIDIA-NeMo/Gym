@@ -320,3 +320,44 @@ class TestApp:
         assert res.reward == approx(0.0)
         assert res.extracted_final_answer == "no"
         assert server_client.post.call_count == 1
+
+    async def test_api_key_rotation_sanity(self, server: TavilySearchResourcesServer) -> None:
+        """Test multiple calls to Tavily rotate through API keys"""
+        mock_tavily_response = {
+            "results": [
+                {
+                    "url": "https://nvidia.com/docs",
+                    "title": "NVIDIA Documentation",
+                    "content": "Official NVIDIA documentation for developers.",
+                    "score": 0.99,
+                },
+            ]
+        }
+
+        mock_backend1 = MagicMock()
+        mock_backend1.search = AsyncMock(return_value=mock_tavily_response)
+
+        mock_backend2 = MagicMock()
+        mock_backend2.search = AsyncMock(return_value=mock_tavily_response)
+
+        mock_backend3 = MagicMock()
+        mock_backend3.search = AsyncMock(return_value=mock_tavily_response)
+
+        server._async_tavily_clients = [mock_backend1, mock_backend2, mock_backend3]
+
+        request = TavilySearchRequest(query="NVIDIA GPU programming")
+
+        await server.web_search(request)
+        assert mock_backend1.search.call_count == 1
+
+        await server.web_search(request)
+        assert mock_backend2.search.call_count == 1
+
+        await server.web_search(request)
+        assert mock_backend3.search.call_count == 1
+
+        await server.web_search(request)
+        assert mock_backend1.search.call_count == 2
+
+        await server.web_search(request)
+        assert mock_backend2.search.call_count == 2
