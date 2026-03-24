@@ -37,13 +37,6 @@ from nemo_gym.global_config import (
     TASK_INDEX_KEY_NAME,
     get_wandb_run,
 )
-
-
-# turing_vif change: key that a verify response can set to True to indicate the rollout should be
-# excluded from results.jsonl and reward profiling entirely (e.g. the task's instructions are
-# malformed, or the requested language has no validator for those instructions). Skipped rollouts
-# are written to errors.json instead so they can be inspected without polluting training data.
-SHOULD_SKIP_ROLLOUT_KEY = "should_skip_rollout"
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 from nemo_gym.server_utils import (
     GlobalAIOHTTPAsyncClientConfig,
@@ -54,6 +47,13 @@ from nemo_gym.server_utils import (
     raise_for_status,
     set_global_aiohttp_client,
 )
+
+
+# Key that a verify response can set to True to indicate the rollout should be excluded from
+# results.jsonl and reward profiling entirely (e.g. malformed instructions or missing validator).
+# Skipped rollouts are written to errors.json instead so they can be inspected without
+# polluting training data.
+SHOULD_SKIP_ROLLOUT_KEY = "should_skip_rollout"
 
 
 class SharedRolloutCollectionConfig(BaseNeMoGymCLIConfig):
@@ -311,9 +311,6 @@ class RolloutCollectionHelper(BaseModel):
             result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
             result[AGENT_REF_KEY_NAME] = row[AGENT_REF_KEY_NAME]
 
-            # turing_vif change: if the verify response signals the rollout should be skipped (e.g.
-            # the task's instructions were malformed, or the language has no validator for them),
-            # record it in errors.json instead of writing it to the main results file
             if result.get(SHOULD_SKIP_ROLLOUT_KEY, False):
                 error_entries.append(
                     {
