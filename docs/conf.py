@@ -112,6 +112,9 @@ html_theme_options = {
     },
 }
 html_extra_path = ["project.json", "versions1.json"]
+html_static_path = ["_static"]
+html_css_files = ["env-filter.css"]
+html_js_files = ["env-filter.js"]
 
 # -- Options for sphinx-reredirects ------------------------------------------
 # https://documatt.com/sphinx-reredirects/

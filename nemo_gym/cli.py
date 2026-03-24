@@ -1007,3 +1007,54 @@ def reinstall():  # pragma: no cover
     BaseNeMoGymCLIConfig.model_validate(global_config_dict)
 
     Popen("uv sync --extra dev --group docs", shell=True).communicate()
+
+
+def list_envs():  # pragma: no cover
+    """
+    List all available NeMo Gym environments.
+
+    Scans resources_servers/ and responses_api_agents/ for environments with datasets
+    and prints a summary table.
+
+    Examples:
+
+    ```bash
+    ng_list_envs
+    ```
+    """
+    from rich.table import Table
+
+    from nemo_gym.env_list import get_envs
+
+    global_config_dict = get_global_config_dict()
+    BaseNeMoGymCLIConfig.model_validate(global_config_dict)
+
+    envs = get_envs(PARENT_DIR)
+    example_envs = [e for e in envs if e.is_example]
+    training_envs = [e for e in envs if not e.is_example]
+
+    if example_envs:
+        rich.print("\n[bold]Example Environments[/bold]")
+        t = Table("Name", "Demonstrates", "Config")
+        for e in example_envs:
+            display = e.name.removeprefix("example_").replace("_", " ").title()
+            t.add_row(display, e.description or "", e.config_path)
+        rich.print(t)
+
+    if training_envs:
+        rich.print("\n[bold]Training & Evaluation Environments[/bold]")
+        t = Table("Name", "Domain", "Description", "Train", "Val", "Config")
+        for e in training_envs:
+            display = e.name.replace("_", " ").title()
+            t.add_row(
+                display,
+                e.domain or "",
+                e.description or "",
+                "✓" if e.has_train else "-",
+                "✓" if e.has_validation else "-",
+                e.config_path,
+            )
+        rich.print(t)
+
+    total = len(envs)
+    rich.print(f"\n[dim]{total} environment config(s) found[/dim]")

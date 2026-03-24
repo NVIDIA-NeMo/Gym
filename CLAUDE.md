@@ -42,6 +42,9 @@ ng_collect_rollouts +agent_name=<agent> +input_jsonl_fpath=<data.jsonl> +output_
 # Profile results (compute per-task pass rates)
 ng_reward_profile +input_jsonl_fpath=<data.jsonl> +rollouts_jsonl_fpath=<rollouts.jsonl> +output_jsonl_fpath=<profiled.jsonl> +pass_threshold=1.0
 
+# List all available environments
+ng_list_envs
+
 # Check server health
 ng_status
 

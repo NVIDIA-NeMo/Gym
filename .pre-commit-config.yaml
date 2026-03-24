@@ -62,4 +62,4 @@ repos:
         language: python
         entry: python scripts/update_resource_servers.py
         additional_dependencies: [pyyaml]
-        files: ^README\.md$|^resources_servers/.*/configs/.*\.yaml$
+        files: ^docs/environments/index\.md$|^resources_servers/.*/configs/.*\.yaml$|^responses_api_agents/.*/configs/.*\.yaml$
