@@ -108,7 +108,7 @@ def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSess
             limit=cfg.global_aiohttp_connector_limit,
             limit_per_host=cfg.global_aiohttp_connector_limit_per_host,
         ),
-        timeout=ClientTimeout(total=None),
+        timeout=ClientTimeout(),
         cookie_jar=DummyCookieJar(),
     )
 

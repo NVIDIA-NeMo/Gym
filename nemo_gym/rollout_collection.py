@@ -38,7 +38,6 @@ from nemo_gym.global_config import (
     get_wandb_run,
 )
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
-from aiohttp import ClientConnectorError, ClientResponseError
 
 from nemo_gym.server_utils import (
     GlobalAIOHTTPAsyncClientConfig,
@@ -49,11 +48,6 @@ from nemo_gym.server_utils import (
     raise_for_status,
     set_global_aiohttp_client,
 )
-
-_ROLLOUT_MAX_RETRIES = 3
-_ROLLOUT_RETRY_BACKOFF_BASE = 2.0
-_ROLLOUT_MAX_FAILURES = 50
-
 
 class SharedRolloutCollectionConfig(BaseNeMoGymCLIConfig):
     output_jsonl_fpath: str = Field(description="The output data jsonl file path.")
@@ -274,27 +268,9 @@ class RolloutCollectionHelper(BaseModel):
 
         pcts_to_print = [20, 40, 60, 80, 90, 95, 98, 99, 100]
         counts_left = Counter(r[AGENT_REF_KEY_NAME]["name"] for r in input_rows)
-        failed_count = 0
         results_file = output_fpath.open("ab")
         for future in self.run_examples(input_rows, semaphore=semaphore):
-            try:
-                row, result = await future
-            except (ClientResponseError, Exception) as exc:
-                is_connection_error = isinstance(exc, (ClientConnectorError, ConnectionRefusedError)) or (
-                    isinstance(exc.__cause__, (ClientConnectorError, ConnectionRefusedError))
-                )
-                if is_connection_error:
-                    continue
-                failed_count += 1
-                print(f"[rollout error] Task failed after retries ({type(exc).__name__}: {exc}). "
-                      f"Total failures so far: {failed_count}/{len(input_rows)}")
-                if failed_count >= _ROLLOUT_MAX_FAILURES:
-                    results_file.close()
-                    raise RuntimeError(
-                        f"Aborting: {failed_count} rollouts failed (limit: {_ROLLOUT_MAX_FAILURES}). "
-                        f"Likely a persistent server error. Check logs for details."
-                    ) from exc
-                continue
+            row, result = await future
 
             result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
             result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
@@ -319,10 +295,6 @@ class RolloutCollectionHelper(BaseModel):
                     print(f"Examples left:\n{top_left_str}")
 
         results_file.close()
-
-        if failed_count:
-            print(f"\n[rollout summary] {failed_count}/{len(input_rows)} tasks failed and were skipped. "
-                  f"Re-run with resume_from_cache=true to retry them.")
 
         if get_wandb_run():  # pragma: no cover
             get_wandb_run().log({"Rollouts": Table(data=result_strs, columns=["Rollout"])})
@@ -429,24 +401,9 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
 
         async def _post_subroutine(row: Dict) -> Tuple[Dict, Dict]:
             async with semaphore:
-                last_exc: Optional[Exception] = None
-                for attempt in range(1, _ROLLOUT_MAX_RETRIES + 1):
-                    res = await server_client.post(
-                        server_name=row["agent_ref"]["name"], url_path="/run", json=row
-                    )
-                    if res.ok:
-                        return row, await get_response_json(res)
-                    content = await res.content.read()
-                    status = res.status
-                    if status < 500 or attempt == _ROLLOUT_MAX_RETRIES:
-                        await raise_for_status(res)
-                    backoff = _ROLLOUT_RETRY_BACKOFF_BASE**attempt
-                    print(
-                        f"[rollout retry] task {row.get(TASK_INDEX_KEY_NAME)} got HTTP {status} "
-                        f"(attempt {attempt}/{_ROLLOUT_MAX_RETRIES}), retrying in {backoff:.0f}s..."
-                    )
-                    await asyncio.sleep(backoff)
+                res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
                 await raise_for_status(res)
+                return row, await get_response_json(res)
 
         return tqdm.as_completed(
             map(_post_subroutine, examples),
