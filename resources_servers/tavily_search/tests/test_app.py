@@ -368,3 +368,31 @@ class TestApp:
 
         await server.web_search(self._create_dummy_request(), request)
         assert mock_backend2.search.call_count == 2
+
+    async def test_metrics(self, server: TavilySearchResourcesServer) -> None:
+        mock_tavily_response = {
+            "results": [
+                {
+                    "url": "https://nvidia.com/docs",
+                    "title": "NVIDIA Documentation",
+                    "content": "Official NVIDIA documentation for developers.",
+                    "score": 0.99,
+                },
+            ]
+        }
+
+        mock_backend = MagicMock()
+        mock_backend.search = AsyncMock(return_value=mock_tavily_response)
+        server._async_tavily_clients = [mock_backend]
+
+        request = TavilySearchRequest(query="NVIDIA GPU programming")
+
+        await server.web_search(self._create_dummy_request(), request)
+        await server.web_search(self._create_dummy_request(), request)
+        await server.web_search(self._create_dummy_request(), request)
+        await server.web_search(self._create_dummy_request(), request)
+        await server.web_search(self._create_dummy_request(), request)
+
+        expected_metrics_length = 5
+        actual_metrics_length = len(server._session_id_to_metrics["abcd"].async_tavily_calls)
+        assert expected_metrics_length == actual_metrics_length
