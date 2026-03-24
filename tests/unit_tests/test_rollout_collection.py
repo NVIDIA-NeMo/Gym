@@ -207,12 +207,42 @@ class TestRolloutCollection:
         actual_returned_results = await TestRolloutCollectionHelper().run_from_config(config)
 
         expected_results = [
-            {"_ng_task_index": 0, "_ng_rollout_index": 0, "response": {"usage": {"abc usage": 1}}},
-            {"_ng_task_index": 0, "_ng_rollout_index": 1, "response": {"usage": {"abc usage": 1}}},
-            {"_ng_task_index": 1, "_ng_rollout_index": 0, "response": {"usage": {"abc usage": 1}}},
-            {"_ng_task_index": 1, "_ng_rollout_index": 1, "response": {"usage": {"abc usage": 1}}},
-            {"_ng_task_index": 2, "_ng_rollout_index": 0, "response": {"usage": {"abc usage": 1}}},
-            {"_ng_task_index": 2, "_ng_rollout_index": 1, "response": {"usage": {"abc usage": 1}}},
+            {
+                "_ng_task_index": 0,
+                "_ng_rollout_index": 0,
+                "response": {"usage": {"abc usage": 1}},
+                "agent_ref": {"name": "my agent name"},
+            },
+            {
+                "_ng_task_index": 0,
+                "_ng_rollout_index": 1,
+                "response": {"usage": {"abc usage": 1}},
+                "agent_ref": {"name": "my agent name"},
+            },
+            {
+                "_ng_task_index": 1,
+                "_ng_rollout_index": 0,
+                "response": {"usage": {"abc usage": 1}},
+                "agent_ref": {"name": "my agent name"},
+            },
+            {
+                "_ng_task_index": 1,
+                "_ng_rollout_index": 1,
+                "response": {"usage": {"abc usage": 1}},
+                "agent_ref": {"name": "my agent name"},
+            },
+            {
+                "_ng_task_index": 2,
+                "_ng_rollout_index": 0,
+                "response": {"usage": {"abc usage": 1}},
+                "agent_ref": {"name": "my agent name"},
+            },
+            {
+                "_ng_task_index": 2,
+                "_ng_rollout_index": 1,
+                "response": {"usage": {"abc usage": 1}},
+                "agent_ref": {"name": "my agent name"},
+            },
         ]
 
         assert expected_results == actual_returned_results
@@ -285,12 +315,42 @@ class TestRolloutCollection:
         actual_returned_results = await TestRolloutCollectionHelper().run_from_config(config)
 
         expected_results = [
-            {"_ng_task_index": 0, "_ng_rollout_index": 0, "response": {"usage": {"abc usage": 1}}},
-            {"_ng_task_index": 0, "_ng_rollout_index": 1, "response": {"usage": {"abc usage": 1}}},
-            {"_ng_task_index": 1, "_ng_rollout_index": 0, "response": {"usage": {"abc usage": 1}}},
-            {"_ng_task_index": 1, "_ng_rollout_index": 1, "response": {"usage": {"abc usage": 1}}},
-            {"_ng_task_index": 2, "_ng_rollout_index": 0, "response": {"usage": {"abc usage": 1}}},
-            {"_ng_task_index": 2, "_ng_rollout_index": 1, "response": {"usage": {"abc usage": 1}}},
+            {
+                "_ng_task_index": 0,
+                "_ng_rollout_index": 0,
+                "response": {"usage": {"abc usage": 1}},
+                "agent_ref": {"name": "my agent name"},
+            },
+            {
+                "_ng_task_index": 0,
+                "_ng_rollout_index": 1,
+                "response": {"usage": {"abc usage": 1}},
+                "agent_ref": {"name": "my agent name"},
+            },
+            {
+                "_ng_task_index": 1,
+                "_ng_rollout_index": 0,
+                "response": {"usage": {"abc usage": 1}},
+                "agent_ref": {"name": "my agent name"},
+            },
+            {
+                "_ng_task_index": 1,
+                "_ng_rollout_index": 1,
+                "response": {"usage": {"abc usage": 1}},
+                "agent_ref": {"name": "my agent name"},
+            },
+            {
+                "_ng_task_index": 2,
+                "_ng_rollout_index": 0,
+                "response": {"usage": {"abc usage": 1}},
+                "agent_ref": {"name": "my agent name"},
+            },
+            {
+                "_ng_task_index": 2,
+                "_ng_rollout_index": 1,
+                "response": {"usage": {"abc usage": 1}},
+                "agent_ref": {"name": "my agent name"},
+            },
         ]
 
         assert expected_results == actual_returned_results
