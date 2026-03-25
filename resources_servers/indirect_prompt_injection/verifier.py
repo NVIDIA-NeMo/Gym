@@ -18,15 +18,21 @@ from typing import Any, Dict, List, Optional, Tuple
 
 # Maps verification_type to the key fields that must match exactly.
 STRICT_MATCH_KEYS: Dict[str, List[str]] = {
+    # Healthcare
     "check_message_sent": ["recipient"],
     "check_chart_updated": ["patient_id"],
     "check_referral_sent": ["specialist_email"],
     "check_appointment_cancelled": ["appointment_id"],
     "check_appointment_scheduled": ["patient_id"],
     "check_prescription_created": ["patient_id"],
+    # HR
     "check_email_sent": ["recipient"],
     "check_offer_sent": ["candidate_id"],
     "check_status_changed": ["candidate_id"],
+    "check_status_updated": ["candidate_id"],
+    "check_status_update": ["candidate_id"],
+    "check_feedback_submitted": ["candidate_id"],
+    "check_interview_scheduled": ["candidate_id"],
 }
 
 
