@@ -18,48 +18,17 @@ Downloads AIME 2025 problems from HuggingFace and converts them to the
 Gym benchmark JSONL format with `question` and `expected_answer` fields.
 """
 
+import base64
+import hashlib
 import json
 from pathlib import Path
 
-from datasets import load_dataset
+import pandas
 
 
 BENCHMARK_DIR = Path(__file__).parent
 DATA_DIR = BENCHMARK_DIR / "data"
-OUTPUT_FPATH = DATA_DIR / "aime25_benchmark.jsonl"
-
-# HuggingFace dataset for AIME 2025
-HF_REPO_ID = "MathArena/aime_2025"
-
-
-def prepare() -> Path:
-    """Download and prepare AIME 2025 data. Returns the output file path."""
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-
-    print(f"Loading AIME 2025 data from {HF_REPO_ID}...")
-    ds = load_dataset(HF_REPO_ID, split="train")
-
-    count = 0
-    with open(OUTPUT_FPATH, "w") as f:
-        for row in ds:
-            out = {
-                "question": row["problem"],
-                "expected_answer": str(row["answer"]),
-            }
-            f.write(json.dumps(out) + "\n")
-            count += 1
-
-    print(f"Wrote {count} problems to {OUTPUT_FPATH}")
-    return OUTPUT_FPATH
-
-
-import argparse
-import base64
-import hashlib
-import json
-import os
-
-import pandas
+OUTPUT_FPATH = DATA_DIR / "browsecomp_benchmark.jsonl"
 
 
 QUERY_TEMPLATE = """
@@ -124,32 +93,24 @@ def map_browsecomp_sample_to_rl_sample(row: dict) -> dict:
     }
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Download BrowseComp dataset, decrypt, and convert to NeMo Gym format."
-    )
-    parser.add_argument("--output_path", type=str, required=True, help="Output JSONL file path")
-    args = parser.parse_args()
+def prepare() -> Path:
+    """Download and prepare AIME 2025 data. Returns the output file path."""
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
 
     print(f"Downloading BrowseComp dataset from {BROWSECOMP_CSV_URL} ...")
     df = pandas.read_csv(BROWSECOMP_CSV_URL)
-    rows = [row.to_dict() for _, row in df.iterrows()]
-    print(f"Downloaded {len(rows)} samples")
+    assert len(df) == 1266, f"Expected 1266 samples, got {len(df)}"
 
-    print("Decrypting and converting to NeMo Gym format ...")
-    rl_samples = [map_browsecomp_sample_to_rl_sample(row) for row in rows]
-    assert len(rl_samples) == 1266, f"Expected 1266 samples, got {len(rl_samples)}"
-
-    os.makedirs(os.path.dirname(os.path.abspath(args.output_path)), exist_ok=True)
-    with open(args.output_path, "w") as f:
-        for sample in rl_samples:
+    count = 0
+    with open(OUTPUT_FPATH, "w") as f:
+        for _, row in df.iterrows():
+            sample = map_browsecomp_sample_to_rl_sample(row.to_dict())
             f.write(json.dumps(sample) + "\n")
+            count += 1
 
-    print(f"Saved {len(rl_samples)} samples to {args.output_path}")
+    print(f"Wrote {count} problems to {OUTPUT_FPATH}")
+    return OUTPUT_FPATH
 
-
-if __name__ == "__main__":
-    main()
 
 if __name__ == "__main__":
     prepare()
