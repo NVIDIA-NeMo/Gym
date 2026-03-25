@@ -167,15 +167,9 @@ async def execute_and_compare(
     timeout_s: float = 30.0,
 ) -> tuple[bool, ResultSet | None, ResultSet | None, str | None]:
     """Execute both queries and compare. Returns (match, gold_rows, pred_rows, error_msg)."""
-    try:
-        gold_rows = await execute_sqlite_async(db_path, gold_sql, semaphore, timeout_s)
-    except Exception as e:
-        return False, None, None, f"gold_sql_error: {e}"
+    gold_rows = await execute_sqlite_async(db_path, gold_sql, semaphore, timeout_s)
 
-    try:
-        pred_rows = await execute_sqlite_async(db_path, pred_sql, semaphore, timeout_s)
-    except Exception as e:
-        return False, gold_rows, None, f"pred_sql_error: {e}"
+    pred_rows = await execute_sqlite_async(db_path, pred_sql, semaphore, timeout_s)
 
     match = compare_multi_result_sets(
         [gold_rows], pred_rows, multi_condition_cols=condition_cols, ignore_order=ignore_order
