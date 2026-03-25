@@ -1,20 +1,34 @@
 # Chain to existing resource server + agent config
 config_paths:
-  - resources_servers/tavily_search/configs/tavily_search_self_judge.yaml
+  - responses_api_models/local_vllm_model/configs/Qwen/Qwen3-235B-A22B-Instruct-2507-FP8.yaml
 
-# We use `_inherit_from` directives to inherit from and not use the generic config above to ensure this benchmark config is isolated.
 browsecomp_tavily_search_resources_server:
-  _inherit_from: tavily_search_resources_server
-
+  resources_servers:
+    tavily_search:
+      entrypoint: app.py
+      domain: agent
+      debug: false
+      use_judge: true
+      judge_model_server:
+        type: responses_api_models
+        name: Qwen3-235B-A22B-Instruct-2507-FP8
+      judge_responses_create_params:
+        input: []
+      verified: false
 browsecomp_tavily_search_simple_agent:
-  _inherit_from: tavily_search_simple_agent
   responses_api_agents:
     simple_agent:
+      entrypoint: app.py
       resources_server:
+        type: resources_servers
         name: browsecomp_tavily_search_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
       datasets:
       - name: browsecomp
         type: benchmark
         jsonl_fpath: benchmarks/browsecomp/data/browsecomp_benchmark.jsonl
+        prompt_config: null
         prepare_script: benchmarks/browsecomp/prepare.py
         num_repeats: 1
