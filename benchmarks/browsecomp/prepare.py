@@ -12,10 +12,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Prepare AIME 2025 benchmark data.
+"""Prepare Browsecomp benchmark data.
 
-Downloads AIME 2025 problems from HuggingFace and converts them to the
-Gym benchmark JSONL format with `question` and `expected_answer` fields.
+Downloads Browsecomp problems from OpenAI and converts them to the Gym benchmark JSONL format.
 """
 
 import base64
