@@ -399,7 +399,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
     async def verify(self, request: Request, body: TavilySearchVerifyRequest) -> TavilySearchVerifyResponse:
         question = body.question
         ground_truth = body.ground_truth
-        last_assistant_response = self._get_last_assistant_response(body.response)
+        last_assistant_response = body.response.output_text
 
         if self.config.use_judge:
             judge_evaluation = await self._verify_answer_with_judge(question, ground_truth, last_assistant_response)
@@ -552,16 +552,6 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             reward=reward,
             judge_response=None,
         )
-
-    def _get_last_assistant_response(self, response: NeMoGymResponse) -> str:
-        for output_item in response.output[::-1]:
-            if output_item.type != "message":
-                continue
-            # if any content item is of type output_text, then return the text
-            for content_item in output_item.content:
-                if content_item.type == "output_text":
-                    return content_item.text
-        return ""
 
 
 if __name__ == "__main__":
