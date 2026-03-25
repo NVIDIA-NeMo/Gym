@@ -18,6 +18,8 @@ rdkit_chemistry:
       sandbox_proxy_request_timeout_s: ${oc.env:RDKIT_SANDBOX_PROXY_REQUEST_TIMEOUT_S,120}
       sandbox_proxy_connect_retries: ${oc.env:RDKIT_SANDBOX_PROXY_CONNECT_RETRIES,3}
       sandbox_proxy_retry_backoff_s: ${oc.env:RDKIT_SANDBOX_PROXY_RETRY_BACKOFF_S,0.25}
+      sandbox_startup_probe_enabled: ${oc.env:RDKIT_SANDBOX_STARTUP_PROBE_ENABLED,true}
+      sandbox_startup_probe_timeout_s: ${oc.env:RDKIT_SANDBOX_STARTUP_PROBE_TIMEOUT_S,15}
       sandbox_extra_packages:
         - rdkit
         - flask
