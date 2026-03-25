@@ -134,6 +134,9 @@ class TestGlobalConfig:
         monkeypatch.setattr(nemo_gym.server_utils.OmegaConf, "load", omegaconf_load_mock)
 
         global_config_dict = get_global_config_dict()
+        # _resolved_config_paths contains machine-specific absolute paths; check separately.
+        resolved = global_config_dict.pop("_resolved_config_paths")
+        assert len(resolved) == 2
         assert (
             self._default_global_config_dict_values
             | {
@@ -183,6 +186,8 @@ class TestGlobalConfig:
         monkeypatch.setattr(nemo_gym.server_utils.OmegaConf, "load", omegaconf_load_mock)
 
         global_config_dict = get_global_config_dict()
+        resolved = global_config_dict.pop("_resolved_config_paths")
+        assert len(resolved) == 4
         assert (
             self._default_global_config_dict_values
             | {
