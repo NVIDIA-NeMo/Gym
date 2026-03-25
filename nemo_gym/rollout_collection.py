@@ -404,7 +404,7 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
             )
             metrics_to_log.update(
                 {
-                    f"key_metrics/{k}": v
+                    f"key_metrics/{agent_name}/{k}": v
                     for k, v in agent_entry["key_metrics"].items()
                     if isinstance(v, primitive_types)
                 }
