@@ -56,4 +56,6 @@ for d in dicts:
 avg_regex_reward = sum(regex_rewards) / len(dicts)
 avg_judge_reward = sum(judge_rewards) / len(dicts)
 avg_alignment = sum(alignments) / len(dicts)
-print(f"{avg_regex_reward=:.2f} {avg_judge_reward=:.2f} {avg_alignment=:.2f}")
+print(f"""{avg_regex_reward=:.2f} ({sum(regex_rewards)} / {len(dicts)})
+{avg_judge_reward=:.2f} ({sum(judge_rewards)} / {len(dicts)})
+{avg_alignment=:.2f} ({sum(alignments)} / {len(dicts)})""")
