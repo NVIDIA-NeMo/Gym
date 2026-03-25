@@ -27,6 +27,7 @@ The model is expected to place its answer in \\boxed{...} format and output
 grades the model's extracted answer against the gold target as one of CORRECT,
 INCORRECT, or NOT_ATTEMPTED. NOT_ATTEMPTED is treated as implicit abstention.
 """
+
 from __future__ import annotations
 
 import re

@@ -34,6 +34,7 @@ import json
 import os
 from pathlib import Path
 
+
 SYSTEM_PROMPT = (
     "You will be given a question, answer with JUST the answer (no explanation).\n"
     "Put your final answer in \\boxed{your answer} format.\n"
