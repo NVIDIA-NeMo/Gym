@@ -12,7 +12,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import asyncio
 import json
 import re
 from asyncio import sleep
@@ -26,7 +25,7 @@ from urllib.parse import urlparse
 from fastapi import FastAPI, Request
 from httpx import AsyncClient
 from pydantic import BaseModel, Field, PrivateAttr, model_validator
-from tavily import AsyncTavilyClient, UsageLimitExceededError
+from tavily import AsyncTavilyClient
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -53,8 +52,6 @@ class TavilySearchResourcesServerConfig(BaseResourcesServerConfig):
     use_judge: bool = True  # If False, use regex matching instead of LLM judge
     judge_model_server: Optional[ModelServerRef] = None
     judge_responses_create_params: Optional[NeMoGymResponseCreateParamsNonStreaming] = None
-    max_retries: int = 5  # Max retries for UsageLimitExceededError
-    retry_delay_seconds: int = 30  # Delay between retries in seconds
     debug: bool = False
     dump_session_id_to_metrics_on_exit: bool = False
 
@@ -263,45 +260,20 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         if len(body.query) > 400:
             return TavilySearchResponse(results_string="Query is too long")
 
-        max_retries = self.config.max_retries
-        retry_delay_seconds = self.config.retry_delay_seconds
+        async_tavily_client = self._select_tavily_client()
+        start_time = time()
+        results = await async_tavily_client.search(
+            body.query,
+            max_results=self.MAX_RESULTS,
+            exclude_domains=self._exclude_domains,
+            search_depth="advanced",
+        )
+        metrics.async_tavily_calls.append(
+            TavilySearchSingleAsyncTavilyMetrics(
+                function="search", status="success", start_time=start_time, end_time=time()
+            )
+        )
 
-        for attempt in range(max_retries):
-            # @bxyu-nvidia: We put this in the attempt loop so we have a different client per attempt to better avoid rate limits.
-            async_tavily_client = self._select_tavily_client()
-            start_time = time()
-            try:
-                results = await async_tavily_client.search(
-                    body.query,
-                    max_results=self.MAX_RESULTS,
-                    exclude_domains=self._exclude_domains,
-                    search_depth="advanced",
-                )
-                metrics.async_tavily_calls.append(
-                    TavilySearchSingleAsyncTavilyMetrics(
-                        function="search", status="success", start_time=start_time, end_time=time()
-                    )
-                )
-                break  # Success, exit the retry loop
-            except UsageLimitExceededError as e:
-                metrics.async_tavily_calls.append(
-                    TavilySearchSingleAsyncTavilyMetrics(
-                        function="search",
-                        status=f"UsageLimitExceededError {attempt=}",
-                        start_time=start_time,
-                        end_time=time(),
-                    )
-                )
-                if self.config.debug:
-                    print(f"UsageLimitExceededError (attempt {attempt + 1}/{max_retries}): {e}")
-                if attempt < max_retries - 1:
-                    if self.config.debug:
-                        print(f"Sleeping for {retry_delay_seconds} seconds before retrying...")
-                    await asyncio.sleep(retry_delay_seconds)
-                else:
-                    if self.config.debug:
-                        print("Max retries exceeded. Returning empty results.")
-                    return TavilySearchResponse(results_string="[]")
         postprocessed_results = self._postprocess_search_results(results)
         return TavilySearchResponse(results_string="".join(postprocessed_results))
 
@@ -320,42 +292,17 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         if self._is_url_excluded(body.url):
             return FindInPageResponse(results_string="URL is in excluded domains")
 
-        max_retries = self.config.max_retries
-        retry_delay_seconds = self.config.retry_delay_seconds
-
-        for attempt in range(max_retries):
-            async_tavily_client = self._select_tavily_client()
-            start_time = time()
-            try:
-                results = await async_tavily_client.extract(
-                    urls=body.url,
-                    query=body.query,
-                )
-                metrics.async_tavily_calls.append(
-                    TavilySearchSingleAsyncTavilyMetrics(
-                        function="extract", status="success", start_time=start_time, end_time=time()
-                    )
-                )
-                break  # Success, exit the retry loop
-            except UsageLimitExceededError as e:
-                metrics.async_tavily_calls.append(
-                    TavilySearchSingleAsyncTavilyMetrics(
-                        function="extract",
-                        status=f"UsageLimitExceededError {attempt=}",
-                        start_time=start_time,
-                        end_time=time(),
-                    )
-                )
-                if self.config.debug:
-                    print(f"UsageLimitExceededError (attempt {attempt + 1}/{max_retries}): {e}")
-                if attempt < max_retries - 1:
-                    if self.config.debug:
-                        print(f"Sleeping for {retry_delay_seconds} seconds before retrying...")
-                    await asyncio.sleep(retry_delay_seconds)
-                else:
-                    if self.config.debug:
-                        print("Max retries exceeded. Returning empty results.")
-                    return FindInPageResponse(results_string="[]")
+        async_tavily_client = self._select_tavily_client()
+        start_time = time()
+        results = await async_tavily_client.extract(
+            urls=body.url,
+            query=body.query,
+        )
+        metrics.async_tavily_calls.append(
+            TavilySearchSingleAsyncTavilyMetrics(
+                function="extract", status="success", start_time=start_time, end_time=time()
+            )
+        )
 
         # Extract raw_content from the first successful result
         if results.get("results"):
@@ -405,41 +352,17 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         else:
             if self.config.debug:
                 print(f"Cache miss for {body.url}, fetching with tavily extract")
-            max_retries = self.config.max_retries
-            retry_delay_seconds = self.config.retry_delay_seconds
 
-            for attempt in range(max_retries):
-                async_tavily_client = self._select_tavily_client()
-                start_time = time()
-                try:
-                    results = await async_tavily_client.extract(
-                        urls=body.url,
-                    )
-                    metrics.async_tavily_calls.append(
-                        TavilySearchSingleAsyncTavilyMetrics(
-                            function="extract", status="success", start_time=start_time, end_time=time()
-                        )
-                    )
-                    break  # Success, exit the retry loop
-                except UsageLimitExceededError as e:
-                    metrics.async_tavily_calls.append(
-                        TavilySearchSingleAsyncTavilyMetrics(
-                            function="extract",
-                            status=f"UsageLimitExceededError {attempt=}",
-                            start_time=start_time,
-                            end_time=time(),
-                        )
-                    )
-                    if self.config.debug:
-                        print(f"UsageLimitExceededError (attempt {attempt + 1}/{max_retries}): {e}")
-                    if attempt < max_retries - 1:
-                        if self.config.debug:
-                            print(f"Sleeping for {retry_delay_seconds} seconds before retrying...")
-                        await asyncio.sleep(retry_delay_seconds)
-                    else:
-                        if self.config.debug:
-                            print("Max retries exceeded. Returning empty results.")
-                        return ScrollPageResponse(results_string="[]", total_words=0)
+            async_tavily_client = self._select_tavily_client()
+            start_time = time()
+            results = await async_tavily_client.extract(
+                urls=body.url,
+            )
+            metrics.async_tavily_calls.append(
+                TavilySearchSingleAsyncTavilyMetrics(
+                    function="extract", status="success", start_time=start_time, end_time=time()
+                )
+            )
 
             if results.get("results"):
                 page_content = results["results"][0].get("raw_content", "")
