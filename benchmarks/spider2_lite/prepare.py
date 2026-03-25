@@ -34,7 +34,7 @@ def prepare() -> Path:
             dataset_name="spider2_lite_sqlite",
             version="0.0.1",
             artifact_fpath="spider2_lite_sqlite_validation.jsonl",
-            output_fpath=OUTPUT_FPATH,
+            output_fpath=str(OUTPUT_FPATH),
         )
     )
 
