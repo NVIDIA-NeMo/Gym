@@ -34,7 +34,9 @@ import socket
 import subprocess
 import threading
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Optional
 
 import httpx
 
@@ -43,17 +45,142 @@ logger = logging.getLogger(__name__)
 
 _HEALTH_POLL = 2.0
 _HEALTH_TIMEOUT = 120.0
+_PROXY_HEALTH_TIMEOUT = 30.0
 _WATCHDOG_INTERVAL = 10.0
+_DEFAULT_PROXY_REQUEST_TIMEOUT = 120.0
+_HOP_BY_HOP_HEADERS = {
+    "connection",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+}
 
 _lock = threading.Lock()
 _sandbox_proc: subprocess.Popen | None = None
 _sandbox_python: str | None = None
 _sandbox_port: int = 6000
+_proxy_port: int | None = None
+_proxy_server: "_SandboxProxyServer | None" = None
+_proxy_thread: threading.Thread | None = None
+
+
+class _SandboxProxyServer(ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+    request_queue_size = 512
+
+    def __init__(
+        self,
+        server_address: tuple[str, int],
+        upstream_port: int,
+        max_concurrency: int,
+        request_timeout_s: float,
+        connect_retries: int,
+        retry_backoff_s: float,
+    ) -> None:
+        super().__init__(server_address, _SandboxProxyHandler)
+        self.upstream_base_url = f"http://127.0.0.1:{upstream_port}"
+        self.semaphore = threading.Semaphore(max_concurrency)
+        self.request_timeout_s = request_timeout_s
+        self.connect_retries = connect_retries
+        self.retry_backoff_s = retry_backoff_s
+        self.client = httpx.Client(timeout=httpx.Timeout(request_timeout_s, connect=5.0))
+
+
+class _SandboxProxyHandler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def do_DELETE(self) -> None:  # noqa: N802
+        self._proxy_request()
+
+    def do_GET(self) -> None:  # noqa: N802
+        self._proxy_request()
+
+    def do_HEAD(self) -> None:  # noqa: N802
+        self._proxy_request()
+
+    def do_OPTIONS(self) -> None:  # noqa: N802
+        self._proxy_request()
+
+    def do_PATCH(self) -> None:  # noqa: N802
+        self._proxy_request()
+
+    def do_POST(self) -> None:  # noqa: N802
+        self._proxy_request()
+
+    def do_PUT(self) -> None:  # noqa: N802
+        self._proxy_request()
+
+    def log_message(self, fmt: str, *args) -> None:
+        logger.debug("Sandbox proxy: " + fmt, *args)
+
+    def _proxy_request(self) -> None:
+        server = self.server
+        assert isinstance(server, _SandboxProxyServer)
+
+        content_length = int(self.headers.get("Content-Length", "0") or "0")
+        body = self.rfile.read(content_length) if content_length else b""
+        headers = {
+            key: value
+            for key, value in self.headers.items()
+            if key.lower() not in _HOP_BY_HOP_HEADERS and key.lower() not in {"content-length", "host"}
+        }
+
+        acquired = server.semaphore.acquire(timeout=server.request_timeout_s)
+        if not acquired:
+            self.send_error(503, "Sandbox proxy is saturated")
+            return
+
+        try:
+            upstream_response = None
+            last_error: Optional[Exception] = None
+            for attempt in range(server.connect_retries + 1):
+                try:
+                    upstream_response = server.client.request(
+                        self.command,
+                        f"{server.upstream_base_url}{self.path}",
+                        headers=headers,
+                        content=body or None,
+                    )
+                    break
+                except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout, httpx.RemoteProtocolError) as e:
+                    last_error = e
+                    if attempt >= server.connect_retries:
+                        break
+                    time.sleep(server.retry_backoff_s * (2**attempt))
+
+            if upstream_response is None:
+                logger.warning("Sandbox proxy upstream request failed: %s", last_error)
+                self.send_error(502, f"Sandbox proxy upstream request failed: {last_error}")
+                return
+
+            response_content = upstream_response.content
+            self.send_response(upstream_response.status_code)
+            for key, value in upstream_response.headers.items():
+                lower_key = key.lower()
+                if lower_key in _HOP_BY_HOP_HEADERS or lower_key in {"content-length", "date", "server"}:
+                    continue
+                self.send_header(key, value)
+            self.send_header("Content-Length", str(len(response_content)))
+            self.end_headers()
+            if self.command != "HEAD" and response_content:
+                self.wfile.write(response_content)
+        finally:
+            server.semaphore.release()
 
 
 def start_sandbox(
     venv_path: str,
     port: int = 6000,
+    proxy_port: int | None = None,
+    proxy_max_concurrency: int = 128,
+    proxy_request_timeout_s: float = _DEFAULT_PROXY_REQUEST_TIMEOUT,
+    proxy_connect_retries: int = 3,
+    proxy_retry_backoff_s: float = 0.25,
     extra_packages: list[str] | None = None,
     discovery_path: str | None = None,
 ) -> None:
@@ -72,10 +199,6 @@ def start_sandbox(
     global _sandbox_proc, _sandbox_python, _sandbox_port
 
     with _lock:
-        if _sandbox_proc is not None and _sandbox_proc.poll() is None:
-            logger.info("Sandbox already running (pid=%d)", _sandbox_proc.pid)
-            return
-
         python = os.path.join(venv_path, "bin", "python")
         pip = os.path.join(venv_path, "bin", "pip")
 
@@ -86,19 +209,42 @@ def start_sandbox(
         _sandbox_python = python
         _sandbox_port = port
 
-        _ensure_packages(python, pip, extra_packages or [])
-        _sandbox_proc = _spawn(python, port)
+        if _sandbox_proc is None or _sandbox_proc.poll() is not None:
+            _ensure_packages(python, pip, extra_packages or [])
+            _sandbox_proc = _spawn(python, port)
 
     _wait_for_health(port)
 
+    advertised_port = port
+    if proxy_port is not None and proxy_port != port:
+        _start_proxy(
+            proxy_port=proxy_port,
+            upstream_port=port,
+            max_concurrency=proxy_max_concurrency,
+            request_timeout_s=proxy_request_timeout_s,
+            connect_retries=proxy_connect_retries,
+            retry_backoff_s=proxy_retry_backoff_s,
+        )
+        _wait_for_health(proxy_port, timeout_s=_PROXY_HEALTH_TIMEOUT, check_sandbox_proc=False)
+        advertised_port = proxy_port
+
     if discovery_path:
-        _write_discovery(discovery_path, port)
+        _write_discovery(discovery_path, advertised_port)
 
     watchdog = threading.Thread(target=_watchdog, args=(python, port), daemon=True, name="sandbox-watchdog")
     watchdog.start()
 
+    atexit.register(_stop_proxy)
     atexit.register(_stop_sandbox)
-    logger.info("Sandbox ready on 127.0.0.1:%d (pid=%d)", port, _sandbox_proc.pid)
+    if advertised_port != port:
+        logger.info(
+            "Sandbox ready on 127.0.0.1:%d via throttling proxy 127.0.0.1:%d (pid=%d)",
+            port,
+            advertised_port,
+            _sandbox_proc.pid,
+        )
+    else:
+        logger.info("Sandbox ready on 127.0.0.1:%d (pid=%d)", port, _sandbox_proc.pid)
 
 
 _VENV_TIMEOUT = 600.0  # ng_run venv creation can take several minutes
@@ -171,17 +317,68 @@ def _spawn(python: str, port: int) -> subprocess.Popen:
     return proc
 
 
-def _wait_for_health(port: int) -> None:
+def _start_proxy(
+    proxy_port: int,
+    upstream_port: int,
+    max_concurrency: int,
+    request_timeout_s: float,
+    connect_retries: int,
+    retry_backoff_s: float,
+) -> None:
+    global _proxy_port, _proxy_server, _proxy_thread
+
+    old_server = None
+    old_thread = None
+    with _lock:
+        if _proxy_thread is not None and _proxy_thread.is_alive() and _proxy_port == proxy_port:
+            return
+
+        if _proxy_server is not None:
+            old_server = _proxy_server
+            old_thread = _proxy_thread
+            _proxy_server = None
+            _proxy_thread = None
+            _proxy_port = None
+
+    if old_server is not None:
+        old_server.shutdown()
+        old_server.server_close()
+        old_server.client.close()
+        if old_thread is not None:
+            old_thread.join(timeout=5)
+
+    with _lock:
+        _proxy_server = _SandboxProxyServer(
+            ("127.0.0.1", proxy_port),
+            upstream_port=upstream_port,
+            max_concurrency=max_concurrency,
+            request_timeout_s=request_timeout_s,
+            connect_retries=connect_retries,
+            retry_backoff_s=retry_backoff_s,
+        )
+        _proxy_port = proxy_port
+        _proxy_thread = threading.Thread(target=_proxy_server.serve_forever, daemon=True, name="sandbox-proxy")
+        _proxy_thread.start()
+        logger.info(
+            "Sandbox proxy listening on 127.0.0.1:%d -> 127.0.0.1:%d (max_concurrency=%d)",
+            proxy_port,
+            upstream_port,
+            max_concurrency,
+        )
+
+
+def _wait_for_health(port: int, timeout_s: float = _HEALTH_TIMEOUT, check_sandbox_proc: bool = True) -> None:
     url = f"http://127.0.0.1:{port}/health"
-    deadline = time.monotonic() + _HEALTH_TIMEOUT
+    deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
-        with _lock:
-            proc = _sandbox_proc
-        if proc and proc.poll() is not None:
-            log_tail = _tail_log(port)
-            raise RuntimeError(
-                f"Sandbox died during startup (exit={proc.returncode})\n--- sandbox log tail ---\n{log_tail}"
-            )
+        if check_sandbox_proc:
+            with _lock:
+                proc = _sandbox_proc
+            if proc and proc.poll() is not None:
+                log_tail = _tail_log(_sandbox_port)
+                raise RuntimeError(
+                    f"Sandbox died during startup (exit={proc.returncode})\n--- sandbox log tail ---\n{log_tail}"
+                )
         try:
             with httpx.Client(timeout=5.0) as client:
                 resp = client.get(url)
@@ -191,7 +388,7 @@ def _wait_for_health(port: int) -> None:
             pass
         time.sleep(_HEALTH_POLL)
 
-    raise TimeoutError(f"Sandbox not healthy after {_HEALTH_TIMEOUT}s on port {port}")
+    raise TimeoutError(f"Sandbox not healthy after {timeout_s}s on port {port}")
 
 
 def _tail_log(port: int, n: int = 30) -> str:
@@ -223,6 +420,30 @@ def _watchdog(python: str, port: int) -> None:
                 logger.info("Sandbox recovered (pid=%d)", _sandbox_proc.pid)
             except (RuntimeError, TimeoutError):
                 logger.error("Sandbox failed to recover after restart")
+
+
+def _stop_proxy() -> None:
+    global _proxy_port, _proxy_server, _proxy_thread
+    old_server = None
+    old_thread = None
+    with _lock:
+        if _proxy_server is not None:
+            old_server = _proxy_server
+            _proxy_server = None
+        if _proxy_thread is not None:
+            old_thread = _proxy_thread
+            _proxy_thread = None
+        old_port = _proxy_port
+        _proxy_port = None
+
+    if old_server is not None:
+        old_server.shutdown()
+        old_server.server_close()
+        old_server.client.close()
+    if old_thread is not None:
+        old_thread.join(timeout=5)
+    if old_port is not None:
+        logger.info("Sandbox proxy stopped")
 
 
 def _stop_sandbox() -> None:

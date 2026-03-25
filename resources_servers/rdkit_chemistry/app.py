@@ -59,8 +59,10 @@ Each row carries:
 
 from __future__ import annotations
 
+import ipaddress
 import math
 import re
+import socket
 import statistics
 from collections import defaultdict
 from typing import Any, Dict, List, Optional, Union
@@ -74,6 +76,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.global_config import get_first_server_config_dict
 
 
 # ---------------------------------------------------------------------------
@@ -92,8 +95,15 @@ _DOUBLE_PAREN_RE = re.compile(r"\(\(([^)]+)\)\)")
 
 class RDKitChemistryConfig(BaseResourcesServerConfig):
     sandbox_venv_path: str = ""
+    sandbox_proxy_port: int | None = 6001
+    sandbox_proxy_max_concurrency: int = 128
+    sandbox_proxy_request_timeout_s: float = 120.0
+    sandbox_proxy_connect_retries: int = 3
+    sandbox_proxy_retry_backoff_s: float = 0.25
     sandbox_extra_packages: list[str] = ["rdkit", "flask", "wcwidth"]
     sandbox_discovery_path: str = ""
+    require_local_ns_tools_colocation: bool = False
+    ns_tools_server_name: str = "rdkit_chemistry_ns_tools"
 
 
 # ---------------------------------------------------------------------------
@@ -262,12 +272,69 @@ def compute_reward(
 class RDKitChemistryResourcesServer(SimpleResourcesServer):
     config: RDKitChemistryConfig
 
+    def _resolve_host_for_compare(self, host: str) -> str:
+        if host in {"localhost", "127.0.0.1", "::1"}:
+            return "127.0.0.1"
+        if host in {"0.0.0.0", "::"}:
+            return socket.gethostbyname(socket.gethostname())
+        return socket.gethostbyname(host)
+
+    def _is_loopback_host(self, host: str) -> bool:
+        try:
+            return ipaddress.ip_address(self._resolve_host_for_compare(host)).is_loopback
+        except ValueError:
+            return host == "localhost"
+
+    def _validate_local_ns_tools_colocation(self) -> None:
+        if not self.config.require_local_ns_tools_colocation:
+            return
+
+        if not self.config.sandbox_venv_path:
+            raise RuntimeError(
+                "require_local_ns_tools_colocation=true requires sandbox_venv_path "
+                "to be set so the local sandbox can be started."
+            )
+
+        ns_tools_config = get_first_server_config_dict(
+            self.server_client.global_config_dict,
+            self.config.ns_tools_server_name,
+        )
+        sandbox_host = ns_tools_config.get("sandbox_host", "127.0.0.1")
+        expected_sandbox_port = self.config.sandbox_proxy_port or 6000
+        if not self._is_loopback_host(sandbox_host):
+            raise RuntimeError(
+                "require_local_ns_tools_colocation=true requires the paired ns_tools "
+                f"server to use a loopback sandbox_host, but got {sandbox_host!r}."
+            )
+        if int(ns_tools_config.get("sandbox_port", expected_sandbox_port)) != expected_sandbox_port:
+            raise RuntimeError(
+                "require_local_ns_tools_colocation=true requires the paired ns_tools "
+                f"server to use sandbox_port={expected_sandbox_port}, but got "
+                f"{ns_tools_config.get('sandbox_port')!r}."
+            )
+
+        rdkit_host = self._resolve_host_for_compare(self.config.host)
+        ns_tools_host = self._resolve_host_for_compare(ns_tools_config["host"])
+        if rdkit_host != ns_tools_host:
+            raise RuntimeError(
+                "Local sandbox mode requires rdkit_chemistry and its paired ns_tools "
+                "server to be colocated on the same host, "
+                f"but rdkit_chemistry resolved to {rdkit_host} and "
+                f"{self.config.ns_tools_server_name!r} resolved to {ns_tools_host}."
+            )
+
     def setup_webserver(self) -> FastAPI:
         if self.config.sandbox_venv_path:
             import sandbox_launcher
 
+            self._validate_local_ns_tools_colocation()
             sandbox_launcher.start_sandbox(
                 venv_path=self.config.sandbox_venv_path,
+                proxy_port=self.config.sandbox_proxy_port,
+                proxy_max_concurrency=self.config.sandbox_proxy_max_concurrency,
+                proxy_request_timeout_s=self.config.sandbox_proxy_request_timeout_s,
+                proxy_connect_retries=self.config.sandbox_proxy_connect_retries,
+                proxy_retry_backoff_s=self.config.sandbox_proxy_retry_backoff_s,
                 extra_packages=self.config.sandbox_extra_packages,
                 discovery_path=self.config.sandbox_discovery_path or None,
             )
