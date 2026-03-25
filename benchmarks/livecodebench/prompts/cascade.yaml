@@ -1,0 +1,11 @@
+system: |-
+  You are a helpful and harmless assistant.
+  
+  You are not allowed to use any tools.
+user: |-
+  {question_content}{starter_code}
+  
+  Write Python code to solve the problem. Please place the solution code in the following format:
+  ```python
+  # Your solution code here
+  ```
