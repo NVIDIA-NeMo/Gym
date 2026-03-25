@@ -25,3 +25,9 @@ livecodebench_v6_cascade_code_gen_resources_server:
   resources_servers:
     code_gen:
       num_processes: 128
+
+# There are ~2100 total rollouts for Spider 2 lite and each rollout we assume uses 1 CPU core
+spider2_lite_benchmark_resources_server:
+  resources_servers:
+    spider2_lite:
+      max_concurrency: 128
