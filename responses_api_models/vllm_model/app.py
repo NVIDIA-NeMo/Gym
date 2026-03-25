@@ -23,6 +23,7 @@ from typing import Any, ClassVar, Dict, List, Optional, Tuple, Union
 from uuid import uuid4
 
 import ray
+
 from aiohttp.client_exceptions import ClientResponseError
 from fastapi import Request
 from pydantic import BaseModel, Field
@@ -336,7 +337,6 @@ class VLLMModel(SimpleResponsesAPIModel):
         if self.config.chat_template_kwargs:
             body_dict["chat_template_kwargs"] = deepcopy(self.config.chat_template_kwargs)
 
-        print(f'[DEBUG chat_template_kwargs][gym->vllm_model] process={self.config.name} model={self.config.model} injected={body_dict.get("chat_template_kwargs")}')
 
         session_id = request.session[SESSION_ID_KEY]
         if session_id not in self._session_id_to_client:
@@ -403,46 +403,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         if self.config.extra_body:
             create_params = self.config.extra_body | create_params
 
-        try:
-            print(f'[DEBUG chat_template_kwargs][gym->vllm_model] process={self.config.name} sending.chat_template_kwargs={create_params.get("chat_template_kwargs")} add_generation_prompt={create_params.get("add_generation_prompt")}')
-            chat_completion_dict = await client.create_chat_completion(**create_params)
-        except ClientResponseError as e:
-            """
-            Example messages for out of context length:
-
-            1. https://github.com/vllm-project/vllm/blob/685c99ee77b4818dcdd15b30fe0e0eff0d5d22ec/vllm/entrypoints/openai/serving_engine.py#L914
-            ```json
-            {"object":"error","message":"This model\'s maximum context length is 32768 tokens. However, you requested 32818 tokens in the messages, Please reduce the length of the messages. None","type":"BadRequestError","param":null,"code":400}
-            ```
-            2. https://github.com/vllm-project/vllm/blob/685c99ee77b4818dcdd15b30fe0e0eff0d5d22ec/vllm/entrypoints/openai/serving_engine.py#L940
-            3. https://github.com/vllm-project/vllm/blob/685c99ee77b4818dcdd15b30fe0e0eff0d5d22ec/vllm/entrypoints/openai/serving_engine.py#L948
-            4. https://github.com/vllm-project/vllm/blob/685c99ee77b4818dcdd15b30fe0e0eff0d5d22ec/vllm/sampling_params.py#L463
-            """
-            result_content_str = e.response_content.decode()
-
-            is_out_of_context_length = e.status == 400 and (
-                "context length" in result_content_str or "max_tokens" in result_content_str
-            )
-            if is_out_of_context_length:
-                return NeMoGymChatCompletion(
-                    id="chtcmpl-123",
-                    object="chat.completion",
-                    created=int(time()),
-                    model=self.config.model,
-                    choices=[
-                        NeMoGymChoice(
-                            index=0,
-                            finish_reason="stop",
-                            message=NeMoGymChatCompletionMessage(
-                                role="assistant",
-                                content=None,
-                                tool_calls=None,
-                            ),
-                        )
-                    ],
-                )
-            else:
-                raise e
+        chat_completion_dict = await client.create_chat_completion(**create_params)
 
         choice_dict = chat_completion_dict["choices"][0]
         if self.config.uses_reasoning_parser:
@@ -771,7 +732,16 @@ class VLLMConverter(BaseModel):
         response_output = []
 
         content = raw_message.get("content") or ""
-        reasoning_matches, content = self._extract_reasoning_from_content(content)
+
+        if self.return_token_id_information:
+            # Training mode: keep <think>…</think> in the message content so that
+            # the text matches the generation token IDs.  Splitting reasoning into
+            # a separate output item causes NeMo-RL to lose the thinking text
+            # (the reasoning item carries no token IDs).
+            reasoning_matches = []
+        else:
+            reasoning_matches, content = self._extract_reasoning_from_content(content)
+
         if reasoning_matches:
             reasoning_item = NeMoGymResponseReasoningItem(
                 id=f"rs_{uuid4().hex}",
@@ -784,8 +754,6 @@ class VLLMConverter(BaseModel):
             response_output.append(reasoning_item)
 
         tool_calls_raw = raw_message.get("tool_calls", []) or []
-        # We need to return at least one output item. When the model decides to just stop with no chat or tool calls
-        # We just add an output item with empty or null content here. This is prevalent e.g. in the case of base models that may not be the most reliable since they have not been instruction tuned.
         has_empty_output = not (response_output or tool_calls_raw)
 
         if content or has_empty_output:
