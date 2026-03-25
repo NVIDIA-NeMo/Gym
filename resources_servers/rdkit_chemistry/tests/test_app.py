@@ -4,16 +4,21 @@
 
 import sys
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
+from omegaconf import OmegaConf
 
 
 sys.path.insert(0, str(Path(__file__).parents[3]))  # repo root
 
 from resources_servers.rdkit_chemistry.app import (
+    RDKitChemistryConfig,
+    RDKitChemistryResourcesServer,
     compute_reward,
     extract_predicted_value,
 )
+from nemo_gym.server_utils import ServerClient
 
 
 # ---------------------------------------------------------------------------
@@ -199,3 +204,99 @@ class TestComputeRewardFloat:
 
     def test_nan_prediction(self):
         assert compute_reward(float("nan"), 1.0, "float") == 0.0
+
+
+class TestLocalNSToolsColocation:
+    def test_rejects_cross_host_pairing(self):
+        config = RDKitChemistryConfig(
+            host="10.0.0.1",
+            port=8000,
+            entrypoint="app.py",
+            name="rdkit_chemistry",
+            domain="knowledge",
+            sandbox_venv_path="/tmp/ns_tools/.venv",
+            require_local_ns_tools_colocation=True,
+        )
+        server_client = MagicMock(spec=ServerClient)
+        server_client.global_config_dict = OmegaConf.create(
+            {
+                "rdkit_chemistry_ns_tools": {
+                    "resources_servers": {
+                        "ns_tools": {
+                            "host": "10.0.0.2",
+                            "port": 8001,
+                            "entrypoint": "app.py",
+                            "domain": "agent",
+                            "sandbox_host": "127.0.0.1",
+                        }
+                    }
+                }
+            }
+        )
+        server = RDKitChemistryResourcesServer(config=config, server_client=server_client)
+
+        with pytest.raises(RuntimeError, match="same host"):
+            server._validate_local_ns_tools_colocation()
+
+    def test_allows_same_host_pairing(self):
+        config = RDKitChemistryConfig(
+            host="10.0.0.1",
+            port=8000,
+            entrypoint="app.py",
+            name="rdkit_chemistry",
+            domain="knowledge",
+            sandbox_venv_path="/tmp/ns_tools/.venv",
+            require_local_ns_tools_colocation=True,
+        )
+        server_client = MagicMock(spec=ServerClient)
+        server_client.global_config_dict = OmegaConf.create(
+            {
+                "rdkit_chemistry_ns_tools": {
+                    "resources_servers": {
+                        "ns_tools": {
+                            "host": "10.0.0.1",
+                            "port": 8001,
+                            "entrypoint": "app.py",
+                            "domain": "agent",
+                            "sandbox_host": "127.0.0.1",
+                        }
+                    }
+                }
+            }
+        )
+        server = RDKitChemistryResourcesServer(config=config, server_client=server_client)
+
+        server._validate_local_ns_tools_colocation()
+
+    def test_rejects_wrong_ns_tools_sandbox_port(self):
+        config = RDKitChemistryConfig(
+            host="10.0.0.1",
+            port=8000,
+            entrypoint="app.py",
+            name="rdkit_chemistry",
+            domain="knowledge",
+            sandbox_venv_path="/tmp/ns_tools/.venv",
+            sandbox_proxy_port=6001,
+            require_local_ns_tools_colocation=True,
+        )
+        server_client = MagicMock(spec=ServerClient)
+        server_client.global_config_dict = OmegaConf.create(
+            {
+                "rdkit_chemistry_ns_tools": {
+                    "resources_servers": {
+                        "ns_tools": {
+                            "host": "10.0.0.1",
+                            "port": 8001,
+                            "entrypoint": "app.py",
+                            "domain": "agent",
+                            "sandbox_host": "127.0.0.1",
+                            "sandbox_port": 6000,
+                        }
+                    }
+                }
+            }
+        )
+        server = RDKitChemistryResourcesServer(config=config, server_client=server_client)
+
+        with pytest.raises(RuntimeError, match="sandbox_port=6001"):
+            server._validate_local_ns_tools_colocation()
