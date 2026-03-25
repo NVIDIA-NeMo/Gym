@@ -6,10 +6,10 @@ tavily_search_resources_server:
       debug: false
       tavily_api_key: ???
       exclude_domains_file_path: ???
-      use_judge: true
+      use_judge: false
       judge_model_server:
         type: responses_api_models
-        name: judge_model
+        name: policy_model
       judge_responses_create_params:
         input: []
       verified: false
