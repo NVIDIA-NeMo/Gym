@@ -180,24 +180,20 @@ class Spider2LiteResourcesServer(SimpleResourcesServer):
                 failure_reason = FailureCode.NONE if match else FailureCode.EXECUTION_ERROR
 
         elif body.gold_result:
-            try:
-                pred_rows = await execute_sqlite_async(
-                    db_path,
-                    extracted_sql,
-                    self._semaphore,
-                    timeout_s=self.config.sql_execution_timeout_s,
-                )
-                gold_sets = [[tuple(row) for row in gold] for gold in body.gold_result]
-                execution_match = compare_multi_result_sets(
-                    gold_sets=gold_sets,
-                    pred=pred_rows,
-                    multi_condition_cols=body.condition_cols,
-                    ignore_order=body.ignore_order,
-                )
-                failure_reason = FailureCode.NONE if execution_match else FailureCode.EXECUTION_ERROR
-            except Exception as e:
-                failure_reason = FailureCode.EXECUTION_ERROR
-                logger.warning("pred execution error: %s %s", type(e).__name__, e)
+            pred_rows = await execute_sqlite_async(
+                db_path,
+                extracted_sql,
+                self._semaphore,
+                timeout_s=self.config.sql_execution_timeout_s,
+            )
+            gold_sets = [[tuple(row) for row in gold] for gold in body.gold_result]
+            execution_match = compare_multi_result_sets(
+                gold_sets=gold_sets,
+                pred=pred_rows,
+                multi_condition_cols=body.condition_cols,
+                ignore_order=body.ignore_order,
+            )
+            failure_reason = FailureCode.NONE if execution_match else FailureCode.EXECUTION_ERROR
         else:
             raise ValueError("verifier_metadata must contain either 'gold_sql' or 'gold_result'")
 
