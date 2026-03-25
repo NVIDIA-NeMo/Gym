@@ -31,7 +31,6 @@ from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
-    BaseVerifyResponse,
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
@@ -118,7 +117,7 @@ class TavilySearchMetrics(BaseModel):
     async_tavily_calls: List[TavilySearchSingleAsyncTavilyMetrics] = Field(default_factory=list)
 
 
-class TavilySearchVerifyResponse(BaseVerifyResponse, JudgeEvaluation):
+class TavilySearchVerifyResponse(TavilySearchVerifyRequest, JudgeEvaluation):
     num_tool_calls: int
     metrics: TavilySearchMetrics
 
