@@ -1,0 +1,27 @@
+config_paths:
+  - benchmarks/browsecomp/config.yaml
+  - benchmarks/gpqa/config.yaml
+  - benchmarks/livecodebench/v6_2408_2505/cascade.yaml
+  - benchmarks/spider2_lite/config.yaml
+
+# Please put the following secrets into the local env.yaml
+# tavily_search_resources_server:
+#   resources_servers:
+#     tavily_search:
+#       tavily_api_key: ???
+#       exclude_domains_file_path: ???
+# Qwen3-235B-A22B-Instruct-2507-FP8:
+#   responses_api_models:
+#     vllm_model:
+#       model: ???  # The actual judge model needs to be Qwen/Qwen3-235B-A22B-Instruct-2507-FP8, but the name will probably differ based on endpoint.
+#       base_url: ???
+#       api_key: ???
+
+# Set various resource limits. We assume this is run using at least 8 GPU nodes with 128 CPU cores on each node
+global_aiohttp_connector_limit_per_host: 16384
+
+# There are ~1500 total rollouts to do for LCBv6 and each rollout we assume uses 1 CPU core
+livecodebench_v6_cascade_code_gen_resources_server:
+  resources_servers:
+    code_gen:
+      num_processes: 128
