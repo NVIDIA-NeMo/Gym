@@ -69,6 +69,7 @@ def _extract_last_assistant_text(body: BaseVerifyRequest) -> str:
                 texts.append(content)
     return "\n".join(texts).strip()
 
+
 def _normalize_expected_answers(
     *,
     expected_answer: Optional[str | list[str]],
@@ -107,6 +108,7 @@ def _extract_options_and_expected_answers(
             expected_answer=body.expected_answer,
         ),
     )
+
 
 def _get_allowed_letters_from_options(
     options: Optional[list[dict[str, str]]],
