@@ -6,6 +6,11 @@ tavily_search_resources_server:
     tavily_search:
       tavily_api_key: ???
       exclude_domains_file_path: ???
+Qwen3-235B-A22B-Instruct-2507-FP8:
+  responses_api_models:
+    vllm_model:
+      base_url: ???
+      api_key: ???
 ```
 
 2. Prepare the benchmark dataset
