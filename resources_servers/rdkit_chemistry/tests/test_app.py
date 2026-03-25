@@ -4,6 +4,7 @@
 
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -12,6 +13,7 @@ from omegaconf import OmegaConf
 
 sys.path.insert(0, str(Path(__file__).parents[3]))  # repo root
 
+from resources_servers.rdkit_chemistry import sandbox_launcher
 from resources_servers.rdkit_chemistry.app import (
     RDKitChemistryConfig,
     RDKitChemistryResourcesServer,
@@ -300,3 +302,126 @@ class TestLocalNSToolsColocation:
 
         with pytest.raises(RuntimeError, match="sandbox_port=6001"):
             server._validate_local_ns_tools_colocation()
+
+    def test_setup_webserver_passes_startup_probe_config(self, monkeypatch):
+        config = RDKitChemistryConfig(
+            host="10.0.0.1",
+            port=8000,
+            entrypoint="app.py",
+            name="rdkit_chemistry",
+            domain="knowledge",
+            sandbox_venv_path="/tmp/ns_tools/.venv",
+            sandbox_proxy_port=6001,
+            sandbox_startup_probe_enabled=True,
+            sandbox_startup_probe_timeout_s=21.0,
+            require_local_ns_tools_colocation=True,
+        )
+        server_client = MagicMock(spec=ServerClient)
+        server_client.global_config_dict = OmegaConf.create(
+            {
+                "rdkit_chemistry_ns_tools": {
+                    "resources_servers": {
+                        "ns_tools": {
+                            "host": "10.0.0.1",
+                            "port": 8001,
+                            "entrypoint": "app.py",
+                            "domain": "agent",
+                            "sandbox_host": "127.0.0.1",
+                            "sandbox_port": 6001,
+                        }
+                    }
+                }
+            }
+        )
+        server = RDKitChemistryResourcesServer(config=config, server_client=server_client)
+        start_kwargs = {}
+
+        def fake_start_sandbox(**kwargs):
+            start_kwargs.update(kwargs)
+
+        monkeypatch.setitem(sys.modules, "sandbox_launcher", SimpleNamespace(start_sandbox=fake_start_sandbox))
+        monkeypatch.setattr("resources_servers.rdkit_chemistry.app.SimpleResourcesServer.setup_webserver", lambda self: "web")
+
+        assert server.setup_webserver() == "web"
+        assert start_kwargs["startup_probe_enabled"] is True
+        assert start_kwargs["startup_probe_timeout_s"] == 21.0
+
+
+class TestSandboxStartupProbe:
+    def test_runs_stateful_rdkit_probe(self, monkeypatch):
+        posted_payloads = []
+        deleted_urls = []
+
+        class FakeResponse:
+            def __init__(self, payload):
+                self.payload = payload
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return self.payload
+
+        class FakeClient:
+            def __init__(self, *args, **kwargs):
+                self.probe_value = None
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def post(self, url, headers, json):
+                posted_payloads.append((url, headers, json))
+                code = json["generated_code"]
+                if "probe_value = 42" in code:
+                    self.probe_value = 42
+                    return FakeResponse({"process_status": "completed", "stdout": "42\n", "stderr": ""})
+                if "probe_value + 1" in code:
+                    return FakeResponse(
+                        {"process_status": "completed", "stdout": f"{self.probe_value + 1}\n", "stderr": ""}
+                    )
+                if "Chem.MolFromSmiles('CCO').GetNumAtoms()" in code:
+                    return FakeResponse({"process_status": "completed", "stdout": "3\n", "stderr": ""})
+                raise AssertionError(f"Unexpected probe code: {code}")
+
+            def delete(self, url):
+                deleted_urls.append(url)
+                return FakeResponse({})
+
+        monkeypatch.setattr(sandbox_launcher.httpx, "Client", FakeClient)
+        sandbox_launcher._run_startup_probe(6001, timeout_s=9.0)
+
+        assert len(posted_payloads) == 3
+        assert all(url == "http://127.0.0.1:6001/execute" for url, _, _ in posted_payloads)
+        assert deleted_urls == [posted_payloads[0][0].replace("/execute", f"/sessions/{posted_payloads[0][1]['X-Session-ID']}")]
+
+    def test_raises_when_probe_fails(self, monkeypatch):
+        class FakeResponse:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"process_status": "error", "stdout": "", "stderr": "boom"}
+
+        class FakeClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def post(self, url, headers, json):
+                return FakeResponse()
+
+            def delete(self, url):
+                return FakeResponse()
+
+        monkeypatch.setattr(sandbox_launcher.httpx, "Client", FakeClient)
+
+        with pytest.raises(RuntimeError, match="Sandbox startup probe failed"):
+            sandbox_launcher._run_startup_probe(6001, timeout_s=9.0)

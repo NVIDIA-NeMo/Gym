@@ -100,6 +100,8 @@ class RDKitChemistryConfig(BaseResourcesServerConfig):
     sandbox_proxy_request_timeout_s: float = 120.0
     sandbox_proxy_connect_retries: int = 3
     sandbox_proxy_retry_backoff_s: float = 0.25
+    sandbox_startup_probe_enabled: bool = True
+    sandbox_startup_probe_timeout_s: float = 15.0
     sandbox_extra_packages: list[str] = ["rdkit", "flask", "wcwidth"]
     sandbox_discovery_path: str = ""
     require_local_ns_tools_colocation: bool = False
@@ -335,6 +337,8 @@ class RDKitChemistryResourcesServer(SimpleResourcesServer):
                 proxy_request_timeout_s=self.config.sandbox_proxy_request_timeout_s,
                 proxy_connect_retries=self.config.sandbox_proxy_connect_retries,
                 proxy_retry_backoff_s=self.config.sandbox_proxy_retry_backoff_s,
+                startup_probe_enabled=self.config.sandbox_startup_probe_enabled,
+                startup_probe_timeout_s=self.config.sandbox_startup_probe_timeout_s,
                 extra_packages=self.config.sandbox_extra_packages,
                 discovery_path=self.config.sandbox_discovery_path or None,
             )

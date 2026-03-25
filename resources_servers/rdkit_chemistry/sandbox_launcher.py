@@ -34,6 +34,7 @@ import socket
 import subprocess
 import threading
 import time
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Optional
@@ -48,6 +49,7 @@ _HEALTH_TIMEOUT = 120.0
 _PROXY_HEALTH_TIMEOUT = 30.0
 _WATCHDOG_INTERVAL = 10.0
 _DEFAULT_PROXY_REQUEST_TIMEOUT = 120.0
+_DEFAULT_STARTUP_PROBE_TIMEOUT = 15.0
 _HOP_BY_HOP_HEADERS = {
     "connection",
     "keep-alive",
@@ -66,6 +68,11 @@ _sandbox_port: int = 6000
 _proxy_port: int | None = None
 _proxy_server: "_SandboxProxyServer | None" = None
 _proxy_thread: threading.Thread | None = None
+_STARTUP_PROBE_STEPS = (
+    ("basic execution", "probe_value = 42\nprint(probe_value)", "42"),
+    ("stateful session reuse", "print(probe_value + 1)", "43"),
+    ("rdkit import", "from rdkit import Chem\nprint(Chem.MolFromSmiles('CCO').GetNumAtoms())", "3"),
+)
 
 
 class _SandboxProxyServer(ThreadingHTTPServer):
@@ -181,6 +188,8 @@ def start_sandbox(
     proxy_request_timeout_s: float = _DEFAULT_PROXY_REQUEST_TIMEOUT,
     proxy_connect_retries: int = 3,
     proxy_retry_backoff_s: float = 0.25,
+    startup_probe_enabled: bool = True,
+    startup_probe_timeout_s: float = _DEFAULT_STARTUP_PROBE_TIMEOUT,
     extra_packages: list[str] | None = None,
     discovery_path: str | None = None,
 ) -> None:
@@ -228,6 +237,9 @@ def start_sandbox(
         _wait_for_health(proxy_port, timeout_s=_PROXY_HEALTH_TIMEOUT, check_sandbox_proc=False)
         advertised_port = proxy_port
 
+    if startup_probe_enabled:
+        _run_startup_probe(advertised_port, timeout_s=startup_probe_timeout_s)
+
     if discovery_path:
         _write_discovery(discovery_path, advertised_port)
 
@@ -245,6 +257,45 @@ def start_sandbox(
         )
     else:
         logger.info("Sandbox ready on 127.0.0.1:%d (pid=%d)", port, _sandbox_proc.pid)
+
+
+def _run_startup_probe(port: int, timeout_s: float = _DEFAULT_STARTUP_PROBE_TIMEOUT) -> None:
+    """Issue real sandbox execution requests before serving rollout traffic."""
+    session_id = f"rdkit-startup-probe-{uuid.uuid4().hex}"
+    base_url = f"http://127.0.0.1:{port}"
+    timeout = httpx.Timeout(timeout_s, connect=5.0)
+    headers = {"X-Session-ID": session_id}
+
+    with httpx.Client(timeout=timeout) as client:
+        for step_name, generated_code, expected_stdout in _STARTUP_PROBE_STEPS:
+            response = client.post(
+                f"{base_url}/execute",
+                headers=headers,
+                json={
+                    "generated_code": generated_code,
+                    "timeout": timeout_s,
+                    "language": "ipython",
+                    "traceback_verbosity": "Plain",
+                },
+            )
+            response.raise_for_status()
+            result = response.json()
+
+            process_status = result.get("process_status")
+            stdout = (result.get("stdout") or "").strip()
+            stderr = (result.get("stderr") or "").strip()
+            if process_status != "completed" or stdout != expected_stdout or stderr:
+                raise RuntimeError(
+                    "Sandbox startup probe failed during "
+                    f"{step_name!r}: process_status={process_status!r}, stdout={stdout!r}, stderr={stderr!r}"
+                )
+
+        try:
+            client.delete(f"{base_url}/sessions/{session_id}")
+        except httpx.HTTPError:
+            logger.debug("Best-effort sandbox probe session cleanup failed", exc_info=True)
+
+    logger.info("Sandbox startup probe passed on 127.0.0.1:%d", port)
 
 
 _VENV_TIMEOUT = 600.0  # ng_run venv creation can take several minutes
