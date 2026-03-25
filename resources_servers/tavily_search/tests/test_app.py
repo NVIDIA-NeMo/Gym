@@ -53,8 +53,6 @@ class TestApp:
             exclude_domains_file_path=os.path.join(_TEST_DIR, "dummy_exclude_domains_file.json"),
             judge_model_server=ModelServerRef(type="responses_api_models", name="judge"),
             judge_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
-            max_retries=2,
-            retry_delay_seconds=0,  # No delay in tests
         )
 
     @fixture
