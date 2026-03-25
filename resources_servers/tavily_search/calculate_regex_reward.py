@@ -16,7 +16,8 @@
 import json
 from argparse import ArgumentParser
 
-from resources_servers.tavily_search.app import TavilySearchResourcesServer, TavilySearchVerifyRequest
+from nemo_gym.openai_utils import NeMoGymResponse
+from resources_servers.tavily_search.app import TavilySearchResourcesServer
 
 
 parser = ArgumentParser()
@@ -37,11 +38,14 @@ regex_rewards = []
 judge_rewards = []
 alignments = []
 for d in dicts:
-    verify_request = TavilySearchVerifyRequest.model_validate(d)
-    response = verify_request.response.output_text
+    response = NeMoGymResponse.model_validate(d["response"])
+
+    judge_prompt = d["judge_response_create_params"]["input"][0]["content"]
+    correct_answer = judge_prompt.split("[correct_answer]: ")[1].split("\n")[0]
+
     regex_reward = TavilySearchResourcesServer._verify_answer_with_regex(
-        DummySelf, ground_truth=verify_request.ground_truth, response=response
-    )
+        DummySelf, ground_truth=correct_answer, response=response.output_text
+    ).reward
 
     judge_reward = d["reward"]
 
