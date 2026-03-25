@@ -149,7 +149,8 @@ class TavilySearchAIOHTTPClient(BaseModel):
             "data": content,
         }
 
-        max_num_tries = 3  # Hardcode for now
+        MAX_NUM_TRIES = 3  # Hardcode for now
+        max_num_tries = MAX_NUM_TRIES
         tries = 0
         while tries < max_num_tries:
             tries += 1
@@ -158,7 +159,7 @@ class TavilySearchAIOHTTPClient(BaseModel):
             if response.status in RETRY_ERROR_CODES:
                 # If we hit a rate limit, we don't want to hit max num tries, so we increment both.
                 if response.status in RATE_LIMIT_ERROR_CODES:
-                    tries += 1
+                    max_num_tries += 1
 
                 content = (await response.content.read()).decode()
                 print(
