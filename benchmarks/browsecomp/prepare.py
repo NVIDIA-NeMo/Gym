@@ -138,6 +138,7 @@ def main():
 
     print("Decrypting and converting to NeMo Gym format ...")
     rl_samples = [map_browsecomp_sample_to_rl_sample(row) for row in rows]
+    assert len(rl_samples) == 1266, f"Expected 1266 samples, got {len(rl_samples)}"
 
     os.makedirs(os.path.dirname(os.path.abspath(args.output_path)), exist_ok=True)
     with open(args.output_path, "w") as f:
