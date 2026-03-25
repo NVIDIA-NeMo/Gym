@@ -1,0 +1,64 @@
+perplexity_summarizer_resources_server:
+  resources_servers:
+    perplexity_summarizer:
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: Search-augmented QA with Perplexity Search API and LLM-as-a-judge
+      value: Improve factual grounding with search augmentation
+      perplexity_api_key: ${perplexity_api_key}
+      search_max_concurrency: 20
+      search_rate_limit_qps: 45
+      max_search_results: 10
+      max_tokens_per_page: 500
+      judge_type: llm
+      judge_model_server:
+        type: responses_api_models
+        name: perplexity_summarizer_judge_model
+      judge_responses_create_params:
+        input: []
+      judge_temperature: 0.0
+      judge_top_p: null
+      judge_max_output_tokens: 8192
+      judge_reasoning_effort: null
+      judge_endpoint_max_concurrency: 64
+
+perplexity_summarizer_judge_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: ${judge_base_url}
+      api_key: ${judge_api_key}
+      model: ${judge_model_name}
+      return_token_id_information: false
+      uses_reasoning_parser: true
+
+perplexity_summarizer:
+  responses_api_agents:
+    perplexity_summarizer_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: perplexity_summarizer_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      max_tool_calls: 3
+      bad_words:
+      - "<tool_call>"
+      - "</tool_call>"
+      temperature: 1.0
+      top_p: 1.0
+      max_output_tokens: 32768
+      datasets:
+      - name: perplexity_facts_grounding
+        type: validation
+        jsonl_fpath: resources_servers/perplexity_summarizer/data/perplexity_facts_grounding.jsonl
+        gitlab_identifier:
+          dataset_name: perplexity_facts_grounding
+          version: 0.0.2
+          artifact_fpath: perplexity_facts_grounding.jsonl
+        license: "NVIDIA Internal Use Only, Do Not Distribute"
+      - name: perplexity_facts_grounding_example
+        type: example
+        jsonl_fpath: resources_servers/perplexity_summarizer/data/perplexity_facts_grounding_example.jsonl

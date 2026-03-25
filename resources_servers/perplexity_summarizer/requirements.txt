@@ -1,0 +1,3 @@
+-e nemo-gym[dev] @ ../../
+perplexityai>=0.1.0
+aiolimiter>=1.1.0
