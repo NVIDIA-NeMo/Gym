@@ -134,9 +134,6 @@ class TestGlobalConfig:
         monkeypatch.setattr(nemo_gym.server_utils.OmegaConf, "load", omegaconf_load_mock)
 
         global_config_dict = get_global_config_dict()
-        # _resolved_config_paths contains machine-specific absolute paths; check separately.
-        resolved = global_config_dict.pop("_resolved_config_paths")
-        assert len(resolved) == 2
         assert (
             self._default_global_config_dict_values
             | {
@@ -186,8 +183,6 @@ class TestGlobalConfig:
         monkeypatch.setattr(nemo_gym.server_utils.OmegaConf, "load", omegaconf_load_mock)
 
         global_config_dict = get_global_config_dict()
-        resolved = global_config_dict.pop("_resolved_config_paths")
-        assert len(resolved) == 4
         assert (
             self._default_global_config_dict_values
             | {
@@ -801,9 +796,8 @@ class TestGlobalConfig:
         (tmp_path / "my_config.yaml").write_text("my_key: from_cwd\n")
         monkeypatch.chdir(tmp_path)
 
-        config_paths, extra_configs, resolved_config_paths = parser.load_extra_config_paths(["my_config.yaml"])
+        config_paths, extra_configs = parser.load_extra_config_paths(["my_config.yaml"])
         assert extra_configs[0]["my_key"] == "from_cwd"
-        assert len(resolved_config_paths) == 1
 
     def test_load_extra_config_paths_falls_back_to_parent_dir(self, monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
         parser = GlobalConfigDictParser()
@@ -817,7 +811,7 @@ class TestGlobalConfig:
         monkeypatch.chdir(cwd_dir)
         monkeypatch.setattr(nemo_gym.global_config, "PARENT_DIR", parent_dir)
 
-        config_paths, extra_configs, resolved_config_paths = parser.load_extra_config_paths(["my_config.yaml"])
+        config_paths, extra_configs = parser.load_extra_config_paths(["my_config.yaml"])
         assert extra_configs[0]["my_key"] == "from_parent"
 
     def test_env_yaml_loaded_from_cwd(self, monkeypatch: MonkeyPatch, tmp_path: Path) -> None:

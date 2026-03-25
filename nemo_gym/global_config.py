@@ -65,7 +65,6 @@ DRY_RUN_KEY_NAME = "dry_run"
 UV_CACHE_DIR_KEY_NAME = "uv_cache_dir"
 UV_VENV_DIR_KEY_NAME = "uv_venv_dir"
 INHERIT_FROM_KEY_NAME = "_inherit_from"
-RESOLVED_CONFIG_PATHS_KEY_NAME = "_resolved_config_paths"
 NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     CONFIG_PATHS_KEY_NAME,
     ENTRYPOINT_KEY_NAME,
@@ -86,7 +85,6 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     UV_CACHE_DIR_KEY_NAME,
     UV_VENV_DIR_KEY_NAME,
     INHERIT_FROM_KEY_NAME,
-    RESOLVED_CONFIG_PATHS_KEY_NAME,
 ]
 
 # Data keys
@@ -116,25 +114,6 @@ def get_wandb_run() -> Optional[Run]:
 
 # OmegaConf new resolvers
 OmegaConf.register_new_resolver("inherit_from", lambda a: f"${{inherit_from:{a}}}")
-
-
-def _resolve_data_paths_in_config(config, base_dir: Path) -> None:
-    """For external configs (outside PARENT_DIR), resolve relative jsonl_fpath values to absolute paths.
-
-    This ensures that data file references in configs defined outside the Gym root
-    point to the correct location on disk, using base_dir as the resolution root.
-    """
-    if isinstance(config, DictConfig):
-        with open_dict(config):
-            for key, value in list(config.items()):
-                if key == "jsonl_fpath" and isinstance(value, str) and not Path(value).is_absolute():
-                    config[key] = str((base_dir / value).resolve())
-                elif isinstance(value, DictConfig):
-                    _resolve_data_paths_in_config(value, base_dir)
-                elif isinstance(value, ListConfig):
-                    for item in value:
-                        if isinstance(item, DictConfig):
-                            _resolve_data_paths_in_config(item, base_dir)
 
 
 class GlobalConfigDictParserConfig(BaseModel):
@@ -197,16 +176,14 @@ class GlobalConfigDictParser(BaseModel):
 
         return global_config_dict
 
-    def load_extra_config_paths(self, config_paths: List[str]) -> Tuple[List[str], List[DictConfig], List[str]]:
+    def load_extra_config_paths(self, config_paths: List[str]) -> Tuple[List[str], List[DictConfig]]:
         """
-        Returns the new total config_paths, the extra configs, and the resolved absolute config file paths.
+        Returns the new total config_paths and the extra configs
         """
         config_paths = config_paths.copy()
 
         extra_configs: List[DictConfig] = []
-        resolved_config_paths: List[str] = []
         duplicate_config_paths: List[str] = []
-        parent_dir_resolved = PARENT_DIR.resolve()
         for config_path in config_paths:
             config_path = Path(config_path)
             # Check cwd first for user's local configs, then install location
@@ -214,19 +191,7 @@ class GlobalConfigDictParser(BaseModel):
                 cwd_path = Path.cwd() / config_path
                 config_path = cwd_path if cwd_path.exists() else PARENT_DIR / config_path
 
-            resolved_path = config_path.resolve()
-            resolved_config_paths.append(str(resolved_path))
-
             extra_config = OmegaConf.load(config_path)
-
-            # For external configs (not under PARENT_DIR), resolve relative data paths
-            # so that jsonl_fpath values point to the correct external location.
-            if not str(resolved_path).startswith(str(parent_dir_resolved)):
-                # Convention: config at <base>/<type>/<name>/configs/<file>.yaml
-                # base_dir is the root that contains the <type>/<name> directory tree.
-                config_base_dir = resolved_path.parent.parent.parent.parent
-                _resolve_data_paths_in_config(extra_config, config_base_dir)
-
             for new_config_path in extra_config.get(CONFIG_PATHS_KEY_NAME) or []:
                 if new_config_path not in config_paths:
                     config_paths.append(new_config_path)
@@ -241,7 +206,7 @@ In cases like these, you may want to consider using the `inherit_from` OmegaConf
 Duplicate config paths:
 {duplicate_config_paths_str}""")
 
-        return config_paths, extra_configs, resolved_config_paths
+        return config_paths, extra_configs
 
     def filter_for_server_instance_configs(self, global_config_dict: DictConfig) -> List[ServerInstanceConfig]:
         # Get the non-reserved top level items
@@ -400,7 +365,7 @@ Duplicate config paths:
         config_paths = merged_config_for_config_paths.get(CONFIG_PATHS_KEY_NAME) or []
         config_paths = ta.validate_python(config_paths)
 
-        config_paths, extra_configs, resolved_config_paths = self.load_extra_config_paths(config_paths)
+        config_paths, extra_configs = self.load_extra_config_paths(config_paths)
 
         # Dot env overrides previous configs
         extra_configs.append(dotenv_extra_config)
@@ -410,11 +375,9 @@ Duplicate config paths:
         global_config_dict = OmegaConf.merge(*extra_configs, global_config_dict)
 
         # Update the config paths after postprocessing
-        with open_dict(global_config_dict):
-            if config_paths:
+        if config_paths:
+            with open_dict(global_config_dict):
                 global_config_dict[CONFIG_PATHS_KEY_NAME] = config_paths
-            if resolved_config_paths:
-                global_config_dict[RESOLVED_CONFIG_PATHS_KEY_NAME] = resolved_config_paths
 
         self._recursively_swap_keys(global_config_dict)
 

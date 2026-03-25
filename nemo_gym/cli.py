@@ -47,7 +47,6 @@ from nemo_gym.global_config import (
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
     NEMO_GYM_RESERVED_TOP_LEVEL_KEYS,
-    RESOLVED_CONFIG_PATHS_KEY_NAME,
     GlobalConfigDictParserConfig,
     get_global_config_dict,
 )
@@ -165,16 +164,6 @@ class RunHelper:  # pragma: no cover
             assert not entrypoint_fpath.is_absolute()
 
             dir_path = PARENT_DIR / Path(first_key, second_key)
-            if not dir_path.exists():
-                # For external servers, derive dir from the resolved config path.
-                # Convention: config at <base>/<type>/<name>/configs/<file>.yaml
-                # Server dir = config_path.parent.parent
-                for rcp in global_config_dict.get(RESOLVED_CONFIG_PATHS_KEY_NAME, []):
-                    rcp_path = Path(rcp)
-                    candidate = rcp_path.parent.parent
-                    if candidate.name == second_key and candidate.parent.name == first_key:
-                        dir_path = candidate
-                        break
 
             command = f"""{setup_env_command(dir_path, global_config_dict, top_level_path)} \\
     && {NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME}={escaped_config_dict_yaml_str} \\
