@@ -77,13 +77,13 @@ class TestCLI:
     def test_init_resources_server_includes_domain(self) -> None:
         """Test that init_resources_server creates a config with the required domain field."""
 
-        # Use a temp directory but stay in the project root for access to template files
         server_name = "test_cli_server"
         entrypoint = f"resources_servers/{server_name}"
+        server_path = Path(entrypoint).resolve()
 
         # Clean up any existing test server directory
-        if Path(entrypoint).exists():
-            shutil.rmtree(entrypoint)
+        if server_path.exists():
+            shutil.rmtree(server_path)
 
         try:
             with MonkeyPatch.context() as mp:
@@ -98,7 +98,7 @@ class TestCLI:
                 init_resources_server()
 
                 # Verify the generated config file exists
-                config_file = Path(entrypoint) / "configs" / f"{server_name}.yaml"
+                config_file = server_path / "configs" / f"{server_name}.yaml"
                 assert config_file.exists(), f"Config file not created at {config_file}"
 
                 # Load and verify the config
@@ -130,5 +130,5 @@ class TestCLI:
                 assert instance_config is not None
         finally:
             # Clean up the test server directory
-            if Path(entrypoint).exists():
-                shutil.rmtree(entrypoint)
+            if server_path.exists():
+                shutil.rmtree(server_path)
