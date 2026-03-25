@@ -14,9 +14,9 @@
 # limitations under the License.
 """Prepare Spider2 Lite benchmark data."""
 
-import json
 from pathlib import Path
 
+from nemo_gym.gitlab_utils import DownloadJsonlDatasetGitlabConfig, download_jsonl_dataset
 from resources_servers.spider2_lite.setup_spider2 import ensure_spider2_lite
 
 
@@ -28,19 +28,15 @@ OUTPUT_FPATH = DATA_DIR / "spider2_lite_benchmark.jsonl"
 def prepare() -> Path:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-    ds = []
-
-    count = 0
-    with open(OUTPUT_FPATH, "w") as f:
-        for row in ds:
-            out = {
-                "question": row["problem"],
-                "expected_answer": str(row["answer"]),
-            }
-            f.write(json.dumps(out) + "\n")
-            count += 1
-
-    print(f"Wrote {count} problems to {OUTPUT_FPATH}")
+    # Nvidia-internal only for the moment. Public script coming soon.
+    download_jsonl_dataset(
+        config=DownloadJsonlDatasetGitlabConfig(
+            dataset_name="spider2_lite_sqlite",
+            version="0.0.1",
+            artifact_fpath="spider2_lite_sqlite_validation.jsonl",
+            output_fpath=OUTPUT_FPATH,
+        )
+    )
 
     # Download SQL lite databases
     ensure_spider2_lite()
