@@ -5,8 +5,11 @@
 import asyncio
 import math
 import sqlite3
+import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
+
+import ray
 
 
 ResultRow = tuple[Any, ...]
@@ -40,7 +43,14 @@ def _coerce(v: Any) -> Any:
         return v
 
 
-def execute_sqlite(db_path: Path, sql: str, timeout_s: float = 30.0) -> ResultSet:
+@ray.remote(
+    num_cpus=1,
+    scheduling_strategy="SPREAD",
+    runtime_env={
+        "py_executable": sys.executable,
+    },
+)
+def execute_sqlite(db_path: Path, sql: str) -> ResultSet:
     """Execute SQL against a SQLite database file and return all rows.
 
     Copies db to in-memory connection before querying (matches official eval).
@@ -64,14 +74,17 @@ async def execute_sqlite_async(
     sql: str,
     semaphore: asyncio.Semaphore,
     timeout_s: float = 30.0,
-) -> ResultSet:
+) -> Optional[ResultSet]:
     """Execute SQL asynchronously via thread executor, bounded by semaphore."""
-    loop = asyncio.get_running_loop()
     async with semaphore:
-        return await asyncio.wait_for(
-            loop.run_in_executor(None, execute_sqlite, db_path, sql, timeout_s),
-            timeout=timeout_s,
-        )
+        task = execute_sqlite.remote(db_path, sql)
+        done, in_progress = await ray.wait([task], num_returns=1, timeout=timeout_s, fetch_local=False)
+
+        if in_progress:
+            ray.cancel(in_progress[0])
+            return None
+        else:
+            return ray.get(done[0])
 
 
 def _col_vector(rows: ResultSet, col_idx: int) -> list[Any]:
@@ -168,8 +181,12 @@ async def execute_and_compare(
 ) -> tuple[bool, ResultSet | None, ResultSet | None, str | None]:
     """Execute both queries and compare. Returns (match, gold_rows, pred_rows, error_msg)."""
     gold_rows = await execute_sqlite_async(db_path, gold_sql, semaphore, timeout_s)
+    # Gold execution must always succeed
+    assert gold_rows is not None
 
     pred_rows = await execute_sqlite_async(db_path, pred_sql, semaphore, timeout_s)
+    if pred_rows is None:
+        return False, gold_rows, pred_rows, "Pred SQL execution timed out"
 
     match = compare_multi_result_sets(
         [gold_rows], pred_rows, multi_condition_cols=condition_cols, ignore_order=ignore_order

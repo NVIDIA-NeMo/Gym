@@ -171,9 +171,7 @@ class Spider2LiteResourcesServer(SimpleResourcesServer):
                 ignore_order=body.ignore_order,
                 timeout_s=self.config.sql_execution_timeout_s,
             )
-            if err and err.startswith("gold_sql_error"):
-                failure_reason = FailureCode.GOLD_EXECUTION_ERROR
-            elif err:
+            if err:
                 failure_reason = FailureCode.EXECUTION_ERROR
             else:
                 execution_match = match
@@ -186,14 +184,18 @@ class Spider2LiteResourcesServer(SimpleResourcesServer):
                 self._semaphore,
                 timeout_s=self.config.sql_execution_timeout_s,
             )
-            gold_sets = [[tuple(row) for row in gold] for gold in body.gold_result]
-            execution_match = compare_multi_result_sets(
-                gold_sets=gold_sets,
-                pred=pred_rows,
-                multi_condition_cols=body.condition_cols,
-                ignore_order=body.ignore_order,
-            )
-            failure_reason = FailureCode.NONE if execution_match else FailureCode.EXECUTION_ERROR
+            if pred_rows is None:
+                execution_match = False
+                failure_reason = FailureCode.EXECUTION_ERROR
+            else:
+                gold_sets = [[tuple(row) for row in gold] for gold in body.gold_result]
+                execution_match = compare_multi_result_sets(
+                    gold_sets=gold_sets,
+                    pred=pred_rows,
+                    multi_condition_cols=body.condition_cols,
+                    ignore_order=body.ignore_order,
+                )
+                failure_reason = FailureCode.NONE if execution_match else FailureCode.EXECUTION_ERROR
         else:
             raise ValueError("verifier_metadata must contain either 'gold_sql' or 'gold_result'")
 
