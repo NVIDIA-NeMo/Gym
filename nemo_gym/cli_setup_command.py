@@ -197,6 +197,7 @@ def run_command(command: str, working_dir_path: Path, server_name: str = "") -> 
     if log_dir:
         safe_name = (server_name or working_dir_path.name).replace("/", "_")
         log_path = Path(log_dir) / f"{safe_name}.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
         command = f"set -o pipefail; ({command}) 2>&1 | tee -a {log_path}"
 
     redirect_stdout = stdout

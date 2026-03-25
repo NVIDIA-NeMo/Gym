@@ -486,7 +486,7 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
 
         max_num_tries = MAX_NUM_TRIES
         tries = 0
-        while tries < MAX_NUM_TRIES:
+        while tries < max_num_tries:
             tries += 1
             response = await request(**request_kwargs)
 
