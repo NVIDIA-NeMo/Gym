@@ -1,15 +1,10 @@
 # Chain to existing resource server + agent config
 config_paths:
-  - resources_servers/tavily_search/configs/tavily_search_no_judge.yaml
+  - resources_servers/tavily_search/configs/tavily_search_self_judge.yaml
 
 # We use `_inherit_from` directives to inherit from and not use the generic config above to ensure this benchmark config is isolated.
 browsecomp_tavily_search_resources_server:
   _inherit_from: tavily_search_resources_server
-  resources_servers:
-    tavily_search:
-      judge_model_server:
-        type: responses_api_models
-        name: browsecomp_judge_model
 
 browsecomp_tavily_search_simple_agent:
   _inherit_from: tavily_search_simple_agent
