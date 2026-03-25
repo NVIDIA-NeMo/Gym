@@ -157,56 +157,51 @@ class Spider2LiteResourcesServer(SimpleResourcesServer):
         if not generated:
             return _response(extracted_sql=None, failure_reason=FailureCode.NO_SQL_EXTRACTED)
 
-        try:
-            extracted_sql = extract_sql_from_response(generated)
-            if not extracted_sql:
-                return _response(extracted_sql=None, failure_reason=FailureCode.NO_SQL_EXTRACTED)
+        extracted_sql = extract_sql_from_response(generated)
+        if not extracted_sql:
+            return _response(extracted_sql=None, failure_reason=FailureCode.NO_SQL_EXTRACTED)
 
-            if body.gold_sql:
-                match, _gold, _pred, err = await execute_and_compare(
-                    db_path=db_path,
-                    gold_sql=body.gold_sql,
-                    pred_sql=extracted_sql,
-                    semaphore=self._semaphore,
-                    condition_cols=body.condition_cols or [],
-                    ignore_order=body.ignore_order,
+        if body.gold_sql:
+            match, _gold, _pred, err = await execute_and_compare(
+                db_path=db_path,
+                gold_sql=body.gold_sql,
+                pred_sql=extracted_sql,
+                semaphore=self._semaphore,
+                condition_cols=body.condition_cols or [],
+                ignore_order=body.ignore_order,
+                timeout_s=self.config.sql_execution_timeout_s,
+            )
+            if err and err.startswith("gold_sql_error"):
+                failure_reason = FailureCode.GOLD_EXECUTION_ERROR
+            elif err:
+                failure_reason = FailureCode.EXECUTION_ERROR
+            else:
+                execution_match = match
+                failure_reason = FailureCode.NONE if match else FailureCode.EXECUTION_ERROR
+
+        elif body.gold_result:
+            try:
+                pred_rows = await execute_sqlite_async(
+                    db_path,
+                    extracted_sql,
+                    self._semaphore,
                     timeout_s=self.config.sql_execution_timeout_s,
                 )
-                if err and err.startswith("gold_sql_error"):
-                    failure_reason = FailureCode.GOLD_EXECUTION_ERROR
-                elif err:
-                    failure_reason = FailureCode.EXECUTION_ERROR
-                else:
-                    execution_match = match
-                    failure_reason = FailureCode.NONE if match else FailureCode.EXECUTION_ERROR
+                gold_sets = [[tuple(row) for row in gold] for gold in body.gold_result]
+                execution_match = compare_multi_result_sets(
+                    gold_sets=gold_sets,
+                    pred=pred_rows,
+                    multi_condition_cols=body.condition_cols,
+                    ignore_order=body.ignore_order,
+                )
+                failure_reason = FailureCode.NONE if execution_match else FailureCode.EXECUTION_ERROR
+            except Exception as e:
+                failure_reason = FailureCode.EXECUTION_ERROR
+                logger.warning("pred execution error: %s %s", type(e).__name__, e)
+        else:
+            raise ValueError("verifier_metadata must contain either 'gold_sql' or 'gold_result'")
 
-            elif body.gold_result:
-                try:
-                    pred_rows = await execute_sqlite_async(
-                        db_path,
-                        extracted_sql,
-                        self._semaphore,
-                        timeout_s=self.config.sql_execution_timeout_s,
-                    )
-                    gold_sets = [[tuple(row) for row in gold] for gold in body.gold_result]
-                    execution_match = compare_multi_result_sets(
-                        gold_sets=gold_sets,
-                        pred=pred_rows,
-                        multi_condition_cols=body.condition_cols,
-                        ignore_order=body.ignore_order,
-                    )
-                    failure_reason = FailureCode.NONE if execution_match else FailureCode.EXECUTION_ERROR
-                except Exception as e:
-                    failure_reason = FailureCode.EXECUTION_ERROR
-                    logger.warning("pred execution error: %s %s", type(e).__name__, e)
-            else:
-                raise ValueError("verifier_metadata must contain either 'gold_sql' or 'gold_result'")
-
-            reward = 1.0 if execution_match else 0.0
-
-        except Exception as e:
-            failure_reason = FailureCode.UNKNOWN_ERROR
-            logger.warning("Unknown error in verify: %s %s", type(e).__name__, e)
+        reward = 1.0 if execution_match else 0.0
 
         return _response(extracted_sql=extracted_sql, failure_reason=failure_reason)
 
