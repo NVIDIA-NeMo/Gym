@@ -355,6 +355,7 @@ When a benchmark requires an external tool (compiler, runtime, etc.), auto-insta
 
 ## Async Patterns
 
+- **Use aiohttp, not httpx, for async HTTP.** All async HTTP calls must go through NeMo Gym's global aiohttp client (`nemo_gym.server_utils.request()`). Do not use `httpx.AsyncClient` — httpx/httpcore has O(n^2) connection pooling that causes hangs at high concurrency (16k+ requests). When wrapping external libraries that use httpx internally, replace their HTTP transport with an aiohttp adapter. See `docs/infrastructure/engineering-notes/aiohttp-vs-httpx.md` for the full writeup and `resources_servers/tavily_search/app.py` (`TavilySearchAIOHTTPClient`) for the adapter pattern.
 - Use `asyncio.Semaphore` to bound concurrent subprocess/external calls
 - For Ray remote tasks in async code: `result = await future` (Ray futures are directly awaitable). Never call `ray.get()` directly in async context.
 - Decode all subprocess output with `errors="replace"` to handle non-UTF8
