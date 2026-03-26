@@ -41,7 +41,7 @@ def prepare_helper(output_name: str, model: str, length: str) -> Path:
 && cd Skills \
 && git lfs install \
 && git checkout 54d2e113c2f64bf74bda72e15f23f01b524850da \
-&& uv venv --python 3.12 --seed \
+&& uv venv --python 3.12 --seed .venv \
 && source .venv/bin/activate \
 && uv pip install '-e .' scipy wonderwords html2text tenacity nltk""",
             check=True,
