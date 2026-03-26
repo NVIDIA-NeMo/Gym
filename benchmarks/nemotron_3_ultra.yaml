@@ -7,6 +7,7 @@ config_paths:
   - benchmarks/livecodebench/v6_2408_2505/cascade.yaml
   - benchmarks/spider2_lite/config.yaml
   - benchmarks/xstest/config.yaml
+  - resources_servers/aalcr/configs/aalcr.yaml
 
 # Set various resource limits. We assume this is run using at least 8 GPU nodes with 128 CPU cores on each node
 global_aiohttp_connector_limit_per_host: 16384
