@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from fastapi import FastAPI
+from typing import Any, Dict
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -21,25 +21,77 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.config_types import ModelServerRef
+from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.server_utils import get_response_json
 
 
 class AalcrResourcesServerConfig(BaseResourcesServerConfig):
-    pass
+    judge_model_server: ModelServerRef
+    judge_responses_create_params_overrides: Dict[str, Any]
+
+
+class AALCRVerifyRequest(BaseVerifyRequest):
+    document_category: str
+    document_set_id: str
+    question_id: int
+    question: str
+    answer: str
+    data_source_filenames: str
+    data_source_urls: str
+    input_tokens: int
+    input_tokens_band: str
+
+
+class AALCRVerifyResponse(AALCRVerifyRequest, BaseVerifyResponse):
+    invalid_judge_response: bool
+    judge_responses_create_params: NeMoGymResponseCreateParamsNonStreaming
+    judge_response: NeMoGymResponse
 
 
 class AalcrResourcesServer(SimpleResourcesServer):
     config: AalcrResourcesServerConfig
 
-    def setup_webserver(self) -> FastAPI:
-        app = super().setup_webserver()
+    async def verify(self, body: AALCRVerifyRequest) -> AALCRVerifyResponse:
+        candidate_answer = body.response.output_text
 
-        # Additional server routes go here! e.g.:
-        # app.post("/get_weather")(self.get_weather)
+        judge_prompt = f"""Assess whether the following CANDIDATE ANSWER is CORRECT or INCORRECT.
+For the CANDIDATE ANSWER to be correct, it must be consistent with the OFFICIAL ANSWER.
 
-        return app
+The question, for reference only: {body.question}
+The OFFICIAL ANSWER: {body.answer}
+CANDIDATE ANSWER TO ASSESS: {candidate_answer}
 
-    async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
-        return BaseVerifyResponse(**body.model_dump(), reward=1.0)
+Reply only with CORRECT or INCORRECT."""
+
+        judge_responses_create_params = dict(input=[{"role": "user", "content": judge_prompt}])
+        judge_responses_create_params |= self.config.judge_responses_create_params_overrides
+
+        http_response = await self.server_client.post(
+            server_name=self.config.judge_model_server.name,
+            url_path="/v1/responses",
+            json=judge_responses_create_params,
+        )
+        judge_response = NeMoGymResponse.model_validate(await get_response_json(http_response))
+
+        judge_response_text = judge_response.output_text.strip()
+        if judge_response_text == "CORRECT":
+            invalid_judge_response = False
+            reward = 1.0
+        elif judge_response_text == "INCORRECT":
+            invalid_judge_response = False
+            reward = 0.0
+        else:
+            invalid_judge_response = True
+            reward = 0.0
+
+        return AALCRVerifyResponse(
+            **body.model_dump(),
+            reward=reward,
+            invalid_judge_response=invalid_judge_response,
+            judge_responses_create_params=judge_responses_create_params,
+            judge_response=judge_response,
+        )
 
 
 if __name__ == "__main__":
