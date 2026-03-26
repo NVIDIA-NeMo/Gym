@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -47,6 +47,11 @@ class AALCRVerifyResponse(AALCRVerifyRequest, BaseVerifyResponse):
     invalid_judge_response: bool
     judge_responses_create_params: NeMoGymResponseCreateParamsNonStreaming
     judge_response: NeMoGymResponse
+    reward_lt_80k: Optional[float] = None
+    reward_80k_100k: Optional[float] = None
+    reward_100k_110k: Optional[float] = None
+    reward_110k_128k: Optional[float] = None
+    reward_128k_plus: Optional[float] = None
 
 
 class AalcrResourcesServer(SimpleResourcesServer):
@@ -85,12 +90,25 @@ Reply only with CORRECT or INCORRECT."""
             invalid_judge_response = True
             reward = 0.0
 
+        match body.input_tokens_band:
+            case "<80k":
+                input_tokens_band_key = "reward_lt_80k"
+            case "80k-100k":
+                input_tokens_band_key = "reward_80k_100k"
+            case "100k-110k":
+                input_tokens_band_key = "reward_100k_110k"
+            case "110k-128k":
+                input_tokens_band_key = "reward_110k_128k"
+            case "128k+":
+                input_tokens_band_key = "reward_128k_plus"
+
         return AALCRVerifyResponse(
             **body.model_dump(),
             reward=reward,
             invalid_judge_response=invalid_judge_response,
             judge_responses_create_params=judge_responses_create_params,
             judge_response=judge_response,
+            **{input_tokens_band_key: reward},
         )
 
 
