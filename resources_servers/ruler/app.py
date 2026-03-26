@@ -34,19 +34,19 @@ class RulerVerifyRequest(BaseVerifyRequest):
 
 
 class RulerVerifyResponse(RulerVerifyRequest, BaseVerifyResponse):
-    cwe: Optional[float]
-    fwe: Optional[float]
-    niah_multikey_1: Optional[float]
-    niah_multikey_2: Optional[float]
-    niah_multikey_3: Optional[float]
-    niah_multiquery: Optional[float]
-    niah_multivalue: Optional[float]
-    niah_single_1: Optional[float]
-    niah_single_2: Optional[float]
-    niah_single_3: Optional[float]
-    qa_1: Optional[float]
-    qa_2: Optional[float]
-    vt: Optional[float]
+    cwe: Optional[float] = None
+    fwe: Optional[float] = None
+    niah_multikey_1: Optional[float] = None
+    niah_multikey_2: Optional[float] = None
+    niah_multikey_3: Optional[float] = None
+    niah_multiquery: Optional[float] = None
+    niah_multivalue: Optional[float] = None
+    niah_single_1: Optional[float] = None
+    niah_single_2: Optional[float] = None
+    niah_single_3: Optional[float] = None
+    qa_1: Optional[float] = None
+    qa_2: Optional[float] = None
+    vt: Optional[float] = None
 
 
 class RulerResourcesServer(SimpleResourcesServer):
