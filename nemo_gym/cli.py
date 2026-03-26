@@ -25,6 +25,7 @@ from importlib.metadata import version as md_version
 from os import makedirs
 from os.path import exists
 from pathlib import Path
+from shutil import rmtree
 from signal import SIGINT
 from subprocess import Popen, TimeoutExpired
 from threading import Thread
@@ -592,6 +593,10 @@ class TestAllConfig(BaseNeMoGymCLIConfig):
         default=False,
         description="Fail if the number of server modules doesn't match the number with tests (default: False).",
     )
+    delete_venvs_after_each_test: bool = Field(
+        default=False,
+        description="Delete each server venv after its tests have been run (default: False).",
+    )
 
 
 def test_all():  # pragma: no cover
@@ -638,6 +643,9 @@ You can rerun just these tests using `ng_test +entrypoint={dir_path}` or run det
             _validate_data_single(test_config)
         except AssertionError:
             data_validation_failed.append(dir_path)
+
+        if test_all_config.delete_venvs_after_each_test:
+            rmtree(dir_path / ".venv")
 
     print(f"""Found {len(candidate_dir_paths)} total modules:{_display_list_of_paths(candidate_dir_paths)}
 
