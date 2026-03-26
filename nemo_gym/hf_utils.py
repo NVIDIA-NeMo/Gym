@@ -20,7 +20,7 @@ import yaml
 from datasets import load_dataset
 from huggingface_hub import HfApi, hf_hub_download
 from huggingface_hub.utils import HfHubHTTPError
-from scripts.update_resource_servers import visit_resources_server
+from nemo_gym.server_metadata import visit_resources_server
 
 from nemo_gym.config_types import DownloadJsonlDatasetHuggingFaceConfig, UploadJsonlDatasetHuggingFaceConfig
 

@@ -291,6 +291,9 @@ exclude-dependencies = [
     "waitress",
 ]
 
+[tool.setuptools.package-data]
+nemo_gym = ["resources/*.py"]
+
 [tool.setuptools.dynamic]
 version = {attr = "nemo_gym.__version__"}
 readme = {file = "README.md", content-type = "text/markdown"}
@@ -385,7 +388,7 @@ ng_reinstall = "nemo_gym.cli:reinstall"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["benchmarks", "resources_servers", "responses_api_agents", "responses_api_models", "nemo_gym", "scripts"]
+include = ["benchmarks", "resources_servers", "responses_api_agents", "responses_api_models", "nemo_gym"]
 
 ################################################
 # Testing
@@ -438,7 +441,6 @@ omit = [
     "results/*",
     "/tmp/*",
     "benchmarks/*",
-    "scripts/*",
 ]
 data_file = "results/.coverage"
 concurrency = ["thread", "multiprocessing"]
