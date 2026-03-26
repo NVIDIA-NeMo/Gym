@@ -34,34 +34,19 @@ class RulerVerifyRequest(BaseVerifyRequest):
 
 
 class RulerVerifyResponse(RulerVerifyRequest, BaseVerifyResponse):
-    string_match_all_single: float
-    string_match_part_single: float
-    cwe_string_match_all_single: Optional[float]
-    cwe_string_match_part_single: Optional[float]
-    fwe_string_match_all_single: Optional[float]
-    fwe_string_match_part_single: Optional[float]
-    niah_multikey_1_string_match_all_single: Optional[float]
-    niah_multikey_1_string_match_part_single: Optional[float]
-    niah_multikey_2_string_match_all_single: Optional[float]
-    niah_multikey_2_string_match_part_single: Optional[float]
-    niah_multikey_3_string_match_all_single: Optional[float]
-    niah_multikey_3_string_match_part_single: Optional[float]
-    niah_multiquery_string_match_all_single: Optional[float]
-    niah_multiquery_string_match_part_single: Optional[float]
-    niah_multivalue_string_match_all_single: Optional[float]
-    niah_multivalue_string_match_part_single: Optional[float]
-    niah_single_1_string_match_all_single: Optional[float]
-    niah_single_1_string_match_part_single: Optional[float]
-    niah_single_2_string_match_all_single: Optional[float]
-    niah_single_2_string_match_part_single: Optional[float]
-    niah_single_3_string_match_all_single: Optional[float]
-    niah_single_3_string_match_part_single: Optional[float]
-    qa_1_string_match_all_single: Optional[float]
-    qa_1_string_match_part_single: Optional[float]
-    qa_2_string_match_all_single: Optional[float]
-    qa_2_string_match_part_single: Optional[float]
-    vt_string_match_all_single: Optional[float]
-    vt_string_match_part_single: Optional[float]
+    cwe: Optional[float]
+    fwe: Optional[float]
+    niah_multikey_1: Optional[float]
+    niah_multikey_2: Optional[float]
+    niah_multikey_3: Optional[float]
+    niah_multiquery: Optional[float]
+    niah_multivalue: Optional[float]
+    niah_single_1: Optional[float]
+    niah_single_2: Optional[float]
+    niah_single_3: Optional[float]
+    qa_1: Optional[float]
+    qa_2: Optional[float]
+    vt: Optional[float]
 
 
 class RulerResourcesServer(SimpleResourcesServer):
@@ -69,18 +54,17 @@ class RulerResourcesServer(SimpleResourcesServer):
 
     async def verify(self, body: RulerVerifyRequest) -> BaseVerifyResponse:
         prediction = body.response.output_text.strip()
-        reward_string_match_all_single = self.string_match_all_single(prediction, body.outputs)
-        reward_string_match_part_single = self.string_match_part_single(prediction, body.outputs)
+
+        if body.subset in ("qa_1", "qa_2"):
+            reward_calc_function = self.string_match_part_single
+        else:
+            reward_calc_function = self.string_match_all_single
+        reward = reward_calc_function(prediction, body.outputs)
 
         return RulerVerifyResponse(
             **body.model_dump(),
-            reward=1.0,
-            string_match_all_single=reward_string_match_all_single,
-            string_match_part_single=reward_string_match_part_single,
-            **{
-                f"{body.subset}_string_match_all_single": reward_string_match_all_single,
-                f"{body.subset}_string_match_part_single": reward_string_match_part_single,
-            },
+            reward=reward,
+            **{body.subset: reward},
         )
 
     # These helper functions are taken from https://github.com/NVIDIA-NeMo/Skills/blob/54d2e113c2f64bf74bda72e15f23f01b524850da/nemo_skills/evaluation/evaluator/ruler.py#L36
