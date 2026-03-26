@@ -1,4 +1,4 @@
-xstest:
+xstest_resources_server:
   resources_servers:
     xstest:
       entrypoint: app.py
@@ -9,7 +9,7 @@ xstest:
       use_judge: true
       judge_model_server:
         type: responses_api_models
-        name: judge_model
+        name: allenai_wildguard_model_server
       judge_responses_create_params:
         input: []
         max_output_tokens: 50
@@ -17,7 +17,7 @@ xstest:
       judge_endpoint_max_concurrency: 64
       judge_prompt_template_fpath: prompt_templates/wildguard_judge.txt
       judge_output_format: wildguard
-judge_model:
+allenai_wildguard_model_server:
   responses_api_models:
     local_vllm_model:
       entrypoint: app.py
@@ -41,7 +41,7 @@ xstest_simple_agent:
       entrypoint: app.py
       resources_server:
         type: resources_servers
-        name: xstest
+        name: xstest_resources_server
       model_server:
         type: responses_api_models
         name: policy_model
