@@ -20,7 +20,7 @@ from pytest import MonkeyPatch, raises
 import nemo_gym.cli_setup_command
 from nemo_gym.cli_setup_command import run_command, setup_env_command
 from nemo_gym.global_config import UV_VENV_DIR_KEY_NAME
-from tests.unit_tests.test_global_config import TestGlobalConfig
+from tests.unit_tests.test_global_config import TestGlobalConfig as _TestGlobalConfig
 
 
 class TestCLISetupCommandSetupEnvCommand:
@@ -33,7 +33,7 @@ class TestCLISetupCommandSetupEnvCommand:
         return server_dir.absolute()
 
     def _debug_global_config_dict(self, tmp_path: Path) -> dict:
-        return TestGlobalConfig._default_global_config_dict_values.fget(None) | {UV_VENV_DIR_KEY_NAME: str(tmp_path)}
+        return _TestGlobalConfig._default_global_config_dict_values.fget(None) | {UV_VENV_DIR_KEY_NAME: str(tmp_path)}
 
     def test_sanity(self, tmp_path: Path) -> None:
         server_dir = self._setup_server_dir(tmp_path)
@@ -286,6 +286,55 @@ class TestCLISetupCommandRunCommand:
             executable="/bin/bash",
             shell=True,
             env={"PYTHONPATH": "/my path", "UV_CACHE_DIR": "my uv cache dir"},
+            stdout="stdout",
+            stderr="stderr",
+        )
+        actual_args = Popen_mock.call_args
+        assert expected_args == actual_args
+
+    def test_tee_logs_with_server_name(self, monkeypatch: MonkeyPatch) -> None:
+        Popen_mock, get_global_config_dict_mock = self._setup(monkeypatch)
+
+        get_global_config_dict_mock.return_value = {
+            "uv_cache_dir": "default uv cache dir",
+            "nemo_gym_log_dir": "/tmp/gym_logs",
+        }
+
+        run_command(
+            command="my command",
+            working_dir_path=Path("/my path"),
+            server_name="my_resources/my_server",
+        )
+
+        expected_args = call(
+            "set -o pipefail; (my command) 2>&1 | tee -a /tmp/gym_logs/my_resources_my_server.log",
+            executable="/bin/bash",
+            shell=True,
+            env={"PYTHONPATH": "/my path", "UV_CACHE_DIR": "default uv cache dir"},
+            stdout="stdout",
+            stderr="stderr",
+        )
+        actual_args = Popen_mock.call_args
+        assert expected_args == actual_args
+
+    def test_tee_logs_falls_back_to_dir_name(self, monkeypatch: MonkeyPatch) -> None:
+        Popen_mock, get_global_config_dict_mock = self._setup(monkeypatch)
+
+        get_global_config_dict_mock.return_value = {
+            "uv_cache_dir": "default uv cache dir",
+            "nemo_gym_log_dir": "/tmp/gym_logs",
+        }
+
+        run_command(
+            command="my command",
+            working_dir_path=Path("/my path"),
+        )
+
+        expected_args = call(
+            "set -o pipefail; (my command) 2>&1 | tee -a /tmp/gym_logs/my path.log",
+            executable="/bin/bash",
+            shell=True,
+            env={"PYTHONPATH": "/my path", "UV_CACHE_DIR": "default uv cache dir"},
             stdout="stdout",
             stderr="stderr",
         )

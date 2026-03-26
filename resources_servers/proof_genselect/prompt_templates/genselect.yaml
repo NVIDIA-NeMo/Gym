@@ -1,0 +1,20 @@
+user: |-
+  [Instructions]
+  You are a senior mathematician. You are given a math problem and two candidate solutions written by different students.
+  Your task is to carefully analyze both solutions and pick the more correct solution.
+
+  [Problem]
+  {problem}
+
+  [Proof 1]
+  {proof_1}
+
+  [Proof 2]
+  {proof_2}
+
+  [Format]
+  Your output must end with the following tags:
+  <analysis>One-paragraph summary of your analysis of the two solutions</analysis>
+  <best_solution>Index</best_solution>
+
+  The best_solution tag MUST ONLY contain either 1 or 2.

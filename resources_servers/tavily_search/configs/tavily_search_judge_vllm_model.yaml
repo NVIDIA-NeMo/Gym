@@ -3,6 +3,7 @@ tavily_search_resources_server:
     tavily_search:
       entrypoint: app.py
       domain: agent
+      debug: false
       tavily_api_key: ${tavily_api_key}
       exclude_domains_file_path: ${exclude_domains_file_path}
       use_judge: true
@@ -12,6 +13,8 @@ tavily_search_resources_server:
       judge_responses_create_params:
         input: []
       verified: false
+      description: Model uses search tools to satisfy a user query.
+      value: Measure agentic search capability
 judge_model:
   responses_api_models:
     vllm_model:
@@ -31,9 +34,6 @@ tavily_search_simple_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      judge_model_server:
-        type: responses_api_models
-        name: judge_model
       datasets:
       - name: train
         type: train

@@ -2,6 +2,7 @@ mcqa:
   resources_servers:
     mcqa:
       entrypoint: app.py
+      grading_mode: null
       domain: knowledge
       verified: false
       description: Multi-choice question answering problems

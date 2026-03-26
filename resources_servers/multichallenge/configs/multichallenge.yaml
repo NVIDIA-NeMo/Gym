@@ -66,7 +66,6 @@ multichallenge:
       no_label: "[[NO]]"
 
       domain: knowledge
-      description: "MultiChallenge benchmark evaluation with LLM judge"
       verified: false
 
 # ============================================================================
@@ -82,19 +81,6 @@ multichallenge_simple_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      datasets:
-        - name: multichallenge_example
-          type: example
-          license: "Apache 2.0"
-          jsonl_fpath: resources_servers/multichallenge/data/example.jsonl
-        - name: multichallenge_advanced
-          type: train
-          license: "TBD"
-          jsonl_fpath: resources_servers/multichallenge/data/advanced.jsonl
-        - name: multichallenge_vanilla
-          type: train
-          license: "TBD"
-          jsonl_fpath: resources_servers/multichallenge/data/vanilla.jsonl
 
 # ============================================================================
 # Judge Model Server Configuration (Optional)

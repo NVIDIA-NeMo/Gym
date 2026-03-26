@@ -170,7 +170,7 @@ class RunHelper:  # pragma: no cover
     {NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME}={shlex.quote(top_level_path)} \\
     python {str(entrypoint_fpath)}"""
 
-            process = run_command(command, dir_path)
+            process = run_command(command, dir_path, server_name=top_level_path)
             self._processes[top_level_path] = process
             # In dry run mode, wait for each setup command to finish before starting the next.
             # This installs uv virtual environments serially, which significantly reduces uv
@@ -422,14 +422,27 @@ def e2e_rollout_collection():  # pragma: no cover
         data_process_output_dir = output_fpath.parent / "preprocessed_datasets"
         data_processor_config_dict["output_dirpath"] = str(data_process_output_dir)
 
-    data_processor = TrainDataProcessor()
-    data_processor.run(data_processor_config_dict)
+    input_jsonl_fpath = data_process_output_dir / f"{e2e_rollout_collection_config.split}.jsonl"
+    should_skip_data_processing = (
+        e2e_rollout_collection_config.reuse_existing_data_preparation and input_jsonl_fpath.exists()
+    )
+    if not should_skip_data_processing:
+        if e2e_rollout_collection_config.reuse_existing_data_preparation:
+            print(
+                f"Even though the `reuse_existing_data_preparation=true` flag was set, we will still do data preparation since the final input jsonl fpath `{input_jsonl_fpath}` does not exist yet"
+            )
+
+        data_processor = TrainDataProcessor()
+        data_processor.run(data_processor_config_dict)
+    else:
+        print(
+            f"Skipping data preparation since `reuse_existing_data_preparation=true` and the final input jsonl fpath `{input_jsonl_fpath}` already exists"
+        )
 
     # Convert to RolloutCollectionConfig
     rollout_collection_config_dict = deepcopy(global_config_dict)
     with open_dict(rollout_collection_config_dict):
-        input_jsonl_fpath = data_process_output_dir / f"{e2e_rollout_collection_config.split}.jsonl"
-        assert input_jsonl_fpath.exists()
+        assert input_jsonl_fpath.exists(), input_jsonl_fpath
         rollout_collection_config_dict["input_jsonl_fpath"] = str(input_jsonl_fpath)
 
     rollout_collection_config = RolloutCollectionConfig.model_validate(

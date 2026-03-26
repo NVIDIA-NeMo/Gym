@@ -12,8 +12,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from argparse import ArgumentParser
 from collections import defaultdict
 from copy import deepcopy
+from importlib import import_module
 from os import environ, getenv
 from pathlib import Path
 from platform import python_version
@@ -62,6 +64,8 @@ PORT_RANGE_HIGH_KEY_NAME = "port_range_high"
 DRY_RUN_KEY_NAME = "dry_run"
 UV_CACHE_DIR_KEY_NAME = "uv_cache_dir"
 UV_VENV_DIR_KEY_NAME = "uv_venv_dir"
+INHERIT_FROM_KEY_NAME = "_inherit_from"
+NEMO_GYM_LOG_DIR_KEY_NAME = "nemo_gym_log_dir"
 NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     CONFIG_PATHS_KEY_NAME,
     ENTRYPOINT_KEY_NAME,
@@ -81,6 +85,8 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     DRY_RUN_KEY_NAME,
     UV_CACHE_DIR_KEY_NAME,
     UV_VENV_DIR_KEY_NAME,
+    INHERIT_FROM_KEY_NAME,
+    NEMO_GYM_LOG_DIR_KEY_NAME,
 ]
 
 # Data keys
@@ -109,7 +115,7 @@ def get_wandb_run() -> Optional[Run]:
 
 
 # OmegaConf new resolvers
-OmegaConf.register_new_resolver("swap_key", lambda a: f"${{swap_key:{a}}}")
+OmegaConf.register_new_resolver("inherit_from", lambda a: f"${{inherit_from:{a}}}")
 
 
 class GlobalConfigDictParserConfig(BaseModel):
@@ -122,17 +128,42 @@ class GlobalConfigDictParserConfig(BaseModel):
 
     hide_secrets: bool = False
 
+    # This is a shorthand we use for config resolution use cases that shouldn't require a model
+    # e.g. data loading, etc
     NO_MODEL_GLOBAL_CONFIG_DICT: ClassVar[DictConfig] = DictConfig(
         {
             POLICY_BASE_URL_KEY_NAME: "",
             POLICY_API_KEY_KEY_NAME: "",
             POLICY_MODEL_NAME_KEY_NAME: "",
+            "policy_model": {"responses_api_models": {"dummy_model": {"entrypoint": "app.py"}}},
         }
     )
 
 
 class GlobalConfigDictParser(BaseModel):
     def parse_global_config_dict_from_cli(self) -> DictConfig:
+        # We need to monkeypatch hydra here so that it doesn't use Hydra help so that we can use our own help down the line
+        hydra_main_module = import_module("hydra.main")
+        original_get_args_parser = hydra_main_module.get_args_parser
+
+        def new_get_args_parser():
+            parser: ArgumentParser = original_get_args_parser()
+            # Set the conflict handlers to resolve so we can disable the help.
+            parser.conflict_handler = "resolve"
+            for action_group in parser._action_groups:
+                action_group.conflict_handler = "resolve"
+
+            parser.add_argument("--help", "-h", action="store_false", default=False)
+
+            # Reset to the original conflict_handler error scheme
+            parser.conflict_handler = "error"
+            for action_group in parser._action_groups:
+                action_group.conflict_handler = "error"
+
+            return parser
+
+        hydra_main_module.get_args_parser = new_get_args_parser
+
         # This function is just to get the config object out of the hydra main call.
         # Need a closure. We simply use an outer ref of a list
         config_list = []
@@ -154,6 +185,8 @@ class GlobalConfigDictParser(BaseModel):
         config_paths = config_paths.copy()
 
         extra_configs: List[DictConfig] = []
+        duplicate_config_paths: List[str] = []
+        # Just a careful note here that we explicitly mutate config_paths as it is being appended to
         for config_path in config_paths:
             config_path = Path(config_path)
             # Check cwd first for user's local configs, then install location
@@ -165,7 +198,16 @@ class GlobalConfigDictParser(BaseModel):
             for new_config_path in extra_config.get(CONFIG_PATHS_KEY_NAME) or []:
                 if new_config_path not in config_paths:
                     config_paths.append(new_config_path)
+                else:
+                    duplicate_config_paths.append(new_config_path)
             extra_configs.append(extra_config)
+
+        if duplicate_config_paths:
+            duplicate_config_paths_str = "".join(f"- {p}\n" for p in duplicate_config_paths)
+            print(f"""Found configs that reference the same source config path. You may want to double check whether the configs you have need to use different configs for the same server.
+In cases like these, you may want to consider using the `inherit_from` OmegaConf directive e.g. '++my_specific_server=${{inherit_from:generic_server}}' and then overriding config parameters in `my_specific_server`.
+Duplicate config paths:
+{duplicate_config_paths_str}""")
 
         return config_paths, extra_configs
 
@@ -261,21 +303,38 @@ class GlobalConfigDictParser(BaseModel):
                     if isinstance(inner_v, (DictConfig, dict)):
                         self._recursively_swap_keys_helper(inner_v, original_dict_config, frozen_dict_config)
 
-            # e.g. ${swap_key:grpo.num_prompts_per_step}
-            is_swap = isinstance(v, str) and v.startswith("${swap_key:")
+            # e.g. ${inherit_from:grpo.num_prompts_per_step}
+            is_swap_str = isinstance(v, str) and v.startswith("${inherit_from:")
+            is_swap_property = isinstance(v, DictConfig) and INHERIT_FROM_KEY_NAME in v
+            is_swap = is_swap_str or is_swap_property
             if not is_swap:
                 continue
 
-            path_to_swap = v.removeprefix("${swap_key:").removesuffix("}").split(".")
+            if is_swap_str:
+                path_to_swap = v.removeprefix("${inherit_from:").removesuffix("}")
+            elif is_swap_property:
+                path_to_swap = v.pop(INHERIT_FROM_KEY_NAME)
+
+            path_to_swap = path_to_swap.split(".")
+
+            # Pop the swapped value
             dict_containing_key_to_swap = self._recursive_index_dict_using_path(
                 original_dict_config, path_to_swap[:-1]
             )
-            dict_containing_key_to_swap.pop(path_to_swap[-1])
+            # Pop with a default since multiple configs may refer to the same path
+            dict_containing_key_to_swap.pop(path_to_swap[-1], None)
 
-            dict_config[k] = self._recursive_index_dict_using_path(frozen_dict_config, path_to_swap)
+            swapped_value = self._recursive_index_dict_using_path(frozen_dict_config, path_to_swap)
+            if is_swap_property:
+                swapped_value = OmegaConf.merge(swapped_value, v)
+
+            dict_config[k] = swapped_value
 
     def _recursive_index_dict_using_path(self, dict_config: DictConfig, path: List[str]) -> DictConfig:
         for k in path:
+            if k not in dict_config:
+                raise ValueError(f"Path specified does not exist in config: {path}")
+
             dict_config = dict_config[k]
 
         return dict_config
