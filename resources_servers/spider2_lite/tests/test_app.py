@@ -341,8 +341,9 @@ class TestSpider2LiteServerUnit:
 
     async def test_verify_gold_execution_error(self, server):
         req = _make_verify_request("```sql\nSELECT 1;\n```", gold_sql="SELECT * FROM nonexistent_table")
-        with pytest.raises(AssertionError):
-            await server.verify(req)
+        result = await server.verify(req)
+        assert result.reward == 0.0
+        assert result.failure_reason == FailureCode.EXECUTION_ERROR
 
     async def test_verify_no_gold_data(self, server):
         req = Spider2LiteVerifyRequest(
