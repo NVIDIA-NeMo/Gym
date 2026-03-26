@@ -1,8 +1,5 @@
-config_paths:
-  - benchmarks/browsecomp/config.yaml
-  - benchmarks/gpqa/config.yaml
-  - benchmarks/livecodebench/v6_2408_2505/cascade.yaml
-  - benchmarks/spider2_lite/config.yaml
+# Hardware required:
+# xstest: 1 GPU for 7B https://huggingface.co/allenai/wildguard
 
 # Please put the following secrets into the local env.yaml
 # tavily_search_resources_server:
@@ -16,6 +13,14 @@ config_paths:
 #       model: ???  # The actual judge model needs to be Qwen/Qwen3-235B-A22B-Instruct-2507-FP8, but the name will probably differ based on endpoint.
 #       base_url: ???
 #       api_key: ???
+
+# This is the list of benchmarks that this config file contains.
+config_paths:
+  - benchmarks/browsecomp/config.yaml
+  - benchmarks/gpqa/config.yaml
+  - benchmarks/livecodebench/v6_2408_2505/cascade.yaml
+  - benchmarks/spider2_lite/config.yaml
+  - benchmarks/xstest/config.yaml
 
 # Set various resource limits. We assume this is run using at least 8 GPU nodes with 128 CPU cores on each node
 global_aiohttp_connector_limit_per_host: 16384
