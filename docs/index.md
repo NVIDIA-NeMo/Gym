@@ -117,9 +117,9 @@ Generate batches of scored interactions and view them with the rollout viewer.
 
 ::::
 
-## Environment Configuration
+## Environment Components
 
-Configure and customize environment components and prepare datasets.
+An environment can be constructed from solely an agent, but is typically composed of two components: Agent server, and one or more Resources servers, plus the datsets that provide environment or task instances. Additionaly, the Model server configures LLM inference backends including vLLM and OpenAI.
 
 ::::{grid} 1 2 2 2
 :gutter: 1 1 1 2
@@ -294,28 +294,14 @@ Rollout Collection <get-started/rollout-collection.md>
 ```
 
 ```{toctree}
-:caption: Agent Server
+:caption: Environment Components
 :hidden:
 :maxdepth: 1
 
-Overview <agent-server/index>
-```
-
-```{toctree}
-:caption: Model Server
-:hidden:
-:maxdepth: 1
-
-Overview <model-server/index>
+Agent Server <agent-server/index>
+Model Server <model-server/index>
 vLLM <model-server/vllm>
-```
-
-```{toctree}
-:caption: Resources Server
-:hidden:
-:maxdepth: 1
-
-Overview <resources-server/index>
+Resources Server <resources-server/index>
 ```
 
 ```{toctree}
@@ -340,6 +326,7 @@ Multi-Step Environment <environment-tutorials/multi-step-environment>
 Stateful Environment <environment-tutorials/stateful-environment>
 Real-World Environment <environment-tutorials/real-world-environment>
 Integrate external libraries <environment-tutorials/integrate-external-environments>
+LangGraph Agent <environment-tutorials/langgraph-agent>
 Aggregate Metrics <environment-tutorials/aggregate-metrics>
 ```
 
