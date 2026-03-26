@@ -651,7 +651,7 @@ You can rerun just these tests using `ng_test +entrypoint={dir_path}` or run det
         if test_all_config.delete_venvs_after_each_test:
             venv_path = dir_path / ".venv"
             print(f"Deleting {venv_path} since `delete_venvs_after_each_test=true`")
-            rmtree(venv_path)
+            rmtree(venv_path, ignore_errors=True)
 
         times_taken.append((time() - start_time, dir_path))
 
