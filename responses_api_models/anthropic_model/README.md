@@ -9,7 +9,7 @@ Uses the async Anthropic SDK (`AsyncAnthropic`) with built-in retries.
 Set up your `env.yaml` file:
 
 ```yaml
-policy_api_key: "sk-ant-..."
+policy_api_key: <YOUR_ANTHROPIC_API_KEY>
 policy_model_name: claude-sonnet-4-20250514
 ```
 

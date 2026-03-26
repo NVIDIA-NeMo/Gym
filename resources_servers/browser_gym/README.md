@@ -291,10 +291,10 @@ responses_api_agents/browser_agent/
 
 3. **API keys and settings** in `env.yaml` (project root):
    ```yaml
-   cua_openai_api_key: "sk-proj-..."
-   cua_openai_org: "org-..."
-   cua_anthropic_api_key: "sk-ant-..."
-   cua_gemini_api_key: "AIza..."
+   cua_openai_api_key: <YOUR_OPENAI_API_KEY>
+   cua_openai_org: <YOUR_OPENAI_ORG>
+   cua_anthropic_api_key: <YOUR_ANTHROPIC_API_KEY>
+   cua_gemini_api_key: <YOUR_GEMINI_API_KEY>
 
    # Debug trajectories (screenshots + JSON saved to results/cua_debug_trajectories/)
    cua_debug_trajectories: false

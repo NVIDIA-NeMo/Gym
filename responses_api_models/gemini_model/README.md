@@ -9,7 +9,7 @@ Uses the native async client (`client.aio.models.generate_content`) from the `go
 Set up your `env.yaml` file:
 
 ```yaml
-policy_api_key: "AIza..."
+policy_api_key: <YOUR_GEMINI_API_KEY>
 policy_model_name: gemini-2.5-computer-use-preview-10-2025
 ```
 

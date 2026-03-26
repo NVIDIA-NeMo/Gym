@@ -13,9 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+import urllib.error
 from asyncio import Future
+from io import BytesIO
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import orjson
 import pytest
@@ -24,7 +26,7 @@ import yaml
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.global_config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.reward_profile import compute_aggregate_metrics
-from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
+from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper, _fetch_gym_tasks
 
 
 class TestRolloutCollection:
@@ -531,3 +533,321 @@ class TestRolloutCollection:
         output_fpath = tmp_path / "output.jsonl"
         result = await helper._call_aggregate_metrics([], [], output_fpath)
         assert result is None
+
+    async def test_call_aggregate_metrics_skips_rows_without_agent(self, tmp_path: Path) -> None:
+        """Rows missing agent_ref are silently skipped during aggregation."""
+        agg = AggregateMetrics(
+            agent_metrics={"mean/reward": 1.0},
+            key_metrics={"mean/reward": 1.0},
+            group_level_metrics=[{"mean/reward": 1.0}],
+        )
+
+        mock_response = AsyncMock()
+        mock_response.raise_for_status = MagicMock()
+        mock_response.read = AsyncMock(return_value=orjson.dumps(agg.model_dump()))
+        mock_response.status = 200
+
+        mock_server_client = MagicMock()
+        mock_server_client.post = AsyncMock(return_value=mock_response)
+
+        class MockHelper(RolloutCollectionHelper):
+            def setup_server_client(self):
+                return mock_server_client
+
+        helper = MockHelper()
+
+        rows = [
+            {},
+            {AGENT_REF_KEY_NAME: {"name": "my_agent"}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0},
+        ]
+        results = [
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 0.0},
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0, "response": {"usage": {"tokens": 5}}},
+        ]
+
+        output_fpath = tmp_path / "output.jsonl"
+        metrics_fpath = await helper._call_aggregate_metrics(results, rows, output_fpath)
+
+        assert metrics_fpath is not None
+        written = json.loads(metrics_fpath.read_text())
+        assert len(written) == 1
+        assert written[0][AGENT_REF_KEY_NAME] == {"name": "my_agent"}
+
+
+class TestRolloutCollectionConfigValidation:
+    def test_config_requires_input_source(self) -> None:
+        """Neither input_jsonl_fpath nor input_gym_url raises ValueError."""
+        with pytest.raises(ValueError, match="Either input_jsonl_fpath or input_gym_url must be provided"):
+            RolloutCollectionConfig(output_jsonl_fpath="out.jsonl")
+
+    def test_config_rejects_both_input_sources(self) -> None:
+        """Both input_jsonl_fpath and input_gym_url raises ValueError."""
+        with pytest.raises(ValueError, match="Cannot provide both"):
+            RolloutCollectionConfig(
+                input_jsonl_fpath="input.jsonl",
+                input_gym_url="http://localhost:3000",
+                output_jsonl_fpath="out.jsonl",
+            )
+
+    def test_config_gym_task_id_requires_gym_url(self) -> None:
+        """input_gym_task_id without input_gym_url raises ValueError."""
+        with pytest.raises(ValueError, match="input_gym_task_id requires input_gym_url"):
+            RolloutCollectionConfig(
+                input_jsonl_fpath="input.jsonl",
+                input_gym_task_id=["TASK-001"],
+                output_jsonl_fpath="out.jsonl",
+            )
+
+
+class TestFetchGymTasks:
+    def _mock_urlopen(self, payload: dict):
+        """Return a context-manager mock for urllib.request.urlopen."""
+        response = MagicMock()
+        response.read.return_value = orjson.dumps(payload)
+        response.__enter__ = lambda s: s
+        response.__exit__ = MagicMock(return_value=False)
+        return response
+
+    def test_happy_path_with_task_statement_and_viewport_list(self) -> None:
+        """Tasks with task_statement and list viewport are parsed correctly."""
+        payload = {
+            "verifiers": {
+                "TASK-001": {
+                    "task_statement": "Click the button",
+                    "start_url": "http://app.test/page1",
+                    "viewport_size": [1920, 1080],
+                }
+            }
+        }
+        with patch("nemo_gym.rollout_collection.urllib.request.urlopen", return_value=self._mock_urlopen(payload)):
+            rows = _fetch_gym_tasks("http://gym.test")
+
+        assert len(rows) == 1
+        row = orjson.loads(rows[0])
+        assert row["responses_create_params"]["input"][0]["content"] == "Click the button"
+        assert row["verifier_metadata"]["start_url"] == "http://app.test/page1"
+        assert row["verifier_metadata"]["viewport"] == {"width": 1920, "height": 1080}
+
+    def test_prompt_fallback_when_no_task_statement(self) -> None:
+        """Falls back to 'prompt' field when 'task_statement' is absent."""
+        payload = {
+            "verifiers": {
+                "TASK-002": {
+                    "prompt": "Fill the form",
+                    "start_url": "http://app.test/form",
+                }
+            }
+        }
+        with patch("nemo_gym.rollout_collection.urllib.request.urlopen", return_value=self._mock_urlopen(payload)):
+            rows = _fetch_gym_tasks("http://gym.test/")
+
+        row = orjson.loads(rows[0])
+        assert row["responses_create_params"]["input"][0]["content"] == "Fill the form"
+
+    def test_viewport_dict_passthrough(self) -> None:
+        """Viewport already in dict format passes through unchanged."""
+        payload = {
+            "verifiers": {
+                "TASK-003": {
+                    "task_statement": "test",
+                    "viewport_size": {"width": 800, "height": 600},
+                }
+            }
+        }
+        with patch("nemo_gym.rollout_collection.urllib.request.urlopen", return_value=self._mock_urlopen(payload)):
+            rows = _fetch_gym_tasks("http://gym.test")
+
+        row = orjson.loads(rows[0])
+        assert row["verifier_metadata"]["viewport"] == {"width": 800, "height": 600}
+
+    def test_viewport_default_when_missing(self) -> None:
+        """Default 1280x720 viewport when not specified."""
+        payload = {"verifiers": {"TASK-004": {"task_statement": "test"}}}
+        with patch("nemo_gym.rollout_collection.urllib.request.urlopen", return_value=self._mock_urlopen(payload)):
+            rows = _fetch_gym_tasks("http://gym.test")
+
+        row = orjson.loads(rows[0])
+        assert row["verifier_metadata"]["viewport"] == {"width": 1280, "height": 720}
+
+    def test_non_dict_details_uses_gym_url_fallback(self) -> None:
+        """Non-dict verifier details falls back to gym_url for start_url and defaults for viewport."""
+        payload = {"verifiers": {"TASK-005": "just a string"}}
+        with patch("nemo_gym.rollout_collection.urllib.request.urlopen", return_value=self._mock_urlopen(payload)):
+            rows = _fetch_gym_tasks("http://gym.test")
+
+        row = orjson.loads(rows[0])
+        assert row["responses_create_params"]["input"][0]["content"] == ""
+        assert row["verifier_metadata"]["start_url"] == "http://gym.test"
+        assert row["verifier_metadata"]["viewport"] == {"width": 1280, "height": 720}
+
+    def test_start_url_defaults_to_gym_url(self) -> None:
+        """When start_url is absent from details, gym_url is used."""
+        payload = {"verifiers": {"TASK-006": {"task_statement": "test"}}}
+        with patch("nemo_gym.rollout_collection.urllib.request.urlopen", return_value=self._mock_urlopen(payload)):
+            rows = _fetch_gym_tasks("http://gym.test")
+
+        row = orjson.loads(rows[0])
+        assert row["verifier_metadata"]["start_url"] == "http://gym.test"
+
+    def test_filter_by_task_ids(self) -> None:
+        """Only requested task IDs are returned."""
+        payload = {
+            "verifiers": {
+                "A": {"task_statement": "a"},
+                "B": {"task_statement": "b"},
+                "C": {"task_statement": "c"},
+            }
+        }
+        with patch("nemo_gym.rollout_collection.urllib.request.urlopen", return_value=self._mock_urlopen(payload)):
+            rows = _fetch_gym_tasks("http://gym.test", task_ids=["A", "C"])
+
+        assert len(rows) == 2
+        task_ids = [orjson.loads(r)["verifier_metadata"]["task_id"] for r in rows]
+        assert task_ids == ["A", "C"]
+
+    def test_missing_task_ids_raises(self) -> None:
+        """Requesting non-existent task IDs raises ValueError."""
+        payload = {"verifiers": {"A": {"task_statement": "a"}}}
+        with patch("nemo_gym.rollout_collection.urllib.request.urlopen", return_value=self._mock_urlopen(payload)):
+            with pytest.raises(ValueError, match="Task ID.*not found"):
+                _fetch_gym_tasks("http://gym.test", task_ids=["MISSING"])
+
+    def test_empty_verifiers_raises(self) -> None:
+        """Empty verifiers dict raises ValueError."""
+        payload = {"verifiers": {}}
+        with patch("nemo_gym.rollout_collection.urllib.request.urlopen", return_value=self._mock_urlopen(payload)):
+            with pytest.raises(ValueError, match="No verifiers found"):
+                _fetch_gym_tasks("http://gym.test")
+
+    def test_http_error_raises(self) -> None:
+        """HTTPError is wrapped in a ValueError."""
+        with patch(
+            "nemo_gym.rollout_collection.urllib.request.urlopen",
+            side_effect=urllib.error.HTTPError("http://gym.test", 500, "Internal Error", {}, BytesIO(b"")),
+        ):
+            with pytest.raises(ValueError, match="HTTP 500"):
+                _fetch_gym_tasks("http://gym.test")
+
+    def test_url_error_raises(self) -> None:
+        """URLError (connection failure) is wrapped in a ValueError."""
+        with patch(
+            "nemo_gym.rollout_collection.urllib.request.urlopen",
+            side_effect=urllib.error.URLError("Connection refused"),
+        ):
+            with pytest.raises(ValueError, match="Could not connect"):
+                _fetch_gym_tasks("http://gym.test")
+
+
+class TestPreprocessRowsGymUrl:
+    def test_preprocess_rows_from_gym_url(self) -> None:
+        """input_gym_url branch calls _fetch_gym_tasks and processes rows."""
+        fake_row = orjson.dumps(
+            {
+                "responses_create_params": {"input": [{"role": "user", "content": "Do task"}]},
+                "verifier_metadata": {"task_id": "T1", "gym_url": "http://gym.test"},
+            }
+        ).decode()
+
+        config = RolloutCollectionConfig(
+            agent_name="my_agent",
+            input_gym_url="http://gym.test",
+            output_jsonl_fpath="out.jsonl",
+            num_repeats=1,
+        )
+
+        with patch("nemo_gym.rollout_collection._fetch_gym_tasks", return_value=[fake_row]):
+            rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+
+        assert len(rows) == 1
+        assert rows[0]["responses_create_params"]["input"][0]["content"] == "Do task"
+        assert rows[0]["agent_ref"] == {"name": "my_agent"}
+        assert rows[0][TASK_INDEX_KEY_NAME] == 0
+        assert rows[0][ROLLOUT_INDEX_KEY_NAME] == 0
+
+    def test_preprocess_rows_missing_agent_ref_raises(self, tmp_path: Path) -> None:
+        """Rows without agent_ref and no agent_name config raises ValueError."""
+        fpath = tmp_path / "input.jsonl"
+        fpath.write_text(json.dumps({"responses_create_params": {"input": []}}) + "\n")
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+            num_repeats=1,
+        )
+
+        with pytest.raises(ValueError, match="No agent specified"):
+            RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+
+
+class TestRunFromConfigEdgeCases:
+    def _make_helper(self):
+        class StubHelper(RolloutCollectionHelper):
+            def run_examples(self, examples, *args, **kwargs):
+                futures = []
+                for example in examples:
+                    future = Future()
+                    future.set_result((example, {"response": {"usage": {"tokens": 1}}}))
+                    futures.append(future)
+                return futures
+
+            async def _call_aggregate_metrics(self, results, rows, output_fpath):
+                return None
+
+        return StubHelper()
+
+    async def test_resume_from_cache_skips_when_output_missing(self, tmp_path: Path) -> None:
+        """resume_from_cache=True with missing output file falls through to normal path."""
+        input_jsonl_fpath = tmp_path / "input.jsonl"
+        input_jsonl_fpath.write_text(
+            json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "a"}}) + "\n"
+        )
+        output_jsonl_fpath = tmp_path / "output.jsonl"
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_jsonl_fpath),
+            output_jsonl_fpath=str(output_jsonl_fpath),
+            resume_from_cache=True,
+            num_repeats=1,
+        )
+
+        results = await self._make_helper().run_from_config(config)
+        assert len(results) == 1
+
+    async def test_resume_from_cache_skips_when_materialized_missing(self, tmp_path: Path) -> None:
+        """resume_from_cache=True with missing materialized file falls through to normal path."""
+        input_jsonl_fpath = tmp_path / "input.jsonl"
+        input_jsonl_fpath.write_text(
+            json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "a"}}) + "\n"
+        )
+        output_jsonl_fpath = tmp_path / "output.jsonl"
+        output_jsonl_fpath.write_text("")
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_jsonl_fpath),
+            output_jsonl_fpath=str(output_jsonl_fpath),
+            resume_from_cache=True,
+            num_repeats=1,
+        )
+
+        results = await self._make_helper().run_from_config(config)
+        assert len(results) == 1
+
+    async def test_run_from_config_with_num_samples_in_parallel(self, tmp_path: Path) -> None:
+        """num_samples_in_parallel creates a Semaphore for concurrency control."""
+        input_jsonl_fpath = tmp_path / "input.jsonl"
+        samples = [
+            json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "agent"}, "x": i})
+            for i in range(3)
+        ]
+        input_jsonl_fpath.write_text("\n".join(samples) + "\n")
+        output_jsonl_fpath = tmp_path / "output.jsonl"
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_jsonl_fpath),
+            output_jsonl_fpath=str(output_jsonl_fpath),
+            num_repeats=1,
+            num_samples_in_parallel=2,
+        )
+
+        results = await self._make_helper().run_from_config(config)
+        assert len(results) == 3

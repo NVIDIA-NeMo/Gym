@@ -32,7 +32,7 @@ def _make_config(**overrides):
         "port": 8082,
         "entrypoint": "",
         "name": "",
-        "anthropic_api_key": "test-key",
+        "anthropic_api_key": "test-key",  # pragma: allowlist secret
         "anthropic_model": "claude-sonnet-4-20250514",
     }
     defaults.update(overrides)
