@@ -1,7 +1,3 @@
-# Chain to existing resource server + agent config
-config_paths:
-  - resources_servers/aalcr/configs/aalcr.yaml
-
 # Refer to the params in responses_api_models/local_vllm_model/configs/Qwen/Qwen3-235B-A22B-Instruct-2507-FP8.yaml
 Qwen3-235B-A22B-Instruct-2507-FP8:
   responses_api_models:
@@ -12,16 +8,27 @@ Qwen3-235B-A22B-Instruct-2507-FP8:
       return_token_id_information: false
       uses_reasoning_parser: true
 
-# We use `_inherit_from` directives to inherit from and not use the generic config above to ensure this benchmark config is isolated.
 aalcr_benchmark_resources_server:
-  _inherit_from: aalcr_resources_server
+  resources_servers:
+    aalcr:
+      entrypoint: app.py
+      domain: other
+      verified: false
+      judge_model_server:
+        type: responses_api_models
+        name: Qwen3-235B-A22B-Instruct-2507-FP8
+      judge_responses_create_params_overrides: {}
 
 aalcr_benchmark_simple_agent:
-  _inherit_from: aalcr_simple_agent
   responses_api_agents:
     simple_agent:
+      entrypoint: app.py
       resources_server:
+        type: resources_servers
         name: aalcr_benchmark_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
       datasets:
       - name: aalcr
         type: benchmark
