@@ -310,8 +310,8 @@ class TestSECFilingSearch:
         assert "NOTEXIST" in results["error"]
 
     @pytest.mark.asyncio
-    async def test_returns_only_default_form_types(self, server) -> None:
-        """Test that only 10-K, 10-Q, and DEF 14A filings are returned by default."""
+    async def test_no_default_form_type_filter(self, server) -> None:
+        """Without form_types param, all form types are returned."""
         server._tickers = {"AAPL": {"cik": "0000320193", "name": "APPLE INC."}}
         server._initialized = True
 
@@ -363,17 +363,54 @@ class TestSECFilingSearch:
         response = await server.sec_filing_search(request)
 
         results = json.loads(response.results)
-        assert len(results) == 3
-        forms = [r["form"] for r in results]
-        assert "10-K" in forms
-        assert "10-Q" in forms
-        assert "DEF 14A" in forms
-        assert "8-K" not in forms
-        assert "4" not in forms
+        assert len(results) == 5
+        forms = {r["form"] for r in results}
+        assert forms == {"10-K", "10-Q", "8-K", "DEF 14A", "4"}
 
     @pytest.mark.asyncio
-    async def test_results_capped_at_30(self, server) -> None:
-        """Results are capped at 30 regardless of how many filings exist."""
+    async def test_explicit_form_types_filter(self, server) -> None:
+        """Passing form_types filters to only those types."""
+        server._tickers = {"AAPL": {"cik": "0000320193", "name": "APPLE INC."}}
+        server._initialized = True
+
+        test_filings = {
+            "a": {
+                "ticker": "AAPL",
+                "form": "10-K",
+                "filing_date": "2025-01-15",
+                "report_date": "2024-12-31",
+                "accession_number": "a",
+                "filing_url": "",
+            },
+            "b": {
+                "ticker": "AAPL",
+                "form": "8-K",
+                "filing_date": "2024-10-01",
+                "report_date": "2024-10-01",
+                "accession_number": "b",
+                "filing_url": "",
+            },
+            "c": {
+                "ticker": "AAPL",
+                "form": "4",
+                "filing_date": "2024-08-01",
+                "report_date": "2024-08-01",
+                "accession_number": "c",
+                "filing_url": "",
+            },
+        }
+        _write_filings_cache(server, "0000320193", test_filings)
+
+        request = FinanceAgentSearchRequest(ticker="AAPL", form_types=["10-K"])
+        response = await server.sec_filing_search(request)
+
+        results = json.loads(response.results)
+        assert len(results) == 1
+        assert results[0]["form"] == "10-K"
+
+    @pytest.mark.asyncio
+    async def test_results_capped_at_max_filing_results(self, server) -> None:
+        """Results are capped at max_filing_results (default 200)."""
         server._tickers = {"AAPL": {"cik": "0000320193", "name": "APPLE INC."}}
         server._initialized = True
 
@@ -381,12 +418,12 @@ class TestSECFilingSearch:
             f"{i}": {
                 "ticker": "AAPL",
                 "form": "10-Q",
-                "filing_date": f"2024-{(i % 12) + 1:02d}-{(i % 28) + 1:02d}",
-                "report_date": f"2024-{(i % 12) + 1:02d}-{(i % 28) + 1:02d}",
+                "filing_date": f"20{20 + i // 365:02d}-{(i % 12) + 1:02d}-{(i % 28) + 1:02d}",
+                "report_date": f"20{20 + i // 365:02d}-{(i % 12) + 1:02d}-{(i % 28) + 1:02d}",
                 "accession_number": f"{i}",
                 "filing_url": "",
             }
-            for i in range(1, 51)
+            for i in range(1, 251)
         }
         _write_filings_cache(server, "0000320193", test_filings)
 
@@ -394,7 +431,183 @@ class TestSECFilingSearch:
         response = await server.sec_filing_search(request)
 
         results = json.loads(response.results)
-        assert len(results) == 30
+        assert len(results) == 200
+
+
+# ============================================================================
+# Test: Date Filtering (start_date / end_date)
+# ============================================================================
+
+MIXED_DATE_FILINGS = {
+    "a": {
+        "ticker": "AAPL",
+        "form": "10-K",
+        "filing_date": "2025-01-15",
+        "report_date": "2024-12-31",
+        "accession_number": "a",
+        "filing_url": "",
+    },
+    "b": {
+        "ticker": "AAPL",
+        "form": "10-Q",
+        "filing_date": "2024-07-15",
+        "report_date": "2024-06-30",
+        "accession_number": "b",
+        "filing_url": "",
+    },
+    "c": {
+        "ticker": "AAPL",
+        "form": "10-Q",
+        "filing_date": "2024-01-10",
+        "report_date": "2023-12-31",
+        "accession_number": "c",
+        "filing_url": "",
+    },
+    "d": {
+        "ticker": "AAPL",
+        "form": "10-K",
+        "filing_date": "2023-06-01",
+        "report_date": "2023-05-31",
+        "accession_number": "d",
+        "filing_url": "",
+    },
+}
+
+
+class TestDateFiltering:
+    @pytest.fixture(autouse=True)
+    def _setup(self, server):
+        server._tickers = {"AAPL": {"cik": "0000320193", "name": "APPLE INC."}}
+        server._initialized = True
+        _write_filings_cache(server, "0000320193", MIXED_DATE_FILINGS)
+
+    @pytest.mark.asyncio
+    async def test_start_date_only(self, server) -> None:
+        """start_date filters out filings before the given date."""
+        request = FinanceAgentSearchRequest(ticker="AAPL", start_date="2024-01-01")
+        response = await server.sec_filing_search(request)
+        results = json.loads(response.results)
+        assert len(results) == 3
+        assert all(r["filing_date"] >= "2024-01-01" for r in results)
+
+    @pytest.mark.asyncio
+    async def test_end_date_only(self, server) -> None:
+        """end_date filters out filings after the given date."""
+        request = FinanceAgentSearchRequest(ticker="AAPL", end_date="2024-07-15")
+        response = await server.sec_filing_search(request)
+        results = json.loads(response.results)
+        assert len(results) == 3
+        assert all(r["filing_date"] <= "2024-07-15" for r in results)
+
+    @pytest.mark.asyncio
+    async def test_start_and_end_date(self, server) -> None:
+        """Combined date range narrows results."""
+        request = FinanceAgentSearchRequest(
+            ticker="AAPL", start_date="2024-01-01", end_date="2024-12-31"
+        )
+        response = await server.sec_filing_search(request)
+        results = json.loads(response.results)
+        assert len(results) == 2
+        for r in results:
+            assert "2024-01-01" <= r["filing_date"] <= "2024-12-31"
+
+    @pytest.mark.asyncio
+    async def test_date_filter_no_results(self, server) -> None:
+        """Date range with no matching filings returns error with filter info."""
+        request = FinanceAgentSearchRequest(
+            ticker="AAPL", start_date="2030-01-01", end_date="2030-12-31"
+        )
+        response = await server.sec_filing_search(request)
+        results = json.loads(response.results)
+        assert "error" in results
+        assert "start_date=" in results["error"]
+        assert "end_date=" in results["error"]
+
+    @pytest.mark.asyncio
+    async def test_results_sorted_newest_first(self, server) -> None:
+        """Results are sorted by filing_date descending."""
+        request = FinanceAgentSearchRequest(ticker="AAPL")
+        response = await server.sec_filing_search(request)
+        results = json.loads(response.results)
+        dates = [r["filing_date"] for r in results]
+        assert dates == sorted(dates, reverse=True)
+
+
+# ============================================================================
+# Test: In-Memory Filings Cache
+# ============================================================================
+
+
+class TestFilingsCache:
+    @pytest.mark.asyncio
+    async def test_memory_cache_avoids_disk_read(self, server) -> None:
+        """Second call for same CIK returns from _filings_cache, not disk."""
+        server._tickers = {"AAPL": {"cik": "0000320193", "name": "APPLE INC."}}
+        server._initialized = True
+
+        test_filings = {
+            "a": {
+                "ticker": "AAPL",
+                "form": "10-K",
+                "filing_date": "2025-01-15",
+                "report_date": "2024-12-31",
+                "accession_number": "a",
+                "primary_document": "doc.htm",
+                "filing_url": "",
+            },
+        }
+        _write_filings_cache(server, "0000320193", test_filings)
+
+        result1 = await server._get_company_filings("0000320193", "AAPL")
+        assert "a" in result1
+        assert "0000320193" in server._filings_cache
+
+        # Delete the disk file -- second call should still work from memory
+        server._get_company_cache_path("0000320193").unlink()
+
+        result2 = await server._get_company_filings("0000320193", "AAPL")
+        assert result2 == result1
+
+
+# ============================================================================
+# Test: Dump Fallback
+# ============================================================================
+
+
+class TestDumpFallback:
+    def test_lookup_dump_returns_none_without_config(self, server) -> None:
+        """_lookup_dump returns None when sec_dump_path is not configured."""
+        assert server.config.sec_dump_path is None
+        result = server._lookup_dump("https://www.sec.gov/Archives/edgar/data/320193/000032019325000001/doc.htm")
+        assert result is None
+
+    def test_lookup_dump_returns_none_without_metadata(self, server, tmp_path) -> None:
+        """_lookup_dump returns None when metadata is not in _filings_cache."""
+        server.config.sec_dump_path = str(tmp_path)
+        result = server._lookup_dump("https://www.sec.gov/Archives/edgar/data/320193/000032019325000001/doc.htm")
+        assert result is None
+
+    def test_lookup_dump_reads_from_dump(self, server, tmp_path) -> None:
+        """_lookup_dump reads HTML from dump, parses to text, returns it."""
+        server.config.sec_dump_path = str(tmp_path)
+
+        server._filings_cache["0000320193"] = {
+            "000032019325000001": {
+                "ticker": "AAPL",
+                "form": "10-K",
+                "report_date": "2024-12-31",
+                "accession_number": "0000320193-25-000001",
+            },
+        }
+
+        dump_dir = tmp_path / "AAPL" / "10-K" / "2024" / "0000320193-25-000001"
+        dump_dir.mkdir(parents=True)
+        (dump_dir / "primary-document.html").write_text("<html><body><p>Revenue was $100B</p></body></html>")
+
+        url = "https://www.sec.gov/Archives/edgar/data/320193/000032019325000001/doc.htm"
+        result = server._lookup_dump(url)
+        assert result is not None
+        assert "Revenue was $100B" in result
 
 
 # ============================================================================
