@@ -1,0 +1,67 @@
+{
+    "name": "spider2_lite",
+    "type": "benchmark",
+    "jsonl_fpath": "benchmarks/spider2_lite/data/spider2_lite_benchmark.jsonl",
+    "prepare_script": "benchmarks/spider2_lite/prepare.py",
+    "prompt_config": null,
+    "num_repeats": 16,
+    "Number of examples": 2160,
+    "Number of tools": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 2160,
+        "Average": 465.01,
+        "Min": 179.0,
+        "Max": 1120.0,
+        "Standard deviation": 271.8
+    },
+    "Number of turns": {
+        "Total # non-null values": 2160,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Standard deviation": 0.0
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "instance_id": {
+        "unique_count": 135,
+        "total_count": 2160
+    },
+    "db_id": {
+        "unique_count": 30,
+        "total_count": 2160
+    },
+    "question": {
+        "unique_count": 135,
+        "total_count": 2160
+    },
+    "ignore_order": {
+        "Total # non-null values": 2160,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Standard deviation": 0.0
+    },
+    "gold_sql": {
+        "unique_count": 24,
+        "total_count": 384
+    },
+    "condition_cols": {
+        "Total # non-null values": 1888,
+        "Average": 3.55,
+        "Min": 0.0,
+        "Max": 17.0,
+        "Standard deviation": 3.48
+    }
+}

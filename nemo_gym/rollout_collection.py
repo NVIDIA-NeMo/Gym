@@ -74,6 +74,7 @@ class E2ERolloutCollectionConfig(SharedRolloutCollectionConfig):
     """
 
     split: Union[Literal["train"], Literal["validation"], Literal["benchmark"]]
+    reuse_existing_data_preparation: bool = False
 
 
 class RolloutCollectionConfig(SharedRolloutCollectionConfig):
@@ -280,11 +281,13 @@ class RolloutCollectionHelper(BaseModel):
 
             result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
             result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
+            result[AGENT_REF_KEY_NAME] = row[AGENT_REF_KEY_NAME]
 
             rows.append(row)
             results.append(result)
             result_strs.append([orjson.dumps(result)])
             results_file.write(result_strs[-1][0] + b"\n")
+            results_file.flush()
 
             counts_left[row[AGENT_REF_KEY_NAME]["name"]] -= 1
             if counts_left[row[AGENT_REF_KEY_NAME]["name"]] <= 0:
@@ -396,7 +399,7 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
             )
             metrics_to_log.update(
                 {
-                    f"key_metrics/{k}": v
+                    f"key_metrics/{agent_name}/{k}": v
                     for k, v in agent_entry["key_metrics"].items()
                     if isinstance(v, primitive_types)
                 }

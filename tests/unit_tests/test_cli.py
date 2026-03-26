@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import shutil
 import sys
 import tomllib
 from importlib import import_module
@@ -75,7 +76,6 @@ class TestCLI:
 
     def test_init_resources_server_includes_domain(self) -> None:
         """Test that init_resources_server creates a config with the required domain field."""
-        import shutil
 
         # Use a temp directory but stay in the project root for access to template files
         server_name = "test_cli_server"

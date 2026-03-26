@@ -391,7 +391,7 @@ class BenchmarkDatasetConfig(BaseModel):
     type: Literal["benchmark"]
     jsonl_fpath: Path
     prepare_script: Path
-    prompt_config: Path
+    prompt_config: Optional[Path]
     num_repeats: int = Field(default=1, ge=1)
 
 
@@ -603,3 +603,39 @@ class WANDBConfig(BaseModel):
     def is_available(self) -> bool:
         # If global_config recursively hide secrets is called, the api key will be set to ****
         return self.wandb_project and self.wandb_name and self.wandb_api_key and self.wandb_api_key != "****"
+
+
+########################################
+# Weights and Biases
+########################################
+
+
+class AggregateMetricsRequest(BaseModel):
+    """POST body for /aggregate_metrics.
+
+    Each item is a stripped verify response dict containing at minimum:
+    - TASK_INDEX_KEY_NAME: int
+    - "reward": float
+    """
+
+    verify_responses: List[Dict[str, Any]]
+
+
+class AggregateMetrics(BaseModel):
+    """Response from /aggregate_metrics.
+
+    Flat string keys for direct logging to W&B/MLflow.
+    """
+
+    group_level_metrics: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="Per-task metrics (one dict per task) from RewardProfiler baseline stats.",
+    )
+    agent_metrics: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Overall metrics across all rollouts (RewardProfiler baseline + compute_metrics).",
+    )
+    key_metrics: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Headline metrics for this benchmark. Subset of agent_metrics.",
+    )
