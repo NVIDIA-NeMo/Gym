@@ -188,6 +188,7 @@ class GlobalConfigDictParser(BaseModel):
 
         extra_configs: List[DictConfig] = []
         duplicate_config_paths: List[str] = []
+        # Just a careful note here that we explicitly mutate config_paths as it is being appended to
         for config_path in config_paths:
             config_path = Path(config_path)
             # Check cwd first for user's local configs, then install location

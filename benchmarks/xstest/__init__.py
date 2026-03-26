@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,23 +12,3 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-[project]
-name = "local-vllm-model"
-dynamic = ["dependencies"]
-version = "0.2.0rc0"
-requires-python = ">=3.12"
-
-[build-system]
-build-backend = "setuptools.build_meta"
-requires = ["setuptools>=61", "setuptools-scm"]
-
-[tool.setuptools.packages.find]
-where = [".."]
-include = ["local_vllm_model"]
-
-[tool.uv.sources]
-nemo-gym = { path = "../..", editable = true }
-
-[tool.uv.pip]
-torch-backend = "auto"
