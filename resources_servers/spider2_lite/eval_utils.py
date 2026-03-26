@@ -43,13 +43,6 @@ def _coerce(v: Any) -> Any:
         return v
 
 
-@ray.remote(
-    num_cpus=1,
-    scheduling_strategy="SPREAD",
-    runtime_env={
-        "py_executable": sys.executable,
-    },
-)
 def execute_sqlite(db_path: Path, sql: str) -> ResultSet:
     """Execute SQL against a SQLite database file and return all rows.
 
@@ -69,6 +62,17 @@ def execute_sqlite(db_path: Path, sql: str) -> ResultSet:
         mem.close()
 
 
+@ray.remote(
+    num_cpus=1,
+    scheduling_strategy="SPREAD",
+    runtime_env={
+        "py_executable": sys.executable,
+    },
+)
+def execute_sqlite_remote(*args, **kwargs):
+    return execute_sqlite(*args, **kwargs)
+
+
 async def execute_sqlite_async(
     db_path: Path,
     sql: str,
@@ -77,14 +81,16 @@ async def execute_sqlite_async(
 ) -> Optional[ResultSet]:
     """Execute SQL asynchronously via thread executor, bounded by semaphore."""
     async with semaphore:
-        task = execute_sqlite.remote(db_path, sql)
-        done, in_progress = await ray.wait([task], num_returns=1, timeout=timeout_s, fetch_local=False)
+        task = execute_sqlite_remote.remote(db_path, sql)
+        fut: asyncio.Future = asyncio.wrap_future(task.future())
+
+        _, in_progress = await asyncio.wait([fut], timeout=timeout_s)
 
         if in_progress:
-            ray.cancel(in_progress[0])
+            ray.cancel(task)
             return None
         else:
-            return ray.get(done[0])
+            return ray.get(task)
 
 
 def _col_vector(rows: ResultSet, col_idx: int) -> list[Any]:
