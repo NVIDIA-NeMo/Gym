@@ -57,7 +57,7 @@ class TestServerStatus:
                 pid=123,
                 server_type="resources_servers",
                 name="test_resource",
-                process_name="test_resource_server",
+                process_name="test_resources_server",
                 host="127.0.0.1",
                 port=8000,
                 url="http://127.0.0.1:8000",
@@ -213,8 +213,6 @@ class TestServerStatus:
         mock_head_config = MagicMock()
         mock_head_config.host = "127.0.0.1"
         mock_head_config.port = 11000
-
-        from nemo_gym.server_utils import ServerClient
 
         monkeypatch.setattr(ServerClient, "load_head_server_config", lambda: mock_head_config)
 

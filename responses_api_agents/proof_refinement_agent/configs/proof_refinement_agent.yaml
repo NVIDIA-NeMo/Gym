@@ -1,0 +1,14 @@
+proof_refinement_agent:
+  responses_api_agents:
+    proof_refinement_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: ???
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      # Agent controls the retry loop
+      max_correction_turns: 2
+      # Include all attempts in output (for training data)
+      include_all_attempts: true

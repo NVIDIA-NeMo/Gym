@@ -28,7 +28,7 @@ import sys
 project = "NeMo Gym"
 copyright = "2025, NVIDIA Corporation"
 author = "NVIDIA Corporation"
-release = "0.1.1"
+release = "0.2.0"
 
 # -- General configuration ---------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#general-configuration
@@ -42,10 +42,11 @@ extensions = [
     "sphinx_copybutton",  # For copy button in code blocks
     "sphinx_design",  # For grid layouts and card components
     "sphinx_reredirects",  # For URL redirects when pages move
+    "sphinxcontrib.mermaid",  # For mermaid diagrams
 ]
 
 templates_path = ["_templates"]
-exclude_patterns = ["_build", "Thumbs.db", ".DS_Store"]
+exclude_patterns = ["_build", "Thumbs.db", ".DS_Store", "rfc"]
 
 # -- Options for MyST Parser (Markdown) --------------------------------------
 # MyST Parser settings
@@ -61,8 +62,11 @@ myst_enable_extensions = [
 myst_heading_anchors = 5  # Generates anchor links for headings up to level 5
 
 # MyST substitutions - variables that can be used in markdown files
+_unsloth_version = "2026.1.4"
 myst_substitutions = {
     "product_name": "NeMo Gym",
+    "unsloth_version": _unsloth_version,
+    "unsloth_pinned": f"`unsloth=={_unsloth_version}` and `unsloth_zoo=={_unsloth_version}`",
 }
 
 # -- Options for Autodoc2 ---------------------------------------------------
@@ -123,6 +127,18 @@ html_extra_path = ["project.json", "versions1.json"]
 # The .html extension is required for source paths.
 
 redirects = {
+    # tutorials/ split into environment-tutorials/ and training-tutorials/ (0.1.1 → 0.2.0)
+    "tutorials/index.html": "../training-tutorials/index.html",
+    "tutorials/creating-resource-server.html": "../environment-tutorials/creating-training-environment.html",
+    "tutorials/offline-training-w-rollouts.html": "../training-tutorials/offline-training-w-rollouts.html",
+    # nemo-rl-grpo subdir: source is tutorials/nemo-rl-grpo/, target is training-tutorials/nemo-rl-grpo/
+    "tutorials/nemo-rl-grpo/index.html": "../../training-tutorials/nemo-rl-grpo/index.html",
+    "tutorials/nemo-rl-grpo/about-workplace-assistant.html": "../../training-tutorials/nemo-rl-grpo/about-workplace-assistant.html",
+    "tutorials/nemo-rl-grpo/gym-configuration.html": "../../training-tutorials/nemo-rl-grpo/gym-configuration.html",
+    "tutorials/nemo-rl-grpo/nemo-rl-configuration.html": "../../training-tutorials/nemo-rl-grpo/nemo-rl-configuration.html",
+    "tutorials/nemo-rl-grpo/setup.html": "../../training-tutorials/nemo-rl-grpo/setup.html",
+    "tutorials/nemo-rl-grpo/single-node-training.html": "../../training-tutorials/nemo-rl-grpo/single-node-training.html",
+    "tutorials/nemo-rl-grpo/multi-node-training.html": "../../training-tutorials/nemo-rl-grpo/multi-node-training.html",
     # Get Started section renames (same directory)
     "get-started/setup-installation.html": "detailed-setup.html",
     # RL Framework Integration moved from training/ to contribute/
@@ -140,4 +156,7 @@ redirects = {
     "about/concepts/configuration-system.html": "configuration.html",
     # Top-level page moves (from root to reference/)
     "how-to-faq.html": "reference/faq.html",
+    # Infrastructure engineering notes moved to subdirectory
+    "infrastructure/swe-rl-case-study.html": "engineering-notes/swe-rl-case-study.html",
+    "infrastructure/aiohttp-vs-httpx.html": "engineering-notes/aiohttp-vs-httpx.html",
 }

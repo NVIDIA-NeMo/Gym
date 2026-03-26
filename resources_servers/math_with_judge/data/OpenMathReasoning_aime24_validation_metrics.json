@@ -1,0 +1,49 @@
+{
+    "name": "validation",
+    "type": "validation",
+    "jsonl_fpath": "resources_servers/math_with_judge/data/OpenMathReasoning_aime24_validation.jsonl",
+    "num_repeats": 1,
+    "gitlab_identifier": null,
+    "huggingface_identifier": {
+        "repo_id": "nvidia/Nemotron-RL-math-OpenMathReasoning",
+        "artifact_fpath": "validation.jsonl"
+    },
+    "license": "Apache 2.0",
+    "Number of examples": 30,
+    "Number of tools": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 30,
+        "Average": 80.47,
+        "Min": 42.0,
+        "Max": 149.0,
+        "Standard deviation": 25.11
+    },
+    "Number of turns": {
+        "Total # non-null values": 30,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Standard deviation": 0.0
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "question": {
+        "unique_count": 30,
+        "total_count": 30
+    },
+    "expected_answer": {
+        "unique_count": 29,
+        "total_count": 30
+    }
+}

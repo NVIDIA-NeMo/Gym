@@ -4,6 +4,8 @@ reasoning_gym:
       entrypoint: app.py
       domain: knowledge
       verified: true
+      description: Over 100 tasks including algebra, arithmetic, computation, cognition, geometry, graph theory, logic, and many common games.
+      value: Improve robustness, generalization, broad knowledge and reasoning
 reasoning_gym_simple_agent:
   responses_api_agents:
     simple_agent:
@@ -17,9 +19,8 @@ reasoning_gym_simple_agent:
       datasets:
       - name: train
         type: train
-        jsonl_fpath: resources_servers/reasoning_gym/data/train_knights_knaves.jsonl
-        gitlab_identifier:
-          dataset_name: knights_knaves_reasoning_gym
-          version: 1.0.0
-          artifact_fpath: train_knights_knaves.jsonl
-        license: Apache 2.0
+        jsonl_fpath: resources_servers/reasoning_gym/data/Nemotron-RL-ReasoningGym-v1_train.jsonl
+        huggingface_identifier:
+          repo_id: nvidia/Nemotron-RL-ReasoningGym-v1
+          artifact_fpath: data/train.jsonl
+        license: Creative Commons Attribution 4.0 International

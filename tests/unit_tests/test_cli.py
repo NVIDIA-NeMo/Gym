@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import shutil
 import sys
 import tomllib
 from importlib import import_module
@@ -23,7 +24,7 @@ from pytest import MonkeyPatch, raises
 
 import nemo_gym.global_config
 from nemo_gym import PARENT_DIR
-from nemo_gym.cli import RunConfig, init_resources_server
+from nemo_gym.cli import RunConfig, display_help, init_resources_server
 from nemo_gym.config_types import ResourcesServerInstanceConfig
 
 
@@ -33,7 +34,7 @@ class TestCLI:
         RunConfig(entrypoint="", name="")
 
     def test_pyproject_scripts(self) -> None:
-        pyproject_path = Path(PARENT_DIR) / "pyproject.toml"
+        pyproject_path = PARENT_DIR / "pyproject.toml"
         with pyproject_path.open("rb") as f:
             pyproject_data = tomllib.load(f)
 
@@ -59,9 +60,22 @@ class TestCLI:
                 with raises(SystemExit):
                     fn()
 
+    def test_display_help_discovers_scripts(self) -> None:
+        with MonkeyPatch.context() as mp:
+            mp.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", OmegaConf.create({}))
+
+            text_trap = StringIO()
+            mp.setattr(sys, "stdout", text_trap)
+
+            display_help()
+
+            output = text_trap.getvalue()
+            assert "ng_help" in output
+            assert "ng_run" in output
+            assert "ng_collect_rollouts" in output
+
     def test_init_resources_server_includes_domain(self) -> None:
         """Test that init_resources_server creates a config with the required domain field."""
-        import shutil
 
         # Use a temp directory but stay in the project root for access to template files
         server_name = "test_cli_server"

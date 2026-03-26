@@ -5,10 +5,10 @@ orphan: true
 (about-concepts)=
 # Understanding Concepts for {{product_name}}
 
-NeMo Gym concepts explain the mental model behind building reliable agent systems: how services collaborate, how teams capture interaction data, and how verification signals drive learning. Use this page as a compass to decide which explanation to read next.
+NeMo Gym concepts explain the mental model behind building RL training environments: when to use RL over SFT, how environment components work together, and how verification signals drive learning. Use this page as a compass to decide which explanation to read next.
 
 ::::{tip}
-Need a refresher on reinforcement learning language? Refer to the {doc}`key-terminology` before diving in.
+New to RL for LLMs? Start with {ref}`training-approaches` for context on SFT, RL, and RLVR, or refer to {doc}`key-terminology` for a quick glossary.
 ::::
 
 ---
@@ -20,7 +20,13 @@ Each explainer below covers one foundational idea and links to deeper material.
 ::::{grid} 1 1 1 2
 :gutter: 1 1 1 2
 
-:::{grid-item-card} {octicon}`package;1.5em;sd-mr-1` Core Components
+:::{grid-item-card} {octicon}`mortar-board;1.5em;sd-mr-1` Training Approaches
+:link: training-approaches
+:link-type: ref
+Understand the differences between SFT, DPO, and GRPO, and the rise of RLVR.
+:::
+
+:::{grid-item-card} {octicon}`package;1.5em;sd-mr-1` Environment Components
 :link: core-components
 :link-type: ref
 Understand the three server components that make up a training environment.
@@ -30,6 +36,12 @@ Understand the three server components that make up a training environment.
 :link: configuration-concepts
 :link-type: ref
 Understand how servers are configured and connected.
+:::
+
+:::{grid-item-card} {octicon}`workflow;1.5em;sd-mr-1` Architecture
+:link: architecture
+:link-type: ref
+How components interact during startup and rollout collection.
 :::
 
 :::{grid-item-card} {octicon}`check-circle;1.5em;sd-mr-1` Task Verification
@@ -52,8 +64,10 @@ Essential vocabulary for agent training, RL workflows, and NeMo Gym.
 :hidden:
 :maxdepth: 1
 
-Core Components <core-components>
+Training Approaches <training-approaches>
+Environment Components <core-components>
 Configuration System <configuration>
+Architecture <architecture>
 Task Verification <task-verification>
 Key Terminology <key-terminology>
 ```

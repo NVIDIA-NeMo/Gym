@@ -6,6 +6,8 @@
 
 **Goal**: Get [NeMo Gym](https://github.com/NVIDIA-NeMo/Gym) installed and servers running, then verify all components work together.
 
+**Time**: ~15 minutes | **Cost**: ~$0.05 (OpenAI API)
+
 ^^^
 
 **In this tutorial, you will**:
@@ -17,6 +19,14 @@
 
 :::
 
+:::{button-ref} index
+:color: secondary
+:outline:
+:ref-type: doc
+
+← Previous: Quickstart
+:::
+
 ## Requirements
 
 ### Hardware Requirements
@@ -24,7 +34,7 @@
 NeMo Gym is designed to run on standard development machines without specialized hardware:
 
 - **GPU**: Not required for NeMo Gym library operation
-  - GPU may be needed for specific resource servers or model inference (see individual server documentation). E.g. if you are intending to train your model with NeMo-RL, GPU resources are required (see training documentation)
+  - GPU may be needed for specific resources servers or model inference (see individual server documentation). E.g. if you are intending to train your model with NeMo-RL, GPU resources are required (see training documentation)
 - **CPU**: Any modern x86_64 or ARM64 processor (e.g., Intel, AMD, Apple Silicon)
 - **RAM**: Minimum 8 GB (16 GB+ recommended for larger environments and datasets)
 - **Storage**: Minimum 2 GB free disk space for installation and basic usage
@@ -64,12 +74,12 @@ The following configurations have been tested and verified:
 | Windows 11 | x86_64 (via WSL2) | 3.12 | ✅ Verified |
 
 :::{note}
-While NeMo Gym itself does not require a GPU, some resource servers (particularly those involving local model inference or training) may have GPU requirements. Check the individual resource server documentation for specific requirements.
+While NeMo Gym itself does not require a GPU, some resources servers (particularly those involving local model inference or training) may have GPU requirements. Check the individual resources server documentation for specific requirements.
 :::
 
 ---
 
-## Before You Start
+## Prerequisites
 
 Make sure you have these prerequisites ready before beginning:
 
@@ -82,11 +92,27 @@ Make sure you have these prerequisites ready before beginning:
 
 Clone the [NeMo Gym repository](https://github.com/NVIDIA-NeMo/Gym) and install dependencies:
 
+:::::{tab-set}
+
+::::{tab-item} SSH (recommended)
 ```bash
 # Clone the repository
 git clone git@github.com:NVIDIA-NeMo/Gym.git
 cd Gym
+```
+::::
 
+::::{tab-item} HTTPS
+```bash
+# Clone the repository (if you don't have SSH keys configured)
+git clone https://github.com/NVIDIA-NeMo/Gym.git
+cd Gym
+```
+::::
+
+:::::
+
+```bash
 # Install UV (Python package manager)
 curl -LsSf https://astral.sh/uv/install.sh | sh
 source $HOME/.local/bin/env
@@ -105,6 +131,9 @@ uv sync --extra dev --group docs
 
 Create an `env.yaml` file in the project root to configure your {term}`Policy Model` credentials:
 
+:::::{tab-set}
+
+::::{tab-item} Using terminal
 ```bash
 # Create env.yaml with your OpenAI credentials
 cat > env.yaml << EOF
@@ -113,6 +142,19 @@ policy_api_key: sk-your-actual-openai-api-key-here
 policy_model_name: gpt-4.1-2025-04-14
 EOF
 ```
+::::
+
+::::{tab-item} Create manually
+Create a file named `env.yaml` in the `Gym/` directory with this content:
+
+```yaml
+policy_base_url: https://api.openai.com/v1
+policy_api_key: sk-your-actual-openai-api-key-here
+policy_model_name: gpt-4.1-2025-04-14
+```
+::::
+
+:::::
 
 :::{important}
 Replace `sk-your-actual-openai-api-key-here` with your real OpenAI API key. This file keeps secrets out of version control while making them available to NeMo Gym.
@@ -128,7 +170,7 @@ Refer to {doc}`/reference/configuration` for additional `env.yaml` options.
 **Why GPT-4.1?** We use GPT-4.1 for getting started because it provides low latency (no reasoning step) and reliable function calling support out-of-the-box, letting you focus on learning NeMo Gym without configuration complexity.
 
 **Can I use my own model?** Yes! NeMo Gym works with any OpenAI-compatible inference server that supports function calling:
-- **Self-hosted models**: Use vLLM to serve your own models (see the [vLLM setup guide](../reference/faq.md#how-to-use-nemo-gym-with-a-non-responses-compatible-api-endpoint-like-vllm))
+- **Self-hosted models**: Use vLLM to serve your own models (see the {ref}`model-server-vllm`)
 - **Other providers**: Any inference server that implements the OpenAI API specification
 
 Simply update `policy_base_url`, `policy_api_key`, and `policy_model_name` in your `env.yaml` to point to your chosen endpoint.
@@ -173,6 +215,13 @@ If this step fails, you will see a clear error message (like quota exceeded or i
 Check your `env.yaml` file has the correct API key format.
 :::
 
+
+The cost for running rollouts using the OpenAI API can be calculated using the following rough formula: per token API cost × average number of input/output tokens × num_repeats × limit.
+- Per token API cost: See the OpenAI API pricing for more details https://openai.com/api/pricing/.
+- Average number of input/output tokens: After rollouts are run, you can see the input/output token usage in the returned response.
+- Num repeats and limit: These parameters are set in the rollout collection command later.
+
+
 ## 3. Start the Servers
 
 ```bash
@@ -195,6 +244,12 @@ INFO:     Uvicorn running on http://127.0.0.1:62920 (Press CTRL+C to quit)
 
 :::{note}
 The head server always uses port **11000**. Other servers get automatically assigned ports (like 62920, 52341, etc.) - your port numbers will differ from the example above.
+
+**Finding your server ports**: Query the head server to see all registered servers and their assigned ports:
+
+```bash
+curl http://localhost:11000/server_instances
+```
 :::
 
 When you ran `ng_run`, it started all the servers you configured:
@@ -203,6 +258,10 @@ When you ran `ng_run`, it started all the servers you configured:
 - **Resources server:** defining tools and verification
 - **Model server:** providing LLM inference
 - **Agent server:** orchestrating how the model interacts with the resources. The agent server calls the model and resources servers using REST requests.
+
+:::{tip}
+**Stopping servers**: Press `Ctrl+C` in the terminal running `ng_run` to stop all servers.
+:::
 
 :::{dropdown} Troubleshooting: "command not found: ng_run"
 Make sure you activated the virtual environment:
@@ -215,7 +274,13 @@ source .venv/bin/activate
 
 ## 4. Test the Setup
 
-Open a **new terminal** (keep servers running in the first one):
+Open a **new terminal** (keep servers running in the first one).
+
+:::{important}
+**Before running the test**, make sure you:
+1. **`cd /path/to/Gym`** — navigate to the project directory
+2. **`source .venv/bin/activate`** — activate the virtual environment
+:::
 
 ```bash
 # Navigate to project directory
@@ -310,11 +375,17 @@ Error code: 404 - Model not found
 **Testing your API key**:
 
 ```bash
-# Quick test to verify API access
+# Quick test to verify API access using your env.yaml credentials
 python -c "
-import openai
-client = openai.OpenAI()
-print(client.models.list().data[0])
+from openai import OpenAI
+from nemo_gym.global_config import get_global_config_dict
+
+config = get_global_config_dict()
+client = OpenAI(
+    api_key=config['policy_api_key'],
+    base_url=config['policy_base_url']
+)
+print('✅ API access verified:', client.models.list().data[0].id)
 "
 ```
 
@@ -334,4 +405,21 @@ Gym/
 ├── responses_api_agents/       # Agent implementations
 └── docs/                       # Documentation files
 ```
+
+---
+
+## Next Steps
+
+You've confirmed that NeMo Gym is working — the agent can call tools and return results. But a single interaction isn't enough for RL training. **The next step is to collect batches of scored interactions (rollouts) that become your training data.**
+
+:::{button-ref} rollout-collection
+:color: primary
+:ref-type: doc
+
+Continue to Rollout Collection →
+:::
+
+:::{note}
+Rollout collection is required before proceeding to tutorials like {doc}`/environment-tutorials/index` or training workflows. Complete it next.
+:::
 
