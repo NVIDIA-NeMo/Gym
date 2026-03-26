@@ -26,11 +26,11 @@ from nemo_gym.global_config import get_hf_token
 
 BENCHMARK_DIR = Path(__file__).parent
 DATA_DIR = BENCHMARK_DIR / "data"
-OUTPUT_FPATH = DATA_DIR / "ruler_benchmark.jsonl"
 
 
-def prepare(model: str, length: str) -> Path:
+def prepare_helper(output_name: str, model: str, length: str) -> Path:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    output_fpath = DATA_DIR / output_name
 
     skills_dir = BENCHMARK_DIR / "Skills"
     if skills_dir.exists():
@@ -72,20 +72,24 @@ python nemo_skills/dataset/ruler/prepare.py \
     )
 
     samples = []
-    for row in samples:
-        sample = {
-            "responses_create_params": {"input": [{"role": "user", "content": ""}]},
-        }
-        samples.append(sample)
+    for subset_dir in (tmp_data_dir / "ruler_data").iterdir():
+        subset_file = subset_dir / "test.jsonl"
+        with subset_file.open() as f:
+            subset_samples = list(map(json.loads, f))
 
-    with OUTPUT_FPATH.open("w") as f:
+        for sample in subset_samples:
+            sample = {
+                "responses_create_params": {"input": [{"role": "user", "content": sample["input"]}]},
+                "outputs": sample["outputs"],
+                "length": sample["length"],
+                "subset": subset_dir.name,
+            }
+            samples.append(sample)
+
+    with output_fpath.open("w") as f:
         for sample in samples:
             f.write(json.dumps(sample) + "\n")
 
-    print(f"Wrote {len(samples)} samples to {OUTPUT_FPATH}")
+    print(f"Wrote {len(samples)} samples to {output_fpath}")
 
-    return OUTPUT_FPATH
-
-
-if __name__ == "__main__":
-    prepare()
+    return output_fpath

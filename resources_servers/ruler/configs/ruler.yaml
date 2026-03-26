@@ -15,24 +15,6 @@ ruler_simple_agent:
         type: responses_api_models
         name: policy_model
       datasets:
-      - name: train
-        type: train
-        jsonl_fpath: resources_servers/ruler/data/train.jsonl
-        num_repeats: 1
-        gitlab_identifier:
-          dataset_name: ruler
-          version: 0.0.1
-          artifact_fpath: train.jsonl
-        license: Apache 2.0
-      - name: validation
-        type: validation
-        jsonl_fpath: resources_servers/ruler/data/validation.jsonl
-        num_repeats: 1
-        gitlab_identifier:
-          dataset_name: ruler
-          version: 0.0.1
-          artifact_fpath: validation.jsonl
-        license: Apache 2.0
       - name: example
         type: example
         jsonl_fpath: resources_servers/ruler/data/example.jsonl
