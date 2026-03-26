@@ -12,6 +12,11 @@ config_paths:
 # Set various resource limits. We assume this is run using at least 8 GPU nodes with 128 CPU cores on each node
 global_aiohttp_connector_limit_per_host: 16384
 
+policy_model:
+  responses_api_models:
+    vllm_model:
+      num_workers: 4
+
 # There are ~1500 total rollouts to do for LCBv6 and each rollout we assume uses 1 CPU core
 livecodebench_v6_cascade_code_gen_resources_server:
   resources_servers:
