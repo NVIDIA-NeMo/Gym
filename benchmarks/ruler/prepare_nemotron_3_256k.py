@@ -15,9 +15,13 @@
 from benchmarks.ruler.prepare_utils import prepare_helper
 
 
-if __name__ == "__main__":
+def prepare():
     prepare_helper(
         model="nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
         length=262144,
         output_name="ruler_nemotron_3_256k_benchmark.jsonl",
     )
+
+
+if __name__ == "__main__":
+    prepare()
