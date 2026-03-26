@@ -146,8 +146,9 @@ Purpose: Demonstrate NeMo Gym patterns and concepts.
 
 Purpose: Training-ready environments with curated datasets.
 
-> [!TIP]
-> Each resources server includes example data, configuration files, and tests. See each server's README for details.
+Each resources server includes example data, configuration files, and tests. See each server's README for details.
+
+The Dataset column links to publicly available datasets (e.g., on HuggingFace). A `-` means the train/validation data has not been publicly released yet, or that it is procedurally generated using a provided script. If no data is released yet, new data can be generated, or the environment can be used as a reference. Each server includes 5 example tasks in `data/example.jsonl`.
 
 <!-- START_TRAINING_SERVERS_TABLE -->
 | Resources Server                              | Domain                | Description                                                                                                                                                                                                                  | Value                                                                                                                        | Train | Validation | License                                                   | Config                                                                                                                                                                                                                      | Dataset                                                                                                                                                        |
