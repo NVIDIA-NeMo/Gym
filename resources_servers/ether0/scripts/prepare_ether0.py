@@ -47,7 +47,7 @@ _MCQ_TEMPLATE = (
 )
 
 
-def _apply_aai_format(problem: str, problem_type: str, ideal: str | None) -> tuple[str, str | None, dict]:
+def _apply_boxed_letter_format(problem: str, problem_type: str, ideal: str | None) -> tuple[str, str | None, dict]:
     if problem_type in _OPEN_ENDED or problem_type.split("/")[0] in _OPEN_ENDED:
         return _MATH_TEMPLATE.format(problem=problem), ideal, {}
 
@@ -63,14 +63,14 @@ def _apply_aai_format(problem: str, problem_type: str, ideal: str | None) -> tup
     return prompt, answer_label, {"choices": choices}
 
 
-def format_row(row: dict, aai_format: bool = False) -> dict:
+def format_row(row: dict, boxed_letter_format: bool = False) -> dict:
     problem = row["problem"]
     problem_type = row.get("problem_type", "")
     ideal = row.get("ideal")
     extra_meta: dict = {}
 
-    if aai_format:
-        problem, ideal, extra_meta = _apply_aai_format(problem, problem_type, ideal)
+    if boxed_letter_format:
+        problem, ideal, extra_meta = _apply_boxed_letter_format(problem, problem_type, ideal)
         input_messages = [{"role": "user", "content": problem}]
     else:
         input_messages = [
@@ -104,9 +104,9 @@ def main() -> None:
     parser.add_argument("--problem-types", nargs="*", default=None, help="Problem type prefixes to include")
     parser.add_argument("--limit", type=int, default=None, help="Max rows to output")
     parser.add_argument(
-        "--aai-format",
+        "--boxed-letter-format",
         action="store_true",
-        help="Use AAI prompt format: open-ended -> \\boxed{}, MCQ -> Answer: LETTER",
+        help="Use boxed/letter prompt format: open-ended -> \\boxed{}, MCQ -> Answer: LETTER",
     )
     args = parser.parse_args()
 
@@ -123,7 +123,7 @@ def main() -> None:
                 if not any(pt.startswith(p) for p in args.problem_types):
                     continue
 
-            fout.write(json.dumps(format_row(row, aai_format=args.aai_format), ensure_ascii=False) + "\n")
+            fout.write(json.dumps(format_row(row, boxed_letter_format=args.boxed_letter_format), ensure_ascii=False) + "\n")
             count += 1
 
             if args.limit and count >= args.limit:
@@ -135,6 +135,6 @@ def main() -> None:
 # python scripts/prepare_ether0.py --output data/val.jsonl
 # python scripts/prepare_ether0.py --output data/example.jsonl --limit 5
 # python scripts/prepare_ether0.py --output data/val_reactions.jsonl --problem-types reaction-prediction retro-synthesis
-# python scripts/prepare_ether0.py --output data/val_aai.jsonl --aai-format
+# python scripts/prepare_ether0.py --output data/val_boxed_letter.jsonl --boxed-letter-format
 if __name__ == "__main__":
     main()
