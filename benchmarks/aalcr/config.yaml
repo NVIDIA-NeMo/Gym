@@ -1,0 +1,21 @@
+# Chain to existing resource server + agent config
+config_paths:
+  - resources_servers/aalcr/configs/aalcr.yaml
+
+# We use `_inherit_from` directives to inherit from and not use the generic config above to ensure this benchmark config is isolated.
+aalcr_benchmark_resources_server:
+  _inherit_from: aalcr_resources_server
+
+aalcr_benchmark_simple_agent:
+  _inherit_from: aalcr_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: aalcr_benchmark_resources_server
+      datasets:
+      - name: aalcr
+        type: benchmark
+        jsonl_fpath: benchmarks/aalcr/data/aalcr_benchmark.jsonl
+        prompt_config: null
+        prepare_script: benchmarks/aalcr/prepare.py
+        num_repeats: 16

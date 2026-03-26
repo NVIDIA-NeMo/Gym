@@ -31,6 +31,24 @@ DATA_DIR = BENCHMARK_DIR / "data"
 OUTPUT_FPATH = DATA_DIR / "aalcr_benchmark.jsonl"
 
 
+# From https://github.com/NVIDIA-NeMo/Skills/blob/54d2e113c2f64bf74bda72e15f23f01b524850da/nemo_skills/dataset/aalcr/prepare.py#L94-L105
+def _dirty_filename(fname: str) -> str:
+    replacements = [
+        ("'", "ΓÇÖ"),  # ASCII apostrophe to encoding artifact (ord: 39)
+        (chr(8217), "ΓÇÖ"),  # Right single quotation mark to encoding artifact (ord: 8217)
+        (chr(8216), "ΓÇÖ"),  # Left single quotation mark to encoding artifact (ord: 8216)
+        ("—", "ΓÇö"),  # em dash to encoding artifact
+        ("–", "ΓÇô"),  # en dash to encoding artifact
+        ("ş", "s╠º"),  # Turkish character to combining diacritic
+    ]
+
+    filename_with_artifacts = fname
+    for clean, artifact in replacements:
+        filename_with_artifacts = filename_with_artifacts.replace(clean, artifact)
+
+    return filename_with_artifacts
+
+
 def prepare() -> Path:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -62,7 +80,7 @@ def prepare() -> Path:
         document_paths = [
             f"lcr/{row['document_category']}/{row['document_set_id']}/{document}" for document in documents
         ]
-        document_texts = [doc_path_to_txt[dp] for dp in document_paths]
+        document_texts = [doc_path_to_txt[_dirty_filename(dp)] for dp in document_paths]
 
         documents_text = "\n\n".join(
             f"BEGIN DOCUMENT {i + 1}:\n{doc}\nEND DOCUMENT {i + 1}" for i, doc in enumerate(document_texts)
@@ -107,6 +125,7 @@ END QUESTION
             "input_tokens": row["input_tokens"],
             "input_tokens_band": input_tokens_band,
         }
+        samples.append(sample)
 
     with OUTPUT_FPATH.open("w") as f:
         for sample in samples:
