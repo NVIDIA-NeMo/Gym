@@ -25,6 +25,7 @@ from importlib.metadata import version as md_version
 from os import makedirs
 from os.path import exists
 from pathlib import Path
+from shutil import rmtree
 from signal import SIGINT
 from subprocess import Popen, TimeoutExpired
 from threading import Thread
@@ -37,6 +38,7 @@ import uvicorn
 from devtools import pprint
 from omegaconf import DictConfig, OmegaConf, open_dict
 from pydantic import Field
+from rich.table import Table
 from tqdm.auto import tqdm
 
 from nemo_gym import PARENT_DIR, ROOT_DIR, __version__
@@ -594,6 +596,10 @@ class TestAllConfig(BaseNeMoGymCLIConfig):
         default=False,
         description="Fail if the number of server modules doesn't match the number with tests (default: False).",
     )
+    delete_venvs_after_each_test: bool = Field(
+        default=False,
+        description="Delete each server venv after its tests have been run (default: False).",
+    )
 
 
 def test_all():  # pragma: no cover
@@ -615,7 +621,10 @@ def test_all():  # pragma: no cover
     tests_failed: List[Path] = []
     tests_missing: List[Path] = []
     data_validation_failed: List[Path] = []
+    times_taken: List[Tuple[float, Path]] = []
     for dir_path in tqdm(dir_paths, desc="Running tests"):
+        start_time = time()
+
         test_config = TestConfig(
             entrypoint=str(dir_path),
             should_validate_data=True,  # Test all always validates data.
@@ -640,6 +649,21 @@ You can rerun just these tests using `ng_test +entrypoint={dir_path}` or run det
             _validate_data_single(test_config)
         except AssertionError:
             data_validation_failed.append(dir_path)
+
+        if test_all_config.delete_venvs_after_each_test:
+            venv_path = dir_path / ".venv"
+            print(f"Deleting {venv_path} since `delete_venvs_after_each_test=true`")
+            rmtree(venv_path)
+
+        times_taken.append((time() - start_time, dir_path))
+
+    times_taken.sort(reverse=True)
+    table = Table(title="Times taken per test (sorted from highest to lowest)")
+    table.add_column("Server path")
+    table.add_column("Time taken (s)")
+    for time_taken, dir_path in times_taken:
+        table.add_row(str(dir_path), f"{time_taken:.2f}")
+    rich.print(table)
 
     print(f"""Found {len(candidate_dir_paths)} total modules:{_display_list_of_paths(candidate_dir_paths)}
 
