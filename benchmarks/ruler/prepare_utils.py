@@ -39,6 +39,7 @@ def prepare(model: str, length: str) -> Path:
         run(
             """git clone https://github.com/NVIDIA-NeMo/Skills \
 && cd Skills \
+&& git lfs install \
 && git checkout 54d2e113c2f64bf74bda72e15f23f01b524850da \
 && uv venv --python 3.12 --seed \
 && source .venv/bin/activate \
@@ -53,17 +54,16 @@ def prepare(model: str, length: str) -> Path:
     if maybe_hf_token:
         env_vars["HF_TOKEN"] = maybe_hf_token
 
+    tmp_data_dir = skills_dir / "ruler" / model / str(length)
     run(
-        """source .venv/bin/activate \
-LENGTH=262144
-MODEL=nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16
+        f"""source .venv/bin/activate \
 python nemo_skills/dataset/ruler/prepare.py \
     --data_format=chat \
-    --setup=$MODEL-$LENGTH \
-    --max_seq_length=$LENGTH \
-    --tokenizer_path=$MODEL \
-    --max_seq_length=$LENGTH \
-    --tmp_data_dir=ruler
+    --setup={model}-{length} \
+    --max_seq_length={length} \
+    --tokenizer_path={model} \
+    --max_seq_length={length} \
+    --tmp_data_dir={tmp_data_dir.absolute()}
 """,
         check=True,
         shell=True,
