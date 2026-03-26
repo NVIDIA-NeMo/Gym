@@ -34,9 +34,81 @@ search_judge_model_name: /hf_models/Qwen3-30B-A3B
 finance_sec_search_resources_server:
   resources_servers:
     finance_sec_search:
-      cache_dir: cache
+      cache_dir: /workspace/cache/finance_sec_search
       # tavily_api_key: <your-tavily-key>
 ```
+
+## Cache Management
+
+The resource server caches SEC data locally to avoid redundant API calls and to
+enable offline operation after the first fetch.
+
+### What is cached
+
+| Directory | Contents |
+|-----------|----------|
+| `filings_metadata/{CIK}.json` | Filing metadata (accession numbers, dates, forms) per company |
+| `filings/{hash}.txt` | Parsed filing content (HTML to text) |
+| `tickers.json` | SEC ticker-to-CIK mapping |
+
+### Cache location
+
+| Scenario | Location |
+|----------|----------|
+| `cache_dir` set to an absolute path | Uses that path directly |
+| `cache_dir` set to a relative path | Resolved from the current working directory |
+| `cache_dir` not set (null) | `~/.cache/nemo_gym/finance_sec_search/` |
+
+**Important**: The default `~/.cache/...` path is only suitable for local
+development on a workstation. In containerized or Slurm environments this path
+is **ephemeral** (destroyed when the container exits) and **not shared** across
+jobs -- each seed runs in its own container and cannot see another seed's cache.
+For multi-seed rollouts or any production use, always set `cache_dir` to a
+shared, persistent absolute path on a mounted filesystem (e.g.
+`/workspace/cache/finance_sec_search`).
+
+### Pre-warming the cache (prefetch)
+
+The `prefetch_sec_metadata.py` script populates the metadata cache for a set of
+companies **before** starting rollouts. This avoids SEC.gov API calls during
+GPU-intensive rollout collection and eliminates race conditions when multiple
+seeds share the same cache.
+
+**Requirements**: Python 3.10+, `aiohttp`, `pyyaml` (both are Gym
+dependencies). Internet access to SEC.gov is required. No GPU, no model server,
+and no running Gym server needed.
+
+```bash
+# Prefetch for specific tickers:
+python resources_servers/finance_sec_search/scripts/prefetch_sec_metadata.py \
+    --cache_dir /path/to/cache \
+    --tickers AAPL MSFT NVDA GOOG AMZN
+
+# Or with a YAML ticker list (expects a 'tickers' key with a list):
+python resources_servers/finance_sec_search/scripts/prefetch_sec_metadata.py \
+    --cache_dir /path/to/cache \
+    --ticker_config /path/to/tickers.yaml
+
+# Force refresh (re-fetch even if cached):
+python resources_servers/finance_sec_search/scripts/prefetch_sec_metadata.py \
+    --cache_dir /path/to/cache \
+    --tickers AAPL --force
+```
+
+The script is **idempotent**: it skips companies whose cache file already exists
+(unless `--force` is used).
+
+### Without prefetch
+
+If the cache is empty, the resource server lazily fetches and caches metadata
+from SEC.gov on first access. This works but is slower on the first run and
+requires SEC.gov connectivity during rollout.
+
+### Shared cache
+
+Multiple seeds or runs can share the same `cache_dir`. With prefetch, all GPU
+jobs are read-only (no race conditions). Without prefetch, concurrent writes are
+benign because all writers produce identical data for the same company.
 
 ## End-to-End Rollout
 

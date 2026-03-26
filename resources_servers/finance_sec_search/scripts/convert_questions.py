@@ -52,15 +52,23 @@ SEC_TOOLS = [
     {
         "type": "function",
         "name": "sec_filing_search",
-        "description": "Search SEC EDGAR for company filings by stock ticker symbol. Returns at most 30 filing metadata entries (sorted by filing date, most recent first), including filing_url, form type, and report_date. It does not contain the full text of the filing.",
+        "description": "Search SEC EDGAR for company filings by stock ticker symbol. Returns filing metadata entries (sorted by filing date, most recent first), including filing_url, form type, and report_date. It does not contain the full text of the filing. Use form_types, start_date, and end_date to narrow results.",
         "parameters": {
             "type": "object",
             "properties": {
                 "ticker": {"type": "string", "description": "Stock ticker symbol (e.g., 'AAPL', 'MSFT', 'NVDA')"},
                 "form_types": {
                     "type": "array",
-                    "description": "(optional) Limits search to specific EDGAR form types (e.g., ['8-K'], ['DEF 14A', '10-K']). Default: ['10-K', '10-Q', 'DEF 14A']. Override to search other form types.",
+                    "description": "(optional) Limits search to specific EDGAR form types (e.g., ['10-K'], ['10-Q', '8-K']). Default: all form types.",
                     "items": {"type": "string"},
+                },
+                "start_date": {
+                    "type": "string",
+                    "description": "(optional) Filter filings on or after this date (YYYY-MM-DD)",
+                },
+                "end_date": {
+                    "type": "string",
+                    "description": "(optional) Filter filings on or before this date (YYYY-MM-DD)",
                 },
             },
             "required": ["ticker"],
