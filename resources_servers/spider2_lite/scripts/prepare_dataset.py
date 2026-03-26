@@ -19,6 +19,7 @@ import csv
 import json
 import re
 from pathlib import Path
+from subprocess import run
 
 
 SYSTEM_PROMPT = (
@@ -161,15 +162,7 @@ def build_row(instance_id: str, task: dict, meta: dict, schema: str, gold_sql=No
     return row
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Convert Spider 2.0-Lite to NeMo Gym JSONL")
-    parser.add_argument("--spider2-dir", required=True, help="Path to Spider2/spider2-lite directory")
-    parser.add_argument(
-        "--sqlite-dir", default=None, help="Path to downloaded SQLite databases (for schema extraction)"
-    )
-    parser.add_argument("--output-dir", default=".", help="Output directory for JSONL files")
-    args = parser.parse_args()
-
+def _main(args: argparse.Namespace):
     spider2_dir = Path(args.spider2_dir)
     sqlite_dir = Path(args.sqlite_dir) if args.sqlite_dir else None
     output_dir = Path(args.output_dir)
@@ -217,6 +210,30 @@ def main():
         for row in validation_rows:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
     print(f"Wrote {len(validation_rows)} validation tasks to {validation_path}")
+
+
+def clone_spider2_repo(parent_dir: str):
+    if Path(parent_dir).exists():
+        print("Skipping git clone as the repository is already cloned!")
+        return
+
+    run(
+        f"cd {parent_dir} && git clone https://github.com/xlang-ai/Spider2.git",
+        check=True,
+        shell=True,
+    )
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Convert Spider 2.0-Lite to NeMo Gym JSONL")
+    parser.add_argument("--spider2-dir", required=True, help="Path to Spider2/spider2-lite directory")
+    parser.add_argument(
+        "--sqlite-dir", default=None, help="Path to downloaded SQLite databases (for schema extraction)"
+    )
+    parser.add_argument("--output-dir", default=".", help="Output directory for JSONL files")
+    args = parser.parse_args()
+
+    _main(args)
 
 
 if __name__ == "__main__":

@@ -14,10 +14,12 @@
 # limitations under the License.
 """Prepare Spider2 Lite benchmark data."""
 
+from argparse import Namespace
 from pathlib import Path
+from shutil import copy
 
-from nemo_gym.gitlab_utils import DownloadJsonlDatasetGitlabConfig, download_jsonl_dataset
-from resources_servers.spider2_lite.setup_spider2 import ensure_spider2_lite
+from resources_servers.spider2_lite.scripts.prepare_dataset import _main, clone_spider2_repo
+from resources_servers.spider2_lite.setup_spider2 import _DEFAULT_DIR, ensure_spider2_lite
 
 
 BENCHMARK_DIR = Path(__file__).parent
@@ -28,18 +30,22 @@ OUTPUT_FPATH = DATA_DIR / "spider2_lite_benchmark.jsonl"
 def prepare() -> Path:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Nvidia-internal only for the moment. Public script coming soon.
-    download_jsonl_dataset(
-        config=DownloadJsonlDatasetGitlabConfig(
-            dataset_name="spider2_lite_sqlite",
-            version="0.0.1",
-            artifact_fpath="spider2_lite_sqlite_validation.jsonl",
-            output_fpath=str(OUTPUT_FPATH),
-        )
-    )
-
     # Download SQL lite databases
     ensure_spider2_lite()
+
+    clone_spider2_repo(parent_dir=_DEFAULT_DIR)
+
+    _main(
+        args=Namespace(
+            spider2_dir=_DEFAULT_DIR / "Spider2" / "spider2-lite",
+            sqlite_dir=None,
+            output_dir=str(OUTPUT_FPATH.parent),
+        )
+    )
+    copy(
+        OUTPUT_FPATH.parent / "spider2_lite_sqlite_validation.jsonl",
+        OUTPUT_FPATH,
+    )
 
     return OUTPUT_FPATH
 
