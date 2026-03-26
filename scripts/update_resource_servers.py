@@ -21,31 +21,12 @@ from typing import Optional
 
 import yaml
 
+from nemo_gym.server_metadata import ResourcesServerMetadata, visit_resources_server
+
 
 README_PATH = Path("README.md")
 
 TARGET_FOLDER = Path("resources_servers")
-
-
-@dataclass
-class ResourcesServerMetadata:
-    """Metadata extracted from resources server YAML config."""
-
-    domain: Optional[str] = None
-    description: Optional[str] = None
-    verified: bool = False
-    verified_url: Optional[str] = None
-    value: Optional[str] = None
-
-    def to_dict(self) -> dict[str, str | bool | None]:  # pragma: no cover
-        """Convert to dict for backward compatibility with hf_utils.py"""
-        return {
-            "domain": self.domain,
-            "description": self.description,
-            "verified": self.verified,
-            "verified_url": self.verified_url,
-            "value": self.value,
-        }
 
 
 @dataclass
@@ -167,23 +148,6 @@ class ServerInfo:
     def get_readme_link(self) -> str:  # pragma: no cover
         return f"<a href='{self.readme_path}'>README</a>"
 
-
-def visit_resources_server(data: dict, level: int = 1) -> ResourcesServerMetadata:  # pragma: no cover
-    """Extract resources server metadata from YAML data."""
-    resource = ResourcesServerMetadata()
-    if level == 4:
-        resource.domain = data.get("domain")
-        resource.description = data.get("description")
-        resource.verified = data.get("verified", False)
-        resource.verified_url = data.get("verified_url")
-        resource.value = data.get("value")
-        return resource
-    elif isinstance(data, dict):
-        for k, v in data.items():
-            if level == 2 and k != "resources_servers":
-                continue
-            return visit_resources_server(v, level + 1)
-    return resource
 
 
 def visit_agent_datasets(data: dict) -> AgentDatasetsMetadata:  # pragma: no cover
