@@ -114,6 +114,11 @@ def get_wandb_run() -> Optional[Run]:
     return _WANDB_RUN
 
 
+# HuggingFace
+def get_hf_token() -> Optional[str]:
+    return get_global_config_dict().get(HF_TOKEN_KEY_NAME)
+
+
 # OmegaConf new resolvers
 OmegaConf.register_new_resolver("inherit_from", lambda a: f"${{inherit_from:{a}}}")
 
