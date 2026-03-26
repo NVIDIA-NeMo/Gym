@@ -123,7 +123,9 @@ def main() -> None:
                 if not any(pt.startswith(p) for p in args.problem_types):
                     continue
 
-            fout.write(json.dumps(format_row(row, boxed_letter_format=args.boxed_letter_format), ensure_ascii=False) + "\n")
+            fout.write(
+                json.dumps(format_row(row, boxed_letter_format=args.boxed_letter_format), ensure_ascii=False) + "\n"
+            )
             count += 1
 
             if args.limit and count >= args.limit:
