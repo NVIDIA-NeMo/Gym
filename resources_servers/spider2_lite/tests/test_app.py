@@ -241,8 +241,11 @@ class TestEvalUtils:
 
     def test_execute_and_compare_gold_error(self, tiny_db):
         sem = asyncio.Semaphore(4)
-        with pytest.raises(AssertionError):
-            asyncio.get_event_loop().run_until_complete(execute_and_compare(tiny_db, "INVALID SQL", "SELECT 1", sem))
+        match, gold, pred, err = asyncio.get_event_loop().run_until_complete(
+            execute_and_compare(tiny_db, "INVALID SQL", "SELECT 1", sem)
+        )
+        assert match is False
+        assert err is not None and "gold_sql_error" in err
 
     def test_execute_and_compare_pred_error(self, tiny_db):
         sem = asyncio.Semaphore(4)

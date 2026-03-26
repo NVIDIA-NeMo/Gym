@@ -190,8 +190,8 @@ async def execute_and_compare(
 ) -> tuple[bool, ResultSet | None, ResultSet | None, str | None]:
     """Execute both queries and compare. Returns (match, gold_rows, pred_rows, error_msg)."""
     gold_rows = await execute_sqlite_async(db_path, gold_sql, semaphore, timeout_s)
-    # Gold execution must always succeed
-    assert gold_rows is not None
+    if gold_rows is None:
+        return False, gold_rows, None, "gold_sql_error"
 
     pred_rows = await execute_sqlite_async(db_path, pred_sql, semaphore, timeout_s)
     if pred_rows is None:
