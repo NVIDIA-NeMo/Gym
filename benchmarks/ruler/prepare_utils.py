@@ -43,7 +43,7 @@ def prepare_helper(output_name: str, model: str, length: str) -> Path:
 && git checkout 54d2e113c2f64bf74bda72e15f23f01b524850da \
 && uv venv --python 3.12 --seed \
 && source .venv/bin/activate \
-&& uv pip install '-e .' wonderwords html2text tenacity nltk""",
+&& uv pip install '-e .' scipy wonderwords html2text tenacity nltk""",
             check=True,
             shell=True,
             cwd=BENCHMARK_DIR,
@@ -57,7 +57,7 @@ def prepare_helper(output_name: str, model: str, length: str) -> Path:
     tmp_data_dir = skills_dir / "ruler" / model / str(length)
     run(
         f"""source .venv/bin/activate \
-python nemo_skills/dataset/ruler/prepare.py \
+&& python nemo_skills/dataset/ruler/prepare.py \
     --data_format=chat \
     --setup={model}-{length} \
     --max_seq_length={length} \
