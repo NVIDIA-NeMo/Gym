@@ -43,7 +43,7 @@ def _coerce(v: Any) -> Any:
         return v
 
 
-def execute_sqlite(db_path: Path, sql: str) -> ResultSet:
+def execute_sqlite(db_path: Path, sql: str) -> Optional[ResultSet]:
     """Execute SQL against a SQLite database file and return all rows.
 
     Copies db to in-memory connection before querying (matches official eval).
@@ -58,6 +58,9 @@ def execute_sqlite(db_path: Path, sql: str) -> ResultSet:
         cur = mem.cursor()
         cur.execute(sql)
         return cur.fetchall()
+    # We try/except only the actual code execution.
+    except:
+        return None
     finally:
         mem.close()
 
@@ -192,7 +195,7 @@ async def execute_and_compare(
 
     pred_rows = await execute_sqlite_async(db_path, pred_sql, semaphore, timeout_s)
     if pred_rows is None:
-        return False, gold_rows, pred_rows, "Pred SQL execution timed out"
+        return False, gold_rows, pred_rows, "pred_sql_error"
 
     match = compare_multi_result_sets(
         [gold_rows], pred_rows, multi_condition_cols=condition_cols, ignore_order=ignore_order
