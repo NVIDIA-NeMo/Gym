@@ -1,8 +1,7 @@
-# Please refer to benchmarks/nemotron_3_ultra.md
+# Please refer to benchmarks/nemotron_3_ultra/README.md
 
 # This is the list of benchmarks that this config file contains.
 config_paths:
-  - benchmarks/browsecomp/config.yaml
   - benchmarks/gpqa/config.yaml
   - benchmarks/livecodebench/v6_2408_2505/cascade.yaml
   - benchmarks/spider2_lite/config.yaml
