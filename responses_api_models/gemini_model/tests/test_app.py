@@ -33,7 +33,7 @@ def _make_config(**overrides):
         "port": 8083,
         "entrypoint": "",
         "name": "",
-        "gemini_api_key": "test-key",
+        "gemini_api_key": "test-key",  # pragma: allowlist secret
         "gemini_model": "gemini-2.5-computer-use-preview-10-2025",
     }
     defaults.update(overrides)
