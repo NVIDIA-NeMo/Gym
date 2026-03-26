@@ -213,7 +213,7 @@ def _main(args: argparse.Namespace):
 
 
 def clone_spider2_repo(parent_dir: str):
-    if Path(parent_dir).exists():
+    if (Path(parent_dir) / "Spider2").exists():
         print("Skipping git clone as the repository is already cloned!")
         return
 
