@@ -1,7 +1,12 @@
 # Hardware required:
 # xstest: 1 GPU for 7B https://huggingface.co/allenai/wildguard
 
+# Gated HuggingFace dataset and model to request access to
+# xstest: https://huggingface.co/allenai/wildguard
+# GPQA: https://huggingface.co/datasets/Idavidrein/gpqa
+
 # Please put the following secrets into the local env.yaml
+# hf_token: ???  # For gated datasets like GPQA
 # tavily_search_resources_server:
 #   resources_servers:
 #     tavily_search:
