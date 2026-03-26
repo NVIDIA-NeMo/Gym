@@ -1,36 +1,4 @@
-########################################
-# Pre-requisites
-########################################
-# Hardware required:
-# xstest: 1 GPU for 7B https://huggingface.co/allenai/wildguard
-
-########################################
-# Configuration
-########################################
-
-# Gated HuggingFace dataset and model to request access to
-# xstest: https://huggingface.co/allenai/wildguard
-# GPQA: https://huggingface.co/datasets/Idavidrein/gpqa
-
-# Please put the following secrets into the local env.yaml
-# hf_token: ???  # For gated datasets like GPQA
-# tavily_search_resources_server:
-#   resources_servers:
-#     tavily_search:
-#       tavily_api_key: ???
-#       exclude_domains_file_path: ???
-# Qwen3-235B-A22B-Instruct-2507-FP8:
-#   responses_api_models:
-#     vllm_model:
-#       model: ???  # The actual judge model needs to be Qwen/Qwen3-235B-A22B-Instruct-2507-FP8, but the name will probably differ based on endpoint.
-#       base_url: ???
-#       api_key: ???
-
-########################################
-# Run instructions
-########################################
-# 
-
+# Please refer to benchmarks/nemotron_3_ultra.md
 
 # This is the list of benchmarks that this config file contains.
 config_paths:
