@@ -296,12 +296,11 @@ Rollout Collection <get-started/rollout-collection.md>
 ```{toctree}
 :caption: Environment Components
 :hidden:
-:maxdepth: 1
+:maxdepth: 2
 
 Agent Server <agent-server/index>
-Model Server <model-server/index>
-vLLM <model-server/vllm>
 Resources Server <resources-server/index>
+Model Server <model-server/index>
 ```
 
 ```{toctree}
@@ -326,7 +325,7 @@ Multi-Step Environment <environment-tutorials/multi-step-environment>
 Stateful Environment <environment-tutorials/stateful-environment>
 Real-World Environment <environment-tutorials/real-world-environment>
 Integrate external libraries <environment-tutorials/integrate-external-environments>
-LangGraph Agent <environment-tutorials/langgraph-agent>
+LangGraph Integration <environment-tutorials/langgraph-agent>
 Aggregate Metrics <environment-tutorials/aggregate-metrics>
 ```
 
