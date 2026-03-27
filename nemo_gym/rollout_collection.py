@@ -256,6 +256,8 @@ class RolloutCollectionHelper(BaseModel):
                     print(
                         f"Skipping resume_from_cache because materialized_jsonl_fpath {config.materialized_jsonl_fpath} doesn't exist!"
                     )
+            else:
+                print("Clearing output fpath since `resume_from_cache=False`!")
 
             rows: List[Dict] = []
             results: List[Dict] = []
@@ -268,7 +270,6 @@ class RolloutCollectionHelper(BaseModel):
                 for row in input_rows:
                     f.write(orjson.dumps(row) + b"\n")
 
-            print("Clearing output fpath since `resume_from_cache=False`!")
             output_fpath.unlink(missing_ok=True)
 
         semaphore = nullcontext()

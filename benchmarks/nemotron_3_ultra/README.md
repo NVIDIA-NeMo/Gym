@@ -27,7 +27,7 @@ Qwen3-235B-A22B-Instruct-2507-FP8:
 
 # Prepare benchmark data
 ```bash
-config_paths="benchmarks/nemotron_3_ultra.yaml"
+config_paths="benchmarks/nemotron_3_ultra/config_short.yaml"
 ng_prepare_benchmark "+config_paths=[$config_paths]"
 ```
 
@@ -38,7 +38,7 @@ WANDB_PROJECT=<>
 EXPERIMENT_NAME=<>
 
 config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
-benchmarks/nemotron_3_ultra.yaml"
+benchmarks/nemotron_3_ultra/config_short.yaml"
 ng_e2e_collect_rollouts \
     "+config_paths=[${config_paths}]" \
     +wandb_project=$WANDB_PROJECT \
@@ -52,3 +52,6 @@ ng_e2e_collect_rollouts \
     ++policy_api_key=<> \
     ++policy_model_name=model<>
 ```
+
+# Configs
+We provide two configs: short and long. Short configs are meant to be run on every checkpoint while long configs are meant to be run on every major checkpoint. The benchmarks in the long config are typically more expensive cost-wise to run. For example, Browsecomp uses Tavily API keys for search, which may end up with hundreds of dollars spent per benchmark run.
