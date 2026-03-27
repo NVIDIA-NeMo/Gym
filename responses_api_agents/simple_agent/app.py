@@ -157,10 +157,6 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         return model_response
 
     async def run(self, request: Request, body: SimpleAgentRunRequest) -> SimpleAgentVerifyResponse:
-        # TODO remove
-        import sys
-
-        print("HIT IN RUN", file=sys.stderr)
         cookies = request.cookies
 
         seed_session_response = await self.server_client.post(
