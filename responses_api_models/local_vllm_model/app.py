@@ -506,6 +506,10 @@ class LocalVLLMModel(VLLMModel):
         final_args = parser.parse_args(namespace=Namespace(**server_args))
         validate_parsed_serve_args(final_args)
 
+        # @bxyu-nvidia: TODO remove, specific to Nemotron 3 Ultra vLLM version
+        # this return_routed_experts argument isn't present in 0.17.0, so this must be from 0.16.x
+        final_args.return_routed_experts = final_args.enable_return_routed_experts
+
         if self.config.debug:
             env_vars_to_print = env_vars.copy()
             if "HF_TOKEN" in env_vars_to_print:
