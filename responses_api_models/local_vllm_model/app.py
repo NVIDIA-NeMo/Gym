@@ -104,6 +104,7 @@ class LocalVLLMModelActor:
         self._maybe_patch_engine_stats()
         self._patch_create_dp_placement_groups()
         self._patch_init_data_parallel()
+        self._patch_multi_thread_safetensors_weights_iterator()
 
         for k, v in self.env_vars.items():
             environ[k] = v
@@ -390,6 +391,41 @@ class LocalVLLMModelActor:
             return placement_groups, local_dp_ranks
 
         CoreEngineActorManager.create_dp_placement_groups = new_create_dp_placement_groups
+
+    def _patch_multi_thread_safetensors_weights_iterator(self) -> None:
+        from tqdm.auto import tqdm
+        from vllm.model_executor.model_loader import default_loader
+        from vllm.model_executor.model_loader.weight_utils import _BAR_FORMAT, load_file
+
+        load_file_remote = ray.remote(
+            load_file,
+            num_cpus=1,
+            # @bxyu-nvidia: It may be more efficient to not spread the loading across nodes
+            # given that all of the shards need to end up in the main proc on the driver node anyways
+            scheduling_strategy="SPREAD",
+            runtime_env={
+                "py_executable": sys.executable,
+            },
+        )
+
+        def new_multi_thread_safetensors_weights_iterator(
+            hf_weights_files: list[str],
+            use_tqdm_on_load: bool,
+            max_workers: int = 4,
+        ):
+            tasks = [load_file_remote.remote(st_file, device="cpu") for st_file in hf_weights_files]
+
+            futures_iter = tqdm(
+                ray.util.as_completed(tasks, chunk_size=1),
+                total=len(hf_weights_files),
+                desc="Multi-thread loading shards",
+                bar_format=_BAR_FORMAT,
+            )
+
+            for state_dict in futures_iter:
+                yield from state_dict.items()
+
+        default_loader.multi_thread_safetensors_weights_iterator = new_multi_thread_safetensors_weights_iterator
 
     def base_url(self) -> str:
         return self._base_url
