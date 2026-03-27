@@ -397,23 +397,25 @@ class LocalVLLMModelActor:
         from vllm.model_executor.model_loader import default_loader
         from vllm.model_executor.model_loader.weight_utils import _BAR_FORMAT, load_file
 
-        load_file_remote = ray.remote(
-            load_file,
-            num_cpus=1,
-            # @bxyu-nvidia: It may be more efficient to not spread the loading across nodes
-            # given that all of the shards need to end up in the main proc on the driver node anyways
-            scheduling_strategy="SPREAD",
-            runtime_env={
-                "py_executable": sys.executable,
-            },
-        )
+        load_file_remote = ray.remote(load_file)
 
         def new_multi_thread_safetensors_weights_iterator(
             hf_weights_files: list[str],
             use_tqdm_on_load: bool,
             max_workers: int = 4,
         ):
-            tasks = [load_file_remote.remote(st_file, device="cpu") for st_file in hf_weights_files]
+            tasks = [
+                load_file_remote.options(
+                    num_cpus=1,
+                    # @bxyu-nvidia: It may be more efficient to not spread the loading across nodes
+                    # given that all of the shards need to end up in the main proc on the driver node anyways
+                    scheduling_strategy="SPREAD",
+                    runtime_env={
+                        "py_executable": sys.executable,
+                    },
+                ).remote(st_file, device="cpu")
+                for st_file in hf_weights_files
+            ]
 
             futures_iter = tqdm(
                 ray.util.as_completed(tasks, chunk_size=1),
