@@ -25,6 +25,7 @@ from nemo_gym.global_config import (
     PIP_INSTALL_VERBOSE_KEY_NAME,
     PYTHON_VERSION_KEY_NAME,
     SKIP_VENV_IF_PRESENT_KEY_NAME,
+    SPINUP_SERVERS_USING_RAY,
     UV_CACHE_DIR_KEY_NAME,
     UV_PIP_SET_PYTHON_KEY_NAME,
     UV_VENV_DIR_KEY_NAME,
@@ -115,13 +116,16 @@ def run_command(command: str, working_dir_path: Path, server_name: str = "") -> 
         log_path.parent.mkdir(parents=True, exist_ok=True)
         command = f"set -o pipefail; ({command}) 2>&1 | tee -a {log_path}"
 
-    redirect_stdout = stdout
-    redirect_stderr = stderr
-    return Popen(
-        command,
+    shared_args = dict(
+        args=command,
         executable="/bin/bash",
         shell=True,
         env=custom_env,
-        stdout=redirect_stdout,
-        stderr=redirect_stderr,
     )
+
+    if global_config_dict[SPINUP_SERVERS_USING_RAY]:
+        # TODO write
+        # TODO figure out how to poll procs with ray workers
+        pass
+    else:
+        return Popen(**shared_args, stdout=stdout, stderr=stderr)
