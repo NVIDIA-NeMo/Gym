@@ -1,5 +1,5 @@
 # This config is used for spinning up Ultra dev models inside of a NeMo RL container
-# This config by default assumes DP4, requiring 4 GPU nodes
+# This config by default assumes DP4, requiring 4 GPU nodes on GB200 (each node has 4 GPUs)
 nemotron_3_ultra_dev:
   responses_api_models:
     local_vllm_model:
