@@ -427,10 +427,12 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
         server_client = self.setup_server_client(head_server_config)
         semaphore = semaphore or nullcontext()
 
+        import sys
+
         async def _post_subroutine(row: Dict) -> Tuple[Dict, Dict]:
             async with semaphore:
                 # TODO remove
-                print("HIT INSIDE POST SUBROUTINE")
+                print("HIT INSIDE POST SUBROUTINE", file=sys.stderr)
                 res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
                 await raise_for_status(res)
                 return row, await get_response_json(res)
