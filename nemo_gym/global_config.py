@@ -140,7 +140,7 @@ class GlobalConfigDictParserConfig(BaseModel):
             POLICY_BASE_URL_KEY_NAME: "",
             POLICY_API_KEY_KEY_NAME: "",
             POLICY_MODEL_NAME_KEY_NAME: "",
-            "policy_model": {"responses_api_models": {"dummy_model": {"entrypoint": "app.py"}}},
+            POLICY_MODEL_KEY_NAME: {"responses_api_models": {"dummy_model": {"entrypoint": "app.py"}}},
         }
     )
 
