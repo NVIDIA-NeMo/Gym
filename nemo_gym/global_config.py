@@ -513,11 +513,11 @@ Duplicate config paths:
             self._recursively_hide_secrets(global_config_dict)
 
         # Ray server spinup
-        with open_dict(global_config_dict):
-            global_config_dict.setdefault(SPINUP_SERVERS_USING_RAY, False)
-        assert not global_config_dict[SPINUP_SERVERS_USING_RAY] or global_config_dict[USE_ABSOLUTE_IP], (
-            f"`{SPINUP_SERVERS_USING_RAY}=true` can only be used with `{USE_ABSOLUTE_IP}=true` since the Ray server instances are not guaranteed to be placed on the same node and still need to communicate with each other."
-        )
+        # with open_dict(global_config_dict):
+        #     global_config_dict.setdefault(SPINUP_SERVERS_USING_RAY, False)
+        # assert not global_config_dict[SPINUP_SERVERS_USING_RAY] or global_config_dict[USE_ABSOLUTE_IP], (
+        #     f"`{SPINUP_SERVERS_USING_RAY}=true` can only be used with `{USE_ABSOLUTE_IP}=true` since the Ray server instances are not guaranteed to be placed on the same node and still need to communicate with each other."
+        # )
 
         # Set up W&B and log config. This must happen at the very last step.
         wandb_config = WANDBConfig.model_validate(global_config_dict)
