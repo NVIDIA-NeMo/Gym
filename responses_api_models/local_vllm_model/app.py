@@ -87,7 +87,7 @@ class LocalVLLMModelActor:
         # TODO remove
         import vllm
 
-        print("VLLM FILE", vllm.__file_, file=sys.stderr)
+        print("VLLM FILE", vllm.__file__, file=sys.stderr)
 
         self.head_node_placement_group = head_node_placement_group
         self.server_args = server_args
