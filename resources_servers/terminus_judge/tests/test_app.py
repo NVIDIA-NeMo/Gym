@@ -717,7 +717,9 @@ class TestTerminusJudgeStringSimilarityOnly:
         )
 
     @pytest.mark.asyncio
-    async def test_verify_correct_prediction_without_judge_config(self, resources_server: TerminusJudgeResourcesServer):
+    async def test_verify_correct_prediction_without_judge_config(
+        self, resources_server: TerminusJudgeResourcesServer
+    ):
         """Test string-sim-only mode works without judge configuration."""
         expected_answer = create_terminus_1_response([{"keystrokes": "ls -la"}])
         request = self._create_verify_request(json.dumps(expected_answer), expected_answer)
@@ -746,7 +748,9 @@ class TestTerminusJudgeStringSimilarityOnly:
         assert response.judge_evaluations == []
 
     @pytest.mark.asyncio
-    async def test_verify_uses_default_threshold_in_string_only_mode(self, resources_server: TerminusJudgeResourcesServer):
+    async def test_verify_uses_default_threshold_in_string_only_mode(
+        self, resources_server: TerminusJudgeResourcesServer
+    ):
         """Test string-sim-only mode uses configured default threshold when request threshold is absent."""
         expected_answer = create_terminus_1_response([{"keystrokes": "ls -la"}])
         pred_answer = create_terminus_1_response([{"keystrokes": "ls -l"}])
