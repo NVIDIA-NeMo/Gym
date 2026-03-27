@@ -53,7 +53,7 @@ class LocalVLLMModelConfig(VLLMModelConfig):
     vllm_serve_kwargs: Dict[str, Any]
     vllm_serve_env_vars: Dict[str, str]
 
-    ray_worker_py_executable = sys.executable
+    ray_worker_py_executable: str = sys.executable
 
     debug: bool = False
 
