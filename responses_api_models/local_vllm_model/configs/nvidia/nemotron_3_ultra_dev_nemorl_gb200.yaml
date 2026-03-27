@@ -1,0 +1,57 @@
+# This config is used for spinning up Ultra dev models inside of a NeMo RL container
+# This config by default assumes DP4, requiring 4 GPU nodes
+nemotron_3_ultra_dev:
+  responses_api_models:
+    local_vllm_model:
+      entrypoint: app.py
+      model: ???
+      return_token_id_information: false
+      uses_reasoning_parser: true
+      replace_developer_role_with_system: false
+      debug: false
+
+      ray_worker_py_executable: /usr/local/bin/python-VllmAsyncGenerationWorker
+
+      # Recommended in https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16#use-it-with-transformers
+      extra_body:
+        temperature: 1.0
+        top_p: 1.0
+        max_output_tokens: null
+
+      # For example, if your model is downloaded at ~/.cache/huggingface/hub/models--Qwen--Qwen3-235B-A22B-Instruct-2507, your hf_home here would be `~/.cache/huggingface`
+      hf_home: null
+
+      vllm_serve_env_vars:
+        # If your tp * pp is greater than one node or one model instance spans more than one node, set this to `span`!
+        VLLM_RAY_DP_PACK_STRATEGY: strict
+
+      # If a hf_token is present in the env.yaml, it will be prepended to the hf download.
+      vllm_serve_kwargs:
+        # vLLM serving is a bit quirky at the moment. These parallelism configs are fairly sensitive and need to always be set properly!
+        # Parallelism config
+        data_parallel_size: 4
+        tensor_parallel_size: 4
+        pipeline_parallel_size: 1
+
+        # Scheduling configuration
+        gpu_memory_utilization: 0.85
+        max_num_batched_tokens: 131072
+        max_num_seqs: 256
+        enable_prefix_caching: true
+
+        # Params that may affect accuracy
+        kv_cache_dtype: fp8
+
+        # Parser config
+        enable_auto_tool_choice: true
+        tool_call_parser: qwen3_coder
+        reasoning_parser_plugin: /lustre/fsw/portfolios/llmservice/users/lvega/evals/ultra_v3_reasoning_parser.py
+        reasoning_parser: ultra_v3
+
+        # Loading config
+        model_loader_extra_config:
+          enable_multithread_load: true
+          num_threads: 96
+
+        # Misc
+        trust_remote_code: true
