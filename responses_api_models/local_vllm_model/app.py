@@ -434,6 +434,8 @@ class LocalVLLMModelActor:
         default_loader.multi_thread_safetensors_weights_iterator = new_multi_thread_safetensors_weights_iterator
         weight_utils.multi_thread_safetensors_weights_iterator = new_multi_thread_safetensors_weights_iterator
 
+        print("Patched multi_thread_safetensors_weights_iterator", file=sys.stderr)
+
     def base_url(self) -> str:
         return self._base_url
 
