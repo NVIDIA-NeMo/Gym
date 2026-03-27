@@ -429,7 +429,7 @@ class LocalVLLMModelActor:
             futures_iter = tqdm(
                 ray.util.as_completed(tasks, chunk_size=1),
                 total=len(hf_weights_files),
-                desc="Multi-thread loading shards",
+                desc="Multi-thread loading shards using Ray",
                 bar_format=_BAR_FORMAT,
             )
 
