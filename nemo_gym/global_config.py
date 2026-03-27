@@ -68,6 +68,7 @@ INHERIT_FROM_KEY_NAME = "_inherit_from"
 COPY_KEY_NAME = "_copy"
 DELETE_KEY_KEY_NAME = "_delete_key"
 NEMO_GYM_LOG_DIR_KEY_NAME = "nemo_gym_log_dir"
+SPINUP_SERVERS_USING_RAY = "spinup_servers_using_ray"
 NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     CONFIG_PATHS_KEY_NAME,
     ENTRYPOINT_KEY_NAME,
@@ -90,6 +91,7 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     INHERIT_FROM_KEY_NAME,
     COPY_KEY_NAME,
     NEMO_GYM_LOG_DIR_KEY_NAME,
+    SPINUP_SERVERS_USING_RAY,
 ]
 
 # Data keys
@@ -445,7 +447,7 @@ Duplicate config paths:
 
         server_instance_configs = self.filter_for_server_instance_configs(global_config_dict)
 
-        use_absolute_ip = global_config_dict.get(USE_ABSOLUTE_IP, False)
+        use_absolute_ip = global_config_dict.setdefault(USE_ABSOLUTE_IP, False)
         if use_absolute_ip:
             default_host = gethostbyname(gethostname())
         else:
@@ -509,7 +511,13 @@ Duplicate config paths:
         if parse_config.hide_secrets:
             self._recursively_hide_secrets(global_config_dict)
 
-        # Set up W&B
+        # Ray server spinup
+        global_config_dict.setdefault(SPINUP_SERVERS_USING_RAY, False)
+        assert not global_config_dict[SPINUP_SERVERS_USING_RAY] or global_config_dict[USE_ABSOLUTE_IP], (
+            f"`{SPINUP_SERVERS_USING_RAY}=true` can only be used with `{USE_ABSOLUTE_IP}=true` since the Ray server instances are not guaranteed to be placed on the same node and still need to communicate with each other."
+        )
+
+        # Set up W&B and log config. This must happen at the very last step.
         wandb_config = WANDBConfig.model_validate(global_config_dict)
         if wandb_config.is_available:  # pragma: no cover
             environ["WANDB_API_KEY"] = wandb_config.wandb_api_key
