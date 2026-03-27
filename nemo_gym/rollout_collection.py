@@ -429,6 +429,8 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
 
         async def _post_subroutine(row: Dict) -> Tuple[Dict, Dict]:
             async with semaphore:
+                # TODO remove
+                print("HIT INSIDE POST SUBROUTINE")
                 res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
                 await raise_for_status(res)
                 return row, await get_response_json(res)
