@@ -15,7 +15,6 @@
 import sys
 from contextlib import nullcontext as does_not_raise
 from pathlib import Path
-from socket import gethostbyname, gethostname
 from unittest.mock import MagicMock
 
 from omegaconf import OmegaConf
@@ -662,7 +661,9 @@ class TestGlobalConfig:
         hydra_main_mock.return_value = hydra_main_wrapper
         monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
 
-        expected_ip = gethostbyname(gethostname())
+        expected_ip = "abcd ip"
+        gethostbyname_mock = MagicMock(return_value=expected_ip)
+        monkeypatch.setattr(nemo_gym.global_config, "gethostbyname", gethostbyname_mock)
 
         global_config_dict = get_global_config_dict()
 
