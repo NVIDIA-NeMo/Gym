@@ -66,6 +66,7 @@ UV_CACHE_DIR_KEY_NAME = "uv_cache_dir"
 UV_VENV_DIR_KEY_NAME = "uv_venv_dir"
 INHERIT_FROM_KEY_NAME = "_inherit_from"
 COPY_KEY_NAME = "_copy"
+DELETE_KEY_KEY_NAME = "_delete_key"
 NEMO_GYM_LOG_DIR_KEY_NAME = "nemo_gym_log_dir"
 NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     CONFIG_PATHS_KEY_NAME,
@@ -303,6 +304,13 @@ Duplicate config paths:
     def _recursively_swap_keys_helper(
         self, dict_config: DictConfig, original_dict_config: DictConfig, frozen_dict_config: DictConfig
     ) -> None:
+        # Try to resolve delete keys first
+        if DELETE_KEY_KEY_NAME in dict_config:
+            keys_to_delete = dict_config.pop(DELETE_KEY_KEY_NAME).split(",")
+            keys_to_delete = map(str.strip, keys_to_delete)
+            for key in keys_to_delete:
+                dict_config.pop(key)
+
         for k, v in list(dict_config.items()):
             if isinstance(v, (DictConfig, dict)):
                 self._recursively_swap_keys_helper(v, original_dict_config, frozen_dict_config)
