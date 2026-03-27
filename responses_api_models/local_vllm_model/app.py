@@ -409,6 +409,10 @@ class LocalVLLMModelActor:
             use_tqdm_on_load: bool,
             max_workers: int = 4,
         ):
+            print(
+                "Using patched multi_thread_safetensors_weights_iterator that uses Ray rather than multithreading to distribute the workload.",
+                file=sys.stderr,
+            )
             tasks = [
                 load_file_remote.options(
                     num_cpus=1,
