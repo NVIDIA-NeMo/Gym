@@ -84,6 +84,11 @@ class LocalVLLMModelActor:
     ) -> None:
         from os import environ
 
+        # TODO remove
+        import vllm
+
+        print("VLLM FILE", vllm.__file_, file=sys.stderr)
+
         self.head_node_placement_group = head_node_placement_group
         self.server_args = server_args
         self.env_vars = env_vars
