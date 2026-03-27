@@ -51,6 +51,7 @@ class MultiturnProofAgentConfig(BaseResponsesAPIAgentConfig):
     response_processor: str = "strip_thinking"
     include_all_attempts: bool = True
     max_output_tokens: Optional[int] = None
+    summary_max_output_tokens: Optional[int] = None
 
 
 class MultiturnProofRunRequest(BaseRunRequest):
@@ -69,6 +70,11 @@ class MultiturnProofVerifyResponse(BaseVerifyResponse):
 
 class MultiturnProofAgent(SimpleResponsesAPIAgent):
     config: MultiturnProofAgentConfig
+
+    def _turn_max_output_tokens(self, is_summary_prompt: bool) -> Optional[int]:
+        if is_summary_prompt:
+            return self.config.summary_max_output_tokens
+        return self.config.max_output_tokens
 
     async def responses(
         self,
@@ -120,8 +126,9 @@ class MultiturnProofAgent(SimpleResponsesAPIAgent):
                 value = getattr(params, key, None) if hasattr(params, key) else params.get(key)
                 if value is not None:
                     current_input[key] = value
-        if self.config.max_output_tokens is not None:
-            current_input["max_output_tokens"] = self.config.max_output_tokens
+        initial_max_output_tokens = self._turn_max_output_tokens(is_summary_prompt=False)
+        if initial_max_output_tokens is not None:
+            current_input["max_output_tokens"] = initial_max_output_tokens
         turn_index = 0
         existing_summary = "None"
         use_summary = self.config.response_processor == "summary_model"
@@ -217,8 +224,11 @@ class MultiturnProofAgent(SimpleResponsesAPIAgent):
                 value = getattr(params, key, None) if hasattr(params, key) else params.get(key)
                 if value is not None:
                     current_input[key] = value
-            if not next_is_summary_prompt and self.config.max_output_tokens is not None:
-                current_input["max_output_tokens"] = self.config.max_output_tokens
+            next_turn_max_output_tokens = self._turn_max_output_tokens(
+                is_summary_prompt=next_is_summary_prompt
+            )
+            if next_turn_max_output_tokens is not None:
+                current_input["max_output_tokens"] = next_turn_max_output_tokens
 
             turn_index += 1
 

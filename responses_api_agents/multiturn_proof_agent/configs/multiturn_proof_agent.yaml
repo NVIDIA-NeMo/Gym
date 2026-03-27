@@ -12,3 +12,4 @@ multiturn_proof_agent:
       response_processor: strip_thinking
       include_all_attempts: true
       max_output_tokens: null
+      summary_max_output_tokens: null
