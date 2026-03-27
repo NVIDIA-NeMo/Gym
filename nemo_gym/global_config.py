@@ -447,7 +447,8 @@ Duplicate config paths:
 
         server_instance_configs = self.filter_for_server_instance_configs(global_config_dict)
 
-        use_absolute_ip = global_config_dict.setdefault(USE_ABSOLUTE_IP, False)
+        with open_dict(global_config_dict):
+            use_absolute_ip = global_config_dict.setdefault(USE_ABSOLUTE_IP, False)
         if use_absolute_ip:
             default_host = gethostbyname(gethostname())
         else:
