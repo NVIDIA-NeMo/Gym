@@ -310,7 +310,6 @@ Duplicate config paths:
             if is_delete_property:
                 keys_to_delete = v.pop(DELETE_KEY_KEY_NAME).split(",")
                 keys_to_delete = set(map(str.strip, keys_to_delete))
-                print(keys_to_delete)
 
                 # Delete first so we don't resolve the deleted keys
                 # but only delete keys that are present in case the key-to-delete comes from a downstream inherit or swap
