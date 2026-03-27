@@ -4,6 +4,10 @@ Hardware required:
 
 For local endpoint, the minimum configuration is dp4pp1tp4, which requires 16 GPUs. This was primarily tested on GB200 where each node is 4 GPUs, resulting in 4 nodes.
 
+For Ruler benchmark, please ensure that you have git-lfs installed!
+
+Linux: `apt update && apt install -y git-lfs`
+
 # Configuration
 Gated HuggingFace datasets and models to request access to
 - xstest: https://huggingface.co/allenai/wildguard
