@@ -719,6 +719,12 @@ class TestGlobalConfig:
                     "test_resource_2": {"responses_api_models": {"test_model": {"entrypoint": "app.py"}}},
                     "a": {"b": {"c": 3}},
                     "a_prime": {"b_prime": "${inherit_from:a.b.c}"},
+                    "test_resource_3_copy1": "${copy:test_resource_3}",
+                    "test_resource_3": {"responses_api_models": {"test_model": {"entrypoint": "app.py"}}},
+                    "test_resource_3_copy2": {
+                        "_copy": "test_resource_3",
+                        "responses_api_models": {"test_model": {"entrypoint": "app2.py"}},
+                    },
                 }
             )
             return lambda: fn(config_dict)
@@ -734,7 +740,16 @@ class TestGlobalConfig:
             "policy_model_2": {
                 "responses_api_models": {"test_model": {"entrypoint": "app2.py", "host": "127.0.0.1", "port": 12345}}
             },
-            "disallowed_ports": [11000, 12345, 12345],
+            "test_resource_3_copy1": {
+                "responses_api_models": {"test_model": {"entrypoint": "app.py", "host": "127.0.0.1", "port": 12345}}
+            },
+            "test_resource_3": {
+                "responses_api_models": {"test_model": {"entrypoint": "app.py", "host": "127.0.0.1", "port": 12345}}
+            },
+            "test_resource_3_copy2": {
+                "responses_api_models": {"test_model": {"entrypoint": "app2.py", "host": "127.0.0.1", "port": 12345}},
+            },
+            "disallowed_ports": [11000, 12345, 12345, 12345, 12345, 12345],
             "a": {"b": {}},
             "a_prime": {"b_prime": 3},
         }

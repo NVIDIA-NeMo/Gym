@@ -65,6 +65,7 @@ DRY_RUN_KEY_NAME = "dry_run"
 UV_CACHE_DIR_KEY_NAME = "uv_cache_dir"
 UV_VENV_DIR_KEY_NAME = "uv_venv_dir"
 INHERIT_FROM_KEY_NAME = "_inherit_from"
+COPY_KEY_NAME = "_copy"
 NEMO_GYM_LOG_DIR_KEY_NAME = "nemo_gym_log_dir"
 NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     CONFIG_PATHS_KEY_NAME,
@@ -86,6 +87,7 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     UV_CACHE_DIR_KEY_NAME,
     UV_VENV_DIR_KEY_NAME,
     INHERIT_FROM_KEY_NAME,
+    COPY_KEY_NAME,
     NEMO_GYM_LOG_DIR_KEY_NAME,
 ]
 
@@ -121,6 +123,7 @@ def get_hf_token() -> Optional[str]:
 
 # OmegaConf new resolvers
 OmegaConf.register_new_resolver("inherit_from", lambda a: f"${{inherit_from:{a}}}")
+OmegaConf.register_new_resolver("copy", lambda a: f"${{copy:{a}}}")
 
 
 class GlobalConfigDictParserConfig(BaseModel):
@@ -312,7 +315,11 @@ Duplicate config paths:
             is_swap_str = isinstance(v, str) and v.startswith("${inherit_from:")
             is_swap_property = isinstance(v, DictConfig) and INHERIT_FROM_KEY_NAME in v
             is_swap = is_swap_str or is_swap_property
-            if not is_swap:
+
+            is_copy_str = isinstance(v, str) and v.startswith("${copy:")
+            is_copy_property = isinstance(v, DictConfig) and COPY_KEY_NAME in v
+            is_copy = is_copy_str or is_copy_property
+            if not (is_swap or is_copy):
                 continue
 
             if is_swap_str:
@@ -320,17 +327,24 @@ Duplicate config paths:
             elif is_swap_property:
                 path_to_swap = v.pop(INHERIT_FROM_KEY_NAME)
 
+            if is_copy_str:
+                path_to_swap = v.removeprefix("${copy:").removesuffix("}")
+            elif is_copy_property:
+                path_to_swap = v.pop(COPY_KEY_NAME)
+
             path_to_swap = path_to_swap.split(".")
 
             # Pop the swapped value
             dict_containing_key_to_swap = self._recursive_index_dict_using_path(
                 original_dict_config, path_to_swap[:-1]
             )
-            # Pop with a default since multiple configs may refer to the same path
-            dict_containing_key_to_swap.pop(path_to_swap[-1], None)
+            if is_swap:
+                # Pop with a default since multiple configs may refer to the same path
+                # We don't want to pop if it's just a copy
+                dict_containing_key_to_swap.pop(path_to_swap[-1], None)
 
             swapped_value = self._recursive_index_dict_using_path(frozen_dict_config, path_to_swap)
-            if is_swap_property:
+            if is_swap_property or is_copy_property:
                 swapped_value = OmegaConf.merge(swapped_value, v)
 
             dict_config[k] = swapped_value
