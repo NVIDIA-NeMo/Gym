@@ -37,7 +37,7 @@ ng_prepare_benchmark "+config_paths=[$config_paths]"
 WANDB_PROJECT=<>
 EXPERIMENT_NAME=<>
 
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
+config_paths="benchmarks/nemotron_3_ultra/remote_endpoint.yaml,\
 benchmarks/nemotron_3_ultra/config_short.yaml"
 ng_e2e_collect_rollouts \
     "+config_paths=[${config_paths}]" \
@@ -50,8 +50,27 @@ ng_e2e_collect_rollouts \
     ++reuse_existing_data_preparation=true \
     ++policy_base_url=<> \
     ++policy_api_key=<> \
-    ++policy_model_name=model<>
+    ++policy_model_name=<>
 ```
+
+## Using local compute
+```bash
+WANDB_PROJECT=<>
+EXPERIMENT_NAME=<>
+
+config_paths="benchmarks/nemotron_3_ultra/local_endpoint.yaml,\
+benchmarks/nemotron_3_ultra/config_short.yaml"
+ng_e2e_collect_rollouts \
+    "+config_paths=[${config_paths}]" \
+    +wandb_project=$WANDB_PROJECT \
+    +wandb_name=$EXPERIMENT_NAME \
+    ++output_jsonl_fpath=results/$EXPERIMENT_NAME.jsonl \
+    ++overwrite_metrics_conflicts=true \
+    ++split=benchmark \
+    ++resume_from_cache=true \
+    ++reuse_existing_data_preparation=true
+```
+
 
 # Configs
 We provide two configs: short and long. Short configs are meant to be run on every checkpoint while long configs are meant to be run on every major checkpoint. The benchmarks in the long config are typically more expensive cost-wise to run. For example, Browsecomp uses Tavily API keys for search, which may end up with hundreds of dollars spent per benchmark run.
