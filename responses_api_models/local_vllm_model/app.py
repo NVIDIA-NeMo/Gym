@@ -394,7 +394,7 @@ class LocalVLLMModelActor:
 
     def _patch_multi_thread_safetensors_weights_iterator(self) -> None:
         from tqdm.auto import tqdm
-        from vllm.model_executor.model_loader import default_loader
+        from vllm.model_executor.model_loader import default_loader, weight_utils
         from vllm.model_executor.model_loader.weight_utils import _BAR_FORMAT, load_file
 
         load_file_remote = ray.remote(load_file)
@@ -432,6 +432,7 @@ class LocalVLLMModelActor:
                 yield from state_dict.items()
 
         default_loader.multi_thread_safetensors_weights_iterator = new_multi_thread_safetensors_weights_iterator
+        weight_utils.multi_thread_safetensors_weights_iterator = new_multi_thread_safetensors_weights_iterator
 
     def base_url(self) -> str:
         return self._base_url
