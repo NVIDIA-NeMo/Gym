@@ -2,6 +2,8 @@
 Hardware required:
 - xstest: 1 GPU for 7B https://huggingface.co/allenai/wildguard
 
+For local endpoint, the minimum configuration is dp4pp1tp4, which requires 16 GPUs. This was primarily tested on GB200 where each node is 4 GPUs, resulting in 4 nodes.
+
 # Configuration
 Gated HuggingFace datasets and models to request access to
 - xstest: https://huggingface.co/allenai/wildguard
