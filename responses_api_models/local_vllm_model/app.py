@@ -53,6 +53,8 @@ class LocalVLLMModelConfig(VLLMModelConfig):
     vllm_serve_kwargs: Dict[str, Any]
     vllm_serve_env_vars: Dict[str, str]
 
+    ray_worker_py_executable = sys.executable
+
     debug: bool = False
 
     def model_post_init(self, context):
@@ -510,7 +512,7 @@ Total Ray cluster resources: {cluster_resources()}""")
                 placement_group=head_node_placement_group,
             ),
             runtime_env=dict(
-                py_executable=sys.executable,
+                py_executable=self.config.ray_worker_py_executable,
                 env_vars={
                     "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
                     **env_vars,
