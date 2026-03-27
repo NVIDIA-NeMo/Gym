@@ -160,7 +160,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         # TODO remove
         import sys
 
-        print("HIT IN RUN", sys.stderr)
+        print("HIT IN RUN", file=sys.stderr)
         cookies = request.cookies
 
         seed_session_response = await self.server_client.post(
