@@ -349,6 +349,8 @@ Duplicate config paths:
 
             dict_config[k] = swapped_value
 
+            # TODO We may want to recurse again after swap since we are not guaranteed to traverse the swapped-from value before hitting this swap.
+
     def _recursive_index_dict_using_path(self, dict_config: DictConfig, path: List[str]) -> DictConfig:
         for k in path:
             if k not in dict_config:
