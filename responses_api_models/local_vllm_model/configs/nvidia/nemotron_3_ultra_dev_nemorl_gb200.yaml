@@ -8,6 +8,8 @@ nemotron_3_ultra_dev:
       return_token_id_information: false
       uses_reasoning_parser: true
       replace_developer_role_with_system: false
+      # We expect this to be a pretty beefy deployment so we default our proxy server replicas to 4 > 1
+      num_workers: 4
       debug: false
 
       ray_worker_py_executable: /usr/local/bin/python-VllmAsyncGenerationWorker
