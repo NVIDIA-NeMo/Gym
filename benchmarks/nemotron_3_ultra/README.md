@@ -1,8 +1,8 @@
 # Pre-requisites
-Hardware required for remote config:
+Hardware required for remote config (total 1 GPU):
 - xstest: 1 GPU for 7B https://huggingface.co/allenai/wildguard
 
-Hardware required for local config:
+Hardware required for local config (total 25 GPUs):
 1. Ultra model: default configuration is dp4pp1tp4, which requires 16 GPUs. This was primarily tested on GB200 where each node is 4 GPUs, resulting in 4 nodes.
 2. xstest: 1 GPU for 7B https://huggingface.co/allenai/wildguard
 3. browsecomp: 8 GPUs for dp2pp1tp4 Qwen3-235B-A22B-Instruct-2507-FP8
