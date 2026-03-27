@@ -50,14 +50,19 @@ def _make_response(text: str) -> NeMoGymResponse:
     )
 
 
-def _make_request(text: str, solution: str, problem_type: str) -> Ether0VerifyRequest:
+def _make_request(
+    text: str,
+    solution: str,
+    problem_type: str,
+    choices: dict | None = None,
+) -> Ether0VerifyRequest:
+    meta: dict = {"solution": solution, "problem_type": problem_type}
+    if choices is not None:
+        meta["choices"] = choices
     return Ether0VerifyRequest(
         responses_create_params={"input": [{"role": "user", "content": "Q"}]},
         response=_make_response(text),
-        verifier_metadata={
-            "solution": solution,
-            "problem_type": problem_type,
-        },
+        verifier_metadata=meta,
     )
 
 
@@ -111,3 +116,66 @@ class TestVerify:
         req = _make_request("<answer>CCO</answer>", "bad_format", "")
         result = await server.verify(req)
         assert result.reward == 0.0
+
+    async def test_boxed_correct(self) -> None:
+        server = _make_server()
+        req = _make_request(
+            "Reasoning here.\n\n\\boxed{FCC(=O)O}",
+            "str_eval!:!FCC(=O)O!:!property-regression-ld50",
+            "property-regression-ld50",
+        )
+        result = await server.verify(req)
+        assert result.reward == 1.0
+        assert result.extracted_answer == "FCC(=O)O"
+
+    async def test_boxed_wrong(self) -> None:
+        server = _make_server()
+        req = _make_request(
+            "Reasoning here.\n\n\\boxed{CCCCCC}",
+            "str_eval!:!FCC(=O)O!:!property-regression-ld50",
+            "property-regression-ld50",
+        )
+        result = await server.verify(req)
+        assert result.reward == 0.0
+
+    _MCQ_SOLUTION = "str_eval!:!C1=CC(NN)=CC=C1C!:!property-regression-pka/pKaH1"
+    _MCQ_CHOICES = {
+        "A": "NNC1=CC=C(C=C1)Cl",
+        "B": "ClC1C=CC(=CC=1)SC1C=C(N=C(N)N=1)N",
+        "C": "C1=CC(NN)=CC=C1C",
+    }
+
+    async def test_letter_correct(self) -> None:
+        server = _make_server()
+        req = _make_request(
+            "Let me think...\nAnswer: C",
+            self._MCQ_SOLUTION,
+            "property-regression-pka/pKaH1",
+            choices=self._MCQ_CHOICES,
+        )
+        result = await server.verify(req)
+        assert result.reward == 1.0
+        assert result.extracted_answer == "C1=CC(NN)=CC=C1C"
+
+    async def test_letter_wrong(self) -> None:
+        server = _make_server()
+        req = _make_request(
+            "Let me think...\nAnswer: A",
+            self._MCQ_SOLUTION,
+            "property-regression-pka/pKaH1",
+            choices=self._MCQ_CHOICES,
+        )
+        result = await server.verify(req)
+        assert result.reward == 0.0
+        assert result.extracted_answer == "NNC1=CC=C(C=C1)Cl"
+
+    async def test_letter_lowercase(self) -> None:
+        server = _make_server()
+        req = _make_request(
+            "Let me think...\nAnswer: c",
+            self._MCQ_SOLUTION,
+            "property-regression-pka/pKaH1",
+            choices=self._MCQ_CHOICES,
+        )
+        result = await server.verify(req)
+        assert result.reward == 1.0
