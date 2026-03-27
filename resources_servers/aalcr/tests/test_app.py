@@ -25,5 +25,10 @@ class TestApp:
             port=8080,
             entrypoint="",
             name="",
+            judge_model_server={
+                "type": "responses_api_models",
+                "name": "abcd",
+            },
+            judge_responses_create_params_overrides=dict(),
         )
         AalcrResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
