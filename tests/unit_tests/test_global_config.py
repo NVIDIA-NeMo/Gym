@@ -726,6 +726,11 @@ class TestGlobalConfig:
                         "_copy": "test_resource_3",
                         "responses_api_models": {"test_model": {"entrypoint": "app2.py"}},
                     },
+                    "test_resource_3_copy3_delete": {
+                        "_copy": "test_resource_3",
+                        "_delete_key": "responses_api_models",
+                        "responses_api_models_2": {"test_model": {"entrypoint": "app.py"}},
+                    },
                 }
             )
             return lambda: fn(config_dict)
@@ -753,6 +758,9 @@ class TestGlobalConfig:
             "disallowed_ports": [11000, 12345, 12345, 12345, 12345, 12345],
             "a": {"b": {}},
             "a_prime": {"b_prime": 3},
+            "test_resource_3_copy3_delete": {
+                "responses_api_models_2": {"test_model": {"entrypoint": "app.py"}},
+            },
         }
 
         assert expected_global_config_dict == actual_global_config_dict

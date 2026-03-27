@@ -304,14 +304,21 @@ Duplicate config paths:
     def _recursively_swap_keys_helper(
         self, dict_config: DictConfig, original_dict_config: DictConfig, frozen_dict_config: DictConfig
     ) -> None:
-        # Try to resolve delete keys first
-        if DELETE_KEY_KEY_NAME in dict_config:
-            keys_to_delete = dict_config.pop(DELETE_KEY_KEY_NAME).split(",")
-            keys_to_delete = map(str.strip, keys_to_delete)
-            for key in keys_to_delete:
-                dict_config.pop(key)
-
         for k, v in list(dict_config.items()):
+            is_delete_property = isinstance(v, DictConfig) and DELETE_KEY_KEY_NAME in v
+
+            if is_delete_property:
+                keys_to_delete = v.pop(DELETE_KEY_KEY_NAME).split(",")
+                keys_to_delete = set(map(str.strip, keys_to_delete))
+                print(keys_to_delete)
+
+                # Delete first so we don't resolve the deleted keys
+                # but only delete keys that are present in case the key-to-delete comes from a downstream inherit or swap
+                existing_keys = set(k for k in keys_to_delete if k in v)
+                for key in existing_keys:
+                    v.pop(key)
+                keys_to_delete -= existing_keys
+
             if isinstance(v, (DictConfig, dict)):
                 self._recursively_swap_keys_helper(v, original_dict_config, frozen_dict_config)
             elif isinstance(v, (ListConfig, list)):
@@ -358,6 +365,11 @@ Duplicate config paths:
             dict_config[k] = swapped_value
 
             # TODO We may want to recurse again after swap since we are not guaranteed to traverse the swapped-from value before hitting this swap.
+
+            if is_delete_property:
+                # Enforce that every key-to-delete exists
+                for key in keys_to_delete:
+                    dict_config[k].pop(key)
 
     def _recursive_index_dict_using_path(self, dict_config: DictConfig, path: List[str]) -> DictConfig:
         for k in path:
