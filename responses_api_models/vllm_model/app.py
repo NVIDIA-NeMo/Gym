@@ -122,6 +122,9 @@ class VLLMModel(SimpleResponsesAPIModel):
     async def responses(
         self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
     ) -> NeMoGymResponse:
+        # TODO remove
+        print("HIT IN RESPONSES")
+
         if self.config.is_responses_native:
             return await self._responses_native(request, body)
 
