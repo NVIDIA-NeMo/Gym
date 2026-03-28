@@ -7,17 +7,23 @@ HTTP service that can be deployed on a separate Kubernetes cluster/pod.
 Service discovery uses a shared K8s ConfigMap (endpoint registry). The Gym
 server registers its address and waits for the RL cluster to register vLLM URLs.
 
-Usage (from nemo-rl repo root):
+The --config-yaml should contain the env.nemo_gym section from the GRPO config,
+which includes config_paths and server overrides. Paths in config_paths are
+resolved relative to the Gym repo root (PARENT_DIR).
+
+Usage (from the Gym submodule directory):
     uv run --extra nemo_gym python -m nemo_gym.standalone_server \
         --job-id my-job \
-        --port 8080 \
-        --model-name Qwen/Qwen3-0.6B
+        --port 9090 \
+        --model-name Qwen/Qwen3-0.6B \
+        --config-yaml /path/to/gym_config.yaml
 
     # Or with static vLLM URLs (skips registry for vLLM discovery):
     uv run --extra nemo_gym python -m nemo_gym.standalone_server \
-        --port 8080 \
+        --port 9090 \
         --model-name Qwen/Qwen3-0.6B \
-        --vllm-base-urls http://10.0.0.1:8000/v1
+        --vllm-base-urls http://10.0.0.1:8000/v1 \
+        --config-yaml /path/to/gym_config.yaml
 """
 import argparse
 import json
@@ -39,7 +45,7 @@ def _get_node_ip() -> str:
 
 def main():
     parser = argparse.ArgumentParser(description="Standalone NeMo Gym server")
-    parser.add_argument("--port", type=int, default=8080, help="Head server port")
+    parser.add_argument("--port", type=int, default=9090, help="Head server port")
     parser.add_argument(
         "--job-id",
         type=str,
@@ -65,13 +71,13 @@ def main():
         "--config-yaml",
         type=str,
         default=None,
-        help="Path to a Gym config YAML (e.g., nemo_gym_env.yaml)",
+        help="Path to a YAML with the env.nemo_gym config section (config_paths, server overrides).",
     )
     parser.add_argument(
         "--dotenv-path",
         type=str,
         default=None,
-        help="Path to the nemo_gym_env.yaml dotenv file",
+        help="Path to the env.yaml dotenv file",
     )
     args = parser.parse_args()
 
@@ -96,13 +102,31 @@ def main():
         print("Error: --vllm-base-urls or --job-id is required", file=sys.stderr)
         sys.exit(1)
 
-    # Build the global config dict.
+    # Build the global config dict from the config YAML.
+    # The YAML should be the env.nemo_gym section (with config_paths, server overrides).
+    # We use resolve=False to avoid failing on unresolvable interpolations
+    # (e.g., ${cluster.num_nodes}) that are only valid in the full GRPO config.
     initial_global_config_dict = {}
     if args.config_yaml:
-        initial_global_config_dict = OmegaConf.to_container(
-            OmegaConf.load(args.config_yaml), resolve=True
-        )
+        loaded = OmegaConf.load(args.config_yaml)
+        # Strip unresolvable interpolation values by converting with struct=False
+        initial_global_config_dict = OmegaConf.to_container(loaded, resolve=False)
+        # Remove keys with unresolved interpolations (they're strings like "${...}")
+        def _strip_interpolations(d):
+            if isinstance(d, dict):
+                return {k: _strip_interpolations(v) for k, v in d.items()
+                        if not (isinstance(v, str) and "${" in v)}
+            return d
+        initial_global_config_dict = _strip_interpolations(initial_global_config_dict)
 
+    # Remove RL-specific keys that don't apply to standalone mode.
+    initial_global_config_dict.pop("is_trajectory_collection", None)
+    initial_global_config_dict.pop("rollout_max_attempts_to_avoid_lp_nan", None)
+
+    # Bind to actual pod IP instead of localhost so remote RL cluster can reach us.
+    initial_global_config_dict["use_absolute_ip"] = True
+
+    # Set policy/connection config.
     initial_global_config_dict["policy_model_name"] = args.model_name
     initial_global_config_dict["policy_api_key"] = "dummy_key"
     initial_global_config_dict["policy_base_url"] = vllm_base_urls
@@ -116,14 +140,12 @@ def main():
 
     # Determine dotenv path.
     dotenv_path = Path(args.dotenv_path) if args.dotenv_path else None
-    if dotenv_path is None:
-        candidate = Path(__file__).parent.parent.parent.parent / "nemo_rl" / "environments" / "nemo_gym_env.yaml"
-        if candidate.exists():
-            dotenv_path = candidate
 
     print(f"Starting standalone NeMo Gym server on port {args.port}")
     print(f"vLLM base URLs: {vllm_base_urls}")
     print(f"Model: {args.model_name}")
+    if "config_paths" in initial_global_config_dict:
+        print(f"Config paths: {initial_global_config_dict['config_paths']}")
 
     rh = RunHelper()
     rh.start(
