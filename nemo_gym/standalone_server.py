@@ -1,4 +1,17 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """Standalone NeMo Gym server for disaggregated RL-Gym deployments.
 
 Starts the Gym servers (head, agent, model, resource) as a long-running
@@ -114,8 +127,13 @@ def main():
         # Remove keys with unresolved interpolations (they're strings like "${...}")
         def _strip_interpolations(d):
             if isinstance(d, dict):
-                return {k: _strip_interpolations(v) for k, v in d.items()
-                        if not (isinstance(v, str) and "${" in v)}
+                return {
+                    k: _strip_interpolations(v)
+                    for k, v in d.items()
+                    if not (isinstance(v, str) and "${" in v)
+                }
+            if isinstance(d, list):
+                return [_strip_interpolations(item) for item in d]
             return d
         initial_global_config_dict = _strip_interpolations(initial_global_config_dict)
 
