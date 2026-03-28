@@ -1,0 +1,77 @@
+{
+    "name": "train",
+    "type": "train",
+    "jsonl_fpath": "resources_servers/grl_sokoban/data/train.jsonl",
+    "num_repeats": 1,
+    "gitlab_identifier": {
+        "dataset_name": "grl_sokoban",
+        "version": "0.0.1",
+        "artifact_fpath": "grl_sokoban/train.jsonl"
+    },
+    "license": "Apache 2.0",
+    "Number of examples": 1600,
+    "Number of tools": {
+        "Total # non-null values": 1600,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Median": 1.0,
+        "Standard deviation": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 1600,
+        "Average": 160.0,
+        "Min": 160.0,
+        "Max": 160.0,
+        "Median": 160.0,
+        "Standard deviation": 0.0
+    },
+    "Number of turns": {
+        "Total # non-null values": 1600,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Median": 1.0,
+        "Standard deviation": 0.0
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Median": 0.0,
+        "Standard deviation": 0.0
+    },
+    "level_id": {
+        "Total # non-null values": 1600,
+        "Average": 1001.68,
+        "Min": 1.0,
+        "Max": 2000.0,
+        "Median": 997.75,
+        "Standard deviation": 574.92
+    },
+    "seed": {
+        "Total # non-null values": 1600,
+        "Average": 604177.21,
+        "Min": 11500.0,
+        "Max": 1186049.0,
+        "Median": 610086.33,
+        "Standard deviation": 295565.88
+    },
+    "dim_room": {
+        "Total # non-null values": 3200,
+        "Average": 6.0,
+        "Min": 6.0,
+        "Max": 6.0,
+        "Median": 6.0,
+        "Standard deviation": 0.0
+    },
+    "num_boxes": {
+        "Total # non-null values": 1600,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Median": 1.0,
+        "Standard deviation": 0.0
+    }
+}

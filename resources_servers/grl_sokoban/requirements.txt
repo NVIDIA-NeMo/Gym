@@ -1,0 +1,10 @@
+-e nemo-gym[dev] @ ../../
+gymnasium==1.1.1
+gym-sokoban==0.0.6
+numpy>=1.26
+scipy>=1.11
+imageio>=2.31
+pillow>=10
+pyyaml>=6.0
+pkgconfig>=1.5
+setuptools>=70
