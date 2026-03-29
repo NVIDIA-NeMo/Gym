@@ -393,24 +393,15 @@ class LocalVLLMModelActor:
         CoreEngineActorManager.create_dp_placement_groups = new_create_dp_placement_groups
 
     def _patch_multi_thread_safetensors_weights_iterator(self) -> None:
-        import time
-
         from tqdm.auto import tqdm
-        from vllm.model_executor.model_loader import _LOAD_FORMAT_TO_MODEL_LOADER, DefaultModelLoader
+        from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
         from vllm.model_executor.model_loader.weight_utils import _BAR_FORMAT, load_file
 
         load_file_remote = ray.remote(load_file)
 
-        def new_DefaultModelLoader_get_weights_iterator(self, source):
+        def new_DefaultModelLoader_get_weights_iterator(*args, **kwargs):
             print("Using patched `DefaultModelLoader._get_weights_iterator`", file=sys.stderr)
-
-            extra_config = self.load_config.model_loader_extra_config
-            hf_folder, hf_weights_files, use_safetensors = self._prepare_weights(
-                source.model_or_path,
-                source.revision,
-                source.fall_back_to_pt,
-                source.allow_patterns_overrides,
-            )
+            from vllm.model_executor.model_loader import default_loader
 
             def new_multi_thread_safetensors_weights_iterator(
                 hf_weights_files: list[str],
@@ -444,24 +435,11 @@ class LocalVLLMModelActor:
                 for state_dict in futures_iter:
                     yield from state_dict.items()
 
-            weights_iterator = new_multi_thread_safetensors_weights_iterator(
-                hf_weights_files,
-                self.load_config.use_tqdm_on_load,
-                max_workers=extra_config.get("num_threads", self.DEFAULT_NUM_THREADS),
-            )
-
-            if self.counter_before_loading_weights == 0.0:
-                self.counter_before_loading_weights = time.perf_counter()
-            # Apply the prefix.
-            return ((source.prefix + name, tensor) for (name, tensor) in weights_iterator)
-
-        _LOAD_FORMAT_TO_MODEL_LOADER["auto"] = DefaultModelLoader
-        _LOAD_FORMAT_TO_MODEL_LOADER["hf"] = DefaultModelLoader
-        _LOAD_FORMAT_TO_MODEL_LOADER["safetensors"] = DefaultModelLoader
+            default_loader.multi_thread_safetensors_weights_iterator = new_multi_thread_safetensors_weights_iterator
 
         DefaultModelLoader._get_weights_iterator = new_DefaultModelLoader_get_weights_iterator
 
-        print("Patched `DefaultModelLoader._get_weights_iterator`", file=sys.stderr)
+        print("Patched multi_thread_safetensors_weights_iterator", file=sys.stderr)
 
     def base_url(self) -> str:
         return self._base_url
