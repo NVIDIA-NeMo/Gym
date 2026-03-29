@@ -393,7 +393,7 @@ class LocalVLLMModelActor:
         CoreEngineActorManager.create_dp_placement_groups = new_create_dp_placement_groups
 
     def _patch_multi_thread_safetensors_weights_iterator(self) -> None:
-        from vllm.v1.executor.ray_utils import RayWorkerWrapper
+        from vllm.v1.executor.ray_executor import RayWorkerWrapper
 
         original_RayWorkerWrapper__init__ = RayWorkerWrapper.__init__
 
