@@ -433,7 +433,7 @@ class LocalVLLMModelActor:
 
         default_loader.multi_thread_safetensors_weights_iterator = new_multi_thread_safetensors_weights_iterator
 
-    def _patch_multi_thread_safetensors_weights_iterator(self) -> None:
+    def _inner_patch_RayWorkerWrapper__init__(self) -> None:
         from vllm.v1.executor.ray_executor import RayWorkerWrapper
 
         original_RayWorkerWrapper__init__ = RayWorkerWrapper.__init__
@@ -448,6 +448,19 @@ class LocalVLLMModelActor:
         RayWorkerWrapper.__init__ = new_RayWorkerWrapper__init__
 
         print("Patched RayWorkerWrapper.__init__", file=sys.stderr)
+
+    def _patch_multi_thread_safetensors_weights_iterator(self) -> None:
+        from vllm.v1.executor.ray_executor import RayDistributedExecutor
+
+        original_RayDistributedExecutor_init_workers_ray = RayDistributedExecutor._init_workers_ray
+
+        def new_RayDistributedExecutor_init_workers_ray(*args, **kwargs):
+            print("Using patched `RayDistributedExecutor._init_workers_ray`", file=sys.stderr)
+            self._inner_patch_RayWorkerWrapper__init__()
+            print("LOCALS", locals(), file=sys.stderr)
+            return original_RayDistributedExecutor_init_workers_ray(*args, **kwargs)
+
+        RayDistributedExecutor._init_workers_ray = new_RayDistributedExecutor_init_workers_ray
 
     def base_url(self) -> str:
         return self._base_url
