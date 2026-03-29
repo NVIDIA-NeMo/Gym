@@ -436,16 +436,6 @@ class LocalVLLMModelActor:
 
     def _patch_multi_thread_safetensors_weights_iterator(self) -> None:
         LocalVLLMModelActor_obj = self
-        from vllm.v1.engine.core import DPEngineCoreProc
-
-        original_DPEngineCoreProc__init__ = DPEngineCoreProc.__init__
-
-        def new_DPEngineCoreProc__init__(self, *args, **kwargs):
-            print("Using patched `DPEngineCoreProc.__init__`", file=sys.stderr)
-            LocalVLLMModelActor_obj._inner_patch_multi_thread_safetensors_weights_iterator()
-            return original_DPEngineCoreProc__init__(self, *args, **kwargs)
-
-        DPEngineCoreProc.__init__ = new_DPEngineCoreProc__init__
 
         from vllm.v1.engine.utils import CoreEngineActorManager
 
@@ -460,6 +450,7 @@ class LocalVLLMModelActor:
 
             def new_DPMoEEngineCoreActor__init__(self, *args, **kwargs):
                 print("Using patched `DPMoEEngineCoreActor.__init__`", file=sys.stderr)
+                LocalVLLMModelActor_obj._inner_patch_multi_thread_safetensors_weights_iterator()
                 return original_DPMoEEngineCoreActor__init__(self, *args, **kwargs)
 
             DPMoEEngineCoreActor.__init__ = new_DPMoEEngineCoreActor__init__
