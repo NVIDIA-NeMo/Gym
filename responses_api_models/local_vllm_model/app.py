@@ -393,15 +393,18 @@ class LocalVLLMModelActor:
         CoreEngineActorManager.create_dp_placement_groups = new_create_dp_placement_groups
 
     def _patch_multi_thread_safetensors_weights_iterator(self) -> None:
-        from tqdm.auto import tqdm
-        from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
-        from vllm.model_executor.model_loader.weight_utils import _BAR_FORMAT, load_file
+        from vllm.v1.executor.ray_utils import RayWorkerWrapper
 
-        load_file_remote = ray.remote(load_file)
+        original_RayWorkerWrapper__init__ = RayWorkerWrapper.__init__
 
-        def new_DefaultModelLoader_get_weights_iterator(*args, **kwargs):
-            print("Using patched `DefaultModelLoader._get_weights_iterator`", file=sys.stderr)
+        def new_RayWorkerWrapper__init__(*args, **kwargs):
+            print("Using patched `RayWorkerWrapper.__init__`", file=sys.stderr)
+
+            from tqdm.auto import tqdm
             from vllm.model_executor.model_loader import default_loader
+            from vllm.model_executor.model_loader.weight_utils import _BAR_FORMAT, load_file
+
+            load_file_remote = ray.remote(load_file)
 
             def new_multi_thread_safetensors_weights_iterator(
                 hf_weights_files: list[str],
@@ -437,9 +440,11 @@ class LocalVLLMModelActor:
 
             default_loader.multi_thread_safetensors_weights_iterator = new_multi_thread_safetensors_weights_iterator
 
-        DefaultModelLoader._get_weights_iterator = new_DefaultModelLoader_get_weights_iterator
+            return original_RayWorkerWrapper__init__(*args, **kwargs)
 
-        print("Patched multi_thread_safetensors_weights_iterator", file=sys.stderr)
+        RayWorkerWrapper.__init__ = new_RayWorkerWrapper__init__
+
+        print("Patched RayWorkerWrapper.__init__", file=sys.stderr)
 
     def base_url(self) -> str:
         return self._base_url
