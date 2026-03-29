@@ -469,6 +469,15 @@ class LocalVLLMModelActor:
             executor_class = original_Executor_get_class(*args, **kwargs)
             self._patch_RayDistributedExecutor_init_workers_ray(executor_class)
             print(f"Using patched `Executor.get_class`. Resolved executor class to {executor_class}", file=sys.stderr)
+
+            original__init__ = executor_class.__init__
+
+            def new__init__(*args2, **kwargs2):
+                print("Using patched Executor init", file=sys.stderr)
+                return original__init__(**args2, **kwargs2)
+
+            executor_class.__init__ = new__init__
+
             return executor_class
 
         Executor.get_class = new_Executor_get_class
