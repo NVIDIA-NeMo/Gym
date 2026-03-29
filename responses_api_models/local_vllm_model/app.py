@@ -461,6 +461,8 @@ class LocalVLLMModelActor:
         executor_class._init_workers_ray = new_RayDistributedExecutor_init_workers_ray
 
     def _patch_multi_thread_safetensors_weights_iterator(self) -> None:
+        from vllm.entrypoints.cli import serve
+        from vllm.v1.engine import async_llm, llm_engine
         from vllm.v1.executor.abstract import Executor
 
         original_Executor_get_class = Executor.get_class
@@ -481,6 +483,9 @@ class LocalVLLMModelActor:
             return executor_class
 
         Executor.get_class = new_Executor_get_class
+        serve.Executor.get_class = new_Executor_get_class
+        async_llm.Executor.get_class = new_Executor_get_class
+        llm_engine.Executor.get_class = new_Executor_get_class
 
     def base_url(self) -> str:
         return self._base_url
