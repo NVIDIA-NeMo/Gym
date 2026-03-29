@@ -393,48 +393,71 @@ class LocalVLLMModelActor:
         CoreEngineActorManager.create_dp_placement_groups = new_create_dp_placement_groups
 
     def _patch_multi_thread_safetensors_weights_iterator(self) -> None:
+        import time
+
         from tqdm.auto import tqdm
-        from vllm.model_executor.model_loader import default_loader, weight_utils
+        from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
         from vllm.model_executor.model_loader.weight_utils import _BAR_FORMAT, load_file
 
         load_file_remote = ray.remote(load_file)
 
-        def new_multi_thread_safetensors_weights_iterator(
-            hf_weights_files: list[str],
-            use_tqdm_on_load: bool,
-            max_workers: int = 4,
-        ):
-            print(
-                "Using patched multi_thread_safetensors_weights_iterator that uses Ray rather than multithreading to distribute the workload.",
-                file=sys.stderr,
-            )
-            tasks = [
-                load_file_remote.options(
-                    num_cpus=1,
-                    # @bxyu-nvidia: It may be more efficient to not spread the loading across nodes
-                    # given that all of the shards need to end up in the main proc on the driver node anyways
-                    scheduling_strategy="SPREAD",
-                    runtime_env={
-                        "py_executable": sys.executable,
-                    },
-                ).remote(st_file, device="cpu")
-                for st_file in hf_weights_files
-            ]
+        def new_DefaultModelLoader_get_weights_iterator(self, source):
+            print("Using patched `DefaultModelLoader._get_weights_iterator`", file=sys.stderr)
 
-            futures_iter = tqdm(
-                ray.util.as_completed(tasks, chunk_size=1),
-                total=len(hf_weights_files),
-                desc="Multi-thread loading shards using Ray",
-                bar_format=_BAR_FORMAT,
+            extra_config = self.load_config.model_loader_extra_config
+            hf_folder, hf_weights_files, use_safetensors = self._prepare_weights(
+                source.model_or_path,
+                source.revision,
+                source.fall_back_to_pt,
+                source.allow_patterns_overrides,
             )
 
-            for state_dict in futures_iter:
-                yield from state_dict.items()
+            def new_multi_thread_safetensors_weights_iterator(
+                hf_weights_files: list[str],
+                use_tqdm_on_load: bool,
+                max_workers: int = 4,
+            ):
+                print(
+                    "Using patched multi_thread_safetensors_weights_iterator that uses Ray rather than multithreading to distribute the workload.",
+                    file=sys.stderr,
+                )
+                tasks = [
+                    load_file_remote.options(
+                        num_cpus=1,
+                        # @bxyu-nvidia: It may be more efficient to not spread the loading across nodes
+                        # given that all of the shards need to end up in the main proc on the driver node anyways
+                        scheduling_strategy="SPREAD",
+                        runtime_env={
+                            "py_executable": sys.executable,
+                        },
+                    ).remote(st_file, device="cpu")
+                    for st_file in hf_weights_files
+                ]
 
-        default_loader.multi_thread_safetensors_weights_iterator = new_multi_thread_safetensors_weights_iterator
-        weight_utils.multi_thread_safetensors_weights_iterator = new_multi_thread_safetensors_weights_iterator
+                futures_iter = tqdm(
+                    ray.util.as_completed(tasks, chunk_size=1),
+                    total=len(hf_weights_files),
+                    desc="Multi-thread loading shards using Ray",
+                    bar_format=_BAR_FORMAT,
+                )
 
-        print("Patched multi_thread_safetensors_weights_iterator", file=sys.stderr)
+                for state_dict in futures_iter:
+                    yield from state_dict.items()
+
+            weights_iterator = new_multi_thread_safetensors_weights_iterator(
+                hf_weights_files,
+                self.load_config.use_tqdm_on_load,
+                max_workers=extra_config.get("num_threads", self.DEFAULT_NUM_THREADS),
+            )
+
+            if self.counter_before_loading_weights == 0.0:
+                self.counter_before_loading_weights = time.perf_counter()
+            # Apply the prefix.
+            return ((source.prefix + name, tensor) for (name, tensor) in weights_iterator)
+
+        DefaultModelLoader._get_weights_iterator = new_DefaultModelLoader_get_weights_iterator
+
+        print("Patched `DefaultModelLoader._get_weights_iterator`", file=sys.stderr)
 
     def base_url(self) -> str:
         return self._base_url
