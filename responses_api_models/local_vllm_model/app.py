@@ -397,6 +397,10 @@ class LocalVLLMModelActor:
         from vllm.model_executor.model_loader import default_loader, weight_utils
         from vllm.model_executor.model_loader.weight_utils import _BAR_FORMAT, load_file
 
+        # TODO remove
+        print("DEFAULT LOADER FILE", default_loader.__file__, file=sys.stderr)
+        print("WEIGHT UTILS FILE", weight_utils.__file__, file=sys.stderr)
+
         load_file_remote = ray.remote(load_file)
 
         def new_multi_thread_safetensors_weights_iterator(
