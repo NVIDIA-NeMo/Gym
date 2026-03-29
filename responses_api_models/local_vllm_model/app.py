@@ -171,6 +171,7 @@ class LocalVLLMModelActor:
         from vllm.v1.engine.core import DPEngineCoreProc, logger
 
         def new_init_data_parallel(self, vllm_config):
+            print("Using patched DPEngineCoreProc._init_data_parallel", file=sys.stderr)
             # Configure GPUs and stateless process group for data parallel.
             dp_rank = vllm_config.parallel_config.data_parallel_rank
             dp_size = vllm_config.parallel_config.data_parallel_size
