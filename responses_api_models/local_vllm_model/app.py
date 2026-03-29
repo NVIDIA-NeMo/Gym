@@ -433,59 +433,17 @@ class LocalVLLMModelActor:
 
         default_loader.multi_thread_safetensors_weights_iterator = new_multi_thread_safetensors_weights_iterator
 
-    def _inner_patch_RayWorkerWrapper__init__(self) -> None:
-        from vllm.v1.executor.ray_executor import RayWorkerWrapper
-
-        original_RayWorkerWrapper__init__ = RayWorkerWrapper.__init__
-
-        def new_RayWorkerWrapper__init__(*args, **kwargs):
-            print("Using patched `RayWorkerWrapper.__init__`", file=sys.stderr)
-
-            self._inner_patch_multi_thread_safetensors_weights_iterator()
-
-            return original_RayWorkerWrapper__init__(*args, **kwargs)
-
-        RayWorkerWrapper.__init__ = new_RayWorkerWrapper__init__
-
-        print("Patched RayWorkerWrapper.__init__", file=sys.stderr)
-
-    def _patch_RayDistributedExecutor_init_workers_ray(self, executor_class) -> None:
-        original_RayDistributedExecutor_init_workers_ray = executor_class._init_workers_ray
-
-        def new_RayDistributedExecutor_init_workers_ray(*args, **kwargs):
-            print("Using patched `RayDistributedExecutor._init_workers_ray`", file=sys.stderr)
-            self._inner_patch_RayWorkerWrapper__init__()
-            print("LOCALS", locals(), file=sys.stderr)
-            return original_RayDistributedExecutor_init_workers_ray(*args, **kwargs)
-
-        executor_class._init_workers_ray = new_RayDistributedExecutor_init_workers_ray
-
     def _patch_multi_thread_safetensors_weights_iterator(self) -> None:
-        from vllm.entrypoints.cli import serve
-        from vllm.v1.engine import async_llm, llm_engine
-        from vllm.v1.executor.abstract import Executor
+        from vllm.v1.engine.core import DPEngineCoreProc
 
-        original_Executor_get_class = Executor.get_class
+        original_DPEngineCoreProc__init__ = DPEngineCoreProc.__init__
 
-        def new_Executor_get_class(*args, **kwargs):
-            executor_class = original_Executor_get_class(*args, **kwargs)
-            self._patch_RayDistributedExecutor_init_workers_ray(executor_class)
-            print(f"Using patched `Executor.get_class`. Resolved executor class to {executor_class}", file=sys.stderr)
+        def new_DPEngineCoreProc__init__(*args, **kwargs):
+            print("Using patched `DPEngineCoreProc.__init__`", file=sys.stderr)
+            self._inner_patch_multi_thread_safetensors_weights_iterator()
+            return original_DPEngineCoreProc__init__(*args, **kwargs)
 
-            original__init__ = executor_class.__init__
-
-            def new__init__(*args2, **kwargs2):
-                print("Using patched Executor init", file=sys.stderr)
-                return original__init__(**args2, **kwargs2)
-
-            executor_class.__init__ = new__init__
-
-            return executor_class
-
-        Executor.get_class = new_Executor_get_class
-        serve.Executor.get_class = new_Executor_get_class
-        async_llm.Executor.get_class = new_Executor_get_class
-        llm_engine.Executor.get_class = new_Executor_get_class
+        DPEngineCoreProc.__init__ = new_DPEngineCoreProc__init__
 
     def base_url(self) -> str:
         return self._base_url
