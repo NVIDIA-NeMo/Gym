@@ -396,7 +396,7 @@ class LocalVLLMModelActor:
         import time
 
         from tqdm.auto import tqdm
-        from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
+        from vllm.model_executor.model_loader import DefaultModelLoader
         from vllm.model_executor.model_loader.weight_utils import _BAR_FORMAT, load_file
 
         load_file_remote = ray.remote(load_file)
