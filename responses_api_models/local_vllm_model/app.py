@@ -396,7 +396,7 @@ class LocalVLLMModelActor:
         import time
 
         from tqdm.auto import tqdm
-        from vllm.model_executor.model_loader import DefaultModelLoader
+        from vllm.model_executor.model_loader import _LOAD_FORMAT_TO_MODEL_LOADER, DefaultModelLoader
         from vllm.model_executor.model_loader.weight_utils import _BAR_FORMAT, load_file
 
         load_file_remote = ray.remote(load_file)
@@ -454,6 +454,10 @@ class LocalVLLMModelActor:
                 self.counter_before_loading_weights = time.perf_counter()
             # Apply the prefix.
             return ((source.prefix + name, tensor) for (name, tensor) in weights_iterator)
+
+        _LOAD_FORMAT_TO_MODEL_LOADER["auto"] = DefaultModelLoader
+        _LOAD_FORMAT_TO_MODEL_LOADER["hf"] = DefaultModelLoader
+        _LOAD_FORMAT_TO_MODEL_LOADER["safetensors"] = DefaultModelLoader
 
         DefaultModelLoader._get_weights_iterator = new_DefaultModelLoader_get_weights_iterator
 
