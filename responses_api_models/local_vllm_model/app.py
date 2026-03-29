@@ -393,50 +393,7 @@ class LocalVLLMModelActor:
 
         CoreEngineActorManager.create_dp_placement_groups = new_create_dp_placement_groups
 
-    def _inner_patch_multi_thread_safetensors_weights_iterator(self) -> None:
-        from tqdm.auto import tqdm
-        from vllm.model_executor.model_loader import default_loader
-        from vllm.model_executor.model_loader.weight_utils import _BAR_FORMAT, load_file
-
-        load_file_remote = ray.remote(load_file)
-
-        def new_multi_thread_safetensors_weights_iterator(
-            hf_weights_files: list[str],
-            use_tqdm_on_load: bool,
-            max_workers: int = 4,
-        ):
-            print(
-                "Using patched multi_thread_safetensors_weights_iterator that uses Ray rather than multithreading to distribute the workload.",
-                file=sys.stderr,
-            )
-            tasks = [
-                load_file_remote.options(
-                    num_cpus=1,
-                    # @bxyu-nvidia: It may be more efficient to not spread the loading across nodes
-                    # given that all of the shards need to end up in the main proc on the driver node anyways
-                    scheduling_strategy="SPREAD",
-                    runtime_env={
-                        "py_executable": sys.executable,
-                    },
-                ).remote(st_file, device="cpu")
-                for st_file in hf_weights_files
-            ]
-
-            futures_iter = tqdm(
-                ray.util.as_completed(tasks, chunk_size=1),
-                total=len(hf_weights_files),
-                desc="Multi-thread loading shards using Ray",
-                bar_format=_BAR_FORMAT,
-            )
-
-            for state_dict in futures_iter:
-                yield from state_dict.items()
-
-        default_loader.multi_thread_safetensors_weights_iterator = new_multi_thread_safetensors_weights_iterator
-
     def _patch_multi_thread_safetensors_weights_iterator(self) -> None:
-        LocalVLLMModelActor_obj = self
-
         from vllm.v1.engine.utils import CoreEngineActorManager
 
         original_CoreEngineActorManager__init__ = CoreEngineActorManager.__init__
@@ -448,10 +405,52 @@ class LocalVLLMModelActor:
 
             original_DPMoEEngineCoreActor__init__ = DPMoEEngineCoreActor.__init__
 
-            def new_DPMoEEngineCoreActor__init__(self, *args, **kwargs):
+            def new_DPMoEEngineCoreActor__init__(*args, **kwargs):
                 print("Using patched `DPMoEEngineCoreActor.__init__`", file=sys.stderr)
-                LocalVLLMModelActor_obj._inner_patch_multi_thread_safetensors_weights_iterator()
-                return original_DPMoEEngineCoreActor__init__(self, *args, **kwargs)
+
+                from tqdm.auto import tqdm
+                from vllm.model_executor.model_loader import default_loader
+                from vllm.model_executor.model_loader.weight_utils import _BAR_FORMAT, load_file
+
+                load_file_remote = ray.remote(load_file)
+
+                def new_multi_thread_safetensors_weights_iterator(
+                    hf_weights_files: list[str],
+                    use_tqdm_on_load: bool,
+                    max_workers: int = 4,
+                ):
+                    print(
+                        "Using patched multi_thread_safetensors_weights_iterator that uses Ray rather than multithreading to distribute the workload.",
+                        file=sys.stderr,
+                    )
+                    tasks = [
+                        load_file_remote.options(
+                            num_cpus=1,
+                            # @bxyu-nvidia: It may be more efficient to not spread the loading across nodes
+                            # given that all of the shards need to end up in the main proc on the driver node anyways
+                            scheduling_strategy="SPREAD",
+                            runtime_env={
+                                "py_executable": sys.executable,
+                            },
+                        ).remote(st_file, device="cpu")
+                        for st_file in hf_weights_files
+                    ]
+
+                    futures_iter = tqdm(
+                        ray.util.as_completed(tasks, chunk_size=1),
+                        total=len(hf_weights_files),
+                        desc="Multi-thread loading shards using Ray",
+                        bar_format=_BAR_FORMAT,
+                    )
+
+                    for state_dict in futures_iter:
+                        yield from state_dict.items()
+
+                default_loader.multi_thread_safetensors_weights_iterator = (
+                    new_multi_thread_safetensors_weights_iterator
+                )
+
+                return original_DPMoEEngineCoreActor__init__(*args, **kwargs)
 
             DPMoEEngineCoreActor.__init__ = new_DPMoEEngineCoreActor__init__
 
