@@ -449,10 +449,8 @@ class LocalVLLMModelActor:
 
         print("Patched RayWorkerWrapper.__init__", file=sys.stderr)
 
-    def _patch_RayDistributedExecutor_init_workers_ray(self) -> None:
-        from vllm.v1.executor.ray_executor import RayDistributedExecutor
-
-        original_RayDistributedExecutor_init_workers_ray = RayDistributedExecutor._init_workers_ray
+    def _patch_RayDistributedExecutor_init_workers_ray(self, executor_class) -> None:
+        original_RayDistributedExecutor_init_workers_ray = executor_class._init_workers_ray
 
         def new_RayDistributedExecutor_init_workers_ray(*args, **kwargs):
             print("Using patched `RayDistributedExecutor._init_workers_ray`", file=sys.stderr)
@@ -460,7 +458,7 @@ class LocalVLLMModelActor:
             print("LOCALS", locals(), file=sys.stderr)
             return original_RayDistributedExecutor_init_workers_ray(*args, **kwargs)
 
-        RayDistributedExecutor._init_workers_ray = new_RayDistributedExecutor_init_workers_ray
+        executor_class._init_workers_ray = new_RayDistributedExecutor_init_workers_ray
 
     def _patch_multi_thread_safetensors_weights_iterator(self) -> None:
         from vllm.v1.executor.abstract import Executor
@@ -469,8 +467,9 @@ class LocalVLLMModelActor:
 
         def new_Executor_get_class(*args, **kwargs):
             print("Using patched `Executor.get_class`", file=sys.stderr)
-            self._patch_RayDistributedExecutor_init_workers_ray()
-            return original_Executor_get_class(*args, **kwargs)
+            executor_class = original_Executor_get_class(*args, **kwargs)
+            self._patch_RayDistributedExecutor_init_workers_ray(executor_class)
+            return executor_class
 
         Executor.get_class = new_Executor_get_class
 
