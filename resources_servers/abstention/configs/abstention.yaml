@@ -11,6 +11,7 @@ abstention:
       domain: rlhf
       verified: false
       description: Train models to abstain when unsure using three-tier reward on HotPotQA with LLM judge
+      value: Improve calibration by rewarding abstention over incorrect answers
 
       # LLM judge model server
       judge_model_server:
