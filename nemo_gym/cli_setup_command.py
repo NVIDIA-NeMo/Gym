@@ -37,7 +37,7 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
     head_server_deps = global_config_dict[HEAD_SERVER_DEPS_KEY_NAME]
 
     root_venv_path = global_config_dict[UV_VENV_DIR_KEY_NAME]
-    if root_venv_path != str(PARENT_DIR):
+    if Path(root_venv_path).resolve() != PARENT_DIR.resolve():
         venv_path = Path(root_venv_path, *dir_path.parts[-2:], ".venv").absolute()
     else:
         venv_path = (dir_path / ".venv").absolute()
@@ -57,7 +57,7 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
 
     verbose_flag = "-v " if global_config_dict.get(PIP_INSTALL_VERBOSE_KEY_NAME) else ""
     find_links = global_config_dict.get(UV_FIND_LINKS_KEY_NAME)
-    find_links_flag = f"--find-links {find_links} " if find_links else ""
+    find_links_flag = f"--find-links {find_links} --prerelease=allow " if find_links else ""
 
     is_editable_install = (dir_path.resolve() / "../../pyproject.toml").exists()
 
