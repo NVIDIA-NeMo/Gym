@@ -62,13 +62,32 @@ ng_e2e_collect_rollouts \
     ++policy_model_name=<>
 ```
 
-## Using local compute
+## Using local compute including benchmarks that use judge models
 ```bash
 WANDB_PROJECT=<>
 EXPERIMENT_NAME=<>
 
 config_paths="benchmarks/nemotron_3_ultra/local_endpoint.yaml,\
 benchmarks/nemotron_3_ultra/config_short.yaml"
+ng_e2e_collect_rollouts \
+    "+config_paths=[${config_paths}]" \
+    +wandb_project=$WANDB_PROJECT \
+    +wandb_name=$EXPERIMENT_NAME \
+    ++output_jsonl_fpath=results/$EXPERIMENT_NAME.jsonl \
+    ++overwrite_metrics_conflicts=true \
+    ++split=benchmark \
+    ++resume_from_cache=true \
+    ++reuse_existing_data_preparation=true
+```
+
+
+## Using local compute excluding benchmarks that use judge models
+```bash
+WANDB_PROJECT=<>
+EXPERIMENT_NAME=<>
+
+config_paths="benchmarks/nemotron_3_ultra/local_endpoint_no_gpus.yaml,\
+benchmarks/nemotron_3_ultra/config_short_no_gpus.yaml"
 ng_e2e_collect_rollouts \
     "+config_paths=[${config_paths}]" \
     +wandb_project=$WANDB_PROJECT \
