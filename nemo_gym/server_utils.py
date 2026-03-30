@@ -400,44 +400,15 @@ def maybe_ray_cluster_exit():  # pragma: no cover
 atexit.register(maybe_ray_cluster_exit)
 
 
-# Handling FastAPI multiple workers is the only place we use environment variables in NeMo Gym
-# Everything else goes through the global config. Even the entrypoint here technically should go through the global config.
 IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME = "IS_NEMO_GYM_FASTAPI_WORKER"
-NEMO_GYM_FASTAPI_ENTRYPOINT_KEY_NAME = "NEMO_GYM_FASTAPI_ENTRYPOINT"
 
 
 def is_nemo_gym_fastapi_worker() -> bool:
     return getenv(IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME) == "1"
 
 
-def is_nemo_gym_fastapi_worker_entrypoint(absolute_entrypoint_fpath: str) -> bool:
-    """
-    absolute_entrypoint_fpath: str
-        From __file__ in the entrypoint file
-    """
-    # TODO remove
-    print(f"HIT BEFORE is_nemo_gym_fastapi_worker() with {absolute_entrypoint_fpath}")
-    if not is_nemo_gym_fastapi_worker():
-        return False
-
-    relative_entrypoint_fpath = getenv(NEMO_GYM_FASTAPI_ENTRYPOINT_KEY_NAME)
-    # TODO remove
-    print(f"HIT BEFORE relative_entrypoint_fpath with {relative_entrypoint_fpath=}")
-    if not relative_entrypoint_fpath:
-        return False
-
-    # TODO remove
-    print(
-        (PARENT_DIR / relative_entrypoint_fpath).absolute(),
-        Path(absolute_entrypoint_fpath).absolute(),
-        (PARENT_DIR / relative_entrypoint_fpath).absolute() == Path(absolute_entrypoint_fpath).absolute(),
-    )
-    return (PARENT_DIR / relative_entrypoint_fpath).absolute() == Path(absolute_entrypoint_fpath).absolute()
-
-
-def set_is_nemo_gym_fastapi_worker(relative_entrypoint_fpath: str) -> None:
+def set_is_nemo_gym_fastapi_worker() -> None:
     environ[IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME] = "1"
-    environ[NEMO_GYM_FASTAPI_ENTRYPOINT_KEY_NAME] = relative_entrypoint_fpath
 
 
 class SimpleServer(BaseServer):
@@ -635,14 +606,14 @@ Full body: {json.dumps(exc.body, indent=4)}
         )
 
         if server.config.num_workers and server.config.num_workers > 1:
+            set_is_nemo_gym_fastapi_worker()
+
             # TODO this is very dirty. We need a cleaner way to populate this information in the configs data structures.
             server_instance_config_dict = global_config_dict[server.config.name]
             first_level_key = list(server_instance_config_dict.keys())[0]
             second_level_key = list(server_instance_config_dict[first_level_key].keys())[0]
             relative_fpath = f"{first_level_key}/{second_level_key}/{server.config.entrypoint}"
             module_import_str = relative_fpath.replace(".py", "").replace("/", ".")
-
-            set_is_nemo_gym_fastapi_worker(relative_fpath)
 
             uvicorn_kwargs["app"] = f"{module_import_str}:app"
             uvicorn_kwargs["workers"] = server.config.num_workers

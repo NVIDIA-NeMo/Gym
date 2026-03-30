@@ -40,7 +40,6 @@ from nemo_gym.global_config import (
     get_global_config_dict,
     get_hf_token,
 )
-from nemo_gym.server_utils import is_nemo_gym_fastapi_worker_entrypoint
 from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
 
 
@@ -555,11 +554,5 @@ Total Ray cluster resources: {cluster_resources()}""")
                 sleep(3)
 
 
-# TODO remove
-print("HIT BEFORE LocalVLLMModel fastapi worker entrypoint")
 if __name__ == "__main__":
     LocalVLLMModel.run_webserver()
-elif is_nemo_gym_fastapi_worker_entrypoint(__file__):
-    # TODO remove
-    print("HIT IN LocalVLLMModel fastapi worker entrypoint")
-    app = LocalVLLMModel.run_webserver()  # noqa: F401

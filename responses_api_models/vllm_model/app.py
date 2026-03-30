@@ -61,7 +61,7 @@ from nemo_gym.openai_utils import (
     NeMoGymSummary,
     TokenIDLogProbMixin,
 )
-from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_worker_entrypoint
+from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_worker
 
 
 class VLLMModelConfig(BaseResponsesAPIModelConfig):
@@ -816,11 +816,7 @@ def split_responses_input_output_items(
     return items[:i], items[i:]
 
 
-# TODO remove
-print("HIT BEFORE VLLMModel fastapi worker entrypoint")
 if __name__ == "__main__":
     VLLMModel.run_webserver()
-elif is_nemo_gym_fastapi_worker_entrypoint(__file__):
-    # TODO remove
-    print("HIT IN VLLMModel fastapi worker entrypoint")
+elif is_nemo_gym_fastapi_worker():
     app = VLLMModel.run_webserver()  # noqa: F401
