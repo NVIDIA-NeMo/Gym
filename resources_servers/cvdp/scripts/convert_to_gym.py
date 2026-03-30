@@ -32,6 +32,17 @@ def _get_harness_files(entry: dict) -> dict[str, str | None]:
     return (entry.get("harness") or {}).get("files") or {}
 
 
+def _get_context_files(entry: dict) -> dict[str, str]:
+    """Companion RTL files from input.context that the model doesn't generate
+    but are needed for compilation (e.g. floor_to_seven_segment.sv).
+
+    Returns input.context files that are NOT in output.context (i.e. not
+    target files the model is asked to produce)."""
+    input_context = (entry.get("input") or {}).get("context") or {}
+    target_keys = set(_get_target_files(entry))
+    return {k: v for k, v in input_context.items() if k not in target_keys and v}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Convert CVDP export prompts to NeMo-Gym format")
     parser.add_argument("--prompts", required=True, help="prompts.jsonl from CVDP local_export mode")
@@ -66,6 +77,17 @@ def main() -> None:
                 skipped += 1
                 continue
 
+            context_files = _get_context_files(raw)
+            verifier_metadata = {
+                "task_id": task_id,
+                "categories": raw.get("categories", []),
+                "difficulty": raw.get("difficulty", ""),
+                "target_files": target_files,
+                "harness_files": _get_harness_files(raw),
+            }
+            if context_files:
+                verifier_metadata["context_files"] = context_files
+
             gym_row = {
                 "responses_create_params": {
                     "input": [
@@ -73,13 +95,7 @@ def main() -> None:
                         {"role": "user", "content": row["user"]},
                     ]
                 },
-                "verifier_metadata": {
-                    "task_id": task_id,
-                    "categories": raw.get("categories", []),
-                    "difficulty": raw.get("difficulty", ""),
-                    "target_files": target_files,
-                    "harness_files": _get_harness_files(raw),
-                },
+                "verifier_metadata": verifier_metadata,
             }
             fout.write(json.dumps(gym_row) + "\n")
             written += 1
