@@ -137,6 +137,7 @@ class MultiturnProofAgent(SimpleResponsesAPIAgent):
         effective_max = self.config.max_turns * 2 - 1 if use_summary else self.config.max_turns
 
         next_is_summary_prompt = False
+        reasoning_was_truncated = False
 
         while turn_index < effective_max:
             LOG.info("Turn %d: Generating (summary_prompt=%s)", turn_index, next_is_summary_prompt)
@@ -161,6 +162,11 @@ class MultiturnProofAgent(SimpleResponsesAPIAgent):
 
             is_summary_turn = use_summary and (turn_index % 2 == 1)
             was_truncated = self._check_truncated(model_response_json)
+
+            if is_summary_turn:
+                was_truncated = was_truncated or reasoning_was_truncated
+            else:
+                reasoning_was_truncated = was_truncated
 
             verify_request_data = body.model_dump()
             verify_request_data["response"] = model_response_json
