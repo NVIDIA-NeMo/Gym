@@ -357,8 +357,39 @@ class LocalVLLMModelActor:
                     "The actual data-parallel-size-local will be auto determined."
                 )
 
+            # strict/fill: Ray's strategy only packs *within* each PG; we still create one PG
+            # per DP rank, so without node affinity ranks spread across nodes. Pin extra PGs
+            # to the DP master when it has room for the remaining ranks (rank 0 head PG already
+            # holds world_size GPUs there). Matches upstream vLLM's "node:IP" bundle hint.
+            master_node_res = nodes[0]
+            master_gpus_avail = int(master_node_res.get(device_str, 0))
+            need_on_master = world_size * (dp_size - 1)
+            pin_dp_to_master = (
+                pack_strategy in ("strict", "fill") and dp_size > 1 and master_gpus_avail >= need_on_master
+            )
+            if pin_dp_to_master:
+                logger.info(
+                    "Pinning DP ranks 1..%s to DP master %s (avail GPU on master %s >= %s)",
+                    dp_size - 1,
+                    dp_master_ip,
+                    master_gpus_avail,
+                    need_on_master,
+                )
+                node_affinity = {"node:" + dp_master_ip: 0.001}
+            else:
+                if pack_strategy in ("strict", "fill") and dp_size > 1:
+                    logger.info(
+                        "Not pinning extra DP PGs to master %s: master avail GPU %s < %s needed for ranks 1..%s",
+                        dp_master_ip,
+                        master_gpus_avail,
+                        need_on_master,
+                        dp_size - 1,
+                    )
+                node_affinity = {}
+
             for _ in range(dp_size - 1):
-                bundles = [{device_str: 1.0}] * world_size + [{"CPU": 1.0}]
+                device_bundle = {device_str: 1.0, **node_affinity}
+                bundles = [device_bundle] * world_size + [{"CPU": 1.0}]
 
                 pg_name = f"{self.server_name}_dp_rank_{len(placement_groups)}"
                 pg = ray.util.placement_group(
