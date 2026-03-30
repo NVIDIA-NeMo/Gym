@@ -47,7 +47,11 @@ class Agent:
 
 You can use an existing agent in NeMo Gym, integrate an external one, or build your own from scratch.
 
-[`SimpleAgent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/simple_agent) is a native NeMo Gym agent that handles general-purpose multi-step tool calling with configurable max steps, and works with any Resources server out of the box. NeMo Gym also includes agents that integrate external tools: for example, [`MiniSWEAgent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/mini_swe_agent) wraps an external coding harness running in Docker containers and converts its output back into the NeMo Gym format.
+[`SimpleAgent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/simple_agent) is a native NeMo Gym agent that handles general-purpose multi-step tool calling with configurable max steps, and works with any Resources server out of the box. NeMo Gym also includes agents that integrate external tools and frameworks:
+
+- [`MiniSWEAgent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/mini_swe_agent) wraps an external coding harness running in Docker containers and converts its output back into the NeMo Gym format.
+- [`LangGraphAgent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/langgraph_agent) adapter lets you run LangGraph graphs as NeMo Gym agent servers, with built-in support for multi-turn patterns like reflection. See the {doc}`LangGraph agent tutorial </environment-tutorials/langgraph-agent>` for details.
+- [`VerifiersAgent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/verifiers_agent) integrates the [verifiers](https://github.com/PrimeIntellect-ai/verifiers) library, which provides environment implementations that bundle multi-turn orchestration, state logic, tools, and verification together, similar to how NeMo Gym environments work. Because verifiers handles the full environment internally, no separate Resources server is needed.
 
 ### Tools in Agent vs. Resources Server
 
