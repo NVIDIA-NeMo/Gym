@@ -415,10 +415,14 @@ def is_nemo_gym_fastapi_worker_entrypoint(absolute_entrypoint_fpath: str) -> boo
     absolute_entrypoint_fpath: str
         From __file__ in the entrypoint file
     """
+    # TODO remove
+    print(f"HIT BEFORE is_nemo_gym_fastapi_worker() with {absolute_entrypoint_fpath}")
     if not is_nemo_gym_fastapi_worker():
         return False
 
     relative_entrypoint_fpath = getenv(NEMO_GYM_FASTAPI_ENTRYPOINT_KEY_NAME)
+    # TODO remove
+    print(f"HIT BEFORE relative_entrypoint_fpath with {relative_entrypoint_fpath=}")
     if not relative_entrypoint_fpath:
         return False
 
