@@ -1,19 +1,6 @@
 config_paths:
-- responses_api_models/local_vllm_model/configs/nvidia/nemotron_3_ultra_dev_nemorl_gb200.yaml
+- benchmarks/nemotron_3_ultra/local_endpoint_no_gpus.yaml
 - responses_api_models/local_vllm_model/configs/Qwen/Qwen3-235B-A22B-Instruct-2507-FP8.yaml
-
-# We bump up the connector per host limit since this is a larger benchmark suite
-global_aiohttp_connector_limit_per_host: 16384
-
-policy_model: ${inherit_from:nemotron_3_ultra_dev}
-
-# Some benchmarks may require reasoning off mode
-policy_model_reasoning_off:
-  _copy: nemotron_3_ultra_dev
-  responses_api_models:
-    local_vllm_model:
-      chat_template_kwargs:
-        enable_thinking: false
 
 # Spin up judge models locally too
 # Used in browsecomp
