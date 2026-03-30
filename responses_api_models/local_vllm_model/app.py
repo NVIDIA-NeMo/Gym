@@ -420,6 +420,7 @@ class LocalVLLMModelActor:
 
                     original_RayWorkerWrapper_init_device = RayWorkerWrapper.init_device
 
+                    # We patch `RayWorkerWrapper.init_device` since we need to model_runner to be initialized
                     def new_RayWorkerWrapper_init_device(RayWorkerWrapper_self, *args, **kwargs):
                         print("Using patched `RayWorkerWrapper.init_device`", file=sys.stderr)
 
@@ -429,6 +430,7 @@ class LocalVLLMModelActor:
                         loader = RayWorkerWrapper_self.worker
 
                         model_runner_load_model = loader.model_runner.load_model
+                        print(f"{model_runner_load_model.__globals__.keys()=}", file=sys.stderr)
                         original_get_model_loader = model_runner_load_model.__globals__["get_model_loader"]
 
                         def new_get_model_loader(*args, **kwargs):
