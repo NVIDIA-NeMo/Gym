@@ -34,7 +34,7 @@ from nemo_gym.global_config import (
 
 
 def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: str) -> str:
-    head_server_deps = [f"'{dep}'" for dep in global_config_dict[HEAD_SERVER_DEPS_KEY_NAME]]
+    head_server_deps = global_config_dict[HEAD_SERVER_DEPS_KEY_NAME]
 
     root_venv_path = global_config_dict[UV_VENV_DIR_KEY_NAME]
     if root_venv_path != str(PARENT_DIR):
@@ -76,7 +76,7 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
             else:
                 # pypi path
                 install_cmd = (
-                    f"""uv pip install {verbose_flag}{find_links_flag}{uv_pip_python_flag}--prerelease=allow nemo-gym && """
+                    f"""uv pip install {verbose_flag}{find_links_flag}{uv_pip_python_flag}nemo-gym && """
                     f"""uv pip install {verbose_flag}{find_links_flag}{uv_pip_python_flag}--no-sources '-e .' {" ".join(head_server_deps)}"""
                 )
         elif has_requirements_txt:
@@ -86,7 +86,7 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
                 # pypi path
                 install_cmd = (
                     f"""(echo 'nemo-gym' && grep -v -F '../..' requirements.txt) | """
-                    f"""uv pip install {verbose_flag}{find_links_flag}{uv_pip_python_flag}--prerelease=allow -r /dev/stdin {" ".join(head_server_deps)}"""
+                    f"""uv pip install {verbose_flag}{find_links_flag}{uv_pip_python_flag}-r /dev/stdin {" ".join(head_server_deps)}"""
                 )
         else:
             raise RuntimeError(
