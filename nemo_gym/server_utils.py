@@ -422,6 +422,12 @@ def is_nemo_gym_fastapi_worker_entrypoint(absolute_entrypoint_fpath: str) -> boo
     if not relative_entrypoint_fpath:
         return False
 
+    # TODO remove
+    print(
+        (PARENT_DIR / relative_entrypoint_fpath).absolute(),
+        Path(absolute_entrypoint_fpath).absolute(),
+        (PARENT_DIR / relative_entrypoint_fpath).absolute() == Path(absolute_entrypoint_fpath).absolute(),
+    )
     return (PARENT_DIR / relative_entrypoint_fpath).absolute() == Path(absolute_entrypoint_fpath).absolute()
 
 
