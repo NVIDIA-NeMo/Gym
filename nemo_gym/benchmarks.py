@@ -28,6 +28,7 @@ from rich.table import Table
 from nemo_gym import PARENT_DIR
 from nemo_gym.config_types import BaseNeMoGymCLIConfig, BenchmarkDatasetConfig
 from nemo_gym.global_config import (
+    POLICY_MODEL_KEY_NAME,
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
     get_first_server_config_dict,
@@ -51,9 +52,10 @@ class BenchmarkConfig(BaseModel):
 
     @classmethod
     def from_initial_config_dict(cls, path: Path, initial_config_dict: DictConfig) -> "Optional[BenchmarkConfig]":
-        initial_config_dict = OmegaConf.merge(
-            initial_config_dict, GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT
-        )
+        if POLICY_MODEL_KEY_NAME not in initial_config_dict:
+            initial_config_dict = OmegaConf.merge(
+                initial_config_dict, GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT
+            )
 
         parser = GlobalConfigDictParser()
         global_config_dict = parser.parse_no_environment(initial_global_config_dict=initial_config_dict)
