@@ -408,6 +408,18 @@ class LocalVLLMModelActor:
             def new_DPMoEEngineCoreActor__init__(*args, **kwargs):
                 print("Using patched `DPMoEEngineCoreActor.__init__`", file=sys.stderr)
 
+                executor_class = kwargs["executor_class"]
+                print(f"Found {executor_class=}", file=sys.stderr)
+
+                original_init_workers_ray = executor_class._init_workers_ray
+
+                def new_init_workers_ray(*args, **kwargs):
+                    print("Using patched executor_class._init_workers_ray", file=sys.stderr)
+                    print("LOCALS executor_class._init_workers_ray", locals().keys(), file=sys.stderr)
+                    return original_init_workers_ray(*args, **kwargs)
+
+                executor_class._init_workers_ray = new_init_workers_ray
+
                 from tqdm.auto import tqdm
                 from vllm.model_executor.model_loader import default_loader
                 from vllm.model_executor.model_loader.weight_utils import _BAR_FORMAT, load_file
