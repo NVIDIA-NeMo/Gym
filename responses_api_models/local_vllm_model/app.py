@@ -104,7 +104,6 @@ class LocalVLLMModelActor:
         self._maybe_patch_engine_stats()
         self._patch_create_dp_placement_groups()
         self._patch_init_data_parallel()
-        self._patch_multi_thread_safetensors_weights_iterator()
 
         for k, v in self.env_vars.items():
             environ[k] = v
@@ -392,111 +391,6 @@ class LocalVLLMModelActor:
             return placement_groups, local_dp_ranks
 
         CoreEngineActorManager.create_dp_placement_groups = new_create_dp_placement_groups
-
-    def _patch_multi_thread_safetensors_weights_iterator(self) -> None:
-        from vllm.v1.engine.utils import CoreEngineActorManager
-
-        original_CoreEngineActorManager__init__ = CoreEngineActorManager.__init__
-
-        def new_CoreEngineActorManager__init__(*args, **kwargs):
-            print("Using patched `CoreEngineActorManager.__init__`", file=sys.stderr)
-
-            from vllm.v1.engine.core import DPMoEEngineCoreActor
-
-            original_DPMoEEngineCoreActor__init__ = DPMoEEngineCoreActor.__init__
-
-            def new_DPMoEEngineCoreActor__init__(*args, **kwargs):
-                print("Using patched `DPMoEEngineCoreActor.__init__`", file=sys.stderr)
-
-                executor_class = kwargs["executor_class"]
-                print(f"Found {executor_class=}", file=sys.stderr)
-
-                original_init_workers_ray = executor_class._init_workers_ray
-
-                def new_init_workers_ray(*args, **kwargs):
-                    print("Using patched executor_class._init_workers_ray", file=sys.stderr)
-
-                    RayWorkerWrapper = original_init_workers_ray.__globals__["RayWorkerWrapper"]
-
-                    original_RayWorkerWrapper_init_device = RayWorkerWrapper.init_device
-
-                    # We patch `RayWorkerWrapper.init_device` since we need to model_runner to be initialized
-                    def new_RayWorkerWrapper_init_device(RayWorkerWrapper_self, *args, **kwargs):
-                        print("Using patched `RayWorkerWrapper.init_device`", file=sys.stderr)
-
-                        res = original_RayWorkerWrapper_init_device(RayWorkerWrapper_self, *args, **kwargs)
-
-                        # GPU Worker
-                        loader = RayWorkerWrapper_self.worker
-
-                        otel_wrapper = loader.model_runner.load_model
-                        model_runner_load_model = otel_wrapper.__wrapped__
-                        original_get_model_loader = model_runner_load_model.__globals__["get_model_loader"]
-
-                        def new_get_model_loader(*args, **kwargs):
-                            print("Using patched `get_model_loader`", file=sys.stderr)
-
-                            from tqdm.auto import tqdm
-                            from vllm.model_executor.model_loader.weight_utils import _BAR_FORMAT, load_file
-
-                            load_file_remote = ray.remote(load_file)
-
-                            def new_multi_thread_safetensors_weights_iterator(
-                                hf_weights_files: list[str],
-                                use_tqdm_on_load: bool,
-                                max_workers: int = 4,
-                            ):
-                                print(
-                                    "Using patched multi_thread_safetensors_weights_iterator that uses Ray rather than multithreading to distribute the workload.",
-                                    file=sys.stderr,
-                                )
-                                tasks = [
-                                    load_file_remote.options(
-                                        num_cpus=1,
-                                        # @bxyu-nvidia: It may be more efficient to not spread the loading across nodes
-                                        # given that all of the shards need to end up in the main proc on the driver node anyways
-                                        scheduling_strategy="SPREAD",
-                                        runtime_env={
-                                            "py_executable": sys.executable,
-                                        },
-                                    ).remote(st_file, device="cpu")
-                                    for st_file in hf_weights_files
-                                ]
-
-                                futures_iter = tqdm(
-                                    ray.util.as_completed(tasks, chunk_size=1),
-                                    total=len(hf_weights_files),
-                                    desc="Multi-thread loading shards using Ray",
-                                    bar_format=_BAR_FORMAT,
-                                )
-
-                                for state_dict in futures_iter:
-                                    yield from state_dict.items()
-
-                            model_loader = original_get_model_loader(*args, **kwargs)
-                            model_loader._get_weights_iterator.__globals__[
-                                "multi_thread_safetensors_weights_iterator"
-                            ] = new_multi_thread_safetensors_weights_iterator
-
-                            return model_loader
-
-                        model_runner_load_model.__globals__["get_model_loader"] = new_get_model_loader
-
-                        return res
-
-                    RayWorkerWrapper.init_device = new_RayWorkerWrapper_init_device
-
-                    return original_init_workers_ray(*args, **kwargs)
-
-                executor_class._init_workers_ray = new_init_workers_ray
-
-                return original_DPMoEEngineCoreActor__init__(*args, **kwargs)
-
-            DPMoEEngineCoreActor.__init__ = new_DPMoEEngineCoreActor__init__
-
-            return original_CoreEngineActorManager__init__(*args, **kwargs)
-
-        CoreEngineActorManager.__init__ = new_CoreEngineActorManager__init__
 
     def base_url(self) -> str:
         return self._base_url
