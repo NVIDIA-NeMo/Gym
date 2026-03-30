@@ -63,6 +63,7 @@ class CVDPVerifierMetadata(BaseModel):
     difficulty: str = ""
     target_files: List[str]
     harness_files: Dict[str, Optional[str]]
+    context_files: Dict[str, str] = {}  # Companion RTL from input.context (non-target files needed for compilation)
 
 
 class CVDPRunRequest(BaseRunRequest):
@@ -409,6 +410,7 @@ class CVDPResourcesServer(SimpleResourcesServer):
                 rtl_files=rtl_files or {},
                 harness_files=meta.harness_files,
                 task_id=meta.task_id,
+                context_files=meta.context_files,
             )
             execution_time = time.time() - t0
 
@@ -430,6 +432,7 @@ class CVDPResourcesServer(SimpleResourcesServer):
         rtl_files: Dict[str, str],
         harness_files: Dict[str, Optional[str]],
         task_id: str,
+        context_files: Optional[Dict[str, str]] = None,
     ) -> Tuple[int, str, List[Dict]]:
         """
         Write harness + RTL to a temp workspace and run verification via Apptainer.
@@ -444,6 +447,7 @@ class CVDPResourcesServer(SimpleResourcesServer):
               docs/                (empty, bound as /code/docs)
               rundir/              (execution output, bound as /code/rundir)
         """
+        context_files = context_files or {}
         with tempfile.TemporaryDirectory(prefix=f"cvdp_{task_id}_") as workdir:
             workdir_path = Path(workdir)
 
@@ -470,7 +474,24 @@ class CVDPResourcesServer(SimpleResourcesServer):
             if compose_content is None:
                 return 1, "No docker-compose.yml found in harness_files", []
 
-            # Write model-generated RTL files
+            # Write companion RTL files from input.context — mirrors
+            # repository.restore_files(self.context) which writes pre-existing
+            # RTL (e.g. floor_to_seven_segment.sv) that the model doesn't
+            # generate but iverilog needs for compilation.
+            for filepath, code in context_files.items():
+                rel = Path(filepath)
+                if rel.parts[0] == "rtl":
+                    dest = (workdir_path / "rtl").joinpath(*rel.parts[1:])
+                else:
+                    dest = workdir_path / "rtl" / rel.name
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    with open(str(dest), "w+", encoding="utf-8") as f:
+                        f.write(code)
+                except Exception:
+                    print(f"Failed to write context file: {filepath}")
+
+            # Write model-generated RTL files (overwrites context files for target slots)
             for filepath, code in rtl_files.items():
                 rel = Path(filepath)
                 if rel.parts[0] == "rtl":
