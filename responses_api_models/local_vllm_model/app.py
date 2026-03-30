@@ -421,7 +421,7 @@ class LocalVLLMModel(VLLMModel):
         app = super().setup_webserver()
 
         # This route is only used to support LocalVLLMModelProxy
-        app.post("/get_inner_vllm_config")(self.get_inner_vllm_config)
+        app.get("/get_inner_vllm_config")(self.get_inner_vllm_config)
 
         return app
 
