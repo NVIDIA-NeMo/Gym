@@ -12,7 +12,7 @@ nemotron_3_ultra_dev:
       num_workers: 4
       debug: false
 
-      chat_template_kwargs: {}
+      chat_template_kwargs: null
 
       ray_worker_py_executable: /usr/local/bin/python-VllmAsyncGenerationWorker
 
