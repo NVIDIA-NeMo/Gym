@@ -19,6 +19,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+
+# Ensure nemo_gym is importable when run as a pre-commit hook outside the venv.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import yaml
 
 from nemo_gym.server_metadata import ResourcesServerMetadata, visit_resources_server
@@ -147,7 +151,6 @@ class ServerInfo:
 
     def get_readme_link(self) -> str:  # pragma: no cover
         return f"<a href='{self.readme_path}'>README</a>"
-
 
 
 def visit_agent_datasets(data: dict) -> AgentDatasetsMetadata:  # pragma: no cover

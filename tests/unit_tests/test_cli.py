@@ -25,7 +25,7 @@ from pytest import MonkeyPatch, raises
 
 import nemo_gym.global_config
 from nemo_gym import PARENT_DIR
-from nemo_gym.cli import RunConfig, RunHelper, display_help, init_resources_server
+from nemo_gym.cli import RunConfig, display_help, init_resources_server
 from nemo_gym.config_types import ResourcesServerInstanceConfig
 
 
@@ -141,7 +141,6 @@ class TestCLI:
         local_server.mkdir(parents=True)
         (local_server / "requirements.txt").write_text("nemo-gym\n")
 
-        helper = RunHelper()
         with patch.object(Path, "cwd", return_value=tmp_path):
             _cwd_path = Path.cwd() / Path("resources_servers", "my_server")
             dir_path = _cwd_path if _cwd_path.exists() else PARENT_DIR / Path("resources_servers", "my_server")
