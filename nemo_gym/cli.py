@@ -161,7 +161,7 @@ class RunHelper:  # pragma: no cover
             entrypoint_fpath = Path(server_config_dict.entrypoint)
             assert not entrypoint_fpath.is_absolute()
 
-            # Check CWD first for a local server, fall back to the install location for built-ins.
+            # Check cwd first for a local server, fall back to the install location for built-ins.
             _server_rel_path = Path(first_key, second_key)
             _cwd_path = Path.cwd() / _server_rel_path
             _cwd_is_server = (_cwd_path / "requirements.txt").exists() or (_cwd_path / "pyproject.toml").exists()
@@ -788,11 +788,11 @@ def init_resources_server():  # pragma: no cover
     requirements_fpath = dirpath / "requirements.txt"
     with open(requirements_fpath, "w") as f:
         if (PARENT_DIR / "pyproject.toml").exists():
-            # Editable install: PARENT_DIR is the Gym repo root, point at it directly
+            # local nemo gym - detected by ../pyproject.toml exists
             rel_to_gym_root = os.path.relpath(PARENT_DIR, dirpath)
             f.write(f"-e nemo-gym[dev] @ {rel_to_gym_root}\n")
         else:
-            # PyPI install: just depend on the package
+            # pypi path
             f.write("nemo-gym[dev]\n")
 
     readme_fpath = dirpath / "README.md"
