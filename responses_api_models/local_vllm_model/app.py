@@ -431,10 +431,6 @@ class LocalVLLMModelActor:
 
                         otel_wrapper = loader.model_runner.load_model
                         model_runner_load_model = otel_wrapper.__wrapped__
-                        print(
-                            f"{model_runner_load_model=} {type(model_runner_load_model)=} {dir(model_runner_load_model)=} {model_runner_load_model.__globals__.keys()=}",
-                            file=sys.stderr,
-                        )
                         original_get_model_loader = model_runner_load_model.__globals__["get_model_loader"]
 
                         def new_get_model_loader(*args, **kwargs):
