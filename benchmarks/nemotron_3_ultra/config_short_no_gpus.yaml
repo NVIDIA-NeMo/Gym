@@ -1,4 +1,5 @@
 # Please refer to benchmarks/nemotron_3_ultra/README.md
+# This is a testing config that doesn't require additional Judge models (i.e. additional GPU resources or external endpoints) for running
 
 # This is the list of benchmarks that this config file contains.
 config_paths:
