@@ -400,6 +400,8 @@ def maybe_ray_cluster_exit():  # pragma: no cover
 atexit.register(maybe_ray_cluster_exit)
 
 
+# Handling FastAPI multiple workers is the only place we use environment variables in NeMo Gym
+# Everything else goes through the global config. Even the entrypoint here technically should go through the global config.
 IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME = "IS_NEMO_GYM_FASTAPI_WORKER"
 NEMO_GYM_FASTAPI_ENTRYPOINT_KEY_NAME = "NEMO_GYM_FASTAPI_ENTRYPOINT"
 
