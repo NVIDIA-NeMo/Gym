@@ -19,7 +19,7 @@ import requests
 from pytest import MonkeyPatch
 
 from nemo_gym.cli import ServerInstanceDisplayConfig
-from nemo_gym.server_status import StatusCommand
+from nemo_gym.server_commands import StatusCommand
 from nemo_gym.server_utils import ServerClient
 
 
@@ -182,7 +182,7 @@ class TestServerStatus:
         monkeypatch.setattr(requests, "get", mock_get)
 
         mock_time = MagicMock(return_value=10000.0)
-        monkeypatch.setattr("nemo_gym.server_status.time", mock_time)
+        monkeypatch.setattr("nemo_gym.server_commands.time", mock_time)
 
         cmd = StatusCommand()
         servers = cmd.discover_servers()
