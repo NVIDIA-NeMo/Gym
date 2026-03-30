@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import ray
 import requests
-from pydantic import Field
+from pydantic import BaseModel, Field
 from ray import available_resources, cluster_resources
 from ray.util.placement_group import PlacementGroup
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
@@ -401,6 +401,12 @@ class LocalVLLMModelActor:
         return self.server_thread.is_alive()
 
 
+class GetInnerVLLMConfigResponse(BaseModel):
+    base_url: List[str]
+    api_key: str
+    model: str
+
+
 class LocalVLLMModel(VLLMModel):
     config: LocalVLLMModelConfig
 
@@ -410,7 +416,19 @@ class LocalVLLMModel(VLLMModel):
         print("Starting vLLM server. This will take a few minutes...")
         self.start_vllm_server()
 
-        return super().setup_webserver()
+        app = super().setup_webserver()
+
+        # This route is only used to support LocalVLLMModelProxy
+        app.post("/get_inner_vllm_config")(self.get_inner_vllm_config)
+
+        return app
+
+    async def get_inner_vllm_config(self) -> GetInnerVLLMConfigResponse:
+        return GetInnerVLLMConfigResponse(
+            base_url=self.config.base_url,
+            api_key=self.config.api_key,
+            model=self.config.model,
+        )
 
     def get_cache_dir(self) -> str:
         # We need to reconstruct the cache dir as HF does it given HF_HOME. See https://github.com/huggingface/huggingface_hub/blob/b2723cad81f530e197d6e826f194c110bf92248e/src/huggingface_hub/constants.py#L146
