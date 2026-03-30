@@ -48,6 +48,7 @@ class TestGlobalConfig:
     @property
     def _default_global_config_dict_values(self) -> dict:
         return {
+            "use_absolute_ip": False,
             "head_server": {"host": "127.0.0.1", "port": 11000},
             "disallowed_ports": [11000],
             "port_range_low": 10_001,
