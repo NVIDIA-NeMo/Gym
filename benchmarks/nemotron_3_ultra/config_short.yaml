@@ -9,23 +9,6 @@ config_paths:
   - benchmarks/aalcr/config.yaml
   - benchmarks/ruler/config_nemotron_3_256k.yaml
 
-# Set various resource limits. We assume this is run using at least 8 GPU nodes with 128 CPU cores on each node
-global_aiohttp_connector_limit_per_host: 16384
-
-# We bump up the number of workers since we need higher concurrency for this larger benchmark suite
-policy_model:
-  responses_api_models:
-    vllm_model:
-      num_workers: 4
-
-# Some benchmarks may require reasoning off mode
-policy_model_reasoning_off:
-  _copy: policy_model
-  responses_api_models:
-    vllm_model:
-      chat_template_kwargs:
-        enable_thinking: false
-
 # For Ruler benchmark, we evaluate Nemotron 3 Ultra with reasoning off.
 ruler_benchmark_simple_agent:
   _inherit_from: ruler_simple_agent

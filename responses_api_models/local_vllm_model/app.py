@@ -40,6 +40,7 @@ from nemo_gym.global_config import (
     get_global_config_dict,
     get_hf_token,
 )
+from nemo_gym.server_utils import is_nemo_gym_fastapi_worker_entrypoint
 from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
 
 
@@ -52,6 +53,8 @@ class LocalVLLMModelConfig(VLLMModelConfig):
     hf_home: Optional[str] = None
     vllm_serve_kwargs: Dict[str, Any]
     vllm_serve_env_vars: Dict[str, str]
+
+    ray_worker_py_executable: str = sys.executable
 
     debug: bool = False
 
@@ -461,6 +464,10 @@ class LocalVLLMModel(VLLMModel):
         final_args = parser.parse_args(namespace=Namespace(**server_args))
         validate_parsed_serve_args(final_args)
 
+        # @bxyu-nvidia: TODO remove, specific to Nemotron 3 Ultra vLLM version
+        # this return_routed_experts argument isn't present in 0.17.0, so this must be from 0.16.x
+        final_args.return_routed_experts = final_args.enable_return_routed_experts
+
         if self.config.debug:
             env_vars_to_print = env_vars.copy()
             if "HF_TOKEN" in env_vars_to_print:
@@ -510,7 +517,7 @@ Total Ray cluster resources: {cluster_resources()}""")
                 placement_group=head_node_placement_group,
             ),
             runtime_env=dict(
-                py_executable=sys.executable,
+                py_executable=self.config.ray_worker_py_executable,
                 env_vars={
                     "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
                     **env_vars,
@@ -550,3 +557,5 @@ Total Ray cluster resources: {cluster_resources()}""")
 
 if __name__ == "__main__":
     LocalVLLMModel.run_webserver()
+elif is_nemo_gym_fastapi_worker_entrypoint(__file__):
+    app = LocalVLLMModel.run_webserver()  # noqa: F401

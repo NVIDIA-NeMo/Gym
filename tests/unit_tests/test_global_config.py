@@ -15,7 +15,6 @@
 import sys
 from contextlib import nullcontext as does_not_raise
 from pathlib import Path
-from socket import gethostbyname, gethostname
 from unittest.mock import MagicMock
 
 from omegaconf import OmegaConf
@@ -49,6 +48,7 @@ class TestGlobalConfig:
     @property
     def _default_global_config_dict_values(self) -> dict:
         return {
+            "use_absolute_ip": False,
             "head_server": {"host": "127.0.0.1", "port": 11000},
             "disallowed_ports": [11000],
             "port_range_low": 10_001,
@@ -662,7 +662,9 @@ class TestGlobalConfig:
         hydra_main_mock.return_value = hydra_main_wrapper
         monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
 
-        expected_ip = gethostbyname(gethostname())
+        expected_ip = "abcd ip"
+        gethostbyname_mock = MagicMock(return_value=expected_ip)
+        monkeypatch.setattr(nemo_gym.global_config, "gethostbyname", gethostbyname_mock)
 
         global_config_dict = get_global_config_dict()
 
@@ -725,6 +727,11 @@ class TestGlobalConfig:
                         "_copy": "test_resource_3",
                         "responses_api_models": {"test_model": {"entrypoint": "app2.py"}},
                     },
+                    "test_resource_3_copy3_delete": {
+                        "_copy": "test_resource_3",
+                        "_delete_key": "responses_api_models",
+                        "responses_api_models_2": {"test_model": {"entrypoint": "app.py"}},
+                    },
                 }
             )
             return lambda: fn(config_dict)
@@ -752,6 +759,9 @@ class TestGlobalConfig:
             "disallowed_ports": [11000, 12345, 12345, 12345, 12345, 12345],
             "a": {"b": {}},
             "a_prime": {"b_prime": 3},
+            "test_resource_3_copy3_delete": {
+                "responses_api_models_2": {"test_model": {"entrypoint": "app.py"}},
+            },
         }
 
         assert expected_global_config_dict == actual_global_config_dict

@@ -66,6 +66,7 @@ UV_CACHE_DIR_KEY_NAME = "uv_cache_dir"
 UV_VENV_DIR_KEY_NAME = "uv_venv_dir"
 INHERIT_FROM_KEY_NAME = "_inherit_from"
 COPY_KEY_NAME = "_copy"
+DELETE_KEY_KEY_NAME = "_delete_key"
 NEMO_GYM_LOG_DIR_KEY_NAME = "nemo_gym_log_dir"
 NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     CONFIG_PATHS_KEY_NAME,
@@ -304,6 +305,19 @@ Duplicate config paths:
         self, dict_config: DictConfig, original_dict_config: DictConfig, frozen_dict_config: DictConfig
     ) -> None:
         for k, v in list(dict_config.items()):
+            is_delete_property = isinstance(v, DictConfig) and DELETE_KEY_KEY_NAME in v
+
+            if is_delete_property:
+                keys_to_delete = v.pop(DELETE_KEY_KEY_NAME).split(",")
+                keys_to_delete = set(map(str.strip, keys_to_delete))
+
+                # Delete first so we don't resolve the deleted keys
+                # but only delete keys that are present in case the key-to-delete comes from a downstream inherit or swap
+                existing_keys = set(k for k in keys_to_delete if k in v)
+                for key in existing_keys:
+                    v.pop(key)
+                keys_to_delete -= existing_keys
+
             if isinstance(v, (DictConfig, dict)):
                 self._recursively_swap_keys_helper(v, original_dict_config, frozen_dict_config)
             elif isinstance(v, (ListConfig, list)):
@@ -348,6 +362,13 @@ Duplicate config paths:
                 swapped_value = OmegaConf.merge(swapped_value, v)
 
             dict_config[k] = swapped_value
+
+            # TODO We may want to recurse again after swap since we are not guaranteed to traverse the swapped-from value before hitting this swap.
+
+            if is_delete_property:
+                # Enforce that every key-to-delete exists
+                for key in keys_to_delete:
+                    dict_config[k].pop(key)
 
     def _recursive_index_dict_using_path(self, dict_config: DictConfig, path: List[str]) -> DictConfig:
         for k in path:
@@ -424,7 +445,8 @@ Duplicate config paths:
 
         server_instance_configs = self.filter_for_server_instance_configs(global_config_dict)
 
-        use_absolute_ip = global_config_dict.get(USE_ABSOLUTE_IP, False)
+        with open_dict(global_config_dict):
+            use_absolute_ip = global_config_dict.setdefault(USE_ABSOLUTE_IP, False)
         if use_absolute_ip:
             default_host = gethostbyname(gethostname())
         else:
@@ -488,7 +510,7 @@ Duplicate config paths:
         if parse_config.hide_secrets:
             self._recursively_hide_secrets(global_config_dict)
 
-        # Set up W&B
+        # Set up W&B and log config. This must happen at the very last step.
         wandb_config = WANDBConfig.model_validate(global_config_dict)
         if wandb_config.is_available:  # pragma: no cover
             environ["WANDB_API_KEY"] = wandb_config.wandb_api_key
