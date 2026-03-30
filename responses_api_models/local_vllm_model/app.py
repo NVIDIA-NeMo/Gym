@@ -557,5 +557,5 @@ Total Ray cluster resources: {cluster_resources()}""")
 
 if __name__ == "__main__":
     LocalVLLMModel.run_webserver()
-elif is_nemo_gym_fastapi_worker():
-    app = VLLMModel.run_webserver()  # noqa: F401
+elif is_nemo_gym_fastapi_worker(__file__):
+    app = LocalVLLMModel.run_webserver()  # noqa: F401

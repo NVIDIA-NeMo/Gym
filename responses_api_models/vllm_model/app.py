@@ -818,5 +818,5 @@ def split_responses_input_output_items(
 
 if __name__ == "__main__":
     VLLMModel.run_webserver()
-elif is_nemo_gym_fastapi_worker():
+elif is_nemo_gym_fastapi_worker(__file__):
     app = VLLMModel.run_webserver()  # noqa: F401
