@@ -14,21 +14,32 @@
 # limitations under the License.
 from unittest.mock import MagicMock
 
-from app import GPQADiamondResourcesServer
+import pytest
 
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.server_utils import ServerClient
-from resources_servers.mcqa.app import MCQAResourcesServerConfig, MCQAVerifyRequest
+from resources_servers.gpqa_diamond.app import GPQADiamondResourcesServer
+from resources_servers.mcqa.app import (
+    MCQAResourcesServerConfig,
+    MCQAVerifyRequest,
+)
 
 
 class TestApp:
     def test_sanity(self) -> None:
-        config = MCQAResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name="")
-        GPQADiamondResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        config = MCQAResourcesServerConfig(
+            host="0.0.0.0", port=8080, entrypoint="", name=""
+        )
+        GPQADiamondResourcesServer(
+            config=config,
+            server_client=MagicMock(spec=ServerClient),
+        )
 
     async def test_verify_gpqa_diamond_template_metadata_priority(self) -> None:
         server = GPQADiamondResourcesServer(
-            config=MCQAResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name=""),
+            config=MCQAResourcesServerConfig(
+                host="0.0.0.0", port=8080, entrypoint="", name=""
+            ),
             server_client=MagicMock(spec=ServerClient),
         )
 
@@ -59,7 +70,12 @@ class TestApp:
 
         verify_request = MCQAVerifyRequest(
             responses_create_params={
-                "input": [{"role": "user", "content": "Question?\nA: optA\nB: optB\nC: optC\nD: optD"}]
+                "input": [
+                    {
+                        "role": "user",
+                        "content": "Question?\nA: optA\nB: optB\nC: optC\nD: optD",
+                    }
+                ]
             },
             response=regex_response,
             options=[{"A": "optA"}, {"B": "optB"}, {"C": "optC"}, {"D": "optD"}],
@@ -74,7 +90,9 @@ class TestApp:
 
     async def test_verify_gpqa_diamond_format(self) -> None:
         server = GPQADiamondResourcesServer(
-            config=MCQAResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name=""),
+            config=MCQAResourcesServerConfig(
+                host="0.0.0.0", port=8080, entrypoint="", name=""
+            ),
             server_client=MagicMock(spec=ServerClient),
         )
 
@@ -86,7 +104,13 @@ class TestApp:
             output=[
                 {
                     "id": "msg_answer",
-                    "content": [{"annotations": [], "text": "Reasoning...\nAnswer: C", "type": "output_text"}],
+                    "content": [
+                        {
+                            "annotations": [],
+                            "text": "Reasoning...\nAnswer: C",
+                            "type": "output_text",
+                        }
+                    ],
                     "role": "assistant",
                     "status": "completed",
                     "type": "message",
@@ -103,7 +127,8 @@ class TestApp:
                     {
                         "role": "user",
                         "content": (
-                            "The last line should be of the format 'Answer: LETTER'. "
+                            "The last line should be of the format "
+                            "'Answer: LETTER'. "
                             "Question?\nA: optA\nB: optB\nC: optC\nD: optD"
                         ),
                     }
@@ -126,7 +151,13 @@ class TestApp:
             output=[
                 {
                     "id": "msg_boxed",
-                    "content": [{"annotations": [], "text": "Final: \\boxed{C}", "type": "output_text"}],
+                    "content": [
+                        {
+                            "annotations": [],
+                            "text": "Final: \\boxed{C}",
+                            "type": "output_text",
+                        }
+                    ],
                     "role": "assistant",
                     "status": "completed",
                     "type": "message",
@@ -137,7 +168,9 @@ class TestApp:
             tools=[],
         )
         verify_request_boxed = MCQAVerifyRequest(
-            responses_create_params=verify_request.responses_create_params.model_dump(exclude_none=True),
+            responses_create_params=verify_request.responses_create_params.model_dump(
+                exclude_none=True
+            ),
             response=boxed_response,
             options=verify_request.options,
             expected_answer=verify_request.expected_answer,
@@ -150,7 +183,9 @@ class TestApp:
 
     async def test_verify_gpqa_diamond_rejects_invalid_letter(self) -> None:
         server = GPQADiamondResourcesServer(
-            config=MCQAResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name=""),
+            config=MCQAResourcesServerConfig(
+                host="0.0.0.0", port=8080, entrypoint="", name=""
+            ),
             server_client=MagicMock(spec=ServerClient),
         )
 
@@ -175,7 +210,12 @@ class TestApp:
 
         verify_request = MCQAVerifyRequest(
             responses_create_params={
-                "input": [{"role": "user", "content": "Question?\nA: optA\nB: optB\nC: optC\nD: optD"}]
+                "input": [
+                    {
+                        "role": "user",
+                        "content": "Question?\nA: optA\nB: optB\nC: optC\nD: optD",
+                    }
+                ]
             },
             response=invalid_response,
             options=[{"A": "optA"}, {"B": "optB"}, {"C": "optC"}, {"D": "optD"}],
@@ -186,3 +226,73 @@ class TestApp:
 
         assert result.reward == 0.0
         assert result.extracted_answer is None
+
+    def test_compute_metrics_breaks_down_by_subject(self) -> None:
+        server = GPQADiamondResourcesServer(
+            config=MCQAResourcesServerConfig(
+                host="0.0.0.0", port=8080, entrypoint="", name=""
+            ),
+            server_client=MagicMock(spec=ServerClient),
+        )
+
+        tasks = [
+            [
+                {
+                    "reward": 1.0,
+                    "extracted_answer": "A",
+                    "metadata": {"subset_for_metrics": "Organic Chemistry"},
+                }
+            ],
+            [
+                {
+                    "reward": 0.0,
+                    "extracted_answer": "B",
+                    "metadata": {"subset_for_metrics": "Organic Chemistry"},
+                }
+            ],
+            [
+                {
+                    "reward": 1.0,
+                    "extracted_answer": "C",
+                    "metadata": {"subset_for_metrics": "Quantum Mechanics"},
+                }
+            ],
+        ]
+
+        metrics = server.compute_metrics(tasks)
+
+        assert metrics["subset/Organic Chemistry/num_tasks"] == 2
+        assert metrics["subset/Quantum Mechanics/num_tasks"] == 1
+        assert metrics["subset/Organic Chemistry/pass@1/accuracy"] == pytest.approx(
+            50.0
+        )
+        assert metrics["subset/Quantum Mechanics/pass@1/accuracy"] == pytest.approx(
+            100.0
+        )
+        assert metrics["pass@1/accuracy"] == pytest.approx((2 / 3) * 100)
+
+        key_metrics = server.get_key_metrics(metrics)
+        assert key_metrics["subset/Organic Chemistry/pass@1/accuracy"] == pytest.approx(
+            50.0
+        )
+        assert key_metrics["subset/Quantum Mechanics/pass@1/accuracy"] == pytest.approx(
+            100.0
+        )
+
+    def test_compute_metrics_uses_unknown_subject_fallback(self) -> None:
+        server = GPQADiamondResourcesServer(
+            config=MCQAResourcesServerConfig(
+                host="0.0.0.0", port=8080, entrypoint="", name=""
+            ),
+            server_client=MagicMock(spec=ServerClient),
+        )
+
+        metrics = server.compute_metrics(
+            [
+                [{"reward": 1.0, "extracted_answer": "A", "metadata": {}}],
+                [{"reward": 0.0, "extracted_answer": None}],
+            ]
+        )
+
+        assert metrics["subset/Unknown/num_tasks"] == 2
+        assert metrics["subset/Unknown/pass@1/accuracy"] == pytest.approx(50.0)
