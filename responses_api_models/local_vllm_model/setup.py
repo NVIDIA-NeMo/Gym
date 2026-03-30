@@ -44,7 +44,7 @@ dependencies = [
 if platform == "darwin":
     dependencies.append("vllm==0.11.0")
 else:
-    dependencies.append("vllm[fastsafetensors]==0.17.0")
+    dependencies.append("vllm==0.17.0")
 
 
 setuptools.setup(install_requires=dependencies)
