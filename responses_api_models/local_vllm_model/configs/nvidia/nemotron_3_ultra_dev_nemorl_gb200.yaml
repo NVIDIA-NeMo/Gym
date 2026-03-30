@@ -53,6 +53,7 @@ nemotron_3_ultra_dev:
         reasoning_parser: ultra_v3
 
         # Loading config
+        load_format: fastsafetensors
         model_loader_extra_config:
           enable_multithread_load: true
           num_threads: 96
