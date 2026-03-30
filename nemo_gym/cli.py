@@ -161,10 +161,11 @@ class RunHelper:  # pragma: no cover
             entrypoint_fpath = Path(server_config_dict.entrypoint)
             assert not entrypoint_fpath.is_absolute()
 
-            # Check CWD first (user's local server), fall back to install location (built-in servers)
+            # Check CWD first for a local server, fall back to the install location for built-ins.
             _server_rel_path = Path(first_key, second_key)
             _cwd_path = Path.cwd() / _server_rel_path
-            dir_path = _cwd_path if _cwd_path.exists() else PARENT_DIR / _server_rel_path
+            _cwd_is_server = (_cwd_path / "requirements.txt").exists() or (_cwd_path / "pyproject.toml").exists()
+            dir_path = _cwd_path if _cwd_is_server else PARENT_DIR / _server_rel_path
 
             command = f"""{setup_env_command(dir_path, global_config_dict, top_level_path)} \\
     && {NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME}={escaped_config_dict_yaml_str} \\
@@ -717,8 +718,7 @@ def init_resources_server():  # pragma: no cover
 
     makedirs(dirpath)
 
-    server_type = dirpath.parts[-2]
-    assert server_type == "resources_servers"
+    server_type = "resources_servers"
     server_type_name = dirpath.parts[-1].lower()
     server_type_title = "".join(x.capitalize() for x in server_type_name.split("_"))
 
@@ -786,9 +786,14 @@ def init_resources_server():  # pragma: no cover
         f.write(tests_content)
 
     requirements_fpath = dirpath / "requirements.txt"
-    rel_to_gym_root = os.path.relpath(PARENT_DIR, dirpath)
     with open(requirements_fpath, "w") as f:
-        f.write(f"-e nemo-gym[dev] @ {rel_to_gym_root}\n")
+        if (PARENT_DIR / "pyproject.toml").exists():
+            # Editable install: PARENT_DIR is the Gym repo root, point at it directly
+            rel_to_gym_root = os.path.relpath(PARENT_DIR, dirpath)
+            f.write(f"-e nemo-gym[dev] @ {rel_to_gym_root}\n")
+        else:
+            # PyPI install: just depend on the package
+            f.write("nemo-gym[dev]\n")
 
     readme_fpath = dirpath / "README.md"
     with open(readme_fpath, "w") as f:
