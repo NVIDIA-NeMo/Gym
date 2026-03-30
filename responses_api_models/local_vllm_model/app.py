@@ -417,6 +417,11 @@ class LocalVLLMModelActor:
                     print("Using patched executor_class._init_workers_ray", file=sys.stderr)
                     print("LOCALS executor_class._init_workers_ray", locals().keys(), file=sys.stderr)
                     print("GLOBALS executor_class._init_workers_ray", globals().keys(), file=sys.stderr)
+                    print(
+                        "GLOBALS original_init_workers_ray",
+                        original_init_workers_ray.__globals__.keys(),
+                        file=sys.stderr,
+                    )
                     return original_init_workers_ray(*args, **kwargs)
 
                 executor_class._init_workers_ray = new_init_workers_ray
