@@ -14,8 +14,10 @@
 # limitations under the License.
 
 import re
-from typing import Optional
+from collections import defaultdict
+from typing import Any, Optional
 
+from nemo_gym.reward_profile import compute_pass_majority_metrics
 from resources_servers.mcqa.app import (
     MCQAResourcesServer,
     MCQAVerifyRequest,
@@ -37,15 +39,62 @@ def extract_letter(text: str) -> Optional[str]:
         if letter_match:
             return letter_match[-1].strip()
 
-    answer_match = re.findall(r"(?i)[\*\_]{0,2}Answer[\*\_]{0,2}\s*:[\s\*\_]{0,2}\s*([A-Z])(?![a-zA-Z0-9])", text)
+    answer_match = re.findall(
+        r"(?i)[\*\_]{0,2}Answer[\*\_]{0,2}\s*:[\s\*\_]{0,2}\s*([A-Z])(?![a-zA-Z0-9])",
+        text,
+    )
     if answer_match:
         return answer_match[-1].strip().upper()
 
     return None
 
 
+def _get_subset_label(task_rollouts: list[dict[str, Any]]) -> str:
+    metadata = (
+        task_rollouts[0].get("metadata") if task_rollouts else None
+    ) or {}
+    subset = metadata.get("subset_for_metrics")
+    if isinstance(subset, str) and subset.strip():
+        return " ".join(subset.split()).replace("/", "_")
+    return "Unknown"
+
+
 class GPQADiamondResourcesServer(MCQAResourcesServer):
     """GPQA-Diamond verifier with GPQA-specific answer extraction."""
+
+    def compute_metrics(self, tasks):
+        metrics = super().compute_metrics(tasks)
+
+        tasks_by_subset: dict[
+            str, list[list[dict[str, Any]]]
+        ] = defaultdict(list)
+        for task_rollouts in tasks:
+            tasks_by_subset[_get_subset_label(task_rollouts)].append(
+                task_rollouts
+            )
+
+        for subset, subset_tasks in sorted(tasks_by_subset.items()):
+            subset_metrics = compute_pass_majority_metrics(
+                subset_tasks,
+                score_fn=lambda r: {"accuracy": r["reward"]},
+                answer_key="extracted_answer",
+            )
+            subset_prefix = f"subset/{subset}"
+            metrics[f"{subset_prefix}/num_tasks"] = len(subset_tasks)
+            for key, value in subset_metrics.items():
+                metrics[f"{subset_prefix}/{key}"] = value
+
+        return metrics
+
+    def get_key_metrics(self, agent_metrics):
+        key_metrics = super().get_key_metrics(agent_metrics)
+        for key in sorted(agent_metrics):
+            if key.startswith("subset/") and (
+                key.endswith("/pass@1/accuracy")
+                or key.endswith("/majority@1/accuracy")
+            ):
+                key_metrics[key] = agent_metrics[key]
+        return key_metrics
 
     async def verify(self, body: MCQAVerifyRequest) -> MCQAVerifyResponse:
         text = body.response.output_text.strip()
@@ -56,7 +105,9 @@ class GPQADiamondResourcesServer(MCQAResourcesServer):
 
         if body.template_metadata and "output_regex" in body.template_metadata:
             regex_pattern = body.template_metadata["output_regex"]
-            pred = _parse_answer_with_custom_regex(text, regex_pattern, allowed_letters, options)
+            pred = _parse_answer_with_custom_regex(
+                text, regex_pattern, allowed_letters, options
+            )
 
         if pred is None:
             pred = extract_letter(text)

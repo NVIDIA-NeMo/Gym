@@ -102,12 +102,18 @@ ng_collect_rollouts \
     +limit=3
 ```
 
-`ng_collect_rollouts` also writes sidecar files next to `output_jsonl_fpath`, matching
-the same pattern as `test_rollouts*`:
+`ng_collect_rollouts` also writes sidecar files next to `output_jsonl_fpath`:
 
 - `*_materialized_inputs.jsonl`
 - `*_reward_profiling.jsonl`
-- `*_agent_metrics.json`
+- `*_aggregate_metrics.json`
+
+`gpqa_diamond` additionally reports subject-area aggregate metrics based on
+`metadata.subset_for_metrics`, for example:
+
+- `subset/Organic Chemistry/pass@1/accuracy`
+- `subset/Organic Chemistry/majority@1/accuracy`
+- `subset/Organic Chemistry/num_tasks`
 
 ## Licensing
 
