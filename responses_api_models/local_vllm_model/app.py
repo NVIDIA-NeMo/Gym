@@ -555,6 +555,7 @@ Total Ray cluster resources: {cluster_resources()}""")
                 sleep(3)
 
 
+print("HIT BEFORE LocalVLLMModel fastapi worker entrypoint")
 if __name__ == "__main__":
     LocalVLLMModel.run_webserver()
 elif is_nemo_gym_fastapi_worker_entrypoint(__file__):
