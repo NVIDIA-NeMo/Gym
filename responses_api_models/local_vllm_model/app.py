@@ -418,12 +418,12 @@ class LocalVLLMModelActor:
 
                     RayWorkerWrapper = original_init_workers_ray.__globals__["RayWorkerWrapper"]
 
-                    original_RayWorkerWrapper_init_worker = RayWorkerWrapper.init_worker
+                    original_RayWorkerWrapper_init_device = RayWorkerWrapper.init_device
 
-                    def new_RayWorkerWrapper_init_worker(RayWorkerWrapper_self, *args, **kwargs):
-                        print("Using patched `RayWorkerWrapper.init_worker`", file=sys.stderr)
+                    def new_RayWorkerWrapper_init_device(RayWorkerWrapper_self, *args, **kwargs):
+                        print("Using patched `RayWorkerWrapper.init_device`", file=sys.stderr)
 
-                        res = original_RayWorkerWrapper_init_worker(RayWorkerWrapper_self, *args, **kwargs)
+                        res = original_RayWorkerWrapper_init_device(RayWorkerWrapper_self, *args, **kwargs)
 
                         # GPU Worker
                         loader = RayWorkerWrapper_self.worker
@@ -482,7 +482,7 @@ class LocalVLLMModelActor:
 
                         return res
 
-                    RayWorkerWrapper.init_worker = new_RayWorkerWrapper_init_worker
+                    RayWorkerWrapper.init_device = new_RayWorkerWrapper_init_device
 
                     return original_init_workers_ray(*args, **kwargs)
 
