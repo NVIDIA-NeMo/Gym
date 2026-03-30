@@ -429,9 +429,10 @@ class LocalVLLMModelActor:
                         # GPU Worker
                         loader = RayWorkerWrapper_self.worker
 
-                        model_runner_load_model = loader.model_runner.load_model
+                        otel_wrapper = loader.model_runner.load_model
+                        model_runner_load_model = otel_wrapper.__wrapped__
                         print(
-                            f"{type(model_runner_load_model)=} {dir(model_runner_load_model)=} {model_runner_load_model.__globals__.keys()=}",
+                            f"{model_runner_load_model=} {type(model_runner_load_model)=} {dir(model_runner_load_model)=} {model_runner_load_model.__globals__.keys()=}",
                             file=sys.stderr,
                         )
                         original_get_model_loader = model_runner_load_model.__globals__["get_model_loader"]
