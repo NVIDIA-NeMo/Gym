@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import asyncio
+import hashlib
 import os
 import shlex
 import tempfile
@@ -142,6 +143,81 @@ def _apply_substitutions(content: str, config: CVDPResourcesServerConfig) -> str
         if value and placeholder in content:
             content = content.replace(placeholder, value)
     return content
+
+
+def _resolve_image_for_service(
+    compose_data: dict,
+    service_name: str,
+    harness_files: Dict[str, Optional[str]],
+    config: CVDPResourcesServerConfig,
+) -> Tuple[str, List[str]]:
+    """
+    Resolve the container image for a service that uses ``build:`` instead of
+    ``image:`` in its docker-compose definition.
+
+    Docker Compose handles ``build:`` natively by reading a Dockerfile and
+    building an image on the fly.  Apptainer cannot do this directly, so we
+    parse the Dockerfile to extract the base image (FROM) and any RUN / ADD
+    commands, then replay them via ``apptainer build`` with a def file.
+
+    Returns (base_image, post_commands) where *post_commands* are shell
+    commands for the ``%post`` section of an Apptainer definition file.
+    If the service already has ``image:``, returns (image, []).
+    """
+    svc = (compose_data.get("services") or {}).get(service_name, {})
+    image = svc.get("image", "")
+    if image:
+        return image, []
+
+    # Determine Dockerfile path from build: config
+    build_cfg = svc.get("build", {})
+    if isinstance(build_cfg, str):
+        dockerfile_path = os.path.join(build_cfg, "Dockerfile")
+    elif isinstance(build_cfg, dict):
+        dockerfile_path = build_cfg.get("dockerfile", "Dockerfile")
+    else:
+        return "", []
+
+    # Look for the Dockerfile in harness_files (try multiple path variants)
+    dockerfile_content = None
+    candidates = [
+        dockerfile_path,
+        f"src/{dockerfile_path}",
+        dockerfile_path.replace("src/", ""),
+    ]
+    for candidate in candidates:
+        for hf_path, hf_content in harness_files.items():
+            if hf_content and (hf_path == candidate or hf_path.endswith(os.path.basename(candidate))):
+                dockerfile_content = _apply_substitutions(hf_content, config)
+                break
+        if dockerfile_content:
+            break
+
+    if not dockerfile_content:
+        return "", []
+
+    # Parse Dockerfile: extract FROM base image and RUN/ADD commands
+    base_image = ""
+    post_commands: List[str] = []
+    for line in dockerfile_content.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.upper().startswith("FROM "):
+            parts = line.split()
+            base_image = parts[1] if len(parts) > 1 else ""
+            if " AS " in base_image.upper():
+                base_image = base_image.split()[0]
+        elif line.upper().startswith("RUN "):
+            post_commands.append(line[4:].strip())
+        elif line.upper().startswith("ADD ") and "http" in line.lower():
+            # Convert ADD <url> <dest> to wget/curl
+            parts = line.split()
+            if len(parts) >= 3:
+                url, dest = parts[1], parts[2]
+                post_commands.append(f"wget -q -O {dest} {url} || curl -sL -o {dest} {url}")
+
+    return base_image, post_commands
 
 
 def _parse_compose_service(compose_content: str, service_name: str) -> Dict[str, Any]:
@@ -416,14 +492,21 @@ class CVDPResourcesServer(SimpleResourcesServer):
 
             service_results: List[Dict] = []
             for service in services:
-                exit_code, output = await self._run_service(workdir, service, task_id, compose_content)
+                exit_code, output = await self._run_service(workdir, service, task_id, compose_content, harness_files)
                 service_results.append({"service": service, "exit_code": exit_code, "stderr": output})
 
             final_exit_code = 0 if all(r["exit_code"] == 0 for r in service_results) else 1
             combined_stderr = "\n".join(f"[{r['service']}] {r['stderr']}" for r in service_results if r["stderr"])
             return final_exit_code, combined_stderr, service_results
 
-    async def _run_service(self, workdir: str, service: str, task_id: str, compose_content: str) -> Tuple[int, str]:
+    async def _run_service(
+        self,
+        workdir: str,
+        service: str,
+        task_id: str,
+        compose_content: str,
+        harness_files: Optional[Dict[str, Optional[str]]] = None,
+    ) -> Tuple[int, str]:
         """
         Run a single service from the compose definition using Apptainer. — mirrors repository.log_docker().
 
@@ -435,13 +518,22 @@ class CVDPResourcesServer(SimpleResourcesServer):
         path = os.path.abspath(workdir)
         svc = _parse_compose_service(compose_content, service)
 
+        # Resolve image — handles both image: and build: services.
+        # Docker Compose builds from Dockerfiles automatically; for Apptainer
+        # we parse the Dockerfile and build a SIF with the equivalent commands.
         image = svc["image"]
+        post_commands: List[str] = []
+        if not image and harness_files:
+            compose_data = yaml.safe_load(compose_content)
+            image, post_commands = _resolve_image_for_service(compose_data, service, harness_files, self.config)
         if not image:
             return 1, f"No image defined for service '{service}'"
 
-        # Pull / cache the SIF image from the Docker registry
         try:
-            sif_path = await self._ensure_sif(image)
+            if post_commands:
+                sif_path = await self._ensure_built_sif(image, post_commands)
+            else:
+                sif_path = await self._ensure_sif(image)
         except RuntimeError as exc:
             return 1, str(exc)
 
@@ -450,7 +542,12 @@ class CVDPResourcesServer(SimpleResourcesServer):
         env_args = _build_env_args(svc["environment"], dot_env)
         cmd_parts = _build_command(svc["entrypoint"], svc["command"])
 
+        # Fix working_dir paths that don't exist under Apptainer's bind mounts.
+        # Some compose files use /src/rundir/ which exists in Docker (via volume
+        # mount) but not in Apptainer (which only binds to /code/*).
         working_dir = svc["working_dir"] or "/code/rundir"
+        if "/code/" not in working_dir:
+            working_dir = "/code/rundir"
 
         if cmd_parts:
             cmd = [
@@ -504,6 +601,62 @@ class CVDPResourcesServer(SimpleResourcesServer):
 
         combined = (stderr_bytes + stdout_bytes).decode("utf-8", errors="replace")
         return exit_code, combined
+
+    async def _ensure_built_sif(self, base_image: str, post_commands: List[str]) -> str:
+        """
+        Build a SIF that extends a base image with extra commands from a Dockerfile.
+
+        This replicates what ``docker compose build`` does: take a base image,
+        run additional commands (pip install, etc.), and produce a new image.
+        For Apptainer we generate a definition file and run ``apptainer build``.
+        Results are cached by a hash of the commands.
+        """
+        if not post_commands:
+            return await self._ensure_sif(base_image)
+
+        cmd_hash = hashlib.md5("\n".join(post_commands).encode()).hexdigest()[:12]
+        safe_name = base_image.replace("/", "_").replace(":", "_") + f"__built_{cmd_hash}.sif"
+        sif_path = os.path.join(self._sif_cache_dir, safe_name)
+
+        if os.path.exists(sif_path):
+            return sif_path
+
+        # Reuse the per-image locking pattern
+        async with self._sif_lock_guard:
+            if safe_name not in self._sif_locks:
+                self._sif_locks[safe_name] = asyncio.Lock()
+            lock = self._sif_locks[safe_name]
+
+        async with lock:
+            if os.path.exists(sif_path):
+                return sif_path
+
+            base_sif = await self._ensure_sif(base_image)
+
+            post_section = "\n    ".join(post_commands)
+            def_content = f"Bootstrap: localimage\nFrom: {base_sif}\n\n%post\n    {post_section}\n"
+            tmp_def = sif_path + ".def"
+            tmp_sif = sif_path + ".building"
+            with open(tmp_def, "w") as f:
+                f.write(def_content)
+
+            proc = await asyncio.create_subprocess_exec(
+                "apptainer",
+                "build",
+                "--force",
+                tmp_sif,
+                tmp_def,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, stderr = await proc.communicate()
+            os.unlink(tmp_def)
+            if proc.returncode != 0:
+                if os.path.exists(tmp_sif):
+                    os.unlink(tmp_sif)
+                raise RuntimeError(f"apptainer build failed: {stderr.decode(errors='replace')}")
+            os.rename(tmp_sif, sif_path)
+            return sif_path
 
     async def _ensure_sif(self, image: str) -> str:
         """
