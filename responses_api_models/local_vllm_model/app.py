@@ -55,6 +55,7 @@ class LocalVLLMModelConfig(VLLMModelConfig):
 
     ray_worker_py_executable: str = sys.executable
 
+    show_vllm_engine_stats: bool = False
     debug: bool = False
 
     def model_post_init(self, context):
@@ -81,6 +82,7 @@ class LocalVLLMModelActor:
         env_vars: Dict[str, str],
         server_name: str,
         debug: bool,
+        show_vllm_engine_stats: bool,
     ) -> None:
         from os import environ
 
@@ -89,6 +91,7 @@ class LocalVLLMModelActor:
         self.env_vars = env_vars
         self.server_name = server_name
         self.debug = debug
+        self.show_vllm_engine_stats = show_vllm_engine_stats
 
         self.env_vars.pop("CUDA_VISIBLE_DEVICES", None)
 
@@ -158,7 +161,7 @@ class LocalVLLMModelActor:
 
         from vllm.v1.metrics.loggers import logger as metrics_logger
 
-        if self.debug:
+        if self.debug or self.show_vllm_engine_stats:
             print("vLLM metrics logger will display engine stats.")
         else:
             print(
@@ -528,6 +531,7 @@ Total Ray cluster resources: {cluster_resources()}""")
             env_vars=env_vars,
             server_name=self.config.name,
             debug=self.config.debug,
+            show_vllm_engine_stats=self.config.show_vllm_engine_stats,
         )
 
         self.config.base_url = [ray.get(self._local_vllm_model_actor.base_url.remote())]

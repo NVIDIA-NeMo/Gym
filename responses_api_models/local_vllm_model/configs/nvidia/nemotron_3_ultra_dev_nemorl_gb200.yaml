@@ -11,6 +11,7 @@ nemotron_3_ultra_dev:
       # We expect this to be a pretty beefy deployment so we default our proxy server replicas to 4 > 1
       # TODO @bxyu-nvidia: Multiple workers currently doesn't work
       # num_workers: 4
+      show_vllm_engine_stats: true
       debug: false
 
       chat_template_kwargs: null
