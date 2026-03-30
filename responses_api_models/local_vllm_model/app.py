@@ -157,12 +157,14 @@ class LocalVLLMModelActor:
         uvicorn_logger.addFilter(No200Filter())
 
     def _maybe_patch_engine_stats(self) -> None:
-        from logging import ERROR
+        from logging import ERROR, StreamHandler
 
         from vllm.v1.metrics.loggers import logger as metrics_logger
 
         if self.debug or self.show_vllm_engine_stats:
             print("vLLM metrics logger will display engine stats.")
+            handler = StreamHandler(sys.stderr)
+            metrics_logger.addHandler(handler)
         else:
             print(
                 f"Setting vLLM metrics logger for {self.server_name} to ERROR which will not print engine stats. This helps declutter the logs. Use `debug` for LocalVLLMModel to see them."
