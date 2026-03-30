@@ -6,16 +6,18 @@ config_paths:
   - benchmarks/gpqa/config.yaml
   - benchmarks/livecodebench/v6_2408_2505/cascade.yaml
   - benchmarks/spider2_lite/config.yaml
-  - benchmarks/ruler/config_nemotron_3_256k.yaml
+  # TODO @bxyu-nvidia
+  # - benchmarks/ruler/config_nemotron_3_256k.yaml
 
+# TODO @bxyu-nvidia
 # For Ruler benchmark, we evaluate Nemotron 3 Ultra with reasoning off.
-ruler_benchmark_simple_agent:
-  _inherit_from: ruler_simple_agent
-  responses_api_agents:
-    simple_agent:
-      model_server:
-        type: responses_api_models
-        name: policy_model_reasoning_off
+# ruler_benchmark_simple_agent:
+#   _inherit_from: ruler_simple_agent
+#   responses_api_agents:
+#     simple_agent:
+#       model_server:
+#         type: responses_api_models
+#         name: policy_model_reasoning_off
 
 # There are ~1500 total rollouts to do for LCBv6 and each rollout we assume uses 1 CPU core
 livecodebench_v6_cascade_code_gen_resources_server:
