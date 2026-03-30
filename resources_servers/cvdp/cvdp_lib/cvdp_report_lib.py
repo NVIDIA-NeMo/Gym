@@ -50,7 +50,11 @@ def auto_generate_text_report(json_path: str) -> None:
         cmd = [sys.executable, reporter_script, json_path, "-o", txt_path]
         print(f"Generating text report: {txt_path}")
 
-        subprocess.run(cmd, capture_output=True, text=True, check=True)
+        # Add the cvdp server root to PYTHONPATH so cvdp_lib imports resolve
+        env = os.environ.copy()
+        cvdp_root = os.path.dirname(script_dir)
+        env["PYTHONPATH"] = cvdp_root + os.pathsep + env.get("PYTHONPATH", "")
+        subprocess.run(cmd, capture_output=True, text=True, check=True, env=env)
 
         print(f"Text report generated: {txt_path}")
 
