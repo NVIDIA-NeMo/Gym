@@ -49,7 +49,9 @@ class LocalVLLMModelProxyServer(VLLMModel):
             # Sleep for 10s by default
             sleep(10)
 
-        model_server_config_dict = get_first_server_config_dict(self.global_config_dict, model_server_name)
+        model_server_config_dict = get_first_server_config_dict(
+            self.server_client.global_config_dict, model_server_name
+        )
         model_server_base_url = self.server_client._build_server_base_url(model_server_config_dict)
         response = requests.get(
             f"{model_server_base_url}/get_inner_vllm_config",
