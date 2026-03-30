@@ -43,6 +43,12 @@ nemotron_3_ultra_dev:
         max_num_seqs: 256
         enable_prefix_caching: true
 
+        # MTP
+        mamba_cache_mode: align
+        speculative_config:
+          method: mtp
+          num_speculative_tokens: 5
+
         # Params that may affect accuracy
         kv_cache_dtype: fp8
 
