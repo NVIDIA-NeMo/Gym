@@ -14,10 +14,13 @@
 # limitations under the License.
 from unittest.mock import MagicMock
 
-from app import MCQAResourcesServer, MCQAResourcesServerConfig, MCQAVerifyRequest
-
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.server_utils import ServerClient
+from resources_servers.mcqa.app import (
+    MCQAResourcesServer,
+    MCQAResourcesServerConfig,
+    MCQAVerifyRequest,
+)
 
 
 class TestApp:
@@ -583,6 +586,27 @@ class TestGradingModeAnswerColonMD:
         result = await server.verify(body)
         assert result.extracted_answer is None
         assert result.reward == 0.0
+
+    async def test_verify_preserves_metadata_for_aggregate_metrics(self) -> None:
+        server = self._make_server()
+        body = _make_verify_request(
+            text="Answer: C",
+            expected="C",
+            grading_mode="lenient_answer_colon",
+        ).model_copy(
+            update={
+                "uuid": "gpqa-task-1",
+                "metadata": {"subset_for_metrics": "Organic Chemistry"},
+                "template_metadata": {"output_regex": r"Answer:\s*([A-Za-z])"},
+            }
+        )
+
+        result = await server.verify(body)
+
+        assert result.reward == 1.0
+        assert result.uuid == "gpqa-task-1"
+        assert result.metadata == {"subset_for_metrics": "Organic Chemistry"}
+        assert result.template_metadata == {"output_regex": r"Answer:\s*([A-Za-z])"}
 
 
 class TestComputeMetrics:

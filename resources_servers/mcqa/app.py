@@ -63,8 +63,17 @@ class MCQAVerifyRequest(MCQARunRequest, BaseVerifyRequest):
 
 
 class MCQAVerifyResponse(BaseVerifyResponse):
+    uuid: Optional[str] = None
+    options: Optional[list[dict[str, Optional[str]]]] = None
     expected_answer: str
     extracted_answer: Optional[str]
+    metadata: Optional[dict[str, Any]] = None
+    grading_mode: Literal[
+        "strict_single_letter_boxed",
+        "lenient_boxed",
+        "lenient_answer_colon",
+    ] = "strict_single_letter_boxed"
+    template_metadata: Optional[dict[str, Any]] = None
 
 
 def _extract_options_and_expected(

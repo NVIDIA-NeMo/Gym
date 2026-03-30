@@ -181,6 +181,67 @@ class TestApp:
         assert result_boxed.reward == 1.0
         assert result_boxed.extracted_answer == "C"
 
+    async def test_verify_preserves_subset_metadata_for_aggregation(self) -> None:
+        server = GPQADiamondResourcesServer(
+            config=MCQAResourcesServerConfig(
+                host="0.0.0.0", port=8080, entrypoint="", name=""
+            ),
+            server_client=MagicMock(spec=ServerClient),
+        )
+
+        response = NeMoGymResponse(
+            id="resp_subset",
+            created_at=0.0,
+            model="dummy",
+            object="response",
+            output=[
+                {
+                    "id": "msg_subset",
+                    "content": [
+                        {
+                            "annotations": [],
+                            "text": "Answer: C",
+                            "type": "output_text",
+                        }
+                    ],
+                    "role": "assistant",
+                    "status": "completed",
+                    "type": "message",
+                }
+            ],
+            parallel_tool_calls=True,
+            tool_choice="auto",
+            tools=[],
+        )
+
+        verify_request = MCQAVerifyRequest(
+            responses_create_params={
+                "input": [
+                    {
+                        "role": "user",
+                        "content": "Question?\nA: optA\nB: optB\nC: optC\nD: optD",
+                    }
+                ]
+            },
+            response=response,
+            options=[{"A": "optA"}, {"B": "optB"}, {"C": "optC"}, {"D": "optD"}],
+            expected_answer="C",
+            grading_mode="strict_single_letter_boxed",
+            metadata={"subset_for_metrics": "Organic Chemistry"},
+            template_metadata={"output_regex": r"Answer:\s*([A-Za-z])"},
+        )
+
+        result = await server.verify(verify_request)
+
+        assert result.reward == 1.0
+        assert result.metadata == {"subset_for_metrics": "Organic Chemistry"}
+
+        metrics = server.compute_metrics([[result.model_dump()]])
+        assert metrics["subset/Organic Chemistry/num_tasks"] == 1
+        assert metrics["subset/Organic Chemistry/pass@1/accuracy"] == pytest.approx(
+            100.0
+        )
+
     async def test_verify_gpqa_diamond_rejects_invalid_letter(self) -> None:
         server = GPQADiamondResourcesServer(
             config=MCQAResourcesServerConfig(
