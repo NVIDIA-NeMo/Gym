@@ -6,7 +6,6 @@ config_paths:
   - benchmarks/gpqa/config.yaml
   - benchmarks/livecodebench/v6_2408_2505/cascade.yaml
   - benchmarks/spider2_lite/config.yaml
-  - benchmarks/aalcr/config.yaml
   - benchmarks/ruler/config_nemotron_3_256k.yaml
 
 # For Ruler benchmark, we evaluate Nemotron 3 Ultra with reasoning off.
