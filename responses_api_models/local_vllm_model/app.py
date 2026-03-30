@@ -558,4 +558,6 @@ Total Ray cluster resources: {cluster_resources()}""")
 if __name__ == "__main__":
     LocalVLLMModel.run_webserver()
 elif is_nemo_gym_fastapi_worker_entrypoint(__file__):
+    # TODO remove
+    print("HIT IN LocalVLLMModel fastapi worker entrypoint")
     app = LocalVLLMModel.run_webserver()  # noqa: F401

@@ -819,4 +819,6 @@ def split_responses_input_output_items(
 if __name__ == "__main__":
     VLLMModel.run_webserver()
 elif is_nemo_gym_fastapi_worker_entrypoint(__file__):
+    # TODO remove
+    print("HIT IN VLLMModel fastapi worker entrypoint")
     app = VLLMModel.run_webserver()  # noqa: F401
