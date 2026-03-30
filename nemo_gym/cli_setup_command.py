@@ -19,12 +19,14 @@ from sys import stderr, stdout
 
 from omegaconf import DictConfig
 
+from nemo_gym import PARENT_DIR
 from nemo_gym.global_config import (
     HEAD_SERVER_DEPS_KEY_NAME,
     PIP_INSTALL_VERBOSE_KEY_NAME,
     PYTHON_VERSION_KEY_NAME,
     SKIP_VENV_IF_PRESENT_KEY_NAME,
     UV_CACHE_DIR_KEY_NAME,
+    UV_FIND_LINKS_KEY_NAME,
     UV_PIP_SET_PYTHON_KEY_NAME,
     UV_VENV_DIR_KEY_NAME,
     get_global_config_dict,
@@ -32,10 +34,13 @@ from nemo_gym.global_config import (
 
 
 def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: str) -> str:
-    head_server_deps = global_config_dict[HEAD_SERVER_DEPS_KEY_NAME]
+    head_server_deps = [f"'{dep}'" for dep in global_config_dict[HEAD_SERVER_DEPS_KEY_NAME]]
 
     root_venv_path = global_config_dict[UV_VENV_DIR_KEY_NAME]
-    venv_path = Path(root_venv_path, *dir_path.parts[-2:], ".venv").absolute()
+    if root_venv_path != str(PARENT_DIR):
+        venv_path = Path(root_venv_path, *dir_path.parts[-2:], ".venv").absolute()
+    else:
+        venv_path = (dir_path / ".venv").absolute()
 
     uv_venv_cmd = f"uv venv --seed --allow-existing --python {global_config_dict[PYTHON_VERSION_KEY_NAME]} {venv_path}"
 
@@ -51,6 +56,8 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
     uv_pip_python_flag = f"--python {venv_python_fpath} " if uv_pip_set_python else ""
 
     verbose_flag = "-v " if global_config_dict.get(PIP_INSTALL_VERBOSE_KEY_NAME) else ""
+    find_links = global_config_dict.get(UV_FIND_LINKS_KEY_NAME)
+    find_links_flag = f"--find-links {find_links} " if find_links else ""
 
     is_editable_install = (dir_path.resolve() / "../../pyproject.toml").exists()
 
@@ -66,22 +73,22 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
         elif has_pyproject_toml:
             if is_editable_install:
                 install_cmd = (
-                    f"""uv pip install {verbose_flag}{uv_pip_python_flag}'-e .' {" ".join(head_server_deps)}"""
+                    f"""uv pip install {verbose_flag}{find_links_flag}{uv_pip_python_flag}'-e .' {" ".join(head_server_deps)}"""
                 )
             else:
                 # install nemo-gym from pypi instead of relative path in pyproject.toml
                 install_cmd = (
-                    f"""uv pip install {verbose_flag}{uv_pip_python_flag}nemo-gym && """
-                    f"""uv pip install {verbose_flag}{uv_pip_python_flag}--no-sources '-e .' {" ".join(head_server_deps)}"""
+                    f"""uv pip install {verbose_flag}{find_links_flag}{uv_pip_python_flag}--prerelease=allow nemo-gym && """
+                    f"""uv pip install {verbose_flag}{find_links_flag}{uv_pip_python_flag}--no-sources '-e .' {" ".join(head_server_deps)}"""
                 )
         elif has_requirements_txt:
             if is_editable_install:
-                install_cmd = f"""uv pip install {verbose_flag}{uv_pip_python_flag}-r requirements.txt {" ".join(head_server_deps)}"""
+                install_cmd = f"""uv pip install {verbose_flag}{find_links_flag}{uv_pip_python_flag}-r requirements.txt {" ".join(head_server_deps)}"""
             else:
                 # install nemo-gym from pypi instead of relative path in requirements.txt
                 install_cmd = (
                     f"""(echo 'nemo-gym' && grep -v -F '../..' requirements.txt) | """
-                    f"""uv pip install {verbose_flag}{uv_pip_python_flag}-r /dev/stdin {" ".join(head_server_deps)}"""
+                    f"""uv pip install {verbose_flag}{find_links_flag}{uv_pip_python_flag}--prerelease=allow -r /dev/stdin {" ".join(head_server_deps)}"""
                 )
         else:
             raise RuntimeError(
