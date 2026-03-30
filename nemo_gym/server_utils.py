@@ -606,9 +606,6 @@ Full body: {json.dumps(exc.body, indent=4)}
         )
 
         if server.config.num_workers and server.config.num_workers > 1:
-            # TODO remove
-            print(f"HIT INSIDE FAST API WORKERS. {global_config_dict=} {server.config.name=}")
-
             set_is_nemo_gym_fastapi_worker()
 
             # TODO this is very dirty. We need a cleaner way to populate this information in the configs data structures.

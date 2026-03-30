@@ -816,8 +816,6 @@ def split_responses_input_output_items(
     return items[:i], items[i:]
 
 
-# TODO remove
-print(f"HIT BEFORE VLLMModel entrypoint {is_nemo_gym_fastapi_worker()=}")
 if __name__ == "__main__":
     VLLMModel.run_webserver()
 elif is_nemo_gym_fastapi_worker():
