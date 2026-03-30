@@ -115,18 +115,13 @@ def run_command(command: str, working_dir_path: Path, server_name: str = "") -> 
         log_path.parent.mkdir(parents=True, exist_ok=True)
         command = f"set -o pipefail; ({command}) 2>&1 | tee -a {log_path}"
 
-    return Popen(command, executable="/bin/bash", shell=True, env=custom_env, stdout=stdout, stderr=stderr)
-
-    # shared_args = dict(
-    #     args=command,
-    #     executable="/bin/bash",
-    #     shell=True,
-    #     env=custom_env,
-    # )
-
-    # if global_config_dict[SPINUP_SERVERS_USING_RAY]:
-    #     # TODO write
-    #     # TODO figure out how to poll procs with ray workers
-    #     pass
-    # else:
-    #     return Popen(**shared_args, stdout=stdout, stderr=stderr)
+    redirect_stdout = stdout
+    redirect_stderr = stderr
+    return Popen(
+        command,
+        executable="/bin/bash",
+        shell=True,
+        env=custom_env,
+        stdout=redirect_stdout,
+        stderr=redirect_stderr,
+    )
