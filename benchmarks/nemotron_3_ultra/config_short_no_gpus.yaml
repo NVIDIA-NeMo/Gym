@@ -1,0 +1,30 @@
+# Please refer to benchmarks/nemotron_3_ultra/README.md
+
+# This is the list of benchmarks that this config file contains.
+config_paths:
+  - benchmarks/gpqa/config.yaml
+  - benchmarks/livecodebench/v6_2408_2505/cascade.yaml
+  - benchmarks/spider2_lite/config.yaml
+  - benchmarks/aalcr/config.yaml
+  - benchmarks/ruler/config_nemotron_3_256k.yaml
+
+# For Ruler benchmark, we evaluate Nemotron 3 Ultra with reasoning off.
+ruler_benchmark_simple_agent:
+  _inherit_from: ruler_simple_agent
+  responses_api_agents:
+    simple_agent:
+      model_server:
+        type: responses_api_models
+        name: policy_model_reasoning_off
+
+# There are ~1500 total rollouts to do for LCBv6 and each rollout we assume uses 1 CPU core
+livecodebench_v6_cascade_code_gen_resources_server:
+  resources_servers:
+    code_gen:
+      num_processes: 128
+
+# There are ~2100 total rollouts for Spider 2 lite and each rollout we assume uses 1 CPU core
+spider2_lite_benchmark_resources_server:
+  resources_servers:
+    spider2_lite:
+      max_concurrency: 128
