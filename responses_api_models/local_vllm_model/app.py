@@ -417,10 +417,20 @@ class LocalVLLMModelActor:
                     print("Using patched executor_class._init_workers_ray", file=sys.stderr)
 
                     RayWorkerWrapper = original_init_workers_ray.__globals__["RayWorkerWrapper"]
-                    print("RayWorkerWrapper properties", dir(RayWorkerWrapper), file=sys.stderr)
 
-                    # def new_load_model(*args, **kwargs):
-                    #     print("Using patched load_model", file=sys.stderr)
+                    original_RayWorkerWrapper_init_worker = RayWorkerWrapper.init_worker
+
+                    def new_RayWorkerWrapper_init_worker(RayWorkerWrapper_self, *args, **kwargs):
+                        print("Using patched `RayWorkerWrapper.init_worker`", file=sys.stderr)
+
+                        res = original_RayWorkerWrapper_init_worker(RayWorkerWrapper_self, *args, **kwargs)
+
+                        loader = RayWorkerWrapper_self.worker
+                        print(f"Found {loader=} with methods {dir(loader)}", file=sys.stderr)
+
+                        return res
+
+                    RayWorkerWrapper.init_worker = new_RayWorkerWrapper_init_worker
 
                     return original_init_workers_ray(*args, **kwargs)
 
