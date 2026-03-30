@@ -302,7 +302,8 @@ class RolloutCollectionHelper(BaseModel):
                 top_left = counts_left.most_common(5)  # Fix to top 3 for now.
                 if top_left:
                     top_left_str = "\n".join(f"{i + 1}. {k}: {v}" for i, (k, v) in enumerate(top_left))
-                    print(f"Examples left:\n{top_left_str}")
+                    # Use flush=True here so we can print properly with tqdm being used.
+                    print(f"Examples left:\n{top_left_str}", flush=True)
 
         results_file.close()
 
