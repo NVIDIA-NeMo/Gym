@@ -10,11 +10,9 @@ config_paths:
 
 # For Ruler benchmark, we evaluate Nemotron 3 Ultra with reasoning off.
 ruler_benchmark_simple_agent:
-  _inherit_from: ruler_simple_agent
   responses_api_agents:
     simple_agent:
       model_server:
-        type: responses_api_models
         name: policy_model_reasoning_off
 
 # There are ~1500 total rollouts to do for LCBv6 and each rollout we assume uses 1 CPU core
