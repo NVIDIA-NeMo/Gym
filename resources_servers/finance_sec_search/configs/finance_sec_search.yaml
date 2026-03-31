@@ -37,7 +37,7 @@ search_judge_model:
       openai_api_key: ${search_judge_model_api_key}
       openai_model: ${search_judge_model_name}
 
-finance_agent_simple_agent:
+finance_agent:
   responses_api_agents:
     simple_agent:
       entrypoint: app.py
