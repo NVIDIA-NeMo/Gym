@@ -17,6 +17,7 @@ import asyncio
 import hashlib
 import os
 import shlex
+import signal
 import tempfile
 import time
 from pathlib import Path
@@ -604,6 +605,7 @@ class CVDPResourcesServer(SimpleResourcesServer):
             cwd=workdir,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,  # Create new process group so we can kill all children
         )
         exit_code = -1
         stdout_bytes = b""
@@ -615,7 +617,11 @@ class CVDPResourcesServer(SimpleResourcesServer):
             )
             exit_code = proc.returncode
         except asyncio.TimeoutError:
-            proc.kill()
+            # Kill the entire process group (apptainer + vvp and other children)
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
             stdout_bytes, stderr_bytes = await proc.communicate()
             exit_code = -1
             stderr_bytes = f"apptainer exec timed out after {self.config.container_timeout}s".encode()
