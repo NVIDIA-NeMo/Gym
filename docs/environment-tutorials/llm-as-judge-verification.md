@@ -42,22 +42,6 @@ Note that the judge is a verifier dependency. It is **not** the policy.
 
 ---
 
-## Deployment options
-
-Before diving into code, it helps to know the ways you can deploy a judge model. The key decision is how the judge is wired in Gym. The URL it points at can be a local GPU, a remote cluster, or a commercial API like OpenAI.
-
-| Approach | What it means | When it helps |
-|----------|----------------|---------------|
-| **Gym model server** | A `responses_api_models` entry in your Hydra config. The `openai_base_url` can point at a co-located vLLM instance, a remote cluster, or a managed API like OpenAI. | Most common pattern; works for any backend that uses `/v1/responses` |
-| **Shared policy endpoint** | Special case of the above: set `judge_model_server.name` to `policy_model` so the judge reuses the policy's model server. | Fewer moving parts; judge and policy share quota and weights |
-| **Direct HTTP client** | No Gym model server for the judge. Your resources server code calls an external endpoint directly (e.g., `AsyncOpenAI` client to `/v1/chat/completions`). See [`proof_verification`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/proof_verification) for this pattern. | Integrate with endpoints that don't go through Gym's model server layer |
-
-Tune **concurrency** (semaphores, `judge_endpoint_max_concurrency`, or similar) so verification does not overwhelm the judge endpoint during large rollout batches.
-
-The walkthrough below uses the **Gym model server** approach — a dedicated `judge_model` entry in the Hydra config. You provide the endpoint URL and API key in `env.yaml`. The fastest way to get started is with a managed API (e.g., OpenAI), but the same config works with any self-hosted endpoint.
-
----
-
 ## Architecture: where the judge runs
 
 During rollout collection, the **agent** first calls the **policy model**. When the episode ends, the **resources server** runs `verify()`. An LLM judge is **not** the policy: it is an extra inference call **started from inside `verify()`**, after you have the model’s final output (and any verifier metadata from the JSONL line).
@@ -82,35 +66,47 @@ For how NeMo Gym sits next to GPUs and training frameworks, see {doc}`/infrastru
 
 ---
 
+In production, the judge is typically a **dedicated Gym model server**, a separate `responses_api_models` entry in your Hydra config that can point at any OpenAI-compatible endpoint (a co-located vLLM instance, a remote cluster, or a managed API). For this walkthrough, we skip the separate model and reuse the same OpenAI endpoint for both the policy and the judge.
+
+---
+
 ## Walkthrough: `over_refusal_detection`
 
 [`over_refusal_detection`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/over_refusal_detection) trains models to avoid over-refusing safe prompts (e.g., treating "How do I kill a Linux process?" as dangerous). The judge decides whether the policy model helpfully **complied** or inappropriately **refused**.
 
-This walkthrough has two parts: first you'll read through how the config and code work, then you'll run it.
+This walkthrough uses **OpenAI `gpt-4o-mini`** as both the policy and judge model — no GPUs required. It has two parts: first you'll read through how the config and code work, then you'll run it.
 
 ### How it works
 
-#### YAML config: declaring the judge
+#### `env.yaml`: configure your API key
 
-From `resources_servers/over_refusal_detection/configs/over_refusal_detection.yaml` (the ~70-line judge prompt is truncated below — see the full file for the complete template including worked examples):
+If you haven't already, configure your OpenAI API key in `env.yaml` in the repository root:
 
 ```yaml
-# A dedicated judge model server (can also reuse policy_model as judge_model_server.name instead)
-judge_model:
-  responses_api_models:
-    openai_model:
-      entrypoint: app.py
-      openai_base_url: ${judge_base_url}
-      openai_api_key: ${judge_api_key}
-      openai_model: ${judge_model_name}
+openai_api_key: ???
+policy_api_key: ${openai_api_key}
+policy_base_url: https://api.openai.com/v1
+policy_model_name: gpt-4o-mini
+```
 
+Since we're reusing the policy model as the judge, no extra endpoint fields are needed.
+
+:::{tip}
+In production, you can point the judge at a dedicated model server by adding a separate `judge_model` block and setting `judge_model_server.name: judge_model`. This lets you use a different model, provider, or quota for the judge. See [`over_refusal_detection/configs/over_refusal_detection.yaml`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/over_refusal_detection/configs/over_refusal_detection.yaml) for an example of that setup.
+:::
+
+#### YAML config: declaring the judge
+
+The resources server config points the judge at the policy model — `judge_model_server.name: policy_model`. Below is a simplified view of `resources_servers/over_refusal_detection/configs/over_refusal_detection.yaml` (the ~70-line judge prompt is truncated — see the full file for the complete template including worked examples):
+
+```yaml
 over_refusal_detection:
   resources_servers:
     over_refusal_detection:
       entrypoint: app.py
       judge_model_server:
         type: responses_api_models
-        name: judge_model
+        name: policy_model
       judge_responses_create_params:
         input: []
         temperature: 0.0
@@ -130,7 +126,7 @@ over_refusal_detection:
 
 Key points:
 
-- `judge_model_server` references a model server by name. Here it is a dedicated `judge_model`, but you can point it at `policy_model` to share the same endpoint.
+- `judge_model_server` references a model server by name. Here `policy_model` means the judge calls go through the same OpenAI endpoint used for rollouts.
 - `judge_responses_create_params` sets generation parameters for the judge call (`temperature: 0.0` for determinism).
 - `complied_label` / `refused_label` are specific to `over_refusal_detection`. Other servers define their own verdict labels — e.g., `equivalence_llm_judge` uses `judge_equal_label` / `judge_not_equal_label`. The names and values are up to each server's design.
 - The bare minimum config for any LLM-as-a-judge server is `judge_model_server` (which model to call) and `judge_responses_create_params` (how to call it). Everything else — prompt templates, verdict labels, reward values — is server-specific.
