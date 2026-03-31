@@ -28,10 +28,10 @@ cvdp_simple_agent:
         jsonl_fpath: resources_servers/cvdp/data/example.jsonl
       - name: validation
         type: validation
-        jsonl_fpath: resources_servers/cvdp/data/gym_cvdp_v1.0.2_nonagentic_code_gen_no_commercial.jsonl
+        jsonl_fpath: resources_servers/cvdp/data/gym_cvdp_1.0.4_nonagentic_code_generation_no_commercial.jsonl
         gitlab_identifier:
           dataset_name: cvdp_nonagentic_code_gen_no_commercial
-          version: 0.0.1
-          artifact_fpath: gym_cvdp_v1.0.2_nonagentic_code_gen_no_commercial.jsonl
+          version: 0.0.2
+          artifact_fpath: gym_cvdp_1.0.4_nonagentic_code_generation_no_commercial.jsonl
         license: Apache 2.0
         num_repeats: 5
