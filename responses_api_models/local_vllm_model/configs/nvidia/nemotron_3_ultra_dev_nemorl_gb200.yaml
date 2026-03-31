@@ -16,7 +16,7 @@ nemotron_3_ultra_dev:
 
       chat_template_kwargs: null
 
-      ray_worker_py_executable: /usr/local/bin/python-VllmAsyncGenerationWorker
+      ray_worker_py_executable: /opt/ray_venvs/nemo_rl.models.generation.vllm.vllm_worker_async.VllmAsyncGenerationWorker/bin/python
 
       # Recommended in https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16#use-it-with-transformers
       extra_body:
