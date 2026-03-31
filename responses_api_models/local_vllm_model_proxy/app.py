@@ -64,6 +64,9 @@ class LocalVLLMModelProxyServer(VLLMModel):
         self.config.api_key = response_dict["api_key"]
         self.config.model = response_dict["model"]
 
+        # Reset clients after base_url config
+        self._post_init()
+
         return super().setup_webserver()
 
 
