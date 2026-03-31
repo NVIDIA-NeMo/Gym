@@ -30,7 +30,7 @@ The walkthrough uses [`over_refusal_detection`](https://github.com/NVIDIA-NeMo/G
 - `verify()` may call a **judge model** to score semantic quality.
 - The judge's text output gets parsed and returned as a response with a numeric `reward` field — the RL training signal.
 
-Note that the judge is a verifier dependency. It is **not** the policy.
+The judge is a verifier dependency — it is **not** the policy.
 
 ---
 
@@ -66,7 +66,7 @@ For how NeMo Gym sits next to GPUs and training frameworks, see {doc}`/infrastru
 
 ---
 
-In production, the judge is typically a **dedicated Gym model server**, a separate `responses_api_models` entry in your Hydra config that can point at any OpenAI-compatible endpoint (a co-located vLLM instance, a remote cluster, or a managed API). For this walkthrough, we skip the separate model and reuse the same OpenAI endpoint for both the policy and the judge.
+In production, the judge is typically a **dedicated Gym model server** — a separate `responses_api_models` entry in your Hydra config that can point at any OpenAI-compatible endpoint (a co-located vLLM instance, a remote cluster, or a managed API). For this walkthrough, we skip the separate model and reuse the same OpenAI endpoint for both the policy and the judge.
 
 ---
 
@@ -91,22 +91,35 @@ policy_model_name: gpt-4o-mini
 
 Since we're reusing the policy model as the judge, no extra endpoint fields are needed.
 
-:::{tip}
-In production, you can point the judge at a dedicated model server by adding a separate `judge_model` block and setting `judge_model_server.name: judge_model`. This lets you use a different model, provider, or quota for the judge. See [`over_refusal_detection/configs/over_refusal_detection.yaml`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/over_refusal_detection/configs/over_refusal_detection.yaml) for an example of that setup.
-:::
-
 #### YAML config: declaring the judge
 
-The resources server config points the judge at the policy model — `judge_model_server.name: policy_model`. Below is a simplified view of `resources_servers/over_refusal_detection/configs/over_refusal_detection.yaml` (the ~70-line judge prompt is truncated — see the full file for the complete template including worked examples):
+The resources server config points the judge at the policy model — `judge_model_server.name: policy_model`. Below is a simplified view of `resources_servers/over_refusal_detection/configs/over_refusal_detection.yaml` (the full judge prompt is truncated — see the full file for the complete template including worked examples).
+
+:::{important}
+The config file ships with a `judge_model` block that starts a dedicated judge server. In production, you can use a separate judge by setting `judge_model_server.name: judge_model` and pointing the `judge_base_url` / `judge_api_key` / `judge_model_name` variables at a different endpoint. This lets you use a different model, provider, or quota for the judge.
+
+Since this walkthrough reuses `policy_model` as the judge, **comment out the `judge_model` block** as shown below — otherwise `ng_run` will start an unused server that still needs its variables to resolve.
+
+Be sure to **set `judge_model_server.name` to `policy_model`** as well.
+:::
 
 ```yaml
+# Unused in this walkthrough — judge calls go to policy_model instead.
+# judge_model:
+#   responses_api_models:
+#     openai_model:
+#       entrypoint: app.py
+#       openai_base_url: ${judge_base_url}
+#       openai_api_key: ${judge_api_key}
+#       openai_model: ${judge_model_name}
+
 over_refusal_detection:
   resources_servers:
     over_refusal_detection:
       entrypoint: app.py
       judge_model_server:
         type: responses_api_models
-        name: policy_model
+        name: policy_model  # reuses the policy endpoint as the judge
       judge_responses_create_params:
         input: []
         temperature: 0.0
