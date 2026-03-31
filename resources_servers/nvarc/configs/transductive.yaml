@@ -5,6 +5,7 @@ nvarc_transductive_resources_server:
       domain: knowledge
       verified: false
       description: "ARC-AGI transductive mode: model outputs grid directly"
+      value: Improve ARC-AGI puzzle-solving by directly predicting transformed grids
       agent_mode: transductive
 
 nvarc_transductive_simple_agent:
