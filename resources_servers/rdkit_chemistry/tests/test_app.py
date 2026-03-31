@@ -340,7 +340,9 @@ class TestLocalNSToolsColocation:
             start_kwargs.update(kwargs)
 
         monkeypatch.setitem(sys.modules, "sandbox_launcher", SimpleNamespace(start_sandbox=fake_start_sandbox))
-        monkeypatch.setattr("resources_servers.rdkit_chemistry.app.SimpleResourcesServer.setup_webserver", lambda self: "web")
+        monkeypatch.setattr(
+            "resources_servers.rdkit_chemistry.app.SimpleResourcesServer.setup_webserver", lambda self: "web"
+        )
 
         assert server.setup_webserver() == "web"
         assert start_kwargs["startup_probe_enabled"] is True
@@ -395,7 +397,9 @@ class TestSandboxStartupProbe:
 
         assert len(posted_payloads) == 3
         assert all(url == "http://127.0.0.1:6001/execute" for url, _, _ in posted_payloads)
-        assert deleted_urls == [posted_payloads[0][0].replace("/execute", f"/sessions/{posted_payloads[0][1]['X-Session-ID']}")]
+        assert deleted_urls == [
+            posted_payloads[0][0].replace("/execute", f"/sessions/{posted_payloads[0][1]['X-Session-ID']}")
+        ]
 
     def test_raises_when_probe_fails(self, monkeypatch):
         class FakeResponse:
