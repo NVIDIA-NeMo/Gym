@@ -5,6 +5,7 @@ nvarc_inductive_resources_server:
       domain: knowledge
       verified: false
       description: "ARC-AGI inductive mode: model outputs Python code with transform()"
+      value: Improve ARC-AGI puzzle-solving by inducing executable transformation programs
       agent_mode: inductive
       python_timeout_seconds: 30
 
