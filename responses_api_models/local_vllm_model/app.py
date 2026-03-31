@@ -357,49 +357,118 @@ class LocalVLLMModelActor:
                     "The actual data-parallel-size-local will be auto determined."
                 )
 
-            # strict/fill: Ray's strategy only packs *within* each PG; we still create one PG
-            # per DP rank, so without node affinity ranks spread across nodes. Pin extra PGs
-            # to the DP master when it has room for the remaining ranks (rank 0 head PG already
-            # holds world_size GPUs there). Matches upstream vLLM's "node:IP" bundle hint.
-            master_node_res = nodes[0]
-            master_gpus_avail = int(master_node_res.get(device_str, 0))
-            need_on_master = world_size * (dp_size - 1)
-            pin_dp_to_master = (
-                pack_strategy in ("strict", "fill") and dp_size > 1 and master_gpus_avail >= need_on_master
-            )
-            if pin_dp_to_master:
-                logger.info(
-                    "Pinning DP ranks 1..%s to DP master %s (avail GPU on master %s >= %s)",
-                    dp_size - 1,
-                    dp_master_ip,
-                    master_gpus_avail,
-                    need_on_master,
-                )
-                node_affinity = {"node:" + dp_master_ip: 0.001}
-            else:
-                if pack_strategy in ("strict", "fill") and dp_size > 1:
-                    logger.info(
-                        "Not pinning extra DP PGs to master %s: master avail GPU %s < %s needed for ranks 1..%s",
-                        dp_master_ip,
-                        master_gpus_avail,
-                        need_on_master,
-                        dp_size - 1,
+            # Mirror: vllm/v1/engine/utils.py CoreEngineActorManager.create_dp_placement_groups
+            # Upstream uses one loop for strict/fill/span; we split span out. NeMo Gym diffs
+            # from upstream only inside START/END blocks (same style as earlier patches).
+            if pack_strategy == "span":
+                """
+                START NeMo Gym: span with pre-created head PG — simplified PG loop vs upstream
+                (upstream interleaves span/collected_bundles with empty initial PG list).
+                """
+                for _ in range(dp_size - 1):
+                    bundles = [{device_str: 1.0}] * world_size + [{"CPU": 1.0}]
+                    pg_name = f"{self.server_name}_dp_rank_{len(placement_groups)}"
+                    pg = ray.util.placement_group(
+                        name=pg_name,
+                        strategy=placement_strategy,
+                        bundles=bundles,
                     )
-                node_affinity = {}
+                    ray.get(pg.ready())
+                    placement_groups.append(pg)
+                    local_dp_ranks.append(0)
+                """
+                END NeMo Gym: span with pre-created head PG — simplified PG loop vs upstream
+                """
+            else:
+                # strict/fill only (span handled above). Body parallels
+                # vllm/v1/engine/utils.py create_dp_placement_groups for node walk + inner loop.
+                for node_resources in nodes:
+                    """
+                    START NeMo Gym: stop once head PG + new PGs reach dp_size
+                    """
+                    if len(placement_groups) == dp_size:
+                        break
+                    """
+                    END NeMo Gym: stop once head PG + new PGs reach dp_size
+                    """
+                    node_ip_keys = [
+                        key for key in node_resources if key != "node:__internal_head__" and key.startswith("node:")
+                    ]
+                    assert len(node_ip_keys) == 1, (
+                        f"Zero or multiple node IP keys found in node resources: {node_ip_keys}"
+                    )
+                    node_ip_key = node_ip_keys[0]
+                    node_ip = node_ip_key.split(":")[1]
 
-            for _ in range(dp_size - 1):
-                device_bundle = {device_str: 1.0, **node_affinity}
-                bundles = [device_bundle] * world_size + [{"CPU": 1.0}]
+                    n_device_on_node = int(node_resources.get(device_str, 0))
+                    dp_size_available = n_device_on_node // world_size
 
-                pg_name = f"{self.server_name}_dp_rank_{len(placement_groups)}"
-                pg = ray.util.placement_group(
-                    name=pg_name,
-                    strategy=placement_strategy,
-                    bundles=bundles,
-                )
+                    if node_ip == dp_master_ip:
+                        if dp_size_available < dp_size_local:
+                            raise ValueError(
+                                f"Not enough resources to allocate {dp_size_local} DP ranks "
+                                f"on DP master node {dp_master_ip}, possible to fit "
+                                f"{dp_size_available} DP ranks."
+                            )
+                        dp_size_to_allocate = dp_size_local
+                    elif pack_strategy == "strict":
+                        if dp_size_available < dp_size_local:
+                            logger.info(
+                                "Skipping node %s as %s DP ranks could not fit, possible to fit %s DP ranks",
+                                node_ip,
+                                dp_size_local,
+                                dp_size_available,
+                            )
+                            continue
+                        dp_size_to_allocate = dp_size_local
+                    else:
+                        # for "fill" (and upstream "span"; span not in this branch)
+                        # we always take everything that's available
+                        dp_size_to_allocate = dp_size_available
 
-                placement_groups.append(pg)
-                local_dp_ranks.append(0)
+                    """
+                    START NeMo Gym: pre-created head PG is rank 0 on master; first inner slot is i=1
+                    Upstream (same file): for i in range(dp_size_to_allocate):
+                    """
+                    if node_ip == dp_master_ip and len(placement_groups) == 1:
+                        dp_rank_index_range = range(1, dp_size_to_allocate)
+                    else:
+                        dp_rank_index_range = range(dp_size_to_allocate)
+                    """
+                    END NeMo Gym: pre-created head PG is rank 0 on master; first inner slot is i=1
+                    """
+
+                    for i in dp_rank_index_range:
+                        device_bundle = [{device_str: 1.0, "node:" + node_ip: 0.001}]
+                        bundles = device_bundle * world_size + [{"CPU": 1.0}]
+
+                        """
+                        START NeMo Gym: per-server PG names; wait for PG before scheduling next
+                        Upstream (same file): name=f"dp_rank_{len(placement_groups)}"
+                        then append without ray.get(pg.ready()).
+                        """
+                        pg = ray.util.placement_group(
+                            name=f"{self.server_name}_dp_rank_{len(placement_groups)}",
+                            strategy=placement_strategy,
+                            bundles=bundles,
+                        )
+                        ray.get(pg.ready())
+                        """
+                        END NeMo Gym: per-server PG names; wait for PG before scheduling next
+                        """
+                        placement_groups.append(pg)
+                        local_dp_ranks.append(i)
+                        if len(placement_groups) == dp_size:
+                            break
+
+                    """
+                    START NeMo Gym: outer for-node loop exit when dp_size reached
+                    """
+                    if len(placement_groups) == dp_size:
+                        break
+                    """
+                    END NeMo Gym: outer for-node loop exit when dp_size reached
+                    """
 
             if len(placement_groups) < dp_size:
                 raise ValueError(
@@ -480,14 +549,13 @@ class LocalVLLMModel(VLLMModel):
         #     "Ray backend only works with data parallel size > 1!"
         # )
 
-        # With our vLLM patches, this is no longer necessary for people to set.
-        server_args["data_parallel_size_local"] = 1
-
-        # TODO multi-node model instances still need to be properly supported
-        # We get a vLLM error: Exception: Error setting CUDA_VISIBLE_DEVICES: local range: [0, 16) base value: "0,1,2,3,4,5,6,7"
-        if env_vars.get("VLLM_RAY_DP_PACK_STRATEGY") == "span":
-            # Unset this flag since it's set by default using span
+        # Match upstream vLLM: data_parallel_size_local controls ranks per node for
+        # strict/fill (see create_dp_placement_groups). Default to 1 when unset.
+        pack = env_vars.get("VLLM_RAY_DP_PACK_STRATEGY")
+        if pack == "span":
             server_args.pop("data_parallel_size_local", None)
+        elif server_args.get("data_parallel_size_local") is None:
+            server_args["data_parallel_size_local"] = 1
 
         cli_env_setup()
         parser = FlexibleArgumentParser(description="vLLM OpenAI-Compatible RESTful API server.")
