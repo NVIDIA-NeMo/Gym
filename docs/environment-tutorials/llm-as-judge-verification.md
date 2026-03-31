@@ -25,12 +25,12 @@ The walkthrough uses [`over_refusal_detection`](https://github.com/NVIDIA-NeMo/G
 
 ## Quick mental model
 
-- The **policy model** generates the rollout output.
-- Your **resources server** receives that output in `verify()`.
+- The **agent server** orchestrates each rollout by calling the **policy model server** for inference and the **resources server** for tool execution and verification. Together they produce the full rollout.
+- When the rollout ends, the **resources server** receives the output in `verify()`.
 - `verify()` may call a **judge model** to score semantic quality.
-- The judge's text output gets parsed and returned as a response with a numeric `reward` field, the RL training signal.
+- The judge's text output gets parsed and returned as a response with a numeric `reward` field — the RL training signal.
 
-Remember that the judge is a verifier dependency, it is **not** the policy.
+Note that the judge is a verifier dependency. It is **not** the policy.
 
 ---
 
@@ -227,7 +227,7 @@ Tradeoffs of LLM judges: extra latency and cost, non-determinism (unless you tun
 
 - **Policy model:** the model being trained/evaluated to produce task outputs.
 - **Judge model:** a second model used inside `verify()` for scoring.
-- **Resources server:** server that implements verification and returns reward.
+- **Resources server:** the environment server that manages state, executes tools, formats tool results into messages for the model, and runs verification to produce a reward.
 - **Verifier metadata:** task-specific fields passed from JSONL into `verify()`.
 - **Internal judge call:** call to a configured NeMo Gym model server via `/v1/responses`.
 - **External judge call:** direct OpenAI-compatible call (often `/v1/chat/completions`) to another endpoint.
