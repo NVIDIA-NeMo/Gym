@@ -17,9 +17,6 @@
 
 Downloads MMLU-Pro from HuggingFace and converts to Gym JSONL format
 compatible with the mcqa resource server.
-
-Output is raw data (no prompts baked in). Use prompt_config at rollout time
-to specify the prompt, or ng_materialize_prompts to produce RL-ready data.
 """
 
 import json
