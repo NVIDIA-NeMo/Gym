@@ -18,12 +18,11 @@ RDKit Chemistry — Nemo-Gym Resources Server
 Verifiable chemistry question answering with optional Python tool-use.
 
 The agent receives a natural-language chemistry question paired with a SMILES
-string and must respond with a single number (integer or float) or a binary
-0/1 flag.
+string and must respond with a single integer or binary 0/1 flag.
 
 Questions are drawn from a stratified sample of the ChEMBL database and cover
-RDKit-computable molecular properties (logP, molecular weight, ring counts,
-hydrogen bond donor/acceptor counts, fragment presence, etc.).
+RDKit-computable molecular properties (ring counts, hydrogen bond
+donor/acceptor counts, fragment presence, etc.).
 
 Two question methods are supported (selected per-row via the ``method`` field):
 
@@ -33,16 +32,14 @@ Two question methods are supported (selected per-row via the ``method`` field):
 
 This server is a pure verifier: it only implements ``verify()``.  When tool-use
 is needed, pair this server with ``ns_tools`` via
-``rdkit_chemistry_with_tools.yaml`` — ``ns_tools`` handles tool execution and
+``rdkit_chemistry.yaml`` — ``ns_tools`` handles tool execution and
 delegates verification here.
 
 Reward signal
 -------------
-- Integer / count / bool / presence / fragment properties: exact match
-  (reward = 1.0 iff round(predicted) == round(actual), else 0.0).
-- Float properties: negative absolute error — reward = -|predicted - actual|.
-  A perfect prediction scores 0.0; larger errors give more negative rewards.
-  When no numeric value can be extracted from the response, reward = 0.0.
+All property types use exact match:
+reward = 1.0 iff round(predicted) == round(actual), else 0.0.
+When no numeric value can be extracted from the response, reward = 0.0.
 
 Dataset format (JSONL)
 ----------------------
@@ -50,8 +47,8 @@ Each row carries:
   responses_create_params.input  — user message (prompt + format instruction)
   responses_create_params.tools  — [] for direct, [stateful_python_code_exec] for mcp-python
   expected_answer                — ground-truth numeric value
-  property_type                  — "float" | "count" | "bool" | "presence" | "fragment"
-  property                       — RDKit property name, e.g. "MolLogP"
+  property_type                  — "count" | "bool" | "presence" | "fragment"
+  property                       — RDKit property name, e.g. "NumValenceElectrons"
   chembl_id                      — ChEMBL molecule identifier
   smiles                         — canonical SMILES string
   method                         — "direct" | "mcp-python"
@@ -82,6 +79,8 @@ from nemo_gym.global_config import get_first_server_config_dict
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
+
+_SUPPORTED_PROPERTY_TYPES = {"count", "bool", "presence", "fragment"}
 
 _NUMBER_RE = re.compile(r"-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?")
 _BOXED_RE = re.compile(r"\\boxed\{([^}]+)\}")
@@ -130,7 +129,6 @@ class ChemistryVerifyRequest(ChemistryRunRequest, BaseVerifyRequest):
 class ChemistryVerifyResponse(BaseVerifyResponse):
     predicted_value: Optional[float] = None
     correct: bool = False
-    absolute_error: Optional[float] = None
     property: str = ""
     property_type: str = ""
     chembl_id: Optional[str] = None
@@ -247,22 +245,10 @@ def extract_predicted_value(
 def compute_reward(
     predicted: Optional[float],
     actual: float,
-    property_type: str,
 ) -> float:
-    """
-    Compute a scalar reward given a prediction.
-
-    Float properties: reward = -|predicted - actual|  (negative absolute error).
-    Discrete properties (count / bool / presence / fragment):
-      reward = 1.0 if round(predicted) == round(actual), else 0.0.
-    No prediction (None / NaN) scores 0.0.
-    """
+    """Compute exact-match reward: 1.0 if round(predicted) == round(actual), else 0.0."""
     if predicted is None or math.isnan(predicted):
         return 0.0
-
-    if property_type == "float":
-        return -abs(predicted - actual)
-
     return 1.0 if round(predicted) == round(actual) else 0.0
 
 
@@ -349,16 +335,13 @@ class RDKitChemistryResourcesServer(SimpleResourcesServer):
         self,
         body: ChemistryVerifyRequest,
     ) -> ChemistryVerifyResponse:
+        if body.property_type not in _SUPPORTED_PROPERTY_TYPES:
+            raise ValueError(f"Unsupported property_type={body.property_type!r}")
+
         text = _extract_last_assistant_text(body)
         predicted = extract_predicted_value(text, body.property_type, use_box_format=body.use_box_format)
         actual = float(body.expected_answer)
-
-        reward = compute_reward(predicted, actual, body.property_type)
-
-        absolute_error: Optional[float] = None
-        if body.property_type == "float" and predicted is not None and not math.isnan(predicted):
-            absolute_error = abs(predicted - actual)
-
+        reward = compute_reward(predicted, actual)
         correct = reward == 1.0
 
         return ChemistryVerifyResponse(
@@ -366,7 +349,6 @@ class RDKitChemistryResourcesServer(SimpleResourcesServer):
             reward=reward,
             predicted_value=predicted,
             correct=correct,
-            absolute_error=absolute_error,
         )
 
     def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
@@ -381,16 +363,11 @@ class RDKitChemistryResourcesServer(SimpleResourcesServer):
         def _ptype_stats(group: list) -> Dict[str, Any]:
             rewards = [r["reward"] for r in group]
             corrects = [int(r.get("correct", False)) for r in group]
-            stats: Dict[str, Any] = {
+            return {
                 "count": len(group),
                 "accuracy": statistics.mean(corrects),
                 "mean_reward": statistics.mean(rewards),
             }
-            errors = [r["absolute_error"] for r in group if r.get("absolute_error") is not None]
-            if errors:
-                stats["mean_abs_error"] = statistics.mean(errors)
-                stats["median_abs_error"] = statistics.median(errors)
-            return stats
 
         result: Dict[str, Any] = {}
         for method in sorted(grouped):

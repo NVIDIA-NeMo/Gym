@@ -11,13 +11,12 @@ molecular properties drawn from the ChEMBL database.
   Python tool with RDKit available to compute the answer)
 - Dataset prompt format: user message containing a natural-language question, a
   SMILES string, and a format instruction; the model must respond with a single
-  number or binary `0`/`1` flag
+  integer or binary `0`/`1` flag
 
-Questions cover five property types:
+Questions cover four property types:
 
 | Property type | Examples | Expected response |
 |---|---|---|
-| `float` | MolLogP, TPSA, MolWt, qed | Single floating-point number |
 | `count` | HeavyAtomCount, NumValenceElectrons | Single integer |
 | `bool` | PassesRo5, PassesVeber | `0` or `1` |
 | `presence` | HasAmide | `0` or `1` |
@@ -25,11 +24,7 @@ Questions cover five property types:
 
 ## Reward Signal
 
-| Property type | Reward |
-|---|---|
-| `float` | `−|predicted − actual|` (negative absolute error; 0.0 = perfect) |
-| `count` / `bool` / `presence` / `fragment` | 1.0 if exact match, else 0.0 |
-
+All property types use exact match: 1.0 if `round(predicted) == round(actual)`, else 0.0.
 When no parseable number can be extracted from the response, `reward = 0.0`.
 
 ## Server Composition
@@ -49,9 +44,9 @@ Each JSONL row:
 
 - `responses_create_params.input[0].content`: user prompt (question + SMILES + format instruction)
 - `responses_create_params.tools`: `[]` for `direct`, `[stateful_python_code_exec]` for `mcp-python`
-- `expected_answer`: ground-truth numeric value (string, int, or float)
-- `property_type`: one of `float`, `count`, `bool`, `presence`, `fragment`
-- `property`: RDKit property name, e.g. `MolLogP`
+- `expected_answer`: ground-truth numeric value (string or int)
+- `property_type`: one of `count`, `bool`, `presence`, `fragment`
+- `property`: RDKit property name, e.g. `NumValenceElectrons`
 - `chembl_id`: ChEMBL molecule identifier
 - `smiles`: canonical SMILES string
 - `method`: `direct` or `mcp-python`
