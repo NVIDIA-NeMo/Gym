@@ -268,16 +268,6 @@ Model URLs, API keys, and model IDs for hosted backends belong in your **merged 
 
 ---
 
-## Multiple providers and local models
-
-NeMo Gym does not require a single vendor. For the **internal** pattern, any backend exposed as a **model server** that implements `/v1/responses` can serve as the judge — for example **vLLM** or **OpenAI/Azure**-style stacks configured under `responses_api_models/`. See {doc}`/model-server/index` and the configuration reference for model server fields.
-
-For **external** HTTP judges that only speak **Chat Completions**, use the pattern in `proof_verification` (OpenAI-compatible client and `/v1/chat/completions`). Use NeMo Gym’s OpenAI utilities (`nemo_gym.openai_utils`) for schema compatibility, as noted in the contributor guide.
-
-**Thinking models:** strip chain-of-thought or "thinking" sections from the judge output before parsing fixed verdict labels (many servers use helpers similar to `exclude_thinking=True` when extracting assistant text).
-
----
-
 ## Implementation: end-to-end `verify()` flow
 
 Here is the full flow inside `over_refusal_detection`, condensed. Every Gym-internal LLM-judge server follows the same shape:
@@ -329,25 +319,6 @@ Other servers apply the same pattern with domain-specific variations. For exampl
 | Timeouts during rollout batches | Judge endpoint saturated | Lower concurrency or add judge capacity / dedicated endpoint |
 | HTTP errors calling judge | Wrong server key or endpoint config | Verify `judge_model_server.name`, merged config, and model server health |
 | Intermittent parse failures with reasoning models | Thinking blocks included in extracted text | Use extraction that strips thinking segments before parsing |
-
----
-
-## Reference resources servers
-
-Use these as templates; each README and `configs/*.yaml` is the source of truth:
-
-| Server | Role of the judge | Complexity |
-|--------|-------------------|------------|
-| [`over_refusal_detection`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/over_refusal_detection) | Compliance classification for safe prompts (**this tutorial's walkthrough**) | Low — single judge call, configurable labels |
-| [`jailbreak_detection`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/jailbreak_detection) | Safety classification; optional combined-reward second judge | Low–Medium |
-| [`equivalence_llm_judge`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/equivalence_llm_judge) | Semantic equivalence of answers; optional swap pass and rescue | Medium |
-| [`multichallenge`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/multichallenge) | Per-rubric-item judge calls, aggregated reward | Medium |
-| [`text_to_sql`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/text_to_sql) | SQL equivalence via LLM; optional swap | Medium |
-| [`math_with_judge`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/math_with_judge) | Library-style symbolic check plus LLM judge fallback | Medium |
-| [`finance_sec_search`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/finance_sec_search) | Optional judge vs. substring fallback | Medium–High |
-| [`terminus_judge`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/terminus_judge) | String similarity vs. LLM judge toggles; JSON/OpenAPI validation | High |
-| [`proof_verification`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/proof_verification) | Internal `/v1/responses` vs. external chat completions | High |
-| [`proof_judge`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/proof_judge) | Verifier + meta-verifier; external/internal split | High |
 
 ---
 
