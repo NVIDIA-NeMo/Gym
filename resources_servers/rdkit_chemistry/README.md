@@ -36,7 +36,7 @@ Use `rdkit_chemistry` with:
 - `resources_servers/rdkit_chemistry`
 
 For `mcp-python` rows the agent must have access to `ns_tools` for Python code
-execution; use `rdkit_chemistry_with_tools.yaml` in that case.
+execution; use `rdkit_chemistry.yaml` which includes the `ns_tools` and agent definitions.
 
 ## Dataset Format
 
@@ -62,7 +62,7 @@ responses_api_models/openai_model/configs/openai_model.yaml"
 ng_run "+config_paths=[${config_paths}]"
 
 ng_collect_rollouts \
-    +agent_name=rdkit_chemistry_simple_agent \
+    +agent_name=rdkit_chemistry_agent \
     +input_jsonl_fpath=resources_servers/rdkit_chemistry/data/example.jsonl \
     +output_jsonl_fpath=resources_servers/rdkit_chemistry/data/example_rollouts.jsonl
 ```
