@@ -432,9 +432,8 @@ class SimpleServer(BaseServer):
 
         @app.middleware("http")
         async def add_session_id(request: Request, call_next):  # pragma: no cover
-            # If session_id not present, assign one
-            if SESSION_ID_KEY not in request.session:
-                request.session[SESSION_ID_KEY] = str(uuid4())
+            # Always assign so Starlette 1.0+ marks session.modified=True and re-sends Set-Cookie.
+            request.session[SESSION_ID_KEY] = request.session.get(SESSION_ID_KEY, str(uuid4()))
 
             response: Response = await call_next(request)
             return response

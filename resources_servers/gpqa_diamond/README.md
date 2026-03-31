@@ -1,8 +1,8 @@
-# GPQA-Diamond Resource Server
+# GPQA-Diamond Resources Server
 
 ## Overview
 
-This resource server evaluates GPQA-Diamond multiple-choice responses with a
+This resources server evaluates GPQA-Diamond multiple-choice responses with a
 GPQA-specific verifier built on top of `resources_servers/mcqa`.
 
 - Task type: single-turn MCQ
@@ -69,7 +69,7 @@ This generates:
 - `resources_servers/gpqa_diamond/data/train.jsonl`
 
 `data/example.jsonl` is a curated repo artifact and is not modified by the
-preprocess script. There is currently no `validation.jsonl` for this resource
+preprocess script. There is currently no `validation.jsonl` for this resources
 server.
 
 ## Example Usage
@@ -79,7 +79,7 @@ Using a local Nemotron 3 model with `local_vllm_model`:
 ```bash
 config_paths="responses_api_agents/simple_agent/configs/simple_agent.yaml,responses_api_models/local_vllm_model/configs/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16.yaml,resources_servers/gpqa_diamond/configs/gpqa_diamond.yaml"
 ng_run "+config_paths=[${config_paths}]" \
-    '++policy_model=${swap_key:NVIDIA-Nemotron-3-Nano-30B-A3B-BF16}' \
+    '++policy_model=${inherit_from:NVIDIA-Nemotron-3-Nano-30B-A3B-BF16}' \
     +simple_agent.responses_api_agents.simple_agent.resources_server.name=gpqa_diamond \
     "++NVIDIA-Nemotron-3-Nano-30B-A3B-BF16.responses_api_models.local_vllm_model.vllm_serve_kwargs.mamba_ssm_cache_dtype=float32" \
     "++NVIDIA-Nemotron-3-Nano-30B-A3B-BF16.responses_api_models.local_vllm_model.vllm_serve_kwargs.enable_prefix_caching=False"
@@ -113,3 +113,4 @@ the same pattern as `test_rollouts*`:
 
 Code: Apache 2.0
 Configured train dataset license metadata: MIT
+

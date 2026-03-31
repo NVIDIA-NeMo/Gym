@@ -25,7 +25,10 @@ requires = ["setuptools>=61", "setuptools-scm"]
 
 [tool.setuptools.packages.find]
 where = [".."]
-include = ["genrm_model*"]
+include = ["genrm_model"]
 
 [tool.uv.sources]
 nemo-gym = { path = "../..", editable = true }
+
+[tool.uv.pip]
+torch-backend = "auto"

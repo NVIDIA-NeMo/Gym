@@ -22,6 +22,7 @@ import os
 import sys
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from pathlib import Path
 
 import numpy as np
 import ray
@@ -42,7 +43,21 @@ def _temp_run(in_outs, generation, debug, result, metadata_list, timeout):
 
 
 # Using SPREAD scheduling so that Ray assigns tasks to as many distinct nodes as possible.
-@ray.remote(scheduling_strategy="SPREAD")
+# runtime_env ensures Ray workers:
+#   1. py_executable: use the code_gen server's venv Python (not system Python)
+#   2. PYTHONPATH: include code_gen/ so `import lcb_integration` resolves.
+#      lcb_integration has no pyproject.toml so can't be pip-installed; it must be on sys.path.
+#      Pattern from swerl_gen/eval/singularity_utils.py.
+_CODE_GEN_DIR = str(Path(__file__).parent.parent)
+
+
+@ray.remote(
+    scheduling_strategy="SPREAD",
+    runtime_env={
+        "py_executable": sys.executable,
+        "env_vars": {"PYTHONPATH": _CODE_GEN_DIR},
+    },
+)
 def check_correctness_remote(sample, generation, timeout, debug=True):
     """Ray wrapper of check_correctness for remote execution."""
     return check_correctness(sample, generation, timeout, debug)

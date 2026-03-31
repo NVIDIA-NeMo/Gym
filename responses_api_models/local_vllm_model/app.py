@@ -36,9 +36,9 @@ from vllm.entrypoints.openai.api_server import (
 
 from nemo_gym.global_config import (
     DISALLOWED_PORTS_KEY_NAME,
-    HF_TOKEN_KEY_NAME,
     find_open_port,
     get_global_config_dict,
+    get_hf_token,
 )
 from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
 
@@ -407,9 +407,6 @@ class LocalVLLMModel(VLLMModel):
 
         return super().setup_webserver()
 
-    def get_hf_token(self) -> Optional[str]:
-        return get_global_config_dict().get(HF_TOKEN_KEY_NAME)
-
     def get_cache_dir(self) -> str:
         # We need to reconstruct the cache dir as HF does it given HF_HOME. See https://github.com/huggingface/huggingface_hub/blob/b2723cad81f530e197d6e826f194c110bf92248e/src/huggingface_hub/constants.py#L146
         return str(Path(self.config.hf_home) / "hub")
@@ -430,7 +427,7 @@ class LocalVLLMModel(VLLMModel):
 
         env_vars = {"HF_HUB_ENABLE_HF_TRANSFER": "1"}
         # vLLM accepts a `hf_token` parameter but it's not used everywhere. We need to set HF_TOKEN environment variable here.
-        maybe_hf_token = self.get_hf_token()
+        maybe_hf_token = get_hf_token()
         if maybe_hf_token:
             env_vars["HF_TOKEN"] = maybe_hf_token
 

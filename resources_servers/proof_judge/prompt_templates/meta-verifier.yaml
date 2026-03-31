@@ -1,0 +1,79 @@
+user: |-
+  You are given a "problem", "solution", and "solution evaluation", and you need to assess the whether this "solution evaluation" is reasonable.
+
+  First, "solution evaluation" is generated to evaluate the quality of the "solution", by prompting a verifier with the rules below (these are not your rules):
+
+  ```
+  Please evaluate the solution and score it according to the following criteria:
+  - If the solution is completely correct, with all steps executed properly and clearly demonstrated, then the score is 1
+  - If the solution is generally correct, but with some details omitted or minor errors, then the score is 0.5
+  - If the solution does not actually address the required problem, contains fatal errors, or has severe omissions, then the score is 0
+
+  Additionally, referencing anything from any paper does not save the need to prove the reference. It's okay IF AND ONLY IF the solution also presents a valid proof of the reference argument(s); otherwise, if the solution omits the proof or if the proof provided is not completely correct, the solution should be scored according to the criteria above, and definitely not with a score of 1
+  ```
+
+  Next, I will introduce the rules for you to analyze the quality of the "solution evaluation":
+
+  1. Your task is to analyze the "solution evaluation". You do not need to solve the "problem", nor do you need to strictly assess whether the "solution" is accurate. Your only task is to strictly follow the rules below to evaluate whether the "solution evaluation" is reasonable.
+
+  2. You need to analyze the content of the "solution evaluation" from three aspects:
+
+  Step Restatement: In the "solution evaluation", certain behaviors of the "solution" may be restated. You need to return to the original text of the "solution" and check whether the "solution" actually has these behaviors mentioned in the "solution evaluation".
+
+  Defect Analysis: "solution evaluation" may point out errors or defects in the "solution". You need to carefully analyze whether the mentioned errors and defects are indeed valid.
+
+  Expression Analysis: Whether the "solution evaluation"'s expressions are accurate.
+
+  Score Analysis: Whether the final score given by the "solution evaluation" matches the defects it found. You need to analyze according to the scoring rules given above.
+
+  3. The most important part is **defect analysis**: In this part, your core task is to check whether the errors or defects of the "solution" pointed out in the "solution evaluation" are reasonable. In other words, any positive components about the "solution" in the "solution evaluation", regardless of whether they are reasonable, are not within your evaluation scope.
+
+  - For example: If the "solution evaluation" says that a certain conclusion in the "solution" is correct, but actually this conclusion is incorrect, then you do not need to care about this point. All parts that the "solution evaluation" considers correct do not belong to your evaluation scope.
+  - Specifically: If the "solution evaluation" believes that the "solution" is completely accurate and has not found any errors or defects, then regardless of whether the "solution" itself is actually accurate, even if there are obvious errors, you should still consider its analysis of errors to be reasonable.
+
+  **Importantly**, for defects found by the "solution evaluation", you need to analyze two points simultaneously:
+
+  - whether this defect actually exists
+  - whether the "solution evaluation"'s analysis of this defect is accurate
+
+  These two aspects constitute the analysis of defects.
+
+  4. About **expression analysis**, if there are certain expression errors in the "solution evaluation", even minor errors in details, you need to identify them. However, please note that identifying incorrect steps in the "solution" as correct steps does not constitute an **expression error**.
+
+  In practice, expression errors include but are not limited to:
+
+  - If the "solution evaluation" identifies some reasoning step(s) in the "solution" as incorrect, then it cannot further indicate that subsequent conclusion(s) depending on those reasoning step(s) are wrong, but can only indicate that subsequent conclusion(s) are "not rigorously demonstrated."
+  - Typos and calculation errors made by "solution evaluation"
+  - Inaccurate restatement of content from "solution"
+
+  5. Finally, you need to present your analysis of the "solution evaluation" in your output and also rate its quality based on the rules below:
+
+  First, if there is at least one unreasonable defect among the defects found by the "solution evaluation", then you only need to do **defect analysis**:
+
+  - If all defects found by the "solution evaluation" are unreasonable, then you should rate it with \(0\)
+  - If some defects found by the "solution evaluation" are reasonable and some are unreasonable, then your rating should be \(0.5\)
+
+  Next, if the "solution evaluation" points out no errors or defects, or all defects found by the evaluation are reasonable, then you should do the following things:
+
+  - Analyze whether "expression errors" exist in the "solution evaluation" (**expression analysis**) or whether "solution evaluation" gives a wrong score according to the rules for "solution evaluation" (**score analysis**). If yes, you should rate the "solution evaluation" with \(0.5\); if no, your rating should be \(1\)
+
+  Your output should follow the format below:
+
+  Here is my analysis of the "solution evaluation":
+  ... // Your analysis here.
+
+  Based on my analysis, I will rate the "solution evaluation" as:
+  \boxed{{...}} // where ... should be a numerical rating of the "solution evaluation" (0, 0.5, or 1, and nothing else) based on the criteria above.
+
+  ---
+
+  Here is your task input:
+
+  ## Problem
+  {problem}
+
+  ## Solution
+  {proof}
+
+  ## Solution Evaluation
+  {proof_analysis}

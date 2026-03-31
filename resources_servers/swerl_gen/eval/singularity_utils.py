@@ -200,10 +200,7 @@ def _run_instance(
 
 
 # Using SPREAD scheduling so that Ray assigns tasks to as many distinct nodes as possible.
-@ray.remote(
-    scheduling_strategy="SPREAD",
-    runtime_env={"env_vars": {"PYTHONPATH": "/opt/nemo-rl/3rdparty/Gym-workspace/Gym"}},
-)
+@ray.remote(scheduling_strategy="SPREAD", runtime_env={"py_executable": sys.executable})
 def compute_score(
     extra_info_base64: str,
     patch_str: str,

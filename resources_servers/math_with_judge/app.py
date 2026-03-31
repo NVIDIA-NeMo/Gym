@@ -15,7 +15,7 @@
 import contextlib
 import logging
 from io import StringIO
-from typing import Any, ClassVar, Optional
+from typing import Any, ClassVar, Dict, List, Optional, Union
 
 from fastapi import FastAPI
 from math_verify import grader
@@ -37,6 +37,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
 from nemo_gym.server_utils import get_response_json
 
 
@@ -302,6 +303,41 @@ Example output: "My final verdict is different [[A!=B]]"."""
                 return True, judge_evaluation
             else:
                 return False, judge_evaluation
+
+    # ──────────────────────────────────────────────────────────
+    # Aggregate metrics overrides
+    # ──────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _math_score_fn(r: dict) -> Dict[str, Union[float, bool]]:
+        scores: Dict[str, Union[float, bool]] = {}
+        if "library_reward" in r:
+            scores["symbolic_accuracy"] = r["library_reward"]
+        if "judge_evaluations" in r and r["judge_evaluations"] is not None:
+            scores["judge_accuracy"] = r["reward"]
+        return scores
+
+    def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
+        """Compute math-specific metrics: pass@k, majority@k, per-sample statistics."""
+        return compute_pass_majority_metrics(
+            tasks,
+            score_fn=self._math_score_fn,
+            answer_key="extracted_answer",
+        )[0]
+
+    def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
+        """Select headline metrics for this math benchmark."""
+        key: Dict[str, Any] = {}
+
+        for name in ("mean/input_tokens", "mean/output_tokens"):
+            if name in agent_metrics:
+                key[name] = agent_metrics[name]
+
+        key.update(highest_k_metrics(agent_metrics, "pass@1[avg-of-{k}]"))
+        key.update(highest_k_metrics(agent_metrics, "pass@{k}", exclude_names=["no_answer"]))
+        key.update(highest_k_metrics(agent_metrics, "majority@{k}", exclude_names=["no_answer"]))
+
+        return key
 
 
 if __name__ == "__main__":

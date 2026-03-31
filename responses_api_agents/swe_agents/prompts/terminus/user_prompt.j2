@@ -1,0 +1,11 @@
+Task:
+
+<github_issue_description>
+{{ instance.problem_statement }}
+</github_issue_description>
+
+{% set language = instance.repo_language | default('python') %}
+I've uploaded a {{ language }} repository in the directory {{ workspace_path }}.
+
+Can you implement the necessary changes to the repository so that the requirements specified in the <github_issue_description> are met? 
+Your task is to make the changes to non-test files in the {{ workspace_path }} directory.

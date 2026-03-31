@@ -302,6 +302,22 @@ class TestExtractLastAssistantText:
         result = _extract_last_assistant_text(body)
         assert result == "Hello response."
 
+    def test_extract_multiple_assistant_messages(self):
+        """Test extracting text from multiple assistant messages."""
+        output_messages = [
+            NeMoGymResponseOutputMessage(
+                id="msg_1",
+                content=[NeMoGymResponseOutputText(annotations=[], text="First message.")],
+            ),
+            NeMoGymResponseOutputMessage(
+                id="msg_2",
+                content=[NeMoGymResponseOutputText(annotations=[], text="Second message.")],
+            ),
+        ]
+        body = self._create_verify_request_with_output(output_messages)
+        result = _extract_last_assistant_text(body)
+        assert result == "First message.\nSecond message."
+
     def test_extract_multiple_content_parts(self):
         """Test extracting text from message with multiple content parts."""
         output_message = NeMoGymResponseOutputMessage(
@@ -646,6 +662,149 @@ class TestTerminusJudgeResourcesServerVerify:
         result = await resources_server.verify(request)
         assert result.reward == 0.0
         assert result.failure_reason == FailureCode.EXPECTED_ANSWER_INVALID
+
+
+class TestTerminusJudgeStringSimilarityOnly:
+    """Tests for command-sim-only mode without judge dependencies."""
+
+    @fixture
+    def resources_server(self) -> TerminusJudgeResourcesServer:
+        """Create a server with string similarity only enabled."""
+        config = TerminusJudgeResourcesServerConfig(
+            host="127.0.0.1",
+            port=20002,
+            entrypoint="",
+            name="terminus_judge_string_only_test_server",
+            enable_string_similarity=True,
+            string_similarity_threshold=0.8,
+            enable_llm_judge=False,
+        )
+        return TerminusJudgeResourcesServer(
+            config=config,
+            server_client=MagicMock(spec=ServerClient),
+        )
+
+    def _create_verify_request(
+        self,
+        model_output: str,
+        expected_answer: dict,
+        harness: str = "terminus_1",
+        threshold: float = None,
+    ) -> TerminusJudgeVerifyRequest:
+        """Helper to create a TerminusJudgeVerifyRequest."""
+        output_message = NeMoGymResponseOutputMessage(
+            id="msg_1",
+            content=[NeMoGymResponseOutputText(annotations=[], text=model_output)],
+        )
+        response = NeMoGymResponse(
+            id="test_response",
+            created_at=1000,
+            model="test_model",
+            object="response",
+            output=[output_message],
+            parallel_tool_calls=False,
+            tool_choice="auto",
+            tools=[],
+        )
+        return TerminusJudgeVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+                input=[NeMoGymEasyInputMessage(role="user", content="test")]
+            ),
+            response=response,
+            expected_answer=json.dumps(expected_answer),
+            metadata={"harness": harness},
+            threshold=threshold,
+        )
+
+    @pytest.mark.asyncio
+    async def test_verify_correct_prediction_without_judge_config(
+        self, resources_server: TerminusJudgeResourcesServer
+    ):
+        """Test string-sim-only mode works without judge configuration."""
+        expected_answer = create_terminus_1_response([{"keystrokes": "ls -la"}])
+        request = self._create_verify_request(json.dumps(expected_answer), expected_answer)
+
+        response = await resources_server.verify(request)
+
+        assert response.reward == 1.0
+        assert response.failure_reason == FailureCode.NONE
+        assert response.string_similarity_passed is True
+        assert response.judge_passed is None
+        assert response.judge_evaluations == []
+
+    @pytest.mark.asyncio
+    async def test_verify_below_threshold_without_judge(self, resources_server: TerminusJudgeResourcesServer):
+        """Test string-sim-only mode returns threshold failure without judge fallback."""
+        expected_answer = create_terminus_1_response([{"keystrokes": "ls -la"}])
+        pred_answer = create_terminus_1_response([{"keystrokes": "pwd"}])
+        request = self._create_verify_request(json.dumps(pred_answer), expected_answer)
+
+        response = await resources_server.verify(request)
+
+        assert response.reward == 0.0
+        assert response.failure_reason == FailureCode.STRING_SIMILARITY_BELOW_THRESHOLD
+        assert response.string_similarity_passed is False
+        assert response.judge_passed is None
+        assert response.judge_evaluations == []
+
+    @pytest.mark.asyncio
+    async def test_verify_uses_default_threshold_in_string_only_mode(
+        self, resources_server: TerminusJudgeResourcesServer
+    ):
+        """Test string-sim-only mode uses configured default threshold when request threshold is absent."""
+        expected_answer = create_terminus_1_response([{"keystrokes": "ls -la"}])
+        pred_answer = create_terminus_1_response([{"keystrokes": "ls -l"}])
+        request = self._create_verify_request(json.dumps(pred_answer), expected_answer)
+
+        response = await resources_server.verify(request)
+
+        assert response.reward == 1.0
+        assert response.failure_reason == FailureCode.NONE
+        assert response.string_similarity_passed is True
+
+    @pytest.mark.asyncio
+    async def test_verify_serializes_when_parsed_output_contains_lone_surrogate(
+        self, resources_server: TerminusJudgeResourcesServer
+    ):
+        """Verify response should remain JSON-serializable even with malformed Unicode in parsed output."""
+        bad = "\udf89"
+        expected_answer = create_terminus_1_response([{"keystrokes": "ls -la\n"}])
+        model_output = (
+            '{"state_analysis":"bad '
+            + bad
+            + '","explanation":"ok","commands":[{"keystrokes":"ls -la\\n","is_blocking":true,"timeout_sec":5.0}],"is_task_complete":false}'
+        )
+        request = self._create_verify_request(model_output, expected_answer)
+
+        response = await resources_server.verify(request)
+        serialized = response.model_dump_json()
+
+        assert response.failure_reason == FailureCode.NONE
+        assert response.reward == 1.0
+        assert "\udf89" not in response.model_output
+        assert "\udf89" not in response.parsed_output["state_analysis"]
+        assert serialized
+
+    @pytest.mark.asyncio
+    async def test_verify_serializes_when_expected_answer_contains_lone_surrogate(
+        self, resources_server: TerminusJudgeResourcesServer
+    ):
+        """Malformed Unicode in the ground truth should not crash verify response serialization."""
+        bad = "\udf89"
+        expected_answer = create_terminus_1_response(
+            [{"keystrokes": "ls -la\n"}],
+            state_analysis=f"expected {bad}",
+        )
+        request = self._create_verify_request(json.dumps(expected_answer), expected_answer)
+
+        response = await resources_server.verify(request)
+        serialized = response.model_dump_json()
+
+        assert response.failure_reason == FailureCode.NONE
+        assert response.reward == 1.0
+        assert "\udf89" not in response.expected_answer
+        assert "\udf89" not in response.response.output[0].content[0].text
+        assert serialized
 
 
 class TestParseVerdictFromText:

@@ -43,7 +43,7 @@ jobs:
       cache-from: ${{ steps.cache-from.outputs.LAST_PRS }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Get last merged PR
         id: cache-from

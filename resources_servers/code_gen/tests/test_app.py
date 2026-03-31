@@ -27,6 +27,8 @@ from app import (
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
+from nemo_gym.base_resources_server import AggregateMetricsRequest
+from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.server_utils import ServerClient
 
@@ -268,3 +270,90 @@ class TestApp:
         )
         res = CompCodingVerifyResponse.model_validate(response.json())
         assert res.reward == 0.0 and res.metadata["error_message"] == "Runtime Error"
+
+
+def _make_server():
+    return CompCodingResourcesServer(
+        config=CompCodingResourcesServerConfig(
+            host="127.0.0.1",
+            port=12345,
+            entrypoint="app.py",
+            name="code_gen",
+            num_processes=1,
+            unit_test_timeout_secs=10,
+            debug=False,
+        ),
+        server_client=MagicMock(spec=ServerClient),
+    )
+
+
+class TestComputeMetrics:
+    def test_produces_pass_at_k_and_subsets(self) -> None:
+        server = _make_server()
+        tasks = [
+            [
+                {"reward": 1.0, "extracted_model_code": "print(1)", "difficulty": "easy"},
+                {"reward": 1.0, "extracted_model_code": "print(1)", "difficulty": "easy"},
+            ],
+            [
+                {"reward": 0.0, "extracted_model_code": "print(2)", "difficulty": "hard"},
+                {"reward": 1.0, "extracted_model_code": "print(2b)", "difficulty": "hard"},
+            ],
+            [
+                {"reward": 1.0, "extracted_model_code": "print(3)", "difficulty": "easy"},
+                {"reward": 0.0, "extracted_model_code": None, "difficulty": "easy"},
+            ],
+        ]
+        m = server.compute_metrics(tasks)
+
+        # Overall metrics
+        assert "pass@1/accuracy" in m
+        assert "pass@2/accuracy" in m
+        assert "majority@2/accuracy" in m
+        assert "pass@1[avg-of-2]/accuracy" in m
+        assert "pass@1[avg-of-2]/accuracy/avg_sample_std_dev" in m
+
+        # Per-difficulty subsets
+        assert "easy/pass@1/accuracy" in m
+        assert "hard/pass@1/accuracy" in m
+        assert m["easy/pass@1/accuracy"] > m["hard/pass@1/accuracy"]
+
+    def test_no_answer_tracked(self) -> None:
+        server = _make_server()
+        tasks = [
+            [{"reward": 1.0, "extracted_model_code": "x"}, {"reward": 0.0, "extracted_model_code": None}],
+        ]
+        m = server.compute_metrics(tasks)
+        assert "pass@1[avg-of-2]/no_answer" in m
+        assert m["pass@1[avg-of-2]/no_answer"] == pytest.approx(50.0)
+
+
+class TestGetKeyMetrics:
+    @pytest.mark.asyncio
+    async def test_selects_headline_metrics(self) -> None:
+        server = _make_server()
+        responses = []
+        for task_idx in range(4):
+            for rollout_idx in range(3):
+                responses.append(
+                    {
+                        TASK_INDEX_KEY_NAME: task_idx,
+                        ROLLOUT_INDEX_KEY_NAME: rollout_idx,
+                        "reward": float((task_idx + rollout_idx) % 2),
+                        "extracted_model_code": f"print({task_idx})" if rollout_idx < 2 else None,
+                        "difficulty": ["easy", "easy", "hard", "hard"][task_idx],
+                    }
+                )
+
+        result = await server.aggregate_metrics(AggregateMetricsRequest(verify_responses=responses))
+        km = result.key_metrics
+
+        # Should have token stats, overall pass/majority, and per-subset
+        assert "pass@3/accuracy" in km
+        assert "majority@3/accuracy" in km
+        assert "pass@1[avg-of-3]/accuracy" in km
+        assert any(k.startswith("easy/") for k in km)
+        assert any(k.startswith("hard/") for k in km)
+        # Should NOT have stat suffixes or no_answer
+        assert not any("std_dev" in k for k in km)
+        assert not any("no_answer" in k for k in km)

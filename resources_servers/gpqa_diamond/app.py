@@ -20,7 +20,6 @@ from resources_servers.mcqa.app import (
     MCQAResourcesServer,
     MCQAVerifyRequest,
     MCQAVerifyResponse,
-    _extract_last_assistant_text,
     _extract_options_and_expected,
     _get_allowed_letters_from_options,
     _parse_answer_with_custom_regex,
@@ -49,7 +48,7 @@ class GPQADiamondResourcesServer(MCQAResourcesServer):
     """GPQA-Diamond verifier with GPQA-specific answer extraction."""
 
     async def verify(self, body: MCQAVerifyRequest) -> MCQAVerifyResponse:
-        text = _extract_last_assistant_text(body)
+        text = body.response.output_text.strip()
         options, expected_answer = _extract_options_and_expected(body)
         allowed_letters = _get_allowed_letters_from_options(options)
 

@@ -1,0 +1,11 @@
+reflection_agent:
+  responses_api_agents:
+    reflection_agent:
+      entrypoint: reflection_agent.py
+      resources_server:
+        type: resources_servers
+        name: ???
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      max_reflections: 2

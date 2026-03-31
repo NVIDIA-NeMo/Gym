@@ -122,24 +122,23 @@ def check_task_complete(pred: dict, expected_answer: dict) -> bool:
 
 
 def _extract_last_assistant_text(body: BaseVerifyRequest) -> str:
-    """Extract the last assistant message text from the response.
+    """Extract assistant message text from the response.
 
-    Returns an empty string when no assistant text is available.
+    Concatenates all assistant messages in order to preserve the behavior
+    of the legacy terminal_pivot verifier.
     """
-    for o in reversed(body.response.output):
+    texts: list[str] = []
+    for o in body.response.output:
         if getattr(o, "type", None) == "message" and getattr(o, "role", None) == "assistant":
             content = getattr(o, "content", None)
             if isinstance(content, list):
-                texts: list[str] = []
                 for c in content:
                     t = getattr(c, "text", None)
                     if isinstance(t, str):
                         texts.append(t)
-                return "\n".join(texts).strip()
             elif isinstance(content, str):
-                return content.strip()
-            break
-    return ""
+                texts.append(content)
+    return "\n".join(texts).strip()
 
 
 def _extract_expected_answer(req: BaseRunRequest) -> Optional[str]:
@@ -151,10 +150,40 @@ def _extract_expected_answer(req: BaseRunRequest) -> Optional[str]:
     return str(exp) if exp is not None else None
 
 
+def _sanitize_unicode_string(value: str) -> str:
+    """Replace invalid Unicode surrogate code points with safe replacement chars.
+
+    Python strings can contain lone surrogate code points. They may survive JSON
+    parsing, but FastAPI/Pydantic will later fail while serializing the response
+    back to JSON. This helper preserves normal text and only scrubs invalid
+    surrogates.
+    """
+    return value.encode("utf-8", "surrogatepass").decode("utf-8", "replace")
+
+
+def _sanitize_for_json(value: Any) -> Any:
+    """Recursively sanitize strings so JSON serialization cannot fail."""
+    if isinstance(value, str):
+        return _sanitize_unicode_string(value)
+    if isinstance(value, dict):
+        return {_sanitize_for_json(k): _sanitize_for_json(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_for_json(v) for v in value]
+    if isinstance(value, tuple):
+        return tuple(_sanitize_for_json(v) for v in value)
+    return value
+
+
+def _sanitize_pydantic_model(model: BaseModel) -> BaseModel:
+    """Round-trip through model_dump/model_validate after recursive sanitization."""
+    sanitized_data = _sanitize_for_json(model.model_dump(mode="python"))
+    return type(model).model_validate(sanitized_data)
+
+
 class TerminusJudgeResourcesServerConfig(BaseResourcesServerConfig):
     name: str = "terminus_judge"
-    judge_model_server: ModelServerRef
-    judge_responses_create_params: NeMoGymResponseCreateParamsNonStreaming
+    judge_model_server: Optional[ModelServerRef] = None
+    judge_responses_create_params: Optional[NeMoGymResponseCreateParamsNonStreaming] = None
     judge_endpoint_max_concurrency: Optional[int] = 64
     judge_system_message: Optional[str] = None
     judge_prompt_template_fpath: str = "prompt_templates/terminus_prompt.txt"
@@ -216,13 +245,22 @@ class TerminusJudgeResourcesServer(SimpleResourcesServer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        if self.config.judge_endpoint_max_concurrency is not None:
-            self._judge_endpoint_max_concurrency = asyncio.Semaphore(value=self.config.judge_endpoint_max_concurrency)
-        else:
-            self._judge_endpoint_max_concurrency = None
+        self._judge_endpoint_max_concurrency = None
+        self._judge_prompt_template: Optional[str] = None
 
-        with open(self.config.judge_prompt_template_fpath, "r") as f:
-            self._judge_prompt_template = f.read().strip()
+        if self.config.enable_llm_judge:
+            if self.config.judge_model_server is None:
+                raise ValueError("judge_model_server is required when enable_llm_judge is True")
+            if self.config.judge_responses_create_params is None:
+                raise ValueError("judge_responses_create_params is required when enable_llm_judge is True")
+
+            if self.config.judge_endpoint_max_concurrency is not None:
+                self._judge_endpoint_max_concurrency = asyncio.Semaphore(
+                    value=self.config.judge_endpoint_max_concurrency
+                )
+
+            with open(self.config.judge_prompt_template_fpath, "r") as f:
+                self._judge_prompt_template = f.read().strip()
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -242,6 +280,8 @@ class TerminusJudgeResourcesServer(SimpleResourcesServer):
 
         # Helper to build response
         def _build_response(expected_str: str, model_output_str: str) -> TerminusJudgeVerifyResponse:
+            sanitized_responses_create_params = _sanitize_pydantic_model(body.responses_create_params)
+            sanitized_response = _sanitize_pydantic_model(body.response)
             logger.info(
                 f"terminus_judge _build_response | uuid={body.uuid} reward={reward} "
                 f"failure_reason={failure_reason} schema_check_passed={schema_passed} "
@@ -252,21 +292,21 @@ class TerminusJudgeResourcesServer(SimpleResourcesServer):
                 f"expected_answer_len={len(expected_str)} model_output_len={len(model_output_str)}"
             )
             return TerminusJudgeVerifyResponse(
-                responses_create_params=body.responses_create_params,
-                response=body.response,
+                responses_create_params=sanitized_responses_create_params,
+                response=sanitized_response,
                 reward=reward,
                 uuid=body.uuid,
-                expected_answer=expected_str,
-                model_output=model_output_str,
-                parsed_output=parsed_output,
+                expected_answer=_sanitize_unicode_string(expected_str),
+                model_output=_sanitize_unicode_string(model_output_str),
+                parsed_output=_sanitize_for_json(parsed_output),
                 similarity_score=similarity_score,
                 schema_check_passed=schema_passed,
                 task_complete_check_passed=task_complete_passed,
                 string_similarity_passed=string_similarity_passed,
                 judge_passed=judge_passed,
                 failure_reason=failure_reason,
-                judge_evaluations=judge_evaluations,
-                metadata=body.metadata,
+                judge_evaluations=[_sanitize_pydantic_model(j) for j in judge_evaluations],
+                metadata=_sanitize_for_json(body.metadata),
                 threshold=body.threshold,
             )
 
@@ -455,6 +495,13 @@ class TerminusJudgeResourcesServer(SimpleResourcesServer):
     ) -> tuple[bool, JudgeEvaluation]:
         """Run a single judge evaluation."""
         cfg = self.config
+        if cfg.judge_model_server is None:
+            raise RuntimeError("judge_model_server is not configured")
+        if cfg.judge_responses_create_params is None:
+            raise RuntimeError("judge_responses_create_params is not configured")
+        if self._judge_prompt_template is None:
+            raise RuntimeError("judge prompt template is not loaded")
+
         equal_label = cfg.judge_equal_label
         not_equal_label = cfg.judge_not_equal_label
 
