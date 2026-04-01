@@ -28,8 +28,8 @@ TARGET_FOLDER = Path("resources_servers")
 
 
 @dataclass
-class ResourceServerMetadata:
-    """Metadata extracted from resource server YAML config."""
+class ResourcesServerMetadata:
+    """Metadata extracted from resources server YAML config."""
 
     domain: Optional[str] = None
     description: Optional[str] = None
@@ -80,9 +80,9 @@ class ConfigMetadata:
 
     @classmethod
     def from_yaml_data(
-        cls, resource: ResourceServerMetadata, agent: AgentDatasetsMetadata
+        cls, resource: ResourcesServerMetadata, agent: AgentDatasetsMetadata
     ) -> "ConfigMetadata":  # pragma: no cover
-        """Combine resource server and agent datasets metadata."""
+        """Combine resources server and agent datasets metadata."""
         return cls(
             domain=resource.domain,
             description=resource.description,
@@ -97,7 +97,7 @@ class ConfigMetadata:
 
 @dataclass
 class ServerInfo:
-    """Information about a resource server for table generation."""
+    """Information about a resources server for table generation."""
 
     name: str
     display_name: str
@@ -125,7 +125,7 @@ class ServerInfo:
         elif self.config_metadata.domain:
             return f"{self.config_metadata.domain.title()} example"
         else:
-            return "Example resource server"
+            return "Example resources server"
 
     def get_domain_or_empty(self) -> str:  # pragma: no cover
         return self.config_metadata.domain or ""
@@ -168,9 +168,9 @@ class ServerInfo:
         return f"<a href='{self.readme_path}'>README</a>"
 
 
-def visit_resource_server(data: dict, level: int = 1) -> ResourceServerMetadata:  # pragma: no cover
-    """Extract resource server metadata from YAML data."""
-    resource = ResourceServerMetadata()
+def visit_resources_server(data: dict, level: int = 1) -> ResourcesServerMetadata:  # pragma: no cover
+    """Extract resources server metadata from YAML data."""
+    resource = ResourcesServerMetadata()
     if level == 4:
         resource.domain = data.get("domain")
         resource.description = data.get("description")
@@ -182,14 +182,14 @@ def visit_resource_server(data: dict, level: int = 1) -> ResourceServerMetadata:
         for k, v in data.items():
             if level == 2 and k != "resources_servers":
                 continue
-            return visit_resource_server(v, level + 1)
+            return visit_resources_server(v, level + 1)
     return resource
 
 
 def visit_agent_datasets(data: dict) -> AgentDatasetsMetadata:  # pragma: no cover
     agent = AgentDatasetsMetadata()
     for k1, v1 in data.items():
-        if k1.endswith("_simple_agent") and isinstance(v1, dict):
+        if k1.endswith("_agent") and isinstance(v1, dict):
             v2 = v1.get("responses_api_agents")
             if isinstance(v2, dict):
                 # Look for any agent key
@@ -236,7 +236,7 @@ def extract_config_metadata(yaml_path: Path) -> ConfigMetadata:  # pragma: no co
     with yaml_path.open() as f:
         data = yaml.safe_load(f)
 
-    resource_data = visit_resource_server(data)
+    resource_data = visit_resources_server(data)
     agent_data = visit_agent_datasets(data)
 
     return ConfigMetadata.from_yaml_data(resource_data, agent_data)
@@ -261,12 +261,11 @@ def get_example_and_training_server_info() -> tuple[list[ServerInfo], list[Serve
 
         for yaml_file in yaml_files:
             yaml_data = extract_config_metadata(yaml_file)
+            if not yaml_data.types:
+                continue
 
             server_name = subdir.name
             is_example_only = server_name.startswith("example_")
-
-            if not is_example_only and not yaml_data.huggingface_repo_id:
-                continue
 
             display_name = (
                 (server_name[len("example_") :] if is_example_only else server_name).replace("_", " ").title()
@@ -294,7 +293,7 @@ def get_example_and_training_server_info() -> tuple[list[ServerInfo], list[Serve
 
 
 def generate_example_only_table(servers: list[ServerInfo]) -> str:  # pragma: no cover
-    """Generate table for example-only resource servers."""
+    """Generate table for example-only resources servers."""
     col_names = ["Name", "Demonstrates", "Config", "README"]
 
     if not servers:
@@ -319,19 +318,19 @@ def generate_example_only_table(servers: list[ServerInfo]) -> str:  # pragma: no
 
 
 def generate_training_table(servers: list[ServerInfo]) -> str:  # pragma: no cover
-    """Generate table for training resource servers."""
+    """Generate table for training resources servers."""
     col_names = [
-        "Resource Server",
+        "Resources Server",
         "Domain",
-        "Dataset",
         "Description",
         "Value",
-        "Config",
         "Train",
         "Validation",
-        # TODO: Add back in when we can verify resource servers
-        # "Verified",
         "License",
+        "Config",
+        "Dataset",
+        # TODO: Add back in when we can verify resources servers
+        # "Verified",
     ]
     if not servers:
         return handle_empty_table(col_names)
@@ -339,30 +338,26 @@ def generate_training_table(servers: list[ServerInfo]) -> str:  # pragma: no cov
     rows = []
 
     for server in servers:
-        # TODO: Add back in when we can verify resource servers
-        # verified_mark = server.get_verified_mark()
-
         rows.append(
             [
                 server.display_name,
                 server.get_domain_or_empty(),
-                server.get_dataset_link(),
                 server.get_description_or_dash(),
                 server.get_value_or_dash(),
-                server.get_config_link(use_filename=False),
                 server.get_train_mark(),
                 server.get_validation_mark(),
-                # TODO: Add back in when we can verify resource servers
-                # verified_mark,
                 server.get_license_or_dash(),
+                server.get_config_link(use_filename=True),
+                server.get_dataset_link(),
+                # TODO: Add back in when we can verify resources servers
+                # verified_mark,
             ]
         )
 
     rows.sort(
         key=lambda r: (
+            normalize_str(r[0]),  # resources server name
             normalize_str(r[1]),  # domain
-            # TODO: Add back in when we can verify resource servers
-            # 0 if "✓" in r[8] else 1,  # verified first (reverse order for checkmarks...hyphens)
             tuple(normalize_str(cell) for cell in r),
         )
     )

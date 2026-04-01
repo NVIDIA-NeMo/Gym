@@ -28,6 +28,7 @@ from typing import (
 from openai.types.chat import (
     ChatCompletion,
     ChatCompletionAssistantMessageParam,
+    ChatCompletionContentPartImageParam,
     ChatCompletionContentPartTextParam,
     ChatCompletionDeveloperMessageParam,
     ChatCompletionMessage,
@@ -73,6 +74,9 @@ from openai.types.responses.response_output_text_param import Annotation, Logpro
 from openai.types.responses.response_reasoning_item import (
     Summary,
 )
+from openai.types.responses.response_usage import InputTokensDetails as ResponseInputTokensDetails
+from openai.types.responses.response_usage import OutputTokensDetails as ResponseOutputTokensDetails
+from openai.types.responses.response_usage import ResponseUsage
 from openai.types.shared.chat_model import ChatModel
 from openai.types.shared_params import FunctionDefinition
 from pydantic import BaseModel, ConfigDict, Field
@@ -280,8 +284,22 @@ class NeMoGymResponseCreateParamsNonStreaming(BaseModel):
 NeMoGymResponseOutputItem = NeMoGymResponseInputItem
 
 
+class NeMoGymResponseInputTokensDetails(ResponseInputTokensDetails):
+    pass
+
+
+class NeMoGymResponseOutputTokensDetails(ResponseOutputTokensDetails):
+    pass
+
+
+class NeMoGymResponseUsage(ResponseUsage):
+    input_tokens_details: NeMoGymResponseInputTokensDetails
+    output_tokens_details: NeMoGymResponseOutputTokensDetails
+
+
 class NeMoGymResponse(Response):
     output: List[NeMoGymResponseOutputItem]
+    usage: Optional[NeMoGymResponseUsage] = None
 
 
 ########################################
@@ -331,9 +349,19 @@ class NeMoGymChatCompletionContentPartTextParam(ChatCompletionContentPartTextPar
     pass
 
 
+class NeMoGymChatCompletionContentPartImageParam(ChatCompletionContentPartImageParam):
+    pass
+
+
+NeMoGymChatCompletionContentPartParam = Union[
+    NeMoGymChatCompletionContentPartTextParam,
+    NeMoGymChatCompletionContentPartImageParam,
+]
+
+
 class NeMoGymChatCompletionUserMessageParam(ChatCompletionUserMessageParam):
     # Override the iterable which is annoying to work with.
-    content: Required[Union[str, List[NeMoGymChatCompletionContentPartTextParam]]]
+    content: Required[Union[str, List[NeMoGymChatCompletionContentPartParam]]]
 
 
 class NeMoGymChatCompletionSystemMessageParam(ChatCompletionSystemMessageParam):
@@ -458,7 +486,7 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
 
         max_num_tries = MAX_NUM_TRIES
         tries = 0
-        while tries < MAX_NUM_TRIES:
+        while tries < max_num_tries:
             tries += 1
             response = await request(**request_kwargs)
 

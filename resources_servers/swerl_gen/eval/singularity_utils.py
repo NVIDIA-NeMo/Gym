@@ -200,7 +200,7 @@ def _run_instance(
 
 
 # Using SPREAD scheduling so that Ray assigns tasks to as many distinct nodes as possible.
-@ray.remote(scheduling_strategy="SPREAD")
+@ray.remote(scheduling_strategy="SPREAD", runtime_env={"py_executable": sys.executable})
 def compute_score(
     extra_info_base64: str,
     patch_str: str,

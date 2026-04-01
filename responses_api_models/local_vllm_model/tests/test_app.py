@@ -67,11 +67,10 @@ class TestApp:
                 model="test model",
                 return_token_id_information=False,
                 uses_reasoning_parser=False,
-                vllm_serve_env_vars=dict(),
-                vllm_serve_kwargs=dict(),
+                vllm_serve_env_vars={"VLLM_RAY_DP_PACK_STRATEGY": "strict"},
+                vllm_serve_kwargs={"data_parallel_size": 1, "tensor_parallel_size": 1, "pipeline_parallel_size": 1},
             )
 
             get_cache_dir = LocalVLLMModel.get_cache_dir
-            get_hf_token = LocalVLLMModel.get_hf_token
 
         LocalVLLMModel._configure_vllm_serve(DummyLocalVLLMModel())

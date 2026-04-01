@@ -305,7 +305,7 @@ Generate training examples by running your agent on prepared data.
 :::
 
 :::{grid-item-card} {octicon}`rocket;1.5em;sd-mr-1` Train with NeMo RL
-:link: /tutorials/nemo-rl-grpo/index
+:link: /training-tutorials/nemo-rl-grpo/index
 :link-type: doc
 
 Use validated data with NeMo RL for GRPO training.

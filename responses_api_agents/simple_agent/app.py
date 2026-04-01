@@ -19,6 +19,8 @@ from fastapi import Request, Response
 from pydantic import ConfigDict, ValidationError
 
 from nemo_gym.base_resources_server import (
+    AggregateMetrics,
+    AggregateMetricsRequest,
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
@@ -73,6 +75,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
 
         new_outputs = []
+        usage = None
         step = 0
         model_server_cookies = None  # update the cookies on every model response
         resources_server_cookies = request.cookies  # update the cookies on every resources server response
@@ -100,6 +103,19 @@ class SimpleAgent(SimpleResponsesAPIAgent):
 
             output = model_response.output
             new_outputs.extend(output)
+
+            if not usage:
+                usage = model_response.usage
+                model_response.usage = None
+
+            if usage and model_response.usage:
+                usage.input_tokens += model_response.usage.input_tokens
+                usage.output_tokens += model_response.usage.output_tokens
+                usage.total_tokens += model_response.usage.total_tokens
+
+                # TODO support more advanced token details
+                usage.input_tokens_details.cached_tokens = 0
+                usage.output_tokens_details.reasoning_tokens = 0
 
             if model_response.incomplete_details and model_response.incomplete_details.reason == "max_output_tokens":
                 break
@@ -137,6 +153,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             response.set_cookie(k, v)
 
         model_response.output = new_outputs
+        model_response.usage = usage
         return model_response
 
     async def run(self, request: Request, body: SimpleAgentRunRequest) -> SimpleAgentVerifyResponse:
@@ -172,6 +189,16 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         )
         await raise_for_status(verify_response)
         return SimpleAgentVerifyResponse.model_validate(await get_response_json(verify_response))
+
+    async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
+        """Proxy aggregate_metrics to the resources server."""
+        response = await self.server_client.post(
+            server_name=self.config.resources_server.name,
+            url_path="/aggregate_metrics",
+            json=body,
+        )
+        await raise_for_status(response)
+        return AggregateMetrics.model_validate(await get_response_json(response))
 
 
 if __name__ == "__main__":

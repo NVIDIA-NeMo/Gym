@@ -16,7 +16,6 @@ from copy import deepcopy
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
-from omegaconf import OmegaConf
 from pytest import approx, fixture
 
 from nemo_gym.config_types import ModelServerRef
@@ -38,11 +37,8 @@ from resources_servers.equivalence_llm_judge.app import (
 class TestApp:
     @fixture
     def config(self) -> LLMJudgeResourcesServerConfig:
-        # Load judge template from YAML so tests mirror runtime config
-        yaml_path = Path(__file__).resolve().parents[1] / "configs" / "equivalence_llm_judge.yaml"
-        yaml_cfg = OmegaConf.load(str(yaml_path))
-        judge_template: str = (
-            yaml_cfg.equivalence_llm_judge.resources_servers.equivalence_llm_judge.judge_prompt_template
+        judge_prompt_template_fpath = str(
+            Path(__file__).resolve().parents[1] / "prompt_templates/equivalence_llm_judge.txt"
         )
 
         cfg = LLMJudgeResourcesServerConfig(
@@ -51,7 +47,7 @@ class TestApp:
             entrypoint="",
             judge_model_server=ModelServerRef(type="responses_api_models", name="judge"),
             judge_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
-            judge_prompt_template=judge_template,
+            judge_prompt_template_fpath=judge_prompt_template_fpath,
         )
         cfg.judge_equal_label = "[[A=B]]"
         cfg.judge_not_equal_label = "[[A!=B]]"

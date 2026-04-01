@@ -1,0 +1,106 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+[project]
+name = "local-vllm-model"
+version = "0.2.0rc0"
+requires-python = ">=3.12"
+dependencies = [
+    "nemo-gym[dev]",
+    # VLMEvalKit dependencies
+    "accelerate",
+    "anls>=0.0.2",
+    # We need to remove this runtime restriction otherwise Gym's hydra won't work properly
+    # "antlr4-python3-runtime==4.11.1",
+    "apted>=1.0.3",
+    "bert_score",
+    "cairosvg",
+    "colormath>=3.0.0",
+    "datasets",
+    # Original VLMEvalKit uses decord which is not compatible with MacOS
+    # "decord>=0.6.0",
+    "decord2>=3.0.0",
+    "distance>=0.1.3",
+    "dotenv",
+    "editdistance>=0.8.1",
+    "einops",
+    # for gemini api
+    "google-genai",
+    "gradio",
+    "huggingface_hub",
+    "imageio",
+    "ipdb",
+    "jieba>=0.42.1",
+    "json_repair",
+    "levenshtein>=0.27.1",
+    "lpips",
+    "lxml>=6.0.2",
+    "math-verify",
+    "matplotlib",
+    "nltk",
+    "num2words",
+    "numpy",
+    "omegaconf>=2.4.0.dev4",
+    "openai",
+    "openai-clip",
+    "opencv-python>=4.7.0.72",
+    "openpyxl",
+    "pandas",
+    "pdf2image>=1.17.0",
+    "pillow",
+    "polygon3>=3.0.9.1",
+    "portalocker",
+    "protobuf",
+    "pylatexenc==2.10",
+    "python-dotenv",
+    "qwen_vl_utils",
+    "requests",
+    "rich",
+    "scikit-image",
+    "scikit-learn",
+    # For UniSVG
+    "sentence_transformers",
+    "sentencepiece",
+    "setuptools",
+    "sty",
+    "sympy",
+    "tabulate",
+    "tiktoken",
+    "timeout-decorator",
+    "timm",
+    "torch",
+    # For SArena
+    "torchmetrics",
+    "torchvision",
+    "tqdm",
+    "transformers",
+    "typing_extensions",
+    "validators",
+    "xlsxwriter",
+    "zss>=1.2.0",
+    # Somehow this is missing from VLMEvalKit requirements, possibly due to HF updates.
+    "rouge",
+]
+
+[build-system]
+build-backend = "setuptools.build_meta"
+requires = ["setuptools>=61", "setuptools-scm"]
+
+[tool.setuptools.packages.find]
+where = [".."]
+include = ["local_vllm_model"]
+
+[tool.uv.sources]
+nemo-gym = { path = "../..", editable = true }

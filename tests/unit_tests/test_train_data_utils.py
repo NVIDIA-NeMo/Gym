@@ -56,7 +56,7 @@ class TestLoadAndValidateServerInstanceConfigs:
         # Fix the port returned
         find_open_port_mock = MagicMock()
         find_open_port_mock.return_value = 12345
-        monkeypatch.setattr(nemo_gym.global_config, "find_open_port", find_open_port_mock)
+        monkeypatch.setattr(nemo_gym.global_config, "_find_open_port_using_range", find_open_port_mock)
 
         config = TrainDataProcessorConfig(
             output_dirpath="",
@@ -301,7 +301,7 @@ class TestLoadDatasets:
             }
         }
 
-        with raises(SystemExit) as exc_info:
+        with raises(AssertionError, match="GitLab backend selected but missing credentials"):
             processor.load_datasets(
                 config=config,
                 server_instance_configs=[
@@ -312,7 +312,6 @@ class TestLoadDatasets:
                     ),
                 ],
             )
-        assert exc_info.value.code == 1
 
     def test_validate_backend_credentials_missing(self, monkeypatch: MonkeyPatch) -> None:
         monkeypatch.setattr(
@@ -402,6 +401,7 @@ class TestValidateSamplesAndAggregateMetrics:
                     responses_api_agents=server_type_config_dict["responses_api_agents"],
                 ),
             ],
+            overwrite_metrics_conflicts=False,
         )
 
         expected_dataset_type_to_aggregate_metrics = {
@@ -540,6 +540,7 @@ class TestValidateSamplesAndAggregateMetrics:
                         responses_api_agents=server_type_config_dict["responses_api_agents"],
                     ),
                 ],
+                overwrite_metrics_conflicts=False,
             )
 
         assert write_filenames == [Path("resources_servers/example_multi_step/data/example_metrics_conflict.json")]

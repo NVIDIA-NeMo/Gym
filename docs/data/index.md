@@ -33,7 +33,7 @@ Additional fields like `expected_answer` vary by resources server—the componen
 | Field | Added By | Description |
 |-------|----------|-------------|
 | `responses_create_params` | User | Input to the model during training. Contains `input` (messages) and optional `tools`, `temperature`, etc. |
-| `agent_ref` | `ng_prepare_data` | Routes each row to its resource server. Auto-generated during data preparation. |
+| `agent_ref` | `ng_prepare_data` | Routes each row to its resources server. Auto-generated during data preparation. |
 
 ### Optional Fields
 
@@ -44,12 +44,12 @@ Additional fields like `expected_answer` vary by resources server—the componen
 | `id` | Tracking identifier. |
 
 :::{tip}
-Check `resources_servers/<name>/README.md` for fields required by each resource server's `verify()` method.
+Check `resources_servers/<name>/README.md` for fields required by each resources server's `verify()` method.
 :::
 
 ### The `agent_ref` Field
 
-The `agent_ref` field maps each row to a specific resource server. A training dataset can blend multiple resource servers in a single file—`agent_ref` tells NeMo Gym which server handles each row.
+The `agent_ref` field maps each row to a specific resources server. A training dataset can blend multiple resources servers in a single file—`agent_ref` tells NeMo Gym which server handles each row.
 
 ```json
 {
@@ -73,8 +73,10 @@ The `agent_ref` field maps each row to a specific resource server. A training da
 Run this command from the repository root:
 
 ```bash
-ng_prepare_data \
-    "+config_paths=[resources_servers/example_multi_step/configs/example_multi_step.yaml]" \
+config_paths="responses_api_models/vllm_model/configs/vllm_model_for_training.yaml,\
+resources_servers/example_multi_step/configs/example_multi_step.yaml"
+
+ng_prepare_data "+config_paths=[${config_paths}]" \
     +output_dirpath=data/test \
     +mode=example_validation
 ```
@@ -143,8 +145,10 @@ flowchart LR
 To prepare training data with auto-download:
 
 ```bash
-ng_prepare_data \
-    "+config_paths=[resources_servers/workplace_assistant/configs/workplace_assistant.yaml]" \
+config_paths="responses_api_models/vllm_model/configs/vllm_model_for_training.yaml,\
+resources_servers/workplace_assistant/configs/workplace_assistant.yaml"
+
+ng_prepare_data "+config_paths=[${config_paths}]" \
     +output_dirpath=data/workplace_assistant \
     +mode=train_preparation \
     +should_download=true
@@ -184,6 +188,14 @@ Fetch datasets from HuggingFace Hub.
 {bdg-secondary}`huggingface`
 :::
 
+:::{grid-item-card} {octicon}`pencil;1.5em;sd-mr-1` Prompt Config
+:link: prompt-config
+:link-type: doc
+YAML-based prompt templates applied at rollout time.
++++
+{bdg-secondary}`prompts`
+:::
+
 ::::
 
 ## CLI Commands
@@ -192,7 +204,6 @@ Fetch datasets from HuggingFace Hub.
 |---------|-------------|
 | `ng_prepare_data` | Validate and generate metrics |
 | `ng_download_dataset_from_hf` | Download from HuggingFace |
-| `ng_viewer` | View dataset in Gradio UI |
 
 See {doc}`/reference/cli-commands` for details.
 
