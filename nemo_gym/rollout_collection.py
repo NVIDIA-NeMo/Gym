@@ -14,6 +14,7 @@
 # limitations under the License.
 import asyncio
 import json
+import urllib.request
 from asyncio import Future, Semaphore
 from collections import Counter
 from contextlib import nullcontext
@@ -24,7 +25,7 @@ from typing import Any, Dict, Iterator, List, Literal, Optional, Tuple, Union
 
 import orjson
 from omegaconf import OmegaConf
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from tqdm.asyncio import tqdm
 from wandb import Table
 
@@ -52,7 +53,8 @@ from nemo_gym.server_utils import (
 class SharedRolloutCollectionConfig(BaseNeMoGymCLIConfig):
     output_jsonl_fpath: str = Field(description="The output data jsonl file path.")
     num_samples_in_parallel: Optional[int] = Field(
-        default=None, description="Limit the number of concurrent samples running at once."
+        default=None,
+        description="Limit the number of concurrent samples running at once. Set to null/None for unlimited.",
     )
     responses_create_params: Dict[str, Any] = Field(
         default_factory=dict,
@@ -84,6 +86,7 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
     Examples:
 
     ```bash
+    # From a local JSONL file:
     ng_collect_rollouts \
         +agent_name=example_single_tool_call_simple_agent \
         +input_jsonl_fpath=weather_query.jsonl \
@@ -91,6 +94,21 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
         +limit=100 \
         +num_repeats=4 \
         +num_samples_in_parallel=10
+
+    # From a gym URL (fetches all tasks):
+    ng_collect_rollouts \
+        +agent_name=browser_openai_agent \
+        +input_gym_url=https://your-gym-url.com \
+        +output_jsonl_fpath=rollouts.jsonl \
+        +num_repeats=5
+
+    # From a gym URL (specific tasks):
+    ng_collect_rollouts \
+        +agent_name=browser_openai_agent \
+        +input_gym_url=https://your-gym-url.com \
+        "+input_gym_task_id=[TASK-ID-001,TASK-ID-002]" \
+        +output_jsonl_fpath=rollouts.jsonl \
+        +num_repeats=3
     ```
     """
 
@@ -98,8 +116,17 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
         default=None,
         description="The agent to collect rollouts from. If not specified, uses agent_ref from each data row.",
     )
-    input_jsonl_fpath: str = Field(
-        description="The input data source to use to collect rollouts, in the form of a file path to a jsonl file."
+    input_jsonl_fpath: Optional[str] = Field(
+        default=None,
+        description="The input data source to use to collect rollouts, in the form of a file path to a jsonl file.",
+    )
+    input_gym_url: Optional[str] = Field(
+        default=None,
+        description="Base URL of a gym to fetch tasks from via /api/v1/get_expected_state. Alternative to input_jsonl_fpath.",
+    )
+    input_gym_task_id: Optional[List[str]] = Field(
+        default=None,
+        description="If set with input_gym_url, only run specific task ID(s). Use list syntax for multiple: [ID1,ID2]. Errors if any task ID is not found.",
     )
     limit: Optional[int] = Field(
         default=None, description="Maximum number of examples to load and take from the input dataset."
@@ -121,10 +148,81 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
         description="Path to a prompt YAML file. Builds responses_create_params.input from the template at rollout time. Mutually exclusive with pre-populated responses_create_params.input in the JSONL data.",
     )
 
+    @model_validator(mode="after")
+    def validate_input_source(self):
+        if not self.input_jsonl_fpath and not self.input_gym_url:
+            raise ValueError("Either input_jsonl_fpath or input_gym_url must be provided")
+        if self.input_jsonl_fpath and self.input_gym_url:
+            raise ValueError("Cannot provide both input_jsonl_fpath and input_gym_url — use one or the other")
+        if self.input_gym_task_id and not self.input_gym_url:
+            raise ValueError("input_gym_task_id requires input_gym_url to be set")
+        return self
+
     @property
     def materialized_jsonl_fpath(self) -> Path:
         output_fpath = Path(self.output_jsonl_fpath)
         return output_fpath.with_stem(output_fpath.stem + "_materialized_inputs").with_suffix(".jsonl")
+
+
+def _fetch_gym_tasks(gym_url: str, task_ids: Optional[List[str]] = None) -> List[str]:
+    """Fetch tasks from a gym's /api/v1/get_expected_state endpoint.
+
+    Returns a list of JSON strings in the same format as JSONL input lines,
+    each containing responses_create_params and verifier_metadata.
+    """
+    endpoint = f"{gym_url.rstrip('/')}/api/v1/get_expected_state"
+    print(f"Fetching tasks from {endpoint} ...")
+
+    req = urllib.request.Request(endpoint, method="POST", headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            payload = orjson.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        raise ValueError(f"Failed to fetch tasks from {endpoint}: HTTP {e.code} — {e.reason}") from e
+    except urllib.error.URLError as e:
+        raise ValueError(f"Could not connect to gym at {endpoint}: {e.reason}") from e
+
+    verifiers = payload.get("verifiers", {})
+    if not verifiers:
+        raise ValueError(f"No verifiers found in response from {endpoint}")
+
+    if task_ids:
+        missing_ids = [tid for tid in task_ids if tid not in verifiers]
+        if missing_ids:
+            available = ", ".join(sorted(verifiers.keys())[:20])
+            raise ValueError(
+                f"Task ID(s) not found in gym at {gym_url}: {', '.join(missing_ids)}. "
+                f"Available task IDs ({len(verifiers)} total): {available}"
+            )
+        verifiers = {tid: verifiers[tid] for tid in task_ids}
+
+    rows: List[str] = []
+    for tid, details in verifiers.items():
+        prompt = ""
+        if isinstance(details, dict):
+            prompt = details.get("task_statement") or details.get("prompt", "")
+
+        start_url = details.get("start_url", gym_url) if isinstance(details, dict) else gym_url
+
+        viewport = details.get("viewport_size") if isinstance(details, dict) else None
+        if isinstance(viewport, list) and len(viewport) == 2:
+            viewport = {"width": viewport[0], "height": viewport[1]}
+        elif not isinstance(viewport, dict):
+            viewport = {"width": 1280, "height": 720}
+
+        row = {
+            "responses_create_params": {"input": [{"role": "user", "content": prompt}]},
+            "verifier_metadata": {
+                "task_id": tid,
+                "gym_url": gym_url,
+                "start_url": start_url,
+                "viewport": viewport,
+            },
+        }
+        rows.append(orjson.dumps(row).decode())
+
+    print(f"Fetched {len(rows)} task(s) from gym")
+    return rows
 
 
 class RolloutCollectionHelper(BaseModel):
@@ -152,18 +250,22 @@ class RolloutCollectionHelper(BaseModel):
         if num_repeats:
             print(f"Repeating rows {num_repeats} times (in a pattern of abc to aabbcc)!")
 
-        # Load prompt config if specified
         prompt_cfg = None
         if config.prompt_config:
             prompt_cfg = load_prompt_config(config.prompt_config)
             print(f"Using prompt config: {config.prompt_config}")
 
-        with open(config.input_jsonl_fpath) as input_file:
-            rows_iterator: Iterator[str] = tqdm(input_file, desc="Reading rows")
+        if config.input_gym_url:
+            raw_lines = _fetch_gym_tasks(config.input_gym_url, config.input_gym_task_id)
+            rows_iterator: Iterator[str] = tqdm(raw_lines, desc="Reading rows from gym")
             rows_iterator: Iterator[tuple[int, str]] = zip(range_iterator, rows_iterator)
             raw_rows = [(row_idx, row_str, orjson.loads(row_str)) for row_idx, row_str in rows_iterator]
+        else:
+            with open(config.input_jsonl_fpath) as input_file:
+                rows_iterator: Iterator[str] = tqdm(input_file, desc="Reading rows")
+                rows_iterator: Iterator[tuple[int, str]] = zip(range_iterator, rows_iterator)
+                raw_rows = [(row_idx, row_str, orjson.loads(row_str)) for row_idx, row_str in rows_iterator]
 
-        # Validate and apply prompt config before per-row processing
         if prompt_cfg is not None:
             validate_prompt_compatibility([row for _, _, row in raw_rows], prompt_cfg)
             raw_rows = [(idx, s, apply_prompt_to_row(row, prompt_cfg)) for idx, s, row in raw_rows]
@@ -207,22 +309,26 @@ class RolloutCollectionHelper(BaseModel):
 
         return rows
 
-    def _load_from_cache(
-        self, config: RolloutCollectionConfig
-    ) -> Tuple[List[Dict], List[Dict], List[Dict], List[List[str]]]:
+    def _load_from_cache(self, config: RolloutCollectionConfig) -> Tuple[List[Dict], List[Dict]]:
+        """Load cache and return (remaining_input_rows, already_completed_rows).
+
+        Deserializes each cached result line to extract index keys (task_index,
+        rollout_index) for matching against the original input rows.  Full result
+        dicts are not retained — only the key set is kept in memory.
+        """
         with config.materialized_jsonl_fpath.open() as f:
             original_input_rows = list(map(orjson.loads, f))
-        with Path(config.output_jsonl_fpath).open("rb") as f:
-            result_strs = [[line.strip()] for line in f]
-        results = [orjson.loads(p[0]) for p in result_strs]
 
         get_key = lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME])
 
-        seen_rows = set(map(get_key, results))
-        input_rows = [row for row in original_input_rows if get_key(row) not in seen_rows]
+        seen_keys: set = set()
+        with Path(config.output_jsonl_fpath).open("rb") as f:
+            for line in f:
+                result_key = orjson.loads(line)
+                seen_keys.add((result_key[TASK_INDEX_KEY_NAME], result_key[ROLLOUT_INDEX_KEY_NAME]))
 
-        key_to_row = dict(zip(map(get_key, original_input_rows), original_input_rows))
-        rows = [key_to_row[get_key(result)] for result in results]
+        input_rows = [row for row in original_input_rows if get_key(row) not in seen_keys]
+        rows = [row for row in original_input_rows if get_key(row) in seen_keys]
 
         print(
             f"""Resumed from cache. Found:
@@ -231,18 +337,13 @@ class RolloutCollectionHelper(BaseModel):
 - {len(input_rows)} rows that still need to be run"""
         )
 
-        return input_rows, rows, results, result_strs
+        return input_rows, rows
 
     async def run_from_config(self, config: RolloutCollectionConfig) -> Tuple[List[Dict]]:
         output_fpath = Path(config.output_jsonl_fpath)
 
         if config.resume_from_cache and config.materialized_jsonl_fpath.exists() and output_fpath.exists():
-            (
-                input_rows,
-                rows,
-                results,
-                result_strs,
-            ) = self._load_from_cache(config)
+            input_rows, rows = self._load_from_cache(config)
         else:
             if config.resume_from_cache:
                 if not output_fpath.exists():
@@ -255,8 +356,6 @@ class RolloutCollectionHelper(BaseModel):
                 print("Clearing output fpath since `resume_from_cache=False`!")
 
             rows: List[Dict] = []
-            results: List[Dict] = []
-            result_strs: List[List[str]] = []
 
             input_rows = self._preprocess_rows_from_config(config)
             # Returned rows are sorted by (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME])
@@ -277,6 +376,8 @@ class RolloutCollectionHelper(BaseModel):
         pcts_to_print = [20, 40, 60, 80, 90, 95, 98, 99, 100]
         counts_left = Counter(r[AGENT_REF_KEY_NAME]["name"] for r in input_rows)
         results_file = output_fpath.open("ab")
+        # Track how many new results we've written in this run (rows from cache are already in rows).
+        initial_rows_len = len(rows)
         for future in self.run_examples(input_rows, semaphore=semaphore):
             row, result = await future
 
@@ -284,17 +385,21 @@ class RolloutCollectionHelper(BaseModel):
             result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
             result[AGENT_REF_KEY_NAME] = row[AGENT_REF_KEY_NAME]
 
-            rows.append(row)
-            results.append(result)
-            result_strs.append([orjson.dumps(result)])
-            results_file.write(result_strs[-1][0] + b"\n")
+            # Write immediately and release the result dict so GC can reclaim it.
+            # For CUA rollouts each result holds the full trajectory with all screenshots,
+            # so accumulating them in-memory would exhaust RAM over large collection runs.
+            result_bytes = orjson.dumps(result)
+            results_file.write(result_bytes + b"\n")
             results_file.flush()
+
+            rows.append(row)
 
             counts_left[row[AGENT_REF_KEY_NAME]["name"]] -= 1
             if counts_left[row[AGENT_REF_KEY_NAME]["name"]] <= 0:
                 counts_left.pop(row[AGENT_REF_KEY_NAME]["name"])
 
-            current_pct = 100 * len(results) / len(input_rows)
+            newly_completed = len(rows) - initial_rows_len
+            current_pct = 100 * newly_completed / len(input_rows)
             if pcts_to_print and current_pct >= pcts_to_print[0]:
                 while pcts_to_print and current_pct >= pcts_to_print[0]:
                     pcts_to_print.pop(0)
@@ -306,10 +411,15 @@ class RolloutCollectionHelper(BaseModel):
 
         results_file.close()
 
+        # Re-read all results from disk (covers both cached results from resume path and
+        # newly written results). Avoids holding large result dicts in memory during collection.
+        with output_fpath.open("rb") as f:
+            results = [orjson.loads(line) for line in f]
+
         if get_wandb_run():  # pragma: no cover
             print("Uploading rollouts to W&B. This may take a few minutes if your data is large.")
+            result_strs = [[orjson.dumps(r)] for r in results]
             get_wandb_run().log({"Rollouts": Table(data=result_strs, columns=["Rollout"])})
-        del result_strs
 
         print("Sorting results to ensure consistent ordering")
         rows.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))

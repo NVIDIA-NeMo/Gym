@@ -1,0 +1,140 @@
+browser_gym_resources_server:
+  resources_servers:
+    browser_gym:
+      entrypoint: app.py
+      domain: agent
+      description: Browser-based CUA environment using Playwright. Models interact with live web pages via screenshots and actions (click, type, scroll, keypress).
+      value: Improve computer-use and web navigation capabilities
+      max_concurrent_browsers: ${max_concurrent_browsers}
+      browser_pool_size: ${browser_pool_size}
+      default_viewport_width: 1280
+      default_viewport_height: 720
+      verified: false
+browser_gym_openai_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: https://api.openai.com/v1
+      openai_api_key: ${cua_openai_api_key}
+      openai_model: computer-use-preview
+      openai_organization: ${cua_openai_org}
+browser_gym_anthropic_sonnet_model:
+  responses_api_models:
+    anthropic_model:
+      entrypoint: app.py
+      anthropic_api_key: ${cua_anthropic_api_key}
+      anthropic_model: claude-sonnet-4-20250514
+browser_gym_anthropic_opus_model:
+  responses_api_models:
+    anthropic_model:
+      entrypoint: app.py
+      anthropic_api_key: ${cua_anthropic_api_key}
+      anthropic_model: claude-opus-4-6
+browser_openai_agent:
+  responses_api_agents:
+    browser_agent:
+      entrypoint: app.py
+      cua_adapter_type: openai
+      cua_model: computer-use-preview
+      max_steps: 250
+      viewport_width: 1280
+      viewport_height: 720
+      cua_debug_trajectories: ${cua_debug_trajectories}
+      cua_debug_output_dir: results/cua_debug_trajectories
+      resources_server:
+        type: resources_servers
+        name: browser_gym_resources_server
+      model_server:
+        type: responses_api_models
+        name: browser_gym_openai_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/browser_gym/data/example.jsonl
+        num_repeats: 1
+        license: Apache 2.0
+browser_anthropic_sonnet_agent:
+  responses_api_agents:
+    browser_agent:
+      entrypoint: app.py
+      cua_adapter_type: anthropic_sonnet
+      cua_model: claude-sonnet-4-20250514
+      cua_is_opus: false
+      cua_max_tokens: 4096
+      cua_turns_to_keep: 8
+      cua_screenshot_turn_limit: 8
+      max_steps: 250
+      viewport_width: 1280
+      viewport_height: 720
+      cua_debug_trajectories: ${cua_debug_trajectories}
+      cua_debug_output_dir: results/cua_debug_trajectories
+      resources_server:
+        type: resources_servers
+        name: browser_gym_resources_server
+      model_server:
+        type: responses_api_models
+        name: browser_gym_anthropic_sonnet_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/browser_gym/data/example.jsonl
+        num_repeats: 1
+        license: Apache 2.0
+browser_anthropic_opus_agent:
+  responses_api_agents:
+    browser_agent:
+      entrypoint: app.py
+      cua_adapter_type: anthropic_opus
+      cua_model: claude-opus-4-6
+      cua_is_opus: true
+      cua_effort_level: high
+      cua_max_tokens: 4096
+      cua_turns_to_keep: 8
+      cua_screenshot_turn_limit: 8
+      max_steps: 250
+      viewport_width: 1280
+      viewport_height: 720
+      cua_debug_trajectories: ${cua_debug_trajectories}
+      cua_debug_output_dir: results/cua_debug_trajectories
+      resources_server:
+        type: resources_servers
+        name: browser_gym_resources_server
+      model_server:
+        type: responses_api_models
+        name: browser_gym_anthropic_opus_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/browser_gym/data/example.jsonl
+        num_repeats: 1
+        license: Apache 2.0
+browser_gym_gemini_model:
+  responses_api_models:
+    gemini_model:
+      entrypoint: app.py
+      gemini_api_key: ${cua_gemini_api_key}
+      gemini_model: gemini-2.5-computer-use-preview-10-2025
+browser_gemini_agent:
+  responses_api_agents:
+    browser_agent:
+      entrypoint: app.py
+      cua_adapter_type: gemini
+      cua_model: gemini-2.5-computer-use-preview-10-2025
+      cua_max_conversation_turns: 8
+      max_steps: 250
+      viewport_width: 1280
+      viewport_height: 720
+      cua_debug_trajectories: ${cua_debug_trajectories}
+      cua_debug_output_dir: results/cua_debug_trajectories
+      resources_server:
+        type: resources_servers
+        name: browser_gym_resources_server
+      model_server:
+        type: responses_api_models
+        name: browser_gym_gemini_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/browser_gym/data/example.jsonl
+        num_repeats: 1
+        license: Apache 2.0
