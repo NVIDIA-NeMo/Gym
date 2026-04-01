@@ -17,6 +17,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from omegaconf import OmegaConf
+from yaml import safe_load
 
 from nemo_gym.benchmarks import list_benchmarks, prepare_benchmark
 
@@ -73,7 +74,9 @@ class TestPrepareBenchmark:
         with (
             patch(
                 "nemo_gym.benchmarks.get_global_config_dict",
-                return_value=_mock_global_config({"config_paths": [str(config_path)]}),
+                return_value=_mock_global_config(
+                    {"config_paths": [str(config_path)], **safe_load(config_path.read_text())}
+                ),
             ),
             patch("nemo_gym.benchmarks.BENCHMARKS_DIR", bench_dir.parent),
             patch("nemo_gym.benchmarks.importlib.import_module", return_value=mock_module),
@@ -88,7 +91,9 @@ class TestPrepareBenchmark:
         with (
             patch(
                 "nemo_gym.benchmarks.get_global_config_dict",
-                return_value=_mock_global_config({"config_paths": [str(config_path)]}),
+                return_value=_mock_global_config(
+                    {"config_paths": [str(config_path)], **safe_load(config_path.read_text())}
+                ),
             ),
             patch("nemo_gym.benchmarks.BENCHMARKS_DIR", bench_dir.parent),
         ):
@@ -103,7 +108,9 @@ class TestPrepareBenchmark:
         with (
             patch(
                 "nemo_gym.benchmarks.get_global_config_dict",
-                return_value=_mock_global_config({"config_paths": [str(config_path)]}),
+                return_value=_mock_global_config(
+                    {"config_paths": [str(config_path)], **safe_load(config_path.read_text())}
+                ),
             ),
             patch("nemo_gym.benchmarks.BENCHMARKS_DIR", bench_dir.parent),
             patch("nemo_gym.benchmarks.importlib.import_module", return_value=mock_module),
