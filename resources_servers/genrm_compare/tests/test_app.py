@@ -12,263 +12,212 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Any, Dict
+"""Tests for GenRM Compare Resources Server."""
+
+import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
-from pytest import approx, fixture
+import pytest
+from pytest import approx
 
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import ServerClient
 from resources_servers.genrm_compare.app import (
     GenRMCompareConfig,
     GenRMCompareRequest,
     GenRMCompareResourcesServer,
+    GenRMCompareResponse,
 )
 
 
-class TestGenRMCompareApp:
-    """Tests for GenRMCompareResourcesServer."""
+class TestGenRMCompareConfig:
+    """Test GenRM compare configuration."""
 
-    @fixture
-    def config(self) -> GenRMCompareConfig:
-        """Create a test configuration."""
-        return GenRMCompareConfig(
-            host="0.0.0.0",
-            port=8080,
+    def test_config_defaults(self):
+        """Test configuration with default values."""
+        config = GenRMCompareConfig(
+            # Required fields from BaseServerConfig
+            host="localhost",
+            port=8000,
+            # Required fields from BaseRunServerConfig
             entrypoint="app.py",
+            # Required fields from BaseResourcesServerConfig
+            domain="rlhf",
+            # GenRMCompareConfig fields
             name="genrm_compare",
             genrm_model_server=ModelServerRef(type="responses_api_models", name="genrm_model"),
-            genrm_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            genrm_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[], max_output_tokens=1024),
+        )
+
+        # Check defaults
+        assert config.comparison_strategy == "circular"
+        assert config.num_judges_per_comparison == 1
+        assert config.use_principle is False
+        assert config.aggregator_method == "simple_tiebreaker"
+        assert config.default_score == 3.0
+        assert config.default_ranking == 3.5
+
+
+class TestGenRMCompareRequest:
+    """Test request/response models."""
+
+    def test_request_creation(self):
+        """Test creating a compare request."""
+        request = GenRMCompareRequest(
+            conversation_history=[{"role": "user", "content": "What is 2+2?"}],
+            response_objs=[
+                {"output": [{"type": "message", "content": [{"type": "output_text", "text": "4"}]}]},
+                {"output": [{"type": "message", "content": [{"type": "output_text", "text": "Four"}]}]},
+            ],
+            principle="Be concise",
+        )
+
+        assert len(request.conversation_history) == 1
+        assert len(request.response_objs) == 2
+        assert request.principle == "Be concise"
+
+    def test_response_creation(self):
+        """Test creating a compare response."""
+        response = GenRMCompareResponse(
+            rewards=[3.5, 4.0],
+            comparison_results=[{"response_i": 0, "response_j": 1, "score_1": 3.0, "score_2": 4.0, "ranking": 4.0}],
+            metrics={"mean_individual_score": 3.5},
+        )
+
+        assert len(response.rewards) == 2
+        assert response.rewards[0] == approx(3.5)
+        assert response.rewards[1] == approx(4.0)
+
+
+class TestGenRMCompareResourcesServer:
+    """Test GenRM Compare Resources Server methods."""
+
+    @pytest.fixture
+    def config(self):
+        """Create a test configuration."""
+        return GenRMCompareConfig(
+            host="localhost",
+            port=8000,
+            entrypoint="app.py",
+            domain="rlhf",
+            name="genrm_compare",
+            genrm_model_server=ModelServerRef(type="responses_api_models", name="genrm_model"),
+            genrm_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[], max_output_tokens=1024),
             comparison_strategy="circular",
             num_judges_per_comparison=1,
-            aggregator_method="simple_tiebreaker",
-            default_score=3.0,
-            default_ranking=3.5,
+            debug_logging=False,
         )
 
-    def _make_response_obj(self, output_text: str) -> Dict[str, Any]:
-        """Helper to create a Response API object."""
-        return {
-            "id": "resp_123",
-            "output": [
-                {
-                    "type": "message",
-                    "content": [{"type": "output_text", "text": output_text}]
-                }
-            ]
-        }
+    def test_single_response_returns_default(self, config):
+        """Single response should return default score."""
+        # model_construct bypasses Pydantic validation; server_client is unused for single-response path
+        server = GenRMCompareResourcesServer.model_construct(config=config, server_client=MagicMock())
 
-    def _make_genrm_response(self, score_1: float, score_2: float, ranking: float) -> Dict[str, Any]:
-        """Helper to create a mock GenRM model response."""
-        return {
-            "id": "genrm_resp",
-            "output": [
-                {
-                    "type": "message",
-                    "content": [
-                        {
-                            "type": "output_text",
-                            "text": f'{{"score_1": {score_1}, "score_2": {score_2}, "ranking": {ranking}}}'
-                        }
-                    ]
-                }
-            ]
-        }
-
-    async def test_compare_single_response_returns_default(self, config: GenRMCompareConfig) -> None:
-        """Single response returns default score (no comparison possible)."""
-        server_mock = MagicMock(spec=ServerClient)
-        rs = GenRMCompareResourcesServer(config=config, server_client=server_mock)
-
-        req = GenRMCompareRequest(
-            conversation_history=[{"role": "user", "content": "Hello"}],
-            response_objs=[self._make_response_obj("Response 1")],
+        # Create request with single response
+        request = GenRMCompareRequest(
+            conversation_history=[{"role": "user", "content": "Hello"}], response_objs=[{"output": []}]
         )
 
-        res = await rs.compare(req)
+        response = asyncio.run(server.compare(request))
 
-        assert len(res.rewards) == 1
-        assert res.rewards[0] == approx(3.0)  # default score
-        # No model calls should be made
-        server_mock.post.assert_not_called()
+        assert len(response.rewards) == 1
+        assert response.rewards[0] == config.default_score
+        assert response.comparison_results is None
+        assert response.metrics is None
 
-    async def test_compare_two_responses_circular(self, config: GenRMCompareConfig) -> None:
-        """Two responses with circular strategy (2 comparisons)."""
-        server_mock = MagicMock(spec=ServerClient)
-        rs = GenRMCompareResourcesServer(config=config, server_client=server_mock)
 
-        # Mock GenRM model responses
-        post_mock = MagicMock()
-        post_mock.json = AsyncMock()
-        server_mock.post = AsyncMock(return_value=post_mock)
+class TestRunSingleComparison:
+    """Tests for GenRMCompareResourcesServer._run_single_comparison."""
 
-        # Circular: (0,1) and (1,0)
-        # First: response 0 is better (score_1=5, score_2=3, ranking=2)
-        # Second: response 0 is better (now as response_2, score_1=3, score_2=5, ranking=5)
-        post_mock.json.side_effect = [
-            self._make_genrm_response(5, 3, 2),  # (0,1): 0 is better
-            self._make_genrm_response(3, 5, 5),  # (1,0): 0 is better (as response_2)
-        ]
+    def _make_response_obj(self, text):
+        return {"output": [{"type": "message", "content": [{"type": "output_text", "text": text}]}]}
 
-        req = GenRMCompareRequest(
-            conversation_history=[{"role": "user", "content": "Hello"}],
-            response_objs=[
-                self._make_response_obj("Good response"),
-                self._make_response_obj("Bad response"),
-            ],
+    def _make_server(self, use_principle=False):
+        config = GenRMCompareConfig(
+            host="localhost",
+            port=8000,
+            entrypoint="app.py",
+            domain="rlhf",
+            name="genrm_compare",
+            genrm_model_server=ModelServerRef(type="responses_api_models", name="genrm_model"),
+            genrm_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[], max_output_tokens=1024),
+            use_principle=use_principle,
+        )
+        mock_server_client = MagicMock()
+        # Return a well-formed GenRM score response
+        mock_http_response = AsyncMock()
+        mock_http_response.json = AsyncMock(
+            return_value={
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [{"type": "output_text", "text": '{"score_1": 4, "score_2": 2, "ranking": 2}'}],
+                    }
+                ]
+            }
+        )
+        mock_server_client.post = AsyncMock(return_value=mock_http_response)
+        server = GenRMCompareResourcesServer.model_construct(config=config, server_client=mock_server_client)
+        return server, mock_server_client
+
+    def _get_sent_body(self, mock_server_client):
+        call_kwargs = mock_server_client.post.call_args.kwargs
+        return call_kwargs["json"]
+
+    def test_responses_passed_via_metadata_not_input(self):
+        """response_1 and response_2 are sent in metadata, not appended to input."""
+        server, mock_client = self._make_server(use_principle=False)
+        conversation = [{"role": "user", "content": "What is 2+2?"}]
+
+        asyncio.run(
+            server._run_single_comparison(
+                conversation,
+                self._make_response_obj("4"),
+                self._make_response_obj("Four"),
+            )
         )
 
-        res = await rs.compare(req)
+        body = self._get_sent_body(mock_client)
+        metadata = body.metadata
+        assert metadata["response_1"] == "4"
+        assert metadata["response_2"] == "Four"
 
-        assert len(res.rewards) == 2
-        # Response 0 should have higher reward than response 1
-        assert res.rewards[0] > res.rewards[1]
+        # input should contain only the conversation history
+        input_roles = [m.role for m in body.input]
+        assert input_roles == ["user"]
+        assert "response_1" not in input_roles
+        assert "response_2" not in input_roles
 
-    async def test_compare_with_tiebreaker(self, config: GenRMCompareConfig) -> None:
-        """Test tiebreaker when scores are equal."""
-        server_mock = MagicMock(spec=ServerClient)
-        rs = GenRMCompareResourcesServer(config=config, server_client=server_mock)
+    def test_principle_passed_via_metadata_when_enabled(self):
+        """principle is sent in metadata when use_principle=True."""
+        server, mock_client = self._make_server(use_principle=True)
+        conversation = [{"role": "user", "content": "Explain gravity."}]
 
-        post_mock = MagicMock()
-        post_mock.json = AsyncMock()
-        server_mock.post = AsyncMock(return_value=post_mock)
-
-        # Equal scores but ranking favors response 0
-        post_mock.json.side_effect = [
-            self._make_genrm_response(3, 3, 2),  # Tied, ranking=2 favors response_1 (idx 0)
-            self._make_genrm_response(3, 3, 5),  # Tied, ranking=5 favors response_2 (idx 0)
-        ]
-
-        req = GenRMCompareRequest(
-            conversation_history=[{"role": "user", "content": "Hello"}],
-            response_objs=[
-                self._make_response_obj("Response A"),
-                self._make_response_obj("Response B"),
-            ],
+        asyncio.run(
+            server._run_single_comparison(
+                conversation,
+                self._make_response_obj("Gravity pulls objects."),
+                self._make_response_obj("Gravity is a force."),
+                principle="Be concise.",
+            )
         )
 
-        res = await rs.compare(req)
+        body = self._get_sent_body(mock_client)
+        assert body.metadata["principle"] == "Be concise."
 
-        assert len(res.rewards) == 2
-        # With tiebreaker applied, response 0 should have higher score
-        assert res.rewards[0] > res.rewards[1]
+    def test_principle_absent_from_metadata_when_disabled(self):
+        """principle key is absent from metadata when use_principle=False."""
+        server, mock_client = self._make_server(use_principle=False)
+        conversation = [{"role": "user", "content": "Hello"}]
 
-    async def test_compare_with_principle(self, config: GenRMCompareConfig) -> None:
-        """Test comparison with principle parameter."""
-        config.use_principle = True
-        server_mock = MagicMock(spec=ServerClient)
-        rs = GenRMCompareResourcesServer(config=config, server_client=server_mock)
-
-        post_mock = MagicMock()
-        post_mock.json = AsyncMock()
-        server_mock.post = AsyncMock(return_value=post_mock)
-
-        post_mock.json.side_effect = [
-            self._make_genrm_response(5, 3, 2),
-            self._make_genrm_response(3, 5, 5),
-        ]
-
-        req = GenRMCompareRequest(
-            conversation_history=[{"role": "user", "content": "Hello"}],
-            response_objs=[
-                self._make_response_obj("Response A"),
-                self._make_response_obj("Response B"),
-            ],
-            principle="The response should be helpful and accurate.",
+        asyncio.run(
+            server._run_single_comparison(
+                conversation,
+                self._make_response_obj("Hi"),
+                self._make_response_obj("Hello there"),
+                principle="Be concise.",  # ignored when use_principle=False
+            )
         )
 
-        res = await rs.compare(req)
-
-        assert len(res.rewards) == 2
-        # Verify model was called (principle should be included in prompts)
-        assert server_mock.post.call_count == 2
-
-    async def test_compare_parse_failure_uses_defaults(self, config: GenRMCompareConfig) -> None:
-        """GenRM output parse failure uses default scores."""
-        server_mock = MagicMock(spec=ServerClient)
-        rs = GenRMCompareResourcesServer(config=config, server_client=server_mock)
-
-        post_mock = MagicMock()
-        post_mock.json = AsyncMock()
-        server_mock.post = AsyncMock(return_value=post_mock)
-
-        # Return invalid JSON that can't be parsed
-        post_mock.json.side_effect = [
-            {"id": "resp", "output": [{"type": "message", "content": [{"type": "output_text", "text": "No JSON here"}]}]},
-            {"id": "resp", "output": [{"type": "message", "content": [{"type": "output_text", "text": "Still no JSON"}]}]},
-        ]
-
-        req = GenRMCompareRequest(
-            conversation_history=[{"role": "user", "content": "Hello"}],
-            response_objs=[
-                self._make_response_obj("Response A"),
-                self._make_response_obj("Response B"),
-            ],
-        )
-
-        res = await rs.compare(req)
-
-        # Both should get default scores since parsing failed
-        assert len(res.rewards) == 2
-        # Scores should be around default (3.0) since parsing failed
-        assert all(2.0 <= r <= 4.0 for r in res.rewards)
-
-    async def test_compare_three_responses_all_pairs(self, config: GenRMCompareConfig) -> None:
-        """Three responses with all_pairs strategy (3 comparisons)."""
-        config.comparison_strategy = "all_pairs"
-        server_mock = MagicMock(spec=ServerClient)
-        rs = GenRMCompareResourcesServer(config=config, server_client=server_mock)
-
-        post_mock = MagicMock()
-        post_mock.json = AsyncMock()
-        server_mock.post = AsyncMock(return_value=post_mock)
-
-        # all_pairs: (0,1), (0,2), (1,2)
-        post_mock.json.side_effect = [
-            self._make_genrm_response(5, 3, 2),  # (0,1): 0 wins
-            self._make_genrm_response(5, 2, 1),  # (0,2): 0 wins
-            self._make_genrm_response(4, 2, 2),  # (1,2): 1 wins
-        ]
-
-        req = GenRMCompareRequest(
-            conversation_history=[{"role": "user", "content": "Hello"}],
-            response_objs=[
-                self._make_response_obj("Best response"),
-                self._make_response_obj("Medium response"),
-                self._make_response_obj("Worst response"),
-            ],
-        )
-
-        res = await rs.compare(req)
-
-        assert len(res.rewards) == 3
-        # Response 0 should be best, response 2 should be worst
-        assert res.rewards[0] > res.rewards[1] > res.rewards[2]
-        # Verify 3 comparisons were made
-        assert server_mock.post.call_count == 3
-
-    async def test_verify_returns_default(self, config: GenRMCompareConfig) -> None:
-        """Verify endpoint returns default score (stub implementation)."""
-        from nemo_gym.base_resources_server import BaseVerifyRequest
-        from nemo_gym.openai_utils import NeMoGymResponse
-
-        server_mock = MagicMock(spec=ServerClient)
-        rs = GenRMCompareResourcesServer(config=config, server_client=server_mock)
-
-        req = BaseVerifyRequest(
-            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
-            response=NeMoGymResponse(
-                id="resp",
-                created_at=0.0,
-                model="m",
-                object="response",
-                output=[],
-                parallel_tool_calls=False,
-                tool_choice="none",
-                tools=[],
-            ),
-        )
-
-        res = await rs.verify(req)
-        assert res.reward == approx(3.0)  # default_score
+        body = self._get_sent_body(mock_client)
+        assert "principle" not in body.metadata

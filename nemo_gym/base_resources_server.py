@@ -17,10 +17,12 @@ from abc import abstractmethod
 from fastapi import FastAPI
 from pydantic import BaseModel
 
+from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
 from nemo_gym.server_utils import BaseRunServerInstanceConfig, BaseServer, SimpleServer
 
 
@@ -52,7 +54,7 @@ class BaseSeedSessionResponse(BaseModel):
     pass
 
 
-class SimpleResourcesServer(BaseResourcesServer, SimpleServer):
+class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleServer):
     config: BaseResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:
@@ -62,6 +64,7 @@ class SimpleResourcesServer(BaseResourcesServer, SimpleServer):
 
         app.post("/seed_session")(self.seed_session)
         app.post("/verify")(self.verify)
+        app.post("/aggregate_metrics")(self.aggregate_metrics)
 
         return app
 
@@ -71,3 +74,15 @@ class SimpleResourcesServer(BaseResourcesServer, SimpleServer):
     @abstractmethod
     async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
         pass
+
+    async def aggregate_metrics(self, body: AggregateMetricsRequest) -> AggregateMetrics:
+        """Compute aggregate metrics from verify responses.
+
+        RewardProfiler provides baseline stats. Override compute_metrics() and/or
+        get_key_metrics() for benchmark-specific customization.
+        """
+        return compute_aggregate_metrics(
+            body.verify_responses,
+            compute_metrics_fn=self.compute_metrics,
+            get_key_metrics_fn=self.get_key_metrics,
+        )

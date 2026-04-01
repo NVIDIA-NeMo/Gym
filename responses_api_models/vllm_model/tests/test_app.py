@@ -868,7 +868,6 @@ class TestApp:
                     "required": ["order_id"],
                 },
                 "description": "Get the current status for a given order",
-                "strict": True,
             },
             {
                 "name": "get_delivery_date",
@@ -883,7 +882,6 @@ class TestApp:
                     "required": ["order_id"],
                 },
                 "description": "Get the estimated delivery date for a given order",
-                "strict": True,
             },
         ]
         assert expected_sent_tools == actual_sent_tools
@@ -1351,7 +1349,6 @@ class TestApp:
                     },
                     "required": ["order_id", "date"],
                 },
-                "strict": True,
             }
         ]
         assert expected_sent_tools == actual_sent_tools
@@ -1796,6 +1793,7 @@ class TestApp:
                 "content": "Sure, one sec.",
                 "tool_calls": [],
                 "reasoning_content": "First reasoning item",
+                "reasoning": "First reasoning item",
             },
             {"content": [{"text": "cool", "type": "text"}], "role": "user"},
             {
@@ -1889,6 +1887,7 @@ class TestApp:
                 "content": "Sure, one sec.",
                 "tool_calls": [],
                 "reasoning_content": "First reasoning item",
+                "reasoning": "First reasoning item",
             },
             {"content": [{"text": "cool", "type": "text"}], "role": "user"},
             {
@@ -1913,6 +1912,7 @@ class TestApp:
                     },
                 ],
                 "reasoning_content": "Gathering order status and delivery info...",
+                "reasoning": "Gathering order status and delivery info...",
             },
             {"content": [{"text": "user", "type": "text"}], "role": "user"},
         ]
@@ -2002,6 +2002,7 @@ class TestApp:
                 "content": "Sure, one sec.",
                 "tool_calls": [],
                 "reasoning_content": "First reasoning item",
+                "reasoning": "First reasoning item",
             },
             {"content": [{"text": "cool", "type": "text"}], "role": "user"},
             {
@@ -2026,6 +2027,7 @@ class TestApp:
                     },
                 ],
                 "reasoning_content": "Gathering order status and delivery info...",
+                "reasoning": "Gathering order status and delivery info...",
             },
             {"content": [{"text": "user", "type": "text"}], "role": "user"},
             {
@@ -2033,6 +2035,464 @@ class TestApp:
                 "content": "",
                 "tool_calls": [],
                 "reasoning_content": "None content test",
+                "reasoning": "None content test",
+            },
+            {"content": [{"text": "user", "type": "text"}], "role": "user"},
+        ]
+        actual_messages = mock_method.call_args.kwargs["messages"]
+        assert expected_messages == actual_messages
+
+    def test_responses_reasoning_parser_reasoning(self, monkeypatch: MonkeyPatch):
+        # See the TODO wrt reasoning_content in vllm_model/app.py
+        server = self._setup_server(monkeypatch)
+        server.config.uses_reasoning_parser = True
+
+        app = server.setup_webserver()
+        client = TestClient(app)
+
+        # START: First turn
+        mock_chat_completion = NeMoGymChatCompletion(
+            id="chtcmpl-123",
+            object="chat.completion",
+            created=FIXED_TIME,
+            model="dummy_model",
+            choices=[
+                NeMoGymChoice(
+                    index=0,
+                    finish_reason="tool_calls",
+                    message=NeMoGymChatCompletionMessage(
+                        role="assistant",
+                        content=" hello hello",
+                        tool_calls=[
+                            NeMoGymChatCompletionMessageToolCall(
+                                id="call_123",
+                                function=NeMoGymFunction(
+                                    name="get_order_status",
+                                    arguments='{"order_id": "123"}',
+                                ),
+                                type="function",
+                            ),
+                            NeMoGymChatCompletionMessageToolCall(
+                                id="call_234",
+                                function=NeMoGymFunction(
+                                    name="get_delivery_date",
+                                    arguments='{"order_id": "234"}',
+                                ),
+                                type="function",
+                            ),
+                        ],
+                        reasoning="Gathering order status and delivery info...",
+                    ),
+                )
+            ],
+        )
+
+        input_messages = [
+            NeMoGymEasyInputMessage(
+                type="message",
+                role="user",
+                content=[NeMoGymResponseInputText(text="Check my order status", type="input_text")],
+                status="completed",
+            ),
+            NeMoGymResponseReasoningItem(
+                id="rs_123",
+                status="completed",
+                type="reasoning",
+                summary=[
+                    NeMoGymSummary(
+                        type="summary_text",
+                        text="First reasoning item",
+                    )
+                ],
+            ),
+            NeMoGymEasyInputMessage(
+                type="message",
+                role="assistant",
+                content=[NeMoGymResponseInputText(text="Sure, one sec.", type="input_text")],
+                status="completed",
+            ),
+            NeMoGymEasyInputMessage(
+                type="message",
+                role="user",
+                content=[NeMoGymResponseInputText(text="cool", type="input_text")],
+                status="completed",
+            ),
+            NeMoGymEasyInputMessage(
+                type="message",
+                role="assistant",
+                content=[NeMoGymResponseInputText(text="I'm still checking", type="input_text")],
+                status="completed",
+            ),
+            NeMoGymEasyInputMessage(
+                type="message",
+                role="user",
+                content=[NeMoGymResponseInputText(text="ok", type="input_text")],
+                status="completed",
+            ),
+        ]
+
+        input_tools = [
+            NeMoGymFunctionToolParam(
+                name="get_order_status",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "order_id": {
+                            "type": "string",
+                            "description": "The ID of the order",
+                        },
+                    },
+                    "required": ["order_id"],
+                },
+                type="function",
+                description="Get the current status for a given order",
+                strict=True,
+            ),
+            NeMoGymFunctionToolParam(
+                name="get_delivery_date",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "order_id": {
+                            "type": "string",
+                            "description": "The ID of the order",
+                        },
+                    },
+                    "required": ["order_id"],
+                },
+                type="function",
+                description="Get the estimated delivery date for a given order",
+                strict=True,
+            ),
+        ]
+
+        expected_response = NeMoGymResponse(
+            **COMMON_RESPONSE_PARAMS,
+            id="resp_123",
+            object="response",
+            tools=input_tools,
+            created_at=FIXED_TIME,
+            model="dummy_model",
+            output=[
+                NeMoGymResponseReasoningItem(
+                    id="rs_123",
+                    status="completed",
+                    type="reasoning",
+                    summary=[
+                        NeMoGymSummary(
+                            type="summary_text",
+                            text="Gathering order status and delivery info...",
+                        )
+                    ],
+                ),
+                NeMoGymResponseOutputMessage(
+                    id="msg_123",
+                    status="completed",
+                    type="message",
+                    content=[
+                        NeMoGymResponseOutputText(
+                            type="output_text",
+                            text=" hello hello",
+                            annotations=[],
+                            logprobs=None,
+                        )
+                    ],
+                ),
+                NeMoGymResponseFunctionToolCall(
+                    type="function_call",
+                    name="get_order_status",
+                    arguments='{"order_id": "123"}',
+                    call_id="call_123",
+                    status="completed",
+                    id="call_123",
+                ),
+                NeMoGymResponseFunctionToolCall(
+                    type="function_call",
+                    name="get_delivery_date",
+                    arguments='{"order_id": "234"}',
+                    call_id="call_234",
+                    status="completed",
+                    id="call_234",
+                ),
+            ],
+        )
+
+        mock_method = AsyncMock(return_value=mock_chat_completion.model_dump())
+        monkeypatch.setattr(
+            server._clients[0].__class__,
+            "create_chat_completion",
+            mock_method,
+        )
+
+        monkeypatch.setattr("responses_api_models.vllm_model.app.time", lambda: FIXED_TIME)
+        monkeypatch.setattr("responses_api_models.vllm_model.app.uuid4", lambda: FakeUUID())
+
+        request_body = NeMoGymResponseCreateParamsNonStreaming(
+            input=input_messages,
+            tools=input_tools,
+        )
+
+        response = client.post(
+            "/v1/responses",
+            json=request_body.model_dump(exclude_unset=True, mode="json"),
+        )
+        assert response.status_code == 200
+
+        data = response.json()
+
+        expected_dict = expected_response.model_dump()
+        assert data == expected_dict
+
+        expected_messages = [
+            {"content": [{"text": "Check my order status", "type": "text"}], "role": "user"},
+            {
+                "role": "assistant",
+                "content": "Sure, one sec.",
+                "tool_calls": [],
+                "reasoning_content": "First reasoning item",
+                "reasoning": "First reasoning item",
+            },
+            {"content": [{"text": "cool", "type": "text"}], "role": "user"},
+            {
+                "role": "assistant",
+                "content": "I'm still checking",
+                "tool_calls": [],
+            },
+            {"content": [{"text": "ok", "type": "text"}], "role": "user"},
+        ]
+        actual_messages = mock_method.call_args.kwargs["messages"]
+        assert expected_messages == actual_messages
+
+        # START: Second turn
+        input_messages = [
+            *input_messages,
+            *data["output"],
+            NeMoGymEasyInputMessage(
+                type="message",
+                role="user",
+                content=[NeMoGymResponseInputText(text="user", type="input_text")],
+                status="completed",
+            ),
+        ]
+        request_body = NeMoGymResponseCreateParamsNonStreaming(
+            input=input_messages,
+            tools=input_tools,
+        )
+
+        mock_chat_completion = NeMoGymChatCompletion(
+            id="chtcmpl-123",
+            object="chat.completion",
+            created=FIXED_TIME,
+            model="dummy_model",
+            choices=[
+                NeMoGymChoice(
+                    index=0,
+                    finish_reason="tool_calls",
+                    message=NeMoGymChatCompletionMessage(
+                        role="assistant",
+                        # Test the None path ehre
+                        content=None,
+                        tool_calls=[],
+                        reasoning="None content test",
+                    ),
+                )
+            ],
+        )
+        mock_method = AsyncMock(return_value=mock_chat_completion.model_dump())
+        monkeypatch.setattr(
+            server._clients[0].__class__,
+            "create_chat_completion",
+            mock_method,
+        )
+
+        response = client.post(
+            "/v1/responses",
+            json=request_body.model_dump(exclude_unset=True, mode="json"),
+        )
+        assert response.status_code == 200
+
+        data = response.json()
+
+        expected_response = NeMoGymResponse(
+            **COMMON_RESPONSE_PARAMS,
+            id="resp_123",
+            object="response",
+            tools=input_tools,
+            created_at=FIXED_TIME,
+            model="dummy_model",
+            output=[
+                NeMoGymResponseReasoningItem(
+                    id="rs_123",
+                    status="completed",
+                    type="reasoning",
+                    summary=[
+                        NeMoGymSummary(
+                            type="summary_text",
+                            text="None content test",
+                        )
+                    ],
+                ),
+            ],
+        )
+        expected_dict = expected_response.model_dump()
+        assert data == expected_dict
+
+        expected_messages = [
+            {"content": [{"text": "Check my order status", "type": "text"}], "role": "user"},
+            {
+                "role": "assistant",
+                "content": "Sure, one sec.",
+                "tool_calls": [],
+                "reasoning_content": "First reasoning item",
+                "reasoning": "First reasoning item",
+            },
+            {"content": [{"text": "cool", "type": "text"}], "role": "user"},
+            {
+                "role": "assistant",
+                "content": "I'm still checking",
+                "tool_calls": [],
+            },
+            {"content": [{"text": "ok", "type": "text"}], "role": "user"},
+            {
+                "role": "assistant",
+                "content": " hello hello",
+                "tool_calls": [
+                    {
+                        "id": "call_123",
+                        "function": {"arguments": '{"order_id": "123"}', "name": "get_order_status"},
+                        "type": "function",
+                    },
+                    {
+                        "id": "call_234",
+                        "function": {"arguments": '{"order_id": "234"}', "name": "get_delivery_date"},
+                        "type": "function",
+                    },
+                ],
+                "reasoning_content": "Gathering order status and delivery info...",
+                "reasoning": "Gathering order status and delivery info...",
+            },
+            {"content": [{"text": "user", "type": "text"}], "role": "user"},
+        ]
+        actual_messages = mock_method.call_args.kwargs["messages"]
+        assert expected_messages == actual_messages
+
+        # START: Third turn
+        input_messages = [
+            *input_messages,
+            *data["output"],
+            NeMoGymEasyInputMessage(
+                type="message",
+                role="user",
+                content=[NeMoGymResponseInputText(text="user", type="input_text")],
+                status="completed",
+            ),
+        ]
+        request_body = NeMoGymResponseCreateParamsNonStreaming(
+            input=input_messages,
+            tools=input_tools,
+        )
+
+        mock_chat_completion = NeMoGymChatCompletion(
+            id="chtcmpl-123",
+            object="chat.completion",
+            created=FIXED_TIME,
+            model="dummy_model",
+            choices=[
+                NeMoGymChoice(
+                    index=0,
+                    finish_reason="tool_calls",
+                    message=NeMoGymChatCompletionMessage(
+                        role="assistant",
+                        # Test the None path ehre
+                        content="None reasoning test",
+                        tool_calls=[],
+                        reasoning=None,
+                    ),
+                )
+            ],
+        )
+        mock_method = AsyncMock(return_value=mock_chat_completion.model_dump())
+        monkeypatch.setattr(
+            server._clients[0].__class__,
+            "create_chat_completion",
+            mock_method,
+        )
+
+        response = client.post(
+            "/v1/responses",
+            json=request_body.model_dump(exclude_unset=True, mode="json"),
+        )
+        assert response.status_code == 200
+
+        data = response.json()
+
+        expected_response = NeMoGymResponse(
+            **COMMON_RESPONSE_PARAMS,
+            id="resp_123",
+            object="response",
+            tools=input_tools,
+            created_at=FIXED_TIME,
+            model="dummy_model",
+            output=[
+                NeMoGymResponseOutputMessage(
+                    id="msg_123",
+                    status="completed",
+                    type="message",
+                    content=[
+                        NeMoGymResponseOutputText(
+                            type="output_text",
+                            text="None reasoning test",
+                            annotations=[],
+                            logprobs=None,
+                        )
+                    ],
+                ),
+            ],
+        )
+        expected_dict = expected_response.model_dump()
+        assert data == expected_dict
+
+        expected_messages = [
+            {"content": [{"text": "Check my order status", "type": "text"}], "role": "user"},
+            {
+                "role": "assistant",
+                "content": "Sure, one sec.",
+                "tool_calls": [],
+                "reasoning_content": "First reasoning item",
+                "reasoning": "First reasoning item",
+            },
+            {"content": [{"text": "cool", "type": "text"}], "role": "user"},
+            {
+                "role": "assistant",
+                "content": "I'm still checking",
+                "tool_calls": [],
+            },
+            {"content": [{"text": "ok", "type": "text"}], "role": "user"},
+            {
+                "role": "assistant",
+                "content": " hello hello",
+                "tool_calls": [
+                    {
+                        "id": "call_123",
+                        "function": {"arguments": '{"order_id": "123"}', "name": "get_order_status"},
+                        "type": "function",
+                    },
+                    {
+                        "id": "call_234",
+                        "function": {"arguments": '{"order_id": "234"}', "name": "get_delivery_date"},
+                        "type": "function",
+                    },
+                ],
+                "reasoning_content": "Gathering order status and delivery info...",
+                "reasoning": "Gathering order status and delivery info...",
+            },
+            {"content": [{"text": "user", "type": "text"}], "role": "user"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [],
+                "reasoning_content": "None content test",
+                "reasoning": "None content test",
             },
             {"content": [{"text": "user", "type": "text"}], "role": "user"},
         ]
@@ -2597,3 +3057,182 @@ class TestVLLMConverter:
             ),
         ]
         assert expected_messages == actual_messages
+
+    def test_metadata_chat_template_kwargs_override(self, monkeypatch: MonkeyPatch):
+        config = VLLMModelConfig(
+            host="0.0.0.0",
+            port=8081,
+            base_url="http://api.openai.com/v1",
+            api_key="dummy_key",  # pragma: allowlist secret
+            model="dummy_model",
+            entrypoint="",
+            name="",
+            return_token_id_information=False,
+            uses_reasoning_parser=False,
+            chat_template_kwargs={"enable_thinking": True, "some_other_param": "value1"},
+        )
+        server = VLLMModel(config=config, server_client=MagicMock(spec=ServerClient))
+        app = server.setup_webserver()
+
+        mock_chat_completion = NeMoGymChatCompletion(
+            id="chtcmpl",
+            object="chat.completion",
+            created=FIXED_TIME,
+            model="dummy_model",
+            choices=[
+                NeMoGymChoice(
+                    index=0,
+                    finish_reason="stop",
+                    message=NeMoGymChatCompletionMessage(
+                        role="assistant",
+                        content="response",
+                        tool_calls=[],
+                    ),
+                )
+            ],
+        )
+
+        captured_kwargs = {}
+
+        async def mock_create_chat_completion(**kwargs):
+            captured_kwargs.update(kwargs)
+            return mock_chat_completion.model_dump()
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=mock_create_chat_completion)
+        server._clients = [mock_client]
+
+        request_body_with_override = NeMoGymResponseCreateParamsNonStreaming(
+            input=[
+                NeMoGymEasyInputMessage(
+                    type="message",
+                    role="user",
+                    content="hello",
+                )
+            ],
+            metadata={"chat_template_kwargs": json.dumps({"enable_thinking": False})},
+        )
+
+        client = TestClient(app)
+        response = client.post(
+            "/v1/responses",
+            json=request_body_with_override.model_dump(exclude_unset=True, mode="json"),
+        )
+        assert response.status_code == 200
+
+        assert "chat_template_kwargs" in captured_kwargs
+        assert captured_kwargs["chat_template_kwargs"]["enable_thinking"] is False
+        assert captured_kwargs["chat_template_kwargs"]["some_other_param"] == "value1"
+
+        captured_kwargs.clear()
+        request_body_no_override = NeMoGymResponseCreateParamsNonStreaming(
+            input=[
+                NeMoGymEasyInputMessage(
+                    type="message",
+                    role="user",
+                    content="hello",
+                )
+            ],
+        )
+
+        response = client.post(
+            "/v1/responses",
+            json=request_body_no_override.model_dump(exclude_unset=True, mode="json"),
+        )
+        assert response.status_code == 200
+
+        assert "chat_template_kwargs" in captured_kwargs
+        assert captured_kwargs["chat_template_kwargs"]["enable_thinking"] is True
+        assert captured_kwargs["chat_template_kwargs"]["some_other_param"] == "value1"
+
+        captured_kwargs.clear()
+        request_body_multi_override = NeMoGymResponseCreateParamsNonStreaming(
+            input=[
+                NeMoGymEasyInputMessage(
+                    type="message",
+                    role="user",
+                    content="hello",
+                )
+            ],
+            metadata={
+                "chat_template_kwargs": json.dumps(
+                    {"enable_thinking": False, "some_other_param": "value2", "new_param": "new"}
+                )
+            },
+        )
+
+        response = client.post(
+            "/v1/responses",
+            json=request_body_multi_override.model_dump(exclude_unset=True, mode="json"),
+        )
+        assert response.status_code == 200
+
+        assert captured_kwargs["chat_template_kwargs"]["enable_thinking"] is False
+        assert captured_kwargs["chat_template_kwargs"]["some_other_param"] == "value2"
+        assert captured_kwargs["chat_template_kwargs"]["new_param"] == "new"
+
+    def test_metadata_extra_body_override(self, monkeypatch: MonkeyPatch):
+        config = VLLMModelConfig(
+            host="0.0.0.0",
+            port=8081,
+            base_url="http://api.openai.com/v1",
+            api_key="dummy_key",  # pragma: allowlist secret
+            model="dummy_model",
+            entrypoint="",
+            name="",
+            return_token_id_information=False,
+            uses_reasoning_parser=False,
+            extra_body={"guided_json": '{"type": "object"}', "min_tokens": 10},
+        )
+        server = VLLMModel(config=config, server_client=MagicMock(spec=ServerClient))
+        app = server.setup_webserver()
+
+        mock_chat_completion = NeMoGymChatCompletion(
+            id="chtcmpl",
+            object="chat.completion",
+            created=FIXED_TIME,
+            model="dummy_model",
+            choices=[
+                NeMoGymChoice(
+                    index=0,
+                    finish_reason="stop",
+                    message=NeMoGymChatCompletionMessage(
+                        role="assistant",
+                        content="response",
+                        tool_calls=[],
+                    ),
+                )
+            ],
+        )
+
+        captured_kwargs = {}
+
+        async def mock_create_chat_completion(**kwargs):
+            captured_kwargs.update(kwargs)
+            return mock_chat_completion.model_dump()
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=mock_create_chat_completion)
+        server._clients = [mock_client]
+
+        request_body_with_override = NeMoGymResponseCreateParamsNonStreaming(
+            input=[
+                NeMoGymEasyInputMessage(
+                    type="message",
+                    role="user",
+                    content="hello",
+                )
+            ],
+            metadata={"extra_body": json.dumps({"min_tokens": 20, "new_param": "value"})},
+        )
+
+        client = TestClient(app)
+        response = client.post(
+            "/v1/responses",
+            json=request_body_with_override.model_dump(exclude_unset=True, mode="json"),
+        )
+        assert response.status_code == 200
+
+        assert captured_kwargs["guided_json"] == '{"type": "object"}'
+        assert captured_kwargs["min_tokens"] == 20
+        assert captured_kwargs["new_param"] == "value"

@@ -19,7 +19,6 @@ import resource
 import sys
 from abc import abstractmethod
 from contextlib import asynccontextmanager
-from io import StringIO
 from logging import Filter as LoggingFilter
 from logging import LogRecord, getLogger
 from os import environ, getenv
@@ -33,7 +32,6 @@ import orjson
 import ray
 import requests
 import uvicorn
-import yappi
 from aiohttp import (
     ClientResponse,
     ClientResponseError,
@@ -63,12 +61,12 @@ from nemo_gym.global_config import (
     HEAD_SERVER_KEY_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
     RAY_HEAD_NODE_ADDRESS_KEY_NAME,
-    RAY_NAMESPACE_KEY_NAME,
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
     get_first_server_config_dict,
     get_global_config_dict,
 )
+from nemo_gym.profiling import Profiler
 
 
 _GLOBAL_AIOHTTP_CLIENT: Union[None, ClientSession] = None
@@ -234,13 +232,7 @@ class ServerClient(BaseModel):
             ) from e
 
         global_config_dict_yaml = response.content.decode()
-        # TODO: json.loads below can fail.
-        try:
-            global_config_dict = OmegaConf.create(json.loads(global_config_dict_yaml))
-        except Exception as e:
-            print(f"Failed to load global config dict yaml: {type(e).__name__} {e}")
-            print("Retrying without json.loads...", flush=True)
-            global_config_dict = OmegaConf.create(global_config_dict_yaml)
+        global_config_dict = OmegaConf.create(json.loads(global_config_dict_yaml))
 
         return cls(head_server_config=head_server_config, global_config_dict=global_config_dict)
 
@@ -358,6 +350,9 @@ class UvicornLoggingConfig(BaseModel):
     uvicorn_logging_show_200_ok: bool = False
 
 
+_NEMO_GYM_STARTED_RAY_CLUSTER: bool = False
+
+
 def initialize_ray() -> None:
     """
     Initialize ray cluster in a process.
@@ -372,7 +367,6 @@ def initialize_ray() -> None:
 
     global_config_dict = get_global_config_dict()
     ray_head_node_address = global_config_dict.get(RAY_HEAD_NODE_ADDRESS_KEY_NAME)
-    ray_namespace = global_config_dict.get(RAY_NAMESPACE_KEY_NAME, None)
     ray_init_kwargs = dict(ignore_reinit_error=True)
 
     if ray_head_node_address:
@@ -380,11 +374,8 @@ def initialize_ray() -> None:
         ray_init_kwargs["address"] = ray_head_node_address
     else:
         print("NeMo Gym is starting a new Ray cluster...")
-
-    if ray_namespace is None:
-        ray_namespace = "nemo_gym"
-    print(f"Ray namespace: {ray_namespace}")
-    ray_init_kwargs["namespace"] = ray_namespace
+        global _NEMO_GYM_STARTED_RAY_CLUSTER
+        _NEMO_GYM_STARTED_RAY_CLUSTER = True
 
     ray.init(**ray_init_kwargs)
 
@@ -392,6 +383,21 @@ def initialize_ray() -> None:
         with open_dict(global_config_dict):
             global_config_dict["ray_head_node_address"] = ray.get_runtime_context().gcs_address
         print(f"Started Ray cluster at {global_config_dict['ray_head_node_address']}")
+
+
+def maybe_ray_cluster_exit():  # pragma: no cover
+    global _NEMO_GYM_STARTED_RAY_CLUSTER
+
+    if not _NEMO_GYM_STARTED_RAY_CLUSTER:
+        return
+
+    print("Shutting down Ray cluster spun up by NeMo Gym...")
+    ray.shutdown()
+
+    _NEMO_GYM_STARTED_RAY_CLUSTER = False
+
+
+atexit.register(maybe_ray_cluster_exit)
 
 
 IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME = "IS_NEMO_GYM_FASTAPI_WORKER"
@@ -426,9 +432,8 @@ class SimpleServer(BaseServer):
 
         @app.middleware("http")
         async def add_session_id(request: Request, call_next):  # pragma: no cover
-            # If session_id not present, assign one
-            if SESSION_ID_KEY not in request.session:
-                request.session[SESSION_ID_KEY] = str(uuid4())
+            # Always assign so Starlette 1.0+ marks session.modified=True and re-sends Set-Cookie.
+            request.session[SESSION_ID_KEY] = request.session.get(SESSION_ID_KEY, str(uuid4()))
 
             response: Response = await call_next(request)
             return response
@@ -447,6 +452,9 @@ class SimpleServer(BaseServer):
                 )
 
                 response_content = f"Hit an exception in {self.get_session_middleware_key()} calling an inner server: {e.response_content}"
+                if _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:
+                    print(response_content)
+
                 return JSONResponse(content=response_content, status_code=500)
             except Exception as e:
                 print(
@@ -463,58 +471,26 @@ repr(e): {repr(e)}"""
                 return JSONResponse(content="An unknown error occurred", status_code=500)
 
     def setup_profiling(self, app: FastAPI, profiling_config: ProfilingMiddlewareConfig) -> None:  # pragma: no cover
-        base_profile_dir = PARENT_DIR / profiling_config.profiling_results_dirpath
-        server_profile_path = (base_profile_dir / self.get_session_middleware_key()).with_suffix(".log")
-
-        base_profile_dir.mkdir(parents=True, exist_ok=True)
+        base_profile_dir = PARENT_DIR / profiling_config.profiling_results_dirpath / self.get_session_middleware_key()
+        profiler = Profiler(name=self.config.name, base_profile_dir=base_profile_dir)
 
         main_app_lifespan = app.router.lifespan_context
 
-        def _dump_yappi_stats() -> str:
-            buffer = StringIO()
-            yappi.get_func_stats().print_all(
-                out=buffer,
-                columns={
-                    0: ("name", 200),
-                    1: ("ncall", 10),
-                    2: ("tsub", 8),
-                    3: ("ttot", 8),
-                    4: ("tavg", 8),
-                },
-            )
-
-            buffer.seek(0)
-            res = ""
-            past_header = False
-            for line in buffer:
-                if not past_header or self.config.entrypoint in line:
-                    res += line
-
-                if line.startswith("name"):
-                    past_header = True
-
-            return res
-
         @asynccontextmanager
         async def lifespan_wrapper(app):
-            yappi.set_clock_type("CPU")
-            yappi.start()
-            print(f"🔍 Enabled profiling for {self.config.name}")
+            profiler.start()
 
             async with main_app_lifespan(app) as maybe_state:
                 yield maybe_state
 
-            print(f"🛑 Stopping profiler for {self.config.name}. Check {server_profile_path} for the metrics!")
-            yappi.stop()
-
-            with open(server_profile_path, "w") as f:
-                f.write(_dump_yappi_stats())
+            profiler.stop()
 
         app.router.lifespan_context = lifespan_wrapper
 
         @app.get("/stats")
         def stats():
-            return Response(_dump_yappi_stats())
+            profiler.dump()
+            return Response()
 
     def set_ulimit(self, target_soft_limit: int = 65535):  # pragma: no cover
         # From https://github.com/vllm-project/vllm/blob/fed8a9b107df3e27d57728c6911c7d308b871477/vllm/utils/__init__.py#L2790
@@ -705,3 +681,14 @@ class ServerInstanceDisplayConfig(BaseModel):
     status: Optional[ServerStatus] = None
     uptime_seconds: Optional[float] = None
     url: Optional[str] = None
+
+
+def get_server_url(server_name: str) -> str:
+    global_config_dict = get_global_config_dict()
+
+    model_server_config = get_first_server_config_dict(
+        global_config_dict,
+        server_name,
+    )
+
+    return f"http://{model_server_config['host']}:{model_server_config['port']}"

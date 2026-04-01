@@ -11,6 +11,19 @@ The GenRM compare server evaluates multiple candidate responses by:
 3. **Parsing JSON scores** from the GenRM output
 4. **Aggregating pairwise results** into per-response rewards
 
+### Architecture
+
+```
+GenRM Compare Resources Server
+    ├── Pair Generation (circular or all_pairs)
+    ├── Message Formatting (response_1, response_2 roles)
+    ├── Call GenRM Model (/v1/responses) for each pair
+    ├── Parse JSON scores from GenRM output
+    └── Aggregate into per-response rewards
+```
+
+**Key Design:** Uses the GenRM Response API Model (server name `genrm_model` by default) which properly handles custom roles through `GenRMConverter`. The default config includes a `genrm_model` block (local vLLM); set `genrm_model_server.name` to another server if you use a separate model config or remote endpoint.
+
 ### Expected GenRM Output Format
 
 The GenRM model should output JSON in the following format:
@@ -56,7 +69,7 @@ genrm_compare:
       
       genrm_model_server:
         type: responses_api_models
-        name: your_genrm_model  # Point to your GenRM model server
+        name: genrm_model  # Default: use the genrm_model block from config (or another loaded config)
       
       genrm_responses_create_params:
         input: []
@@ -112,7 +125,7 @@ Send a POST request to the `/compare` endpoint:
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `genrm_model_server` | ModelServerRef | *required* | Reference to the GenRM model server |
+| `genrm_model_server` | ModelServerRef | *required* | Reference to the GenRM model server (default: `genrm_model`) |
 | `genrm_responses_create_params` | object | *required* | Generation parameters for GenRM calls |
 | `comparison_strategy` | string | `"circular"` | Pair generation strategy: `"circular"` or `"all_pairs"` |
 | `num_judges_per_comparison` | int | `1` | Number of judge passes per pair (for majority voting) |
@@ -190,17 +203,18 @@ Example principle:
 
 ```
 genrm_compare/
-├── app.py              # Main server implementation
-├── utils.py            # Utility functions (parsing, aggregation, etc.)
+├── __init__.py
+├── app.py                         # Main Resources Server implementation
+├── comparison_strategies.py       # Comparison strategy infrastructure (GenRMStrategy)
+├── utils.py                       # Utility functions (parsing, aggregation, etc.)
 ├── configs/
-│   └── genrm_compare.yaml  # Default configuration
-├── data/
-│   └── example.jsonl   # Example dataset
+│   └── genrm_compare.yaml        # Default configuration
 ├── tests/
-│   ├── test_app.py     # Server tests
-│   └── test_utils.py   # Utility function tests
-├── requirements.txt    # Dependencies
-└── README.md           # This file
+│   ├── __init__.py
+│   ├── test_app.py               # Server tests
+│   ├── test_comparison_strategies.py  # Strategy tests
+│   └── test_utils.py             # Utility function tests
+└── README.md                     # This file
 ```
 
 ## API Endpoints
@@ -246,7 +260,36 @@ pytest tests/ -v
 python app.py --config configs/genrm_compare.yaml
 ```
 
+## Comparison Strategies Integration
+
+The `comparison_strategies.py` module provides the infrastructure for integrating this Resources Server with rollout collection workflows (e.g., GRPO training):
+
+**Key Components:**
+
+- **`ComparisonStrategy` Protocol**: Interface for comparison strategies
+- **`GenRMStrategy`**: Implementation that calls this Resources Server
+- **`GenRMStrategyConfig`**: Configuration for strategy behavior
+- **Utility functions**: For prompt grouping, text extraction, response generation
+
+**Integration with Rollout Collection:**
+
+When configured in `rollout_collection.py`, the strategy:
+1. Generates N responses per prompt using the policy model
+2. Buffers responses by prompt+principle
+3. Calls this Resources Server's `/compare` endpoint
+4. Attaches rewards and metrics to results
+
+See `examples/genrm_grpo_example.yaml` for complete configuration.
+
+## Related Components
+
+- **GenRM Model**: `responses_api_models/genrm_model/` - Response API model with custom roles (`response_1`, `response_2`, `principle`); default config uses server name `genrm_model` (local vLLM)
+- **Comparison Strategies**: `comparison_strategies.py` (in this package) - Strategy infrastructure
+- **Base VLLM Model**: `responses_api_models/vllm_model/` - Generic model (unchanged)
+- **Type Definitions**: `nemo_gym/openai_utils.py` - Custom role type support
+- **Rollout Collection**: `nemo_gym/rollout_collection.py` - Integrates comparison strategies
+- **Design Doc**: `docs/design_notes/genrm_reward_model_refactoring.md`
+
 ## License
 
-Code: Apache 2.0
-
+Apache 2.0 - Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.

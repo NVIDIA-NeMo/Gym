@@ -13,16 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
-import os
 import re
-import urllib
 from copy import deepcopy
-from multiprocessing import Process, Value
-from time import sleep, time
+from time import time
 from typing import Any, ClassVar, Dict, List, Optional, Tuple, Union
 from uuid import uuid4
 
-import ray
 from aiohttp.client_exceptions import ClientResponseError
 from fastapi import Request
 from pydantic import BaseModel, Field
@@ -32,7 +28,6 @@ from nemo_gym.base_responses_api_model import (
     Body,
     SimpleResponsesAPIModel,
 )
-from nemo_gym.global_config import find_open_port, get_global_config_dict, PORT_RANGE_HIGH_KEY_NAME, PORT_RANGE_LOW_KEY_NAME
 from nemo_gym.openai_utils import (
     RESPONSES_TO_TRAIN,
     NeMoGymAsyncOpenAI,
@@ -40,7 +35,6 @@ from nemo_gym.openai_utils import (
     NeMoGymChatCompletionAssistantMessageForTrainingParam,
     NeMoGymChatCompletionAssistantMessageParam,
     NeMoGymChatCompletionCreateParamsNonStreaming,
-    NeMoGymChatCompletionCustomRoleMessageParam,
     NeMoGymChatCompletionDeveloperMessageParam,
     NeMoGymChatCompletionMessage,
     NeMoGymChatCompletionMessageParam,
@@ -51,20 +45,21 @@ from nemo_gym.openai_utils import (
     NeMoGymChatCompletionToolParam,
     NeMoGymChatCompletionUserMessageParam,
     NeMoGymChoice,
+    NeMoGymEasyInputMessage,
+    NeMoGymFunctionCallOutput,
     NeMoGymFunctionDefinition,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
+    NeMoGymResponseInputTokensDetails,
     NeMoGymResponseOutputItem,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
+    NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseReasoningItem,
+    NeMoGymResponseUsage,
     NeMoGymSummary,
     TokenIDLogProbMixin,
-)
-from nemo_gym.ray_utils import (
-    lookup_current_ray_node_ip,
-    spinup_single_ray_gpu_node_worker,
 )
 from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_worker
 
@@ -78,16 +73,16 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     uses_reasoning_parser: bool
     replace_developer_role_with_system: bool = False
 
+    # Whether or not the model can generate a reasoning output, and called again to produce additional reasoning output.
+    sequential_reasoning_allowed: bool = True
+
+    # As of Feb 2026, we default this to False since majority of open source models aren't responses native with the exception of GPT-OSS
+    is_responses_native: bool = False
+
     chat_template_kwargs: Optional[Dict[str, Any]] = None
 
     # Corresponds to the extra_body of OpenAI Client.
     extra_body: Optional[Dict[str, Any]] = None
-
-    spinup_server: bool = False
-    server_args: Optional[Dict[str, Any]] = None
-    server_env: Optional[Dict[str, str]] = None
-
-    router_dp_size: int = 1
 
     def model_post_init(self, context):
         if isinstance(self.base_url, str):
@@ -95,266 +90,41 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
         return super().model_post_init(context)
 
 
-def _build_vllm_argv(config: VLLMModelConfig, server_host: str, server_port: int) -> list[str]:
-    argv = []
-    argv.append("--model")
-    argv.append(config.model)
-    argv.append("--host")
-    argv.append(server_host)
-    argv.append("--port")
-    argv.append(f"{server_port}")
-    argv.append("--distributed-executor-backend")
-    argv.append("mp")
-    for k, v in (config.server_args or {}).items():
-        k2 = k.replace("_", "-")
-        if v is None:
-            pass
-        elif isinstance(v, bool):
-            if not v:
-                arg_key = f"--no-{k2}"
-            else:
-                arg_key = f"--{k2}"
-            argv.append(arg_key)
-        elif isinstance(v, dict):
-            # Dict values must be passed as JSON strings to vLLM CLI
-            arg_key = f"--{k2}"
-            argv.append(arg_key)
-            argv.append(json.dumps(v))
-        else:
-            arg_key = f"--{k2}"
-            argv.append(arg_key)
-            argv.append(f"{v}")
-    return argv
-
-
-def _start_vllm_server(
-    config: VLLMModelConfig,
-    server_host: str,
-    port_range_low: int,
-    port_range_high: int,
-    actual_port: "Value",
-    router_dp_rank: int,
-    max_retries: int = 10,
-) -> None:
-    """Start a vLLM OpenAI-compatible server, retrying on port conflicts.
-
-    Port selection happens here (inside the subprocess) rather than in the
-    parent to eliminate the TOCTOU gap that occurs when a port is probed in
-    one process and later bound in another.  If vLLM's sock.bind() fails
-    with EADDRINUSE, we pick a new random port and retry.
-
-    The chosen port is written to *actual_port* (a multiprocessing.Value
-    backed by shared memory) so the parent process can discover which port
-    the server ultimately bound to.
-    """
-    for k, v in (config.server_env or {}).items():
-        os.environ[k] = v
-
-    import uvloop
-    import vllm.engine.arg_utils
-    import vllm.entrypoints.openai.api_server
-    import vllm.entrypoints.openai.cli_args
-    import vllm.utils.argparse_utils
-
-    from random import randint
-
-    last_exc = None
-    for attempt in range(max_retries):
-        port = randint(port_range_low, port_range_high)
-        argv = _build_vllm_argv(config, server_host, port)
-
-        server_args = vllm.utils.argparse_utils.FlexibleArgumentParser()
-        server_args = vllm.entrypoints.openai.cli_args.make_arg_parser(server_args)
-        server_args = server_args.parse_args(argv)
-        vllm.entrypoints.openai.cli_args.validate_parsed_serve_args(server_args)
-
-        try:
-            # Write the candidate port to shared memory so the parent can
-            # read it once the server is up (via heartbeat polling).
-            actual_port.value = port
-            uvloop.run(vllm.entrypoints.openai.api_server.run_server(server_args))
-            return
-        except OSError as e:
-            import errno
-            if e.errno == errno.EADDRINUSE:
-                # Port was claimed between selection and bind (race with
-                # another server on the same node).  Reset the sentinel
-                # and retry with a different port.
-                actual_port.value = -1
-                last_exc = e
-                continue
-            raise
-
-    raise RuntimeError(
-        f"Failed to start vLLM server after {max_retries} attempts "
-        f"on port range {port_range_low}-{port_range_high}"
-    ) from last_exc
-
-
-@ray.remote
-class VLLMServerSpinupWorker:
-    def __init__(self, config: VLLMModelConfig, working_dir: Optional[str], router_dp_rank: int):
-        self.config = config
-        self.working_dir = working_dir
-        self.router_dp_rank = router_dp_rank
-        self._server_host = lookup_current_ray_node_ip()
-
-        global_config_dict = get_global_config_dict()
-        port_range_low = global_config_dict[PORT_RANGE_LOW_KEY_NAME]
-        port_range_high = global_config_dict[PORT_RANGE_HIGH_KEY_NAME]
-
-        # Shared memory integer for the subprocess to report which port it
-        # actually bound to.  -1 = not yet determined / retrying.
-        self._actual_port = Value("i", -1)
-
-        if self.working_dir is not None:
-            os.chdir(self.working_dir)
-
-        server_proc = Process(
-            target=_start_vllm_server,
-            args=(
-                self.config,
-                self._server_host,
-                port_range_low,
-                port_range_high,
-                self._actual_port,
-                self.router_dp_rank,
-            ),
-            daemon=False,
-        )
-        server_proc.start()
-        self._server_proc = server_proc
-
-    def _get_ip(self) -> int:
-        return self._server_host
-
-    def _get_port(self) -> int:
-        """Return the port the vLLM server bound to, or -1 if still starting."""
-        return self._actual_port.value
-
-    def is_alive(self) -> bool:
-        return self._server_proc.is_alive()
-
-
-# Use this to query the VLLM servers during spinup without having to start an
-# asyncio event loop for the async client.
-def _vllm_server_heartbeat(base_url: str):
-    req_headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-    }
-    req_body = {
-        "messages": [
-            {
-                "role": "user",
-                "content": "hi",
-            }
-        ],
-        "max_tokens": 8,
-        "temperature": 1.0,
-    }
-    req_data = json.dumps(req_body).encode("utf-8")
-    req_url = f"{base_url}/chat/completions"
-    req = urllib.request.Request(
-        req_url,
-        headers=req_headers,
-        data=req_data,
-    )
-    with urllib.request.urlopen(req, timeout=5) as out:
-        out_status = out.status
-        out_data = out.read()
-    output = out_data.decode("utf-8")
-    return {
-        "_status": out_status,
-        "output": output,
-        "except": None,
-    }
-
-
 class VLLMModel(SimpleResponsesAPIModel):
     config: VLLMModelConfig
 
-    def model_post_init(self, context):
-        working_dir = os.getcwd()
+    def get_converter(self) -> "VLLMConverter":
+        """Return the converter used for Responses API <-> Chat Completions mapping.
 
-        if self.config.spinup_server:
-            self._server_urls = []
-            self._server_workers = []
-            self._clients = []
-
-            # TODO: support for other parallel sizes.
-            server_tp_size = (self.config.server_args or {}).get("tensor_parallel_size", 1)
-            server_dp_size = (self.config.server_args or {}).get("data_parallel_size", 1)
-
-            assert server_dp_size == 1
-
-            router_dp_size = max(1, self.config.router_dp_size)
-
-            for router_dp_rank in range(router_dp_size):
-                server_worker = spinup_single_ray_gpu_node_worker(
-                    VLLMServerSpinupWorker,
-                    server_tp_size,
-                    config=self.config,
-                    working_dir=working_dir,
-                    router_dp_rank=router_dp_rank,
-                )
-
-                self._server_workers.append(server_worker)
-
-            # Wait for each server to come up.  The subprocess picks its own
-            # port and writes it to shared memory.  We poll _get_port() until
-            # it returns a real port (not -1), then confirm the server is
-            # reachable via heartbeat.  Re-reading the port each iteration
-            # handles the case where the subprocess retries on a new port
-            # after an EADDRINUSE.
-            for server_worker in self._server_workers:
-                server_ip = ray.get(server_worker._get_ip.remote())
-
-                while True:
-                    server_port = ray.get(server_worker._get_port.remote())
-                    if server_port == -1:
-                        server_worker_ref: VLLMServerSpinupWorker = server_worker
-                        assert ray.get(server_worker_ref.is_alive.remote())
-                        sleep(1)
-                        continue
-                    server_url = f"http://{server_ip}:{server_port}/v1"
-                    try:
-                        _vllm_server_heartbeat(server_url)
-                        self._server_urls.append(server_url)
-                        self._clients.append(
-                            NeMoGymAsyncOpenAI(
-                                base_url=server_url,
-                                api_key=self.config.api_key,
-                            )
-                        )
-                        break
-                    except Exception:
-                        server_worker_ref: VLLMServerSpinupWorker = server_worker
-                        assert ray.get(server_worker_ref.is_alive.remote())
-                        sleep(3)
-
-        else:
-            self._server_urls = None
-            self._server_workers = None
-            self._clients = [
-                NeMoGymAsyncOpenAI(
-                    base_url=base_url,
-                    api_key=self.config.api_key,
-                )
-                for base_url in self.config.base_url
-            ]
-
-        self._session_id_to_client: Dict[str, NeMoGymAsyncOpenAI] = dict()
-
-        self._converter = VLLMConverter(
+        Override in subclasses (e.g. GenRMModel) to use a specialized converter.
+        """
+        return VLLMConverter(
             return_token_id_information=self.config.return_token_id_information,
         )
 
+    def model_post_init(self, context):
+        self._post_init()
         return super().model_post_init(context)
+
+    def _post_init(self) -> None:
+        self._clients = [
+            NeMoGymAsyncOpenAI(
+                base_url=base_url,
+                api_key=self.config.api_key,
+            )
+            for base_url in self.config.base_url
+        ]
+
+        self._session_id_to_client: Dict[str, NeMoGymAsyncOpenAI] = dict()
+
+        self._converter = self.get_converter()
 
     async def responses(
         self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
     ) -> NeMoGymResponse:
+        if self.config.is_responses_native:
+            return await self._responses_native(request, body)
+
         # Response Create Params -> Chat Completion Create Params
         chat_completion_create_params = self._converter.responses_to_chat_completion_create_params(body)
         body.model = self.config.model
@@ -366,6 +136,17 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         response_output = self._converter.postprocess_chat_response(choice)
         response_output_dicts = [item.model_dump() for item in response_output]
+
+        usage = None
+        if chat_completion_response.usage:
+            usage = NeMoGymResponseUsage(
+                input_tokens=chat_completion_response.usage.prompt_tokens,
+                input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=0),
+                output_tokens=chat_completion_response.usage.completion_tokens,
+                output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
+                total_tokens=chat_completion_response.usage.prompt_tokens
+                + chat_completion_response.usage.completion_tokens,
+            )
 
         # Chat Completion -> Response
         return NeMoGymResponse(
@@ -393,46 +174,83 @@ class VLLMModel(SimpleResponsesAPIModel):
             instructions=body.instructions,
             user=body.user,
             incomplete_details={"reason": "max_output_tokens"} if choice.finish_reason == "length" else None,
+            usage=usage,
         )
 
-    async def chat_completions(
-        self, request: Request, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
-    ) -> NeMoGymChatCompletion:
+    async def _responses_native(
+        self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming
+    ) -> NeMoGymResponse:
+        """
+        The following config parameters are effectively no-ops with Responses native models:
+        - uses_reasoning_parser: bool (Not applicable)
+        """
+        # The following parameters could be supported, but have not been supported yet for Responses-native models:
+        if self.config.return_token_id_information:
+            raise NotImplementedError
         if self.config.replace_developer_role_with_system:
-            for message in body.messages:
-                if message["role"] == "developer":
-                    message["role"] = "system"
+            raise NotImplementedError
+        if not self.config.sequential_reasoning_allowed:
+            raise NotImplementedError
 
         body_dict = body.model_dump(exclude_unset=True)
         body_dict["model"] = self.config.model
-
         if self.config.chat_template_kwargs:
             body_dict["chat_template_kwargs"] = deepcopy(self.config.chat_template_kwargs)
+        if self.config.extra_body:
+            body_dict = self.config.extra_body | body_dict
 
-        print(
-            f"[DEBUG chat_template_kwargs][gym->vllm_model] process={self.config.name} model={self.config.model} injected={body_dict.get('chat_template_kwargs')}"
-        )
+        client = self._resolve_client(request)
+        response_dict = await client.create_response(**body_dict)
 
-        session_id = request.session[SESSION_ID_KEY]
-        if session_id not in self._session_id_to_client:
-            # There is probably a better way to select the endpoint for this request. But this will do for now.
-            client_idx = len(self._session_id_to_client) % len(self._clients)
-            client = self._clients[client_idx]
-            self._session_id_to_client[session_id] = client
-        client = self._session_id_to_client[session_id]
+        return NeMoGymResponse.model_validate(response_dict)
 
-        create_params = body_dict
+    def _preprocess_chat_completion_create_params(self, request: Request, body_dict: Dict[str, Any]) -> Dict[str, Any]:
+        """Preprocess the body dict before issuing a chat completion request.
+
+        Subclasses can override this to apply model-specific transformations
+        (e.g. role remapping, extra sampling params).  The base implementation
+        handles the features driven by ``VLLMModelConfig``.
+
+        Args:
+            request: The originating FastAPI request (available for session /
+                client resolution if needed by subclasses).
+            body_dict: Mutable dict produced by ``body.model_dump(exclude_unset=True)``.
+
+        Returns:
+            The (possibly mutated) ``body_dict`` that will be forwarded to
+            ``client.create_chat_completion``.
+        """
+        if self.config.replace_developer_role_with_system:
+            for message_dict in body_dict["messages"]:
+                if message_dict.get("role") == "developer":
+                    message_dict["role"] = "system"
+
+        body_dict["model"] = self.config.model
+
+        chat_template_kwargs = {}
+        if self.config.chat_template_kwargs:
+            chat_template_kwargs = deepcopy(self.config.chat_template_kwargs)
+
+        metadata = body_dict.get("metadata", dict())
+
+        # Merge global config chat_template_kwargs with per-request overrides in metadata (e.g. per-sample reasoning on/off)
+        metadata_chat_template_kwargs_str = metadata.get("chat_template_kwargs", "{}")
+        chat_template_kwargs.update(json.loads(metadata_chat_template_kwargs_str))
+
+        if chat_template_kwargs:
+            body_dict["chat_template_kwargs"] = chat_template_kwargs
+
+        # Merge global config extra_body with per-request overrides from metadata
+        extra_body = {}
+        if self.config.extra_body:
+            extra_body = deepcopy(self.config.extra_body)
+
+        metadata_extra_body_str = metadata.get("extra_body", "{}")
+        extra_body.update(json.loads(metadata_extra_body_str))
 
         if self.config.return_token_id_information:
-            create_params |= dict(
+            body_dict |= dict(
                 logprobs=True,
-                # vLLM treats `top_logprobs=None` as "do not compute/return
-                # logprobs", so we must ensure it is a valid integer when
-                # requesting logprobs for RL training.
-                #
-                # `0` means "sampled token logprob only" (no top-k alternatives),
-                # which is what NeMo-RL needs.
-                top_logprobs=0 if create_params.get("top_logprobs") is None else create_params.get("top_logprobs"),
                 # Typically passed via OpenAI client extra_body.
                 return_tokens_as_token_ids=True,
                 # TODO add this when NeMo RL upgrades to vLLM 0.10.2 support for prompt token ids
@@ -453,6 +271,10 @@ class VLLMModel(SimpleResponsesAPIModel):
                     message_dict["content"] = remaining_content
                     if reasoning_matches:
                         message_dict["reasoning_content"] = reasoning_matches[0]
+
+                        # TODO when NeMo RL migrates to vLLM>=0.16.0, remove the reasoning_content support above.
+                        # Starting with vLLM 0.16.0, the `reasoning_content` field has been deprecated in favor of just `reasoning`
+                        message_dict["reasoning"] = reasoning_matches[0]
                 elif isinstance(content, list):
                     reasoning_content = None
                     for content_item_dict in content:
@@ -467,20 +289,34 @@ class VLLMModel(SimpleResponsesAPIModel):
                         content_item_dict["text"] = remaining_content
                         if reasoning_matches:
                             message_dict["reasoning_content"] = reasoning_matches[0]
+                            # See the TODO wrt reasoning_content above
+                            message_dict["reasoning"] = reasoning_matches[0]
                 elif not content:
                     # No content or content None is a no-op
                     pass
                 else:
                     raise NotImplementedError
 
-        if self.config.extra_body:
-            create_params = self.config.extra_body | create_params
+        if extra_body:
+            body_dict = extra_body | body_dict
+
+        return body_dict
+
+    async def chat_completions(
+        self, request: Request, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
+    ) -> NeMoGymChatCompletion:
+        body_dict = body.model_dump(exclude_unset=True)
+        body_dict = self._preprocess_chat_completion_create_params(request, body_dict)
+
+        client = self._resolve_client(request)
+
+        if not self.config.sequential_reasoning_allowed:
+            last_message = body_dict["messages"][-1]
+            if last_message["role"] == "assistant" and not (last_message["content"] or last_message.get("tool_calls")):
+                return self._create_empty_chat_completion()
 
         try:
-            print(
-                f"[DEBUG chat_template_kwargs][gym->vllm_model] process={self.config.name} sending.chat_template_kwargs={create_params.get('chat_template_kwargs')} add_generation_prompt={create_params.get('add_generation_prompt')}"
-            )
-            chat_completion_dict = await client.create_chat_completion(**create_params)
+            chat_completion_dict = await client.create_chat_completion(**body_dict)
         except ClientResponseError as e:
             """
             Example messages for out of context length:
@@ -521,17 +357,23 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         choice_dict = chat_completion_dict["choices"][0]
         if self.config.uses_reasoning_parser:
-            reasoning_content = choice_dict["message"].get("reasoning_content")
+            # See the TODO wrt reasoning_content above
+            reasoning_content = choice_dict["message"].get("reasoning_content") or choice_dict["message"].get(
+                "reasoning"
+            )
             if reasoning_content:
-                choice_dict["message"].pop("reasoning_content")
+                choice_dict["message"].pop("reasoning_content", None)
+                # See the TODO wrt reasoning_content above
+                choice_dict["message"].pop("reasoning", None)
 
                 # We wrap this here in think tags for Gym's sake and to return a valid OpenAI Chat Completions response.
                 choice_dict["message"]["content"] = self._converter._wrap_reasoning_in_think_tags(
                     [reasoning_content]
                 ) + (choice_dict["message"]["content"] or "")
         else:
-            assert not choice_dict["message"].get("reasoning_content"), (
-                "Please do not use a reasoning parser in vLLM! There is one source of truth for handling data (including reasoning), which is NeMo Gym!"
+            # See the TODO wrt reasoning_content above
+            assert not (choice_dict["message"].get("reasoning_content") or choice_dict["message"].get("reasoning")), (
+                f"NeMo Gym server `{self.config.name}` config has explicitly been set to not use a reasoning parser i.e. `uses_reasoning_parser: false`. Please do not use a reasoning parser in your vLLM endpoint, or fix the `{self.config.name}` server config!"
             )
 
         if self.config.return_token_id_information:
@@ -552,7 +394,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             # `prompt_str`) can be built with different chat template settings than
             # the actual generation request.
             tokenize_body_dict = dict()
-            for key in ("model", "messages", "tools", "chat_template_kwargs", "add_generation_prompt"):
+            for key in ("model", "messages", "tools", "chat_template_kwargs"):
                 if key in body_dict:
                     tokenize_body_dict[key] = body_dict[key]
 
@@ -581,6 +423,17 @@ class VLLMModel(SimpleResponsesAPIModel):
             # choice_dict.pop("token_ids")
 
         return NeMoGymChatCompletion.model_validate(chat_completion_dict)
+
+    def _resolve_client(self, request: Request) -> NeMoGymAsyncOpenAI:
+        session_id = request.session[SESSION_ID_KEY]
+        if session_id not in self._session_id_to_client:
+            # There is probably a better way to select the endpoint for this request. But this will do for now.
+            client_idx = len(self._session_id_to_client) % len(self._clients)
+            client = self._clients[client_idx]
+            self._session_id_to_client[session_id] = client
+        client = self._session_id_to_client[session_id]
+
+        return client
 
 
 class VLLMConverterResponsesToChatCompletionsState(BaseModel):
@@ -714,6 +567,9 @@ class VLLMConverter(BaseModel):
             for tool_dict in tools:
                 tool_dict = tool_dict.copy()
                 tool_dict.pop("type", None)
+
+                # As of vLLM 0.17.1, vLLM Chat Completions does not accept this `strict` parameter on tool definitions that OpenAI accepts.
+                tool_dict.pop("strict", None)
                 responses_create_params["tools"].append(
                     NeMoGymChatCompletionToolParam(type="function", function=NeMoGymFunctionDefinition(**tool_dict))
                 )
@@ -748,12 +604,21 @@ class VLLMConverter(BaseModel):
         content = m["content"]
 
         if isinstance(content, list) and m["role"] != "assistant":
+            converted_parts = []
             for part_param in content:
                 match part_param["type"]:
                     case "input_text":
-                        part_param["type"] = "text"
+                        converted_parts.append({"type": "text", "text": part_param["text"]})
+                    case "input_image":
+                        image_url = part_param.get("image_url", "")
+                        detail = part_param.get("detail", "auto")
+                        converted_parts.append(
+                            {"type": "image_url", "image_url": {"url": image_url, "detail": detail}}
+                        )
                     case _:
                         raise NotImplementedError(f"Unsupported part param type: {part_param['type']}")
+            content = converted_parts
+            m["content"] = content
 
         match m["role"]:
             case "assistant":
@@ -796,10 +661,6 @@ class VLLMConverter(BaseModel):
                         role="developer",
                     )
                 ]
-            # Custom roles (e.g., GenRM response_1/response_2 for pairwise comparison)
-            case "response_1" | "response_2" | "principle":
-                state.flush_assistant()
-                converted = [NeMoGymChatCompletionCustomRoleMessageParam(role=m["role"], content=content)]
             case _:  # pragma: no cover
                 raise NotImplementedError(f"Unrecognized role for message: `{m['role']}`")
 
@@ -842,10 +703,12 @@ class VLLMConverter(BaseModel):
     # =======================================================
 
     def postprocess_chat_response(self, choice: NeMoGymChoice) -> List[NeMoGymResponseOutputItem]:
-        raw_message = choice.message.model_dump()
+        return self.postprocess_assistant_message_dict(choice.message.model_dump())
+
+    def postprocess_assistant_message_dict(self, message_dict: Dict[str, Any]) -> List[NeMoGymResponseOutputItem]:
         response_output = []
 
-        content = raw_message.get("content") or ""
+        content = message_dict.get("content") or ""
         reasoning_matches, content = self._extract_reasoning_from_content(content)
         if reasoning_matches:
             reasoning_item = NeMoGymResponseReasoningItem(
@@ -858,7 +721,7 @@ class VLLMConverter(BaseModel):
             )
             response_output.append(reasoning_item)
 
-        tool_calls_raw = raw_message.get("tool_calls", []) or []
+        tool_calls_raw = message_dict.get("tool_calls", []) or []
         # We need to return at least one output item. When the model decides to just stop with no chat or tool calls
         # We just add an output item with empty or null content here. This is prevalent e.g. in the case of base models that may not be the most reliable since they have not been instruction tuned.
         has_empty_output = not (response_output or tool_calls_raw)
@@ -867,7 +730,7 @@ class VLLMConverter(BaseModel):
             response_output.append(
                 NeMoGymResponseOutputMessage(
                     id=f"msg_{uuid4().hex}",
-                    role=raw_message.get("role"),
+                    role=message_dict.get("role"),
                     content=[
                         NeMoGymResponseOutputText(
                             type="output_text",
@@ -895,14 +758,14 @@ class VLLMConverter(BaseModel):
 
         # `"prompt_token_ids" in raw_message`: sometimes the model endpoint may go out of context length, in which case we return an empty response
         # In these cases, there are no token id information provided.
-        if self.return_token_id_information and "prompt_token_ids" in raw_message:
+        if self.return_token_id_information and "prompt_token_ids" in message_dict:
             last_response_output_item = response_output[-1]
             train_cls = RESPONSES_TO_TRAIN[last_response_output_item.__class__]
             response_output[-1] = train_cls(
                 **last_response_output_item.model_dump(),
-                prompt_token_ids=raw_message["prompt_token_ids"],
-                generation_token_ids=raw_message["generation_token_ids"],
-                generation_log_probs=raw_message["generation_log_probs"],
+                prompt_token_ids=message_dict["prompt_token_ids"],
+                generation_token_ids=message_dict["generation_token_ids"],
+                generation_log_probs=message_dict["generation_log_probs"],
             )
 
         return response_output
@@ -911,6 +774,46 @@ class VLLMConverter(BaseModel):
         # TODO: Currently only parses reasoning wrapped in <think>...</think> tags.
         # Maybe parameterize to support other model formats in the future.
         return self._parse_think_tags(content)
+
+    def chat_completions_messages_to_responses_items(
+        self, messages: List[Dict[str, Any]]
+    ) -> List[NeMoGymResponseOutputItem]:
+        output_items = []
+
+        for message in messages:
+            role = message["role"]
+            if role in ("user", "system", "developer"):
+                output_items.append(NeMoGymEasyInputMessage.model_validate(message))
+            elif role == "assistant":
+                output_items.extend(self.postprocess_assistant_message_dict(message))
+            elif role == "tool":
+                output_items.append(
+                    NeMoGymFunctionCallOutput(
+                        call_id=message["tool_call_id"],
+                        output=message["content"],
+                        status="completed",
+                    )
+                )
+            else:
+                raise NotImplementedError(f"Unrecognized role: {role}!")
+
+        return output_items
+
+
+def split_responses_input_output_items(
+    items: List[NeMoGymResponseOutputItem],
+) -> Tuple[List[NeMoGymResponseOutputItem], List[NeMoGymResponseOutputItem]]:
+    if not items:
+        return [], []
+
+    for i, item in enumerate(items):
+        if getattr(item, "role", None) == "assistant" or getattr(item, "type", None) in {
+            "reasoning",
+            "reasoning_item",
+        }:
+            break
+
+    return items[:i], items[i:]
 
 
 if __name__ == "__main__":

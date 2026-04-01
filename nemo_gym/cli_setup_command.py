@@ -21,6 +21,7 @@ from omegaconf import DictConfig
 
 from nemo_gym.global_config import (
     HEAD_SERVER_DEPS_KEY_NAME,
+    NEMO_GYM_LOG_DIR_KEY_NAME,
     PIP_INSTALL_VERBOSE_KEY_NAME,
     PYTHON_VERSION_KEY_NAME,
     SKIP_VENV_IF_PRESENT_KEY_NAME,
@@ -52,6 +53,8 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
 
     verbose_flag = "-v " if global_config_dict.get(PIP_INSTALL_VERBOSE_KEY_NAME) else ""
 
+    is_editable_install = (dir_path / "../../pyproject.toml").exists()
+
     if should_skip_venv_setup:
         env_setup_cmd = f"source {venv_activate_fpath}"
     else:
@@ -62,9 +65,25 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
                 f"Found both pyproject.toml and requirements.txt for uv venv setup in server dir: {dir_path}. Please only use one or the other!"
             )
         elif has_pyproject_toml:
-            install_cmd = f"""uv pip install {verbose_flag}{uv_pip_python_flag}'-e .' {" ".join(head_server_deps)}"""
+            if is_editable_install:
+                install_cmd = (
+                    f"""uv pip install {verbose_flag}{uv_pip_python_flag}'-e .' {" ".join(head_server_deps)}"""
+                )
+            else:
+                # install nemo-gym from pypi instead of relative path in pyproject.toml
+                install_cmd = (
+                    f"""uv pip install {verbose_flag}{uv_pip_python_flag}nemo-gym && """
+                    f"""uv pip install {verbose_flag}{uv_pip_python_flag}--no-sources '-e .' {" ".join(head_server_deps)}"""
+                )
         elif has_requirements_txt:
-            install_cmd = f"""uv pip install {verbose_flag}{uv_pip_python_flag}-r requirements.txt {" ".join(head_server_deps)}"""
+            if is_editable_install:
+                install_cmd = f"""uv pip install {verbose_flag}{uv_pip_python_flag}-r requirements.txt {" ".join(head_server_deps)}"""
+            else:
+                # install nemo-gym from pypi instead of relative path in requirements.txt
+                install_cmd = (
+                    f"""(echo 'nemo-gym' && grep -v -F '../..' requirements.txt) | """
+                    f"""uv pip install {verbose_flag}{uv_pip_python_flag}-r /dev/stdin {" ".join(head_server_deps)}"""
+                )
         else:
             raise RuntimeError(
                 f"Missing pyproject.toml or requirements.txt for uv venv setup in server dir: {dir_path}"
@@ -76,9 +95,8 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
     return f"cd {dir_path} && {env_setup_cmd}"
 
 
-def run_command(command: str, working_dir_path: Path) -> Popen:
+def run_command(command: str, working_dir_path: Path, server_name: str = "") -> Popen:
     global_config_dict = get_global_config_dict()
-    global_config_dict
 
     work_dir = f"{working_dir_path.absolute()}"
     custom_env = environ.copy()
@@ -89,6 +107,13 @@ def run_command(command: str, working_dir_path: Path) -> Popen:
         custom_env["PYTHONPATH"] = work_dir
 
     custom_env["UV_CACHE_DIR"] = global_config_dict[UV_CACHE_DIR_KEY_NAME]
+
+    log_dir = global_config_dict.get(NEMO_GYM_LOG_DIR_KEY_NAME)
+    if log_dir:
+        safe_name = (server_name or working_dir_path.name).replace("/", "_")
+        log_path = Path(log_dir) / f"{safe_name}.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        command = f"set -o pipefail; ({command}) 2>&1 | tee -a {log_path}"
 
     redirect_stdout = stdout
     redirect_stderr = stderr

@@ -25,42 +25,20 @@ from typing import (
     Union,
 )
 
-
-# Backward-compatible imports for different openai versions
-try:
-    from openai.types.chat import (
-        ChatCompletion,
-        ChatCompletionAssistantMessageParam,
-        ChatCompletionContentPartTextParam,
-        ChatCompletionDeveloperMessageParam,
-        ChatCompletionMessage,
-        ChatCompletionMessageToolCall,
-        ChatCompletionMessageToolCallParam,
-        ChatCompletionSystemMessageParam,
-        ChatCompletionToolMessageParam,
-        ChatCompletionToolParam,
-        ChatCompletionUserMessageParam,
-    )
-except ImportError:
-    from openai.types.chat.chat_completion import ChatCompletion
-    from openai.types.chat.chat_completion_message import ChatCompletionMessage
-    from openai.types.chat.chat_completion_message_tool_call import (
-        ChatCompletionMessageToolCall,
-    )
-
-    try:
-        from openai.types.chat import (
-            ChatCompletionAssistantMessageParam,
-            ChatCompletionContentPartTextParam,
-            ChatCompletionDeveloperMessageParam,
-            ChatCompletionMessageToolCallParam,
-            ChatCompletionSystemMessageParam,
-            ChatCompletionToolMessageParam,
-            ChatCompletionToolParam,
-            ChatCompletionUserMessageParam,
-        )
-    except ImportError as exc2:
-        raise ImportError("openai types.chat param classes missing; please install a newer openai package") from exc2
+from openai.types.chat import (
+    ChatCompletion,
+    ChatCompletionAssistantMessageParam,
+    ChatCompletionContentPartImageParam,
+    ChatCompletionContentPartTextParam,
+    ChatCompletionDeveloperMessageParam,
+    ChatCompletionMessage,
+    ChatCompletionMessageToolCall,
+    ChatCompletionMessageToolCallParam,
+    ChatCompletionSystemMessageParam,
+    ChatCompletionToolMessageParam,
+    ChatCompletionToolParam,
+    ChatCompletionUserMessageParam,
+)
 from openai.types.chat.chat_completion import Choice
 from openai.types.chat.chat_completion_assistant_message_param import (
     ContentArrayOfContentPart,
@@ -96,6 +74,9 @@ from openai.types.responses.response_output_text_param import Annotation, Logpro
 from openai.types.responses.response_reasoning_item import (
     Summary,
 )
+from openai.types.responses.response_usage import InputTokensDetails as ResponseInputTokensDetails
+from openai.types.responses.response_usage import OutputTokensDetails as ResponseOutputTokensDetails
+from openai.types.responses.response_usage import ResponseUsage
 from openai.types.shared.chat_model import ChatModel
 from openai.types.shared_params import FunctionDefinition
 from pydantic import BaseModel, ConfigDict, Field
@@ -177,13 +158,13 @@ class NeMoGymResponseOutputMessage(BaseModel):
 
 class NeMoGymEasyInputMessage(BaseModel):
     content: Union[str, ResponseInputMessageContentListParam]
-    role: Literal["user", "assistant", "system", "developer", "response_1", "response_2", "principle"]
+    role: Literal["user", "assistant", "system", "developer"]
     type: Literal["message"] = "message"
 
 
 class NeMoGymMessage(BaseModel):
     content: ResponseInputMessageContentListParam
-    role: Literal["user", "system", "developer", "response_1", "response_2", "principle"]
+    role: Literal["user", "system", "developer"]
     status: Literal["in_progress", "completed", "incomplete"] = "completed"
     type: Literal["message"] = "message"
 
@@ -303,8 +284,22 @@ class NeMoGymResponseCreateParamsNonStreaming(BaseModel):
 NeMoGymResponseOutputItem = NeMoGymResponseInputItem
 
 
+class NeMoGymResponseInputTokensDetails(ResponseInputTokensDetails):
+    pass
+
+
+class NeMoGymResponseOutputTokensDetails(ResponseOutputTokensDetails):
+    pass
+
+
+class NeMoGymResponseUsage(ResponseUsage):
+    input_tokens_details: NeMoGymResponseInputTokensDetails
+    output_tokens_details: NeMoGymResponseOutputTokensDetails
+
+
 class NeMoGymResponse(Response):
     output: List[NeMoGymResponseOutputItem]
+    usage: Optional[NeMoGymResponseUsage] = None
 
 
 ########################################
@@ -354,9 +349,19 @@ class NeMoGymChatCompletionContentPartTextParam(ChatCompletionContentPartTextPar
     pass
 
 
+class NeMoGymChatCompletionContentPartImageParam(ChatCompletionContentPartImageParam):
+    pass
+
+
+NeMoGymChatCompletionContentPartParam = Union[
+    NeMoGymChatCompletionContentPartTextParam,
+    NeMoGymChatCompletionContentPartImageParam,
+]
+
+
 class NeMoGymChatCompletionUserMessageParam(ChatCompletionUserMessageParam):
     # Override the iterable which is annoying to work with.
-    content: Required[Union[str, List[NeMoGymChatCompletionContentPartTextParam]]]
+    content: Required[Union[str, List[NeMoGymChatCompletionContentPartParam]]]
 
 
 class NeMoGymChatCompletionSystemMessageParam(ChatCompletionSystemMessageParam):
@@ -395,13 +400,6 @@ class NeMoGymChatCompletionToolMessageParam(ChatCompletionToolMessageParam):
     content: Required[Union[str, List[NeMoGymChatCompletionContentPartTextParam]]]
 
 
-class NeMoGymChatCompletionCustomRoleMessageParam(TypedDict):
-    """Message param for custom roles not in the standard OpenAI API (e.g., GenRM response_1/response_2)."""
-
-    role: Required[str]
-    content: Required[str]
-
-
 class NeMoGymFunctionToolParam(FunctionToolParam):
     pass
 
@@ -412,7 +410,6 @@ NeMoGymChatCompletionMessageParam: TypeAlias = Union[
     NeMoGymChatCompletionUserMessageParam,
     NeMoGymChatCompletionAssistantMessageParam,
     NeMoGymChatCompletionToolMessageParam,
-    NeMoGymChatCompletionCustomRoleMessageParam,
     # Don't add deprecated.
     # NeMoGymChatCompletionFunctionMessageParam,
     # Training:
@@ -489,7 +486,7 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
 
         max_num_tries = MAX_NUM_TRIES
         tries = 0
-        while tries < MAX_NUM_TRIES:
+        while tries < max_num_tries:
             tries += 1
             response = await request(**request_kwargs)
 
