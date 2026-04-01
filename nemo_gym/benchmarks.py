@@ -163,9 +163,37 @@ def prepare_benchmark() -> None:
     )
     PrepareBenchmarkConfig.model_validate(global_config_dict)
 
-    config_paths = global_config_dict.get("config_paths") or []
-    config_paths = list(map(Path, config_paths))
-    benchmarks_dict = _load_benchmarks_from_config_paths(config_paths)
+    benchmarks_dict: Dict[str, BenchmarkConfig] = dict()
+    for server_instance_name in global_config_dict:
+        server_config = global_config_dict[server_instance_name]
+        if not isinstance(server_config, (dict, DictConfig)) or "responses_api_agents" not in server_config:
+            continue
+
+        inner_server_config = get_first_server_config_dict(global_config_dict, server_instance_name)
+
+        datasets: List[BenchmarkDatasetConfig] = []
+        for dataset in inner_server_config.get("datasets") or []:
+            if dataset["type"] != "benchmark":
+                continue
+
+            datasets.append(BenchmarkDatasetConfig.model_validate(dataset))
+
+        if len(datasets) < 1:
+            continue
+
+        assert len(datasets) == 1, (
+            f"Expected 1 benchmark dataset for `{server_instance_name}`, but found {len(datasets)}!"
+        )
+
+        dataset = datasets[0]
+
+        benchmarks_dict[server_instance_name] = BenchmarkConfig(
+            name=dataset.name,
+            path=Path(""),
+            agent_name=server_instance_name,
+            num_repeats=dataset.num_repeats,
+            dataset=dataset,
+        )
 
     assert benchmarks_dict, (
         'No benchmark config found in config_paths. Pass a benchmark config, e.g.: "+config_paths=[benchmarks/aime24/config.yaml]"'
