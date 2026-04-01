@@ -732,15 +732,15 @@ def init_resources_server():  # pragma: no cover
     config_dict = get_global_config_dict()
     run_config = RunConfig.model_validate(config_dict)
 
-    if exists(run_config.entrypoint):
-        print(f"Folder already exists: {run_config.entrypoint}. Exiting init.")
+    dirpath = Path(run_config.entrypoint).resolve()
+
+    if exists(dirpath):
+        print(f"Folder already exists: {dirpath}. Exiting init.")
         exit()
 
-    dirpath = Path(run_config.entrypoint)
-    assert len(dirpath.parts) == 2
     makedirs(dirpath)
 
-    server_type = dirpath.parts[0]
+    server_type = dirpath.parts[-2]
     assert server_type == "resources_servers"
     server_type_name = dirpath.parts[-1].lower()
     server_type_title = "".join(x.capitalize() for x in server_type_name.split("_"))
@@ -791,7 +791,7 @@ def init_resources_server():  # pragma: no cover
 """)
 
     app_fpath = dirpath / "app.py"
-    with open("resources/resources_server_template.py") as f:
+    with open(PARENT_DIR / "resources" / "resources_server_template.py") as f:
         app_template = f.read()
     app_content = app_template.replace("ExampleMultiStep", server_type_title)
     with open(app_fpath, "w") as f:
@@ -801,7 +801,7 @@ def init_resources_server():  # pragma: no cover
     makedirs(tests_dirpath)
 
     tests_fpath = tests_dirpath / "test_app.py"
-    with open("resources/resources_server_test_template.py") as f:
+    with open(PARENT_DIR / "resources" / "resources_server_test_template.py") as f:
         tests_template = f.read()
     tests_content = tests_template.replace("ExampleMultiStep", server_type_title)
     tests_content = tests_content.replace("from app", f"from resources_servers.{server_type_name}.app")
@@ -809,9 +809,9 @@ def init_resources_server():  # pragma: no cover
         f.write(tests_content)
 
     requirements_fpath = dirpath / "requirements.txt"
+    rel_to_gym_root = os.path.relpath(PARENT_DIR, dirpath)
     with open(requirements_fpath, "w") as f:
-        f.write("""-e nemo-gym[dev] @ ../../
-""")
+        f.write(f"-e nemo-gym[dev] @ {rel_to_gym_root}\n")
 
     readme_fpath = dirpath / "README.md"
     with open(readme_fpath, "w") as f:
