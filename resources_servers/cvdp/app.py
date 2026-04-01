@@ -24,7 +24,15 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
+from cvdp_lib.cvdp_constants import (
+    BLEU_THRESHOLD,
+    CODE_COMPREHENSION_CATEGORIES,
+    N_GRAM_DEFAULT,
+    ROUGE_THRESHOLD,
+    is_score_based_category,
+)
 from cvdp_lib.model_helpers import ModelHelpers
+from cvdp_lib.subjective import calculate_BLEU, calculate_ROUGE
 from pydantic import BaseModel
 
 from nemo_gym.base_resources_server import (
@@ -62,9 +70,10 @@ class CVDPVerifierMetadata(BaseModel):
     task_id: str
     categories: List[str] = []
     difficulty: str = ""
-    target_files: List[str]
-    harness_files: Dict[str, Optional[str]]
+    target_files: List[str] = []  # Empty for code-comprehension categories
+    harness_files: Dict[str, Optional[str]] = {}  # Empty for code-comprehension categories
     context_files: Dict[str, str] = {}  # Companion RTL from input.context (non-target files needed for compilation)
+    subjective_reference: Optional[str] = None  # Reference answer for code-comprehension categories (6,8,9,10)
 
 
 class CVDPRunRequest(BaseRunRequest):
@@ -85,6 +94,8 @@ class CVDPVerifyResponse(BaseVerifyResponse):
     container_services: Optional[List[Dict]] = None  # per-service results: [{"service", "exit_code", "stderr"}]
     execution_time: Optional[float] = None  # total harness wall time in seconds
     parse_failed: bool = False  # True when model produced output but RTL extraction failed
+    bleu_score: Optional[float] = None  # BLEU score for code-comprehension categories
+    rouge_score: Optional[float] = None  # ROUGE score for code-comprehension categories
 
 
 # ----------------------------
@@ -350,11 +361,11 @@ class CVDPResourcesServer(SimpleResourcesServer):
         os.makedirs(self._sif_cache_dir, exist_ok=True)
 
     async def verify(self, body: CVDPVerifyRequest) -> CVDPVerifyResponse:
-        # print(f"[DEBUG] verify entry from model")
         meta = CVDPVerifierMetadata.model_validate(body.verifier_metadata)
 
         # categories is [category_id, difficulty], e.g. ["cid003", "medium"]
         category, difficulty = meta.categories[0], meta.categories[1]
+        category_num = int(category[3:])  # "cid003" -> 3
 
         model_out = body.response.output_text
 
@@ -366,7 +377,6 @@ class CVDPResourcesServer(SimpleResourcesServer):
                     reasoning_texts = [s.text for s in (item.summary or []) if s.text]
                     if reasoning_texts:
                         model_out = "\n".join(reasoning_texts)
-                        # print(f"[verify] output_text empty — falling back to reasoning content (len={len(model_out)})")
                         break
 
         has_model_output = bool(model_out and model_out.strip())
@@ -385,6 +395,78 @@ class CVDPResourcesServer(SimpleResourcesServer):
                 parse_failed=False,
             )
 
+        # Route: code-comprehension categories use subjective scoring,
+        # code-generation categories use the docker-compose harness.
+        if category_num in CODE_COMPREHENSION_CATEGORIES:
+            return self._verify_subjective(body, meta, category, difficulty, category_num, model_out)
+
+        return await self._verify_objective(body, meta, category, difficulty, model_out)
+
+    def _verify_subjective(
+        self,
+        body: CVDPVerifyRequest,
+        meta: CVDPVerifierMetadata,
+        category: str,
+        difficulty: str,
+        category_num: int,
+        model_out: str,
+    ) -> CVDPVerifyResponse:
+        """
+        Subjective scoring for code-comprehension categories (6, 8, 9, 10).
+
+        Mirrors repository.sbj() + dataset_processor.run_subjective_scoring():
+        - Categories 6, 8: BLEU/ROUGE n-gram scoring
+        - Categories 9, 10: Also BLEU/ROUGE (LLM subjective scoring requires a
+          separate judge model endpoint which is not wired up here; BLEU/ROUGE
+          serves as the default fallback, matching CVDP's behavior when no
+          sbj_llm_model is configured)
+        """
+        reference = meta.subjective_reference or ""
+        if not reference:
+            return CVDPVerifyResponse(
+                **body.model_dump(),
+                reward=0.0,
+                task_id=meta.task_id,
+                category=category,
+                difficulty=difficulty,
+                container_stderr="No subjective_reference provided for code-comprehension category",
+            )
+
+        n_gram = N_GRAM_DEFAULT
+        bleu_val = calculate_BLEU(model_out.strip(), reference, n_gram)
+        rouge_val = calculate_ROUGE(model_out.strip(), reference, n_gram)
+
+        # Score-based categories (6, 8, 9, 10) return the BLEU score directly
+        # as a fractional reward, matching CVDP's SCORING_MODE_SCORE behavior.
+        if is_score_based_category(category_num):
+            reward = bleu_val
+        else:
+            # Threshold-based: both ROUGE and BLEU must pass
+            rouge_pass = rouge_val > ROUGE_THRESHOLD
+            bleu_pass = bleu_val > BLEU_THRESHOLD
+            reward = 1.0 if (rouge_pass and bleu_pass) else 0.0
+
+        return CVDPVerifyResponse(
+            **body.model_dump(),
+            reward=reward,
+            task_id=meta.task_id,
+            category=category,
+            difficulty=difficulty,
+            bleu_score=bleu_val,
+            rouge_score=rouge_val,
+        )
+
+    async def _verify_objective(
+        self,
+        body: CVDPVerifyRequest,
+        meta: CVDPVerifierMetadata,
+        category: str,
+        difficulty: str,
+        model_out: str,
+    ) -> CVDPVerifyResponse:
+        """
+        Objective scoring for code-generation categories via docker-compose harness.
+        """
         rtl_files = _parse_model_response(model_out, meta.target_files)
 
         # If model produced output but parsing failed, signal parse_failed so the

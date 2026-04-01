@@ -21,6 +21,19 @@ import json
 from pathlib import Path
 
 
+# Code comprehension categories use subjective scoring, not docker-compose harness.
+# They have no target_files or harness_files — instead they carry a reference answer.
+CODE_COMPREHENSION_CATEGORIES = [6, 8, 9, 10]
+
+
+def _get_category_num(entry: dict) -> int | None:
+    """Extract the numeric category from the categories list (e.g. 'cid010' -> 10)."""
+    categories = entry.get("categories", [])
+    if categories and isinstance(categories[0], str) and categories[0].startswith("cid"):
+        return int(categories[0][3:])
+    return None
+
+
 def _get_target_files(entry: dict) -> list[str]:
     """All output.context keys — matches dataset_processor.py line 1117."""
     output_context = (entry.get("output") or {}).get("context") or {}
@@ -41,6 +54,11 @@ def _get_context_files(entry: dict) -> dict[str, str]:
     input_context = (entry.get("input") or {}).get("context") or {}
     target_keys = set(_get_target_files(entry))
     return {k: v for k, v in input_context.items() if k not in target_keys and v}
+
+
+def _get_subjective_reference(entry: dict) -> str | None:
+    """Reference answer for code-comprehension categories — from output.response."""
+    return (entry.get("output") or {}).get("response")
 
 
 def main() -> None:
@@ -72,8 +90,12 @@ def main() -> None:
                 continue
 
             raw = dataset[task_id]
+            cat_num = _get_category_num(raw)
+            is_comprehension = cat_num is not None and cat_num in CODE_COMPREHENSION_CATEGORIES
+
             target_files = _get_target_files(raw)
-            if not target_files:
+            # Code-generation categories require target_files; comprehension categories don't.
+            if not target_files and not is_comprehension:
                 skipped += 1
                 continue
 
@@ -87,6 +109,16 @@ def main() -> None:
             }
             if context_files:
                 verifier_metadata["context_files"] = context_files
+
+            # Code-comprehension categories carry the reference answer for BLEU/ROUGE scoring.
+            if is_comprehension:
+                ref = _get_subjective_reference(raw)
+                if ref:
+                    verifier_metadata["subjective_reference"] = ref
+                else:
+                    print(f"WARNING: no output.response for comprehension task {task_id}, skipping")
+                    skipped += 1
+                    continue
 
             gym_row = {
                 "responses_create_params": {
@@ -102,7 +134,7 @@ def main() -> None:
 
     print(f"Wrote {written} entries to {args.output}")
     if skipped:
-        print(f"Skipped {skipped} entries (no dataset match or no target files)")
+        print(f"Skipped {skipped} entries (no dataset match, no target files, or missing reference)")
 
 
 if __name__ == "__main__":

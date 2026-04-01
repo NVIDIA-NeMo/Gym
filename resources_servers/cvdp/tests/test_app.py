@@ -31,6 +31,7 @@ from resources_servers.cvdp.app import (
     _parse_compose_service,
     _parse_model_response,
 )
+from resources_servers.cvdp.cvdp_lib.subjective import calculate_BLEU, calculate_ROUGE
 
 
 # ---------------------------------------------------------------------------
@@ -422,6 +423,159 @@ class TestCVDPServerVerify:
         assert result.reward == 1.0
         assert "rtl/a.sv" in result.extracted_rtl
         assert "rtl/b.sv" in result.extracted_rtl
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: subjective scoring (BLEU / ROUGE)
+# ---------------------------------------------------------------------------
+
+
+class TestSubjectiveScoring:
+    def test_bleu_identical_strings(self):
+        score = calculate_BLEU("the cat sat on the mat", "the cat sat on the mat", 2)
+        assert score == pytest.approx(1.0)
+
+    def test_bleu_completely_different(self):
+        score = calculate_BLEU("alpha beta gamma", "one two three four five six", 2)
+        assert score == pytest.approx(0.0)
+
+    def test_rouge_identical_strings(self):
+        score = calculate_ROUGE("the cat sat on the mat", "the cat sat on the mat", 2)
+        assert score == pytest.approx(1.0)
+
+    def test_rouge_completely_different(self):
+        score = calculate_ROUGE("alpha beta gamma", "one two three four five six", 2)
+        assert score == pytest.approx(0.0)
+
+    def test_bleu_partial_overlap(self):
+        score = calculate_BLEU("the cat sat on the mat", "the cat slept on a mat", 2)
+        assert 0.0 < score < 1.0
+
+    def test_rouge_partial_overlap(self):
+        score = calculate_ROUGE("the cat sat on the mat", "the cat slept on a mat", 2)
+        assert 0.0 < score < 1.0
+
+
+# ---------------------------------------------------------------------------
+# Integration: subjective category verify flow
+# ---------------------------------------------------------------------------
+
+
+def _make_subjective_body(
+    output_text: str,
+    category: str = "cid010",
+    difficulty: str = "easy",
+    subjective_reference: str = "This is the reference answer.",
+) -> dict:
+    return {
+        "responses_create_params": {"input": [{"role": "user", "content": "Explain the barrel shifter"}]},
+        "response": {
+            "id": "resp_test",
+            "created_at": 0.0,
+            "model": "test-model",
+            "object": "response",
+            "output": [
+                {
+                    "id": "msg_test",
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": output_text, "annotations": []}],
+                }
+            ],
+            "parallel_tool_calls": False,
+            "tool_choice": "auto",
+            "tools": [],
+            "usage": {
+                "input_tokens": 10,
+                "output_tokens": 20,
+                "total_tokens": 30,
+                "input_tokens_details": {"cached_tokens": 0},
+                "output_tokens_details": {"reasoning_tokens": 0},
+            },
+        },
+        "verifier_metadata": {
+            "task_id": "test_subjective_001",
+            "categories": [category, difficulty],
+            "target_files": [],
+            "harness_files": {},
+            "subjective_reference": subjective_reference,
+        },
+    }
+
+
+class TestCVDPServerVerifySubjective:
+    def setup_method(self):
+        self.server = _make_server()
+
+    @pytest.mark.asyncio
+    async def test_identical_answer_gets_high_reward(self):
+        ref = "Testing circular shifts with shift_bits equal to DATA_WIDTH checks correctness."
+        body_dict = _make_subjective_body(output_text=ref, subjective_reference=ref)
+        result = await self.server.verify(_make_request(body_dict))
+        assert result.reward == pytest.approx(1.0)
+        assert result.bleu_score == pytest.approx(1.0)
+        assert result.rouge_score == pytest.approx(1.0)
+
+    @pytest.mark.asyncio
+    async def test_empty_output_returns_zero(self):
+        body_dict = _make_subjective_body(output_text="", subjective_reference="some reference")
+        result = await self.server.verify(_make_request(body_dict))
+        assert result.reward == 0.0
+
+    @pytest.mark.asyncio
+    async def test_no_reference_returns_zero(self):
+        body_dict = _make_subjective_body(output_text="some answer", subjective_reference="")
+        result = await self.server.verify(_make_request(body_dict))
+        assert result.reward == 0.0
+
+    @pytest.mark.asyncio
+    async def test_partial_match_returns_fractional_reward(self):
+        ref = "The barrel shifter rotates bits in a circular fashion using multiplexers."
+        answer = "The barrel shifter rotates bits using a series of multiplexers for shifting."
+        body_dict = _make_subjective_body(output_text=answer, subjective_reference=ref)
+        result = await self.server.verify(_make_request(body_dict))
+        assert 0.0 < result.reward < 1.0
+        assert result.bleu_score is not None
+        assert result.rouge_score is not None
+
+    @pytest.mark.asyncio
+    async def test_completely_wrong_answer_gets_low_reward(self):
+        ref = "The barrel shifter rotates bits in a circular fashion using multiplexers."
+        answer = "Quantum computing leverages entanglement for parallel processing."
+        body_dict = _make_subjective_body(output_text=answer, subjective_reference=ref)
+        result = await self.server.verify(_make_request(body_dict))
+        assert result.reward < 0.3
+
+    @pytest.mark.asyncio
+    async def test_category_6_uses_subjective_path(self):
+        ref = "module foo implements a decoder."
+        body_dict = _make_subjective_body(output_text=ref, category="cid006", subjective_reference=ref)
+        result = await self.server.verify(_make_request(body_dict))
+        assert result.reward == pytest.approx(1.0)
+        assert result.bleu_score is not None
+
+    @pytest.mark.asyncio
+    async def test_category_8_uses_subjective_path(self):
+        ref = "The testbench checks reset behavior."
+        body_dict = _make_subjective_body(output_text=ref, category="cid008", subjective_reference=ref)
+        result = await self.server.verify(_make_request(body_dict))
+        assert result.reward == pytest.approx(1.0)
+
+    @pytest.mark.asyncio
+    async def test_code_gen_category_does_not_use_subjective(self):
+        """Category 3 (code gen) should go to the harness path, not subjective."""
+        body_dict = _make_body(output_text=f"```systemverilog\n{SAMPLE_RTL}\n```")
+        body_dict["verifier_metadata"]["categories"] = ["cid003", "medium"]
+        with patch.object(
+            self.server,
+            "_run_harness",
+            new_callable=AsyncMock,
+            return_value=(0, "", []),
+        ):
+            result = await self.server.verify(_make_request(body_dict))
+        assert result.reward == 1.0
+        assert result.bleu_score is None  # Not a subjective category
 
 
 # ---------------------------------------------------------------------------
