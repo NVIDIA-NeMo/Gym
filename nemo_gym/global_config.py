@@ -427,6 +427,19 @@ Duplicate config paths:
 
         self._recursively_swap_keys(global_config_dict)
 
+        # TODO @bxyu-nvidia: We need a better way of handling dummy model configs
+        with open_dict(global_config_dict):
+            for top_level_value in global_config_dict.values():
+                if not (
+                    isinstance(top_level_value, (DictConfig))
+                    and "responses_api_models" in top_level_value
+                    and len(top_level_value["responses_api_models"]) > 1
+                    and "dummy_model" in top_level_value["responses_api_models"]
+                ):
+                    continue
+
+                top_level_value["responses_api_models"].pop("dummy_model")
+
         # Almost-server detection and reporting
         almost_servers = self.detect_and_report_almost_servers(global_config_dict)
 
