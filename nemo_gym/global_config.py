@@ -439,8 +439,14 @@ Duplicate config paths:
 
             error_on_almost_servers = global_config_dict.get("error_on_almost_servers", True)
             if error_on_almost_servers:
-                error_msg = f"Found {len(almost_servers)} almost-server(s) with validation errors. "
-                error_msg += "Fix the issues above or set error_on_almost_servers=false to bypass this error."
+                config_dict_to_log = deepcopy(global_config_dict)
+                self._recursively_hide_secrets(config_dict_to_log)
+                config_to_log_yaml = OmegaConf.to_yaml(config_dict_to_log)
+
+                error_msg = f"""Found {len(almost_servers)} almost-server(s) with validation errors. Fix the issues above or set error_on_almost_servers=false to bypass this error.
+Found global config dict yaml:
+{config_to_log_yaml}"""
+
                 raise ValueError(error_msg)
 
         server_instance_configs = self.filter_for_server_instance_configs(global_config_dict)
