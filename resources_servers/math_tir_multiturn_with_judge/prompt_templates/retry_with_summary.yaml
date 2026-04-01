@@ -1,0 +1,30 @@
+user: |-
+  You will be asked to solve a math problem. You are given a summary of your previous attempt. Carefully review it, fix any issues you identified, and provide an improved solution.
+
+  You have access to a Python code execution tool. Use it strategically — not every problem benefits from code. Before writing any code, assess the problem type:
+
+  USE CODE when:
+  - The answer is a concrete number that can be computed via enumeration, simulation, or dynamic programming (e.g., counting combinatorial objects, game-theory DP, modular arithmetic over finite sets)
+  - You can verify a conjectured closed-form by checking it against computed values
+  - The problem involves explicit computation that is error-prone by hand (e.g., large modular exponentials, convolutions, polynomial manipulations)
+
+  AVOID CODE when:
+  - The problem asks to maximize/minimize over an infinite or very large parameter space — brute-forcing small cases can be misleading when the extremum requires a clever construction at scale
+  - The answer requires a theoretical bound or structural argument (e.g., "find the maximum possible value" where the construction achieving it is non-obvious)
+  - Small-case computation cannot distinguish between candidate answers (e.g., the answer is 1350 but small cases all give 3)
+  - The problem is about existence, characterization, or finding a closed-form expression in terms of parameters
+
+  When in doubt, reason first. Develop a theoretical framework before reaching for code. If you do use code, use it to confirm theoretical insights — not as a substitute for them. If code results conflict with your theoretical reasoning, trust the theory and recheck the code, not the other way around.
+
+  CRITICAL: If you find yourself running more than 5 tool calls without making progress toward the answer, STOP writing code. Step back and reason about the problem theoretically. Repeated brute-force searches with increasing parameters is almost never the path to a correct answer on competition problems.
+
+  Ok, now solve the following math problem. Don't forget to put the answer inside \boxed{{}}.
+
+  ## Problem
+  {problem}
+
+  ### YOUR PREVIOUS ATTEMPT
+  {summary}
+
+  ### INSTRUCTIONS
+  Please try again. Carefully review your previous attempt, fix any issues, and provide an improved solution.

@@ -22,7 +22,7 @@ from itertools import repeat
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional, Set, Tuple
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 from tqdm.asyncio import tqdm
 
 from nemo_gym.config_types import BaseNeMoGymCLIConfig, BaseServerConfig
@@ -86,6 +86,17 @@ class RolloutCollectionConfig(BaseNeMoGymCLIConfig):
 
 
 class RolloutCollectionHelper(BaseModel):  # pragma: no cover
+    max_concurrent_requests: int = 0
+    _semaphore: Optional[Semaphore] = PrivateAttr(default=None)
+
+    def _get_semaphore(self) -> Optional[Semaphore]:
+        """Lazy-init a shared asyncio.Semaphore that limits total concurrent Gym
+        requests across all prompt groups on this actor's event loop.
+        Returns None (no limit) when max_concurrent_requests <= 0."""
+        if self.max_concurrent_requests > 0 and self._semaphore is None:
+            self._semaphore = Semaphore(self.max_concurrent_requests)
+        return self._semaphore
+
     async def run_from_config(self, config: RolloutCollectionConfig):
         range_iterator = repeat(0)
         if config.limit:
@@ -174,11 +185,13 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
 
     def _run_standard(self, examples: List[Dict], server_client: ServerClient) -> Iterator[Future]:
         """Standard rollout collection - each sample through its agent."""
+        sem = self._get_semaphore()
 
         async def _post_subroutine(row: Dict) -> Tuple[Dict, Dict]:
-            res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
-            await raise_for_status(res)
-            return row, await get_response_json(res)
+            async with (sem or nullcontext()):
+                res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
+                await raise_for_status(res)
+                return row, await get_response_json(res)
 
         return tqdm.as_completed(
             map(_post_subroutine, examples), desc="Collecting rollouts", miniters=10, total=len(examples)

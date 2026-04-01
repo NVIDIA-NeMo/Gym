@@ -1,0 +1,17 @@
+user: |-
+  You are given a maths problem and a reasoning attempt toward solving it. Your task is to write a summary of the reasoning attempt.
+
+  The summary you generate should possess the following characteristics:
+  - It should provide a detailed overview of what occurred in the reasoning attempt. This may include a summary of the high-level problem-solving strategy, a description of theorems used, verification attempts, calculations and logical deductions etc.
+  - It should be no more than two paragraphs long and written in paragraph form, without headers or subheaders.
+  - It should be written in the first person, as if though it is being written by the person solving the problem.
+  - The reasoning attempt may not be complete. In this case, the summary should still attempt to summarize the partial reasoning.
+
+  IMPORTANT: Do not under any circumstances add any additional reasoning not contained in the reasoning given. Your task is only to summarize what is given to you.
+  Output plain text only. Do not use backticks, code blocks, or XML-like tags (e.g. think tags) in your response. Write in continuous paragraphs.
+
+  ### PROBLEM
+  {problem}
+
+  ### REASONING
+  {reasoning_process}

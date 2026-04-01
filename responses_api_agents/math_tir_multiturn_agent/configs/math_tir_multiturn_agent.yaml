@@ -1,0 +1,20 @@
+# Standalone agent config (alternative to embedding in resource server config).
+# Usually the agent config is part of math_tir_multiturn_with_judge.yaml;
+# this file exists for independent use / testing.
+math_tir_multiturn_agent:
+  responses_api_agents:
+    math_tir_multiturn_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: math_tir_multiturn_with_judge
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      tool_server_name: ns_tools
+      max_turns: 2
+      max_steps: 100
+      response_processor: summary_model
+      include_all_attempts: true
+      max_output_tokens: null
+      datasets: []

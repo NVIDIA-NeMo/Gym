@@ -1,0 +1,38 @@
+# Multi-turn TIR (tool-integrated reasoning) judge resource server.
+#
+# Provides multi-turn awareness for TIR tasks: summarize + retry flow
+# with math_with_judge as the final verifier.
+#
+# Non-final reasoning turn → build summary prompt (summarize_reasoning.yaml)
+# Summary turn → build retry prompt (retry_with_summary.yaml)
+# Final reasoning turn → delegate to math_with_judge for verification
+math_tir_multiturn_with_judge:
+  resources_servers:
+    math_tir_multiturn_with_judge:
+      entrypoint: app.py
+      verifier_server_name: math_with_judge
+      max_turns: 2
+      reward_strategy: final_only
+      response_processor: summary_model
+      zero_truncated_turn_reward: false
+      truncated_turn_reward_share: 1.0
+      domain: math
+      description: Multi-turn TIR with summarize+retry and math_with_judge verification
+
+math_tir_multiturn_agent:
+  responses_api_agents:
+    math_tir_multiturn_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: math_tir_multiturn_with_judge
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      tool_server_name: ns_tools
+      max_turns: 2
+      max_steps: 100
+      response_processor: summary_model
+      include_all_attempts: true
+      max_output_tokens: null
+      datasets: []
