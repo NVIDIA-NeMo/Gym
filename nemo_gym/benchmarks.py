@@ -58,12 +58,7 @@ class BenchmarkConfig(BaseModel):
             )
 
         parser = GlobalConfigDictParser()
-        global_config_dict = parser.parse(
-            parse_config=GlobalConfigDictParserConfig(
-                initial_global_config_dict=initial_config_dict,
-                skip_load_from_cli=True,
-            )
-        )
+        global_config_dict = parser.parse_no_environment(initial_global_config_dict=initial_config_dict)
 
         datasets: List[BenchmarkDatasetConfig] = []
         candidate_agent_server_instance_names: List[str] = []
