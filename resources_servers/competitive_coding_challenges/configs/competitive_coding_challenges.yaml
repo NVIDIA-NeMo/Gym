@@ -1,0 +1,25 @@
+competitive_coding_challenges_resources_server:
+  resources_servers:
+    competitive_coding_challenges:
+      entrypoint: app.py
+      domain: coding
+      description: Execution of competitive programming competition questions
+      test_file: ${oc.env:CCC_TEST_FILE,data/test_metadata.jsonl}
+      test_batch_size: 32
+      num_parallel_requests: 16
+      time_scale: 2.0
+      shared_dir: ${oc.env:SHARED_TEMP_DIR,/tmp}
+competitive_coding_challenges_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: competitive_coding_challenges_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/competitive_coding_challenges/data/example.jsonl
