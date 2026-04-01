@@ -289,9 +289,12 @@ Duplicate config paths:
             if isinstance(v, (DictConfig, dict)):
                 self._recursively_hide_secrets_helper(v)
             elif isinstance(v, (ListConfig, list)):
-                for inner_v in v:
-                    if isinstance(inner_v, (DictConfig, dict)):
-                        self._recursively_hide_secrets_helper(inner_v)
+                if "token" in k or "key" in k:
+                    dict_config[k] = ["****"] * len(v)
+                else:
+                    for inner_v in v:
+                        if isinstance(inner_v, (DictConfig, dict)):
+                            self._recursively_hide_secrets_helper(inner_v)
             else:
                 if "token" in k or "key" in k:
                     dict_config[k] = "****"
