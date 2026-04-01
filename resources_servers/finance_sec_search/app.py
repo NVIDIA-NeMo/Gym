@@ -101,6 +101,12 @@ class FinanceAgentResourcesServerConfig(BaseResourcesServerConfig):
         default=100000,
         description="If the document is larger than this threshold characters, give a warning to the model to use char ranges.",
     )
+    reward_mode: str = Field(
+        default="binary",
+        description="How judge ratings map to rewards. "
+        "'binary': only [[2]] → 1.0, else 0.0. "
+        "'scaled': [[0]] → 0.0, [[1]] → 0.5, [[2]] → 1.0.",
+    )
     retrieval_max_output_tokens: int = Field(
         default=8192,
         description="Max output tokens for retrieve_information LLM calls. Increase for thinking models.",
@@ -1046,10 +1052,10 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
     async def verify(self, request: Request, body: FinanceAgentVerifyRequest) -> FinanceAgentVerifyResponse:
         """Verify using LLM-as-judge with strict financial grading rubric (0/1/2 scale).
 
-        Rating scale:
-            [[2]] = fully correct  → reward 1.0
-            [[1]] = partial        → reward 0.0
-            [[0]] = incorrect      → reward 0.0
+        Rating scale (reward depends on config.reward_mode):
+            [[2]] = fully correct  → binary: 1.0 | scaled: 1.0
+            [[1]] = partial        → binary: 0.0 | scaled: 0.5
+            [[0]] = incorrect      → binary: 0.0 | scaled: 0.0
         """
         session_id = request.session.get(SESSION_ID_KEY)
         if session_id:
@@ -1147,8 +1153,11 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
             if attempt < max_judge_retries - 1:
                 await asyncio.sleep(2**attempt)
 
-        # Only [[2]] (fully correct) gets reward 1.0
-        reward = 1.0 if rating == 2 else 0.0
+        if self.config.reward_mode == "scaled":
+            _REWARD_MAP = {0: 0.0, 1: 0.5, 2: 1.0}
+            reward = _REWARD_MAP.get(rating, 0.0)
+        else:
+            reward = 1.0 if rating == 2 else 0.0
 
         return FinanceAgentVerifyResponse(
             **body.model_dump(), reward=reward, judge_rating=rating, judge_text=judge_text
