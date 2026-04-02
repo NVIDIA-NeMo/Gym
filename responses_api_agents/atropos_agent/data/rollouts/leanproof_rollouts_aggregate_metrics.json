@@ -1,0 +1,84 @@
+[
+  {
+    "agent_ref": {
+      "name": "atropos_leanproof_agent"
+    },
+    "agent_metrics": {
+      "mean/reward": 0.0,
+      "max/reward": 0.0,
+      "min/reward": 0.0,
+      "median/reward": 0.0,
+      "std/reward": 0.0
+    },
+    "key_metrics": {
+      "mean/reward": 0.0
+    },
+    "group_level_metrics": [
+      {
+        "mean/reward": 0.0,
+        "max/reward": 0.0,
+        "min/reward": 0.0,
+        "median/reward": 0.0,
+        "std/reward": 0.0,
+        "sample": {
+          "agent_ref": {
+            "name": "agent"
+          }
+        },
+        "_ng_task_index": 0
+      },
+      {
+        "mean/reward": 0.0,
+        "max/reward": 0.0,
+        "min/reward": 0.0,
+        "median/reward": 0.0,
+        "std/reward": 0.0,
+        "sample": {
+          "agent_ref": {
+            "name": "agent"
+          }
+        },
+        "_ng_task_index": 1
+      },
+      {
+        "mean/reward": 0.0,
+        "max/reward": 0.0,
+        "min/reward": 0.0,
+        "median/reward": 0.0,
+        "std/reward": 0.0,
+        "sample": {
+          "agent_ref": {
+            "name": "agent"
+          }
+        },
+        "_ng_task_index": 2
+      },
+      {
+        "mean/reward": 0.0,
+        "max/reward": 0.0,
+        "min/reward": 0.0,
+        "median/reward": 0.0,
+        "std/reward": 0.0,
+        "sample": {
+          "agent_ref": {
+            "name": "agent"
+          }
+        },
+        "_ng_task_index": 3
+      },
+      {
+        "mean/reward": 0.0,
+        "max/reward": 0.0,
+        "min/reward": 0.0,
+        "median/reward": 0.0,
+        "std/reward": 0.0,
+        "sample": {
+          "agent_ref": {
+            "name": "agent"
+          }
+        },
+        "_ng_task_index": 4
+      }
+    ]
+  }
+]
