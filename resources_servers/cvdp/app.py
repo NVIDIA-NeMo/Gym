@@ -15,6 +15,7 @@
 
 import asyncio
 import hashlib
+import logging
 import os
 import shlex
 import signal
@@ -29,6 +30,7 @@ from cvdp_lib.cvdp_constants import (
     CODE_COMPREHENSION_CATEGORIES,
     N_GRAM_DEFAULT,
     ROUGE_THRESHOLD,
+    VERIF_EDA_CATEGORIES,
     is_score_based_category,
 )
 from cvdp_lib.model_helpers import ModelHelpers
@@ -359,6 +361,19 @@ class CVDPResourcesServer(SimpleResourcesServer):
             cache = os.path.join(Path.home(), ".cache", "nemo-gym", "sif")
         self._sif_cache_dir = cache
         os.makedirs(self._sif_cache_dir, exist_ok=True)
+
+        # Warn if commercial EDA image is not configured.
+        # Categories 12, 13, 14 require a commercial EDA image (e.g. Cadence Xcelium).
+        # Apptainer uses host networking so no license network setup is needed
+        # (unlike Docker which requires a dedicated license network).
+        # This mirrors CVDP's validate_commercial_eda_setup() — warn but don't block.
+        if not self.config.eda_sim_image:
+            logging.warning(
+                "eda_sim_image is not configured. "
+                "Categories %s (commercial EDA) will fail if __VERIF_EDA_IMAGE__ "
+                "is referenced in harness files.",
+                VERIF_EDA_CATEGORIES,
+            )
 
     async def verify(self, body: CVDPVerifyRequest) -> CVDPVerifyResponse:
         meta = CVDPVerifierMetadata.model_validate(body.verifier_metadata)
