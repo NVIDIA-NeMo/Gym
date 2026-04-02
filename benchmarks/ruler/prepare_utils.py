@@ -28,7 +28,7 @@ BENCHMARK_DIR = Path(__file__).parent
 DATA_DIR = BENCHMARK_DIR / "data"
 
 
-def prepare_helper(output_name: str, model: str, length: str) -> Path:
+def prepare_helper(output_name: str, model: str, length: str, add_answer_prefix: bool = True) -> Path:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     output_fpath = DATA_DIR / output_name
 
@@ -78,12 +78,16 @@ def prepare_helper(output_name: str, model: str, length: str) -> Path:
             subset_samples = list(map(json.loads, f))
 
         for sample in subset_samples:
+            answer_prefix = sample["answer_prefix"].strip()
             sample = {
                 "responses_create_params": {"input": [{"role": "user", "content": sample["input"]}]},
                 "outputs": sample["outputs"],
                 "length": sample["length"],
                 "subset": subset_dir.name,
             }
+            if add_answer_prefix:
+                # status is needed in response mode but optional in chat completion mode.
+                sample["responses_create_params"]["input"].append({"role": "assistant", "content": answer_prefix, "status": "in_progress"})
             samples.append(sample)
 
     with output_fpath.open("w") as f:
