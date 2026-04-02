@@ -87,7 +87,9 @@ def prepare_helper(output_name: str, model: str, length: str, add_answer_prefix:
             }
             if add_answer_prefix:
                 # status is needed in response mode but optional in chat completion mode.
-                sample["responses_create_params"]["input"].append({"role": "assistant", "content": answer_prefix, "status": "in_progress"})
+                sample["responses_create_params"]["input"].append(
+                    {"role": "assistant", "content": answer_prefix, "status": "in_progress"}
+                )
             samples.append(sample)
 
     with output_fpath.open("w") as f:
