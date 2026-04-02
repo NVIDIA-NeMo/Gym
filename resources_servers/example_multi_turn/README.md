@@ -48,13 +48,21 @@ The **user model's** system prompt lives in the YAML config as `user_model_syste
 ## Usage
 
 ```bash
-ng_run "+config_paths=[resources_servers/example_multi_turn/configs/example_multi_turn.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
+ng_prepare_data "+config_paths=[resources_servers/example_multi_turn/configs/example_multi_turn.yaml]" \
+    +output_dirpath=resources_servers/example_multi_turn/data \
+    +mode=example_validation \
+    "+user_model={responses_api_models: {dummy_model: {entrypoint: app.py}}}" \
+    +user_base_url="" +user_api_key="" +user_model_name=""
+```
+
+```bash
+ng_run "+config_paths=[resources_servers/example_multi_turn/configs/example_multi_turn.yaml,responses_api_models/openai_model/configs/openai_model_with_user.yaml]"
 ```
 
 ```bash
 ng_collect_rollouts +agent_name=example_multi_turn_agent \
     +input_jsonl_fpath=resources_servers/example_multi_turn/data/example.jsonl \
-    +output_jsonl_fpath=/tmp/example_multi_turn_rollouts.jsonl \
+    +output_jsonl_fpath=resources_servers/example_multi_turn/data/example_rollouts.jsonl \
     +num_repeats=1 \
     "+responses_create_params={max_output_tokens: 4096, temperature: 0.0}"
 ```
