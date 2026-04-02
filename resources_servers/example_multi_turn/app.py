@@ -115,7 +115,9 @@ class ExampleMultiTurnServer(SimpleResourcesServer):
         app.post("/make_move")(self.make_move)
         return app
 
-    async def seed_session(self, request: Request, body: ExampleMultiTurnSeedSessionRequest) -> BaseSeedSessionResponse:
+    async def seed_session(
+        self, request: Request, body: ExampleMultiTurnSeedSessionRequest
+    ) -> BaseSeedSessionResponse:
         session_id = request.session[SESSION_ID_KEY]
         game = GameState()
 
