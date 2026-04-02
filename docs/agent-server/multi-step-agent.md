@@ -1,5 +1,3 @@
-(multi-step-agent)=
-
 # Multi-Step Agent
 
 The Multi-Step Agent [`SimpleAgent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/simple_agent) handles **single-turn, multi-step** interactions: one user message triggers a model response that may loop through multiple tool calls before verification produces a reward.

@@ -1,5 +1,3 @@
-(multi-turn-agent)=
-
 # Multi-Turn Agent
 
 The [`MultiTurnAgent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/multi_turn_agent) orchestrates dialogue between a **policy model** (being trained/evaluated) and a **user model** (an LLM simulating the human user). It wraps the [Multi-Step Agent's](multi-step-agent) tool-call loop with an outer turn-based loop.
@@ -150,7 +148,7 @@ Only policy model tokens are used for RL training; user model tokens are not inc
 
 The `user_model_system_prompt` can be overridden per task in JSONL:
 
-```json
+```text
 {
   "responses_create_params": { "input": [...], "tools": [...] },
   "user_model_system_prompt": "You are a customer asking about returns..."
