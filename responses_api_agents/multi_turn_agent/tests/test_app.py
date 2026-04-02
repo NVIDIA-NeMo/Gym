@@ -173,7 +173,6 @@ class TestApp:
 
 
 class TestGenerateUserResponse:
-
     async def _call_generate(self, server: MultiTurnAgent, body=None) -> str | None:
         """Shorthand to call _generate_user_response with minimal arguments."""
         if body is None:
