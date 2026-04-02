@@ -1,0 +1,21 @@
+atropos_math_agent:
+  responses_api_agents:
+    atropos_agent:
+      entrypoint: app.py
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model_name: ${policy_model_name}
+      atropos_env_module: environments.math_server
+      atropos_env_class: MathEnv
+      atropos_group_size: 4
+      atropos_env_config:
+        max_token_length: 4096
+        include_messages: true
+      reward_function: atroposlib.envs.reward_fns.accuracy_reward:AccuracyReward
+      reward_function_kwargs:
+        split_on_think_tag: true
+      max_tokens: 4096
+      temperature: 1.0
+      top_p: 1.0
+      max_concurrent: -1

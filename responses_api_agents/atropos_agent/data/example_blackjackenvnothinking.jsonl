@@ -1,0 +1,5 @@
+{"responses_create_params": {"input": [{"role": "system", "content": "You are a helpful assistant."}, {"role": "user", "content": "Play the game. (seed: 44834)"}]}, "verifier_metadata": {"atropos_item": {"seed": 44834}}}
+{"responses_create_params": {"input": [{"role": "system", "content": "You are a helpful assistant."}, {"role": "user", "content": "Play the game. (seed: 236699)"}]}, "verifier_metadata": {"atropos_item": {"seed": 236699}}}
+{"responses_create_params": {"input": [{"role": "system", "content": "You are a helpful assistant."}, {"role": "user", "content": "Play the game. (seed: 788858)"}]}, "verifier_metadata": {"atropos_item": {"seed": 788858}}}
+{"responses_create_params": {"input": [{"role": "system", "content": "You are a helpful assistant."}, {"role": "user", "content": "Play the game. (seed: 906913)"}]}, "verifier_metadata": {"atropos_item": {"seed": 906913}}}
+{"responses_create_params": {"input": [{"role": "system", "content": "You are a helpful assistant."}, {"role": "user", "content": "Play the game. (seed: 271232)"}]}, "verifier_metadata": {"atropos_item": {"seed": 271232}}}
