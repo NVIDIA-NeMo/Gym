@@ -367,7 +367,8 @@ def initialize_ray() -> None:
 
     global_config_dict = get_global_config_dict()
     ray_head_node_address = global_config_dict.get(RAY_HEAD_NODE_ADDRESS_KEY_NAME)
-    ray_init_kwargs = dict(ignore_reinit_error=True)
+    # TODO remove _temp_dir arg
+    ray_init_kwargs = dict(ignore_reinit_error=True, _temp_dir="/cache/huggingface/ray")
 
     if ray_head_node_address:
         print(f"Connecting to Ray cluster at specified address: {ray_head_node_address}")
