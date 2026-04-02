@@ -6,50 +6,43 @@ The Agent server is the central component of environment design. It defines whet
 
 ## Rollout Lifecycle
 
-The following pseudocode illustrates a typical agent rollout in three phases: initialize the episode, run the agent loop, and grade the result. During the agent loop, the agent sends the conversation to the model, gets back a response, and if the model makes any tool calls, it routes them to the Resources server and feeds the results back to the model. The loop repeats until stop criteria are met, such as model max sequence length or the agent reaching a defined max steps or turns. Once the loop completes, the agent calls the Resources server to verify the result and collect a reward.
+Every agent follows a three-phase lifecycle:
+
+1. **Seed:**  initialize the Resources server session with task data
+2. **Agent loop:** send the conversation to the Model server, route any tool calls to the Resources server and feed results back to the Model, optionally interact with a user or another agent. Repeat until stop criteria are met (e.g. max steps, max turns, context length exceeded).
+3. **Verify** — send the full conversation to the Resources server to compute a reward
 
 ```python
-# Agent Server - pseudocode
 class Agent:
     async def run(self, task_data):
         # 1. Initialize episode
         resources_server.seed_session(task_data)
 
-        # 2. Run the agent loop
+        # 2. Run the agent loop (may be multiple steps and/or multiple turns)
         response = self.responses(task_data.prompt, task_data.tools)
 
         # 3. Grade the result
         reward = resources_server.verify(response, task_data.ground_truth)
         return response, reward
-
-    async def responses(self, prompt, tools):
-        conversation = prompt
-        step = 0
-
-        # Agent loop
-        while step < max_steps:
-            model_output = model_server.responses(conversation, tools)
-            conversation.append(model_output)
-
-            if model_output is text:
-                break # model is done, no more tool calls
-
-            for tool_call in model_output.function_calls:
-                result = resources_server.post(f"/{tool_call.name}", tool_call.arguments)
-                conversation.append(result)
-
-            step += 1
-
-        return conversation
 ```
 
-## Integrate Existing Agents
+How the agent loop works depends on the agent implementation, e.g. single turn vs multi-turn.
 
-You can use an existing agent in NeMo Gym, integrate an external one, or build your own from scratch.
 
-[`SimpleAgent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/simple_agent) is a native NeMo Gym agent that handles general-purpose multi-step tool calling with configurable max steps, and works with any Resources server out of the box. NeMo Gym also includes agents that integrate external tools: for example, [`MiniSWEAgent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/mini_swe_agent) wraps an external coding harness running in Docker containers and converts its output back into the NeMo Gym format.
+## Reference Agents
+- **[Multi-Step Agent](multi-step-agent):** (`SimpleAgent`) single-turn, multi-step. One user message triggers a model response that may loop through tool calls before verification.
+- **[Multi-Turn Agent](multi-turn-agent):** multi-turn, multi-step. Alternates between a policy model and an LLM user model over several dialogue turns. Each turn can include tool-call steps. Used for games, conversations, and iterative refinement.
 
-### Tools in Agent vs. Resources Server
+## Design Conventions
+- **Cookie propagation:** cookies are propagated through all hops (model server, resources server) so stateful environments can track session state.
+- **Token propagation:** policy model token IDs and log probs are included in the output trajectory for RL training.
+- **Tool error handling:** tool call errors from the resources server are returned to the model as normal tool results, not raised as exceptions. Invalid calls become part of the training trajectory.
+
+## Integrating External Agents
+
+You can also integrate external agents that bring their own tools and interaction patterns. For example, [`MiniSWEAgent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/mini_swe_agent) wraps a coding harness running in Docker containers and converts its output back into the NeMo Gym format.
+
+## Tools in Agent vs. Resources Server
 
 Existing agents may come with predefined tools, allowing you to leverage them directly and use the Resources server to supplement with any additional external tools. When building a new environment, prefer defining tools in the Resources server rather than the Agent server. This separation of concerns allows different agents to share the same Resources server without duplicating tool logic.
 

@@ -79,6 +79,7 @@ class MultiTurnAgentConfig(BaseResponsesAPIAgentConfig):
     max_steps_per_turn: Optional[int] = None  # None = unbounded; inner loop self-terminates
     user_model_system_prompt: str  # Required — defines the user model's persona/behavior
     user_model_stop_token: Optional[str] = None  # If the user model emits this, conversation ends
+    user_model_tool_choice: Optional[str] = None  # None = API default ("auto"); "required" forces tool use
 
 
 # extra="allow" lets the JSONL data include arbitrary task-specific fields
@@ -354,11 +355,11 @@ class MultiTurnAgent(SimpleResponsesAPIAgent):
         observes the effects of user tool calls through environment state
         (e.g. an updated game board) on its next turn.
 
-        The user model's response (which comes back as role=assistant from the
-        API) is extracted as text and will be inserted into the conversation
-        as a role=user message by the caller.
+        When user_model_tool_choice is "required", the model is forced to call
+        a tool each iteration. If it never produces text, the last tool call
+        result is returned as the user message so the conversation continues.
 
-        Returns None if the user model fails to produce a text response.
+        Returns None only if the user model produces neither text nor tool calls.
         """
         # Per-task override from JSONL data takes precedence over config default
         user_system_prompt = body.model_dump().get("user_model_system_prompt") or self.config.user_model_system_prompt
@@ -375,20 +376,17 @@ class MultiTurnAgent(SimpleResponsesAPIAgent):
         original_params = body.responses_create_params.model_dump(exclude_unset=True)
         user_model_params = {"input": user_model_input}
 
-        # Pass through the same tools so the user model can interact with the
-        # resources server (e.g. make_move in tic-tac-toe). If the environment
-        # doesn't need user model tools, the JSONL data simply won't include any.
         tools = original_params.get("tools")
         if tools:
             user_model_params["tools"] = tools
+        if self.config.user_model_tool_choice:
+            user_model_params["tool_choice"] = self.config.user_model_tool_choice
 
-        # User model tool-call loop: same pattern as the policy's inner loop.
-        # The user model may make tool calls (e.g. placing a game piece) before
-        # producing its final text response.
         user_outputs = []
         resources_server_cookies = cookies
 
-        while True:
+        max_user_steps = self.config.max_steps_per_turn or 10
+        for step in range(max_user_steps):
             user_response = await self.server_client.post(
                 server_name=self.config.user_model_server.name,
                 url_path="/v1/responses",
@@ -436,15 +434,19 @@ class MultiTurnAgent(SimpleResponsesAPIAgent):
             if not fn_calls and not text_msgs:
                 break
 
-        # Extract only the final text from the user model's response.
-        # Tool calls are internal to the user model's turn and are NOT
-        # added to the conversation trajectory — only the text is visible
-        # to the policy model.
+        # Extract text from the user model's response.
         for output_item in reversed(user_outputs):
             if output_item.get("type") == "message" and output_item.get("role") == "assistant":
                 for content in output_item.get("content", []):
                     if content.get("type") == "output_text":
                         return content.get("text", "")
+
+        # Fallback: user model made tool calls but produced no text.
+        # Use the last tool result as the user message so the policy
+        # sees the environment state change and the conversation continues.
+        for output_item in reversed(user_outputs):
+            if output_item.get("type") == "function_call_output":
+                return output_item.get("output", "Your turn.")
 
         return None
 

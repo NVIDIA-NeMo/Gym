@@ -13,3 +13,6 @@ multi_turn_agent:
         name: user_model
       max_turns: ???
       max_steps_per_turn: null
+      user_model_system_prompt: ???
+      user_model_stop_token: null
+      user_model_tool_choice: null

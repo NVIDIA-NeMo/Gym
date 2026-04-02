@@ -1,60 +1,19 @@
 # Multi-Turn Agent
 
-A reference agent server that orchestrates multi-turn dialogue between a **policy model** (being trained/evaluated) and a **user model** (an LLM simulating the human user).
+Orchestrates dialogue between a **policy model** (being trained/evaluated) and a **user model** (an LLM simulating the human user). It wraps the `SimpleAgent` tool-call loop with an outer turn-based loop.
 
-This agent assumes the user side of the conversation is always driven by an LLM. The `user_model_server` is a required config field. There is no built-in support for scripted, template-based, or environment-driven user messages. If your use case requires a non-LLM user (e.g., deterministic scripts or resources-server-generated prompts), create a custom agent that subclasses `MultiTurnAgent` and overrides `_generate_user_message`, or build a separate agent tailored to your pattern.
+This agent requires an LLM user model. For non-LLM users (scripted, template-based), subclass `MultiTurnAgent` and override `_generate_user_response`.
 
 ## How It Works
 
-The agent runs a turn-based loop:
+The agent has two nested loops:
 
-1. **Seed** the resources server session with task data.
-2. **Policy turn** — call the policy model with the full conversation. The policy may execute tool calls within a turn (same inner loop as `SimpleAgent`).
-3. **User turn** — call the user model with a system prompt and the conversation so far to generate the next user message.
-4. **Repeat** until a stop condition is met.
-5. **Verify** the full conversation with the resources server to produce a reward.
-
-### Stop Conditions
-
-The outer conversation loop stops when:
-
-- `max_turns` reached
-- User model emits the configured `user_model_stop_token`
-- Policy model hits `max_output_tokens` (context length exceeded)
-
-Within each policy turn, the inner tool-call loop stops when:
-
-- The policy model produces a text response with no tool calls
-- `max_steps_per_turn` reached (same behavior as `SimpleAgent.max_steps`)
-- `max_output_tokens` hit on the model response
+- **Conversation loop (`run`)** — alternates between policy and user model turns. Controlled by `max_turns`.
+- **Single-turn loop (`responses`)** — within a single turn, the model may make multiple tool calls. Same as `SimpleAgent`'s loop. Controlled by `max_steps_per_turn`.
 
 ## Configuration
 
-The base template (`configs/multi_turn_agent.yaml`) defines the agent's interface. Each environment provides its own config that sets environment-specific values:
-
 ```yaml
-# Base template (multi_turn_agent.yaml) — documents all parameters
-multi_turn_agent:
-  responses_api_agents:
-    multi_turn_agent:
-      entrypoint: app.py
-      resources_server:
-        type: resources_servers
-        name: ???                     # required, set by resources server config
-      model_server:
-        type: responses_api_models
-        name: policy_model
-      user_model_server:
-        type: responses_api_models
-        name: user_model
-      max_turns: ???                  # required, set by resources server config
-      max_steps_per_turn: null        # no limit by default; inner loop self-terminates
-      user_model_system_prompt: ???   # required; can be overridden per-task in JSONL
-      user_model_stop_token: null     # e.g. "[END]" to signal conversation end
-```
-
-```yaml
-# Environment config (e.g. tic_tac_toe.yaml) — sets concrete values
 my_multi_turn_agent:
   responses_api_agents:
     multi_turn_agent:
@@ -72,24 +31,89 @@ my_multi_turn_agent:
       max_steps_per_turn: null
       user_model_system_prompt: >-
         You are simulating a user in a conversation...
-      user_model_stop_token: "[END]"
+      user_model_stop_token: null
+      user_model_tool_choice: null
 ```
-
-### Config Fields
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `resources_server` | ResourcesServerRef | required | Resources server for tools and verification |
-| `model_server` | ModelServerRef | required | Policy model being trained/evaluated |
-| `user_model_server` | ModelServerRef | required | LLM simulating the user |
-| `max_turns` | int | required | Maximum number of policy turns (no default; must be set per environment) |
-| `max_steps_per_turn` | int | null | Max tool-call steps per policy turn (null = unbounded; inner loop self-terminates) |
-| `user_model_system_prompt` | str | required | System prompt for the user model (can be overridden per-task in JSONL) |
-| `user_model_stop_token` | str | null | Token that signals conversation end (e.g. "[END]") |
+| `resources_server` | ref | required | Resources server for tools and verification |
+| `model_server` | ref | required | Policy model being trained/evaluated |
+| `user_model_server` | ref | required | LLM simulating the user |
+| `max_turns` | int | required | Max policy turns per episode |
+| `max_steps_per_turn` | int | null | Max tool-call steps per turn (both policy and user model). Null = unbounded for policy, safety limit of 10 for user model |
+| `user_model_system_prompt` | str | required | System prompt for the user model persona. Can be overridden per task in JSONL |
+| `user_model_stop_token` | str | null | Substring that terminates the conversation when detected in the user model's message |
+| `user_model_tool_choice` | str | null | `"required"` forces tool use; null uses API default (`"auto"`) |
 
-### Per-Task Override
+### Model Server Setup
 
-The `user_model_system_prompt` can be overridden per task by including it in the JSONL data alongside `responses_create_params`:
+The agent requires two model servers. Convenience configs that define both in one file:
+
+- `responses_api_models/openai_model/configs/openai_model_with_user.yaml`
+- `responses_api_models/vllm_model/configs/vllm_model_for_training_with_user.yaml`
+
+Add user model credentials to `env.yaml`:
+
+```yaml
+# Policy model
+policy_base_url: your-policy-endpoint
+policy_api_key: your-policy-key
+policy_model_name: your-policy-model
+
+# User model
+user_base_url: your-user-endpoint
+user_api_key: your-user-key
+user_model_name: your-user-model
+```
+
+Both can point to the same endpoint if you want both sides to use the same LLM.
+
+## Stop Conditions
+
+**Conversation** (across turns) stops when:
+
+- `max_turns` reached
+- `user_model_stop_token` detected in the user model's message
+- Policy model hits `max_output_tokens`
+- User model produces no output
+
+**Single turn** (tool-call loop) stops when:
+
+- Text with no tool calls
+- `max_steps_per_turn` reached
+- `max_output_tokens` hit
+
+For single-action-per-turn environments (e.g. board games), set `max_steps_per_turn: 1`.
+
+## User Model Tool Calls
+
+The user model can call tools on the same resources server as the policy. Tools from the JSONL data are passed to both models. Only the user model's final text appears in the trajectory — its tool calls are internal. If the user model makes tool calls but produces no text (common with `user_model_tool_choice: required`), the last tool result is used as the user message.
+
+## Output Format
+
+The final `output` list contains the full interleaved trajectory across all turns:
+
+```
+[
+  # Policy turn 1
+  reasoning, function_call, function_call_output, message,
+  # User turn 1
+  user_message,
+  # Policy turn 2
+  reasoning, function_call, function_call_output, message,
+  # User turn 2
+  user_message,
+  # Policy turn 3
+  reasoning, message,
+]
+```
+
+Only policy model tokens are used for RL training — user model tokens are not included.
+
+## Per-Task System Prompt
+
+The `user_model_system_prompt` can be overridden per task in JSONL:
 
 ```json
 {
@@ -98,22 +122,6 @@ The `user_model_system_prompt` can be overridden per task by including it in the
 }
 ```
 
-## User Model Tool Calls
+## Licensing
 
-The user model can make tool calls against the same resources server as the policy model. If the JSONL data includes `tools`, those are passed to the user model too. This enables scenarios where the user model also interacts with the environment.
-
-Only the user model's final text message appears in the conversation trajectory — its tool calls are internal and not visible to the policy model. The policy observes the effects of user tool calls through environment state on its next turn.
-
-If the environment doesn't need user model tools, simply omit `tools` from the JSONL data.
-
-## Output Format
-
-The final `NeMoGymResponse.output` contains the full interleaved trajectory:
-
-```
-[policy_turn_1_outputs..., user_message_1, policy_turn_2_outputs..., user_message_2, ...]
-```
-
-Policy outputs include assistant messages, tool calls, and tool results. User messages appear as standard `{role: "user"}` input messages.
-
-Only policy model tokens are relevant for RL training — user model tokens are not included in training metadata.
+Code: Apache 2.0

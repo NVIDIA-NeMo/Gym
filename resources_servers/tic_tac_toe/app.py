@@ -98,17 +98,6 @@ class MakeMoveResponse(BaseModel):
     message: str
 
 
-class GetBoardRequest(BaseModel):
-    pass
-
-
-class GetBoardResponse(BaseModel):
-    board: str
-    game_over: bool
-    winner: Optional[str]
-    next_mark: str
-
-
 class TicTacToeVerifyRequest(BaseVerifyRequest):
     pass
 
@@ -124,7 +113,6 @@ class TicTacToeResourcesServer(SimpleResourcesServer):
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
         app.post("/make_move")(self.make_move)
-        app.post("/get_board")(self.get_board)
         return app
 
     async def seed_session(self, request: Request, body: TicTacToeSeedSessionRequest) -> BaseSeedSessionResponse:
@@ -208,15 +196,6 @@ class TicTacToeResourcesServer(SimpleResourcesServer):
             game_over=game.game_over,
             winner=game.winner,
             message=message,
-        )
-
-    async def get_board(self, request: Request, body: GetBoardRequest) -> GetBoardResponse:
-        session_id = request.session[SESSION_ID_KEY]
-        game = self.session_id_to_game.get(session_id)
-        if game is None:
-            return GetBoardResponse(board="No active game.", game_over=False, winner=None, next_mark="X")
-        return GetBoardResponse(
-            board=format_board(game.board), game_over=game.game_over, winner=game.winner, next_mark=game.next_mark
         )
 
     async def verify(self, request: Request, body: TicTacToeVerifyRequest) -> TicTacToeVerifyResponse:

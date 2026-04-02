@@ -19,14 +19,14 @@ tic_tac_toe_multi_turn_agent:
         type: responses_api_models
         name: user_model
       max_turns: 5
-      max_steps_per_turn: null
+      max_steps_per_turn: 1
+      user_model_tool_choice: required
+      user_model_stop_token: '"game_over":true'
       user_model_system_prompt: >-
         You are playing tic-tac-toe as O against an opponent (X).
         Use the make_move tool to place your O mark on the board.
         Positions are 0-8, numbered left to right, top to bottom.
-        Think strategically about your moves. After placing your mark,
-        briefly comment on the game state and encourage your opponent
-        to make their next move.
+        Think strategically about your moves.
       datasets:
       - name: example
         type: example
