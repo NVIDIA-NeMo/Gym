@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tic-tac-toe resources server for the multi-turn agent.
+"""Example multi-turn resources server: tic-tac-toe.
 
 The policy model plays as X and the user model plays as O, both using the
 make_move tool. The server tracks whose turn it is and checks for a winner
@@ -78,11 +78,11 @@ def format_board(board: List[str]) -> str:
     return "\n-----------\n".join(rows)
 
 
-class TicTacToeResourcesServerConfig(BaseResourcesServerConfig):
+class ExampleMultiTurnConfig(BaseResourcesServerConfig):
     pass
 
 
-class TicTacToeSeedSessionRequest(BaseSeedSessionRequest):
+class ExampleMultiTurnSeedSessionRequest(BaseSeedSessionRequest):
     verifier_metadata: Optional[Dict[str, Any]] = None
 
 
@@ -98,16 +98,16 @@ class MakeMoveResponse(BaseModel):
     message: str
 
 
-class TicTacToeVerifyRequest(BaseVerifyRequest):
+class ExampleMultiTurnVerifyRequest(BaseVerifyRequest):
     pass
 
 
-class TicTacToeVerifyResponse(BaseVerifyResponse):
+class ExampleMultiTurnVerifyResponse(BaseVerifyResponse):
     game_result: Optional[str] = None
 
 
-class TicTacToeResourcesServer(SimpleResourcesServer):
-    config: TicTacToeResourcesServerConfig
+class ExampleMultiTurnServer(SimpleResourcesServer):
+    config: ExampleMultiTurnConfig
     session_id_to_game: Dict[str, GameState] = Field(default_factory=dict)
 
     def setup_webserver(self) -> FastAPI:
@@ -115,7 +115,7 @@ class TicTacToeResourcesServer(SimpleResourcesServer):
         app.post("/make_move")(self.make_move)
         return app
 
-    async def seed_session(self, request: Request, body: TicTacToeSeedSessionRequest) -> BaseSeedSessionResponse:
+    async def seed_session(self, request: Request, body: ExampleMultiTurnSeedSessionRequest) -> BaseSeedSessionResponse:
         session_id = request.session[SESSION_ID_KEY]
         game = GameState()
 
@@ -198,12 +198,12 @@ class TicTacToeResourcesServer(SimpleResourcesServer):
             message=message,
         )
 
-    async def verify(self, request: Request, body: TicTacToeVerifyRequest) -> TicTacToeVerifyResponse:
+    async def verify(self, request: Request, body: ExampleMultiTurnVerifyRequest) -> ExampleMultiTurnVerifyResponse:
         session_id = request.session[SESSION_ID_KEY]
         game = self.session_id_to_game.get(session_id)
 
         if game is None:
-            return TicTacToeVerifyResponse(**body.model_dump(), reward=0.0, game_result="no_game")
+            return ExampleMultiTurnVerifyResponse(**body.model_dump(), reward=0.0, game_result="no_game")
 
         if game.winner == "X":
             reward = 1.0
@@ -218,8 +218,8 @@ class TicTacToeResourcesServer(SimpleResourcesServer):
             reward = 0.0
             game_result = "incomplete"
 
-        return TicTacToeVerifyResponse(**body.model_dump(), reward=reward, game_result=game_result)
+        return ExampleMultiTurnVerifyResponse(**body.model_dump(), reward=reward, game_result=game_result)
 
 
 if __name__ == "__main__":
-    TicTacToeResourcesServer.run_webserver()
+    ExampleMultiTurnServer.run_webserver()

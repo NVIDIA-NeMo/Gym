@@ -1,14 +1,12 @@
-# Tic-Tac-Toe
+# Example Multi-Turn (Tic-Tac-Toe)
 
-A tic-tac-toe game environment designed for use with the [Multi-Turn Agent](../../responses_api_agents/multi_turn_agent/README.md).
+A tic-tac-toe game environment designed for use with the [Multi-Turn Agent](../../responses_api_agents/multi_turn_agent/README.md). Demonstrates multi-turn interaction between a policy model and an LLM user model through a shared game environment.
 
 ## How It Works
 
 The policy model plays as **X** and the user model plays as **O**, both using the `make_move` tool. The server tracks whose turn it is and checks for a winner or draw after each move.
 
 By default X goes first, but the JSONL data can specify `initial_moves` in `verifier_metadata` to pre-populate the board — for example, having O open with a move so the policy must respond to the opponent's opening. This lets training data mix both first-mover and second-mover scenarios without any server or agent changes.
-
-This demonstrates the multi-turn agent's key feature: two LLMs interacting through tool calls and natural language, with the resources server managing shared game state.
 
 ### Tools
 
@@ -18,7 +16,7 @@ This demonstrates the multi-turn agent's key feature: two LLMs interacting throu
 
 Both the policy model and user model call the same `make_move` endpoint. The server determines which mark (X or O) to place based on turn order. The response includes the full board state, game-over status, and winner, so no separate observation tool is needed.
 
-The tic-tac-toe config sets `max_steps_per_turn: 1` so each player makes exactly one move per turn. This prevents either model from making multiple `make_move` calls in a single turn (which would inadvertently place marks for both sides, since the server alternates marks).
+The config sets `max_steps_per_turn: 1` so each player makes exactly one move per turn. This prevents either model from making multiple `make_move` calls in a single turn (which would inadvertently place marks for both sides, since the server alternates marks).
 
 ### Board Layout
 
@@ -50,13 +48,13 @@ The **user model's** system prompt lives in the YAML config as `user_model_syste
 ## Usage
 
 ```bash
-ng_run "+config_paths=[resources_servers/tic_tac_toe/configs/tic_tac_toe.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
+ng_run "+config_paths=[resources_servers/example_multi_turn/configs/example_multi_turn.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
 ```
 
 ```bash
-ng_collect_rollouts +agent_name=tic_tac_toe_multi_turn_agent \
-    +input_jsonl_fpath=resources_servers/tic_tac_toe/data/example.jsonl \
-    +output_jsonl_fpath=/tmp/tic_tac_toe_rollouts.jsonl \
+ng_collect_rollouts +agent_name=example_multi_turn_agent \
+    +input_jsonl_fpath=resources_servers/example_multi_turn/data/example.jsonl \
+    +output_jsonl_fpath=/tmp/example_multi_turn_rollouts.jsonl \
     +num_repeats=1 \
     "+responses_create_params={max_output_tokens: 4096, temperature: 0.0}"
 ```

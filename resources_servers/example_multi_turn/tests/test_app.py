@@ -13,9 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for the tic-tac-toe resources server.
+"""Tests for the example multi-turn resources server (tic-tac-toe).
 
-The tic-tac-toe server provides a simple two-player game environment used as a
+This server provides a simple two-player game environment used as a
 reference example for multi-turn agent development. Tests are organized as:
 
 - TestGameLogic: Pure-function tests for board evaluation (winner detection,
@@ -40,9 +40,9 @@ from unittest.mock import MagicMock
 from fastapi.testclient import TestClient
 
 from nemo_gym.server_utils import ServerClient
-from resources_servers.tic_tac_toe.app import (
-    TicTacToeResourcesServer,
-    TicTacToeResourcesServerConfig,
+from resources_servers.example_multi_turn.app import (
+    ExampleMultiTurnConfig,
+    ExampleMultiTurnServer,
     check_winner,
     format_board,
     is_draw,
@@ -107,13 +107,13 @@ class TestGameLogic:
 class TestApp:
     def test_sanity(self) -> None:
         """Verify the server can be constructed without errors."""
-        config = TicTacToeResourcesServerConfig(
+        config = ExampleMultiTurnConfig(
             host="0.0.0.0",
             port=8080,
             entrypoint="",
             name="",
         )
-        TicTacToeResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        ExampleMultiTurnServer(config=config, server_client=MagicMock(spec=ServerClient))
 
 
 # ---------------------------------------------------------------------------
@@ -126,9 +126,9 @@ class TestApp:
 
 class TestEndpoints:
     def _make_server(self) -> tuple:
-        """Create a fresh TicTacToeResourcesServer and a FastAPI TestClient."""
-        config = TicTacToeResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name="")
-        server = TicTacToeResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        """Create a fresh ExampleMultiTurnServer and a FastAPI TestClient."""
+        config = ExampleMultiTurnConfig(host="0.0.0.0", port=8080, entrypoint="", name="")
+        server = ExampleMultiTurnServer(config=config, server_client=MagicMock(spec=ServerClient))
         app = server.setup_webserver()
         client = TestClient(app)
         return server, client
