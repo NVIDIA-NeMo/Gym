@@ -23,4 +23,4 @@ mmlu_prox_mcqa_simple_agent:
         jsonl_fpath: benchmarks/mmlu_prox/data/mmlu_prox_benchmark.jsonl
         prompt_config: benchmarks/mmlu_prox/prompts/default.yaml
         prepare_script: benchmarks/mmlu_prox/prepare.py
-        num_repeats: 8
+        num_repeats: 1
