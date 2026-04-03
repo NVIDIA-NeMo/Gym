@@ -128,10 +128,24 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 break
 
             for output_function_call in all_fn_calls:
+                try:
+                    tool_arguments = json.loads(output_function_call.arguments)
+                except json.JSONDecodeError as e:
+                    tool_response = NeMoGymFunctionCallOutput(
+                        type="function_call_output",
+                        call_id=output_function_call.call_id,
+                        output=(
+                            f"Invalid function call arguments for {output_function_call.name}: {e!r}. "
+                            f"Raw arguments: {output_function_call.arguments}"
+                        ),
+                    )
+                    new_outputs.append(tool_response)
+                    continue
+
                 api_response = await self.server_client.post(
                     server_name=self.config.resources_server.name,
                     url_path=f"/{output_function_call.name}",
-                    json=json.loads(output_function_call.arguments),
+                    json=tool_arguments,
                     cookies=resources_server_cookies,
                 )
                 # We don't raise for status here since it's a valid return for the API to error e.g. if the model outputs an invalid call or something.
