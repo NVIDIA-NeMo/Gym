@@ -4,7 +4,8 @@ config_paths:
 # We bump up the connector per host limit since this is a larger benchmark suite
 global_aiohttp_connector_limit_per_host: 16384
 
-policy_model: ${inherit_from:nemotron_3_ultra_dev}
+policy_model:
+  _inherit_from: nemotron_3_ultra_dev
 
 # Some benchmarks may require reasoning off mode
 policy_model_reasoning_off:
