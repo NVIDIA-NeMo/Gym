@@ -22,7 +22,7 @@ from typing import Dict, List, Optional, Tuple
 
 import rich
 from omegaconf import DictConfig, OmegaConf
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from rich.table import Table
 
 from nemo_gym import PARENT_DIR
@@ -153,6 +153,10 @@ class PrepareBenchmarkConfig(BaseNeMoGymCLIConfig):
     ```
     """
 
+    use_cached_prepared_benchmarks: bool = Field(
+        default=True, description="Skip benchmark preparation if the prepared file is already present"
+    )
+
 
 def prepare_benchmark() -> None:
     """CLI command: prepare benchmark data."""
@@ -161,7 +165,7 @@ def prepare_benchmark() -> None:
             initial_global_config_dict=GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
         )
     )
-    PrepareBenchmarkConfig.model_validate(global_config_dict)
+    prepare_benchmark_config = PrepareBenchmarkConfig.model_validate(global_config_dict)
 
     benchmarks_dict: Dict[str, BenchmarkConfig] = dict()
     for server_instance_name in global_config_dict:
@@ -204,11 +208,16 @@ def prepare_benchmark() -> None:
     prepare_function_missing: List[BenchmarkConfig] = []
 
     validated: List[Tuple[BenchmarkConfig, ModuleType]] = []
+    already_prepared: List[BenchmarkConfig] = []
     for benchmark_config in benchmarks_dict.values():
         prepare_script_path = benchmark_config.dataset.prepare_script
         if not prepare_script_path.exists():
             prepare_script_missing.append(benchmark_config)
             continue
+
+        is_already_prepared = benchmark_config.dataset.jsonl_fpath.exists()
+        if prepare_benchmark_config.use_cached_prepared_benchmarks and is_already_prepared:
+            already_prepared.append(benchmark_config)
 
         prepare_module_path = ".".join(prepare_script_path.with_suffix("").parts)
         module = importlib.import_module(prepare_module_path)
@@ -217,6 +226,12 @@ def prepare_benchmark() -> None:
             continue
 
         validated.append((benchmark_config, module))
+
+    if already_prepared:
+        already_prepared_str = "".join(f"- {bc.name}: {bc.dataset.jsonl_fpath}\n" for bc in already_prepared)
+        already_prepared_str = f"""The following benchmarks have already been prepared. Since `use_cached_prepared_benchmarks=true`, we will skip re-preparation of those benchmarks.
+        {already_prepared_str}"""
+        print(already_prepared_str)
 
     errors_to_print = ""
     if prepare_script_missing:
