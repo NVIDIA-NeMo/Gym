@@ -431,7 +431,8 @@ Duplicate config paths:
                 if not (
                     isinstance(top_level_value, (DictConfig))
                     and "responses_api_models" in top_level_value
-                    and len(top_level_value["responses_api_models"]) > 1
+                    # We check `len(top_level_value) > 1` in case the policy model is inherited from.
+                    and (len(top_level_value) > 1 or len(top_level_value["responses_api_models"]) > 1)
                     and "dummy_model" in top_level_value["responses_api_models"]
                 ):
                     continue
