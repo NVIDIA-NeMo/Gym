@@ -206,7 +206,7 @@ Start the servers:
 ng_run "+config_paths=[resources_servers/over_refusal_detection/configs/over_refusal_detection.yaml,responses_api_models/openai_model/configs/openai_model.yaml]"
 ```
 
-Then collect rollouts against the 5-entry example dataset to confirm the judge call and reward parsing work end-to-end:
+In another terminal, collect rollouts against the 5-entry example dataset to confirm the judge call and reward parsing work end-to-end:
 
 ```bash
 ng_collect_rollouts \
@@ -218,6 +218,19 @@ ng_collect_rollouts \
 ```
 
 Inspect the output JSONL to verify that `reward` values are `0.0`, `0.5`, or `1.0` as expected. Once this looks right, scale to larger datasets and higher `num_repeats`.
+```bash
+cat /tmp/over_refusal_smoke_test.jsonl | python -c "
+import json, sys
+for line in sys.stdin:
+    d = json.loads(line)
+    print(f\"Reward: {d.get('reward')} | Complied: {d.get('complied')}\")
+"
+```
+
+To view the entire output:
+```bash
+cat /tmp/over_refusal_smoke_test.jsonl | jq .
+```
 
 ---
 
