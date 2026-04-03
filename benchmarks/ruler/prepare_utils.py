@@ -49,7 +49,7 @@ def prepare_helper(output_name: str, model: str, length: str) -> Path:
         run(
             """uv venv --python 3.12 --seed .venv \
 && source .venv/bin/activate \
-&& uv pip install bs4 scipy wonderwords html2text tenacity nltk""",
+&& uv pip install pyyaml bs4 scipy wonderwords html2text tenacity nltk""",
             check=True,
             shell=True,
             cwd=BENCHMARK_DIR,
