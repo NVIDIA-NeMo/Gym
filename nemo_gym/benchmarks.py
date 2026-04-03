@@ -215,14 +215,15 @@ def prepare_benchmark() -> None:
             prepare_script_missing.append(benchmark_config)
             continue
 
-        is_already_prepared = benchmark_config.dataset.jsonl_fpath.exists()
-        if prepare_benchmark_config.use_cached_prepared_benchmarks and is_already_prepared:
-            already_prepared.append(benchmark_config)
-
         prepare_module_path = ".".join(prepare_script_path.with_suffix("").parts)
         module = importlib.import_module(prepare_module_path)
         if not hasattr(module, "prepare"):
             prepare_function_missing.append(benchmark_config)
+            continue
+
+        is_already_prepared = benchmark_config.dataset.jsonl_fpath.exists()
+        if prepare_benchmark_config.use_cached_prepared_benchmarks and is_already_prepared:
+            already_prepared.append(benchmark_config)
             continue
 
         validated.append((benchmark_config, module))
