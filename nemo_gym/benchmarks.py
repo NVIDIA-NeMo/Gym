@@ -277,7 +277,7 @@ def prepare_benchmark() -> None:
     if prepare_benchmark_config.num_prepare_benchmark_processes > 1:
         with Pool(processes=prepare_benchmark_config.num_prepare_benchmark_processes) as pool:
             results = pool.imap(_multiprocess_benchmark_prepare_fn, validated)
-            list(tqdm(results, total=len(validated)))
     else:
         results = map(_multiprocess_benchmark_prepare_fn, validated)
-        list(tqdm(results, total=len(validated)))
+
+    list(tqdm(results, total=len(validated)))
