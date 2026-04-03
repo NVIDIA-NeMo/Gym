@@ -16,14 +16,15 @@
 
 import importlib
 from glob import glob
+from multiprocessing import Pool
 from pathlib import Path
-from types import ModuleType
 from typing import Dict, List, Optional, Tuple
 
 import rich
 from omegaconf import DictConfig, OmegaConf
 from pydantic import BaseModel, Field
 from rich.table import Table
+from tqdm.auto import tqdm
 
 from nemo_gym import PARENT_DIR
 from nemo_gym.config_types import BaseNeMoGymCLIConfig, BenchmarkDatasetConfig
@@ -156,6 +157,24 @@ class PrepareBenchmarkConfig(BaseNeMoGymCLIConfig):
     use_cached_prepared_benchmarks: bool = Field(
         default=True, description="Skip benchmark preparation if the prepared file is already present"
     )
+    num_prepare_benchmark_processes: int = Field(
+        default=1, description="Number of processes to parallelize benchmark preparation"
+    )
+
+
+def _multiprocess_benchmark_prepare_fn(args):
+    benchmark_config: BenchmarkConfig
+    prepare_module_path: str
+    (benchmark_config, prepare_module_path) = args
+
+    print(f"Preparing benchmark: {benchmark_config.name}")
+
+    module = importlib.import_module(prepare_module_path)
+    output_fpath = module.prepare()
+    assert output_fpath.absolute() == benchmark_config.dataset.jsonl_fpath.absolute(), (
+        f"Expected the actual prepared dataset output fpath to match the jsonl_fpath set in the config. Instead got {output_fpath=} jsonl_fpath={benchmark_config.dataset.jsonl_fpath}"
+    )
+    print(f"Benchmark data prepared at: {output_fpath}")
 
 
 def prepare_benchmark() -> None:
@@ -207,7 +226,7 @@ def prepare_benchmark() -> None:
     prepare_script_missing: List[BenchmarkConfig] = []
     prepare_function_missing: List[BenchmarkConfig] = []
 
-    validated: List[Tuple[BenchmarkConfig, ModuleType]] = []
+    validated: List[Tuple[BenchmarkConfig, str]] = []
     already_prepared: List[BenchmarkConfig] = []
     for benchmark_config in benchmarks_dict.values():
         prepare_script_path = benchmark_config.dataset.prepare_script
@@ -226,7 +245,7 @@ def prepare_benchmark() -> None:
             already_prepared.append(benchmark_config)
             continue
 
-        validated.append((benchmark_config, module))
+        validated.append((benchmark_config, prepare_module_path))
 
     if already_prepared:
         already_prepared_str = "".join(f"- {bc.name}: {bc.dataset.jsonl_fpath}\n" for bc in already_prepared)
@@ -255,10 +274,6 @@ def prepare_benchmark() -> None:
         raise RuntimeError(errors_to_print)
 
     # Prepare after all validations pass
-    for benchmark_config, module in validated:
-        print(f"Preparing benchmark: {benchmark_config.name}")
-        output_fpath: Path = module.prepare()
-        assert output_fpath.absolute() == benchmark_config.dataset.jsonl_fpath.absolute(), (
-            f"Expected the actual prepared dataset output fpath to match the jsonl_fpath set in the config. Instead got {output_fpath=} jsonl_fpath={benchmark_config.dataset.jsonl_fpath}"
-        )
-        print(f"Benchmark data prepared at: {output_fpath}")
+    with Pool(processes=prepare_benchmark_config.num_prepare_benchmark_processes) as pool:
+        results = pool.imap(_multiprocess_benchmark_prepare_fn, validated)
+        list(tqdm(results, total=len(validated)))
