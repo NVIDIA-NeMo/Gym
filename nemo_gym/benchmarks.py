@@ -274,6 +274,10 @@ def prepare_benchmark() -> None:
         raise RuntimeError(errors_to_print)
 
     # Prepare after all validations pass
-    with Pool(processes=prepare_benchmark_config.num_prepare_benchmark_processes) as pool:
-        results = pool.imap(_multiprocess_benchmark_prepare_fn, validated)
+    if prepare_benchmark_config.num_prepare_benchmark_processes > 1:
+        with Pool(processes=prepare_benchmark_config.num_prepare_benchmark_processes) as pool:
+            results = pool.imap(_multiprocess_benchmark_prepare_fn, validated)
+            list(tqdm(results, total=len(validated)))
+    else:
+        results = map(_multiprocess_benchmark_prepare_fn, validated)
         list(tqdm(results, total=len(validated)))
