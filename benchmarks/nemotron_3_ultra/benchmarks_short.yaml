@@ -2,6 +2,6 @@
 
 # This is the list of benchmarks that this config file contains.
 config_paths:
-  - benchmarks/nemotron_3_ultra/config_short_no_gpus.yaml
+  - benchmarks/nemotron_3_ultra/benchmarks_no_external.yaml
   - benchmarks/aalcr/config.yaml
   - benchmarks/xstest/config.yaml
