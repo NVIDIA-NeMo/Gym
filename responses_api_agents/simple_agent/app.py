@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
-import logging
 from typing import List
 
 from fastapi import Request, Response
@@ -41,9 +40,6 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessage,
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
-
-
-logger = logging.getLogger(__name__)
 
 
 class SimpleAgentConfig(BaseResponsesAPIAgentConfig):
@@ -135,19 +131,6 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 try:
                     tool_arguments = json.loads(output_function_call.arguments)
                 except json.JSONDecodeError as e:
-                    logger.warning(
-                        "Malformed tool-call arguments from model server. "
-                        "step=%s model_response_id=%s model=%s "
-                        "tool_call_id=%s "
-                        "tool_name=%s error=%r raw_arguments=%s",
-                        step,
-                        model_response.id,
-                        model_response.model,
-                        output_function_call.call_id,
-                        output_function_call.name,
-                        e,
-                        output_function_call.arguments,
-                    )
                     tool_response = NeMoGymFunctionCallOutput(
                         type="function_call_output",
                         call_id=output_function_call.call_id,
