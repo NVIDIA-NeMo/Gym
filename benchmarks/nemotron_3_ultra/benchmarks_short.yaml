@@ -4,4 +4,5 @@
 config_paths:
   - benchmarks/nemotron_3_ultra/config_short_no_gpus.yaml
   - benchmarks/aalcr/config.yaml
-  - benchmarks/xstest/config.yaml
+  # TODO @bxyu-nvidia: Bring back after figuring out Evaluator model mounting
+  # - benchmarks/xstest/config.yaml
