@@ -815,6 +815,106 @@ class TestGlobalConfig:
 
         assert expected_global_config_dict == actual_global_config_dict
 
+    def test_dummy_model_sanity(self, monkeypatch: MonkeyPatch) -> None:
+        self._mock_versions_for_testing(monkeypatch)
+
+        monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
+        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+
+        exists_mock = MagicMock()
+        exists_mock.return_value = False
+        monkeypatch.setattr(nemo_gym.global_config.Path, "exists", exists_mock)
+
+        find_open_port_mock = MagicMock()
+        find_open_port_mock.return_value = 12345
+        monkeypatch.setattr(nemo_gym.global_config, "_find_open_port_using_range", find_open_port_mock)
+
+        hydra_main_mock = MagicMock()
+
+        def hydra_main_wrapper(fn):
+            config_dict = DictConfig({})
+            return lambda: fn(config_dict)
+
+        hydra_main_mock.return_value = hydra_main_wrapper
+        monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
+
+        actual_global_config_dict = OmegaConf.to_container(
+            get_global_config_dict(
+                global_config_dict_parser_config=GlobalConfigDictParserConfig(
+                    initial_global_config_dict=GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+                )
+            )
+        )
+        expected_global_config_dict = self._default_global_config_dict_values | {
+            "disallowed_ports": [11000, 12345],
+            "policy_model": {
+                "responses_api_models": {
+                    "dummy_model": {
+                        "entrypoint": "app.py",
+                        "host": "127.0.0.1",
+                        "port": 12345,
+                    }
+                }
+            },
+            "policy_base_url": "",
+            "policy_api_key": "",
+            "policy_model_name": "",
+        }
+
+        assert expected_global_config_dict == actual_global_config_dict
+
+    def test_dummy_model_override(self, monkeypatch: MonkeyPatch) -> None:
+        self._mock_versions_for_testing(monkeypatch)
+
+        monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
+        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+
+        exists_mock = MagicMock()
+        exists_mock.return_value = False
+        monkeypatch.setattr(nemo_gym.global_config.Path, "exists", exists_mock)
+
+        find_open_port_mock = MagicMock()
+        find_open_port_mock.return_value = 12345
+        monkeypatch.setattr(nemo_gym.global_config, "_find_open_port_using_range", find_open_port_mock)
+
+        hydra_main_mock = MagicMock()
+
+        def hydra_main_wrapper(fn):
+            config_dict = DictConfig(
+                {
+                    "policy_model": {"responses_api_models": {"test_model": {"entrypoint": "app.py"}}},
+                }
+            )
+            return lambda: fn(config_dict)
+
+        hydra_main_mock.return_value = hydra_main_wrapper
+        monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
+
+        actual_global_config_dict = OmegaConf.to_container(
+            get_global_config_dict(
+                global_config_dict_parser_config=GlobalConfigDictParserConfig(
+                    initial_global_config_dict=GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+                )
+            )
+        )
+        expected_global_config_dict = self._default_global_config_dict_values | {
+            "disallowed_ports": [11000, 12345],
+            "policy_model": {
+                "responses_api_models": {
+                    "test_model": {
+                        "entrypoint": "app.py",
+                        "host": "127.0.0.1",
+                        "port": 12345,
+                    }
+                }
+            },
+            "policy_base_url": "",
+            "policy_api_key": "",
+            "policy_model_name": "",
+        }
+
+        assert expected_global_config_dict == actual_global_config_dict
+
     def test_load_extra_config_paths_prefers_cwd(self, monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
         parser = GlobalConfigDictParser()
 
