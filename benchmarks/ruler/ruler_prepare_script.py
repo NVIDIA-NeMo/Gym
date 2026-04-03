@@ -79,7 +79,16 @@ def prepare_task_for_ns(task, data_dir, setup, data_format):
         )
 
 
-def get_ruler_data(tasks, setup, template_tokens, max_seq_length, data_format, ruler_prepare_args, tmp_data_dir=None):
+def get_ruler_data(
+    tasks,
+    setup,
+    template_tokens,
+    max_seq_length,
+    data_format,
+    ruler_prepare_args,
+    tmp_data_dir=None,
+    ruler_parent_dir=None,
+):
     if "cwe" in tasks:
         # checking if git-lfs is installed
         try:
@@ -102,8 +111,11 @@ def get_ruler_data(tasks, setup, template_tokens, max_seq_length, data_format, r
         tmpdir_context = tempfile.TemporaryDirectory()
         tmpdirname = tmpdir_context.__enter__()
 
+    if ruler_parent_dir is None:
+        ruler_parent_dir = tmpdirname
+
     try:
-        json_dir = Path(tmpdirname) / "RULER" / "scripts" / "data" / "synthetic" / "json"
+        json_dir = Path(ruler_parent_dir) / "RULER" / "scripts" / "data" / "synthetic" / "json"
         required_files = [
             "english_words.json",
             "hotpotqa.json",
@@ -119,7 +131,7 @@ def get_ruler_data(tasks, setup, template_tokens, max_seq_length, data_format, r
                 "python download_paulgraham_essay.py && bash download_qa_dataset.sh",
                 check=True,
                 shell=True,
-                cwd=tmpdirname,
+                cwd=ruler_parent_dir,
             )
 
         max_seq_length -= template_tokens  # Adjusting for template tokens
@@ -132,7 +144,7 @@ def get_ruler_data(tasks, setup, template_tokens, max_seq_length, data_format, r
                 f"    --num_samples 100 --max_seq_length {max_seq_length} {ruler_prepare_args}",
                 shell=True,
                 check=True,
-                cwd=Path(tmpdirname) / "RULER" / "scripts" / "data",
+                cwd=Path(ruler_parent_dir) / "RULER" / "scripts" / "data",
             )
 
         with concurrent.futures.ThreadPoolExecutor() as executor:
@@ -140,15 +152,23 @@ def get_ruler_data(tasks, setup, template_tokens, max_seq_length, data_format, r
             for future in concurrent.futures.as_completed(futures):
                 future.result()  # Will raise exception if any subprocess fails
 
-        # resaving the data and creating __init__.py files
-        for task in tasks:
-            prepare_task_for_ns(task, Path(tmpdirname) / "ruler_data", setup, data_format=data_format)
+        ########################################
+        # START NeMo Gym prepare skips these steps since we don't use them
+        ########################################
 
-        with open(Path(__file__).parent / setup / "__init__.py", "w", encoding="utf-8") as init_file:
-            init_file.write("IS_BENCHMARK_GROUP = True\n")
-            init_file.write("SCORE_MODULE = 'nemo_skills.dataset.ruler.ruler_score'\n")
-            benchmarks = ", ".join(f"'ruler.{setup}.{task}': {{}}" for task in tasks)
-            init_file.write(f"BENCHMARKS = {{{benchmarks}}}\n")
+        # resaving the data and creating __init__.py files
+        # for task in tasks:
+        #     prepare_task_for_ns(task, Path(tmpdirname) / "ruler_data", setup, data_format=data_format)
+
+        # with open(Path(__file__).parent / setup / "__init__.py", "w", encoding="utf-8") as init_file:
+        #     init_file.write("IS_BENCHMARK_GROUP = True\n")
+        #     init_file.write("SCORE_MODULE = 'nemo_skills.dataset.ruler.ruler_score'\n")
+        #     benchmarks = ", ".join(f"'ruler.{setup}.{task}': {{}}" for task in tasks)
+        #     init_file.write(f"BENCHMARKS = {{{benchmarks}}}\n")
+
+        ########################################
+        # END NeMo Gym prepare skips these steps since we don't use them
+        ########################################
 
     finally:
         if tmpdir_context is not None:
@@ -203,6 +223,12 @@ if __name__ == "__main__":
         help="Directory to store intermediate data. If not provided, a temporary directory will be created.",
     )
     parser.add_argument(
+        "--ruler_parent_dir",
+        type=str,
+        default=None,
+        help="Directory to clone RULER Github repository in",
+    )
+    parser.add_argument(
         "--data_format",
         type=str,
         default="default",
@@ -239,5 +265,6 @@ if __name__ == "__main__":
         args.data_format,
         ruler_prepare_args,
         tmp_data_dir=args.tmp_data_dir,
+        ruler_parent_dir=args.ruler_parent_dir,
     )
     print("RULER dataset preparation completed.")
