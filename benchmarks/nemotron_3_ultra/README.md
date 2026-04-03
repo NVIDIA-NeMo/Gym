@@ -41,6 +41,20 @@ ng_prepare_benchmark "+config_paths=[$config_paths]"
 ```
 
 # Run
+|Model|Requires GPUs (local/remote)|Path|
+|---|---|---|
+|Ultra model|No|benchmarks/nemotron_3_ultra/ultra_remote_endpoint.yaml|
+||Yes|benchmarks/nemotron_3_ultra/ultra_local_endpoint.yaml|
+|Judge models|No|benchmarks/nemotron_3_ultra/judge_remote_endpoints.yaml|
+||Yes|benchmarks/nemotron_3_ultra/judge_local_endpoints.yaml|
+
+|Benchmark suite|Path|
+|---|---|
+|No external models required|benchmarks/nemotron_3_ultra/benchmarks_no_external.yaml|
+|Short config (external models required)|benchmarks/nemotron_3_ultra/benchmarks_short.yaml|
+|Long config (expensive to run e.g. API keys/costs)|benchmarks/nemotron_3_ultra/benchmarks_long.yaml|
+
+
 ## Against an external endpoint
 ```bash
 WANDB_PROJECT=<>
