@@ -56,6 +56,11 @@ ng_prepare_benchmark "+config_paths=[$config_paths]"
 
 
 ## Against an external endpoint
+This example uses:
+1. Remote Ultra model
+2. Remote judges
+3. Short config
+
 ```bash
 WANDB_PROJECT=<>
 EXPERIMENT_NAME=<>
