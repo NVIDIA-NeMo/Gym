@@ -4,14 +4,10 @@ rdkit_chemistry:
       entrypoint: app.py
       domain: knowledge
       verified: false
-      description: >
-        Verifiable chemistry question answering.
-        The agent receives a natural-language chemistry question + SMILES and
-        must respond with a single number or binary flag.  All questions are
-        derived from RDKit-computable properties over the ChEMBL database.
-        Rows with method=mcp-python include tool definitions for sandboxed
-        Python/RDKit execution; rows with method=direct do not.
-      value: Train models to answer quantitative chemistry questions about molecules
+      description: >-
+        Molecular chemistry question answering: calculate properties of SMILES.
+        Includes a mix of tool-use (python + rdkit) and no-tool-use questions.
+      value: Improve molecular reasoning and SMILES parsing.
       sandbox_venv_path: ${oc.env:SANDBOX_VENV_PATH,''}
       sandbox_proxy_port: ${oc.env:NEMO_SKILLS_SANDBOX_PORT,6001}
       sandbox_proxy_max_concurrency: ${oc.env:RDKIT_SANDBOX_PROXY_MAX_CONCURRENCY,128}
