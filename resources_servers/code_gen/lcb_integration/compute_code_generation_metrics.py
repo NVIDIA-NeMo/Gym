@@ -43,18 +43,34 @@ def _temp_run(in_outs, generation, debug, result, metadata_list, timeout):
 
 
 # Using SPREAD scheduling so that Ray assigns tasks to as many distinct nodes as possible.
-# runtime_env ensures Ray workers:
-#   1. py_executable: use the code_gen server's venv Python (not system Python)
-#   2. PYTHONPATH: include code_gen/ so `import lcb_integration` resolves.
-#      lcb_integration has no pyproject.toml so can't be pip-installed; it must be on sys.path.
-#      Pattern from swerl_gen/eval/singularity_utils.py.
+# runtime_env ensures Ray workers have access to lcb_integration and nemo_gym:
+#   1. working_dir: Ray zips the Gym root and distributes it to all workers in the cluster.
+#      This is necessary because workers run in the vLLM deployment container which does not
+#      have Gym installed — py_executable into the eval container's venv does not work across
+#      container boundaries.
+#   2. pip: installs nemo_gym from the distributed source (no internet needed; pyproject.toml
+#      is at the working_dir root). Bypasses code_gen/requirements.txt which uses a relative
+#      path (-e nemo-gym[dev] @ ../../) that breaks after Ray zips and re-roots the tree.
+#   3. PYTHONPATH: lcb_integration has no pyproject.toml so can't be pip-installed; it must
+#      be on sys.path. working_dir places it on disk, PYTHONPATH makes it importable.
+_GYM_ROOT = str(Path(__file__).parent.parent.parent.parent)
 _CODE_GEN_DIR = str(Path(__file__).parent.parent)
 
 
 @ray.remote(
     scheduling_strategy="SPREAD",
     runtime_env={
-        "py_executable": sys.executable,
+        "working_dir": _GYM_ROOT,
+        "excludes": [
+            ".git",
+            "**/__pycache__",
+            "**/*.pyc",
+            "**/.venv",
+            "**/venv",
+            "docs/",
+            "resources/*.png",
+        ],
+        "pip": [".[dev]"],
         "env_vars": {"PYTHONPATH": _CODE_GEN_DIR},
     },
 )
