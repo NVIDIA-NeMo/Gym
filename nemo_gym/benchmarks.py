@@ -155,7 +155,7 @@ class PrepareBenchmarkConfig(BaseNeMoGymCLIConfig):
     """
 
     use_cached_prepared_benchmarks: bool = Field(
-        default=True, description="Skip benchmark preparation if the prepared file is already present"
+        default=False, description="Skip benchmark preparation if the prepared file is already present"
     )
     num_prepare_benchmark_processes: int = Field(
         default=1, description="Number of processes to parallelize benchmark preparation"
