@@ -14,7 +14,7 @@ allenai_wildguard_model_server:
   responses_api_models:
     vllm_model:
       entrypoint: app.py
-      model: allenai/wildguard
+      model: ???
       base_url: ???
       api_key: ???
       return_token_id_information: false
