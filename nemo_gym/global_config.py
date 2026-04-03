@@ -425,8 +425,6 @@ Duplicate config paths:
             with open_dict(global_config_dict):
                 global_config_dict[CONFIG_PATHS_KEY_NAME] = config_paths
 
-        self._recursively_swap_keys(global_config_dict)
-
         # TODO @bxyu-nvidia: We need a better way of handling dummy model configs
         with open_dict(global_config_dict):
             for top_level_value in global_config_dict.values():
@@ -439,6 +437,8 @@ Duplicate config paths:
                     continue
 
                 top_level_value["responses_api_models"].pop("dummy_model")
+
+        self._recursively_swap_keys(global_config_dict)
 
         # Almost-server detection and reporting
         almost_servers = self.detect_and_report_almost_servers(global_config_dict)
