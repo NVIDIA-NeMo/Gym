@@ -19,7 +19,10 @@ Adapted from https://github.com/NVIDIA-NeMo/Skills/blob/54d2e113c2f64bf74bda72e1
 import json
 from os import environ
 from pathlib import Path
+from shutil import rmtree
 from subprocess import run
+
+import requests
 
 from nemo_gym.global_config import get_hf_token
 
@@ -32,21 +35,25 @@ def prepare_helper(output_name: str, model: str, length: str) -> Path:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     output_fpath = DATA_DIR / output_name
 
-    skills_dir = BENCHMARK_DIR / "Skills"
-    if skills_dir.exists():
-        print("Skipping git clone as the repository is already cloned!")
-    else:
+    response = requests.get(
+        "https://raw.githubusercontent.com/NVIDIA-NeMo/Skills/54d2e113c2f64bf74bda72e15f23f01b524850da/nemo_skills/dataset/ruler/prepare.py"
+    )
+    assert response.ok
+
+    prepare_script_fpath = BENCHMARK_DIR / "ruler_prepare_script.py"
+    with prepare_script_fpath.open("wb") as f:
+        f.write(response.content)
+
+    venv_dir = BENCHMARK_DIR / ".venv"
+    if not venv_dir.exists():
         run(
-            """git clone https://github.com/NVIDIA-NeMo/Skills \
-&& cd Skills \
-&& git lfs install \
-&& git checkout 54d2e113c2f64bf74bda72e15f23f01b524850da \
-&& uv venv --python 3.12 --seed .venv \
+            """uv venv --python 3.12 --seed .venv \
 && source .venv/bin/activate \
-&& uv pip install '-e .' scipy wonderwords html2text tenacity nltk""",
+&& uv pip install bs4 scipy wonderwords html2text tenacity nltk""",
             check=True,
             shell=True,
             cwd=BENCHMARK_DIR,
+            executable="/bin/bash",
         )
 
     maybe_hf_token = get_hf_token()
@@ -54,10 +61,12 @@ def prepare_helper(output_name: str, model: str, length: str) -> Path:
     if maybe_hf_token:
         env_vars["HF_TOKEN"] = maybe_hf_token
 
-    tmp_data_dir = skills_dir / "ruler" / model / str(length)
+    tmp_data_dir = BENCHMARK_DIR / "temp_ruler_data_dir" / model / str(length)
+    ruler_dir = tmp_data_dir / "RULER"
+    rmtree(ruler_dir, ignore_errors=True)
     run(
         f"""source .venv/bin/activate \
-&& python nemo_skills/dataset/ruler/prepare.py \
+&& python ruler_prepare_script.py \
     --data_format=chat \
     --setup={model}-{length} \
     --max_seq_length={length} \
@@ -67,8 +76,9 @@ def prepare_helper(output_name: str, model: str, length: str) -> Path:
 """,
         check=True,
         shell=True,
-        cwd=skills_dir,
+        cwd=BENCHMARK_DIR,
         env=environ | env_vars,
+        executable="/bin/bash",
     )
 
     samples = []
