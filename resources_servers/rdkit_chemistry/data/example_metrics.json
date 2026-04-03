@@ -36,11 +36,8 @@
         "Standard deviation": 0.0
     },
     "expected_answer": {
-        "Total # non-null values": 5,
-        "Average": 11.4,
-        "Min": 0.0,
-        "Max": 42.0,
-        "Standard deviation": 17.54
+        "unique_count": 5,
+        "total_count": 5
     },
     "property_type": {
         "unique_count": 3,
