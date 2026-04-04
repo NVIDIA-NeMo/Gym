@@ -1,0 +1,18 @@
+hermes_agent:
+  responses_api_agents:
+    hermes_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: ???
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      concurrency: 32
+      max_turns: 30
+      enabled_toolsets: null
+      disabled_toolsets: null
+      terminal_backend: local
+      terminal_timeout: 120
+      tool_pool_size: 128
+      system_prompt: null
