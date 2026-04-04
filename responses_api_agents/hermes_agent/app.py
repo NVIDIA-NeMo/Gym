@@ -107,7 +107,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
 
         # Hermes uses chat-completions format: {"type": "function", "function": {name, ...}}
         # Gym's Responses API ToolParam is flat: {"type": "function", "name": ..., ...}
-        cc_schemas = (
+        chat_completion_schemas = (
             get_tool_definitions(
                 enabled_toolsets=self.config.enabled_toolsets,
                 disabled_toolsets=self.config.disabled_toolsets,
@@ -115,8 +115,8 @@ class HermesAgent(SimpleResponsesAPIAgent):
             )
             or []
         )
-        names = {t["function"]["name"] for t in cc_schemas}
-        schemas = [{"type": "function", "strict": None, **t["function"]} for t in cc_schemas]
+        names = {t["function"]["name"] for t in chat_completion_schemas}
+        schemas = [{"type": "function", "strict": None, **t["function"]} for t in chat_completion_schemas]
         return schemas, names
 
     async def responses(
