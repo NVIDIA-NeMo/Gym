@@ -36,9 +36,9 @@ from vllm.entrypoints.openai.api_server import (
 
 from nemo_gym.global_config import (
     DISALLOWED_PORTS_KEY_NAME,
+    HF_TOKEN_KEY_NAME,
     find_open_port,
     get_global_config_dict,
-    get_hf_token,
 )
 from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
 
@@ -53,6 +53,7 @@ class LocalVLLMModelConfig(VLLMModelConfig):
     vllm_serve_kwargs: Dict[str, Any]
     vllm_serve_env_vars: Dict[str, str]
 
+    show_vllm_engine_stats: bool = False
     debug: bool = False
 
     def model_post_init(self, context):
@@ -79,6 +80,7 @@ class LocalVLLMModelActor:
         env_vars: Dict[str, str],
         server_name: str,
         debug: bool,
+        show_vllm_engine_stats: bool,
     ) -> None:
         from os import environ
 
@@ -87,6 +89,7 @@ class LocalVLLMModelActor:
         self.env_vars = env_vars
         self.server_name = server_name
         self.debug = debug
+        self.show_vllm_engine_stats = show_vllm_engine_stats
 
         self.env_vars.pop("CUDA_VISIBLE_DEVICES", None)
 
@@ -152,12 +155,14 @@ class LocalVLLMModelActor:
         uvicorn_logger.addFilter(No200Filter())
 
     def _maybe_patch_engine_stats(self) -> None:
-        from logging import ERROR
+        from logging import ERROR, StreamHandler
 
         from vllm.v1.metrics.loggers import logger as metrics_logger
 
-        if self.debug:
+        if self.debug or self.show_vllm_engine_stats:
             print("vLLM metrics logger will display engine stats.")
+            handler = StreamHandler(sys.stderr)
+            metrics_logger.addHandler(handler)
         else:
             print(
                 f"Setting vLLM metrics logger for {self.server_name} to ERROR which will not print engine stats. This helps declutter the logs. Use `debug` for LocalVLLMModel to see them."
@@ -407,6 +412,9 @@ class LocalVLLMModel(VLLMModel):
 
         return super().setup_webserver()
 
+    def get_hf_token(self) -> Optional[str]:
+        return get_global_config_dict().get(HF_TOKEN_KEY_NAME)
+
     def get_cache_dir(self) -> str:
         # We need to reconstruct the cache dir as HF does it given HF_HOME. See https://github.com/huggingface/huggingface_hub/blob/b2723cad81f530e197d6e826f194c110bf92248e/src/huggingface_hub/constants.py#L146
         return str(Path(self.config.hf_home) / "hub")
@@ -427,7 +435,7 @@ class LocalVLLMModel(VLLMModel):
 
         env_vars = {"HF_HUB_ENABLE_HF_TRANSFER": "1"}
         # vLLM accepts a `hf_token` parameter but it's not used everywhere. We need to set HF_TOKEN environment variable here.
-        maybe_hf_token = get_hf_token()
+        maybe_hf_token = self.get_hf_token()
         if maybe_hf_token:
             env_vars["HF_TOKEN"] = maybe_hf_token
 
@@ -522,6 +530,7 @@ Total Ray cluster resources: {cluster_resources()}""")
             env_vars=env_vars,
             server_name=self.config.name,
             debug=self.config.debug,
+            show_vllm_engine_stats=self.config.show_vllm_engine_stats,
         )
 
         self.config.base_url = [ray.get(self._local_vllm_model_actor.base_url.remote())]

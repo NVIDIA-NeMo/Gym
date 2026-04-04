@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import FastAPI
@@ -59,9 +60,19 @@ from resources_servers.genrm_compare.utils import (
 
 logger = logging.getLogger(__name__)
 
+
+@dataclass
+class CohortCoordinator:
+    """One in-flight cohort per prompt_key: barrier via Event"""
+
+    entries: List[Any] = field(default_factory=list)
+    event: asyncio.Event = field(default_factory=asyncio.Event)
+    rewards: Optional[List[float]] = None
+
+
 # Cohort state for verify(): buffer by prompt_key until num_rollouts_per_prompt received (Difference 1)
 _cohort_lock: asyncio.Lock = asyncio.Lock()
-_cohort_buffers: Dict[str, List[Tuple[Any, asyncio.Future]]] = {}
+_cohort_by_key: Dict[str, CohortCoordinator] = {}
 
 
 class GenRMCompareConfig(BaseResourcesServerConfig):
@@ -210,39 +221,47 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
             input_messages if isinstance(input_messages, list) else list(input_messages),
             principle,
         )
-        future: asyncio.Future[float] = asyncio.get_running_loop().create_future()
+        cohort_snapshot: Optional[
+            Tuple[List[Dict[str, str]], List[Dict[str, Any]], Optional[str], CohortCoordinator]
+        ] = None
 
         async with _cohort_lock:
-            if prompt_key not in _cohort_buffers:
-                _cohort_buffers[prompt_key] = []
-            _cohort_buffers[prompt_key].append((body, future))
-            buf = _cohort_buffers[prompt_key]
-            if len(buf) < cfg.num_rollouts_per_prompt:
-                pass  # release lock and await below
+            coordinator = _cohort_by_key.setdefault(prompt_key, CohortCoordinator())
+            my_index = len(coordinator.entries)
+            coordinator.entries.append(body)
+            if len(coordinator.entries) < cfg.num_rollouts_per_prompt:
+                pass  # release lock; await coordinator.event below
             else:
-                # Cohort complete: run comparison and resolve all futures
-                assert len(buf) == cfg.num_rollouts_per_prompt
-                first_params = buf[0][0].responses_create_params
+                # Cohort complete: snapshot args and remove key under lock; run GenRM outside the lock
+                # so other prompts' verify() calls and concurrent /compare traffic are not blocked.
+                assert len(coordinator.entries) == cfg.num_rollouts_per_prompt
+                entries = coordinator.entries
+                first_params = entries[0].responses_create_params
                 conversation_history = _input_to_conversation_history(getattr(first_params, "input", []) or [])
                 response_objs = [
-                    (b.response.model_dump() if hasattr(b.response, "model_dump") else b.response) for b, _ in buf
+                    (b.response.model_dump() if hasattr(b.response, "model_dump") else b.response) for b in entries
                 ]
-                principle_val = getattr(buf[0][0], "principle", None) or principle
-                try:
-                    rewards, _metrics, _, _ = await self._run_compare(
-                        conversation_history, response_objs, principle=principle_val
-                    )
-                    for i, (_, f) in enumerate(buf):
-                        if not f.done():
-                            f.set_result(rewards[i])
-                except Exception as e:
-                    logger.exception("[GenRM] Cohort compare failed: %s", e)
-                    for _, f in buf:
-                        if not f.done():
-                            f.set_result(cfg.default_score)
-                del _cohort_buffers[prompt_key]
+                principle_val = getattr(entries[0], "principle", None) or principle
+                del _cohort_by_key[prompt_key]
+                cohort_snapshot = (conversation_history, response_objs, principle_val, coordinator)
 
-        reward = await future
+        if cohort_snapshot is not None:
+            conversation_history, response_objs, principle_val, coordinator = cohort_snapshot
+            n = cfg.num_rollouts_per_prompt
+            try:
+                rewards, _metrics, _, _ = await self._run_compare(
+                    conversation_history, response_objs, principle=principle_val
+                )
+                coordinator.rewards = rewards
+            except Exception as e:
+                logger.exception("[GenRM] Cohort compare failed: %s", e)
+                coordinator.rewards = [cfg.default_score] * n
+            coordinator.event.set()
+        else:
+            await coordinator.event.wait()
+
+        assert coordinator.rewards is not None
+        reward = coordinator.rewards[my_index]
         return BaseVerifyResponse(
             responses_create_params=body.responses_create_params,
             response=body.response,
