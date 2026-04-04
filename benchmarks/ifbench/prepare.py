@@ -49,11 +49,7 @@ def prepare() -> Path:
                     "instruction_id_list": entry["instruction_id_list"],
                     "prompt": prompt,
                     "kwargs": entry["kwargs"],
-                    "responses_create_params": {
-                        "input": [{"role": "user", "content": prompt}],
-                        "tools": [],
-                        "parallel_tool_calls": False,
-                    },
+                    "grading_mode": "fraction",
                 }
             )
 
