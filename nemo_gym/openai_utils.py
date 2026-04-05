@@ -486,6 +486,8 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
 
         max_num_tries = MAX_NUM_TRIES
         tries = 0
+        last_error_status: int | None = None
+        last_error_body: str = ""
         while tries < max_num_tries:
             tries += 1
             response = await request(**request_kwargs)
@@ -495,17 +497,20 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
                 if response.status in RATE_LIMIT_ERROR_CODES:
                     max_num_tries += 1
 
-                content = (await response.content.read()).decode()
+                last_error_status = response.status
+                last_error_body = (await response.content.read()).decode(errors="replace")
                 print(
-                    f"Hit a {response.status} trying to query an OpenAI endpoint (try {tries}). Sleeping 0.5s. Error message: {content}"
+                    f"Hit a {response.status} trying to query an OpenAI endpoint (try {tries}). Sleeping 0.5s. Error message: {last_error_body[:2000]}"
                 )
                 await sleep(0.5)
                 continue
             else:
                 return response
 
-        # We've exited the loop
-        await raise_for_status(response)
+        # Exited after exhausting retries without a non-retry status — response body was already read above.
+        raise RuntimeError(
+            f"OpenAI HTTP {last_error_status} after {tries} tries. Last error body: {last_error_body[:8000]}"
+        )
 
     async def _raise_for_status(self, response: ClientResponse, request_kwargs: Dict[str, Any]) -> None:
         if not response.ok and _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:

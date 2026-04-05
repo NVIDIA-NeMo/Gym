@@ -14,10 +14,13 @@
 # limitations under the License.
 import asyncio
 import json
+import logging
+import time
 from asyncio import Future, Semaphore
 from collections import Counter
 from contextlib import nullcontext
 from copy import deepcopy
+from datetime import datetime
 from itertools import repeat
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Literal, Optional, Tuple, Union
@@ -49,6 +52,29 @@ from nemo_gym.server_utils import (
 )
 
 
+logger = logging.getLogger(__name__)
+
+
+def _print_and_strip_debug_step_events(row: Dict, body: Dict) -> None:
+    """Print per-step lines on the rollout client; remove debug_step_events so JSONL stays lean."""
+    events = body.pop("debug_step_events", None)
+    inner = body.get("response")
+    if not events and isinstance(inner, dict):
+        events = inner.pop("debug_step_events", None)
+    if not events:
+        return
+    prefix = (
+        f"[ng_collect_rollouts task_index={row.get(TASK_INDEX_KEY_NAME)} "
+        f"rollout_index={row.get(ROLLOUT_INDEX_KEY_NAME)}]"
+    )
+    for ev in events:
+        print(
+            f"{prefix} step={ev.get('step')} tool_calls={ev.get('tool_calls')} "
+            f"from_env_step={ev.get('from_env_step')} reward={ev.get('reward')!r} done={ev.get('done')}",
+            flush=True,
+        )
+
+
 class SharedRolloutCollectionConfig(BaseNeMoGymCLIConfig):
     output_jsonl_fpath: str = Field(description="The output data jsonl file path.")
     num_samples_in_parallel: Optional[int] = Field(
@@ -57,6 +83,16 @@ class SharedRolloutCollectionConfig(BaseNeMoGymCLIConfig):
     responses_create_params: Dict[str, Any] = Field(
         default_factory=dict,
         description="Overrides for the responses_create_params e.g. temperature, max_output_tokens, etc.",
+    )
+    debug: bool = Field(
+        default=False,
+        description="Verbose rollout diagnostics: print each POST /run start/end with timestamps, refresh tqdm often, "
+        "and set global_aiohttp_client_request_debug for richer aiohttp failure output.",
+    )
+    debug_each_step: bool = Field(
+        default=False,
+        description="Forwarded on each POST /run body as debug_each_step=true. cube_agent returns debug_step_events "
+        "and ng_collect_rollouts prints each step on the client (other agents ignore the field).",
     )
 
 
@@ -277,7 +313,12 @@ class RolloutCollectionHelper(BaseModel):
         pcts_to_print = [20, 40, 60, 80, 90, 95, 98, 99, 100]
         counts_left = Counter(r[AGENT_REF_KEY_NAME]["name"] for r in input_rows)
         results_file = output_fpath.open("ab")
-        for future in self.run_examples(input_rows, semaphore=semaphore):
+        for future in self.run_examples(
+            input_rows,
+            semaphore=semaphore,
+            debug=config.debug,
+            debug_each_step=config.debug_each_step,
+        ):
             row, result = await future
 
             result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
@@ -420,37 +461,75 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
         examples: List[Dict],
         head_server_config: Optional[BaseServerConfig] = None,
         semaphore: Optional[Semaphore] = None,
+        debug: bool = False,
+        debug_each_step: bool = False,
     ) -> Iterator[Future]:  # pragma: no cover
         """
         We provide this function as a lower level interface for running rollout collection.
         """
-        server_client = self.setup_server_client(head_server_config)
+        server_client = self.setup_server_client(head_server_config, debug=debug)
         semaphore = semaphore or nullcontext()
 
         async def _post_subroutine(row: Dict) -> Tuple[Dict, Dict]:
             async with semaphore:
-                res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
+                agent_name = row["agent_ref"]["name"]
+                payload = dict(row)
+                if debug_each_step:
+                    payload["debug_each_step"] = True
+                if debug:
+                    extra = (
+                        f"task_index={row.get(TASK_INDEX_KEY_NAME)} rollout_index={row.get(ROLLOUT_INDEX_KEY_NAME)}"
+                    )
+                    if "task_idx" in row:
+                        extra += f" env_task_idx={row['task_idx']}"
+                    msg = (
+                        f"[ng_collect_rollouts {datetime.now().isoformat(timespec='seconds')}] "
+                        f"POST /run -> {agent_name} {extra}"
+                    )
+                    print(msg, flush=True)
+                t0 = time.perf_counter()
+                res = await server_client.post(server_name=agent_name, url_path="/run", json=payload)
                 await raise_for_status(res)
-                return row, await get_response_json(res)
+                result_body = await get_response_json(res)
+                if debug_each_step:
+                    _print_and_strip_debug_step_events(row, result_body)
+                out = row, result_body
+                if debug:
+                    dt = time.perf_counter() - t0
+                    done_msg = (
+                        f"[ng_collect_rollouts {datetime.now().isoformat(timespec='seconds')}] "
+                        f"finished /run {agent_name} in {dt:.1f}s"
+                    )
+                    print(done_msg, flush=True)
+                return out
 
-        return tqdm.as_completed(
-            map(_post_subroutine, examples),
+        tqdm_kw: Dict[str, Any] = dict(
             desc="Collecting rollouts",
             miniters=10,
             total=len(examples),
             maxinterval=60,
         )
+        if debug:
+            tqdm_kw["miniters"] = 1
+            tqdm_kw["maxinterval"] = 5
+
+        return tqdm.as_completed(map(_post_subroutine, examples), **tqdm_kw)
 
     def setup_server_client(
-        self, head_server_config: Optional[BaseServerConfig] = None
+        self,
+        head_server_config: Optional[BaseServerConfig] = None,
+        *,
+        debug: bool = False,
     ) -> ServerClient:  # pragma: no cover
         server_client = ServerClient.load_from_global_config(head_server_config)
 
         # We set this rollout global aiohttp client to use the same max connections as the underlying head server global config.
         if not is_global_aiohttp_client_setup():
-            set_global_aiohttp_client(
-                cfg=GlobalAIOHTTPAsyncClientConfig.model_validate(server_client.global_config_dict)
-            )
+            conf_container = OmegaConf.to_container(server_client.global_config_dict, resolve=True)
+            assert isinstance(conf_container, dict)
+            if debug:
+                conf_container["global_aiohttp_client_request_debug"] = True
+            set_global_aiohttp_client(GlobalAIOHTTPAsyncClientConfig.model_validate(conf_container))
 
         return server_client
 
@@ -458,5 +537,19 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
 def collect_rollouts():  # pragma: no cover
     config = RolloutCollectionConfig.model_validate(get_global_config_dict())
     rch = RolloutCollectionHelper()
+
+    if config.debug:
+        logging.basicConfig(level=logging.DEBUG, format="%(levelname)s %(name)s: %(message)s")
+        logger.setLevel(logging.DEBUG)
+        print(
+            "ng_collect_rollouts: debug=true (per-/run timestamps, tqdm refreshes more often, aiohttp request debug).",
+            flush=True,
+        )
+    if config.debug_each_step:
+        print(
+            "ng_collect_rollouts: debug_each_step=true (each POST /run includes debug_each_step; "
+            "cube_agent returns debug_step_events and the client prints one line per step).",
+            flush=True,
+        )
 
     asyncio.run(rch.run_from_config(config))

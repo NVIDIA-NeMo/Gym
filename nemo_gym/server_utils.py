@@ -15,6 +15,7 @@
 import asyncio
 import atexit
 import json
+import logging
 import resource
 import sys
 from abc import abstractmethod
@@ -71,6 +72,19 @@ from nemo_gym.profiling import Profiler
 
 _GLOBAL_AIOHTTP_CLIENT: Union[None, ClientSession] = None
 _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG: bool = False
+
+
+def configure_stdlib_logging_before_uvicorn(*, debug: bool) -> None:
+    """So ``logger.info`` / ``debug`` in ``setup_webserver()`` (e.g. cube eager init) is visible.
+
+    Uvicorn only configures loggers after the app is built; until then the root logger defaults
+    to WARNING and application INFO lines are dropped.
+    """
+    level = logging.DEBUG if debug else logging.INFO
+    root = logging.getLogger()
+    root.setLevel(level)
+    if not root.handlers:
+        logging.basicConfig(level=level, format="%(levelname)s %(name)s: %(message)s")
 
 
 class GlobalAIOHTTPAsyncClientConfig(BaseModel):
@@ -368,6 +382,19 @@ def initialize_ray() -> None:
     global_config_dict = get_global_config_dict()
     ray_head_node_address = global_config_dict.get(RAY_HEAD_NODE_ADDRESS_KEY_NAME)
     ray_init_kwargs = dict(ignore_reinit_error=True)
+    # Editable nemo-gym installs use ../../pyproject.toml from server subdirs (e.g. openai_model, cube_agent).
+    # Ray's uv_runtime_env_hook requires that file to lie inside runtime_env.working_dir (defaults to cwd).
+    # Exclude .git and venvs from the Ray working_dir zip (avoids huge .git/objects/pack uploads and warnings).
+    ray_init_kwargs["runtime_env"] = {
+        "working_dir": str(PARENT_DIR.resolve()),
+        "excludes": [
+            ".git",
+            ".git/**",
+            "**/.venv",
+            "**/__pycache__",
+            "**/*.pyc",
+        ],
+    }
 
     if ray_head_node_address:
         print(f"Connecting to Ray cluster at specified address: {ray_head_node_address}")
@@ -385,16 +412,30 @@ def initialize_ray() -> None:
         print(f"Started Ray cluster at {global_config_dict['ray_head_node_address']}")
 
 
-def maybe_ray_cluster_exit():  # pragma: no cover
+def shutdown_ray_in_this_process() -> None:
+    """
+    Disconnect this process from Ray if connected.
+
+    Child servers call ``ray.init(address=...)`` as drivers; they must call ``ray.shutdown()``
+    on exit or Ray's background threads keep trying to reach GCS after the parent tears down
+    the cluster, which surfaces as delayed ``rpc_client.h`` / GCS errors in the terminal.
+    """
     global _NEMO_GYM_STARTED_RAY_CLUSTER
 
-    if not _NEMO_GYM_STARTED_RAY_CLUSTER:
+    if not ray.is_initialized():
         return
 
-    print("Shutting down Ray cluster spun up by NeMo Gym...")
-    ray.shutdown()
-
+    if _NEMO_GYM_STARTED_RAY_CLUSTER:
+        print("Shutting down Ray cluster spun up by NeMo Gym...")
+    try:
+        ray.shutdown()
+    except Exception as e:  # pragma: no cover
+        getLogger(__name__).warning("Ray shutdown failed: %s", e)
     _NEMO_GYM_STARTED_RAY_CLUSTER = False
+
+
+def maybe_ray_cluster_exit():  # pragma: no cover
+    shutdown_ray_in_this_process()
 
 
 atexit.register(maybe_ray_cluster_exit)
@@ -564,9 +605,10 @@ repr(e): {repr(e)}"""
         if global_config_dict[DRY_RUN_KEY_NAME]:
             return
 
-        app = server.setup_webserver()
         server.set_ulimit()
         server.prefix_server_logs()
+        configure_stdlib_logging_before_uvicorn(debug=server.config.debug)
+        app = server.setup_webserver()
         server.setup_exception_middleware(app)
 
         @app.exception_handler(RequestValidationError)
@@ -604,6 +646,8 @@ Full body: {json.dumps(exc.body, indent=4)}
             # We add a very small graceful shutdown timeout so when we shutdown we cancel all inflight requests and there are no lingering requests (requests are cancelled)
             timeout_graceful_shutdown=0.5,
         )
+        if server.config.debug:
+            uvicorn_kwargs["log_level"] = "debug"
 
         if server.config.num_workers and server.config.num_workers > 1:
             set_is_nemo_gym_fastapi_worker()
