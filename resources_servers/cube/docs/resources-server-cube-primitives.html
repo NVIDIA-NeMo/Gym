@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Cube resources server ↔ cube-harness / CUBE primitives</title>
+  <script type="module">
+    import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+
+    function isDarkMode() {
+      return window.matchMedia("(prefers-color-scheme: dark)").matches;
+    }
+
+    const darkThemeVariables = {
+      background: "#1c1f26",
+      mainBkg: "#2d333b",
+      secondBkg: "#252b33",
+      tertiaryColor: "#252b33",
+      primaryColor: "#3d444d",
+      primaryTextColor: "#f0f3f6",
+      secondaryTextColor: "#f0f3f6",
+      tertiaryTextColor: "#f0f3f6",
+      lineColor: "#b7c0ca",
+      textColor: "#f0f3f6",
+      border1: "#8b949e",
+      border2: "#6e7681",
+      actorBkg: "#2d333b",
+      actorBorder: "#8b949e",
+      actorTextColor: "#f0f3f6",
+      actorLineColor: "#b7c0ca",
+      signalColor: "#79c0ff",
+      signalTextColor: "#f0f3f6",
+      labelBoxBkgColor: "#252b33",
+      labelBoxBorderColor: "#8b949e",
+      labelTextColor: "#f0f3f6",
+      loopTextColor: "#f0f3f6",
+      noteBkgColor: "#252b33",
+      noteTextColor: "#f0f3f6",
+      noteBorderColor: "#8b949e",
+      sequenceNumberColor: "#f0f3f6",
+      clusterBkg: "#252b33",
+      clusterBorder: "#8b949e",
+      defaultLinkColor: "#79c0ff",
+      titleColor: "#f0f3f6",
+      edgeLabelBackground: "#2d333b",
+      nodeBorder: "#8b949e",
+    };
+
+    const darkThemeCSS = `
+      .edgePath .path { stroke: #79c0ff !important; stroke-width: 2px !important; }
+      .flowchart-link { stroke: #79c0ff !important; }
+      .marker { fill: #79c0ff !important; stroke: #79c0ff !important; }
+      .edgeLabel, .edgeLabel div { color: #f0f3f6 !important; }
+      .label text, .nodeLabel, .labelText { fill: #f0f3f6 !important; }
+      .actor-line { stroke: #b7c0ca !important; }
+      path.messageLine0, path.messageLine1 { stroke: #79c0ff !important; }
+      #arrowhead path { fill: #79c0ff !important; stroke: #79c0ff !important; }
+      text.messageText, text.actor > tspan { fill: #f0f3f6 !important; }
+    `;
+
+    mermaid.initialize({
+      startOnLoad: true,
+      securityLevel: "loose",
+      flowchart: { curve: "basis" },
+      theme: isDarkMode() ? "dark" : "neutral",
+      ...(isDarkMode()
+        ? { themeVariables: darkThemeVariables, themeCSS: darkThemeCSS }
+        : {}),
+    });
+
+    window
+      .matchMedia("(prefers-color-scheme: dark)")
+      .addEventListener("change", () => window.location.reload());
+  </script>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f6f7f9;
+      --card: #fff;
+      --text: #1a1d23;
+      --muted: #5c6570;
+      --border: #d8dde4;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #121418;
+        --card: #1c1f26;
+        --text: #e8eaef;
+        --muted: #9aa3ad;
+        --border: #2f3540;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: "Segoe UI", system-ui, sans-serif;
+      line-height: 1.55;
+      max-width: 960px;
+      margin: 0 auto;
+      padding: 1.5rem 1.25rem 3rem;
+      background: var(--bg);
+      color: var(--text);
+    }
+    h1 { font-size: 1.35rem; font-weight: 650; margin: 0 0 0.5rem; }
+    h2 {
+      font-size: 1.05rem;
+      font-weight: 650;
+      margin: 2rem 0 0.75rem;
+      padding-bottom: 0.35rem;
+      border-bottom: 1px solid var(--border);
+    }
+    p.lead { color: var(--muted); margin: 0 0 1.25rem; font-size: 0.95rem; }
+    p.note {
+      font-size: 0.88rem;
+      color: var(--muted);
+      margin: 0.75rem 0 0;
+      padding: 0.65rem 0.85rem;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+    }
+    .diagram {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1rem 0.5rem 0.25rem;
+      margin: 0.75rem 0 0;
+      overflow-x: auto;
+    }
+    nav { font-size: 0.9rem; margin-bottom: 1rem; }
+    nav a { color: inherit; }
+    footer {
+      margin-top: 2.5rem;
+      font-size: 0.8rem;
+      color: var(--muted);
+    }
+    code { font-size: 0.9em; }
+  </style>
+</head>
+<body>
+  <nav><a href="architecture-flow.html">← Request flow (agent + resources server)</a></nav>
+
+  <h1>Cube resources server ↔ CUBE / cube-harness primitives</h1>
+  <p class="lead">
+    How NeMo-Gym’s <strong>resources_servers/cube</strong> types sit on top of packages from the
+    <strong>cube-harness</strong> repo (e.g. <code>osworld-cube</code> git install), the shared
+    <strong>cube</strong> core API, and <strong>cube_computer_tool</strong>. Names match Python import paths used in
+    <code>server.py</code>, <code>domains/osworld/</code>, and <code>adapters.py</code>.
+  </p>
+
+  <h2>1. Type relationships (who holds what)</h2>
+  <p class="lead" style="margin-top:-0.5rem;font-size:0.9rem">
+    High-level wiring only; see Python under <code>server.py</code>, <code>domains/osworld/</code>, <code>adapters.py</code> for full types.
+  </p>
+  <div class="diagram">
+    <pre class="mermaid">
+flowchart TB
+  CFG[CubeResourcesServerConfig]
+  SRV[CubeResourcesServer]
+  BOOT[ensure_osworld_tasks]
+  BENCH[OSWorldBenchmark]
+  TLIST[task config list]
+  LIVE[env_id to live Task]
+  ADP[adapters module]
+  CUBE[Action Observation from cube.core]
+
+  CFG --> SRV
+  BOOT --> BENCH
+  BENCH --> TLIST
+  BENCH --> SRV
+  SRV --> LIVE
+  SRV --> ADP
+  ADP --> CUBE
+    </pre>
+  </div>
+
+  <h2>2. Bootstrap vs HTTP: data flow</h2>
+  <div class="diagram">
+    <pre class="mermaid">
+flowchart TB
+  YML[YAML extra fields]
+  EOT[bootstrap]
+  BC[OSWorldBenchmark]
+  ST[server state lists]
+  SD[HTTP seed_session]
+  SP[HTTP step]
+  CL[HTTP close]
+  VM[env_id task map]
+
+  YML --> EOT
+  EOT --> BC
+  BC --> ST
+  SD --> ST
+  SD --> VM
+  SP --> VM
+  CL --> VM
+    </pre>
+  </div>
+
+  <p class="note">
+    <strong>Package origins:</strong> <code>osworld-cube</code> is installed from
+    <code>git+https://github.com/The-AI-Alliance/cube-harness.git#subdirectory=cubes/osworld-cube</code>
+    (see <code>resources_servers/cube/requirements.txt</code>). <code>cube</code> and
+    <code>cube_computer_tool</code> are pulled in as dependencies of that stack. NeMo-Gym does not vendor
+    cube-harness; it wires YAML → benchmark → Task and translates CUBE types to OpenAI / NeMo-Gym HTTP shapes.
+  </p>
+
+  <footer>
+    NeMo-Gym · <code>resources_servers/cube/docs/resources-server-cube-primitives.html</code>
+  </footer>
+</body>
+</html>

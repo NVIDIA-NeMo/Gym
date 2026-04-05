@@ -1,0 +1,44 @@
+# OSWorld via ``resources_servers/cube`` — same pattern as OpenEnv (one app.py, YAML selects adapter).
+cube_osworld_resources_server:
+  resources_servers:
+    cube:
+      entrypoint: app.py
+      domain: other
+      verified: false
+      debug: true
+      env_domain: osworld
+      # Load OSWorld benchmark at server startup (VM image download) instead of on first /seed_session.
+      eager_benchmark_init: true
+      # After benchmark load, boot QEMU once for task 0 and close it so cold-start finishes before HTTP listen.
+      eager_osworld_vm_warmup: true
+      eager_osworld_warmup_task_idx: 0
+      description: "OSWorld desktop tasks via CUBE (osworld-cube package)."
+      vm_backend_class: osworld_cube.vm_backend.OSWorldQEMUVMBackend
+      vm_backend_kwargs: {}
+      test_set_name: TEST_SMALL
+      use_som: false
+      action_space: computer_13
+      require_a11y_tree: true
+      require_terminal: false
+      observe_after_action: true
+
+cube_osworld_agent:
+  responses_api_agents:
+    cube_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: cube_osworld_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      max_steps: 50
+      return_transitions: true
+      done_if_no_tool_calls: true
+      collapse_old_env_states: false
+      # Optional: rolling multimodal context (like cube-harness Genny render_last_n_obs)
+      # render_last_n_obs: 3
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/cube/data/osworld/example.jsonl

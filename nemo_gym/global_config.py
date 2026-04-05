@@ -202,7 +202,14 @@ class GlobalConfigDictParser(BaseModel):
                 cwd_path = Path.cwd() / config_path
                 config_path = cwd_path if cwd_path.exists() else PARENT_DIR / config_path
 
-            extra_config = OmegaConf.load(config_path)
+            try:
+                extra_config = OmegaConf.load(config_path)
+            except FileNotFoundError as e:
+                raise FileNotFoundError(
+                    f"NeMo Gym could not load config YAML: {config_path}\n"
+                    f"Check +config_paths=... — each entry must be a real path (repo root or cwd). "
+                    f"Placeholders like '...' or '[...]' from docs will not work."
+                ) from e
             for new_config_path in extra_config.get(CONFIG_PATHS_KEY_NAME) or []:
                 if new_config_path not in config_paths:
                     config_paths.append(new_config_path)
