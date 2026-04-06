@@ -64,6 +64,7 @@ PORT_RANGE_HIGH_KEY_NAME = "port_range_high"
 DRY_RUN_KEY_NAME = "dry_run"
 UV_CACHE_DIR_KEY_NAME = "uv_cache_dir"
 UV_VENV_DIR_KEY_NAME = "uv_venv_dir"
+UV_FIND_LINKS_KEY_NAME = "uv_find_links"
 INHERIT_FROM_KEY_NAME = "_inherit_from"
 COPY_KEY_NAME = "_copy"
 DELETE_KEY_KEY_NAME = "_delete_key"
@@ -87,6 +88,7 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     DRY_RUN_KEY_NAME,
     UV_CACHE_DIR_KEY_NAME,
     UV_VENV_DIR_KEY_NAME,
+    UV_FIND_LINKS_KEY_NAME,
     INHERIT_FROM_KEY_NAME,
     COPY_KEY_NAME,
     NEMO_GYM_LOG_DIR_KEY_NAME,
@@ -526,8 +528,8 @@ Found global config dict yaml:
             global_config_dict.setdefault(UV_CACHE_DIR_KEY_NAME, str(CACHE_DIR / "uv"))
             # Set the appropriate environment variable here, and matche the config
             environ["UV_CACHE_DIR"] = global_config_dict[UV_CACHE_DIR_KEY_NAME]
-            # By default, build the directories in their individual folders using the root repository
-            # e.g. PARENT_DIR/responses_api_models/my_server
+            # By default, build venvs next to each server directory
+            # e.g. PARENT_DIR/nemo_gym/responses_api_models/my_server/.venv
             global_config_dict.setdefault(UV_VENV_DIR_KEY_NAME, str(PARENT_DIR))
 
         if parse_config.hide_secrets:

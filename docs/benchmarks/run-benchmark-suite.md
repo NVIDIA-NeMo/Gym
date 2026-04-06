@@ -22,9 +22,9 @@ You can create a HF token following these instructions https://huggingface.co/do
 3. Prepare benchmark data using `ng_prepare_benchmark`. In the command below, we prepare the `aime24`, `aime25`, and `gpqa` benchmark datasets.
 
 ```bash
-config_paths="benchmarks/aime24/config.yaml,\
-benchmarks/aime25/config.yaml,\
-benchmarks/gpqa/config.yaml"
+config_paths="nemo_gym/benchmarks/aime24/config.yaml,\
+nemo_gym/benchmarks/aime25/config.yaml,\
+nemo_gym/benchmarks/gpqa/config.yaml"
 ng_prepare_benchmark "+config_paths=[$config_paths]"
 ```
 
@@ -41,10 +41,10 @@ echo "wandb_api_key: ?\n" >> env.yaml
 WANDB_PROJECT=bxyu-gym-dev
 EXPERIMENT_NAME=benchmark-dev/gpt-5-nano-2025-08-07
 
-config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
-benchmarks/aime24/config.yaml,\
-benchmarks/aime25/config.yaml,\
-benchmarks/gpqa/config.yaml"
+config_paths="nemo_gym/responses_api_models/openai_model/configs/openai_model.yaml,\
+nemo_gym/benchmarks/aime24/config.yaml,\
+nemo_gym/benchmarks/aime25/config.yaml,\
+nemo_gym/benchmarks/gpqa/config.yaml"
 ```
 
 2. For using `openai_model`, configure your OpenAI API key and other policy model information.

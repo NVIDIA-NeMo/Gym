@@ -216,7 +216,7 @@ class BaseUploadJsonlDatasetHuggingFaceConfig(BaseNeMoGymCLIConfig):
     Examples:
 
     ```bash
-    resource_config_path="resources_servers/example_multi_step/configs/example_multi_step.yaml"
+    resource_config_path="nemo_gym/resources_servers/example_multi_step/configs/example_multi_step.yaml"
     ng_upload_dataset_to_hf \
         +dataset_name=my_dataset \
         +input_jsonl_fpath=data/train.jsonl \
@@ -269,7 +269,7 @@ class UploadJsonlDatasetHuggingFaceConfig(BaseUploadJsonlDatasetHuggingFaceConfi
     Examples:
 
     ```bash
-    resource_config_path="resources_servers/example_multi_step/configs/example_multi_step.yaml"
+    resource_config_path="nemo_gym/resources_servers/example_multi_step/configs/example_multi_step.yaml"
     ng_gitlab_to_hf_dataset \
         +dataset_name=my_dataset \
         +input_jsonl_fpath=data/train.jsonl \
@@ -295,7 +295,7 @@ class UploadJsonlDatasetHuggingFaceMaybeDeleteConfig(BaseUploadJsonlDatasetHuggi
     Examples:
 
     ```bash
-    resource_config_path="resources_servers/example_multi_step/configs/example_multi_step.yaml"
+    resource_config_path="nemo_gym/resources_servers/example_multi_step/configs/example_multi_step.yaml"
     ng_upload_dataset_to_hf \
         +dataset_name=my_dataset \
         +input_jsonl_fpath=data/train.jsonl \

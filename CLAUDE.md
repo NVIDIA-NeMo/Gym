@@ -14,11 +14,11 @@ uv venv && uv sync --extra dev --group docs
 pre-commit install
 
 # Run servers
-ng_run "+config_paths=[resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
+ng_run "+config_paths=[nemo_gym/resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml,nemo_gym/responses_api_models/vllm_model/configs/vllm_model.yaml]"
 
 # Run tests for a specific server (creates .venv per server, installs deps, runs pytest)
 # First run is slow. Use skip_venv_if_present config or place a .venv to skip venv creation.
-ng_test +entrypoint=resources_servers/example_single_tool_call
+ng_test +entrypoint=nemo_gym/resources_servers/example_single_tool_call
 
 # Run all server tests
 ng_test_all
@@ -46,7 +46,7 @@ ng_reward_profile +input_jsonl_fpath=<data.jsonl> +rollouts_jsonl_fpath=<rollout
 ng_status
 
 # Dev test (runs pytest directly in server dir, no venv isolation)
-ng_dev_test +entrypoint=resources_servers/example_single_tool_call
+ng_dev_test +entrypoint=nemo_gym/resources_servers/example_single_tool_call
 
 # Dump merged config
 ng_dump_config "+config_paths=[...]"
@@ -60,9 +60,9 @@ ng_download_dataset_from_hf +dataset_name=<name> +version=<ver> +output_jsonl_fp
 
 Three server types, all FastAPI apps communicating via aiohttp:
 
-- **Resources Servers** (`resources_servers/`): Implement `verify()` — task verification and reward computation. Return reward 0.0 or 1.0.
-- **Response API Models** (`responses_api_models/`): Implement `chat_completions()` and `responses()` — LLM inference. Four variants: openai, azure_openai, vllm, local_vllm.
-- **Response API Agents** (`responses_api_agents/`): Implement `responses()` and `run()` — orchestrate model-tool call loops. `simple_agent` is the default single-turn agent; others include `proof_refinement_agent` (multi-turn correction), `verifiers_agent`, `swe_agents`, etc.
+- **Resources Servers** (`nemo_gym/resources_servers/`): Implement `verify()` — task verification and reward computation. Return reward 0.0 or 1.0.
+- **Response API Models** (`nemo_gym/responses_api_models/`): Implement `chat_completions()` and `responses()` — LLM inference. Four variants: openai, azure_openai, vllm, local_vllm.
+- **Response API Agents** (`nemo_gym/responses_api_agents/`): Implement `responses()` and `run()` — orchestrate model-tool call loops. `simple_agent` is the default single-turn agent; others include `proof_refinement_agent` (multi-turn correction), `verifiers_agent`, `swe_agents`, etc.
 
 A **HeadServer** coordinates all server lifecycles, config, and Ray cluster init.
 
@@ -164,7 +164,7 @@ Upload a JSONL dataset:
 ng_upload_dataset_to_gitlab \
     +dataset_name=my_benchmark \
     +version=0.0.1 \
-    +input_jsonl_fpath=resources_servers/my_benchmark/data/my_dataset.jsonl
+    +input_jsonl_fpath=nemo_gym/resources_servers/my_benchmark/data/my_dataset.jsonl
 ```
 
 Requires MLflow credentials in `env.yaml` (or passed via CLI):
@@ -181,7 +181,7 @@ Both fields coexist. `jsonl_fpath` is the local download destination; `gitlab_id
 ```yaml
 - name: my_dataset
   type: validation
-  jsonl_fpath: resources_servers/my_benchmark/data/my_dataset.jsonl
+  jsonl_fpath: nemo_gym/resources_servers/my_benchmark/data/my_dataset.jsonl
   gitlab_identifier:
     dataset_name: my_benchmark
     version: 0.0.1
@@ -229,7 +229,7 @@ Copy an existing server as template:
 
 Required structure:
 ```
-resources_servers/my_server/
+nemo_gym/resources_servers/my_server/
 ├── app.py              # Server class extending SimpleResourcesServer
 ├── configs/my_server.yaml
 ├── data/example.jsonl  # 5 examples for quick testing
@@ -248,7 +248,7 @@ The `verify()` method receives the model output and `verifier_metadata`, returns
 
 Agent structure:
 ```
-responses_api_agents/my_agent/
+nemo_gym/responses_api_agents/my_agent/
 ├── app.py              # Server class extending SimpleResponsesAPIAgent
 ├── configs/my_agent.yaml
 ├── tests/__init__.py
@@ -282,7 +282,7 @@ Run against multiple models to validate correctness:
 
 ```bash
 # Start servers
-ng_run "+config_paths=[resources_servers/my_server/configs/my_server.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
+ng_run "+config_paths=[nemo_gym/resources_servers/my_server/configs/my_server.yaml,nemo_gym/responses_api_models/vllm_model/configs/vllm_model.yaml]"
 
 # Collect rollouts (start with example.jsonl for quick smoke test)
 ng_collect_rollouts +agent_name=my_agent +input_jsonl_fpath=<data.jsonl> +output_jsonl_fpath=results/rollouts.jsonl +num_repeats=5 "+responses_create_params={max_output_tokens: 16384, temperature: 1.0}"
@@ -328,11 +328,11 @@ First run may fail as hooks modify files. Stage the changes and commit again.
 
 To avoid committing unrelated auto-fixes from other servers, scope pre-commit to your files:
 ```bash
-pre-commit run --files resources_servers/my_benchmark/**/*
+pre-commit run --files nemo_gym/resources_servers/my_benchmark/**/*
 ```
 If hooks modify files in other directories, discard those changes:
 ```bash
-git checkout -- resources_servers/other_server/
+git checkout -- nemo_gym/resources_servers/other_server/
 ```
 
 ## External Tool Auto-Install
@@ -355,7 +355,7 @@ When a benchmark requires an external tool (compiler, runtime, etc.), auto-insta
 
 ## Async Patterns
 
-- **Use aiohttp, not httpx, for async HTTP.** All async HTTP calls must go through NeMo Gym's global aiohttp client (`nemo_gym.server_utils.request()`). Do not use `httpx.AsyncClient` — httpx/httpcore has O(n^2) connection pooling that causes hangs at high concurrency (16k+ requests). When wrapping external libraries that use httpx internally, replace their HTTP transport with an aiohttp adapter. See `docs/infrastructure/engineering-notes/aiohttp-vs-httpx.md` for the full writeup and `resources_servers/tavily_search/app.py` (`TavilySearchAIOHTTPClient`) for the adapter pattern.
+- **Use aiohttp, not httpx, for async HTTP.** All async HTTP calls must go through NeMo Gym's global aiohttp client (`nemo_gym.server_utils.request()`). Do not use `httpx.AsyncClient` — httpx/httpcore has O(n^2) connection pooling that causes hangs at high concurrency (16k+ requests). When wrapping external libraries that use httpx internally, replace their HTTP transport with an aiohttp adapter. See `docs/infrastructure/engineering-notes/aiohttp-vs-httpx.md` for the full writeup and `nemo_gym/resources_servers/tavily_search/app.py` (`TavilySearchAIOHTTPClient`) for the adapter pattern.
 - Use `asyncio.Semaphore` to bound concurrent subprocess/external calls
 - For Ray remote tasks in async code: `result = await future` (Ray futures are directly awaitable). Never call `ray.get()` directly in async context.
 - Decode all subprocess output with `errors="replace"` to handle non-UTF8

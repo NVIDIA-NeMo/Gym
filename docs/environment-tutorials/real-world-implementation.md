@@ -46,7 +46,7 @@ This Resources Server introduces three patterns not seen in the earlier tutorial
 - **Per-session toolkit initialization** --- `seed_session()` creates an independent set of toolkits and data for each episode, so concurrent rollouts don't interfere.
 - **State-based verification** --- `verify()` extracts the agent's function calls, replays them in a fresh environment alongside the ground truth, and compares the resulting state rather than the exact call sequence.
 
-**File (simplified from [`resources_servers/workplace_assistant/app.py`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/workplace_assistant/app.py)):**
+**File (simplified from [`nemo_gym/resources_servers/workplace_assistant/app.py`](https://github.com/NVIDIA-NeMo/Gym/tree/main/nemo_gym/resources_servers/workplace_assistant/app.py)):**
 
 ```python
 # simplified

@@ -47,8 +47,8 @@ This command reads configuration from YAML files specified via `+config_paths` a
 
 ```bash
 # Start servers with specific configs
-config_paths="resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml,\
-responses_api_models/openai_model/configs/openai_model.yaml"
+config_paths="nemo_gym/resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml,\
+nemo_gym/responses_api_models/openai_model/configs/openai_model.yaml"
 ng_run "+config_paths=[${config_paths}]"
 ```
 
@@ -69,7 +69,7 @@ Test a specific server module by running its pytest suite and optionally validat
   - Description
 * - `entrypoint`
   - str
-  - Entrypoint for this command. Must be a relative path with two parts (such as `responses_api_agents/simple_agent`).
+  - Entrypoint for this command. Must be a relative path with two parts (such as `nemo_gym/responses_api_agents/simple_agent`).
 * - `should_validate_data`
   - bool
   - Whether to validate the example data (examples, metrics, rollouts, and so on) for this server. Default: `False`.
@@ -78,7 +78,7 @@ Test a specific server module by running its pytest suite and optionally validat
 **Example**
 
 ```bash
-ng_test +entrypoint=resources_servers/example_single_tool_call
+ng_test +entrypoint=nemo_gym/resources_servers/example_single_tool_call
 ```
 
 ---
@@ -128,7 +128,7 @@ Initialize a new resources server with template files and directory structure.
 **Example**
 
 ```bash
-ng_init_resources_server +entrypoint=resources_servers/my_server
+ng_init_resources_server +entrypoint=nemo_gym/resources_servers/my_server
 ```
 
 ---
@@ -221,8 +221,8 @@ ng_e2e_collect_rollouts \
 ```
 
 ```bash
-config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
-resources_servers/math_with_judge/configs/math_with_judge.yaml"
+config_paths="nemo_gym/responses_api_models/openai_model/configs/openai_model.yaml,\
+nemo_gym/resources_servers/math_with_judge/configs/math_with_judge.yaml"
 ng_e2e_collect_rollouts \
     "+config_paths=[${config_paths}]" \
     ++wandb_project= \
@@ -235,8 +235,8 @@ ng_e2e_collect_rollouts \
 Example using GPT-OSS 120B remote vLLM endpoint
 ```bash
 experiment_name=rollouts/test_001
-config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
-resources_servers/math_with_judge/configs/math_with_judge.yaml"
+config_paths="nemo_gym/responses_api_models/openai_model/configs/openai_model.yaml,\
+nemo_gym/resources_servers/math_with_judge/configs/math_with_judge.yaml"
 ng_e2e_collect_rollouts \
     "+config_paths=[${config_paths}]" \
     +skip_venv_if_present=true \
@@ -338,8 +338,8 @@ Prepare and validate training data, generating metrics and statistics for datase
 **Example**
 
 ```bash
-config_paths="resources_servers/example_multi_step/configs/example_multi_step.yaml,\
-responses_api_models/openai_model/configs/openai_model.yaml"
+config_paths="nemo_gym/resources_servers/example_multi_step/configs/example_multi_step.yaml,\
+nemo_gym/responses_api_models/openai_model/configs/openai_model.yaml"
 ng_prepare_data "+config_paths=[${config_paths}]" \
     +output_dirpath=data/example_multi_step \
     +mode=example_validation
@@ -500,7 +500,7 @@ Upload a JSONL dataset to HuggingFace Hub with optional GitLab deletion after su
 **Example**
 
 ```bash
-resource_config_path="resources_servers/example_multi_step/configs/example_multi_step.yaml"
+resource_config_path="nemo_gym/resources_servers/example_multi_step/configs/example_multi_step.yaml"
 ng_upload_dataset_to_hf \
     +dataset_name=my_dataset \
     +input_jsonl_fpath=data/train.jsonl \
@@ -561,7 +561,7 @@ Same as `ng_upload_dataset_to_hf` but `delete_from_gitlab` is not available. Thi
 **Example**
 
 ```bash
-resource_config_path="resources_servers/example_multi_step/configs/example_multi_step.yaml"
+resource_config_path="nemo_gym/resources_servers/example_multi_step/configs/example_multi_step.yaml"
 ng_gitlab_to_hf_dataset \
     +dataset_name=my_dataset \
     +input_jsonl_fpath=data/train.jsonl \
@@ -656,13 +656,13 @@ Each server has its own isolated virtual environment. To inspect the packages:
 
 ```bash
 # List all packages
-ng_pip_list +entrypoint=resources_servers/example_single_tool_call
+ng_pip_list +entrypoint=nemo_gym/resources_servers/example_single_tool_call
 
 # Output as JSON
-ng_pip_list +entrypoint=resources_servers/example_single_tool_call +format=json
+ng_pip_list +entrypoint=nemo_gym/resources_servers/example_single_tool_call +format=json
 
 # Check for outdated packages
-ng_pip_list +entrypoint=resources_servers/example_single_tool_call +outdated=true
+ng_pip_list +entrypoint=nemo_gym/resources_servers/example_single_tool_call +outdated=true
 ```
 
 ---
@@ -678,7 +678,7 @@ ng_status
 
 NeMo Gym Server Status:
 
-[1] ✓ example_single_tool_call (resources_servers/example_single_tool_call)
+[1] ✓ example_single_tool_call (nemo_gym/resources_servers/example_single_tool_call)
 {
     'server_type': 'resources_servers',
     'name': 'example_single_tool_call',
@@ -686,7 +686,7 @@ NeMo Gym Server Status:
     'pid': 89904,
     'uptime_seconds': '0d 0h 0m 41.5s',
 }
-[2] ✓ example_single_tool_call_simple_agent (responses_api_agents/simple_agent)
+[2] ✓ example_single_tool_call_simple_agent (nemo_gym/responses_api_agents/simple_agent)
 {
     'server_type': 'responses_api_agents',
     'name': 'simple_agent',
@@ -694,7 +694,7 @@ NeMo Gym Server Status:
     'pid': 89905,
     'uptime_seconds': '0d 0h 0m 41.5s',
 }
-[3] ✓ policy_model (responses_api_models/openai_model)
+[3] ✓ policy_model (nemo_gym/responses_api_models/openai_model)
 {
     'server_type': 'responses_api_models',
     'name': 'openai_model',

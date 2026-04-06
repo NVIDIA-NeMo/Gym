@@ -44,12 +44,12 @@ For semantic or rubric-based scoring, `verify()` may call a **second language mo
 
 ## Example Resources Servers
 
-**[`workplace_assistant`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/workplace_assistant)** — Multi-step tool calling in a workplace setting.
+**[`workplace_assistant`](https://github.com/NVIDIA-NeMo/Gym/tree/main/nemo_gym/resources_servers/workplace_assistant)** — Multi-step tool calling in a workplace setting.
 - **Task**: Execute business activities such as sending emails, scheduling meetings, and managing projects.
 - **Actions**: 26 tools across 5 databases (email, calendar, analytics, project management, CRM). Each tool can read and mutate the database state.
 - **Verification**: State matching: executes both the agent's actions and the ground truth actions against fresh databases, then compares the resulting states.
 
-**[`math_with_code`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/math_with_code)** — Mathematical reasoning with code execution.
+**[`math_with_code`](https://github.com/NVIDIA-NeMo/Gym/tree/main/nemo_gym/resources_servers/math_with_code)** — Mathematical reasoning with code execution.
 - **Task**: Solve math problems using Python as a reasoning tool.
 - **Actions**: `execute_python()` runs code in an isolated per-session process with numpy, scipy, and pandas available. State persists across steps so the agent can build on previous computations.
 - **Verification**: Answer correctness: extracts the boxed answer from the model's final response and compares it against the expected result.

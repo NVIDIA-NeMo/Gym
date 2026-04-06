@@ -1,0 +1,21 @@
+# Chain to existing resource server + agent config
+config_paths:
+  - nemo_gym/resources_servers/math_with_judge/configs/math_with_judge.yaml
+
+# We use `_inherit_from` directives to inherit from and not use the generic config above to ensure this benchmark config is isolated.
+aime24_math_with_judge_resources_server:
+  _inherit_from: math_with_judge
+
+aime24_math_with_judge_simple_agent:
+  _inherit_from: math_with_judge_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: aime24_math_with_judge_resources_server
+      datasets:
+      - name: aime24
+        type: benchmark
+        jsonl_fpath: nemo_gym/benchmarks/aime24/data/aime24_benchmark.jsonl
+        prompt_config: nemo_gym/benchmarks/aime24/prompts/default.yaml
+        prepare_script: nemo_gym/benchmarks/aime24/prepare.py
+        num_repeats: 32

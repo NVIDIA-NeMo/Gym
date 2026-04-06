@@ -1,3 +1,0 @@
--e nemo-gym[dev] @ ../../
-math-verify==0.8.0
-datasets

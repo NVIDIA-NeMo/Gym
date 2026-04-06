@@ -18,6 +18,7 @@ import tomllib
 from importlib import import_module
 from io import StringIO
 from pathlib import Path
+from unittest.mock import patch
 
 from omegaconf import OmegaConf
 from pytest import MonkeyPatch, raises
@@ -77,13 +78,13 @@ class TestCLI:
     def test_init_resources_server_includes_domain(self) -> None:
         """Test that init_resources_server creates a config with the required domain field."""
 
-        # Use a temp directory but stay in the project root for access to template files
         server_name = "test_cli_server"
-        entrypoint = f"resources_servers/{server_name}"
+        entrypoint = f"nemo_gym/resources_servers/{server_name}"
+        server_path = Path(entrypoint).resolve()
 
         # Clean up any existing test server directory
-        if Path(entrypoint).exists():
-            shutil.rmtree(entrypoint)
+        if server_path.exists():
+            shutil.rmtree(server_path)
 
         try:
             with MonkeyPatch.context() as mp:
@@ -98,7 +99,7 @@ class TestCLI:
                 init_resources_server()
 
                 # Verify the generated config file exists
-                config_file = Path(entrypoint) / "configs" / f"{server_name}.yaml"
+                config_file = server_path / "configs" / f"{server_name}.yaml"
                 assert config_file.exists(), f"Config file not created at {config_file}"
 
                 # Load and verify the config
@@ -130,5 +131,26 @@ class TestCLI:
                 assert instance_config is not None
         finally:
             # Clean up the test server directory
-            if Path(entrypoint).exists():
-                shutil.rmtree(entrypoint)
+            if server_path.exists():
+                shutil.rmtree(server_path)
+
+    def test_run_helper_prefers_cwd_server_over_install(self, tmp_path: Path) -> None:
+        """ng_run should use a local CWD server dir instead of the installed one."""
+        # Create a fake local server dir in tmp_path (simulates user's own resources_servers/)
+        local_server = tmp_path / "resources_servers" / "my_server"
+        local_server.mkdir(parents=True)
+        (local_server / "requirements.txt").write_text("nemo-gym\n")
+
+        with patch.object(Path, "cwd", return_value=tmp_path):
+            _cwd_path = Path.cwd() / Path("resources_servers", "my_server")
+            dir_path = _cwd_path if _cwd_path.exists() else PARENT_DIR / Path("resources_servers", "my_server")
+
+        assert dir_path == local_server
+
+    def test_run_helper_falls_back_to_install_when_not_in_cwd(self, tmp_path: Path) -> None:
+        """ng_run should fall back to PARENT_DIR when the server doesn't exist in CWD."""
+        with patch.object(Path, "cwd", return_value=tmp_path):
+            _cwd_path = Path.cwd() / Path("resources_servers", "arc_agi")
+            dir_path = _cwd_path if _cwd_path.exists() else PARENT_DIR / Path("resources_servers", "arc_agi")
+
+        assert dir_path == PARENT_DIR / "resources_servers" / "arc_agi"

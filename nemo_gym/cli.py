@@ -41,7 +41,7 @@ from pydantic import Field
 from rich.table import Table
 from tqdm.auto import tqdm
 
-from nemo_gym import PARENT_DIR, __version__
+from nemo_gym import PARENT_DIR, ROOT_DIR, __version__
 from nemo_gym.cli_setup_command import run_command, setup_env_command
 from nemo_gym.config_types import BaseNeMoGymCLIConfig
 from nemo_gym.global_config import (
@@ -72,14 +72,14 @@ class RunConfig(BaseNeMoGymCLIConfig):
     Examples:
 
     ```bash
-    config_paths="resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml,\\
-    responses_api_models/openai_model/configs/openai_model.yaml"
+    config_paths="nemo_gym/resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml,\\
+    nemo_gym/responses_api_models/openai_model/configs/openai_model.yaml"
     ng_run "+config_paths=[${config_paths}]"
     ```
     """
 
     entrypoint: str = Field(
-        description="Entrypoint for this command. This must be a relative path with 2 parts. Should look something like `responses_api_agents/simple_agent`."
+        description="Entrypoint for this command. This must be a relative path with 3 parts. Should look something like `nemo_gym/responses_api_agents/simple_agent`."
     )
 
 
@@ -90,7 +90,7 @@ class TestConfig(RunConfig):
     Examples:
 
     ```bash
-    ng_test +entrypoint=resources_servers/example_single_tool_call
+    ng_test +entrypoint=nemo_gym/resources_servers/example_single_tool_call
     ```
     """
 
@@ -102,10 +102,8 @@ class TestConfig(RunConfig):
     _dir_path: Path  # initialized in model_post_init
 
     def model_post_init(self, context):  # pragma: no cover
-        # TODO: This currently only handles relative entrypoints. Later on we can resolve the absolute path.
         self._dir_path = Path(self.entrypoint)
         assert not self.dir_path.is_absolute()
-        assert len(self.dir_path.parts) == 2
 
         return super().model_post_init(context)
 
@@ -165,7 +163,11 @@ class RunHelper:  # pragma: no cover
             entrypoint_fpath = Path(server_config_dict.entrypoint)
             assert not entrypoint_fpath.is_absolute()
 
-            dir_path = PARENT_DIR / Path(first_key, second_key)
+            # Check cwd first for a local server, fall back to the install location for built-ins.
+            _server_rel_path = Path(first_key, second_key)
+            _cwd_path = Path.cwd() / _server_rel_path
+            _cwd_is_server = (_cwd_path / "requirements.txt").exists() or (_cwd_path / "pyproject.toml").exists()
+            dir_path = _cwd_path if _cwd_is_server else PARENT_DIR / "nemo_gym" / _server_rel_path
 
             command = f"""{setup_env_command(dir_path, global_config_dict, top_level_path)} \\
     && {NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME}={escaped_config_dict_yaml_str} \\
@@ -394,8 +396,8 @@ def run(
 
     ```bash
     # Start servers with specific configs
-    config_paths="resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml,\\
-    responses_api_models/openai_model/configs/openai_model.yaml"
+    config_paths="nemo_gym/resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml,\\
+    nemo_gym/responses_api_models/openai_model/configs/openai_model.yaml"
     ng_run "+config_paths=[${config_paths}]"
     ```
     """
@@ -476,7 +478,7 @@ def _validate_data_single(test_config: TestConfig) -> None:  # pragma: no cover
         return
 
     # We have special data checks for resources servers
-    if test_config.dir_path.parts[0] != "resources_servers":
+    if test_config.dir_path.parts[1] != "resources_servers":
         return
 
     # Check that the required examples and example metrics are present.
@@ -508,10 +510,10 @@ example_multi_step_simple_agent:
       datasets:
       - name: example
         type: example
-        jsonl_fpath: resources_servers/example_multi_step/data/example.jsonl
+        jsonl_fpath: nemo_gym/resources_servers/example_multi_step/data/example.jsonl
 ```
 
-See `resources_servers/example_multi_step/configs/example_multi_step.yaml` for a full config example.
+See `nemo_gym/resources_servers/example_multi_step/configs/example_multi_step.yaml` for a full config example.
 """
     with open(example_metrics_fpath) as f:
         example_metrics = json.load(f)
@@ -529,18 +531,18 @@ See `resources_servers/example_multi_step/configs/example_multi_step.yaml` for a
 Your commands should look something like:
 ```bash
 # Server spinup
-example_multi_step_config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
-resources_servers/example_multi_step/configs/example_multi_step.yaml"
+example_multi_step_config_paths="nemo_gym/responses_api_models/openai_model/configs/openai_model.yaml,\
+nemo_gym/resources_servers/example_multi_step/configs/example_multi_step.yaml"
 ng_run "+config_paths=[${{example_multi_step_config_paths}}]"
 
 # Collect the rollouts
 ng_collect_rollouts +agent_name=example_multi_step_simple_agent \
-    +input_jsonl_fpath=resources_servers/example_multi_step/data/example.jsonl \
-    +output_jsonl_fpath=resources_servers/example_multi_step/data/example_rollouts.jsonl \
+    +input_jsonl_fpath=nemo_gym/resources_servers/example_multi_step/data/example.jsonl \
+    +output_jsonl_fpath=nemo_gym/resources_servers/example_multi_step/data/example_rollouts.jsonl \
     +limit=null
 
 # View your rollouts
-head -1 resources_servers/example_multi_step/data/example_rollouts.jsonl
+head -1 nemo_gym/resources_servers/example_multi_step/data/example_rollouts.jsonl
 ```
 """
     with open(example_rollouts_fpath) as f:
@@ -605,9 +607,9 @@ def test_all():  # pragma: no cover
     test_all_config = TestAllConfig.model_validate(global_config_dict)
 
     candidate_dir_paths = [
-        *glob("resources_servers/*"),
-        *glob("responses_api_agents/*"),
-        *glob("responses_api_models/*"),
+        *glob("nemo_gym/resources_servers/*"),
+        *glob("nemo_gym/responses_api_agents/*"),
+        *glob("nemo_gym/responses_api_models/*"),
     ]
     candidate_dir_paths = [p for p in candidate_dir_paths if "pycache" not in p]
     print(f"Found {len(candidate_dir_paths)} total modules:{_display_list_of_paths(candidate_dir_paths)}\n")
@@ -726,22 +728,21 @@ def init_resources_server():  # pragma: no cover
     Examples:
 
     ```bash
-    ng_init_resources_server +entrypoint=resources_servers/my_server
+    ng_init_resources_server +entrypoint=nemo_gym/resources_servers/my_server
     ```
     """
     config_dict = get_global_config_dict()
     run_config = RunConfig.model_validate(config_dict)
 
-    if exists(run_config.entrypoint):
-        print(f"Folder already exists: {run_config.entrypoint}. Exiting init.")
+    dirpath = Path(run_config.entrypoint).resolve()
+
+    if exists(dirpath):
+        print(f"Folder already exists: {dirpath}. Exiting init.")
         exit()
 
-    dirpath = Path(run_config.entrypoint)
-    assert len(dirpath.parts) == 2
     makedirs(dirpath)
 
-    server_type = dirpath.parts[0]
-    assert server_type == "resources_servers"
+    server_type = "resources_servers"
     server_type_name = dirpath.parts[-1].lower()
     server_type_title = "".join(x.capitalize() for x in server_type_name.split("_"))
 
@@ -768,7 +769,7 @@ def init_resources_server():  # pragma: no cover
       datasets:
       - name: train
         type: train
-        jsonl_fpath: resources_servers/{server_type_name}/data/train.jsonl
+        jsonl_fpath: nemo_gym/resources_servers/{server_type_name}/data/train.jsonl
         num_repeats: 1
         gitlab_identifier:
           dataset_name: {server_type_name}
@@ -777,7 +778,7 @@ def init_resources_server():  # pragma: no cover
         license: Apache 2.0
       - name: validation
         type: validation
-        jsonl_fpath: resources_servers/{server_type_name}/data/validation.jsonl
+        jsonl_fpath: nemo_gym/resources_servers/{server_type_name}/data/validation.jsonl
         num_repeats: 1
         gitlab_identifier:
           dataset_name: {server_type_name}
@@ -786,12 +787,12 @@ def init_resources_server():  # pragma: no cover
         license: Apache 2.0
       - name: example
         type: example
-        jsonl_fpath: resources_servers/{server_type_name}/data/example.jsonl
+        jsonl_fpath: nemo_gym/resources_servers/{server_type_name}/data/example.jsonl
         num_repeats: 1
 """)
 
     app_fpath = dirpath / "app.py"
-    with open("resources/resources_server_template.py") as f:
+    with open(ROOT_DIR / "resources/resources_server_template.py") as f:
         app_template = f.read()
     app_content = app_template.replace("ExampleMultiStep", server_type_title)
     with open(app_fpath, "w") as f:
@@ -801,17 +802,22 @@ def init_resources_server():  # pragma: no cover
     makedirs(tests_dirpath)
 
     tests_fpath = tests_dirpath / "test_app.py"
-    with open("resources/resources_server_test_template.py") as f:
+    with open(ROOT_DIR / "resources/resources_server_test_template.py") as f:
         tests_template = f.read()
     tests_content = tests_template.replace("ExampleMultiStep", server_type_title)
-    tests_content = tests_content.replace("from app", f"from resources_servers.{server_type_name}.app")
+    tests_content = tests_content.replace("from app", f"from nemo_gym.resources_servers.{server_type_name}.app")
     with open(tests_fpath, "w") as f:
         f.write(tests_content)
 
     requirements_fpath = dirpath / "requirements.txt"
     with open(requirements_fpath, "w") as f:
-        f.write("""-e nemo-gym[dev] @ ../../
-""")
+        if (PARENT_DIR / "pyproject.toml").exists():
+            # local nemo gym - detected by pyproject.toml exists at repo root
+            rel_to_gym_root = os.path.relpath(PARENT_DIR, dirpath)
+            f.write(f"-e nemo-gym[dev] @ {rel_to_gym_root}\n")
+        else:
+            # pypi path
+            f.write("nemo-gym[dev]\n")
 
     readme_fpath = dirpath / "README.md"
     with open(readme_fpath, "w") as f:

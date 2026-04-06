@@ -5,12 +5,12 @@
 
 Most open-source models use Chat Completions format, while NeMo Gym uses the Responses API natively. VLLMModel bridges this gap by converting between the two formats automatically. For background on why NeMo Gym chose the Responses API and how the two schemas differ, see {ref}`responses-api-evolution`.
 
-VLLMModel provides a Responses API to Chat Completions mapping middleware layer via `responses_api_models/vllm_model`. It assumes you are pointing to a vLLM instance since it relies on vLLM-specific endpoints like `/tokenize` and vLLM-specific arguments like `return_tokens_as_token_ids`.
+VLLMModel provides a Responses API to Chat Completions mapping middleware layer via `nemo_gym/responses_api_models/vllm_model`. It assumes you are pointing to a vLLM instance since it relies on vLLM-specific endpoints like `/tokenize` and vLLM-specific arguments like `return_tokens_as_token_ids`.
 
-**To use VLLMModel, just change the `responses_api_models/openai_model/configs/openai_model.yaml` in your config paths to `responses_api_models/vllm_model/configs/vllm_model.yaml`!**
+**To use VLLMModel, just change the `nemo_gym/responses_api_models/openai_model/configs/openai_model.yaml` in your config paths to `nemo_gym/responses_api_models/vllm_model/configs/vllm_model.yaml`!**
 ```bash
-config_paths="resources_servers/example_multi_step/configs/example_multi_step.yaml,\
-responses_api_models/vllm_model/configs/vllm_model.yaml"
+config_paths="nemo_gym/resources_servers/example_multi_step/configs/example_multi_step.yaml,\
+nemo_gym/responses_api_models/vllm_model/configs/vllm_model.yaml"
 ng_run "+config_paths=[$config_paths]"
 ```
 
@@ -71,8 +71,8 @@ vllm serve \
 ### Configure NeMo Gym to use the local vLLM server
 In a second terminal on the same GPU node that was used to spin up the vLLM server, enter the NeMo Gym Python environment, and start the NeMo Gym servers.
 ```bash
-config_paths="resources_servers/example_multi_step/configs/example_multi_step.yaml,\
-responses_api_models/vllm_model/configs/vllm_model.yaml"
+config_paths="nemo_gym/resources_servers/example_multi_step/configs/example_multi_step.yaml,\
+nemo_gym/responses_api_models/vllm_model/configs/vllm_model.yaml"
 ng_run "+config_paths=[$config_paths]" \
     ++policy_base_url=http://0.0.0.0:10240/v1 \
     ++policy_model_name=Qwen/Qwen3-4B-Thinking-2507 \
@@ -94,7 +94,7 @@ Then replace the `policy_base_url=http://0.0.0.0:10240/v1` to point to the hostn
 In a third terminal on the same GPU node that was used to spin up the vLLM server, enter the NeMo Gym Python environment, and run rollout collection.
 ```bash
 ng_collect_rollouts +agent_name=example_multi_step_simple_agent \
-    +input_jsonl_fpath=resources_servers/example_multi_step/data/example.jsonl \
+    +input_jsonl_fpath=nemo_gym/resources_servers/example_multi_step/data/example.jsonl \
     +output_jsonl_fpath=results/example_multi_step_rollouts.jsonl
 ```
 

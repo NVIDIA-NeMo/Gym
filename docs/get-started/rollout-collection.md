@@ -48,7 +48,7 @@ Make sure you have:
 Look at the example dataset included with the Example Single Tool Call resources server:
 
 ```bash
-head -1 resources_servers/example_single_tool_call/data/example.jsonl | python -m json.tool
+head -1 nemo_gym/resources_servers/example_single_tool_call/data/example.jsonl | python -m json.tool
 ```
 
 Each line contains a `responses_create_params` object with:
@@ -63,8 +63,8 @@ If you still have servers running from the [Detailed Setup Guide](detailed-setup
 If not, start them again:
 
 ```bash
-config_paths="resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml,\
-responses_api_models/openai_model/configs/openai_model.yaml"
+config_paths="nemo_gym/resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml,\
+nemo_gym/responses_api_models/openai_model/configs/openai_model.yaml"
 ng_run "+config_paths=[${config_paths}]"
 ```
 
@@ -76,7 +76,7 @@ In a separate terminal, run:
 
 ```bash
 ng_collect_rollouts +agent_name=example_single_tool_call_simple_agent \
-    +input_jsonl_fpath=resources_servers/example_single_tool_call/data/example.jsonl \
+    +input_jsonl_fpath=nemo_gym/resources_servers/example_single_tool_call/data/example.jsonl \
     +output_jsonl_fpath=results/example_single_tool_call_rollouts.jsonl \
     +limit=5 \
     +num_repeats=2 \
@@ -118,7 +118,7 @@ ng_collect_rollouts +agent_name=example_single_tool_call_simple_agent \
 Today's LLM endpoints are not fully deterministic, which means that running the same request multiple times will yield different results every time. However, you can improve the reproducibility of your rollouts by setting the `temperature` parameter to `0.0`. For example:
 ```bash
 ng_collect_rollouts +agent_name=example_single_tool_call_simple_agent \
-    +input_jsonl_fpath=resources_servers/example_single_tool_call/data/example.jsonl \
+    +input_jsonl_fpath=nemo_gym/resources_servers/example_single_tool_call/data/example.jsonl \
     +output_jsonl_fpath=results/example_single_tool_call_rollouts.jsonl \
     +responses_create_params.temperature=0.0
 ```

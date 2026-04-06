@@ -1,0 +1,31 @@
+gpqa_diamond:
+  resources_servers:
+    gpqa_diamond:
+      entrypoint: app.py
+      domain: knowledge
+      verified: false
+      description: GPQA Diamond multiple-choice question answering problems
+      value: Evaluate graduate-level scientific reasoning via MCQ verification
+
+gpqa_diamond_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: gpqa_diamond
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: train
+        type: train
+        jsonl_fpath: nemo_gym/resources_servers/gpqa_diamond/data/train.jsonl
+        gitlab_identifier:
+          dataset_name: gpqa_diamond_benchmark
+          version: 0.0.2
+          artifact_fpath: train.jsonl
+        license: MIT
+      - name: example
+        type: example
+        jsonl_fpath: nemo_gym/resources_servers/gpqa_diamond/data/example.jsonl

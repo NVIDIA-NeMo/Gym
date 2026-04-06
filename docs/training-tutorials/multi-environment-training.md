@@ -11,23 +11,23 @@ Suppose you want to use both the example_single_tool_call and example_multi_step
 
 For example_single_tool_call:
 ```bash
-config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
-resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml"
+config_paths="nemo_gym/responses_api_models/openai_model/configs/openai_model.yaml,\
+nemo_gym/resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml"
 ng_run "+config_paths=[${config_paths}]"
 ```
 
 For example_multi_step:
 ```bash
-config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
-resources_servers/example_multi_step/configs/example_multi_step.yaml"
+config_paths="nemo_gym/responses_api_models/openai_model/configs/openai_model.yaml,\
+nemo_gym/resources_servers/example_multi_step/configs/example_multi_step.yaml"
 ng_run "+config_paths=[$config_paths]"
 ```
 
 To use both environments, add the YAML configs together as follows:
 ```bash
-config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
-resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml,\
-resources_servers/example_multi_step/configs/example_multi_step.yaml"
+config_paths="nemo_gym/responses_api_models/openai_model/configs/openai_model.yaml,\
+nemo_gym/resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml,\
+nemo_gym/resources_servers/example_multi_step/configs/example_multi_step.yaml"
 ng_run "+config_paths=[$config_paths]"
 ```
 
@@ -35,8 +35,8 @@ ng_run "+config_paths=[$config_paths]"
 
 Build a dataset that contains data for both servers. Add the agent ref used to route requests to the correct agent server to each record.
 ```bash
-jq -c '. + {"agent_ref": {"type": "responses_api_agents", "name": "example_single_tool_call_simple_agent"}}' resources_servers/example_single_tool_call/data/example.jsonl >> results/test_multiverifier_input.jsonl
-jq -c '. + {"agent_ref": {"type": "responses_api_agents", "name": "example_multi_step_simple_agent"}}' resources_servers/example_multi_step/data/example.jsonl >> results/test_multiverifier_input.jsonl
+jq -c '. + {"agent_ref": {"type": "responses_api_agents", "name": "example_single_tool_call_simple_agent"}}' nemo_gym/resources_servers/example_single_tool_call/data/example.jsonl >> results/test_multiverifier_input.jsonl
+jq -c '. + {"agent_ref": {"type": "responses_api_agents", "name": "example_multi_step_simple_agent"}}' nemo_gym/resources_servers/example_multi_step/data/example.jsonl >> results/test_multiverifier_input.jsonl
 ```
 
 ## Rollout Collection

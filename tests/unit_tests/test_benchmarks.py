@@ -19,7 +19,7 @@ import pytest
 from omegaconf import OmegaConf
 from yaml import safe_load
 
-from nemo_gym.benchmarks import list_benchmarks, prepare_benchmark
+from nemo_gym.benchmark_utils import list_benchmarks, prepare_benchmark
 
 
 def _mock_global_config(config: dict = None):
@@ -29,14 +29,14 @@ def _mock_global_config(config: dict = None):
 
 class TestListBenchmarks:
     def test_lists_found_benchmarks(self, capsys) -> None:
-        with patch("nemo_gym.benchmarks.get_global_config_dict", return_value=_mock_global_config()):
+        with patch("nemo_gym.benchmark_utils.get_global_config_dict", return_value=_mock_global_config()):
             list_benchmarks()
         assert "aime24" in capsys.readouterr().out
 
     def test_no_benchmarks(self, capsys) -> None:
         with (
-            patch("nemo_gym.benchmarks.get_global_config_dict", return_value=_mock_global_config()),
-            patch("nemo_gym.benchmarks._load_benchmarks_from_config_paths", return_value={}),
+            patch("nemo_gym.benchmark_utils.get_global_config_dict", return_value=_mock_global_config()),
+            patch("nemo_gym.benchmark_utils._load_benchmarks_from_config_paths", return_value={}),
         ):
             list_benchmarks()
         assert "No benchmarks found" in capsys.readouterr().out
@@ -73,13 +73,13 @@ class TestPrepareBenchmark:
 
         with (
             patch(
-                "nemo_gym.benchmarks.get_global_config_dict",
+                "nemo_gym.benchmark_utils.get_global_config_dict",
                 return_value=_mock_global_config(
                     {"config_paths": [str(config_path)], **safe_load(config_path.read_text())}
                 ),
             ),
-            patch("nemo_gym.benchmarks.BENCHMARKS_DIR", bench_dir.parent),
-            patch("nemo_gym.benchmarks.importlib.import_module", return_value=mock_module),
+            patch("nemo_gym.benchmark_utils.BENCHMARKS_DIR", bench_dir.parent),
+            patch("nemo_gym.benchmark_utils.importlib.import_module", return_value=mock_module),
         ):
             prepare_benchmark()
             mock_module.prepare.assert_called_once()
@@ -90,12 +90,12 @@ class TestPrepareBenchmark:
 
         with (
             patch(
-                "nemo_gym.benchmarks.get_global_config_dict",
+                "nemo_gym.benchmark_utils.get_global_config_dict",
                 return_value=_mock_global_config(
                     {"config_paths": [str(config_path)], **safe_load(config_path.read_text())}
                 ),
             ),
-            patch("nemo_gym.benchmarks.BENCHMARKS_DIR", bench_dir.parent),
+            patch("nemo_gym.benchmark_utils.BENCHMARKS_DIR", bench_dir.parent),
         ):
             with pytest.raises(RuntimeError, match="The following benchmarks are missing a valid prepare script"):
                 prepare_benchmark()
@@ -107,13 +107,13 @@ class TestPrepareBenchmark:
 
         with (
             patch(
-                "nemo_gym.benchmarks.get_global_config_dict",
+                "nemo_gym.benchmark_utils.get_global_config_dict",
                 return_value=_mock_global_config(
                     {"config_paths": [str(config_path)], **safe_load(config_path.read_text())}
                 ),
             ),
-            patch("nemo_gym.benchmarks.BENCHMARKS_DIR", bench_dir.parent),
-            patch("nemo_gym.benchmarks.importlib.import_module", return_value=mock_module),
+            patch("nemo_gym.benchmark_utils.BENCHMARKS_DIR", bench_dir.parent),
+            patch("nemo_gym.benchmark_utils.importlib.import_module", return_value=mock_module),
         ):
             with pytest.raises(
                 AssertionError,
@@ -124,10 +124,12 @@ class TestPrepareBenchmark:
     def test_no_benchmark_in_config_paths(self) -> None:
         with (
             patch(
-                "nemo_gym.benchmarks.get_global_config_dict",
-                return_value=_mock_global_config({"config_paths": ["resources_servers/foo/configs/foo.yaml"]}),
+                "nemo_gym.benchmark_utils.get_global_config_dict",
+                return_value=_mock_global_config(
+                    {"config_paths": ["nemo_gym/resources_servers/foo/configs/foo.yaml"]}
+                ),
             ),
-            patch("nemo_gym.benchmarks._load_benchmarks_from_config_paths", return_value={}),
+            patch("nemo_gym.benchmark_utils._load_benchmarks_from_config_paths", return_value={}),
         ):
             with pytest.raises(AssertionError, match="No benchmark config found in config_paths"):
                 prepare_benchmark()
@@ -141,7 +143,7 @@ class TestPrepareBenchmark:
 
         with (
             patch(
-                "nemo_gym.benchmarks.get_global_config_dict",
+                "nemo_gym.benchmark_utils.get_global_config_dict",
                 return_value=_mock_global_config(
                     {
                         "use_cached_prepared_benchmarks": True,
@@ -150,8 +152,8 @@ class TestPrepareBenchmark:
                     }
                 ),
             ),
-            patch("nemo_gym.benchmarks.BENCHMARKS_DIR", bench_dir.parent),
-            patch("nemo_gym.benchmarks.importlib.import_module", return_value=mock_module),
+            patch("nemo_gym.benchmark_utils.BENCHMARKS_DIR", bench_dir.parent),
+            patch("nemo_gym.benchmark_utils.importlib.import_module", return_value=mock_module),
         ):
             prepare_benchmark()
 

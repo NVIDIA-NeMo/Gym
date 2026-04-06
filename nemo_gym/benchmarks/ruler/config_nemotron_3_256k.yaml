@@ -1,0 +1,21 @@
+# Chain to existing resource server + agent config
+config_paths:
+  - nemo_gym/resources_servers/ruler/configs/ruler.yaml
+
+# We use `_inherit_from` directives to inherit from and not use the generic config above to ensure this benchmark config is isolated.
+ruler_benchmark_resources_server:
+  _inherit_from: ruler_resources_server
+
+ruler_benchmark_simple_agent:
+  _inherit_from: ruler_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: ruler_benchmark_resources_server
+      datasets:
+      - name: ruler
+        type: benchmark
+        jsonl_fpath: nemo_gym/benchmarks/ruler/data/ruler_nemotron_3_256k_benchmark.jsonl
+        prompt_config: null
+        prepare_script: nemo_gym/benchmarks/ruler/prepare_nemotron_3_256k.py
+        num_repeats: 1

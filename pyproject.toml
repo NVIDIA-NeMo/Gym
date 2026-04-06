@@ -291,6 +291,9 @@ exclude-dependencies = [
     "waitress",
 ]
 
+[tool.setuptools.package-data]
+nemo_gym = ["resources/*.py"]
+
 [tool.setuptools.dynamic]
 version = {attr = "nemo_gym.__version__"}
 readme = {file = "README.md", content-type = "text/markdown"}
@@ -318,10 +321,10 @@ nemo_gym_init_resources_server = "nemo_gym.cli:init_resources_server"
 ng_init_resources_server = "nemo_gym.cli:init_resources_server"
 
 # Benchmarks
-nemo_gym_list_benchmarks = "nemo_gym.benchmarks:list_benchmarks"
-ng_list_benchmarks = "nemo_gym.benchmarks:list_benchmarks"
-nemo_gym_prepare_benchmark = "nemo_gym.benchmarks:prepare_benchmark"
-ng_prepare_benchmark = "nemo_gym.benchmarks:prepare_benchmark"
+nemo_gym_list_benchmarks = "nemo_gym.benchmark_utils:list_benchmarks"
+ng_list_benchmarks = "nemo_gym.benchmark_utils:list_benchmarks"
+nemo_gym_prepare_benchmark = "nemo_gym.benchmark_utils:prepare_benchmark"
+ng_prepare_benchmark = "nemo_gym.benchmark_utils:prepare_benchmark"
 
 # Rollout collection
 nemo_gym_collect_rollouts = "nemo_gym.rollout_collection:collect_rollouts"
@@ -385,7 +388,7 @@ ng_reinstall = "nemo_gym.cli:reinstall"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["benchmarks", "resources_servers", "responses_api_agents", "responses_api_models", "nemo_gym"]
+include = ["nemo_gym"]
 
 ################################################
 # Testing
@@ -437,7 +440,10 @@ omit = [
     "temp*",
     "results/*",
     "/tmp/*",
-    "benchmarks/*",
+    "nemo_gym/benchmarks/*",
+    "nemo_gym/resources_servers/*",
+    "nemo_gym/responses_api_models/*",
+    "nemo_gym/responses_api_agents/*",
 ]
 data_file = "results/.coverage"
 concurrency = ["thread", "multiprocessing"]

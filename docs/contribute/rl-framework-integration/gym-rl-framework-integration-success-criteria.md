@@ -39,7 +39,7 @@ Train on the DAPO17k math training environment and verify model improvement on A
 * - Parameter
   - Value
 * - Training environment
-  - [DAPO17k math environment](https://github.com/NVIDIA-NeMo/Gym/blob/299e8c04f4a3bbf0f6069139092225f2fe3aa70f/resources_servers/math_with_judge/configs/bytedtsinghua_dapo17k.yaml)
+  - [DAPO17k math environment](https://github.com/NVIDIA-NeMo/Gym/blob/299e8c04f4a3bbf0f6069139092225f2fe3aa70f/nemo_gym/resources_servers/math_with_judge/configs/bytedtsinghua_dapo17k.yaml)
 * - Base model
   - [Qwen3-4B-Instruct-2507](https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507)
 * - Minimum training steps
@@ -61,7 +61,7 @@ Train on the workplace assistant environment and verify validation set improveme
 * - Parameter
   - Value
 * - Training environment
-  - [Workplace assistant environment](https://github.com/NVIDIA-NeMo/Gym/tree/299e8c04f4a3bbf0f6069139092225f2fe3aa70f/resources_servers/workplace_assistant)
+  - [Workplace assistant environment](https://github.com/NVIDIA-NeMo/Gym/tree/299e8c04f4a3bbf0f6069139092225f2fe3aa70f/nemo_gym/resources_servers/workplace_assistant)
 * - Base model
   - [Qwen3-4B-Instruct-2507](https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507)
 * - Minimum training steps

@@ -45,7 +45,7 @@ Flow (state is stored per session_id inside the ResourcesServer)
 
 ## Implementation
 
-**File (simplified from [`resources_servers/example_session_state_mgmt/app.py`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/example_session_state_mgmt/app.py), with improved `seed_session` pattern):**
+**File (simplified from [`nemo_gym/resources_servers/example_session_state_mgmt/app.py`](https://github.com/NVIDIA-NeMo/Gym/tree/main/nemo_gym/resources_servers/example_session_state_mgmt/app.py), with improved `seed_session` pattern):**
 
 ```python
 # simplified

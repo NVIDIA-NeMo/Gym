@@ -44,7 +44,7 @@ Additional fields like `expected_answer` vary by resources server—the componen
 | `id` | Tracking identifier. |
 
 :::{tip}
-Check `resources_servers/<name>/README.md` for fields required by each resources server's `verify()` method.
+Check `nemo_gym/resources_servers/<name>/README.md` for fields required by each resources server's `verify()` method.
 :::
 
 ### The `agent_ref` Field
@@ -73,8 +73,8 @@ The `agent_ref` field maps each row to a specific resources server. A training d
 Run this command from the repository root:
 
 ```bash
-config_paths="responses_api_models/vllm_model/configs/vllm_model_for_training.yaml,\
-resources_servers/example_multi_step/configs/example_multi_step.yaml"
+config_paths="nemo_gym/responses_api_models/vllm_model/configs/vllm_model_for_training.yaml,\
+nemo_gym/resources_servers/example_multi_step/configs/example_multi_step.yaml"
 
 ng_prepare_data "+config_paths=[${config_paths}]" \
     +output_dirpath=data/test \
@@ -101,14 +101,14 @@ Define datasets in your agent server's YAML config:
 datasets:
   - name: train
     type: train
-    jsonl_fpath: resources_servers/workplace_assistant/data/train.jsonl
+    jsonl_fpath: nemo_gym/resources_servers/workplace_assistant/data/train.jsonl
     huggingface_identifier:
       repo_id: nvidia/Nemotron-RL-agent-workplace_assistant
       artifact_fpath: train.jsonl
     license: Apache 2.0
 ```
 
-**Source**: `resources_servers/workplace_assistant/configs/workplace_assistant.yaml:21-27`
+**Source**: `nemo_gym/resources_servers/workplace_assistant/configs/workplace_assistant.yaml:21-27`
 
 | Field | Required | Description |
 |-------|----------|-------------|
@@ -145,8 +145,8 @@ flowchart LR
 To prepare training data with auto-download:
 
 ```bash
-config_paths="responses_api_models/vllm_model/configs/vllm_model_for_training.yaml,\
-resources_servers/workplace_assistant/configs/workplace_assistant.yaml"
+config_paths="nemo_gym/responses_api_models/vllm_model/configs/vllm_model_for_training.yaml,\
+nemo_gym/resources_servers/workplace_assistant/configs/workplace_assistant.yaml"
 
 ng_prepare_data "+config_paths=[${config_paths}]" \
     +output_dirpath=data/workplace_assistant \

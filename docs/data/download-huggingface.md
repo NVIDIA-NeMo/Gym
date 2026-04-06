@@ -238,7 +238,7 @@ NeMo Gym can automatically download missing datasets during data preparation. Co
 datasets:
   - name: train
     type: train
-    jsonl_fpath: resources_servers/code_gen/data/train.jsonl
+    jsonl_fpath: nemo_gym/resources_servers/code_gen/data/train.jsonl
     huggingface_identifier:
       repo_id: nvidia/nemotron-RL-coding-competitive_coding
       artifact_fpath: opencodereasoning_filtered_25k_train.jsonl
@@ -248,7 +248,7 @@ datasets:
 Run with download enabled:
 
 ```bash
-config_paths="resources_servers/code_gen/configs/code_gen.yaml"
+config_paths="nemo_gym/resources_servers/code_gen/configs/code_gen.yaml"
 ng_prepare_data "+config_paths=[${config_paths}]" \
     +output_dirpath=./data/prepared \
     +mode=train_preparation \
