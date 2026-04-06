@@ -55,6 +55,8 @@ def test_simple(
     expected_num_evictions: list,
 ) -> None:
     config = VLLMModelConfig(
+        host="0.0.0.0",
+        port=8081,
         entrypoint="",
         name="",
         base_url="http://localhost:8000/v1",
