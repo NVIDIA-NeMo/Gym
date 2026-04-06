@@ -93,6 +93,9 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
 class VLLMModel(SimpleResponsesAPIModel):
     config: VLLMModelConfig
 
+    _chat_completion_cls: ClassVar[type] = NeMoGymChatCompletion
+    _response_cls: ClassVar[type] = NeMoGymResponse
+
     def get_converter(self) -> "VLLMConverter":
         """Return the converter used for Responses API <-> Chat Completions mapping.
 
@@ -149,7 +152,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             )
 
         # Chat Completion -> Response
-        return NeMoGymResponse(
+        return self._response_cls(
             id=f"resp_{uuid4().hex}",
             created_at=int(time()),
             model=body.model,
@@ -335,7 +338,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 "context length" in result_content_str or "max_tokens" in result_content_str
             )
             if is_out_of_context_length:
-                return NeMoGymChatCompletion(
+                return self._chat_completion_cls(
                     id="chtcmpl-123",
                     object="chat.completion",
                     created=int(time()),
@@ -422,7 +425,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             # chat_completion_dict.pop("prompt_token_ids")
             # choice_dict.pop("token_ids")
 
-        return NeMoGymChatCompletion.model_validate(chat_completion_dict)
+        return self._chat_completion_cls.model_validate(chat_completion_dict)
 
     def _resolve_client(self, request: Request) -> NeMoGymAsyncOpenAI:
         session_id = request.session[SESSION_ID_KEY]
@@ -702,6 +705,12 @@ class VLLMConverter(BaseModel):
     # Chat Completion to Response
     # =======================================================
 
+    def get_train_response_output_item_cls(self, response_output_item_cls: type[BaseModel]) -> type[BaseModel]:
+        return RESPONSES_TO_TRAIN[response_output_item_cls]
+
+    def get_extra_training_fields(self, message_dict: Dict[str, Any]) -> Dict[str, Any]:
+        return {}
+
     def postprocess_chat_response(self, choice: NeMoGymChoice) -> List[NeMoGymResponseOutputItem]:
         return self.postprocess_assistant_message_dict(choice.message.model_dump())
 
@@ -760,12 +769,13 @@ class VLLMConverter(BaseModel):
         # In these cases, there are no token id information provided.
         if self.return_token_id_information and "prompt_token_ids" in message_dict:
             last_response_output_item = response_output[-1]
-            train_cls = RESPONSES_TO_TRAIN[last_response_output_item.__class__]
+            train_cls = self.get_train_response_output_item_cls(last_response_output_item.__class__)
             response_output[-1] = train_cls(
                 **last_response_output_item.model_dump(),
                 prompt_token_ids=message_dict["prompt_token_ids"],
                 generation_token_ids=message_dict["generation_token_ids"],
                 generation_log_probs=message_dict["generation_log_probs"],
+                **self.get_extra_training_fields(message_dict),
             )
 
         return response_output
