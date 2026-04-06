@@ -31,7 +31,7 @@ import sys
 from pathlib import Path
 
 
-IFBENCH_COMMIT = "c6767a19bd82ac0536cab950f2f8f6bcc6fabe7c"
+IFBENCH_COMMIT = "c6767a19bd82ac0536cab950f2f8f6bcc6fabe7c"  # pragma: allowlist secret
 IFBENCH_REPO = "https://github.com/allenai/IFBench.git"
 SERVER_DIR = Path(__file__).parent
 IFBENCH_DIR = SERVER_DIR / ".ifbench"
