@@ -1,0 +1,24 @@
+strategic_bench_agent:
+  responses_api_agents:
+    strategic_bench_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: strategic_bench
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      user_model_server:
+        type: responses_api_models
+        name: user_model
+      max_turns: 15
+      max_steps_per_turn: null
+      user_model_stop_token: "[DONE]"
+      user_model_system_prompt: >-
+        You are an expert negotiator playing the opposing side of a negotiation.
+        Negotiate strategically to achieve your goals. Keep responses concise,
+        1-2 sentences, written as natural realistic dialogue.
+      datasets:
+        - name: strategic_bench_examples
+          type: example
+          jsonl_fpath: resources_servers/strategic_bench/data/examples.jsonl
