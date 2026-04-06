@@ -79,7 +79,7 @@ class TestCLI:
 
         # Use a temp directory but stay in the project root for access to template files
         server_name = "test_cli_server"
-        entrypoint = f"resources_servers/{server_name}"
+        entrypoint = f"nemo_gym/resources_servers/{server_name}"
 
         # Clean up any existing test server directory
         if Path(entrypoint).exists():

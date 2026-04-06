@@ -349,10 +349,10 @@ LLM-as-Judge Verification <environment-tutorials/llm-as-judge-verification>
 :hidden:
 :maxdepth: 1
 
-Overview <benchmarks/index>
-Run benchmarks <benchmarks/run-benchmark-suite>
-Add a benchmark <benchmarks/adding-a-benchmark>
-Design a customer evaluation <benchmarks/designing-customer-evaluation>
+Overview <nemo_gym/benchmarks/index>
+Run benchmarks <nemo_gym/benchmarks/run-benchmark-suite>
+Add a benchmark <nemo_gym/benchmarks/adding-a-benchmark>
+Design a customer evaluation <nemo_gym/benchmarks/designing-customer-evaluation>
 ```
 
 ```{toctree}

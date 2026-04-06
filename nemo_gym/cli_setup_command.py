@@ -53,7 +53,7 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
 
     verbose_flag = "-v " if global_config_dict.get(PIP_INSTALL_VERBOSE_KEY_NAME) else ""
 
-    is_editable_install = (dir_path / "../../pyproject.toml").exists()
+    is_editable_install = (dir_path / "../../../pyproject.toml").exists()
 
     if should_skip_venv_setup:
         env_setup_cmd = f"source {venv_activate_fpath}"

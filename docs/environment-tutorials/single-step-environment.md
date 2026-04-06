@@ -56,16 +56,16 @@ In most cases, the **Resources Server** is where your changes go: define your to
 
 ## 1. Scaffolding
 
-Resource servers live in the `resources_servers/` directory. Scaffold a weather server that provides weather information to models:
+Resource servers live in the `nemo_gym/resources_servers/` directory. Scaffold a weather server that provides weather information to models:
 
 ```bash
-ng_init_resources_server +entrypoint=resources_servers/my_weather_tool
+ng_init_resources_server +entrypoint=nemo_gym/resources_servers/my_weather_tool
 ```
 
 This generates the following structure along with a paired simple agent configuration:
 
 ```text
-resources_servers/my_weather_tool/
+nemo_gym/resources_servers/my_weather_tool/
 +-- app.py                      # Main server implementation
 +-- configs/
 |   +-- my_weather_tool.yaml    # Configuration files
@@ -124,7 +124,7 @@ Each line contains a `responses_create_params` object with the conversation mess
 
 ### Create Data
 
-Create `resources_servers/my_weather_tool/data/example.jsonl` with five weather examples:
+Create `nemo_gym/resources_servers/my_weather_tool/data/example.jsonl` with five weather examples:
 
 ```json
 {"responses_create_params": {"input": [{"role": "user", "content": "What's the weather in San Francisco?"}], "tools": [{"type": "function", "name": "get_weather", "description": "Get weather for a city.", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"], "additionalProperties": false}, "strict": true}]}}
@@ -142,7 +142,7 @@ This section covers the key aspects of building the environment itself: building
 
 ### 3.1 Agent Server
 
-While this tutorial is about a single-step environment, it still can use the built-in `simple_agent`, which handles even multi-step tool calling out of the box. No custom agent code is needed. Here is simplified pseudocode showing the core flow ([actual implementation](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/simple_agent)):
+While this tutorial is about a single-step environment, it still can use the built-in `simple_agent`, which handles even multi-step tool calling out of the box. No custom agent code is needed. Here is simplified pseudocode showing the core flow ([actual implementation](https://github.com/NVIDIA-NeMo/Gym/tree/main/nemo_gym/responses_api_agents/simple_agent)):
 
 ```python
 # run() — episode lifecycle
@@ -167,7 +167,7 @@ async def responses(self, body):
     return model_response
 ```
 
-This tutorial uses `simple_agent`. For other patterns (multi-turn correction, custom orchestration), see the other agents in [`responses_api_agents/`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents), or build your own by extending `SimpleResponsesAPIAgent`.
+This tutorial uses `simple_agent`. For other patterns (multi-turn correction, custom orchestration), see the other agents in [`nemo_gym/responses_api_agents/`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents), or build your own by extending `SimpleResponsesAPIAgent`.
 
 ### 3.2 Resources Server
 
@@ -181,7 +181,7 @@ It provides:
 Some agents may come with predefined tools, and you can use the Resources Server to supplement them with additional external tools. When building a new environment, prefer defining tools in the Resources Server rather than the Agent Server. This separation lets multiple agents share the same tool logic without duplicating it.
 
 
-Open `resources_servers/my_weather_tool/app.py` and implement:
+Open `nemo_gym/resources_servers/my_weather_tool/app.py` and implement:
 
 ```python
 from fastapi import FastAPI
@@ -281,7 +281,7 @@ This example checks tool *usage*, not argument correctness. See {ref}`task-verif
 
 #### Configure - Wiring the pieces together
 
-Open `resources_servers/my_weather_tool/configs/my_weather_tool.yaml`. This file contains both the resource server and its paired simple agent configuration.
+Open `nemo_gym/resources_servers/my_weather_tool/configs/my_weather_tool.yaml`. This file contains both the resource server and its paired simple agent configuration.
 
 Update the `domain` field from `other` to `agent`:
 
@@ -306,7 +306,7 @@ my_weather_tool_simple_agent:
       datasets:
       - name: example
         type: example
-        jsonl_fpath: resources_servers/my_weather_tool/data/example.jsonl
+        jsonl_fpath: nemo_gym/resources_servers/my_weather_tool/data/example.jsonl
       # The scaffold also generates train/validation dataset entries
       # with gitlab_identifier blocks. Those are omitted here since
       # we only have example data at this stage.
@@ -336,7 +336,7 @@ If your server needs external packages, add them to `requirements.txt`:
 
 ## 5. Write Tests
 
-Update `resources_servers/my_weather_tool/tests/test_app.py` to test your implementation:
+Update `nemo_gym/resources_servers/my_weather_tool/tests/test_app.py` to test your implementation:
 
 ```python
 import pytest
@@ -412,13 +412,13 @@ async def test_verify_without_tool_call(server):
 Run the tests:
 
 ```bash
-ng_test +entrypoint=resources_servers/my_weather_tool
+ng_test +entrypoint=nemo_gym/resources_servers/my_weather_tool
 ```
 
 For detailed test output:
 
 ```bash
-cd resources_servers/my_weather_tool
+cd nemo_gym/resources_servers/my_weather_tool
 source .venv/bin/activate
 pytest -v
 ```
@@ -432,8 +432,8 @@ pytest -v
 Start the servers:
 
 ```bash
-config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
-resources_servers/my_weather_tool/configs/my_weather_tool.yaml"
+config_paths="nemo_gym/responses_api_models/openai_model/configs/openai_model.yaml,\
+nemo_gym/resources_servers/my_weather_tool/configs/my_weather_tool.yaml"
 
 ng_run "+config_paths=[$config_paths]"
 ```
@@ -471,10 +471,10 @@ If you don't want to use the OpenAI API, you can try using a local vLLM server (
 
 ### Test with Client (Optional)
 
-You can do a quick spot-check by pointing the built-in client at your agent. Inside `responses_api_agents/simple_agent/client.py`, change the server name to `my_weather_tool_simple_agent`, then run:
+You can do a quick spot-check by pointing the built-in client at your agent. Inside `nemo_gym/responses_api_agents/simple_agent/client.py`, change the server name to `my_weather_tool_simple_agent`, then run:
 
 ```bash
-python responses_api_agents/simple_agent/client.py
+python nemo_gym/responses_api_agents/simple_agent/client.py
 ```
 
 :::{note}
@@ -492,8 +492,8 @@ With your servers still running, collect rollouts against your example inputs:
 
 ```bash
 ng_collect_rollouts +agent_name=my_weather_tool_simple_agent \
-    +input_jsonl_fpath=resources_servers/my_weather_tool/data/example.jsonl \
-    +output_jsonl_fpath=resources_servers/my_weather_tool/data/example_rollouts.jsonl \
+    +input_jsonl_fpath=nemo_gym/resources_servers/my_weather_tool/data/example.jsonl \
+    +output_jsonl_fpath=nemo_gym/resources_servers/my_weather_tool/data/example_rollouts.jsonl \
     +limit=null \
     +num_repeats=null \
     +num_samples_in_parallel=null
@@ -529,7 +529,7 @@ Train with Unsloth for fast fine-tuning.
 
 ## 8. Update Documentation
 
-Update `resources_servers/my_weather_tool/README.md` with licensing and usage information:
+Update `nemo_gym/resources_servers/my_weather_tool/README.md` with licensing and usage information:
 
 ```markdown
 # My Weather Tool Resource Server
@@ -623,7 +623,7 @@ async def verify(self, body: MultiStepVerifyRequest) -> BaseVerifyResponse:
         reward=float(accuracy),
     )
 ```
-See `resources_servers/example_multi_step/app.py` for a complete example.
+See `nemo_gym/resources_servers/example_multi_step/app.py` for a complete example.
 
 ::::{important}
 The custom request model (`MultiStepVerifyRequest`) is required for extra fields like `expected_values` to survive Pydantic parsing. Using `BaseVerifyRequest` directly would silently drop any fields not defined on the base class.
@@ -637,7 +637,7 @@ The custom request model (`MultiStepVerifyRequest`) is required for extra fields
 
 For tasks with multiple valid answers, use an LLM to judge correctness.
 
-See `resources_servers/math_with_judge/app.py` for implementation details.
+See `nemo_gym/resources_servers/math_with_judge/app.py` for implementation details.
 :::
 
 :::{dropdown} Unit test verification (code generation)
@@ -645,7 +645,7 @@ See `resources_servers/math_with_judge/app.py` for implementation details.
 
 For code generation tasks, run unit tests against model output.
 
-See `resources_servers/code_gen/app.py` for implementation details.
+See `nemo_gym/resources_servers/code_gen/app.py` for implementation details.
 :::
 
 ---
@@ -689,7 +689,7 @@ Check server status and logs:
 ng_status
 
 # For detailed logs, run the server directly:
-cd resources_servers/my_weather_tool
+cd nemo_gym/resources_servers/my_weather_tool
 source .venv/bin/activate
 python app.py
 ```

@@ -23,8 +23,8 @@ We have hands-on tutorials with supported training frameworks to help you train 
 
 NeMo Gym integrates with external environment libraries and benchmarks. See the [README](https://github.com/NVIDIA-NeMo/Gym?tab=readme-ov-file#table-2-resource-servers-for-training) for the full list—here are a few examples:
 
-- **[Reasoning Gym](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/reasoning_gym)** - reasoning environments spanning computation, cognition, logic and more
-- **[Aviary](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/aviary)** - environments spanning math, knowledge, biological sequences, scientific literature search, and protein stability
+- **[Reasoning Gym](https://github.com/NVIDIA-NeMo/Gym/tree/main/nemo_gym/resources_servers/reasoning_gym)** - reasoning environments spanning computation, cognition, logic and more
+- **[Aviary](https://github.com/NVIDIA-NeMo/Gym/tree/main/nemo_gym/resources_servers/aviary)** - environments spanning math, knowledge, biological sequences, scientific literature search, and protein stability
 - **[Verifiers](https://github.com/PrimeIntellect-ai/verifiers)** - *(In progress)* - environments spanning coding, data & ML, science & reasoning, tool use and more
 - **[BrowserGym](https://github.com/ServiceNow/BrowserGym)** - *(In progress)* - environments for web task automation
 

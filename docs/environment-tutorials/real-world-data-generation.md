@@ -30,9 +30,9 @@ The data generation pipeline:
 
 ## Notebook
 
-The tutorial is provided as a Jupyter notebook. See the [notebook README](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/workplace_assistant/notebooks/synthetic-data-generation/) for prerequisites and setup instructions.
+The tutorial is provided as a Jupyter notebook. See the [notebook README](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/resources_servers/workplace_assistant/notebooks/synthetic-data-generation/) for prerequisites and setup instructions.
 
-:::{button-link} https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/workplace_assistant/notebooks/synthetic-data-generation/multistep-toolcalling-sdg.ipynb
+:::{button-link} https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/resources_servers/workplace_assistant/notebooks/synthetic-data-generation/multistep-toolcalling-sdg.ipynb
 :color: primary
 :class: sd-rounded-pill
 

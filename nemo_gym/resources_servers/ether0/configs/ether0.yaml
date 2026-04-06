@@ -1,0 +1,26 @@
+ether0:
+  resources_servers:
+    ether0:
+      entrypoint: app.py
+      domain: knowledge
+      verified: false
+      description: ether0 chemistry benchmark verifiers
+      value: Evalutate chemistry knowledge and reasoning with ether0 benchmark
+ether0_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: ether0
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: nemo_gym/resources_servers/ether0/data/example.jsonl
+      - name: val
+        type: validation
+        jsonl_fpath: nemo_gym/resources_servers/ether0/data/val.jsonl
+        license: Creative Commons Attribution 4.0 International

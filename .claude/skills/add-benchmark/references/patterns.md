@@ -206,7 +206,7 @@ my_benchmark_simple_agent:
       datasets:
       - name: my_dataset
         type: train
-        jsonl_fpath: resources_servers/my_benchmark/data/my_dataset.jsonl
+        jsonl_fpath: nemo_gym/resources_servers/my_benchmark/data/my_dataset.jsonl
         gitlab_identifier:
           dataset_name: my_benchmark
           version: 0.0.1
@@ -215,7 +215,7 @@ my_benchmark_simple_agent:
         num_repeats: 1
       - name: example
         type: example
-        jsonl_fpath: resources_servers/my_benchmark/data/example.jsonl
+        jsonl_fpath: nemo_gym/resources_servers/my_benchmark/data/example.jsonl
 
 # Optional: custom agent pairing (multi-turn)
 my_benchmark_eval_agent:
@@ -232,7 +232,7 @@ my_benchmark_eval_agent:
       datasets:
       - name: my_dataset
         type: train
-        jsonl_fpath: resources_servers/my_benchmark/data/my_dataset.jsonl
+        jsonl_fpath: nemo_gym/resources_servers/my_benchmark/data/my_dataset.jsonl
         gitlab_identifier:
           dataset_name: my_benchmark
           version: 0.0.1
@@ -241,7 +241,7 @@ my_benchmark_eval_agent:
         num_repeats: 1
       - name: example
         type: example
-        jsonl_fpath: resources_servers/my_benchmark/data/example.jsonl
+        jsonl_fpath: nemo_gym/resources_servers/my_benchmark/data/example.jsonl
 ```
 
 ### Key rules
@@ -565,13 +565,13 @@ If your filename doesn't match (e.g. `my_eval.jsonl`), add a custom pattern (e.g
    ng_upload_dataset_to_gitlab \
        +dataset_name=my_benchmark \
        +version=0.0.1 \
-       +input_jsonl_fpath=resources_servers/my_benchmark/data/my_dataset.jsonl
+       +input_jsonl_fpath=nemo_gym/resources_servers/my_benchmark/data/my_dataset.jsonl
    ```
 3. **Add `gitlab_identifier`** to the dataset entry in YAML config:
    ```yaml
    - name: my_dataset
      type: train
-     jsonl_fpath: resources_servers/my_benchmark/data/my_dataset.jsonl
+     jsonl_fpath: nemo_gym/resources_servers/my_benchmark/data/my_dataset.jsonl
      gitlab_identifier:
        dataset_name: my_benchmark
        version: 0.0.1
@@ -595,13 +595,13 @@ The tracking URI format is `https://<gitlab-host>/api/v4/projects/<PROJECT_ID>/m
 
 Validate example data (for PR submission):
 ```bash
-ng_prepare_data "+config_paths=[resources_servers/my_benchmark/configs/my_benchmark.yaml]" \
+ng_prepare_data "+config_paths=[nemo_gym/resources_servers/my_benchmark/configs/my_benchmark.yaml]" \
     +output_dirpath=/tmp/prepare +mode=example_validation
 ```
 
 Download and prepare train/validation from GitLab:
 ```bash
-ng_prepare_data "+config_paths=[resources_servers/my_benchmark/configs/my_benchmark.yaml]" \
+ng_prepare_data "+config_paths=[nemo_gym/resources_servers/my_benchmark/configs/my_benchmark.yaml]" \
     +output_dirpath=data/my_benchmark +mode=train_preparation +should_download=true +data_source=gitlab
 ```
 

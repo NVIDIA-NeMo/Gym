@@ -36,7 +36,7 @@ You will only need to manually input the `{dataset_name}` portion of the above w
 
 To upload to Huggingface, use the below command:
 ```bash
-resource_config_path="resources_servers/multineedle/configs/multineedle.yaml"
+resource_config_path="nemo_gym/resources_servers/multineedle/configs/multineedle.yaml"
 ng_upload_dataset_to_hf \
     +dataset_name={your dataset name} \
     +input_jsonl_fpath=data/multineedle_benchmark.jsonl \
@@ -48,7 +48,7 @@ Because of the required dataset nomenclature, the resources server config path i
 By default, the `split` parameter for uploading is set to `train`, which will run a check on the required fields `{"responses_create_params"}`. Specifying `validation` or `test` bypasses this check:
 
 ```bash
-resource_config_path="resources_servers/multineedle/configs/multineedle.yaml"
+resource_config_path="nemo_gym/resources_servers/multineedle/configs/multineedle.yaml"
 ng_gitlab_to_hf_dataset \
     +dataset_name={your dataset name} \
     +input_jsonl_fpath=data/multineedle_benchmark_validation.jsonl \
@@ -86,7 +86,7 @@ The commit_message and commit_description parameters work for both direct pushes
 ## Deleting Datasets from Gitlab
 You can optionally pass a `+delete_from_gitlab=true` flag to the above command, which will delete the model and all of its artifacts from Gitlab. By default, this is set to `False`.
 ```bash
-resource_config_path="resources_servers/multineedle/configs/multineedle.yaml"
+resource_config_path="nemo_gym/resources_servers/multineedle/configs/multineedle.yaml"
 ng_upload_dataset_to_hf \
     +dataset_name={your dataset name} \
     +input_jsonl_fpath=data/multineedle_benchmark.jsonl \
@@ -103,7 +103,7 @@ There will be a confirmation dialog to confirm the deletion:
 You can also run the below command which does the same thing without the need for a `+delete_from_gitlab` flag:
 
 ```bash
-resource_config_path="resources_servers/multineedle/configs/multineedle.yaml"
+resource_config_path="nemo_gym/resources_servers/multineedle/configs/multineedle.yaml"
 ng_gitlab_to_hf_dataset \
     +dataset_name={your dataset name} \
     +input_jsonl_fpath=data/multineedle_benchmark.jsonl \
@@ -145,7 +145,7 @@ Use `artifact_fpath` when the HuggingFace repo contains raw/arbitrary JSONL file
 
 
 # How To: Prepare and validate data for PR submission or RL training
-When you use `ng_init_resources_server +entrypoint=resources_servers/example_multi_step` to initialize a resources server, you will get a config.yaml that looks like the below code block. The dataset information for training, validation, and example will be inside the scope of your agent config (e.g. under simple_agent) and is a list of dataset objects.
+When you use `ng_init_resources_server +entrypoint=nemo_gym/resources_servers/example_multi_step` to initialize a resources server, you will get a config.yaml that looks like the below code block. The dataset information for training, validation, and example will be inside the scope of your agent config (e.g. under simple_agent) and is a list of dataset objects.
 
 ```yaml
 example_multi_step_resources_server:
@@ -166,7 +166,7 @@ example_multi_step_simple_agent:
       - name: train
         type: train
         license: Apache 2.0
-        jsonl_fpath: resources_servers/example_multi_step/data/train.jsonl
+        jsonl_fpath: nemo_gym/resources_servers/example_multi_step/data/train.jsonl
         num_repeats: 1
         gitlab_identifier:
           dataset_name: example_multi_step
@@ -179,7 +179,7 @@ example_multi_step_simple_agent:
       - name: validation
         type: validation
         license: Apache 2.0
-        jsonl_fpath: resources_servers/example_multi_step/data/validation.jsonl
+        jsonl_fpath: nemo_gym/resources_servers/example_multi_step/data/validation.jsonl
         num_repeats: 1
         gitlab_identifier:
           dataset_name: example_multi_step
@@ -191,7 +191,7 @@ example_multi_step_simple_agent:
         license: Apache 2.0
       - name: example
         type: example
-        jsonl_fpath: resources_servers/example_multi_step/data/example.jsonl
+        jsonl_fpath: nemo_gym/resources_servers/example_multi_step/data/example.jsonl
         num_repeats: 1
 ```
 
@@ -207,7 +207,7 @@ A dataset object consists of:
 ```yaml
 - name: train
   type: train
-  jsonl_fpath: resources_servers/example_multi_step/data/train.jsonl
+  jsonl_fpath: nemo_gym/resources_servers/example_multi_step/data/train.jsonl
   gitlab_identifier:
     dataset_name: example_multi_step
     version: 0.0.1
@@ -222,8 +222,8 @@ Each config.yaml in the resources server requires at least one agent with one ex
 
 For every PR that contributes data, we require common dataset statistics and sanity checks on the data itself. This process is also helpful to catch any simple issues before you ever train with NeMo RL. NeMo Gym provides a helper command ng_prepare_data to do so.
 ```bash
-config_paths="resources_servers/example_multi_step/configs/example_multi_step.yaml,\
-responses_api_models/openai_model/configs/openai_model.yaml"
+config_paths="nemo_gym/resources_servers/example_multi_step/configs/example_multi_step.yaml,\
+nemo_gym/responses_api_models/openai_model/configs/openai_model.yaml"
 ng_prepare_data "+config_paths=[$config_paths]" \
     +output_dirpath=data/example_multi_step \
     +mode=example_validation
@@ -273,8 +273,8 @@ The `ng_prepare_data` command will:
 
 The `ng_prepare_data` command has 2 modes, one for actual train and validation set preparation, and one for example validation intended to sanity check your data format. You would typically run `+mode=example_validation` when first contributing a resources server, and then run with `+mode=train_preparation` when you actually go to train.
 ```bash
-config_paths="resources_servers/example_multi_step/configs/example_multi_step.yaml,\
-responses_api_models/openai_model/configs/openai_model.yaml"
+config_paths="nemo_gym/resources_servers/example_multi_step/configs/example_multi_step.yaml,\
+nemo_gym/responses_api_models/openai_model/configs/openai_model.yaml"
 ng_prepare_data "+config_paths=[$config_paths]" \
     +output_dirpath=data/example_multi_step \
     +mode=example_validation
@@ -288,8 +288,8 @@ In one terminal, start your agent, model, and resources servers, with profiling 
 - `profiling_enabled` (bool): whether profiling is enabled or not. By default this is disabled since it incurs some slight overhead we don't want at runtime.
 - `profiling_results_dirpath` (str): The directory to save all server profiling results in. Previous logs for the same will be overwritten in the same directory.
 ```bash
-config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
-resources_servers/math_with_judge/configs/bytedtsinghua_dapo17k.yaml"
+config_paths="nemo_gym/responses_api_models/openai_model/configs/openai_model.yaml,\
+nemo_gym/resources_servers/math_with_judge/configs/bytedtsinghua_dapo17k.yaml"
 ng_run "+config_paths=[${config_paths}]" \
     +profiling_enabled=true \
     +profiling_results_dirpath=results/profiling/math_with_judge
@@ -298,7 +298,7 @@ ng_run "+config_paths=[${config_paths}]" \
 In another terminal, run some large number of rollouts against your servers. Use the `limit` and `num_repeats` flags to adjust the number of samples you want to run.
 ```bash
 ng_collect_rollouts +agent_name=math_with_judge_simple_agent \
-    +input_jsonl_fpath=resources_servers/math_with_judge/data/dapo17k_bytedtsinghua_train.jsonl \
+    +input_jsonl_fpath=nemo_gym/resources_servers/math_with_judge/data/dapo17k_bytedtsinghua_train.jsonl \
     +output_jsonl_fpath=temp/math_with_judge_rollouts.jsonl \
     +limit=1024 \
     +num_repeats=1
@@ -311,11 +311,11 @@ After `ng_collect_rollouts` finishes, ctrl+c to quit your servers. You should se
 The log file content for a server will look something like the following:
 ```
 name                                                                                                                      ncall       tsub      ttot      tavg      
-.../nemo-gym/resources_servers/math_with_judge/app.py:118 LibraryJudgeMathResourcesServer.verify                       1024        0.009755  17.98387  0.017562
-.../nemo-gym/resources_servers/math_with_judge/app.py:145 LibraryJudgeMathResourcesServer._verify_answer               1024        0.002933  17.87998  0.017461
-.../nemo-gym/resources_servers/math_with_judge/app.py:173 LibraryJudgeMathResourcesServer._verify_answer_with_library  1024        0.007851  17.87704  0.017458
-.../nemo-gym/resources_servers/math_with_judge/app.py:191 <genexpr>                                                    2339        0.001695  0.029082  0.000012
-.../nemo-gym/resources_servers/math_with_judge/app.py:163 _mute_output                                                 2048        0.007473  0.016538  0.000008
+.../nemo-gym/nemo_gym/resources_servers/math_with_judge/app.py:118 LibraryJudgeMathResourcesServer.verify                       1024        0.009755  17.98387  0.017562
+.../nemo-gym/nemo_gym/resources_servers/math_with_judge/app.py:145 LibraryJudgeMathResourcesServer._verify_answer               1024        0.002933  17.87998  0.017461
+.../nemo-gym/nemo_gym/resources_servers/math_with_judge/app.py:173 LibraryJudgeMathResourcesServer._verify_answer_with_library  1024        0.007851  17.87704  0.017458
+.../nemo-gym/nemo_gym/resources_servers/math_with_judge/app.py:191 <genexpr>                                                    2339        0.001695  0.029082  0.000012
+.../nemo-gym/nemo_gym/resources_servers/math_with_judge/app.py:163 _mute_output                                                 2048        0.007473  0.016538  0.000008
 ```
 
 - `ncall`: number of calls (how many times the function/subroutine was invoked).

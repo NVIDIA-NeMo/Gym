@@ -24,7 +24,7 @@ import yaml
 
 README_PATH = Path("README.md")
 
-TARGET_FOLDER = Path("resources_servers")
+TARGET_FOLDER = Path("nemo_gym/resources_servers")
 
 
 @dataclass
@@ -271,8 +271,8 @@ def get_example_and_training_server_info() -> tuple[list[ServerInfo], list[Serve
                 (server_name[len("example_") :] if is_example_only else server_name).replace("_", " ").title()
             )
 
-            config_path = f"{TARGET_FOLDER.name}/{server_name}/configs/{yaml_file.name}"
-            readme_path = f"{TARGET_FOLDER.name}/{server_name}/README.md"
+            config_path = f"{TARGET_FOLDER}/{server_name}/configs/{yaml_file.name}"
+            readme_path = f"{TARGET_FOLDER}/{server_name}/README.md"
 
             server_info = ServerInfo(
                 name=server_name,

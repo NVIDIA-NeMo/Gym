@@ -50,7 +50,7 @@ Keep the server ID as `policy_model` — agent configs reference this name by de
 ```yaml
 my_resource:                                  # Server ID (your choice — agents reference this name)
   resources_servers:                          # Server type (must be "resources_servers" for resources servers)
-    example_single_tool_call:                   # Implementation (must match a directory in resources_servers/)
+    example_single_tool_call:                   # Implementation (must match a directory in nemo_gym/resources_servers/)
       entrypoint: app.py                      # Python file to run
       domain: agent                           # Server category (see values below)
       verified: false                         # Passed reward profiling and training checks (default: false)
@@ -67,7 +67,7 @@ Agent servers must include both a `resources_server` and `model_server` block to
 ```yaml
 my_agent:                                     # Server ID (your choice — used in API requests)
   responses_api_agents:                       # Server type (must be "responses_api_agents" for agent servers)
-    simple_agent:                             # Implementation (must match a directory in responses_api_agents/)
+    simple_agent:                             # Implementation (must match a directory in nemo_gym/responses_api_agents/)
       entrypoint: app.py                      # Python file to run
       resources_server:                       # Specifies which resources server to use
         type: resources_servers               # Always "resources_servers"
@@ -125,8 +125,8 @@ policy_model_name: gpt-4o-2024-11-20
 
 # Optional: store config paths for reuse
 my_config_paths:
-  - responses_api_models/openai_model/configs/openai_model.yaml
-  - resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml
+  - nemo_gym/responses_api_models/openai_model/configs/openai_model.yaml
+  - nemo_gym/resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml
 
 # Optional: validation behavior
 error_on_almost_servers: true   # Exit on invalid configs (default: true)

@@ -39,8 +39,8 @@ def load_example_multi_step_test_global_config_dict() -> DictConfig:
         initial_global_config_dict=DictConfig(
             {
                 "config_paths": [
-                    "resources_servers/example_multi_step/configs/example_multi_step.yaml",
-                    "responses_api_models/openai_model/configs/openai_model.yaml",
+                    "nemo_gym/resources_servers/example_multi_step/configs/example_multi_step.yaml",
+                    "nemo_gym/responses_api_models/openai_model/configs/openai_model.yaml",
                 ],
                 # For policy_model
                 "policy_base_url": "",
@@ -82,7 +82,7 @@ class TestLoadAndValidateServerInstanceConfigs:
                             {
                                 "name": "example",
                                 "type": "example",
-                                "jsonl_fpath": "resources_servers/example_multi_step/data/example.jsonl",
+                                "jsonl_fpath": "nemo_gym/resources_servers/example_multi_step/data/example.jsonl",
                                 "num_repeats": 1,
                                 "gitlab_identifier": None,
                                 "huggingface_identifier": None,
@@ -126,7 +126,7 @@ class TestLoadDatasets:
                         {
                             "name": "example",
                             "type": "example",
-                            "jsonl_fpath": "resources_servers/example_multi_step/data/example.jsonl",
+                            "jsonl_fpath": "nemo_gym/resources_servers/example_multi_step/data/example.jsonl",
                             "num_repeats": 1,
                             "gitlab_identifier": None,
                             "license": None,
@@ -172,7 +172,7 @@ class TestLoadDatasets:
                         {
                             "name": "example",
                             "type": "example",
-                            "jsonl_fpath": "resources_servers/example_multi_step/data/example_missing.jsonl",
+                            "jsonl_fpath": "nemo_gym/resources_servers/example_multi_step/data/example_missing.jsonl",
                             "num_repeats": 1,
                             "gitlab_identifier": None,
                             "license": None,
@@ -376,7 +376,7 @@ class TestValidateSamplesAndAggregateMetrics:
                         {
                             "name": "example",
                             "type": "example",
-                            "jsonl_fpath": "resources_servers/example_multi_step/data/example.jsonl",
+                            "jsonl_fpath": "nemo_gym/resources_servers/example_multi_step/data/example.jsonl",
                             "num_repeats": 1,
                             "gitlab_identifier": None,
                             "license": None,
@@ -473,7 +473,7 @@ class TestValidateSamplesAndAggregateMetrics:
             == actual_dataset_type_to_aggregate_metrics.get("example").model_dump()
         )
 
-        assert write_filenames == [Path("resources_servers/example_multi_step/data/example_metrics.json")]
+        assert write_filenames == [Path("nemo_gym/resources_servers/example_multi_step/data/example_metrics.json")]
 
     def test_validate_samples_and_aggregate_metrics_conflict_raises_ValueError(self, monkeypatch: MonkeyPatch) -> None:
         mock_write_file = mock_open()
@@ -486,9 +486,9 @@ class TestValidateSamplesAndAggregateMetrics:
                 write_filenames.append(filename)
                 return mock_write_file()
 
-            if filename == "resources_servers/example_multi_step/data/example.jsonl":
+            if filename == "nemo_gym/resources_servers/example_multi_step/data/example.jsonl":
                 return original_open(filename, mode)
-            elif filename == Path("resources_servers/example_multi_step/data/example_metrics.json"):
+            elif filename == Path("nemo_gym/resources_servers/example_multi_step/data/example_metrics.json"):
                 with original_open(filename, mode) as f:
                     read_data = json.loads(f.read())
 
@@ -511,7 +511,7 @@ class TestValidateSamplesAndAggregateMetrics:
                         {
                             "name": "example",
                             "type": "example",
-                            "jsonl_fpath": "resources_servers/example_multi_step/data/example.jsonl",
+                            "jsonl_fpath": "nemo_gym/resources_servers/example_multi_step/data/example.jsonl",
                             "num_repeats": 1,
                             "gitlab_identifier": None,
                             "license": None,
@@ -543,7 +543,7 @@ class TestValidateSamplesAndAggregateMetrics:
                 overwrite_metrics_conflicts=False,
             )
 
-        assert write_filenames == [Path("resources_servers/example_multi_step/data/example_metrics_conflict.json")]
+        assert write_filenames == [Path("nemo_gym/resources_servers/example_multi_step/data/example_metrics_conflict.json")]
 
     def test_validate_samples_and_aggregate_metrics_single_sample(self) -> None:
         processor = TrainDataProcessor()
@@ -971,7 +971,7 @@ class TestCollateSamples:
                         {
                             "name": "example",
                             "type": "example",
-                            "jsonl_fpath": "resources_servers/example_multi_step/data/example.jsonl",
+                            "jsonl_fpath": "nemo_gym/resources_servers/example_multi_step/data/example.jsonl",
                             "num_repeats": 1,
                             "gitlab_identifier": None,
                             "license": None,
@@ -1023,7 +1023,7 @@ class TestCollateSamples:
 
         assert list(write_filenames_to_mock.keys()) == [
             Path("example_metrics.json"),
-            Path("resources_servers/example_multi_step/data/example_prepare.jsonl"),
+            Path("nemo_gym/resources_servers/example_multi_step/data/example_prepare.jsonl"),
             Path("example.jsonl"),
         ]
 
@@ -1068,7 +1068,7 @@ class TestCollateSamples:
                         {
                             "name": "example",
                             "type": "example",
-                            "jsonl_fpath": "resources_servers/example_multi_step/data/example.jsonl",
+                            "jsonl_fpath": "nemo_gym/resources_servers/example_multi_step/data/example.jsonl",
                             "num_repeats": 1,
                             "gitlab_identifier": None,
                             "license": None,

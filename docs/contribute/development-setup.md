@@ -26,7 +26,7 @@ pre-commit install
 ```bash
 ng_dev_test                                    # Run all NeMo Gym core tests
 ng_test_all                                    # Run all server tests
-ng_test +entrypoint=responses_api_agents/simple_agent  # Test single server
+ng_test +entrypoint=nemo_gym/responses_api_agents/simple_agent  # Test single server
 ```
 
 **View Test Coverage**:

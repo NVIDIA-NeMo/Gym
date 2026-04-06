@@ -30,8 +30,8 @@ Format and validate JSONL datasets for NeMo Gym training using `ng_prepare_data`
 From the repository root:
 
 ```bash
-config_paths="resources_servers/example_multi_step/configs/example_multi_step.yaml,\
-responses_api_models/openai_model/configs/openai_model.yaml"
+config_paths="nemo_gym/resources_servers/example_multi_step/configs/example_multi_step.yaml,\
+nemo_gym/responses_api_models/openai_model/configs/openai_model.yaml"
 ng_prepare_data \
     "+config_paths=[$config_paths]" \
     +output_dirpath=data/test \
@@ -49,7 +49,7 @@ Success output:
 ```
 
 This generates two types of output:
-- **Per-dataset metrics**: `resources_servers/example_multi_step/data/example_metrics.json` (alongside source JSONL)
+- **Per-dataset metrics**: `nemo_gym/resources_servers/example_multi_step/data/example_metrics.json` (alongside source JSONL)
 - **Aggregated metrics**: `data/test/example_metrics.json` (in output directory)
 
 ---
@@ -79,7 +79,7 @@ Most resources servers add fields for reward computation:
 ```
 
 :::{tip}
-Check `resources_servers/<name>/README.md` for required fields specific to each resources server.
+Check `nemo_gym/resources_servers/<name>/README.md` for required fields specific to each resources server.
 :::
 
 ### Key Properties
@@ -219,7 +219,7 @@ custom_simple_agent:
 Run data preparation:
 
 ```bash
-config_paths="custom_data.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml"
+config_paths="custom_data.yaml,nemo_gym/responses_api_models/vllm_model/configs/vllm_model.yaml"
 ng_prepare_data "+config_paths=[${config_paths}]" +mode=train_preparation +output_dirpath=data
 ```
 
@@ -237,7 +237,7 @@ This validates your data and adds the `agent_ref` field to each row, routing sam
 ### Example Validation
 
 ```bash
-ng_prepare_data "+config_paths=[resources_servers/example_multi_step/configs/example_multi_step.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]" \
+ng_prepare_data "+config_paths=[nemo_gym/resources_servers/example_multi_step/configs/example_multi_step.yaml,nemo_gym/responses_api_models/vllm_model/configs/vllm_model.yaml]" \
     +output_dirpath=data/example_multi_step \
     +mode=example_validation
 ```
@@ -245,7 +245,7 @@ ng_prepare_data "+config_paths=[resources_servers/example_multi_step/configs/exa
 ### Training Preparation
 
 ```bash
-ng_prepare_data "+config_paths=[resources_servers/workplace_assistant/configs/workplace_assistant.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]" \
+ng_prepare_data "+config_paths=[nemo_gym/resources_servers/workplace_assistant/configs/workplace_assistant.yaml,nemo_gym/responses_api_models/vllm_model/configs/vllm_model.yaml]" \
     +output_dirpath=data/workplace_assistant \
     +mode=train_preparation \
     +should_download=true
@@ -345,7 +345,7 @@ Metrics files are written to two locations:
 {
     "name": "example",
     "type": "example",
-    "jsonl_fpath": "resources_servers/example_multi_step/data/example.jsonl",
+    "jsonl_fpath": "nemo_gym/resources_servers/example_multi_step/data/example.jsonl",
     "Number of examples": 5,
     "Number of tools": {
         "Total # non-null values": 5,
@@ -368,15 +368,15 @@ Define datasets in your server's YAML config:
 datasets:
   - name: train
     type: train
-    jsonl_fpath: resources_servers/my_server/data/train.jsonl
+    jsonl_fpath: nemo_gym/resources_servers/my_server/data/train.jsonl
     license: Apache 2.0
   - name: validation
     type: validation
-    jsonl_fpath: resources_servers/my_server/data/validation.jsonl
+    jsonl_fpath: nemo_gym/resources_servers/my_server/data/validation.jsonl
     license: Apache 2.0
   - name: example
     type: example
-    jsonl_fpath: resources_servers/my_server/data/example.jsonl
+    jsonl_fpath: nemo_gym/resources_servers/my_server/data/example.jsonl
 ```
 
 | Type | Purpose | Required for |

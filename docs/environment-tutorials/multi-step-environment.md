@@ -67,7 +67,7 @@ This is the `simple_agent` loop from the {doc}`single-step tutorial <single-step
 
 ## Implementation
 
-**File (simplified from [`resources_servers/example_multi_step/app.py`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/example_multi_step/app.py), with added defensive guards):**
+**File (simplified from [`nemo_gym/resources_servers/example_multi_step/app.py`](https://github.com/NVIDIA-NeMo/Gym/tree/main/nemo_gym/resources_servers/example_multi_step/app.py), with added defensive guards):**
 
 ```python
 # simplified

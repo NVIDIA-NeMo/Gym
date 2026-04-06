@@ -14,17 +14,17 @@ Each server type has a dedicated directory with its implementations and their co
 
 ```text
 # Model Server Config
-responses_api_models/
+nemo_gym/responses_api_models/
   └── openai_model/
       └── configs/openai_model.yaml
 
 # Resources Server Config
-resources_servers/
+nemo_gym/resources_servers/
   └── example_single_tool_call/
       └── configs/example_single_tool_call.yaml
 
 # Agent Server Config
-responses_api_agents/
+nemo_gym/responses_api_agents/
   └── simple_agent/
       └── configs/simple_agent.yaml
 ```
@@ -54,7 +54,7 @@ These serve different purposes:
 
 - **Server ID** (`example_single_tool_call` on line 1): Your chosen identifier for this server instance. Used in API requests and when other servers reference it. You could name it `my_weather` or `weather_prod` instead.
 
-- **Implementation** (`example_single_tool_call` on line 3): Must match the folder `resources_servers/example_single_tool_call/`. This tells NeMo Gym which code to run.
+- **Implementation** (`example_single_tool_call` on line 3): Must match the folder `nemo_gym/resources_servers/example_single_tool_call/`. This tells NeMo Gym which code to run.
 
 Examples often use matching names for simplicity, but the two values are independent choices.
 

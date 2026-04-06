@@ -35,12 +35,12 @@ Before starting, determine which type of benchmark you're adding:
 Run `ng_init_resources_server` to generate the directory structure:
 
 ```bash
-ng_init_resources_server +entrypoint=resources_servers/my_benchmark
+ng_init_resources_server +entrypoint=nemo_gym/resources_servers/my_benchmark
 ```
 
 This creates:
 ```
-resources_servers/my_benchmark/
+nemo_gym/resources_servers/my_benchmark/
 ├── app.py              # Server template
 ├── configs/my_benchmark.yaml
 ├── data/.gitignore
@@ -49,7 +49,7 @@ resources_servers/my_benchmark/
 └── README.md
 ```
 
-For external benchmarks, create the agent server manually under `responses_api_agents/my_agent/` with the same structure.
+For external benchmarks, create the agent server manually under `nemo_gym/responses_api_agents/my_agent/` with the same structure.
 
 ### Step 2: Prepare data
 
@@ -80,7 +80,7 @@ Convert your source dataset to Gym JSONL format. Each line must have `responses_
 ng_upload_dataset_to_gitlab \
     +dataset_name=my_benchmark \
     +version=0.0.1 \
-    +input_jsonl_fpath=resources_servers/my_benchmark/data/my_dataset.jsonl
+    +input_jsonl_fpath=nemo_gym/resources_servers/my_benchmark/data/my_dataset.jsonl
 ```
 
 Requires MLflow credentials in `env.yaml` (or passed via CLI):
@@ -94,11 +94,11 @@ mlflow_tracking_token: <your-gitlab-api-token>
 **Validate** your data:
 ```bash
 # Validate example data (for PR submission)
-ng_prepare_data "+config_paths=[resources_servers/my_benchmark/configs/my_benchmark.yaml]" \
+ng_prepare_data "+config_paths=[nemo_gym/resources_servers/my_benchmark/configs/my_benchmark.yaml]" \
     +output_dirpath=/tmp/prepare +mode=example_validation
 
 # Download and prepare train/validation from GitLab
-ng_prepare_data "+config_paths=[resources_servers/my_benchmark/configs/my_benchmark.yaml]" \
+ng_prepare_data "+config_paths=[nemo_gym/resources_servers/my_benchmark/configs/my_benchmark.yaml]" \
     +output_dirpath=data/my_benchmark +mode=train_preparation +should_download=true +data_source=gitlab
 ```
 
@@ -145,7 +145,7 @@ For `train`/`validation` datasets, add `gitlab_identifier` alongside `jsonl_fpat
 datasets:
 - name: my_dataset
   type: train
-  jsonl_fpath: resources_servers/my_benchmark/data/my_dataset.jsonl
+  jsonl_fpath: nemo_gym/resources_servers/my_benchmark/data/my_dataset.jsonl
   gitlab_identifier:
     dataset_name: my_benchmark
     version: 0.0.1
@@ -153,7 +153,7 @@ datasets:
   license: MIT
 - name: example
   type: example
-  jsonl_fpath: resources_servers/my_benchmark/data/example.jsonl
+  jsonl_fpath: nemo_gym/resources_servers/my_benchmark/data/example.jsonl
 ```
 
 Both fields must coexist: `jsonl_fpath` is the local download destination, `gitlab_identifier` tells the system where to fetch from. `example` datasets don't need `gitlab_identifier` — they're committed to git directly.
@@ -162,7 +162,7 @@ Both fields must coexist: `jsonl_fpath` is the local download destination, `gitl
 
 ```bash
 # Run server tests (creates isolated .venv, slow on first run)
-ng_test +entrypoint=resources_servers/my_benchmark
+ng_test +entrypoint=nemo_gym/resources_servers/my_benchmark
 
 # Run core library tests to check nothing broke
 pytest tests/unit_tests/ -x
@@ -174,11 +174,11 @@ Test coverage must be >= 95%. Write tests for: verify pass, verify fail (wrong o
 
 ```bash
 # Start servers
-ng_run "+config_paths=[resources_servers/my_benchmark/configs/my_benchmark.yaml,responses_api_models/openai_model/configs/openai_model.yaml]"
+ng_run "+config_paths=[nemo_gym/resources_servers/my_benchmark/configs/my_benchmark.yaml,nemo_gym/responses_api_models/openai_model/configs/openai_model.yaml]"
 
 # Quick test with example data
 ng_collect_rollouts +agent_name=my_benchmark_simple_agent \
-  +input_jsonl_fpath=resources_servers/my_benchmark/data/example.jsonl \
+  +input_jsonl_fpath=nemo_gym/resources_servers/my_benchmark/data/example.jsonl \
   +output_jsonl_fpath=results/example_rollouts.jsonl \
   +num_repeats=1 \
   "+responses_create_params={max_output_tokens: 16384, temperature: 1.0}"
@@ -197,13 +197,13 @@ Run against multiple models to validate correctness. Recommended suite:
 ```bash
 # Collect rollouts
 ng_collect_rollouts +agent_name=my_benchmark_simple_agent \
-  +input_jsonl_fpath=resources_servers/my_benchmark/data/my_dataset.jsonl \
+  +input_jsonl_fpath=nemo_gym/resources_servers/my_benchmark/data/my_dataset.jsonl \
   +output_jsonl_fpath=results/rollouts.jsonl \
   +num_repeats=5 \
   "+responses_create_params={max_output_tokens: 16384, temperature: 1.0}"
 
 # Compute per-task pass rates
-ng_reward_profile +input_jsonl_fpath=resources_servers/my_benchmark/data/my_dataset.jsonl \
+ng_reward_profile +input_jsonl_fpath=nemo_gym/resources_servers/my_benchmark/data/my_dataset.jsonl \
   +rollouts_jsonl_fpath=results/rollouts.jsonl \
   +output_jsonl_fpath=results/profiled.jsonl \
   +pass_threshold=1.0
@@ -230,17 +230,17 @@ Set `verified: true` in YAML config after successful baselining. Include W&B lin
 
 To avoid committing unrelated auto-fixes from other servers, scope pre-commit to your files:
 ```bash
-pre-commit run --files resources_servers/my_benchmark/**/*
+pre-commit run --files nemo_gym/resources_servers/my_benchmark/**/*
 ```
 If hooks modify files in other directories, discard those changes:
 ```bash
-git checkout -- resources_servers/other_server/
+git checkout -- nemo_gym/resources_servers/other_server/
 ```
 
 ## Constraints
 
 - Use NeMo Gym's OpenAI client (`nemo_gym/openai_utils.py`), not LiteLLM/Anthropic/other
-- **Use aiohttp, not httpx, for async HTTP.** All async HTTP calls must go through `nemo_gym.server_utils.request()` (aiohttp). httpx has O(n^2) connection pooling that hangs at high concurrency. When wrapping external libraries that use httpx internally, replace their HTTP transport with an aiohttp adapter — see `resources_servers/tavily_search/app.py` (`TavilySearchAIOHTTPClient`) for the pattern and `docs/infrastructure/engineering-notes/aiohttp-vs-httpx.md` for the rationale.
+- **Use aiohttp, not httpx, for async HTTP.** All async HTTP calls must go through `nemo_gym.server_utils.request()` (aiohttp). httpx has O(n^2) connection pooling that hangs at high concurrency. When wrapping external libraries that use httpx internally, replace their HTTP transport with an aiohttp adapter — see `nemo_gym/resources_servers/tavily_search/app.py` (`TavilySearchAIOHTTPClient`) for the pattern and `docs/infrastructure/engineering-notes/aiohttp-vs-httpx.md` for the rationale.
 - Pass configuration through Gym config (YAML), not environment variables
 - Code must run on Linux
 - `/run` endpoint must be async

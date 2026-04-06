@@ -21,7 +21,7 @@ flowchart LR
 The `ng_run` command uses Hydra to parse command-line arguments. Users specify configuration files via `+config_paths`:
 
 ```bash
-ng_run "+config_paths=[resources_servers/math/configs/math.yaml, responses_api_models/openai_model/configs/openai_model.yaml]"
+ng_run "+config_paths=[nemo_gym/resources_servers/math/configs/math.yaml, nemo_gym/responses_api_models/openai_model/configs/openai_model.yaml]"
 ```
 
 ### Phase 2: Load and Merge Configs

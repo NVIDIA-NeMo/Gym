@@ -25,7 +25,7 @@ from tests.unit_tests.test_global_config import TestGlobalConfig as _TestGlobalC
 
 class TestCLISetupCommandSetupEnvCommand:
     def _setup_server_dir(self, tmp_path: Path) -> Path:
-        server_dir = tmp_path / "first_level" / "second_level"
+        server_dir = tmp_path / "nemo_gym" / "first_level" / "second_level"
         server_dir.mkdir(parents=True)
         (server_dir / "requirements.txt").write_text("pytest\n")
         (tmp_path / "pyproject.toml").write_text("")
@@ -33,7 +33,7 @@ class TestCLISetupCommandSetupEnvCommand:
         return server_dir.absolute()
 
     def _debug_global_config_dict(self, tmp_path: Path) -> dict:
-        return _TestGlobalConfig._default_global_config_dict_values.fget(None) | {UV_VENV_DIR_KEY_NAME: str(tmp_path)}
+        return _TestGlobalConfig._default_global_config_dict_values.fget(None) | {UV_VENV_DIR_KEY_NAME: str(tmp_path / "nemo_gym")}
 
     def test_sanity(self, tmp_path: Path) -> None:
         server_dir = self._setup_server_dir(tmp_path)
@@ -172,7 +172,7 @@ class TestCLISetupCommandSetupEnvCommand:
         assert expected_command == actual_command
 
     def test_installs_from_pypi_when_not_editable(self, tmp_path: Path) -> None:
-        server_dir = (tmp_path / "first_level" / "second_level").absolute()
+        server_dir = (tmp_path / "nemo_gym" / "first_level" / "second_level").absolute()
         server_dir.mkdir(parents=True)
         (server_dir / "requirements.txt").write_text("pytest\n")
 
@@ -185,7 +185,7 @@ class TestCLISetupCommandSetupEnvCommand:
         assert expected_command == actual_command
 
     def test_installs_from_pypi_when_not_editable_pyproject(self, tmp_path: Path) -> None:
-        server_dir = (tmp_path / "first_level" / "second_level").absolute()
+        server_dir = (tmp_path / "nemo_gym" / "first_level" / "second_level").absolute()
         server_dir.mkdir(parents=True)
         (server_dir / "pyproject.toml").write_text("")
 

@@ -6,7 +6,7 @@ Use a **second language model** inside your resources server's `verify()` when r
 
 This tutorial is a beginner-first walkthrough. It gives you a minimal path that works first, then shows common production variants.
 
-The walkthrough uses [`over_refusal_detection`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/over_refusal_detection) as its running example. By the end, you will:
+The walkthrough uses [`over_refusal_detection`](https://github.com/NVIDIA-NeMo/Gym/tree/main/nemo_gym/resources_servers/over_refusal_detection) as its running example. By the end, you will:
 
 - Understand where the judge runs in NeMo Gym.
 - Wire judge model config in YAML.
@@ -60,7 +60,7 @@ flowchart LR
 
 **Typical in-repo pattern (Gym-internal):** `verify()` uses `self.server_client.post(..., url_path="/v1/responses", ...)` to call a **named model server** declared in the same Hydra config. The judge therefore goes through NeMo Gym’s **Responses API** surface, same as rollouts.
 
-**Alternative pattern (external):** some servers call an **OpenAI-compatible** `chat.completions` client pointed at URLs you supply (e.g. HPC or a separate cluster). [`proof_verification`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/proof_verification) routes to external judges when `JUDGE_SERVER_ARGS` is set, and otherwise uses the internal `/v1/responses` path.
+**Alternative pattern (external):** some servers call an **OpenAI-compatible** `chat.completions` client pointed at URLs you supply (e.g. HPC or a separate cluster). [`proof_verification`](https://github.com/NVIDIA-NeMo/Gym/tree/main/nemo_gym/resources_servers/proof_verification) routes to external judges when `JUDGE_SERVER_ARGS` is set, and otherwise uses the internal `/v1/responses` path.
 
 For how NeMo Gym sits next to GPUs and training frameworks, see {doc}`/infrastructure/deployment-topology`.
 
@@ -72,7 +72,7 @@ In production, the judge is typically a **dedicated Gym model server** — a sep
 
 ## Walkthrough: `over_refusal_detection`
 
-[`over_refusal_detection`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/over_refusal_detection) trains models to avoid over-refusing safe prompts (e.g., treating "How do I kill a Linux process?" as dangerous). The judge decides whether the policy model helpfully **complied** or inappropriately **refused**.
+[`over_refusal_detection`](https://github.com/NVIDIA-NeMo/Gym/tree/main/nemo_gym/resources_servers/over_refusal_detection) trains models to avoid over-refusing safe prompts (e.g., treating "How do I kill a Linux process?" as dangerous). The judge decides whether the policy model helpfully **complied** or inappropriately **refused**.
 
 This walkthrough uses **OpenAI `gpt-4o-mini`** as both the policy and judge model — no GPUs required. It has two parts: first you'll read through how the config and code work, then you'll run it.
 
@@ -93,7 +93,7 @@ Since we're reusing the policy model as the judge, no extra endpoint fields are 
 
 #### YAML config: declaring the judge
 
-The resources server config points the judge at the policy model — `judge_model_server.name: policy_model`. Below is a simplified view of `resources_servers/over_refusal_detection/configs/over_refusal_detection.yaml` (the full judge prompt is truncated — see the full file for the complete template including worked examples).
+The resources server config points the judge at the policy model — `judge_model_server.name: policy_model`. Below is a simplified view of `nemo_gym/resources_servers/over_refusal_detection/configs/over_refusal_detection.yaml` (the full judge prompt is truncated — see the full file for the complete template including worked examples).
 
 :::{important}
 The config file ships with a `judge_model` block that starts a dedicated judge server. In production, you can use a separate judge by setting `judge_model_server.name: judge_model` and pointing the `judge_base_url` / `judge_api_key` / `judge_model_name` variables at a different endpoint. This lets you use a different model, provider, or quota for the judge.
@@ -203,7 +203,7 @@ If you are building your own LLM-judge server, you will write similar code — t
 Start the servers:
 
 ```bash
-ng_run "+config_paths=[resources_servers/over_refusal_detection/configs/over_refusal_detection.yaml,responses_api_models/openai_model/configs/openai_model.yaml]"
+ng_run "+config_paths=[nemo_gym/resources_servers/over_refusal_detection/configs/over_refusal_detection.yaml,nemo_gym/responses_api_models/openai_model/configs/openai_model.yaml]"
 ```
 
 In another terminal, collect rollouts against the 5-entry example dataset to confirm the judge call and reward parsing work end-to-end:
@@ -211,7 +211,7 @@ In another terminal, collect rollouts against the 5-entry example dataset to con
 ```bash
 ng_collect_rollouts \
   +agent_name=over_refusal_detection_simple_agent \
-  +input_jsonl_fpath=resources_servers/over_refusal_detection/data/example.jsonl \
+  +input_jsonl_fpath=nemo_gym/resources_servers/over_refusal_detection/data/example.jsonl \
   +output_jsonl_fpath=/tmp/over_refusal_smoke_test.jsonl \
   +num_repeats=1 \
   "+responses_create_params={max_output_tokens: 1024, temperature: 1.0}"
@@ -241,7 +241,7 @@ cat /tmp/over_refusal_smoke_test.jsonl | jq .
 | Exact match, MCQ, executable tests, known tool traces | **Deterministic verifier** | Faster, cheaper, and more stable at scale |
 | Rubric-based quality, semantic equivalence, nuanced safety/style criteria | **LLM judge** | Easier to express with instructions than writing a full checker |
 
-Tradeoffs of LLM judges: extra latency and cost, non-determinism (unless you tune/constrain generation and parsing), and possible **positional bias** (judge favors text in a fixed slot). Some servers mitigate bias with a second pass that **swaps** gold vs. prediction (see [`equivalence_llm_judge`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/equivalence_llm_judge)).
+Tradeoffs of LLM judges: extra latency and cost, non-determinism (unless you tune/constrain generation and parsing), and possible **positional bias** (judge favors text in a fixed slot). Some servers mitigate bias with a second pass that **swaps** gold vs. prediction (see [`equivalence_llm_judge`](https://github.com/NVIDIA-NeMo/Gym/tree/main/nemo_gym/resources_servers/equivalence_llm_judge)).
 
 ---
 
@@ -267,9 +267,9 @@ Most LLM-judge servers expose fields along these lines (exact names vary by serv
 | Prompting | Inline `judge_prompt_template` / `judge_system_message`, or paths like `judge_prompt_template_fpath` |
 | Load control | Fields such as `judge_endpoint_max_concurrency` where implemented |
 
-**Same server as policy:** set `name:` to the policy model’s key (e.g. `policy_model`). **Dedicated judge:** add a second `responses_api_models` block in the merged config (e.g. `judge_model`) and set `judge_model_server.name: judge_model`. [`multichallenge`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/multichallenge) documents this split in its YAML comments.
+**Same server as policy:** set `name:` to the policy model’s key (e.g. `policy_model`). **Dedicated judge:** add a second `responses_api_models` block in the merged config (e.g. `judge_model`) and set `judge_model_server.name: judge_model`. [`multichallenge`](https://github.com/NVIDIA-NeMo/Gym/tree/main/nemo_gym/resources_servers/multichallenge) documents this split in its YAML comments.
 
-The `over_refusal_detection` config shown in the walkthrough above is a complete, working example. Here is a different server — [`equivalence_llm_judge`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/equivalence_llm_judge) — that uses a file-based prompt template and different verdict labels (`[[A=B]]` / `[[A!=B]]` instead of `[[COMPLIED]]` / `[[REFUSED]]`):
+The `over_refusal_detection` config shown in the walkthrough above is a complete, working example. Here is a different server — [`equivalence_llm_judge`](https://github.com/NVIDIA-NeMo/Gym/tree/main/nemo_gym/resources_servers/equivalence_llm_judge) — that uses a file-based prompt template and different verdict labels (`[[A=B]]` / `[[A!=B]]` instead of `[[COMPLIED]]` / `[[REFUSED]]`):
 
 ```yaml
 equivalence_llm_judge:
@@ -328,7 +328,7 @@ async def verify(self, body):
 
 The `_request_judge` helper handles HTTP errors and JSON parsing gracefully — on failure it returns `(None, error_message)` instead of raising, so `verify()` can map that to `reward_if_unclear` rather than crashing the server.
 
-Other servers apply the same pattern with domain-specific variations. For example, [`multichallenge`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/multichallenge) runs one judge call **per rubric item** via `asyncio.gather`, and [`equivalence_llm_judge`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/equivalence_llm_judge) adds an optional **swap pass** to detect positional bias.
+Other servers apply the same pattern with domain-specific variations. For example, [`multichallenge`](https://github.com/NVIDIA-NeMo/Gym/tree/main/nemo_gym/resources_servers/multichallenge) runs one judge call **per rubric item** via `asyncio.gather`, and [`equivalence_llm_judge`](https://github.com/NVIDIA-NeMo/Gym/tree/main/nemo_gym/resources_servers/equivalence_llm_judge) adds an optional **swap pass** to detect positional bias.
 
 ---
 

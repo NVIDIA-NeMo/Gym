@@ -226,8 +226,8 @@ The cost for running rollouts using the OpenAI API can be calculated using the f
 
 ```bash
 # Define which servers to start
-config_paths="resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml,\
-responses_api_models/openai_model/configs/openai_model.yaml"
+config_paths="nemo_gym/resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml,\
+nemo_gym/responses_api_models/openai_model/configs/openai_model.yaml"
 
 # Start all servers
 ng_run "+config_paths=[${config_paths}]"
@@ -290,7 +290,7 @@ cd /path/to/Gym
 source .venv/bin/activate
 
 # Test the agent
-python responses_api_agents/simple_agent/client.py
+python nemo_gym/responses_api_agents/simple_agent/client.py
 ```
 
 **✅ Success Check**: Verify that you can see JSON output showing:
@@ -400,9 +400,9 @@ Gym/
 ├── env.yaml                    # Your API credentials (git-ignored)
 ├── .venv/                      # Virtual environment (git-ignored)
 ├── nemo_gym/                   # Core library code
-├── resources_servers/          # Tools and environments
-├── responses_api_models/       # Model integrations  
-├── responses_api_agents/       # Agent implementations
+├── nemo_gym/resources_servers/          # Tools and environments
+├── nemo_gym/responses_api_models/       # Model integrations  
+├── nemo_gym/responses_api_agents/       # Agent implementations
 └── docs/                       # Documentation files
 ```
 

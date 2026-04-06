@@ -174,8 +174,8 @@ echo "hf_token: {your HF token}" >> env.yaml
 Prepare the data:
 
 ```bash
-config_paths="responses_api_models/vllm_model/configs/vllm_model_for_training.yaml,\
-resources_servers/workplace_assistant/configs/workplace_assistant.yaml"
+config_paths="nemo_gym/responses_api_models/vllm_model/configs/vllm_model_for_training.yaml,\
+nemo_gym/resources_servers/workplace_assistant/configs/workplace_assistant.yaml"
 
 ng_prepare_data "+config_paths=[${config_paths}]" \
     +output_dirpath=data/workplace_assistant \
