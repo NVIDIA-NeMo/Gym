@@ -119,14 +119,6 @@ class ServerInfo:
     def types(self) -> list[str]:  # pragma: no cover
         return self.config_metadata.types
 
-    def get_description_for_example_table(self) -> str:  # pragma: no cover
-        if self.config_metadata.description:
-            return self.config_metadata.description
-        elif self.config_metadata.domain:
-            return f"{self.config_metadata.domain.title()} example"
-        else:
-            return "Example resources server"
-
     def get_domain_or_empty(self) -> str:  # pragma: no cover
         return self.config_metadata.domain or ""
 
@@ -242,13 +234,15 @@ def extract_config_metadata(yaml_path: Path) -> ConfigMetadata:  # pragma: no co
     return ConfigMetadata.from_yaml_data(resource_data, agent_data)
 
 
-def get_example_and_training_server_info() -> tuple[list[ServerInfo], list[ServerInfo]]:  # pragma: no cover
-    """Categorize servers into example-only and training-ready with metadata."""
-    example_only_servers = []
+def get_training_server_info() -> list[ServerInfo]:  # pragma: no cover
+    """Collect training-ready server metadata (skips example_* servers)."""
     training_servers = []
 
     for subdir in TARGET_FOLDER.iterdir():
         if not subdir.is_dir():
+            continue
+
+        if subdir.name.startswith("example_"):
             continue
 
         configs_folder = subdir / "configs"
@@ -265,56 +259,23 @@ def get_example_and_training_server_info() -> tuple[list[ServerInfo], list[Serve
                 continue
 
             server_name = subdir.name
-            is_example_only = server_name.startswith("example_")
-
-            display_name = (
-                (server_name[len("example_") :] if is_example_only else server_name).replace("_", " ").title()
-            )
-
+            display_name = server_name.replace("_", " ").title()
             config_path = f"{TARGET_FOLDER.name}/{server_name}/configs/{yaml_file.name}"
             readme_path = f"{TARGET_FOLDER.name}/{server_name}/README.md"
 
-            server_info = ServerInfo(
-                name=server_name,
-                display_name=display_name,
-                config_metadata=yaml_data,
-                config_path=config_path,
-                config_filename=yaml_file.name,
-                readme_path=readme_path,
-                yaml_file=yaml_file,
+            training_servers.append(
+                ServerInfo(
+                    name=server_name,
+                    display_name=display_name,
+                    config_metadata=yaml_data,
+                    config_path=config_path,
+                    config_filename=yaml_file.name,
+                    readme_path=readme_path,
+                    yaml_file=yaml_file,
+                )
             )
 
-            if is_example_only:
-                example_only_servers.append(server_info)
-            else:
-                training_servers.append(server_info)
-
-    return example_only_servers, training_servers
-
-
-def generate_example_only_table(servers: list[ServerInfo]) -> str:  # pragma: no cover
-    """Generate table for example-only resources servers."""
-    col_names = ["Name", "Demonstrates", "Config", "README"]
-
-    if not servers:
-        return handle_empty_table(col_names)
-
-    rows = []
-
-    for server in servers:
-        rows.append(
-            [
-                server.display_name,
-                server.get_description_for_example_table(),
-                server.get_config_link(),
-                server.get_readme_link(),
-            ]
-        )
-
-    rows.sort(key=lambda r: tuple(normalize_str(cell) for cell in r))
-
-    table = [col_names, ["-" for _ in col_names]] + rows
-    return format_table(table)
+    return training_servers
 
 
 def generate_training_table(servers: list[ServerInfo]) -> str:  # pragma: no cover
@@ -416,23 +377,8 @@ def format_table(table: list[list[str]]) -> str:  # pragma: no cover
 def main():  # pragma: no cover
     text = README_PATH.read_text()
 
-    example_servers, training_servers = get_example_and_training_server_info()
-
-    example_table_str = generate_example_only_table(example_servers)
+    training_servers = get_training_server_info()
     training_table_str = generate_training_table(training_servers)
-
-    example_pattern = re.compile(
-        r"(<!-- START_EXAMPLE_ONLY_SERVERS_TABLE -->)(.*?)(<!-- END_EXAMPLE_ONLY_SERVERS_TABLE -->)",
-        flags=re.DOTALL,
-    )
-
-    if not example_pattern.search(text):
-        sys.stderr.write(
-            "Error: README.md does not contain <!-- START_EXAMPLE_ONLY_SERVERS_TABLE --> and <!-- END_EXAMPLE_ONLY_SERVERS_TABLE --> markers.\n"
-        )
-        sys.exit(1)
-
-    text = example_pattern.sub(lambda m: f"{m.group(1)}\n{example_table_str}\n{m.group(3)}", text)
 
     training_pattern = re.compile(
         r"(<!-- START_TRAINING_SERVERS_TABLE -->)(.*?)(<!-- END_TRAINING_SERVERS_TABLE -->)",
