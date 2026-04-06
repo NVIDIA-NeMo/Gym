@@ -34,6 +34,7 @@ import re
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
+from pydantic import BaseModel
 
 
 logger = logging.getLogger(__name__)
@@ -73,7 +74,18 @@ class GenRMOutputParseError(ValueError):
 # =============================================================================
 
 
-def get_prompt_key_from_input(input_messages: List[Dict], principle: Optional[str] = None) -> str:
+def _to_jsonable_data(value: Any) -> Any:
+    """Recursively convert request payloads into JSON-serializable data."""
+    if isinstance(value, BaseModel):
+        return value.model_dump(mode="json")
+    if isinstance(value, dict):
+        return {str(k): _to_jsonable_data(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_to_jsonable_data(item) for item in value]
+    return value
+
+
+def get_prompt_key_from_input(input_messages: List[Any], principle: Optional[str] = None) -> str:
     """Stable key for grouping rollouts by prompt and principle.
 
     Used by cohort-based verify to group N rollouts per prompt.
@@ -85,7 +97,7 @@ def get_prompt_key_from_input(input_messages: List[Dict], principle: Optional[st
     Returns:
         A stable string key for the prompt + principle combination
     """
-    key_data = {"input": input_messages, "principle": principle}
+    key_data = {"input": _to_jsonable_data(input_messages), "principle": principle}
     return hashlib.sha256(json.dumps(key_data, sort_keys=True).encode()).hexdigest()
 
 

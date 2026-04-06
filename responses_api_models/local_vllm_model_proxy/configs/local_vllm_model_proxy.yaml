@@ -1,0 +1,12 @@
+policy_model_proxy:
+  responses_api_models:
+    local_vllm_model_proxy:
+      entrypoint: app.py
+
+      # This class accepts normal VLLMModel config parameters
+      return_token_id_information: false
+      uses_reasoning_parser: true
+
+      model_server:
+        type: responses_api_models
+        name: ???

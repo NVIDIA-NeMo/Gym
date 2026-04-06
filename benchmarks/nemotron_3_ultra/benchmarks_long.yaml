@@ -2,5 +2,5 @@
 
 # This is the list of benchmarks that this config file contains.
 config_paths:
-  - benchmarks/nemotron_3_ultra/config_short.yaml
+  - benchmarks/nemotron_3_ultra/benchmarks_short.yaml
   - benchmarks/browsecomp/config.yaml

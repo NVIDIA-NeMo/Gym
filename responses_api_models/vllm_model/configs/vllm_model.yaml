@@ -8,3 +8,5 @@ policy_model:
       return_token_id_information: false
       uses_reasoning_parser: true
       sequential_reasoning_allowed: true
+      chat_template_kwargs: null
+      extra_body: null
