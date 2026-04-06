@@ -3236,3 +3236,62 @@ class TestVLLMConverter:
         assert captured_kwargs["guided_json"] == '{"type": "object"}'
         assert captured_kwargs["min_tokens"] == 20
         assert captured_kwargs["new_param"] == "value"
+
+    def test_top_logprobs_null_stripped_from_request(self, monkeypatch: MonkeyPatch):
+        """top_logprobs=null in the request body (common in rollout JSONL files) must be
+        stripped before forwarding to vLLM, otherwise vLLM returns logprobs=None and
+        chat_completions crashes when indexing into it."""
+        config = VLLMModelConfig(
+            host="0.0.0.0",
+            port=8081,
+            base_url="http://api.openai.com/v1",
+            api_key="dummy_key",  # pragma: allowlist secret
+            model="dummy_model",
+            entrypoint="",
+            name="",
+            return_token_id_information=False,
+            uses_reasoning_parser=False,
+        )
+        server = VLLMModel(config=config, server_client=MagicMock(spec=ServerClient))
+        app = server.setup_webserver()
+
+        mock_chat_completion = NeMoGymChatCompletion(
+            id="chtcmpl",
+            object="chat.completion",
+            created=FIXED_TIME,
+            model="dummy_model",
+            choices=[
+                NeMoGymChoice(
+                    index=0,
+                    finish_reason="stop",
+                    message=NeMoGymChatCompletionMessage(
+                        role="assistant",
+                        content="response",
+                        tool_calls=[],
+                    ),
+                )
+            ],
+        )
+
+        captured_kwargs = {}
+
+        async def mock_create_chat_completion(**kwargs):
+            captured_kwargs.update(kwargs)
+            return mock_chat_completion.model_dump()
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=mock_create_chat_completion)
+        server._clients = [mock_client]
+
+        client = TestClient(app)
+
+        # Simulate a request from rollout JSONL that includes explicit top_logprobs: null
+        response = client.post(
+            "/v1/responses",
+            json={
+                "input": [{"type": "message", "role": "user", "content": "hello"}],
+                "top_logprobs": None,
+            },
+        )
+        assert response.status_code == 200
+        assert "top_logprobs" not in captured_kwargs

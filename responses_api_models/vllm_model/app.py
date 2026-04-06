@@ -297,6 +297,12 @@ class VLLMModel(SimpleResponsesAPIModel):
                 else:
                     raise NotImplementedError
 
+        # vLLM treats explicit top_logprobs=null differently from omitting it:
+        # logprobs=True with top_logprobs=null causes vLLM to not return logprobs content.
+        # This null value commonly appears in rollout JSONL files serialized by ng_collect_rollouts.
+        if "top_logprobs" in body_dict and body_dict["top_logprobs"] is None:
+            del body_dict["top_logprobs"]
+
         if extra_body:
             body_dict = extra_body | body_dict
 
