@@ -55,7 +55,11 @@ class TestApp:
         )
 
         json_mock = MagicMock()
-        json_mock.json.return_value = {"base_url": ["abcd", "defg"], "api_key": "my api key", "model": "my model"}
+        json_mock.json.return_value = {
+            "base_url": ["abcd", "defg"],
+            "api_key": "my api key",  # pragma: allowlist secret
+            "model": "my model",
+        }
         requests_mock = MagicMock()
         requests_mock.get.return_value = json_mock
         monkeypatch.setattr(responses_api_models.local_vllm_model_proxy.app, "requests", requests_mock)
