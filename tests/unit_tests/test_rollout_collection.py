@@ -160,6 +160,43 @@ class TestRolloutCollection:
             },
         ]
 
+    def test_preprocess_rows_relative_path_resolves_from_cwd(self, tmp_path: Path, monkeypatch) -> None:
+        fpath = tmp_path / "input.jsonl"
+        samples = [json.dumps({"responses_create_params": {"input": []}, "x": i}) for i in range(3)]
+        fpath.write_text("\n".join(samples) + "\n")
+
+        monkeypatch.chdir(tmp_path)
+
+        config = RolloutCollectionConfig(
+            agent_name="my_agent",
+            input_jsonl_fpath="input.jsonl",
+            output_jsonl_fpath="out.jsonl",
+            limit=None,
+        )
+        rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+        assert len(rows) == 3
+
+    def test_preprocess_rows_relative_path_falls_back_to_parent_dir(self, tmp_path: Path, monkeypatch) -> None:
+        from nemo_gym import PARENT_DIR
+
+        fpath = PARENT_DIR / "input_test_relative.jsonl"
+        samples = [json.dumps({"responses_create_params": {"input": []}, "x": i}) for i in range(2)]
+        fpath.write_text("\n".join(samples) + "\n")
+
+        monkeypatch.chdir(tmp_path)  # cwd has no such file
+
+        try:
+            config = RolloutCollectionConfig(
+                agent_name="my_agent",
+                input_jsonl_fpath="input_test_relative.jsonl",
+                output_jsonl_fpath="out.jsonl",
+                limit=None,
+            )
+            rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+            assert len(rows) == 2
+        finally:
+            fpath.unlink()
+
     async def test_run_from_config_sanity(self, tmp_path: Path) -> None:
         input_jsonl_fpath = tmp_path / "input.jsonl"
         samples = [

@@ -59,7 +59,7 @@ class TestGlobalConfig:
             "skip_venv_if_present": False,
             "dry_run": False,
             "uv_cache_dir": str(CACHE_DIR / "uv"),
-            "uv_venv_dir": str(PARENT_DIR / "nemo_gym"),
+            "uv_venv_dir": str(PARENT_DIR),
         }
 
     def test_get_global_config_dict_sanity(self, monkeypatch: MonkeyPatch) -> None:
