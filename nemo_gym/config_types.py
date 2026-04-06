@@ -428,6 +428,13 @@ class BaseRunServerConfig(BaseServerConfig):
 
 class BaseRunServerInstanceConfig(BaseRunServerConfig):
     name: str  # This name is unique at runtime.
+    debug: bool = Field(
+        default=False,
+        description=(
+            "If True, uvicorn log_level=debug. Before the app is built, Python logging is set to DEBUG "
+            "(otherwise INFO) so messages during setup_webserver()—e.g. cube eager benchmark init—are not dropped."
+        ),
+    )
 
 
 ########################################

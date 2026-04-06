@@ -1,0 +1,9 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Per-server venv for ng_run: uv pip install -r requirements.txt (see nemo_gym/cli_setup_command.py).
+
+-e nemo-gym[dev] @ ../../
+osworld-cube @ git+https://github.com/The-AI-Alliance/cube-harness.git#subdirectory=cubes/osworld-cube
+# cube_computer_tool imports PIL; keep explicit so resolution always includes it.
+pillow>=9.0

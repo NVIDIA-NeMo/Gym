@@ -61,8 +61,13 @@ from nemo_gym.server_utils import (
     ServerInstanceDisplayConfig,
     ServerStatus,
     initialize_ray,
+    shutdown_ray_in_this_process,
 )
 from nemo_gym.train_data_utils import TrainDataProcessor
+
+
+# Grace period for child servers to exit on SIGINT (Ray + uvicorn teardown, atexit hooks).
+_SERVER_SIGINT_GRACE_SEC = 15
 
 
 class RunConfig(BaseNeMoGymCLIConfig):
@@ -115,13 +120,14 @@ class TestConfig(RunConfig):
 
 
 class RunHelper:  # pragma: no cover
-    _head_server: uvicorn.Server
-    _head_server_thread: Thread
-    _head_server_instance: HeadServer
-
-    _processes: Dict[str, Popen]
-    _server_instance_display_configs: List[ServerInstanceDisplayConfig]
-    _server_client: ServerClient
+    def __init__(self) -> None:
+        self._shutdown_done: bool = False
+        self._processes: Dict[str, Popen] = {}
+        self._server_instance_display_configs: List[ServerInstanceDisplayConfig] = []
+        self._head_server: Optional[uvicorn.Server] = None
+        self._head_server_thread: Optional[Thread] = None
+        self._head_server_instance: Optional[HeadServer] = None
+        self._server_client: Optional[ServerClient] = None
 
     def start(self, global_config_dict_parser_config: GlobalConfigDictParserConfig) -> None:
         global_config_dict = get_global_config_dict(global_config_dict_parser_config=global_config_dict_parser_config)
@@ -138,8 +144,8 @@ class RunHelper:  # pragma: no cover
 
         top_level_paths = [k for k in global_config_dict.keys() if k not in NEMO_GYM_RESERVED_TOP_LEVEL_KEYS]
 
-        self._processes: Dict[str, Popen] = dict()
-        self._server_instance_display_configs: List[ServerInstanceDisplayConfig] = []
+        self._processes = {}
+        self._server_instance_display_configs = []
 
         start_time = time()
 
@@ -248,6 +254,7 @@ class RunHelper:  # pragma: no cover
         print(f"{'#' * 100}\n")
 
     def poll(self) -> None:
+        assert self._head_server_thread is not None
         if not self._head_server_thread.is_alive():
             raise RuntimeError("Head server finished unexpectedly!")
 
@@ -314,38 +321,49 @@ Process `{process_name}` stderr:
             sleep(sleep_interval)
 
     def shutdown(self) -> None:
+        if self._shutdown_done:
+            return
+        self._shutdown_done = True
+
         print("Sending interrupt signals to servers...")
         for process in self._processes.values():
-            process.send_signal(SIGINT)
+            if process.poll() is None:
+                process.send_signal(SIGINT)
 
-        print("Waiting for processes to finish...")
+        print(f"Waiting for processes to finish (up to {_SERVER_SIGINT_GRACE_SEC}s after SIGINT)...")
         killed_process_names: List[str] = []
         for process_name, process in self._processes.items():
             try:
-                process.wait(timeout=1)
+                process.wait(timeout=_SERVER_SIGINT_GRACE_SEC)
             except TimeoutExpired:
                 process.kill()
                 killed_process_names.append(process_name)
 
         if killed_process_names:
             print(
-                f"""Some processes ({", ".join(killed_process_names)}) didn't shutdown within the 5s timeout, killing instead. You may see messages like:
+                f"""Some processes ({", ".join(killed_process_names)}) didn't shutdown within the {_SERVER_SIGINT_GRACE_SEC}s timeout after SIGINT; sent SIGKILL. You may still see delayed Ray messages like:
 ```bash
 rpc_client.h:203: Failed to connect to GCS within 60 seconds. GCS may have been killed. It's either GCS is terminated by `ray stop` or is killed unexpectedly. If it is killed unexpectedly, see the log file gcs_server.out. https://docs.ray.io/en/master/ray-observability/user-guides/configure-logging.html#logging-directory-structure. The program will terminate.
 ```
 """
             )
-        self._processes = dict()
+        self._processes = {}
 
-        self._head_server.should_exit = True
-        self._head_server_thread.join()
+        if self._head_server is not None and self._head_server_thread is not None:
+            self._head_server.should_exit = True
+            self._head_server_thread.join()
 
         self._head_server = None
         self._head_server_thread = None
+        self._head_server_instance = None
+        self._server_client = None
+
+        shutdown_ray_in_this_process()
 
         print("NeMo Gym finished!")
 
     def run_forever(self) -> None:
+        assert self._server_client is not None
         if self._server_client.global_config_dict[DRY_RUN_KEY_NAME]:
             self.shutdown()
             return
@@ -404,8 +422,11 @@ def run(
     BaseNeMoGymCLIConfig.model_validate(global_config_dict)
 
     rh = RunHelper()
-    rh.start(global_config_dict_parser_config)
-    rh.run_forever()
+    try:
+        rh.start(global_config_dict_parser_config)
+        rh.run_forever()
+    finally:
+        rh.shutdown()
 
 
 def e2e_rollout_collection():  # pragma: no cover

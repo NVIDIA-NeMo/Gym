@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Per-server venv for ``ng_run``: ``uv pip install -e .`` from this directory (see nemo_gym/cli_setup_command.py).
+
+[project]
+name = "nemo-gym-cube-agent"
+version = "0.0.0"
+description = "NeMo-Gym CUBE rollout agent dependencies."
+requires-python = ">=3.12"
+dependencies = [
+    "nemo-gym[dev]",
+    "tenacity",
+]
+
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["cube_agent_ng*"]
+
+[tool.uv.sources]
+nemo-gym = { path = "../..", editable = true }

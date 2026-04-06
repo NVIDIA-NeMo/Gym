@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>CUBE OSWorld — architecture (resources server &amp; cube_agent)</title>
+  <script type="module">
+    import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+
+    function isDarkMode() {
+      return window.matchMedia("(prefers-color-scheme: dark)").matches;
+    }
+
+    /** High-contrast dark palette so arrows, edges, and labels stay readable on ~#1c1f26 backgrounds. */
+    const darkThemeVariables = {
+      background: "#1c1f26",
+      mainBkg: "#2d333b",
+      secondBkg: "#252b33",
+      tertiaryColor: "#252b33",
+      primaryColor: "#3d444d",
+      primaryTextColor: "#f0f3f6",
+      secondaryTextColor: "#f0f3f6",
+      tertiaryTextColor: "#f0f3f6",
+      lineColor: "#b7c0ca",
+      textColor: "#f0f3f6",
+      border1: "#8b949e",
+      border2: "#6e7681",
+      /* Sequence diagram */
+      actorBkg: "#2d333b",
+      actorBorder: "#8b949e",
+      actorTextColor: "#f0f3f6",
+      actorLineColor: "#b7c0ca",
+      signalColor: "#79c0ff",
+      signalTextColor: "#f0f3f6",
+      labelBoxBkgColor: "#252b33",
+      labelBoxBorderColor: "#8b949e",
+      labelTextColor: "#f0f3f6",
+      loopTextColor: "#f0f3f6",
+      noteBkgColor: "#252b33",
+      noteTextColor: "#f0f3f6",
+      noteBorderColor: "#8b949e",
+      sequenceNumberColor: "#f0f3f6",
+      /* Flowchart */
+      clusterBkg: "#252b33",
+      clusterBorder: "#8b949e",
+      defaultLinkColor: "#79c0ff",
+      titleColor: "#f0f3f6",
+      edgeLabelBackground: "#2d333b",
+      nodeBorder: "#8b949e",
+    };
+
+    const darkThemeCSS = `
+      .edgePath .path { stroke: #79c0ff !important; stroke-width: 2px !important; }
+      .flowchart-link { stroke: #79c0ff !important; }
+      .marker { fill: #79c0ff !important; stroke: #79c0ff !important; }
+      .edgeLabel, .edgeLabel div { color: #f0f3f6 !important; }
+      .label text, .nodeLabel, .labelText { fill: #f0f3f6 !important; }
+      .actor-line { stroke: #b7c0ca !important; }
+      path.messageLine0, path.messageLine1 { stroke: #79c0ff !important; }
+      #arrowhead path { fill: #79c0ff !important; stroke: #79c0ff !important; }
+      text.messageText, text.actor > tspan { fill: #f0f3f6 !important; }
+    `;
+
+    mermaid.initialize({
+      startOnLoad: true,
+      securityLevel: "loose",
+      flowchart: { curve: "basis" },
+      theme: isDarkMode() ? "dark" : "neutral",
+      ...(isDarkMode()
+        ? { themeVariables: darkThemeVariables, themeCSS: darkThemeCSS }
+        : {}),
+    });
+
+    window
+      .matchMedia("(prefers-color-scheme: dark)")
+      .addEventListener("change", () => window.location.reload());
+  </script>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f6f7f9;
+      --card: #fff;
+      --text: #1a1d23;
+      --muted: #5c6570;
+      --border: #d8dde4;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #121418;
+        --card: #1c1f26;
+        --text: #e8eaef;
+        --muted: #9aa3ad;
+        --border: #2f3540;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: "Segoe UI", system-ui, sans-serif;
+      line-height: 1.55;
+      max-width: 960px;
+      margin: 0 auto;
+      padding: 1.5rem 1.25rem 3rem;
+      background: var(--bg);
+      color: var(--text);
+    }
+    h1 { font-size: 1.35rem; font-weight: 650; margin: 0 0 0.5rem; }
+    h2 {
+      font-size: 1.05rem;
+      font-weight: 650;
+      margin: 2rem 0 0.75rem;
+      padding-bottom: 0.35rem;
+      border-bottom: 1px solid var(--border);
+    }
+    p.lead { color: var(--muted); margin: 0 0 1.25rem; font-size: 0.95rem; }
+    p.note {
+      font-size: 0.88rem;
+      color: var(--muted);
+      margin: 0.75rem 0 0;
+      padding: 0.65rem 0.85rem;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+    }
+    .diagram {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1rem 0.5rem 0.25rem;
+      margin: 0.75rem 0 0;
+      overflow-x: auto;
+    }
+    footer {
+      margin-top: 2.5rem;
+      font-size: 0.8rem;
+      color: var(--muted);
+    }
+    code { font-size: 0.9em; }
+  </style>
+</head>
+<body>
+  <nav style="font-size:0.9rem;margin-bottom:1rem"><a href="resources-server-cube-primitives.html">Cube resources server ↔ osworld-cube / CUBE primitives →</a></nav>
+  <h1>CUBE OSWorld — request flow</h1>
+  <p class="lead">
+    Two views of the same stack: how <strong>cube_agent</strong> orchestrates policy + environment during one rollout,
+    and what the <strong>cube resources server</strong> owns (process lifecycle, QEMU, HTTP surface).
+    Rollout collection talks to the <strong>head</strong> server, which forwards to child servers.
+  </p>
+
+  <h2>1. <code>cube_agent</code> point of view</h2>
+  <p class="lead" style="margin-bottom:0.5rem">
+    One <code>POST /run</code> (from the head, on behalf of <code>ng_collect_rollouts</code>) runs this loop.
+    The agent holds <code>env_id</code> and growing <code>responses_create_params</code> (multimodal context).
+  </p>
+  <div class="diagram">
+    <pre class="mermaid">
+sequenceDiagram
+  autonumber
+  participant RC
+  participant H
+  participant A
+  participant P
+  participant R
+  RC->>H: run row
+  H->>A: forward
+  A->>R: seed_session
+  R-->>A: env_id obs tools
+  loop turns
+    A->>P: policy call
+    P-->>A: model output
+    A->>R: step
+    R-->>A: obs reward done
+  end
+  A->>R: close
+  A->>R: verify
+  R-->>A: reward
+  A-->>H: response
+  H-->>RC: jsonl
+    </pre>
+  </div>
+  <p class="note">
+    <strong>Not shown:</strong> after a batch, the collector may call <code>POST /aggregate_metrics</code> on the agent with
+    stripped results (separate from a single <code>/run</code>).
+  </p>
+
+  <h2>2. Cube <strong>resources server</strong> responsibilities</h2>
+  <p class="lead" style="margin-bottom:0.5rem">
+    One FastAPI app per child process. <strong>eager_benchmark_init</strong> + optional <strong>VM warmup</strong> run
+    before uvicorn accepts traffic (when enabled in YAML).
+  </p>
+  <div class="diagram">
+    <pre class="mermaid">
+flowchart TB
+  ETC[eager load benchmark]
+  WU[optional VM warmup]
+  UP[uvicorn up]
+  MAP[env_id to Task]
+  RW[reward totals]
+
+  ETC --> WU
+  WU --> UP
+  UP --> SEED[seed_session]
+  UP --> STP[step]
+  UP --> CLS[close]
+  UP --> VFY[verify]
+
+  SEED --> MAP
+  STP --> MAP
+  STP --> RW
+  CLS --> MAP
+  VFY --> RW
+    </pre>
+  </div>
+  <p class="note">
+    Each <code>/seed_session</code> creates a <strong>new</strong> <code>OSWorldTask</code> and VM; warmup only pre-touches
+    cold paths at <code>ng_run</code> time. Concurrent rollouts mean multiple <code>env_id</code>s in
+    <code>env_id_to_task</code> until closed—bounded by host RAM/CPU, not a fixed pool in this codebase.
+  </p>
+
+  <footer>
+    NeMo-Gym · <code>resources_servers/cube/docs/architecture-flow.html</code> · Open in a browser (Mermaid loads from jsDelivr).
+  </footer>
+</body>
+</html>
