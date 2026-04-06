@@ -12,25 +12,27 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from typing import List, Tuple
+
 from nemo_gym.openai_utils import RESPONSES_TO_TRAIN, NeMoGymChoice, NeMoGymResponseOutputItem, TokenIDLogProbMixin
 from nemo_gym.server_utils import is_nemo_gym_fastapi_worker
 from responses_api_models.vllm_model.app import VLLMConverter, VLLMModel
 
 
 class MegatronTokenIDLogProbMixin(TokenIDLogProbMixin):
-    policy_epoch: list[list[tuple[int, int]]]
-    kv_cache_epoch: list[list[tuple[int, int]]]
-    num_evictions: list[int]
+    policy_epoch: List[List[Tuple[int, int]]]
+    kv_cache_epoch: List[List[Tuple[int, int]]]
+    num_evictions: List[int]
 
 
 MEGATRON_RESPONSES_TO_TRAIN = {
-    base: type(f"Megatron{train.__name__}", (base, MegatronTokenIDLogProbMixin), {})
+    base: type(f"Megatron{train.__name__}", (train, MegatronTokenIDLogProbMixin), {})
     for base, train in RESPONSES_TO_TRAIN.items()
 }
 
 
 class MegatronInferenceConverter(VLLMConverter):
-    def postprocess_chat_response(self, choice: NeMoGymChoice) -> list[NeMoGymResponseOutputItem]:
+    def postprocess_chat_response(self, choice: NeMoGymChoice) -> List[NeMoGymResponseOutputItem]:
         response_output = super().postprocess_chat_response(choice)
         raw_message = choice.message.model_dump()
         if not (self.return_token_id_information and "prompt_token_ids" in raw_message):
