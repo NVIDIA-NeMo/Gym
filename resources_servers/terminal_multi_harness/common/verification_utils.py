@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
-from collections import Counter
+from difflib import SequenceMatcher
 from enum import StrEnum
 from json import JSONDecodeError
 from typing import Annotated, Any, Literal, Optional, TypeAlias, Union
@@ -62,7 +62,7 @@ class StepRewardCategory(StrEnum):
 
 
 class ToolCallComparatorConfig(BaseModel):
-    word_count_similarity_threshold: float
+    string_similarity_threshold: float
     floating_point_comparison_threshold: float = 1e-6
     ignored_argument_keys_by_tool: dict[str, list[str]] = Field(default_factory=dict)
 
@@ -229,15 +229,4 @@ class ActionComparator(BaseModel):
         return False, StepRewardCategory.ARGUMENT_VALUE_DIFFERENT
 
     def compare_text(self, expected_text: str, actual_text: str) -> bool:
-        expected_word_counts = Counter(expected_text.strip().lower().split())
-        actual_word_counts = Counter(actual_text.strip().lower().split())
-        expected_word_total = expected_word_counts.total()
-        actual_word_total = actual_word_counts.total()
-
-        if expected_word_total < 2 or actual_word_total < 2:
-            return expected_text == actual_text
-
-        intersection_word_counts = expected_word_counts & actual_word_counts
-        word_count_similarity = intersection_word_counts.total() / (expected_word_total + actual_word_total)
-        return word_count_similarity >= self.config.word_count_similarity_threshold
-
+        return SequenceMatcher(None, expected_text, actual_text).ratio() >= self.config.string_similarity_threshold

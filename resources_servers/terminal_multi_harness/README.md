@@ -18,6 +18,7 @@ Unlike `terminus_judge`, this server does not assume the model response is assis
   - `function_call_batch`
 - current comparison behavior:
   - structured tool-call argument comparison
+  - Terminus-style string similarity using `SequenceMatcher(...).ratio()`
   - optional ignored argument keys for volatile tool arguments
   - ordered or unordered batch comparison
 

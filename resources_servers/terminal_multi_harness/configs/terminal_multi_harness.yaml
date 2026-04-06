@@ -4,7 +4,7 @@ terminal_multi_harness_resources_server:
       entrypoint: app.py
       domain: agent
       tool_call_comparator_config:
-        word_count_similarity_threshold: 0.1
+        string_similarity_threshold: 0.9
         ignored_argument_keys_by_tool:
           exec_command:
           - max_output_tokens

@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+from difflib import SequenceMatcher
 
 from pytest import fixture
 
@@ -30,7 +31,7 @@ class TestActionComparator:
     @fixture
     def action_comparator(self) -> ActionComparator:
         comparator_config = ToolCallComparatorConfig(
-            word_count_similarity_threshold=0.1,
+            string_similarity_threshold=0.9,
             ignored_argument_keys_by_tool={
                 "exec_command": ["yield_time_ms", "max_output_tokens"],
             },
@@ -40,13 +41,16 @@ class TestActionComparator:
     def test_compare_message(self, action_comparator: ActionComparator) -> None:
         assert action_comparator.compare_message(
             MessageAction(type="message", content="Birds are animals."),
-            MessageAction(type="message", content="The birds fly."),
+            MessageAction(type="message", content="Birds are animal."),
         ) == (True, StepRewardCategory.EXPECTED_CHAT_MESSAGE_FOUND)
 
         assert action_comparator.compare_message(
             MessageAction(type="message", content="hello"),
             MessageAction(type="message", content="goodbye"),
         ) == (False, StepRewardCategory.MESSAGE_CONTENT_DIFFERENT)
+
+        assert SequenceMatcher(None, "Birds are animals.", "Birds are animal.").ratio() >= 0.9
+        assert SequenceMatcher(None, "Birds are animals.", "The birds fly.").ratio() < 0.9
 
     def test_compare_tool_call(self, action_comparator: ActionComparator) -> None:
         expected_function_call = FunctionCallAction(
