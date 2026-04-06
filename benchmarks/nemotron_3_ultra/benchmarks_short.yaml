@@ -1,0 +1,7 @@
+# Please refer to benchmarks/nemotron_3_ultra/README.md
+
+# This is the list of benchmarks that this config file contains.
+config_paths:
+  - benchmarks/nemotron_3_ultra/benchmarks_no_external.yaml
+  - benchmarks/aalcr/config.yaml
+  - benchmarks/xstest/config.yaml

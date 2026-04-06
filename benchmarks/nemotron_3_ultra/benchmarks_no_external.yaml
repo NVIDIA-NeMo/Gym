@@ -1,45 +1,25 @@
 # Please refer to benchmarks/nemotron_3_ultra/README.md
+# This is a testing config that doesn't require additional Judge models (i.e. additional GPU resources or external endpoints) for running
 
 # This is the list of benchmarks that this config file contains.
 config_paths:
   - benchmarks/gpqa/config.yaml
   - benchmarks/livecodebench/v6_2408_2505/cascade.yaml
   - benchmarks/spider2_lite/config.yaml
-  - benchmarks/xstest/config.yaml
-  - benchmarks/aalcr/config.yaml
   - benchmarks/ruler/config_nemotron_3_256k.yaml
-
-# Set various resource limits. We assume this is run using at least 8 GPU nodes with 128 CPU cores on each node
-global_aiohttp_connector_limit_per_host: 16384
-
-# We bump up the number of workers since we need higher concurrency for this larger benchmark suite
-policy_model:
-  responses_api_models:
-    vllm_model:
-      num_workers: 4
-
-# Some benchmarks may require reasoning off mode
-policy_model_reasoning_off:
-  _copy: policy_model
-  responses_api_models:
-    vllm_model:
-      chat_template_kwargs:
-        enable_thinking: false
 
 # For Ruler benchmark, we evaluate Nemotron 3 Ultra with reasoning off.
 ruler_benchmark_simple_agent:
-  _inherit_from: ruler_simple_agent
   responses_api_agents:
     simple_agent:
       model_server:
-        type: responses_api_models
         name: policy_model_reasoning_off
 
 # There are ~1500 total rollouts to do for LCBv6 and each rollout we assume uses 1 CPU core
 livecodebench_v6_cascade_code_gen_resources_server:
   resources_servers:
     code_gen:
-      num_processes: 128
+      num_processes: 256
 
 # There are ~2100 total rollouts for Spider 2 lite and each rollout we assume uses 1 CPU core
 spider2_lite_benchmark_resources_server:
