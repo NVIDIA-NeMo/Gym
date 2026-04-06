@@ -17,10 +17,9 @@ from resources_servers.ifbench.setup_ifbench import ensure_ifbench
 
 
 def pytest_configure(config):
-    """Ensure IFBench is installed before test collection.
+    """Clone and set up IFBench before pytest collects any test modules.
 
-    pytest.mark.skipif markers evaluate at import time, before fixtures run.
-    Calling ensure_ifbench() here guarantees that instructions_registry is on
-    sys.path before any test module is imported.
+    This runs early enough that instructions_registry is on sys.path by the
+    time any test file is imported.
     """
     ensure_ifbench()
