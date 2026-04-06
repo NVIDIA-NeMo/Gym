@@ -77,13 +77,17 @@ from tqdm.auto import tqdm
 
 
 if __name__ == "__main__":
-    with open("nemo_gym/resources_servers/code_gen/data/gpt-4o-2024-05-13_Scenario.codegeneration_10_0.2_eval_all.json") as f:
+    with open(
+        "nemo_gym/resources_servers/code_gen/data/gpt-4o-2024-05-13_Scenario.codegeneration_10_0.2_eval_all.json"
+    ) as f:
         eval_outputs = json.load(f)
 
     with open("nemo_gym/resources_servers/code_gen/data/livecodebench_prompts.jsonl") as f:
         eval_inputs = list(map(json.loads, f))
 
-    with open("nemo_gym/resources_servers/code_gen/data/livecodebench_v5_2024-07-01_2025-02-01_validation.jsonl", "w") as f:
+    with open(
+        "nemo_gym/resources_servers/code_gen/data/livecodebench_v5_2024-07-01_2025-02-01_validation.jsonl", "w"
+    ) as f:
         for eval_input, eval_output in tqdm(zip(eval_inputs, eval_outputs), desc="Examples"):
             assert eval_input["verifier_metadata"]["problem_id"] == eval_output["question_id"]
 

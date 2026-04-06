@@ -14,11 +14,11 @@
 # limitations under the License.
 from unittest.mock import MagicMock
 
-from nemo_gym.server_utils import ServerClient
 from nemo_gym.resources_servers.mini_swe_agent.app import (
     MiniSweResourceResourcesServer,
     MiniSweResourceResourcesServerConfig,
 )
+from nemo_gym.server_utils import ServerClient
 
 
 class TestApp:

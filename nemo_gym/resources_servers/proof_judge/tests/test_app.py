@@ -4,11 +4,11 @@
 from unittest.mock import MagicMock
 
 from nemo_gym.config_types import ModelServerRef
-from nemo_gym.server_utils import ServerClient
 from nemo_gym.resources_servers.proof_judge.app import (
     ProofWithJudgeResourcesServer,
     ProofWithJudgeResourcesServerConfig,
 )
+from nemo_gym.server_utils import ServerClient
 
 
 class TestApp:

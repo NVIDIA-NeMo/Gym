@@ -14,13 +14,13 @@
 # limitations under the License.
 from unittest.mock import MagicMock
 
-from nemo_gym.server_utils import ServerClient
 from nemo_gym.responses_api_agents.proof_refinement_agent.app import (
     ModelServerRef,
     ProofRefinementAgent,
     ProofRefinementAgentConfig,
     ResourcesServerRef,
 )
+from nemo_gym.server_utils import ServerClient
 
 
 class TestApp:

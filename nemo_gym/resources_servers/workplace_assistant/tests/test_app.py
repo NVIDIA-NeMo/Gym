@@ -23,7 +23,6 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from nemo_gym.resources_servers.workplace_assistant.app import (
     WorkbenchRequest,
     WorkbenchResourcesServer,
@@ -31,6 +30,7 @@ from nemo_gym.resources_servers.workplace_assistant.app import (
     WorkbenchResponse,
     WorkbenchVerifyRequest,
 )
+from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 
 
 class TestApp:

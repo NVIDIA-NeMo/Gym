@@ -98,8 +98,8 @@ class TestAggregation:
 
         from nemo_gym.config_types import ModelServerRef
         from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-        from nemo_gym.server_utils import ServerClient
         from nemo_gym.resources_servers.multichallenge.app import MultiChallengeServer
+        from nemo_gym.server_utils import ServerClient
 
         config = MultiChallengeConfig(
             host="",

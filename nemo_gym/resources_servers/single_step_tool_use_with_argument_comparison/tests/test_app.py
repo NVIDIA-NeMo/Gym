@@ -29,7 +29,6 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseReasoningItem,
     NeMoGymSummary,
 )
-from nemo_gym.server_utils import ServerClient
 from nemo_gym.resources_servers.single_step_tool_use_with_argument_comparison.app import (
     SingleStepToolUseArgumentComparisonResourcesServer,
     SingleStepToolUseArgumentComparisonResourcesServerConfig,
@@ -42,6 +41,7 @@ from nemo_gym.resources_servers.single_step_tool_use_with_argument_comparison.co
     StepRewardCategory,
     ToolCallComparatorConfig,
 )
+from nemo_gym.server_utils import ServerClient
 
 
 class TestApp:

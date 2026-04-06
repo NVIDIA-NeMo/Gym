@@ -15,7 +15,6 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.server_utils import ServerClient
 from nemo_gym.resources_servers.spider2_lite.app import (
     FailureCode,
     Spider2LiteResourcesServer,
@@ -32,6 +31,7 @@ from nemo_gym.resources_servers.spider2_lite.eval_utils import (
     execute_sqlite_async,
 )
 from nemo_gym.resources_servers.text_to_sql.app import extract_sql_from_response
+from nemo_gym.server_utils import ServerClient
 
 
 # ---------------------------------------------------------------------------

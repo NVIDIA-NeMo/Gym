@@ -23,13 +23,13 @@ from nemo_gym.openai_utils import (
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.server_utils import ServerClient
 from nemo_gym.responses_api_agents.mini_swe_agent.app import (
     MiniSWEAgent,
     MiniSWEAgentConfig,
     MiniSWEAgentRunRequest,
     MiniSWEAgentVerifyResponse,
 )
+from nemo_gym.server_utils import ServerClient
 
 
 DEFAULT_RUN_SWEGYM_RESULT = {

@@ -22,12 +22,12 @@ from fastapi import Request
 from starlette.testclient import TestClient
 
 from nemo_gym.openai_utils import NeMoGymResponseFunctionToolCall
-from nemo_gym.server_utils import ServerClient
 from nemo_gym.resources_servers.aviary.app import AviaryResourcesServerConfig
 from nemo_gym.resources_servers.aviary.client_app import AviaryClientResourcesServer, AviaryClientResourcesServerConfig
 from nemo_gym.resources_servers.aviary.gsm8k_app import GSM8kResourcesServer
 from nemo_gym.resources_servers.aviary.notebook_app import BixBenchResourcesServer
 from nemo_gym.resources_servers.aviary.schemas import AviaryCloseRequest, AviarySeedSessionRequest, AviaryStepRequest
+from nemo_gym.server_utils import ServerClient
 
 
 class TestGSM8kApp:

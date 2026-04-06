@@ -20,12 +20,12 @@ import pytest
 from fastapi.testclient import TestClient
 from httpx import Cookies
 
-from nemo_gym.server_utils import ServerClient
 from nemo_gym.resources_servers.openenv.app import (
     OpenEnvResourcesServer,
     OpenEnvResourcesServerConfig,
     _import_class,
 )
+from nemo_gym.server_utils import ServerClient
 
 
 def _make_test_client(server):

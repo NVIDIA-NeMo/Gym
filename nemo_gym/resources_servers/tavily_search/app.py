@@ -41,8 +41,8 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.server_utils import SESSION_ID_KEY, raise_for_status, request
 from nemo_gym.resources_servers.tavily_search.judge_prompt import JUDGE_PROMPT_TEMPLATE
+from nemo_gym.server_utils import SESSION_ID_KEY, raise_for_status, request
 
 
 class TavilySearchResourcesServerConfig(BaseResourcesServerConfig):

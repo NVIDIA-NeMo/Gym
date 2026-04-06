@@ -17,13 +17,13 @@ from typing import Any, Dict
 from unittest.mock import MagicMock, patch
 
 from nemo_gym.openai_utils import NeMoGymResponse
-from nemo_gym.server_utils import ServerClient
 from nemo_gym.resources_servers.swerl_gen.app import (
     SWEGenResourcesServer,
     SWEGenResourcesServerConfig,
     SWEGenVerifyRequest,
     SWEGenVerifyResponse,
 )
+from nemo_gym.server_utils import ServerClient
 
 
 class AwaitableResult:

@@ -15,11 +15,11 @@
 from unittest.mock import MagicMock
 
 import nemo_gym.responses_api_models.local_vllm_model_proxy.app
-from nemo_gym.server_utils import ServerClient
 from nemo_gym.responses_api_models.local_vllm_model_proxy.app import (
     LocalVLLMModelProxyServer,
     LocalVLLMModelProxyServerConfig,
 )
+from nemo_gym.server_utils import ServerClient
 
 
 class TestApp:
@@ -42,14 +42,14 @@ class TestApp:
         server = self._setup_server()
 
         sleep_mock = MagicMock()
-        monkeypatch.setattr(responses_api_models.local_vllm_model_proxy.app, "sleep", sleep_mock)
+        monkeypatch.setattr(nemo_gym.responses_api_models.local_vllm_model_proxy.app, "sleep", sleep_mock)
 
         server.server_client.poll_for_status.side_effect = ["error", "error", "success"]
         server.server_client.global_config_dict = None
 
         get_first_server_config_dict_mock = MagicMock()
         monkeypatch.setattr(
-            responses_api_models.local_vllm_model_proxy.app,
+            nemo_gym.responses_api_models.local_vllm_model_proxy.app,
             "get_first_server_config_dict",
             get_first_server_config_dict_mock,
         )
@@ -62,7 +62,7 @@ class TestApp:
         }
         requests_mock = MagicMock()
         requests_mock.get.return_value = json_mock
-        monkeypatch.setattr(responses_api_models.local_vllm_model_proxy.app, "requests", requests_mock)
+        monkeypatch.setattr(nemo_gym.responses_api_models.local_vllm_model_proxy.app, "requests", requests_mock)
 
         server.setup_webserver()
 

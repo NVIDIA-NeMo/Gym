@@ -18,7 +18,10 @@ import json
 from pathlib import Path
 
 from nemo_gym.resources_servers.newton_bench.newton_bench_utils.prompt_utils import get_physics_prompt
-from nemo_gym.resources_servers.newton_bench.newton_bench_utils.schemas import MODULE_REQUEST_CLASSES_MAPPING, get_tool_schema
+from nemo_gym.resources_servers.newton_bench.newton_bench_utils.schemas import (
+    MODULE_REQUEST_CLASSES_MAPPING,
+    get_tool_schema,
+)
 
 
 def generate_record(

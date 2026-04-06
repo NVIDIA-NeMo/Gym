@@ -16,12 +16,12 @@ import json
 from unittest.mock import MagicMock
 
 from nemo_gym.openai_utils import NeMoGymResponse
-from nemo_gym.server_utils import ServerClient
 from nemo_gym.resources_servers.circle_click.app import (
     CircleClickConfig,
     CircleClickResourcesServer,
     CircleClickVerifyRequest,
 )
+from nemo_gym.server_utils import ServerClient
 
 
 CIRCLES = [

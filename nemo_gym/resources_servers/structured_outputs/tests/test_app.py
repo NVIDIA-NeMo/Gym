@@ -27,13 +27,13 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.server_utils import ServerClient
 from nemo_gym.resources_servers.structured_outputs.app import (
     SchemaType,
     StructuredOutputsResourcesServer,
     StructuredOutputsResourcesServerConfig,
     StructuredOutputsVerifyRequest,
 )
+from nemo_gym.server_utils import ServerClient
 
 
 class TestApp:

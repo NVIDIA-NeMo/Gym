@@ -14,11 +14,11 @@
 # limitations under the License.
 from unittest.mock import MagicMock
 
-from nemo_gym.server_utils import ServerClient
 from nemo_gym.resources_servers.example_single_tool_call.app import (
     SimpleWeatherResourcesServer,
     SimpleWeatherResourcesServerConfig,
 )
+from nemo_gym.server_utils import ServerClient
 
 
 class TestApp:

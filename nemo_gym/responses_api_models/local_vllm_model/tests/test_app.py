@@ -48,7 +48,7 @@ class TestApp:
         get_global_config_dict_mock = MagicMock()
         get_global_config_dict_mock.return_value = DictConfig({DISALLOWED_PORTS_KEY_NAME: []})
         monkeypatch.setattr(
-            responses_api_models.local_vllm_model.app,
+            nemo_gym.responses_api_models.local_vllm_model.app,
             "get_global_config_dict",
             get_global_config_dict_mock,
         )

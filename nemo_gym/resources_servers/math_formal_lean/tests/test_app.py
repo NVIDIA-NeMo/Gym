@@ -23,7 +23,6 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.server_utils import ServerClient
 from nemo_gym.resources_servers.math_formal_lean.app import (
     REFINEMENT_PROMPT_TEMPLATE,
     MathFormalLeanResourcesServer,
@@ -34,6 +33,7 @@ from nemo_gym.resources_servers.math_formal_lean.app import (
     get_error_str,
     parse_error,
 )
+from nemo_gym.server_utils import ServerClient
 
 
 class TestMathFormalLeanApp:

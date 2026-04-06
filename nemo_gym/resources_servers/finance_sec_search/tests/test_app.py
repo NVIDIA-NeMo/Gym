@@ -27,7 +27,6 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.server_utils import ServerClient
 from nemo_gym.resources_servers.finance_sec_search.app import (
     FinanceAgentResourcesServer,
     FinanceAgentResourcesServerConfig,
@@ -36,6 +35,7 @@ from nemo_gym.resources_servers.finance_sec_search.app import (
     RateLimiter,
     RetrieveInformationRequest,
 )
+from nemo_gym.server_utils import ServerClient
 
 
 # ============================================================================

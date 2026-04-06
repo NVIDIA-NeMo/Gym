@@ -16,12 +16,12 @@ import asyncio
 from unittest.mock import MagicMock
 
 from nemo_gym.base_resources_server import NeMoGymResponse
-from nemo_gym.server_utils import ServerClient
 from nemo_gym.resources_servers.calendar.app import (
     CalendarResourcesServer,
     CalendarResourcesServerConfig,
     CalendarVerifyRequest,
 )
+from nemo_gym.server_utils import ServerClient
 
 
 class TestApp:

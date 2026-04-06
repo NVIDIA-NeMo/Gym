@@ -21,7 +21,6 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.server_utils import ServerClient
 from nemo_gym.resources_servers.math_advanced_calculations.app import (
     MultiVerseMathHardRequest,
     MultiVerseMathHardResourcesServer,
@@ -29,6 +28,7 @@ from nemo_gym.resources_servers.math_advanced_calculations.app import (
     MultiVerseMathHardResponse,
     MultiVerseMathHardVerifyRequest,
 )
+from nemo_gym.server_utils import ServerClient
 
 
 class TestApp:

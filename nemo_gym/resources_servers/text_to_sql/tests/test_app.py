@@ -23,7 +23,6 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.server_utils import ServerClient
 from nemo_gym.resources_servers.text_to_sql.app import (
     FailureCode,
     TextToSqlResourcesServer,
@@ -31,6 +30,7 @@ from nemo_gym.resources_servers.text_to_sql.app import (
     TextToSqlVerifyRequest,
     extract_sql_from_response,
 )
+from nemo_gym.server_utils import ServerClient
 
 
 class TestExtractSqlFromResponse:

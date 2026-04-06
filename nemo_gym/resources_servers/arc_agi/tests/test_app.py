@@ -13,12 +13,12 @@
 # limitations under the License.
 from unittest.mock import MagicMock
 
-from nemo_gym.server_utils import ServerClient
 from nemo_gym.resources_servers.arc_agi.app import (
     ARCAGIResourcesServer,
     ARCAGIResourcesServerConfig,
     _parse_grid,
 )
+from nemo_gym.server_utils import ServerClient
 
 
 class TestApp:

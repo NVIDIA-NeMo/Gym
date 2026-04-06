@@ -543,7 +543,9 @@ class TestValidateSamplesAndAggregateMetrics:
                 overwrite_metrics_conflicts=False,
             )
 
-        assert write_filenames == [Path("nemo_gym/resources_servers/example_multi_step/data/example_metrics_conflict.json")]
+        assert write_filenames == [
+            Path("nemo_gym/resources_servers/example_multi_step/data/example_metrics_conflict.json")
+        ]
 
     def test_validate_samples_and_aggregate_metrics_single_sample(self) -> None:
         processor = TrainDataProcessor()

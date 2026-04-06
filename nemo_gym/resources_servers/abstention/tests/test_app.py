@@ -23,7 +23,6 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.server_utils import ServerClient
 from nemo_gym.resources_servers.abstention.app import (
     AbstentionConfig,
     AbstentionServer,
@@ -34,6 +33,7 @@ from nemo_gym.resources_servers.abstention.app import (
     normalize_answer,
     parse_judge_grade,
 )
+from nemo_gym.server_utils import ServerClient
 
 
 class TestExtractBoxedAnswer:

@@ -23,12 +23,12 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.server_utils import ServerClient
 from nemo_gym.resources_servers.reasoning_gym.app import (
     ReasoningGymResourcesServer,
     ReasoningGymResourcesServerConfig,
     ReasoningGymVerifyRequest,
 )
+from nemo_gym.server_utils import ServerClient
 
 
 class TestApp:

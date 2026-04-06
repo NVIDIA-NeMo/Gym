@@ -125,7 +125,9 @@ class TestPrepareBenchmark:
         with (
             patch(
                 "nemo_gym.benchmarks.get_global_config_dict",
-                return_value=_mock_global_config({"config_paths": ["nemo_gym/resources_servers/foo/configs/foo.yaml"]}),
+                return_value=_mock_global_config(
+                    {"config_paths": ["nemo_gym/resources_servers/foo/configs/foo.yaml"]}
+                ),
             ),
             patch("nemo_gym.benchmarks._load_benchmarks_from_config_paths", return_value={}),
         ):

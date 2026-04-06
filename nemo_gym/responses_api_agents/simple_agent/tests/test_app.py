@@ -24,13 +24,13 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseReasoningItem,
     NeMoGymSummary,
 )
-from nemo_gym.server_utils import ServerClient
 from nemo_gym.responses_api_agents.simple_agent.app import (
     ModelServerRef,
     ResourcesServerRef,
     SimpleAgent,
     SimpleAgentConfig,
 )
+from nemo_gym.server_utils import ServerClient
 
 
 class TestApp:

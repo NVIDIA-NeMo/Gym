@@ -42,11 +42,11 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.responses_api_agents.mini_swe_agent.utils import MiniSWEAgentUtils
 from nemo_gym.server_utils import (
     ServerClient,
     get_first_server_config_dict,
 )
-from nemo_gym.responses_api_agents.mini_swe_agent.utils import MiniSWEAgentUtils
 
 
 class MiniSWEAgentConfig(BaseResponsesAPIAgentConfig):

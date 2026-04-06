@@ -35,13 +35,13 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.server_utils import SESSION_ID_KEY
 from nemo_gym.resources_servers.newton_bench.newton_bench_utils.sandbox import (
     SessionHandle,
     validate_python_code,
 )
 from nemo_gym.resources_servers.newton_bench.newton_bench_utils.schemas import MODULE_REQUEST_CLASSES_MAPPING
 from nemo_gym.resources_servers.newton_bench.setup_newton_bench import NEWTON_BENCH_PATH, ensure_newton_bench
+from nemo_gym.server_utils import SESSION_ID_KEY
 
 
 if str(NEWTON_BENCH_PATH) not in sys.path:

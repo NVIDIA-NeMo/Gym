@@ -13,7 +13,6 @@ from omegaconf import OmegaConf
 
 sys.path.insert(0, str(Path(__file__).parents[3]))  # repo root
 
-from nemo_gym.server_utils import ServerClient
 from nemo_gym.resources_servers.rdkit_chemistry import sandbox_launcher
 from nemo_gym.resources_servers.rdkit_chemistry.app import (
     _SUPPORTED_PROPERTY_TYPES,
@@ -22,6 +21,7 @@ from nemo_gym.resources_servers.rdkit_chemistry.app import (
     compute_reward,
     extract_predicted_value,
 )
+from nemo_gym.server_utils import ServerClient
 
 
 # ---------------------------------------------------------------------------

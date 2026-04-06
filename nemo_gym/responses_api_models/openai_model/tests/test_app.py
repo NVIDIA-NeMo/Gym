@@ -17,12 +17,12 @@ from unittest.mock import AsyncMock, MagicMock
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
-from nemo_gym.server_utils import ServerClient
 from nemo_gym.responses_api_models.openai_model.app import (
     NeMoGymAsyncOpenAI,
     SimpleModelServer,
     SimpleModelServerConfig,
 )
+from nemo_gym.server_utils import ServerClient
 
 
 class TestApp:

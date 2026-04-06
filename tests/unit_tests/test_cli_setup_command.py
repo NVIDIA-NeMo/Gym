@@ -33,7 +33,9 @@ class TestCLISetupCommandSetupEnvCommand:
         return server_dir.absolute()
 
     def _debug_global_config_dict(self, tmp_path: Path) -> dict:
-        return _TestGlobalConfig._default_global_config_dict_values.fget(None) | {UV_VENV_DIR_KEY_NAME: str(tmp_path / "nemo_gym")}
+        return _TestGlobalConfig._default_global_config_dict_values.fget(None) | {
+            UV_VENV_DIR_KEY_NAME: str(tmp_path / "nemo_gym")
+        }
 
     def test_sanity(self, tmp_path: Path) -> None:
         server_dir = self._setup_server_dir(tmp_path)

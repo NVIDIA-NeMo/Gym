@@ -26,11 +26,11 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
 )
-from nemo_gym.server_utils import ServerClient
 from nemo_gym.responses_api_models.azure_openai_model.app import (
     AzureOpenAIModelServer,
     AzureOpenAIModelServerConfig,
 )
+from nemo_gym.server_utils import ServerClient
 
 
 # Used for mocking created_at timestamp generation

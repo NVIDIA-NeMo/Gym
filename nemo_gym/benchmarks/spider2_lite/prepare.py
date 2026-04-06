@@ -18,7 +18,11 @@ from argparse import Namespace
 from pathlib import Path
 from shutil import copy
 
-from nemo_gym.resources_servers.spider2_lite.scripts.prepare_dataset import _main, clone_spider2_repo, delete_spider2_repo
+from nemo_gym.resources_servers.spider2_lite.scripts.prepare_dataset import (
+    _main,
+    clone_spider2_repo,
+    delete_spider2_repo,
+)
 from nemo_gym.resources_servers.spider2_lite.setup_spider2 import _DEFAULT_DIR, ensure_spider2_lite
 
 

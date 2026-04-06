@@ -28,7 +28,6 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.server_utils import ServerClient
 from nemo_gym.responses_api_agents.swe_agents.app import (
     ActiveContainerCommand,
     AgentPromptOverride,
@@ -50,6 +49,7 @@ from nemo_gym.responses_api_agents.swe_agents.app import (
     runner_ray_remote,
     update_metrics,
 )
+from nemo_gym.server_utils import ServerClient
 
 
 SWE_AGENTS_DIR = Path(__file__).resolve().parent.parent

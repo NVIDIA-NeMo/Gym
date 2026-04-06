@@ -26,12 +26,12 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.server_utils import ServerClient
 from nemo_gym.resources_servers.equivalence_llm_judge.app import (
     LLMJudgeResourcesServer,
     LLMJudgeResourcesServerConfig,
     LLMJudgeVerifyRequest,
 )
+from nemo_gym.server_utils import ServerClient
 
 
 class TestApp:

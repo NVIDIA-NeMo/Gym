@@ -27,7 +27,6 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseReasoningItem,
     NeMoGymSummary,
 )
-from nemo_gym.server_utils import ServerClient
 from nemo_gym.resources_servers.terminus_judge.app import (
     FailureCode,
     TerminusJudgeResourcesServer,
@@ -39,6 +38,7 @@ from nemo_gym.resources_servers.terminus_judge.app import (
     extract_keystrokes,
     text_similarity,
 )
+from nemo_gym.server_utils import ServerClient
 
 
 # Sample rubrics v4 structured output for testing (5-step format, task_complete checked in code)

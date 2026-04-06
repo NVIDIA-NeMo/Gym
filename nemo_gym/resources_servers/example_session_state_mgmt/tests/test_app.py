@@ -17,11 +17,11 @@ from unittest.mock import MagicMock
 from fastapi.testclient import TestClient
 from httpx import Cookies
 
-from nemo_gym.server_utils import ServerClient
 from nemo_gym.resources_servers.example_session_state_mgmt.app import (
     StatefulCounterResourcesServer,
     StatefulCounterResourcesServerConfig,
 )
+from nemo_gym.server_utils import ServerClient
 
 
 class TestApp:

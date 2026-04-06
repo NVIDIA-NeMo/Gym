@@ -18,11 +18,11 @@ from unittest.mock import AsyncMock, MagicMock
 from fastapi.testclient import TestClient
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.server_utils import ServerClient
 from nemo_gym.responses_api_agents.langgraph_agent.reflection_agent import (
     ReflectionAgent,
     ReflectionAgentConfig,
 )
+from nemo_gym.server_utils import ServerClient
 
 
 MOCK_RESPONSE = {

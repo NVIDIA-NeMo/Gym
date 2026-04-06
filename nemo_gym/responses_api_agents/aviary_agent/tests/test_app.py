@@ -22,7 +22,6 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
 )
-from nemo_gym.server_utils import ServerClient
 from nemo_gym.responses_api_agents.aviary_agent.app import (
     AviaryAgent,
     AviaryAgentConfig,
@@ -30,6 +29,7 @@ from nemo_gym.responses_api_agents.aviary_agent.app import (
     ModelServerRef,
     ResourcesServerRef,
 )
+from nemo_gym.server_utils import ServerClient
 
 
 class TestApp:
