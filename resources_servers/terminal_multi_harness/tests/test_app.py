@@ -48,7 +48,7 @@ class TestApp:
             entrypoint="",
             name="terminal_multi_harness_server",
             tool_call_comparator_config=ToolCallComparatorConfig(
-                word_count_similarity_threshold=0.1,
+                string_similarity_threshold=0.9,
                 ignored_argument_keys_by_tool={"exec_command": ["yield_time_ms"]},
             ),
         )
