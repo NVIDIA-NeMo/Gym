@@ -57,7 +57,11 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
 
     verbose_flag = "-v " if global_config_dict.get(PIP_INSTALL_VERBOSE_KEY_NAME) else ""
     extra_index_url = global_config_dict.get(UV_EXTRA_INDEX_URL_KEY_NAME)
-    extra_index_url_flag = f"--extra-index-url {extra_index_url} --index-strategy unsafe-best-match --prerelease=allow " if extra_index_url else ""
+    extra_index_url_flag = (
+        f"--extra-index-url {extra_index_url} --index-strategy unsafe-best-match --prerelease=allow "
+        if extra_index_url
+        else ""
+    )
 
     is_editable_install = (dir_path.resolve() / "../../pyproject.toml").exists()
 
