@@ -16,16 +16,13 @@ from unittest.mock import MagicMock
 
 from pytest import mark
 
-from nemo_gym.openai_utils import (
-    NeMoGymChatCompletionMessage,
-    NeMoGymChoice,
-    NeMoGymResponseOutputMessage,
-)
 from nemo_gym.server_utils import ServerClient
 from responses_api_models.megatron_inference.app import (
-    MEGATRON_RESPONSES_TO_TRAIN,
+    MegatronChatCompletion,
     MegatronInferenceConverter,
     MegatronInferenceModel,
+    MegatronResponse,
+    MegatronResponseOutputMessageForTraining,
 )
 from responses_api_models.vllm_model.app import VLLMConverter, VLLMModelConfig
 
@@ -68,29 +65,60 @@ def test_simple(
     server = MegatronInferenceModel(config=config, server_client=MagicMock(spec=ServerClient))
     assert isinstance(server._converter, MegatronInferenceConverter)
     assert isinstance(server._converter, VLLMConverter)
+    assert server._chat_completion_cls is MegatronChatCompletion
+    assert server._response_cls is MegatronResponse
 
-    choice = NeMoGymChoice(
-        index=0,
-        finish_reason="stop",
-        message=NeMoGymChatCompletionMessage(
-            role="assistant",
-            content="hi",
-            tool_calls=None,
-            prompt_token_ids=[1, 2, 3],
-            generation_token_ids=[4, 5],
-            generation_log_probs=[-0.1, -0.2],
-            **megatron_metadata,
-        ),
+    chat_completion = MegatronChatCompletion.model_validate(
+        {
+            "id": "chtcmpl-123",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "dummy_model",
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": "stop",
+                    "message": {
+                        "role": "assistant",
+                        "content": "hi",
+                        "tool_calls": None,
+                        "prompt_token_ids": [1, 2, 3],
+                        "generation_token_ids": [4, 5],
+                        "generation_log_probs": [-0.1, -0.2],
+                        **megatron_metadata,
+                    },
+                }
+            ],
+        }
     )
+    choice = chat_completion.choices[0]
     response_output = server._converter.postprocess_chat_response(choice)
 
     assert len(response_output) == 1
     last = response_output[-1]
-    expected_cls = MEGATRON_RESPONSES_TO_TRAIN[NeMoGymResponseOutputMessage]
-    assert isinstance(last, expected_cls)
+    assert isinstance(last, MegatronResponseOutputMessageForTraining)
     assert last.prompt_token_ids == [1, 2, 3]
     assert last.generation_token_ids == [4, 5]
     assert last.generation_log_probs == [-0.1, -0.2]
     assert last.policy_epoch == expected_policy_epoch
     assert last.kv_cache_epoch == expected_kv_cache_epoch
     assert last.num_evictions == expected_num_evictions
+
+    response = MegatronResponse.model_validate(
+        {
+            "id": "resp_123",
+            "created_at": 0,
+            "model": "dummy_model",
+            "object": "response",
+            "output": [last.model_dump()],
+            "tool_choice": "auto",
+            "parallel_tool_calls": True,
+            "tools": [],
+            "background": False,
+        }
+    )
+    validated_last = response.output[-1]
+    assert isinstance(validated_last, MegatronResponseOutputMessageForTraining)
+    assert validated_last.policy_epoch == expected_policy_epoch
+    assert validated_last.kv_cache_epoch == expected_kv_cache_epoch
+    assert validated_last.num_evictions == expected_num_evictions

@@ -12,45 +12,79 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import List, Tuple
+from typing import Any, ClassVar, Dict, List, Tuple, Union
 
-from nemo_gym.openai_utils import RESPONSES_TO_TRAIN, NeMoGymChoice, NeMoGymResponseOutputItem, TokenIDLogProbMixin
+from pydantic import BaseModel, Field
+
+from nemo_gym.openai_utils import (
+    RESPONSES_TO_TRAIN,
+    NeMoGymChatCompletion,
+    NeMoGymChatCompletionMessage,
+    NeMoGymChatCompletionMessageForTraining,
+    NeMoGymChoice,
+    NeMoGymResponse,
+    NeMoGymResponseFunctionToolCall,
+    NeMoGymResponseOutputMessage,
+    NeMoGymResponseReasoningItem,
+)
 from nemo_gym.server_utils import is_nemo_gym_fastapi_worker
 from responses_api_models.vllm_model.app import VLLMConverter, VLLMModel
 
 
-class MegatronTokenIDLogProbMixin(TokenIDLogProbMixin):
-    policy_epoch: List[List[Tuple[int, int]]]
-    kv_cache_epoch: List[List[Tuple[int, int]]]
-    num_evictions: List[int]
+class MegatronMetadataMixin(BaseModel):
+    policy_epoch: List[List[Tuple[int, int]]] = Field(default_factory=lambda: [[(0, 0)]])
+    kv_cache_epoch: List[List[Tuple[int, int]]] = Field(default_factory=lambda: [[(0, 0)]])
+    num_evictions: List[int] = Field(default_factory=lambda: [0])
+
+
+class MegatronChatCompletionMessageForTraining(
+    NeMoGymChatCompletionMessageForTraining, MegatronMetadataMixin
+):
+    pass
+
+
+class MegatronChoice(NeMoGymChoice):
+    message: Union[NeMoGymChatCompletionMessage, MegatronChatCompletionMessageForTraining]
+
+
+class MegatronChatCompletion(NeMoGymChatCompletion):
+    choices: List[MegatronChoice]
 
 
 MEGATRON_RESPONSES_TO_TRAIN = {
-    base: type(f"Megatron{train.__name__}", (train, MegatronTokenIDLogProbMixin), {})
+    base: type(f"Megatron{train.__name__}", (train, MegatronMetadataMixin), {})
     for base, train in RESPONSES_TO_TRAIN.items()
 }
 
+MegatronResponseOutputMessageForTraining = MEGATRON_RESPONSES_TO_TRAIN[NeMoGymResponseOutputMessage]
+
+
+class MegatronResponse(NeMoGymResponse):
+    output: List[Union[
+        MegatronResponseOutputMessageForTraining,
+        MEGATRON_RESPONSES_TO_TRAIN[NeMoGymResponseFunctionToolCall],
+        MEGATRON_RESPONSES_TO_TRAIN[NeMoGymResponseReasoningItem],
+    ]]
+
 
 class MegatronInferenceConverter(VLLMConverter):
-    def postprocess_chat_response(self, choice: NeMoGymChoice) -> List[NeMoGymResponseOutputItem]:
-        response_output = super().postprocess_chat_response(choice)
-        raw_message = choice.message.model_dump()
-        if not (self.return_token_id_information and "prompt_token_ids" in raw_message):
-            return response_output
-        last = response_output[-1]
-        for base_cls, train_cls in MEGATRON_RESPONSES_TO_TRAIN.items():
-            if isinstance(last, base_cls):
-                response_output[-1] = train_cls(
-                    **last.model_dump(),
-                    policy_epoch=raw_message.get("policy_epoch", [[(0, 0)]]),
-                    kv_cache_epoch=raw_message.get("kv_cache_epoch", [[(0, 0)]]),
-                    num_evictions=raw_message.get("num_evictions", [0]),
-                )
-                break
-        return response_output
+    def get_train_response_output_item_cls(
+        self, response_output_item_cls: type[BaseModel]
+    ) -> type[BaseModel]:
+        return MEGATRON_RESPONSES_TO_TRAIN[response_output_item_cls]
+
+    def get_extra_training_fields(self, message_dict: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "policy_epoch": message_dict.get("policy_epoch", [[(0, 0)]]),
+            "kv_cache_epoch": message_dict.get("kv_cache_epoch", [[(0, 0)]]),
+            "num_evictions": message_dict.get("num_evictions", [0]),
+        }
 
 
 class MegatronInferenceModel(VLLMModel):
+    _chat_completion_cls: ClassVar[type] = MegatronChatCompletion
+    _response_cls: ClassVar[type] = MegatronResponse
+
     def model_post_init(self, context):
         super().model_post_init(context)
         self._converter = MegatronInferenceConverter(

@@ -15,10 +15,9 @@
 
 from pydantic import ConfigDict
 
-from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
-from nemo_gym.openai_utils import NeMoGymResponseOutputMessageForTraining
+from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyRequest
 
-from .app import MegatronTokenIDLogProbMixin
+from .app import MegatronResponse
 
 
 class MegatronRunRequest(BaseRunRequest):
@@ -26,13 +25,9 @@ class MegatronRunRequest(BaseRunRequest):
     model_config = ConfigDict(extra="allow")
 
 
-class MegatronResponseOutputMessageForTraining(
-    NeMoGymResponseOutputMessageForTraining, MegatronTokenIDLogProbMixin
-):
-    """Training output message with Megatron epoch fields declared for type checking."""
-    ...
+class MegatronVerifyRequest(BaseVerifyRequest):
+    response: MegatronResponse
 
 
-class MegatronVerifyResponse(BaseVerifyResponse):
-    """Verify response from a Megatron inference backend."""
-    ...
+class MegatronVerifyResponse(MegatronVerifyRequest):
+    reward: float
