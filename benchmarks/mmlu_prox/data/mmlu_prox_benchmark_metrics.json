@@ -1,0 +1,37 @@
+{
+    "name": "mmlu_prox",
+    "type": "benchmark",
+    "jsonl_fpath": "benchmarks/mmlu_prox/data/mmlu_prox_benchmark.jsonl",
+    "prepare_script": "benchmarks/mmlu_prox/prepare.py",
+    "prompt_config": "benchmarks/mmlu_prox/prompts/default.yaml",
+    "num_repeats": 8,
+    "Number of examples": 0,
+    "Number of tools": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "Number of turns": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    }
+}
