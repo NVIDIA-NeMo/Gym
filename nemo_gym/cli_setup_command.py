@@ -26,7 +26,7 @@ from nemo_gym.global_config import (
     PYTHON_VERSION_KEY_NAME,
     SKIP_VENV_IF_PRESENT_KEY_NAME,
     UV_CACHE_DIR_KEY_NAME,
-    UV_FIND_LINKS_KEY_NAME,
+    UV_EXTRA_INDEX_URL_KEY_NAME,
     UV_PIP_SET_PYTHON_KEY_NAME,
     UV_VENV_DIR_KEY_NAME,
     get_global_config_dict,
@@ -56,8 +56,8 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
     uv_pip_python_flag = f"--python {venv_python_fpath} " if uv_pip_set_python else ""
 
     verbose_flag = "-v " if global_config_dict.get(PIP_INSTALL_VERBOSE_KEY_NAME) else ""
-    find_links = global_config_dict.get(UV_FIND_LINKS_KEY_NAME)
-    find_links_flag = f"--find-links {find_links} --prerelease=allow " if find_links else ""
+    extra_index_url = global_config_dict.get(UV_EXTRA_INDEX_URL_KEY_NAME)
+    extra_index_url_flag = f"--extra-index-url {extra_index_url} --index-strategy unsafe-best-match --prerelease=allow " if extra_index_url else ""
 
     is_editable_install = (dir_path.resolve() / "../../pyproject.toml").exists()
 
@@ -72,21 +72,21 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
             )
         elif has_pyproject_toml:
             if is_editable_install:
-                install_cmd = f"""uv pip install {verbose_flag}{find_links_flag}{uv_pip_python_flag}'-e .' {" ".join(head_server_deps)}"""
+                install_cmd = f"""uv pip install {verbose_flag}{extra_index_url_flag}{uv_pip_python_flag}'-e .' {" ".join(head_server_deps)}"""
             else:
                 # pypi path
                 install_cmd = (
-                    f"""uv pip install {verbose_flag}{find_links_flag}{uv_pip_python_flag}nemo-gym && """
-                    f"""uv pip install {verbose_flag}{find_links_flag}{uv_pip_python_flag}--no-sources '-e .' {" ".join(head_server_deps)}"""
+                    f"""uv pip install {verbose_flag}{extra_index_url_flag}{uv_pip_python_flag}nemo-gym && """
+                    f"""uv pip install {verbose_flag}{extra_index_url_flag}{uv_pip_python_flag}--no-sources '-e .' {" ".join(head_server_deps)}"""
                 )
         elif has_requirements_txt:
             if is_editable_install:
-                install_cmd = f"""uv pip install {verbose_flag}{find_links_flag}{uv_pip_python_flag}-r requirements.txt {" ".join(head_server_deps)}"""
+                install_cmd = f"""uv pip install {verbose_flag}{extra_index_url_flag}{uv_pip_python_flag}-r requirements.txt {" ".join(head_server_deps)}"""
             else:
                 # pypi path
                 install_cmd = (
                     f"""(echo 'nemo-gym' && grep -v -F '../..' requirements.txt) | """
-                    f"""uv pip install {verbose_flag}{find_links_flag}{uv_pip_python_flag}-r /dev/stdin {" ".join(head_server_deps)}"""
+                    f"""uv pip install {verbose_flag}{extra_index_url_flag}{uv_pip_python_flag}-r /dev/stdin {" ".join(head_server_deps)}"""
                 )
         else:
             raise RuntimeError(
