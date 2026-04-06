@@ -97,7 +97,7 @@ from nemo_gym.server_utils import (
 ########################################
 
 
-class TokenIDLogProbMixin(BaseModel):
+class TokenIDLogProbMixin(BaseModel, extra="allow"):
     prompt_token_ids: List[int]
     generation_token_ids: List[int]
     generation_log_probs: List[float]
