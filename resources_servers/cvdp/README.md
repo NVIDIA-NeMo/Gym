@@ -126,7 +126,7 @@ ng_run "+config_paths=[resources_servers/cvdp/configs/cvdp.yaml,responses_api_mo
 
 ```bash
 ng_collect_rollouts \
-    +agent_name=cvdp_simple_agent \
+    +agent_name=cvdp_agent \
     +input_jsonl_fpath=resources_servers/cvdp/data/<dataset>.jsonl \
     +output_jsonl_fpath=results/rollouts.jsonl \
     +num_repeats=5 \
@@ -144,7 +144,7 @@ At the end of this step, you should have rollouts.jsonl, rollouts_agent_metrics.
 python resources_servers/cvdp/scripts/cvdp_pass_at_k_report.py \
     --rollouts  results/rollouts.jsonl \
     --output    results/report/ \
-    --model     cvdp_simple_agent \
+    --model     cvdp_agent \
     --dataset   <original_cvdp_dataset>.jsonl \
     --k         1
 ```
