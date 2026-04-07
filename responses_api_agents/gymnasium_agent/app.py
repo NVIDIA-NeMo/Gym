@@ -13,14 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""
-Agent for Gymnasium-style Env resources servers.
-Drives the reset -> model, step -> ... -> step loop.
-All episode logic lives in the Env.
+"""Agent for GymnasiumServer resources servers.
+
+Drives the reset -> (model -> step)* loop. All episode logic lives in the
+GymnasiumServer; this agent is a generic orchestrator.
 
 Protocol:
-  POST /reset  -> EnvResetResponse  (observation or None = episode over; info = env-specific)
-  POST /step   -> EnvStepResponse   (observation, reward, terminated, truncated, info = env-specific)
+  POST /reset  -> EnvResetResponse  (observation or None; info)
+  POST /step   -> EnvStepResponse   (observation, reward, terminated, truncated, info)
 """
 
 from fastapi import Body, Request, Response
@@ -34,26 +34,26 @@ from nemo_gym.base_resources_server import (
 )
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from resources_servers.gymnasium import EnvResetResponse, EnvStepResponse
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
+from resources_servers.gymnasium import EnvResetResponse, EnvStepResponse
 
 
-class EnvAgentConfig(BaseResponsesAPIAgentConfig):
+class GymnasiumAgentConfig(BaseResponsesAPIAgentConfig):
     env_server: ResourcesServerRef
     model_server: ModelServerRef
     max_steps: int = 10
 
 
-class EnvAgentRunRequest(BaseRunRequest):
+class GymnasiumAgentRunRequest(BaseRunRequest):
     model_config = ConfigDict(extra="allow")
 
 
-class EnvRunResponse(BaseVerifyResponse):
+class GymnasiumRunResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
     terminated: bool = False
     truncated: bool = False
@@ -72,8 +72,8 @@ def _extract_text(response: NeMoGymResponse) -> str:
     return ""
 
 
-class EnvAgent(SimpleResponsesAPIAgent):
-    config: EnvAgentConfig
+class GymnasiumAgent(SimpleResponsesAPIAgent):
+    config: GymnasiumAgentConfig
 
     async def responses(
         self,
@@ -93,7 +93,7 @@ class EnvAgent(SimpleResponsesAPIAgent):
             response.set_cookie(k, v)
         return result
 
-    async def run(self, request: Request, body: EnvAgentRunRequest) -> EnvRunResponse:
+    async def run(self, request: Request, body: GymnasiumAgentRunRequest) -> GymnasiumRunResponse:
         cookies = request.cookies
 
         # --- reset ---
@@ -178,7 +178,7 @@ class EnvAgent(SimpleResponsesAPIAgent):
         last_model_response.output = all_outputs
         last_model_response.usage = usage
 
-        return EnvRunResponse(
+        return GymnasiumRunResponse(
             responses_create_params=body.responses_create_params,
             response=last_model_response,
             reward=step_data.reward,
@@ -198,4 +198,4 @@ class EnvAgent(SimpleResponsesAPIAgent):
 
 
 if __name__ == "__main__":
-    EnvAgent.run_webserver()
+    GymnasiumAgent.run_webserver()

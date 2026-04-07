@@ -4,9 +4,9 @@ workplace_assistant_env:
       entrypoint: app.py
       domain: agent
       verified: false
-workplace_assistant_env_agent:
+workplace_assistant_gymnasium_agent:
   responses_api_agents:
-    env_agent:
+    gymnasium_agent:
       entrypoint: app.py
       env_server:
         type: resources_servers

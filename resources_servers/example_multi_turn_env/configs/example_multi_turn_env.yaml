@@ -4,9 +4,9 @@ example_multi_turn_env:
       entrypoint: app.py
       domain: knowledge
       verified: false
-example_multi_turn_env_agent:
+example_multi_turn_gymnasium_agent:
   responses_api_agents:
-    env_agent:
+    gymnasium_agent:
       entrypoint: app.py
       env_server:
         type: resources_servers

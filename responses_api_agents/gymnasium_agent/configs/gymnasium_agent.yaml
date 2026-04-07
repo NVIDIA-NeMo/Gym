@@ -1,4 +1,4 @@
-env_agent:
+gymnasium_agent:
   responses_api_agents:
-    env_agent:
+    gymnasium_agent:
       entrypoint: app.py

@@ -43,11 +43,11 @@ $PYTHON -m pytest tests/unit_tests/test_envs.py -x -q \
     && pass "unit tests" \
     || die "unit tests"
 
-# ── 2. env_agent server tests ─────────────────────────────────────────────────
-log "=== 2. env_agent (ng_test) ==="
-RAY_TMPDIR=/tmp ng_test +entrypoint=responses_api_agents/env_agent \
-    && pass "env_agent ng_test" \
-    || die "env_agent ng_test"
+# ── 2. gymnasium_agent server tests ─────────────────────────────────────────────────
+log "=== 2. gymnasium_agent (ng_test) ==="
+RAY_TMPDIR=/tmp ng_test +entrypoint=responses_api_agents/gymnasium_agent \
+    && pass "gymnasium_agent ng_test" \
+    || die "gymnasium_agent ng_test"
 
 # ── 3. Smoke test: ng_run + ng_collect_rollouts ────────────────────────────────
 log "=== 3. Smoke test: reasoning_gym_env ==="
@@ -75,7 +75,7 @@ done
 
 log "Collecting rollouts..."
 ng_collect_rollouts \
-    +agent_name=reasoning_gym_env_agent \
+    +agent_name=reasoning_gym_gymnasium_agent \
     "+input_jsonl_fpath=$DATA" \
     "+output_jsonl_fpath=$ROLLOUT_OUT" \
     +num_repeats=2 \

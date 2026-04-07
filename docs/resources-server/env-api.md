@@ -4,7 +4,7 @@
 
 <!-- TODO: framing on the two definitions of "environment" and when to use Env vs custom agent -->
 
-`GymnasiumServer` is a [Gymnasium](https://gymnasium.farama.org/)-style base class for resources servers. Implement `step()`, optionally `reset()`, pair with `env_agent`.
+`GymnasiumServer` is a [Gymnasium](https://gymnasium.farama.org/)-style base class for resources servers. Implement `step()`, optionally `reset()`, pair with `gymnasium_agent`.
 
 ## Interface
 
@@ -111,7 +111,7 @@ class MyToolEnv(GymnasiumServer):
 
 ## Multi-turn
 
-`step()` returns the next user message as the observation. The `env_agent` appends it to the conversation and calls the model again. Return `None` to end.
+`step()` returns the next user message as the observation. The `gymnasium_agent` appends it to the conversation and calls the model again. Return `None` to end.
 
 ```python
 class MyMultiTurnEnv(GymnasiumServer):
@@ -174,7 +174,7 @@ class MyRewardModelEnv(GymnasiumServer):
 
 ## YAML configuration
 
-`GymnasiumServer` pairs with `env_agent` instead of `simple_agent`. The agent config references the env server via `env_server`.
+`GymnasiumServer` pairs with `gymnasium_agent` instead of `simple_agent`. The agent config references the env server via `env_server`.
 
 ```yaml
 my_env_instance:
@@ -183,9 +183,9 @@ my_env_instance:
       entrypoint: app.py
       domain: knowledge
 
-my_env_agent_instance:
+my_gymnasium_agent_instance:
   responses_api_agents:
-    env_agent:
+    gymnasium_agent:
       entrypoint: app.py
       env_server:
         type: resources_servers

@@ -5,9 +5,9 @@ blackjack_env:
       domain: games
       verified: false
       description: Blackjack. Model hits or stands. Reward +1 win, 0 draw, -1 loss/bust.
-blackjack_env_agent:
+blackjack_gymnasium_agent:
   responses_api_agents:
-    env_agent:
+    gymnasium_agent:
       entrypoint: app.py
       env_server:
         type: resources_servers

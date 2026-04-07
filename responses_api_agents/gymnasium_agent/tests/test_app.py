@@ -17,22 +17,22 @@ from unittest.mock import MagicMock
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.server_utils import ServerClient
-from responses_api_agents.env_agent.app import EnvAgent, EnvAgentConfig
+from responses_api_agents.gymnasium_agent.app import GymnasiumAgent, GymnasiumAgentConfig
 
 
 def _make_agent():
-    config = EnvAgentConfig(
+    config = GymnasiumAgentConfig(
         host="",
         port=0,
         entrypoint="",
-        name="test_env_agent",
+        name="test_gymnasium_agent",
         env_server=ResourcesServerRef(type="resources_servers", name="my_env"),
         model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
     )
-    return EnvAgent(config=config, server_client=MagicMock(spec=ServerClient))
+    return GymnasiumAgent(config=config, server_client=MagicMock(spec=ServerClient))
 
 
-class TestEnvAgent:
+class TestGymnasiumAgent:
     def test_setup_webserver(self):
         agent = _make_agent()
         app = agent.setup_webserver()

@@ -5,9 +5,9 @@ reasoning_gym_env:
       domain: knowledge
       verified: false
       description: reasoning_gym reimplemented as a Gymnasium-style Env.
-reasoning_gym_env_agent:
+reasoning_gym_gymnasium_agent:
   responses_api_agents:
-    env_agent:
+    gymnasium_agent:
       entrypoint: app.py
       env_server:
         type: resources_servers

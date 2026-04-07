@@ -5,9 +5,9 @@ tictactoe_env:
       domain: games
       verified: false
       description: TicTacToe. Model plays X against a rule-based opponent. Reward +1 win, 0 draw, -1 loss.
-tictactoe_env_agent:
+tictactoe_gymnasium_agent:
   responses_api_agents:
-    env_agent:
+    gymnasium_agent:
       entrypoint: app.py
       env_server:
         type: resources_servers
