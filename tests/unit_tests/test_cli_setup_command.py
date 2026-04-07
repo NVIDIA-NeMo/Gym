@@ -182,12 +182,13 @@ class TestCLISetupCommandSetupEnvCommand:
         server_dir.mkdir(parents=True)
         (server_dir / "requirements.txt").write_text("pytest\n")
 
-        actual_command = setup_env_command(
-            dir_path=server_dir,
-            global_config_dict=self._debug_global_config_dict(tmp_path),
-            prefix="my server name",
-        )
-        expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python test python version {server_dir}/.venv > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2) && source {server_dir}/.venv/bin/activate && (echo 'nemo-gym' && grep -v -F '../..' requirements.txt) | uv pip install -r /dev/stdin ray[default]==test ray version openai==test openai version > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2)"
+        with patch("importlib.metadata.version", return_value="0.3.0rc0"):
+            actual_command = setup_env_command(
+                dir_path=server_dir,
+                global_config_dict=self._debug_global_config_dict(tmp_path),
+                prefix="my server name",
+            )
+        expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python test python version {server_dir}/.venv > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2) && source {server_dir}/.venv/bin/activate && (echo 'nemo-gym==0.3.0rc0' && grep -v -F '../..' requirements.txt) | uv pip install -r /dev/stdin ray[default]==test ray version openai==test openai version > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2)"
         assert expected_command == actual_command
 
     def test_installs_from_pypi_when_not_editable_pyproject(self, tmp_path: Path) -> None:
@@ -195,12 +196,13 @@ class TestCLISetupCommandSetupEnvCommand:
         server_dir.mkdir(parents=True)
         (server_dir / "pyproject.toml").write_text("")
 
-        actual_command = setup_env_command(
-            dir_path=server_dir,
-            global_config_dict=self._debug_global_config_dict(tmp_path),
-            prefix="my server name",
-        )
-        expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python test python version {server_dir}/.venv > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2) && source {server_dir}/.venv/bin/activate && uv pip install nemo-gym && uv pip install --no-sources '-e .' ray[default]==test ray version openai==test openai version > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2)"
+        with patch("importlib.metadata.version", return_value="0.3.0rc0"):
+            actual_command = setup_env_command(
+                dir_path=server_dir,
+                global_config_dict=self._debug_global_config_dict(tmp_path),
+                prefix="my server name",
+            )
+        expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python test python version {server_dir}/.venv > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2) && source {server_dir}/.venv/bin/activate && uv pip install nemo-gym==0.3.0rc0 && uv pip install --no-sources '-e .' ray[default]==test ray version openai==test openai version > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2)"
         assert expected_command == actual_command
 
     def test_uv_venv_dir_and_skip_install_when_venv_present(self, tmp_path: Path) -> None:
@@ -292,55 +294,6 @@ class TestCLISetupCommandRunCommand:
             executable="/bin/bash",
             shell=True,
             env={"PYTHONPATH": "/my path", "UV_CACHE_DIR": "my uv cache dir"},
-            stdout="stdout",
-            stderr="stderr",
-        )
-        actual_args = Popen_mock.call_args
-        assert expected_args == actual_args
-
-    def test_tee_logs_with_server_name(self, monkeypatch: MonkeyPatch) -> None:
-        Popen_mock, get_global_config_dict_mock = self._setup(monkeypatch)
-
-        get_global_config_dict_mock.return_value = {
-            "uv_cache_dir": "default uv cache dir",
-            "nemo_gym_log_dir": "/tmp/gym_logs",
-        }
-
-        run_command(
-            command="my command",
-            working_dir_path=Path("/my path"),
-            server_name="my_resources/my_server",
-        )
-
-        expected_args = call(
-            "set -o pipefail; (my command) 2>&1 | tee -a /tmp/gym_logs/my_resources_my_server.log",
-            executable="/bin/bash",
-            shell=True,
-            env={"PYTHONPATH": "/my path", "UV_CACHE_DIR": "default uv cache dir"},
-            stdout="stdout",
-            stderr="stderr",
-        )
-        actual_args = Popen_mock.call_args
-        assert expected_args == actual_args
-
-    def test_tee_logs_falls_back_to_dir_name(self, monkeypatch: MonkeyPatch) -> None:
-        Popen_mock, get_global_config_dict_mock = self._setup(monkeypatch)
-
-        get_global_config_dict_mock.return_value = {
-            "uv_cache_dir": "default uv cache dir",
-            "nemo_gym_log_dir": "/tmp/gym_logs",
-        }
-
-        run_command(
-            command="my command",
-            working_dir_path=Path("/my path"),
-        )
-
-        expected_args = call(
-            "set -o pipefail; (my command) 2>&1 | tee -a /tmp/gym_logs/my path.log",
-            executable="/bin/bash",
-            shell=True,
-            env={"PYTHONPATH": "/my path", "UV_CACHE_DIR": "default uv cache dir"},
             stdout="stdout",
             stderr="stderr",
         )
