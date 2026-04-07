@@ -25,8 +25,8 @@ from typing import Any, Dict, Optional
 
 from pydantic import Field
 
-from resources_servers.gymnasium import GymnasiumServer
 from nemo_gym.openai_utils import NeMoGymResponse
+from resources_servers.gymnasium import GymnasiumServer
 from resources_servers.workplace_assistant.utils import get_tools, is_correct
 
 

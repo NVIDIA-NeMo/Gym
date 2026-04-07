@@ -26,8 +26,8 @@ from typing import Dict, Optional
 
 from pydantic import Field
 
-from resources_servers.gymnasium import GymnasiumServer
 from nemo_gym.openai_utils import NeMoGymResponse
+from resources_servers.gymnasium import GymnasiumServer
 
 
 def _extract_text(response: NeMoGymResponse) -> str:

@@ -29,8 +29,8 @@ from typing import Optional
 import reasoning_gym
 from reasoning_gym.utils import extract_answer
 
-from resources_servers.gymnasium import GymnasiumServer
 from nemo_gym.openai_utils import NeMoGymResponse
+from resources_servers.gymnasium import GymnasiumServer
 
 
 def _extract_answer_from_response(response: NeMoGymResponse) -> str:
