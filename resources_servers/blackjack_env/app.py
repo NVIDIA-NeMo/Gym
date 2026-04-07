@@ -27,8 +27,8 @@ from typing import Dict, Optional
 
 from pydantic import Field
 
-from resources_servers.gymnasium import GymnasiumServer
 from nemo_gym.openai_utils import NeMoGymResponse
+from resources_servers.gymnasium import GymnasiumServer
 
 
 _RANKS = ["2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K", "A"]
@@ -99,7 +99,7 @@ class BlackjackEnv(GymnasiumServer):
             )
             return obs, 0.0, False, False, {}
 
-        # stand — dealer plays out
+        # stand: dealer plays out
         while _hand_value(dealer) < 17:
             dealer.append(_deal())
 

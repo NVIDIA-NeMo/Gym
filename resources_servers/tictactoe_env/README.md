@@ -1,10 +1,8 @@
 # TicTacToe Env
 
-TicTacToe implemented as a Gymnasium-style `Env`. The model plays as X against a rule-based opponent that takes winning moves when available.
+TicTacToe as a GymnasiumServer. Model plays as X, opponent (O) is an LLM called via user_model_server. Falls back to first empty cell on invalid opponent moves.
 
 Reward: +1 win, 0 draw, -1 loss.
-
-Move format: `row R col C` (R and C are 1-3).
 
 ## Run
 
