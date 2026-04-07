@@ -16,7 +16,7 @@ ng_run "+config_paths=[resources_servers/tictactoe_env/configs/tictactoe_env.yam
 
 ```bash
 ng_collect_rollouts \
-    +agent_name=tictactoe_env_agent \
+    +agent_name=tictactoe_gymnasium_agent \
     +input_jsonl_fpath=resources_servers/tictactoe_env/data/example.jsonl \
     +output_jsonl_fpath=results/tictactoe_rollouts.jsonl
 ```

@@ -13,11 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""workplace_assistant reimplemented as an Env.
+"""workplace_assistant reimplemented as a GymnasiumServer.
 
 verifier_metadata fields:
-  available_tools: List[str]  — toolkit names to load (required)
-  ground_truth:   list        — expected function calls for scoring
+  available_tools: List[str]   toolkit names to load
+  ground_truth:   list         expected function calls for scoring
 """
 
 import json

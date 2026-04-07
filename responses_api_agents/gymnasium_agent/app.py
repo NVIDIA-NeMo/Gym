@@ -15,12 +15,7 @@
 
 """Agent for GymnasiumServer resources servers.
 
-Drives the reset -> (model -> step)* loop. All episode logic lives in the
-GymnasiumServer; this agent is a generic orchestrator.
-
-Protocol:
-  POST /reset  -> EnvResetResponse  (observation or None; info)
-  POST /step   -> EnvStepResponse   (observation, reward, terminated, truncated, info)
+Drives the reset -> (model -> step)* loop.
 """
 
 from fastapi import Body, Request, Response

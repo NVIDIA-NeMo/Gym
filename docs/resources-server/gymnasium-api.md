@@ -1,8 +1,8 @@
-(env-api)=
+(gymnasium-api)=
 
-# Env API
+# Gymnasium API
 
-<!-- TODO: framing on the two definitions of "environment" and when to use Env vs custom agent -->
+<!-- TODO: framing on the two definitions of "environment" and when to use GymnasiumServer vs custom agent -->
 
 `GymnasiumServer` is a [Gymnasium](https://gymnasium.farama.org/)-style base class for resources servers. Implement `step()`, optionally `reset()`, pair with `gymnasium_agent`.
 

@@ -49,19 +49,9 @@ class EnvStepResponse(BaseModel):
 
 
 class GymnasiumServer(SimpleResourcesServer):
-    """Gymnasium-style RL environment base class.
+    """Gymnasium-style base class. Pair with gymnasium_agent.
 
-    Implement step() and optionally reset(). The EnvAgent calls /reset at episode
-    start and /step after each model response, looping until terminated or truncated.
-
-    Both methods receive session_id for per-rollout state isolation. Stateless
-    environments can ignore it.
-
-    step() returns (observation, reward, terminated, truncated, info):
-      - observation: next prompt to send to model, or None if episode is over
-      - reward: meaningful when terminated=True
-      - terminated: episode ended naturally (success or failure)
-      - truncated: episode hit step limit
+    step() returns (observation, reward, terminated, truncated, info).
     """
 
     def setup_webserver(self) -> FastAPI:
@@ -91,4 +81,4 @@ class GymnasiumServer(SimpleResourcesServer):
     ) -> tuple[Optional[str], float, bool, bool, dict]: ...
 
     async def verify(self, body: BaseVerifyRequest) -> None:  # type: ignore[override]
-        raise NotImplementedError("Env uses /step instead of /verify. Pair with EnvAgent.")
+        raise NotImplementedError("GymnasiumServer uses /step instead of /verify. Pair with gymnasium_agent.")

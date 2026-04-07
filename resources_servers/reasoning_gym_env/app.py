@@ -13,14 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""reasoning_gym reimplemented as an Env.
+"""reasoning_gym reimplemented as a GymnasiumServer.
 
-Single-step: step() always returns terminated=True after the first model response.
+Single-step: step() returns terminated=True on first call.
 
 verifier_metadata fields:
   question: str
   answer: Optional[str]
-  metadata: dict  (must contain source_dataset key)
+  metadata: dict (must contain source_dataset key)
 """
 
 import re

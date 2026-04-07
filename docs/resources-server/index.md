@@ -52,9 +52,9 @@ Every Resources server implements a `verify()` function that evaluates the resul
 - **Actions**: `execute_python()` runs code in an isolated per-session process with numpy, scipy, and pandas available. State persists across steps so the agent can build on previous computations.
 - **Verification**: Answer correctness: extracts the boxed answer from the model's final response and compares it against the expected result.
 
-## Env API
+## Gymnasium API
 
-For new environments, consider using the {doc}`Env API </resources-server/env-api>` instead of `SimpleResourcesServer`. It follows the Gymnasium interface and requires less boilerplate.
+For new environments, consider using {doc}`GymnasiumServer </resources-server/gymnasium-api>` instead of `SimpleResourcesServer`. It follows the Gymnasium interface and requires less boilerplate.
 
 ## Server Configuration
 :::{seealso}

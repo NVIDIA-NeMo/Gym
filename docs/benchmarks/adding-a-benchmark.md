@@ -25,6 +25,6 @@ For integrating existing benchmarks into Gym, you must first use the original re
 
 Once you have a stable setup to run your benchmark, run it a few times on the highest scoring open source model to understand the variance. We want to increase the number of repeats of the benchmark (that is, average @ k, where k is the number of repeats) so that the variance is less than 1%.
 
-## Env API
+## Gymnasium API
 
-For new environments, the {doc}`Env API </resources-server/env-api>` provides a simpler alternative to `SimpleResourcesServer`. See that page for details.
+For new environments, {doc}`GymnasiumServer </resources-server/gymnasium-api>` provides a simpler alternative to `SimpleResourcesServer`. See that page for details.

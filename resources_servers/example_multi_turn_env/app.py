@@ -13,14 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Scripted multi-turn env example.
+"""Scripted multi-turn GymnasiumServer example.
 
-The user side is simulated by replaying a fixed sequence of follow-up messages
-from verifier_metadata. Turn index is tracked per session_id.
+Replays follow-up messages from verifier_metadata. Turn index tracked per session_id.
 
 verifier_metadata fields:
-  follow_ups:      List[str]  — follow-up messages sent after each assistant turn
-  expected_answer: str        — substring expected in the final assistant response
+  follow_ups:      List[str]   follow-up messages sent after each assistant turn
+  expected_answer: str         substring expected in the final assistant response
 """
 
 from typing import Dict, Optional

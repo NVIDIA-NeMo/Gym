@@ -14,7 +14,7 @@ ng_run "+config_paths=[resources_servers/blackjack_env/configs/blackjack_env.yam
 
 ```bash
 ng_collect_rollouts \
-    +agent_name=blackjack_env_agent \
+    +agent_name=blackjack_gymnasium_agent \
     +input_jsonl_fpath=resources_servers/blackjack_env/data/example.jsonl \
     +output_jsonl_fpath=results/blackjack_rollouts.jsonl
 ```
