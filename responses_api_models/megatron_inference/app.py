@@ -12,11 +12,22 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import List, Tuple
+from typing import Any, ClassVar, Dict, List, Tuple, Union
 
 from pydantic import BaseModel
 
-from nemo_gym.openai_utils import RESPONSES_TO_TRAIN
+from nemo_gym.openai_utils import (
+    RESPONSES_TO_TRAIN,
+    NeMoGymChatCompletion,
+    NeMoGymChatCompletionMessage,
+    NeMoGymChatCompletionMessageForTraining,
+    NeMoGymChoice,
+    NeMoGymFunctionCallOutput,
+    NeMoGymResponse,
+    NeMoGymResponseFunctionToolCall,
+    NeMoGymResponseOutputMessage,
+    NeMoGymResponseReasoningItem,
+)
 from nemo_gym.server_utils import is_nemo_gym_fastapi_worker
 from responses_api_models.vllm_model.app import VLLMConverter, VLLMModel
 
@@ -27,17 +38,57 @@ class MegatronMetadataMixin(BaseModel):
     num_evictions: List[int]
 
 
+class MegatronChatCompletionMessageForTraining(NeMoGymChatCompletionMessageForTraining, MegatronMetadataMixin):
+    pass
+
+
+class MegatronChoice(NeMoGymChoice):
+    message: Union[NeMoGymChatCompletionMessage, MegatronChatCompletionMessageForTraining]
+
+
+class MegatronChatCompletion(NeMoGymChatCompletion):
+    choices: List[MegatronChoice]
+
+
 MEGATRON_RESPONSES_TO_TRAIN = {
     base: type(f"Megatron{train.__name__}", (train, MegatronMetadataMixin), {})
     for base, train in RESPONSES_TO_TRAIN.items()
 }
 
+MegatronResponseOutputMessageForTraining = MEGATRON_RESPONSES_TO_TRAIN[NeMoGymResponseOutputMessage]
+
+
+class MegatronResponse(NeMoGymResponse):
+    output: List[
+        Union[
+            # Megatron training variants first so Pydantic prefers them when training fields are present
+            MegatronResponseOutputMessageForTraining,
+            MEGATRON_RESPONSES_TO_TRAIN[NeMoGymResponseFunctionToolCall],
+            MEGATRON_RESPONSES_TO_TRAIN[NeMoGymResponseReasoningItem],
+            NeMoGymResponseOutputMessage,
+            NeMoGymResponseFunctionToolCall,
+            NeMoGymFunctionCallOutput,
+            NeMoGymResponseReasoningItem,
+        ]
+    ]
+
 
 class MegatronInferenceConverter(VLLMConverter):
-    ...
+    def get_train_response_output_item_cls(self, response_output_item_cls: type[BaseModel]) -> type[BaseModel]:
+        return MEGATRON_RESPONSES_TO_TRAIN[response_output_item_cls]
+
+    def get_extra_training_fields(self, message_dict: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "policy_epoch": message_dict["policy_epoch"],
+            "kv_cache_epoch": message_dict["kv_cache_epoch"],
+            "num_evictions": message_dict["num_evictions"],
+        }
 
 
 class MegatronInferenceModel(VLLMModel):
+    _chat_completion_cls: ClassVar[type] = MegatronChatCompletion
+    _response_cls: ClassVar[type] = MegatronResponse
+
     def model_post_init(self, context):
         super().model_post_init(context)
         self._converter = MegatronInferenceConverter(

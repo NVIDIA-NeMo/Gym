@@ -15,10 +15,21 @@
 
 from pydantic import ConfigDict
 
-from nemo_gym.base_resources_server import BaseRunRequest
+from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyRequest
+
+from .app import MegatronResponse
 
 
 class MegatronRunRequest(BaseRunRequest):
     """Run request that preserves environment-specific dataset fields."""
 
     model_config = ConfigDict(extra="allow")
+
+
+class MegatronVerifyRequest(BaseVerifyRequest):
+    model_config = ConfigDict(extra="allow")
+    response: MegatronResponse
+
+
+class MegatronVerifyResponse(MegatronVerifyRequest):
+    reward: float
