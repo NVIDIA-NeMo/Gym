@@ -32,43 +32,39 @@ def prepare_helper(output_name: str, model: str, length: str) -> Path:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     output_fpath = DATA_DIR / output_name
 
-    skills_dir = BENCHMARK_DIR / "Skills"
-    if skills_dir.exists():
-        print("Skipping git clone as the repository is already cloned!")
-    else:
-        run(
-            """git clone https://github.com/NVIDIA-NeMo/Skills \
-&& cd Skills \
-&& git lfs install \
-&& git checkout 54d2e113c2f64bf74bda72e15f23f01b524850da \
-&& uv venv --python 3.12 --seed .venv \
+    run(
+        """uv venv --python 3.12 --allow-existing --seed .venv \
 && source .venv/bin/activate \
-&& uv pip install '-e .' scipy wonderwords html2text tenacity nltk""",
-            check=True,
-            shell=True,
-            cwd=BENCHMARK_DIR,
-        )
+&& uv pip install pyyaml bs4 scipy wonderwords html2text tenacity nltk transformers""",
+        check=True,
+        shell=True,
+        cwd=BENCHMARK_DIR,
+        executable="/bin/bash",
+    )
 
     maybe_hf_token = get_hf_token()
     env_vars = dict()
     if maybe_hf_token:
         env_vars["HF_TOKEN"] = maybe_hf_token
 
-    tmp_data_dir = skills_dir / "ruler" / model / str(length)
+    tmp_data_dir = BENCHMARK_DIR / "temp_ruler_data_dir" / model / str(length)
+
     run(
         f"""source .venv/bin/activate \
-&& python nemo_skills/dataset/ruler/prepare.py \
+&& python ruler_prepare_script.py \
     --data_format=chat \
     --setup={model}-{length} \
     --max_seq_length={length} \
     --tokenizer_path={model} \
     --max_seq_length={length} \
+    --ruler_parent_dir={BENCHMARK_DIR} \
     --tmp_data_dir={tmp_data_dir.absolute()}
 """,
         check=True,
         shell=True,
-        cwd=skills_dir,
+        cwd=BENCHMARK_DIR,
         env=environ | env_vars,
+        executable="/bin/bash",
     )
 
     samples = []
