@@ -30,7 +30,7 @@ from nemo_gym.base_responses_api_agent import (
     Body,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.config_types import AgentServerRef, ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -45,11 +45,14 @@ from nemo_gym.server_utils import get_response_json, raise_for_status
 class SimpleAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
+    user_agent_server: AgentServerRef
     max_steps: int = None
 
 
 class SimpleAgentRunRequest(BaseRunRequest):
     model_config = ConfigDict(extra="allow")
+
+    user_model_initial_trajectory: list
 
 
 class SimpleAgentVerifyRequest(BaseVerifyRequest):
@@ -168,14 +171,50 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         await raise_for_status(seed_session_response)
         cookies = seed_session_response.cookies
 
-        response = await self.server_client.post(
-            server_name=self.config.name,
-            url_path="/v1/responses",
-            json=body.responses_create_params,
-            cookies=cookies,
-        )
-        await raise_for_status(response)
-        cookies = response.cookies
+        # TODO call seed session for the User model resources server?
+
+        # TODO initialize the Policy trajectory from body.responses.input
+        policy_input_items = []
+        # TODO initialize the User trajectory from body. whatever the system prompt input in the run request is
+        user_input_items = body.user_model_initial_trajectory
+
+        MAX_TURNS = 10
+        max_turns = 0
+        while max_turns <= MAX_TURNS:
+            response = await self.server_client.post(
+                server_name=self.config.name,
+                url_path="/v1/responses",
+                json=body.responses_create_params,
+                cookies=cookies,
+            )
+            await raise_for_status(response)
+            cookies = response.cookies
+
+            policy_response = await get_response_json(response)
+            policy_response = NeMoGymResponse.model_validate(policy_response)
+
+            # TODO update Policy and user trajectories
+            policy_input_items.extend(policy_response.output)
+            user_input_items.extend({"role": "user", "content": policy_response.output_text})
+
+            user_response = await self.server_client.post(
+                server_name=self.config.user_agent_server.name,
+                url_path="/v1/responses",
+                json=body.responses_create_params,
+                cookies=cookies,
+            )
+            await raise_for_status(user_response)
+            cookies = user_response.cookies
+            # TODO handle user agent server cookies properly
+
+            user_response = await get_response_json(response)
+            user_response = NeMoGymResponse.model_validate(user_response)
+
+            # TODO update Policy and user trajectories
+            user_input_items.extend(user_response.output)
+            policy_input_items.extend({"role": "user", "content": user_response.output_text})
+
+            max_turns += 1
 
         verify_request = SimpleAgentVerifyRequest.model_validate(
             body.model_dump() | {"response": await get_response_json(response)}
