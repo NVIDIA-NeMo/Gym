@@ -12,8 +12,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import importlib
 import json
-from typing import List
+from typing import ClassVar, List
 
 from fastapi import Request, Response
 from pydantic import ConfigDict, ValidationError
@@ -31,6 +32,7 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.global_config import get_first_server_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -62,6 +64,24 @@ class SimpleAgentVerifyResponse(BaseVerifyResponse):
 
 class SimpleAgent(SimpleResponsesAPIAgent):
     config: SimpleAgentConfig
+
+    _response_cls: ClassVar[type] = NeMoGymResponse
+    _verify_request_cls: ClassVar[type] = SimpleAgentVerifyRequest
+    _verify_response_cls: ClassVar[type] = SimpleAgentVerifyResponse
+
+    def model_post_init(self, context):
+        # Auto-discover custom response/verify types from the model server's
+        # config, so model backends like megatron_inference can declare them
+        # once and have them propagate through the agent pipeline.
+        model_config = get_first_server_config_dict(
+            self.server_client.global_config_dict, self.config.model_server.name
+        )
+        for attr in ("response_cls", "verify_request_cls", "verify_response_cls"):
+            dotted_path = model_config.get(attr)
+            if dotted_path:
+                mod, cls = dotted_path.rsplit(".", 1)
+                object.__setattr__(self, f"_{attr}", getattr(importlib.import_module(mod), cls))
+        return super().model_post_init(context)
 
     async def responses(
         self,
@@ -95,7 +115,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             model_response_json = await get_response_json(model_response)
             model_server_cookies = model_response.cookies
             try:
-                model_response = NeMoGymResponse.model_validate(model_response_json)
+                model_response = self._response_cls.model_validate(model_response_json)
             except ValidationError as e:
                 raise RuntimeError(
                     f"Received an invalid response from model server: {json.dumps(model_response_json)}"
@@ -177,7 +197,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         await raise_for_status(response)
         cookies = response.cookies
 
-        verify_request = SimpleAgentVerifyRequest.model_validate(
+        verify_request = self._verify_request_cls.model_validate(
             body.model_dump() | {"response": await get_response_json(response)}
         )
 
@@ -188,7 +208,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             cookies=cookies,
         )
         await raise_for_status(verify_response)
-        return SimpleAgentVerifyResponse.model_validate(await get_response_json(verify_response))
+        return self._verify_response_cls.model_validate(await get_response_json(verify_response))
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
         """Proxy aggregate_metrics to the resources server."""

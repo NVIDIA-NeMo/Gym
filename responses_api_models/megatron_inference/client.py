@@ -26,6 +26,7 @@ class MegatronRunRequest(BaseRunRequest):
 
 
 class MegatronVerifyRequest(BaseVerifyRequest):
+    model_config = ConfigDict(extra="allow")
     response: MegatronResponse
 
 

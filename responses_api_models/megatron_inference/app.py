@@ -22,6 +22,7 @@ from nemo_gym.openai_utils import (
     NeMoGymChatCompletionMessage,
     NeMoGymChatCompletionMessageForTraining,
     NeMoGymChoice,
+    NeMoGymFunctionCallOutput,
     NeMoGymResponse,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
@@ -61,9 +62,15 @@ MegatronResponseOutputMessageForTraining = MEGATRON_RESPONSES_TO_TRAIN[NeMoGymRe
 
 class MegatronResponse(NeMoGymResponse):
     output: List[Union[
+        # Megatron training variants first so Pydantic prefers them when training fields are present
         MegatronResponseOutputMessageForTraining,
         MEGATRON_RESPONSES_TO_TRAIN[NeMoGymResponseFunctionToolCall],
         MEGATRON_RESPONSES_TO_TRAIN[NeMoGymResponseReasoningItem],
+        # Non-training base types for output items that don't carry token IDs (e.g. reasoning)
+        NeMoGymResponseOutputMessage,
+        NeMoGymResponseFunctionToolCall,
+        NeMoGymFunctionCallOutput,
+        NeMoGymResponseReasoningItem,
     ]]
 
 

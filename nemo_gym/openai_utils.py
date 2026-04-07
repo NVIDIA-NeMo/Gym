@@ -225,18 +225,20 @@ RESPONSES_TO_TRAIN = {
 
 
 NeMoGymResponseInputItem = Union[
+    # Training types first so Pydantic prefers them when training fields are present,
+    # rather than matching a base type and silently dropping the extra fields.
+    NeMoGymEasyInputMessageForTraining,
+    NeMoGymMessageForTraining,
+    NeMoGymResponseOutputMessageForTraining,
+    NeMoGymResponseFunctionToolCallForTraining,
+    NeMoGymResponseReasoningItemForTraining,
+    # Base types as fallback for items without training data (e.g. reasoning items).
     NeMoGymEasyInputMessage,
     NeMoGymMessage,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseFunctionToolCall,
     NeMoGymFunctionCallOutput,
     NeMoGymResponseReasoningItem,
-    # For training:
-    NeMoGymEasyInputMessageForTraining,
-    NeMoGymMessageForTraining,
-    NeMoGymResponseOutputMessageForTraining,
-    NeMoGymResponseFunctionToolCallForTraining,
-    NeMoGymResponseReasoningItemForTraining,
 ]
 NeMoGymResponseInput: TypeAlias = List[NeMoGymResponseInputItem]
 
