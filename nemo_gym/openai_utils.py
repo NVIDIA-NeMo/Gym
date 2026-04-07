@@ -274,6 +274,8 @@ class NeMoGymResponseCreateParamsNonStreaming(BaseModel):
     truncation: Optional[Literal["auto", "disabled"]] = None
     user: Optional[str] = None
     stream: Optional[Literal[False]] = None
+    # vLLM-specific: passed as chat_template_kwargs to enable/disable per-request thinking.
+    chat_template_kwargs: Optional[Dict[str, Any]] = None
 
 
 ########################################
@@ -447,6 +449,8 @@ class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
     user: Optional[str] = None
     web_search_options: Optional[WebSearchOptions] = None
     stream: Optional[Literal[False]] = None
+    # vLLM-specific: passed as chat_template_kwargs to enable/disable per-request thinking.
+    chat_template_kwargs: Optional[Dict[str, Any]] = None
 
     # Disallow deprecated args
     # function_call: FunctionCall

@@ -1,3 +1,5 @@
 *.json
 *.jsonl
 *.csv
+*.[pP][dD][fF]
+*.docx
