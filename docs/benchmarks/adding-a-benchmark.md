@@ -25,12 +25,6 @@ For integrating existing benchmarks into Gym, you must first use the original re
 
 Once you have a stable setup to run your benchmark, run it a few times on the highest scoring open source model to understand the variance. We want to increase the number of repeats of the benchmark (that is, average @ k, where k is the number of repeats) so that the variance is less than 1%.
 
-## Choosing an implementation path
+## Env API
 
-Environment logic does not have to live in the resources server. In NeMo-Gym, the agent server can be the RL environment. SWE-RL is an example: the agent server owns the full execution loop (patching, test execution, result collection) and the resources server is minimal. The verifiers library follows the same pattern. For environments with complex execution that requires calling the model mid-episode or branching on intermediate results, writing a custom agent server is often the right choice.
-
-For environments where the resources server is the primary environment component, there are two paths:
-
-**`SimpleResourcesServer`** is the lower-level path. You implement `verify()` directly, register tool endpoints manually, and wire up an agent in the YAML config. Use this when integrating an existing benchmark with its own execution loop, or when you need precise control over the HTTP interface.
-
-**`Env`** is the higher-level path, modeled on the [Gymnasium](https://gymnasium.farama.org/) interface. You implement `step()` and optionally `reset()`, and pair with `env_agent`. Use this when writing a new environment from scratch. See {doc}`/resources-server/env-api` for the interface and examples.
+For new environments, the {doc}`Env API </resources-server/env-api>` provides a simpler alternative to `SimpleResourcesServer`. See that page for details.

@@ -6,15 +6,7 @@
 
 ## What is an Environment?
 
-An environment in reinforcement learning is defined by a Markov Decision Process: at each step, the agent takes an action, the environment transitions to a new state, and returns an observation and a reward.
-
-For a language model, the action at each step is a single token. The observation is the conversation context: the full text the model can see at that point, including the system prompt, prior turns, and any tool results that have been injected. The reward is sparse: zero at every step except the end of the episode, where a verifier assigns a score.
-
-Because the model can only observe the conversation and not the full state of the environment (the contents of a database, the filesystem, the execution environment), most LLM training setups are technically partially observable MDPs (POMDPs). The model infers hidden state from what it observes through tool calls.
-
-The environment does not step between tokens. While the model is generating a response, the environment waits. It steps only at response boundaries: when the model finishes generating, the agent decides what happens next. Tools may be called, results may be injected into the context, a new user turn may be added, or the episode may end and return a reward.
-
-The episode is the full sequence from the initial prompt to the terminal state, potentially spanning many response boundaries. The policy gradient is computed across every token in the episode.
+An environment is defined by the task for the agent to accomplish, the actions the agent can take, and the state of the world the agent observes and acts upon. The environment also determines how the agent's performance is evaluated: what constitutes success and how reward is assigned.
 
 In NeMo Gym, these concepts map to three server components:
 
