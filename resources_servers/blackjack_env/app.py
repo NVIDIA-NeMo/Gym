@@ -27,7 +27,7 @@ from typing import Dict, Optional
 
 from pydantic import Field
 
-from nemo_gym.envs import Env
+from resources_servers.gymnasium import GymnasiumServer
 from nemo_gym.openai_utils import NeMoGymResponse
 
 
@@ -63,7 +63,7 @@ def _extract_text(response: NeMoGymResponse) -> str:
     return ""
 
 
-class BlackjackEnv(Env):
+class BlackjackEnv(GymnasiumServer):
     session_state: Dict[str, dict] = Field(default_factory=dict)
 
     async def reset(self, metadata: dict, session_id: Optional[str] = None) -> tuple[Optional[str], dict]:

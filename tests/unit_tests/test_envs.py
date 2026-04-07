@@ -18,7 +18,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from nemo_gym.base_resources_server import BaseResourcesServerConfig, BaseVerifyRequest
-from nemo_gym.envs import Env, EnvResetRequest, EnvResetResponse, EnvStepRequest, EnvStepResponse
+from resources_servers.gymnasium import GymnasiumServer, EnvResetRequest, EnvResetResponse, EnvStepRequest, EnvStepResponse
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 
 
@@ -37,7 +37,7 @@ def _mock_request(session_id="test-session"):
     return request
 
 
-class ConcreteEnv(Env):
+class ConcreteEnv(GymnasiumServer):
     async def step(self, action, metadata, session_id=None):
         return None, 1.0, True, False, {}
 
@@ -84,7 +84,7 @@ class TestEnv:
 
     @pytest.mark.asyncio
     async def test_step_terminated_fields(self):
-        class TerminatingEnv(Env):
+        class TerminatingEnv(GymnasiumServer):
             async def step(self, action, metadata, session_id=None):
                 return None, 0.5, True, False, {"extra": "data"}
 
@@ -100,7 +100,7 @@ class TestEnv:
 
     @pytest.mark.asyncio
     async def test_step_continues_with_observation(self):
-        class ContinuingEnv(Env):
+        class ContinuingEnv(GymnasiumServer):
             async def step(self, action, metadata, session_id=None):
                 return "follow up", 0.0, False, False, {}
 
@@ -122,7 +122,7 @@ class TestEnv:
     async def test_metadata_passed_to_step(self):
         received = {}
 
-        class MetaEnv(Env):
+        class MetaEnv(GymnasiumServer):
             async def step(self, action, metadata, session_id=None):
                 received.update(metadata)
                 return None, 0.0, True, False, {}
@@ -138,7 +138,7 @@ class TestEnv:
     async def test_session_id_passed_to_step(self):
         received = {}
 
-        class SessionEnv(Env):
+        class SessionEnv(GymnasiumServer):
             async def step(self, action, metadata, session_id=None):
                 received["session_id"] = session_id
                 return None, 0.0, True, False, {}
@@ -154,7 +154,7 @@ class TestEnv:
     async def test_session_id_passed_to_reset(self):
         received = {}
 
-        class SessionEnv(Env):
+        class SessionEnv(GymnasiumServer):
             async def reset(self, metadata, session_id=None):
                 received["session_id"] = session_id
                 return None, {}

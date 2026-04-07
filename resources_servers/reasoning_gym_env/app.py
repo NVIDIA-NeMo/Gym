@@ -29,7 +29,7 @@ from typing import Optional
 import reasoning_gym
 from reasoning_gym.utils import extract_answer
 
-from nemo_gym.envs import Env
+from resources_servers.gymnasium import GymnasiumServer
 from nemo_gym.openai_utils import NeMoGymResponse
 
 
@@ -54,7 +54,7 @@ def _extract_answer_from_response(response: NeMoGymResponse) -> str:
     return text.strip()
 
 
-class ReasoningGymEnv(Env):
+class ReasoningGymEnv(GymnasiumServer):
     async def step(
         self, action: NeMoGymResponse, metadata: dict, session_id: Optional[str] = None
     ) -> tuple[Optional[str], float, bool, bool, dict]:

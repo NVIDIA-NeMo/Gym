@@ -30,7 +30,7 @@ class EnvResetRequest(BaseModel):
 
 
 class EnvResetResponse(BaseModel):
-    observation: Optional[str] = None  # None = use responses_create_params.input as-is
+    observation: Optional[str] = None
     info: dict = {}
 
 
@@ -41,14 +41,14 @@ class EnvStepRequest(BaseModel):
 
 
 class EnvStepResponse(BaseModel):
-    observation: Optional[str] = None  # next prompt for model; None = episode over
+    observation: Optional[str] = None
     reward: float = 0.0
     terminated: bool = False
     truncated: bool = False
     info: dict = {}
 
 
-class Env(SimpleResourcesServer):
+class GymnasiumServer(SimpleResourcesServer):
     """Gymnasium-style RL environment base class.
 
     Implement step() and optionally reset(). The EnvAgent calls /reset at episode
