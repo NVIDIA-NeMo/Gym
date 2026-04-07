@@ -90,5 +90,7 @@ jobs:
         run: |
           cd /tmp
           source test_install/bin/activate
+          # Copy example server from source since it's not in the wheel
+          cp -r $GITHUB_WORKSPACE/resources_servers .
           export UV_FIND_LINKS=$GITHUB_WORKSPACE/dist
           ng_test +entrypoint=resources_servers/example_single_tool_call
