@@ -1,0 +1,7 @@
+gymnasium:
+  resources_servers:
+    gymnasium:
+      entrypoint: __init__.py
+      domain: other
+      verified: false
+      description: Base class for Gymnasium-style servers. Not a standalone server.

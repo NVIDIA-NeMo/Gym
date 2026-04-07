@@ -133,6 +133,83 @@ class MyMultiTurnEnv(GymnasiumServer):
         return None, reward, True, False, {}
 ```
 
+## Multi-turn with user model
+
+Instead of scripted follow-ups, call a second LLM to generate user replies. The policy never sees the user model's internals. Configure the user model as a separate model server in YAML.
+
+```python
+from nemo_gym.server_utils import get_response_json, raise_for_status
+
+class UserSimEnv(GymnasiumServer):
+    user_model_server: str = "user_model"
+
+    async def step(self, action, metadata, session_id=None):
+        assistant_text = _extract_text(action)
+        resp = await self.server_client.post(
+            server_name=self.user_model_server,
+            url_path="/v1/responses",
+            json={"input": [
+                {"role": "system", "content": metadata.get("user_persona", "You are a user.")},
+                {"role": "assistant", "content": assistant_text},
+            ]},
+        )
+        await raise_for_status(resp)
+        data = await get_response_json(resp)
+        user_reply = _extract_text_from_json(data)
+
+        if is_done(user_reply, metadata):
+            reward = self._grade(action, metadata)
+            return None, reward, True, False, {}
+
+        return user_reply, 0.0, False, False, {}
+```
+
+## Multi-turn with user model and tools
+
+The user model can also call tools that the policy model does not have access to. For example, the user model might query a database or check a schedule to formulate realistic follow-up questions. The policy only sees the resulting text, not the tool calls or their outputs.
+
+Configure the user model's tool schemas in the `step()` call, not in the policy's `responses_create_params.tools`.
+
+```python
+class UserWithToolsEnv(GymnasiumServer):
+    user_model_server: str = "user_model"
+    session_state: dict = Field(default_factory=dict)
+
+    async def reset(self, metadata, session_id=None):
+        self.session_state[session_id] = initialize_user_tools(metadata)
+        return None, {}
+
+    async def step(self, action, metadata, session_id=None):
+        assistant_text = _extract_text(action)
+        state = self.session_state[session_id]
+
+        # User model gets its own tool schemas (hidden from the policy)
+        resp = await self.server_client.post(
+            server_name=self.user_model_server,
+            url_path="/v1/responses",
+            json={
+                "input": [
+                    {"role": "system", "content": state["user_system_prompt"]},
+                    {"role": "assistant", "content": assistant_text},
+                ],
+                "tools": state["user_tools"],  # only the user model sees these
+            },
+        )
+        await raise_for_status(resp)
+        data = await get_response_json(resp)
+
+        # Execute any tool calls the user model made
+        user_reply = await self._run_user_tool_loop(data, state)
+
+        if is_done(user_reply, metadata):
+            reward = self._grade(action, metadata)
+            return None, reward, True, False, {}
+
+        return user_reply, 0.0, False, False, {}
+```
+
+The policy sees `user_reply` as a plain user message. It has no knowledge of the user model's tools, tool calls, or tool results. This enables asymmetric information between the policy and the simulated user.
+
 ## LLM-as-judge
 
 Use `step()` to call a judge model via `self.server_client` and score the output. The judge model must be configured as a separate model server.
