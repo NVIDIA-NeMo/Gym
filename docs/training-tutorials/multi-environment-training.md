@@ -6,6 +6,12 @@ NeMo Gym supports training on multiple environments simultaneously. Multi-verifi
 ## Why Train on Multiple Environments?
 This technique often results in more stable gains across multiple benchmarks. Single-environment training may cause unrecoverable degradation of other benchmarks.
 
+## Environments and agent_ref
+
+Each training environment is a separate MDP: a different task, different tools, different reward function. In multi-environment training, the dataset contains records from multiple environments mixed together. Each record carries an `agent_ref` field that identifies which environment it belongs to. The training framework uses `agent_ref` to route each record to the correct agent server for rollout collection.
+
+The `agent_ref` is the boundary between environments, not the resources server. Two instances of `simple_agent` each paired with a different resources server are two different environments and carry different `agent_ref` values. The resources server is a component of an environment; the agent server instance is the identifier of it.
+
 ## How to Configure
 Suppose you want to use both the example_single_tool_call and example_multi_step training environments. To start each server individually:
 
