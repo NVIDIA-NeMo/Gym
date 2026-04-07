@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
-from typing import List
+from typing import List, Union
 
 from fastapi import Request, Response
 from pydantic import ConfigDict, ValidationError
@@ -45,7 +45,7 @@ from nemo_gym.server_utils import get_response_json, raise_for_status
 class SimpleAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
-    user_agent_server: AgentServerRef
+    user_server: Union[ModelServerRef, AgentServerRef]
     max_steps: int = None
 
 
