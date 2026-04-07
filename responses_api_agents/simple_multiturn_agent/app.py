@@ -195,7 +195,19 @@ class SimpleAgent(SimpleResponsesAPIAgent):
 
             # TODO update Policy and user trajectories
             policy_input_items.extend(policy_response.output)
-            user_input_items.extend({"role": "user", "content": policy_response.output_text})
+            # user_input_items.extend({"role": "user", "content": policy_response.output_text})
+
+            # TODO get state
+            state_response = await self.server_client.post(
+                server_name=self.config.resources_server.name,
+                url_path="/get_state",
+                json=body.responses_create_params,
+                cookies=cookies,
+            )
+            # SWE Bench OpenHands harness uses user role
+            user_input_items.append({"role": "user", "content": state_response})
+            # Tau Bench harness uses tool role
+            # policy_input_items.append({"role": "tool", "content": state_response})
 
             user_response = await self.server_client.post(
                 server_name=self.config.user_agent_server.name,
@@ -212,7 +224,17 @@ class SimpleAgent(SimpleResponsesAPIAgent):
 
             # TODO update Policy and user trajectories
             user_input_items.extend(user_response.output)
-            policy_input_items.extend({"role": "user", "content": user_response.output_text})
+            # policy_input_items.extend({"role": "user", "content": user_response.output_text})
+
+            # TODO get state
+            self.get_state()
+            state_response = await self.server_client.post(
+                server_name=self.config.resources_server.name,
+                url_path="/get_state",
+                json=body.responses_create_params,
+                cookies=cookies,
+            )
+            policy_input_items.append({"role": "user", "content": state_response})
 
             max_turns += 1
 
