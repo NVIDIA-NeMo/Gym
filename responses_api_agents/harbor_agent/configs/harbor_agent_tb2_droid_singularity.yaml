@@ -1,0 +1,32 @@
+harbor_agent:
+  responses_api_agents:
+    harbor_agent:
+      entrypoint: app.py
+      concurrency: 50
+
+      harbor_datasets:
+        terminal_bench:
+          local_dataset_path: "/path/to/tb2-tasks"
+
+      harbor_agent_name: null
+      harbor_agent_import_path: "responses_api_agents.harbor_agent.custom_agents.droid_nemo_gym:DroidNemoGym"
+
+      harbor_agent_kwargs:
+        api_base: ${policy_base_url}
+        api_key: ${policy_api_key}
+        max_output_tokens: 32768
+        max_context_limit: 131072
+
+      # Singularity/Apptainer environment for HPC clusters (no Docker required).
+      # TB2 task Docker images must be pre-converted to .sif format.
+      harbor_environment_type: null
+      harbor_environment_import_path: "responses_api_agents.harbor_agent.custom_envs.singularity.singularity:SingularityEnvironment"
+      harbor_environment_kwargs:
+        singularity_image_cache_dir: "/path/to/tb2_sif_cache"
+
+      model_server:
+        type: responses_api_models
+        name: policy_model
+
+      harbor_agent_override_timeout: 1800
+      harbor_jobs_dir: "jobs"
