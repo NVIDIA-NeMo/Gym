@@ -1,0 +1,266 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+import json
+from typing import List, Union
+
+from fastapi import Request, Response
+from pydantic import ConfigDict, ValidationError
+
+from nemo_gym.base_resources_server import (
+    AggregateMetrics,
+    AggregateMetricsRequest,
+    BaseRunRequest,
+    BaseVerifyRequest,
+    BaseVerifyResponse,
+)
+from nemo_gym.base_responses_api_agent import (
+    BaseResponsesAPIAgentConfig,
+    Body,
+    SimpleResponsesAPIAgent,
+)
+from nemo_gym.config_types import AgentServerRef, ModelServerRef, ResourcesServerRef
+from nemo_gym.openai_utils import (
+    NeMoGymEasyInputMessage,
+    NeMoGymFunctionCallOutput,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseFunctionToolCall,
+    NeMoGymResponseOutputMessage,
+)
+from nemo_gym.server_utils import get_response_json, raise_for_status
+
+
+class SimpleAgentConfig(BaseResponsesAPIAgentConfig):
+    resources_server: ResourcesServerRef
+    model_server: ModelServerRef
+    user_server: Union[ModelServerRef, AgentServerRef]
+    max_steps: int = None
+
+
+class SimpleAgentRunRequest(BaseRunRequest):
+    model_config = ConfigDict(extra="allow")
+
+    user_model_initial_trajectory: list
+
+
+class SimpleAgentVerifyRequest(BaseVerifyRequest):
+    model_config = ConfigDict(extra="allow")
+
+
+class SimpleAgentVerifyResponse(BaseVerifyResponse):
+    model_config = ConfigDict(extra="allow")
+
+
+class SimpleAgent(SimpleResponsesAPIAgent):
+    config: SimpleAgentConfig
+
+    async def responses(
+        self,
+        request: Request,
+        response: Response,
+        body: NeMoGymResponseCreateParamsNonStreaming = Body(),
+    ) -> NeMoGymResponse:
+        body = body.model_copy(deep=True)
+
+        if isinstance(body.input, str):
+            body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
+
+        new_outputs = []
+        usage = None
+        step = 0
+        model_server_cookies = None  # update the cookies on every model response
+        resources_server_cookies = request.cookies  # update the cookies on every resources server response
+
+        while True:
+            step += 1
+            new_body = body.model_copy(update={"input": body.input + new_outputs})
+
+            model_response = await self.server_client.post(
+                server_name=self.config.model_server.name,
+                url_path="/v1/responses",
+                json=new_body,
+                cookies=model_server_cookies,
+            )
+            # We raise for status here since we expect model calls to always work.
+            await raise_for_status(model_response)
+            model_response_json = await get_response_json(model_response)
+            model_server_cookies = model_response.cookies
+            try:
+                model_response = NeMoGymResponse.model_validate(model_response_json)
+            except ValidationError as e:
+                raise RuntimeError(
+                    f"Received an invalid response from model server: {json.dumps(model_response_json)}"
+                ) from e
+
+            output = model_response.output
+            new_outputs.extend(output)
+
+            if not usage:
+                usage = model_response.usage
+                model_response.usage = None
+
+            if usage and model_response.usage:
+                usage.input_tokens += model_response.usage.input_tokens
+                usage.output_tokens += model_response.usage.output_tokens
+                usage.total_tokens += model_response.usage.total_tokens
+
+                # TODO support more advanced token details
+                usage.input_tokens_details.cached_tokens = 0
+                usage.output_tokens_details.reasoning_tokens = 0
+
+            if model_response.incomplete_details and model_response.incomplete_details.reason == "max_output_tokens":
+                break
+
+            all_fn_calls: List[NeMoGymResponseFunctionToolCall] = [o for o in output if o.type == "function_call"]
+            all_output_messages: List[NeMoGymResponseOutputMessage] = [
+                o for o in output if o.type == "message" and o.role == "assistant"
+            ]
+            if not all_fn_calls and all_output_messages:
+                break
+
+            for output_function_call in all_fn_calls:
+                api_response = await self.server_client.post(
+                    server_name=self.config.resources_server.name,
+                    url_path=f"/{output_function_call.name}",
+                    json=json.loads(output_function_call.arguments),
+                    cookies=resources_server_cookies,
+                )
+                # We don't raise for status here since it's a valid return for the API to error e.g. if the model outputs an invalid call or something.
+                resources_server_cookies = api_response.cookies
+
+                tool_response = NeMoGymFunctionCallOutput(
+                    type="function_call_output",
+                    call_id=output_function_call.call_id,
+                    output=(await api_response.content.read()).decode(),
+                )
+                new_outputs.append(tool_response)
+
+            # Check if max steps is not None and if we have exhausted it.
+            if self.config.max_steps and step >= self.config.max_steps:
+                break
+
+        # Propogate any extra cookies necessary for downstream verification
+        for k, v in (*resources_server_cookies.items(), *model_server_cookies.items()):
+            response.set_cookie(k, v)
+
+        model_response.output = new_outputs
+        model_response.usage = usage
+        return model_response
+
+    async def run(self, request: Request, body: SimpleAgentRunRequest) -> SimpleAgentVerifyResponse:
+        cookies = request.cookies
+
+        seed_session_response = await self.server_client.post(
+            server_name=self.config.resources_server.name,
+            url_path="/seed_session",
+            json=body.model_dump(),
+            cookies=cookies,
+        )
+        await raise_for_status(seed_session_response)
+        cookies = seed_session_response.cookies
+
+        # TODO call seed session for the User model resources server?
+
+        # TODO initialize the Policy trajectory from body.responses.input
+        policy_input_items = []
+        # TODO initialize the User trajectory from body. whatever the system prompt input in the run request is
+        user_input_items = body.user_model_initial_trajectory
+
+        MAX_TURNS = 10
+        max_turns = 0
+        while max_turns <= MAX_TURNS:
+            response = await self.server_client.post(
+                server_name=self.config.name,
+                url_path="/v1/responses",
+                json=body.responses_create_params,
+                cookies=cookies,
+            )
+            await raise_for_status(response)
+            cookies = response.cookies
+
+            policy_response = await get_response_json(response)
+            policy_response = NeMoGymResponse.model_validate(policy_response)
+
+            # TODO update Policy and user trajectories
+            policy_input_items.extend(policy_response.output)
+            # user_input_items.extend({"role": "user", "content": policy_response.output_text})
+
+            # TODO get state
+            state_response = await self.server_client.post(
+                server_name=self.config.resources_server.name,
+                url_path="/get_state",
+                json=body.responses_create_params,
+                cookies=cookies,
+            )
+            # SWE Bench OpenHands harness uses user role
+            user_input_items.append({"role": "user", "content": state_response})
+            # Tau Bench harness uses tool role
+            # policy_input_items.append({"role": "tool", "content": state_response})
+
+            user_response = await self.server_client.post(
+                server_name=self.config.user_agent_server.name,
+                url_path="/v1/responses",
+                json=body.responses_create_params,
+                cookies=cookies,
+            )
+            await raise_for_status(user_response)
+            cookies = user_response.cookies
+            # TODO handle user agent server cookies properly
+
+            user_response = await get_response_json(response)
+            user_response = NeMoGymResponse.model_validate(user_response)
+
+            # TODO update Policy and user trajectories
+            user_input_items.extend(user_response.output)
+            # policy_input_items.extend({"role": "user", "content": user_response.output_text})
+
+            # TODO get state
+            self.get_state()
+            state_response = await self.server_client.post(
+                server_name=self.config.resources_server.name,
+                url_path="/get_state",
+                json=body.responses_create_params,
+                cookies=cookies,
+            )
+            policy_input_items.append({"role": "user", "content": state_response})
+
+            max_turns += 1
+
+        verify_request = SimpleAgentVerifyRequest.model_validate(
+            body.model_dump() | {"response": await get_response_json(response)}
+        )
+
+        verify_response = await self.server_client.post(
+            server_name=self.config.resources_server.name,
+            url_path="/verify",
+            json=verify_request.model_dump(),
+            cookies=cookies,
+        )
+        await raise_for_status(verify_response)
+        return SimpleAgentVerifyResponse.model_validate(await get_response_json(verify_response))
+
+    async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
+        """Proxy aggregate_metrics to the resources server."""
+        response = await self.server_client.post(
+            server_name=self.config.resources_server.name,
+            url_path="/aggregate_metrics",
+            json=body,
+        )
+        await raise_for_status(response)
+        return AggregateMetrics.model_validate(await get_response_json(response))
+
+
+if __name__ == "__main__":
+    SimpleAgent.run_webserver()

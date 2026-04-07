@@ -1,0 +1,1 @@
+user: "Answer the following multiple choice question. The last line of your response should be in the following format: 'Answer: $LETTER' where LETTER is one of A, B, C, D, E, F, G, H, I, J.\n\n{question}\n{options_text}"
