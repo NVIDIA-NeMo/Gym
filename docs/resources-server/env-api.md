@@ -2,19 +2,9 @@
 
 # Env API
 
-`Env` is a simpler alternative to `SimpleResourcesServer` for writing training environments. It follows the [Gymnasium](https://gymnasium.farama.org/) interface: implement `step()`, optionally `reset()`, and pair with `EnvAgent` instead of `simple_agent`.
+<!-- TODO: framing on the two definitions of "environment" and when to use Env vs custom agent -->
 
-### Where does environment logic live?
-
-In NeMo-Gym, the RL environment is not always the resources server. There are three common patterns:
-
-**Resources server as environment.** The resources server owns verification and any tools. The agent (simple_agent, env_agent) is a thin orchestration loop that calls the model and routes to the server. This is the common case for grading benchmarks and tool-use tasks.
-
-**Agent server as environment.** For complex execution environments, the agent server IS the RL environment. SWE-RL is an example: the agent server runs the full evaluation loop (applying patches, executing tests, collecting results) and the resources server is minimal or not needed. The verifiers library follows the same pattern. There is no architectural requirement that environment logic live in the resources server.
-
-**Split.** The agent owns the episode structure (turn count, retry logic, branching) and the resources server owns verification and tools. `proof_refinement_agent` is an example: the agent controls the correction loop; the resources server verifies each attempt.
-
-`Env` is for the first pattern. If your environment logic is better expressed as an agent (because it needs to call the model mid-episode, branch on intermediate results, or own a complex execution loop), write a custom agent server instead.
+`Env` is a [Gymnasium](https://gymnasium.farama.org/)-style base class for resources servers. Implement `step()`, optionally `reset()`, pair with `env_agent`.
 
 ## Interface
 
