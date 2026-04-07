@@ -42,21 +42,10 @@ subprocess.CalledProcessError: Command '['git', 'clone', ..., 'https://github.co
 
 This happens because `setup_ifbench.py` tries to clone the IFBench repo at server startup, but the outgoing connection is blocked inside the container. Note that the cluster node itself may have internet access, but the container environment may block it.
 
-**Fix:** pre-clone the repo outside the container (e.g. on a login node), then include it when syncing the repo to the cluster.
+**Fix:** run `setup_ifbench.py` outside the container from the repo root. It handles the clone, patch, and marker automatically:
 
 ```bash
-# Run this outside the container, on a machine with internet access
-cd nemo-gym
-git clone https://github.com/allenai/IFBench.git resources_servers/ifbench/.ifbench
-cd resources_servers/ifbench/.ifbench
-git checkout c6767a19bd82ac0536cab950f2f8f6bcc6fabe7c
-cd ..
-
-# Patch out the spaCy auto-download (fires at import time in the unpatched code)
-sed -i "s/^download('en_core_web_sm')$/# download('en_core_web_sm')  # pre-installed via requirements.txt/" .ifbench/instructions.py
-
-# Mark the clone as complete so setup_ifbench.py skips it on startup
-touch .ifbench/.installed
+python resources_servers/ifbench/setup_ifbench.py
 ```
 
-Make sure `.ifbench/` is included when you copy or sync the repo to the cluster. Once the `.installed` marker is present, `setup_ifbench.py` skips the clone entirely and goes straight to adding the repo to `sys.path`.
+Make sure `.ifbench/` is included when you copy or sync the repo to the cluster. Once the `.installed` marker is present, the server skips the clone entirely on startup.

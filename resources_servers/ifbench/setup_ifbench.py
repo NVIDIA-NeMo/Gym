@@ -126,3 +126,7 @@ def ensure_ifbench() -> None:
 
     _add_to_path()
     print("IFBench setup complete.")
+
+
+if __name__ == "__main__":
+    ensure_ifbench()
