@@ -40,6 +40,8 @@ Tools are exposed as HTTP endpoints that the Agent server calls during a rollout
 
 Every Resources server implements a `verify()` function that evaluates the result of a rollout and returns a reward signal for training. See {doc}`/about/concepts/task-verification` for verification approaches, patterns, and best practices.
 
+For semantic or rubric-based scoring, `verify()` may call a **second language model** (LLM-as-a-judge); the concept is outlined in {ref}`task-verification` under *What is LLM-as-a-judge?*. For configuration, deployment, and implementation patterns, see {doc}`/environment-tutorials/llm-as-judge-verification`.
+
 ## Example Resources Servers
 
 **[`workplace_assistant`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/workplace_assistant)** — Multi-step tool calling in a workplace setting.

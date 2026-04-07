@@ -33,6 +33,7 @@ import ray
 import requests
 import uvicorn
 from aiohttp import (
+    ClientOSError,
     ClientResponse,
     ClientResponseError,
     ClientSession,
@@ -141,6 +142,17 @@ atexit.register(global_aiohttp_client_exit)
 # This is not intended to be changed. If you want to increase this, we should probably figure out how to improve server-side robustness.
 MAX_NUM_TRIES = 3
 
+_NUM_SERVER_DISCONNECTED_ERROR: int = 0
+_NUM_CLIENT_OS_ERROR: int = 0
+DISCONNECTED_CLIENT_OS_PRINT_INTERVAL: int = 100
+DISCONNECTED_CLIENT_OS_HELP_TEXT = """We've run into this issue in two different scenarios previously:
+1. Too many open connections and not enough sockets due to the file descriptor limit being hit.
+    - Increase ulimit.
+    - Bash example: https://github.com/NVIDIA-NeMo/RL/blob/de55be7777bbf034c04e41c40382c44725e8aa4b/ray.sub#L81
+    - Python example: https://github.com/NVIDIA-NeMo/Gym/blob/c74ffddb3d8190cd717508b0830916b19a26e6cd/nemo_gym/server_utils.py#L495
+2. Depending on the serving framework and config, the server may be overloaded and is dropping connections.
+    - Increase adapter server replicas."""
+
 
 async def request(
     method: str, url: str, _internal: bool = False, **kwargs: Unpack[_RequestOptions]
@@ -157,6 +169,22 @@ async def request(
         try:
             return await client.request(method=method, url=url, **kwargs)
         except ServerDisconnectedError:
+            global _NUM_SERVER_DISCONNECTED_ERROR
+            _NUM_SERVER_DISCONNECTED_ERROR += 1
+            if _NUM_SERVER_DISCONNECTED_ERROR % DISCONNECTED_CLIENT_OS_PRINT_INTERVAL:
+                print(
+                    f"Hit {_NUM_SERVER_DISCONNECTED_ERROR} global `ServerDisconnectedError` while querying {url}.\n{DISCONNECTED_CLIENT_OS_HELP_TEXT}"
+                )
+
+            await asyncio.sleep(0.5)
+        except ClientOSError:
+            global _NUM_CLIENT_OS_ERROR
+            _NUM_CLIENT_OS_ERROR += 1
+            if _NUM_CLIENT_OS_ERROR % DISCONNECTED_CLIENT_OS_PRINT_INTERVAL:
+                print(
+                    f"Hit {_NUM_CLIENT_OS_ERROR} global `ClientOSError` while querying {url}.\n{DISCONNECTED_CLIENT_OS_HELP_TEXT}"
+                )
+
             await asyncio.sleep(0.5)
         except Exception as e:
             if _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:
@@ -432,9 +460,8 @@ class SimpleServer(BaseServer):
 
         @app.middleware("http")
         async def add_session_id(request: Request, call_next):  # pragma: no cover
-            # If session_id not present, assign one
-            if SESSION_ID_KEY not in request.session:
-                request.session[SESSION_ID_KEY] = str(uuid4())
+            # Always assign so Starlette 1.0+ marks session.modified=True and re-sends Set-Cookie.
+            request.session[SESSION_ID_KEY] = request.session.get(SESSION_ID_KEY, str(uuid4()))
 
             response: Response = await call_next(request)
             return response

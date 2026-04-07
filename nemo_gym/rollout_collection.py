@@ -74,6 +74,7 @@ class E2ERolloutCollectionConfig(SharedRolloutCollectionConfig):
     """
 
     split: Union[Literal["train"], Literal["validation"], Literal["benchmark"]]
+    reuse_existing_data_preparation: bool = False
 
 
 class RolloutCollectionConfig(SharedRolloutCollectionConfig):
@@ -250,6 +251,8 @@ class RolloutCollectionHelper(BaseModel):
                     print(
                         f"Skipping resume_from_cache because materialized_jsonl_fpath {config.materialized_jsonl_fpath} doesn't exist!"
                     )
+            else:
+                print("Clearing output fpath since `resume_from_cache=False`!")
 
             rows: List[Dict] = []
             results: List[Dict] = []
@@ -262,7 +265,6 @@ class RolloutCollectionHelper(BaseModel):
                 for row in input_rows:
                     f.write(orjson.dumps(row) + b"\n")
 
-            print("Clearing output fpath since `resume_from_cache=False`!")
             output_fpath.unlink(missing_ok=True)
 
         semaphore = nullcontext()
@@ -280,11 +282,13 @@ class RolloutCollectionHelper(BaseModel):
 
             result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
             result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
+            result[AGENT_REF_KEY_NAME] = row[AGENT_REF_KEY_NAME]
 
             rows.append(row)
             results.append(result)
             result_strs.append([orjson.dumps(result)])
             results_file.write(result_strs[-1][0] + b"\n")
+            results_file.flush()
 
             counts_left[row[AGENT_REF_KEY_NAME]["name"]] -= 1
             if counts_left[row[AGENT_REF_KEY_NAME]["name"]] <= 0:
@@ -298,7 +302,8 @@ class RolloutCollectionHelper(BaseModel):
                 top_left = counts_left.most_common(5)  # Fix to top 3 for now.
                 if top_left:
                     top_left_str = "\n".join(f"{i + 1}. {k}: {v}" for i, (k, v) in enumerate(top_left))
-                    print(f"Examples left:\n{top_left_str}")
+                    # Use tqdm.write here so we can print properly with tqdm being used.
+                    tqdm.write(f"Examples left:\n{top_left_str}")
 
         results_file.close()
 
@@ -396,7 +401,7 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
             )
             metrics_to_log.update(
                 {
-                    f"key_metrics/{k}": v
+                    f"key_metrics/{agent_name}/{k}": v
                     for k, v in agent_entry["key_metrics"].items()
                     if isinstance(v, primitive_types)
                 }

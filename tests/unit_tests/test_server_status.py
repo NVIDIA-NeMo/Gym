@@ -214,8 +214,6 @@ class TestServerStatus:
         mock_head_config.host = "127.0.0.1"
         mock_head_config.port = 11000
 
-        from nemo_gym.server_utils import ServerClient
-
         monkeypatch.setattr(ServerClient, "load_head_server_config", lambda: mock_head_config)
 
         mock_get = MagicMock(side_effect=requests.exceptions.ConnectionError("Connection refused"))

@@ -5,8 +5,11 @@
 import asyncio
 import math
 import sqlite3
+import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
+
+import ray
 
 
 ResultRow = tuple[Any, ...]
@@ -40,7 +43,7 @@ def _coerce(v: Any) -> Any:
         return v
 
 
-def execute_sqlite(db_path: Path, sql: str, timeout_s: float = 30.0) -> ResultSet:
+def execute_sqlite(db_path: Path, sql: str) -> Optional[ResultSet]:
     """Execute SQL against a SQLite database file and return all rows.
 
     Copies db to in-memory connection before querying (matches official eval).
@@ -55,8 +58,22 @@ def execute_sqlite(db_path: Path, sql: str, timeout_s: float = 30.0) -> ResultSe
         cur = mem.cursor()
         cur.execute(sql)
         return cur.fetchall()
+    # We try/except only the actual code execution.
+    except:
+        return None
     finally:
         mem.close()
+
+
+@ray.remote(
+    num_cpus=1,
+    scheduling_strategy="SPREAD",
+    runtime_env={
+        "py_executable": sys.executable,
+    },
+)
+def execute_sqlite_remote(*args, **kwargs):
+    return execute_sqlite(*args, **kwargs)
 
 
 async def execute_sqlite_async(
@@ -64,14 +81,19 @@ async def execute_sqlite_async(
     sql: str,
     semaphore: asyncio.Semaphore,
     timeout_s: float = 30.0,
-) -> ResultSet:
+) -> Optional[ResultSet]:
     """Execute SQL asynchronously via thread executor, bounded by semaphore."""
-    loop = asyncio.get_running_loop()
     async with semaphore:
-        return await asyncio.wait_for(
-            loop.run_in_executor(None, execute_sqlite, db_path, sql, timeout_s),
-            timeout=timeout_s,
-        )
+        task = execute_sqlite_remote.remote(db_path, sql)
+        fut: asyncio.Future = asyncio.wrap_future(task.future())
+
+        _, in_progress = await asyncio.wait([fut], timeout=timeout_s)
+
+        if in_progress:
+            ray.cancel(task)
+            return None
+        else:
+            return ray.get(task)
 
 
 def _col_vector(rows: ResultSet, col_idx: int) -> list[Any]:
@@ -167,15 +189,13 @@ async def execute_and_compare(
     timeout_s: float = 30.0,
 ) -> tuple[bool, ResultSet | None, ResultSet | None, str | None]:
     """Execute both queries and compare. Returns (match, gold_rows, pred_rows, error_msg)."""
-    try:
-        gold_rows = await execute_sqlite_async(db_path, gold_sql, semaphore, timeout_s)
-    except Exception as e:
-        return False, None, None, f"gold_sql_error: {e}"
+    gold_rows = await execute_sqlite_async(db_path, gold_sql, semaphore, timeout_s)
+    if gold_rows is None:
+        return False, gold_rows, None, "gold_sql_error"
 
-    try:
-        pred_rows = await execute_sqlite_async(db_path, pred_sql, semaphore, timeout_s)
-    except Exception as e:
-        return False, gold_rows, None, f"pred_sql_error: {e}"
+    pred_rows = await execute_sqlite_async(db_path, pred_sql, semaphore, timeout_s)
+    if pred_rows is None:
+        return False, gold_rows, pred_rows, "pred_sql_error"
 
     match = compare_multi_result_sets(
         [gold_rows], pred_rows, multi_condition_cols=condition_cols, ignore_order=ignore_order
