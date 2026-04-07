@@ -1,8 +1,8 @@
 # TicTacToe Env
 
-TicTacToe as a GymnasiumServer. Model plays as X, opponent (O) is an LLM called via user_model_server. Falls back to first empty cell on invalid opponent moves.
+Multi-turn GymnasiumServer. Model plays as X, opponent (O) is an LLM via user_model_server. Falls back to first empty cell on invalid opponent moves. Game state managed per session.
 
-Reward: +1 win, 0 draw, -1 loss.
+Example data provided in `data/example.jsonl` (system prompt only, no verifier_metadata needed). No train/validation data.
 
 ## Run
 

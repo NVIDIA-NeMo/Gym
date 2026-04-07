@@ -1,8 +1,8 @@
 # Blackjack Env
 
-Blackjack implemented as a Gymnasium-style `Env`. The model hits or stands until the hand ends.
+Multi-step GymnasiumServer. Model hits or stands using `<action>` tags until the hand ends. Game state managed per session.
 
-Reward: +1 win, 0 draw, -1 loss or bust.
+Example data provided in `data/example.jsonl` (system prompt only, no verifier_metadata needed). No train/validation data.
 
 ## Run
 
