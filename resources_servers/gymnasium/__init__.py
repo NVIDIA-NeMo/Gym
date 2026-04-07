@@ -49,16 +49,18 @@ class EnvStepResponse(BaseModel):
 
 
 def extract_text(response: NeMoGymResponse) -> str:
-    """Extract the first text content from a NeMoGymResponse."""
+    """Extract all text content from a NeMoGymResponse."""
+    parts = []
     for item in response.output:
         if item.type == "message":
             content = item.content
             if isinstance(content, str):
-                return content
-            for c in content:
-                if c.type == "output_text":
-                    return c.text
-    return ""
+                parts.append(content)
+            else:
+                for c in content:
+                    if c.type == "output_text":
+                        parts.append(c.text)
+    return "".join(parts)
 
 
 class GymnasiumServer(SimpleResourcesServer):
