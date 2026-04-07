@@ -16,6 +16,9 @@ finance_sec_search_resources_server:
         name: search_judge_model
       judge_responses_create_params:
         input: []
+        max_output_tokens: 8192
+        reasoning:
+          effort: high
       # Judge prompt: loaded from this file at startup. To override inline (e.g. from
       # NVFlow), set judge_prompt_template directly — it takes priority over the file.
       judge_prompt_template_fpath: prompt_templates/finance_sec_search_judge.yaml
@@ -39,8 +42,10 @@ search_judge_model:
 
 finance_agent:
   responses_api_agents:
-    simple_agent:
+    finance_agent:
       entrypoint: app.py
+      max_steps: 50
+      truncate_on_overflow: true
       resources_server:
         type: resources_servers
         name: finance_sec_search_resources_server

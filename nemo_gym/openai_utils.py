@@ -25,6 +25,7 @@ from typing import (
     Union,
 )
 
+from aiohttp import ClientPayloadError
 from openai.types.chat import (
     ChatCompletion,
     ChatCompletionAssistantMessageParam,
@@ -495,7 +496,11 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
                 if response.status in RATE_LIMIT_ERROR_CODES:
                     max_num_tries += 1
 
-                content = (await response.content.read()).decode()
+                try:
+                    content = (await response.content.read()).decode()
+                except ClientPayloadError:
+                    content = "<body read failed — connection dropped during error response>"
+
                 print(
                     f"Hit a {response.status} trying to query an OpenAI endpoint (try {tries}). Sleeping 0.5s. Error message: {content}"
                 )
@@ -535,10 +540,20 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
             url=f"{self.base_url}/responses",
             json=kwargs,
         )
-        response = await self._request(method="POST", **request_kwargs)
-
-        await self._raise_for_status(response, request_kwargs)
-        return await get_response_json(response)
+        for attempt in range(MAX_NUM_TRIES):
+            response = await self._request(method="POST", **request_kwargs)
+            try:
+                await self._raise_for_status(response, request_kwargs)
+                return await get_response_json(response)
+            except ClientPayloadError as e:
+                if attempt < MAX_NUM_TRIES - 1:
+                    print(
+                        f"ClientPayloadError reading response body (attempt {attempt + 1}/{MAX_NUM_TRIES}): {e}. "
+                        "Retrying full request."
+                    )
+                    await sleep(0.5)
+                    continue
+                raise
 
     async def create_tokenize(self, **kwargs):
         base_url = self.base_url.removesuffix("/v1")

@@ -16,7 +16,7 @@
 Finance SEC Search Resource Server.
 
 Provides tools for searching SEC filings by ticker symbol or company name.
-Caches ticker mappings and filing metadata locally to minimize SEC API calls.
+Caches ticker mappings and filing metadata locally to minimize SEC.gov calls.
 """
 
 import asyncio
@@ -33,13 +33,13 @@ from collections import deque
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-import yaml
-
 import aiohttp
+import yaml
 from bs4 import BeautifulSoup
 from fastapi import FastAPI
 from pydantic import BaseModel, Field, field_validator
 from starlette.requests import Request
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential_jitter
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -58,17 +58,21 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.server_utils import SESSION_ID_KEY, get_response_json
 
+
 logger = logging.getLogger(__name__)
 
 
 class FinanceAgentResourcesServerConfig(BaseResourcesServerConfig):
-    """Configuration for SEC Search resource server."""
+    """Configuration for Finance SEC Search resource server."""
 
-    cache_dir: Optional[str] = Field(default=None, description="Path for caching ticker mappings and filing metadata. Defaults to ~/.cache/nemo_gym/finance_sec_search/ if not set. Relative paths are resolved from cwd.")
-    user_agent: str = Field(
-        default="Gym-SEC-Search/1.0 (research@nvidia.com)", description="User-Agent header for SEC API requests"
+    cache_dir: Optional[str] = Field(
+        default=None,
+        description="Path for caching ticker mappings and filing metadata. Defaults to ~/.cache/nemo_gym/finance_sec_search/ if not set. Relative paths are resolved from cwd.",
     )
-    requests_per_second: int = Field(default=10, description="Rate limit for SEC API requests")
+    user_agent: str = Field(
+        default="Gym-SEC-Search/1.0 (research@nvidia.com)", description="User-Agent header for SEC.gov requests"
+    )
+    requests_per_second: int = Field(default=10, description="Rate limit for SEC.gov requests")
     tavily_api_key: Optional[str] = Field(default=None, description="Tavily API key for web search")
     retrieval_model_server: Optional[ModelServerRef] = Field(
         default=None, description="Model server for retrieve_information LLM calls"
@@ -119,9 +123,9 @@ class FinanceAgentResourcesServerConfig(BaseResourcesServerConfig):
         default=200,
         description="Maximum number of filing metadata entries returned by sec_filing_search.",
     )
-    request_timeout: int = Field(default=30, description="Per-request timeout in seconds for SEC API calls")
+    request_timeout: int = Field(default=30, description="Per-request timeout in seconds for SEC.gov calls")
     max_connections_per_host: int = Field(default=10, description="Max concurrent connections to SEC.gov")
-    max_retries: int = Field(default=3, description="Max retries for transient SEC API errors (403, 429, 503)")
+    max_retries: int = Field(default=3, description="Max retries for transient SEC.gov errors (403, 429, 503)")
     sec_dump_path: Optional[str] = Field(
         default=None,
         description="Path to pre-fetched SEC dump directory (read-only). Used as fallback for filing content cache misses.",
@@ -192,19 +196,6 @@ class FinanceAgentSearchResponse(BaseModel):
     results: str = Field(description="JSON string of filing results")
 
 
-class DownloadAndParseFilingRequest(BaseModel):
-    """Request model for download_and_parse_filing tool."""
-
-    url: str = Field(description="The filing URL from sec_filing_search results")
-    key: str = Field(description="The key to use when saving the result in the conversation's data storage.")
-
-
-class DownloadAndParseFilingResponse(BaseModel):
-    """Response model for download_and_parse_filing tool."""
-
-    results: str = Field(description="Status message about data storage operation")
-
-
 class RetrieveInformationRequest(BaseModel):
     """Request model for retrieve_information tool."""
 
@@ -240,13 +231,29 @@ class SubmitFinalResultResponse(BaseModel):
 class WebSearchRequest(BaseModel):
     """Request model for web_search tool."""
 
-    query: str = Field(description="Search query")
+    search_query: str = Field(description="The query to search for")
+    start_date: Optional[str] = Field(default=None, description="Start date for search range (YYYY-MM-DD)")
+    end_date: Optional[str] = Field(default=None, description="End date for search range (YYYY-MM-DD)")
+    number_of_results: Optional[int] = Field(default=10, ge=1, le=20, description="Number of search results to return")
 
 
 class WebSearchResponse(BaseModel):
     """Response model for web_search tool."""
 
     results: str = Field(description="JSON string with search results")
+
+
+class ParseHtmlPageRequest(BaseModel):
+    """Request model for parse_html_page tool."""
+
+    url: str = Field(description="The URL of the HTML page to parse")
+    key: str = Field(description="The key to use when saving the result in the conversation's data storage.")
+
+
+class ParseHtmlPageResponse(BaseModel):
+    """Response model for parse_html_page tool."""
+
+    results: str = Field(description="Status message about data storage operation")
 
 
 class FinanceAgentRunRequest(BaseRunRequest):
@@ -276,7 +283,7 @@ class FinanceAgentVerifyResponse(BaseVerifyResponse):
 
 
 class RateLimiter:
-    """Sliding window rate limiter for SEC API compliance."""
+    """Sliding window rate limiter for SEC.gov compliance."""
 
     def __init__(self, max_requests: int = 10, window_seconds: float = 1.0):
         self.max_requests = max_requests
@@ -299,7 +306,7 @@ class RateLimiter:
 
 
 # ============================================================================
-# SEC Search Resource Server
+# Finance SEC Search Resource Server
 # ============================================================================
 
 
@@ -307,7 +314,7 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
     """
     SEC EDGAR Filing Search Resource Server.
     - /sec_filing_search: Search for SEC filings by ticker or company name
-    - /download_and_parse_filing: Download, parse filing, store in data storage under a key
+    - /parse_html_page: Fetch, parse, and store any HTML page (SEC URLs use XBRL-aware parsing + disk cache)
     - /retrieve_information: Query stored documents via LLM prompt with {{key}} syntax
     - /web_search: Tavily web search
     - /submit_final_result: Submit the final answer
@@ -396,11 +403,18 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
             return None
         elapsed = time.monotonic() - start
         if elapsed > self.config.max_rollout_time_seconds:
-            logger.warning("Session %s exceeded time budget (%.0fs > %.0fs)", session_id, elapsed, self.config.max_rollout_time_seconds)
-            return json.dumps({
-                "error": f"Time budget exhausted ({elapsed:.0f}s / {self.config.max_rollout_time_seconds:.0f}s). "
-                "No further tool calls will be executed. Call submit_final_result immediately with your best answer."
-            })
+            logger.warning(
+                "Session %s exceeded time budget (%.0fs > %.0fs)",
+                session_id,
+                elapsed,
+                self.config.max_rollout_time_seconds,
+            )
+            return json.dumps(
+                {
+                    "error": f"Time budget exhausted ({elapsed:.0f}s / {self.config.max_rollout_time_seconds:.0f}s). "
+                    "No further tool calls will be executed. Call submit_final_result immediately with your best answer."
+                }
+            )
         return None
 
     async def seed_session(self, request: Request, body: BaseSeedSessionRequest) -> BaseSeedSessionResponse:
@@ -423,7 +437,7 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
         self._load_tickers_or_fail()
 
         app.post("/sec_filing_search")(self.sec_filing_search)
-        app.post("/download_and_parse_filing")(self.download_and_parse_filing)
+        app.post("/parse_html_page")(self.parse_html_page)
         app.post("/retrieve_information")(self.retrieve_information)
         app.post("/submit_final_result")(self.submit_final_result)
         app.post("/web_search")(self.web_search)
@@ -433,7 +447,9 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
             return {
                 "results": json.dumps(
                     {
-                        "error": f"Tool '{tool_name}' does not exist. Available tools: sec_filing_search, download_and_parse_filing, retrieve_information, submit_final_result, web_search"
+                        "error": f"Tool '{tool_name}' does not exist. Available tools: "
+                        "sec_filing_search, parse_html_page, "
+                        "retrieve_information, submit_final_result, web_search"
                     }
                 )
             }
@@ -474,17 +490,22 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
                             return raw.decode("latin-1")
                     if response.status in (403, 429, 503):
                         logger.warning(
-                            "SEC API %d on attempt %d/%d for %s",
-                            response.status, attempt + 1, self.config.max_retries, url,
+                            "SEC.gov %d on attempt %d/%d for %s",
+                            response.status,
+                            attempt + 1,
+                            self.config.max_retries,
+                            url,
                         )
                         await asyncio.sleep(2**attempt)
                         continue
-                    logger.warning("SEC API %d (non-retryable) for %s", response.status, url)
+                    logger.warning("SEC.gov %d (non-retryable) for %s", response.status, url)
                     return None
             except (aiohttp.ClientError, asyncio.TimeoutError):
                 logger.warning(
                     "Fetch error on attempt %d/%d for %s",
-                    attempt + 1, self.config.max_retries, url,
+                    attempt + 1,
+                    self.config.max_retries,
+                    url,
                     exc_info=True,
                 )
                 if attempt < self.config.max_retries - 1:
@@ -574,9 +595,7 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
             raise
 
     @staticmethod
-    def _parse_filings_columns(
-        columns: Dict[str, Any], cik: str, ticker: str
-    ) -> Dict[str, Dict[str, Any]]:
+    def _parse_filings_columns(columns: Dict[str, Any], cik: str, ticker: str) -> Dict[str, Dict[str, Any]]:
         """Parse SEC columnar filing data into a dict keyed by accession number (no dashes)."""
         acc_numbers = columns.get("accessionNumber", [])
         forms = columns.get("form", [])
@@ -600,7 +619,7 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
         return filings
 
     async def _get_company_filings(self, cik: str, ticker: str) -> Dict[str, Dict[str, Any]]:
-        """Get filings for a company. Memory cache → disk cache → SEC API.
+        """Get filings for a company. Memory cache → disk cache → SEC.gov.
 
         Uses per-CIK locking so concurrent requests for the same company
         coalesce into a single fetch instead of stampeding SEC.gov.
@@ -638,9 +657,7 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
                     filename = file_ref.get("name", "")
                     if not filename:
                         continue
-                    extra_data = await self._fetch_with_retry(
-                        f"https://data.sec.gov/submissions/{filename}"
-                    )
+                    extra_data = await self._fetch_with_retry(f"https://data.sec.gov/submissions/{filename}")
                     if extra_data:
                         try:
                             extra = json.loads(extra_data)
@@ -730,7 +747,7 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
             return {"cik": cik, "accession_number": accession}
         return None
 
-    def _parse_html_to_text(self, html_content: str) -> str:
+    def _parse_filing_html(self, html_content: str) -> str:
         """Parse HTML content and extract clean text."""
         soup = BeautifulSoup(html_content, "html.parser")
 
@@ -772,7 +789,7 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
         capped at max_filing_results. Supports optional form_types,
         start_date, and end_date filters.
         """
-        if (timeout_msg := self._check_time_budget(request.session.get(SESSION_ID_KEY, ""))):
+        if timeout_msg := self._check_time_budget(request.session.get(SESSION_ID_KEY, "")):
             return FinanceAgentSearchResponse(results=timeout_msg)
 
         company = await self._resolve_ticker(body.ticker)
@@ -838,33 +855,63 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
         return FinanceAgentSearchResponse(results=json.dumps(all_results, indent=2))
 
     # ========================================================================
-    # download_and_parse_filing Endpoint
+    # parse_html_page Endpoint
     # ========================================================================
 
-    async def download_and_parse_filing(self, request: Request, body: DownloadAndParseFilingRequest) -> DownloadAndParseFilingResponse:
-        """Download and parse an SEC filing, store text in session-scoped data storage."""
-        if (timeout_msg := self._check_time_budget(request.session.get(SESSION_ID_KEY, ""))):
-            return DownloadAndParseFilingResponse(results=timeout_msg)
+    @staticmethod
+    def _parse_html_to_text(html_content: str) -> str:
+        """Extract plain text from HTML."""
+        soup = BeautifulSoup(html_content, "html.parser")
+        for script_or_style in soup(["script", "style"]):
+            _ = script_or_style.extract()
 
-        storage = self._get_session_storage(request.session[SESSION_ID_KEY])
-        url, key = body.url, body.key
+        text = soup.get_text()
+        lines = (line.strip() for line in text.splitlines())
+        chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
+        return "\n".join(chunk for chunk in chunks if chunk)
 
-        if not url:
-            return DownloadAndParseFilingResponse(
-                results="ERROR: url is required. Use the filing_url from sec_filing_search results."
-            )
-        if not key:
-            return DownloadAndParseFilingResponse(
-                results="ERROR: key is required. Provide a key to store this filing in data storage."
-            )
+    @retry(
+        retry=retry_if_exception(
+            lambda e: (isinstance(e, aiohttp.ClientResponseError) and e.status in (429, 503))
+            or any(str(code) in str(e) for code in (429, 503))
+        ),
+        stop=stop_after_attempt(100),
+        wait=wait_exponential_jitter(initial=3, exp_base=2, max=120),
+        reraise=True,
+    )
+    async def _parse_html_page(self, url: str) -> str:
+        """Fetch a URL and extract plain text."""
+        async with aiohttp.ClientSession() as session:
+            try:
+                async with session.get(
+                    url,
+                    timeout=aiohttp.ClientTimeout(total=60),
+                    headers={"User-Agent": self.config.user_agent},
+                ) as response:
+                    response.raise_for_status()
+                    html_content = await response.text()
+            except Exception as e:
+                if len(str(e)) == 0:
+                    raise TimeoutError(
+                        "Timeout error when parsing HTML page after 60 seconds. "
+                        "The URL might be blocked or the server is taking too long to respond."
+                    ) from e
+                raise
 
+        return self._parse_html_to_text(html_content)
+
+    async def _fetch_sec_filing_text(self, url: str) -> str:
+        """Fetch a SEC filing URL using the disk-cache / dump / live pipeline.
+
+        Uses the same generic HTML parser as non-SEC URLs
+        but caches the parsed text to disk for subsequent calls.
+
+        Raises on failure (caller handles the exception).
+        """
         file_path = self._url_to_filing_path(url)
         if file_path is None:
-            return DownloadAndParseFilingResponse(
-                results=f"ERROR: Invalid SEC URL format: {url}. Use the filing_url from sec_filing_search results."
-            )
+            raise ValueError(f"Invalid SEC URL format: {url}")
 
-        # Resolution order: disk cache → prefetch dump → live SEC.gov download
         text_content = None
         if file_path.exists():
             text_content = file_path.read_text(encoding="utf-8")
@@ -877,53 +924,78 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
         if text_content is None:
             html_content = await self._fetch_with_retry(url)
             if not html_content:
-                return DownloadAndParseFilingResponse(
-                    results=f"ERROR: Failed to download filing from {url}. "
-                    "The SEC server may be temporarily unavailable. "
-                    "Try downloading a different filing, or retry this one."
+                raise RuntimeError(
+                    f"Failed to download filing from {url}. The SEC server may be temporarily unavailable."
                 )
 
             text_content = await asyncio.get_running_loop().run_in_executor(
                 None, self._parse_html_to_text, html_content
             )
-
             self._atomic_write(file_path, text_content)
 
         if not text_content:
-            return DownloadAndParseFilingResponse(results="ERROR: Filing content was empty after parsing.")
+            raise ValueError("Filing content was empty after parsing.")
 
-        result_msg = ""
-        if key in storage:
-            result_msg += "WARNING: Key already exists in data storage. Overwriting.\n"
+        return text_content
 
-        storage[key] = text_content
+    async def _save_tool_output(self, output: str, key: str, state: dict[str, Any]) -> str:
+        if not output:
+            raise ValueError("HTML output was empty")
 
-        result_msg += f"SUCCESS: Filing saved to data storage under key: {key}.\n"
-        result_msg += f"Document size: {len(text_content)} characters.\n"
-
-        if len(text_content) > self.config.large_doc_threshold_chars:
-            threshold = self.config.large_doc_threshold_chars
-            second_end = min(threshold * 2, len(text_content))
-            result_msg += (
-                f"WARNING: This is a large document ({len(text_content)} chars). "
-                f"Use input_character_ranges to read it in chunks of ~{threshold} characters. "
-                f"Example: [{{'key': '{key}', 'start': 0, 'end': {threshold}}}], "
-                f"then [{{'key': '{key}', 'start': {threshold}, 'end': {second_end}}}], etc. "
-                f"Financial data and notes are typically in the second half of 10-K/10-Q filings.\n"
+        tool_result = ""
+        if key in state:
+            tool_result = (
+                "WARNING: The key already exists in the data storage. The new result overwrites the old one.\n"
             )
+        tool_result += f"SUCCESS: The result has been saved to the data storage under the key: {key}.\n"
 
-        keys_list = ", ".join(storage.keys())
-        result_msg += f"Keys in data_storage: [{keys_list}]\n"
+        state[key] = output
 
-        return DownloadAndParseFilingResponse(results=result_msg)
+        keys_list = "\n".join(state.keys())
+        tool_result += f"The data_storage currently contains the following keys:\n{keys_list}\n"
+
+        return tool_result
+
+    async def parse_html_page(self, request: Request, body: ParseHtmlPageRequest) -> ParseHtmlPageResponse:
+        """Parse an HTML page from any URL and store in session data storage.
+
+        SEC URLs are detected automatically and routed through the
+        disk-cache / dump / live-download pipeline (with caching).
+        All URLs use the same generic BeautifulSoup parser.
+        """
+        if timeout_msg := self._check_time_budget(request.session.get(SESSION_ID_KEY, "")):
+            return ParseHtmlPageResponse(results=timeout_msg)
+
+        url, key = body.url, body.key
+        if not url:
+            return ParseHtmlPageResponse(results="ERROR: url is required.")
+        if not key:
+            return ParseHtmlPageResponse(results="ERROR: key is required.")
+
+        storage = self._get_session_storage(request.session[SESSION_ID_KEY])
+
+        try:
+            if self._parse_sec_url(url):
+                text_output = await self._fetch_sec_filing_text(url)
+            else:
+                text_output = await self._parse_html_page(url)
+            result_msg = await self._save_tool_output(text_output, key, storage)
+        except Exception as e:
+            error_msg = str(e)
+            logger.warning("parse_html_page failed for %s: %s", url, error_msg)
+            return ParseHtmlPageResponse(results=error_msg)
+
+        return ParseHtmlPageResponse(results=result_msg)
 
     # ========================================================================
     # retrieve_information Endpoint (LLM-based document querying)
     # ========================================================================
 
-    async def retrieve_information(self, request: Request, body: RetrieveInformationRequest) -> RetrieveInformationResponse:
+    async def retrieve_information(
+        self, request: Request, body: RetrieveInformationRequest
+    ) -> RetrieveInformationResponse:
         """Query stored documents using LLM-based prompting."""
-        if (timeout_msg := self._check_time_budget(request.session.get(SESSION_ID_KEY, ""))):
+        if timeout_msg := self._check_time_budget(request.session.get(SESSION_ID_KEY, "")):
             return RetrieveInformationResponse(results=timeout_msg)
 
         if not self.config.retrieval_model_server:
@@ -948,7 +1020,7 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
             if key not in storage:
                 return RetrieveInformationResponse(
                     results=f"ERROR: Key '{key}' not in data storage. "
-                    f"Available keys: [{available_keys}]. Use download_and_parse_filing first."
+                    f"Available keys: [{available_keys}]. Use parse_html_page first."
                 )
 
         ranges_dict: Dict[str, tuple] = {}
@@ -975,8 +1047,7 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
 
         try:
             retrieval_params = (
-                self.config.retrieval_responses_create_params
-                or NeMoGymResponseCreateParamsNonStreaming(input=[])
+                self.config.retrieval_responses_create_params or NeMoGymResponseCreateParamsNonStreaming(input=[])
             ).model_copy(deep=True)
             retrieval_params.input = [
                 NeMoGymEasyInputMessage(role="system", content=self._retrieval_system_prompt),
@@ -1009,6 +1080,33 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
         except Exception as e:
             return RetrieveInformationResponse(results=f"ERROR: Retrieval LLM call failed: {str(e)}")
 
+    # ========================================================================
+    # Date Validation Helper
+    # ========================================================================
+
+    _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+    def _validate_and_clamp_dates(
+        self,
+        start_date: Optional[str],
+        end_date: Optional[str],
+        default_start: str = "1900-01-01",
+    ) -> tuple:
+        if end_date:
+            if not self._DATE_RE.match(end_date):
+                raise ValueError(f"Invalid end_date format: '{end_date}'. Expected YYYY-MM-DD.")
+
+        if start_date:
+            if not self._DATE_RE.match(start_date):
+                raise ValueError(f"Invalid start_date format: '{start_date}'. Expected YYYY-MM-DD.")
+        else:
+            start_date = default_start
+
+        if start_date and end_date and start_date > end_date:
+            raise ValueError(f"start_date '{start_date}' is later than end_date '{end_date}'.")
+
+        return start_date, end_date
+
     async def submit_final_result(self, body: SubmitFinalResultRequest) -> SubmitFinalResultResponse:
         """Accept the agent's final answer submission."""
         final_result = body.final_result
@@ -1017,30 +1115,54 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
         return SubmitFinalResultResponse(results=json.dumps({"success": True, "result": final_result}))
 
     async def web_search(self, request: Request, body: WebSearchRequest) -> WebSearchResponse:
-        """Search the web using Tavily. Returns up to 10 results."""
-        if (timeout_msg := self._check_time_budget(request.session.get(SESSION_ID_KEY, ""))):
+        """Search the web using Tavily."""
+        if timeout_msg := self._check_time_budget(request.session.get(SESSION_ID_KEY, "")):
             return WebSearchResponse(results=timeout_msg)
 
         if self._tavily is None:
             return WebSearchResponse(
                 results=json.dumps(
                     {
-                        "error": "web_search is not available. Use sec_filing_search, download_and_parse_filing, and retrieve_information instead.",
+                        "error": "web_search is not available. Use sec_filing_search, parse_html_page, and retrieve_information instead.",
                     }
                 )
             )
+
+        search_query = body.search_query
+        if not search_query or not search_query.strip():
+            return WebSearchResponse(results=json.dumps({"error": "search_query is required and cannot be empty."}))
+
+        try:
+            _, end_date = self._validate_and_clamp_dates(None, body.end_date)
+        except ValueError as e:
+            return WebSearchResponse(results=json.dumps({"error": str(e)}))
+
+        kwargs: Dict[str, Any] = {}
+        if body.start_date:
+            try:
+                start_date, end_date = self._validate_and_clamp_dates(body.start_date, end_date)
+            except ValueError as e:
+                return WebSearchResponse(results=json.dumps({"error": str(e)}))
+            kwargs["start_date"] = start_date
+
+        num_results = min(body.number_of_results or 10, 20)
 
         max_retries = 3
         for attempt in range(max_retries):
             try:
                 raw = await asyncio.get_running_loop().run_in_executor(
-                    None, lambda: self._tavily.search(body.query, num_results=10)
+                    None,
+                    lambda: self._tavily.search(
+                        query=search_query,
+                        search_depth="fast",
+                        end_date=end_date,
+                        max_results=num_results,
+                        chunks_per_source=1,
+                        **kwargs,
+                    ),
                 )
-                results = [
-                    {"url": r.get("url", ""), "title": r.get("title", ""), "content": r.get("content", "")}
-                    for r in raw.get("results", [])
-                ]
-                return WebSearchResponse(results=json.dumps(results))
+                results = raw.get("results", [])
+                return WebSearchResponse(results=json.dumps(results, default=str))
             except Exception as e:
                 if attempt < max_retries - 1:
                     logger.warning(f"web_search attempt {attempt + 1} failed: {e}. Retrying in {2**attempt}s...")
@@ -1049,8 +1171,12 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
                     logger.error(f"web_search failed after {max_retries} attempts: {e}")
                     return WebSearchResponse(results=json.dumps({"error": str(e)}))
 
+    # ========================================================================
+    # Verify Endpoint
+    # ========================================================================
+
     async def verify(self, request: Request, body: FinanceAgentVerifyRequest) -> FinanceAgentVerifyResponse:
-        """Verify using LLM-as-judge with strict financial grading rubric (0/1/2 scale).
+        """Verify the agent's answer.
 
         Rating scale (reward depends on config.reward_mode):
             [[2]] = fully correct  → binary: 1.0 | scaled: 1.0
@@ -1069,9 +1195,7 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
                 if isinstance(content, str):
                     question = content
 
-        # Prefer submit_final_result tool call; fall back to last assistant text message
         generated_answer = ""
-
         for output_item in reversed(body.response.output):
             if getattr(output_item, "type", None) == "function_call":
                 if getattr(output_item, "name", None) == "submit_final_result":
@@ -1095,11 +1219,12 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
                     if generated_answer:
                         break
 
+        # No judge model → substring match
         if not self.config.judge_model_server:
             reward = 1.0 if body.expected_answer.lower() in generated_answer.lower() else 0.0
             return FinanceAgentVerifyResponse(**body.model_dump(), reward=reward)
 
-        # .replace() instead of str.format() to avoid KeyError on braces in content
+        # Legacy mode: [[0]]/[[1]]/[[2]] judge
         judge_user_prompt = self._judge_prompt_template
         judge_user_prompt = judge_user_prompt.replace("{question}", question)
         judge_user_prompt = judge_user_prompt.replace("{expected_answer}", body.expected_answer)
@@ -1125,7 +1250,9 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
                 )
                 judge_response = NeMoGymResponse.model_validate(await get_response_json(response))
             except Exception as e:
-                logger.warning("Judge call attempt %d/%d failed: %s: %s", attempt + 1, max_judge_retries, type(e).__name__, e)
+                logger.warning(
+                    "Judge call attempt %d/%d failed: %s: %s", attempt + 1, max_judge_retries, type(e).__name__, e
+                )
                 if attempt < max_judge_retries - 1:
                     await asyncio.sleep(2**attempt)
                     continue
@@ -1148,7 +1275,9 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
 
             logger.warning(
                 "Judge returned no [[N]] rating (attempt %d/%d). Output: %s",
-                attempt + 1, max_judge_retries, judge_text[:200],
+                attempt + 1,
+                max_judge_retries,
+                judge_text[:200],
             )
             if attempt < max_judge_retries - 1:
                 await asyncio.sleep(2**attempt)

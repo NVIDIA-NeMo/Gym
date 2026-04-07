@@ -9,7 +9,7 @@ Financial information retrieval using SEC EDGAR filings with optional web search
 | Tool | Description |
 |------|-------------|
 | `sec_filing_search` | Search SEC EDGAR for filing metadata by stock ticker symbol |
-| `download_and_parse_filing` | Download and parse a filing (HTML → text), store under a key |
+| `parse_html_page` | Fetch and parse any HTML page (SEC URLs use disk cache), store under a key |
 | `retrieve_information` | Query stored documents via LLM prompt with `{{key}}` placeholders |
 | `submit_final_result` | Submit the final answer (keeps model in tool-calling mode until ready) |
 | `web_search` | Internet search via Tavily API (optional — requires `tavily_api_key`) |
