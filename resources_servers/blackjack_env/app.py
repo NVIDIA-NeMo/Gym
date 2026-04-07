@@ -28,7 +28,7 @@ from typing import Dict, Optional
 from pydantic import Field
 
 from nemo_gym.openai_utils import NeMoGymResponse
-from resources_servers.gymnasium import GymnasiumServer
+from resources_servers.gymnasium import GymnasiumServer, extract_text
 
 
 _RANKS = ["2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K", "A"]
@@ -51,18 +51,6 @@ def _fmt(hand: list[str]) -> str:
     return "[" + ", ".join(hand) + "]"
 
 
-def _extract_text(response: NeMoGymResponse) -> str:
-    for item in response.output:
-        if item.type == "message":
-            content = item.content
-            if isinstance(content, str):
-                return content
-            for c in content:
-                if c.type == "output_text":
-                    return c.text
-    return ""
-
-
 class BlackjackEnv(GymnasiumServer):
     session_state: Dict[str, dict] = Field(default_factory=dict)
 
@@ -83,7 +71,7 @@ class BlackjackEnv(GymnasiumServer):
         state = self.session_state.get(session_id, {})
         player = state.get("player", [])
         dealer = state.get("dealer", [])
-        text = _extract_text(action)
+        text = extract_text(action)
         m = re.search(r"<action>\s*(hit|stand)\s*</action>", text, re.IGNORECASE)
         decision = m.group(1).lower() if m else ("hit" if "hit" in text.lower() else "stand")
 

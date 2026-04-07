@@ -15,7 +15,7 @@ blackjack_gymnasium_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      max_steps: 10
+      max_steps: 5
       datasets:
       - name: example
         type: example

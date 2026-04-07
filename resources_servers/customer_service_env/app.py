@@ -38,7 +38,8 @@ from pydantic import Field
 
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.server_utils import get_response_json, raise_for_status
-from resources_servers.gymnasium import GymnasiumServer
+from resources_servers.gymnasium import GymnasiumServer, extract_text
+
 
 _USER_TOOLS = [
     {
@@ -72,18 +73,6 @@ _USER_TOOLS = [
         },
     },
 ]
-
-
-def _extract_text(response: NeMoGymResponse) -> str:
-    for item in response.output:
-        if item.type == "message":
-            content = item.content
-            if isinstance(content, str):
-                return content
-            for c in content:
-                if c.type == "output_text":
-                    return c.text
-    return ""
 
 
 class CustomerServiceEnv(GymnasiumServer):
@@ -149,7 +138,14 @@ class CustomerServiceEnv(GymnasiumServer):
             for tc in tool_calls:
                 args = json.loads(tc.get("arguments", "{}"))
                 result = self._execute_user_tool(tc["name"], args, scenario)
-                messages.append({"role": "function", "name": tc["name"], "content": result})
+                messages.append(tc)
+                messages.append(
+                    {
+                        "type": "function_call_output",
+                        "call_id": tc.get("call_id", ""),
+                        "output": result,
+                    }
+                )
 
         return "I see."
 
@@ -157,7 +153,7 @@ class CustomerServiceEnv(GymnasiumServer):
         self, action: NeMoGymResponse, metadata: dict, session_id: Optional[str] = None
     ) -> tuple[Optional[str], float, bool, bool, dict]:
         scenario = self.session_state.get(session_id, metadata)
-        agent_text = _extract_text(action)
+        agent_text = extract_text(action)
 
         user_reply = await self._get_user_reply(agent_text, scenario)
 

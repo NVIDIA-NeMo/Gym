@@ -27,19 +27,7 @@ from typing import Dict, Optional
 from pydantic import Field
 
 from nemo_gym.openai_utils import NeMoGymResponse
-from resources_servers.gymnasium import GymnasiumServer
-
-
-def _extract_text(response: NeMoGymResponse) -> str:
-    for item in response.output:
-        if item.type == "message":
-            content = item.content
-            if isinstance(content, str):
-                return content
-            for c in content:
-                if c.type == "output_text":
-                    return c.text
-    return ""
+from resources_servers.gymnasium import GymnasiumServer, extract_text
 
 
 class ScriptedMultiTurnEnv(GymnasiumServer):
@@ -60,7 +48,7 @@ class ScriptedMultiTurnEnv(GymnasiumServer):
             return follow_ups[turn], 0.0, False, False, {}
 
         expected = metadata.get("expected_answer", "")
-        text = _extract_text(action)
+        text = extract_text(action)
         reward = 1.0 if expected and expected.lower() in text.lower() else 0.0
         return None, reward, True, False, {}
 

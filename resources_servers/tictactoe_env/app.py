@@ -28,7 +28,7 @@ from pydantic import Field
 
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.server_utils import get_response_json, raise_for_status
-from resources_servers.gymnasium import GymnasiumServer
+from resources_servers.gymnasium import GymnasiumServer, extract_text
 
 
 _OPPONENT_SYSTEM_PROMPT = (
@@ -68,18 +68,6 @@ def _first_empty(board: list) -> Optional[tuple]:
             if board[r][c] == " ":
                 return r, c
     return None
-
-
-def _extract_text(response: NeMoGymResponse) -> str:
-    for item in response.output:
-        if item.type == "message":
-            content = item.content
-            if isinstance(content, str):
-                return content
-            for c in content:
-                if c.type == "output_text":
-                    return c.text
-    return ""
 
 
 def _parse_action(text: str) -> Optional[tuple[int, int]]:
@@ -139,7 +127,7 @@ class TicTacToeEnv(GymnasiumServer):
     ) -> tuple[Optional[str], float, bool, bool, dict]:
         state = self.session_state.get(session_id, {})
         board = state.get("board", _empty_board())
-        text = _extract_text(action)
+        text = extract_text(action)
 
         move = _parse_action(text)
         if not move:

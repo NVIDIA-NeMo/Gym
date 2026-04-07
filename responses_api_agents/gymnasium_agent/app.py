@@ -35,7 +35,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
-from resources_servers.gymnasium import EnvResetResponse, EnvStepResponse
+from resources_servers.gymnasium import EnvResetResponse, EnvStepResponse, extract_text
 
 
 class GymnasiumAgentConfig(BaseResponsesAPIAgentConfig):
@@ -53,18 +53,6 @@ class GymnasiumRunResponse(BaseVerifyResponse):
     terminated: bool = False
     truncated: bool = False
     info: dict = {}
-
-
-def _extract_text(response: NeMoGymResponse) -> str:
-    for item in response.output:
-        if item.type == "message":
-            content = item.content
-            if isinstance(content, str):
-                return content
-            for c in content:
-                if c.type == "output_text":
-                    return c.text
-    return ""
 
 
 class GymnasiumAgent(SimpleResponsesAPIAgent):
@@ -109,7 +97,10 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
             )
         if reset_data.observation:
             current_input = current_input.model_copy(
-                update={"input": [NeMoGymEasyInputMessage(role="user", content=reset_data.observation)]}
+                update={
+                    "input": list(current_input.input)
+                    + [NeMoGymEasyInputMessage(role="user", content=reset_data.observation)]
+                }
             )
 
         all_outputs = []
@@ -161,13 +152,13 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
                     update={
                         "input": list(current_input.input)
                         + [
-                            NeMoGymEasyInputMessage(role="assistant", content=_extract_text(model_response)),
+                            NeMoGymEasyInputMessage(role="assistant", content=extract_text(model_response)),
                             NeMoGymEasyInputMessage(role="user", content=step_data.observation),
                         ]
                     }
                 )
 
-        else:
+        else:  # for/else: loop completed without break, meaning max_steps exhausted
             step_data = step_data.model_copy(update={"truncated": True})
 
         last_model_response.output = all_outputs

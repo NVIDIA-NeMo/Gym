@@ -48,6 +48,19 @@ class EnvStepResponse(BaseModel):
     info: dict = {}
 
 
+def extract_text(response: NeMoGymResponse) -> str:
+    """Extract the first text content from a NeMoGymResponse."""
+    for item in response.output:
+        if item.type == "message":
+            content = item.content
+            if isinstance(content, str):
+                return content
+            for c in content:
+                if c.type == "output_text":
+                    return c.text
+    return ""
+
+
 class GymnasiumServer(SimpleResourcesServer):
     """Gymnasium-style base class. Pair with gymnasium_agent.
 

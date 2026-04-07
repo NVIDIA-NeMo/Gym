@@ -41,29 +41,29 @@ class WorkplaceAssistantEnv(GymnasiumServer):
             "project_management",
             "customer_relationship_manager",
         ]
-        self.session_tools[session_id] = get_tools(tool_list)
+        self.session_tools[session_id] = {"env": get_tools(tool_list), "calls": []}
         return None, {}
 
     async def step(
         self, action: NeMoGymResponse, metadata: dict, session_id: Optional[str] = None
     ) -> tuple[Optional[str], float, bool, bool, dict]:
+        state = self.session_tools.get(session_id, {"env": {}, "calls": []})
         tool_calls = [o for o in action.output if o.type == "function_call"]
 
         if tool_calls:
-            tool_env = self.session_tools.get(session_id, {})
+            state["calls"].extend(o.model_dump() for o in tool_calls)
             results = []
             for call in tool_calls:
                 args = {k: v for k, v in json.loads(call.arguments).items() if v is not None}
                 try:
-                    result = tool_env["functions"][call.name](**args)
+                    result = state["env"]["functions"][call.name](**args)
                 except Exception as e:
                     result = f"Error executing '{call.name}': {e}"
                 results.append(f"{call.name} -> {result}")
             return "\n".join(results), 0.0, False, False, {}
 
         ground_truth = metadata.get("ground_truth", [])
-        predicted = [m.model_dump() for m in action.output if m.type == "function_call"]
-        return None, is_correct(predicted, ground_truth, None) * 1.0, True, False, {}
+        return None, is_correct(state["calls"], ground_truth, None) * 1.0, True, False, {}
 
 
 if __name__ == "__main__":
