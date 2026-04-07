@@ -19,6 +19,7 @@ import csv
 import json
 import re
 from pathlib import Path
+from shutil import rmtree
 from subprocess import run
 
 
@@ -222,6 +223,15 @@ def clone_spider2_repo(parent_dir: str):
         check=True,
         shell=True,
     )
+
+
+def delete_spider2_repo(parent_dir: str):
+    dir_path = Path(parent_dir) / "Spider2"
+    if not dir_path.exists():
+        return
+
+    print(f"Deleting Spider2 git repo at {dir_path}")
+    rmtree(dir_path)
 
 
 def main():
