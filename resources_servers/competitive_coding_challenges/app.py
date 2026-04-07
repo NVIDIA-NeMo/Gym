@@ -18,6 +18,7 @@ import os
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+from ccc_eval import CCCEvaluator
 from fastapi import FastAPI
 from pydantic import ConfigDict, Field, PrivateAttr
 
@@ -27,8 +28,6 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-
-from ccc_eval import CCCEvaluator
 
 
 LOG = logging.getLogger(__name__)
@@ -139,7 +138,9 @@ class CompetitiveCodingChallengesResourcesServer(SimpleResourcesServer):
 
         if max_total and total_score >= max_total:
             return 1.0
-        if max_total == 0.0 and all(float(result.get("score", 0.0) or 0.0) > 0.0 for result in test_case_results.values()):
+        if max_total == 0.0 and all(
+            float(result.get("score", 0.0) or 0.0) > 0.0 for result in test_case_results.values()
+        ):
             return 1.0
         return 0.0
 
@@ -147,8 +148,7 @@ class CompetitiveCodingChallengesResourcesServer(SimpleResourcesServer):
         app = super().setup_webserver()
 
         print(
-            "Initializing CompetitiveCodingChallenges evaluator with config: "
-            f"{self.config.model_dump_json(indent=2)}"
+            f"Initializing CompetitiveCodingChallenges evaluator with config: {self.config.model_dump_json(indent=2)}"
         )
 
         print(f"CCC_LOG_JSONL_PATH: {LOG_JSONL_PATH}")

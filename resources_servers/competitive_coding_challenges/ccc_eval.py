@@ -1,16 +1,16 @@
 # Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
 
 import asyncio
-from dataclasses import dataclass, is_dataclass
 import glob
 import json
-from concurrent.futures import ThreadPoolExecutor
 import os
 import re
 import shutil
 import threading
 import time
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, is_dataclass
 
 import httpx
 
@@ -279,7 +279,12 @@ def _iter_metadata_entries(raw_metadata):
     if not isinstance(raw_metadata, dict):
         raise ValueError(f"Unsupported metadata payload type: {type(raw_metadata).__name__}")
 
-    if "metadata" in raw_metadata or "problems" in raw_metadata or "competition_id" in raw_metadata or "competition" in raw_metadata:
+    if (
+        "metadata" in raw_metadata
+        or "problems" in raw_metadata
+        or "competition_id" in raw_metadata
+        or "competition" in raw_metadata
+    ):
         yield raw_metadata
         return
 
@@ -362,7 +367,9 @@ def run_test_case(task_args: dict, worker_id: int) -> dict:
             with open(os.path.join(unique_dir, "solution.odo"), "w", encoding="utf-8") as f:
                 f.write(task_args["generated_code"])
         else:
-            with open(os.path.join(unique_dir, "graders", f"{task_args['problem_id']}.cpp"), "w", encoding="utf-8") as f:
+            with open(
+                os.path.join(unique_dir, "graders", f"{task_args['problem_id']}.cpp"), "w", encoding="utf-8"
+            ) as f:
                 f.write(task_args["generated_code"])
         with open(os.path.join(unique_dir, "input.txt"), "w", encoding="latin1") as f:
             f.write(task_args["test_input"])
@@ -370,7 +377,9 @@ def run_test_case(task_args: dict, worker_id: int) -> dict:
             f.write(task_args["test_output"])
 
         sandbox = _get_thread_test_sandbox()
-        compile_result = _exec_sync(_test_loop_tls, sandbox, f"cd {unique_dir} && ./compile.sh", language="shell", timeout=120)
+        compile_result = _exec_sync(
+            _test_loop_tls, sandbox, f"cd {unique_dir} && ./compile.sh", language="shell", timeout=120
+        )
         result = {
             "compile_success": not compile_result.get("stderr"),
             "compile_stdout": compile_result.get("stdout", ""),
@@ -410,7 +419,7 @@ def run_test_case(task_args: dict, worker_id: int) -> dict:
 
 
 def extract_final_code_block(text: str, langs: tuple[str, ...]) -> str:
-    pattern = r"```(?:" + "|".join(re.escape(l) for l in langs) + r")\s*\n(.*?)```"
+    pattern = r"```(?:" + "|".join(re.escape(lang) for lang in langs) + r")\s*\n(.*?)```"
     matches = re.findall(pattern, text, re.DOTALL | re.IGNORECASE)
     return matches[-1] if matches else (text or "")
 
@@ -535,7 +544,9 @@ class CCCEvaluator(BaseEvaluator):
         self.precompiled_cache[cache_key] = {"grader": grader_dir}
         return grader_dir
 
-    def _build_test_task(self, problem_id: str, pre_dir: str, completion: str, test_data: dict, task_type: str = "Batch"):
+    def _build_test_task(
+        self, problem_id: str, pre_dir: str, completion: str, test_data: dict, task_type: str = "Batch"
+    ):
         return {
             "generated_code": completion,
             "task_type": task_type,
@@ -645,7 +656,6 @@ class CCCEvaluator(BaseEvaluator):
                 "score": self._aggregate_subtask_score(subtask_meta, state["outputs"], failed=state["failed"]),
                 "outputs": state["outputs"],
             }
-
 
         num_tests_run = len(all_run_times)
         return {
