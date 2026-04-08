@@ -9,3 +9,4 @@ policy_model:
       uses_reasoning_parser: true
       chat_template_kwargs: null
       extra_body: null
+      default_headers: ${policy_default_headers}

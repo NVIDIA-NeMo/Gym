@@ -84,6 +84,8 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     # Corresponds to the extra_body of OpenAI Client.
     extra_body: Optional[Dict[str, Any]] = None
 
+    default_headers: Dict[str, str] = Field(default_factory=dict)
+
     def model_post_init(self, context):
         if isinstance(self.base_url, str):
             self.base_url = [self.base_url]
@@ -111,6 +113,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             NeMoGymAsyncOpenAI(
                 base_url=base_url,
                 api_key=self.config.api_key,
+                default_headers=self.config.default_headers,
             )
             for base_url in self.config.base_url
         ]
