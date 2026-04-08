@@ -27,4 +27,4 @@ Once you have a stable setup to run your benchmark, run it a few times on the hi
 
 ## Gymnasium API
 
-For new environments, {doc}`GymnasiumServer </resources-server/gymnasium-api>` provides a simpler alternative to `SimpleResourcesServer`. See that page for details.
+For new environments, the {doc}`Gymnasium API </resources-server/gymnasium-api>` provides a simpler alternative to `SimpleResourcesServer`. See that page for details.

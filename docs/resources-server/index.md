@@ -56,7 +56,7 @@ For semantic or rubric-based scoring, `verify()` may call a **second language mo
 
 ## Gymnasium API
 
-For new environments, consider using {doc}`GymnasiumServer </resources-server/gymnasium-api>` instead of `SimpleResourcesServer`. It follows the Gymnasium interface and requires less boilerplate.
+For new environments, consider using the {doc}`Gymnasium API </resources-server/gymnasium-api>` instead of `SimpleResourcesServer`. It follows the Gymnasium interface and requires less boilerplate.
 
 ## Server Configuration
 :::{seealso}

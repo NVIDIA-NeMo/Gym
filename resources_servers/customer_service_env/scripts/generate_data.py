@@ -83,6 +83,39 @@ ISSUES = {
 REFUND_POLICY = "Refunds are available within 30 days of delivery for unused items. Damaged items are eligible for immediate refund or replacement."
 CANCEL_POLICY = "Orders in 'processing' status can be cancelled. Shipped orders cannot be cancelled but may be returned after delivery."
 
+USER_TOOLS = [
+    {
+        "type": "function",
+        "name": "lookup_order",
+        "description": "Look up order details by order ID",
+        "parameters": {
+            "type": "object",
+            "properties": {"order_id": {"type": "string"}},
+            "required": ["order_id"],
+        },
+    },
+    {
+        "type": "function",
+        "name": "check_account",
+        "description": "Check account details by email",
+        "parameters": {
+            "type": "object",
+            "properties": {"email": {"type": "string"}},
+            "required": ["email"],
+        },
+    },
+    {
+        "type": "function",
+        "name": "get_policy",
+        "description": "Get company policy on refunds, cancellations, etc.",
+        "parameters": {
+            "type": "object",
+            "properties": {"policy_type": {"type": "string", "enum": ["refund", "cancel"]}},
+            "required": ["policy_type"],
+        },
+    },
+]
+
 
 def generate_entry(rng: random.Random) -> dict:
     issue_type = rng.choice(list(ISSUES.keys()))
@@ -122,6 +155,7 @@ def generate_entry(rng: random.Random) -> dict:
         "opener": opener,
         "resolution_keywords": config["resolution_keywords"],
         "policies": {"refund": REFUND_POLICY, "cancel": CANCEL_POLICY},
+        "user_tools": USER_TOOLS,
     }
 
 

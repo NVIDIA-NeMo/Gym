@@ -28,7 +28,7 @@ from pydantic import Field
 
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.server_utils import get_response_json, raise_for_status
-from resources_servers.gymnasium import GymnasiumServer, extract_text
+from resources_servers.example_gymnasium import GymnasiumServer, extract_text
 
 
 _OPPONENT_SYSTEM_PROMPT = (

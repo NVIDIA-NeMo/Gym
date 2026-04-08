@@ -35,7 +35,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
-from resources_servers.gymnasium import EnvResetResponse, EnvStepResponse, extract_text
+from resources_servers.example_gymnasium import EnvResetResponse, EnvStepResponse, extract_text
 
 
 class GymnasiumAgentConfig(BaseResponsesAPIAgentConfig):

@@ -1,6 +1,6 @@
 # Customer Service Env
 
-Multi-turn GymnasiumServer with asymmetric tool access. The policy model is a support agent that sees only conversation text. The user model is a simulated customer with private tools (lookup_order, check_account, get_policy) that the policy never sees.
+Multi-turn gymnasium-style server with asymmetric tool access. The policy model is a support agent that sees only conversation text. The user model is a simulated customer with private tools (lookup_order, check_account, get_policy) that the policy never sees.
 
 All scenario data is in the JSONL. Generate with:
 

@@ -2,14 +2,14 @@
 
 # Gymnasium API
 
-<!-- TODO: framing on the two definitions of "environment" and when to use GymnasiumServer vs custom agent -->
+<!-- TODO: framing on the two definitions of "environment" and when to use example_gymnasium vs custom agent -->
 
 `GymnasiumServer` is a [Gymnasium](https://gymnasium.farama.org/)-style base class for resources servers. Implement `step()`, optionally `reset()`, pair with `gymnasium_agent`.
 
 ## Interface
 
 ```python
-from resources_servers.gymnasium import GymnasiumServer
+from resources_servers.example_gymnasium import GymnasiumServer
 from nemo_gym.openai_utils import NeMoGymResponse
 
 class MyEnv(GymnasiumServer):

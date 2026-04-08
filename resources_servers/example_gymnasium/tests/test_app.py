@@ -16,7 +16,7 @@ from unittest.mock import MagicMock
 
 from nemo_gym.base_resources_server import BaseResourcesServerConfig
 from nemo_gym.server_utils import ServerClient
-from resources_servers.gymnasium import GymnasiumServer
+from resources_servers.example_gymnasium import GymnasiumServer
 
 
 class TestGymnasiumServer:

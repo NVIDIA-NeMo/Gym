@@ -1,6 +1,6 @@
 # Example Multi-Turn Env
 
-Multi-turn GymnasiumServer. Replays scripted follow-up questions from verifier_metadata. Turn index tracked per session.
+Multi-turn gymnasium-style  Replays scripted follow-up questions from verifier_metadata. Turn index tracked per session.
 
 Example data provided in `data/example.jsonl`. No train/validation data.
 

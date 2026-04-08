@@ -28,7 +28,7 @@ from typing import Dict, Optional
 from pydantic import Field
 
 from nemo_gym.openai_utils import NeMoGymResponse
-from resources_servers.gymnasium import GymnasiumServer, extract_text
+from resources_servers.example_gymnasium import GymnasiumServer, extract_text
 
 
 _RANKS = ["2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K", "A"]

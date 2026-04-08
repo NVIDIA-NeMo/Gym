@@ -16,11 +16,11 @@
 """Customer service multi-turn environment with separate tools for policy and user agent.
 
 Policy agent = support agent. Sees only conversation text.
-User agent = simulated customer with private tools (lookup_order, check_account,
-get_policy). Policy agent never sees the user agent's tool calls or results.
+User agent = simulated customer with private tools. Policy agent never sees the
+user agent's tool calls or results.
 
-All scenario data comes from the JSONL. Nothing generated at runtime.
-Use scripts/generate_customer_service_data.py to create datasets.
+All scenario data comes from the JSONL, including user model tool schemas.
+Use scripts/generate_data.py to create datasets.
 
 verifier_metadata fields:
   customer:             dict    name, email
@@ -29,6 +29,7 @@ verifier_metadata fields:
   opener:               str     customer's opening message
   resolution_keywords:  list    keywords that indicate correct resolution
   policies:             dict    refund and cancel policy text
+  user_tools:           list    tool schemas for the user model
 """
 
 import json
@@ -38,41 +39,8 @@ from pydantic import Field
 
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.server_utils import get_response_json, raise_for_status
-from resources_servers.gymnasium import GymnasiumServer, extract_text
+from resources_servers.example_gymnasium import GymnasiumServer, extract_text
 
-
-_USER_TOOLS = [
-    {
-        "type": "function",
-        "name": "lookup_order",
-        "description": "Look up order details by order ID",
-        "parameters": {
-            "type": "object",
-            "properties": {"order_id": {"type": "string"}},
-            "required": ["order_id"],
-        },
-    },
-    {
-        "type": "function",
-        "name": "check_account",
-        "description": "Check account details by email",
-        "parameters": {
-            "type": "object",
-            "properties": {"email": {"type": "string"}},
-            "required": ["email"],
-        },
-    },
-    {
-        "type": "function",
-        "name": "get_policy",
-        "description": "Get company policy on refunds, cancellations, etc.",
-        "parameters": {
-            "type": "object",
-            "properties": {"policy_type": {"type": "string", "enum": ["refund", "cancel"]}},
-            "required": ["policy_type"],
-        },
-    },
-]
 
 
 class CustomerServiceEnv(GymnasiumServer):
@@ -117,7 +85,7 @@ class CustomerServiceEnv(GymnasiumServer):
                 resp = await self.server_client.post(
                     server_name=self.user_model_server,
                     url_path="/v1/responses",
-                    json={"input": messages, "tools": _USER_TOOLS},
+                    json={"input": messages, "tools": scenario.get("user_tools", [])},
                 )
                 await raise_for_status(resp)
                 data = await get_response_json(resp)

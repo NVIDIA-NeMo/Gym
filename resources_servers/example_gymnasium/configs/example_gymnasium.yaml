@@ -1,6 +1,6 @@
-gymnasium:
+example_gymnasium:
   resources_servers:
-    gymnasium:
+    example_gymnasium:
       entrypoint: __init__.py
       domain: other
       verified: false
