@@ -20,7 +20,7 @@ on:
     branches:
       - main
       - "r**"
-      - "cmunley1/pypi-fix-324"
+      - "cmunley1/pypi-fix-clean"
 
 defaults:
   run:
