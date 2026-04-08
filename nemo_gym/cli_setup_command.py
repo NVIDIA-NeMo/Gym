@@ -12,6 +12,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import importlib.metadata
+import os
 from os import environ
 from pathlib import Path
 from subprocess import Popen
@@ -31,6 +33,70 @@ from nemo_gym.global_config import (
     UV_VENV_DIR_KEY_NAME,
     get_global_config_dict,
 )
+
+
+def _get_nemo_gym_install_flags() -> str:
+    """
+    Build uv pip install flags for nemo-gym in sub-venvs.
+
+    Supports:
+    - Pre-release versions via NEMO_GYM_ALLOW_PRERELEASE=true
+    - Custom PyPI indexes via UV_INDEX_URL, UV_EXTRA_INDEX_URL, UV_INDEX_STRATEGY
+    - Auto-detection of parent venv version for consistency
+
+    Returns:
+        String of flags to add to 'uv pip install nemo-gym'
+        Example: "--pre --index-url https://test.pypi.org/simple/ ==0.2.1rc0"
+    """
+    flags = ""
+
+    # 1. Pre-release flag
+    allow_prerelease = os.getenv("NEMO_GYM_ALLOW_PRERELEASE", "").lower() == "true"
+    if allow_prerelease:
+        flags += "--pre "
+        # When pre-releases are enabled, also use unsafe-best-match strategy if not already set
+        # This helps when using test.pypi with potentially broken packages (e.g., fastapi==1.0)
+        if not os.getenv("UV_INDEX_STRATEGY"):
+            flags += "--index-strategy unsafe-best-match "
+
+    # 2. Index URLs (respects uv's standard env vars)
+    index_url = os.getenv("UV_INDEX_URL")
+    if index_url:
+        flags += f"--index-url {index_url} "
+
+    extra_index_url = os.getenv("UV_EXTRA_INDEX_URL")
+    if extra_index_url:
+        flags += f"--extra-index-url {extra_index_url} "
+
+    # Explicit index strategy (overrides auto-set above)
+    index_strategy = os.getenv("UV_INDEX_STRATEGY")
+    if index_strategy:
+        flags += f"--index-strategy {index_strategy} "
+
+    return flags
+
+
+def _get_nemo_gym_version_spec(is_editable_install: bool) -> str:
+    """
+    Detect nemo-gym version from parent venv and return version specifier.
+
+    Args:
+        is_editable_install: Whether nemo-gym is installed in editable mode in parent venv
+
+    Returns:
+        Version specifier string (e.g., "==0.2.1rc0") or empty string
+    """
+    # Don't pin version for editable installs (development mode)
+    if is_editable_install:
+        return ""
+
+    try:
+        parent_version = importlib.metadata.version("nemo-gym")
+        # Pin to exact version for consistency between parent and sub-venvs
+        return f"=={parent_version}"
+    except importlib.metadata.PackageNotFoundError:
+        # nemo-gym not installed in parent venv (shouldn't happen, but be safe)
+        return ""
 
 
 def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: str) -> str:
@@ -78,19 +144,29 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
             if is_editable_install:
                 install_cmd = f"""uv pip install {verbose_flag}{extra_index_url_flag}{uv_pip_python_flag}'-e .' {" ".join(head_server_deps)}"""
             else:
-                # pypi path
+                # install nemo-gym from pypi instead of relative path in pyproject.toml
+                # with support for pre-releases, custom indexes, and version pinning
+                install_flags = _get_nemo_gym_install_flags()
+                version_spec = _get_nemo_gym_version_spec(is_editable_install)
+                # Combine with PR #972's extra_index_url_flag for config-based index
+                combined_flags = f"{extra_index_url_flag}{install_flags}"
                 install_cmd = (
-                    f"""uv pip install {verbose_flag}{extra_index_url_flag}{uv_pip_python_flag}nemo-gym && """
+                    f"""uv pip install {verbose_flag}{uv_pip_python_flag}{combined_flags}nemo-gym{version_spec} && """
                     f"""uv pip install {verbose_flag}{extra_index_url_flag}{uv_pip_python_flag}--no-sources '-e .' {" ".join(head_server_deps)}"""
                 )
         elif has_requirements_txt:
             if is_editable_install:
                 install_cmd = f"""uv pip install {verbose_flag}{extra_index_url_flag}{uv_pip_python_flag}-r requirements.txt {" ".join(head_server_deps)}"""
             else:
-                # pypi path
+                # install nemo-gym from pypi instead of relative path in requirements.txt
+                # with support for pre-releases, custom indexes, and version pinning
+                install_flags = _get_nemo_gym_install_flags()
+                version_spec = _get_nemo_gym_version_spec(is_editable_install)
+                # Combine with PR #972's extra_index_url_flag for config-based index
+                combined_flags = f"{extra_index_url_flag}{install_flags}"
                 install_cmd = (
-                    f"""(echo 'nemo-gym' && grep -v -F '../..' requirements.txt) | """
-                    f"""uv pip install {verbose_flag}{extra_index_url_flag}{uv_pip_python_flag}-r /dev/stdin {" ".join(head_server_deps)}"""
+                    f"""(echo 'nemo-gym{version_spec}' && grep -v -F '../..' requirements.txt) | """
+                    f"""uv pip install {verbose_flag}{uv_pip_python_flag}{combined_flags}-r /dev/stdin {" ".join(head_server_deps)}"""
                 )
         else:
             raise RuntimeError(
