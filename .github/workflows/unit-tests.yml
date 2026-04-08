@@ -57,6 +57,10 @@ jobs:
   test-wheel-install:
     name: Test Wheel Install (E2E)
     runs-on: ubuntu-latest
+    env:
+      NEMO_GYM_ALLOW_PRERELEASE: "true"
+      UV_INDEX_URL: "http://127.0.0.1:8888/"
+      UV_EXTRA_INDEX_URL: "https://pypi.org/simple/"
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -66,9 +70,18 @@ jobs:
           curl -LsSf https://astral.sh/uv/install.sh | sh
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
-      - name: Build and install wheel
+      - name: Build wheel and serve as local PyPI index
         run: |
           uv build
+          mkdir -p /tmp/local-pypi/nemo-gym
+          cp dist/*.whl /tmp/local-pypi/nemo-gym/
+          ls /tmp/local-pypi/nemo-gym/ | sed 's|.*|<a href="&">&</a>|' > /tmp/local-pypi/nemo-gym/index.html
+          echo '<a href="nemo-gym/">nemo-gym</a>' > /tmp/local-pypi/index.html
+          python3 -m http.server 8888 --directory /tmp/local-pypi &
+          sleep 1
+
+      - name: Install wheel in fresh venv
+        run: |
           cd /tmp && mkdir -p myproject && cd myproject
           uv venv --python 3.12 .venv
           source .venv/bin/activate
@@ -107,14 +120,13 @@ jobs:
           HTTPServer(("127.0.0.1", 9999), Handler).serve_forever()
           PYEOF
           python3 /tmp/mock_server.py &
-          sleep 2
+          sleep 1
 
       - name: Setup project
-        run: |  # pragma: allowlist secret
+        run: |
           cd /tmp/myproject
           cat > env.yaml << 'EOF'
           policy_base_url: http://127.0.0.1:9999/v1
-          policy_api_key: mock  # pragma: allowlist secret
           policy_model_name: mock-model
           EOF
 
@@ -144,7 +156,7 @@ jobs:
           source .venv/bin/activate
           ng_run "+config_paths=[resources_servers/arc_agi/configs/arc_agi.yaml,responses_api_models/openai_model/configs/openai_model.yaml]" &
           NG_RUN_PID=$!
-          sleep 60
+          sleep 90
           mkdir -p results
           ng_collect_rollouts \
             +agent_name=arc_agi_simple_agent \
@@ -159,7 +171,7 @@ jobs:
           source .venv/bin/activate
           ng_run "+config_paths=[resources_servers/hello_world/configs/hello_world.yaml,responses_api_models/openai_model/configs/openai_model.yaml]" &
           NG_RUN_PID=$!
-          sleep 60
+          sleep 90
           ng_collect_rollouts \
             +agent_name=hello_world_simple_agent \
             +input_jsonl_fpath=resources_servers/hello_world/data/example.jsonl \
