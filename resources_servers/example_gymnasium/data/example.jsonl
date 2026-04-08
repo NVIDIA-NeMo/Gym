@@ -1,5 +1,5 @@
-{"responses_create_params": {"input": [{"role": "user", "content": "Hello"}]}}
-{"responses_create_params": {"input": [{"role": "user", "content": "Hello"}]}}
-{"responses_create_params": {"input": [{"role": "user", "content": "Hello"}]}}
-{"responses_create_params": {"input": [{"role": "user", "content": "Hello"}]}}
-{"responses_create_params": {"input": [{"role": "user", "content": "Hello"}]}}
+{"responses_create_params": {"input": [{"role": "user", "content": "Hello"}]}, "agent_ref": {"type": "responses_api_agents", "name": "example_gymnasium_agent"}}
+{"responses_create_params": {"input": [{"role": "user", "content": "Hello"}]}, "agent_ref": {"type": "responses_api_agents", "name": "example_gymnasium_agent"}}
+{"responses_create_params": {"input": [{"role": "user", "content": "Hello"}]}, "agent_ref": {"type": "responses_api_agents", "name": "example_gymnasium_agent"}}
+{"responses_create_params": {"input": [{"role": "user", "content": "Hello"}]}, "agent_ref": {"type": "responses_api_agents", "name": "example_gymnasium_agent"}}
+{"responses_create_params": {"input": [{"role": "user", "content": "Hello"}]}, "agent_ref": {"type": "responses_api_agents", "name": "example_gymnasium_agent"}}
