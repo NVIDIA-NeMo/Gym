@@ -35,32 +35,32 @@ def prepare() -> Path:
     """Download HLE test data and convert to Gym JSONL format."""
     import json
 
-    from datasets import Value, load_dataset
+    from datasets import load_dataset
 
     print("Downloading HLE from HuggingFace...")
     hf_token = get_global_config_dict().get(HF_TOKEN_KEY_NAME)
     ds = load_dataset("cais/hle", split="test", token=hf_token)
-    # Cast image column to string to avoid requiring Pillow.
-    # Text-only questions have an empty string
-    # Image questions have base64 data.
-    ds = ds.cast_column("image", Value("string"))
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
+    # Use arrow format to avoid decoding the Image column, which requires Pillow.
+    # In arrow format the image column is a raw string: empty for text-only questions,
+    # base64 data for image questions.
     rows = []
     skipped_image = 0
-    for entry in ds:
-        if entry["image"]:
-            skipped_image += 1
-            continue
+    for batch in ds.with_format("arrow").iter(batch_size=500):
+        for i in range(batch.num_rows):
+            if batch.column("image")[i].as_py():
+                skipped_image += 1
+                continue
 
-        row = {
-            "question": entry["question"],
-            "expected_answer": entry["answer"],
-            "answer_type": entry["answer_type"],  # not used for grading; useful for analysis
-            "uuid": entry["id"],
-        }
-        rows.append(json.dumps(row) + "\n")
+            row = {
+                "question": batch.column("question")[i].as_py(),
+                "expected_answer": batch.column("answer")[i].as_py(),
+                "answer_type": batch.column("answer_type")[i].as_py(),  # not used for grading; useful for analysis
+                "uuid": batch.column("id")[i].as_py(),
+            }
+            rows.append(json.dumps(row) + "\n")
 
     with open(OUTPUT_FPATH, "w") as f:
         f.writelines(rows)
