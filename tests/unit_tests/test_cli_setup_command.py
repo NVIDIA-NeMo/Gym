@@ -179,10 +179,14 @@ class TestCLISetupCommandSetupEnvCommand:
         assert expected_command == actual_command
 
     @pytest.mark.parametrize("version", ["0.3.0", "0.3.0rc0", "1.0.0", "2.1.3rc1"])
-    def test_installs_from_pypi_when_not_editable(self, tmp_path: Path, version: str) -> None:
+    def test_installs_from_pypi_when_not_editable(self, tmp_path: Path, version: str, monkeypatch: MonkeyPatch) -> None:
         server_dir = (tmp_path / "first_level" / "second_level").absolute()
         server_dir.mkdir(parents=True)
         (server_dir / "requirements.txt").write_text("pytest\n")
+        monkeypatch.delenv("NEMO_GYM_ALLOW_PRERELEASE", raising=False)
+        monkeypatch.delenv("UV_INDEX_URL", raising=False)
+        monkeypatch.delenv("UV_EXTRA_INDEX_URL", raising=False)
+        monkeypatch.delenv("UV_INDEX_STRATEGY", raising=False)
 
         with patch("importlib.metadata.version", return_value=version):
             actual_command = setup_env_command(
@@ -194,10 +198,14 @@ class TestCLISetupCommandSetupEnvCommand:
         assert expected_command == actual_command
 
     @pytest.mark.parametrize("version", ["0.3.0", "0.3.0rc0", "1.0.0", "2.1.3rc1"])
-    def test_installs_from_pypi_when_not_editable_pyproject(self, tmp_path: Path, version: str) -> None:
+    def test_installs_from_pypi_when_not_editable_pyproject(self, tmp_path: Path, version: str, monkeypatch: MonkeyPatch) -> None:
         server_dir = (tmp_path / "first_level" / "second_level").absolute()
         server_dir.mkdir(parents=True)
         (server_dir / "pyproject.toml").write_text("")
+        monkeypatch.delenv("NEMO_GYM_ALLOW_PRERELEASE", raising=False)
+        monkeypatch.delenv("UV_INDEX_URL", raising=False)
+        monkeypatch.delenv("UV_EXTRA_INDEX_URL", raising=False)
+        monkeypatch.delenv("UV_INDEX_STRATEGY", raising=False)
 
         with patch("importlib.metadata.version", return_value=version):
             actual_command = setup_env_command(
@@ -330,6 +338,9 @@ class TestGetNemoGymInstallFlags:
     def test_prerelease_false(self, monkeypatch: MonkeyPatch) -> None:
         """When NEMO_GYM_ALLOW_PRERELEASE=false, should not add flags."""
         monkeypatch.setenv("NEMO_GYM_ALLOW_PRERELEASE", "false")
+        monkeypatch.delenv("UV_INDEX_URL", raising=False)
+        monkeypatch.delenv("UV_EXTRA_INDEX_URL", raising=False)
+        monkeypatch.delenv("UV_INDEX_STRATEGY", raising=False)
 
         flags = _get_nemo_gym_install_flags()
         assert flags == ""
