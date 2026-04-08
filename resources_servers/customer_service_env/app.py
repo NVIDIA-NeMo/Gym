@@ -64,6 +64,8 @@ class CustomerServiceEnv(GymnasiumServer):
         return f"Unknown tool: {tool_name}"
 
     async def _get_user_reply(self, agent_text: str, scenario: dict) -> str:
+        # Simplified tool loop for the user model. A production version could route
+        # through its own agent server (e.g. simple_agent) for full protocol support.
         customer = scenario.get("customer", {})
         system = (
             f"You are {customer.get('name', 'a customer')} contacting support. "
