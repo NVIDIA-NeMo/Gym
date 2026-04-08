@@ -18,3 +18,8 @@ terminal_multi_harness_codex_agent:
       model_server:
         type: responses_api_models
         name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/terminal_multi_harness/data/example.jsonl
+        num_repeats: 1
