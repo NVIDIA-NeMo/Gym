@@ -1,0 +1,6 @@
+# Turing VIF Resource Server Dependencies
+# Install nemo_gym from parent directory (provides fastapi, pydantic, etc.)
+-e nemo-gym[dev] @ ../../
+
+# VIF-specific dependencies
+pandas>=1.5.0
