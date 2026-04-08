@@ -70,7 +70,7 @@ python prepare_dataset.py \
     --input /path/to/nemo_skills/dataset/comp-math-24-25/test.txt \
     --output data/compmath_prepared.jsonl \
     --prompt_config generic/math \
-    --tools nemo_skills.mcp.servers.python_tool.PythonTool \
+    --tools nemo_skills.mcp.servers.python_tool::DirectPythonTool \
     --verifier_type math_with_judge
 ```
 
@@ -88,5 +88,5 @@ Code: Apache 2.0
 
 Dependencies
 - nemo_gym: Apache 2.0
-- nemo_skills: Apache 2.0
+- nemo_skills-core: Apache 2.0
 - math-verify: [Apache 2.0](https://github.com/huggingface/Math-Verify/blob/5d148cfaaf99214c2e4ffb4bc497ab042c592a7a/LICENCE)
