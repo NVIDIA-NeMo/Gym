@@ -55,7 +55,7 @@ jobs:
           ng_test_all +fail_on_total_and_test_mismatch=true +delete_venvs_after_each_test=true
 
   test-wheel-install:
-    name: Test Wheel Install (E2E)
+    name: Test Wheel Use
     runs-on: ubuntu-latest
     env:
       NEMO_GYM_ALLOW_PRERELEASE: "true"
