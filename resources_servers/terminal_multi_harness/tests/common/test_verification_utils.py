@@ -260,7 +260,9 @@ class TestActionComparator:
             type="function_call_batch",
             ordered=True,
             calls=[
-                FunctionCallAction(type="function_call", name="write_stdin", arguments='{"session_id": 7, "chars": ""}'),
+                FunctionCallAction(
+                    type="function_call", name="write_stdin", arguments='{"session_id": 7, "chars": ""}'
+                ),
                 FunctionCallAction(type="function_call", name="exec_command", arguments='{"cmd": "pwd"}'),
             ],
         )

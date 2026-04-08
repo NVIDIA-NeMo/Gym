@@ -14,7 +14,7 @@ The main lesson from the Codex branch is simple:
 Codex is the reference example for this workflow. The in-repo packaged rulebook
 is:
 
-- `resources_servers/terminal_multi_harness/docs/rulebooks/codex_match_rules.md`
+- `resources_servers/terminal_multi_harness/docs/rulebooks/codex-match-rules.md`
 
 ## 1. Start with real collection, not code assumptions
 

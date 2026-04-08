@@ -42,6 +42,6 @@ Unlike `terminus_judge`, this server does not assume the model response is assis
 ## Docs
 
 - workflow:
-  - `resources_servers/terminal_multi_harness/docs/development_workflow.md`
+  - `resources_servers/terminal_multi_harness/docs/development-workflow.md`
 - extension architecture:
-  - `resources_servers/terminal_multi_harness/docs/harness_extension_architecture.md`
+  - `resources_servers/terminal_multi_harness/docs/harness-extension-architecture.md`

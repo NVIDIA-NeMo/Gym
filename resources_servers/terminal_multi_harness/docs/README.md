@@ -6,10 +6,10 @@ behavior.
 
 ## Docs
 
-- [Development Workflow](./development_workflow.md)
+- [Development Workflow](./development-workflow.md)
   - end-to-end workflow from raw harness collection to rollout validation and
     reward-profile sanity checks
-- [Harness Extension Architecture](./harness_extension_architecture.md)
+- [Harness Extension Architecture](./harness-extension-architecture.md)
   - codebase structure, extension boundaries, and rules for keeping harnesses
     isolated and maintainable
 
@@ -19,7 +19,7 @@ Every new harness should land a rulebook in `docs/rulebooks/` before shared
 implementation work starts.
 
 - Codex:
-  - [codex_match_rules.md](./rulebooks/codex_match_rules.md)
+  - [codex-match-rules.md](./rulebooks/codex-match-rules.md)
 
 ## Current packaged harness envs
 
@@ -41,4 +41,4 @@ Future harnesses should usually follow the same pattern:
 - package overview:
   - `resources_servers/terminal_multi_harness/README.md`
 - packaged Codex rulebook:
-  - `resources_servers/terminal_multi_harness/docs/rulebooks/codex_match_rules.md`
+  - `resources_servers/terminal_multi_harness/docs/rulebooks/codex-match-rules.md`

@@ -74,9 +74,7 @@ class TestApp:
             server_client=MagicMock(spec=ServerClient),
         )
 
-    async def test_verify_multiple_tool_calls(
-        self, resources_server: TerminalMultiHarnessResourcesServer
-    ) -> None:
+    async def test_verify_multiple_tool_calls(self, resources_server: TerminalMultiHarnessResourcesServer) -> None:
         responses_create_params = NeMoGymResponseCreateParamsNonStreaming(
             input=[NeMoGymEasyInputMessage(role="user", content="Inspect the repo state.")]
         )
@@ -105,7 +103,9 @@ class TestApp:
             type="function_call_batch",
             ordered=True,
             calls=[
-                FunctionCallAction(type="function_call", name="write_stdin", arguments='{"session_id": 7, "chars": ""}'),
+                FunctionCallAction(
+                    type="function_call", name="write_stdin", arguments='{"session_id": 7, "chars": ""}'
+                ),
                 FunctionCallAction(type="function_call", name="exec_command", arguments='{"cmd": "pwd"}'),
             ],
         )
