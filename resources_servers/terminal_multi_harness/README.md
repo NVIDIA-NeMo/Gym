@@ -17,10 +17,13 @@ Unlike `terminus_judge`, this server does not assume the model response is assis
   - `function_call`
   - `function_call_batch`
 - current comparison behavior:
-  - structured tool-call argument comparison
-  - Terminus-style string similarity using `SequenceMatcher(...).ratio()`
-  - optional ignored argument keys for volatile tool arguments
-  - ordered or unordered batch comparison
+  - completion-message verification is structural: any non-empty assistant `message` matches
+  - actual tool calls must validate against the declared tool schema
+  - actual tool-call names must match expected tool names exactly
+  - actual tool-call argument keys may not go beyond the expected answer
+  - `exec_command.cmd` uses Terminus-style `SequenceMatcher(...).ratio()`
+  - `update_plan` only requires a non-empty `plan`
+  - multiple tool calls are sorted by tool name and compared pairwise
 
 ## Notes
 
@@ -30,5 +33,15 @@ Unlike `terminus_judge`, this server does not assume the model response is assis
 - Aspen's synthesized `responses_api_response` is still useful as a compatibility
   mirror, but it should normalize to the same canonical action as the raw
   `backend_response`.
+- The verifier should receive the declared tool definitions from the current
+  sample. If they are not passed explicitly, it falls back to
+  `responses_create_params.tools`.
 - For `opencode`, the top-level model action should be the reward target. If the model emits a `batch` tool call, the expected action should usually be a single `function_call` named `batch`, not the runtime fan-out of child tool executions.
 - Terminus-2 is intentionally not handled here yet. The correct extension point is a future harness-specific normalizer and comparator.
+
+## Docs
+
+- workflow:
+  - `resources_servers/terminal_multi_harness/docs/development_workflow.md`
+- extension architecture:
+  - `resources_servers/terminal_multi_harness/docs/harness_extension_architecture.md`

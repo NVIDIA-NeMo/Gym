@@ -44,8 +44,32 @@ def _build_action(tool_calls: list[FunctionCallAction], assistant_text: str | No
     return None
 
 
+def _extract_assistant_text_from_content(content: Any) -> str | None:
+    text_parts: list[str] = []
+
+    if isinstance(content, str):
+        text_parts.append(content)
+    elif isinstance(content, list):
+        for content_item in content:
+            if hasattr(content_item, "type") and getattr(content_item, "type", None) == "output_text":
+                text = getattr(content_item, "text", None)
+                if isinstance(text, str):
+                    text_parts.append(text)
+                continue
+
+            if isinstance(content_item, dict) and content_item.get("type") == "output_text":
+                text = content_item.get("text")
+                if isinstance(text, str):
+                    text_parts.append(text)
+
+    if not text_parts:
+        return None
+
+    return "".join(text_parts)
+
+
 def extract_action(response: "NeMoGymResponse") -> Optional[ExpectedAction]:
-    assistant_text = None
+    assistant_text_parts: list[str] = []
     tool_calls: list[FunctionCallAction] = []
 
     for output_item in response.output:
@@ -59,17 +83,17 @@ def extract_action(response: "NeMoGymResponse") -> Optional[ExpectedAction]:
             )
             continue
 
-        if output_item.type == "message" and output_item.role == "assistant" and assistant_text is None:
-            for content_item in output_item.content:
-                if content_item.type == "output_text":
-                    assistant_text = content_item.text
-                    break
+        if output_item.type == "message" and output_item.role == "assistant":
+            assistant_text = _extract_assistant_text_from_content(output_item.content)
+            if assistant_text is not None:
+                assistant_text_parts.append(assistant_text)
 
+    assistant_text = "".join(assistant_text_parts) if assistant_text_parts else None
     return _build_action(tool_calls, assistant_text)
 
 
 def extract_action_from_responses_api_response(response: dict[str, Any]) -> Optional[ExpectedAction]:
-    assistant_text = None
+    assistant_text_parts: list[str] = []
     tool_calls: list[FunctionCallAction] = []
 
     for output_item in response.get("output") or []:
@@ -89,14 +113,12 @@ def extract_action_from_responses_api_response(response: dict[str, Any]) -> Opti
                 )
             continue
 
-        if output_item.get("type") == "message" and output_item.get("role") == "assistant" and assistant_text is None:
-            for content_item in output_item.get("content") or []:
-                if not isinstance(content_item, dict):
-                    continue
-                if content_item.get("type") == "output_text" and isinstance(content_item.get("text"), str):
-                    assistant_text = content_item["text"]
-                    break
+        if output_item.get("type") == "message" and output_item.get("role") == "assistant":
+            assistant_text = _extract_assistant_text_from_content(output_item.get("content"))
+            if assistant_text is not None:
+                assistant_text_parts.append(assistant_text)
 
+    assistant_text = "".join(assistant_text_parts) if assistant_text_parts else None
     return _build_action(tool_calls, assistant_text)
 
 
@@ -139,8 +161,6 @@ def extract_action_from_backend_response(backend_response: dict[str, Any]) -> Op
                 )
             )
 
-    assistant_text = message.get("content")
-    if not isinstance(assistant_text, str):
-        assistant_text = None
+    assistant_text = _extract_assistant_text_from_content(message.get("content"))
 
     return _build_action(tool_calls, assistant_text)

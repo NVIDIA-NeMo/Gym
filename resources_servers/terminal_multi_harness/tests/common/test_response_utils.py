@@ -69,6 +69,18 @@ class TestResponseUtils:
         assert extracted_message.type == "message"
         assert extracted_message.content == "this is the first output text"
 
+        multi_text_message = NeMoGymResponseOutputMessage(
+            id="multi_text",
+            content=[
+                NeMoGymResponseOutputText(annotations=[], text="hello"),
+                NeMoGymResponseOutputText(annotations=[], text=" world"),
+            ],
+        )
+        extracted_multi_text = extract_action(self._create_response([multi_text_message]))
+        assert extracted_multi_text is not None
+        assert extracted_multi_text.type == "message"
+        assert extracted_multi_text.content == "hello world"
+
         first_tool_call = NeMoGymResponseFunctionToolCall(
             call_id="call_1",
             name="exec_command",

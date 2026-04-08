@@ -13,9 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
-from difflib import SequenceMatcher
 
-from pytest import fixture
+from pytest import approx, fixture
 
 from resources_servers.terminal_multi_harness.common.verification_utils import (
     ActionComparator,
@@ -27,151 +26,309 @@ from resources_servers.terminal_multi_harness.common.verification_utils import (
 )
 
 
+def build_declared_tools() -> list[dict]:
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": "exec_command",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "cmd": {"type": "string"},
+                        "workdir": {"type": "string"},
+                    },
+                    "required": ["cmd"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "update_plan",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "plan": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "step": {"type": "string"},
+                                    "status": {"type": "string"},
+                                },
+                                "required": ["step", "status"],
+                                "additionalProperties": False,
+                            },
+                        }
+                    },
+                    "required": ["plan"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "write_stdin",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "session_id": {"type": "integer"},
+                        "chars": {"type": "string"},
+                    },
+                    "required": ["session_id"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+    ]
+
+
 class TestActionComparator:
     @fixture
     def action_comparator(self) -> ActionComparator:
         comparator_config = ToolCallComparatorConfig(
             string_similarity_threshold=0.9,
-            ignored_argument_keys_by_tool={
-                "exec_command": ["yield_time_ms", "max_output_tokens"],
-            },
         )
         return ActionComparator(config=comparator_config)
 
-    def test_compare_message(self, action_comparator: ActionComparator) -> None:
-        assert action_comparator.compare_message(
-            MessageAction(type="message", content="Birds are animals."),
-            MessageAction(type="message", content="Birds are animal."),
-        ) == (True, StepRewardCategory.EXPECTED_CHAT_MESSAGE_FOUND)
+    @fixture
+    def declared_tools(self) -> list[dict]:
+        return build_declared_tools()
 
-        assert action_comparator.compare_message(
-            MessageAction(type="message", content="hello"),
-            MessageAction(type="message", content="goodbye"),
-        ) == (False, StepRewardCategory.MESSAGE_CONTENT_DIFFERENT)
+    def test_compare_message_ignores_expected_text(
+        self,
+        action_comparator: ActionComparator,
+        declared_tools: list[dict],
+    ) -> None:
+        comparison_result = action_comparator.compare_action(
+            expected_action=MessageAction(type="message", content="teacher final answer"),
+            actual_action=MessageAction(type="message", content="policy says something else"),
+            declared_tools=declared_tools,
+        )
+        assert comparison_result.matches is True
+        assert comparison_result.category == StepRewardCategory.EXPECTED_CHAT_MESSAGE_FOUND
 
-        assert SequenceMatcher(None, "Birds are animals.", "Birds are animal.").ratio() >= 0.9
-        assert SequenceMatcher(None, "Birds are animals.", "The birds fly.").ratio() < 0.9
+    def test_compare_message_requires_non_empty_text(
+        self,
+        action_comparator: ActionComparator,
+        declared_tools: list[dict],
+    ) -> None:
+        comparison_result = action_comparator.compare_action(
+            expected_action=MessageAction(type="message", content="teacher final answer"),
+            actual_action=MessageAction(type="message", content="   "),
+            declared_tools=declared_tools,
+        )
+        assert comparison_result.matches is False
+        assert comparison_result.category == StepRewardCategory.EMPTY_MESSAGE
 
-    def test_compare_tool_call(self, action_comparator: ActionComparator) -> None:
-        expected_function_call = FunctionCallAction(
-            type="function_call",
-            name="exec_command",
-            arguments=json.dumps(
-                {
-                    "cmd": "pwd",
-                    "workdir": "/repo",
-                }
+    def test_compare_exec_command_uses_similarity_and_records_score(
+        self,
+        action_comparator: ActionComparator,
+        declared_tools: list[dict],
+    ) -> None:
+        comparison_result = action_comparator.compare_action(
+            expected_action=FunctionCallAction(
+                type="function_call",
+                name="exec_command",
+                arguments=json.dumps({"cmd": "pwd\n"}),
             ),
-        )
-
-        ignored_field_tool_call = FunctionCallAction(
-            type="function_call",
-            name="exec_command",
-            arguments=json.dumps(
-                {
-                    "cmd": "pwd",
-                    "workdir": "/repo",
-                    "yield_time_ms": 1000,
-                }
+            actual_action=FunctionCallAction(
+                type="function_call",
+                name="exec_command",
+                arguments=json.dumps({"cmd": "pwd"}),
             ),
+            declared_tools=declared_tools,
         )
-        assert action_comparator.compare_tool_call(expected_function_call, ignored_field_tool_call) == (
-            True,
-            StepRewardCategory.EXPECTED_TOOL_CALL,
-        )
+        assert comparison_result.matches is True
+        assert comparison_result.category == StepRewardCategory.EXPECTED_TOOL_CALL
+        assert comparison_result.similarity_score == approx(1.0)
 
-        different_tool_call = FunctionCallAction(
-            type="function_call",
-            name="write_stdin",
-            arguments=json.dumps({"chars": "pwd\n"}),
+    def test_compare_exec_command_rejects_extra_actual_keys(
+        self,
+        action_comparator: ActionComparator,
+        declared_tools: list[dict],
+    ) -> None:
+        comparison_result = action_comparator.compare_action(
+            expected_action=FunctionCallAction(
+                type="function_call",
+                name="exec_command",
+                arguments=json.dumps({"cmd": "pwd"}),
+            ),
+            actual_action=FunctionCallAction(
+                type="function_call",
+                name="exec_command",
+                arguments=json.dumps({"cmd": "pwd", "workdir": "/repo"}),
+            ),
+            declared_tools=declared_tools,
         )
-        assert action_comparator.compare_tool_call(expected_function_call, different_tool_call) == (
-            False,
-            StepRewardCategory.UNEXPECTED_TOOL,
-        )
+        assert comparison_result.matches is False
+        assert comparison_result.category == StepRewardCategory.UNEXPECTED_ARGUMENT_KEYS
 
-    def test_compare_tool_call_batch(self, action_comparator: ActionComparator) -> None:
+    def test_compare_exec_command_schema_validation_happens_before_match(
+        self,
+        action_comparator: ActionComparator,
+        declared_tools: list[dict],
+    ) -> None:
+        comparison_result = action_comparator.compare_action(
+            expected_action=FunctionCallAction(
+                type="function_call",
+                name="exec_command",
+                arguments=json.dumps({"cmd": "pwd"}),
+            ),
+            actual_action=FunctionCallAction(
+                type="function_call",
+                name="exec_command",
+                arguments=json.dumps({"cmd": 123}),
+            ),
+            declared_tools=declared_tools,
+        )
+        assert comparison_result.matches is False
+        assert comparison_result.category == StepRewardCategory.TOOL_SCHEMA_VALIDATION_FAILED
+
+    def test_compare_tool_name_still_must_match_after_schema_validation(
+        self,
+        action_comparator: ActionComparator,
+        declared_tools: list[dict],
+    ) -> None:
+        comparison_result = action_comparator.compare_action(
+            expected_action=FunctionCallAction(
+                type="function_call",
+                name="exec_command",
+                arguments=json.dumps({"cmd": "pwd"}),
+            ),
+            actual_action=FunctionCallAction(
+                type="function_call",
+                name="write_stdin",
+                arguments=json.dumps({"session_id": 7}),
+            ),
+            declared_tools=declared_tools,
+        )
+        assert comparison_result.matches is False
+        assert comparison_result.category == StepRewardCategory.UNEXPECTED_TOOL
+
+    def test_compare_update_plan_only_checks_non_empty_plan(
+        self,
+        action_comparator: ActionComparator,
+        declared_tools: list[dict],
+    ) -> None:
+        comparison_result = action_comparator.compare_action(
+            expected_action=FunctionCallAction(
+                type="function_call",
+                name="update_plan",
+                arguments=json.dumps({"plan": [{"step": "a", "status": "pending"}]}),
+            ),
+            actual_action=FunctionCallAction(
+                type="function_call",
+                name="update_plan",
+                arguments=json.dumps({"plan": [{"step": "different", "status": "completed"}]}),
+            ),
+            declared_tools=declared_tools,
+        )
+        assert comparison_result.matches is True
+        assert comparison_result.category == StepRewardCategory.EXPECTED_TOOL_CALL
+
+    def test_compare_update_plan_rejects_empty_plan(
+        self,
+        action_comparator: ActionComparator,
+        declared_tools: list[dict],
+    ) -> None:
+        comparison_result = action_comparator.compare_action(
+            expected_action=FunctionCallAction(
+                type="function_call",
+                name="update_plan",
+                arguments=json.dumps({"plan": [{"step": "a", "status": "pending"}]}),
+            ),
+            actual_action=FunctionCallAction(
+                type="function_call",
+                name="update_plan",
+                arguments=json.dumps({"plan": []}),
+            ),
+            declared_tools=declared_tools,
+        )
+        assert comparison_result.matches is False
+        assert comparison_result.category == StepRewardCategory.UPDATE_PLAN_EMPTY_PLAN
+
+    def test_compare_multiple_tool_calls_sorts_by_tool_name_and_compares_pairwise(
+        self,
+        action_comparator: ActionComparator,
+        declared_tools: list[dict],
+    ) -> None:
         expected_batch = FunctionCallBatchAction(
             type="function_call_batch",
             ordered=True,
             calls=[
+                FunctionCallAction(type="function_call", name="write_stdin", arguments='{"session_id": 7, "chars": ""}'),
                 FunctionCallAction(type="function_call", name="exec_command", arguments='{"cmd": "pwd"}'),
-                FunctionCallAction(type="function_call", name="exec_command", arguments='{"cmd": "git status"}'),
             ],
         )
-        matching_batch = FunctionCallBatchAction(
+        actual_batch = FunctionCallBatchAction(
             type="function_call_batch",
             ordered=True,
             calls=[
                 FunctionCallAction(type="function_call", name="exec_command", arguments='{"cmd": "pwd"}'),
-                FunctionCallAction(type="function_call", name="exec_command", arguments='{"cmd": "git status"}'),
+                FunctionCallAction(type="function_call", name="write_stdin", arguments='{"session_id": 7}'),
             ],
         )
-        assert action_comparator.compare_tool_call_batch(expected_batch, matching_batch) == (
-            True,
-            StepRewardCategory.EXPECTED_TOOL_CALL_BATCH,
-        )
 
-        reordered_batch = FunctionCallBatchAction(
+        comparison_result = action_comparator.compare_action(
+            expected_action=expected_batch,
+            actual_action=actual_batch,
+            declared_tools=declared_tools,
+        )
+        assert comparison_result.matches is True
+        assert comparison_result.category == StepRewardCategory.EXPECTED_TOOL_CALL_BATCH
+
+    def test_compare_multiple_tool_calls_fails_when_one_pair_fails(
+        self,
+        action_comparator: ActionComparator,
+        declared_tools: list[dict],
+    ) -> None:
+        expected_batch = FunctionCallBatchAction(
+            type="function_call_batch",
+            ordered=True,
+            calls=[
+                FunctionCallAction(type="function_call", name="write_stdin", arguments='{"session_id": 7}'),
+                FunctionCallAction(type="function_call", name="exec_command", arguments='{"cmd": "pwd"}'),
+            ],
+        )
+        actual_batch = FunctionCallBatchAction(
             type="function_call_batch",
             ordered=True,
             calls=[
                 FunctionCallAction(type="function_call", name="exec_command", arguments='{"cmd": "git status"}'),
-                FunctionCallAction(type="function_call", name="exec_command", arguments='{"cmd": "pwd"}'),
+                FunctionCallAction(type="function_call", name="write_stdin", arguments='{"session_id": 7}'),
             ],
         )
-        assert action_comparator.compare_tool_call_batch(expected_batch, reordered_batch) == (
-            False,
-            StepRewardCategory.ARGUMENT_VALUE_DIFFERENT,
-        )
 
-        unordered_expected_batch = FunctionCallBatchAction(
-            type="function_call_batch",
-            ordered=False,
-            calls=expected_batch.calls,
+        comparison_result = action_comparator.compare_action(
+            expected_action=expected_batch,
+            actual_action=actual_batch,
+            declared_tools=declared_tools,
         )
-        assert action_comparator.compare_tool_call_batch(unordered_expected_batch, reordered_batch) == (
-            True,
-            StepRewardCategory.EXPECTED_TOOL_CALL_BATCH,
-        )
+        assert comparison_result.matches is False
+        assert comparison_result.category == StepRewardCategory.EXEC_COMMAND_CMD_SIMILARITY_BELOW_THRESHOLD
 
-    def test_compare_batch_tool_arguments(self, action_comparator: ActionComparator) -> None:
-        expected_batch_call = FunctionCallAction(
-            type="function_call",
-            name="batch",
-            arguments=json.dumps(
-                {
-                    "tool_calls": [
-                        {
-                            "tool": "exec_command",
-                            "parameters": {
-                                "cmd": "pwd",
-                                "workdir": "/repo",
-                            },
-                        }
-                    ]
-                }
+    def test_compare_exec_command_uses_threshold_override(
+        self,
+        action_comparator: ActionComparator,
+        declared_tools: list[dict],
+    ) -> None:
+        comparison_result = action_comparator.compare_action(
+            expected_action=FunctionCallAction(
+                type="function_call",
+                name="exec_command",
+                arguments=json.dumps({"cmd": "pwd"}),
             ),
-        )
-        actual_batch_call = FunctionCallAction(
-            type="function_call",
-            name="batch",
-            arguments=json.dumps(
-                {
-                    "tool_calls": [
-                        {
-                            "tool": "exec_command",
-                            "parameters": {
-                                "cmd": "pwd",
-                                "workdir": "/repo",
-                                "yield_time_ms": 1000,
-                            },
-                        }
-                    ]
-                }
+            actual_action=FunctionCallAction(
+                type="function_call",
+                name="exec_command",
+                arguments=json.dumps({"cmd": "pwd\n"}),
             ),
+            declared_tools=declared_tools,
+            threshold_override=1.01,
         )
-        assert action_comparator.compare_tool_call(expected_batch_call, actual_batch_call) == (
-            True,
-            StepRewardCategory.EXPECTED_TOOL_CALL,
-        )
+        assert comparison_result.matches is False
+        assert comparison_result.category == StepRewardCategory.EXEC_COMMAND_CMD_SIMILARITY_BELOW_THRESHOLD

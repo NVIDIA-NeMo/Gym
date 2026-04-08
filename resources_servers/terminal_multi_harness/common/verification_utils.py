@@ -16,8 +16,9 @@ import json
 from difflib import SequenceMatcher
 from enum import StrEnum
 from json import JSONDecodeError
-from typing import Annotated, Any, Literal, Optional, TypeAlias, Union
+from typing import Annotated, Any, Literal, TypeAlias, Union
 
+from openapi_schema_validator import validate as validate_against_schema_openapi
 from pydantic import BaseModel, Field
 
 
@@ -47,18 +48,26 @@ ExpectedAction: TypeAlias = Annotated[
 class StepRewardCategory(StrEnum):
     NO_ACTION_FOUND = "No tool call or chat message was found in the response"
     ACTION_TYPE_MISMATCH = "The actual action type does not match the expected action type"
-    MESSAGE_CONTENT_DIFFERENT = "The assistant message content is different than expected"
+    EMPTY_MESSAGE = "The assistant message is empty after trimming whitespace"
     EXPECTED_CHAT_MESSAGE_FOUND = "A chat message that matches the expected message was found"
     UNEXPECTED_TOOL = "The tool in a tool call is not the expected tool"
     ARGUMENTS_DECODE_ERROR = "An error occurred when decoding the arguments string in a tool call as JSON"
-    ARGUMENT_VALUE_TYPE_DIFFERENT = "The type of an argument value in a tool call is different than expected"
-    ARGUMENT_OBJECT_KEYS_DIFFERENT = "The keys in an object argument value are different than expected"
-    ARGUMENT_LIST_LENGTH_DIFFERENT = "A list in an argument value has a different length than expected"
-    ARGUMENT_VALUE_DIFFERENT = "An argument value in a tool call is different than expected"
+    ARGUMENTS_NOT_OBJECT = "The decoded tool-call arguments are not a JSON object"
+    TOOL_SCHEMA_NOT_FOUND = "The declared tool schema for the tool call could not be found"
+    TOOL_SCHEMA_VALIDATION_FAILED = "The actual tool-call arguments are not valid under the declared tool schema"
+    UNEXPECTED_ARGUMENT_KEYS = "The actual tool-call arguments contain parameter keys absent from the expected answer"
     FUNCTION_CALL_BATCH_LENGTH_DIFFERENT = "The number of tool calls in a batch is different than expected"
-    FUNCTION_CALL_BATCH_CALL_DIFFERENT = "A tool call in the batch does not match the expected batch"
+    EXEC_COMMAND_MISSING_CMD = "The exec_command tool call does not contain a cmd argument"
+    EXEC_COMMAND_CMD_SIMILARITY_BELOW_THRESHOLD = "The exec_command cmd similarity is below threshold"
+    UPDATE_PLAN_EMPTY_PLAN = "The update_plan tool call does not contain a non-empty plan argument"
     EXPECTED_TOOL_CALL = "A tool call that matches the expected tool call was found"
     EXPECTED_TOOL_CALL_BATCH = "A tool-call batch that matches the expected batch was found"
+
+
+class ActionComparisonResult(BaseModel):
+    matches: bool
+    category: StepRewardCategory
+    similarity_score: float | None = None
 
 
 class ToolCallComparatorConfig(BaseModel):
@@ -71,162 +80,272 @@ class ActionComparator(BaseModel):
     config: ToolCallComparatorConfig
 
     def compare_action(
-        self, expected_action: ExpectedAction, actual_action: ExpectedAction, harness: str = "generic"
-    ) -> tuple[bool, StepRewardCategory]:
+        self,
+        expected_action: ExpectedAction,
+        actual_action: ExpectedAction,
+        declared_tools: list[Any] | None = None,
+        threshold_override: float | None = None,
+        harness: str = "generic",
+    ) -> ActionComparisonResult:
         del harness
 
-        if expected_action.type != actual_action.type:
-            return False, StepRewardCategory.ACTION_TYPE_MISMATCH
+        declared_tool_schemas = self.build_declared_tool_schema_map(declared_tools)
 
         match expected_action.type:
             case "message":
-                return self.compare_message(expected_action, actual_action)
+                if actual_action.type != "message":
+                    return ActionComparisonResult(
+                        matches=False,
+                        category=StepRewardCategory.ACTION_TYPE_MISMATCH,
+                    )
+                return self.compare_message(actual_action)
             case "function_call":
-                return self.compare_tool_call(expected_action, actual_action)
+                if actual_action.type != "function_call":
+                    return ActionComparisonResult(
+                        matches=False,
+                        category=StepRewardCategory.ACTION_TYPE_MISMATCH,
+                    )
+                return self.compare_tool_call(
+                    expected_tool_call=expected_action,
+                    actual_tool_call=actual_action,
+                    declared_tool_schemas=declared_tool_schemas,
+                    threshold_override=threshold_override,
+                )
             case "function_call_batch":
-                return self.compare_tool_call_batch(expected_action, actual_action)
+                if actual_action.type != "function_call_batch":
+                    return ActionComparisonResult(
+                        matches=False,
+                        category=StepRewardCategory.ACTION_TYPE_MISMATCH,
+                    )
+                return self.compare_tool_call_batch(
+                    expected_batch=expected_action,
+                    actual_batch=actual_action,
+                    declared_tool_schemas=declared_tool_schemas,
+                    threshold_override=threshold_override,
+                )
             case _:
                 raise NotImplementedError
 
-    def compare_message(
-        self, expected_message: MessageAction, actual_message: MessageAction
-    ) -> tuple[bool, StepRewardCategory]:
-        if self.compare_text(expected_message.content, actual_message.content):
-            return True, StepRewardCategory.EXPECTED_CHAT_MESSAGE_FOUND
-        return False, StepRewardCategory.MESSAGE_CONTENT_DIFFERENT
+    def compare_message(self, actual_message: MessageAction) -> ActionComparisonResult:
+        if actual_message.content.strip():
+            return ActionComparisonResult(
+                matches=True,
+                category=StepRewardCategory.EXPECTED_CHAT_MESSAGE_FOUND,
+            )
+        return ActionComparisonResult(
+            matches=False,
+            category=StepRewardCategory.EMPTY_MESSAGE,
+        )
 
     def compare_tool_call(
-        self, expected_tool_call: FunctionCallAction, actual_tool_call: FunctionCallAction
-    ) -> tuple[bool, StepRewardCategory]:
+        self,
+        expected_tool_call: FunctionCallAction,
+        actual_tool_call: FunctionCallAction,
+        declared_tool_schemas: dict[str, dict[str, Any]],
+        threshold_override: float | None = None,
+    ) -> ActionComparisonResult:
+        expected_arguments_result = self.decode_arguments(expected_tool_call.arguments)
+        if expected_arguments_result.category is not None:
+            return expected_arguments_result
+
+        actual_arguments_result = self.decode_arguments(actual_tool_call.arguments)
+        if actual_arguments_result.category is not None:
+            return actual_arguments_result
+
+        expected_arguments = expected_arguments_result.arguments
+        actual_arguments = actual_arguments_result.arguments
+        assert expected_arguments is not None
+        assert actual_arguments is not None
+
+        schema_validation_result = self.validate_against_declared_tool_schema(
+            tool_name=actual_tool_call.name,
+            actual_arguments=actual_arguments,
+            declared_tool_schemas=declared_tool_schemas,
+        )
+        if schema_validation_result is not None:
+            return schema_validation_result
+
         if expected_tool_call.name != actual_tool_call.name:
-            return False, StepRewardCategory.UNEXPECTED_TOOL
+            return ActionComparisonResult(
+                matches=False,
+                category=StepRewardCategory.UNEXPECTED_TOOL,
+            )
 
-        try:
-            expected_arguments = json.loads(expected_tool_call.arguments)
-            actual_arguments = json.loads(actual_tool_call.arguments)
-        except (JSONDecodeError, UnicodeDecodeError):
-            return False, StepRewardCategory.ARGUMENTS_DECODE_ERROR
+        if not set(actual_arguments).issubset(expected_arguments):
+            return ActionComparisonResult(
+                matches=False,
+                category=StepRewardCategory.UNEXPECTED_ARGUMENT_KEYS,
+            )
 
-        expected_arguments = self.normalize_tool_call_arguments(expected_tool_call.name, expected_arguments)
-        actual_arguments = self.normalize_tool_call_arguments(actual_tool_call.name, actual_arguments)
-
-        arguments_match, category = self.compare_action_values(expected_arguments, actual_arguments)
-        if arguments_match:
-            return True, StepRewardCategory.EXPECTED_TOOL_CALL
-        return False, category or StepRewardCategory.ARGUMENT_VALUE_DIFFERENT
+        match expected_tool_call.name:
+            case "exec_command":
+                return self.compare_exec_command(
+                    expected_arguments=expected_arguments,
+                    actual_arguments=actual_arguments,
+                    threshold_override=threshold_override,
+                )
+            case "update_plan":
+                return self.compare_update_plan(actual_arguments)
+            case _:
+                return ActionComparisonResult(
+                    matches=True,
+                    category=StepRewardCategory.EXPECTED_TOOL_CALL,
+                )
 
     def compare_tool_call_batch(
-        self, expected_batch: FunctionCallBatchAction, actual_batch: FunctionCallBatchAction
-    ) -> tuple[bool, StepRewardCategory]:
+        self,
+        expected_batch: FunctionCallBatchAction,
+        actual_batch: FunctionCallBatchAction,
+        declared_tool_schemas: dict[str, dict[str, Any]],
+        threshold_override: float | None = None,
+    ) -> ActionComparisonResult:
         if len(expected_batch.calls) != len(actual_batch.calls):
-            return False, StepRewardCategory.FUNCTION_CALL_BATCH_LENGTH_DIFFERENT
-
-        if expected_batch.ordered:
-            for expected_call, actual_call in zip(expected_batch.calls, actual_batch.calls):
-                call_matches, category = self.compare_tool_call(expected_call, actual_call)
-                if not call_matches:
-                    return False, category
-            return True, StepRewardCategory.EXPECTED_TOOL_CALL_BATCH
-
-        unmatched_actual_calls = list(actual_batch.calls)
-        for expected_call in expected_batch.calls:
-            matched_index = None
-            mismatch_category = StepRewardCategory.FUNCTION_CALL_BATCH_CALL_DIFFERENT
-
-            for actual_index, actual_call in enumerate(unmatched_actual_calls):
-                call_matches, category = self.compare_tool_call(expected_call, actual_call)
-                if call_matches:
-                    matched_index = actual_index
-                    break
-                mismatch_category = category
-
-            if matched_index is None:
-                return False, mismatch_category
-
-            unmatched_actual_calls.pop(matched_index)
-
-        return True, StepRewardCategory.EXPECTED_TOOL_CALL_BATCH
-
-    def normalize_tool_call_arguments(self, tool_name: str, value: Any) -> Any:
-        if isinstance(value, dict):
-            ignored_keys = set(self.config.ignored_argument_keys_by_tool.get(tool_name, []))
-            normalized_value = {}
-            for key, item in value.items():
-                if key in ignored_keys:
-                    continue
-
-                if tool_name == "batch" and key == "tool_calls" and isinstance(item, list):
-                    normalized_value[key] = [self.normalize_batch_tool_call(tool_call) for tool_call in item]
-                    continue
-
-                normalized_value[key] = self.normalize_tool_call_arguments(tool_name, item)
-
-            return normalized_value
-
-        if isinstance(value, list):
-            return [self.normalize_tool_call_arguments(tool_name, item) for item in value]
-
-        return value
-
-    def normalize_batch_tool_call(self, tool_call: Any) -> Any:
-        if not isinstance(tool_call, dict):
-            return tool_call
-
-        normalized_tool_call = dict(tool_call)
-        nested_tool_name = normalized_tool_call.get("tool")
-        nested_parameters = normalized_tool_call.get("parameters")
-        if isinstance(nested_tool_name, str):
-            normalized_tool_call["parameters"] = self.normalize_tool_call_arguments(
-                nested_tool_name,
-                nested_parameters,
+            return ActionComparisonResult(
+                matches=False,
+                category=StepRewardCategory.FUNCTION_CALL_BATCH_LENGTH_DIFFERENT,
             )
-        return normalized_tool_call
 
-    def compare_action_values(self, expected_value: Any, actual_value: Any) -> tuple[bool, Optional[StepRewardCategory]]:
-        if not isinstance(actual_value, type(expected_value)):
-            return False, StepRewardCategory.ARGUMENT_VALUE_TYPE_DIFFERENT
+        expected_calls = sorted(expected_batch.calls, key=lambda call: call.name)
+        actual_calls = sorted(actual_batch.calls, key=lambda call: call.name)
+        for expected_call, actual_call in zip(expected_calls, actual_calls):
+            comparison_result = self.compare_tool_call(
+                expected_tool_call=expected_call,
+                actual_tool_call=actual_call,
+                declared_tool_schemas=declared_tool_schemas,
+                threshold_override=threshold_override,
+            )
+            if not comparison_result.matches:
+                return comparison_result
 
-        if isinstance(expected_value, dict):
-            if set(expected_value.keys()) != set(actual_value.keys()):
-                return False, StepRewardCategory.ARGUMENT_OBJECT_KEYS_DIFFERENT
+        return ActionComparisonResult(
+            matches=True,
+            category=StepRewardCategory.EXPECTED_TOOL_CALL_BATCH,
+        )
 
-            for expected_dict_key, expected_dict_value in expected_value.items():
-                actual_dict_value = actual_value[expected_dict_key]
-                dict_value_match, dict_value_category = self.compare_action_values(
-                    expected_dict_value,
-                    actual_dict_value,
-                )
-                if not dict_value_match:
-                    return False, dict_value_category
-            return True, None
+    def compare_exec_command(
+        self,
+        expected_arguments: dict[str, Any],
+        actual_arguments: dict[str, Any],
+        threshold_override: float | None = None,
+    ) -> ActionComparisonResult:
+        actual_cmd = actual_arguments.get("cmd")
+        if not isinstance(actual_cmd, str):
+            return ActionComparisonResult(
+                matches=False,
+                category=StepRewardCategory.EXEC_COMMAND_MISSING_CMD,
+            )
 
-        if isinstance(expected_value, list):
-            if len(expected_value) != len(actual_value):
-                return False, StepRewardCategory.ARGUMENT_LIST_LENGTH_DIFFERENT
+        expected_cmd = expected_arguments.get("cmd")
+        if not isinstance(expected_cmd, str):
+            return ActionComparisonResult(
+                matches=False,
+                category=StepRewardCategory.EXEC_COMMAND_MISSING_CMD,
+            )
 
-            for expected_list_element, actual_list_element in zip(expected_value, actual_value):
-                list_element_match, list_element_category = self.compare_action_values(
-                    expected_list_element,
-                    actual_list_element,
-                )
-                if not list_element_match:
-                    return False, list_element_category
-            return True, None
+        normalized_expected_cmd = self.normalize_command_text(expected_cmd)
+        normalized_actual_cmd = self.normalize_command_text(actual_cmd)
+        similarity_score = SequenceMatcher(None, normalized_expected_cmd, normalized_actual_cmd).ratio()
+        threshold = self.get_string_similarity_threshold(threshold_override)
 
-        if isinstance(expected_value, float):
-            if abs(actual_value - expected_value) < self.config.floating_point_comparison_threshold:
-                return True, None
-            return False, StepRewardCategory.ARGUMENT_VALUE_DIFFERENT
+        if similarity_score < threshold:
+            return ActionComparisonResult(
+                matches=False,
+                category=StepRewardCategory.EXEC_COMMAND_CMD_SIMILARITY_BELOW_THRESHOLD,
+                similarity_score=similarity_score,
+            )
 
-        if isinstance(expected_value, str):
-            if self.compare_text(expected_value, actual_value):
-                return True, None
-            return False, StepRewardCategory.ARGUMENT_VALUE_DIFFERENT
+        return ActionComparisonResult(
+            matches=True,
+            category=StepRewardCategory.EXPECTED_TOOL_CALL,
+            similarity_score=similarity_score,
+        )
 
-        if expected_value == actual_value:
-            return True, None
+    def compare_update_plan(self, actual_arguments: dict[str, Any]) -> ActionComparisonResult:
+        if self.is_non_empty_value(actual_arguments.get("plan")):
+            return ActionComparisonResult(
+                matches=True,
+                category=StepRewardCategory.EXPECTED_TOOL_CALL,
+            )
 
-        return False, StepRewardCategory.ARGUMENT_VALUE_DIFFERENT
+        return ActionComparisonResult(
+            matches=False,
+            category=StepRewardCategory.UPDATE_PLAN_EMPTY_PLAN,
+        )
 
-    def compare_text(self, expected_text: str, actual_text: str) -> bool:
-        return SequenceMatcher(None, expected_text, actual_text).ratio() >= self.config.string_similarity_threshold
+    def decode_arguments(self, arguments: str) -> "DecodedArgumentsResult":
+        try:
+            decoded_arguments = json.loads(arguments)
+        except (JSONDecodeError, UnicodeDecodeError):
+            return DecodedArgumentsResult(category=StepRewardCategory.ARGUMENTS_DECODE_ERROR)
+
+        if not isinstance(decoded_arguments, dict):
+            return DecodedArgumentsResult(category=StepRewardCategory.ARGUMENTS_NOT_OBJECT)
+
+        return DecodedArgumentsResult(arguments=decoded_arguments)
+
+    def validate_against_declared_tool_schema(
+        self,
+        tool_name: str,
+        actual_arguments: dict[str, Any],
+        declared_tool_schemas: dict[str, dict[str, Any]],
+    ) -> ActionComparisonResult | None:
+        tool_schema = declared_tool_schemas.get(tool_name)
+        if tool_schema is None:
+            return ActionComparisonResult(
+                matches=False,
+                category=StepRewardCategory.TOOL_SCHEMA_NOT_FOUND,
+            )
+
+        try:
+            validate_against_schema_openapi(actual_arguments, tool_schema)
+        except Exception:
+            return ActionComparisonResult(
+                matches=False,
+                category=StepRewardCategory.TOOL_SCHEMA_VALIDATION_FAILED,
+            )
+
+        return None
+
+    def build_declared_tool_schema_map(self, declared_tools: list[Any] | None) -> dict[str, dict[str, Any]]:
+        declared_tool_schemas: dict[str, dict[str, Any]] = {}
+        for tool_definition in declared_tools or []:
+            if hasattr(tool_definition, "model_dump"):
+                tool_definition = tool_definition.model_dump(mode="python")
+
+            if not isinstance(tool_definition, dict):
+                continue
+
+            function_definition = tool_definition.get("function")
+            if isinstance(function_definition, dict):
+                tool_name = function_definition.get("name")
+                tool_schema = function_definition.get("parameters")
+            else:
+                tool_name = tool_definition.get("name")
+                tool_schema = tool_definition.get("parameters")
+
+            if isinstance(tool_name, str) and isinstance(tool_schema, dict):
+                declared_tool_schemas[tool_name] = tool_schema
+
+        return declared_tool_schemas
+
+    def get_string_similarity_threshold(self, threshold_override: float | None = None) -> float:
+        if threshold_override is not None:
+            return threshold_override
+        return self.config.string_similarity_threshold
+
+    def normalize_command_text(self, command_text: str) -> str:
+        return command_text.replace("\r\n", "\n").replace("\r", "\n").strip()
+
+    def is_non_empty_value(self, value: Any) -> bool:
+        if value is None:
+            return False
+        if isinstance(value, str):
+            return bool(value.strip())
+        if isinstance(value, (list, dict, tuple, set)):
+            return bool(value)
+        return True
+
+
+class DecodedArgumentsResult(BaseModel):
+    arguments: dict[str, Any] | None = None
+    category: StepRewardCategory | None = None

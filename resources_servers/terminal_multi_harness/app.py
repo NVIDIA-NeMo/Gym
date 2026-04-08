@@ -12,6 +12,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from typing import Any
+
 from fastapi import FastAPI
 
 from nemo_gym.base_resources_server import (
@@ -37,6 +39,8 @@ class TerminalMultiHarnessResourcesServerConfig(BaseResourcesServerConfig):
 class TerminalMultiHarnessRunRequest(BaseRunRequest):
     harness: str = "generic"
     expected_action: ExpectedAction
+    declared_tools: list[dict[str, Any]] | None = None
+    threshold: float | None = None
 
 
 class TerminalMultiHarnessVerifyRequest(TerminalMultiHarnessRunRequest, BaseVerifyRequest):
@@ -47,6 +51,9 @@ class TerminalMultiHarnessVerifyResponse(BaseVerifyResponse):
     harness: str
     expected_action: ExpectedAction
     category: StepRewardCategory
+    declared_tools: list[dict[str, Any]] | None = None
+    threshold: float | None = None
+    similarity_score: float | None = None
 
 
 class TerminalMultiHarnessResourcesServer(SimpleResourcesServer):
@@ -66,17 +73,33 @@ class TerminalMultiHarnessResourcesServer(SimpleResourcesServer):
             )
 
         comparator = ActionComparator(config=self.config.tool_call_comparator_config)
-        action_matches, category = comparator.compare_action(
+        comparison_result = comparator.compare_action(
             expected_action=body.expected_action,
             actual_action=extracted_action,
+            declared_tools=self.resolve_declared_tools(body),
+            threshold_override=body.threshold,
             harness=body.harness,
         )
 
         return TerminalMultiHarnessVerifyResponse(
             **body.model_dump(),
-            reward=1.0 if action_matches else 0.0,
-            category=category,
+            reward=1.0 if comparison_result.matches else 0.0,
+            category=comparison_result.category,
+            similarity_score=comparison_result.similarity_score,
         )
+
+    def resolve_declared_tools(self, body: TerminalMultiHarnessVerifyRequest) -> list[dict[str, Any]]:
+        if body.declared_tools is not None:
+            return body.declared_tools
+
+        resolved_tools: list[dict[str, Any]] = []
+        for tool_definition in body.responses_create_params.tools or []:
+            if hasattr(tool_definition, "model_dump"):
+                resolved_tools.append(tool_definition.model_dump(mode="python"))
+            elif isinstance(tool_definition, dict):
+                resolved_tools.append(tool_definition)
+
+        return resolved_tools
 
 
 if __name__ == "__main__":
