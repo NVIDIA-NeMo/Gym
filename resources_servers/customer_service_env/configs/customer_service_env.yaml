@@ -4,7 +4,8 @@ customer_service_env:
       entrypoint: app.py
       domain: agent
       verified: false
-      description: Multi-turn customer service with asymmetric tool access. User model has private tools hidden from policy.
+      description: Multi-turn customer service with asymmetric tool access. User model
+        has private tools hidden from policy.
 customer_service_gymnasium_agent:
   responses_api_agents:
     gymnasium_agent:
@@ -25,6 +26,7 @@ customer_service_user_tools:
     customer_service_user_tools:
       entrypoint: app.py
       domain: agent
+      verified: false
 customer_service_user_agent:
   responses_api_agents:
     simple_agent:
