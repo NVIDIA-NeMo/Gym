@@ -125,10 +125,9 @@ jobs:
       - name: Setup project
         run: |
           cd /tmp/myproject
-          cat > env.yaml << 'EOF'
-          policy_base_url: http://127.0.0.1:9999/v1
-          policy_model_name: mock-model
-          EOF
+          echo "policy_base_url: http://127.0.0.1:9999/v1" > env.yaml
+          echo "policy_api_key: not-a-real-key" >> env.yaml  # pragma: allowlist secret
+          echo "policy_model_name: mock-model" >> env.yaml
 
       - name: Test CLI commands
         run: |
