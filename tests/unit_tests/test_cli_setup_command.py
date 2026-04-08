@@ -12,13 +12,20 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import importlib.metadata
 from pathlib import Path
-from unittest.mock import MagicMock, call
+from unittest.mock import MagicMock, call, patch
 
+import pytest
 from pytest import MonkeyPatch, raises
 
 import nemo_gym.cli_setup_command
-from nemo_gym.cli_setup_command import run_command, setup_env_command
+from nemo_gym.cli_setup_command import (
+    _get_nemo_gym_install_flags,
+    _get_nemo_gym_version_spec,
+    run_command,
+    setup_env_command,
+)
 from nemo_gym.global_config import UV_VENV_DIR_KEY_NAME
 from tests.unit_tests.test_global_config import TestGlobalConfig as _TestGlobalConfig
 
@@ -171,30 +178,46 @@ class TestCLISetupCommandSetupEnvCommand:
         expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python test python version {uv_venv_dir}/first_level/second_level/.venv > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2) && source {uv_venv_dir}/first_level/second_level/.venv/bin/activate && uv pip install -r requirements.txt ray[default]==test ray version openai==test openai version > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2)"
         assert expected_command == actual_command
 
-    def test_installs_from_pypi_when_not_editable(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("version", ["0.3.0", "0.3.0rc0", "1.0.0", "2.1.3rc1"])
+    def test_installs_from_pypi_when_not_editable(
+        self, tmp_path: Path, version: str, monkeypatch: MonkeyPatch
+    ) -> None:
         server_dir = (tmp_path / "first_level" / "second_level").absolute()
         server_dir.mkdir(parents=True)
         (server_dir / "requirements.txt").write_text("pytest\n")
+        monkeypatch.delenv("NEMO_GYM_ALLOW_PRERELEASE", raising=False)
+        monkeypatch.delenv("UV_INDEX_URL", raising=False)
+        monkeypatch.delenv("UV_EXTRA_INDEX_URL", raising=False)
+        monkeypatch.delenv("UV_INDEX_STRATEGY", raising=False)
 
-        actual_command = setup_env_command(
-            dir_path=server_dir,
-            global_config_dict=self._debug_global_config_dict(tmp_path),
-            prefix="my server name",
-        )
-        expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python test python version {server_dir}/.venv > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2) && source {server_dir}/.venv/bin/activate && (echo 'nemo-gym' && grep -v -F '../..' requirements.txt) | uv pip install -r /dev/stdin ray[default]==test ray version openai==test openai version > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2)"
+        with patch("importlib.metadata.version", return_value=version):
+            actual_command = setup_env_command(
+                dir_path=server_dir,
+                global_config_dict=self._debug_global_config_dict(tmp_path),
+                prefix="my server name",
+            )
+        expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python test python version {server_dir}/.venv > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2) && source {server_dir}/.venv/bin/activate && (echo 'nemo-gym=={version}' && grep -v -F '../..' requirements.txt) | uv pip install -r /dev/stdin ray[default]==test ray version openai==test openai version > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2)"
         assert expected_command == actual_command
 
-    def test_installs_from_pypi_when_not_editable_pyproject(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("version", ["0.3.0", "0.3.0rc0", "1.0.0", "2.1.3rc1"])
+    def test_installs_from_pypi_when_not_editable_pyproject(
+        self, tmp_path: Path, version: str, monkeypatch: MonkeyPatch
+    ) -> None:
         server_dir = (tmp_path / "first_level" / "second_level").absolute()
         server_dir.mkdir(parents=True)
         (server_dir / "pyproject.toml").write_text("")
+        monkeypatch.delenv("NEMO_GYM_ALLOW_PRERELEASE", raising=False)
+        monkeypatch.delenv("UV_INDEX_URL", raising=False)
+        monkeypatch.delenv("UV_EXTRA_INDEX_URL", raising=False)
+        monkeypatch.delenv("UV_INDEX_STRATEGY", raising=False)
 
-        actual_command = setup_env_command(
-            dir_path=server_dir,
-            global_config_dict=self._debug_global_config_dict(tmp_path),
-            prefix="my server name",
-        )
-        expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python test python version {server_dir}/.venv > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2) && source {server_dir}/.venv/bin/activate && uv pip install nemo-gym && uv pip install --no-sources '-e .' ray[default]==test ray version openai==test openai version > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2)"
+        with patch("importlib.metadata.version", return_value=version):
+            actual_command = setup_env_command(
+                dir_path=server_dir,
+                global_config_dict=self._debug_global_config_dict(tmp_path),
+                prefix="my server name",
+            )
+        expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python test python version {server_dir}/.venv > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2) && source {server_dir}/.venv/bin/activate && uv pip install nemo-gym=={version} && uv pip install --no-sources '-e .' ray[default]==test ray version openai==test openai version > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2)"
         assert expected_command == actual_command
 
     def test_uv_venv_dir_and_skip_install_when_venv_present(self, tmp_path: Path) -> None:
@@ -292,6 +315,111 @@ class TestCLISetupCommandRunCommand:
         actual_args = Popen_mock.call_args
         assert expected_args == actual_args
 
+
+class TestGetNemoGymInstallFlags:
+    """Test _get_nemo_gym_install_flags helper function."""
+
+    def test_no_env_vars_returns_empty(self, monkeypatch: MonkeyPatch) -> None:
+        """When no env vars are set, should return empty string."""
+        monkeypatch.delenv("NEMO_GYM_ALLOW_PRERELEASE", raising=False)
+        monkeypatch.delenv("UV_INDEX_URL", raising=False)
+        monkeypatch.delenv("UV_EXTRA_INDEX_URL", raising=False)
+        monkeypatch.delenv("UV_INDEX_STRATEGY", raising=False)
+
+        flags = _get_nemo_gym_install_flags()
+        assert flags == ""
+
+    def test_prerelease_flag(self, monkeypatch: MonkeyPatch) -> None:
+        """When NEMO_GYM_ALLOW_PRERELEASE=true, should add --pre and --index-strategy."""
+        monkeypatch.setenv("NEMO_GYM_ALLOW_PRERELEASE", "true")
+        monkeypatch.delenv("UV_INDEX_URL", raising=False)
+        monkeypatch.delenv("UV_EXTRA_INDEX_URL", raising=False)
+        monkeypatch.delenv("UV_INDEX_STRATEGY", raising=False)
+
+        flags = _get_nemo_gym_install_flags()
+        assert flags == "--pre --index-strategy unsafe-best-match "
+
+    def test_prerelease_false(self, monkeypatch: MonkeyPatch) -> None:
+        """When NEMO_GYM_ALLOW_PRERELEASE=false, should not add flags."""
+        monkeypatch.setenv("NEMO_GYM_ALLOW_PRERELEASE", "false")
+        monkeypatch.delenv("UV_INDEX_URL", raising=False)
+        monkeypatch.delenv("UV_EXTRA_INDEX_URL", raising=False)
+        monkeypatch.delenv("UV_INDEX_STRATEGY", raising=False)
+
+        flags = _get_nemo_gym_install_flags()
+        assert flags == ""
+
+    def test_index_url(self, monkeypatch: MonkeyPatch) -> None:
+        """Should include UV_INDEX_URL if set."""
+        monkeypatch.delenv("NEMO_GYM_ALLOW_PRERELEASE", raising=False)
+        monkeypatch.setenv("UV_INDEX_URL", "https://test.pypi.org/simple/")
+        monkeypatch.delenv("UV_EXTRA_INDEX_URL", raising=False)
+        monkeypatch.delenv("UV_INDEX_STRATEGY", raising=False)
+
+        flags = _get_nemo_gym_install_flags()
+        assert flags == "--index-url https://test.pypi.org/simple/ "
+
+    def test_extra_index_url(self, monkeypatch: MonkeyPatch) -> None:
+        """Should include UV_EXTRA_INDEX_URL if set."""
+        monkeypatch.delenv("NEMO_GYM_ALLOW_PRERELEASE", raising=False)
+        monkeypatch.delenv("UV_INDEX_URL", raising=False)
+        monkeypatch.setenv("UV_EXTRA_INDEX_URL", "https://pypi.org/simple/")
+        monkeypatch.delenv("UV_INDEX_STRATEGY", raising=False)
+
+        flags = _get_nemo_gym_install_flags()
+        assert flags == "--extra-index-url https://pypi.org/simple/ "
+
+    def test_explicit_index_strategy(self, monkeypatch: MonkeyPatch) -> None:
+        """Explicit UV_INDEX_STRATEGY should override auto-set from prerelease."""
+        monkeypatch.setenv("NEMO_GYM_ALLOW_PRERELEASE", "true")
+        monkeypatch.setenv("UV_INDEX_STRATEGY", "first-match")
+
+        flags = _get_nemo_gym_install_flags()
+        # Should have --pre but use explicit strategy, not auto-set unsafe-best-match
+        assert flags == "--pre --index-strategy first-match "
+
+    def test_all_flags_combined(self, monkeypatch: MonkeyPatch) -> None:
+        """Test all flags together."""
+        monkeypatch.setenv("NEMO_GYM_ALLOW_PRERELEASE", "true")
+        monkeypatch.setenv("UV_INDEX_URL", "https://test.pypi.org/simple/")
+        monkeypatch.setenv("UV_EXTRA_INDEX_URL", "https://pypi.org/simple/")
+        monkeypatch.setenv("UV_INDEX_STRATEGY", "unsafe-best-match")
+
+        flags = _get_nemo_gym_install_flags()
+        assert (
+            flags
+            == "--pre --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ --index-strategy unsafe-best-match "
+        )
+
+
+class TestGetNemoGymVersionSpec:
+    """Test _get_nemo_gym_version_spec helper function."""
+
+    def test_editable_install_returns_empty(self) -> None:
+        """For editable installs, should return empty string (no version pinning)."""
+        version_spec = _get_nemo_gym_version_spec(is_editable_install=True)
+        assert version_spec == ""
+
+    def test_non_editable_detects_version(self) -> None:
+        """For non-editable installs, should detect and pin to parent version."""
+        with patch("importlib.metadata.version", return_value="0.2.1rc0"):
+            version_spec = _get_nemo_gym_version_spec(is_editable_install=False)
+            assert version_spec == "==0.2.1rc0"
+
+    def test_non_editable_stable_version(self) -> None:
+        """Should work with stable versions too."""
+        with patch("importlib.metadata.version", return_value="0.2.0"):
+            version_spec = _get_nemo_gym_version_spec(is_editable_install=False)
+            assert version_spec == "==0.2.0"
+
+    def test_package_not_found_returns_empty(self) -> None:
+        """If nemo-gym is not installed, should return empty string gracefully."""
+        with patch("importlib.metadata.version", side_effect=importlib.metadata.PackageNotFoundError):
+            version_spec = _get_nemo_gym_version_spec(is_editable_install=False)
+            assert version_spec == ""
+
+
+class TestCLISetupCommandRunCommandTeeLog(TestCLISetupCommandRunCommand):
     def test_tee_logs_with_server_name(self, monkeypatch: MonkeyPatch) -> None:
         Popen_mock, get_global_config_dict_mock = self._setup(monkeypatch)
 

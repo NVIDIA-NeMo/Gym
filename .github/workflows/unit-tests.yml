@@ -53,3 +53,45 @@ jobs:
           source .venv/bin/activate
           ng_dev_test
           ng_test_all +fail_on_total_and_test_mismatch=true +delete_venvs_after_each_test=true
+
+  test-wheel-install:
+    name: Test Wheel Install (E2E)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Setup for test
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends git curl ca-certificates
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
+      - name: Build wheel
+        run: uv build
+
+      - name: Test PyPI-like install
+        run: |
+          cd /tmp
+          uv venv test_install --python 3.12
+          source test_install/bin/activate
+          uv pip install $GITHUB_WORKSPACE/dist/*.whl
+          python -c "import nemo_gym; print(f'Installed nemo-gym {nemo_gym.__version__}')"
+
+      - name: Test ng_init works from wheel
+        run: |
+          cd /tmp
+          source test_install/bin/activate
+          ng_init_resources_server +entrypoint=test_hello_world
+          test -f test_hello_world/app.py || exit 1
+          test -f test_hello_world/requirements.txt || exit 1
+          test -d test_hello_world/tests || exit 1
+
+      - name: Test CLI commands are accessible
+        run: |
+          cd /tmp
+          source test_install/bin/activate
+          ng_run --help
+          ng_test --help
+          ng_collect_rollouts --help
