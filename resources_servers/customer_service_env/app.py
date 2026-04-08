@@ -13,11 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Customer service multi-turn environment with separate tools for policy and user agent.
+"""Customer service multi-turn environment with asymmetric tool access.
 
-Policy agent = support agent. Sees only conversation text.
-User agent = simulated customer with private tools. Policy agent never sees the
-user agent's tool calls or results.
+Policy model = support agent. Sees only conversation text.
+User model = simulated customer routed through its own simple_agent +
+customer_service_user_tools resources server. The policy never sees the
+user model's tool calls or results.
 
 All scenario data comes from the JSONL, including user model tool schemas.
 Use scripts/generate_data.py to create datasets.
@@ -32,7 +33,6 @@ verifier_metadata fields:
   user_tools:           list    tool schemas for the user model
 """
 
-import json
 from typing import Any, Dict, Optional
 
 from pydantic import Field
@@ -43,29 +43,14 @@ from resources_servers.example_gymnasium import GymnasiumServer, extract_text
 
 
 class CustomerServiceEnv(GymnasiumServer):
-    user_model_server: str = "customer_service_user_model"
+    user_agent_server: str = "customer_service_user_agent"
     session_state: Dict[str, Any] = Field(default_factory=dict)
 
     async def reset(self, metadata: dict, session_id: Optional[str] = None) -> tuple[Optional[str], dict]:
         self.session_state[session_id] = metadata
         return metadata.get("opener"), {}
 
-    def _execute_user_tool(self, tool_name: str, args: dict, scenario: dict) -> str:
-        if tool_name == "lookup_order":
-            order = scenario.get("order", {})
-            if args.get("order_id") == order.get("order_id"):
-                return json.dumps(order)
-            return json.dumps({"error": "Order not found"})
-        if tool_name == "check_account":
-            return json.dumps(scenario.get("customer", {}))
-        if tool_name == "get_policy":
-            policies = scenario.get("policies", {})
-            return policies.get(args.get("policy_type", ""), "Policy not found.")
-        return f"Unknown tool: {tool_name}"
-
     async def _get_user_reply(self, agent_text: str, scenario: dict) -> str:
-        # Simplified tool loop for the user model. A production version could route
-        # through its own agent server (e.g. simple_agent) for full protocol support.
         customer = scenario.get("customer", {})
         system = (
             f"You are {customer.get('name', 'a customer')} contacting support. "
@@ -76,46 +61,31 @@ class CustomerServiceEnv(GymnasiumServer):
             f"Keep responses short and natural."
         )
 
-        messages = [
-            {"role": "system", "content": system},
-            {"role": "user", "content": agent_text},
-        ]
+        run_body = {
+            "responses_create_params": {
+                "input": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": agent_text},
+                ],
+                "tools": scenario.get("user_tools", []),
+            },
+            **scenario,
+        }
 
-        for _ in range(3):
-            try:
-                resp = await self.server_client.post(
-                    server_name=self.user_model_server,
-                    url_path="/v1/responses",
-                    json={"input": messages, "tools": scenario.get("user_tools", [])},
-                )
-                await raise_for_status(resp)
-                data = await get_response_json(resp)
-            except Exception:
-                return "Could you repeat that?"
+        resp = await self.server_client.post(
+            server_name=self.user_agent_server,
+            url_path="/run",
+            json=run_body,
+        )
+        await raise_for_status(resp)
+        data = await get_response_json(resp)
 
-            outputs = data.get("output", [])
-            tool_calls = [o for o in outputs if o.get("type") == "function_call"]
-
-            if not tool_calls:
-                for o in outputs:
-                    if o.get("type") == "message":
-                        for c in o.get("content", []):
-                            if isinstance(c, dict) and c.get("type") == "output_text":
-                                return c.get("text", "")
-                return "I see."
-
-            for tc in tool_calls:
-                args = json.loads(tc.get("arguments", "{}"))
-                result = self._execute_user_tool(tc["name"], args, scenario)
-                messages.append(tc)
-                messages.append(
-                    {
-                        "type": "function_call_output",
-                        "call_id": tc.get("call_id", ""),
-                        "output": result,
-                    }
-                )
-
+        output = data.get("response", {}).get("output", [])
+        for item in output:
+            if item.get("type") == "message":
+                for c in item.get("content", []):
+                    if isinstance(c, dict) and c.get("type") == "output_text":
+                        return c.get("text", "")
         return "I see."
 
     async def step(

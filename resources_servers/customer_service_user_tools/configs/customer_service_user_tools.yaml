@@ -1,0 +1,7 @@
+customer_service_user_tools:
+  resources_servers:
+    customer_service_user_tools:
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: Tool endpoints for the customer service user model.
