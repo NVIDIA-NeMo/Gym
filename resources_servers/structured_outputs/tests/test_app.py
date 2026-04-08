@@ -77,6 +77,14 @@ class TestApp:
 
         test_schema = {
             "type": "object",
+            "required": [
+                "studentId",
+                "examSubject",
+                "plannedStudyHours",
+                "isFullTimeStudent",
+                "studyMaterials",
+                "studySchedule",
+            ],
             "properties": {
                 "studentId": {"type": "string"},
                 "examSubject": {"type": "string"},
@@ -174,8 +182,7 @@ class TestApp:
         invalid_json_verify_response = await resources_server.verify(invalid_json_request)
         assert invalid_json_verify_response.reward == 0.0
 
-        # --- Test 3: Schema Mismatch (Missing field) ---
-        # `strictify_schema_json` makes all fields required.
+        # --- Test 3: Schema Mismatch (Missing required field) ---
         parsed_completion = json.loads(test_completion)
         del parsed_completion["studentId"]
         missing_field_completion = json.dumps(parsed_completion)
@@ -194,6 +201,27 @@ class TestApp:
 
         missing_field_verify_response = await resources_server.verify(missing_field_request)
         assert missing_field_verify_response.reward == 0.0
+
+        # --- Test 3b: Omitting an optional field should still pass ---
+        # `preparationStatus` is not in the schema's `required` list.
+        parsed_completion = json.loads(test_completion)
+        del parsed_completion["preparationStatus"]
+        optional_omitted_completion = json.dumps(parsed_completion)
+
+        optional_omitted_output_item = self._create_response_output_message(optional_omitted_completion)
+        optional_omitted_response = valid_response.model_copy(
+            deep=True, update={"id": "optional_omitted_id", "output": [optional_omitted_output_item]}
+        )
+
+        optional_omitted_request = StructuredOutputsVerifyRequest(
+            responses_create_params=dummy_create_params,
+            response=optional_omitted_response,
+            schema_str=schema_str,
+            schema_type=SchemaType.JSON,
+        )
+
+        optional_omitted_verify_response = await resources_server.verify(optional_omitted_request)
+        assert optional_omitted_verify_response.reward == 1.0
 
         # --- Test 4: Schema Mismatch (Extra field) ---
         # `strictify_schema_json` sets additionalProperties=False.
@@ -267,6 +295,14 @@ class TestApp:
 
         test_schema = {
             "type": "object",
+            "required": [
+                "studentId",
+                "examSubject",
+                "plannedStudyHours",
+                "isFullTimeStudent",
+                "studyMaterials",
+                "studySchedule",
+            ],
             "properties": {
                 "studentId": {"type": "string"},
                 "examSubject": {"type": "string"},
@@ -383,7 +419,7 @@ class TestApp:
         invalid_yaml_verify_response = await resources_server.verify(invalid_yaml_request)
         assert invalid_yaml_verify_response.reward == 0.0
 
-        # --- Test 3: Schema Mismatch (Missing field) ---
+        # --- Test 3: Schema Mismatch (Missing required field) ---
         missing_field_obj = {k: v for k, v in test_completion_obj.items() if k != "studentId"}
         missing_field_completion = yaml.dump(missing_field_obj, default_flow_style=False)
 
@@ -401,6 +437,26 @@ class TestApp:
 
         missing_field_verify_response = await resources_server.verify(missing_field_request)
         assert missing_field_verify_response.reward == 0.0
+
+        # --- Test 3b: Omitting an optional field should still pass ---
+        # `preparationStatus` is not in the schema's `required` list.
+        optional_omitted_obj = {k: v for k, v in test_completion_obj.items() if k != "preparationStatus"}
+        optional_omitted_completion = yaml.dump(optional_omitted_obj, default_flow_style=False)
+
+        optional_omitted_output_item = self._create_response_output_message(optional_omitted_completion)
+        optional_omitted_response = valid_response.model_copy(
+            deep=True, update={"id": "optional_omitted_yaml_id", "output": [optional_omitted_output_item]}
+        )
+
+        optional_omitted_request = StructuredOutputsVerifyRequest(
+            responses_create_params=dummy_create_params,
+            response=optional_omitted_response,
+            schema_str=schema_str,
+            schema_type=SchemaType.YAML,
+        )
+
+        optional_omitted_verify_response = await resources_server.verify(optional_omitted_request)
+        assert optional_omitted_verify_response.reward == 1.0
 
         # --- Test 4: Schema Mismatch (Extra field) ---
         extra_field_obj = {**test_completion_obj, "extraField": "some value"}
@@ -470,9 +526,11 @@ class TestApp:
 
         test_schema = {
             "type": "object",
+            "required": ["root"],
             "properties": {
                 "root": {
                     "type": "object",
+                    "required": ["name", "age", "score", "active"],
                     "properties": {
                         "name": {"type": "string"},
                         "age": {"type": "integer"},
@@ -530,7 +588,7 @@ class TestApp:
         malformed_verify_response = await resources_server.verify(malformed_request)
         assert malformed_verify_response.reward == 0.0
 
-        # --- Test 3: Schema Mismatch (Missing field) ---
+        # --- Test 3: Schema Mismatch (Missing required field) ---
         missing_obj = {"root": {"name": "Alice", "score": 95.5, "active": True, "tag": ["python", "ml"]}}
         missing_xml = xmltodict.unparse(missing_obj)
 
@@ -548,6 +606,26 @@ class TestApp:
 
         missing_verify_response = await resources_server.verify(missing_request)
         assert missing_verify_response.reward == 0.0
+
+        # --- Test 3b: Omitting an optional field should still pass ---
+        # `tag` is not in the inner schema's `required` list.
+        optional_obj = {"root": {"name": "Alice", "age": 25, "score": 95.5, "active": True}}
+        optional_xml = xmltodict.unparse(optional_obj)
+
+        optional_output_item = self._create_response_output_message(optional_xml)
+        optional_response = valid_response.model_copy(
+            deep=True, update={"id": "optional_omitted_xml_id", "output": [optional_output_item]}
+        )
+
+        optional_request = StructuredOutputsVerifyRequest(
+            responses_create_params=dummy_create_params,
+            response=optional_response,
+            schema_str=schema_str,
+            schema_type=SchemaType.XML,
+        )
+
+        optional_verify_response = await resources_server.verify(optional_request)
+        assert optional_verify_response.reward == 1.0
 
         # --- Test 4: Schema Mismatch (Extra field) ---
         extra_obj = {**valid_obj["root"], "extraField": "bad"}
@@ -587,3 +665,48 @@ class TestApp:
 
         no_coerce_verify_response = await no_coerce_server.verify(no_coerce_request)
         assert no_coerce_verify_response.reward == 0.0
+
+    async def test_phantom_required_sanitized(self, config: StructuredOutputsResourcesServerConfig) -> None:
+        """Schema with phantom required entries (not in properties) should not block valid responses."""
+        server_mock = MagicMock(spec=ServerClient)
+        resources_server = StructuredOutputsResourcesServer(config=config, server_client=server_mock)
+        response_mock = AsyncMock()
+        post_mock = MagicMock()
+        post_mock.json = response_mock
+        server_mock.post = AsyncMock(return_value=post_mock)
+
+        # `ghost_field` is in required but NOT in properties -- a malformed schema seen in ~2.6% of HF data.
+        test_schema = {
+            "type": "object",
+            "required": ["name", "age", "ghost_field"],
+            "properties": {
+                "name": {"type": "string"},
+                "age": {"type": "integer"},
+            },
+        }
+        schema_str = json.dumps(test_schema)
+        dummy_create_params = NeMoGymResponseCreateParamsNonStreaming(input=[])
+
+        # Valid response with all real properties present.
+        completion = json.dumps({"name": "Alice", "age": 30})
+        output_item = self._create_response_output_message(completion)
+        response = NeMoGymResponse(
+            id="phantom_test_id",
+            created_at=1234.5,
+            model="test_model",
+            object="response",
+            output=[output_item],
+            parallel_tool_calls=False,
+            tool_choice="none",
+            tools=[],
+        )
+
+        request = StructuredOutputsVerifyRequest(
+            responses_create_params=dummy_create_params,
+            response=response,
+            schema_str=schema_str,
+            schema_type=SchemaType.JSON,
+        )
+
+        verify_response = await resources_server.verify(request)
+        assert verify_response.reward == 1.0

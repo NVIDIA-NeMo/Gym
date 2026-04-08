@@ -94,11 +94,19 @@ class StructuredOutputsResourcesServer(SimpleResourcesServer):
         return parsed
 
     def strictify_schema(self, schema: Dict[str, Any]):
-        """Make a schema strict as per OpenAPI guidelines"""
+        """Disallow additional properties not defined in the schema.
+
+        Only adds ``additionalProperties: false``.  The original ``required``
+        list is preserved so that models are not penalised for correctly
+        omitting optional fields.  Any ``required`` entries that reference
+        fields absent from ``properties`` are silently dropped (malformed
+        schemas in the wild sometimes list phantom required fields).
+        """
         if isinstance(schema, Dict):
             if "properties" in schema:
-                schema["required"] = list(schema["properties"])
                 schema["additionalProperties"] = False
+                if "required" in schema:
+                    schema["required"] = [r for r in schema["required"] if r in schema["properties"]]
             for k, v in schema.items():
                 self.strictify_schema(v)
 
