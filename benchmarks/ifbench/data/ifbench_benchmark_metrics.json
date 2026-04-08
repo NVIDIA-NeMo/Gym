@@ -1,0 +1,56 @@
+{
+    "name": "ifbench",
+    "type": "benchmark",
+    "jsonl_fpath": "benchmarks/ifbench/data/ifbench_benchmark.jsonl",
+    "prepare_script": "benchmarks/ifbench/prepare.py",
+    "prompt_config": "benchmarks/ifbench/prompts/default.yaml",
+    "num_repeats": 5,
+    "Number of examples": 1470,
+    "Number of tools": {
+        "Total # non-null values": 1470,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 1470,
+        "Average": 66.32,
+        "Min": 19.0,
+        "Max": 966.0,
+        "Standard deviation": 60.09
+    },
+    "Number of turns": {
+        "Total # non-null values": 1470,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Standard deviation": 0.0
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "id": {
+        "Total # non-null values": 1470,
+        "Average": 146.5,
+        "Min": 0.0,
+        "Max": 293.0,
+        "Standard deviation": 84.9
+    },
+    "instruction_id_list": {
+        "unique_count": 57,
+        "total_count": 1675
+    },
+    "prompt": {
+        "unique_count": 294,
+        "total_count": 1470
+    },
+    "grading_mode": {
+        "unique_count": 1,
+        "total_count": 1470
+    }
+}

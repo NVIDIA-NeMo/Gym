@@ -1,0 +1,37 @@
+cvdp:
+  resources_servers:
+    cvdp:
+      entrypoint: app.py
+      domain: coding
+      verified: false
+      oss_sim_image: ghcr.io/hdl/sim/osvb
+      eda_sim_image: ""
+      container_timeout: 600
+      num_processes: 16
+      primary_service: direct
+      description: CVDP benchmark dataset for code generation
+      value: Evaluate RTL code generation capabilities
+
+cvdp_simple_agent:
+  responses_api_agents:
+    cvdp_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: cvdp
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/cvdp/data/example.jsonl
+      - name: validation
+        type: validation
+        jsonl_fpath: resources_servers/cvdp/data/gym_cvdp_1.0.4_nonagentic_code_generation_no_commercial.jsonl
+        gitlab_identifier:
+          dataset_name: cvdp_nonagentic_code_gen_no_commercial
+          version: 0.0.2
+          artifact_fpath: gym_cvdp_1.0.4_nonagentic_code_generation_no_commercial.jsonl
+        license: Apache 2.0
+        num_repeats: 5
