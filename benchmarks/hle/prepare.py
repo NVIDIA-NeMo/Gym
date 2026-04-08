@@ -35,11 +35,15 @@ def prepare() -> Path:
     """Download HLE test data and convert to Gym JSONL format."""
     import json
 
-    from datasets import load_dataset
+    from datasets import Value, load_dataset
 
     print("Downloading HLE from HuggingFace...")
     hf_token = get_global_config_dict().get(HF_TOKEN_KEY_NAME)
     ds = load_dataset("cais/hle", split="test", token=hf_token)
+    # Cast image column to string to avoid requiring Pillow.
+    # Text-only questions have an empty string
+    # Image questions have base64 data.
+    ds = ds.cast_column("image", Value("string"))
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
