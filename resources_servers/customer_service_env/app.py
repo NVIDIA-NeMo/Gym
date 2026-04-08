@@ -42,7 +42,6 @@ from nemo_gym.server_utils import get_response_json, raise_for_status
 from resources_servers.example_gymnasium import GymnasiumServer, extract_text
 
 
-
 class CustomerServiceEnv(GymnasiumServer):
     user_model_server: str = "customer_service_user_model"
     session_state: Dict[str, Any] = Field(default_factory=dict)
