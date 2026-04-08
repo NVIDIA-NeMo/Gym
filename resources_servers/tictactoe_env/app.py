@@ -83,7 +83,7 @@ def _parse_action(text: str) -> Optional[tuple[int, int]]:
 
 
 class TicTacToeEnv(GymnasiumServer):
-    user_model_server: str = "user_model"
+    user_model_server: str = "tictactoe_user_model"
     session_state: Dict[str, dict] = Field(default_factory=dict)
 
     async def reset(self, metadata: dict, session_id: Optional[str] = None) -> tuple[Optional[str], dict]:

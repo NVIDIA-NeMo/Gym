@@ -20,7 +20,7 @@ customer_service_gymnasium_agent:
       - name: example
         type: example
         jsonl_fpath: resources_servers/customer_service_env/data/example.jsonl
-user_model:
+customer_service_user_model:
   responses_api_models:
     vllm_model:
       entrypoint: app.py
