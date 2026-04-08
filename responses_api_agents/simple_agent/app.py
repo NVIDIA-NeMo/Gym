@@ -70,9 +70,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
     _verify_response_cls: ClassVar[type] = SimpleAgentVerifyResponse
 
     def model_post_init(self, context):
-        # Auto-discover custom response/verify types from the model server's
-        # config, so model backends like megatron_inference can declare them
-        # once and have them propagate through the agent pipeline.
+        # Auto-discover custom response/verify types from the model server's config.
         model_config = get_first_server_config_dict(
             self.server_client.global_config_dict, self.config.model_server.name
         )

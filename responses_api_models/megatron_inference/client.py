@@ -22,6 +22,7 @@ from .app import MegatronResponse
 
 class MegatronRunRequest(BaseRunRequest):
     """Run request that preserves environment-specific dataset fields."""
+
     model_config = ConfigDict(extra="allow")
 
 

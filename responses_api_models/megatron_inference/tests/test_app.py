@@ -14,8 +14,6 @@
 # limitations under the License.
 from unittest.mock import MagicMock
 
-from pytest import mark
-
 from nemo_gym.server_utils import ServerClient
 from responses_api_models.megatron_inference.app import (
     MegatronChatCompletion,
@@ -27,30 +25,7 @@ from responses_api_models.megatron_inference.app import (
 from responses_api_models.vllm_model.app import VLLMConverter, VLLMModelConfig
 
 
-@mark.parametrize(
-    "megatron_metadata,expected_policy_epoch,expected_kv_cache_epoch,expected_num_evictions",
-    [
-        (
-            dict(policy_epoch=[[(1, 2)]], kv_cache_epoch=[[(3, 4)]], num_evictions=[7]),
-            [[(1, 2)]],
-            [[(3, 4)]],
-            [7],
-        ),
-        (
-            dict(),
-            [[(0, 0)]],
-            [[(0, 0)]],
-            [0],
-        ),
-    ],
-    ids=["with_megatron_metadata", "defaults_when_missing"],
-)
-def test_simple(
-    megatron_metadata: dict,
-    expected_policy_epoch: list,
-    expected_kv_cache_epoch: list,
-    expected_num_evictions: list,
-) -> None:
+def test_simple() -> None:
     config = VLLMModelConfig(
         host="0.0.0.0",
         port=8081,
@@ -67,6 +42,8 @@ def test_simple(
     assert isinstance(server._converter, VLLMConverter)
     assert server._chat_completion_cls is MegatronChatCompletion
     assert server._response_cls is MegatronResponse
+
+    megatron_metadata = dict(policy_epoch=[[(1, 2)]], kv_cache_epoch=[[(3, 4)]], num_evictions=[7])
 
     chat_completion = MegatronChatCompletion.model_validate(
         {
@@ -100,9 +77,9 @@ def test_simple(
     assert last.prompt_token_ids == [1, 2, 3]
     assert last.generation_token_ids == [4, 5]
     assert last.generation_log_probs == [-0.1, -0.2]
-    assert last.policy_epoch == expected_policy_epoch
-    assert last.kv_cache_epoch == expected_kv_cache_epoch
-    assert last.num_evictions == expected_num_evictions
+    assert last.policy_epoch == [[(1, 2)]]
+    assert last.kv_cache_epoch == [[(3, 4)]]
+    assert last.num_evictions == [7]
 
     response = MegatronResponse.model_validate(
         {
@@ -119,6 +96,6 @@ def test_simple(
     )
     validated_last = response.output[-1]
     assert isinstance(validated_last, MegatronResponseOutputMessageForTraining)
-    assert validated_last.policy_epoch == expected_policy_epoch
-    assert validated_last.kv_cache_epoch == expected_kv_cache_epoch
-    assert validated_last.num_evictions == expected_num_evictions
+    assert validated_last.policy_epoch == [[(1, 2)]]
+    assert validated_last.kv_cache_epoch == [[(3, 4)]]
+    assert validated_last.num_evictions == [7]

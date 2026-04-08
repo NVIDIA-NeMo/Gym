@@ -19,6 +19,7 @@ from fastapi import Body, FastAPI
 from pydantic import BaseModel
 
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest
+from nemo_gym.global_config import NEMO_GYM_RESERVED_TOP_LEVEL_KEYS, get_first_server_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -65,10 +66,23 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
 
         app.post("/seed_session")(self.seed_session)
 
-        # Auto-discover verify_request_cls from any model server in the global
-        # config that specifies one (e.g. megatron_inference).
-        verify_request_cls = self._discover_verify_request_cls()
+        # Auto-discover verify_request_cls from model server in the global config.
+        verify_request_cls = None
+        for key in self.server_client.global_config_dict:
+            if key in NEMO_GYM_RESERVED_TOP_LEVEL_KEYS:
+                continue
+            try:
+                server_config = get_first_server_config_dict(self.server_client.global_config_dict, key)
+                dotted_path = server_config.get("verify_request_cls")
+                if dotted_path:
+                    mod, cls_name = dotted_path.rsplit(".", 1)
+                    verify_request_cls = getattr(importlib.import_module(mod), cls_name)
+                    break
+            except (KeyError, TypeError, AttributeError):
+                continue
+
         if verify_request_cls:
+
             async def verify_with_custom_cls(body: verify_request_cls = Body()) -> BaseVerifyResponse:
                 return await self.verify(body)
 
@@ -79,23 +93,6 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         app.post("/aggregate_metrics")(self.aggregate_metrics)
 
         return app
-
-    def _discover_verify_request_cls(self):
-        """Look for a verify_request_cls in model server configs."""
-        from nemo_gym.global_config import NEMO_GYM_RESERVED_TOP_LEVEL_KEYS, get_first_server_config_dict
-
-        for key in self.server_client.global_config_dict:
-            if key in NEMO_GYM_RESERVED_TOP_LEVEL_KEYS:
-                continue
-            try:
-                server_config = get_first_server_config_dict(self.server_client.global_config_dict, key)
-                dotted_path = server_config.get("verify_request_cls")
-                if dotted_path:
-                    mod, cls_name = dotted_path.rsplit(".", 1)
-                    return getattr(importlib.import_module(mod), cls_name)
-            except (KeyError, TypeError, AttributeError):
-                continue
-        return None
 
     async def seed_session(self, body: BaseSeedSessionRequest) -> BaseSeedSessionResponse:
         return BaseSeedSessionResponse()

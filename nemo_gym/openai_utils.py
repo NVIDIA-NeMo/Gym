@@ -232,7 +232,6 @@ NeMoGymResponseInputItem = Union[
     NeMoGymResponseOutputMessageForTraining,
     NeMoGymResponseFunctionToolCallForTraining,
     NeMoGymResponseReasoningItemForTraining,
-    # Base types as fallback for items without training data (e.g. reasoning items).
     NeMoGymEasyInputMessage,
     NeMoGymMessage,
     NeMoGymResponseOutputMessage,
