@@ -1,0 +1,181 @@
+---
+title: "Rollout Collection"
+description: ""
+position: 3
+---
+In the previous tutorial, you set up NeMo Gym and ran your first agent interaction. But to train an agent with reinforcement learning, you need hundreds or thousands of these interactions—each one scored and saved. That's what rollout collection does.
+
+<Info>
+
+**Goal**: Generate and view your first batch of rollouts.
+
+**Time**: ~10 minutes | **Cost**: ~$0.05 (OpenAI API)
+
+**In this tutorial, you will**:
+
+1. Inspect your input data
+2. Run batch rollout collection
+3. Examine the collected rollouts
+
+</Info>
+
+[← Previous: Detailed Setup Guide](/latest/get-started/detailed-setup)
+
+---
+
+## Prerequisites
+
+Make sure you have:
+
+- ✅ Completed [Detailed Setup Guide](/latest/get-started/detailed-setup)
+- ✅ Servers still running (or ready to restart them)
+- ✅ `env.yaml` configured with your OpenAI API key
+- ✅ Virtual environment activated
+
+**What's in a rollout?** A complete record of a task execution: the input, the model's reasoning and tool calls, the final output, and a verification score.
+
+---
+
+## 1. Inspect the Data
+
+Look at the example dataset included with the Example Single Tool Call resources server:
+
+```bash
+head -1 resources_servers/example_single_tool_call/data/example.jsonl | python -m json.tool
+```
+
+Each line contains a `responses_create_params` object with:
+
+- **input**: The conversation messages (user query)
+- **tools**: Available tools the agent can use
+
+## 2. Verify Servers Are Running
+
+If you still have servers running from the [Detailed Setup Guide](/latest/get-started/detailed-setup) tutorial, proceed to the next step.
+
+If not, start them again:
+
+```bash
+config_paths="resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml,\
+responses_api_models/openai_model/configs/openai_model.yaml"
+ng_run "+config_paths=[${config_paths}]"
+```
+
+**✅ Success Check**: You should see 3 Gym servers running including the `example_single_tool_call_simple_agent`, along with the head server.
+
+## 3. Generate Rollouts
+
+In a separate terminal, run:
+
+```bash
+ng_collect_rollouts +agent_name=example_single_tool_call_simple_agent \
+    +input_jsonl_fpath=resources_servers/example_single_tool_call/data/example.jsonl \
+    +output_jsonl_fpath=results/example_single_tool_call_rollouts.jsonl \
+    +limit=5 \
+    +num_repeats=2 \
+    +num_samples_in_parallel=3
+```
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `+agent_name` | `str` | Which agent to use (required) |
+| `+input_jsonl_fpath` | `str` | Path to input JSONL file (required) |
+| `+output_jsonl_fpath` | `str` | Path to output JSONL file (required) |
+| `+limit` | `int` | Max examples to process (default: `null` = all) |
+| `+num_repeats` | `int` | Rollouts per example (default: `null` = 1) |
+| `+num_samples_in_parallel` | `int` | Concurrent requests (default: `null` = unlimited) |
+| `+responses_create_params` | `dict` | Sampling parameter overrides (default: `null` = no overrides) |
+
+<Tip>
+Today's LLM endpoints are not fully deterministic, which means that running the same request multiple times will yield different results every time. However, you can improve the reproducibility of your rollouts by setting the `temperature` parameter to `0.0`. For example:
+```bash
+ng_collect_rollouts +agent_name=example_single_tool_call_simple_agent \
+    +input_jsonl_fpath=resources_servers/example_single_tool_call/data/example.jsonl \
+    +output_jsonl_fpath=results/example_single_tool_call_rollouts.jsonl \
+    +responses_create_params.temperature=0.0
+```
+
+However, using `temperature=0.0` may result in degraded performance in certain use case scenarios. If temperature is not set, the default temperature for that model endpoint will typically be used, which has been tuned to fit the average use case scenario.
+
+Using `temperature=0.0` will still not guarantee the same result when running the same request multiple times, but it will reduce the output variance considerably.
+
+</Tip>
+
+**✅ Success Check**: You should see:
+
+```text
+Collecting rollouts: 100%|████████████████| 10/10 [00:08<00:00,  1.67s/it]
+```
+
+## 4. View Rollouts
+
+```bash
+cat results/example_single_tool_call_rollouts.jsonl
+```
+
+Each rollout row should contain:
+
+- **Input**: The original query and tools
+- **Response**: Tool calls and agent output
+- **Reward**: Verification score (0.0–1.0)
+
+---
+
+## Rollout Generation Parameters
+
+<Tabs>
+<Tab title="Essential">
+
+```bash
+ng_collect_rollouts \
+    +agent_name=your_agent_name \              # Which agent to use
+    +input_jsonl_fpath=input/tasks.jsonl \     # Input dataset
+    +output_jsonl_fpath=output/rollouts.jsonl  # Where to save results
+```
+
+</Tab>
+
+<Tab title="Data Control">
+
+```bash
+    +limit=100 \                    # Limit examples processed (null = all)
+    +num_repeats=3 \                # Rollouts per example (null = 1)
+    +num_samples_in_parallel=5      # Concurrent requests (null = default)
+```
+
+</Tab>
+
+<Tab title="Model Behavior">
+
+```bash
+    +responses_create_params.max_output_tokens=4096 \     # Response length limit
+    +responses_create_params.temperature=0.7 \            # Randomness (0-1)
+    +responses_create_params.top_p=0.9                    # Nucleus sampling
+```
+</Tab>
+</Tabs>
+
+---
+
+## Next Steps
+
+Congratulations! You now have a working NeMo Gym installation and understand how to generate rollouts. Choose your path based on your goals:
+
+<Cards>
+
+<Card title="Start Training" href="/latest/training-tutorials">
+
+Train models using NeMo Gym with your preferred RL framework.
+</Card>
+
+<Card title="Use an Existing Environment" href="https://github.com/NVIDIA-NeMo/Gym#-available-environments">
+
+Explore environments available for training and evaluation.
+</Card>
+
+<Card title="Build a Custom Environment" href="/latest/environment-tutorials">
+
+Implement or integrate existing tools and define task verification logic.
+</Card>
+
+</Cards>

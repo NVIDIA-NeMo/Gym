@@ -15,7 +15,7 @@ Server deployment patterns and training framework integration.
 :::
 
 :::{grid-item-card} {octicon}`note;1.5em;sd-mr-1` Engineering Notes
-:link: engineering-notes/index
+:link: infrastructure/engineering-notes/index
 :link-type: doc
 Technical notes on infrastructure decisions and design rationale.
 +++

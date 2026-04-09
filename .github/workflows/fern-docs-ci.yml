@@ -1,0 +1,43 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Validates Fern docs on pull requests (aligned with doc-convert-to-fern CI guidance:
+# fern check, fern docs broken-links; optionally fern docs md generate when libraries: exists).
+#
+# NeMo Gym prose docs do not use docs.yml `libraries:` yet, so autodocs generation is skipped.
+# To add API reference generation later, see fern-library-api.md in the convert-to-fern skill
+# and NeMo Curator's fern-docs-ci.yml.
+
+name: Fern docs (CI)
+
+on:
+  pull_request:
+    paths:
+      - "fern/**"
+      - ".github/workflows/fern-docs-ci.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+
+      - name: Install Fern CLI
+        run: npm install -g fern-api
+
+      - name: fern check
+        working-directory: ./fern
+        run: fern check
+
+      - name: fern docs broken-links
+        working-directory: ./fern
+        run: fern docs broken-links

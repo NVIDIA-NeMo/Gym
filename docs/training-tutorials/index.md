@@ -13,7 +13,7 @@ See {ref}`training-approaches` for a refresher on when to use GRPO, SFT, or DPO.
 :gutter: 1 1 1 2
 
 :::{grid-item-card} {octicon}`workflow;1.5em;sd-mr-1` NeMo RL
-:link: nemo-rl-grpo/index
+:link: training-tutorials/nemo-rl-grpo/index
 :link-type: doc
 Tutorial-series: GRPO training to improve multi-step tool calling on the Workplace Assistant environment, scaling from single-node to multi-node training.
 +++
