@@ -9,6 +9,7 @@ policy_model:
   responses_api_models:
     vllm_model:
       num_workers: 4
+      sequential_reasoning_allowed: false
 
 # Some benchmarks may require reasoning off mode
 policy_model_reasoning_off:
