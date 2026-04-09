@@ -9,6 +9,7 @@ math_with_judge:
         input: []
       }
       should_use_judge: false
+      skip_symbolic: false
       domain: math
       verified: false
       description: OpenMathReasoning math dataset with math-verify and LLM-as-a-judge
