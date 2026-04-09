@@ -58,6 +58,10 @@ class SharedRolloutCollectionConfig(BaseNeMoGymCLIConfig):
         default_factory=dict,
         description="Overrides for the responses_create_params e.g. temperature, max_output_tokens, etc.",
     )
+    upload_rollouts_to_wandb: bool = Field(
+        default=True,
+        description="Upload the rollouts to W&B. Sometimes this should be off because the rollouts are massive. Default: True",
+    )
 
 
 class E2ERolloutCollectionConfig(SharedRolloutCollectionConfig):
@@ -302,11 +306,12 @@ class RolloutCollectionHelper(BaseModel):
                 top_left = counts_left.most_common(5)  # Fix to top 3 for now.
                 if top_left:
                     top_left_str = "\n".join(f"{i + 1}. {k}: {v}" for i, (k, v) in enumerate(top_left))
-                    print(f"Examples left:\n{top_left_str}")
+                    # Use tqdm.write here so we can print properly with tqdm being used.
+                    tqdm.write(f"Examples left:\n{top_left_str}")
 
         results_file.close()
 
-        if get_wandb_run():  # pragma: no cover
+        if config.upload_rollouts_to_wandb and get_wandb_run():  # pragma: no cover
             print("Uploading rollouts to W&B. This may take a few minutes if your data is large.")
             get_wandb_run().log({"Rollouts": Table(data=result_strs, columns=["Rollout"])})
         del result_strs
