@@ -24,7 +24,7 @@ We recommend formatting the dataset to test the model's ability to follow instru
 
 For any parsed outputs, we use the `openapi-schema-validator` library for verification.
 
-We currently have support for 3 different schema output types: JSON, YAML, and XML.
+We currently have support for 5 different schema output types: JSON, YAML, XML, TOML, and CSV.
 
 > [!IMPORTANT]
 > Evaluation is only based on the **schema adherence** of the generated output.
@@ -79,6 +79,23 @@ ng_prepare_data "+config_paths=[${config_paths}]" \
     +output_dirpath=data/structured_outputs/ \
     +mode=train_preparation \
     +should_download=true
+```
+
+### Version 3 [260331] (JSON, YAML, XML, TOML, CSV)
+```bash
+config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
+resources_servers/structured_outputs/configs/structured_outputs_all_formats_v1.yaml"
+ng_run "+config_paths=[${config_paths}]"
+```
+
+Collect rollouts:
+```bash
+ng_collect_rollouts \
+    +agent_name=structured_outputs_all_formats_simple_agent \
+    +input_jsonl_fpath=resources_servers/structured_outputs/data/ds1_schema_adherence_train.jsonl \
+    +output_jsonl_fpath=results/structured_outputs_all_formats.jsonl \
+    +resume_from_cache=True \
+    +num_samples_in_parallel=256
 ```
 
 # Testing

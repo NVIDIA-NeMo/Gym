@@ -12,9 +12,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import csv
+import io
 import json
+import tomllib
 from enum import StrEnum
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 import xmltodict
 import yaml
@@ -37,6 +40,8 @@ class SchemaType(StrEnum):
     JSON = "json"
     YAML = "yaml"
     XML = "xml"
+    TOML = "toml"
+    CSV = "csv"
 
 
 class StructuredOutputsVerifyRequest(BaseVerifyRequest):
@@ -89,6 +94,10 @@ class StructuredOutputsResourcesServer(SimpleResourcesServer):
                 parsed = yaml.safe_load(content)
             case SchemaType.XML:
                 parsed = xmltodict.parse(content)
+            case SchemaType.TOML:
+                parsed = tomllib.loads(content)
+            case SchemaType.CSV:
+                parsed = list(csv.DictReader(io.StringIO(content)))
             case _:
                 parsed = None
         return parsed
@@ -163,6 +172,57 @@ class StructuredOutputsResourcesServer(SimpleResourcesServer):
 
         return data
 
+    def coerce_csv_types(self, rows: List[Dict[str, str]], schema: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Coerce CSV string values to match JSON Schema types.
+
+        csv.DictReader returns all values as strings.  Walk rows alongside the
+        items schema and convert values where possible.  On conversion failure
+        the original string is kept so that schema validation reports the error.
+        """
+        items_schema = schema.get("items", schema)
+        properties = items_schema.get("properties", {})
+
+        coerced_rows = []
+        for row in rows:
+            coerced: Dict[str, Any] = {}
+            for key, value in row.items():
+                prop_schema = properties.get(key, {})
+                prop_type = prop_schema.get("type", "string")
+                coerced[key] = self._coerce_csv_scalar(value, prop_type)
+            coerced_rows.append(coerced)
+        return coerced_rows
+
+    def _coerce_csv_scalar(self, value: str, target_type) -> Any:
+        """Coerce a single CSV string to the target JSON Schema type."""
+        if isinstance(target_type, list):
+            if (value is None or value == "") and "null" in target_type:
+                return None
+            for t in target_type:
+                if t == "null":
+                    continue
+                result = self._coerce_csv_scalar(value, t)
+                if not isinstance(result, str) or t == "string":
+                    return result
+            return value
+
+        if value is None or value == "":
+            return value
+
+        try:
+            if target_type == "integer":
+                return int(value)
+            if target_type == "number":
+                return float(value)
+            if target_type == "boolean":
+                lower = value.lower()
+                if lower in ("true", "1"):
+                    return True
+                if lower in ("false", "0"):
+                    return False
+        except (ValueError, AttributeError):
+            pass
+        return value
+
     def evaluate_structured_output_response(
         self, schema_type: SchemaType, schema_str: str, response_text: str
     ) -> bool:
@@ -172,6 +232,8 @@ class StructuredOutputsResourcesServer(SimpleResourcesServer):
             response_obj = self.parse_content(schema_type, response_text)
             if schema_type == SchemaType.XML and self.config.xml_coerce_types:
                 response_obj = self.coerce_xml_types(response_obj, schema)
+            if schema_type == SchemaType.CSV:
+                response_obj = self.coerce_csv_types(response_obj, schema)
             validate_against_schema_openapi(response_obj, schema)
             return 1.0
         except Exception:
