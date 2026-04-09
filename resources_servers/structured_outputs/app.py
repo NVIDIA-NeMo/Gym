@@ -16,7 +16,9 @@ import csv
 import io
 import json
 import tomllib
+from collections import defaultdict
 from enum import StrEnum
+from statistics import mean
 from typing import Any, Dict, List, Optional, Tuple
 
 import xmltodict
@@ -63,6 +65,14 @@ class StructuredOutputsResourcesServer(SimpleResourcesServer):
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
         return app
+
+    def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
+        by_fmt: Dict[str, List[float]] = defaultdict(list)
+        for rollouts in tasks:
+            for r in rollouts:
+                fmt = r.get("schema_type", "unknown")
+                by_fmt[fmt].append(r.get("reward", 0.0))
+        return {f"mean/reward_{fmt}": mean(rewards) for fmt, rewards in by_fmt.items() if rewards}
 
     async def verify(self, body: StructuredOutputsVerifyRequest) -> StructuredOutputsVerifyResponse:
         schema_type = body.schema_type
