@@ -17,7 +17,7 @@ import io
 import json
 import tomllib
 from enum import StrEnum
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 
 import xmltodict
 import yaml
@@ -53,6 +53,8 @@ class StructuredOutputsVerifyRequest(BaseVerifyRequest):
 class StructuredOutputsVerifyResponse(BaseVerifyResponse):
     schema_str: str
     schema_type: SchemaType
+    error_type: Optional[str] = None
+    error_message: Optional[str] = None
 
 
 class StructuredOutputsResourcesServer(SimpleResourcesServer):
@@ -82,8 +84,12 @@ class StructuredOutputsResourcesServer(SimpleResourcesServer):
                 assistant_responses.append(content_item.text)
         response_text = "".join(assistant_responses)
 
-        reward = self.evaluate_structured_output_response(schema_type, schema_str, response_text)
-        return StructuredOutputsVerifyResponse(**body.model_dump(), reward=reward)
+        reward, error_type, error_message = self.evaluate_structured_output_response(
+            schema_type, schema_str, response_text
+        )
+        return StructuredOutputsVerifyResponse(
+            **body.model_dump(), reward=reward, error_type=error_type, error_message=error_message
+        )
 
     # ----- Helpers ----- #
     def parse_content(self, schema_type: SchemaType, content: str):
@@ -225,19 +231,32 @@ class StructuredOutputsResourcesServer(SimpleResourcesServer):
 
     def evaluate_structured_output_response(
         self, schema_type: SchemaType, schema_str: str, response_text: str
-    ) -> bool:
+    ) -> Tuple[float, Optional[str], Optional[str]]:
+        """Returns (reward, error_type, error_message)."""
+        if not response_text or not response_text.strip():
+            return 0.0, "empty_response", "No assistant response text"
+
         try:
             schema = json.loads(schema_str)
-            self.strictify_schema(schema)
+        except Exception as e:
+            return 0.0, "schema_error", str(e)[:200]
+
+        self.strictify_schema(schema)
+
+        try:
             response_obj = self.parse_content(schema_type, response_text)
+        except Exception as e:
+            return 0.0, "parse_error", f"{type(e).__name__}: {str(e)[:200]}"
+
+        try:
             if schema_type == SchemaType.XML and self.config.xml_coerce_types:
                 response_obj = self.coerce_xml_types(response_obj, schema)
             if schema_type == SchemaType.CSV:
                 response_obj = self.coerce_csv_types(response_obj, schema)
             validate_against_schema_openapi(response_obj, schema)
-            return 1.0
-        except Exception:
-            return 0.0
+            return 1.0, None, None
+        except Exception as e:
+            return 0.0, "validation_error", f"{type(e).__name__}: {str(e)[:200]}"
 
 
 if __name__ == "__main__":
