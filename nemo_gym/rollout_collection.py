@@ -116,12 +116,6 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
         default=False,
         description="If the same command is run multiple times, check the materialized inputs and current outputs and remove the inputs that have already been run",
     )
-    skip_existing: bool = Field(
-        default=False,
-        description=(
-            "If True and output_jsonl_fpath already exists, skip task indices that already have num_repeats "
-            "rollouts collected. Useful for resuming an interrupted collection run."
-        ),
     prompt_config: Optional[str] = Field(
         default=None,
         description="Path to a prompt YAML file. Builds responses_create_params.input from the template at rollout time. Mutually exclusive with pre-populated responses_create_params.input in the JSONL data.",
@@ -186,16 +180,10 @@ class RolloutCollectionHelper(BaseModel):
             elif not row.get(AGENT_REF_KEY_NAME, dict()).get("name"):
                 row_idxs_missing_agent_ref.append(row_idx)
 
-            # Responses create params (deep merge so nested dicts like chat_template_kwargs are merged, not replaced)
-            overrides = OmegaConf.to_container(OmegaConf.create(config.responses_create_params), resolve=True)
-            merged = dict(row[RESPONSES_CREATE_PARAMS_KEY_NAME])
-            for k, v in overrides.items():
-                if isinstance(v, dict) and isinstance(merged.get(k), dict):
-                    merged[k] = {**merged[k], **v}
-                else:
-                    merged[k] = v
-            row[RESPONSES_CREATE_PARAMS_KEY_NAME] = merged
-
+            # Responses create params
+            row[RESPONSES_CREATE_PARAMS_KEY_NAME] = (
+                row[RESPONSES_CREATE_PARAMS_KEY_NAME] | responses_create_params_overrides
+            )
 
             # Resolve task index
             row[TASK_INDEX_KEY_NAME] = row_to_task_idx.setdefault(row_str, len(row_to_task_idx))
@@ -277,21 +265,7 @@ class RolloutCollectionHelper(BaseModel):
                 for row in input_rows:
                     f.write(orjson.dumps(row) + b"\n")
 
-            if config.skip_existing and output_fpath.exists():
-                existing_counts: Counter = Counter()
-                with open(output_fpath) as f:
-                    for line in f:
-                        existing_row = json.loads(line)
-                        if TASK_INDEX_KEY_NAME in existing_row:
-                            existing_counts[existing_row[TASK_INDEX_KEY_NAME]] += 1
-                num_repeats = config.num_repeats or 1
-                before = len(input_rows)
-                input_rows = [r for r in input_rows if existing_counts[r.get(TASK_INDEX_KEY_NAME)] < num_repeats]
-                print(f"Skipping {before - len(input_rows)} already-completed rollouts ({len(input_rows)} remaining).")
-            else:
-                print("Clearing output fpath since `resume_from_cache=False` and `skip_existing=False`!")
-                output_fpath.unlink(missing_ok=True)
-
+            output_fpath.unlink(missing_ok=True)
 
         semaphore = nullcontext()
         if config.num_samples_in_parallel:
