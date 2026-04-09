@@ -10,6 +10,11 @@ math_with_judge:
       }
       should_use_judge: false
       skip_symbolic: false
+      judge_system_message: null
+      judge_prompt_template: null
+      judge_equal_label: null
+      judge_not_equal_label: null
+      judge_check_position_bias: true
       domain: math
       verified: false
       description: OpenMathReasoning math dataset with math-verify and LLM-as-a-judge
