@@ -6,7 +6,7 @@ structured_outputs:
       verified: false
       description: Check if responses follow structured output requirements (JSON, YAML, XML, TOML, CSV)
       value: Improve schema adherence across all structured output formats
-structured_outputs_all_formats_simple_agent:
+structured_outputs_json_yaml_xml_toml_csv_simple_agent:
   responses_api_agents:
     simple_agent:
       entrypoint: app.py

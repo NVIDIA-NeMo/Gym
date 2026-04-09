@@ -84,14 +84,14 @@ ng_prepare_data "+config_paths=[${config_paths}]" \
 ### Version 3 [260331] (JSON, YAML, XML, TOML, CSV)
 ```bash
 config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
-resources_servers/structured_outputs/configs/structured_outputs_all_formats_v1.yaml"
+resources_servers/structured_outputs/configs/structured_outputs_json_yaml_xml_toml_csv_v1.yaml"
 ng_run "+config_paths=[${config_paths}]"
 ```
 
 Collect rollouts:
 ```bash
 ng_collect_rollouts \
-    +agent_name=structured_outputs_all_formats_simple_agent \
+    +agent_name=structured_outputs_json_yaml_xml_toml_csv_simple_agent \
     +input_jsonl_fpath=resources_servers/structured_outputs/data/ds1_schema_adherence_train.jsonl \
     +output_jsonl_fpath=results/structured_outputs_all_formats.jsonl \
     +resume_from_cache=True \
