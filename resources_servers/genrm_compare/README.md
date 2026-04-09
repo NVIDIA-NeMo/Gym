@@ -55,6 +55,17 @@ The GenRM model should output JSON in the following format:
 
 > **Note**: The GenRM model must have a chat template that supports the special roles `response_1` and `response_2`. The conversation history should use standard `user` and `assistant` roles, with the last turn being a user turn.
 
+## HelpSteer3 → NeMo Gym JSONL
+
+To train with GRPO on prompts from [nvidia/HelpSteer3](https://huggingface.co/datasets/nvidia/HelpSteer3) (preference subset), convert rows to Gym JSONL with:
+
+```bash
+uv run python resources_servers/genrm_compare/scripts/helpsteer3_to_nemo_gym_jsonl.py \
+  --output-dir data/helpsteer3_gym
+```
+
+See the docs recipe `docs/training-tutorials/nemo-rl-grpo/rlhf-genrm-helpsteer3.md` (RLHF-style GRPO with GenRM compare and HelpSteer3) for NeMo RL wiring, GenRM alignment, and Arena-Hard v2 evaluation. A concrete NeMo RL YAML example is `examples/nemo_rl/grpo_nemotron3_super_genrm_helpsteer3_pipeclean.yaml`.
+
 ## Quick Start
 
 ### 1. Configuration
