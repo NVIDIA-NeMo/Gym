@@ -1,1 +1,3 @@
 -e nemo-gym[dev] @ ../../
+# Frozen as of Thu Apr 09
+git+https://github.com/sierra-research/tau2-bench@b76acee2e625b8fb22deeb63cb0a3e756d5f094e
