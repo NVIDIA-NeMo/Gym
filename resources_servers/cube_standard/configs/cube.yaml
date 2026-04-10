@@ -1,0 +1,48 @@
+# NeMo Gym YAML config template for CubeResourcesServer.
+#
+# Usage:
+#   ng_run "+config_paths=[resources_servers/cube_standard/configs/cube.yaml, ...]"
+#
+# Required field: cube_id — the PyPI package name / entry-point key of the CUBE benchmark.
+#
+# For distributed deployments set screenshot_base_url to the cube server's
+# externally-reachable hostname/IP so the model server can fetch screenshots directly.
+#
+# For OSWorld (benchmark-parallel, VM-based):
+#   cube_id: osworld-cube
+#   parallelization_mode: benchmark-parallel   # REQUIRED for VM-based benchmarks
+#   max_concurrent_sessions: 1
+#   task_timeout_seconds: 600.0
+#   screenshot_base_url: "http://cube-server:8000"
+#   extra_benchmark_config:
+#     vm_backend:
+#       _type: "cube_vm_backend.local.LocalQEMUVMBackend"
+#       cache_dir: "/tmp/cube-vms"
+#       path_to_vm: null
+#       memory: "8G"
+#       cpus: 4
+#       headless: true
+#
+# For WorkArena (task-parallel, PDI required):
+#   cube_id: workarena-cube
+#   max_concurrent_sessions: 10
+#   extra_benchmark_config:
+#     snow_instance_url: "https://dev12345.service-now.com"
+#     snow_username: "admin"
+#     snow_password: "..."
+
+cube_resources_server:
+  resources_servers:
+    cube_standard:
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      cube_id: miniwob-cube
+      cube_version: null
+      cube_dev_install_url: null
+      parallelization_mode: task-parallel  # use benchmark-parallel for VM-based benchmarks
+      task_timeout_seconds: 300.0
+      session_ttl: 1800
+      max_concurrent_sessions: 50
+      extra_benchmark_config: {}
+      screenshot_base_url: null

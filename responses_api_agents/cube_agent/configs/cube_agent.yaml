@@ -1,0 +1,13 @@
+cube_agent:
+  responses_api_agents:
+    cube_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: cube_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      max_steps: 50
+      done_if_no_tool_calls: true
+      max_total_sequence_length: null
