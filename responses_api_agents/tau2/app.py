@@ -14,9 +14,15 @@
 # limitations under the License.
 
 from asyncio import get_event_loop
+from os import environ
 from pathlib import Path
-from subprocess import run
-from typing import Any, Dict
+from typing import Literal
+
+
+DATA_DIR = Path(__file__).parent / "tau2_data"
+environ["TAU2_DATA_DIR"] = str(DATA_DIR)
+
+from fastapi import Body
 
 from nemo_gym.base_resources_server import (
     BaseRunRequest,
@@ -27,9 +33,14 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.openai_utils import (
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+)
 from nemo_gym.server_utils import get_server_url
 from tau2.data_model.simulation import SimulationRun, TextRunConfig
 from tau2.data_model.tasks import Task
+from tau2.evaluator.evaluator import EvaluationType
 from tau2.runner.batch import run_single_task
 
 
@@ -40,7 +51,19 @@ class Tau2Config(BaseResponsesAPIAgentConfig):
 
 
 class Tau2RunRequest(BaseRunRequest):
-    sample_data: Dict[str, Any]
+    config: TextRunConfig
+    task: Task
+    seed: int
+    evaluation_type: EvaluationType
+    save_dir: Literal[None]
+    user_voice_settings: Literal[None]
+    user_persona_config: Literal[None]
+    verbose_logs: Literal[False]
+    audio_debug: Literal[False]
+    audio_taps: Literal[False]
+    auto_review: Literal[False]
+    review_mode: Literal["full"]
+    hallucination_feedback: Literal[None]
 
 
 class Tau2VerifyResponse(Tau2RunRequest, BaseVerifyResponse):
@@ -51,28 +74,31 @@ class Tau2Agent(SimpleResponsesAPIAgent):
     config: Tau2Config
 
     def setup_webserver(self):
-        cwd = Path(__file__).parent
-        repo_path = cwd / "tau2-bench"
-        if not repo_path.exists():
-            run(
-                """git clone https://github.com/bxyu-nvidia/tau2-bench""",
-                shell=True,
-                cwd=cwd,
-                check=True,
-                executable="/bin/bash",
-            )
+        #     cwd = Path(__file__).parent
+        #     repo_path = cwd / "tau2-bench"
+        #     if not repo_path.exists():
+        #         run(
+        #             """git clone https://github.com/bxyu-nvidia/tau2-bench""",
+        #             shell=True,
+        #             cwd=cwd,
+        #             check=True,
+        #             executable="/bin/bash",
+        #         )
 
-        run(
-            """source .venv/bin/activate \
-    && cd tau2-bench \
-    && git checkout b76acee2e625b8fb22deeb63cb0a3e756d5f094e \
-    && uv sync --active""",
-            shell=True,
-            cwd=cwd,
-            check=True,
-            executable="/bin/bash",
-        )
+        #     run(
+        #         """source .venv/bin/activate \
+        # && cd tau2-bench \
+        # && git checkout b76acee2e625b8fb22deeb63cb0a3e756d5f094e \
+        # && uv sync --active""",
+        #         shell=True,
+        #         cwd=cwd,
+        #         check=True,
+        #         executable="/bin/bash",
+        #     )
         return super().setup_webserver()
+
+    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
+        raise NotImplementedError
 
     async def run(self, body: Tau2RunRequest) -> Tau2VerifyResponse:
         kwargs = body.sample_data | {
