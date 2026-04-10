@@ -20,6 +20,8 @@ import re
 from time import sleep
 from typing import Any, Literal, Optional
 
+import requests
+
 
 logger = logging.getLogger(__name__)
 
@@ -163,9 +165,28 @@ class XSTestResourcesServer(SimpleResourcesServer):
 
     def setup_webserver(self):
         judge_name = self.config.judge_model_server.name
+
+        # Wait for the judge proxy server process to start
         logger.info("Waiting for judge model server '%s' to become reachable...", judge_name)
         while self.server_client.poll_for_status(judge_name) != "success":
             sleep(10)
+
+        # Probe through the proxy to verify the actual judge backend is reachable.
+        # Without this, the proxy appears healthy but judge requests hang on TCP timeouts.
+        from nemo_gym.global_config import get_first_server_config_dict
+
+        judge_config = get_first_server_config_dict(self.server_client.global_config_dict, judge_name)
+        judge_url = self.server_client._build_server_base_url(judge_config)
+        logger.info("Verifying judge backend is reachable through '%s' at %s ...", judge_name, judge_url)
+        while True:
+            try:
+                requests.post(f"{judge_url}/v1/responses", json={"input": []}, timeout=10)
+                # Any HTTP response (even 4xx/5xx) means the backend is reachable
+                break
+            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
+                logger.warning("Judge backend not yet reachable through '%s', retrying in 10s...", judge_name)
+                sleep(10)
+
         logger.info("Judge model server '%s' is reachable.", judge_name)
         return super().setup_webserver()
 
