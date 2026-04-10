@@ -14,13 +14,12 @@
 # limitations under the License.
 
 from asyncio import get_event_loop
+from typing import Any, Dict
 
 from fastapi import Request
-from pydantic import ConfigDict
 
 from nemo_gym.base_resources_server import (
     BaseRunRequest,
-    BaseVerifyRequest,
     BaseVerifyResponse,
 )
 from nemo_gym.base_responses_api_agent import (
@@ -28,7 +27,7 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from tau2.data_model.simulation import TextRunConfig
+from tau2.data_model.simulation import SimulationRun, TextRunConfig
 from tau2.data_model.tasks import Task
 from tau2.runner.batch import run_single_task
 
@@ -40,49 +39,31 @@ class Tau2Config(BaseResponsesAPIAgentConfig):
 
 
 class Tau2RunRequest(BaseRunRequest):
-    model_config = ConfigDict(extra="allow")
+    sample_data: Dict[str, Any]
 
 
-class Tau2VerifyRequest(BaseVerifyRequest):
-    model_config = ConfigDict(extra="allow")
-
-
-class Tau2VerifyResponse(BaseVerifyResponse):
-    model_config = ConfigDict(extra="allow")
+class Tau2VerifyResponse(Tau2RunRequest, BaseVerifyResponse):
+    result: SimulationRun
 
 
 class Tau2Agent(SimpleResponsesAPIAgent):
     config: Tau2Config
 
     async def run(self, request: Request, body: Tau2RunRequest) -> Tau2VerifyResponse:
-        """
-        run_single_task function signature
-        def run_single_task(
-            config: RunConfig,
-            task: Task,
-            *,
-            seed: Optional[int] = None,
-            evaluation_type: EvaluationType = EvaluationType.ALL,
-            save_dir: Optional[Path] = None,
-            user_voice_settings: Optional[VoiceSettings] = None,
-            user_persona_config: Optional[PersonaConfig] = None,
-            verbose_logs: bool = False,
-            audio_debug: bool = False,
-            audio_taps: bool = False,
-            auto_review: bool = False,
-            review_mode: str = "full",
-            hallucination_feedback: Optional[str] = None,
-        ) -> SimulationRun:
-        """
-        kwargs = {
-            "config": TextRunConfig(),
-            "task": Task(),
+        kwargs = body.sample_data | {
+            "config": TextRunConfig.model_validate(body.sample_data["config"]),
+            "task": Task.model_validate(TextRunConfig.model_validate(body.sample_data["task"])),
+            "save_dir": None,
         }
 
         loop = get_event_loop()
         result = await loop.run_in_executor(None, run_single_task, **kwargs)
 
-        return Tau2VerifyResponse.model_validate(result)
+        return Tau2VerifyResponse.model_validate(
+            **body.model_dump(),
+            reward=result.reward_info.reward,
+            result=result,
+        )
 
 
 if __name__ == "__main__":
