@@ -28,6 +28,8 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from tau2.data_model.simulation import TextRunConfig
+from tau2.data_model.tasks import Task
 from tau2.runner.batch import run_single_task
 
 
@@ -73,8 +75,8 @@ class Tau2Agent(SimpleResponsesAPIAgent):
         ) -> SimulationRun:
         """
         kwargs = {
-            "config": None,
-            "task": None,
+            "config": TextRunConfig(),
+            "task": Task(),
         }
 
         loop = get_event_loop()
