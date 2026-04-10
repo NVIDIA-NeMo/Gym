@@ -51,8 +51,10 @@ def prepare() -> Path:
         data["config"]["save_to"] = ""
 
         # The default is `all_with_nl_assertions` which may actually be a mistake when running from CLI
-        # We always see "nl": null for results
+        # We always see "nl": null or "nl": "No nl_assertions to evaluate" for results
         data["evaluation_type"] = "all"
+        if "NL_ASSERTION" in data["task"]["evaluation_criteria"]["reward_basis"]:
+            data["task"]["evaluation_criteria"]["reward_basis"].remove("NL_ASSERTION")
 
         # The actual prompts are constructed on the fly by Tau2-Bench
         data["responses_create_params"] = {
