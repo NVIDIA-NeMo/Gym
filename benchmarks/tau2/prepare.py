@@ -29,24 +29,26 @@ def prepare() -> Path:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
     cwd = Path(__file__).parent
-    run(
-        """git clone https://github.com/bxyu-nvidia/tau2-bench \
+    data_dirpath = cwd / "nemo_gym_data"
+    if not data_dirpath.exists():
+        run(
+            """git clone https://github.com/bxyu-nvidia/tau2-bench \
 && cd tau2-bench \
 && git checkout bxyu/nemo_gym_data \
 && bash dump_nemo_gym_data.sh \
 && cp -r nemo_gym_data ../nemo_gym_data \
 && cd .. \
 && rm -rf tau2-bench""",
-        shell=True,
-        cwd=cwd,
-        check=True,
-        executable="/bin/bash",
-    )
+            shell=True,
+            cwd=cwd,
+            check=True,
+            executable="/bin/bash",
+        )
 
-    data_dirpath = cwd / "nemo_gym_data"
     samples = []
     for path in data_dirpath.glob("*/*.json"):
         data = json.loads(path.read_text())
+        data["config"]["save_to"] = ""
 
         # The actual prompts are constructed on the fly by Tau2-Bench
         data["responses_create_params"] = {
