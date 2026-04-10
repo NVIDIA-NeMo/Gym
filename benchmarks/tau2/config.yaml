@@ -1,12 +1,16 @@
 # Chain to existing agent config
 config_paths:
   - responses_api_agents/tau2/configs/tau2_agent.yaml
+  - responses_api_models/openai_model/configs/OpenAI/gpt-5.2-2025-12-11.yaml
 
 # We use `_inherit_from` directives to inherit from and not use the generic config above to ensure this benchmark config is isolated.
 tau2_benchmark_agent:
   _inherit_from: tau2_agent
   responses_api_agents:
     tau2:
+      user_model_server:
+        type: responses_api_models
+        name: gpt-5_2-2025-12-11
       datasets:
       # TODO eventually we may want to split up the domains so we can configure num repeats for each individual domain
       - name: tau2
