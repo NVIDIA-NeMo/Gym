@@ -94,8 +94,8 @@ class TestApp:
 
         actual_response_dict = response.json()
         expected_response_dict = json.loads((Path(__file__).parent / "test_data.json").read_text())
-        with open("temp.json", "w") as f:
-            json.dump(actual_response_dict, f, indent=4)
+        # with open("temp.json", "w") as f:
+        #     json.dump(actual_response_dict, f, indent=4)
 
         def _clean(d):
             d["result"].pop("duration")

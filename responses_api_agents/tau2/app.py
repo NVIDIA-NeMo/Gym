@@ -145,7 +145,7 @@ class Tau2Agent(SimpleResponsesAPIAgent):
         return Tau2VerifyResponse(
             **body_dict,
             responses_create_params=dict(
-                input=input_items_1 + input_items_2,
+                input=body.responses_create_params.input + input_items_1 + input_items_2,
                 model=body.responses_create_params.model or "",
                 parallel_tool_calls=body.responses_create_params.parallel_tool_calls,
                 tool_choice=body.responses_create_params.tool_choice,
