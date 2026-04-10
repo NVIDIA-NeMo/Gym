@@ -50,7 +50,8 @@ class Tau2Config(BaseResponsesAPIAgentConfig):
     user_model_server: ModelServerRef
     debug: bool = False
     print_step_counts: bool = False
-    max_steps: int = None
+    # Tau2 default
+    max_steps: int = 200
 
 
 class Tau2RunRequest(BaseRunRequest):

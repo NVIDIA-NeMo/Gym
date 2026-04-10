@@ -8,6 +8,7 @@ tau2_agent:
       user_model_server:
         type: responses_api_models
         name: policy_model
+      max_steps: 200
       debug: false
       print_step_counts: false
       datasets: []
