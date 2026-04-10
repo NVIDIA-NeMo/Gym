@@ -47,9 +47,13 @@ class SchemaType(StrEnum):
 
 
 class StructuredOutputsVerifyRequest(BaseVerifyRequest):
-    # string representation of schema. For JSON, it is a json dictionary.
     schema_str: str
     schema_type: SchemaType
+    problem_type: Optional[str] = None
+    schema_repr: Optional[str] = None
+    source_format: Optional[str] = None
+    num_turns: Optional[int] = None
+    source_record_id: Optional[str] = None
 
 
 class StructuredOutputsVerifyResponse(BaseVerifyResponse):
@@ -57,6 +61,11 @@ class StructuredOutputsVerifyResponse(BaseVerifyResponse):
     schema_type: SchemaType
     error_type: Optional[str] = None
     error_message: Optional[str] = None
+    problem_type: Optional[str] = None
+    schema_repr: Optional[str] = None
+    source_format: Optional[str] = None
+    num_turns: Optional[int] = None
+    source_record_id: Optional[str] = None
 
 
 class StructuredOutputsResourcesServer(SimpleResourcesServer):
@@ -68,11 +77,24 @@ class StructuredOutputsResourcesServer(SimpleResourcesServer):
 
     def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
         by_fmt: Dict[str, List[float]] = defaultdict(list)
+        by_problem: Dict[str, List[float]] = defaultdict(list)
+        by_repr: Dict[str, List[float]] = defaultdict(list)
+
         for rollouts in tasks:
             for r in rollouts:
-                fmt = r.get("schema_type", "unknown")
-                by_fmt[fmt].append(r.get("reward", 0.0))
-        return {f"mean/reward_{fmt}": mean(rewards) for fmt, rewards in by_fmt.items() if rewards}
+                reward = r.get("reward", 0.0)
+                by_fmt[r.get("schema_type", "unknown")].append(reward)
+                pt = r.get("problem_type")
+                if pt:
+                    by_problem[pt].append(reward)
+                sr = r.get("schema_repr")
+                if sr:
+                    by_repr[sr].append(reward)
+
+        metrics = {f"mean/reward_{k}": mean(v) for k, v in by_fmt.items() if v}
+        metrics.update({f"mean/reward_{k}": mean(v) for k, v in by_problem.items() if v})
+        metrics.update({f"mean/reward_repr_{k}": mean(v) for k, v in by_repr.items() if v})
+        return metrics
 
     async def verify(self, body: StructuredOutputsVerifyRequest) -> StructuredOutputsVerifyResponse:
         schema_type = body.schema_type
