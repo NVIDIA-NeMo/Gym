@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from time import sleep
 from typing import Any, Literal, Optional
 
 
@@ -159,6 +160,14 @@ class XSTestResourcesServer(SimpleResourcesServer):
         self._judge_semaphore = asyncio.Semaphore(value=self.config.judge_endpoint_max_concurrency)
         with open(self.config.judge_prompt_template_fpath, "r") as f:
             self._judge_prompt_template = f.read().strip()
+
+    def setup_webserver(self):
+        judge_name = self.config.judge_model_server.name
+        logger.info("Waiting for judge model server '%s' to become reachable...", judge_name)
+        while self.server_client.poll_for_status(judge_name) != "success":
+            sleep(10)
+        logger.info("Judge model server '%s' is reachable.", judge_name)
+        return super().setup_webserver()
 
     async def verify(self, body: XSTestVerifyRequest) -> XSTestVerifyResponse:
         metadata = body.verifier_metadata or {}
