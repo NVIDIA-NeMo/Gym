@@ -167,30 +167,39 @@ The pipeline can generate a LOT of data. Use these knobs:
 |---|---|---|
 | `--max-total` | 5000 | Hard cap on total output records |
 | `--max-per-category` | 1000 | Cap per problem category |
-| `--samples-per-record` | 3 | Augmented samples per source record |
-| `--category-weights` | equal | Relative mix ratio, e.g. `direct:4,translation:2` |
+| `--samples-per-record` | 3 | Augmented samples per source record (ignored in unique mode) |
+| `--category-weights` | equal | Relative mix ratio, e.g. `direct:4,translation:2`. Also filters: only listed categories are generated |
+| `--no-unique` | off | Allow reusing source records across categories. Default is unique mode: each record used at most once (partitioned across categories). `multistep_unrelated` is exempt since it pairs records |
+| `--passthrough-ratio` | 0.3 | Fraction of `direct` samples that use original messages as-is instead of re-templating |
+| `--max-history-turns` | 4 | Max unrelated history pairs in `multistep_unrelated` (so up to 5 total turns with the model response) |
 
-**Math**: 51 source records x 6 categories x 3 samples/record = 918 records (before caps).
+**Unique mode** (default): 51 source records are partitioned across the 5 partitionable categories (~10 each), producing ~51 samples + multistep_unrelated samples. Use `--no-unique` for more data with record reuse.
 
 ## CLI Examples
 
 ```bash
-# Full generation (default settings)
+# Default (unique mode, ~50-100 samples)
 python 260409_augmented_sdg.py \
     -i /path/to/ds1_verified.jsonl \
     -o data/augmented_train.jsonl
 
-# Small test run
+# Allow reuse for more data
 python 260409_augmented_sdg.py \
     -i /path/to/ds1_verified.jsonl \
-    -o data/augmented_test.jsonl \
-    --max-total 100 --samples-per-record 1
+    -o data/augmented_train.jsonl \
+    --no-unique --samples-per-record 3
 
-# Single category
+# Single category only
 python 260409_augmented_sdg.py \
     -i /path/to/ds1_verified.jsonl \
     -o data/direct_only.jsonl \
-    --categories direct --max-total 200
+    --categories direct
+
+# Single category via weights (equivalent)
+python 260409_augmented_sdg.py \
+    -i /path/to/ds1_verified.jsonl \
+    -o data/multistep_only.jsonl \
+    --category-weights "multistep_unrelated:1"
 
 # JSON and YAML only
 python 260409_augmented_sdg.py \
@@ -198,11 +207,24 @@ python 260409_augmented_sdg.py \
     -o data/json_yaml_only.jsonl \
     --target-formats json,yaml
 
+# More original messages, less re-templating
+python 260409_augmented_sdg.py \
+    -i /path/to/ds1_verified.jsonl \
+    -o data/mostly_original.jsonl \
+    --passthrough-ratio 0.7
+
+# Longer multistep conversations (up to 7 total turns)
+python 260409_augmented_sdg.py \
+    -i /path/to/ds1_verified.jsonl \
+    -o data/long_multistep.jsonl \
+    --categories multistep_unrelated \
+    --max-history-turns 6
+
 # Weighted mix
 python 260409_augmented_sdg.py \
     -i /path/to/ds1_verified.jsonl \
     -o data/weighted.jsonl \
-    --max-total 1000 \
+    --no-unique --max-total 1000 \
     --category-weights "direct:4,translation:2,multistep_related:2,multistep_unrelated:1,schema_only:1,error_correction:1"
 ```
 

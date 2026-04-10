@@ -119,6 +119,12 @@ def main():
         "--category-weights", default=None, help="Relative weights e.g. direct:4,translation:2,schema_only:1"
     )
     parser.add_argument(
+        "--passthrough-ratio",
+        type=float,
+        default=0.3,
+        help="Fraction of 'direct' samples that use the original messages as-is (default: 0.3)",
+    )
+    parser.add_argument(
         "--max-history-turns",
         type=int,
         default=4,
@@ -192,13 +198,16 @@ def main():
                 break
             cap = min(args.max_per_category, remaining, len(subset))
             print(f"  Generating '{cat}' ({len(subset)} unique records, max {cap})...")
-            samples = gen_fn(
+            kwargs = dict(
                 records=subset,
                 rng=rng,
                 samples_per_record=1,
                 target_formats=target_formats,
                 max_samples=cap,
             )
+            if cat == "direct":
+                kwargs["passthrough_ratio"] = args.passthrough_ratio
+            samples = gen_fn(**kwargs)
             all_samples.extend(samples)
             category_counts[cat] = len(samples)
             print(f"    -> {len(samples)} samples")
@@ -217,6 +226,8 @@ def main():
             )
             if cat == "multistep_unrelated":
                 kwargs["max_history_turns"] = args.max_history_turns
+            if cat == "direct":
+                kwargs["passthrough_ratio"] = args.passthrough_ratio
             samples = gen_fn(**kwargs)
             all_samples.extend(samples)
             category_counts[cat] = len(samples)
@@ -244,6 +255,8 @@ def main():
             )
             if cat == "multistep_unrelated":
                 kwargs["max_history_turns"] = args.max_history_turns
+            if cat == "direct":
+                kwargs["passthrough_ratio"] = args.passthrough_ratio
             samples = gen_fn(**kwargs)
             all_samples.extend(samples)
             category_counts[cat] = len(samples)

@@ -37,26 +37,40 @@ def generate_direct(
     samples_per_record: int = 3,
     target_formats: List[str] = ALL_FORMATS,
     max_samples: int = 1000,
+    passthrough_ratio: float = 0.3,
 ) -> List[Dict[str, Any]]:
+    """Generate direct extraction problems.
+
+    With probability passthrough_ratio, use the original messages as-is
+    (keeping the original target format). Otherwise, re-template with a
+    random target format and schema representation.
+    """
     results = []
     for record in records:
         schema_dict = record["_json_schema"]
         document = record.get("document", "")
         rid = record.get("_record_id", "unknown")
         native_schema = record.get("structured_schema")
+        original_fmt = record.get("target_output_format", "json")
+        original_msgs = record.get("messages", [])
 
         for _ in range(samples_per_record):
             if len(results) >= max_samples:
                 return results
 
-            target_fmt = rng.choice(target_formats)
-            repr_mode = rng.choice(SCHEMA_REPR_MODES)
-            schema_str = represent_schema(schema_dict, repr_mode, native_schema)
+            if rng.random() < passthrough_ratio and original_msgs:
+                input_msgs = [m for m in original_msgs if m.get("role") != "assistant"]
+                target_fmt = original_fmt
+                repr_mode = "native"
+            else:
+                target_fmt = rng.choice(target_formats)
+                repr_mode = rng.choice(SCHEMA_REPR_MODES)
+                schema_str = represent_schema(schema_dict, repr_mode, native_schema)
 
-            system_msg = rng.choice(SCHEMA_INSTRUCTIONS[target_fmt]).format(schema=schema_str)
-            user_query = rng.choice(USER_QUERY_INSTRUCTIONS)
-            user_msg = template_document(user_query, document, rng)
-            input_msgs = template_messages(system_msg, user_msg, rng)
+                system_msg = rng.choice(SCHEMA_INSTRUCTIONS[target_fmt]).format(schema=schema_str)
+                user_query = rng.choice(USER_QUERY_INSTRUCTIONS)
+                user_msg = template_document(user_query, document, rng)
+                input_msgs = template_messages(system_msg, user_msg, rng)
 
             results.append(
                 make_gym_record(
