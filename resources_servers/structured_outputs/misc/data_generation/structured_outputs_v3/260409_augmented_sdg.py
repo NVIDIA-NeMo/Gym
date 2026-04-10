@@ -106,8 +106,9 @@ def main():
     parser = argparse.ArgumentParser(description="Augmented SDG for structured outputs")
     parser.add_argument("-i", "--input", required=True, help="Path to ds1_verified.jsonl")
     parser.add_argument("-o", "--output", required=True, help="Path to write Gym-ready jsonl")
+    all_cats = ",".join(ALL_GENERATORS.keys())
     parser.add_argument(
-        "--categories", default=",".join(ALL_GENERATORS.keys()), help="Comma-separated categories to generate"
+        "--categories", default=all_cats, help=f"Comma-separated categories to generate. Available: {all_cats}"
     )
     parser.add_argument("--target-formats", default="json,yaml,xml,toml,csv", help="Comma-separated output formats")
     parser.add_argument("--seed", type=int, default=42)
@@ -117,11 +118,29 @@ def main():
     parser.add_argument(
         "--category-weights", default=None, help="Relative weights e.g. direct:4,translation:2,schema_only:1"
     )
+    parser.add_argument(
+        "--max-history-turns",
+        type=int,
+        default=4,
+        help="Max unrelated history pairs before the final question in multistep_unrelated (default: 4, so up to 5 total turns)",
+    )
+    parser.add_argument(
+        "--no-unique",
+        action="store_true",
+        help="Allow reusing source records across categories. Default is unique mode "
+        "where each record is used at most once (partitioned across categories). "
+        "multistep_unrelated is always exempt since it pairs two records.",
+    )
     args = parser.parse_args()
 
     rng = random.Random(args.seed)
     categories = [c.strip() for c in args.categories.split(",")]
     target_formats = [f.strip() for f in args.target_formats.split(",")]
+
+    if args.category_weights:
+        weights = parse_weights(args.category_weights)
+        categories = [c for c in categories if weights.get(c, 0) > 0]
+        print(f"  category-weights filter: running only {categories}")
 
     src = Path(args.input)
     dst = Path(args.output)
@@ -138,32 +157,97 @@ def main():
         print("No records loaded. Exiting.")
         sys.exit(1)
 
+    unique = not args.no_unique
+    if unique:
+        args.samples_per_record = 1
+        print("  unique mode (default): each source record used at most once")
+
     all_samples = []
     category_counts = Counter()
 
-    for cat in categories:
-        if cat not in ALL_GENERATORS:
-            print(f"  WARNING: unknown category '{cat}', skipping")
-            continue
+    if unique:
+        partitionable = [c for c in categories if c != "multistep_unrelated"]
+        exempt = [c for c in categories if c == "multistep_unrelated"]
 
-        gen_fn = ALL_GENERATORS[cat]
-        remaining = args.max_total - len(all_samples)
-        if remaining <= 0:
-            break
+        shuffled = list(records)
+        rng.shuffle(shuffled)
+        n_parts = len(partitionable) if partitionable else 1
+        chunk_size = max(1, len(shuffled) // n_parts)
+        partitions = {}
+        for i, cat in enumerate(partitionable):
+            start = i * chunk_size
+            end = start + chunk_size if i < n_parts - 1 else len(shuffled)
+            partitions[cat] = shuffled[start:end]
 
-        cap = min(args.max_per_category, remaining)
-        print(f"  Generating '{cat}' (max {cap})...")
+        for cat in partitionable:
+            if cat not in ALL_GENERATORS:
+                print(f"  WARNING: unknown category '{cat}', skipping")
+                continue
+            gen_fn = ALL_GENERATORS[cat]
+            subset = partitions.get(cat, [])
+            if not subset:
+                continue
+            remaining = args.max_total - len(all_samples)
+            if remaining <= 0:
+                break
+            cap = min(args.max_per_category, remaining, len(subset))
+            print(f"  Generating '{cat}' ({len(subset)} unique records, max {cap})...")
+            samples = gen_fn(
+                records=subset,
+                rng=rng,
+                samples_per_record=1,
+                target_formats=target_formats,
+                max_samples=cap,
+            )
+            all_samples.extend(samples)
+            category_counts[cat] = len(samples)
+            print(f"    -> {len(samples)} samples")
 
-        samples = gen_fn(
-            records=records,
-            rng=rng,
-            samples_per_record=args.samples_per_record,
-            target_formats=target_formats,
-            max_samples=cap,
-        )
-        all_samples.extend(samples)
-        category_counts[cat] = len(samples)
-        print(f"    -> {len(samples)} samples")
+        for cat in exempt:
+            if cat not in ALL_GENERATORS:
+                continue
+            gen_fn = ALL_GENERATORS[cat]
+            remaining = args.max_total - len(all_samples)
+            if remaining <= 0:
+                break
+            cap = min(args.max_per_category, remaining)
+            print(f"  Generating '{cat}' (uses record pairs, max {cap})...")
+            kwargs = dict(
+                records=records, rng=rng, samples_per_record=1, target_formats=target_formats, max_samples=cap
+            )
+            if cat == "multistep_unrelated":
+                kwargs["max_history_turns"] = args.max_history_turns
+            samples = gen_fn(**kwargs)
+            all_samples.extend(samples)
+            category_counts[cat] = len(samples)
+            print(f"    -> {len(samples)} samples")
+    else:
+        for cat in categories:
+            if cat not in ALL_GENERATORS:
+                print(f"  WARNING: unknown category '{cat}', skipping")
+                continue
+
+            gen_fn = ALL_GENERATORS[cat]
+            remaining = args.max_total - len(all_samples)
+            if remaining <= 0:
+                break
+
+            cap = min(args.max_per_category, remaining)
+            print(f"  Generating '{cat}' (max {cap})...")
+
+            kwargs = dict(
+                records=records,
+                rng=rng,
+                samples_per_record=args.samples_per_record,
+                target_formats=target_formats,
+                max_samples=cap,
+            )
+            if cat == "multistep_unrelated":
+                kwargs["max_history_turns"] = args.max_history_turns
+            samples = gen_fn(**kwargs)
+            all_samples.extend(samples)
+            category_counts[cat] = len(samples)
+            print(f"    -> {len(samples)} samples")
 
     if args.category_weights and len(all_samples) > args.max_total:
         weights = parse_weights(args.category_weights)
