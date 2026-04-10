@@ -1,0 +1,101 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+from unittest.mock import MagicMock
+
+from nemo_gym.server_utils import ServerClient
+from responses_api_models.megatron_inference.app import (
+    MegatronChatCompletion,
+    MegatronInferenceConverter,
+    MegatronInferenceModel,
+    MegatronResponse,
+    MegatronResponseOutputMessageForTraining,
+)
+from responses_api_models.vllm_model.app import VLLMConverter, VLLMModelConfig
+
+
+def test_simple() -> None:
+    config = VLLMModelConfig(
+        host="0.0.0.0",
+        port=8081,
+        entrypoint="",
+        name="",
+        base_url="http://localhost:8000/v1",
+        api_key="dummy_key",  # pragma: allowlist secret
+        model="dummy_model",
+        return_token_id_information=True,
+        uses_reasoning_parser=False,
+    )
+    server = MegatronInferenceModel(config=config, server_client=MagicMock(spec=ServerClient))
+    assert isinstance(server._converter, MegatronInferenceConverter)
+    assert isinstance(server._converter, VLLMConverter)
+    assert server._chat_completion_cls is MegatronChatCompletion
+    assert server._response_cls is MegatronResponse
+
+    megatron_metadata = dict(policy_epoch=[[(1, 2)]], kv_cache_epoch=[[(3, 4)]], num_evictions=[7])
+
+    chat_completion = MegatronChatCompletion.model_validate(
+        {
+            "id": "chtcmpl-123",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "dummy_model",
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": "stop",
+                    "message": {
+                        "role": "assistant",
+                        "content": "hi",
+                        "tool_calls": None,
+                        "prompt_token_ids": [1, 2, 3],
+                        "generation_token_ids": [4, 5],
+                        "generation_log_probs": [-0.1, -0.2],
+                        **megatron_metadata,
+                    },
+                }
+            ],
+        }
+    )
+    choice = chat_completion.choices[0]
+    response_output = server._converter.postprocess_chat_response(choice)
+
+    assert len(response_output) == 1
+    last = response_output[-1]
+    assert isinstance(last, MegatronResponseOutputMessageForTraining)
+    assert last.prompt_token_ids == [1, 2, 3]
+    assert last.generation_token_ids == [4, 5]
+    assert last.generation_log_probs == [-0.1, -0.2]
+    assert last.policy_epoch == [[(1, 2)]]
+    assert last.kv_cache_epoch == [[(3, 4)]]
+    assert last.num_evictions == [7]
+
+    response = MegatronResponse.model_validate(
+        {
+            "id": "resp_123",
+            "created_at": 0,
+            "model": "dummy_model",
+            "object": "response",
+            "output": [last.model_dump()],
+            "tool_choice": "auto",
+            "parallel_tool_calls": True,
+            "tools": [],
+            "background": False,
+        }
+    )
+    validated_last = response.output[-1]
+    assert isinstance(validated_last, MegatronResponseOutputMessageForTraining)
+    assert validated_last.policy_epoch == [[(1, 2)]]
+    assert validated_last.kv_cache_epoch == [[(3, 4)]]
+    assert validated_last.num_evictions == [7]

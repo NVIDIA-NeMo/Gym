@@ -1,0 +1,12 @@
+policy_model:
+  responses_api_models:
+    megatron_inference:
+      entrypoint: app.py
+      base_url: ${policy_base_url}
+      api_key: ${policy_api_key}
+      model: ${policy_model_name}
+      return_token_id_information: true
+      uses_reasoning_parser: true
+      response_cls: responses_api_models.megatron_inference.app.MegatronResponse
+      verify_request_cls: responses_api_models.megatron_inference.client.MegatronVerifyRequest
+      verify_response_cls: responses_api_models.megatron_inference.client.MegatronVerifyResponse
