@@ -14,10 +14,9 @@
 # limitations under the License.
 import json
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi.testclient import TestClient
-from litellm.exceptions import BadRequestError
 from pytest import raises
 
 from nemo_gym.server_utils import ServerClient
@@ -70,6 +69,12 @@ class TestApp:
         app = server.setup_webserver()
         client = TestClient(app)
 
-        with raises(BadRequestError):
-            with patch("responses_api_agents.tau2.app.get_server_url", return_value="dummy base url"):
+        async_openai_mock = MagicMock()
+        async_openai_mock.create_chat_completion = AsyncMock(return_value={})
+
+        with raises(ValueError, match="UserMessage must have either content or tool_calls. Got UserMessage"):
+            with (
+                patch("responses_api_agents.tau2.app.get_server_url", return_value="dummy base url"),
+                patch("tau2.utils.llm_utils.NeMoGymAsyncOpenAI", return_value=async_openai_mock),
+            ):
                 client.post("/run", json=data[0])

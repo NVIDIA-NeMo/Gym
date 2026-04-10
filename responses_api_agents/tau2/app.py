@@ -13,8 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from asyncio import get_event_loop
-from functools import partial
 from os import environ
 from pathlib import Path
 from subprocess import run
@@ -116,9 +114,7 @@ class Tau2Agent(SimpleResponsesAPIAgent):
             "api_key": "dummy api key",
         }
 
-        loop = get_event_loop()
-        task_fn = partial(run_single_task, **kwargs)
-        result = await loop.run_in_executor(None, task_fn)
+        result = await run_single_task(**kwargs)
 
         return Tau2VerifyResponse.model_validate(
             **body.model_dump(),
