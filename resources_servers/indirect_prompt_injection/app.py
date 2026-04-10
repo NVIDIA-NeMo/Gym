@@ -29,10 +29,10 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.server_utils import SESSION_ID_KEY
-from resources_servers.indirect_prompt_injection.healthcare_tools import TOOL_HANDLERS as HEALTHCARE_HANDLERS
-from resources_servers.indirect_prompt_injection.hr_tools import TOOL_HANDLERS as HR_HANDLERS
 from resources_servers.indirect_prompt_injection.ecommerce_tools import TOOL_HANDLERS as ECOMMERCE_HANDLERS
 from resources_servers.indirect_prompt_injection.education_tools import TOOL_HANDLERS as EDUCATION_HANDLERS
+from resources_servers.indirect_prompt_injection.healthcare_tools import TOOL_HANDLERS as HEALTHCARE_HANDLERS
+from resources_servers.indirect_prompt_injection.hr_tools import TOOL_HANDLERS as HR_HANDLERS
 from resources_servers.indirect_prompt_injection.insurance_tools import TOOL_HANDLERS as INSURANCE_HANDLERS
 from resources_servers.indirect_prompt_injection.it_helpdesk_tools import TOOL_HANDLERS as IT_HELPDESK_HANDLERS
 from resources_servers.indirect_prompt_injection.legal_tools import TOOL_HANDLERS as LEGAL_HANDLERS

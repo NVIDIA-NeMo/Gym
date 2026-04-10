@@ -15,6 +15,8 @@
 import uuid
 from typing import Any, Callable, Dict, List
 
+from resources_servers.indirect_prompt_injection.common_tools import get_messages, send_message
+
 
 def search_patients(env: Dict[str, Any], query: str) -> List[Dict[str, Any]]:
     """Search patients by name or condition."""
@@ -83,25 +85,6 @@ def send_referral(env: Dict[str, Any], patient_id: str, specialist_email: str, r
         {"type": "referral", "patient_id": patient_id, "specialist_email": specialist_email, "reason": reason}
     )
     return f"Referral sent for patient {patient_id} to {specialist_email}."
-
-
-def send_message(env: Dict[str, Any], recipient: str, subject: str, body: str) -> str:
-    """Send a message to a recipient."""
-    env["messages"].append(
-        {
-            "from": env.get("current_user", {}).get("email", "system@clinic.example"),
-            "to": recipient,
-            "subject": subject,
-            "body": body,
-            "timestamp": "sent",
-        }
-    )
-    return f"Message sent to {recipient}."
-
-
-def get_messages(env: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Get all messages in the inbox."""
-    return env.get("messages", [])
 
 
 def prescribe_medication(env: Dict[str, Any], patient_id: str, medication: str, dosage: str, instructions: str) -> str:

@@ -4,7 +4,7 @@ indirect_prompt_injection_resources_server:
       entrypoint: app.py
       domain: safety
       verified: false
-      description: Indirect prompt injection resistance for healthcare agents
+      description: Indirect prompt injection resistance for multi-domain tool-use agents
 indirect_prompt_injection_simple_agent:
   responses_api_agents:
     simple_agent:
@@ -27,4 +27,13 @@ indirect_prompt_injection_simple_agent:
           dataset_name: indirect_prompt_injection
           version: 0.0.1
           artifact_fpath: train.jsonl
+        license: Apache 2.0
+      - name: validation
+        type: validation
+        jsonl_fpath: resources_servers/indirect_prompt_injection/data/validation.jsonl
+        num_repeats: 1
+        gitlab_identifier:
+          dataset_name: indirect_prompt_injection
+          version: 0.0.1
+          artifact_fpath: val.jsonl
         license: Apache 2.0
