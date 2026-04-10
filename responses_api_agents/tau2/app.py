@@ -101,12 +101,16 @@ class Tau2Agent(SimpleResponsesAPIAgent):
         kwargs.pop("responses_create_params")
 
         config: TextRunConfig = kwargs["config"]
-        config.llm_user = "dummy user model"
+        # Need `openai/` provider prefix for LiteLLM
+        config.llm_user = "openai/dummy user model"
         config.llm_args_user |= {
             "api_base": f"{get_server_url(self.config.model_server.name)}/v1",
             "api_key": "dummy api key",
         }
-        config.llm_agent = "dummy agent model"
+        # TODO support User LLM temperature parameter. Temperature 0.0 is not supported for GPT 5.2
+        config.llm_args_user.pop("temperature")
+        # Need `openai/` provider prefix for LiteLLM
+        config.llm_agent = "openai/dummy agent model"
         config.llm_args_agent = {
             "api_base": f"{get_server_url(self.config.user_model_server.name)}/v1",
             "api_key": "dummy api key",
