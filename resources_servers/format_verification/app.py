@@ -51,7 +51,7 @@ class FormatVerificationResourcesServer(SimpleResourcesServer):
         verifier_type = verifier.get("type", "")
 
         match verifier_type:
-            case "regex":
+            case "regex" | "inline_prose":
                 reward, details = self._verify_regex(response_text, verifier)
             case "string_match":
                 reward, details = self._verify_string_match(response_text, verifier)
