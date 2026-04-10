@@ -1,0 +1,16 @@
+# Chain to existing agent config
+config_paths:
+  - responses_api_agents/tau2/configs/tau2_agent.yaml
+
+# We use `_inherit_from` directives to inherit from and not use the generic config above to ensure this benchmark config is isolated.
+tau2_benchmark_agent:
+  _inherit_from: tau2_agent
+  responses_api_agents:
+    simple_agent:
+      datasets:
+      - name: tau2_airline
+        type: benchmark
+        jsonl_fpath: benchmarks/tau2/data/tau2_benchmark.jsonl
+        prompt_config: benchmarks/tau2/prompts/default.yaml
+        prepare_script: benchmarks/tau2/prepare.py
+        num_repeats: 1

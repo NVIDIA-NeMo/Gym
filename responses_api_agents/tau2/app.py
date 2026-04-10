@@ -14,6 +14,8 @@
 # limitations under the License.
 
 from asyncio import get_event_loop
+from pathlib import Path
+from subprocess import run
 from typing import Any, Dict
 
 from fastapi import Request
@@ -26,15 +28,13 @@ from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from responses_api_agents.tau2.repo_utils import clone_and_checkout
+from nemo_gym.config_types import ModelServerRef
 from tau2.data_model.simulation import SimulationRun, TextRunConfig
 from tau2.data_model.tasks import Task
 from tau2.runner.batch import run_single_task
 
 
 class Tau2Config(BaseResponsesAPIAgentConfig):
-    resources_server: ResourcesServerRef
     model_server: ModelServerRef
     max_steps: int = None
 
@@ -51,7 +51,27 @@ class Tau2Agent(SimpleResponsesAPIAgent):
     config: Tau2Config
 
     def setup_webserver(self):
-        clone_and_checkout()
+        cwd = Path(__file__).parent
+        repo_path = cwd / "tau2-bench"
+        if not repo_path.exists():
+            run(
+                """git clone https://github.com/bxyu-nvidia/tau2-bench""",
+                shell=True,
+                cwd=cwd,
+                check=True,
+                executable="/bin/bash",
+            )
+
+        run(
+            """source .venv/bin/activate \
+    && cd tau2-bench \
+    && git checkout b76acee2e625b8fb22deeb63cb0a3e756d5f094e \
+    && uv sync --active""",
+            shell=True,
+            cwd=cwd,
+            check=True,
+            executable="/bin/bash",
+        )
         return super().setup_webserver()
 
     async def run(self, request: Request, body: Tau2RunRequest) -> Tau2VerifyResponse:
