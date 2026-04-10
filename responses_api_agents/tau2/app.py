@@ -27,6 +27,7 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from responses_api_agents.tau2.repo_utils import clone_and_checkout
 from tau2.data_model.simulation import SimulationRun, TextRunConfig
 from tau2.data_model.tasks import Task
 from tau2.runner.batch import run_single_task
@@ -48,6 +49,10 @@ class Tau2VerifyResponse(Tau2RunRequest, BaseVerifyResponse):
 
 class Tau2Agent(SimpleResponsesAPIAgent):
     config: Tau2Config
+
+    def setup_webserver(self):
+        clone_and_checkout()
+        return super().setup_webserver()
 
     async def run(self, request: Request, body: Tau2RunRequest) -> Tau2VerifyResponse:
         kwargs = body.sample_data | {
