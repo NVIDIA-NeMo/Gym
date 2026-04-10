@@ -16,6 +16,7 @@
 from os import environ
 from pathlib import Path
 from subprocess import run
+from time import time
 from typing import Literal
 
 
@@ -39,6 +40,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.server_utils import get_server_url
+from responses_api_models.vllm_model.app import VLLMConverter, split_responses_input_output_items
 from tau2.data_model.simulation import SimulationRun, TextRunConfig
 from tau2.data_model.tasks import Task
 from tau2.evaluator.evaluator import EvaluationType
@@ -127,8 +129,32 @@ class Tau2Agent(SimpleResponsesAPIAgent):
 
         result = await run_single_task(**kwargs)
 
+        body_dict = body.model_dump()
+        body_dict.pop("responses_create_params")
+
+        message_dicts = [m.model_dump() for m in result.messages]
+        converter = VLLMConverter(return_token_id_information=True)
+        all_items = converter.chat_completions_messages_to_responses_items(message_dicts)
+        input_items, output_items = split_responses_input_output_items(all_items)
         return Tau2VerifyResponse.model_validate(
-            **body.model_dump(),
+            **body_dict,
+            responses_create_params=dict(
+                input=input_items,
+                model=body.responses_create_params.model,
+                parallel_tool_calls=body.responses_create_params.parallel_tool_calls,
+                tool_choice=body.responses_create_params.tool_choice,
+                tools=body.responses_create_params.tools,
+            ),
+            response=dict(
+                id=f"tau2-{body.config.domain}-{body.task.task_id}",
+                created_at=int(time()),
+                object="response",
+                output=output_items,
+                model=body.responses_create_params.model,
+                parallel_tool_calls=body.responses_create_params.parallel_tool_calls,
+                tool_choice=body.responses_create_params.tool_choice,
+                tools=body.responses_create_params.tools,
+            ),
             reward=result.reward_info.reward,
             result=result,
         )
