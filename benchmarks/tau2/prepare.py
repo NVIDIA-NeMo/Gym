@@ -50,6 +50,10 @@ def prepare() -> Path:
         data = json.loads(path.read_text())
         data["config"]["save_to"] = ""
 
+        # The default is `all_with_nl_assertions` which may actually be a mistake when running from CLI
+        # We always see "nl": null for results
+        data["evaluation_type"] = "all"
+
         # The actual prompts are constructed on the fly by Tau2-Bench
         data["responses_create_params"] = {
             "input": [],
