@@ -23,6 +23,7 @@ DATA_DIR = Path(__file__).parent / "tau2_data"
 environ["TAU2_DATA_DIR"] = str(DATA_DIR)
 
 from fastapi import Body
+from loguru import logger
 
 from nemo_gym.base_resources_server import (
     BaseRunRequest,
@@ -47,6 +48,7 @@ from tau2.runner.batch import run_single_task
 class Tau2Config(BaseResponsesAPIAgentConfig):
     model_server: ModelServerRef
     user_model_server: ModelServerRef
+    debug: bool = False
     max_steps: int = None
 
 
@@ -88,6 +90,10 @@ class Tau2Agent(SimpleResponsesAPIAgent):
                 check=True,
                 executable="/bin/bash",
             )
+
+        if not self.config.debug:
+            print("Removing loguru logging since `debug=False`")
+            logger.remove()
 
         return super().setup_webserver()
 
