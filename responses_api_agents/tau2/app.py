@@ -53,7 +53,29 @@ class Tau2Agent(SimpleResponsesAPIAgent):
     config: Tau2Config
 
     async def run(self, request: Request, body: Tau2RunRequest) -> Tau2VerifyResponse:
-        kwargs = None
+        """
+        run_single_task function signature
+        def run_single_task(
+            config: RunConfig,
+            task: Task,
+            *,
+            seed: Optional[int] = None,
+            evaluation_type: EvaluationType = EvaluationType.ALL,
+            save_dir: Optional[Path] = None,
+            user_voice_settings: Optional[VoiceSettings] = None,
+            user_persona_config: Optional[PersonaConfig] = None,
+            verbose_logs: bool = False,
+            audio_debug: bool = False,
+            audio_taps: bool = False,
+            auto_review: bool = False,
+            review_mode: str = "full",
+            hallucination_feedback: Optional[str] = None,
+        ) -> SimulationRun:
+        """
+        kwargs = {
+            "config": None,
+            "task": None,
+        }
 
         loop = get_event_loop()
         result = await loop.run_in_executor(None, run_single_task, **kwargs)
