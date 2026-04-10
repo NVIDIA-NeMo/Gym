@@ -14,8 +14,10 @@
 # limitations under the License.
 
 from asyncio import get_event_loop
+from functools import partial
 from os import environ
 from pathlib import Path
+from subprocess import run
 from typing import Literal
 
 
@@ -74,38 +76,29 @@ class Tau2Agent(SimpleResponsesAPIAgent):
     config: Tau2Config
 
     def setup_webserver(self):
-        #     cwd = Path(__file__).parent
-        #     repo_path = cwd / "tau2-bench"
-        #     if not repo_path.exists():
-        #         run(
-        #             """git clone https://github.com/bxyu-nvidia/tau2-bench""",
-        #             shell=True,
-        #             cwd=cwd,
-        #             check=True,
-        #             executable="/bin/bash",
-        #         )
+        cwd = Path(__file__).parent
+        if not DATA_DIR.exists():
+            run(
+                """git clone https://github.com/bxyu-nvidia/tau2-bench \
+&& cd tau2-bench \
+&& git checkout bxyu/nemo_gym_stable \
+&& cd .. \
+&& mv tau2-bench/data tau2_data \
+&& rm -rf tau2-bench""",
+                shell=True,
+                cwd=cwd,
+                check=True,
+                executable="/bin/bash",
+            )
 
-        #     run(
-        #         """source .venv/bin/activate \
-        # && cd tau2-bench \
-        # && git checkout b76acee2e625b8fb22deeb63cb0a3e756d5f094e \
-        # && uv sync --active""",
-        #         shell=True,
-        #         cwd=cwd,
-        #         check=True,
-        #         executable="/bin/bash",
-        #     )
         return super().setup_webserver()
 
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         raise NotImplementedError
 
     async def run(self, body: Tau2RunRequest) -> Tau2VerifyResponse:
-        kwargs = body.sample_data | {
-            "config": TextRunConfig.model_validate(body.sample_data["config"]),
-            "task": Task.model_validate(TextRunConfig.model_validate(body.sample_data["task"])),
-            "save_dir": None,
-        }
+        kwargs = {name: getattr(body, name) for name in Tau2RunRequest.model_fields}
+        kwargs.pop("responses_create_params")
 
         config: TextRunConfig = kwargs["config"]
         config.llm_user = "dummy user model"
@@ -120,7 +113,8 @@ class Tau2Agent(SimpleResponsesAPIAgent):
         }
 
         loop = get_event_loop()
-        result = await loop.run_in_executor(None, run_single_task, **kwargs)
+        task_fn = partial(run_single_task, **kwargs)
+        result = await loop.run_in_executor(None, task_fn)
 
         return Tau2VerifyResponse.model_validate(
             **body.model_dump(),

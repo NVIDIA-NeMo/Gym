@@ -14,9 +14,11 @@
 # limitations under the License.
 import json
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
+from litellm.exceptions import BadRequestError
+from pytest import raises
 
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.tau2.app import (
@@ -44,12 +46,10 @@ class TestApp:
         )
         Tau2Agent(config=config, server_client=MagicMock(spec=ServerClient))
 
-    def test_sanity_query(self) -> None:
+    def test_sanity_query_input(self) -> None:
         example_jsonl = Path(__file__).parent.parent / "data" / "example.jsonl"
         with example_jsonl.open() as f:
             data = list(map(json.loads, f))
-
-        data
 
         config = Tau2Config(
             host="0.0.0.0",
@@ -70,6 +70,6 @@ class TestApp:
         app = server.setup_webserver()
         client = TestClient(app)
 
-        response = client.post("/v1/responses", json=data[0])
-        print(json.dumps(response.json(), indent=4))
-        assert response.status_code == 200
+        with raises(BadRequestError):
+            with patch("responses_api_agents.tau2.app.get_server_url", return_value="dummy base url"):
+                client.post("/run", json=data[0])
