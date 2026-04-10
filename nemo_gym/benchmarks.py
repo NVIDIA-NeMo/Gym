@@ -15,18 +15,21 @@
 """Benchmark discovery and preparation utilities."""
 
 import importlib
+from glob import glob
+from multiprocessing import Pool
 from pathlib import Path
-from types import ModuleType
 from typing import Dict, List, Optional, Tuple
 
 import rich
 from omegaconf import DictConfig, OmegaConf
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from rich.table import Table
+from tqdm.auto import tqdm
 
 from nemo_gym import PARENT_DIR
 from nemo_gym.config_types import BaseNeMoGymCLIConfig, BenchmarkDatasetConfig
 from nemo_gym.global_config import (
+    POLICY_MODEL_KEY_NAME,
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
     get_first_server_config_dict,
@@ -50,9 +53,10 @@ class BenchmarkConfig(BaseModel):
 
     @classmethod
     def from_initial_config_dict(cls, path: Path, initial_config_dict: DictConfig) -> "Optional[BenchmarkConfig]":
-        initial_config_dict = OmegaConf.merge(
-            initial_config_dict, GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT
-        )
+        if POLICY_MODEL_KEY_NAME not in initial_config_dict:
+            initial_config_dict = OmegaConf.merge(
+                initial_config_dict, GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT
+            )
 
         parser = GlobalConfigDictParser()
         global_config_dict = parser.parse_no_environment(initial_global_config_dict=initial_config_dict)
@@ -114,16 +118,9 @@ def list_benchmarks() -> None:
 
     assert BENCHMARKS_DIR.exists(), "Missing benchmarks directory"
 
-    config_paths = []
-    for entry in sorted(BENCHMARKS_DIR.iterdir()):
-        if not entry.is_dir():
-            continue
-
-        config_path = entry / "config.yaml"
-        if not config_path.exists():
-            continue
-
-        config_paths.append(config_path)
+    config_paths = glob("**/config.yaml", root_dir=BENCHMARKS_DIR, recursive=True)
+    config_paths = [BENCHMARKS_DIR / p for p in config_paths]
+    config_paths = sorted(config_paths)
 
     benchmarks = _load_benchmarks_from_config_paths(config_paths)
 
@@ -157,6 +154,28 @@ class PrepareBenchmarkConfig(BaseNeMoGymCLIConfig):
     ```
     """
 
+    use_cached_prepared_benchmarks: bool = Field(
+        default=False, description="Skip benchmark preparation if the prepared file is already present"
+    )
+    num_prepare_benchmark_processes: int = Field(
+        default=1, description="Number of processes to parallelize benchmark preparation"
+    )
+
+
+def _multiprocess_benchmark_prepare_fn(args):
+    benchmark_config: BenchmarkConfig
+    prepare_module_path: str
+    (benchmark_config, prepare_module_path) = args
+
+    print(f"Preparing benchmark: {benchmark_config.name}")
+
+    module = importlib.import_module(prepare_module_path)
+    output_fpath = module.prepare()
+    assert output_fpath.absolute() == benchmark_config.dataset.jsonl_fpath.absolute(), (
+        f"Expected the actual prepared dataset output fpath to match the jsonl_fpath set in the config. Instead got {output_fpath=} jsonl_fpath={benchmark_config.dataset.jsonl_fpath}"
+    )
+    print(f"Benchmark data prepared at: {output_fpath}")
+
 
 def prepare_benchmark() -> None:
     """CLI command: prepare benchmark data."""
@@ -165,11 +184,39 @@ def prepare_benchmark() -> None:
             initial_global_config_dict=GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
         )
     )
-    PrepareBenchmarkConfig.model_validate(global_config_dict)
+    prepare_benchmark_config = PrepareBenchmarkConfig.model_validate(global_config_dict)
 
-    config_paths = global_config_dict.get("config_paths") or []
-    config_paths = list(map(Path, config_paths))
-    benchmarks_dict = _load_benchmarks_from_config_paths(config_paths)
+    benchmarks_dict: Dict[str, BenchmarkConfig] = dict()
+    for server_instance_name in global_config_dict:
+        server_config = global_config_dict[server_instance_name]
+        if not isinstance(server_config, (dict, DictConfig)) or "responses_api_agents" not in server_config:
+            continue
+
+        inner_server_config = get_first_server_config_dict(global_config_dict, server_instance_name)
+
+        datasets: List[BenchmarkDatasetConfig] = []
+        for dataset in inner_server_config.get("datasets") or []:
+            if dataset["type"] != "benchmark":
+                continue
+
+            datasets.append(BenchmarkDatasetConfig.model_validate(dataset))
+
+        if len(datasets) < 1:
+            continue
+
+        assert len(datasets) == 1, (
+            f"Expected 1 benchmark dataset for `{server_instance_name}`, but found {len(datasets)}!"
+        )
+
+        dataset = datasets[0]
+
+        benchmarks_dict[server_instance_name] = BenchmarkConfig(
+            name=dataset.name,
+            path=Path(""),
+            agent_name=server_instance_name,
+            num_repeats=dataset.num_repeats,
+            dataset=dataset,
+        )
 
     assert benchmarks_dict, (
         'No benchmark config found in config_paths. Pass a benchmark config, e.g.: "+config_paths=[benchmarks/aime24/config.yaml]"'
@@ -179,7 +226,8 @@ def prepare_benchmark() -> None:
     prepare_script_missing: List[BenchmarkConfig] = []
     prepare_function_missing: List[BenchmarkConfig] = []
 
-    validated: List[Tuple[BenchmarkConfig, ModuleType]] = []
+    validated: List[Tuple[BenchmarkConfig, str]] = []
+    already_prepared: List[BenchmarkConfig] = []
     for benchmark_config in benchmarks_dict.values():
         prepare_script_path = benchmark_config.dataset.prepare_script
         if not prepare_script_path.exists():
@@ -192,7 +240,18 @@ def prepare_benchmark() -> None:
             prepare_function_missing.append(benchmark_config)
             continue
 
-        validated.append((benchmark_config, module))
+        is_already_prepared = benchmark_config.dataset.jsonl_fpath.exists()
+        if prepare_benchmark_config.use_cached_prepared_benchmarks and is_already_prepared:
+            already_prepared.append(benchmark_config)
+            continue
+
+        validated.append((benchmark_config, prepare_module_path))
+
+    if already_prepared:
+        already_prepared_str = "".join(f"- {bc.name}: {bc.dataset.jsonl_fpath}\n" for bc in already_prepared)
+        already_prepared_str = f"""The following benchmarks have already been prepared. Since `use_cached_prepared_benchmarks=true`, we will skip re-preparation of those benchmarks.
+        {already_prepared_str}"""
+        print(already_prepared_str)
 
     errors_to_print = ""
     if prepare_script_missing:
@@ -215,10 +274,10 @@ def prepare_benchmark() -> None:
         raise RuntimeError(errors_to_print)
 
     # Prepare after all validations pass
-    for benchmark_config, module in validated:
-        print(f"Preparing benchmark: {benchmark_config.name}")
-        output_fpath: Path = module.prepare()
-        assert output_fpath.absolute() == benchmark_config.dataset.jsonl_fpath.absolute(), (
-            f"Expected the actual prepared dataset output fpath to match the jsonl_fpath set in the config. Instead got {output_fpath=} jsonl_fpath={benchmark_config.dataset.jsonl_fpath}"
-        )
-        print(f"Benchmark data prepared at: {output_fpath}")
+    if prepare_benchmark_config.num_prepare_benchmark_processes > 1:
+        with Pool(processes=prepare_benchmark_config.num_prepare_benchmark_processes) as pool:
+            results = pool.imap_unordered(_multiprocess_benchmark_prepare_fn, validated)
+            list(tqdm(results, total=len(validated)))
+    else:
+        results = map(_multiprocess_benchmark_prepare_fn, validated)
+        list(tqdm(results, total=len(validated)))

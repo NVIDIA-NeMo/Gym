@@ -1,0 +1,20 @@
+# Chain to the IFBench resources server config
+config_paths:
+  - resources_servers/ifbench/configs/ifbench.yaml
+
+ifbench_benchmark_resources_server:
+  _inherit_from: ifbench
+
+ifbench_benchmark_simple_agent:
+  _inherit_from: ifbench_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: ifbench_benchmark_resources_server
+      datasets:
+      - name: ifbench
+        type: benchmark
+        jsonl_fpath: benchmarks/ifbench/data/ifbench_benchmark.jsonl
+        prompt_config: benchmarks/ifbench/prompts/default.yaml
+        prepare_script: benchmarks/ifbench/prepare.py
+        num_repeats: 5
