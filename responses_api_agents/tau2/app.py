@@ -18,8 +18,6 @@ from pathlib import Path
 from subprocess import run
 from typing import Any, Dict
 
-from fastapi import Request
-
 from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyResponse,
@@ -29,6 +27,7 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.server_utils import get_server_url
 from tau2.data_model.simulation import SimulationRun, TextRunConfig
 from tau2.data_model.tasks import Task
 from tau2.runner.batch import run_single_task
@@ -36,6 +35,7 @@ from tau2.runner.batch import run_single_task
 
 class Tau2Config(BaseResponsesAPIAgentConfig):
     model_server: ModelServerRef
+    user_model_server: ModelServerRef
     max_steps: int = None
 
 
@@ -74,11 +74,23 @@ class Tau2Agent(SimpleResponsesAPIAgent):
         )
         return super().setup_webserver()
 
-    async def run(self, request: Request, body: Tau2RunRequest) -> Tau2VerifyResponse:
+    async def run(self, body: Tau2RunRequest) -> Tau2VerifyResponse:
         kwargs = body.sample_data | {
             "config": TextRunConfig.model_validate(body.sample_data["config"]),
             "task": Task.model_validate(TextRunConfig.model_validate(body.sample_data["task"])),
             "save_dir": None,
+        }
+
+        config: TextRunConfig = kwargs["config"]
+        config.llm_user = "dummy user model"
+        config.llm_args_user |= {
+            "api_base": f"{get_server_url(self.config.model_server.name)}/v1",
+            "api_key": "dummy api key",
+        }
+        config.llm_agent = "dummy agent model"
+        config.llm_args_agent = {
+            "api_base": f"{get_server_url(self.config.user_model_server.name)}/v1",
+            "api_key": "dummy api key",
         }
 
         loop = get_event_loop()
