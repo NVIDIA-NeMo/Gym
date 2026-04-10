@@ -127,6 +127,8 @@ class Tau2Agent(SimpleResponsesAPIAgent):
             "api_key": "dummy api key",
         }
 
+        config.max_steps = self.config.max_steps
+
         result = await run_single_task(**kwargs)
 
         body_dict = body.model_dump()
@@ -136,21 +138,21 @@ class Tau2Agent(SimpleResponsesAPIAgent):
         converter = VLLMConverter(return_token_id_information=True)
         all_items = converter.chat_completions_messages_to_responses_items(message_dicts)
         input_items, output_items = split_responses_input_output_items(all_items)
-        return Tau2VerifyResponse.model_validate(
+        return Tau2VerifyResponse(
             **body_dict,
             responses_create_params=dict(
                 input=input_items,
-                model=body.responses_create_params.model,
+                model=body.responses_create_params.model or "",
                 parallel_tool_calls=body.responses_create_params.parallel_tool_calls,
                 tool_choice=body.responses_create_params.tool_choice,
                 tools=body.responses_create_params.tools,
             ),
             response=dict(
-                id=f"tau2-{body.config.domain}-{body.task.task_id}",
+                id=f"tau2-{body.config.domain}-{body.task.id}",
                 created_at=int(time()),
                 object="response",
                 output=output_items,
-                model=body.responses_create_params.model,
+                model=body.responses_create_params.model or "",
                 parallel_tool_calls=body.responses_create_params.parallel_tool_calls,
                 tool_choice=body.responses_create_params.tool_choice,
                 tools=body.responses_create_params.tools,

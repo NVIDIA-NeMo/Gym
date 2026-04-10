@@ -17,7 +17,6 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi.testclient import TestClient
-from pytest import raises
 
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.tau2.app import (
@@ -63,6 +62,7 @@ class TestApp:
                 type="responses_api_models",
                 name="",
             ),
+            max_steps=4,
         )
         server = Tau2Agent(config=config, server_client=MagicMock(spec=ServerClient))
 
@@ -70,11 +70,48 @@ class TestApp:
         client = TestClient(app)
 
         async_openai_mock = MagicMock()
-        async_openai_mock.create_chat_completion = AsyncMock(return_value={})
+        async_openai_mock.create_chat_completion = AsyncMock(
+            return_value={
+                "id": "chtcmpl-123",
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "index": 0,
+                        "message": {"content": "hello", "role": "assistant", "tool_calls": []},
+                    }
+                ],
+                "created": 0,
+                "model": "dummy_model",
+                "object": "chat.completion",
+            },
+        )
 
-        with raises(ValueError, match="UserMessage must have either content or tool_calls. Got UserMessage"):
-            with (
-                patch("responses_api_agents.tau2.app.get_server_url", return_value="dummy base url"),
-                patch("tau2.utils.llm_utils.NeMoGymAsyncOpenAI", return_value=async_openai_mock),
-            ):
-                client.post("/run", json=data[0])
+        with (
+            patch("responses_api_agents.tau2.app.get_server_url", return_value="dummy base url"),
+            patch("tau2.utils.llm_utils.NeMoGymAsyncOpenAI", return_value=async_openai_mock),
+        ):
+            response = client.post("/run", json=data[0])
+
+        actual_response_dict = response.json()
+        expected_response_dict = json.loads((Path(__file__).parent / "test_data.json").read_text())
+        with open("temp.json", "w") as f:
+            json.dump(actual_response_dict, f, indent=4)
+
+        def _clean(d):
+            d["result"].pop("duration")
+            d["result"].pop("end_time")
+            d["result"].pop("id")
+            d["result"].pop("start_time")
+            d["result"].pop("timestamp")
+            for m in d["result"]["messages"]:
+                m.pop("timestamp")
+                m.pop("generation_time_seconds", None)
+
+            d["response"].pop("created_at")
+
+            for o in d["response"]["output"]:
+                o.pop("id", None)
+
+            return d
+
+        assert _clean(expected_response_dict) == _clean(actual_response_dict)
