@@ -49,6 +49,7 @@ class Tau2Config(BaseResponsesAPIAgentConfig):
     model_server: ModelServerRef
     user_model_server: ModelServerRef
     debug: bool = False
+    print_step_counts: bool = False
     max_steps: int = None
 
 
@@ -94,6 +95,9 @@ class Tau2Agent(SimpleResponsesAPIAgent):
         if not self.config.debug:
             print("Removing loguru logging since `debug=False`")
             logger.remove()
+
+        if self.config.print_step_counts:
+            environ["NEMO_GYM_TAU2_STEP_COUNT_PRINT"] = "true"
 
         return super().setup_webserver()
 
