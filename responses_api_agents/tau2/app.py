@@ -29,28 +29,28 @@ from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.server_utils import get_response_json, raise_for_status
 
 
-class SimpleAgentConfig(BaseResponsesAPIAgentConfig):
+class Tau2Config(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
     max_steps: int = None
 
 
-class SimpleAgentRunRequest(BaseRunRequest):
+class Tau2RunRequest(BaseRunRequest):
     model_config = ConfigDict(extra="allow")
 
 
-class SimpleAgentVerifyRequest(BaseVerifyRequest):
+class Tau2VerifyRequest(BaseVerifyRequest):
     model_config = ConfigDict(extra="allow")
 
 
-class SimpleAgentVerifyResponse(BaseVerifyResponse):
+class Tau2VerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
 
 
 class Tau2Agent(SimpleResponsesAPIAgent):
-    config: SimpleAgentConfig
+    config: Tau2Config
 
-    async def run(self, request: Request, body: SimpleAgentRunRequest) -> SimpleAgentVerifyResponse:
+    async def run(self, request: Request, body: Tau2RunRequest) -> Tau2VerifyResponse:
         cookies = request.cookies
 
         seed_session_response = await self.server_client.post(
@@ -71,7 +71,7 @@ class Tau2Agent(SimpleResponsesAPIAgent):
         await raise_for_status(response)
         cookies = response.cookies
 
-        verify_request = SimpleAgentVerifyRequest.model_validate(
+        verify_request = Tau2VerifyRequest.model_validate(
             body.model_dump() | {"response": await get_response_json(response)}
         )
 
@@ -82,7 +82,7 @@ class Tau2Agent(SimpleResponsesAPIAgent):
             cookies=cookies,
         )
         await raise_for_status(verify_response)
-        return SimpleAgentVerifyResponse.model_validate(await get_response_json(verify_response))
+        return Tau2VerifyResponse.model_validate(await get_response_json(verify_response))
 
 
 if __name__ == "__main__":
