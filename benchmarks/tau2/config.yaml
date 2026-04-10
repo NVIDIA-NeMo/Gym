@@ -8,9 +8,10 @@ tau2_benchmark_agent:
   responses_api_agents:
     simple_agent:
       datasets:
-      - name: tau2_airline
+      # TODO eventually we may want to split up the domains so we can configure num repeats for each individual domain
+      - name: tau2
         type: benchmark
         jsonl_fpath: benchmarks/tau2/data/tau2_benchmark.jsonl
         prompt_config: benchmarks/tau2/prompts/default.yaml
         prepare_script: benchmarks/tau2/prepare.py
-        num_repeats: 1
+        num_repeats: 8
