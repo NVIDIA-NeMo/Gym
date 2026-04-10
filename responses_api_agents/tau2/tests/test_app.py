@@ -112,6 +112,9 @@ class TestApp:
             for o in d["response"]["output"]:
                 o.pop("id", None)
 
+            for o in d["responses_create_params"]["input"]:
+                o.pop("id", None)
+
             return d
 
         assert _clean(expected_response_dict) == _clean(actual_response_dict)

@@ -2,7 +2,27 @@
     "responses_create_params": {
         "background": null,
         "include": null,
-        "input": [],
+        "input": [
+            {
+                "id": "msg_31dafb197b394ddaaf2e347c3f849535",
+                "content": [
+                    {
+                        "annotations": [],
+                        "text": "Hi! How can I help you today?",
+                        "type": "output_text",
+                        "logprobs": null
+                    }
+                ],
+                "role": "assistant",
+                "status": "completed",
+                "type": "message"
+            },
+            {
+                "content": "hello",
+                "role": "user",
+                "type": "message"
+            }
+        ],
         "instructions": null,
         "max_output_tokens": null,
         "max_tool_calls": null,
@@ -505,25 +525,6 @@
         "model": "",
         "object": "response",
         "output": [
-            {
-                "id": "msg_31dafb197b394ddaaf2e347c3f849535",
-                "content": [
-                    {
-                        "annotations": [],
-                        "text": "Hi! How can I help you today?",
-                        "type": "output_text",
-                        "logprobs": null
-                    }
-                ],
-                "role": "assistant",
-                "status": "completed",
-                "type": "message"
-            },
-            {
-                "content": "hello",
-                "role": "user",
-                "type": "message"
-            },
             {
                 "id": "msg_5e99554ad0b94efe9b5007f19cd95036",
                 "content": [

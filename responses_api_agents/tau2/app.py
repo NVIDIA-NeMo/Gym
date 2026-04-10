@@ -137,11 +137,15 @@ class Tau2Agent(SimpleResponsesAPIAgent):
         message_dicts = [m.model_dump() for m in result.messages]
         converter = VLLMConverter(return_token_id_information=True)
         all_items = converter.chat_completions_messages_to_responses_items(message_dicts)
-        input_items, output_items = split_responses_input_output_items(all_items)
+        input_items_1, output_items = split_responses_input_output_items(all_items)
+        # Tau starts trajectories with an assistant message
+        input_items_1 += output_items[:1]
+        input_items_2, output_items = split_responses_input_output_items(output_items[1:])
+
         return Tau2VerifyResponse(
             **body_dict,
             responses_create_params=dict(
-                input=input_items,
+                input=input_items_1 + input_items_2,
                 model=body.responses_create_params.model or "",
                 parallel_tool_calls=body.responses_create_params.parallel_tool_calls,
                 tool_choice=body.responses_create_params.tool_choice,
