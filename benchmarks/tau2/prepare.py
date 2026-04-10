@@ -57,9 +57,7 @@ def prepare() -> Path:
             data["task"]["evaluation_criteria"]["reward_basis"].remove("NL_ASSERTION")
 
         # The actual prompts are constructed on the fly by Tau2-Bench
-        data["responses_create_params"] = {
-            "input": [],
-        }
+        # data["responses_create_params"]
 
         samples.append(data)
 
