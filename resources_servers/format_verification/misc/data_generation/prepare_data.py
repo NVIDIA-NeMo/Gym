@@ -33,19 +33,31 @@ import sys
 from pathlib import Path
 
 
-def convert_record(record: dict) -> dict:
+def convert_record(record: dict, agent_name: str = None) -> dict:
     input_msgs = [m for m in record.get("messages", []) if m.get("role") != "assistant"]
 
-    return {
+    out = {
         "responses_create_params": {"input": input_msgs},
         "verifier": record["verifier"],
     }
+    if agent_name:
+        out["agent_ref"] = {
+            "type": "responses_api_agents",
+            "name": agent_name,
+        }
+    return out
 
 
 def main():
     parser = argparse.ArgumentParser(description="Convert verified ds2/ds3 jsonl to Gym-ready format")
     parser.add_argument("--input", "-i", required=True, help="Path to ds2_verified.jsonl or ds3_verified.jsonl")
     parser.add_argument("--output", "-o", required=True, help="Path to write Gym-ready jsonl")
+    parser.add_argument(
+        "--agent-name",
+        required=False,
+        default=None,
+        help="Agent name for agent_ref field (e.g. freeform_formatting_simple_agent)",
+    )
     args = parser.parse_args()
 
     src = Path(args.input)
@@ -66,7 +78,7 @@ def main():
             total += 1
             record = json.loads(line)
             try:
-                gym_record = convert_record(record)
+                gym_record = convert_record(record, agent_name=args.agent_name)
                 fout.write(json.dumps(gym_record, ensure_ascii=False) + "\n")
                 written += 1
             except Exception as e:

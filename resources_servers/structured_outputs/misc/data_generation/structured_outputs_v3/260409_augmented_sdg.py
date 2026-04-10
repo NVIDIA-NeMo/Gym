@@ -112,8 +112,12 @@ def main():
     )
     parser.add_argument("--target-formats", default="json,yaml,xml,toml,csv", help="Comma-separated output formats")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--max-total", type=int, default=5000, help="Hard cap on total output records")
-    parser.add_argument("--max-per-category", type=int, default=1000, help="Cap per category")
+    parser.add_argument(
+        "--max-total", type=int, default=5000, help="Hard cap on total output records (only used with --no-unique)"
+    )
+    parser.add_argument(
+        "--max-per-category", type=int, default=1000, help="Cap per category (only used with --no-unique)"
+    )
     parser.add_argument("--samples-per-record", type=int, default=3, help="Augmented samples per source record")
     parser.add_argument(
         "--category-weights", default=None, help="Relative weights e.g. direct:4,translation:2,schema_only:1"
@@ -193,10 +197,7 @@ def main():
             subset = partitions.get(cat, [])
             if not subset:
                 continue
-            remaining = args.max_total - len(all_samples)
-            if remaining <= 0:
-                break
-            cap = min(args.max_per_category, remaining, len(subset))
+            cap = len(subset)
             print(f"  Generating '{cat}' ({len(subset)} unique records, max {cap})...")
             kwargs = dict(
                 records=subset,
@@ -216,10 +217,7 @@ def main():
             if cat not in ALL_GENERATORS:
                 continue
             gen_fn = ALL_GENERATORS[cat]
-            remaining = args.max_total - len(all_samples)
-            if remaining <= 0:
-                break
-            cap = min(args.max_per_category, remaining)
+            cap = len(records)
             print(f"  Generating '{cat}' (uses record pairs, max {cap})...")
             kwargs = dict(
                 records=records, rng=rng, samples_per_record=1, target_formats=target_formats, max_samples=cap
@@ -262,24 +260,26 @@ def main():
             category_counts[cat] = len(samples)
             print(f"    -> {len(samples)} samples")
 
-    if args.category_weights and len(all_samples) > args.max_total:
-        weights = parse_weights(args.category_weights)
-        total_weight = sum(weights.get(c, 1.0) for c in categories)
-        budgets = {c: int(args.max_total * weights.get(c, 1.0) / total_weight) for c in categories}
+    if not unique:
+        if args.category_weights and len(all_samples) > args.max_total:
+            weights = parse_weights(args.category_weights)
+            total_weight = sum(weights.get(c, 1.0) for c in categories)
+            budgets = {c: int(args.max_total * weights.get(c, 1.0) / total_weight) for c in categories}
 
-        filtered = []
-        by_cat = {}
-        for s in all_samples:
-            pt = s.get("problem_type", "unknown")
-            by_cat.setdefault(pt, []).append(s)
-        for cat, samples in by_cat.items():
-            budget = budgets.get(cat, args.max_total // len(categories))
-            rng.shuffle(samples)
-            filtered.extend(samples[:budget])
-        all_samples = filtered
+            filtered = []
+            by_cat = {}
+            for s in all_samples:
+                pt = s.get("problem_type", "unknown")
+                by_cat.setdefault(pt, []).append(s)
+            for cat, samples in by_cat.items():
+                budget = budgets.get(cat, args.max_total // len(categories))
+                rng.shuffle(samples)
+                filtered.extend(samples[:budget])
+            all_samples = filtered
+
+        all_samples = all_samples[: args.max_total]
 
     rng.shuffle(all_samples)
-    all_samples = all_samples[: args.max_total]
 
     dst.parent.mkdir(parents=True, exist_ok=True)
     with open(dst, "w") as f:
