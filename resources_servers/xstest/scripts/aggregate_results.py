@@ -68,7 +68,7 @@ def aggregate(entries: list[dict]) -> None:
                 verdict_counts[vl] += 1
 
     # Detect judge type from verdict labels
-    judge_type = "string-match"
+    judge_type = "unknown"
     if verdict_counts:
         labels = set(verdict_counts.keys())
         if labels & {"refusal", "compliance"}:
