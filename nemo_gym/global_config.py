@@ -33,7 +33,7 @@ from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 from ray import __version__ as ray_version
 from wandb import Run
 
-from nemo_gym import CACHE_DIR, PARENT_DIR, RESULTS_DIR
+from nemo_gym import CACHE_DIR, PARENT_DIR, RESULTS_DIR, WORKING_DIR
 from nemo_gym.config_types import (
     ServerInstanceConfig,
     WANDBConfig,
@@ -529,8 +529,8 @@ Found global config dict yaml:
             # Set the appropriate environment variable here, and matche the config
             environ["UV_CACHE_DIR"] = global_config_dict[UV_CACHE_DIR_KEY_NAME]
             # By default, build the directories in their individual folders using the root repository
-            # e.g. PARENT_DIR/responses_api_models/my_server
-            global_config_dict.setdefault(UV_VENV_DIR_KEY_NAME, str(PARENT_DIR))
+            # e.g. WORKING_DIR/responses_api_models/my_server
+            global_config_dict.setdefault(UV_VENV_DIR_KEY_NAME, str(WORKING_DIR))
 
         if parse_config.hide_secrets:
             self._recursively_hide_secrets(global_config_dict)
