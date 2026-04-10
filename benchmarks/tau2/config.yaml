@@ -6,7 +6,7 @@ config_paths:
 tau2_benchmark_agent:
   _inherit_from: tau2_agent
   responses_api_agents:
-    simple_agent:
+    tau2:
       datasets:
       # TODO eventually we may want to split up the domains so we can configure num repeats for each individual domain
       - name: tau2
