@@ -17,7 +17,7 @@ from os import environ
 from pathlib import Path
 from subprocess import run
 from time import time
-from typing import Literal
+from typing import Any, Dict, Literal
 
 
 DATA_DIR = Path(__file__).parent / "tau2_data"
@@ -45,6 +45,7 @@ from tau2.data_model.simulation import SimulationRun, TextRunConfig
 from tau2.data_model.tasks import Task
 from tau2.evaluator.evaluator import EvaluationType
 from tau2.runner.batch import run_single_task
+from tau2.utils.llm_utils import to_litellm_messages
 
 
 class Tau2Config(BaseResponsesAPIAgentConfig):
@@ -134,7 +135,7 @@ class Tau2Agent(SimpleResponsesAPIAgent):
         body_dict = body.model_dump()
         body_dict.pop("responses_create_params")
 
-        message_dicts = [m.model_dump() for m in result.messages]
+        message_dicts = to_litellm_messages(result.messages)
         converter = VLLMConverter(return_token_id_information=True)
         all_items = converter.chat_completions_messages_to_responses_items(message_dicts)
         input_items_1, output_items = split_responses_input_output_items(all_items)
@@ -164,6 +165,21 @@ class Tau2Agent(SimpleResponsesAPIAgent):
             reward=result.reward_info.reward,
             result=result,
         )
+
+    def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
+        """Override to select headline metrics for this benchmark.
+
+        Default: all mean/* entries from agent_metrics.
+        """
+        res = super().get_key_metrics(agent_metrics)
+        del (
+            res["mean/seed"],
+            res["mean/verbose_logs"],
+            res["mean/audio_debug"],
+            res["mean/audio_taps"],
+            res["mean/auto_review"],
+        )
+        return res
 
 
 if __name__ == "__main__":
