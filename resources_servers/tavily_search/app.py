@@ -63,26 +63,6 @@ class TavilySearchResponse(BaseModel):
     results_string: str
 
 
-class FindInPageRequest(BaseModel):
-    url: Optional[str] = None
-    query: Optional[str] = None
-
-
-class FindInPageResponse(BaseModel):
-    results_string: str
-
-
-class ScrollPageRequest(BaseModel):
-    url: Optional[str] = None
-    start_index: int = 0
-    n: int = 2000
-
-
-class ScrollPageResponse(BaseModel):
-    results_string: str
-    total_words: int
-
-
 class BrowseRequest(BaseModel):
     urls: List[str]
     goal: Optional[str] = None
@@ -286,124 +266,6 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         postprocessed_results = self._postprocess_search_results(results)
         return TavilySearchResponse(results_string="".join(postprocessed_results))
 
-    async def find_in_page(self, request: Request, body: FindInPageRequest) -> FindInPageResponse:
-        metrics = self._session_id_to_metrics[request.session[SESSION_ID_KEY]]
-
-        if self.config.debug:
-            print("\n\n find_in_page ")
-            print(f"url={body.url}, query={body.query}")
-
-        if body.url is None:
-            return FindInPageResponse(results_string="URL is none")
-        if body.query is None:
-            return FindInPageResponse(results_string="Query is none")
-
-        if self._is_url_excluded(body.url):
-            return FindInPageResponse(results_string="URL is in excluded domains")
-
-        async_tavily_client = self._select_tavily_client()
-        start_time = time()
-        results = await async_tavily_client.extract(
-            urls=body.url,
-            query=body.query,
-        )
-        metrics.async_tavily_calls.append(
-            TavilySearchSingleAsyncTavilyMetrics(
-                function="extract", status="success", start_time=start_time, end_time=time()
-            )
-        )
-
-        # Extract raw_content from the first successful result
-        if results.get("results"):
-            raw_content = results["results"][0].get("raw_content", "")
-        else:
-            raw_content = ""
-
-        if not raw_content:
-            return FindInPageResponse(results_string="No content found.")
-
-        # Format: header + clean + truncate + line numbers
-        domain = self._extract_domain(body.url)
-        cleaned = self._clean_text(raw_content)
-        truncated, was_truncated = self._truncate_text(cleaned)
-        numbered = self._add_line_numbers(truncated)
-
-        header = (
-            f"Content from: {domain}\n"
-            f"URL: {body.url}\n"
-            f'Query: "{body.query}"\n'
-            f"========================================\n"
-        )
-        footer = ""
-        if was_truncated:
-            footer = "\n[...truncated, use scroll_page for full content]"
-
-        return FindInPageResponse(results_string=header + numbered + footer)
-
-    async def scroll_page(self, request: Request, body: ScrollPageRequest) -> ScrollPageResponse:
-        metrics = self._session_id_to_metrics[request.session[SESSION_ID_KEY]]
-
-        if self.config.debug:
-            print("\n\n scroll_page ")
-            print(f"url={body.url}, start_index={body.start_index}, n={body.n}")
-
-        if body.url is None:
-            return ScrollPageResponse(results_string="URL is none", total_words=0)
-
-        if self._is_url_excluded(body.url):
-            return ScrollPageResponse(results_string="URL is in excluded domains", total_words=0)
-
-        # Check cache first
-        if body.url in self._page_cache:
-            if self.config.debug:
-                print(f"Cache hit for {body.url}")
-            page_content = self._page_cache[body.url]
-        else:
-            if self.config.debug:
-                print(f"Cache miss for {body.url}, fetching with tavily extract")
-
-            async_tavily_client = self._select_tavily_client()
-            start_time = time()
-            results = await async_tavily_client.extract(
-                urls=body.url,
-            )
-            metrics.async_tavily_calls.append(
-                TavilySearchSingleAsyncTavilyMetrics(
-                    function="extract", status="success", start_time=start_time, end_time=time()
-                )
-            )
-
-            if results.get("results"):
-                page_content = results["results"][0].get("raw_content", "")
-            else:
-                page_content = ""
-
-            # Store in cache
-            self._page_cache[body.url] = page_content
-
-        words = page_content.split()
-        total_words = len(words)
-        sliced_words = words[body.start_index : body.start_index + body.n]
-        chunk_text = " ".join(sliced_words)
-
-        # Format: header + clean + line numbers
-        domain = self._extract_domain(body.url)
-        cleaned = self._clean_text(chunk_text)
-        numbered = self._add_line_numbers(cleaned)
-
-        end_index = min(body.start_index + body.n, total_words)
-        header = (
-            f"Page content from: {domain}\n"
-            f"URL: {body.url}\n"
-            f"Showing words [{body.start_index}-{end_index}] of {total_words}\n"
-            f"========================================\n"
-        )
-
-        return ScrollPageResponse(
-            results_string=header + numbered,
-            total_words=total_words,
-        )
-
     async def browse(self, request: Request, body: BrowseRequest) -> BrowseResponse:
         metrics = self._session_id_to_metrics[request.session[SESSION_ID_KEY]]
 
@@ -486,11 +348,6 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         # Collapse 3+ consecutive newlines to 2 (one blank line)
         text = re.sub(r"\n{3,}", "\n\n", text)
         return text.strip()
-
-    def _add_line_numbers(self, text: str) -> str:
-        """Add L0:, L1:, ... prefix per line."""
-        lines = text.split("\n")
-        return "\n".join(f"L{i}: {line}" for i, line in enumerate(lines))
 
     def _truncate_text(self, text: str, max_chars: int = None) -> tuple:
         """Truncate text to max_chars, snapping to last full line boundary.
