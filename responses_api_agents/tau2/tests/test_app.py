@@ -77,7 +77,7 @@ class TestApp:
                     {
                         "finish_reason": "stop",
                         "index": 0,
-                        "message": {"content": "hello", "role": "assistant", "tool_calls": []},
+                        "message": {"content": "<think>thinking</think>hello", "role": "assistant", "tool_calls": []},
                     }
                 ],
                 "created": 0,
