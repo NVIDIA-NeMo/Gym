@@ -111,29 +111,32 @@ class Tau2Agent(SimpleResponsesAPIAgent):
         raise NotImplementedError
 
     async def run(self, body: Tau2RunRequest) -> Tau2VerifyResponse:
+        body_dict = body.model_dump()
+        responses_create_params = body_dict.pop("responses_create_params")
+
         kwargs = {name: getattr(body, name) for name in Tau2RunRequest.model_fields}
         kwargs.pop("responses_create_params")
 
         config: TextRunConfig = kwargs["config"]
+
         # Need `openai/` provider prefix for LiteLLM
         config.llm_user = "openai/dummy user model"
         config.llm_args_user |= {
             "api_base": f"{get_server_url(self.config.user_model_server.name)}/v1",
             "api_key": "dummy api key",
         } | self.config.user_llm_args
+
+        extra_agent_args = {k: v for k, v in responses_create_params.items() if k in ("temperature", "top_p")}
         # Need `openai/` provider prefix for LiteLLM
         config.llm_agent = "openai/dummy agent model"
         config.llm_args_agent = {
             "api_base": f"{get_server_url(self.config.model_server.name)}/v1",
             "api_key": "dummy api key",
-        }
+        } | extra_agent_args
 
         config.max_steps = self.config.max_steps
 
         result = await run_single_task(**kwargs)
-
-        body_dict = body.model_dump()
-        body_dict.pop("responses_create_params")
 
         message_dicts = to_litellm_messages(result.messages)
         converter = VLLMConverter(return_token_id_information=True)
