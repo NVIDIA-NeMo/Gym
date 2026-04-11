@@ -16,6 +16,6 @@ tau2_benchmark_agent:
       - name: tau2
         type: benchmark
         jsonl_fpath: benchmarks/tau2/data/tau2_benchmark.jsonl
-        prompt_config: benchmarks/tau2/prompts/default.yaml
+        prompt_config: null
         prepare_script: benchmarks/tau2/prepare.py
         num_repeats: 8
