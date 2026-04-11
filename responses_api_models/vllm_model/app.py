@@ -783,6 +783,9 @@ class VLLMConverter(BaseModel):
         for message in messages:
             role = message["role"]
             if role in ("user", "system", "developer"):
+                # vLLM may return None content
+                if message["content"] is None:
+                    message["content"] = ""
                 output_items.append(NeMoGymEasyInputMessage.model_validate(message))
             elif role == "assistant":
                 output_items.extend(self.postprocess_assistant_message_dict(message))
