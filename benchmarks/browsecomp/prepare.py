@@ -61,56 +61,54 @@ QUERY_SUFFIX = (
 TOOLS = [
     {
         "type": "function",
-        "function": {
-            "name": "search",
-            "description": (
-                "Web Search API, works like Google Search. "
-                "All queries will be searched in parallel. "
-                "If you want to search with multiple keywords, "
-                "put them in a single query."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "queries": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": (
-                            "Search queries. All queries are executed in parallel."
-                        ),
-                    }
-                },
-                "required": ["queries"],
+        "name": "search",
+        "description": (
+            "Web Search API, works like Google Search. "
+            "All queries will be searched in parallel. "
+            "If you want to search with multiple keywords, "
+            "put them in a single query."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "queries": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Search queries. All queries are executed in parallel."
+                    ),
+                }
             },
+            "required": ["queries"],
         },
+        "strict": False,
     },
     {
         "type": "function",
-        "function": {
-            "name": "browse",
-            "description": (
-                "Visit specific webpage(s) and return their full text content. "
-                "Use this to read the complete content of web pages found "
-                "during search."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "urls": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "URL(s) of webpage(s) to visit.",
-                    },
-                    "goal": {
-                        "type": "string",
-                        "description": (
-                            "What specific information you are looking for."
-                        ),
-                    },
+        "name": "browse",
+        "description": (
+            "Visit specific webpage(s) and return their full text content. "
+            "Use this to read the complete content of web pages found "
+            "during search."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "urls": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "URL(s) of webpage(s) to visit.",
                 },
-                "required": ["urls"],
+                "goal": {
+                    "type": "string",
+                    "description": (
+                        "What specific information you are looking for."
+                    ),
+                },
             },
+            "required": ["urls"],
         },
+        "strict": False,
     },
 ]
 
