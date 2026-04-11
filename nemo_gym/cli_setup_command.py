@@ -29,7 +29,6 @@ from nemo_gym.global_config import (
     PYTHON_VERSION_KEY_NAME,
     SKIP_VENV_IF_PRESENT_KEY_NAME,
     UV_CACHE_DIR_KEY_NAME,
-    UV_EXTRA_INDEX_URL_KEY_NAME,
     UV_PIP_SET_PYTHON_KEY_NAME,
     UV_VENV_DIR_KEY_NAME,
     get_global_config_dict,
@@ -56,9 +55,10 @@ def _get_nemo_gym_install_flags() -> str:
     if allow_prerelease:
         flags += "--pre "
         # When pre-releases are enabled, also use unsafe-best-match strategy if not already set
-        # This helps when using test.pypi with potentially broken packages (e.g., fastapi==1.0)
         if not os.getenv("UV_INDEX_STRATEGY"):
             flags += "--index-strategy unsafe-best-match "
+        # Pin fastapi<1.0 to avoid broken test.pypi package
+        flags += "'fastapi<1.0' "
 
     # 2. Index URLs (respects uv's standard env vars)
     index_url = os.getenv("UV_INDEX_URL")
@@ -123,12 +123,6 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
     uv_pip_python_flag = f"--python {venv_python_fpath} " if uv_pip_set_python else ""
 
     verbose_flag = "-v " if global_config_dict.get(PIP_INSTALL_VERBOSE_KEY_NAME) else ""
-    extra_index_url = global_config_dict.get(UV_EXTRA_INDEX_URL_KEY_NAME)
-    extra_index_url_flag = (
-        f"--extra-index-url {extra_index_url} --index-strategy unsafe-best-match --prerelease=allow 'fastapi<1.0' "
-        if extra_index_url
-        else ""
-    )
 
     is_editable_install = (dir_path.resolve() / "../../pyproject.toml").exists()
 
@@ -143,31 +137,29 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
             )
         elif has_pyproject_toml:
             if is_editable_install:
-                install_cmd = f"""uv pip install {verbose_flag}{extra_index_url_flag}{uv_pip_python_flag}'-e .' {" ".join(head_server_deps)}"""
+                install_cmd = (
+                    f"""uv pip install {verbose_flag}{uv_pip_python_flag}'-e .' {" ".join(head_server_deps)}"""
+                )
             else:
                 # install nemo-gym from pypi instead of relative path in pyproject.toml
                 # with support for pre-releases, custom indexes, and version pinning
                 install_flags = _get_nemo_gym_install_flags()
                 version_spec = _get_nemo_gym_version_spec(is_editable_install)
-                # Combine with PR #972's extra_index_url_flag for config-based index
-                combined_flags = f"{extra_index_url_flag}{install_flags}"
                 install_cmd = (
-                    f"""uv pip install {verbose_flag}{uv_pip_python_flag}{combined_flags}nemo-gym{version_spec} && """
-                    f"""uv pip install {verbose_flag}{extra_index_url_flag}{uv_pip_python_flag}--no-sources '-e .' {" ".join(head_server_deps)}"""
+                    f"""uv pip install {verbose_flag}{uv_pip_python_flag}{install_flags}nemo-gym{version_spec} && """
+                    f"""uv pip install {verbose_flag}{uv_pip_python_flag}--no-sources '-e .' {" ".join(head_server_deps)}"""
                 )
         elif has_requirements_txt:
             if is_editable_install:
-                install_cmd = f"""uv pip install {verbose_flag}{extra_index_url_flag}{uv_pip_python_flag}-r requirements.txt {" ".join(head_server_deps)}"""
+                install_cmd = f"""uv pip install {verbose_flag}{uv_pip_python_flag}-r requirements.txt {" ".join(head_server_deps)}"""
             else:
                 # install nemo-gym from pypi instead of relative path in requirements.txt
                 # with support for pre-releases, custom indexes, and version pinning
                 install_flags = _get_nemo_gym_install_flags()
                 version_spec = _get_nemo_gym_version_spec(is_editable_install)
-                # Combine with PR #972's extra_index_url_flag for config-based index
-                combined_flags = f"{extra_index_url_flag}{install_flags}"
                 install_cmd = (
                     f"""(echo 'nemo-gym{version_spec}' && grep -v -F '../..' requirements.txt) | """
-                    f"""uv pip install {verbose_flag}{uv_pip_python_flag}{combined_flags}-r /dev/stdin {" ".join(head_server_deps)}"""
+                    f"""uv pip install {verbose_flag}{uv_pip_python_flag}{install_flags}-r /dev/stdin {" ".join(head_server_deps)}"""
                 )
         else:
             raise RuntimeError(

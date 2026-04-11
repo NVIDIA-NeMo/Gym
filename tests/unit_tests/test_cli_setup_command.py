@@ -337,7 +337,7 @@ class TestGetNemoGymInstallFlags:
         monkeypatch.delenv("UV_INDEX_STRATEGY", raising=False)
 
         flags = _get_nemo_gym_install_flags()
-        assert flags == "--pre --index-strategy unsafe-best-match "
+        assert flags == "--pre --index-strategy unsafe-best-match 'fastapi<1.0' "
 
     def test_prerelease_false(self, monkeypatch: MonkeyPatch) -> None:
         """When NEMO_GYM_ALLOW_PRERELEASE=false, should not add flags."""
@@ -376,7 +376,7 @@ class TestGetNemoGymInstallFlags:
 
         flags = _get_nemo_gym_install_flags()
         # Should have --pre but use explicit strategy, not auto-set unsafe-best-match
-        assert flags == "--pre --index-strategy first-match "
+        assert flags == "--pre 'fastapi<1.0' --index-strategy first-match "
 
     def test_all_flags_combined(self, monkeypatch: MonkeyPatch) -> None:
         """Test all flags together."""
@@ -388,7 +388,7 @@ class TestGetNemoGymInstallFlags:
         flags = _get_nemo_gym_install_flags()
         assert (
             flags
-            == "--pre --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ --index-strategy unsafe-best-match "
+            == "--pre 'fastapi<1.0' --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ --index-strategy unsafe-best-match "
         )
 
 
