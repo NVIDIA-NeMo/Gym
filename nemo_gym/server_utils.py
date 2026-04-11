@@ -171,7 +171,7 @@ async def request(
         except ServerDisconnectedError:
             global _NUM_SERVER_DISCONNECTED_ERROR
             _NUM_SERVER_DISCONNECTED_ERROR += 1
-            if _NUM_SERVER_DISCONNECTED_ERROR % DISCONNECTED_CLIENT_OS_PRINT_INTERVAL:
+            if _NUM_SERVER_DISCONNECTED_ERROR % DISCONNECTED_CLIENT_OS_PRINT_INTERVAL == 0:
                 print(
                     f"Hit {_NUM_SERVER_DISCONNECTED_ERROR} global `ServerDisconnectedError` while querying {url}.\n{DISCONNECTED_CLIENT_OS_HELP_TEXT}"
                 )
@@ -180,7 +180,7 @@ async def request(
         except ClientOSError:
             global _NUM_CLIENT_OS_ERROR
             _NUM_CLIENT_OS_ERROR += 1
-            if _NUM_CLIENT_OS_ERROR % DISCONNECTED_CLIENT_OS_PRINT_INTERVAL:
+            if _NUM_CLIENT_OS_ERROR % DISCONNECTED_CLIENT_OS_PRINT_INTERVAL == 0:
                 print(
                     f"Hit {_NUM_CLIENT_OS_ERROR} global `ClientOSError` while querying {url}.\n{DISCONNECTED_CLIENT_OS_HELP_TEXT}"
                 )
