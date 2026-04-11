@@ -343,7 +343,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                     choices=[
                         NeMoGymChoice(
                             index=0,
-                            finish_reason="stop",
+                            finish_reason="length",
                             message=NeMoGymChatCompletionMessage(
                                 role="assistant",
                                 content=None,
