@@ -7,7 +7,7 @@ from nemo_gym.config_types import Domain
 from resources_servers.cube.schemas import CubeResourcesServerConfig
 
 
-def test_env_domain_default_with_gym_domain():
+def test_environment_default_with_gym_domain():
     c = CubeResourcesServerConfig.model_validate(
         {
             "name": "s",
@@ -18,10 +18,10 @@ def test_env_domain_default_with_gym_domain():
         }
     )
     assert c.domain == Domain.OTHER
-    assert c.env_domain == "osworld"
+    assert c.environment == "osworld"
 
 
-def test_env_domain_explicit():
+def test_environment_explicit():
     c = CubeResourcesServerConfig.model_validate(
         {
             "name": "s",
@@ -29,8 +29,8 @@ def test_env_domain_explicit():
             "port": 1,
             "entrypoint": "app.py",
             "domain": "other",
-            "env_domain": "osworld",
+            "environment": "osworld",
         }
     )
-    assert c.env_domain == "osworld"
+    assert c.environment == "osworld"
     assert c.domain == Domain.OTHER

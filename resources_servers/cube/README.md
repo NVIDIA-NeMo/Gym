@@ -1,26 +1,27 @@
 # CUBE resources server
 
-OpenEnv-style adapter: **one** `app.py` and **YAML** choose the benchmark via **`env_domain`** (plus OSWorld-specific fields). **`domain`** is the NeMo Gym resources-server field (`config_types.Domain`, e.g. `other`) for dataset naming—do not overload it for CUBE.
+OpenEnv-style adapter: **YAML** chooses the benchmark via **`environment`** (plus OSWorld-specific fields). The cube **resources** server keeps **`entrypoint: app.py`**; on startup, **`app.py`** calls **`bootstrap.maybe_install_environment_extras()`** so optional wheels from `environments/<environment>/requirements.txt` install before importing **`osworld_cube`**. Without NeMo-Gym env vars (e.g. ad-hoc `python app.py`), that hook skips extras. **`domain`** is the NeMo Gym resources-server field (`config_types.Domain`, e.g. `other`) for dataset naming—do not overload it for CUBE.
 
 ## Layout
 
 | Path | Role |
 | --- | --- |
-| `app.py` | `CubeResourcesServer.run_webserver()` |
+| `app.py` | Cube resources server `entrypoint`: under `__main__`, runs `bootstrap.maybe_install_environment_extras()` then `CubeResourcesServer.run_webserver()` |
+| `bootstrap.py` | `maybe_install_environment_extras()` — optional `uv pip install -r environments/<environment>/…` (invoked from `app.py`, not a separate YAML entrypoint) |
 | `schemas.py` | Shared HTTP contract (`Cube*`) |
 | `adapters.py` | CUBE `Observation` / tools → NeMo-Gym |
-| `registry.py` | Maps YAML `config.env_domain` → `CubeEnvironmentBase` (`register_domain` / `instantiate_domain`) |
-| `domains/base.py` | `CubeEnvironmentBase` ABC (`ensure_loaded`, `warm_on_startup`, `empty_reset_obs_detail`) |
-| `domains/osworld/` | `env_domain: osworld` — `environment.py` (`OSWorldEnvironment`), `bootstrap.py` (`ensure_osworld_tasks` → `osworld_cube`) |
+| `registry.py` | Maps YAML `config.environment` → `CubeEnvironmentBase` (`register_domain` / `instantiate_domain`) |
+| `environments/base.py` | `CubeEnvironmentBase` ABC (`ensure_loaded`, `warm_on_startup`, `empty_reset_obs_detail`) |
+| `environments/osworld/` | `environment: osworld` — `env.py` (`OSWorldEnvironment`, `ensure_osworld_tasks` → `osworld_cube`), `requirements.txt` (git `osworld-cube`, Pillow) |
 | `server.py` | `CubeResourcesServer` — HTTP + CUBE task loop; delegates load/warmup to `CubeEnvironmentBase` |
 | `host_tools.py` | Host binary checks (e.g. ``qemu-img`` for QEMU VM backend) before benchmark setup |
-| `requirements.txt` | Per-server venv deps for `ng_run` (`uv pip install -r requirements.txt`, same pattern as other `resources_servers`) |
+| `requirements.txt` | Base venv for `ng_run`: editable `nemo-gym[dev]` only; per-`environment` extras install from `app.py` via `bootstrap` |
 
 ## Configuration
 
 Top-level fields on `CubeResourcesServerConfig`:
 
-- **`env_domain`** — `osworld` today; more values can be added by subclassing `CubeEnvironmentBase`, calling `register_domain` in `registry.py`, and setting YAML `env_domain` to that name.
+- **`environment`** — `osworld` today; more values can be added by subclassing `CubeEnvironmentBase`, calling `register_domain` in `registry.py`, and setting YAML `environment` to that name.
 - **`domain`** — Required NeMo Gym field (`math`, `coding`, `other`, …); see `nemo_gym.config_types.Domain`. Use e.g. **`other`** for CUBE OSWorld unless you have a closer category.
 - **`eager_benchmark_init`**, **`eager_osworld_vm_warmup`**, **`eager_osworld_warmup_task_idx`** — see [Eager benchmark init and VM warmup](#eager-benchmark-init-and-vm-warmup).
 
@@ -47,15 +48,6 @@ To **listen for HTTP sooner** (at the cost of moving full QEMU boot to the first
 ```bash
 source .venv/bin/activate   # repo root
 
-config_paths="resources_servers/cube/configs/cube_osworld.yaml,\
-responses_api_models/openai_model/configs/openai_model.yaml"
-
-ng_run "+config_paths=[${config_paths}]"
-```
-
-Equivalent one-liner:
-
-```bash
 ng_run "+config_paths=[resources_servers/cube/configs/cube_osworld.yaml,responses_api_models/openai_model/configs/openai_model.yaml]"
 ```
 
@@ -124,11 +116,13 @@ Set **`eager_benchmark_init: false`** to defer **all** of the above until the fi
 
 ## Dependencies
 
-Use **`requirements.txt`** in this directory: `ng_run` runs **`uv pip install -r requirements.txt`** here to populate `resources_servers/cube/.venv`. That pulls **editable `nemo-gym[dev]`** from the repo root (`-e … @ ../../`), **`osworld-cube`** from cube-harness (git), and **Pillow** (required by `cube_computer_tool`). If there is no checkout-level `pyproject.toml` two levels above this folder, the setup command substitutes **`nemo-gym`** from PyPI and drops lines containing **`../..`** (same as other resource servers).
+Use **`requirements.txt`** in this directory: `ng_run` runs **`uv pip install -r requirements.txt`** here to populate `resources_servers/cube/.venv` (editable **`nemo-gym[dev]`** from the repo root, `-e … @ ../../`). **Heavy extras** for each **`environment`** live under **`environments/<environment>/requirements.txt`**. On process start, **`app.py`** calls **`bootstrap.maybe_install_environment_extras()`**, which reads **`NEMO_GYM_CONFIG_DICT`** and **`NEMO_GYM_CONFIG_PATH`** (set by NeMo-Gym before `python`), resolves **`environment`**, and runs **`uv pip install --python <venv> -r environments/<environment>/requirements.txt`** if that file exists and its content changed since last run (tracked by **`.venv/.cube_environment_extras.stamp`**). OSWorld extras: **`osworld-cube`** (git, **pinned SHA** in `environments/osworld/requirements.txt`) and **Pillow**. The pin avoids **`main`** layouts that declare **`[tool.uv.sources]`** monorepo paths (`../../cube-standard`, …)—those paths are invalid for a standalone `uv pip install` of `cubes/osworld-cube` and make resolution fail with a bogus `cube-standard` git subdirectory. Bump the SHA only after you verify a newer revision installs cleanly outside the full cube-harness checkout. If there is no checkout-level `pyproject.toml` two levels above this folder, the setup command substitutes **`nemo-gym`** from PyPI and drops lines containing **`../..`** from **`requirements.txt`** only (env-specific files are unchanged). Optional: **`NEMO_GYM_CUBE_BOOTSTRAP_VERBOSE=1`** for `uv -v`; **`NEMO_GYM_CUBE_BOOTSTRAP_LOG_LEVEL=DEBUG`** for bootstrap logging.
+
+With **`skip_venv_if_present: true`** and an **existing** cube `.venv`, NeMo-Gym does not re-run the base **`requirements.txt`** install; the **`app.py`** bootstrap hook still runs when the server starts and will install or refresh extras unless the stamp matches. Delete **`.venv/.cube_environment_extras.stamp`** to force a reinstall of env-specific wheels. For **`python app.py`** without NeMo-Gym env vars (e.g. local debugging), bootstrap skips extras—install **`environments/<environment>/requirements.txt`** manually if imports fail.
 
 Adapter-only tests from the repo root usually use the root environment and do not need this venv.
 
-## Host prerequisites (`env_domain: osworld`, QEMU backend)
+## Host prerequisites (`environment: osworld`, QEMU backend)
 
 The default **`OSWorldQEMUVMBackend`** shells out to **`qemu-img`** and a QEMU system binary. Those come from your **OS package manager**, not `pip`. If you see:
 

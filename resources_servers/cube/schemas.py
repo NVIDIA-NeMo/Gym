@@ -26,11 +26,11 @@ from nemo_gym.openai_utils import (
 
 
 class CubeResourcesServerConfig(BaseResourcesServerConfig):
-    """Uses inherited ``domain`` (NeMo Gym :class:`~nemo_gym.config_types.Domain` for HF naming, etc.) and ``env_domain`` for the CUBE adapter."""
+    """Uses inherited ``domain`` (NeMo Gym :class:`~nemo_gym.config_types.Domain` for HF naming, etc.) and ``environment`` for the CUBE adapter."""
 
     model_config = ConfigDict(extra="allow")
 
-    env_domain: Literal["osworld"] = Field(
+    environment: Literal["osworld"] = Field(
         default="osworld",
         description="Which CUBE environment adapter to load (e.g. osworld). Distinct from ``domain`` on the base config.",
     )
@@ -41,7 +41,7 @@ class CubeResourcesServerConfig(BaseResourcesServerConfig):
     )
     eager_osworld_vm_warmup: bool = Field(
         default=True,
-        description="When True together with eager_benchmark_init and env_domain osworld, boot and tear down one "
+        description="When True together with eager_benchmark_init and environment osworld, boot and tear down one "
         "disposable OSWorld task (see eager_osworld_warmup_task_idx) during startup so QEMU and the guest "
         "finish cold-start before the HTTP server accepts traffic. Each later /seed_session still creates a "
         "new task and launches a fresh VM.",

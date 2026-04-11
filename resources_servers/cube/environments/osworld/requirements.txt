@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Extra dependencies for ``environment: osworld`` (``environments/osworld/env.py``).
+# Installed from ``app.py`` via ``bootstrap.maybe_install_environment_extras()`` when NeMo-Gym sets config env vars.
+#
+# Pin the cube-harness git revision: ``main`` may use ``[tool.uv.sources]`` with monorepo paths (``../../cube-standard``)
+# that do not work for a standalone ``pip install`` of ``cubes/osworld-cube`` only; uv then fails resolving ``cube-standard``.
+# Bump the SHA intentionally when you validate a newer osworld-cube + PyPI stack.
+
+osworld-cube @ git+https://github.com/The-AI-Alliance/cube-harness.git@0bca880d8281b7822729b4b0e8a23f3a801bfa8f#subdirectory=cubes/osworld-cube
+# cube_computer_tool imports PIL; keep explicit so resolution always includes it.
+pillow>=9.0

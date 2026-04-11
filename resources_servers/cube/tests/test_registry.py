@@ -3,7 +3,7 @@
 
 import pytest
 
-from resources_servers.cube.domains.base import CubeEnvironmentBase
+from resources_servers.cube.environments.base import CubeEnvironmentBase
 from resources_servers.cube.registry import instantiate_domain, register_domain
 
 

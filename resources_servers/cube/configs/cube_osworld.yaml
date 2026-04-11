@@ -1,4 +1,4 @@
-# OSWorld via ``resources_servers/cube`` — same pattern as OpenEnv (one app.py, YAML selects adapter).
+# OSWorld via ``resources_servers/cube`` — ``app.py`` runs optional env extras (``bootstrap``) then the HTTP server.
 cube_osworld_resources_server:
   resources_servers:
     cube:
@@ -6,7 +6,7 @@ cube_osworld_resources_server:
       domain: other
       verified: false
       debug: true
-      env_domain: osworld
+      environment: osworld
       # Load OSWorld benchmark at server startup (VM image download) instead of on first /seed_session.
       eager_benchmark_init: true
       # After benchmark load, boot QEMU once for task 0 and close it so cold-start finishes before HTTP listen.

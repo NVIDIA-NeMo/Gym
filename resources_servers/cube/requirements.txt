@@ -2,8 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Per-server venv for ng_run: uv pip install -r requirements.txt (see nemo_gym/cli_setup_command.py).
+# Editable NeMo Gym only. Extra packages for ``environment: osworld`` (etc.) install when that YAML key is set
+# and ``environments/<environment>/requirements.txt`` exists (see cube README).
 
 -e nemo-gym[dev] @ ../../
-osworld-cube @ git+https://github.com/The-AI-Alliance/cube-harness.git#subdirectory=cubes/osworld-cube
-# cube_computer_tool imports PIL; keep explicit so resolution always includes it.
-pillow>=9.0

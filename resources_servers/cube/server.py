@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""NeMo-Gym resources server for CUBE ``Task`` episodes (YAML ``env_domain`` selects the adapter)."""
+"""NeMo-Gym resources server for CUBE ``Task`` episodes (YAML ``environment`` selects the adapter)."""
 
 from __future__ import annotations
 
@@ -35,14 +35,14 @@ from resources_servers.cube.schemas import (
 
 
 if TYPE_CHECKING:
-    from resources_servers.cube.domains.base import CubeEnvironmentBase
+    from resources_servers.cube.environments.base import CubeEnvironmentBase
 
 
 logger = logging.getLogger(__name__)
 
 
 class CubeResourcesServer(SimpleResourcesServer):
-    """Hosts CUBE tasks; ``config.env_domain`` selects a :class:`~resources_servers.cube.domains.base.CubeEnvironmentBase` for load + warmup hooks."""
+    """Hosts CUBE tasks; ``config.environment`` selects a :class:`~resources_servers.cube.environments.base.CubeEnvironmentBase` for load + warmup hooks."""
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -55,7 +55,7 @@ class CubeResourcesServer(SimpleResourcesServer):
 
     def _cube_domain_adapter(self) -> CubeEnvironmentBase:
         if self._cube_domain_adapter_cache is None:
-            self._cube_domain_adapter_cache = instantiate_domain(self.config.env_domain)
+            self._cube_domain_adapter_cache = instantiate_domain(self.config.environment)
         return self._cube_domain_adapter_cache
 
     def ensure_task_configs(self) -> None:

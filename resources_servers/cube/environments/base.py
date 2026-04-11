@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Abstract hook surface for CUBE resources server ``env_domain`` values (osworld, …)."""
+"""Abstract hook surface for CUBE resources server ``environment`` values (osworld, …)."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 
 class CubeEnvironmentBase(ABC):
-    """Abstract base for a YAML ``env_domain`` value: load tasks, optional startup warmup, HTTP error strings."""
+    """Abstract base for a YAML ``environment`` value: load tasks, optional startup warmup, HTTP error strings."""
 
     @abstractmethod
     def ensure_loaded(self, server: CubeResourcesServer) -> None:

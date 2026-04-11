@@ -1,16 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Name → :class:`CubeEnvironmentBase` subclass registry for YAML ``config.env_domain``.
+"""Name → :class:`CubeEnvironmentBase` subclass registry for YAML ``config.environment``.
 
 This module maps string keys (e.g. ``osworld``) to implementation classes and builds instances.
-Concrete behavior lives under :mod:`resources_servers.cube.domains`.
+Concrete behavior lives under :mod:`resources_servers.cube.environments`.
 """
 
 from __future__ import annotations
 
 from typing import Dict, Type
 
-from resources_servers.cube.domains.base import CubeEnvironmentBase
+from resources_servers.cube.environments.base import CubeEnvironmentBase
 
 
 _REGISTERED_DOMAIN_CLASSES: Dict[str, Type[CubeEnvironmentBase]] = {}
@@ -18,7 +18,7 @@ _builtin_domains_registered: bool = False
 
 
 def register_domain(name: str, cls: Type[CubeEnvironmentBase]) -> None:
-    """Register a :class:`CubeEnvironmentBase` subclass for YAML ``env_domain: <name>``."""
+    """Register a :class:`CubeEnvironmentBase` subclass for YAML ``environment: <name>``."""
     _REGISTERED_DOMAIN_CLASSES[name] = cls
 
 
@@ -35,7 +35,7 @@ def _ensure_builtin_domains() -> None:
     global _builtin_domains_registered
     if _builtin_domains_registered:
         return
-    from resources_servers.cube.domains.osworld import OSWorldEnvironment
+    from resources_servers.cube.environments.osworld import OSWorldEnvironment
 
     _REGISTERED_DOMAIN_CLASSES.setdefault("osworld", OSWorldEnvironment)
     _builtin_domains_registered = True
