@@ -25,6 +25,7 @@ environ["TAU2_DATA_DIR"] = str(DATA_DIR)
 
 from fastapi import Body
 from loguru import logger
+from pydantic import Field
 
 from nemo_gym.base_resources_server import (
     BaseRunRequest,
@@ -51,6 +52,7 @@ from tau2.utils.llm_utils import to_litellm_messages
 class Tau2Config(BaseResponsesAPIAgentConfig):
     model_server: ModelServerRef
     user_model_server: ModelServerRef
+    user_llm_args: dict = Field(default_factory=dict)
     debug: bool = False
     print_step_counts: bool = False
     # Tau2 default
@@ -118,9 +120,7 @@ class Tau2Agent(SimpleResponsesAPIAgent):
         config.llm_args_user |= {
             "api_base": f"{get_server_url(self.config.user_model_server.name)}/v1",
             "api_key": "dummy api key",
-        }
-        # TODO support User LLM temperature parameter. Temperature 0.0 is not supported for GPT 5.2
-        config.llm_args_user.pop("temperature")
+        } | self.config.user_llm_args
         # Need `openai/` provider prefix for LiteLLM
         config.llm_agent = "openai/dummy agent model"
         config.llm_args_agent = {
