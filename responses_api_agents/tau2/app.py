@@ -40,7 +40,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.server_utils import get_server_url
+from nemo_gym.server_utils import get_server_url, is_nemo_gym_fastapi_entrypoint
 from responses_api_models.vllm_model.app import VLLMConverter, split_responses_input_output_items
 from tau2.data_model.simulation import SimulationRun, TextRunConfig
 from tau2.data_model.tasks import Task
@@ -187,3 +187,5 @@ class Tau2Agent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     Tau2Agent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    app = Tau2Agent.run_webserver()  # noqa: F401

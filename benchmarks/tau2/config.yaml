@@ -11,6 +11,8 @@ tau2_benchmark_agent:
       user_model_server:
         type: responses_api_models
         name: gpt-5_2-2025-12-11
+      # Tau2 has some pretty hefty data processing operations to execute tool calls
+      num_workers: 4
       datasets:
       # TODO eventually we may want to split up the domains so we can configure num repeats for each individual domain
       - name: tau2
