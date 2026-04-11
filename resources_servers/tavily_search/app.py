@@ -56,7 +56,7 @@ class TavilySearchResourcesServerConfig(BaseResourcesServerConfig):
 
 
 class TavilySearchRequest(BaseModel):
-    query: Optional[str] = None  # Make optional to handle missing args gracefully
+    queries: List[str]
 
 
 class TavilySearchResponse(BaseModel):
@@ -81,6 +81,15 @@ class ScrollPageRequest(BaseModel):
 class ScrollPageResponse(BaseModel):
     results_string: str
     total_words: int
+
+
+class BrowseRequest(BaseModel):
+    urls: List[str]
+    goal: Optional[str] = None
+
+
+class BrowseResponse(BaseModel):
+    results_string: str
 
 
 class TavilySearchRunRequest(BaseRunRequest):
@@ -221,9 +230,8 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
 
-        app.post("/web_search")(self.web_search)
-        app.post("/find_in_page")(self.find_in_page)
-        app.post("/scroll_page")(self.scroll_page)
+        app.post("/search")(self.search)
+        app.post("/browse")(self.browse)
 
         main_app_lifespan = app.router.lifespan_context
 
@@ -249,7 +257,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         self._num_requests += 1
         return client
 
-    async def web_search(self, request: Request, body: TavilySearchRequest) -> TavilySearchResponse:
+    async def search(self, request: Request, body: TavilySearchRequest) -> TavilySearchResponse:
         metrics = self._session_id_to_metrics[request.session[SESSION_ID_KEY]]
 
         if self.config.debug:
@@ -267,6 +275,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             max_results=self.MAX_RESULTS,
             exclude_domains=self._exclude_domains,
             search_depth="advanced",
+            include_raw_content=True,
         )
         metrics.async_tavily_calls.append(
             TavilySearchSingleAsyncTavilyMetrics(
@@ -394,6 +403,43 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             results_string=header + numbered,
             total_words=total_words,
         )
+
+    async def browse(self, request: Request, body: BrowseRequest) -> BrowseResponse:
+        metrics = self._session_id_to_metrics[request.session[SESSION_ID_KEY]]
+
+        if self.config.debug:
+            print("\n\n browse urls: ", body.urls)
+            print(f"goal={body.goal}")
+
+        urls = [u for u in body.urls if not self._is_url_excluded(u)]
+        if not urls:
+            return BrowseResponse(results_string="URL is empty or in excluded domains")
+        urls = urls[:5]
+
+        async_tavily_client = self._select_tavily_client()
+        start_time = time()
+        results = await async_tavily_client.extract(
+            urls=urls,
+            query=body.goal,  # optional hint to prioritize relevant content
+        )
+        metrics.async_tavily_calls.append(
+            TavilySearchSingleAsyncTavilyMetrics(
+                function="extract", status="success", start_time=start_time, end_time=time()
+            )
+        )
+
+        result_list = results.get("results", [])
+        if not result_list:
+            return BrowseResponse(results_string="No content extracted.")
+
+        blocks = []
+        for r in result_list:
+            url = r.get("url", "")
+            content = self._clean_text(r.get("raw_content", ""))
+            blocks.append(f"[URL]: {url}\n[Content]:\n{content}\n")
+
+        results_string = "\n\n".join(blocks) if blocks else "No content extracted."
+        return BrowseResponse(results_string=results_string)
 
     async def verify(self, request: Request, body: TavilySearchVerifyRequest) -> TavilySearchVerifyResponse:
         question = body.question
