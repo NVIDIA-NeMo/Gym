@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import json
 import re
 from asyncio import sleep
@@ -56,7 +57,8 @@ class TavilySearchResourcesServerConfig(BaseResourcesServerConfig):
 
 
 class TavilySearchRequest(BaseModel):
-    queries: List[str]
+    queries: Optional[List[str]] = None # Make optional to handle missing args gracefully
+    max_total_length: int = 30000
 
 
 class TavilySearchResponse(BaseModel):
@@ -237,34 +239,41 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         self._num_requests += 1
         return client
 
-    async def search(self, request: Request, body: TavilySearchRequest) -> TavilySearchResponse:
-        metrics = self._session_id_to_metrics[request.session[SESSION_ID_KEY]]
-
-        if self.config.debug:
-            print("\n\n body.query: ", body.query)
-        if body.query is None:
-            return TavilySearchResponse(results_string="Query is none")
-
-        if len(body.query) > 400:
-            return TavilySearchResponse(results_string="Query is too long")
-
-        async_tavily_client = self._select_tavily_client()
-        start_time = time()
-        results = await async_tavily_client.search(
-            body.query,
+    async def _search_one(self, query: str, max_length: int) -> str:
+        client = self._select_tavily_client()
+        results = await client.search(
+            query,
             max_results=self.MAX_RESULTS,
             exclude_domains=self._exclude_domains,
             search_depth="advanced",
             include_raw_content=True,
         )
+        postprocessed_results = self._postprocess_search_results(query, results, max_length)
+        return postprocessed_results
+
+    async def search(self, request: Request, body: TavilySearchRequest) -> TavilySearchResponse:
+        metrics = self._session_id_to_metrics[request.session[SESSION_ID_KEY]]
+
+        if self.config.debug:
+            print("\n\n body.queries: ", body.queries)
+        if body.queries is None:
+            return TavilySearchResponse(results_string="Query is none")
+
+        if len("".join(body.queries)) > 400:
+            return TavilySearchResponse(results_string="Query is too long")
+
+        start_time = time()
+        max_per_query_length = body.max_total_length // len(body.queries)
+        results = await asyncio.gather(*[self._search_one(q, max_per_query_length) for q in body.queries])
+
         metrics.async_tavily_calls.append(
             TavilySearchSingleAsyncTavilyMetrics(
                 function="search", status="success", start_time=start_time, end_time=time()
             )
         )
 
-        postprocessed_results = self._postprocess_search_results(results)
-        return TavilySearchResponse(results_string="".join(postprocessed_results))
+        postprocessed_results = "\n\n".join(results)
+        return TavilySearchResponse(results_string=postprocessed_results)
 
     async def browse(self, request: Request, body: BrowseRequest) -> BrowseResponse:
         metrics = self._session_id_to_metrics[request.session[SESSION_ID_KEY]]
@@ -300,7 +309,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             content = self._clean_text(r.get("raw_content", ""))
             blocks.append(f"[URL]: {url}\n[Content]:\n{content}\n")
 
-        results_string = "\n\n".join(blocks) if blocks else "No content extracted."
+        results_string = "\n\n".join(blocks)
         return BrowseResponse(results_string=results_string)
 
     async def verify(self, request: Request, body: TavilySearchVerifyRequest) -> TavilySearchVerifyResponse:
@@ -363,20 +372,28 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             cut = max_chars
         return text[:cut], True
 
-    def _postprocess_search_results(self, results: dict) -> list[str]:
-        # If an answer is present, return ONLY the answer (no individual search results)
-        answer = results.get("answer")
-        if answer is not None:
-            return [f"Search Answer\n==============\n{answer}\n"]
+    def _postprocess_search_results(self, query: str, results: dict, max_length: int) -> str:
+        blocks = [f"[Search Query]: {query}"]
+        running_len = len(blocks[0])
 
-        formatted_results = ["Search Results\n==============\n"]
-        for i, result in enumerate(results["results"], 1):
-            domain = self._extract_domain(result["url"])
-            snippet = self._clean_text(result.get("content", ""))
-            snippet, _ = self._truncate_text(snippet)
-            formatted_results.append(
-                f"[{i}] {result['title']} ({domain})\n    URL: {result['url']}\n    Summary: {snippet}\n\n"
+        for result in results:
+            title = result.get("title", "")
+            url = result.get("url", "")
+            content = result.get("raw_content") or result.get("content", "")
+            if len(content) > 5000:
+                content = content[:5000] + "\n... [truncated]"
+            entry = (
+                f"[Title]: {title}\n"
+                f"[URL]: {url}\n"
+                f"[Content]:\n{content}\n"
             )
+
+            if running_len + len(entry) > max_length:
+                break
+            blocks.append(entry)
+            running_len += len(entry)
+
+        formatted_results = "\n".join(blocks)
         return formatted_results
 
     def _parse_exclude_domains(self) -> list[str]:
