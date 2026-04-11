@@ -59,6 +59,9 @@ def prepare() -> Path:
         # The actual prompts are constructed on the fly by Tau2-Bench
         # data["responses_create_params"]
 
+        # Clean temperature sampling parameters
+        data["config"]["llm_args_user"].pop("temperature")
+
         samples.append(data)
 
     count = 0
