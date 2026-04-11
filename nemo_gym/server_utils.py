@@ -659,7 +659,8 @@ Full body: {json.dumps(exc.body, indent=4)}
             uvicorn_kwargs["app"] = app
 
         if is_main_fastapi_proc:
-            uvicorn.run(**uvicorn_kwargs)
+            # TODO remove
+            uvicorn.run(**uvicorn_kwargs, log_level="debug")
 
         return app
 
