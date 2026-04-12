@@ -1,65 +1,47 @@
 (kubernetes)=
 # Kubernetes Deployment
 
-NeMo Gym can run on a Kubernetes cluster, separate from the training framework. The typical split: NeMo RL runs on a Slurm/GPU cluster for training and inference, NeMo Gym runs on a K8s cluster for environment orchestration.
-
-```
-Slurm cluster (GPU)              K8s cluster (CPU)
-+-----------------------+        +---------------------------+
-| NeMo RL training      |        | Agent server pods         |
-| vLLM inference        | <----> | Resources server pods     |
-|                       |  HTTP  | Model proxy pod           |
-+-----------------------+        +---------------------------+
-```
-
-The model server on K8s proxies inference requests to the vLLM endpoint on Slurm. Everything else runs on K8s without GPUs.
+NeMo Gym can run on a K8s cluster separate from the training framework. NeMo RL stays on Slurm with GPUs, NeMo Gym runs on K8s with CPUs, model server proxies to vLLM on Slurm.
 
 ## Quick start
 
 ```bash
-# Apply base resources
 kubectl apply -f k8s/base/namespace.yaml
 kubectl apply -f k8s/base/rbac.yaml
 
-# Build a server image (example: math_with_code)
 docker build --build-arg SERVER_PATH=resources_servers/math_with_code \
   -t nemogym/math-with-code:latest -f k8s/base/Dockerfile .
 docker save nemogym/math-with-code:latest | ctr -n k8s.io images import -
 
-# Deploy
 kubectl apply -f k8s/examples/math-with-code.yaml
 ```
 
-## Repository layout
+## Layout
 
 ```
 k8s/
   base/
     Dockerfile           # Generic, parameterized by SERVER_PATH build arg
-    namespace.yaml       # nemogym namespace
-    rbac.yaml            # ServiceAccount + Role for K8s Job management
-    server-template.yaml # Copy-and-fill template for new servers
+    namespace.yaml
+    rbac.yaml
+    server-template.yaml # Copy-and-fill for new servers
   examples/
-    math-with-code.yaml  # In-process resources server
-    k8s-sandbox.yaml     # Container-per-request resources server
-    model-server-proxy.yaml  # Proxies to Slurm vLLM
-    simple-agent.yaml    # Agent wired to resources + model via service DNS
+    math-with-code.yaml
+    k8s-sandbox.yaml
+    model-server-proxy.yaml
+    simple-agent.yaml
 ```
 
 ## Building images
 
-The generic Dockerfile at `k8s/base/Dockerfile` builds any NeMo Gym server:
-
 ```bash
-docker build \
-  --build-arg SERVER_PATH=resources_servers/math_with_code \
-  -t nemogym/math-with-code:latest \
-  -f k8s/base/Dockerfile .
+docker build --build-arg SERVER_PATH=resources_servers/math_with_code \
+  -t nemogym/math-with-code:latest -f k8s/base/Dockerfile .
 ```
 
-Server-specific pip dependencies are installed from the server's `requirements.txt` automatically.
+Server-specific deps installed from the server's `requirements.txt`.
 
-For local clusters (kubeadm), load images into containerd:
+For kubeadm clusters, load into containerd:
 
 ```bash
 docker save nemogym/math-with-code:latest | ctr -n k8s.io images import -
@@ -67,9 +49,9 @@ docker save nemogym/math-with-code:latest | ctr -n k8s.io images import -
 
 ## Configuration
 
-Each server pod gets its config via `NEMO_GYM_CONFIG_DICT` and `NEMO_GYM_CONFIG_PATH` environment variables, injected from a ConfigMap. See the example manifests for the JSON format.
+Config injected via `NEMO_GYM_CONFIG_DICT` and `NEMO_GYM_CONFIG_PATH` env vars from a ConfigMap. See example manifests.
 
-Inter-server references use K8s service DNS:
+Inter-server refs use K8s service DNS:
 
 ```json
 "resources_server": {
@@ -80,38 +62,32 @@ Inter-server references use K8s service DNS:
 
 ## Model server proxy
 
-The model server runs on K8s as an HTTP proxy. It translates between the Responses API and Chat Completions API, forwarding to the vLLM endpoint on the Slurm cluster.
-
-Set `policy_base_url` in the ConfigMap to the Slurm vLLM address:
+Proxies to vLLM on Slurm. Set `policy_base_url` in the ConfigMap:
 
 ```json
 "policy_base_url": "http://slurm-head:8000/v1"
 ```
 
-The K8s cluster and Slurm cluster must be network-reachable.
-
 ## Container-per-request servers
 
-Servers that need isolated execution (k8s_sandbox, swe_agents_k8s) spawn K8s Jobs for each request using `K8sJobRunner`. These servers need the `nemogym` ServiceAccount (which has Job/Pod RBAC).
+k8s_sandbox and swe_agents_k8s spawn K8s Jobs per request via `K8sJobRunner`. Need the `nemogym` ServiceAccount for RBAC.
 
 ### k8s_sandbox
 
-Each `/execute_code` call spawns a `python:3.12-slim` Job. Code is passed via env var. No shared filesystem needed.
+Each `/execute_code` spawns a `python:3.12-slim` Job. Code passed via env var.
 
 ### swe_agents_k8s
 
-Each SWE-bench instance runs as a K8s Job using the instance's Docker image. Requires two PVCs:
+Each SWE-bench instance runs as a K8s Job. Requires two PVCs:
 
 | PVC | Access mode | Contents |
 |-----|-------------|----------|
-| `swe-workspace` | ReadWriteMany | Instance data, patches, trajectories (created at runtime) |
-| `swe-setup` | ReadOnlyMany | Pre-built OpenHands, miniforge3, SWE-bench harness |
-
-The setup PVC must be pre-populated before running SWE-bench tasks. The workspace PVC is used automatically.
+| `swe-workspace` | ReadWriteMany | Runtime data, patches, trajectories |
+| `swe-setup` | ReadOnlyMany | Pre-built OpenHands, miniforge3, SWE-bench |
 
 ## RBAC
 
-The `nemogym` ServiceAccount in `k8s/base/rbac.yaml` grants:
+`k8s/base/rbac.yaml` grants the `nemogym` ServiceAccount:
 
 | API group | Resource | Verbs |
 |-----------|----------|-------|
@@ -119,11 +95,11 @@ The `nemogym` ServiceAccount in `k8s/base/rbac.yaml` grants:
 | core | `pods` | list, get |
 | core | `pods/log` | get |
 
-Only servers that spawn K8s Jobs need this ServiceAccount. Pure HTTP servers can run without it.
+Only needed for servers that spawn Jobs.
 
 ## K8sJobRunner
 
-`nemo_gym/k8s_runner.py` provides the `K8sJobRunner` class used by container-per-request servers. It wraps the synchronous Kubernetes Python client with async executors to avoid blocking the FastAPI event loop.
+`nemo_gym/k8s_runner.py` -- async wrapper around the sync K8s Python client.
 
 ```python
 runner = K8sJobRunner(namespace="nemogym")
@@ -135,4 +111,4 @@ exit_code, stdout, stderr = await runner.run_job(
 )
 ```
 
-Supports `env`, `volume_mounts`, `volumes` (PVC, emptyDir, configMap, hostPath), and `resource_limits`.
+Supports `env`, `volume_mounts`, `volumes`, and `resource_limits`.
