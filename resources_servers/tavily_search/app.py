@@ -57,8 +57,32 @@ class TavilySearchResourcesServerConfig(BaseResourcesServerConfig):
 
 
 class TavilySearchRequest(BaseModel):
-    queries: Optional[List[str]] = None # Make optional to handle missing args gracefully
+    queries: Optional[List[str]] = None  # Make optional to handle missing args gracefully
     max_total_length: int = 30000
+
+    @model_validator(mode="before")
+    @classmethod
+    def coerce_queries(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        queries = data.get("queries")
+        if queries is None:
+            return data
+
+        # Case 1: JSON-encoded string → parse it
+        if isinstance(queries, str):
+            try:
+                queries = json.loads(queries)
+            except (json.JSONDecodeError, ValueError):
+                queries = [queries]
+
+        # Case 2: nested list e.g. [["q1", "q2"]] → flatten one level
+        if isinstance(queries, list) and queries and isinstance(queries[0], list):
+            queries = [q for sublist in queries for q in sublist if isinstance(q, str)]
+
+        data = dict(data)
+        data["queries"] = queries
+        return data
 
 
 class TavilySearchResponse(BaseModel):
@@ -68,6 +92,30 @@ class TavilySearchResponse(BaseModel):
 class BrowseRequest(BaseModel):
     urls: List[str]
     goal: Optional[str] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def coerce_urls(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        urls = data.get("querurlsies")
+        if urls is None:
+            return data
+
+        # Case 1: JSON-encoded string → parse it
+        if isinstance(urls, str):
+            try:
+                urls = json.loads(urls)
+            except (json.JSONDecodeError, ValueError):
+                urls = [urls]
+
+        # Case 2: nested list e.g. [["q1", "q2"]] → flatten one level
+        if isinstance(urls, list) and urls and isinstance(urls[0], list):
+            urls = [q for sublist in urls for q in sublist if isinstance(q, str)]
+
+        data = dict(data)
+        data["urls"] = urls
+        return data
 
 
 class BrowseResponse(BaseModel):
@@ -240,6 +288,9 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         return client
 
     async def _search_one(self, query: str, max_length: int) -> str:
+        if len(query) > 400:
+            return "Query is too long"
+
         client = self._select_tavily_client()
         results = await client.search(
             query,
@@ -248,6 +299,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             search_depth="advanced",
             include_raw_content=True,
         )
+
         postprocessed_results = self._postprocess_search_results(query, results, max_length)
         return postprocessed_results
 
@@ -256,11 +308,9 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
 
         if self.config.debug:
             print("\n\n body.queries: ", body.queries)
-        if body.queries is None:
-            return TavilySearchResponse(results_string="Query is none")
 
-        if len("".join(body.queries)) > 400:
-            return TavilySearchResponse(results_string="Query is too long")
+        if body.queries is None or len(body.queries) == 0:
+            return TavilySearchResponse(results_string="Query is none or empty")
 
         start_time = time()
         max_per_query_length = body.max_total_length // len(body.queries)
@@ -304,9 +354,9 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             return BrowseResponse(results_string="No content extracted.")
 
         blocks = []
-        for r in result_list:
-            url = r.get("url", "")
-            content = self._clean_text(r.get("raw_content", ""))
+        for result in result_list:
+            url = result.get("url", "")
+            content = self._clean_text(result.get("raw_content", ""))
             blocks.append(f"[URL]: {url}\n[Content]:\n{content}\n")
 
         results_string = "\n\n".join(blocks)
@@ -376,7 +426,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         blocks = [f"[Search Query]: {query}"]
         running_len = len(blocks[0])
 
-        for result in results:
+        for result in results["results"]:
             title = result.get("title", "")
             url = result.get("url", "")
             content = result.get("raw_content") or result.get("content", "")
