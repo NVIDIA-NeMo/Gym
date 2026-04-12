@@ -1,0 +1,23 @@
+# Dockerfile for the NeMo Gym head server (service discovery).
+#
+# Build:
+#   docker build -t nemogym/head-server:latest -f k8s/base/Dockerfile.head .
+
+FROM python:3.12-slim
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential git && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir uv
+
+COPY nemo_gym/ ./nemo_gym/
+COPY pyproject.toml README.md ./
+RUN mkdir -p cache && uv pip install --system --no-cache . uvicorn[standard]
+
+COPY k8s/base/head_server_main.py ./head_server_main.py
+
+EXPOSE 8000
+
+CMD ["python", "head_server_main.py"]

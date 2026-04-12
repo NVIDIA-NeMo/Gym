@@ -1,57 +1,66 @@
 (kubernetes)=
-# Kubernetes Deployment
+# kubernetes deployment
 
-NeMo Gym can run on a K8s cluster separate from the training framework. NeMo RL stays on Slurm with GPUs, NeMo Gym runs on K8s with CPUs, model server proxies to vLLM on Slurm.
+run nemo gym on k8s, separate from the training cluster. nemo rl stays on slurm with gpus. nemo gym runs on k8s with cpus. model server on k8s proxies inference requests to vllm on slurm.
 
-## Quick start
+## quick start
 
 ```bash
 kubectl apply -f k8s/base/namespace.yaml
 kubectl apply -f k8s/base/rbac.yaml
 
+# build any server image
 docker build --build-arg SERVER_PATH=resources_servers/math_with_code \
   -t nemogym/math-with-code:latest -f k8s/base/Dockerfile .
 docker save nemogym/math-with-code:latest | ctr -n k8s.io images import -
 
+# deploy
 kubectl apply -f k8s/examples/math-with-code.yaml
 ```
 
-## Layout
+## layout
 
 ```
 k8s/
   base/
-    Dockerfile           # Generic, parameterized by SERVER_PATH build arg
+    Dockerfile             parameterized by SERVER_PATH build arg
+    Dockerfile.head        head server image
+    head_server_main.py    standalone head server entrypoint
     namespace.yaml
     rbac.yaml
-    server-template.yaml # Copy-and-fill for new servers
+    server-template.yaml   copy and fill in REPLACE_* values
   examples/
+    head-server.yaml       service discovery, nodeport for nemo rl
     math-with-code.yaml
     k8s-sandbox.yaml
     model-server-proxy.yaml
     simple-agent.yaml
 ```
 
-## Building images
+## nemo rl integration
+
+no changes to nemo rl. the existing `NemoGym` environment class connects to a head server, fetches the config dict with all server addresses, and routes requests through `ServerClient`. on k8s the head server is its own pod with a nodeport. nemo rl just points `head_server_config` at that nodeport.
+
+the head server configmap (`k8s/examples/head-server.yaml`) is the single source of truth for server addresses. when you add or remove a server on k8s, update that configmap.
+
+## building images
 
 ```bash
 docker build --build-arg SERVER_PATH=resources_servers/math_with_code \
   -t nemogym/math-with-code:latest -f k8s/base/Dockerfile .
 ```
 
-Server-specific deps installed from the server's `requirements.txt`.
-
-For kubeadm clusters, load into containerd:
+server-specific deps from `requirements.txt` get installed automatically. for kubeadm clusters load into containerd:
 
 ```bash
 docker save nemogym/math-with-code:latest | ctr -n k8s.io images import -
 ```
 
-## Configuration
+## config
 
-Config injected via `NEMO_GYM_CONFIG_DICT` and `NEMO_GYM_CONFIG_PATH` env vars from a ConfigMap. See example manifests.
+each server pod gets config from a configmap with `NEMO_GYM_CONFIG_DICT` and `NEMO_GYM_CONFIG_PATH` env vars. see the example manifests for the json format.
 
-Inter-server refs use K8s service DNS:
+servers find each other via k8s service dns:
 
 ```json
 "resources_server": {
@@ -60,46 +69,34 @@ Inter-server refs use K8s service DNS:
 }
 ```
 
-## Model server proxy
+## model server proxy
 
-Proxies to vLLM on Slurm. Set `policy_base_url` in the ConfigMap:
+proxies to vllm on slurm. set `policy_base_url` to the slurm vllm address:
 
 ```json
 "policy_base_url": "http://slurm-head:8000/v1"
 ```
 
-## Container-per-request servers
+## servers that spawn containers
 
-k8s_sandbox and swe_agents_k8s spawn K8s Jobs per request via `K8sJobRunner`. Need the `nemogym` ServiceAccount for RBAC.
+k8s_sandbox and swe_agents_k8s use `K8sJobRunner` to spawn k8s jobs per request. they need the `nemogym` serviceaccount for rbac (job create/delete/get, pod list, pod log).
+
+most servers (math_with_code, code_gen, judges, etc) don't spawn containers and don't need this.
 
 ### k8s_sandbox
 
-Each `/execute_code` spawns a `python:3.12-slim` Job. Code passed via env var.
+demo server. `/execute_code` spawns a `python:3.12-slim` job, passes code via env var, returns stdout/stderr/exit_code. just a proof of concept for the k8s job pattern -- real environments define their own tool endpoints.
 
 ### swe_agents_k8s
 
-Each SWE-bench instance runs as a K8s Job. Requires two PVCs:
+each swe-bench instance runs as a k8s job. needs two pvcs:
 
-| PVC | Access mode | Contents |
-|-----|-------------|----------|
-| `swe-workspace` | ReadWriteMany | Runtime data, patches, trajectories |
-| `swe-setup` | ReadOnlyMany | Pre-built OpenHands, miniforge3, SWE-bench |
-
-## RBAC
-
-`k8s/base/rbac.yaml` grants the `nemogym` ServiceAccount:
-
-| API group | Resource | Verbs |
-|-----------|----------|-------|
-| `batch` | `jobs` | create, get, list, delete |
-| core | `pods` | list, get |
-| core | `pods/log` | get |
-
-Only needed for servers that spawn Jobs.
+- `swe-workspace` (rwx) -- runtime data, patches, trajectories
+- `swe-setup` (rox) -- pre-built openhands, miniforge3, swe-bench harness
 
 ## K8sJobRunner
 
-`nemo_gym/k8s_runner.py` -- async wrapper around the sync K8s Python client.
+`nemo_gym/k8s_runner.py` -- wraps the sync kubernetes python client with async executors so the fastapi event loop doesn't block.
 
 ```python
 runner = K8sJobRunner(namespace="nemogym")
@@ -111,4 +108,4 @@ exit_code, stdout, stderr = await runner.run_job(
 )
 ```
 
-Supports `env`, `volume_mounts`, `volumes`, and `resource_limits`.
+supports `env`, `volume_mounts`, `volumes`, and `resource_limits`.

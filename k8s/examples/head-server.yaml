@@ -1,0 +1,134 @@
+# Head server: service discovery for NeMo Gym.
+# NeMo RL's NemoGym actor connects here to get all server addresses.
+# Build: docker build --build-arg SERVER_PATH=nemo_gym \
+#          -t nemogym/head-server:latest -f k8s/base/Dockerfile.head .
+#
+# The ConfigMap below is the full config dict. Every server's host/port
+# must use K8s service DNS names so NeMo RL can route through the head server.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: head-server
+  namespace: nemogym
+  labels:
+    app: head-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: head-server
+  template:
+    metadata:
+      labels:
+        app: head-server
+    spec:
+      containers:
+        - name: head-server
+          image: nemogym/head-server:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: head-server-config
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: head-server
+  namespace: nemogym
+spec:
+  type: NodePort
+  selector:
+    app: head-server
+  ports:
+    - port: 8000
+      targetPort: 8000
+---
+# This ConfigMap is the single source of truth for all server addresses.
+# Every server deployed on K8s must appear here with its service DNS name.
+# NeMo RL connects to the head server, fetches this config, and uses it
+# to route requests to the right services.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: head-server-config
+  namespace: nemogym
+data:
+  NEMO_GYM_CONFIG_PATH: __head_server__
+  NEMO_GYM_CONFIG_DICT: |
+    {
+      "head_server": {
+        "host": "0.0.0.0",
+        "port": 8000
+      },
+
+      "math_with_code": {
+        "resources_servers": {
+          "math_with_code": {
+            "entrypoint": "app.py",
+            "name": "math_with_code",
+            "host": "math-with-code.nemogym.svc.cluster.local",
+            "port": 8001,
+            "max_execution_time": 10
+          }
+        }
+      },
+
+      "k8s_sandbox": {
+        "resources_servers": {
+          "k8s_sandbox": {
+            "entrypoint": "app.py",
+            "name": "k8s_sandbox",
+            "host": "k8s-sandbox.nemogym.svc.cluster.local",
+            "port": 8001,
+            "job_namespace": "nemogym",
+            "job_image": "python:3.12-slim",
+            "execution_timeout": 30
+          }
+        }
+      },
+
+      "math_with_code_simple_agent": {
+        "responses_api_agents": {
+          "simple_agent": {
+            "entrypoint": "app.py",
+            "name": "math_with_code_simple_agent",
+            "host": "simple-agent.nemogym.svc.cluster.local",
+            "port": 8003,
+            "resources_server": {
+              "type": "resources_servers",
+              "name": "math_with_code"
+            },
+            "model_server": {
+              "type": "responses_api_models",
+              "name": "policy_model"
+            }
+          }
+        }
+      },
+
+      "policy_model": {
+        "responses_api_models": {
+          "openai_model": {
+            "entrypoint": "app.py",
+            "name": "policy_model",
+            "host": "model-proxy.nemogym.svc.cluster.local",
+            "port": 8002
+          }
+        }
+      },
+
+      "policy_base_url": "http://SLURM_VLLM_HOST:8000/v1",
+      "policy_api_key": "dummy",
+      "policy_model_name": "your-model-name",
+      "dry_run": false
+    }
