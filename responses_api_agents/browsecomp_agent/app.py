@@ -47,6 +47,7 @@ class BrowsecompAgentConfig(BaseResponsesAPIAgentConfig):
     model_server: ModelServerRef
     max_steps: int = 400
     keep_rounds: int = 9999
+    nudge_steps: bool = True
 
 
 class BrowsecompAgentRunRequest(BaseRunRequest):
@@ -132,6 +133,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             if not all_fn_calls and all_output_messages:
                 break
 
+            # --- Execute tool calls ---
             for output_function_call in all_fn_calls:
                 api_response = await self.server_client.post(
                     server_name=self.config.resources_server.name,
@@ -142,12 +144,55 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 # We don't raise for status here since it's a valid return for the API to error e.g. if the model outputs an invalid call or something.
                 resources_server_cookies = api_response.cookies
 
+                tool_output = (await api_response.content.read()).decode()
+                if self.config.nudge_steps:
+                    turns_left = self.config.max_steps - step
+                    tool_output += "\n\n[%d turns remaining out of %d]" % (turns_left, self.config.max_steps)
+
                 tool_response = NeMoGymFunctionCallOutput(
                     type="function_call_output",
                     call_id=output_function_call.call_id,
-                    output=(await api_response.content.read()).decode(),
+                    output=tool_output,
                 )
                 new_outputs.append(tool_response)
+
+            # --- Nudge the model at milestone steps ---
+            if self.config.nudge_steps and all_fn_calls:
+                quarter = self.config.max_steps // 4
+                half = self.config.max_steps // 2
+                near_end = int(self.config.max_steps * 0.875)
+                nudge_msg = None
+                if step == quarter:
+                    nudge_msg = (
+                        "\n\n\n\n\n"
+                        "[SYSTEM NOTE: You have used %d out of %d turns. "
+                        "Please consider consolidating your findings and "
+                        "delivering an answer soon.]" % (step, self.config.max_steps)
+                    )
+                elif step == half:
+                    nudge_msg = (
+                        "\n\n\n\n\n"
+                        "[SYSTEM NOTE: You have used %d out of %d turns — "
+                        "you are halfway through your budget. You should start "
+                        "formulating your final answer based on the research "
+                        "you have already done. Do not keep searching endlessly.]"
+                        % (step, self.config.max_steps)
+                    )
+                elif step == near_end:
+                    nudge_msg = (
+                        "\n\n\n\n\n"
+                        "[SYSTEM NOTE: URGENT — You have used %d out of %d turns. "
+                        "You are almost out of turns. YOU MUST deliver your final "
+                        "answer NOW using the information you have already gathered. "
+                        "Do NOT make any more tool calls. Provide your best answer "
+                        "immediately in the required format with 'Exact Answer:' on "
+                        "a line by itself.]" % (step, self.config.max_steps)
+                    )
+
+                if nudge_msg:
+                    last_tool = new_outputs[-1]
+                    new_output = last_tool.output + nudge_msg
+                    new_outputs[-1] = last_tool.model_copy(update={"output": new_output})
 
             # Check if max steps is not None and if we have exhausted it.
             if self.config.max_steps and step >= self.config.max_steps:
