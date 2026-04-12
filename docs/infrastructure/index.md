@@ -22,4 +22,12 @@ Technical notes on infrastructure decisions and design rationale.
 {bdg-secondary}`engineering-notes` {bdg-secondary}`case-studies`
 :::
 
+:::{grid-item-card} {octicon}`container;1.5em;sd-mr-1` Kubernetes
+:link: kubernetes
+:link-type: doc
+Kubernetes deployment manifests and the k8s_sandbox environment.
++++
+{bdg-secondary}`kubernetes` {bdg-secondary}`deployment`
+:::
+
 ::::

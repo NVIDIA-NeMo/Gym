@@ -384,6 +384,7 @@ Nemotron 3 Super <model-recipes/nemotron-3-super>
 
 Overview <infrastructure/index>
 Deployment Topology <infrastructure/deployment-topology>
+Kubernetes <infrastructure/kubernetes>
 Engineering Notes <infrastructure/engineering-notes/index>
 ```
 

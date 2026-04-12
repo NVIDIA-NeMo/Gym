@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: k8s-sandbox
+  namespace: nemogym
+  labels:
+    app: k8s-sandbox
+spec:
+  selector:
+    app: k8s-sandbox
+  ports:
+    - name: http
+      port: 8001
+      targetPort: 8001
+  type: ClusterIP

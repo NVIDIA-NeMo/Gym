@@ -1,0 +1,24 @@
+k8s_sandbox:
+  resources_servers:
+    k8s_sandbox:
+      entrypoint: app.py
+      domain: coding
+      verified: false
+      description: Runs each code execution in an isolated Kubernetes Job.
+      job_namespace: default
+      job_image: python:3.12-slim
+      execution_timeout: 30
+k8s_sandbox_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: k8s_sandbox
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/k8s_sandbox/data/example.jsonl
