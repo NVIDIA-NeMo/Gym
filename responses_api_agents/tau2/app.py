@@ -123,7 +123,7 @@ class Tau2Agent(SimpleResponsesAPIAgent):
         config.llm_user = "openai/dummy user model"
         config.llm_args_user |= {
             "api_base": f"{get_server_url(self.config.user_model_server.name)}/v1",
-            "api_key": "dummy api key",
+            "api_key": "dummy api key",  # pragma: allowlist secret
         } | self.config.user_llm_args
 
         extra_agent_args = {k: v for k, v in responses_create_params.items() if k in ("temperature", "top_p")}
@@ -131,7 +131,7 @@ class Tau2Agent(SimpleResponsesAPIAgent):
         config.llm_agent = "openai/dummy agent model"
         config.llm_args_agent = {
             "api_base": f"{get_server_url(self.config.model_server.name)}/v1",
-            "api_key": "dummy api key",
+            "api_key": "dummy api key",  # pragma: allowlist secret
         } | extra_agent_args
 
         config.max_steps = self.config.max_steps
