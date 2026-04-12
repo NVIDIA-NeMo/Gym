@@ -45,7 +45,8 @@ from nemo_gym.server_utils import get_response_json, raise_for_status
 class BrowsecompAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
-    max_steps: int = None
+    max_steps: int = 400
+    keep_rounds: int = 9999
 
 
 class BrowsecompAgentRunRequest(BaseRunRequest):
@@ -82,6 +83,10 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
 
         while True:
             step += 1
+
+            if self.config.keep_rounds is not None and new_outputs:
+                new_outputs = self._compact_old_tool_messages(new_outputs)
+
             new_body = body.model_copy(update={"input": body.input + new_outputs})
 
             model_response = await self.server_client.post(
@@ -200,6 +205,22 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         await raise_for_status(response)
         return AggregateMetrics.model_validate(await get_response_json(response))
 
+    def _compact_old_tool_messages(self, messages):
+        """
+        Replace old tool-call results with a placeholder, keeping only the most
+        recent *keep_rounds* tool messages.  This is the key context-management
+        trick that enables long agent trajectories within a finite context window.
+        """
+        tool_indices = [i for i, m in enumerate(messages) if m.type == "function_call_output"]
+        if len(tool_indices) <= self.config.keep_rounds:
+            return messages
+
+        for i in range(len(tool_indices) - self.config.keep_rounds):
+            idx = tool_indices[i]
+            messages[idx] = messages[idx].model_copy(
+                update={"output": "[Previous tool result hidden for context management]"}
+            )
+        return messages
 
 if __name__ == "__main__":
     BrowsecompAgent.run_webserver()

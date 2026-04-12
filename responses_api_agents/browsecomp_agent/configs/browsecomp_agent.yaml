@@ -3,6 +3,7 @@ browsecomp_agent:
     browsecomp_agent:
       entrypoint: app.py
       max_steps: 400
+      keep_rounds: 9999
       resources_server:
         type: resources_servers
         name: ???
