@@ -1,0 +1,70 @@
+# Template for deploying a NeMo Gym server on K8s.
+# Copy this file and fill in the values marked with REPLACE_*.
+#
+# Usage:
+#   1. Build the image:
+#      docker build --build-arg SERVER_PATH=REPLACE_SERVER_PATH \
+#        -t REPLACE_IMAGE -f k8s/base/Dockerfile .
+#      docker save REPLACE_IMAGE | ctr -n k8s.io images import -
+#
+#   2. Fill in REPLACE_* values below and apply:
+#      kubectl apply -f k8s/base/namespace.yaml
+#      kubectl apply -f k8s/base/rbac.yaml
+#      kubectl apply -f my-server.yaml
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: REPLACE_NAME
+  namespace: nemogym
+  labels:
+    app: REPLACE_NAME
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: REPLACE_NAME
+  template:
+    metadata:
+      labels:
+        app: REPLACE_NAME
+    spec:
+      serviceAccountName: nemogym
+      containers:
+        - name: server
+          image: REPLACE_IMAGE
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: REPLACE_PORT
+          envFrom:
+            - configMapRef:
+                name: REPLACE_NAME-config
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "2"
+              memory: "4Gi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: REPLACE_NAME
+  namespace: nemogym
+spec:
+  selector:
+    app: REPLACE_NAME
+  ports:
+    - port: REPLACE_PORT
+      targetPort: REPLACE_PORT
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: REPLACE_NAME-config
+  namespace: nemogym
+data:
+  NEMO_GYM_CONFIG_PATH: REPLACE_CONFIG_PATH
+  NEMO_GYM_CONFIG_DICT: |
+    REPLACE_CONFIG_JSON

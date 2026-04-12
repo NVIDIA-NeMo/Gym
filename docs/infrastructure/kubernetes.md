@@ -1,36 +1,117 @@
 (kubernetes)=
 # Kubernetes Deployment
 
-NeMo Gym can run on Kubernetes. This page covers the deployment manifests, RBAC, and the `k8s_sandbox` environment that demonstrates container-per-request execution using Kubernetes Jobs.
-
-## Manifests
-
-All manifests live under `resources_servers/k8s_sandbox/manifests/`.
+NeMo Gym can run on a Kubernetes cluster, separate from the training framework. The typical split: NeMo RL runs on a Slurm/GPU cluster for training and inference, NeMo Gym runs on a K8s cluster for environment orchestration.
 
 ```
-resources_servers/k8s_sandbox/manifests/
-├── Dockerfile          # Resources server image
-├── namespace.yaml      # nemogym namespace
-├── rbac.yaml           # ServiceAccount, Role, RoleBinding
-├── deployment.yaml     # Deployment + ConfigMap
-└── service.yaml        # ClusterIP on port 8001
+Slurm cluster (GPU)              K8s cluster (CPU)
++-----------------------+        +---------------------------+
+| NeMo RL training      |        | Agent server pods         |
+| vLLM inference        | <----> | Resources server pods     |
+|                       |  HTTP  | Model proxy pod           |
++-----------------------+        +---------------------------+
 ```
 
-### Build and deploy
+The model server on K8s proxies inference requests to the vLLM endpoint on Slurm. Everything else runs on K8s without GPUs.
+
+## Quick start
 
 ```bash
-docker build -t nemogym/k8s-sandbox:latest -f resources_servers/k8s_sandbox/manifests/Dockerfile .
-docker save nemogym/k8s-sandbox:latest | ctr -n k8s.io images import -
+# Apply base resources
+kubectl apply -f k8s/base/namespace.yaml
+kubectl apply -f k8s/base/rbac.yaml
 
-kubectl apply -f resources_servers/k8s_sandbox/manifests/namespace.yaml
-kubectl apply -f resources_servers/k8s_sandbox/manifests/rbac.yaml
-kubectl apply -f resources_servers/k8s_sandbox/manifests/deployment.yaml
-kubectl apply -f resources_servers/k8s_sandbox/manifests/service.yaml
+# Build a server image (example: math_with_code)
+docker build --build-arg SERVER_PATH=resources_servers/math_with_code \
+  -t nemogym/math-with-code:latest -f k8s/base/Dockerfile .
+docker save nemogym/math-with-code:latest | ctr -n k8s.io images import -
+
+# Deploy
+kubectl apply -f k8s/examples/math-with-code.yaml
 ```
 
-### RBAC
+## Repository layout
 
-The server pod creates Jobs and reads their logs. The Role grants:
+```
+k8s/
+  base/
+    Dockerfile           # Generic, parameterized by SERVER_PATH build arg
+    namespace.yaml       # nemogym namespace
+    rbac.yaml            # ServiceAccount + Role for K8s Job management
+    server-template.yaml # Copy-and-fill template for new servers
+  examples/
+    math-with-code.yaml  # In-process resources server
+    k8s-sandbox.yaml     # Container-per-request resources server
+    model-server-proxy.yaml  # Proxies to Slurm vLLM
+    simple-agent.yaml    # Agent wired to resources + model via service DNS
+```
+
+## Building images
+
+The generic Dockerfile at `k8s/base/Dockerfile` builds any NeMo Gym server:
+
+```bash
+docker build \
+  --build-arg SERVER_PATH=resources_servers/math_with_code \
+  -t nemogym/math-with-code:latest \
+  -f k8s/base/Dockerfile .
+```
+
+Server-specific pip dependencies are installed from the server's `requirements.txt` automatically.
+
+For local clusters (kubeadm), load images into containerd:
+
+```bash
+docker save nemogym/math-with-code:latest | ctr -n k8s.io images import -
+```
+
+## Configuration
+
+Each server pod gets its config via `NEMO_GYM_CONFIG_DICT` and `NEMO_GYM_CONFIG_PATH` environment variables, injected from a ConfigMap. See the example manifests for the JSON format.
+
+Inter-server references use K8s service DNS:
+
+```json
+"resources_server": {
+  "host": "math-with-code.nemogym.svc.cluster.local",
+  "port": 8001
+}
+```
+
+## Model server proxy
+
+The model server runs on K8s as an HTTP proxy. It translates between the Responses API and Chat Completions API, forwarding to the vLLM endpoint on the Slurm cluster.
+
+Set `policy_base_url` in the ConfigMap to the Slurm vLLM address:
+
+```json
+"policy_base_url": "http://slurm-head:8000/v1"
+```
+
+The K8s cluster and Slurm cluster must be network-reachable.
+
+## Container-per-request servers
+
+Servers that need isolated execution (k8s_sandbox, swe_agents_k8s) spawn K8s Jobs for each request using `K8sJobRunner`. These servers need the `nemogym` ServiceAccount (which has Job/Pod RBAC).
+
+### k8s_sandbox
+
+Each `/execute_code` call spawns a `python:3.12-slim` Job. Code is passed via env var. No shared filesystem needed.
+
+### swe_agents_k8s
+
+Each SWE-bench instance runs as a K8s Job using the instance's Docker image. Requires two PVCs:
+
+| PVC | Access mode | Contents |
+|-----|-------------|----------|
+| `swe-workspace` | ReadWriteMany | Instance data, patches, trajectories (created at runtime) |
+| `swe-setup` | ReadOnlyMany | Pre-built OpenHands, miniforge3, SWE-bench harness |
+
+The setup PVC must be pre-populated before running SWE-bench tasks. The workspace PVC is used automatically.
+
+## RBAC
+
+The `nemogym` ServiceAccount in `k8s/base/rbac.yaml` grants:
 
 | API group | Resource | Verbs |
 |-----------|----------|-------|
@@ -38,74 +119,20 @@ The server pod creates Jobs and reads their logs. The Role grants:
 | core | `pods` | list, get |
 | core | `pods/log` | get |
 
-The Role is namespaced to `nemogym`.
-
-### Configuration
-
-Server config is injected via `NEMO_GYM_CONFIG_DICT` and `NEMO_GYM_CONFIG_PATH` in the ConfigMap in `deployment.yaml`. Adjust `job_namespace`, `job_image`, and `execution_timeout` there.
-
-## k8s_sandbox environment
-
-`resources_servers/k8s_sandbox` is a resources server where each `/execute_code` call spawns a Kubernetes Job. The job runs the submitted Python code in a fresh `python:3.12-slim` container and returns stdout, stderr, and exit code. Jobs are deleted after completion.
-
-Code is passed to the container via the `__CODE` environment variable:
-
-```python
-command=["python", "-c", "import os; exec(os.environ['__CODE'])"]
-env={"__CODE": body.code}
-```
-
-### Verify
-
-`/verify` checks whether `expected_output` appears in the stdout of the last tool call output. Returns `reward=1.0` on match, `0.0` otherwise.
-
-### Run locally
-
-```bash
-export NEMO_GYM_CONFIG_PATH=k8s_sandbox
-export NEMO_GYM_CONFIG_DICT='{
-  "k8s_sandbox": {
-    "resources_servers": {
-      "k8s_sandbox": {
-        "entrypoint": "app.py",
-        "name": "k8s_sandbox",
-        "host": "127.0.0.1",
-        "port": 8765,
-        "job_namespace": "nemogym",
-        "job_image": "python:3.12-slim",
-        "execution_timeout": 30
-      }
-    }
-  },
-  "head_server": {"host": "127.0.0.1", "port": 8000},
-  "dry_run": false
-}'
-
-cd resources_servers/k8s_sandbox && python app.py
-```
-
-```bash
-curl -X POST http://127.0.0.1:8765/execute_code \
-  -H "Content-Type: application/json" \
-  -d '{"code": "print(sum(range(1, 101)))"}'
-```
-
-```json
-{"exit_code": 0, "stdout": "5050", "stderr": ""}
-```
+Only servers that spawn K8s Jobs need this ServiceAccount. Pure HTTP servers can run without it.
 
 ## K8sJobRunner
 
-`nemo_gym/k8s_runner.py` provides `K8sJobRunner`, a reusable async wrapper around the synchronous Kubernetes Python client. Blocking K8s API calls run in a thread-pool executor so the FastAPI event loop is not blocked. The client is initialized lazily on first use, so importing the module is safe in environments without a kubeconfig.
+`nemo_gym/k8s_runner.py` provides the `K8sJobRunner` class used by container-per-request servers. It wraps the synchronous Kubernetes Python client with async executors to avoid blocking the FastAPI event loop.
 
 ```python
 runner = K8sJobRunner(namespace="nemogym")
 exit_code, stdout, stderr = await runner.run_job(
-    job_name=f"sandbox-{uuid4().hex[:12]}",
+    job_name="sandbox-abc123",
     image="python:3.12-slim",
     command=["python", "-c", "print('hello')"],
     timeout=30,
 )
 ```
 
-`run_job` accepts optional `env`, `volume_mounts`, and `volumes` for more complex workloads. Jobs are deleted in a `finally` block after the call returns (`cleanup=True` by default); `ttl_seconds_after_finished=300` acts as a fallback if deletion fails.
+Supports `env`, `volume_mounts`, `volumes` (PVC, emptyDir, configMap, hostPath), and `resource_limits`.

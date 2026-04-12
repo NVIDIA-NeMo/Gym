@@ -1,0 +1,77 @@
+# k8s_sandbox: container-per-request code execution via K8s Jobs.
+# Build: docker build --build-arg SERVER_PATH=resources_servers/k8s_sandbox \
+#          -t nemogym/k8s-sandbox:latest -f k8s/base/Dockerfile .
+# Requires: kubernetes pip package in the image (add to requirements.txt).
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: k8s-sandbox
+  namespace: nemogym
+  labels:
+    app: k8s-sandbox
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: k8s-sandbox
+  template:
+    metadata:
+      labels:
+        app: k8s-sandbox
+    spec:
+      serviceAccountName: nemogym
+      containers:
+        - name: server
+          image: nemogym/k8s-sandbox:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8001
+          envFrom:
+            - configMapRef:
+                name: k8s-sandbox-config
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1"
+              memory: "2Gi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: k8s-sandbox
+  namespace: nemogym
+spec:
+  selector:
+    app: k8s-sandbox
+  ports:
+    - port: 8001
+      targetPort: 8001
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: k8s-sandbox-config
+  namespace: nemogym
+data:
+  NEMO_GYM_CONFIG_PATH: k8s_sandbox
+  NEMO_GYM_CONFIG_DICT: |
+    {
+      "k8s_sandbox": {
+        "resources_servers": {
+          "k8s_sandbox": {
+            "entrypoint": "app.py",
+            "name": "k8s_sandbox",
+            "host": "0.0.0.0",
+            "port": 8001,
+            "job_namespace": "nemogym",
+            "job_image": "python:3.12-slim",
+            "execution_timeout": 30
+          }
+        }
+      },
+      "head_server": {"host": "127.0.0.1", "port": 8000},
+      "dry_run": false
+    }

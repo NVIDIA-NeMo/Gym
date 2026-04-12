@@ -1,0 +1,74 @@
+# math_with_code: in-process Python execution, no container spawning.
+# Build: docker build --build-arg SERVER_PATH=resources_servers/math_with_code \
+#          -t nemogym/math-with-code:latest -f k8s/base/Dockerfile .
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: math-with-code
+  namespace: nemogym
+  labels:
+    app: math-with-code
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: math-with-code
+  template:
+    metadata:
+      labels:
+        app: math-with-code
+    spec:
+      serviceAccountName: nemogym
+      containers:
+        - name: server
+          image: nemogym/math-with-code:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8001
+          envFrom:
+            - configMapRef:
+                name: math-with-code-config
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "4"
+              memory: "8Gi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: math-with-code
+  namespace: nemogym
+spec:
+  selector:
+    app: math-with-code
+  ports:
+    - port: 8001
+      targetPort: 8001
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: math-with-code-config
+  namespace: nemogym
+data:
+  NEMO_GYM_CONFIG_PATH: math_with_code
+  NEMO_GYM_CONFIG_DICT: |
+    {
+      "math_with_code": {
+        "resources_servers": {
+          "math_with_code": {
+            "entrypoint": "app.py",
+            "name": "math_with_code",
+            "host": "0.0.0.0",
+            "port": 8001,
+            "max_execution_time": 10
+          }
+        }
+      },
+      "head_server": {"host": "127.0.0.1", "port": 8000},
+      "dry_run": false
+    }

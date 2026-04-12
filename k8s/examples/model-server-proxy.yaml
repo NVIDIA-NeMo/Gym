@@ -1,0 +1,78 @@
+# Model server that proxies to a vLLM endpoint on a Slurm cluster.
+# No GPU needed on the K8s side; this is a pure HTTP proxy.
+# Build: docker build --build-arg SERVER_PATH=responses_api_models/openai_model \
+#          -t nemogym/model-proxy:latest -f k8s/base/Dockerfile .
+#
+# Set SLURM_VLLM_URL to the vLLM endpoint address accessible from the K8s cluster.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: model-proxy
+  namespace: nemogym
+  labels:
+    app: model-proxy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: model-proxy
+  template:
+    metadata:
+      labels:
+        app: model-proxy
+    spec:
+      containers:
+        - name: server
+          image: nemogym/model-proxy:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8002
+          envFrom:
+            - configMapRef:
+                name: model-proxy-config
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "256Mi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: model-proxy
+  namespace: nemogym
+spec:
+  selector:
+    app: model-proxy
+  ports:
+    - port: 8002
+      targetPort: 8002
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: model-proxy-config
+  namespace: nemogym
+data:
+  NEMO_GYM_CONFIG_PATH: policy_model
+  NEMO_GYM_CONFIG_DICT: |
+    {
+      "policy_model": {
+        "responses_api_models": {
+          "openai_model": {
+            "entrypoint": "app.py",
+            "name": "policy_model",
+            "host": "0.0.0.0",
+            "port": 8002
+          }
+        }
+      },
+      "policy_base_url": "http://SLURM_VLLM_HOST:8000/v1",
+      "policy_api_key": "your-api-key",
+      "policy_model_name": "your-model-name",
+      "head_server": {"host": "127.0.0.1", "port": 8000},
+      "dry_run": false
+    }

@@ -35,6 +35,7 @@ class K8sJobRunner:
         env: Optional[dict[str, str]],
         volume_mounts: Optional[list[dict]],
         volumes: Optional[list[dict]],
+        resource_limits: Optional[dict[str, str]] = None,
     ):
         from kubernetes import client
 
@@ -76,6 +77,20 @@ class K8sJobRunner:
                             config_map=client.V1ConfigMapVolumeSource(name=v["configMap"]["name"]),
                         )
                     )
+                elif "hostPath" in v:
+                    k8s_volumes.append(
+                        client.V1Volume(
+                            name=v["name"],
+                            host_path=client.V1HostPathVolumeSource(
+                                path=v["hostPath"]["path"],
+                                type=v["hostPath"].get("type", ""),
+                            ),
+                        )
+                    )
+
+        resources = None
+        if resource_limits:
+            resources = client.V1ResourceRequirements(limits=resource_limits)
 
         container = client.V1Container(
             name="runner",
@@ -83,6 +98,7 @@ class K8sJobRunner:
             command=command,
             env=env_vars if env_vars else None,
             volume_mounts=k8s_volume_mounts,
+            resources=resources,
         )
 
         return client.V1Job(
@@ -172,6 +188,7 @@ class K8sJobRunner:
         env: Optional[dict[str, str]] = None,
         volume_mounts: Optional[list[dict]] = None,
         volumes: Optional[list[dict]] = None,
+        resource_limits: Optional[dict[str, str]] = None,
         cleanup: bool = True,
         poll_interval: float = 1.0,
     ) -> tuple[int, str, str]:
@@ -181,7 +198,7 @@ class K8sJobRunner:
         unless there is a runner-level error such as a timeout.
         """
         loop = asyncio.get_running_loop()
-        job_obj = self._build_job(job_name, image, command, timeout, env, volume_mounts, volumes)
+        job_obj = self._build_job(job_name, image, command, timeout, env, volume_mounts, volumes, resource_limits)
 
         try:
             await loop.run_in_executor(None, self._sync_create, job_obj)

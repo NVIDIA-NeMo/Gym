@@ -1,0 +1,35 @@
+swe_agents_k8s:
+  responses_api_agents:
+    swe_agents_k8s:
+      entrypoint: app.py
+
+      agent_framework: openhands
+      agent_config: responses_api_agents/swe_agents/configs/oh_config.toml
+      agent_max_turns: 100
+      agent_framework_repo: https://github.com/sdevare-nv/nv-OpenHands.git
+      agent_framework_commit: 0d766ad06b2be64a42e6f0175b9ebcc4a06599d9  # pragma: allowlist secret
+
+      container_formatter: ???
+      swebench_agent_timeout: 1800
+      swebench_tests_timeout: 900
+      apptainer_memory_limit_mb: 32768
+      command_exec_timeout: 300
+
+      k8s_namespace: nemogym
+      workspace_pvc_name: swe-workspace
+      setup_pvc_name: swe-setup
+      workspace_mount_path: /nemogym-workspace
+      setup_mount_path: /nemogym-setup
+      k8s_memory_limit: "32Gi"
+      k8s_cpu_limit: "4"
+
+      dataset_path: ???
+
+      model_server:
+        name: policy_model
+        type: responses_api_models
+
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: responses_api_agents/swe_agents/data/example.jsonl

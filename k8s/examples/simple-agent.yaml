@@ -1,0 +1,85 @@
+# simple_agent: orchestrates model calls and tool calls for single-turn benchmarks.
+# Connects to a resources server and model server via K8s service DNS.
+# Build: docker build --build-arg SERVER_PATH=responses_api_agents/simple_agent \
+#          -t nemogym/simple-agent:latest -f k8s/base/Dockerfile .
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: simple-agent
+  namespace: nemogym
+  labels:
+    app: simple-agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: simple-agent
+  template:
+    metadata:
+      labels:
+        app: simple-agent
+    spec:
+      containers:
+        - name: server
+          image: nemogym/simple-agent:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8003
+          envFrom:
+            - configMapRef:
+                name: simple-agent-config
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "2"
+              memory: "4Gi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: simple-agent
+  namespace: nemogym
+spec:
+  selector:
+    app: simple-agent
+  ports:
+    - port: 8003
+      targetPort: 8003
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: simple-agent-config
+  namespace: nemogym
+data:
+  NEMO_GYM_CONFIG_PATH: math_with_code_simple_agent
+  NEMO_GYM_CONFIG_DICT: |
+    {
+      "math_with_code_simple_agent": {
+        "responses_api_agents": {
+          "simple_agent": {
+            "entrypoint": "app.py",
+            "name": "math_with_code_simple_agent",
+            "host": "0.0.0.0",
+            "port": 8003,
+            "resources_server": {
+              "type": "resources_servers",
+              "name": "math_with_code",
+              "host": "math-with-code.nemogym.svc.cluster.local",
+              "port": 8001
+            },
+            "model_server": {
+              "type": "responses_api_models",
+              "name": "policy_model",
+              "host": "model-proxy.nemogym.svc.cluster.local",
+              "port": 8002
+            }
+          }
+        }
+      },
+      "head_server": {"host": "127.0.0.1", "port": 8000},
+      "dry_run": false
+    }
