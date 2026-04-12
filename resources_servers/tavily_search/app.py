@@ -229,7 +229,7 @@ class TavilySearchAIOHTTPClient(BaseModel):
 
 class TavilySearchResourcesServer(SimpleResourcesServer):
     config: TavilySearchResourcesServerConfig
-    MAX_RESULTS: int = 10
+    MAX_RESULTS: int = 5
     MAX_RESULT_CHARS: int = 2000
 
     _async_tavily_clients: Optional[List[AsyncTavilyClient]] = PrivateAttr(default=None)
@@ -339,15 +339,23 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
 
         async_tavily_client = self._select_tavily_client()
         start_time = time()
-        results = await async_tavily_client.extract(
-            urls=urls,
-            query=body.goal,  # optional hint to prioritize relevant content
-        )
-        metrics.async_tavily_calls.append(
-            TavilySearchSingleAsyncTavilyMetrics(
-                function="extract", status="success", start_time=start_time, end_time=time()
+        try:
+            results = await async_tavily_client.extract(
+                urls=urls,
+                query=body.goal,  # optional hint to prioritize relevant content
             )
-        )
+            metrics.async_tavily_calls.append(
+                TavilySearchSingleAsyncTavilyMetrics(
+                    function="extract", status="success", start_time=start_time, end_time=time()
+                )
+            )
+        except Exception as e:
+            metrics.async_tavily_calls.append(
+                TavilySearchSingleAsyncTavilyMetrics(
+                    function="extract", status="error", start_time=start_time, end_time=time()
+                )
+            )
+            return BrowseResponse(results_string=f"Failed to extract content: {e}")
 
         result_list = results.get("results", [])
         if not result_list:
