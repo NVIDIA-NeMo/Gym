@@ -13,4 +13,7 @@ tau2_agent:
       max_steps: 200
       debug: false
       print_step_counts: false
-      datasets: []
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: responses_api_agents/tau2/data/example.jsonl
