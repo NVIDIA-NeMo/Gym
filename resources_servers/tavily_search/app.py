@@ -237,6 +237,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
     _session_id_to_metrics: Optional[Dict[str, TavilySearchMetrics]] = PrivateAttr(default=None)
 
     JUDGE_PROMPT_TEMPLATE: ClassVar[str] = JUDGE_PROMPT_TEMPLATE
+    JUDGE_MAX_ATTEMPTS: int = 10
 
     def model_post_init(self, __context) -> None:
         tavily_api_keys = self.config.tavily_api_key
@@ -467,49 +468,54 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         return exclude_domains
 
     async def _verify_answer_with_judge(self, question: str, ground_truth: str, response: str) -> JudgeEvaluation:
-        async def _get_judge_response(
-            question: str, ground_truth: str, response: str
-        ) -> tuple[NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponse]:
-            judge_create_params = self.config.judge_responses_create_params.model_copy(deep=True)
-            judge_prompt = self.JUDGE_PROMPT_TEMPLATE.format(
-                question=question, correct_answer=ground_truth, response=response
-            )
-            judge_create_params.input = [
-                NeMoGymEasyInputMessage(
-                    role="user",
-                    content=judge_prompt,
-                ),
-            ]
-            http_response = await self.server_client.post(
-                server_name=self.config.judge_model_server.name,
-                url_path="/v1/responses",
-                json=judge_create_params,
-            )
-            judge_response = NeMoGymResponse.model_validate(await http_response.json())
-            return judge_create_params, judge_response
+        response = re.sub(r"<think>.*?</think>", "", response, flags=re.DOTALL).strip()
 
-        def _grade_sample(
-            judge_create_params: NeMoGymResponseCreateParamsNonStreaming, judge_response: NeMoGymResponse
-        ) -> JudgeEvaluation:
-            # Taken from: https://github.com/openai/simple-evals/blob/5e623c2b400af62a1278e23595f95b0853d7fe8a/browsecomp_eval.py#L79-L93
-            grading_response = judge_response.output[-1].content[-1].text
-            if self.config.debug:
-                print("\n\n grading_response \n\n")
-                print(grading_response)
-            match = re.search(r"correct: (yes|no)", grading_response)
-            extracted_final_answer = match.group(1) if match else ""
-            reward = 1.0 if extracted_final_answer == "yes" else 0.0
-            return JudgeEvaluation(
-                judge_response_create_params=judge_create_params,
-                reasoning=grading_response,
-                extracted_final_answer=extracted_final_answer,
-                reward=reward,
-                judge_response=judge_response,
-            )
+        judge_prompt = self.JUDGE_PROMPT_TEMPLATE.format(
+            question=question,
+            correct_answer=ground_truth,
+            response=response
+        )
 
-        judge_create_params, judge_response = await _get_judge_response(question, ground_truth, response)
-        judge_evaluation = _grade_sample(judge_create_params, judge_response)
-        return judge_evaluation
+        judge_create_params = self.config.judge_responses_create_params.model_copy(deep=True)
+        judge_create_params.max_output_tokens = 2048
+        judge_create_params.input = [
+            NeMoGymEasyInputMessage(role="user", content=judge_prompt),
+        ]
+
+        judge_response = None
+        for attempt in range(self.JUDGE_MAX_ATTEMPTS):
+            try:
+                temp = 0.0 if attempt == 0 else min(0.3 + 0.1 * attempt, 1.0)
+                judge_create_params.temperature = temp
+
+                http_response = await self.server_client.post(
+                    server_name=self.config.judge_model_server.name,
+                    url_path="/v1/responses",
+                    json=judge_create_params,
+                )
+                judge_response = NeMoGymResponse.model_validate(await http_response.json())
+                text = judge_response.output[-1].content[-1].text
+
+                is_correct, extracted, parsed_ok = self._parse_judge(text)
+                if parsed_ok:
+                    return JudgeEvaluation(
+                        judge_response_create_params=judge_create_params,
+                        reasoning=text,
+                        extracted_final_answer=extracted,
+                        reward=1.0 if is_correct else 0.0,
+                        judge_response=judge_response,
+                    )
+
+            except Exception:
+                await sleep(min(2**attempt, 30))
+
+        return JudgeEvaluation(
+            judge_response_create_params=judge_create_params,
+            reasoning="",
+            extracted_final_answer=None,
+            reward=0.0,
+            judge_response=judge_response,
+        )
 
     def _verify_answer_with_regex(self, ground_truth: str, response: str) -> JudgeEvaluation:
         """Verify answer by checking if ground_truth (as regex) matches in response."""
@@ -530,6 +536,27 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             judge_response=None,
         )
 
+    def _parse_judge(self, text: str) -> tuple[bool, str, bool]:
+        """Parse grading output. Returns (is_correct, extracted, parsed_ok).
+
+        Uses the LAST 'correct: yes/no' match to avoid picking up template
+        echoes or reasoning inside <think> blocks.
+        """
+        matches = list(re.finditer(r"correct:\s*(yes|no)\b", text, re.IGNORECASE))
+        if not matches:
+            return False, None, False
+
+        is_correct = matches[-1].group(1).lower() == "yes"
+
+        ans_matches = list(re.finditer(
+            r"extracted_final_answer:\s*(.+?)(?:\n|$)", text
+        ))
+        extracted = ans_matches[-1].group(1).strip() if ans_matches else None
+
+        if extracted and "The final exact answer extracted from the [response]" in extracted:
+            return False, None, False
+
+        return is_correct, extracted, True
 
 if __name__ == "__main__":
     TavilySearchResourcesServer.run_webserver()
