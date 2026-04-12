@@ -1,13 +1,4 @@
-# Refer to the params in responses_api_models/local_vllm_model/configs/Qwen/Qwen3-235B-A22B-Instruct-2507-FP8.yaml
-Qwen3-235B-A22B-Instruct-2507-FP8:
-  responses_api_models:
-    vllm_model:
-      entrypoint: app.py
-      model: Qwen3-235B-A22B-Instruct-2507-FP8
-      replace_developer_role_with_system: true
-      return_token_id_information: false
-      uses_reasoning_parser: true
-browsecomp_tavily_search_resources_server:
+browsecomp_benchmark_resources_server:
   resources_servers:
     tavily_search:
       entrypoint: app.py
@@ -16,17 +7,18 @@ browsecomp_tavily_search_resources_server:
       use_judge: true
       judge_model_server:
         type: responses_api_models
-        name: Qwen3-235B-A22B-Instruct-2507-FP8
+        name: policy_model
       judge_responses_create_params:
         input: []
       verified: false
-browsecomp_tavily_search_simple_agent:
+
+browsecomp_benchmark_agent:
   responses_api_agents:
-    simple_agent:
+    browsecomp_agent:
       entrypoint: app.py
       resources_server:
         type: resources_servers
-        name: browsecomp_tavily_search_resources_server
+        name: browsecomp_benchmark_resources_server
       model_server:
         type: responses_api_models
         name: policy_model
