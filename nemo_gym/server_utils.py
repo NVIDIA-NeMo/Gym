@@ -104,10 +104,11 @@ def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSess
         "There is already a global aiohttp client setup. Please refactor your code or call `global_aiohttp_client_exit` if you want to explicitly re-make the client!"
     )
 
+    num_workers = get_nemo_gym_fastapi_num_workers()
     client_session = ClientSession(
         connector=TCPConnector(
-            limit=cfg.global_aiohttp_connector_limit,
-            limit_per_host=cfg.global_aiohttp_connector_limit_per_host,
+            limit=cfg.global_aiohttp_connector_limit // num_workers,
+            limit_per_host=cfg.global_aiohttp_connector_limit_per_host // num_workers,
         ),
         timeout=ClientTimeout(),
         cookie_jar=DummyCookieJar(),
@@ -427,25 +428,35 @@ def maybe_ray_cluster_exit():  # pragma: no cover
 
 atexit.register(maybe_ray_cluster_exit)
 
-
+# These environment variables are the ONLY environment variables that Gym uses. Please do not set these, they are only used here to pass information
+# from main proc to child procs under FastAPI/uvicorn parallelism
 IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME = "IS_NEMO_GYM_FASTAPI_WORKER"
 IS_NEMO_GYM_FASTAPI_ENTRYPOINT_KEY_NAME = "IS_NEMO_GYM_FASTAPI_ENTRYPOINT"
+NEMO_GYM_FASTAPI_NUM_WORKERS = "NEMO_GYM_FASTAPI_NUM_WORKERS"
 
 
 def is_nemo_gym_fastapi_worker() -> bool:
     return getenv(IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME) == "1"
 
 
-def is_nemo_gym_fastapi_entrypoint(file: str) -> bool:
-    return is_nemo_gym_fastapi_worker() and file.endswith(getenv(IS_NEMO_GYM_FASTAPI_ENTRYPOINT_KEY_NAME))
-
-
 def set_is_nemo_gym_fastapi_worker() -> None:
     environ[IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME] = "1"
 
 
+def is_nemo_gym_fastapi_entrypoint(file: str) -> bool:
+    return is_nemo_gym_fastapi_worker() and file.endswith(getenv(IS_NEMO_GYM_FASTAPI_ENTRYPOINT_KEY_NAME))
+
+
 def set_is_nemo_gym_fastapi_entrypoint(file: str) -> None:
     environ[IS_NEMO_GYM_FASTAPI_ENTRYPOINT_KEY_NAME] = file
+
+
+def get_nemo_gym_fastapi_num_workers() -> int:
+    return int(getenv(NEMO_GYM_FASTAPI_NUM_WORKERS, "1"))
+
+
+def set_nemo_gym_fastapi_num_workers(num_workers: int) -> None:
+    environ[NEMO_GYM_FASTAPI_NUM_WORKERS] = str(num_workers)
 
 
 class SimpleServer(BaseServer):
@@ -654,6 +665,7 @@ Full body: {json.dumps(exc.body, indent=4)}
 
             set_is_nemo_gym_fastapi_worker()
             set_is_nemo_gym_fastapi_entrypoint(str(relative_fpath))
+            set_nemo_gym_fastapi_num_workers(server.config.num_workers)
 
             uvicorn_kwargs["app"] = f"{module_import_str}:app"
             uvicorn_kwargs["workers"] = server.config.num_workers
