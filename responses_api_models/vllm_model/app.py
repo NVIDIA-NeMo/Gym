@@ -722,6 +722,31 @@ class VLLMConverter(BaseModel):
             response_output.append(reasoning_item)
 
         tool_calls_raw = message_dict.get("tool_calls", []) or []
+
+        # Fallback: vllm's minimax_m2 parser sometimes strips the <minimax:tool_call>
+        # opening tag but fails to fully parse the rest, leaving raw XML in content.
+        # Detect and recover these leaked tool calls.
+        if not tool_calls_raw and content:
+            for m in re.finditer(
+                r"<invoke\s+name=[\"']?(\w+)[\"']?>(.*?)</invoke>",
+                content,
+                re.DOTALL,
+            ):
+                func_name = m.group(1)
+                params = dict(
+                    re.findall(
+                        r"<parameter\s+name=[\"']?(\w+)[\"']?>(.*?)</parameter>",
+                        m.group(2),
+                        re.DOTALL,
+                    )
+                )
+                call_id = f"call_{uuid4().hex[:8]}"
+                tool_calls_raw.append(
+                    {"id": call_id, "function": {"name": func_name, "arguments": json.dumps(params)}}
+                )
+            if tool_calls_raw:
+                content = re.sub(r"<invoke\b.*?</minimax:tool_call>", "", content, flags=re.DOTALL).strip()
+
         # We need to return at least one output item. When the model decides to just stop with no chat or tool calls
         # We just add an output item with empty or null content here. This is prevalent e.g. in the case of base models that may not be the most reliable since they have not been instruction tuned.
         has_empty_output = not (response_output or tool_calls_raw)

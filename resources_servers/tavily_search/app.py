@@ -384,7 +384,6 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             judge_evaluation = await self._verify_answer_with_judge(question, ground_truth, last_assistant_response)
         else:
             judge_evaluation = self._verify_answer_with_regex(ground_truth, last_assistant_response)
-        print(f"{judge_evaluation=}")
         return TavilySearchVerifyResponse(
             **body.model_dump(),
             **judge_evaluation.model_dump(),
