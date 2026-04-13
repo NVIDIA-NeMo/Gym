@@ -15,6 +15,8 @@ allowed-tools: Bash(python:*) Bash(ng_*) Bash(git:*) Bash(curl:*) Bash(ps:*) Rea
 
 # NeMo Gym Debugging
 
+> **Tip:** For pre-merge anti-pattern detection (httpx usage, missing cookies, sync endpoints, etc.), use the **gym-review** skill instead. This skill is for runtime debugging.
+
 ## Step 1: Establish the failure mode
 
 Categorize the problem before investigating:

@@ -81,7 +81,7 @@ reward_model_name: your-reward-model
 
 ## Step 4: Configure datasets
 
-See the [gym-data](../gym-data/SKILL.md) skill for full dataset preparation. In config:
+See the **gym-data** skill for full dataset preparation. In config:
 
 ```yaml
 datasets:

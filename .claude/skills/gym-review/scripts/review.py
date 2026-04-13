@@ -63,17 +63,31 @@ class ReviewResult:
 
 
 # ---------------------------------------------------------------------------
+# Pre-compiled patterns (avoid recompilation per line)
+# ---------------------------------------------------------------------------
+
+RE_HTTPX = re.compile(r"\bimport\s+httpx\b|\bfrom\s+httpx\b|\bimport\s+httpcore\b|\bfrom\s+httpcore\b")
+RE_RAY_GET = re.compile(r"\bray\.get\s*\(")
+RE_DECODE_EMPTY = re.compile(r"\.decode\s*\(\s*\)")
+RE_ENV_VAR = re.compile(r'os\.(?:environ|getenv)\s*[\[\(]\s*["\'](\w+)["\']')
+RE_BAD_IMPORTS = {
+    module: re.compile(rf"\bimport\s+{module}\b|\bfrom\s+{module}\b") for module in ("litellm", "anthropic")
+}
+RE_SYNC_ENDPOINT = re.compile(r"def\s+(verify|run)\s*\(")
+RE_REWARD_VALUE = re.compile(r"reward\s*[=:]\s*(-?[\d.]+)")
+
+# ---------------------------------------------------------------------------
 # Rules
 # ---------------------------------------------------------------------------
 
 
-def check_httpx_usage(path: Path, lines: list[str], findings: list[Finding]):
+def check_httpx_usage(path: Path, lines: list[str], findings: list[Finding], full_text: str = ""):
     """BLOCK: httpx/httpcore imports — O(n^2) connection pooling hangs at 16k+ requests."""
     for i, line in enumerate(lines, 1):
         stripped = line.strip()
         if stripped.startswith("#"):
             continue
-        if re.search(r"\bimport\s+httpx\b|\bfrom\s+httpx\b|\bimport\s+httpcore\b|\bfrom\s+httpcore\b", stripped):
+        if RE_HTTPX.search(stripped):
             findings.append(
                 Finding(
                     file=str(path),
@@ -86,13 +100,13 @@ def check_httpx_usage(path: Path, lines: list[str], findings: list[Finding]):
             )
 
 
-def check_ray_get(path: Path, lines: list[str], findings: list[Finding]):
+def check_ray_get(path: Path, lines: list[str], findings: list[Finding], **kwargs):
     """BLOCK: ray.get() blocks the event loop in async context."""
     for i, line in enumerate(lines, 1):
         stripped = line.strip()
         if stripped.startswith("#"):
             continue
-        if re.search(r"\bray\.get\s*\(", stripped):
+        if RE_RAY_GET.search(stripped):
             # Check if it's inside run_in_executor (acceptable pattern)
             context_start = max(0, i - 5)
             context = "\n".join(lines[context_start:i])
@@ -110,7 +124,7 @@ def check_ray_get(path: Path, lines: list[str], findings: list[Finding]):
             )
 
 
-def check_missing_semaphore(path: Path, lines: list[str], findings: list[Finding]):
+def check_missing_semaphore(path: Path, lines: list[str], findings: list[Finding], **kwargs):
     """BLOCK: subprocess calls without asyncio.Semaphore."""
     has_subprocess = False
     has_semaphore = False
@@ -137,14 +151,14 @@ def check_missing_semaphore(path: Path, lines: list[str], findings: list[Finding
         )
 
 
-def check_decode_errors_replace(path: Path, lines: list[str], findings: list[Finding]):
+def check_decode_errors_replace(path: Path, lines: list[str], findings: list[Finding], **kwargs):
     """BLOCK: subprocess decode without errors='replace'."""
     for i, line in enumerate(lines, 1):
         stripped = line.strip()
         if stripped.startswith("#"):
             continue
         # Match .decode() calls that don't have errors="replace"
-        if re.search(r"\.decode\s*\(\s*\)", stripped):
+        if RE_DECODE_EMPTY.search(stripped):
             # Check surrounding context for subprocess
             context_start = max(0, i - 10)
             context = "\n".join(lines[context_start : i + 3])
@@ -161,14 +175,14 @@ def check_decode_errors_replace(path: Path, lines: list[str], findings: list[Fin
                 )
 
 
-def check_env_vars(path: Path, lines: list[str], findings: list[Finding]):
+def check_env_vars(path: Path, lines: list[str], findings: list[Finding], **kwargs):
     """BLOCK: config via environment variables instead of YAML."""
     allowed_env_vars = {"RAY_TMPDIR", "PATH", "LD_LIBRARY_PATH", "HOME", "USER", "TMPDIR", "CUDA_VISIBLE_DEVICES"}
     for i, line in enumerate(lines, 1):
         stripped = line.strip()
         if stripped.startswith("#"):
             continue
-        match = re.search(r'os\.(?:environ|getenv)\s*[\[\(]\s*["\'](\w+)["\']', stripped)
+        match = RE_ENV_VAR.search(stripped)
         if match:
             var_name = match.group(1)
             if var_name not in allowed_env_vars:
@@ -184,7 +198,7 @@ def check_env_vars(path: Path, lines: list[str], findings: list[Finding]):
                 )
 
 
-def check_wrong_client(path: Path, lines: list[str], findings: list[Finding]):
+def check_wrong_client(path: Path, lines: list[str], findings: list[Finding], **kwargs):
     """BLOCK: non-Gym HTTP/LLM clients."""
     bad_imports = {
         "litellm": "LiteLLM",
@@ -195,7 +209,7 @@ def check_wrong_client(path: Path, lines: list[str], findings: list[Finding]):
         if stripped.startswith("#"):
             continue
         for module, name in bad_imports.items():
-            if re.search(rf"\bimport\s+{module}\b|\bfrom\s+{module}\b", stripped):
+            if RE_BAD_IMPORTS[module].search(stripped):
                 findings.append(
                     Finding(
                         file=str(path),
@@ -208,9 +222,10 @@ def check_wrong_client(path: Path, lines: list[str], findings: list[Finding]):
                 )
 
 
-def check_cookie_propagation(path: Path, lines: list[str], findings: list[Finding]):
+def check_cookie_propagation(path: Path, lines: list[str], findings: list[Finding], full_text: str = ""):
     """BLOCK: multi-turn agents missing cookie propagation."""
-    full_text = "\n".join(lines)
+    if not full_text:
+        full_text = "\n".join(lines)
     # Only check agent files
     if "SimpleResponsesAPIAgent" not in full_text and "responses_api_agent" not in str(path):
         return
@@ -231,9 +246,10 @@ def check_cookie_propagation(path: Path, lines: list[str], findings: list[Findin
         )
 
 
-def check_token_propagation(path: Path, lines: list[str], findings: list[Finding]):
+def check_token_propagation(path: Path, lines: list[str], findings: list[Finding], full_text: str = ""):
     """BLOCK: multi-turn agents missing token ID propagation."""
-    full_text = "\n".join(lines)
+    if not full_text:
+        full_text = "\n".join(lines)
     if "SimpleResponsesAPIAgent" not in full_text and "responses_api_agent" not in str(path):
         return
 
@@ -256,9 +272,10 @@ def check_token_propagation(path: Path, lines: list[str], findings: list[Finding
         )
 
 
-def check_think_block_stripping(path: Path, lines: list[str], findings: list[Finding]):
+def check_think_block_stripping(path: Path, lines: list[str], findings: list[Finding], full_text: str = ""):
     """WARN: code parsing model output without stripping think blocks."""
-    full_text = "\n".join(lines)
+    if not full_text:
+        full_text = "\n".join(lines)
     # Only relevant for servers that parse model output
     parses_output = any(p in full_text for p in ["output_text", "extract_code", "extract_answer", "model_out"])
     strips_think = any(p in full_text for p in ["</think>", "<think>", "thinking", "reasoning_format"])
@@ -276,12 +293,12 @@ def check_think_block_stripping(path: Path, lines: list[str], findings: list[Fin
         )
 
 
-def check_sync_endpoints(path: Path, lines: list[str], findings: list[Finding]):
+def check_sync_endpoints(path: Path, lines: list[str], findings: list[Finding], **kwargs):
     """WARN: synchronous verify/run endpoints."""
     for i, line in enumerate(lines, 1):
         stripped = line.strip()
         # Match def verify or def run that are NOT async
-        if re.match(r"def\s+(verify|run)\s*\(", stripped):
+        if RE_SYNC_ENDPOINT.match(stripped):
             # Check if async is on the same line or the previous line
             prev_line = lines[i - 2].strip() if i >= 2 else ""
             if "async" not in stripped and "async" not in prev_line:
@@ -297,9 +314,10 @@ def check_sync_endpoints(path: Path, lines: list[str], findings: list[Finding]):
                 )
 
 
-def check_non_binary_rewards(path: Path, lines: list[str], findings: list[Finding]):
+def check_non_binary_rewards(path: Path, lines: list[str], findings: list[Finding], full_text: str = ""):
     """BLOCK: verify returning non-binary rewards without documentation."""
-    full_text = "\n".join(lines)
+    if not full_text:
+        full_text = "\n".join(lines)
     if "verify" not in full_text or "reward" not in full_text:
         return
 
@@ -308,7 +326,7 @@ def check_non_binary_rewards(path: Path, lines: list[str], findings: list[Findin
         stripped = line.strip()
         if stripped.startswith("#"):
             continue
-        match = re.search(r"reward\s*[=:]\s*(-?[\d.]+)", stripped)
+        match = RE_REWARD_VALUE.search(stripped)
         if match:
             val = float(match.group(1))
             if val not in (0.0, 1.0):
@@ -328,9 +346,10 @@ def check_non_binary_rewards(path: Path, lines: list[str], findings: list[Findin
                     )
 
 
-def check_yaml_config(path: Path, lines: list[str], findings: list[Finding]):
+def check_yaml_config(path: Path, lines: list[str], findings: list[Finding], full_text: str = ""):
     """Check YAML configs for common issues."""
-    full_text = "\n".join(lines)
+    if not full_text:
+        full_text = "\n".join(lines)
 
     # Check verified flag
     if "verified: true" in full_text:
@@ -451,14 +470,15 @@ def scan_file(path: Path, result: ReviewResult):
     except Exception:
         return
     lines = text.splitlines()
+    full_text = "\n".join(lines)
     result.files_scanned += 1
 
     if path.suffix == ".py":
         for check in PY_CHECKS:
-            check(path, lines, result.findings)
+            check(path, lines, result.findings, full_text=full_text)
     elif path.suffix in (".yaml", ".yml"):
         for check in YAML_CHECKS:
-            check(path, lines, result.findings)
+            check(path, lines, result.findings, full_text=full_text)
 
 
 def scan_path(target: Path, result: ReviewResult):
