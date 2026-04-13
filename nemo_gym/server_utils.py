@@ -171,7 +171,7 @@ async def request(
         except ServerDisconnectedError:
             global _NUM_SERVER_DISCONNECTED_ERROR
             _NUM_SERVER_DISCONNECTED_ERROR += 1
-            if _NUM_SERVER_DISCONNECTED_ERROR % DISCONNECTED_CLIENT_OS_PRINT_INTERVAL:
+            if _NUM_SERVER_DISCONNECTED_ERROR % DISCONNECTED_CLIENT_OS_PRINT_INTERVAL == 0:
                 print(
                     f"Hit {_NUM_SERVER_DISCONNECTED_ERROR} global `ServerDisconnectedError` while querying {url}.\n{DISCONNECTED_CLIENT_OS_HELP_TEXT}"
                 )
@@ -180,7 +180,7 @@ async def request(
         except ClientOSError:
             global _NUM_CLIENT_OS_ERROR
             _NUM_CLIENT_OS_ERROR += 1
-            if _NUM_CLIENT_OS_ERROR % DISCONNECTED_CLIENT_OS_PRINT_INTERVAL:
+            if _NUM_CLIENT_OS_ERROR % DISCONNECTED_CLIENT_OS_PRINT_INTERVAL == 0:
                 print(
                     f"Hit {_NUM_CLIENT_OS_ERROR} global `ClientOSError` while querying {url}.\n{DISCONNECTED_CLIENT_OS_HELP_TEXT}"
                 )
@@ -429,14 +429,23 @@ atexit.register(maybe_ray_cluster_exit)
 
 
 IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME = "IS_NEMO_GYM_FASTAPI_WORKER"
+IS_NEMO_GYM_FASTAPI_ENTRYPOINT_KEY_NAME = "IS_NEMO_GYM_FASTAPI_ENTRYPOINT"
 
 
 def is_nemo_gym_fastapi_worker() -> bool:
     return getenv(IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME) == "1"
 
 
+def is_nemo_gym_fastapi_entrypoint(file: str) -> bool:
+    return is_nemo_gym_fastapi_worker() and file.endswith(getenv(IS_NEMO_GYM_FASTAPI_ENTRYPOINT_KEY_NAME))
+
+
 def set_is_nemo_gym_fastapi_worker() -> None:
     environ[IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME] = "1"
+
+
+def set_is_nemo_gym_fastapi_entrypoint(file: str) -> None:
+    environ[IS_NEMO_GYM_FASTAPI_ENTRYPOINT_KEY_NAME] = file
 
 
 class SimpleServer(BaseServer):
@@ -631,17 +640,20 @@ Full body: {json.dumps(exc.body, indent=4)}
             port=server.config.port,
             # We add a very small graceful shutdown timeout so when we shutdown we cancel all inflight requests and there are no lingering requests (requests are cancelled)
             timeout_graceful_shutdown=0.5,
+            # Some workers may take a while for imports and setup_webserver.
+            timeout_worker_healthcheck=30,
         )
 
         if server.config.num_workers and server.config.num_workers > 1:
-            set_is_nemo_gym_fastapi_worker()
-
             # TODO this is very dirty. We need a cleaner way to populate this information in the configs data structures.
             server_instance_config_dict = global_config_dict[server.config.name]
             first_level_key = list(server_instance_config_dict.keys())[0]
             second_level_key = list(server_instance_config_dict[first_level_key].keys())[0]
             relative_fpath = f"{first_level_key}/{second_level_key}/{server.config.entrypoint}"
             module_import_str = relative_fpath.replace(".py", "").replace("/", ".")
+
+            set_is_nemo_gym_fastapi_worker()
+            set_is_nemo_gym_fastapi_entrypoint(str(relative_fpath))
 
             uvicorn_kwargs["app"] = f"{module_import_str}:app"
             uvicorn_kwargs["workers"] = server.config.num_workers

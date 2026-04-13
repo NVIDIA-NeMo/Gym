@@ -61,7 +61,7 @@ from nemo_gym.openai_utils import (
     NeMoGymSummary,
     TokenIDLogProbMixin,
 )
-from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_worker
+from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
 
 
 class VLLMModelConfig(BaseResponsesAPIModelConfig):
@@ -148,6 +148,12 @@ class VLLMModel(SimpleResponsesAPIModel):
                 + chat_completion_response.usage.completion_tokens,
             )
 
+        incomplete_details = None
+        if choice.finish_reason == "length":
+            incomplete_details = {"reason": "max_output_tokens"}
+        elif choice.finish_reason == "content_filter":
+            incomplete_details = {"reason": "content_filter"}
+
         # Chat Completion -> Response
         return NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
@@ -173,7 +179,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             metadata=body.metadata,
             instructions=body.instructions,
             user=body.user,
-            incomplete_details={"reason": "max_output_tokens"} if choice.finish_reason == "length" else None,
+            incomplete_details=incomplete_details,
             usage=usage,
         )
 
@@ -313,7 +319,9 @@ class VLLMModel(SimpleResponsesAPIModel):
         if not self.config.sequential_reasoning_allowed:
             last_message = body_dict["messages"][-1]
             if last_message["role"] == "assistant" and not (last_message["content"] or last_message.get("tool_calls")):
-                return self._create_empty_chat_completion()
+                res = self._create_empty_chat_completion()
+                res.choices[0].finish_reason = "content_filter"
+                return res
 
         try:
             chat_completion_dict = await client.create_chat_completion(**body_dict)
@@ -335,23 +343,9 @@ class VLLMModel(SimpleResponsesAPIModel):
                 "context length" in result_content_str or "max_tokens" in result_content_str
             )
             if is_out_of_context_length:
-                return NeMoGymChatCompletion(
-                    id="chtcmpl-123",
-                    object="chat.completion",
-                    created=int(time()),
-                    model=self.config.model,
-                    choices=[
-                        NeMoGymChoice(
-                            index=0,
-                            finish_reason="stop",
-                            message=NeMoGymChatCompletionMessage(
-                                role="assistant",
-                                content=None,
-                                tool_calls=None,
-                            ),
-                        )
-                    ],
-                )
+                res = self._create_empty_chat_completion()
+                res.choices[0].finish_reason = "length"
+                return res
             else:
                 raise e
 
@@ -423,6 +417,25 @@ class VLLMModel(SimpleResponsesAPIModel):
             # choice_dict.pop("token_ids")
 
         return NeMoGymChatCompletion.model_validate(chat_completion_dict)
+
+    def _create_empty_chat_completion(self) -> NeMoGymChatCompletion:
+        return NeMoGymChatCompletion(
+            id="chtcmpl-123",
+            object="chat.completion",
+            created=int(time()),
+            model=self.config.model,
+            choices=[
+                NeMoGymChoice(
+                    index=0,
+                    finish_reason="stop",
+                    message=NeMoGymChatCompletionMessage(
+                        role="assistant",
+                        content=None,
+                        tool_calls=None,
+                    ),
+                )
+            ],
+        )
 
     def _resolve_client(self, request: Request) -> NeMoGymAsyncOpenAI:
         session_id = request.session[SESSION_ID_KEY]
@@ -783,6 +796,9 @@ class VLLMConverter(BaseModel):
         for message in messages:
             role = message["role"]
             if role in ("user", "system", "developer"):
+                # vLLM may return None content
+                if message["content"] is None:
+                    message["content"] = ""
                 output_items.append(NeMoGymEasyInputMessage.model_validate(message))
             elif role == "assistant":
                 output_items.extend(self.postprocess_assistant_message_dict(message))
@@ -818,5 +834,5 @@ def split_responses_input_output_items(
 
 if __name__ == "__main__":
     VLLMModel.run_webserver()
-elif is_nemo_gym_fastapi_worker():
+elif is_nemo_gym_fastapi_entrypoint(__file__):
     app = VLLMModel.run_webserver()  # noqa: F401
