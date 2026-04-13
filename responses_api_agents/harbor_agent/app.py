@@ -24,6 +24,18 @@ from uuid import uuid4
 
 import ray
 from fastapi import Body, FastAPI
+from harbor.models.job.config import (
+    JobConfig,
+    LocalDatasetConfig,
+    OrchestratorConfig,
+    RegistryDatasetConfig,
+)
+from harbor.models.registry import RemoteRegistryInfo
+from harbor.models.trial.config import (
+    AgentConfig,
+    EnvironmentConfig,
+    VerifierConfig,
+)
 from pydantic import BaseModel, ConfigDict
 
 from nemo_gym.base_resources_server import (
@@ -392,19 +404,6 @@ class HarborAgent(SimpleResponsesAPIAgent):
         responses_create_params: Optional[dict[str, Any]] = None,
     ) -> dict:
         """Build a Harbor JobConfig dict for a single task."""
-        from harbor.models.job.config import (
-            JobConfig,
-            LocalDatasetConfig,
-            OrchestratorConfig,
-            RegistryDatasetConfig,
-        )
-        from harbor.models.registry import RemoteRegistryInfo
-        from harbor.models.trial.config import (
-            AgentConfig,
-            EnvironmentConfig,
-            VerifierConfig,
-        )
-
         agent_kwargs: dict[str, Any] = {"api_base": api_base}
         if responses_create_params:
             agent_kwargs["responses_create_params"] = responses_create_params
