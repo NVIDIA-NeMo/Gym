@@ -1,0 +1,42 @@
+{
+  "skill_name": "gym-data",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Generate an example.jsonl with 5 entries for a tool-calling benchmark. The model needs to call a search_web tool and a calculate tool. The verify method checks that the model called the correct tool with valid arguments.",
+      "expected_output": "JSONL where responses_create_params includes a tools array with function definitions for search_web and calculate, alongside the input messages. Each tool should have non-empty descriptions.",
+      "assertions": [
+        "responses_create_params includes a 'tools' array with at least 2 tool definitions",
+        "Each tool has type 'function' with name, description, and parameters",
+        "Tool descriptions are non-empty (not '' or missing)",
+        "verifier_metadata specifies which tool should be called and with what arguments",
+        "At least one entry expects search_web and at least one expects calculate",
+        "The file contains exactly 5 lines of valid JSON"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "I'm building an LLM-as-judge math benchmark using equivalence_llm_judge. What should verifier_metadata look like? Some of my expected answers are numeric, some are symbolic expressions.",
+      "expected_output": "verifier_metadata structure with expected_answer field, plus guidance on output_regex for per-record extraction, and how template_metadata works for the judge.",
+      "assertions": [
+        "verifier_metadata includes an expected_answer field",
+        "template_metadata with output_regex is mentioned for per-record regex extraction",
+        "The response distinguishes numeric answers (can use regex) from symbolic (need judge evaluation)",
+        "The data leakage risk is mentioned (expected_answer must not appear in the prompt)",
+        "extraction_length_threshold is mentioned for long answers that should skip regex"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "Convert a SQL benchmark dataset. Each source row has: question (natural language), db_id (database name), gold_sql (reference SQL). Generate 5 example entries.",
+      "expected_output": "JSONL with verifier_metadata containing db_id, gold_sql, question, plus additional fields like ignore_order and condition_cols that spider2_lite expects.",
+      "assertions": [
+        "verifier_metadata contains db_id, gold_sql, and question fields",
+        "ignore_order field is present (boolean for whether row order matters)",
+        "condition_cols field is present or mentioned (columns to check for equivalence)",
+        "instance_id or equivalent unique identifier is present per entry",
+        "The system prompt instructs the model to output SQL"
+      ]
+    }
+  ]
+}
