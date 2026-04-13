@@ -230,6 +230,8 @@ class SingularityEnvironment(BaseEnvironment):
             # TODO remove
             from sys import stderr
 
+            cmd[-1] = cmd[-1].replace(":5005", "#")
+
             print(cmd, file=stderr)
 
             process = await asyncio.create_subprocess_exec(
