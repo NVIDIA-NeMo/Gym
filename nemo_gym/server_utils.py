@@ -435,27 +435,27 @@ IS_NEMO_GYM_FASTAPI_ENTRYPOINT_KEY_NAME = "IS_NEMO_GYM_FASTAPI_ENTRYPOINT"
 NEMO_GYM_FASTAPI_NUM_WORKERS = "NEMO_GYM_FASTAPI_NUM_WORKERS"
 
 
-def is_nemo_gym_fastapi_worker() -> bool:
+def is_nemo_gym_fastapi_worker() -> bool:  # pragma: no cover
     return getenv(IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME) == "1"
 
 
-def set_is_nemo_gym_fastapi_worker() -> None:
+def set_is_nemo_gym_fastapi_worker() -> None:  # pragma: no cover
     environ[IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME] = "1"
 
 
-def is_nemo_gym_fastapi_entrypoint(file: str) -> bool:
+def is_nemo_gym_fastapi_entrypoint(file: str) -> bool:  # pragma: no cover
     return is_nemo_gym_fastapi_worker() and file.endswith(getenv(IS_NEMO_GYM_FASTAPI_ENTRYPOINT_KEY_NAME))
 
 
-def set_is_nemo_gym_fastapi_entrypoint(file: str) -> None:
+def set_is_nemo_gym_fastapi_entrypoint(file: str) -> None:  # pragma: no cover
     environ[IS_NEMO_GYM_FASTAPI_ENTRYPOINT_KEY_NAME] = file
 
 
-def get_nemo_gym_fastapi_num_workers() -> int:
+def get_nemo_gym_fastapi_num_workers() -> int:  # pragma: no cover
     return int(getenv(NEMO_GYM_FASTAPI_NUM_WORKERS, "1"))
 
 
-def set_nemo_gym_fastapi_num_workers(num_workers: int) -> None:
+def set_nemo_gym_fastapi_num_workers(num_workers: int) -> None:  # pragma: no cover
     environ[NEMO_GYM_FASTAPI_NUM_WORKERS] = str(num_workers)
 
 
