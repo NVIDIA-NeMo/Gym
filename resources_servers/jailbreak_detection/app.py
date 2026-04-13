@@ -203,8 +203,7 @@ class JailbreakDetectionResourcesServer(SimpleResourcesServer):
             templates_path = Path(__file__).parent / templates_path
         if not templates_path.exists():
             logger.warning(
-                "policy_verifier_templates_path %s does not exist – "
-                "policy-aware verification disabled",
+                "policy_verifier_templates_path %s does not exist – policy-aware verification disabled",
                 templates_path,
             )
             return
@@ -271,7 +270,10 @@ class JailbreakDetectionResourcesServer(SimpleResourcesServer):
         policy = (body.model_extra or {}).get("response_policy_mapped")
         if policy and policy in self._policy_verifier_map:
             return await self._verify_policy_aware(
-                body, adversarial_prompt, model_response, policy,
+                body,
+                adversarial_prompt,
+                model_response,
+                policy,
             )
 
         return await self._verify_legacy(body, adversarial_prompt, model_response)
@@ -421,10 +423,7 @@ class JailbreakDetectionResourcesServer(SimpleResourcesServer):
 
         import asyncio
 
-        tasks = [
-            self._call_verifier(v, adversarial_prompt, model_response)
-            for v in verifier_names
-        ]
+        tasks = [self._call_verifier(v, adversarial_prompt, model_response) for v in verifier_names]
         results = await asyncio.gather(*tasks)
 
         verifier_rewards: dict[str, float] = {}
@@ -444,7 +443,11 @@ class JailbreakDetectionResourcesServer(SimpleResourcesServer):
 
         logger.info(
             "[POLICY-AWARE] policy=%s verifiers=%s labels=%s rewards=%s combined=%.3f",
-            policy, verifier_names, verifier_labels, verifier_rewards, combined,
+            policy,
+            verifier_names,
+            verifier_labels,
+            verifier_rewards,
+            combined,
         )
 
         base_data = body.model_dump()

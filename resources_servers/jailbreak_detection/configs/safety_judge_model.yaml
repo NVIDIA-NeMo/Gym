@@ -3,5 +3,5 @@ safety_judge_model:
     vllm_model:
       entrypoint: app.py
       base_url: http://<host_url>:<port>/v1
-      api_key: EMPTY
+      api_key: <api_key>
       model: nvidia/Nemotron-Content-Safety-Reasoning-4B
