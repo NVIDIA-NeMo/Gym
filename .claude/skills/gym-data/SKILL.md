@@ -172,8 +172,16 @@ datasets:
 
 - `jsonl_fpath` is the local download destination
 - `huggingface_identifier` tells the system where to fetch from (use `gitlab_identifier` only for NVIDIA-internal datasets not yet on HuggingFace)
+- `huggingface_identifier.artifact_fpath` is optional — omit it for structured dataset discovery
 - `example` datasets don't need a remote identifier — they're committed to git
-- `license` is required for train and validation datasets
+- `num_repeats` (default: 1) — repeats the dataset N times during training data preparation
+- `license` is required for train and validation datasets. Valid values:
+  - `Apache 2.0`
+  - `MIT`
+  - `Creative Commons Attribution 4.0 International`
+  - `Creative Commons Attribution-ShareAlike 4.0 International`
+  - `GNU General Public License v3.0`
+  - `TBD` (placeholder — replace before merge)
 
 ## Step 7: Fix .gitignore
 

@@ -33,6 +33,11 @@ Key requirements:
 - `run()` must be `async def`
 - Accept `request: Request` (for cookies) and `body` (the run request)
 
+Inherited attributes:
+- `self.server_client` — `ServerClient` instance for async HTTP calls to model/resources servers. Wraps aiohttp with retry logic (3 tries, exponential backoff) and connection pooling.
+- `self.config` — the agent's Hydra config (resources_server, model_server, datasets, etc.)
+- Override `aggregate_metrics()` for custom metric computation after rollout collection.
+
 ---
 
 ## Multi-turn correction loop

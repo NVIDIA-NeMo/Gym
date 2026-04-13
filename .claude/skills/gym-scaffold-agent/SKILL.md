@@ -56,6 +56,15 @@ class MyAgent(SimpleResponsesAPIAgent):
         ...
 ```
 
+### Key inherited attributes
+
+Your agent inherits from `SimpleServer`, which provides:
+
+- **`self.server_client`** — a `ServerClient` instance for making async HTTP calls to model and resources servers. Wraps aiohttp with retry logic (3 tries, exponential backoff) and connection pooling. Use it for all downstream calls.
+- **`self.config`** — the agent's Hydra config (resources_server, model_server, datasets, etc.)
+
+You can also override `aggregate_metrics()` to compute custom metrics after rollout collection.
+
 ### The `/run` endpoint
 
 This is where orchestration happens. The general pattern:

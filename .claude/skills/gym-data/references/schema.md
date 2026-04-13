@@ -241,7 +241,9 @@ datasets:
 
 - `jsonl_fpath`: local download destination
 - `huggingface_identifier`: where to fetch from (use `gitlab_identifier` only for NVIDIA-internal datasets not yet on HuggingFace)
-- `license`: required for train/validation datasets
+- `huggingface_identifier.artifact_fpath`: optional — omit for structured dataset discovery
+- `num_repeats`: (default: 1) repeats the dataset N times during training data preparation
+- `license`: required for train/validation datasets. Valid values: `Apache 2.0`, `MIT`, `Creative Commons Attribution 4.0 International`, `Creative Commons Attribution-ShareAlike 4.0 International`, `GNU General Public License v3.0`, `TBD`
 
 ### Validation
 

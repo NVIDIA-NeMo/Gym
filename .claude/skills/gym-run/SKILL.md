@@ -153,14 +153,16 @@ Key parameters:
 | `max_output_tokens` | Model output budget | 4096-16384 depending on task complexity |
 | `temperature` | Sampling temperature | 1.0 for RL profiling, 0.0 for deterministic |
 | `num_repeats_add_seed` | Add unique seed per repeat | `true` for reproducibility |
+| `prompt_config` | Path to prompt YAML template | Builds `input` from template at rollout time; mutually exclusive with pre-populated input in JSONL |
+| `upload_rollouts_to_wandb` | Upload results to W&B | `true` by default; set `false` for local-only runs |
 
 ## Step 8: Hand off to gym-profile
 
-Once rollouts are collected, use **gym-profile** to analyze:
+Once rollouts are collected, use **gym-profile** to analyze. The `ng_collect_rollouts` command auto-generates a materialized inputs file alongside the rollouts (with a `_materialized_inputs` suffix):
 
 ```bash
 ng_reward_profile \
-  +input_jsonl_fpath=path/to/dataset.jsonl \
+  +materialized_inputs_jsonl_fpath=results/rollouts_materialized_inputs.jsonl \
   +rollouts_jsonl_fpath=results/rollouts.jsonl \
   +output_jsonl_fpath=results/profiled.jsonl \
   +pass_threshold=1.0
