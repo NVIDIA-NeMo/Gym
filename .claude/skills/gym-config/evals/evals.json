@@ -1,0 +1,41 @@
+{
+  "skill_name": "gym-config",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Set up a YAML config for a new math benchmark that uses LLM-as-judge verification. I need a policy model for generation and a separate judge model for grading answers.",
+      "expected_output": "A config with THREE server instances: resources server, policy model server, AND judge model server. The resources server config should include judge-specific fields like judge_model_server reference, judge_responses_create_params, and judge_endpoint_max_concurrency.",
+      "assertions": [
+        "The config defines two separate model server instances (policy and judge)",
+        "The resources server has a judge_model_server reference with type and name matching the judge model instance",
+        "judge_responses_create_params is present with temperature and max_output_tokens",
+        "judge_endpoint_max_concurrency is set to bound concurrent judge calls",
+        "The agent references the policy model, not the judge model",
+        "env.yaml guidance mentions TWO sets of endpoint configs (policy + judge)"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "I need to deploy my benchmark on a SLURM cluster where the sandbox host varies per node. How do I inject the sandbox host as an environment variable into the Gym config?",
+      "expected_output": "Config using OmegaConf env var injection syntax ${oc.env:VAR_NAME,default} for deployment-specific values, with explanation of when this pattern is acceptable vs passing config through YAML.",
+      "assertions": [
+        "The ${oc.env:VAR_NAME,default} syntax is used for the sandbox host",
+        "A default value is provided in the interpolation",
+        "The response explains this is the approved pattern for deployment-specific infra values",
+        "The response distinguishes this from general config (which must go through YAML, not env vars)"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "Configure a jailbreak detection benchmark with combined reward. I want safety checking AND quality evaluation, with partial credit for safe-but-low-quality responses.",
+      "expected_output": "Config with use_combined_reward: true, separate reward values for safety and quality tiers, and explanation of the reward formula (safety_reward * quality_reward).",
+      "assertions": [
+        "use_combined_reward is set to true",
+        "Separate reward fields exist for safety (reward_if_safe, reward_if_unsafe) and quality (reward_if_quality_high, reward_if_quality_low)",
+        "The partial credit value for low quality is between 0 and 1 (not 0.0 or 1.0)",
+        "The response explains the combined reward formula (multiplication)",
+        "A judge model server is configured for the quality evaluation stage"
+      ]
+    }
+  ]
+}

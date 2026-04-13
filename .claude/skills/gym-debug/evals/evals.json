@@ -1,0 +1,41 @@
+{
+  "skill_name": "gym-debug",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "My equivalence_llm_judge benchmark gives inconsistent rewards. Some tasks get 0.0 even when the model's answer looks correct, and I'm seeing rewards of 0.5 that I didn't expect. check_twice_swap is enabled.",
+      "expected_output": "Diagnosis covering judge positional bias (swap disagrees), regex extraction fallback (partial credit 0.5), and how to read judge_evaluations from the rollout JSONL to see what the judge actually decided.",
+      "assertions": [
+        "check_twice_swap positional bias is identified as cause of unexpected 0.0 rewards",
+        "reward_if_swap_fails is mentioned as the value applied when swap check disagrees",
+        "The 0.5 rewards are explained as check_full_generation_on_fail fallback (reward_if_full_generation_succeeds)",
+        "Reading judge_evaluations from rollout JSONL is recommended for debugging",
+        "Regex extraction failure is identified as a potential upstream cause"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "My code_gen benchmark works for instruct models but thinking models score much lower than expected. The answers look correct when I read the output manually.",
+      "expected_output": "Diagnosis identifying thinking tag interference with code extraction, with specific mention of reasoning_format_violation_rate and think-block stripping.",
+      "assertions": [
+        "Think/thinking block interference with code extraction is identified as the cause",
+        "reasoning_format_violation_rate field is mentioned as a diagnostic indicator",
+        "The response explains that thinking models wrap output in <think>/<thinking> tags",
+        "Stripping think blocks before code extraction is recommended as the fix",
+        "The response suggests checking extracted_model_code in the rollout JSONL to confirm"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "My jailbreak_detection benchmark with use_combined_reward gives rewards of 0.3 for some entries. I expected only 0.0 or 1.0.",
+      "expected_output": "Explanation of the two-stage combined reward formula (safety_reward * quality_reward) and how reward_if_quality_low creates the 0.3 value.",
+      "assertions": [
+        "The two-stage reward formula (safety * quality) is explained",
+        "reward_if_quality_low is identified as the source of the 0.3 value",
+        "The response clarifies this is intentional partial credit, not a bug",
+        "The response explains the two judge calls: safety verdict then quality check",
+        "The math is shown: 1.0 (safe) * 0.3 (low quality) = 0.3"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,46 @@
+{
+  "skill_name": "gym-scaffold-agent",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Create a multi-turn agent that gives the model 3 attempts to solve a math problem. After each wrong attempt, it sends the error back to the model for correction.",
+      "expected_output": "A custom agent server with a retry loop, proper cookie and token ID propagation, async /run endpoint, and YAML config.",
+      "assertions": [
+        "The agent extends SimpleResponsesAPIAgent",
+        "The run() method implements a loop with max 3 iterations",
+        "Each iteration calls the model server then the resources server /verify",
+        "Error feedback from verify is sent back to the model on failure",
+        "cookies=request.cookies is passed on every downstream call",
+        "Token IDs (prompt_token_ids, generation_token_ids, generation_log_probs) are accumulated across turns",
+        "The /run endpoint is async",
+        "asyncio.Semaphore is used for concurrency control"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Wrap the SWE-bench library as an agent in NeMo Gym. The library has its own task execution logic and uses httpx for API calls.",
+      "expected_output": "An agent server that wraps SWE-bench, replaces httpx transport with aiohttp, pre/post-processes between Gym and library schemas.",
+      "assertions": [
+        "httpx is NOT imported — an aiohttp adapter replaces the transport",
+        "Pre-processing converts from Gym schema to SWE-bench input",
+        "Post-processing converts SWE-bench results to BaseVerifyResponse with reward field",
+        "The approach notes to reproduce published SWE-bench numbers first",
+        "asyncio.Semaphore bounds concurrent library calls",
+        "requirements.txt includes the SWE-bench dependency"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "I need an agent that handles tool calls in a loop — the model can call tools multiple times before giving a final answer.",
+      "expected_output": "An agent with a tool-call loop that executes tool calls against the resources server and feeds results back to the model until it produces a final non-tool-call response.",
+      "assertions": [
+        "The agent implements a loop that continues while the model returns tool calls",
+        "Tool call results are sent back to the model as tool response messages",
+        "The loop has a maximum iteration bound to prevent infinite loops",
+        "Cookie propagation is present on all downstream calls",
+        "Token IDs are accumulated across all turns in the loop",
+        "The final response is passed to /verify for reward computation"
+      ]
+    }
+  ]
+}

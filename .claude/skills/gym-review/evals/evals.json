@@ -1,0 +1,52 @@
+{
+  "skill_name": "gym-review",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Review the file evals/files/sample_server_with_bugs.py for NeMo Gym anti-patterns.",
+      "expected_output": "A review identifying all 7 BLOCK findings: httpx import, ray.get() in async, missing semaphore, missing errors='replace' (x2), env var config, and non-binary reward.",
+      "files": ["evals/files/sample_server_with_bugs.py"],
+      "assertions": [
+        "The agent runs scripts/review.py against the file",
+        "httpx-usage BLOCK finding is reported",
+        "ray-get-async BLOCK finding is reported",
+        "missing-semaphore BLOCK finding is reported",
+        "missing-errors-replace BLOCK finding is reported (stdout and stderr)",
+        "env-var-config BLOCK finding is reported for MY_API_KEY",
+        "non-binary-reward BLOCK finding is reported for the 0.5 value",
+        "The report recommends NOT merging due to BLOCK findings",
+        "Each finding includes file path and line number"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Review the multi-turn agent at evals/files/sample_multi_turn_agent.py before I submit a PR.",
+      "expected_output": "A review identifying 2 BLOCK findings (missing cookies, missing token IDs) and 1 WARN (missing think-strip), with fix suggestions referencing the propagation patterns.",
+      "files": ["evals/files/sample_multi_turn_agent.py"],
+      "assertions": [
+        "The agent runs scripts/review.py against the file",
+        "missing-cookies BLOCK finding is reported",
+        "missing-token-ids BLOCK finding is reported",
+        "missing-think-strip WARN finding is reported",
+        "The fix for cookies references passing cookies=request.cookies and updating from response",
+        "The fix for token IDs mentions accumulating prompt_token_ids and generation_token_ids across turns",
+        "The report recommends NOT merging due to BLOCK findings"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "Review evals/files/sample_config.yaml and evals/files/sample_clean_server.py together — this is a new benchmark submission.",
+      "expected_output": "YAML review catches 3 WARN findings (verified:true, missing gitlab_identifier, missing license). Clean server gets zero findings. Overall assessment acknowledges YAML needs fixes but no BLOCK issues.",
+      "files": ["evals/files/sample_config.yaml", "evals/files/sample_clean_server.py"],
+      "assertions": [
+        "The agent runs scripts/review.py against both files",
+        "verified-true WARN is reported for the YAML config",
+        "missing-gitlab-id WARN is reported for the train dataset",
+        "missing-license WARN is reported for the train dataset",
+        "The clean server is reported as having no issues",
+        "The report notes no BLOCK findings — merge is possible after fixing WARNs",
+        "The report mentions that verified should be false for new unbaselined servers"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,42 @@
+{
+  "skill_name": "gym-profile",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "My code_gen benchmark results show that a thinking model (Qwen 3 Thinking) scores 15% lower than the instruct variant (Qwen 3 Instruct) on the same tasks. That seems wrong. Help me analyze.",
+      "expected_output": "Analysis identifying reasoning_format_violation_rate as the likely cause, with instructions to check extracted_model_code and think-block stripping, plus per-task difficulty breakdown.",
+      "assertions": [
+        "reasoning_format_violation_rate is mentioned as a diagnostic field to check",
+        "Think-block stripping failure is identified as the likely cause",
+        "The response recommends checking extracted_model_code in rollout JSONL to see what was actually extracted",
+        "Per-task comparison between the two models is recommended to find which tasks diverge",
+        "The response does NOT dismiss the result as expected behavior"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "I profiled my spider2_lite SQL benchmark. 40% of tasks have 0% pass rate across all models, and 35% have 100% pass rate. The middle is thin. Is this benchmark useful for training?",
+      "expected_output": "Analysis of ceiling/floor effects with concrete thresholds, recommendation to inspect failure_reason field for the 0% tasks, and guidance on whether to trim the dataset.",
+      "assertions": [
+        "Ceiling effect (35% always-pass tasks) is flagged as adding noise not signal",
+        "Floor effect (40% always-fail tasks) is flagged — could be bugs or genuinely too hard",
+        "failure_reason field (NO_SQL_EXTRACTED, EXECUTION_ERROR, etc.) is recommended for diagnosing the 0% tasks",
+        "The response recommends checking if floor tasks fail due to extraction bugs vs genuine difficulty",
+        "Trimming always-pass and always-fail tasks is suggested to improve training signal",
+        "The ideal distribution (10-90% per task with model separation) is mentioned"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "My equivalence_llm_judge results show pass@1 of 0.72 but I'm seeing reward values of 0.0, 0.5, and 1.0 in the rollouts. I thought rewards should be binary. How do I interpret this for pass@k calculation?",
+      "expected_output": "Explanation of partial rewards from judge fallback paths, how they affect pass@1 (avg_reward) vs pass@k (threshold-based), and which config fields control the partial reward values.",
+      "assertions": [
+        "The 0.5 value is explained as reward_if_full_generation_succeeds from the fallback path",
+        "The distinction between pass@1 (avg_reward, includes partials) and pass@k (threshold-based) is explained",
+        "pass_threshold parameter in ng_reward_profile is mentioned for controlling how partials count toward pass@k",
+        "The config fields controlling partial rewards are named (check_full_generation_on_fail, reward_if_full_generation_succeeds, reward_if_swap_fails)",
+        "check_twice_swap is mentioned as another source of non-binary rewards"
+      ]
+    }
+  ]
+}

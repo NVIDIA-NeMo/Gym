@@ -1,0 +1,61 @@
+chains:
+  new-benchmark:
+    name: New Benchmark
+    description: End-to-end benchmark creation — scaffold, implement, data, config, baseline, review
+    steps:
+    - skill: add-benchmark
+      purpose: Scaffold server, implement verify(), write tests
+    - skill: gym-data
+      purpose: Prepare and register datasets
+    - skill: gym-config
+      purpose: Validate YAML configuration
+    - skill: gym-profile
+      purpose: Baseline against multiple models
+    - skill: gym-review
+      purpose: Final review before PR
+
+  validate:
+    name: Validate Benchmark
+    description: Check an existing benchmark is correctly configured and producing valid results
+    steps:
+    - skill: gym-config
+      purpose: Verify config is well-formed
+    - skill: gym-data
+      purpose: Validate datasets with ng_prepare_data
+    - skill: gym-profile
+      purpose: Run rollouts and analyze results
+
+  diagnose:
+    name: Diagnose Issues
+    description: Debug a failing benchmark — identify root cause and anti-patterns
+    steps:
+    - skill: gym-debug
+      purpose: Identify the failure point
+    - skill: gym-review
+      purpose: Check code for anti-patterns that may cause the failure
+
+  external-integration:
+    name: External Benchmark Integration
+    description: Wrap a 3rd-party benchmark library into NeMo Gym
+    steps:
+    - skill: gym-scaffold-agent
+      purpose: Create agent wrapper for external library
+    - skill: gym-data
+      purpose: Convert and register datasets
+    - skill: gym-config
+      purpose: Wire configuration
+    - skill: gym-profile
+      purpose: Compare Gym scores against published numbers
+    - skill: gym-review
+      purpose: Check for httpx, concurrency, and propagation issues
+
+  pre-merge:
+    name: Pre-Merge Check
+    description: Review and validate before merging a benchmark PR
+    steps:
+    - skill: gym-review
+      purpose: Check for anti-patterns and correctness issues
+    - skill: gym-config
+      purpose: Validate configuration
+    - skill: gym-data
+      purpose: Validate datasets
