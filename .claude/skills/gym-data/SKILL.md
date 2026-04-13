@@ -2,11 +2,11 @@
 name: gym-data
 description: >
   Prepare, validate, and register datasets for NeMo Gym benchmarks. Use when converting
-  source data to Gym JSONL format, generating example.jsonl files, uploading to the
-  GitLab dataset registry, validating with ng_prepare_data, or wiring gitlab_identifier
+  source data to Gym JSONL format, generating example.jsonl files, uploading to
+  HuggingFace, validating with ng_prepare_data, or wiring dataset identifiers
   into YAML configs. Covers the full data lifecycle from raw source to registered dataset.
 license: Apache-2.0
-compatibility: Requires Python 3.12+, uv. GitLab registry operations require MLflow credentials in env.yaml.
+compatibility: Requires Python 3.12+, uv. HuggingFace operations require hf_token in env.yaml.
 metadata:
   author: nvidia-nemo-gym
   version: "1.0"
@@ -29,12 +29,17 @@ Every line in a Gym JSONL file must have this structure:
   },
   "verifier_metadata": {
     // Task-specific fields used by verify()
+  },
+  "agent_ref": {
+    "type": "responses_api_agents",
+    "name": "my_benchmark_simple_agent"
   }
 }
 ```
 
 - `responses_create_params.input` follows OpenAI message format
 - `verifier_metadata` is opaque to the framework — define whatever fields your benchmark's `verify()` method needs (test cases, expected answers, task IDs, etc.)
+- `agent_ref` routes the row to a specific agent. Optional if you pass `+agent_name=` on the CLI, but required for multi-agent datasets where different rows target different agents
 
 ## Step 2: Convert source data
 
@@ -98,54 +103,67 @@ Selection criteria:
 
 ## Step 4: Validate data
 
+### Example validation (required before PR submission)
+
 ```bash
-# Validate example data (required before PR submission)
 ng_prepare_data "+config_paths=[resources_servers/my_benchmark/configs/my_benchmark.yaml]" \
     +output_dirpath=/tmp/prepare +mode=example_validation
 ```
 
-Check for:
+### Train preparation (download and prepare train/validation datasets)
+
+```bash
+ng_prepare_data "+config_paths=[resources_servers/my_benchmark/configs/my_benchmark.yaml]" \
+    +output_dirpath=data/my_benchmark +mode=train_preparation +should_download=true
+```
+
+By default, `data_source` is `huggingface`. Use `+data_source=gitlab` only for NVIDIA-internal datasets that haven't been migrated to HuggingFace yet.
+
+### What to check
+
 - Every line parses as valid JSON
 - `responses_create_params.input` is a non-empty list of messages
 - Each message has `role` and `content` fields
 - `verifier_metadata` fields match what `verify()` expects
+- `agent_ref` is present if the dataset is used without `+agent_name=` on the CLI, or if different rows target different agents
 
-## Step 5: Upload to GitLab registry
+## Step 5: Upload to dataset registry
 
-Train and validation datasets must NOT be committed to git. Upload them:
+Train and validation datasets must NOT be committed to git. Upload them to HuggingFace:
 
 ```bash
-ng_upload_dataset_to_gitlab \
+ng_upload_dataset_to_hf \
     +dataset_name=my_benchmark \
-    +version=0.0.1 \
-    +input_jsonl_fpath=resources_servers/my_benchmark/data/my_dataset.jsonl
+    +input_jsonl_fpath=resources_servers/my_benchmark/data/my_dataset.jsonl \
+    +resource_config_path=resources_servers/my_benchmark/configs/my_benchmark.yaml
 ```
 
-Requires MLflow credentials in `env.yaml`:
+Requires HuggingFace credentials in `env.yaml`:
 ```yaml
-mlflow_tracking_uri: <your-gitlab-mlflow-tracking-uri>
-mlflow_tracking_token: <your-gitlab-api-token>
+hf_token: <your-hf-token>
+hf_organization: <your-hf-org>
+hf_collection_name: <collection-name>
+hf_collection_slug: <collection-slug>
 ```
 
 After upload, verify download works:
 ```bash
 ng_prepare_data "+config_paths=[resources_servers/my_benchmark/configs/my_benchmark.yaml]" \
-    +output_dirpath=data/my_benchmark +mode=train_preparation +should_download=true +data_source=gitlab
+    +output_dirpath=data/my_benchmark +mode=train_preparation +should_download=true
 ```
 
 ## Step 6: Wire YAML config
 
-Add dataset entries to the server's YAML config. Both `jsonl_fpath` and `gitlab_identifier` must coexist for train/validation datasets:
+Add dataset entries to the server's YAML config. Train/validation datasets need both `jsonl_fpath` (local path) and a remote identifier:
 
 ```yaml
 datasets:
 - name: my_dataset
   type: train
   jsonl_fpath: resources_servers/my_benchmark/data/my_dataset.jsonl
-  gitlab_identifier:
-    dataset_name: my_benchmark
-    version: 0.0.1
-    artifact_fpath: my_dataset.jsonl
+  huggingface_identifier:
+    repo_id: my-org/my-benchmark-dataset
+    artifact_fpath: train.jsonl
   license: MIT
 - name: example
   type: example
@@ -153,8 +171,8 @@ datasets:
 ```
 
 - `jsonl_fpath` is the local download destination
-- `gitlab_identifier` tells the system where to fetch from
-- `example` datasets don't need `gitlab_identifier` — they're committed to git
+- `huggingface_identifier` tells the system where to fetch from (use `gitlab_identifier` only for NVIDIA-internal datasets not yet on HuggingFace)
+- `example` datasets don't need a remote identifier — they're committed to git
 - `license` is required for train and validation datasets
 
 ## Step 7: Fix .gitignore

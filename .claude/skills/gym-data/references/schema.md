@@ -6,7 +6,7 @@ Self-contained reference for the data format used across all NeMo Gym benchmarks
 
 ## Input JSONL
 
-Each line is a JSON object with two top-level fields:
+Each line is a JSON object with these top-level fields:
 
 ```json
 {
@@ -18,7 +18,11 @@ Each line is a JSON object with two top-level fields:
     "tools": [],
     "parallel_tool_calls": false
   },
-  "verifier_metadata": { ... }
+  "verifier_metadata": { ... },
+  "agent_ref": {
+    "type": "responses_api_agents",
+    "name": "my_benchmark_simple_agent"
+  }
 }
 ```
 
@@ -63,6 +67,19 @@ Roles: `system`, `user`, `assistant`. Multi-turn conversations alternate user/as
   }
 ]
 ```
+
+### agent_ref
+
+Optional. Routes the row to a specific agent at rollout collection time:
+
+```json
+"agent_ref": {
+  "type": "responses_api_agents",
+  "name": "my_benchmark_simple_agent"
+}
+```
+
+If omitted, the `+agent_name=` CLI argument is used instead. Required for multi-agent datasets where different rows target different agents.
 
 ### verifier_metadata
 
@@ -177,8 +194,8 @@ for line in open("data.jsonl"):
 | Type | Where it lives | Committed to git? | Size |
 |------|---------------|-------------------|------|
 | `example` | `data/example.jsonl` | Yes | 5 entries |
-| `train` | GitLab registry → local `data/train.jsonl` | No | Full dataset |
-| `validation` | GitLab registry → local `data/validation.jsonl` | No | Subset |
+| `train` | HuggingFace → local `data/train.jsonl` | No | Full dataset |
+| `validation` | HuggingFace → local `data/validation.jsonl` | No | Subset |
 
 ### .gitignore patterns (auto-generated)
 
@@ -194,37 +211,36 @@ If your filename doesn't match these patterns (e.g. `my_eval.jsonl`), add a cust
 
 ---
 
-## GitLab dataset registry
+## Dataset registry
 
-### Upload
+### Upload to HuggingFace
 
 ```bash
-ng_upload_dataset_to_gitlab \
+ng_upload_dataset_to_hf \
     +dataset_name=my_benchmark \
-    +version=0.0.1 \
-    +input_jsonl_fpath=resources_servers/my_benchmark/data/my_dataset.jsonl
+    +input_jsonl_fpath=resources_servers/my_benchmark/data/my_dataset.jsonl \
+    +resource_config_path=resources_servers/my_benchmark/configs/my_benchmark.yaml
 ```
 
-Requires `mlflow_tracking_uri` and `mlflow_tracking_token` in `env.yaml`.
+Requires `hf_token`, `hf_organization`, `hf_collection_name`, and `hf_collection_slug` in `env.yaml`.
 
 ### YAML wiring
 
-Both `jsonl_fpath` and `gitlab_identifier` coexist:
+Both `jsonl_fpath` and `huggingface_identifier` coexist:
 
 ```yaml
 datasets:
 - name: my_dataset
   type: train
   jsonl_fpath: resources_servers/my_benchmark/data/train.jsonl
-  gitlab_identifier:
-    dataset_name: my_benchmark
-    version: 0.0.1
+  huggingface_identifier:
+    repo_id: my-org/my-benchmark-dataset
     artifact_fpath: train.jsonl
   license: Apache-2.0
 ```
 
 - `jsonl_fpath`: local download destination
-- `gitlab_identifier`: where to fetch from
+- `huggingface_identifier`: where to fetch from (use `gitlab_identifier` only for NVIDIA-internal datasets not yet on HuggingFace)
 - `license`: required for train/validation datasets
 
 ### Validation
@@ -233,6 +249,6 @@ datasets:
 # Validate example data (for PR submission)
 ng_prepare_data "+config_paths=[...]" +output_dirpath=/tmp/prepare +mode=example_validation
 
-# Download and prepare train/validation
-ng_prepare_data "+config_paths=[...]" +output_dirpath=data/ +mode=train_preparation +should_download=true +data_source=gitlab
+# Download and prepare train/validation from HuggingFace (default)
+ng_prepare_data "+config_paths=[...]" +output_dirpath=data/ +mode=train_preparation +should_download=true
 ```
