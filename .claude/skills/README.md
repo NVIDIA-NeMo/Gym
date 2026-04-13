@@ -8,6 +8,7 @@ Agent skills for NeMo Gym development. Each skill follows the [agentskills.io](h
 |-------|-------------|----------------|
 | [gym-review](gym-review/) | Deterministic anti-pattern checker + judgment-based review | Reviewing PRs, auditing servers before merge |
 | [gym-debug](gym-debug/) | Diagnose server failures, rollout errors, unexpected rewards | Servers won't start, rollouts hang, rewards look wrong |
+| [gym-run](gym-run/) | Run benchmarks — env.yaml setup, server launch, rollout collection | First run, smoke testing, full rollout collection |
 | [gym-profile](gym-profile/) | Analyze rollout results, reward distributions, pass rates | Baselining benchmarks, comparing models, investigating variance |
 | [gym-config](gym-config/) | Compose and validate Hydra YAML configurations | Setting up server configs, debugging composition errors |
 | [gym-data](gym-data/) | Prepare, validate, and register JSONL datasets | Converting data, uploading to GitLab registry, validating schemas |
@@ -20,10 +21,11 @@ Chains compose skills into multi-step workflows. Defined in [`chains.yaml`](chai
 
 | Chain | Steps | Use case |
 |-------|-------|----------|
-| **new-benchmark** | add-benchmark > gym-data > gym-config > gym-profile > gym-review | Building a benchmark from scratch |
-| **validate** | gym-config > gym-data > gym-profile | Checking an existing benchmark works correctly |
+| **run** | gym-config > gym-run > gym-profile | Executing a configured benchmark end-to-end |
+| **new-benchmark** | add-benchmark > gym-data > gym-config > gym-run > gym-profile > gym-review | Building a benchmark from scratch |
+| **validate** | gym-config > gym-data > gym-run > gym-profile | Checking an existing benchmark works correctly |
 | **diagnose** | gym-debug > gym-review | Debugging a failing benchmark |
-| **external-integration** | gym-scaffold-agent > gym-data > gym-config > gym-profile > gym-review | Wrapping a 3rd-party benchmark library |
+| **external-integration** | gym-scaffold-agent > gym-data > gym-config > gym-run > gym-profile > gym-review | Wrapping a 3rd-party benchmark library |
 | **pre-merge** | gym-review > gym-config > gym-data | Final checks before merging a PR |
 
 ## Skill structure

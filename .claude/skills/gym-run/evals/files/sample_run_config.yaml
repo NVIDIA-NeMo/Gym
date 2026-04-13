@@ -1,0 +1,32 @@
+my_code_benchmark:
+  resources_servers:
+    code_gen:
+      entrypoint: app.py
+      domain: coding
+      verified: false
+      description: Code generation benchmark with unit test verification
+      num_processes: 8
+      unit_test_timeout_secs: 10
+
+my_code_benchmark_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: my_code_benchmark
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/code_gen/data/example.jsonl
+      - name: train
+        type: train
+        jsonl_fpath: resources_servers/code_gen/data/train.jsonl
+        gitlab_identifier:
+          dataset_name: code_gen
+          version: 0.0.1
+          artifact_fpath: train.jsonl
+        license: Apache-2.0

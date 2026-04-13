@@ -1,7 +1,18 @@
 chains:
+  run:
+    name: Run Benchmark
+    description: Execute a configured benchmark — validate config, launch servers, collect rollouts, analyze results
+    steps:
+    - skill: gym-config
+      purpose: Validate config before launch
+    - skill: gym-run
+      purpose: Set up env.yaml, launch servers, collect rollouts
+    - skill: gym-profile
+      purpose: Analyze rollout results and reward distributions
+
   new-benchmark:
     name: New Benchmark
-    description: End-to-end benchmark creation — scaffold, implement, data, config, baseline, review
+    description: End-to-end benchmark creation — scaffold, implement, data, config, run, baseline, review
     steps:
     - skill: add-benchmark
       purpose: Scaffold server, implement verify(), write tests
@@ -9,6 +20,8 @@ chains:
       purpose: Prepare and register datasets
     - skill: gym-config
       purpose: Validate YAML configuration
+    - skill: gym-run
+      purpose: Set up env.yaml, launch servers, collect rollouts
     - skill: gym-profile
       purpose: Baseline against multiple models
     - skill: gym-review
@@ -22,8 +35,10 @@ chains:
       purpose: Verify config is well-formed
     - skill: gym-data
       purpose: Validate datasets with ng_prepare_data
+    - skill: gym-run
+      purpose: Launch servers and collect rollouts
     - skill: gym-profile
-      purpose: Run rollouts and analyze results
+      purpose: Analyze rollout results
 
   diagnose:
     name: Diagnose Issues
@@ -44,6 +59,8 @@ chains:
       purpose: Convert and register datasets
     - skill: gym-config
       purpose: Wire configuration
+    - skill: gym-run
+      purpose: Launch servers and run initial rollouts
     - skill: gym-profile
       purpose: Compare Gym scores against published numbers
     - skill: gym-review

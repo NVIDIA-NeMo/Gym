@@ -1,0 +1,3 @@
+{"task_index": 0, "reward": 0.0, "response": {"output_text": "<think>Let me solve this step by step...</think>\n\nHere is my solution:\n```python\ndef solve():\n    return 42\n```"}, "extracted_model_code": "", "result": "", "failure_reason": "NO_CODE_EXTRACTED"}
+{"task_index": 1, "reward": 0.0, "response": {"output_text": "```python\nimport time\nwhile True: time.sleep(1)\n```"}, "extracted_model_code": "import time\nwhile True: time.sleep(1)", "result": "TIMEOUT after 10s", "failure_reason": "TIMEOUT"}
+{"task_index": 2, "reward": 0.0, "response": {"output_text": "```python\ndef solve(n):\n    return n + 1\n```"}, "extracted_model_code": "def solve(n):\n    return n + 1", "result": "Expected: 4, Got: 3", "failure_reason": "WRONG_RESULT"}
