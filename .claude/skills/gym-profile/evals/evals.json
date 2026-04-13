@@ -3,39 +3,42 @@
   "evals": [
     {
       "id": 1,
-      "prompt": "My code_gen benchmark results show that a thinking model (Qwen 3 Thinking) scores 15% lower than the instruct variant (Qwen 3 Instruct) on the same tasks. That seems wrong. Help me analyze.",
-      "expected_output": "Analysis identifying reasoning_format_violation_rate as the likely cause, with instructions to check extracted_model_code and think-block stripping, plus per-task difficulty breakdown.",
+      "prompt": "Analyze the profiled results at evals/files/sample_profiled_results.jsonl. The benchmark has 10 tasks. Is this useful for training?",
+      "expected_output": "Analysis identifying ceiling/floor effects, diagnosing floor task failures, and recommending trimming.",
+      "files": ["evals/files/sample_profiled_results.jsonl"],
       "assertions": [
-        "reasoning_format_violation_rate is mentioned as a diagnostic field to check",
-        "Think-block stripping failure is identified as the likely cause",
-        "The response recommends checking extracted_model_code in rollout JSONL to see what was actually extracted",
-        "Per-task comparison between the two models is recommended to find which tasks diverge",
-        "The response does NOT dismiss the result as expected behavior"
+        "Ceiling effect flagged: 2 tasks always pass (20% of dataset)",
+        "Floor effect flagged: 3 tasks always fail (30% of dataset)",
+        "failure_reason field cited for diagnosing 0% tasks (NO_CODE_EXTRACTED, TIMEOUT, WRONG_RESULT)",
+        "Response distinguishes extraction bugs from genuine difficulty",
+        "Trimming always-pass and always-fail tasks suggested to improve training signal",
+        "The 5 middle tasks (20-80%) identified as the useful training signal"
       ]
     },
     {
       "id": 2,
-      "prompt": "I profiled my spider2_lite SQL benchmark. 40% of tasks have 0% pass rate across all models, and 35% have 100% pass rate. The middle is thin. Is this benchmark useful for training?",
-      "expected_output": "Analysis of ceiling/floor effects with concrete thresholds, recommendation to inspect failure_reason field for the 0% tasks, and guidance on whether to trim the dataset.",
+      "prompt": "My equivalence_llm_judge results at evals/files/sample_partial_rewards.jsonl show unexpected 0.5 rewards. I thought rewards should be binary.",
+      "expected_output": "Explanation of partial rewards from judge fallback paths, with specific analysis of each task.",
+      "files": ["evals/files/sample_partial_rewards.jsonl"],
       "assertions": [
-        "Ceiling effect (35% always-pass tasks) is flagged as adding noise not signal",
-        "Floor effect (40% always-fail tasks) is flagged — could be bugs or genuinely too hard",
-        "failure_reason field (NO_SQL_EXTRACTED, EXECUTION_ERROR, etc.) is recommended for diagnosing the 0% tasks",
-        "The response recommends checking if floor tasks fail due to extraction bugs vs genuine difficulty",
-        "Trimming always-pass and always-fail tasks is suggested to improve training signal",
-        "The ideal distribution (10-90% per task with model separation) is mentioned"
+        "0.5 rewards explained as reward_if_full_generation_succeeds from fallback path",
+        "Task 4 (all 0.5) flagged as systematic judge fallback — investigation recommended",
+        "Task 3's EXTRACTION_FAILED identified as upstream cause of 0.0 rewards",
+        "pass_threshold parameter mentioned for controlling how partials count toward pass@k",
+        "check_twice_swap mentioned as another source of non-binary rewards"
       ]
     },
     {
       "id": 3,
-      "prompt": "My equivalence_llm_judge results show pass@1 of 0.72 but I'm seeing reward values of 0.0, 0.5, and 1.0 in the rollouts. I thought rewards should be binary. How do I interpret this for pass@k calculation?",
-      "expected_output": "Explanation of partial rewards from judge fallback paths, how they affect pass@1 (avg_reward) vs pass@k (threshold-based), and which config fields control the partial reward values.",
+      "prompt": "Compare thinking vs instruct model results at evals/files/sample_thinking_comparison.jsonl. The thinking model scores lower overall.",
+      "expected_output": "Per-task analysis correlating reasoning_format_violation_rate with score drops.",
+      "files": ["evals/files/sample_thinking_comparison.jsonl"],
       "assertions": [
-        "The 0.5 value is explained as reward_if_full_generation_succeeds from the fallback path",
-        "The distinction between pass@1 (avg_reward, includes partials) and pass@k (threshold-based) is explained",
-        "pass_threshold parameter in ng_reward_profile is mentioned for controlling how partials count toward pass@k",
-        "The config fields controlling partial rewards are named (check_full_generation_on_fail, reward_if_full_generation_succeeds, reward_if_swap_fails)",
-        "check_twice_swap is mentioned as another source of non-binary rewards"
+        "reasoning_format_violation_rate identified as the diagnostic field",
+        "Task 0 and Task 2 identified as divergent (high violation rate correlates with score drop)",
+        "Task 1 identified as unaffected (violation rate 0.0, same scores)",
+        "Think-block stripping failure identified as the root cause",
+        "Response recommends checking extracted_model_code to confirm"
       ]
     }
   ]

@@ -3,48 +3,43 @@
   "evals": [
     {
       "id": 1,
-      "prompt": "Add a new math benchmark to NeMo Gym. The benchmark tests algebra word problems. The verify method should extract the final numerical answer from the model's response and compare it to the expected answer in verifier_metadata.",
-      "expected_output": "A complete resources server under resources_servers/math_algebra/ with app.py implementing verify(), configs/math_algebra.yaml with proper dataset wiring, data/example.jsonl with 5 entries, tests/test_app.py with >= 95% coverage, and requirements.txt.",
+      "prompt": "I want to add a math algebra benchmark. Here's a sample server at evals/files/sample_math_server.py, data at evals/files/sample_math_example.jsonl, and config at evals/files/sample_math_config.yaml. Review them for completeness.",
+      "expected_output": "Review confirming server, data, and config are correct, identifying any missing pieces.",
+      "files": ["evals/files/sample_math_server.py", "evals/files/sample_math_example.jsonl", "evals/files/sample_math_config.yaml"],
       "assertions": [
-        "resources_servers/math_algebra/app.py exists and contains a class extending SimpleResourcesServer",
-        "The verify() method extracts a numerical answer and compares to verifier_metadata",
-        "Think-block stripping is present before answer extraction",
-        "data/example.jsonl contains exactly 5 lines of valid JSON",
-        "Each example line has responses_create_params.input and verifier_metadata",
-        "configs/math_algebra.yaml defines both resources server and agent instances",
-        "tests/test_app.py contains tests for verify pass, verify fail, and edge cases",
-        "requirements.txt contains '-e nemo-gym[dev] @ ../../'",
-        "The verify method returns reward as 0.0 or 1.0 only"
+        "Server extends SimpleResourcesServer with async verify()",
+        "Think-block stripping is present and validated",
+        "Rewards are binary (0.0 or 1.0)",
+        "example.jsonl has valid entries with responses_create_params and verifier_metadata",
+        "Config correctly wires resources server, agent, and datasets",
+        "verified: false is confirmed for new server",
+        "Response identifies any missing pieces (requirements.txt, README.md)"
       ]
     },
     {
       "id": 2,
-      "prompt": "Wrap the HumanEval benchmark library as an external benchmark in NeMo Gym. The library has its own execution and scoring logic.",
-      "expected_output": "A custom agent server under responses_api_agents/ that wraps the HumanEval library, with pre/post processing between Gym schema and library format, and a YAML config wiring it together.",
+      "prompt": "Review the test file at evals/files/sample_math_test.py for my math benchmark. Does it cover enough cases?",
+      "expected_output": "Test coverage assessment identifying what's covered and what's missing.",
+      "files": ["evals/files/sample_math_test.py", "evals/files/sample_math_server.py"],
       "assertions": [
-        "An agent server directory exists under responses_api_agents/",
-        "The agent's run() endpoint is async",
-        "Pre-processing converts Gym schema to library input format",
-        "Post-processing converts library output to BaseVerifyResponse with reward field",
-        "The agent uses asyncio.Semaphore for concurrency control",
-        "httpx is not imported anywhere — aiohttp adapter is used if the library needs HTTP",
-        "YAML config wires the agent to a model server and resources server",
-        "requirements.txt includes the external library dependency"
+        "Test coverage assessed: pass, fail (wrong answer), fail (no extraction), fail (think block)",
+        "Missing test case identified: timeout handling",
+        "Response notes test coverage is close to but not at the 95% requirement",
+        "Tests correctly validate binary rewards",
+        "Response recommends adding edge cases (empty output, very long output)"
       ]
     },
     {
       "id": 3,
-      "prompt": "Add a code generation benchmark that compiles and runs C++ code. The verify method should compile the model's code, run it against test cases, and compare stdout to expected output.",
-      "expected_output": "A resources server with subprocess execution via Ray, auto-install for g++ if needed, semaphore-bounded compilation, and proper error handling for compilation failures and runtime errors.",
+      "prompt": "I want to wrap an external code execution benchmark. The library uses httpx for API calls and has its own scoring. How should I structure this?",
+      "expected_output": "Integration guide recommending agent-level wrapping with httpx replacement.",
       "assertions": [
-        "app.py uses asyncio.Semaphore to bound concurrent subprocess calls",
-        "Subprocess output is decoded with errors='replace'",
-        "A setup module with ensure_gpp() or similar auto-install function exists",
-        "model_post_init calls the auto-install function",
-        "tests/conftest.py has a pytest_configure hook that calls the auto-install",
-        "Tests use pytest.mark.skipif for the external tool",
-        "Compilation and runtime errors return reward 0.0, not exceptions",
-        "The verify method handles empty or unparseable model output gracefully"
+        "Agent-level integration recommended (wrap in /run, not /verify)",
+        "httpx replacement with aiohttp adapter is mentioned",
+        "Pre-processing from Gym schema to library format described",
+        "Post-processing to BaseVerifyResponse with reward described",
+        "Reproduce published numbers with original repo first, then reproduce after integration",
+        "asyncio.Semaphore for concurrent library calls mentioned"
       ]
     }
   ]

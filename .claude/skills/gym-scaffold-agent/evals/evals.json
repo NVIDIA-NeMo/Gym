@@ -3,43 +3,41 @@
   "evals": [
     {
       "id": 1,
-      "prompt": "Create a multi-turn agent that gives the model 3 attempts to solve a math problem. After each wrong attempt, it sends the error back to the model for correction.",
-      "expected_output": "A custom agent server with a retry loop, proper cookie and token ID propagation, async /run endpoint, and YAML config.",
+      "prompt": "Review the multi-turn correction agent at evals/files/sample_correction_agent.py. It gives models 3 attempts to solve problems.",
+      "expected_output": "Review identifying missing cookie propagation and token ID accumulation, while noting the agent structure is otherwise correct.",
+      "files": ["evals/files/sample_correction_agent.py"],
       "assertions": [
-        "The agent extends SimpleResponsesAPIAgent",
-        "The run() method implements a loop with max 3 iterations",
-        "Each iteration calls the model server then the resources server /verify",
-        "Error feedback from verify is sent back to the model on failure",
-        "cookies=request.cookies is passed on every downstream call",
-        "Token IDs (prompt_token_ids, generation_token_ids, generation_log_probs) are accumulated across turns",
-        "The /run endpoint is async",
-        "asyncio.Semaphore is used for concurrency control"
+        "Missing cookie propagation identified (no cookies=request.cookies on downstream calls)",
+        "Missing token ID accumulation identified (prompt_token_ids, generation_token_ids not collected across turns)",
+        "The fix for cookies references passing cookies=request.cookies and updating from each response",
+        "The fix for token IDs mentions accumulating across all turns and attaching to final response",
+        "Response notes the agent structure (loop, error feedback, think-strip, semaphore) is otherwise correct"
       ]
     },
     {
       "id": 2,
-      "prompt": "Wrap the SWE-bench library as an agent in NeMo Gym. The library has its own task execution logic and uses httpx for API calls.",
-      "expected_output": "An agent server that wraps SWE-bench, replaces httpx transport with aiohttp, pre/post-processes between Gym and library schemas.",
+      "prompt": "Review the external library wrapper at evals/files/sample_library_wrapper.py. It wraps a 3rd-party benchmark.",
+      "expected_output": "Review identifying httpx usage and missing Semaphore, while confirming pre/post-processing is correct.",
+      "files": ["evals/files/sample_library_wrapper.py"],
       "assertions": [
-        "httpx is NOT imported — an aiohttp adapter replaces the transport",
-        "Pre-processing converts from Gym schema to SWE-bench input",
-        "Post-processing converts SWE-bench results to BaseVerifyResponse with reward field",
-        "The approach notes to reproduce published SWE-bench numbers first",
-        "asyncio.Semaphore bounds concurrent library calls",
-        "requirements.txt includes the SWE-bench dependency"
+        "httpx usage identified as BLOCK issue",
+        "aiohttp adapter pattern recommended as replacement",
+        "Missing Semaphore for concurrent library calls identified",
+        "The fix references the AIOHTTPClient adapter pattern",
+        "Response notes pre/post-processing logic is correct"
       ]
     },
     {
       "id": 3,
-      "prompt": "I need an agent that handles tool calls in a loop — the model can call tools multiple times before giving a final answer.",
-      "expected_output": "An agent with a tool-call loop that executes tool calls against the resources server and feeds results back to the model until it produces a final non-tool-call response.",
+      "prompt": "Review the tool-call loop agent at evals/files/sample_tool_loop_agent.py for correctness.",
+      "expected_output": "Clean review confirming all patterns are correct: cookies, tokens, bounds, semaphore.",
+      "files": ["evals/files/sample_tool_loop_agent.py"],
       "assertions": [
-        "The agent implements a loop that continues while the model returns tool calls",
-        "Tool call results are sent back to the model as tool response messages",
-        "The loop has a maximum iteration bound to prevent infinite loops",
-        "Cookie propagation is present on all downstream calls",
-        "Token IDs are accumulated across all turns in the loop",
-        "The final response is passed to /verify for reward computation"
+        "Cookie propagation confirmed as correct",
+        "Token ID accumulation confirmed as correct",
+        "Max iteration bound confirmed as present",
+        "Semaphore usage confirmed",
+        "Response confirms the agent is ready for use (no BLOCK findings)"
       ]
     }
   ]

@@ -1,0 +1,9 @@
+# env.yaml with policy and judge model endpoints.
+
+policy_base_url: http://localhost:8000/v1
+policy_api_key: your-policy-key
+policy_model_name: Qwen/Qwen3-32B-Instruct
+
+judge_base_url: http://localhost:8001/v1
+judge_api_key: your-judge-key
+judge_model_name: Qwen/Qwen3-72B-Instruct

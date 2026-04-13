@@ -40,7 +40,7 @@ skill-name/
   scripts/             # Deterministic tooling (if applicable)
 ```
 
-**gym-review** is the reference implementation for an "S-tier" skill: it includes a standalone Python checker (`scripts/review.py`), self-contained reference docs, and eval fixtures that work without the NeMo Gym repo.
+**gym-review** is the reference implementation: it includes a standalone Python checker (`scripts/review.py`), self-contained reference docs, and eval fixtures that work without the NeMo Gym repo.
 
 ## Evaluating skills
 

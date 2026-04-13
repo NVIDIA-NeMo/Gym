@@ -3,39 +3,41 @@
   "evals": [
     {
       "id": 1,
-      "prompt": "Generate an example.jsonl with 5 entries for a tool-calling benchmark. The model needs to call a search_web tool and a calculate tool. The verify method checks that the model called the correct tool with valid arguments.",
-      "expected_output": "JSONL where responses_create_params includes a tools array with function definitions for search_web and calculate, alongside the input messages. Each tool should have non-empty descriptions.",
+      "prompt": "Validate the tool-calling dataset at evals/files/sample_tool_calling.jsonl for a search+calculation benchmark.",
+      "expected_output": "Validation confirming the JSONL schema is correct: tools array, function definitions, verifier_metadata with expected tool/args. Notes on parallel_tool_calls.",
+      "files": ["evals/files/sample_tool_calling.jsonl"],
       "assertions": [
-        "responses_create_params includes a 'tools' array with at least 2 tool definitions",
-        "Each tool has type 'function' with name, description, and parameters",
-        "Tool descriptions are non-empty (not '' or missing)",
-        "verifier_metadata specifies which tool should be called and with what arguments",
-        "At least one entry expects search_web and at least one expects calculate",
-        "The file contains exactly 5 lines of valid JSON"
+        "responses_create_params.tools array validated with function definitions",
+        "Each tool has type 'function' with name, description, parameters",
+        "verifier_metadata specifies expected tool and arguments",
+        "The data is confirmed as valid for tool-calling benchmarks",
+        "Response notes that parallel_tool_calls should be set if multiple tools can be called"
       ]
     },
     {
       "id": 2,
-      "prompt": "I'm building an LLM-as-judge math benchmark using equivalence_llm_judge. What should verifier_metadata look like? Some of my expected answers are numeric, some are symbolic expressions.",
-      "expected_output": "verifier_metadata structure with expected_answer field, plus guidance on output_regex for per-record extraction, and how template_metadata works for the judge.",
+      "prompt": "Check evals/files/sample_bad_data.jsonl for data quality issues before I upload it.",
+      "expected_output": "Report identifying 3 issues: missing verifier_metadata on line 1, data leakage on line 2, missing responses_create_params.input on line 3.",
+      "files": ["evals/files/sample_bad_data.jsonl"],
       "assertions": [
-        "verifier_metadata includes an expected_answer field",
-        "template_metadata with output_regex is mentioned for per-record regex extraction",
-        "The response distinguishes numeric answers (can use regex) from symbolic (need judge evaluation)",
-        "The data leakage risk is mentioned (expected_answer must not appear in the prompt)",
-        "extraction_length_threshold is mentioned for long answers that should skip regex"
+        "Missing verifier_metadata on line 1 is flagged",
+        "Data leakage on line 2 is identified (expected answer '42' appears in system prompt)",
+        "Missing responses_create_params.input on line 3 is flagged",
+        "Response recommends fixing all 3 issues before upload",
+        "Response explains why data leakage undermines training signal"
       ]
     },
     {
       "id": 3,
-      "prompt": "Convert a SQL benchmark dataset. Each source row has: question (natural language), db_id (database name), gold_sql (reference SQL). Generate 5 example entries.",
-      "expected_output": "JSONL with verifier_metadata containing db_id, gold_sql, question, plus additional fields like ignore_order and condition_cols that spider2_lite expects.",
+      "prompt": "Generate 5 example entries for a SQL benchmark based on the schema in evals/files/sample_sql_benchmark.jsonl.",
+      "expected_output": "5 JSONL entries following the same schema: system prompt for SQL, user question, verifier_metadata with db_id, gold_sql, question, ignore_order.",
+      "files": ["evals/files/sample_sql_benchmark.jsonl"],
       "assertions": [
-        "verifier_metadata contains db_id, gold_sql, and question fields",
-        "ignore_order field is present (boolean for whether row order matters)",
-        "condition_cols field is present or mentioned (columns to check for equivalence)",
-        "instance_id or equivalent unique identifier is present per entry",
-        "The system prompt instructs the model to output SQL"
+        "Generated entries follow the same schema as the sample",
+        "verifier_metadata contains db_id, gold_sql, question",
+        "ignore_order field is present",
+        "System prompt instructs model to output SQL",
+        "Exactly 5 entries are generated"
       ]
     }
   ]
