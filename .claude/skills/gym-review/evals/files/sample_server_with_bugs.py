@@ -18,8 +18,9 @@ import asyncio
 import os
 
 import httpx
-from nemo_gym.server_utils import raise_for_status
+
 from nemo_gym.servers.resources_server import SimpleResourcesServer
+
 
 API_KEY = os.getenv("MY_API_KEY")
 
@@ -35,20 +36,20 @@ class BuggyServer(SimpleResourcesServer):
         import ray
 
         future = ray.remote(lambda: 42).remote()
-        result = ray.get(future)
+        _ = ray.get(future)
 
         code = body.get("code", "")
         if not code:
             return {"reward": 0.0}
 
         proc = await asyncio.create_subprocess_exec(
-            "python", "-c", code,
+            "python",
+            "-c",
+            code,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, stderr = await asyncio.wait_for(
-            proc.communicate(), timeout=30
-        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
         output = stdout.decode()
         errors = stderr.decode()
 

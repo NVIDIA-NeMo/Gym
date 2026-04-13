@@ -66,6 +66,7 @@ class ReviewResult:
 # Rules
 # ---------------------------------------------------------------------------
 
+
 def check_httpx_usage(path: Path, lines: list[str], findings: list[Finding]):
     """BLOCK: httpx/httpcore imports — O(n^2) connection pooling hangs at 16k+ requests."""
     for i, line in enumerate(lines, 1):
@@ -73,11 +74,16 @@ def check_httpx_usage(path: Path, lines: list[str], findings: list[Finding]):
         if stripped.startswith("#"):
             continue
         if re.search(r"\bimport\s+httpx\b|\bfrom\s+httpx\b|\bimport\s+httpcore\b|\bfrom\s+httpcore\b", stripped):
-            findings.append(Finding(
-                file=str(path), line=i, severity="BLOCK", rule="httpx-usage",
-                message=f"httpx/httpcore import: `{stripped.strip()}`",
-                fix="Use aiohttp via nemo_gym.server_utils.request(). See references/fix-patterns.md § aiohttp-adapter.",
-            ))
+            findings.append(
+                Finding(
+                    file=str(path),
+                    line=i,
+                    severity="BLOCK",
+                    rule="httpx-usage",
+                    message=f"httpx/httpcore import: `{stripped.strip()}`",
+                    fix="Use aiohttp via nemo_gym.server_utils.request(). See references/fix-patterns.md § aiohttp-adapter.",
+                )
+            )
 
 
 def check_ray_get(path: Path, lines: list[str], findings: list[Finding]):
@@ -92,11 +98,16 @@ def check_ray_get(path: Path, lines: list[str], findings: list[Finding]):
             context = "\n".join(lines[context_start:i])
             if "run_in_executor" in context:
                 continue
-            findings.append(Finding(
-                file=str(path), line=i, severity="BLOCK", rule="ray-get-async",
-                message=f"ray.get() in potentially async context: `{stripped.strip()}`",
-                fix="Use `result = await future` — Ray futures are directly awaitable. Or wrap in run_in_executor if synchronous context is required.",
-            ))
+            findings.append(
+                Finding(
+                    file=str(path),
+                    line=i,
+                    severity="BLOCK",
+                    rule="ray-get-async",
+                    message=f"ray.get() in potentially async context: `{stripped.strip()}`",
+                    fix="Use `result = await future` — Ray futures are directly awaitable. Or wrap in run_in_executor if synchronous context is required.",
+                )
+            )
 
 
 def check_missing_semaphore(path: Path, lines: list[str], findings: list[Finding]):
@@ -104,7 +115,6 @@ def check_missing_semaphore(path: Path, lines: list[str], findings: list[Finding
     has_subprocess = False
     has_semaphore = False
     subprocess_line = 0
-    full_text = "\n".join(lines)
 
     for i, line in enumerate(lines, 1):
         if "create_subprocess" in line or "asyncio.subprocess" in line:
@@ -115,11 +125,16 @@ def check_missing_semaphore(path: Path, lines: list[str], findings: list[Finding
             has_semaphore = True
 
     if has_subprocess and not has_semaphore:
-        findings.append(Finding(
-            file=str(path), line=subprocess_line, severity="BLOCK", rule="missing-semaphore",
-            message="Subprocess calls without asyncio.Semaphore for concurrency control.",
-            fix="Add `self.semaphore = asyncio.Semaphore(N)` in model_post_init() and wrap subprocess calls with `async with self.semaphore:`.",
-        ))
+        findings.append(
+            Finding(
+                file=str(path),
+                line=subprocess_line,
+                severity="BLOCK",
+                rule="missing-semaphore",
+                message="Subprocess calls without asyncio.Semaphore for concurrency control.",
+                fix="Add `self.semaphore = asyncio.Semaphore(N)` in model_post_init() and wrap subprocess calls with `async with self.semaphore:`.",
+            )
+        )
 
 
 def check_decode_errors_replace(path: Path, lines: list[str], findings: list[Finding]):
@@ -132,13 +147,18 @@ def check_decode_errors_replace(path: Path, lines: list[str], findings: list[Fin
         if re.search(r"\.decode\s*\(\s*\)", stripped):
             # Check surrounding context for subprocess
             context_start = max(0, i - 10)
-            context = "\n".join(lines[context_start:i + 3])
+            context = "\n".join(lines[context_start : i + 3])
             if "subprocess" in context or "stdout" in context or "stderr" in context or "process" in context:
-                findings.append(Finding(
-                    file=str(path), line=i, severity="BLOCK", rule="missing-errors-replace",
-                    message=f"Subprocess output decoded without errors='replace': `{stripped.strip()}`",
-                    fix='Use `.decode(errors="replace")` to handle non-UTF8 output.',
-                ))
+                findings.append(
+                    Finding(
+                        file=str(path),
+                        line=i,
+                        severity="BLOCK",
+                        rule="missing-errors-replace",
+                        message=f"Subprocess output decoded without errors='replace': `{stripped.strip()}`",
+                        fix='Use `.decode(errors="replace")` to handle non-UTF8 output.',
+                    )
+                )
 
 
 def check_env_vars(path: Path, lines: list[str], findings: list[Finding]):
@@ -152,11 +172,16 @@ def check_env_vars(path: Path, lines: list[str], findings: list[Finding]):
         if match:
             var_name = match.group(1)
             if var_name not in allowed_env_vars:
-                findings.append(Finding(
-                    file=str(path), line=i, severity="BLOCK", rule="env-var-config",
-                    message=f"Config via environment variable `{var_name}`. Must use YAML config.",
-                    fix="Pass this value through Hydra/OmegaConf YAML config. Use ${oc.env:VAR,default} only for deployment-specific infra values.",
-                ))
+                findings.append(
+                    Finding(
+                        file=str(path),
+                        line=i,
+                        severity="BLOCK",
+                        rule="env-var-config",
+                        message=f"Config via environment variable `{var_name}`. Must use YAML config.",
+                        fix="Pass this value through Hydra/OmegaConf YAML config. Use ${oc.env:VAR,default} only for deployment-specific infra values.",
+                    )
+                )
 
 
 def check_wrong_client(path: Path, lines: list[str], findings: list[Finding]):
@@ -171,11 +196,16 @@ def check_wrong_client(path: Path, lines: list[str], findings: list[Finding]):
             continue
         for module, name in bad_imports.items():
             if re.search(rf"\bimport\s+{module}\b|\bfrom\s+{module}\b", stripped):
-                findings.append(Finding(
-                    file=str(path), line=i, severity="BLOCK", rule="wrong-client",
-                    message=f"{name} import: `{stripped.strip()}`",
-                    fix="Use nemo_gym/openai_utils.py (openai<=2.6.1) for all LLM calls.",
-                ))
+                findings.append(
+                    Finding(
+                        file=str(path),
+                        line=i,
+                        severity="BLOCK",
+                        rule="wrong-client",
+                        message=f"{name} import: `{stripped.strip()}`",
+                        fix="Use nemo_gym/openai_utils.py (openai<=2.6.1) for all LLM calls.",
+                    )
+                )
 
 
 def check_cookie_propagation(path: Path, lines: list[str], findings: list[Finding]):
@@ -189,11 +219,16 @@ def check_cookie_propagation(path: Path, lines: list[str], findings: list[Findin
     has_cookies_param = "cookies=" in full_text
 
     if has_server_post and not has_cookies_param:
-        findings.append(Finding(
-            file=str(path), line=1, severity="BLOCK", rule="missing-cookies",
-            message="Agent makes server_client.post() calls without passing cookies.",
-            fix="Pass `cookies=request.cookies` on every downstream call. Update cookies from each response: `cookies = response.cookies`.",
-        ))
+        findings.append(
+            Finding(
+                file=str(path),
+                line=1,
+                severity="BLOCK",
+                rule="missing-cookies",
+                message="Agent makes server_client.post() calls without passing cookies.",
+                fix="Pass `cookies=request.cookies` on every downstream call. Update cookies from each response: `cookies = response.cookies`.",
+            )
+        )
 
 
 def check_token_propagation(path: Path, lines: list[str], findings: list[Finding]):
@@ -209,11 +244,16 @@ def check_token_propagation(path: Path, lines: list[str], findings: list[Finding
 
     has_token_ids = "prompt_token_ids" in full_text or "generation_token_ids" in full_text
     if not has_token_ids:
-        findings.append(Finding(
-            file=str(path), line=1, severity="BLOCK", rule="missing-token-ids",
-            message="Multi-turn agent does not propagate token IDs (prompt_token_ids, generation_token_ids, generation_log_probs).",
-            fix="Extract token IDs from each model response and accumulate across turns. Include in final response for RL training.",
-        ))
+        findings.append(
+            Finding(
+                file=str(path),
+                line=1,
+                severity="BLOCK",
+                rule="missing-token-ids",
+                message="Multi-turn agent does not propagate token IDs (prompt_token_ids, generation_token_ids, generation_log_probs).",
+                fix="Extract token IDs from each model response and accumulate across turns. Include in final response for RL training.",
+            )
+        )
 
 
 def check_think_block_stripping(path: Path, lines: list[str], findings: list[Finding]):
@@ -224,11 +264,16 @@ def check_think_block_stripping(path: Path, lines: list[str], findings: list[Fin
     strips_think = any(p in full_text for p in ["</think>", "<think>", "thinking", "reasoning_format"])
 
     if parses_output and not strips_think:
-        findings.append(Finding(
-            file=str(path), line=1, severity="WARN", rule="missing-think-strip",
-            message="Parses model output but does not strip <think>/<thinking> blocks.",
-            fix="Strip think blocks before extraction: `text = text.split('</think>')[-1].strip()` or check reasoning_format_violation.",
-        ))
+        findings.append(
+            Finding(
+                file=str(path),
+                line=1,
+                severity="WARN",
+                rule="missing-think-strip",
+                message="Parses model output but does not strip <think>/<thinking> blocks.",
+                fix="Strip think blocks before extraction: `text = text.split('</think>')[-1].strip()` or check reasoning_format_violation.",
+            )
+        )
 
 
 def check_sync_endpoints(path: Path, lines: list[str], findings: list[Finding]):
@@ -240,11 +285,16 @@ def check_sync_endpoints(path: Path, lines: list[str], findings: list[Finding]):
             # Check if async is on the same line or the previous line
             prev_line = lines[i - 2].strip() if i >= 2 else ""
             if "async" not in stripped and "async" not in prev_line:
-                findings.append(Finding(
-                    file=str(path), line=i, severity="WARN", rule="sync-endpoint",
-                    message=f"Synchronous endpoint: `{stripped.strip()}`",
-                    fix="Change to `async def`.",
-                ))
+                findings.append(
+                    Finding(
+                        file=str(path),
+                        line=i,
+                        severity="WARN",
+                        rule="sync-endpoint",
+                        message=f"Synchronous endpoint: `{stripped.strip()}`",
+                        fix="Change to `async def`.",
+                    )
+                )
 
 
 def check_non_binary_rewards(path: Path, lines: list[str], findings: list[Finding]):
@@ -266,11 +316,16 @@ def check_non_binary_rewards(path: Path, lines: list[str], findings: list[Findin
                 prev_line = lines[i - 2].strip() if i >= 2 else ""
                 has_doc = "#" in stripped or "partial" in stripped.lower() or "partial" in prev_line.lower()
                 if not has_doc:
-                    findings.append(Finding(
-                        file=str(path), line=i, severity="BLOCK", rule="non-binary-reward",
-                        message=f"Non-binary reward value: {val}. Must be 0.0 or 1.0 unless explicitly documented as intentional partial credit.",
-                        fix="Use 0.0 or 1.0, or add a comment explaining why partial credit is intentional.",
-                    ))
+                    findings.append(
+                        Finding(
+                            file=str(path),
+                            line=i,
+                            severity="BLOCK",
+                            rule="non-binary-reward",
+                            message=f"Non-binary reward value: {val}. Must be 0.0 or 1.0 unless explicitly documented as intentional partial credit.",
+                            fix="Use 0.0 or 1.0, or add a comment explaining why partial credit is intentional.",
+                        )
+                    )
 
 
 def check_yaml_config(path: Path, lines: list[str], findings: list[Finding]):
@@ -283,11 +338,16 @@ def check_yaml_config(path: Path, lines: list[str], findings: list[Finding]):
         if "verified:" in full_text:
             for i, line in enumerate(lines, 1):
                 if "verified: true" in line:
-                    findings.append(Finding(
-                        file=str(path), line=i, severity="WARN", rule="verified-true",
-                        message="verified: true — confirm this server has been baselined with reward profiling.",
-                        fix="Set to `verified: false` for new servers. Only set `true` after successful baselining.",
-                    ))
+                    findings.append(
+                        Finding(
+                            file=str(path),
+                            line=i,
+                            severity="WARN",
+                            rule="verified-true",
+                            message="verified: true — confirm this server has been baselined with reward profiling.",
+                            fix="Set to `verified: false` for new servers. Only set `true` after successful baselining.",
+                        )
+                    )
 
     # Check for train/validation datasets missing gitlab_identifier
     in_dataset = False
@@ -302,17 +362,27 @@ def check_yaml_config(path: Path, lines: list[str], findings: list[Finding]):
             # Flush previous dataset
             if in_dataset and dataset_type in ("train", "validation"):
                 if not has_gitlab_id:
-                    findings.append(Finding(
-                        file=str(path), line=dataset_start_line, severity="WARN", rule="missing-gitlab-id",
-                        message=f"{dataset_type} dataset missing gitlab_identifier.",
-                        fix="Add gitlab_identifier with dataset_name, version, and artifact_fpath.",
-                    ))
+                    findings.append(
+                        Finding(
+                            file=str(path),
+                            line=dataset_start_line,
+                            severity="WARN",
+                            rule="missing-gitlab-id",
+                            message=f"{dataset_type} dataset missing gitlab_identifier.",
+                            fix="Add gitlab_identifier with dataset_name, version, and artifact_fpath.",
+                        )
+                    )
                 if not has_license:
-                    findings.append(Finding(
-                        file=str(path), line=dataset_start_line, severity="WARN", rule="missing-license",
-                        message=f"{dataset_type} dataset missing license field.",
-                        fix="Add `license: <license-name>` to the dataset entry.",
-                    ))
+                    findings.append(
+                        Finding(
+                            file=str(path),
+                            line=dataset_start_line,
+                            severity="WARN",
+                            rule="missing-license",
+                            message=f"{dataset_type} dataset missing license field.",
+                            fix="Add `license: <license-name>` to the dataset entry.",
+                        )
+                    )
             in_dataset = True
             dataset_type = None
             has_gitlab_id = False
@@ -329,17 +399,27 @@ def check_yaml_config(path: Path, lines: list[str], findings: list[Finding]):
     # Flush last dataset
     if in_dataset and dataset_type in ("train", "validation"):
         if not has_gitlab_id:
-            findings.append(Finding(
-                file=str(path), line=dataset_start_line, severity="WARN", rule="missing-gitlab-id",
-                message=f"{dataset_type} dataset missing gitlab_identifier.",
-                fix="Add gitlab_identifier with dataset_name, version, and artifact_fpath.",
-            ))
+            findings.append(
+                Finding(
+                    file=str(path),
+                    line=dataset_start_line,
+                    severity="WARN",
+                    rule="missing-gitlab-id",
+                    message=f"{dataset_type} dataset missing gitlab_identifier.",
+                    fix="Add gitlab_identifier with dataset_name, version, and artifact_fpath.",
+                )
+            )
         if not has_license:
-            findings.append(Finding(
-                file=str(path), line=dataset_start_line, severity="WARN", rule="missing-license",
-                message=f"{dataset_type} dataset missing license field.",
-                fix="Add `license: <license-name>` to the dataset entry.",
-            ))
+            findings.append(
+                Finding(
+                    file=str(path),
+                    line=dataset_start_line,
+                    severity="WARN",
+                    rule="missing-license",
+                    message=f"{dataset_type} dataset missing license field.",
+                    fix="Add `license: <license-name>` to the dataset entry.",
+                )
+            )
 
 
 # ---------------------------------------------------------------------------

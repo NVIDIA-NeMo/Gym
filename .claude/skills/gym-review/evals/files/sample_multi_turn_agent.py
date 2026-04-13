@@ -14,8 +14,6 @@
 # limitations under the License.
 """Sample multi-turn agent with intentional anti-patterns for eval testing."""
 
-import asyncio
-
 from pydantic import BaseModel
 from starlette.requests import Request
 
@@ -66,7 +64,10 @@ class MultiTurnAgent(SimpleResponsesAPIAgent):
             # Build next turn input (no token ID accumulation)
             current_input = {
                 "input": [
-                    {"role": "user", "content": f"Your code was wrong. Error: {verify_data.get('errors', '')}. Try again."}
+                    {
+                        "role": "user",
+                        "content": f"Your code was wrong. Error: {verify_data.get('errors', '')}. Try again.",
+                    }
                 ]
             }
 

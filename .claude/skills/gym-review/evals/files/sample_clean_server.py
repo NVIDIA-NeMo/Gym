@@ -19,7 +19,6 @@ review.py should report zero findings on this file.
 
 import asyncio
 
-from nemo_gym.server_utils import request, raise_for_status
 from nemo_gym.servers.resources_server import SimpleResourcesServer
 
 
@@ -42,13 +41,13 @@ class CleanServer(SimpleResourcesServer):
 
         async with self.semaphore:
             proc = await asyncio.create_subprocess_exec(
-                "python", "-c", code,
+                "python",
+                "-c",
+                code,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=self.config.timeout
-            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=self.config.timeout)
             output = stdout.decode(errors="replace")
             errors = stderr.decode(errors="replace")
 
