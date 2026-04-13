@@ -27,6 +27,7 @@ from fastapi import FastAPI, Request
 from httpx import AsyncClient
 from pydantic import BaseModel, Field, PrivateAttr, model_validator
 from tavily import AsyncTavilyClient
+from tavily.errors import BadRequestError
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -293,13 +294,16 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             return "Query is too long"
 
         client = self._select_tavily_client()
-        results = await client.search(
-            query,
-            max_results=self.MAX_RESULTS,
-            exclude_domains=self._exclude_domains,
-            search_depth="advanced",
-            include_raw_content=True,
-        )
+        try:
+            results = await client.search(
+                query,
+                max_results=self.MAX_RESULTS,
+                exclude_domains=self._exclude_domains,
+                search_depth="advanced",
+                include_raw_content=True,
+            )
+        except BadRequestError as e:
+            return f"Search failed: {e}"
 
         postprocessed_results = self._postprocess_search_results(query, results, max_length)
         return postprocessed_results
@@ -380,6 +384,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             judge_evaluation = await self._verify_answer_with_judge(question, ground_truth, last_assistant_response)
         else:
             judge_evaluation = self._verify_answer_with_regex(ground_truth, last_assistant_response)
+        print(f"{judge_evaluation=}")
         return TavilySearchVerifyResponse(
             **body.model_dump(),
             **judge_evaluation.model_dump(),
