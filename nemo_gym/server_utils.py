@@ -105,6 +105,13 @@ def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSess
     )
 
     num_workers = get_nemo_gym_fastapi_num_workers()
+    # TODO remove
+    print(
+        "AIOHTTP LIMIT PER HOST",
+        cfg.global_aiohttp_connector_limit_per_host // num_workers,
+        cfg.global_aiohttp_connector_limit_per_host,
+        num_workers,
+    )
     client_session = ClientSession(
         connector=TCPConnector(
             limit=cfg.global_aiohttp_connector_limit // num_workers,
