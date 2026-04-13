@@ -227,6 +227,11 @@ class SingularityEnvironment(BaseEnvironment):
             # Pull from Docker registry
             cmd = ["singularity", "pull", str(tmp_sif_path), f"docker://{docker_image}"]
 
+            # TODO remove
+            from sys import stderr
+
+            print(cmd, file=stderr)
+
             process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
