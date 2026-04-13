@@ -68,4 +68,4 @@ harbor_agent:
       harbor_timeout_multiplier: null          # Multiplier (null = 1.0)
 
       # Output root directory for Harbor job artifacts.
-      harbor_jobs_dir: "/path/to/Gym/responses_api_agents/harbor_agent/jobs"
+      harbor_jobs_dir: jobs

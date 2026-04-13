@@ -346,7 +346,11 @@ class HarborAgent(SimpleResponsesAPIAgent):
         date_key = run_timestamp.strftime("%Y%m%d")
         dataset_key = self._sanitize_path_component(dataset_alias)
         model_key = self._sanitize_path_component(self._extract_model_name(policy_model_name))
-        return Path(self.config.harbor_jobs_dir) / date_key / dataset_key / model_key
+
+        root_jobs_dir = Path(self.config.harbor_jobs_dir)
+        if not root_jobs_dir.is_absolute():
+            root_jobs_dir = Path(__file__).parent / root_jobs_dir
+        return root_jobs_dir / date_key / dataset_key / model_key
 
     @staticmethod
     def _parse_instance_id(instance_id: str) -> tuple[str, str]:
