@@ -35,6 +35,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.global_config import get_first_server_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -173,8 +174,6 @@ class XSTestResourcesServer(SimpleResourcesServer):
 
         # Probe through the proxy to verify the actual judge backend is reachable.
         # Without this, the proxy appears healthy but judge requests hang on TCP timeouts.
-        from nemo_gym.global_config import get_first_server_config_dict
-
         judge_config = get_first_server_config_dict(self.server_client.global_config_dict, judge_name)
         judge_url = self.server_client._build_server_base_url(judge_config)
         logger.info("Verifying judge backend is reachable through '%s' at %s ...", judge_name, judge_url)
@@ -259,10 +258,7 @@ class XSTestResourcesServer(SimpleResourcesServer):
                 )
                 judge_response = NeMoGymResponse.model_validate(await get_response_json(http_response))
             except Exception as e:
-                print(
-                    f"DEBUG: XSTestResourcesServer: judge HTTP POST error: {type(e).__name__} {e}",
-                    flush=True,
-                )
+                logger.error("Judge HTTP POST error: %s %s", type(e).__name__, e)
                 return None, JudgeEvaluation(
                     responses_create_params=responses_create_params, verdict_label="judge_error"
                 )

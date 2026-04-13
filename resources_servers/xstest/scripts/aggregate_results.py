@@ -60,7 +60,7 @@ def aggregate(entries: list[dict]) -> None:
         for judge_eval in e.get("judge_evaluations") or []:
             judge_total += 1
             vl = judge_eval.get("verdict_label")
-            if vl == "judge_error":
+            if vl in ("judge_error", "judge_parsing_error"):
                 judge_errors += 1
             elif vl is None:
                 judge_empty += 1
