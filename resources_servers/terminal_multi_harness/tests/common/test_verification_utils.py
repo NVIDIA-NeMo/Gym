@@ -334,3 +334,242 @@ class TestActionComparator:
         )
         assert comparison_result.matches is False
         assert comparison_result.category == StepRewardCategory.EXEC_COMMAND_CMD_SIMILARITY_BELOW_THRESHOLD
+
+
+def build_agent006_declared_tools() -> list[dict]:
+    return [
+        {
+            "type": "function",
+            "name": "execute_python",
+            "description": "Execute Python code in the agent's environment.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "code": {"title": "Code", "type": "string"},
+                },
+                "required": ["code"],
+            },
+        },
+        {
+            "type": "function",
+            "name": "return_result",
+            "description": "Return the final result for the task.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "result": {"title": "Result"},
+                },
+                "required": ["result"],
+            },
+        },
+    ]
+
+
+class TestAgent006ActionComparator:
+    """Tests for agent006-specific tool comparators: execute_python and return_result."""
+
+    @fixture
+    def action_comparator(self) -> ActionComparator:
+        comparator_config = ToolCallComparatorConfig(
+            string_similarity_threshold=0.9,
+        )
+        return ActionComparator(config=comparator_config)
+
+    @fixture
+    def declared_tools(self) -> list[dict]:
+        return build_agent006_declared_tools()
+
+    def test_execute_python_exact_match(
+        self,
+        action_comparator: ActionComparator,
+        declared_tools: list[dict],
+    ) -> None:
+        code = "import os\nprint(os.listdir('/testbed'))"
+        comparison_result = action_comparator.compare_action(
+            expected_action=FunctionCallAction(
+                type="function_call",
+                name="execute_python",
+                arguments=json.dumps({"code": code}),
+            ),
+            actual_action=FunctionCallAction(
+                type="function_call",
+                name="execute_python",
+                arguments=json.dumps({"code": code}),
+            ),
+            declared_tools=declared_tools,
+        )
+        assert comparison_result.matches is True
+        assert comparison_result.category == StepRewardCategory.EXPECTED_TOOL_CALL
+        assert comparison_result.similarity_score == approx(1.0)
+
+    def test_execute_python_similar_above_threshold(
+        self,
+        action_comparator: ActionComparator,
+        declared_tools: list[dict],
+    ) -> None:
+        expected_code = "result = await swebench.execute('ls -la /testbed')\nprint(result)"
+        actual_code = "result = await swebench.execute('ls -la /testbed/')\nprint(result)"
+        comparison_result = action_comparator.compare_action(
+            expected_action=FunctionCallAction(
+                type="function_call",
+                name="execute_python",
+                arguments=json.dumps({"code": expected_code}),
+            ),
+            actual_action=FunctionCallAction(
+                type="function_call",
+                name="execute_python",
+                arguments=json.dumps({"code": actual_code}),
+            ),
+            declared_tools=declared_tools,
+        )
+        assert comparison_result.matches is True
+        assert comparison_result.category == StepRewardCategory.EXPECTED_TOOL_CALL
+        assert comparison_result.similarity_score is not None
+        assert comparison_result.similarity_score >= 0.9
+
+    def test_execute_python_below_threshold(
+        self,
+        action_comparator: ActionComparator,
+        declared_tools: list[dict],
+    ) -> None:
+        comparison_result = action_comparator.compare_action(
+            expected_action=FunctionCallAction(
+                type="function_call",
+                name="execute_python",
+                arguments=json.dumps({"code": "print('hello world')"}),
+            ),
+            actual_action=FunctionCallAction(
+                type="function_call",
+                name="execute_python",
+                arguments=json.dumps({"code": "import sys\nsys.exit(1)"}),
+            ),
+            declared_tools=declared_tools,
+        )
+        assert comparison_result.matches is False
+        assert comparison_result.category == StepRewardCategory.EXECUTE_PYTHON_CODE_SIMILARITY_BELOW_THRESHOLD
+        assert comparison_result.similarity_score is not None
+        assert comparison_result.similarity_score < 0.9
+
+    def test_execute_python_missing_code_argument(
+        self,
+        action_comparator: ActionComparator,
+        declared_tools: list[dict],
+    ) -> None:
+        comparison_result = action_comparator.compare_action(
+            expected_action=FunctionCallAction(
+                type="function_call",
+                name="execute_python",
+                arguments=json.dumps({"code": "print('hi')"}),
+            ),
+            actual_action=FunctionCallAction(
+                type="function_call",
+                name="execute_python",
+                arguments=json.dumps({"not_code": "print('hi')"}),
+            ),
+            declared_tools=declared_tools,
+        )
+        assert comparison_result.matches is False
+        assert comparison_result.category == StepRewardCategory.TOOL_SCHEMA_VALIDATION_FAILED
+
+    def test_return_result_exact_match(
+        self,
+        action_comparator: ActionComparator,
+        declared_tools: list[dict],
+    ) -> None:
+        comparison_result = action_comparator.compare_action(
+            expected_action=FunctionCallAction(
+                type="function_call",
+                name="return_result",
+                arguments=json.dumps({"result": 42}),
+            ),
+            actual_action=FunctionCallAction(
+                type="function_call",
+                name="return_result",
+                arguments=json.dumps({"result": 42}),
+            ),
+            declared_tools=declared_tools,
+        )
+        assert comparison_result.matches is True
+        assert comparison_result.category == StepRewardCategory.EXPECTED_TOOL_CALL
+        assert comparison_result.similarity_score == approx(1.0)
+
+    def test_return_result_string_similarity(
+        self,
+        action_comparator: ActionComparator,
+        declared_tools: list[dict],
+    ) -> None:
+        comparison_result = action_comparator.compare_action(
+            expected_action=FunctionCallAction(
+                type="function_call",
+                name="return_result",
+                arguments=json.dumps({"result": "The answer is 42."}),
+            ),
+            actual_action=FunctionCallAction(
+                type="function_call",
+                name="return_result",
+                arguments=json.dumps({"result": "The answer is 43."}),
+            ),
+            declared_tools=declared_tools,
+        )
+        assert comparison_result.matches is True
+        assert comparison_result.similarity_score is not None
+        assert comparison_result.similarity_score >= 0.9
+
+    def test_return_result_below_threshold(
+        self,
+        action_comparator: ActionComparator,
+        declared_tools: list[dict],
+    ) -> None:
+        comparison_result = action_comparator.compare_action(
+            expected_action=FunctionCallAction(
+                type="function_call",
+                name="return_result",
+                arguments=json.dumps({"result": [1, 2, 3]}),
+            ),
+            actual_action=FunctionCallAction(
+                type="function_call",
+                name="return_result",
+                arguments=json.dumps({"result": "totally different"}),
+            ),
+            declared_tools=declared_tools,
+        )
+        assert comparison_result.matches is False
+        assert comparison_result.category == StepRewardCategory.RETURN_RESULT_SIMILARITY_BELOW_THRESHOLD
+
+    def test_execute_python_wrong_tool_name(
+        self,
+        action_comparator: ActionComparator,
+        declared_tools: list[dict],
+    ) -> None:
+        comparison_result = action_comparator.compare_action(
+            expected_action=FunctionCallAction(
+                type="function_call",
+                name="execute_python",
+                arguments=json.dumps({"code": "print('hi')"}),
+            ),
+            actual_action=FunctionCallAction(
+                type="function_call",
+                name="return_result",
+                arguments=json.dumps({"result": "hi"}),
+            ),
+            declared_tools=declared_tools,
+        )
+        assert comparison_result.matches is False
+        assert comparison_result.category == StepRewardCategory.UNEXPECTED_TOOL
+
+    def test_execute_python_message_vs_tool_call_mismatch(
+        self,
+        action_comparator: ActionComparator,
+        declared_tools: list[dict],
+    ) -> None:
+        comparison_result = action_comparator.compare_action(
+            expected_action=FunctionCallAction(
+                type="function_call",
+                name="execute_python",
+                arguments=json.dumps({"code": "print('hi')"}),
+            ),
+            actual_action=MessageAction(type="message", content="I'll do that now"),
+            declared_tools=declared_tools,
+        )
+        assert comparison_result.matches is False
+        assert comparison_result.category == StepRewardCategory.ACTION_TYPE_MISMATCH

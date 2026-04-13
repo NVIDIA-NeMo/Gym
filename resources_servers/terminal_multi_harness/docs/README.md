@@ -20,6 +20,8 @@ implementation work starts.
 
 - Codex:
   - [codex-match-rules.md](./rulebooks/codex-match-rules.md)
+- Agent006:
+  - [agent006-match-rules.md](./rulebooks/agent006-match-rules.md)
 
 ## Current packaged harness envs
 
@@ -28,6 +30,11 @@ implementation work starts.
     - `resources_servers/terminal_multi_harness/configs/terminal_multi_harness_codex.yaml`
   - agent identity:
     - `terminal_multi_harness_codex_agent`
+- `agent006`
+  - config:
+    - `resources_servers/terminal_multi_harness/configs/terminal_multi_harness_agent006.yaml`
+  - agent identity:
+    - `terminal_multi_harness_agent006_agent`
 
 Future harnesses should usually follow the same pattern:
 
