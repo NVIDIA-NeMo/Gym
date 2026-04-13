@@ -5,16 +5,26 @@ It runs Harbor agents (e.g., `terminus-2`) in Harbor-managed environments and re
 
 ## Table of Contents
 
-- [Overview](#overview)
-  - [Custom agents](#custom-agents)
-  - [Custom environments](#custom-environments)
-- [Quick Start](#quick-start)
-- [NeMo RL Training](#nemo-rl-training)
-  - [Required patches to Gym](#required-patches-to-gym)
-  - [Recommended settings](#recommended-settings)
-  - [Finding failed rollouts](#finding-failed-rollouts)
-  - [Known failure cases during RL training](#known-failure-cases-during-rl-training)
-  - [On-policy corrections for multi-turn training](#on-policy-corrections-for-multi-turn-training)
+- [Harbor Agent for NeMo Gym](#harbor-agent-for-nemo-gym)
+  - [Table of Contents](#table-of-contents)
+  - [Overview](#overview)
+    - [Custom agents](#custom-agents)
+    - [Custom environments](#custom-environments)
+  - [Quick Start](#quick-start)
+    - [1) Download the dataset](#1-download-the-dataset)
+    - [2) Set up dependencies and task images](#2-set-up-dependencies-and-task-images)
+    - [3) Configure the vLLM model server](#3-configure-the-vllm-model-server)
+    - [4) Configure Harbor agent](#4-configure-harbor-agent)
+    - [5) Start NeMo Gym servers](#5-start-nemo-gym-servers)
+    - [6) Test Harbor agent](#6-test-harbor-agent)
+    - [7) Collect rollouts](#7-collect-rollouts)
+    - [8) View trajectories](#8-view-trajectories)
+  - [NeMo RL Training](#nemo-rl-training)
+    - [Required patches to Gym](#required-patches-to-gym)
+    - [Recommended settings](#recommended-settings)
+    - [Finding failed rollouts](#finding-failed-rollouts)
+    - [Known failure cases during RL training](#known-failure-cases-during-rl-training)
+    - [On-policy corrections for multi-turn training](#on-policy-corrections-for-multi-turn-training)
 
 ## Overview
 
