@@ -48,6 +48,9 @@ class BrowsecompAgentConfig(BaseResponsesAPIAgentConfig):
     max_steps: int = 400
     keep_rounds: int = 9999
     nudge_steps: bool = True
+    max_context_tokens: int = 196608
+    context_reset_pct: float = 0.3
+    context_reset_keep_rounds: int = 3
 
 
 class BrowsecompAgentRunRequest(BaseRunRequest):
@@ -82,6 +85,11 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         model_server_cookies = None  # update the cookies on every model response
         resources_server_cookies = request.cookies  # update the cookies on every resources server response
 
+        reset_threshold = 0
+        context_resets = 0
+        if self.config.max_context_tokens and self.config.context_reset_pct:
+            reset_threshold = int(self.config.max_context_tokens * self.config.context_reset_pct)
+
         while True:
             step += 1
 
@@ -106,6 +114,16 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 raise RuntimeError(
                     f"Received an invalid response from model server: {json.dumps(model_response_json)}"
                 ) from e
+
+            # --- Check context reset threshold ---
+            prompt_tokens = model_response.usage.input_tokens if model_response.usage else 0
+            if reset_threshold and prompt_tokens > reset_threshold:
+                context_resets += 1
+                if self.config.context_reset_keep_rounds > 0:
+                    new_outputs = self._extract_last_rounds(new_outputs)
+                else:
+                    new_outputs = []
+                continue
 
             output = model_response.output
             new_outputs.extend(output)
@@ -266,6 +284,43 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 update={"output": "[Previous tool result hidden for context management]"}
             )
         return messages
+
+    def _extract_last_rounds(self, new_outputs):
+        """
+        Extract the last n complete tool-call rounds from new_outputs.
+        A round = one or more function_call items + their corresponding
+        function_call_output items. Returns a flat list preserving order.
+        """
+        n = self.config.context_reset_keep_rounds
+        if n <= 0:
+            return []
+
+        rounds = []
+        i = len(new_outputs) - 1
+        while i >= 0 and len(rounds) < n:
+            if new_outputs[i].type == "function_call_output":
+                # Walk backwards to collect all tool messages for this round
+                tool_outputs = []
+                while i >= 0 and new_outputs[i].type == "function_call_output":
+                    tool_outputs.insert(0, new_outputs[i])
+                    i -= 1
+                # The assistant message that triggered these tool calls
+                fn_calls = []
+                while i >= 0 and new_outputs[i].type == "function_call":
+                    fn_calls.insert(0, new_outputs[i])
+                    i -= 1
+                # Add to rounds
+                if fn_calls:
+                    rounds.insert(0, (fn_calls, tool_outputs))
+            else:
+                i -= 1
+
+        result = []
+        for fn_calls, tool_outputs in rounds:
+            result.extend(fn_calls)
+            result.extend(tool_outputs)
+        return result
+
 
 if __name__ == "__main__":
     BrowsecompAgent.run_webserver()

@@ -4,6 +4,10 @@ browsecomp_agent:
       entrypoint: app.py
       max_steps: 400
       keep_rounds: 9999
+      nudge_steps: true
+      max_context_tokens: 196608
+      context_reset_pct: 0.3
+      context_reset_keep_rounds: 3
       resources_server:
         type: resources_servers
         name: ???
