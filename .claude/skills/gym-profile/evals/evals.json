@@ -1,0 +1,45 @@
+{
+  "skill_name": "gym-profile",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Analyze the profiled results at evals/files/sample_profiled_results.jsonl. The benchmark has 10 tasks. Is this useful for training?",
+      "expected_output": "Analysis identifying ceiling/floor effects, diagnosing floor task failures, and recommending trimming.",
+      "files": ["evals/files/sample_profiled_results.jsonl"],
+      "assertions": [
+        "Ceiling effect flagged: 2 tasks always pass (20% of dataset)",
+        "Floor effect flagged: 3 tasks always fail (30% of dataset)",
+        "failure_reason field cited for diagnosing 0% tasks (NO_CODE_EXTRACTED, TIMEOUT, WRONG_RESULT)",
+        "Response distinguishes extraction bugs from genuine difficulty",
+        "Trimming always-pass and always-fail tasks suggested to improve training signal",
+        "The 5 middle tasks (20-80%) identified as the useful training signal"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "My equivalence_llm_judge results at evals/files/sample_partial_rewards.jsonl show unexpected 0.5 rewards. I thought rewards should be binary.",
+      "expected_output": "Explanation of partial rewards from judge fallback paths, with specific analysis of each task.",
+      "files": ["evals/files/sample_partial_rewards.jsonl"],
+      "assertions": [
+        "0.5 rewards explained as reward_if_full_generation_succeeds from fallback path",
+        "Task 4 (all 0.5) flagged as systematic judge fallback — investigation recommended",
+        "Task 3's EXTRACTION_FAILED identified as upstream cause of 0.0 rewards",
+        "pass_threshold parameter mentioned for controlling how partials count toward pass@k",
+        "check_twice_swap mentioned as another source of non-binary rewards"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "Compare thinking vs instruct model results at evals/files/sample_thinking_comparison.jsonl. The thinking model scores lower overall.",
+      "expected_output": "Per-task analysis correlating reasoning_format_violation_rate with score drops.",
+      "files": ["evals/files/sample_thinking_comparison.jsonl"],
+      "assertions": [
+        "reasoning_format_violation_rate identified as the diagnostic field",
+        "Task 0 and Task 2 identified as divergent (high violation rate correlates with score drop)",
+        "Task 1 identified as unaffected (violation rate 0.0, same scores)",
+        "Think-block stripping failure identified as the root cause",
+        "Response recommends checking extracted_model_code to confirm"
+      ]
+    }
+  ]
+}

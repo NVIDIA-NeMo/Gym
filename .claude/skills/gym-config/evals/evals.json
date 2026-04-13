@@ -1,0 +1,44 @@
+{
+  "skill_name": "gym-config",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Validate the config at evals/files/sample_judge_config.yaml for a math benchmark with LLM-as-judge verification.",
+      "expected_output": "Review identifying the agent-to-model wiring bug, plus validation of judge config fields.",
+      "files": ["evals/files/sample_judge_config.yaml"],
+      "assertions": [
+        "Two separate model server instances identified (policy + judge)",
+        "The agent reference error is caught: agent should reference policy_model, not judge_model",
+        "judge_model_server reference on the resources server is validated",
+        "judge_responses_create_params presence is checked (temperature, max_output_tokens)",
+        "judge_endpoint_max_concurrency is checked",
+        "Response recommends fixing the agent's model_server reference"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Validate the config at evals/files/sample_combined_reward_config.yaml for a jailbreak_detection benchmark.",
+      "expected_output": "Review noting combined reward setup and flagging the train dataset missing gitlab_identifier and license.",
+      "files": ["evals/files/sample_combined_reward_config.yaml"],
+      "assertions": [
+        "use_combined_reward: true is noted",
+        "reward_if_quality_low: 0.3 is identified as intentional partial credit",
+        "The train dataset missing gitlab_identifier is flagged",
+        "The train dataset missing license is flagged",
+        "Combined reward formula (safety * quality) is explained"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "Validate the config at evals/files/sample_env_config.yaml alongside evals/files/sample_judge_config.yaml. Check that the env.yaml endpoint names match the config references.",
+      "expected_output": "Cross-validation confirming env.yaml provides all required endpoints for both policy and judge models.",
+      "files": ["evals/files/sample_env_config.yaml", "evals/files/sample_judge_config.yaml"],
+      "assertions": [
+        "env.yaml endpoint variable names are checked against config interpolation references",
+        "Both policy and judge endpoint configs are present",
+        "Response confirms the env.yaml provides all required endpoint fields (base_url, api_key, model_name)",
+        "Any naming mismatches between env.yaml and config are identified"
+      ]
+    }
+  ]
+}

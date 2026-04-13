@@ -6,8 +6,13 @@ description: >
   training environment, or resources server into NeMo-Gym. Also use when wrapping
   an existing 3rd-party benchmark library. Covers the full workflow: data preparation,
   resources server implementation, agent wiring, YAML config, testing, and reward
-  profiling (baselining). Triggered by: "add benchmark", "new resources server",
-  "integrate benchmark", "wrap benchmark", "add training environment", "add eval".
+  profiling (baselining).
+license: Apache-2.0
+compatibility: Requires Python 3.12+, uv, git. NeMo Gym must be installed.
+metadata:
+  author: nvidia-nemo-gym
+  version: "1.0"
+allowed-tools: Bash(python:*) Bash(ng_*) Bash(git:*) Bash(pre-commit:*) Read Write Edit Grep Glob
 ---
 
 # Add Benchmark to NeMo-Gym

@@ -1,0 +1,46 @@
+{
+  "skill_name": "gym-run",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "I have a code_gen benchmark configured at evals/files/sample_run_config.yaml but no env.yaml. Walk me through running it with the OpenAI model against a GPT endpoint at https://api.openai.com/v1.",
+      "expected_output": "Step-by-step guide covering env.yaml creation, config validation with ng_dump_config, server launch with ng_run, health check with ng_status, smoke test with ng_collect_rollouts using example.jsonl, and handoff to gym-profile.",
+      "files": ["evals/files/sample_run_config.yaml"],
+      "assertions": [
+        "env.yaml creation instructed with policy_base_url, policy_api_key, policy_model_name",
+        "ng_dump_config command shown with both the benchmark config and openai_model config",
+        "ng_run command shown with correct +config_paths syntax including both configs",
+        "ng_status mentioned for verifying server health before collecting rollouts",
+        "Smoke test with ng_collect_rollouts using example.jsonl and small limit recommended before full run",
+        "Handoff to gym-profile mentioned for analyzing results after rollout collection"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "I ran ng_run with the config at evals/files/sample_run_config.yaml but ng_status shows my resources server as connection_error and the model server as success. What do I do?",
+      "expected_output": "Triage steps for a partially healthy cluster: check resource server logs, verify the entrypoint, check port conflicts, and hand off to gym-debug if the issue persists.",
+      "files": ["evals/files/sample_run_config.yaml"],
+      "assertions": [
+        "Server logs recommended as first diagnostic step",
+        "Port conflict between servers identified as a possible cause",
+        "Missing dependency or import error mentioned as common startup failure",
+        "ng_run +dry_run=true suggested to verify venv setup without launching",
+        "Handoff to gym-debug recommended if issue persists after basic triage"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "My smoke test at evals/files/sample_smoke_test_output.jsonl returned all 0.0 rewards for 3 tasks. I'm using the config at evals/files/sample_run_config.yaml. Should I proceed to a full rollout collection?",
+      "expected_output": "Do NOT proceed. Diagnose the 0.0 rewards by inspecting the rollout output fields, then hand off to gym-debug.",
+      "files": ["evals/files/sample_smoke_test_output.jsonl", "evals/files/sample_run_config.yaml"],
+      "assertions": [
+        "Response explicitly says do NOT proceed to full rollout collection",
+        "Inspection of output_text and diagnostic fields from the rollout JSONL recommended",
+        "The empty extracted_model_code on task 0 identified as code extraction failure",
+        "The TIMEOUT failure_reason on task 1 identified as subprocess timeout",
+        "The WRONG_RESULT on task 2 identified as logic error in model output",
+        "Handoff to gym-debug recommended for diagnosing verification failures"
+      ]
+    }
+  ]
+}

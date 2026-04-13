@@ -1,0 +1,46 @@
+{
+  "skill_name": "add-benchmark",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "I want to add a math algebra benchmark. Here's a sample server at evals/files/sample_math_server.py, data at evals/files/sample_math_example.jsonl, and config at evals/files/sample_math_config.yaml. Review them for completeness.",
+      "expected_output": "Review confirming server, data, and config are correct, identifying any missing pieces.",
+      "files": ["evals/files/sample_math_server.py", "evals/files/sample_math_example.jsonl", "evals/files/sample_math_config.yaml"],
+      "assertions": [
+        "Server extends SimpleResourcesServer with async verify()",
+        "Think-block stripping is present and validated",
+        "Rewards are binary (0.0 or 1.0)",
+        "example.jsonl has valid entries with responses_create_params and verifier_metadata",
+        "Config correctly wires resources server, agent, and datasets",
+        "verified: false is confirmed for new server",
+        "Response identifies any missing pieces (requirements.txt, README.md)"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Review the test file at evals/files/sample_math_test.py for my math benchmark. Does it cover enough cases?",
+      "expected_output": "Test coverage assessment identifying what's covered and what's missing.",
+      "files": ["evals/files/sample_math_test.py", "evals/files/sample_math_server.py"],
+      "assertions": [
+        "Test coverage assessed: pass, fail (wrong answer), fail (no extraction), fail (think block)",
+        "Missing test case identified: timeout handling",
+        "Response notes test coverage is close to but not at the 95% requirement",
+        "Tests correctly validate binary rewards",
+        "Response recommends adding edge cases (empty output, very long output)"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "I want to wrap an external code execution benchmark. The library uses httpx for API calls and has its own scoring. How should I structure this?",
+      "expected_output": "Integration guide recommending agent-level wrapping with httpx replacement.",
+      "assertions": [
+        "Agent-level integration recommended (wrap in /run, not /verify)",
+        "httpx replacement with aiohttp adapter is mentioned",
+        "Pre-processing from Gym schema to library format described",
+        "Post-processing to BaseVerifyResponse with reward described",
+        "Reproduce published numbers with original repo first, then reproduce after integration",
+        "asyncio.Semaphore for concurrent library calls mentioned"
+      ]
+    }
+  ]
+}
