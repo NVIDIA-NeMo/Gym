@@ -187,10 +187,19 @@ class Tau2Agent(SimpleResponsesAPIAgent):
     def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
         domain_to_rewards = defaultdict(list)
         domain_to_unique_samples = defaultdict(int)
+        termination_reason_domain_count = defaultdict(int)
+        termination_reason_count = defaultdict(int)
+        total_count = 0
         for task_group in tasks:
             for task in task_group:
                 domain = task["config"]["domain"]
                 domain_to_rewards[domain].append(task["reward"])
+
+                termination_reason = task["result"]["termination_reason"]
+                termination_reason_count[f"{termination_reason}/count"] += 1
+                termination_reason_domain_count[f"{domain}/{termination_reason}/count"] += 1
+
+                total_count += 1
 
             domain_to_unique_samples[f"{domain}/num_samples_unique"] += 1
 
@@ -202,11 +211,25 @@ class Tau2Agent(SimpleResponsesAPIAgent):
 
         macro_average = sum(domain_to_average_reward.values()) / len(domain_to_average_reward)
 
+        termination_reason_pct = {
+            f"{k.removesuffix('/count')}/pct": v / total_count for k, v in termination_reason_count.items()
+        }
+        termination_reason_domain_pct = dict()
+        for k, v in termination_reason_domain_count.items():
+            for domain, domain_count in domain_to_counts.items():
+                if k.startswith(domain):
+                    termination_reason_domain_pct[f"{k.removesuffix('/count')}/pct"] = v / domain_count
+                    break
+
         return {
             "macro_average": macro_average,
             **domain_to_unique_samples,
             **domain_to_counts,
             **domain_to_average_reward,
+            **termination_reason_domain_count,
+            **termination_reason_count,
+            **termination_reason_pct,
+            **termination_reason_domain_pct,
         }
 
 
