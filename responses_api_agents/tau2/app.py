@@ -193,6 +193,7 @@ class Tau2Agent(SimpleResponsesAPIAgent):
         hallucination_count = defaultdict(int)
         transfer_to_human_agents = 0
         total_count = 0
+        missing_tool_call = 0
         for task_group in tasks:
             for task in task_group:
                 domain = task["config"]["domain"]
@@ -203,6 +204,7 @@ class Tau2Agent(SimpleResponsesAPIAgent):
                 termination_reason_domain_count[f"{domain}/termination_reason/{termination_reason}/count"] += 1
 
                 this_task_transfer_to_human_agents = False
+                has_tool_call = False
                 for message in task["result"]["messages"]:
                     if message["role"] == "tool":
                         # e.g. `Error: Tool 'run_speed_test' not found.`
@@ -219,9 +221,12 @@ class Tau2Agent(SimpleResponsesAPIAgent):
                     if not message.get("tool_calls"):
                         continue
 
+                    has_tool_call = True
+
                     if message["tool_calls"][0]["name"] == "transfer_to_human_agents":
                         this_task_transfer_to_human_agents = True
 
+                missing_tool_call += not has_tool_call
                 transfer_to_human_agents += this_task_transfer_to_human_agents
                 total_count += 1
 
@@ -265,6 +270,7 @@ class Tau2Agent(SimpleResponsesAPIAgent):
             "transfer_to_human_agents/pct": transfer_to_human_agents / total_count,
             **hallucination_count,
             "hallucination/count/total": sum(hallucination_count.values()),
+            "missing_tool_call": missing_tool_call,
         }
 
 
