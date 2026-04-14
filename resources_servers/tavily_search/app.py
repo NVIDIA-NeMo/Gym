@@ -93,6 +93,7 @@ class TavilySearchResponse(BaseModel):
 class BrowseRequest(BaseModel):
     urls: List[str]
     goal: Optional[str] = None
+    max_total_length: int = 30000
 
     @model_validator(mode="before")
     @classmethod
@@ -231,7 +232,6 @@ class TavilySearchAIOHTTPClient(BaseModel):
 class TavilySearchResourcesServer(SimpleResourcesServer):
     config: TavilySearchResourcesServerConfig
     MAX_RESULTS: int = 5
-    MAX_RESULT_CHARS: int = 2000
 
     _async_tavily_clients: Optional[List[AsyncTavilyClient]] = PrivateAttr(default=None)
     _num_requests: int = 0
@@ -317,16 +317,19 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         if body.queries is None or len(body.queries) == 0:
             return TavilySearchResponse(results_string="Query is none or empty")
 
-        start_time = time()
+        # set max length per query
         max_per_query_length = body.max_total_length // len(body.queries)
-        results = await asyncio.gather(*[self._search_one(q, max_per_query_length) for q in body.queries])
 
+        # search for queries
+        start_time = time()
+        results = await asyncio.gather(*[self._search_one(q, max_per_query_length) for q in body.queries])
         metrics.async_tavily_calls.append(
             TavilySearchSingleAsyncTavilyMetrics(
                 function="search", status="success", start_time=start_time, end_time=time()
             )
         )
 
+        # concat results
         postprocessed_results = "\n\n".join(results)
         return TavilySearchResponse(results_string=postprocessed_results)
 
@@ -339,9 +342,13 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
 
         urls = [u for u in body.urls if not self._is_url_excluded(u)]
         if not urls:
-            return BrowseResponse(results_string="URL is empty or in excluded domains")
+            return BrowseResponse(results_string="Error: no URLs provided.")
         urls = urls[:5]
 
+        # set max length per url
+        max_per_url_length = body.max_total_length // len(urls)
+
+        # search for urls
         async_tavily_client = self._select_tavily_client()
         start_time = time()
         try:
@@ -355,6 +362,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                 )
             )
         except Exception as e:
+            # return if failed to call api
             metrics.async_tavily_calls.append(
                 TavilySearchSingleAsyncTavilyMetrics(
                     function="extract", status="error", start_time=start_time, end_time=time()
@@ -362,14 +370,18 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             )
             return BrowseResponse(results_string=f"Failed to extract content: {e}")
 
+        # return if no results
         result_list = results.get("results", [])
         if not result_list:
             return BrowseResponse(results_string="No content extracted.")
 
+        # concat results
         blocks = []
         for result in result_list:
             url = result.get("url", "")
-            content = self._clean_text(result.get("raw_content", ""))
+            content = result.get("raw_content", "")
+            if len(content) > max_per_url_length:
+                content = content[:max_per_url_length] + "\n... [truncated]"
             blocks.append(f"[URL]: {url}\n[Content]:\n{content}\n")
 
         results_string = "\n\n".join(blocks)
@@ -384,6 +396,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             judge_evaluation = await self._verify_answer_with_judge(question, ground_truth, last_assistant_response)
         else:
             judge_evaluation = self._verify_answer_with_regex(ground_truth, last_assistant_response)
+
         return TavilySearchVerifyResponse(
             **body.model_dump(),
             **judge_evaluation.model_dump(),
@@ -398,42 +411,6 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         hostname = urlparse(url).hostname or ""
         return any(hostname == domain or hostname.endswith("." + domain) for domain in self._exclude_domains)
 
-    def _extract_domain(self, url: str) -> str:
-        """Extract domain from URL."""
-        return urlparse(url).hostname or url
-
-    def _clean_text(self, text: str) -> str:
-        """Remove wiki/web navigation artifacts and normalize whitespace."""
-        # Strip [edit] markers
-        text = re.sub(r"\[edit\]", "", text)
-        # Strip wiki navigation chrome lines: [Jump to content], [Search...], [Read], [View history], etc.
-        text = re.sub(r"^\[(?:Jump to content|Search|Read|Edit|View history)[^\]]*\].*$", "", text, flags=re.MULTILINE)
-        # Strip wiki language sidebar links: [LangName](https://xx.wikipedia.org/...)
-        text = re.sub(r"\[[^\]]+\]\(https?://[a-z]{2,3}\.wikipedia\.org/[^\)]*\)", "", text)
-        # Strip table-of-contents anchor links: * [(Top)](#) etc.
-        text = re.sub(r"^\s*\*\s*\[[^\]]*\]\(#[^\)]*\)\s*$", "", text, flags=re.MULTILINE)
-        # Strip zero-width spaces and special unicode
-        text = text.replace("\u200b", "").replace("\u200c", "").replace("\u200d", "").replace("\ufeff", "")
-        text = text.replace("\u3010", "[").replace("\u3011", "]")
-        # Strip trailing whitespace per line
-        text = re.sub(r"[ \t]+$", "", text, flags=re.MULTILINE)
-        # Collapse 3+ consecutive newlines to 2 (one blank line)
-        text = re.sub(r"\n{3,}", "\n\n", text)
-        return text.strip()
-
-    def _truncate_text(self, text: str, max_chars: int = None) -> tuple:
-        """Truncate text to max_chars, snapping to last full line boundary.
-        Returns (truncated_text, was_truncated).
-        """
-        if max_chars is None:
-            max_chars = self.MAX_RESULT_CHARS
-        if len(text) <= max_chars:
-            return text, False
-        # Find the last newline within max_chars
-        cut = text.rfind("\n", 0, max_chars)
-        if cut == -1:
-            cut = max_chars
-        return text[:cut], True
 
     def _postprocess_search_results(self, query: str, results: dict, max_length: int) -> str:
         blocks = [f"[Search Query]: {query}"]
