@@ -1101,7 +1101,6 @@ version = "3.11.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiohttp" },
-    { name = "docker" },
     { name = "mlflow-skinny" },
     { name = "mlflow-tracing" },
     { name = "numpy" },
