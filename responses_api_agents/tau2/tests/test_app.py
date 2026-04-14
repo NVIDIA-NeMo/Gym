@@ -14,10 +14,12 @@
 # limitations under the License.
 import json
 from pathlib import Path
+from typing import Tuple
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi.testclient import TestClient
 
+from nemo_gym.base_responses_api_agent import AggregateMetricsRequest
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.tau2.app import (
     ModelServerRef,
@@ -27,28 +29,7 @@ from responses_api_agents.tau2.app import (
 
 
 class TestApp:
-    def test_sanity(self) -> None:
-        config = Tau2Config(
-            host="0.0.0.0",
-            port=8080,
-            entrypoint="",
-            name="",
-            model_server=ModelServerRef(
-                type="responses_api_models",
-                name="",
-            ),
-            user_model_server=ModelServerRef(
-                type="responses_api_models",
-                name="",
-            ),
-        )
-        Tau2Agent(config=config, server_client=MagicMock(spec=ServerClient))
-
-    def test_sanity_query_input(self) -> None:
-        example_jsonl = Path(__file__).parent.parent / "data" / "example.jsonl"
-        with example_jsonl.open() as f:
-            data = list(map(json.loads, f))
-
+    def _dummy_server(self) -> Tuple[Tau2Config, Tau2Agent]:
         config = Tau2Config(
             host="0.0.0.0",
             port=8080,
@@ -65,6 +46,18 @@ class TestApp:
             max_steps=4,
         )
         server = Tau2Agent(config=config, server_client=MagicMock(spec=ServerClient))
+
+        return config, server
+
+    def test_sanity(self) -> None:
+        self._dummy_server()
+
+    def test_sanity_query_input(self) -> None:
+        example_jsonl = Path(__file__).parent.parent / "data" / "example.jsonl"
+        with example_jsonl.open() as f:
+            data = list(map(json.loads, f))
+
+        _, server = self._dummy_server()
 
         app = server.setup_webserver()
         client = TestClient(app)
@@ -115,6 +108,78 @@ class TestApp:
             for o in d["responses_create_params"]["input"]:
                 o.pop("id", None)
 
+            d["duration"] = 0.0
+
             return d
 
         assert _clean(expected_response_dict) == _clean(actual_response_dict)
+
+    async def test_compute_metrics(self) -> None:
+        example_rollouts_fpath = Path(__file__).parent.parent / "data" / "example_rollouts.jsonl"
+        with example_rollouts_fpath.open() as f:
+            rollouts = list(map(json.loads, f))
+
+        _, server = self._dummy_server()
+
+        actual_metrics = server.compute_metrics([rollouts])
+        expected_metrics = {
+            "macro_average": 1.0,
+            "telecom/num_samples_unique": 1,
+            "retail/num_samples_total": 1,
+            "telecom/num_samples_total": 3,
+            "airline/num_samples_total": 1,
+            "retail/reward": 1.0,
+            "telecom/reward": 1.0,
+            "airline/reward": 1.0,
+            "telecom/service_issue/reward": 1.0,
+            "retail/trajectory_termination_reason/user_stop/count": 1,
+            "telecom/trajectory_termination_reason/user_stop/count": 3,
+            "airline/trajectory_termination_reason/user_stop/count": 1,
+            "trajectory_termination_reason/user_stop/count": 5,
+            "trajectory_termination_reason/user_stop/pct": 1.0,
+            "message_finish_reason/tool_calls/count": 20,
+            "message_finish_reason/stop/count": 5,
+            "message_finish_reason/tool_calls/pct": 0.8,
+            "message_finish_reason/stop/pct": 0.2,
+            "trajectory_transfer_to_human_agents/count": 4,
+            "trajectory_transfer_to_human_agents/pct": 0.8,
+            "tool_call_hallucination/count/total": 0,
+            "trajectory_missing_tool_call/count": 0,
+            "trajectory_missing_tool_call/pct": 0.0,
+            "messages_with_incomplete_reasoning/count": 0,
+            "messages_with_incomplete_reasoning/pct": 0.0,
+        }
+        assert expected_metrics == actual_metrics
+
+        actual_aggregate_metrics = await server.aggregate_metrics(AggregateMetricsRequest(verify_responses=rollouts))
+        expected_key_aggregate_metrics = {
+            "mean/reward": 1.0,
+            "macro_average": 1.0,
+            "airline/num_samples_unique": 1,
+            "telecom/num_samples_unique": 3,
+            "retail/num_samples_unique": 1,
+            "airline/num_samples_total": 1,
+            "telecom/num_samples_total": 3,
+            "retail/num_samples_total": 1,
+            "airline/reward": 1.0,
+            "telecom/reward": 1.0,
+            "retail/reward": 1.0,
+            "telecom/service_issue/reward": 1.0,
+            "airline/trajectory_termination_reason/user_stop/count": 1,
+            "telecom/trajectory_termination_reason/user_stop/count": 3,
+            "retail/trajectory_termination_reason/user_stop/count": 1,
+            "trajectory_termination_reason/user_stop/count": 5,
+            "trajectory_termination_reason/user_stop/pct": 1.0,
+            "message_finish_reason/tool_calls/count": 20,
+            "message_finish_reason/stop/count": 5,
+            "message_finish_reason/tool_calls/pct": 0.8,
+            "message_finish_reason/stop/pct": 0.2,
+            "trajectory_transfer_to_human_agents/count": 4,
+            "trajectory_transfer_to_human_agents/pct": 0.8,
+            "tool_call_hallucination/count/total": 0,
+            "trajectory_missing_tool_call/count": 0,
+            "trajectory_missing_tool_call/pct": 0.0,
+            "messages_with_incomplete_reasoning/count": 0,
+            "messages_with_incomplete_reasoning/pct": 0.0,
+        }
+        assert expected_key_aggregate_metrics == actual_aggregate_metrics.key_metrics
