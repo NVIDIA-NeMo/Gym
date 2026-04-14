@@ -1,0 +1,35 @@
+terminal_multi_harness_codex_resources_server:
+  resources_servers:
+    terminal_multi_harness:
+      entrypoint: app.py
+      domain: agent
+      tool_call_comparator_config:
+        string_similarity_threshold: 0.9
+      verified: false
+      description: Codex harness structured-action verifier for next-step pivot RL.
+
+terminal_multi_harness_codex_agent:
+  responses_api_agents:
+    tool_simulation_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: terminal_multi_harness_codex_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/terminal_multi_harness/data/example.jsonl
+        num_repeats: 1
+
+policy_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: ${policy_base_url}
+      api_key: ${policy_api_key}
+      model: ${policy_model_name}
+      return_token_id_information: false
+      uses_reasoning_parser: false
