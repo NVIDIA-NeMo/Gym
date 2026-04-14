@@ -13,11 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from collections import defaultdict
 from os import environ
 from pathlib import Path
 from subprocess import run
 from time import time
-from typing import Any, Dict, Literal
+from typing import Any, Dict, List, Literal
 
 
 DATA_DIR = Path(__file__).parent / "tau2_data"
@@ -182,6 +183,31 @@ class Tau2Agent(SimpleResponsesAPIAgent):
             res["mean/auto_review"],
         )
         return res
+
+    def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
+        domain_to_rewards = defaultdict(list)
+        domain_to_unique_samples = defaultdict(int)
+        for task_group in tasks:
+            for task in task_group:
+                domain = task["config"]["domain"]
+                domain_to_rewards[domain].append(task["reward"])
+
+            domain_to_unique_samples[f"{domain}/num_samples_unique"] += 1
+
+        domain_to_average_reward: Dict[str, float] = dict()
+        domain_to_counts: Dict[str, int] = dict()
+        for domain, rewards in domain_to_rewards.items():
+            domain_to_counts[f"{domain}/num_samples_total"] = len(rewards)
+            domain_to_average_reward[f"{domain}/reward"] = sum(rewards) / domain_to_counts[domain]
+
+        macro_average = sum(domain_to_average_reward.values()) / len(domain_to_average_reward)
+
+        return {
+            "macro_average": macro_average,
+            **domain_to_unique_samples,
+            **domain_to_counts,
+            **domain_to_average_reward,
+        }
 
 
 if __name__ == "__main__":
