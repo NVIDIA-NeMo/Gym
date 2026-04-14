@@ -18,7 +18,7 @@ from os import environ
 from pathlib import Path
 from subprocess import run
 from time import time
-from typing import Any, Dict, List, Literal
+from typing import Any, Dict, List, Literal, Optional
 
 
 DATA_DIR = Path(__file__).parent / "tau2_data"
@@ -79,6 +79,14 @@ class Tau2RunRequest(BaseRunRequest):
 class Tau2VerifyResponse(Tau2RunRequest, BaseVerifyResponse):
     result: SimulationRun
     duration: float
+    num_steps: int
+    num_agent_calls: int
+    min_prompt_tokens: Optional[float]
+    min_completion_tokens: Optional[float]
+    mean_prompt_tokens: Optional[float]
+    mean_completion_tokens: Optional[float]
+    max_prompt_tokens: Optional[float]
+    max_completion_tokens: Optional[float]
 
 
 class Tau2Agent(SimpleResponsesAPIAgent):
@@ -145,6 +153,32 @@ class Tau2Agent(SimpleResponsesAPIAgent):
         input_items_1 += output_items[:1]
         input_items_2, output_items = split_responses_input_output_items(output_items[1:])
 
+        prompt_usages = []
+        completion_usages = []
+        num_agent_calls = 0
+        for message in result.messages:
+            if not message.role == "assistant":
+                continue
+
+            num_agent_calls += 1
+            if message.usage:
+                prompt_usages.append(message.usage["prompt_tokens"])
+                completion_usages.append(message.usage["completion_tokens"])
+
+        min_prompt_tokens = None
+        min_completion_tokens = None
+        mean_prompt_tokens = None
+        mean_completion_tokens = None
+        max_prompt_tokens = None
+        max_completion_tokens = None
+        if prompt_usages:
+            min_prompt_tokens = min(prompt_usages)
+            min_completion_tokens = min(completion_usages)
+            mean_prompt_tokens = sum(prompt_usages) / len(prompt_usages)
+            mean_completion_tokens = sum(completion_usages) / len(completion_usages)
+            max_prompt_tokens = max(prompt_usages)
+            max_completion_tokens = max(completion_usages)
+
         return Tau2VerifyResponse(
             **body_dict,
             responses_create_params=dict(
@@ -168,6 +202,13 @@ class Tau2Agent(SimpleResponsesAPIAgent):
             result=result,
             duration=result.duration,
             num_steps=len(result.messages),
+            num_agent_calls=num_agent_calls,
+            min_prompt_tokens=min_prompt_tokens,
+            min_completion_tokens=min_completion_tokens,
+            mean_prompt_tokens=mean_prompt_tokens,
+            mean_completion_tokens=mean_completion_tokens,
+            max_prompt_tokens=max_prompt_tokens,
+            max_completion_tokens=max_completion_tokens,
         )
 
     def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
