@@ -28,6 +28,7 @@ from pydantic import BaseModel, Field
 from tqdm.asyncio import tqdm
 from wandb import Table
 
+from nemo_gym import PARENT_DIR
 from nemo_gym.config_types import BaseNeMoGymCLIConfig, BaseServerConfig
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
@@ -141,7 +142,11 @@ class RolloutCollectionHelper(BaseModel):
         if num_repeats:
             print(f"Repeating rows {num_repeats} times (in a pattern of abc to aabbcc)!")
 
-        input_file = open(config.input_jsonl_fpath)
+        _input_path = Path(config.input_jsonl_fpath)
+        if not _input_path.is_absolute():
+            _cwd_path = Path.cwd() / _input_path
+            _input_path = _cwd_path if _cwd_path.exists() else PARENT_DIR / _input_path
+        input_file = open(_input_path)
         rows_iterator: Iterator[str] = input_file
         rows_iterator: Iterator[str] = tqdm(rows_iterator, desc="Reading rows")
         rows_iterator: Iterator[tuple[int, str]] = zip(range_iterator, rows_iterator)
