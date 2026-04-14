@@ -14,6 +14,7 @@
 # limitations under the License.
 import json
 from pathlib import Path
+from typing import Tuple
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi.testclient import TestClient
@@ -27,28 +28,7 @@ from responses_api_agents.tau2.app import (
 
 
 class TestApp:
-    def test_sanity(self) -> None:
-        config = Tau2Config(
-            host="0.0.0.0",
-            port=8080,
-            entrypoint="",
-            name="",
-            model_server=ModelServerRef(
-                type="responses_api_models",
-                name="",
-            ),
-            user_model_server=ModelServerRef(
-                type="responses_api_models",
-                name="",
-            ),
-        )
-        Tau2Agent(config=config, server_client=MagicMock(spec=ServerClient))
-
-    def test_sanity_query_input(self) -> None:
-        example_jsonl = Path(__file__).parent.parent / "data" / "example.jsonl"
-        with example_jsonl.open() as f:
-            data = list(map(json.loads, f))
-
+    def _dummy_server(self) -> Tuple[Tau2Config, Tau2Agent]:
         config = Tau2Config(
             host="0.0.0.0",
             port=8080,
@@ -65,6 +45,18 @@ class TestApp:
             max_steps=4,
         )
         server = Tau2Agent(config=config, server_client=MagicMock(spec=ServerClient))
+
+        return config, server
+
+    def test_sanity(self) -> None:
+        self._dummy_server()
+
+    def test_sanity_query_input(self) -> None:
+        example_jsonl = Path(__file__).parent.parent / "data" / "example.jsonl"
+        with example_jsonl.open() as f:
+            data = list(map(json.loads, f))
+
+        _, server = self._dummy_server()
 
         app = server.setup_webserver()
         client = TestClient(app)
@@ -115,6 +107,18 @@ class TestApp:
             for o in d["responses_create_params"]["input"]:
                 o.pop("id", None)
 
+            d["duration"] = 0.0
+
             return d
 
         assert _clean(expected_response_dict) == _clean(actual_response_dict)
+
+    def test_compute_metrics(self) -> None:
+        example_rollouts_fpath = Path(__file__).parent.parent / "data" / "example_rollouts.jsonl"
+        with example_rollouts_fpath.open() as f:
+            rollouts = list(map(json.loads, f))
+
+        _, server = self._dummy_server()
+
+        actual_metrics = server.compute_metrics([rollouts])
+        print(json.dumps(actual_metrics, indent=4))

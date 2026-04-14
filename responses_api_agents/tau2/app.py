@@ -151,6 +151,7 @@ class Tau2Agent(SimpleResponsesAPIAgent):
                 continue
             elif message.role == "tool" and message.requestor == "user":
                 continue
+            messages_to_convert.append(message)
 
         message_dicts = to_litellm_messages(messages_to_convert)
 
