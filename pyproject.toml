@@ -291,6 +291,9 @@ exclude-dependencies = [
     "waitress",
 ]
 
+[tool.setuptools.package-data]
+nemo_gym = ["resources/*.py"]
+
 [tool.setuptools.dynamic]
 version = {attr = "nemo_gym.__version__"}
 readme = {file = "README.md", content-type = "text/markdown"}

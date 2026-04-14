@@ -52,7 +52,7 @@ from pydantic import BaseModel, ConfigDict
 from requests.exceptions import ConnectionError
 from starlette.middleware.sessions import SessionMiddleware
 
-from nemo_gym import PARENT_DIR
+from nemo_gym import WORKING_DIR
 from nemo_gym.config_types import (
     BaseRunServerInstanceConfig,
     BaseServerConfig,
@@ -104,10 +104,11 @@ def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSess
         "There is already a global aiohttp client setup. Please refactor your code or call `global_aiohttp_client_exit` if you want to explicitly re-make the client!"
     )
 
+    num_workers = get_nemo_gym_fastapi_num_workers()
     client_session = ClientSession(
         connector=TCPConnector(
-            limit=cfg.global_aiohttp_connector_limit,
-            limit_per_host=cfg.global_aiohttp_connector_limit_per_host,
+            limit=cfg.global_aiohttp_connector_limit // num_workers,
+            limit_per_host=cfg.global_aiohttp_connector_limit_per_host // num_workers,
         ),
         timeout=ClientTimeout(),
         cookie_jar=DummyCookieJar(),
@@ -427,25 +428,35 @@ def maybe_ray_cluster_exit():  # pragma: no cover
 
 atexit.register(maybe_ray_cluster_exit)
 
-
+# These environment variables are the ONLY environment variables that Gym uses. Please do not set these, they are only used here to pass information
+# from main proc to child procs under FastAPI/uvicorn parallelism
 IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME = "IS_NEMO_GYM_FASTAPI_WORKER"
 IS_NEMO_GYM_FASTAPI_ENTRYPOINT_KEY_NAME = "IS_NEMO_GYM_FASTAPI_ENTRYPOINT"
+NEMO_GYM_FASTAPI_NUM_WORKERS = "NEMO_GYM_FASTAPI_NUM_WORKERS"
 
 
-def is_nemo_gym_fastapi_worker() -> bool:
+def is_nemo_gym_fastapi_worker() -> bool:  # pragma: no cover
     return getenv(IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME) == "1"
 
 
-def is_nemo_gym_fastapi_entrypoint(file: str) -> bool:
-    return is_nemo_gym_fastapi_worker() and file.endswith(getenv(IS_NEMO_GYM_FASTAPI_ENTRYPOINT_KEY_NAME))
-
-
-def set_is_nemo_gym_fastapi_worker() -> None:
+def set_is_nemo_gym_fastapi_worker() -> None:  # pragma: no cover
     environ[IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME] = "1"
 
 
-def set_is_nemo_gym_fastapi_entrypoint(file: str) -> None:
+def is_nemo_gym_fastapi_entrypoint(file: str) -> bool:  # pragma: no cover
+    return is_nemo_gym_fastapi_worker() and file.endswith(getenv(IS_NEMO_GYM_FASTAPI_ENTRYPOINT_KEY_NAME))
+
+
+def set_is_nemo_gym_fastapi_entrypoint(file: str) -> None:  # pragma: no cover
     environ[IS_NEMO_GYM_FASTAPI_ENTRYPOINT_KEY_NAME] = file
+
+
+def get_nemo_gym_fastapi_num_workers() -> int:  # pragma: no cover
+    return int(getenv(NEMO_GYM_FASTAPI_NUM_WORKERS, "1"))
+
+
+def set_nemo_gym_fastapi_num_workers(num_workers: int) -> None:  # pragma: no cover
+    environ[NEMO_GYM_FASTAPI_NUM_WORKERS] = str(num_workers)
 
 
 class SimpleServer(BaseServer):
@@ -508,7 +519,7 @@ repr(e): {repr(e)}"""
                 return JSONResponse(content="An unknown error occurred", status_code=500)
 
     def setup_profiling(self, app: FastAPI, profiling_config: ProfilingMiddlewareConfig) -> None:  # pragma: no cover
-        base_profile_dir = PARENT_DIR / profiling_config.profiling_results_dirpath / self.get_session_middleware_key()
+        base_profile_dir = WORKING_DIR / profiling_config.profiling_results_dirpath / self.get_session_middleware_key()
         profiler = Profiler(name=self.config.name, base_profile_dir=base_profile_dir)
 
         main_app_lifespan = app.router.lifespan_context
@@ -654,6 +665,7 @@ Full body: {json.dumps(exc.body, indent=4)}
 
             set_is_nemo_gym_fastapi_worker()
             set_is_nemo_gym_fastapi_entrypoint(str(relative_fpath))
+            set_nemo_gym_fastapi_num_workers(server.config.num_workers)
 
             uvicorn_kwargs["app"] = f"{module_import_str}:app"
             uvicorn_kwargs["workers"] = server.config.num_workers
