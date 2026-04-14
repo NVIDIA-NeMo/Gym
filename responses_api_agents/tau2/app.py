@@ -245,10 +245,15 @@ class Tau2Agent(SimpleResponsesAPIAgent):
         total_count = 0
         missing_tool_call = 0
         incomplete_reasoning = 0
+        telecom_subtask_rewards = defaultdict(list)
         for task_group in tasks:
             for task in task_group:
                 domain = task["config"]["domain"]
                 domain_to_rewards[domain].append(task["reward"])
+
+                if domain == "telecom":
+                    subtask = task["task"]["id"].split("]")[0].removeprefix("[")
+                    telecom_subtask_rewards[f"telecom/{subtask}/reward"].append(task["reward"])
 
                 termination_reason = task["result"]["termination_reason"]
                 termination_reason_count[f"trajectory_termination_reason/{termination_reason}/count"] += 1
@@ -296,6 +301,8 @@ class Tau2Agent(SimpleResponsesAPIAgent):
             for k, v in finish_reasons_count.items()
         }
 
+        telecom_subtask_avg_reward = {k: sum(v) / len(v) for k, v in telecom_subtask_rewards.items()}
+
         domain_to_average_reward: Dict[str, float] = dict()
         domain_to_counts: Dict[str, int] = dict()
         for domain, rewards in domain_to_rewards.items():
@@ -319,6 +326,7 @@ class Tau2Agent(SimpleResponsesAPIAgent):
             **domain_to_unique_samples,
             **domain_to_counts,
             **domain_to_average_reward,
+            **telecom_subtask_avg_reward,
             **termination_reason_domain_count,
             **termination_reason_count,
             **termination_reason_pct,
