@@ -51,7 +51,7 @@ from pydantic import BaseModel, ConfigDict
 from requests.exceptions import ConnectionError
 from starlette.middleware.sessions import SessionMiddleware
 
-from nemo_gym import PARENT_DIR
+from nemo_gym import WORKING_DIR
 from nemo_gym.config_types import (
     BaseRunServerInstanceConfig,
     BaseServerConfig,
@@ -472,7 +472,7 @@ repr(e): {repr(e)}"""
                 return JSONResponse(content="An unknown error occurred", status_code=500)
 
     def setup_profiling(self, app: FastAPI, profiling_config: ProfilingMiddlewareConfig) -> None:  # pragma: no cover
-        base_profile_dir = PARENT_DIR / profiling_config.profiling_results_dirpath / self.get_session_middleware_key()
+        base_profile_dir = WORKING_DIR / profiling_config.profiling_results_dirpath / self.get_session_middleware_key()
         profiler = Profiler(name=self.config.name, base_profile_dir=base_profile_dir)
 
         main_app_lifespan = app.router.lifespan_context
