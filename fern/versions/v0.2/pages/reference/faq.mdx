@@ -439,18 +439,7 @@ This is a fundamental incompatibility between:
 There's no practical workaround that NeMo Gym can implement - the solution is to run with appropriate permissions for your environment.
 
 # FAQ: build-docs / Build docs CI failures
-If you see some docs building related errors that are kind of cryptic regarding .rst files like the following
-```
-updating environment: [config changed ('toc_object_entries_show_parents')] 16 added, 0 changed, 0 removed
-reading sources... [100%] index
-/Users/bxyu/Documents/nemo-gym/nemo_gym/server_utils.py.rst:3: WARNING: Document headings start at H2, not H1 [myst.header]
-/Users/bxyu/Documents/nemo-gym/nemo_gym/server_utils.py.rst:3: WARNING: Document headings start at H2, not H1 [myst.header]
-/Users/bxyu/Documents/nemo-gym/README.md:: WARNING: image file not readable: resources/rl_verifiers_system_design.png [image.not_readable]
-looking for now-outdated files... none found
-pickling environment... done
-checking consistency... done
-```
-You may need to reformat some of your docstrings to Napoleon format docstrings https://sphinxcontrib-napoleon.readthedocs.io/en/v0.2/
+If the build-docs CI check fails, preview the Fern docs locally by running `fern docs dev` from the repository root. Common causes include broken markdown links, invalid MDX syntax, or missing frontmatter in new pages.
 
 # FAQ: Monotonic (Strictly-Increasing) Trajectories
 
