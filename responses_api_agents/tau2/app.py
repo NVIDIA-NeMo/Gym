@@ -274,13 +274,14 @@ class Tau2Agent(SimpleResponsesAPIAgent):
                     if message["role"] != "assistant":
                         continue
 
-                    finish_reason = message["raw_data"]["choices"][0]["finish_reason"]
-                    finish_reasons_count[f"message_finish_reason/{finish_reason}/count"] += 1
+                    if message["raw_data"]:
+                        finish_reason = message["raw_data"]["choices"][0]["finish_reason"]
+                        finish_reasons_count[f"message_finish_reason/{finish_reason}/count"] += 1
 
-                    raw_message = message["raw_data"]["choices"][0]["message"]
-                    has_reasoning = raw_message.get("reasoning_content") is not None
-                    is_empty = not (raw_message.get("content") or raw_message.get("tool_calls"))
-                    incomplete_reasoning += is_empty and has_reasoning
+                        raw_message = message["raw_data"]["choices"][0]["message"]
+                        has_reasoning = raw_message.get("reasoning_content") is not None
+                        is_empty = not (raw_message.get("content") or raw_message.get("tool_calls"))
+                        incomplete_reasoning += is_empty and has_reasoning
 
                     if not message.get("tool_calls"):
                         continue
@@ -308,7 +309,9 @@ class Tau2Agent(SimpleResponsesAPIAgent):
         domain_to_counts: Dict[str, int] = dict()
         for domain, rewards in domain_to_rewards.items():
             domain_to_counts[f"{domain}/num_samples_total"] = len(rewards)
-            domain_to_average_reward[f"{domain}/reward"] = sum(rewards) / domain_to_counts[domain]
+            domain_to_average_reward[f"{domain}/reward"] = (
+                sum(rewards) / domain_to_counts[f"{domain}/num_samples_total"]
+            )
 
         macro_average = sum(domain_to_average_reward.values()) / len(domain_to_average_reward)
 

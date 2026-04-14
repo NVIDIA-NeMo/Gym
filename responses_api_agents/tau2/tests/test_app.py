@@ -121,4 +121,31 @@ class TestApp:
         _, server = self._dummy_server()
 
         actual_metrics = server.compute_metrics([rollouts])
-        print(json.dumps(actual_metrics, indent=4))
+        expected_metrics = {
+            "macro_average": 1.0,
+            "telecom/num_samples_unique": 1,
+            "retail/num_samples_total": 1,
+            "telecom/num_samples_total": 3,
+            "airline/num_samples_total": 1,
+            "retail/reward": 1.0,
+            "telecom/reward": 1.0,
+            "airline/reward": 1.0,
+            "telecom/service_issue/reward": 1.0,
+            "retail/trajectory_termination_reason/user_stop/count": 1,
+            "telecom/trajectory_termination_reason/user_stop/count": 3,
+            "airline/trajectory_termination_reason/user_stop/count": 1,
+            "trajectory_termination_reason/user_stop/count": 5,
+            "trajectory_termination_reason/user_stop/pct": 1.0,
+            "message_finish_reason/tool_calls/count": 20,
+            "message_finish_reason/stop/count": 5,
+            "message_finish_reason/tool_calls/pct": 0.8,
+            "message_finish_reason/stop/pct": 0.2,
+            "trajectory_transfer_to_human_agents/count": 4,
+            "trajectory_transfer_to_human_agents/pct": 0.8,
+            "tool_call_hallucination/count/total": 0,
+            "trajectory_missing_tool_call/count": 0,
+            "trajectory_missing_tool_call/pct": 0.0,
+            "messages_with_incomplete_reasoning/count": 0,
+            "messages_with_incomplete_reasoning/pct": 0.0,
+        }
+        assert expected_metrics == actual_metrics
