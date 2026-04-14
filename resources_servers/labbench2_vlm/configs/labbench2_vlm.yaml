@@ -1,0 +1,81 @@
+labbench2_vlm:
+  resources_servers:
+    labbench2_vlm:
+      entrypoint: app.py
+      domain: knowledge
+      verified: false
+      description: "labbench2 VLM benchmarks: scientific figure/table QA (figqa2, tableqa2) with LLM-as-judge"
+      value: Measure VLM scientific reasoning on figures and tables
+      judge_model_server:
+        type: responses_api_models
+        name: judge_model
+      judge_responses_create_params:
+        input: []
+        max_output_tokens: 1024
+      judge_prompt_template_fpath: prompt_templates/judge.txt
+      judge_equal_label: "[[A=B]]"
+      judge_not_equal_label: "[[A!=B]]"
+      judge_endpoint_max_concurrency: 64
+
+labbench2_vlm_simple_agent:
+  responses_api_agents:
+    labbench2_vlm_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: labbench2_vlm
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      media_base_dir: resources_servers/labbench2_vlm/data
+      dpi: 170
+      datasets:
+      - name: figqa2_img
+        type: validation
+        jsonl_fpath: resources_servers/labbench2_vlm/data/figqa2_img_validation.jsonl
+        num_repeats: 1
+        gitlab_identifier:
+          dataset_name: labbench2_vlm
+          version: 0.0.1
+          artifact_fpath: figqa2_img_validation.jsonl
+        license: Creative Commons Attribution-ShareAlike 4.0 International
+      - name: figqa2_pdf
+        type: validation
+        jsonl_fpath: resources_servers/labbench2_vlm/data/figqa2_pdf_validation.jsonl
+        num_repeats: 1
+        gitlab_identifier:
+          dataset_name: labbench2_vlm
+          version: 0.0.1
+          artifact_fpath: figqa2_pdf_validation.jsonl
+        license: Creative Commons Attribution-ShareAlike 4.0 International
+      - name: tableqa2_img
+        type: validation
+        jsonl_fpath: resources_servers/labbench2_vlm/data/tableqa2_img_validation.jsonl
+        num_repeats: 1
+        gitlab_identifier:
+          dataset_name: labbench2_vlm
+          version: 0.0.1
+          artifact_fpath: tableqa2_img_validation.jsonl
+        license: Creative Commons Attribution-ShareAlike 4.0 International
+      - name: tableqa2_pdf
+        type: validation
+        jsonl_fpath: resources_servers/labbench2_vlm/data/tableqa2_pdf_validation.jsonl
+        num_repeats: 1
+        gitlab_identifier:
+          dataset_name: labbench2_vlm
+          version: 0.0.1
+          artifact_fpath: tableqa2_pdf_validation.jsonl
+        license: Creative Commons Attribution-ShareAlike 4.0 International
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/labbench2_vlm/data/example.jsonl
+        num_repeats: 1
+        license: Creative Commons Attribution-ShareAlike 4.0 International
+
+judge_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${judge_base_url}
+      openai_api_key: ${judge_api_key}
+      openai_model: ${judge_model_name}
