@@ -86,7 +86,6 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         resources_server_cookies = request.cookies  # update the cookies on every resources server response
 
         reset_threshold = 0
-        context_resets = 0
         if self.config.max_context_tokens and self.config.context_reset_pct:
             reset_threshold = int(self.config.max_context_tokens * self.config.context_reset_pct)
 
@@ -118,7 +117,6 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             # --- Check context reset threshold ---
             prompt_tokens = model_response.usage.input_tokens if model_response.usage else 0
             if reset_threshold and prompt_tokens > reset_threshold:
-                context_resets += 1
                 if self.config.context_reset_keep_rounds > 0:
                     new_outputs = self._extract_last_rounds(new_outputs)
                 else:
@@ -141,14 +139,9 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 usage.input_tokens_details.cached_tokens = 0
                 usage.output_tokens_details.reasoning_tokens = 0
 
-            if model_response.incomplete_details and model_response.incomplete_details.reason == "max_output_tokens":
-                break
-
+            # --- If the model decided to answer (no tool calls), we are done ---
             all_fn_calls: List[NeMoGymResponseFunctionToolCall] = [o for o in output if o.type == "function_call"]
-            all_output_messages: List[NeMoGymResponseOutputMessage] = [
-                o for o in output if o.type == "message" and o.role == "assistant"
-            ]
-            if not all_fn_calls and all_output_messages:
+            if not all_fn_calls:
                 break
 
             # --- Execute tool calls ---
