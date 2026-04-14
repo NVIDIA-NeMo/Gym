@@ -190,6 +190,7 @@ class Tau2Agent(SimpleResponsesAPIAgent):
         termination_reason_domain_count = defaultdict(int)
         termination_reason_count = defaultdict(int)
         finish_reasons_count = defaultdict(int)
+        hallucination_count = defaultdict(int)
         transfer_to_human_agents = 0
         total_count = 0
         for task_group in tasks:
@@ -198,18 +199,27 @@ class Tau2Agent(SimpleResponsesAPIAgent):
                 domain_to_rewards[domain].append(task["reward"])
 
                 termination_reason = task["result"]["termination_reason"]
-                termination_reason_count[f"{termination_reason}/count"] += 1
-                termination_reason_domain_count[f"{domain}/{termination_reason}/count"] += 1
+                termination_reason_count[f"termination_reason/{termination_reason}/count"] += 1
+                termination_reason_domain_count[f"{domain}/termination_reason/{termination_reason}/count"] += 1
 
                 this_task_transfer_to_human_agents = False
                 for message in task["result"]["messages"]:
+                    if message["role"] == "tool":
+                        # e.g. `Error: Tool 'run_speed_test' not found.`
+                        if "Error: Tool" and "not found" in message["content"]:
+                            tool_name = message["content"].removeprefix("Error: Tool '").removesuffix(" not found.")
+                            hallucination_count[f"hallucination/{tool_name}/count"] += 1
+
                     if message["role"] != "assistant":
                         continue
 
                     finish_reason = message["raw_data"]["choices"][0]["finish_reason"]
-                    finish_reasons_count[f"{finish_reason}/count"] += 1
+                    finish_reasons_count[f"finish_reason/{finish_reason}/count"] += 1
 
-                    if message.get("tool_calls") and message["tool_calls"][0]["name"] == "transfer_to_human_agents":
+                    if not message.get("tool_calls"):
+                        continue
+
+                    if message["tool_calls"][0]["name"] == "transfer_to_human_agents":
                         this_task_transfer_to_human_agents = True
 
                 transfer_to_human_agents += this_task_transfer_to_human_agents
@@ -253,6 +263,8 @@ class Tau2Agent(SimpleResponsesAPIAgent):
             **finish_reasons_pct,
             "transfer_to_human_agents/count": transfer_to_human_agents,
             "transfer_to_human_agents/pct": transfer_to_human_agents / total_count,
+            **hallucination_count,
+            "hallucination/count/total": sum(hallucination_count.values()),
         }
 
 
