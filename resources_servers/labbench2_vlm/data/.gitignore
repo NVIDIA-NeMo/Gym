@@ -1,8 +1,7 @@
 # Downloaded full media (large -- use prepare_data.py or GitLab artifacts)
 media/
 
-# Generated rollout artifacts (large due to embedded base64; regenerate locally)
-example_rollouts.jsonl
+# Generated rollout sidecar artifacts (regenerate locally via ng_collect_rollouts)
 example_rollouts_materialized_inputs.jsonl
 example_rollouts_aggregate_metrics.json
 
