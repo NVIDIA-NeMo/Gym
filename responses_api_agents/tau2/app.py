@@ -77,6 +77,7 @@ class Tau2RunRequest(BaseRunRequest):
 
 class Tau2VerifyResponse(Tau2RunRequest, BaseVerifyResponse):
     result: SimulationRun
+    duration: float
 
 
 class Tau2Agent(SimpleResponsesAPIAgent):
@@ -164,6 +165,7 @@ class Tau2Agent(SimpleResponsesAPIAgent):
             ),
             reward=result.reward_info.reward,
             result=result,
+            duration=result.duration,
         )
 
     def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
