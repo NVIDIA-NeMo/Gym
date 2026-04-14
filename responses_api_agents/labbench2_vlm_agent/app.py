@@ -41,6 +41,33 @@ class LabbenchVLMAgentConfig(SimpleAgentConfig):
         description="Base directory for resolving verifier_metadata.media_dir references, relative to Gym root.",
     )
     dpi: int = Field(default=170, description="DPI for PDF page rendering.")
+    strip_images_from_output: bool = Field(
+        default=True,
+        description="Remove base64 input_image blocks from the rollout output to keep files small.",
+    )
+
+
+def _block_type(block) -> str | None:
+    if isinstance(block, dict):
+        return block.get("type")
+    return getattr(block, "type", None)
+
+
+def _strip_image_blocks(result: SimpleAgentVerifyResponse) -> SimpleAgentVerifyResponse:
+    """Remove input_image blocks from responses_create_params in the output."""
+    rcp = getattr(result, "responses_create_params", None)
+    if rcp is None:
+        return result
+    inp = getattr(rcp, "input", None) or rcp.get("input", []) if isinstance(rcp, dict) else []
+    for msg in inp:
+        content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", None)
+        if isinstance(content, list):
+            filtered = [b for b in content if _block_type(b) != "input_image"]
+            if isinstance(msg, dict):
+                msg["content"] = filtered
+            else:
+                msg.content = filtered
+    return result
 
 
 class LabbenchVLMAgent(SimpleAgent):
@@ -54,7 +81,12 @@ class LabbenchVLMAgent(SimpleAgent):
         enriched = embed_media_into_row(body.model_dump(), resolved_base, dpi=self.config.dpi)
         body = SimpleAgentRunRequest.model_validate(enriched)
 
-        return await super().run(request, body)
+        result = await super().run(request, body)
+
+        if self.config.strip_images_from_output:
+            result = _strip_image_blocks(result)
+
+        return result
 
 
 if __name__ == "__main__":

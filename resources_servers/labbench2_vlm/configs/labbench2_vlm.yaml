@@ -29,6 +29,7 @@ labbench2_vlm_simple_agent:
         name: policy_model
       media_base_dir: resources_servers/labbench2_vlm/data
       dpi: 170
+      strip_images_from_output: true
       datasets:
       - name: figqa2_img
         type: validation
