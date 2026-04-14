@@ -51,6 +51,7 @@ class BrowsecompAgentConfig(BaseResponsesAPIAgentConfig):
     max_context_tokens: int = 196608
     context_reset_pct: float = 0.3
     context_reset_keep_rounds: int = 3
+    max_run_retries: int = 1
 
 
 class BrowsecompAgentRunRequest(BaseRunRequest):
@@ -229,27 +230,36 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         await raise_for_status(seed_session_response)
         cookies = seed_session_response.cookies
 
-        response = await self.server_client.post(
-            server_name=self.config.name,
-            url_path="/v1/responses",
-            json=body.responses_create_params,
-            cookies=cookies,
-        )
-        await raise_for_status(response)
-        cookies = response.cookies
+        last_verify_response = None
+        for _ in range(max(1, self.config.max_run_retries)):
+            response = await self.server_client.post(
+                server_name=self.config.name,
+                url_path="/v1/responses",
+                json=body.responses_create_params,
+                cookies=cookies,
+            )
+            await raise_for_status(response)
+            cookies = response.cookies
 
-        verify_request = BrowsecompAgentVerifyRequest.model_validate(
-            body.model_dump() | {"response": await get_response_json(response)}
-        )
+            verify_request = BrowsecompAgentVerifyRequest.model_validate(
+                body.model_dump() | {"response": await get_response_json(response)}
+            )
 
-        verify_response = await self.server_client.post(
-            server_name=self.config.resources_server.name,
-            url_path="/verify",
-            json=verify_request.model_dump(),
-            cookies=cookies,
-        )
-        await raise_for_status(verify_response)
-        return BrowsecompAgentVerifyResponse.model_validate(await get_response_json(verify_response))
+            verify_response = await self.server_client.post(
+                server_name=self.config.resources_server.name,
+                url_path="/verify",
+                json=verify_request.model_dump(),
+                cookies=cookies,
+            )
+            await raise_for_status(verify_response)
+
+            last_verify_response = BrowsecompAgentVerifyResponse.model_validate(
+                await get_response_json(verify_response)
+            )
+            if last_verify_response.extracted_final_answer is not None:
+                break
+
+        return last_verify_response
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
         """Proxy aggregate_metrics to the resources server."""
