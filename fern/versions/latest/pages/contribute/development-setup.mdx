@@ -62,16 +62,12 @@ All contributions must pass these automated checks:
 
 If the build-docs check fails:
 
-1. **Test documentation locally**:
-   ```bash
-   cd docs
-   uv run --frozen --only-group docs sphinx-build --fail-on-warning --builder html . _build/html
-   ```
+1. **Test documentation locally**: Preview the Fern docs by running `fern docs dev` from the repository root.
 
 2. **Common issues**:
    - Missing docstrings in public functions
    - Broken markdown links in README or tutorials
-   - Invalid rst/sphinx syntax
+   - Invalid MDX syntax
 
 ### Copyright Header Errors
 

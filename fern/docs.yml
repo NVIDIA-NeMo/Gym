@@ -94,7 +94,7 @@ redirects:
   - source: "nemo/gym/training/rl-framework-integration/openai-compatible-http-server-on-policy-correction.html"
     destination: "/contribute/rl-framework-integration/openai-compatible-http-server-on-policy-correction"
   - source: "nemo/gym/tutorials/creating-resource-server.html"
-    destination: "/environment-tutorials/creating-training-environment"
+    destination: "/environment-tutorials/single-step-environment"
   - source: "nemo/gym/tutorials/index.html"
     destination: "/training-tutorials"
   - source: "nemo/gym/tutorials/nemo-rl-grpo/about-workplace-assistant.html"
@@ -119,6 +119,6 @@ redirects:
     destination: "/nemo/gym/v0.2/:path*"
   - source: "nemo/gym/:path*/index.html"
     destination: "/nemo/gym/:path*"
-  # Sphinx page URLs (foo.html); must follow all :path*/index.html rules above
+  # Legacy page URLs (foo.html); must follow all :path*/index.html rules above
   - source: "nemo/gym/:path*.html"
     destination: "/nemo/gym/:path*"
