@@ -92,6 +92,8 @@ class Tau2VerifyResponse(Tau2RunRequest, BaseVerifyResponse):
 class Tau2Agent(SimpleResponsesAPIAgent):
     config: Tau2Config
 
+    __key_metrics: Optional[List[str]] = None
+
     def setup_webserver(self):
         cwd = Path(__file__).parent
         if not DATA_DIR.exists():
@@ -233,7 +235,7 @@ class Tau2Agent(SimpleResponsesAPIAgent):
             res["mean/audio_taps"],
             res["mean/auto_review"],
         )
-        return res
+        return res | {k: agent_metrics[k] for k in self.__key_metrics}
 
     def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
         domain_to_rewards = defaultdict(list)
@@ -325,7 +327,7 @@ class Tau2Agent(SimpleResponsesAPIAgent):
                     termination_reason_domain_pct[f"{k.removesuffix('/count')}/pct"] = v / domain_count
                     break
 
-        return {
+        res = {
             "macro_average": macro_average,
             **domain_to_unique_samples,
             **domain_to_counts,
@@ -346,6 +348,8 @@ class Tau2Agent(SimpleResponsesAPIAgent):
             "messages_with_incomplete_reasoning/count": incomplete_reasoning,
             "messages_with_incomplete_reasoning/pct": incomplete_reasoning / total_num_assistant_messages,
         }
+        self.__key_metrics = list(res.keys())
+        return res
 
 
 if __name__ == "__main__":
