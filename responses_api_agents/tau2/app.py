@@ -167,6 +167,7 @@ class Tau2Agent(SimpleResponsesAPIAgent):
             reward=result.reward_info.reward,
             result=result,
             duration=result.duration,
+            num_steps=len(result.messages),
         )
 
     def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
