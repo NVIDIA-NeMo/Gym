@@ -39,7 +39,7 @@ from omegaconf import DictConfig, OmegaConf, open_dict
 from pydantic import Field
 from tqdm.auto import tqdm
 
-from nemo_gym import PARENT_DIR, __version__
+from nemo_gym import PARENT_DIR, ROOT_DIR, __version__
 from nemo_gym.cli_setup_command import run_command, setup_env_command
 from nemo_gym.config_types import BaseNeMoGymCLIConfig
 from nemo_gym.global_config import (
@@ -100,10 +100,8 @@ class TestConfig(RunConfig):
     _dir_path: Path  # initialized in model_post_init
 
     def model_post_init(self, context):  # pragma: no cover
-        # TODO: This currently only handles relative entrypoints. Later on we can resolve the absolute path.
         self._dir_path = Path(self.entrypoint)
         assert not self.dir_path.is_absolute()
-        assert len(self.dir_path.parts) == 2
 
         return super().model_post_init(context)
 
@@ -163,7 +161,11 @@ class RunHelper:  # pragma: no cover
             entrypoint_fpath = Path(server_config_dict.entrypoint)
             assert not entrypoint_fpath.is_absolute()
 
-            dir_path = PARENT_DIR / Path(first_key, second_key)
+            # Check cwd first for a local server, fall back to the install location for built-ins.
+            _server_rel_path = Path(first_key, second_key)
+            _cwd_path = Path.cwd() / _server_rel_path
+            _cwd_is_server = (_cwd_path / "requirements.txt").exists() or (_cwd_path / "pyproject.toml").exists()
+            dir_path = _cwd_path if _cwd_is_server else PARENT_DIR / _server_rel_path
 
             command = f"""{setup_env_command(dir_path, global_config_dict, top_level_path)} \\
     && {NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME}={escaped_config_dict_yaml_str} \\
@@ -695,16 +697,15 @@ def init_resources_server():  # pragma: no cover
     config_dict = get_global_config_dict()
     run_config = RunConfig.model_validate(config_dict)
 
-    if exists(run_config.entrypoint):
-        print(f"Folder already exists: {run_config.entrypoint}. Exiting init.")
+    dirpath = Path(run_config.entrypoint).resolve()
+
+    if exists(dirpath):
+        print(f"Folder already exists: {dirpath}. Exiting init.")
         exit()
 
-    dirpath = Path(run_config.entrypoint)
-    assert len(dirpath.parts) == 2
     makedirs(dirpath)
 
-    server_type = dirpath.parts[0]
-    assert server_type == "resources_servers"
+    server_type = "resources_servers"
     server_type_name = dirpath.parts[-1].lower()
     server_type_title = "".join(x.capitalize() for x in server_type_name.split("_"))
 
@@ -754,7 +755,7 @@ def init_resources_server():  # pragma: no cover
 """)
 
     app_fpath = dirpath / "app.py"
-    with open("resources/resources_server_template.py") as f:
+    with open(ROOT_DIR / "resources/resources_server_template.py") as f:
         app_template = f.read()
     app_content = app_template.replace("ExampleMultiStep", server_type_title)
     with open(app_fpath, "w") as f:
@@ -764,7 +765,7 @@ def init_resources_server():  # pragma: no cover
     makedirs(tests_dirpath)
 
     tests_fpath = tests_dirpath / "test_app.py"
-    with open("resources/resources_server_test_template.py") as f:
+    with open(ROOT_DIR / "resources/resources_server_test_template.py") as f:
         tests_template = f.read()
     tests_content = tests_template.replace("ExampleMultiStep", server_type_title)
     tests_content = tests_content.replace("from app", f"from resources_servers.{server_type_name}.app")
@@ -773,8 +774,13 @@ def init_resources_server():  # pragma: no cover
 
     requirements_fpath = dirpath / "requirements.txt"
     with open(requirements_fpath, "w") as f:
-        f.write("""-e nemo-gym[dev] @ ../../
-""")
+        if (PARENT_DIR / "pyproject.toml").exists():
+            # local nemo gym - detected by ../pyproject.toml exists
+            rel_to_gym_root = os.path.relpath(PARENT_DIR, dirpath)
+            f.write(f"-e nemo-gym[dev] @ {rel_to_gym_root}\n")
+        else:
+            # pypi path
+            f.write("nemo-gym[dev]\n")
 
     readme_fpath = dirpath / "README.md"
     with open(readme_fpath, "w") as f:
