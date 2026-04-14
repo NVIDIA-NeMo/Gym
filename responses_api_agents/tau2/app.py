@@ -145,7 +145,15 @@ class Tau2Agent(SimpleResponsesAPIAgent):
 
         result = await run_single_task(**body_dict)
 
-        message_dicts = to_litellm_messages(result.messages)
+        messages_to_convert = []
+        for message in result.messages:
+            if message.role == "user" and message.tool_calls:
+                continue
+            elif message.role == "tool" and message.requestor == "user":
+                continue
+
+        message_dicts = to_litellm_messages(messages_to_convert)
+
         converter = VLLMConverter(return_token_id_information=True)
         all_items = converter.chat_completions_messages_to_responses_items(message_dicts)
         input_items_1, output_items = split_responses_input_output_items(all_items)
