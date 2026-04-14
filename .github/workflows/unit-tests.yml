@@ -57,9 +57,6 @@ jobs:
   test-wheel-install:
     name: Test Wheel Use
     runs-on: ubuntu-latest
-    if: >-
-      github.event_name == 'workflow_call' ||
-      contains(github.event.pull_request.labels.*.name, 'test-wheel')
     env:
       NEMO_GYM_ALLOW_PRERELEASE: "true"
       UV_INDEX_URL: "http://127.0.0.1:8888/"
