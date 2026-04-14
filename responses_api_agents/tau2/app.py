@@ -190,6 +190,7 @@ class Tau2Agent(SimpleResponsesAPIAgent):
         termination_reason_domain_count = defaultdict(int)
         termination_reason_count = defaultdict(int)
         finish_reasons_count = defaultdict(int)
+        transfer_to_human_agents = 0
         total_count = 0
         for task_group in tasks:
             for task in task_group:
@@ -200,6 +201,7 @@ class Tau2Agent(SimpleResponsesAPIAgent):
                 termination_reason_count[f"{termination_reason}/count"] += 1
                 termination_reason_domain_count[f"{domain}/{termination_reason}/count"] += 1
 
+                this_task_transfer_to_human_agents = False
                 for message in task["result"]["messages"]:
                     if message["role"] != "assistant":
                         continue
@@ -207,6 +209,10 @@ class Tau2Agent(SimpleResponsesAPIAgent):
                     finish_reason = message["raw_data"]["choices"][0]["finish_reason"]
                     finish_reasons_count[f"{finish_reason}/count"] += 1
 
+                    if message.get("tool_calls") and message["tool_calls"][0]["name"] == "transfer_to_human_agents":
+                        this_task_transfer_to_human_agents = True
+
+                transfer_to_human_agents += this_task_transfer_to_human_agents
                 total_count += 1
 
             domain_to_unique_samples[f"{domain}/num_samples_unique"] += 1
@@ -245,6 +251,8 @@ class Tau2Agent(SimpleResponsesAPIAgent):
             **termination_reason_domain_pct,
             **finish_reasons_count,
             **finish_reasons_pct,
+            "transfer_to_human_agents/count": transfer_to_human_agents,
+            "transfer_to_human_agents/pct": transfer_to_human_agents / total_count,
         }
 
 
