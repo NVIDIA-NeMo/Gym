@@ -47,6 +47,7 @@ import httpx
 import orjson
 from datasets import load_dataset
 
+
 LABBENCH2_HF_DATASET = "EdisonScientific/labbench2"
 GCS_BUCKET = "labbench2-data-public"
 GCS_API_URL = "https://storage.googleapis.com/storage/v1/b/{bucket}/o"
@@ -100,7 +101,7 @@ def _download_question_files(gcs_prefix: str, media_dir: Path) -> Path:
     for blob_name in _list_gcs_objects(gcs_prefix):
         if blob_name.endswith("/"):
             continue
-        relative = blob_name[len(prefix_with_slash):]
+        relative = blob_name[len(prefix_with_slash) :]
         if not relative:
             continue
         dest = dest_dir / relative
@@ -269,19 +270,28 @@ def prepare_tag(tag: str, output_path: Path, media_dir: Path, limit: int | None 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Prepare labbench2 VLM data for NeMo Gym")
     parser.add_argument(
-        "--tags", nargs="+", default=TAGS, choices=TAGS, metavar="TAG",
+        "--tags",
+        nargs="+",
+        default=TAGS,
+        choices=TAGS,
+        metavar="TAG",
         help="Which benchmark tags to prepare (default: all four)",
     )
     parser.add_argument(
-        "--limit", type=int, default=None,
+        "--limit",
+        type=int,
+        default=None,
         help="Limit number of questions per tag (useful for quick smoke-tests)",
     )
     parser.add_argument(
-        "--output-dir", type=Path, default=Path(__file__).parent / "data",
+        "--output-dir",
+        type=Path,
+        default=Path(__file__).parent / "data",
         help="Output directory for JSONL files (default: ./data)",
     )
     parser.add_argument(
-        "--example", action="store_true",
+        "--example",
+        action="store_true",
         help="Also write data/example.jsonl and populate data/test_media/ (committed to git)",
     )
     args = parser.parse_args()

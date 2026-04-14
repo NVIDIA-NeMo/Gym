@@ -23,6 +23,7 @@ at rollout time via ``embed_media_into_row`` before sending to the model.
 verify() scores the model's free-text answer against the GOLD ideal using an
 LLM judge.
 """
+
 from __future__ import annotations
 
 import asyncio

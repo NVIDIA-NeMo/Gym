@@ -37,6 +37,7 @@ from resources_servers.labbench2_vlm.app import (
 )
 from resources_servers.labbench2_vlm.prepare_data import embed_media_into_row
 
+
 JUDGE_PROMPT_FPATH = str(Path(__file__).resolve().parents[1] / "prompt_templates/judge.txt")
 
 
@@ -166,9 +167,7 @@ class TestExtractQuestion:
         assert _extract_question(params) == "Multi-page question?"
 
     def test_plain_string_content_fallback(self) -> None:
-        params = NeMoGymResponseCreateParamsNonStreaming(
-            input=[{"role": "user", "content": "Plain text question"}]
-        )
+        params = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Plain text question"}])
         assert _extract_question(params) == "Plain text question"
 
     def test_no_user_message_returns_empty(self) -> None:
@@ -331,8 +330,14 @@ class TestVerify:
         req = LabbenchVLMVerifyRequest(
             responses_create_params=_multimodal_params("What is shown?"),
             response=NeMoGymResponse(
-                id="r", created_at=0.0, model="m", object="response",
-                output=[refusal_msg], parallel_tool_calls=False, tool_choice="none", tools=[],
+                id="r",
+                created_at=0.0,
+                model="m",
+                object="response",
+                output=[refusal_msg],
+                parallel_tool_calls=False,
+                tool_choice="none",
+                tools=[],
             ),
             verifier_metadata={"ideal": "3.5", "tag": "figqa2-img", "id": "test-id"},
         )
@@ -345,8 +350,14 @@ class TestVerify:
         """Judge returns a reasoning item instead of a message — must not crash, reward 0."""
         reasoning_item = NeMoGymResponseReasoningItem(id="r1", summary=[], type="reasoning")
         judge_resp = NeMoGymResponse(
-            id="judge_resp", created_at=0.0, model="judge", object="response",
-            output=[reasoning_item], parallel_tool_calls=False, tool_choice="none", tools=[],
+            id="judge_resp",
+            created_at=0.0,
+            model="judge",
+            object="response",
+            output=[reasoning_item],
+            parallel_tool_calls=False,
+            tool_choice="none",
+            tools=[],
         ).model_dump_json()
         mock_resp = MagicMock()
         mock_resp.read = AsyncMock(return_value=judge_resp)
@@ -477,7 +488,12 @@ class TestEmbedMediaIntoRow:
             "responses_create_params": {
                 "input": [{"role": "user", "content": [{"type": "input_text", "text": "What is this?"}]}]
             },
-            "verifier_metadata": {"ideal": "42", "tag": "figqa2-img", "id": "t1", "media_dir": "test_media/figs/imgs/abc"},
+            "verifier_metadata": {
+                "ideal": "42",
+                "tag": "figqa2-img",
+                "id": "t1",
+                "media_dir": "test_media/figs/imgs/abc",
+            },
         }
 
         result = embed_media_into_row(row, tmp_path)

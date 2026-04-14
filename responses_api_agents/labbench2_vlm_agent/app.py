@@ -20,6 +20,7 @@ incoming request, reads the corresponding image/PDF files from disk,
 base64-encodes them, and injects ``input_image`` blocks into the model request
 before delegating to the standard simple_agent pipeline.
 """
+
 from pathlib import Path
 
 from fastapi import Request
