@@ -143,12 +143,6 @@ class RolloutCollectionHelper(BaseModel):
         if num_repeats:
             print(f"Repeating rows {num_repeats} times (in a pattern of abc to aabbcc)!")
 
-<<<<<<< HEAD
-        input_file = open(config.input_jsonl_fpath)
-        rows_iterator: Iterator[str] = input_file
-        rows_iterator: Iterator[str] = tqdm(rows_iterator, desc="Reading rows")
-        rows_iterator: Iterator[tuple[int, str]] = zip(range_iterator, rows_iterator)
-=======
         # Load prompt config if specified
         prompt_cfg = None
         if config.prompt_config:
@@ -168,7 +162,6 @@ class RolloutCollectionHelper(BaseModel):
         if prompt_cfg is not None:
             validate_prompt_compatibility([row for _, _, row in raw_rows], prompt_cfg)
             raw_rows = [(idx, s, apply_prompt_to_row(row, prompt_cfg)) for idx, s, row in raw_rows]
->>>>>>> e2931bfa (fix: pypi  (#1056))
 
         # For ng_reward_profile to match rollouts to tasks
         row_to_task_idx: Dict[str, int] = dict()
