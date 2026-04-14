@@ -244,14 +244,17 @@ class Tau2Agent(SimpleResponsesAPIAgent):
         transfer_to_human_agents = 0
         total_count = 0
         missing_tool_call = 0
+        incomplete_reasoning = 0
         for task_group in tasks:
             for task in task_group:
                 domain = task["config"]["domain"]
                 domain_to_rewards[domain].append(task["reward"])
 
                 termination_reason = task["result"]["termination_reason"]
-                termination_reason_count[f"termination_reason/{termination_reason}/count"] += 1
-                termination_reason_domain_count[f"{domain}/termination_reason/{termination_reason}/count"] += 1
+                termination_reason_count[f"trajectory_termination_reason/{termination_reason}/count"] += 1
+                termination_reason_domain_count[
+                    f"{domain}/trajectory_termination_reason/{termination_reason}/count"
+                ] += 1
 
                 this_task_transfer_to_human_agents = False
                 has_tool_call = False
@@ -260,13 +263,18 @@ class Tau2Agent(SimpleResponsesAPIAgent):
                         # e.g. `Error: Tool 'run_speed_test' not found.`
                         if "Error: Tool" and "not found" in message["content"]:
                             tool_name = message["content"].removeprefix("Error: Tool '").removesuffix(" not found.")
-                            hallucination_count[f"hallucination/{tool_name}/count"] += 1
+                            hallucination_count[f"tool_call_hallucination/{tool_name}/count"] += 1
 
                     if message["role"] != "assistant":
                         continue
 
                     finish_reason = message["raw_data"]["choices"][0]["finish_reason"]
-                    finish_reasons_count[f"finish_reason/{finish_reason}/count"] += 1
+                    finish_reasons_count[f"message_finish_reason/{finish_reason}/count"] += 1
+
+                    raw_message = message["raw_data"]["choices"][0]["message"]
+                    has_reasoning = raw_message.get("reasoning_content") is not None
+                    is_empty = not (raw_message.get("content") or raw_message.get("tool_calls"))
+                    incomplete_reasoning += is_empty and has_reasoning
 
                     if not message.get("tool_calls"):
                         continue
@@ -282,9 +290,10 @@ class Tau2Agent(SimpleResponsesAPIAgent):
 
             domain_to_unique_samples[f"{domain}/num_samples_unique"] += 1
 
-        total_finish_reason = sum(finish_reasons_count.values())
+        total_num_assistant_messages = sum(finish_reasons_count.values())
         finish_reasons_pct = {
-            f"{k.removesuffix('/count')}/pct": v / total_finish_reason for k, v in finish_reasons_count.items()
+            f"{k.removesuffix('/count')}/pct": v / total_num_assistant_messages
+            for k, v in finish_reasons_count.items()
         }
 
         domain_to_average_reward: Dict[str, float] = dict()
@@ -316,11 +325,14 @@ class Tau2Agent(SimpleResponsesAPIAgent):
             **termination_reason_domain_pct,
             **finish_reasons_count,
             **finish_reasons_pct,
-            "transfer_to_human_agents/count": transfer_to_human_agents,
-            "transfer_to_human_agents/pct": transfer_to_human_agents / total_count,
+            "trajectory_transfer_to_human_agents/count": transfer_to_human_agents,
+            "trajectory_transfer_to_human_agents/pct": transfer_to_human_agents / total_count,
             **hallucination_count,
-            "hallucination/count/total": sum(hallucination_count.values()),
-            "missing_tool_call": missing_tool_call,
+            "tool_call_hallucination/count/total": sum(hallucination_count.values()),
+            "trajectory_missing_tool_call/count": missing_tool_call,
+            "trajectory_missing_tool_call/pct": missing_tool_call / total_count,
+            "messages_with_incomplete_reasoning/count": incomplete_reasoning,
+            "messages_with_incomplete_reasoning/pct": incomplete_reasoning / total_num_assistant_messages,
         }
 
 
