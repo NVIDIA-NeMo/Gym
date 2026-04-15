@@ -19,8 +19,12 @@ structured_outputs_v3_simple_agent:
       datasets:
       - name: train
         type: train
-        jsonl_fpath: resources_servers/structured_outputs/data/ds1_schema_adherence_train.jsonl
+        jsonl_fpath: resources_servers/structured_outputs/data/ds1_augmented_train.jsonl
+        gitlab_identifier:
+          dataset_name: structured_outputs_v3_augmented
+          version: 0.0.1
+          artifact_fpath: ds1_augmented_train.jsonl
         license: Apache 2.0
       - name: example
         type: example
-        jsonl_fpath: resources_servers/structured_outputs/data/ds1_schema_adherence_train.jsonl
+        jsonl_fpath: resources_servers/structured_outputs/data/structured_outputs_v3_example.jsonl

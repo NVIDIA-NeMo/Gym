@@ -20,7 +20,11 @@ freeform_formatting_simple_agent:
       - name: train
         type: train
         jsonl_fpath: resources_servers/format_verification/data/ds2_freeform_formatting_train.jsonl
+        gitlab_identifier:
+          dataset_name: format_verification_freeform
+          version: 0.0.1
+          artifact_fpath: ds2_freeform_train.jsonl
         license: Apache 2.0
       - name: example
         type: example
-        jsonl_fpath: resources_servers/format_verification/data/ds2_freeform_formatting_train.jsonl
+        jsonl_fpath: resources_servers/format_verification/data/ds2_freeform_formatting_example.jsonl
