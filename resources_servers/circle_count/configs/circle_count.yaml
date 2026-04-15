@@ -1,23 +1,23 @@
-circle_click:
+circle_count:
   resources_servers:
-    circle_click:
+    circle_count:
       entrypoint: app.py
       domain: other
-      description: Click on circles in images
-      value: Improve visual grounding and spatial reasoning
+      description: Count circles of a given color in images
+      value: Improve visual counting and color recognition
       verified: false
-circle_click_simple_agent:
+circle_count_simple_agent:
   responses_api_agents:
     simple_agent:
       entrypoint: app.py
       max_steps: 1
       resources_server:
         type: resources_servers
-        name: circle_click
+        name: circle_count
       model_server:
         type: responses_api_models
         name: policy_model
       datasets:
       - name: example
         type: example
-        jsonl_fpath: resources_servers/circle_click/data/example.jsonl
+        jsonl_fpath: resources_servers/circle_count/data/example.jsonl
