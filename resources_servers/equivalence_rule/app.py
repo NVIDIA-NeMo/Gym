@@ -35,14 +35,14 @@ from nemo_gym.base_resources_server import (
 
 class GradingRule(str, Enum):
     SEQ_MATCH          = "seq_match"           # plain SequenceMatcher ratio
-    WEIGHTED_SEQ_MATCH = "weighted_seq_match"  # seq_match + prefix bonus (default)
-    EXACT              = "exact"               # 1.0 if normalized strings match exactly, else 0.0
+    WEIGHTED_SEQ_MATCH = "weighted_seq_match"  # seq_match + prefix bonus 
+    EXACT              = "exact"               # 1.0 if normalized strings match exactly, else 0.0 (default)
 
 
 class EquivalenceRuleResourcesServerConfig(BaseResourcesServerConfig):
     name: str = "equivalence_rule"
     # Grading rule to use. Overridable per environment via YAML config block.
-    grading_rule: GradingRule = GradingRule.WEIGHTED_SEQ_MATCH
+    grading_rule: GradingRule = GradingRule.EXACT
 
 
 class EquivalenceRuleRunRequest(BaseRunRequest):

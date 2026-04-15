@@ -5,7 +5,7 @@ lc_equivalence_rule:
       entrypoint: app.py
       domain: knowledge
       verified: false
-      grading_rule: weighted_seq_match
+      grading_rule: exact
 lc_equivalence_rule_simple_agent:
   responses_api_agents:
     simple_agent:
