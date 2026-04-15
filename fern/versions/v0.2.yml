@@ -1,47 +1,66 @@
+tabs:
+  docs:
+    display-name: Documentation
+    slug: ""
+  api:
+    display-name: API Reference
+    slug: api
+
 navigation:
-  - section: "Documentation"
-    contents:
-      - page: "Home"
-        path: ./v0.2/pages/index.mdx
-  - folder: ./v0.2/pages/about
-    title: "About"
-    title-source: frontmatter
-  - folder: ./v0.2/pages/get-started
-    title: "Get Started"
-    title-source: frontmatter
-  - folder: ./v0.2/pages/agent-server
-    title: "Agent Server"
-    title-source: frontmatter
-  - folder: ./v0.2/pages/model-server
-    title: "Model Server"
-    title-source: frontmatter
-  - folder: ./v0.2/pages/resources-server
-    title: "Resources Server"
-    title-source: frontmatter
-  - folder: ./v0.2/pages/data
-    title: "Data"
-    title-source: frontmatter
-  - folder: ./v0.2/pages/environment-tutorials
-    title: "Environment Tutorials"
-    title-source: frontmatter
-  - folder: ./v0.2/pages/benchmarks
-    title: "Benchmarks"
-    title-source: frontmatter
-  - folder: ./v0.2/pages/training-tutorials
-    title: "Training Tutorials"
-    title-source: frontmatter
-  - folder: ./v0.2/pages/model-recipes
-    title: "Model Recipes"
-    title-source: frontmatter
-  - folder: ./v0.2/pages/infrastructure
-    title: "Infrastructure"
-    title-source: frontmatter
-  - folder: ./v0.2/pages/reference
-    title: "Reference"
-    title-source: frontmatter
-  - folder: ./v0.2/pages/troubleshooting
-    title: "Troubleshooting"
-    title-source: frontmatter
-  - folder: ./v0.2/pages/contribute
-    title: "Contribute"
-    title-source: frontmatter
+  - tab: docs
+    layout:
+      - section: "Documentation"
+        contents:
+          - page: "Home"
+            path: ./v0.2/pages/index.mdx
+      - folder: ./v0.2/pages/about
+        title: "About"
+        title-source: frontmatter
+      - folder: ./v0.2/pages/get-started
+        title: "Get Started"
+        title-source: frontmatter
+      - folder: ./v0.2/pages/agent-server
+        title: "Agent Server"
+        title-source: frontmatter
+      - folder: ./v0.2/pages/model-server
+        title: "Model Server"
+        title-source: frontmatter
+      - folder: ./v0.2/pages/resources-server
+        title: "Resources Server"
+        title-source: frontmatter
+      - folder: ./v0.2/pages/data
+        title: "Data"
+        title-source: frontmatter
+      - folder: ./v0.2/pages/environment-tutorials
+        title: "Environment Tutorials"
+        title-source: frontmatter
+      - folder: ./v0.2/pages/benchmarks
+        title: "Benchmarks"
+        title-source: frontmatter
+      - folder: ./v0.2/pages/training-tutorials
+        title: "Training Tutorials"
+        title-source: frontmatter
+      - folder: ./v0.2/pages/model-recipes
+        title: "Model Recipes"
+        title-source: frontmatter
+      - folder: ./v0.2/pages/infrastructure
+        title: "Infrastructure"
+        title-source: frontmatter
+      - folder: ./v0.2/pages/reference
+        title: "Reference"
+        title-source: frontmatter
+      - folder: ./v0.2/pages/troubleshooting
+        title: "Troubleshooting"
+        title-source: frontmatter
+      - folder: ./v0.2/pages/contribute
+        title: "Contribute"
+        title-source: frontmatter
+  - tab: api
+    layout:
+      - section: API Reference
+        slug: reference/api-reference
+        contents:
+          - page: Overview
+            path: ./v0.2/pages/api-reference/index.mdx
+            slug: ""
+          - folder: ../product-docs/nemo-gym/Full-Library-Reference

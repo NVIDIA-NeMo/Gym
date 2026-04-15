@@ -29,8 +29,6 @@ Each JSONL line requires a `responses_create_params` field following the [OpenAI
 
 Additional fields like `expected_answer` vary by resources server—the component that provides tools and reward signals.
 
-**Source**: `nemo_gym/base_resources_server.py:35-36`
-
 ### Required Fields
 
 | Field | Added By | Description |
@@ -95,8 +93,6 @@ ng_prepare_data "+config_paths=[${config_paths}]" \
 | `train` | RL training data | Required |
 | `validation` | Evaluation during training | Required |
 
-**Source**: `nemo_gym/config_types.py:352`
-
 ## Configuration
 
 Define datasets in your agent server's YAML config:
@@ -112,8 +108,6 @@ datasets:
     license: Apache 2.0
 ```
 
-**Source**: `resources_servers/workplace_assistant/configs/workplace_assistant.yaml:21-27`
-
 | Field | Required | Description |
 |-------|----------|-------------|
 | `name` | Yes | Dataset identifier |
@@ -126,8 +120,6 @@ datasets:
 ### Valid Licenses
 
 `Apache 2.0` · `MIT` · `GNU General Public License v3.0` · `Creative Commons Attribution 4.0 International` · `Creative Commons Attribution-ShareAlike 4.0 International` · `TBD` · `NVIDIA Internal Use Only, Do Not Distribute`
-
-**Source**: `nemo_gym/config_types.py:363-372`
 
 ## Workflow
 

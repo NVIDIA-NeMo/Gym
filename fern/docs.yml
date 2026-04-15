@@ -1,6 +1,12 @@
 instances:
-  - url: https://gym.docs.buildwithfern.com
+  - url: https://gym.docs.buildwithfern.com/nemo/gym
     custom-domain: docs.nvidia.com/nemo/gym
+
+check:
+  rules:
+    broken-links: error
+    example-validation: warn
+    missing-redirects: error
 
 title: NeMo Gym
 
@@ -46,6 +52,15 @@ css:
 navbar-links:
   - type: github
     value: https://github.com/NVIDIA-NeMo/Gym
+
+libraries:
+  nemo-gym:
+    input:
+      git: https://github.com/NVIDIA-NeMo/Gym
+      subpath: nemo_gym
+    output:
+      path: ./product-docs/nemo-gym/Full-Library-Reference
+    lang: python
 
 experimental:
   mdx-components:

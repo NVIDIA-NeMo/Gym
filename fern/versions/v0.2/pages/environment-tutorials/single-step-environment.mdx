@@ -27,7 +27,7 @@ Build a complete environment end-to-end, from scaffolding to RL-ready rollouts.
 
 ## Prerequisites
 
-Complete **[Detailed Setup](/v0.2/get-started/detailed-setup)** before starting --- clone the repository, install dependencies, configure your API key, and verify servers start correctly.
+Complete **[Detailed Setup](/v0.2/get-started/detailed-setup)** before starting — clone the repository, install dependencies, configure your API key, and verify servers start correctly.
 
 <Tip>
 If you followed the [Quickstart](/v0.2/get-started), you're ready to proceed.
@@ -78,7 +78,7 @@ resources_servers/my_weather_tool/
 
 Understanding the task is the first step in designing the environment itself.
 
-Every environment starts with **task data** --- the scenarios your model will practice on. Task data is stored in JSONL format (one JSON object per line), where each line represents a single training example. To get started, it's not atypical for a domain-expert to hand-craft a few examples from scratch. Once the environment is developed and tested with these examples, you can scale up by collecting more data or using synthetic data generation using libraries like [NeMo Data Designer](https://github.com/NVIDIA-NeMo/Data-Designer).
+Every environment starts with **task data** — the scenarios your model will practice on. Task data is stored in JSONL format (one JSON object per line), where each line represents a single training example. To get started, it's not atypical for a domain-expert to hand-craft a few examples from scratch. Once the environment is developed and tested with these examples, you can scale up by collecting more data or using synthetic data generation using libraries like [NeMo Data Designer](https://github.com/NVIDIA-NeMo/Data-Designer).
 
 ### JSONL Format
 
@@ -115,7 +115,7 @@ Each line contains a `responses_create_params` object with the conversation mess
 | `responses_create_params` | OpenAI Responses API-compatible input |
 | `responses_create_params.input` | Conversation messages (system, user, assistant) |
 | `responses_create_params.tools` | Available tools/functions for the agent |
-| `responses_create_params.parallel_tool_calls` | Whether the model may call multiple tools simultaneously. Set to `false` to force sequential tool calls --- useful when tool outputs depend on each other. |
+| `responses_create_params.parallel_tool_calls` | Whether the model may call multiple tools simultaneously. Set to `false` to force sequential tool calls — useful when tool outputs depend on each other. |
 
 ### Create Data
 
@@ -169,9 +169,9 @@ This tutorial uses `simple_agent`. For other patterns (multi-turn correction, cu
 While the agent handles orchestration, the **Resources Server** is where you define what makes your environment unique. It is the backbone of tool-based interactions in NeMo Gym.
 
 It provides:
-- **Tool implementations** --- APIs that models can call
-- **Verification logic** --- reward computation for RL
-- **Session state** --- per-episode state management (for stateful environments)
+- **Tool implementations** — APIs that models can call
+- **Verification logic** — reward computation for RL
+- **Session state** — per-episode state management (for stateful environments)
 
 Some agents may come with predefined tools, and you can use the Resources Server to supplement them with additional external tools. When building a new environment, prefer defining tools in the Resources Server rather than the Agent Server. This separation lets multiple agents share the same tool logic without duplicating it.
 
@@ -244,11 +244,11 @@ if __name__ == "__main__":
 | **Request/Response Schemas** | Pydantic models defining the API contract |
 | **`setup_webserver()`** | Registers FastAPI routes for your tools |
 | **Tool Methods** | Async functions implementing tool logic |
-| **`verify()`** | **Required** --- evaluates task performance and returns a reward |
+| **`verify()`** | **Required** — evaluates task performance and returns a reward |
 
 ### 3.3 Verification Logic
 
-The `verify()` function is the heart of your RL environment --- it computes the reward signal that drives model training. In this example, verification is simple: return `1.0` if the model called the `get_weather` tool, `0.0` otherwise. Real environments will have more sophisticated logic, but the principle is the same --- inspect the model's output and score it.
+The `verify()` function is the heart of your RL environment — it computes the reward signal that drives model training. In this example, verification is simple: return `1.0` if the model called the `get_weather` tool, `0.0` otherwise. Real environments will have more sophisticated logic, but the principle is the same — inspect the model's output and score it.
 
 ```python
 async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
@@ -422,9 +422,9 @@ ng_run "+config_paths=[$config_paths]"
 
 `ng_run` reads the config files and starts all three components from the architecture diagram:
 
-1. **Agent Server** (`my_weather_tool_simple_agent`) --- the `simple_agent` that orchestrates the seed → model → tool → verify loop
-2. **Model Server** (`openai_model`) --- proxies LLM inference requests to the OpenAI API
-3. **Resources Server** (`my_weather_tool_resources_server`) --- serves your `get_weather` tool endpoint and `verify()` logic
+1. **Agent Server** (`my_weather_tool_simple_agent`) — the `simple_agent` that orchestrates the seed → model → tool → verify loop
+2. **Model Server** (`openai_model`) — proxies LLM inference requests to the OpenAI API
+3. **Resources Server** (`my_weather_tool_resources_server`) — serves your `get_weather` tool endpoint and `verify()` logic
 
 ### Configure API Keys
 
@@ -470,8 +470,8 @@ This client calls `/v1/responses`, which tests tool-calling but does not exercis
 
 Before training, you collect rollouts to validate that your environment works end-to-end and to profile and establish a baseline. Each rollout runs a task through the full agent loop (prompt → model → tool calls → verification) and records the complete interaction along with the reward. This serves two purposes:
 
-1. **Validation** --- confirm your tools, verification logic, and data produce sensible rewards. If a strong model scores near zero, something is likely wrong with your environment.
-2. **Baselining** --- measure pass rates across models to understand task difficulty before training begins.
+1. **Validation** — confirm your tools, verification logic, and data produce sensible rewards. If a strong model scores near zero, something is likely wrong with your environment.
+2. **Baselining** — measure pass rates across models to understand task difficulty before training begins.
 
 With your servers still running, collect rollouts against your example inputs:
 

@@ -3,6 +3,8 @@ title: "Detailed Setup Guide"
 description: ""
 position: 3
 ---
+import { NavButton } from "../../../../components/NavButton";
+
 <Info>
 
 **Goal**: Get [NeMo Gym](https://github.com/NVIDIA-NeMo/Gym) installed and servers running, then verify all components work together.
@@ -18,7 +20,7 @@ position: 3
 
 </Info>
 
-[← Previous: Quickstart](/latest/get-started)
+<NavButton href="/latest/get-started" label="Previous: Quickstart" direction="prev" />
 
 ## Requirements
 
@@ -398,7 +400,7 @@ Gym/
 
 You've confirmed that NeMo Gym is working — the agent can call tools and return results. But a single interaction isn't enough for RL training. **The next step is to collect batches of scored interactions (rollouts) that become your training data.**
 
-[Continue to Rollout Collection →](/latest/get-started/rollout-collection)
+<NavButton href="/latest/get-started/rollout-collection" label="Continue to Rollout Collection" direction="next" />
 
 <Note>
 Rollout collection is required before proceeding to tutorials like [Index](/latest/environment-tutorials) or training workflows. Complete it next.
