@@ -12,6 +12,10 @@ Example data provided in `data/example.jsonl` (system prompt only, no verifier_m
 ng_run "+config_paths=[resources_servers/blackjack/configs/blackjack.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
 ```
 
+## Data
+
+Each game is generated on the fly during `reset()`, so every row in `example.jsonl` is identical. To create more data, duplicate the row. Each rollout gets a fresh random deal. Use `num_repeats` in the YAML config or the `+num_repeats` CLI flag to control how many games per row.
+
 ## Collect rollouts
 
 ```bash

@@ -6,4 +6,4 @@ Base class (`GymnasiumServer`) for gymnasium-style resources servers. Not a stan
 from resources_servers.base_gymnasium import GymnasiumServer
 ```
 
-See `docs/resources-server/gymnasium-api.md` for usage.
+See `docs/resources-server/gymnasium-api.md` for usage and `resources_servers/blackjack/` for a working example.

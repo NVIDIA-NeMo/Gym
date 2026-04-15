@@ -5,6 +5,7 @@ blackjack:
       domain: games
       verified: false
       description: Blackjack. Model hits or stands. Reward +1 win, 0 draw, -1 loss/bust.
+      value: Example gymnasium-style multi-step environment
 blackjack_gymnasium_agent:
   responses_api_agents:
     gymnasium_agent:
