@@ -587,3 +587,361 @@ class TestApp:
 
         no_coerce_verify_response = await no_coerce_server.verify(no_coerce_request)
         assert no_coerce_verify_response.reward == 0.0
+
+    async def test_verify_toml(self, config: StructuredOutputsResourcesServerConfig) -> None:
+        server_mock = MagicMock(spec=ServerClient)
+        resources_server = StructuredOutputsResourcesServer(config=config, server_client=server_mock)
+        response_mock = AsyncMock()
+        post_mock = MagicMock()
+        post_mock.json = response_mock
+        server_mock.post = AsyncMock(return_value=post_mock)
+
+        test_schema = {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "version": {"type": "string"},
+                "buildNumber": {"type": "integer"},
+                "isStable": {"type": "boolean"},
+                "score": {"type": "number"},
+                "settings": {
+                    "type": "object",
+                    "properties": {
+                        "debug": {"type": "boolean"},
+                        "timeout": {"type": "integer"},
+                        "logLevel": {"type": "string"},
+                    },
+                    "required": ["debug", "timeout", "logLevel"],
+                    "additionalProperties": False,
+                },
+                "tags": {"type": "array", "items": {"type": "string"}},
+            },
+        }
+        valid_toml = (
+            'name = "my-project"\n'
+            'version = "1.2.3"\n'
+            "buildNumber = 42\n"
+            "isStable = true\n"
+            "score = 98.5\n"
+            'tags = ["python", "ml"]\n'
+            "\n"
+            "[settings]\n"
+            "debug = false\n"
+            "timeout = 30\n"
+            'logLevel = "info"\n'
+        )
+
+        schema_str = json.dumps(test_schema)
+        dummy_create_params = NeMoGymResponseCreateParamsNonStreaming(input=[])
+
+        # --- Test 1: Valid TOML ---
+        valid_output_item = self._create_response_output_message(valid_toml)
+        valid_response = NeMoGymResponse(
+            id="valid_toml_response_id",
+            created_at=1234.5,
+            model="test_model",
+            object="response",
+            output=[valid_output_item],
+            parallel_tool_calls=False,
+            tool_choice="none",
+            tools=[],
+        )
+
+        valid_request = StructuredOutputsVerifyRequest(
+            responses_create_params=dummy_create_params,
+            response=valid_response,
+            schema_str=schema_str,
+            schema_type=SchemaType.TOML,
+        )
+
+        valid_verify_response = await resources_server.verify(valid_request)
+        assert valid_verify_response.reward == 1.0
+        assert valid_verify_response.response == valid_response
+
+        # --- Test 2: Unparseable TOML ---
+        broken_toml = 'name = "hello\n[invalid'
+        broken_output_item = self._create_response_output_message(broken_toml)
+        broken_response = valid_response.model_copy(
+            deep=True, update={"id": "broken_toml_id", "output": [broken_output_item]}
+        )
+
+        broken_request = StructuredOutputsVerifyRequest(
+            responses_create_params=dummy_create_params,
+            response=broken_response,
+            schema_str=schema_str,
+            schema_type=SchemaType.TOML,
+        )
+
+        broken_verify_response = await resources_server.verify(broken_request)
+        assert broken_verify_response.reward == 0.0
+        assert broken_verify_response.error_type == "parse_error"
+
+        # --- Test 3: Missing field ---
+        missing_field_toml = (
+            'version = "1.2.3"\n'
+            "buildNumber = 42\n"
+            "isStable = true\n"
+            "score = 98.5\n"
+            'tags = ["python", "ml"]\n'
+            "\n"
+            "[settings]\n"
+            "debug = false\n"
+            "timeout = 30\n"
+            'logLevel = "info"\n'
+        )
+        missing_output_item = self._create_response_output_message(missing_field_toml)
+        missing_response = valid_response.model_copy(
+            deep=True, update={"id": "missing_field_toml_id", "output": [missing_output_item]}
+        )
+
+        missing_request = StructuredOutputsVerifyRequest(
+            responses_create_params=dummy_create_params,
+            response=missing_response,
+            schema_str=schema_str,
+            schema_type=SchemaType.TOML,
+        )
+
+        missing_verify_response = await resources_server.verify(missing_request)
+        assert missing_verify_response.reward == 0.0
+        assert missing_verify_response.error_type == "validation_error"
+
+        # --- Test 4: Extra field ---
+        extra_field_toml = (
+            'name = "my-project"\n'
+            'version = "1.2.3"\n'
+            "buildNumber = 42\n"
+            "isStable = true\n"
+            "score = 98.5\n"
+            'tags = ["python", "ml"]\n'
+            'extraField = "some value"\n'
+            "\n"
+            "[settings]\n"
+            "debug = false\n"
+            "timeout = 30\n"
+            'logLevel = "info"\n'
+        )
+        extra_output_item = self._create_response_output_message(extra_field_toml)
+        extra_response = valid_response.model_copy(
+            deep=True, update={"id": "extra_field_toml_id", "output": [extra_output_item]}
+        )
+
+        extra_request = StructuredOutputsVerifyRequest(
+            responses_create_params=dummy_create_params,
+            response=extra_response,
+            schema_str=schema_str,
+            schema_type=SchemaType.TOML,
+        )
+
+        extra_verify_response = await resources_server.verify(extra_request)
+        assert extra_verify_response.reward == 0.0
+        assert extra_verify_response.error_type == "validation_error"
+
+        # --- Test 5: Wrong type (buildNumber as string) ---
+        wrong_type_toml = (
+            'name = "my-project"\n'
+            'version = "1.2.3"\n'
+            'buildNumber = "forty-two"\n'
+            "isStable = true\n"
+            "score = 98.5\n"
+            'tags = ["python", "ml"]\n'
+            "\n"
+            "[settings]\n"
+            "debug = false\n"
+            "timeout = 30\n"
+            'logLevel = "info"\n'
+        )
+        wrong_type_output_item = self._create_response_output_message(wrong_type_toml)
+        wrong_type_response = valid_response.model_copy(
+            deep=True, update={"id": "wrong_type_toml_id", "output": [wrong_type_output_item]}
+        )
+
+        wrong_type_request = StructuredOutputsVerifyRequest(
+            responses_create_params=dummy_create_params,
+            response=wrong_type_response,
+            schema_str=schema_str,
+            schema_type=SchemaType.TOML,
+        )
+
+        wrong_type_verify_response = await resources_server.verify(wrong_type_request)
+        assert wrong_type_verify_response.reward == 0.0
+        assert wrong_type_verify_response.error_type == "validation_error"
+
+        # --- Test 6: Nested extra field ---
+        nested_extra_toml = (
+            'name = "my-project"\n'
+            'version = "1.2.3"\n'
+            "buildNumber = 42\n"
+            "isStable = true\n"
+            "score = 98.5\n"
+            'tags = ["python", "ml"]\n'
+            "\n"
+            "[settings]\n"
+            "debug = false\n"
+            "timeout = 30\n"
+            'logLevel = "info"\n'
+            'extraNestedField = "bad value"\n'
+        )
+        nested_extra_output_item = self._create_response_output_message(nested_extra_toml)
+        nested_extra_response = valid_response.model_copy(
+            deep=True, update={"id": "nested_extra_toml_id", "output": [nested_extra_output_item]}
+        )
+
+        nested_extra_request = StructuredOutputsVerifyRequest(
+            responses_create_params=dummy_create_params,
+            response=nested_extra_response,
+            schema_str=schema_str,
+            schema_type=SchemaType.TOML,
+        )
+
+        nested_extra_verify_response = await resources_server.verify(nested_extra_request)
+        assert nested_extra_verify_response.reward == 0.0
+        assert nested_extra_verify_response.error_type == "validation_error"
+
+    async def test_verify_csv(self, config: StructuredOutputsResourcesServerConfig) -> None:
+        server_mock = MagicMock(spec=ServerClient)
+        resources_server = StructuredOutputsResourcesServer(config=config, server_client=server_mock)
+        response_mock = AsyncMock()
+        post_mock = MagicMock()
+        post_mock.json = response_mock
+        server_mock.post = AsyncMock(return_value=post_mock)
+
+        test_schema = {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "age": {"type": "integer"},
+                    "score": {"type": "number"},
+                    "active": {"type": "boolean"},
+                },
+            },
+        }
+        valid_csv = "name,age,score,active\nAlice,30,95.5,true\nBob,25,88.0,false\n"
+
+        schema_str = json.dumps(test_schema)
+        dummy_create_params = NeMoGymResponseCreateParamsNonStreaming(input=[])
+
+        # --- Test 1: Valid CSV (type coercion handles str -> int/float/bool) ---
+        valid_output_item = self._create_response_output_message(valid_csv)
+        valid_response = NeMoGymResponse(
+            id="valid_csv_response_id",
+            created_at=1234.5,
+            model="test_model",
+            object="response",
+            output=[valid_output_item],
+            parallel_tool_calls=False,
+            tool_choice="none",
+            tools=[],
+        )
+
+        valid_request = StructuredOutputsVerifyRequest(
+            responses_create_params=dummy_create_params,
+            response=valid_response,
+            schema_str=schema_str,
+            schema_type=SchemaType.CSV,
+        )
+
+        valid_verify_response = await resources_server.verify(valid_request)
+        assert valid_verify_response.reward == 1.0
+        assert valid_verify_response.response == valid_response
+
+        # --- Test 2: Empty response ---
+        empty_output_item = self._create_response_output_message("   ")
+        empty_response = valid_response.model_copy(
+            deep=True, update={"id": "empty_csv_id", "output": [empty_output_item]}
+        )
+
+        empty_request = StructuredOutputsVerifyRequest(
+            responses_create_params=dummy_create_params,
+            response=empty_response,
+            schema_str=schema_str,
+            schema_type=SchemaType.CSV,
+        )
+
+        empty_verify_response = await resources_server.verify(empty_request)
+        assert empty_verify_response.reward == 0.0
+        assert empty_verify_response.error_type == "empty_response"
+
+        # --- Test 3: Missing column ---
+        missing_col_csv = "age,score,active\n30,95.5,true\n25,88.0,false\n"
+        missing_col_output_item = self._create_response_output_message(missing_col_csv)
+        missing_col_response = valid_response.model_copy(
+            deep=True, update={"id": "missing_col_csv_id", "output": [missing_col_output_item]}
+        )
+
+        missing_col_request = StructuredOutputsVerifyRequest(
+            responses_create_params=dummy_create_params,
+            response=missing_col_response,
+            schema_str=schema_str,
+            schema_type=SchemaType.CSV,
+        )
+
+        missing_col_verify_response = await resources_server.verify(missing_col_request)
+        assert missing_col_verify_response.reward == 0.0
+        assert missing_col_verify_response.error_type == "validation_error"
+
+        # --- Test 4: Extra column ---
+        extra_col_csv = "name,age,score,active,bonus\nAlice,30,95.5,true,extra\nBob,25,88.0,false,extra\n"
+        extra_col_output_item = self._create_response_output_message(extra_col_csv)
+        extra_col_response = valid_response.model_copy(
+            deep=True, update={"id": "extra_col_csv_id", "output": [extra_col_output_item]}
+        )
+
+        extra_col_request = StructuredOutputsVerifyRequest(
+            responses_create_params=dummy_create_params,
+            response=extra_col_response,
+            schema_str=schema_str,
+            schema_type=SchemaType.CSV,
+        )
+
+        extra_col_verify_response = await resources_server.verify(extra_col_request)
+        assert extra_col_verify_response.reward == 0.0
+        assert extra_col_verify_response.error_type == "validation_error"
+
+        # --- Test 5: Wrong type (age is non-numeric, coercion fails) ---
+        wrong_type_csv = "name,age,score,active\nAlice,not_a_number,95.5,true\n"
+        wrong_type_output_item = self._create_response_output_message(wrong_type_csv)
+        wrong_type_response = valid_response.model_copy(
+            deep=True, update={"id": "wrong_type_csv_id", "output": [wrong_type_output_item]}
+        )
+
+        wrong_type_request = StructuredOutputsVerifyRequest(
+            responses_create_params=dummy_create_params,
+            response=wrong_type_response,
+            schema_str=schema_str,
+            schema_type=SchemaType.CSV,
+        )
+
+        wrong_type_verify_response = await resources_server.verify(wrong_type_request)
+        assert wrong_type_verify_response.reward == 0.0
+        assert wrong_type_verify_response.error_type == "validation_error"
+
+        # --- Test 6: Nullable type coercion (empty value -> None) ---
+        nullable_schema = {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "age": {"type": ["integer", "null"]},
+                },
+            },
+        }
+        nullable_csv = "name,age\nAlice,\nBob,25\n"
+        nullable_schema_str = json.dumps(nullable_schema)
+
+        nullable_output_item = self._create_response_output_message(nullable_csv)
+        nullable_response = valid_response.model_copy(
+            deep=True, update={"id": "nullable_csv_id", "output": [nullable_output_item]}
+        )
+
+        nullable_request = StructuredOutputsVerifyRequest(
+            responses_create_params=dummy_create_params,
+            response=nullable_response,
+            schema_str=nullable_schema_str,
+            schema_type=SchemaType.CSV,
+        )
+
+        nullable_verify_response = await resources_server.verify(nullable_request)
+        assert nullable_verify_response.reward == 1.0
