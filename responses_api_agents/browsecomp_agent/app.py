@@ -231,7 +231,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         cookies = seed_session_response.cookies
 
         last_verify_response = None
-        for _ in range(max(1, self.config.max_run_retries)):
+        for _ in range(self.config.max_run_retries):
             response = await self.server_client.post(
                 server_name=self.config.name,
                 url_path="/v1/responses",
@@ -256,7 +256,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             last_verify_response = BrowsecompAgentVerifyResponse.model_validate(
                 await get_response_json(verify_response)
             )
-            if last_verify_response.extracted_final_answer is not None:
+            if last_verify_response.extracted_final_answer not in (None, "None"):
                 break
 
         return last_verify_response
