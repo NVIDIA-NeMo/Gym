@@ -28,6 +28,7 @@ from pydantic import BaseModel, Field
 from tqdm.asyncio import tqdm
 from wandb import Table
 
+from nemo_gym import PARENT_DIR
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.config_types import BaseNeMoGymCLIConfig, BaseServerConfig
 from nemo_gym.global_config import (
@@ -57,6 +58,10 @@ class SharedRolloutCollectionConfig(BaseNeMoGymCLIConfig):
     responses_create_params: Dict[str, Any] = Field(
         default_factory=dict,
         description="Overrides for the responses_create_params e.g. temperature, max_output_tokens, etc.",
+    )
+    upload_rollouts_to_wandb: bool = Field(
+        default=True,
+        description="Upload the rollouts to W&B. Sometimes this should be off because the rollouts are massive. Default: True",
     )
 
 
@@ -158,7 +163,11 @@ class RolloutCollectionHelper(BaseModel):
             prompt_cfg = load_prompt_config(config.prompt_config)
             print(f"Using prompt config: {config.prompt_config}")
 
-        with open(config.input_jsonl_fpath) as input_file:
+        _input_path = Path(config.input_jsonl_fpath)
+        if not _input_path.is_absolute():
+            _cwd_path = Path.cwd() / _input_path
+            _input_path = _cwd_path if _cwd_path.exists() else PARENT_DIR / _input_path
+        with open(_input_path) as input_file:
             rows_iterator: Iterator[str] = tqdm(input_file, desc="Reading rows")
             rows_iterator: Iterator[tuple[int, str]] = zip(range_iterator, rows_iterator)
             raw_rows = [(row_idx, row_str, orjson.loads(row_str)) for row_idx, row_str in rows_iterator]
@@ -307,7 +316,7 @@ class RolloutCollectionHelper(BaseModel):
 
         results_file.close()
 
-        if get_wandb_run():  # pragma: no cover
+        if config.upload_rollouts_to_wandb and get_wandb_run():  # pragma: no cover
             print("Uploading rollouts to W&B. This may take a few minutes if your data is large.")
             get_wandb_run().log({"Rollouts": Table(data=result_strs, columns=["Rollout"])})
         del result_strs
