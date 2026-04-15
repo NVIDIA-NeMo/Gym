@@ -34,9 +34,9 @@ from nemo_gym.base_resources_server import (
 
 
 class GradingRule(str, Enum):
-    SEQ_MATCH          = "seq_match"           # plain SequenceMatcher ratio
-    WEIGHTED_SEQ_MATCH = "weighted_seq_match"  # seq_match + prefix bonus 
-    EXACT              = "exact"               # 1.0 if normalized strings match exactly, else 0.0 (default)
+    SEQ_MATCH = "seq_match"  # plain SequenceMatcher ratio
+    WEIGHTED_SEQ_MATCH = "weighted_seq_match"  # seq_match + prefix bonus
+    EXACT = "exact"  # 1.0 if normalized strings match exactly, else 0.0 (default)
 
 
 class EquivalenceRuleResourcesServerConfig(BaseResourcesServerConfig):
@@ -75,22 +75,22 @@ class EquivalenceRuleResourcesServer(SimpleResourcesServer):
         # Extract plain text from all output_text content blocks in the response.
         parts = [
             item.text
-            for output in body.response.output if output.type == "message"
-            for item in output.content if item.type == "output_text"
+            for output in body.response.output
+            if output.type == "message"
+            for item in output.content
+            if item.type == "output_text"
         ]
         response_text = "".join(parts)
 
         score = self._grade(response_text, body.expected_answer, self.config.grading_rule)
-        return EquivalenceRuleVerifyResponse(
-            **body.model_dump(), reward=score, equivalence_score=score
-        )
+        return EquivalenceRuleVerifyResponse(**body.model_dump(), reward=score, equivalence_score=score)
 
     @classmethod
     def _grade(cls, response: str, answer: str, rule: GradingRule) -> float:
         _RULES = {
-            GradingRule.SEQ_MATCH:          cls._grade_seq_match,
+            GradingRule.SEQ_MATCH: cls._grade_seq_match,
             GradingRule.WEIGHTED_SEQ_MATCH: cls._grade_weighted_seq_match,
-            GradingRule.EXACT:              cls._grade_exact,
+            GradingRule.EXACT: cls._grade_exact,
         }
         return _RULES[rule](response, answer)
 
@@ -117,7 +117,7 @@ class EquivalenceRuleResourcesServer(SimpleResourcesServer):
 
         # Prefix bonus: soft reward for matching the first ~10 chars of the answer.
         prefix = answer_n[:10]
-        prefix_sim = float(SequenceMatcher(None, response_n[:len(prefix)], prefix).ratio())
+        prefix_sim = float(SequenceMatcher(None, response_n[: len(prefix)], prefix).ratio())
 
         reward = 0.85 * sim + 0.15 * prefix_sim
         return max(0.0, min(1.0, reward))
