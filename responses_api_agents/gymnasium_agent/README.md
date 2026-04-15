@@ -1,5 +1,5 @@
 # Gymnasium Agent
 
-Agent for `GymnasiumServer` resources servers. Drives the reset/step loop.
+Agent for Gymansium-style environments based on `GymnasiumServer` resources servers. Drives the reset/step loop.
 
-See `docs/resources-server/gymnasium-api.md` for usage.
+See `docs/resources-server/gymnasium-api.md` for more details.

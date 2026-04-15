@@ -1,6 +1,8 @@
 # Blackjack Env
 
-Multi-step gymnasium-style  Model hits or stands using `<action>` tags until the hand ends. Game state managed per session.
+Multi-step gymnasium-style environment. 
+
+Model hits or stands using `<action>` tags until the hand ends. Game state managed per session.
 
 Example data provided in `data/example.jsonl` (system prompt only, no verifier_metadata needed). No train/validation data.
 

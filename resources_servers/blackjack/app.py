@@ -13,12 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Blackjack environment.
+"""
+Blackjack environment in Gymnasium API style.
 
-Multi-step episode: the model hits or stands until the hand ends.
-Reward: +1 win, 0 draw, -1 loss/bust.
-
-No verifier_metadata required. The JSONL just needs a system prompt.
+Multi-step: the model hits or stands until the hand ends.
+Reward: +1 win, 0 draw, -1 loss.
 """
 
 import random

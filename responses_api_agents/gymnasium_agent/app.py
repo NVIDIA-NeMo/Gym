@@ -74,7 +74,7 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
     async def run(self, request: Request, body: GymnasiumAgentRunRequest) -> GymnasiumRunResponse:
         cookies = request.cookies
 
-        # --- reset ---
+        # call reset to initialize the environment
         reset_resp = await self.server_client.post(
             server_name=self.config.env_server.name,
             url_path="/reset",
@@ -99,12 +99,13 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
             )
 
         all_outputs = []
+        total_reward = 0.0
         usage = None
         model_server_cookies = None
         step_data = EnvStepResponse(terminated=False, truncated=True, reward=0.0)
         last_model_response = None
 
-        # --- loop ---
+        # step until done
         for _ in range(self.config.max_steps):
             model_resp = await self.server_client.post(
                 server_name=self.config.model_server.name,
@@ -137,6 +138,7 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
             )
             await raise_for_status(step_resp)
             step_data = EnvStepResponse.model_validate(await get_response_json(step_resp))
+            total_reward += step_data.reward
             cookies = step_resp.cookies
 
             if step_data.terminated or step_data.truncated:
@@ -153,7 +155,7 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
                     }
                 )
 
-        else:  # for/else: loop completed without break, meaning max_steps exhausted
+        else:  # loop completed without break, meaning max_steps reached
             step_data = step_data.model_copy(update={"truncated": True})
 
         last_model_response.output = all_outputs
@@ -162,7 +164,7 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
         return GymnasiumRunResponse(
             responses_create_params=body.responses_create_params,
             response=last_model_response,
-            reward=step_data.reward,
+            reward=total_reward,
             terminated=step_data.terminated,
             truncated=step_data.truncated,
             info=step_data.info,

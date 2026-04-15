@@ -1,10 +1,9 @@
 (gymnasium-api)=
 
+
 # Gymnasium API
 
-<!-- TODO: framing on the two definitions of "environment" and when to use base_gymnasium vs custom agent -->
-
-`GymnasiumServer` is a [Gymnasium](https://gymnasium.farama.org/)-style base class for resources servers. Implement `step()`, optionally `reset()`, pair with `gymnasium_agent`.
+`GymnasiumServer` is a [Gymnasium](https://gymnasium.farama.org/)-style base class for resources servers. Implement `step()`, optionally `reset()`, use with `gymnasium_agent`.
 
 ## Interface
 
@@ -14,25 +13,29 @@ from nemo_gym.openai_utils import NeMoGymResponse
 
 class MyEnv(GymnasiumServer):
     async def reset(self, metadata: dict, session_id=None) -> tuple[str | None, dict]:
-        # Called once at the start of each episode.
-        # Return (observation, info).
+        # Called once at the start of each episode to initial the environment
+        # Return (observation, info)
         # None observation = use responses_create_params.input as-is.
         return None, {}
 
     async def step(self, action: NeMoGymResponse, metadata: dict, session_id=None) -> tuple[str | None, float, bool, bool, dict]:
-        # Called after each model response.
-        # Return (observation, reward, terminated, truncated, info).
-        # observation: next prompt for the model, or None if episode is over.
-        # reward is only used when terminated=True.
-        # truncated=True means the episode hit the step limit.
+        # Called after each model response, executes any actions taken or implements other env logic (<action> tags, tool calls, user turns, or just single-step verification), computes rewards, determines if done.
+        # Return (observation, reward, terminated, truncated, info)
+        # observation: next message to model (tool result, rendering of state, user msg etc), or None if episode is over.
+        # reward: per-step reward, accumulated across all steps by the agent.
+        # terminated: True when the episode ends naturally (task solved, game over, etc). Tells the agent to stop.
+        # truncated: True when the episode is cut short (step limit, timeout, etc).
+        # info: arbitrary dict passed through to the final response. Use for diagnostics, scores, metadata.
         ...
 ```
 
-`metadata` contains the extra fields from `verifier_metadata` in your JSONL input. Access them via `metadata.get("field_name")`.
+The main method to implement is step(). Implementing a custom `reset()` is optional to initialize environment state or return a message from the environment. The default implementation returns `(None, {})`.
 
-`session_id` is a unique string per rollout, used to store and retrieve per-episode state. Stateless environments can ignore it.
+`metadata` is the `verifier_metadata` dict from your input JSONL, passed through unchanged. This is where you put task-specific data (expected answers, test cases, board configurations, etc.) that the environment needs for initialization or scoring. Access fields via `metadata.get("field_name")`.
 
-`reset()` is optional. The default implementation returns `(None, {})`.
+`session_id` is a unique string per rollout. Use it as a key to store per-episode state (e.g. game boards, conversation history) in a dict on your server. Stateless environments can ignore it.
+
+`action` is the full `NeMoGymResponse` from the model server. Your `step()` parses whatever it needs from it: text content, `<action>` tags, function calls, etc. Use the `extract_text()` helper for text, or inspect `action.output` directly for structured output like tool calls.
 
 ## Single-step
 
@@ -48,7 +51,7 @@ class MySingleStepEnv(GymnasiumServer):
 
 ## Multi-step with action tags
 
-Multiple model calls per episode without tool calling. The model uses `<action>` tags in its output, `step()` parses them and returns the next observation or terminates.
+Multiple model calls per episode without native tool calling. The model uses `<action>` tags in its output, `step()` parses them and returns the next observation or terminates.
 
 ```python
 import re
@@ -80,7 +83,7 @@ class BlackjackEnv(GymnasiumServer):
 
 ## Tool-use
 
-`action` is the full `NeMoGymResponse` from the model server, including any function calls already parsed by the model server's tool call parser. `step()` checks `action.output` for items with `type == "function_call"`, executes them, and returns the results as the next observation. Tool schemas go in `responses_create_params.tools` in your JSONL data so the model knows what tools are available.
+For tool-calling environments, `step()` checks `action.output` for items with `type == "function_call"`, executes them, and returns the results as the next observation. Tool schemas go in `responses_create_params.tools` in your JSONL data so the model knows what tools are available.
 
 ```python
 import json
@@ -132,83 +135,6 @@ class MyMultiTurnEnv(GymnasiumServer):
         reward = self._grade(action, metadata)
         return None, reward, True, False, {}
 ```
-
-## Multi-turn with user model
-
-Instead of scripted follow-ups, call a second LLM to generate user replies. The policy never sees the user model's internals. Configure the user model as a separate model server in YAML.
-
-```python
-from nemo_gym.server_utils import get_response_json, raise_for_status
-
-class UserSimEnv(GymnasiumServer):
-    user_model_server: str = "user_model"
-
-    async def step(self, action, metadata, session_id=None):
-        assistant_text = _extract_text(action)
-        resp = await self.server_client.post(
-            server_name=self.user_model_server,
-            url_path="/v1/responses",
-            json={"input": [
-                {"role": "system", "content": metadata.get("user_persona", "You are a user.")},
-                {"role": "assistant", "content": assistant_text},
-            ]},
-        )
-        await raise_for_status(resp)
-        data = await get_response_json(resp)
-        user_reply = _extract_text_from_json(data)
-
-        if is_done(user_reply, metadata):
-            reward = self._grade(action, metadata)
-            return None, reward, True, False, {}
-
-        return user_reply, 0.0, False, False, {}
-```
-
-## Multi-turn with user model and tools
-
-The user model can also call tools that the policy model does not have access to. For example, the user model might query a database or check a schedule to formulate realistic follow-up questions. The policy only sees the resulting text, not the tool calls or their outputs.
-
-Configure the user model's tool schemas in the `step()` call, not in the policy's `responses_create_params.tools`.
-
-```python
-class UserWithToolsEnv(GymnasiumServer):
-    user_model_server: str = "user_model"
-    session_state: dict = Field(default_factory=dict)
-
-    async def reset(self, metadata, session_id=None):
-        self.session_state[session_id] = initialize_user_tools(metadata)
-        return None, {}
-
-    async def step(self, action, metadata, session_id=None):
-        assistant_text = _extract_text(action)
-        state = self.session_state[session_id]
-
-        # User model gets its own tool schemas (hidden from the policy)
-        resp = await self.server_client.post(
-            server_name=self.user_model_server,
-            url_path="/v1/responses",
-            json={
-                "input": [
-                    {"role": "system", "content": state["user_system_prompt"]},
-                    {"role": "assistant", "content": assistant_text},
-                ],
-                "tools": state["user_tools"],  # only the user model sees these
-            },
-        )
-        await raise_for_status(resp)
-        data = await get_response_json(resp)
-
-        # Execute any tool calls the user model made
-        user_reply = await self._run_user_tool_loop(data, state)
-
-        if is_done(user_reply, metadata):
-            reward = self._grade(action, metadata)
-            return None, reward, True, False, {}
-
-        return user_reply, 0.0, False, False, {}
-```
-
-The policy sees `user_reply` as a plain user message. It has no knowledge of the user model's tools, tool calls, or tool results. This enables asymmetric information between the policy and the simulated user.
 
 ## LLM-as-judge
 
@@ -279,10 +205,4 @@ my_gymnasium_agent_instance:
 
 ## Examples
 
-Working implementations are in the repository:
-
-- `resources_servers/reasoning_gym_env/` -- single-step grading
-- `resources_servers/workplace_assistant_env/` -- stateful tool dispatch
-- `resources_servers/example_multi_turn_env/` -- scripted multi-turn
-- `resources_servers/blackjack_env/` -- multi-step game with action tags
-- `resources_servers/tictactoe_env/` -- adversarial game
+- `resources_servers/blackjack/` -- multi-step game with action tags
