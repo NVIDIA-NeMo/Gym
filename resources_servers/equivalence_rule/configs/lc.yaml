@@ -3,9 +3,11 @@ lc_equivalence_rule:
   resources_servers:
     equivalence_rule:
       entrypoint: app.py
+      grading_rule: exact
       domain: knowledge
       verified: false
-      grading_rule: exact
+      description: Question - Answering with rule-based reward
+      
 lc_equivalence_rule_simple_agent:
   responses_api_agents:
     simple_agent:
