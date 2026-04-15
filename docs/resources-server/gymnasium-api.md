@@ -3,7 +3,17 @@
 
 # Gymnasium API
 
-`GymnasiumServer` is a [Gymnasium](https://gymnasium.farama.org/)-style base class for resources servers. Implement `step()`, optionally `reset()`, use with `gymnasium_agent`.
+`GymnasiumServer` is a [Gymnasium](https://gymnasium.farama.org/)-style base class for resources servers. Implement `step()`, optionally `reset()`, and pair with `gymnasium_agent`.
+
+:::{button-ref} index
+:color: secondary
+:outline:
+:ref-type: doc
+
+< Back to Resources Server
+:::
+
+---
 
 ## Interface
 
@@ -13,7 +23,7 @@ from nemo_gym.openai_utils import NeMoGymResponse
 
 class MyEnv(GymnasiumServer):
     async def reset(self, metadata: dict, session_id=None) -> tuple[str | None, dict]:
-        # Called once at the start of each episode to initial the environment
+        # Called once at the start of each episode to initialize the environment
         # Return (observation, info)
         # None observation = use responses_create_params.input as-is.
         return None, {}
@@ -29,25 +39,33 @@ class MyEnv(GymnasiumServer):
         ...
 ```
 
-The main method to implement is step(). Implementing a custom `reset()` is optional to initialize environment state or return a message from the environment. The default implementation returns `(None, {})`.
+The main method to implement is `step()`. Implementing a custom `reset()` is optional — use it to initialize environment state or return an opening message from the environment. The default implementation returns `(None, {})`.
 
 `metadata` is the `verifier_metadata` dict from your input JSONL, passed through unchanged. This is where you put task-specific data (expected answers, test cases, board configurations, etc.) that the environment needs for initialization or scoring. Access fields via `metadata.get("field_name")`.
 
-`session_id` is a unique string per rollout. Use it as a key to store per-episode state (e.g. game boards, conversation history) in a dict on your server. Stateless environments can ignore it.
+`session_id` is a unique string per rollout. Use it as a key to store per-episode state (e.g., game boards, conversation history) in a dict on your server. Stateless environments can ignore it.
 
-`action` is the full `NeMoGymResponse` from the model server. Your `step()` parses whatever it needs from it: text content, `<action>` tags, function calls, etc. Use the `extract_text()` helper for text, or inspect `action.output` directly for structured output like tool calls.
+`action` is the full `NeMoGymResponse` from the model server. Your `step()` parses whatever it needs from it: text content, `<action>` tags, function calls, etc. Use `extract_text()` for text, or inspect `action.output` directly for structured output like tool calls.
+
+:::{tip}
+For the full single-step and multi-step patterns using the standard `SimpleResourcesServer` API, see {doc}`/environment-tutorials/single-step-environment` and {doc}`/environment-tutorials/multi-step-environment`.
+:::
+
+---
 
 ## Single-step
 
-Single-step environments are the common non agentic use case: one model call, then grade the output. Implement `step()` so it always returns `terminated=True`.
+Single-step environments are the common non-agentic use case: one model call, then grade the output. Implement `step()` so it always returns `terminated=True`.
 
 ```python
 class MySingleStepEnv(GymnasiumServer):
     async def step(self, action: NeMoGymResponse, metadata: dict, session_id=None):
-        response_text = _extract_text(action)
+        response_text = extract_text(action)
         reward = 1.0 if metadata.get("answer") in response_text else 0.0
         return None, reward, True, False, {}
 ```
+
+---
 
 ## Multi-step with action tags
 
@@ -66,7 +84,7 @@ class BlackjackEnv(GymnasiumServer):
         return f"Your hand: {hand}. <action>hit</action> or <action>stand</action>?", {}
 
     async def step(self, action, metadata, session_id=None):
-        text = _extract_text(action)
+        text = extract_text(action)
         m = re.search(r"<action>\s*(hit|stand)\s*</action>", text, re.IGNORECASE)
         decision = m.group(1).lower() if m else "stand"
 
@@ -80,6 +98,8 @@ class BlackjackEnv(GymnasiumServer):
         reward = score_against_dealer(hand)
         return None, reward, True, False, {}
 ```
+
+---
 
 ## Tool-use
 
@@ -112,6 +132,8 @@ class MyToolEnv(GymnasiumServer):
         return None, reward, True, False, {}
 ```
 
+---
+
 ## Multi-turn
 
 `step()` returns the next user message as the observation. The `gymnasium_agent` appends it to the conversation and calls the model again. Return `None` to end.
@@ -136,16 +158,18 @@ class MyMultiTurnEnv(GymnasiumServer):
         return None, reward, True, False, {}
 ```
 
+---
+
 ## LLM-as-judge
 
-Use `step()` to call a judge model via `self.server_client` and score the output. The judge model must be configured as a separate model server.
+Use `step()` to call a judge model via `self.server_client` and score the output. The judge model must be configured as a separate model server. See {doc}`/environment-tutorials/llm-as-judge-verification` for the full pattern.
 
 ```python
 class MyJudgeEnv(GymnasiumServer):
     judge_server: str = "judge_model"  # name of the model server in YAML
 
     async def step(self, action, metadata, session_id=None):
-        response_text = _extract_text(action)
+        response_text = extract_text(action)
         judge_input = f"Question: {metadata.get('question')}\nAnswer: {response_text}\nIs this correct? Say YES or NO."
         judge_resp = await self.server_client.post(
             server_name=self.judge_server,
@@ -156,6 +180,8 @@ class MyJudgeEnv(GymnasiumServer):
         reward = 1.0 if "YES" in str(judgment.get("output_text", "")).upper() else 0.0
         return None, reward, True, False, {}
 ```
+
+---
 
 ## Reward model
 
@@ -169,11 +195,13 @@ class MyRewardModelEnv(GymnasiumServer):
         resp = await self.server_client.post(
             server_name=self.rm_server,
             url_path="/v1/score",
-            json={"input": metadata.get("prompt"), "response": _extract_text(action)},
+            json={"input": metadata.get("prompt"), "response": extract_text(action)},
         )
         score = (await resp.json()).get("score", 0.0)
         return None, score, True, False, {}
 ```
+
+---
 
 ## YAML configuration
 
@@ -203,6 +231,8 @@ my_gymnasium_agent_instance:
         jsonl_fpath: resources_servers/my_env/data/example.jsonl
 ```
 
+---
+
 ## Examples
 
-- `resources_servers/blackjack/` -- multi-step game with action tags
+- [`blackjack`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/blackjack) — Multi-step game with action tags
