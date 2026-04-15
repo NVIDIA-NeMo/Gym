@@ -73,7 +73,7 @@ ng_prepare_data "+config_paths=[${config_paths}]" \
 ### Version 2 [260310] (JSON, YAML, XML)
 ```bash
 # prepare
-export config_paths="responses_api_models/vllm_model/configs/vllm_model_for_training.yaml,\
+config_paths="responses_api_models/vllm_model/configs/vllm_model_for_training.yaml,\
 resources_servers/structured_outputs/configs/structured_outputs_json_yaml_xml_v1.yaml"
 ng_prepare_data "+config_paths=[${config_paths}]" \
     +output_dirpath=data/structured_outputs/ \
@@ -81,21 +81,14 @@ ng_prepare_data "+config_paths=[${config_paths}]" \
     +should_download=true
 ```
 
-### Version 3 [260331] (JSON, YAML, XML, TOML, CSV)
+### Version 3 [260409] (JSON, YAML, XML, TOML, CSV)
 ```bash
-config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
-resources_servers/structured_outputs/configs/structured_outputs_json_yaml_xml_toml_csv_v1.yaml"
-ng_run "+config_paths=[${config_paths}]"
-```
-
-Collect rollouts:
-```bash
-ng_collect_rollouts \
-    +agent_name=structured_outputs_json_yaml_xml_toml_csv_simple_agent \
-    +input_jsonl_fpath=resources_servers/structured_outputs/data/ds1_schema_adherence_train.jsonl \
-    +output_jsonl_fpath=results/structured_outputs_all_formats.jsonl \
-    +resume_from_cache=True \
-    +num_samples_in_parallel=256
+config_paths="responses_api_models/vllm_model/configs/vllm_model_for_training.yaml,\
+resources_servers/structured_outputs/configs/structured_outputs_v3.yaml"
+ng_prepare_data "+config_paths=[${config_paths}]" \
+    +output_dirpath=data/structured_outputs_v3/ \
+    +mode=train_preparation \
+    +should_download=true
 ```
 
 # Testing
