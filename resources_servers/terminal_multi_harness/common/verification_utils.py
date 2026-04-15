@@ -56,10 +56,14 @@ class StepRewardCategory(StrEnum):
     TOOL_SCHEMA_NOT_FOUND = "The declared tool schema for the tool call could not be found"
     TOOL_SCHEMA_VALIDATION_FAILED = "The actual tool-call arguments are not valid under the declared tool schema"
     UNEXPECTED_ARGUMENT_KEYS = "The actual tool-call arguments contain parameter keys absent from the expected answer"
+    ARGUMENT_VALUE_MISMATCH = "The actual tool-call argument values do not match the expected answer"
     FUNCTION_CALL_BATCH_LENGTH_DIFFERENT = "The number of tool calls in a batch is different than expected"
     EXEC_COMMAND_MISSING_CMD = "The exec_command tool call does not contain a cmd argument"
     EXEC_COMMAND_CMD_SIMILARITY_BELOW_THRESHOLD = "The exec_command cmd similarity is below threshold"
+    BASH_MISSING_COMMAND = "The bash tool call does not contain a command argument"
+    BASH_COMMAND_SIMILARITY_BELOW_THRESHOLD = "The bash command similarity is below threshold"
     UPDATE_PLAN_EMPTY_PLAN = "The update_plan tool call does not contain a non-empty plan argument"
+    TODOWRITE_EMPTY_TODOS = "The todowrite tool call does not contain a non-empty todos list"
     EXPECTED_TOOL_CALL = "A tool call that matches the expected tool call was found"
     EXPECTED_TOOL_CALL_BATCH = "A tool-call batch that matches the expected batch was found"
 
@@ -87,8 +91,6 @@ class ActionComparator(BaseModel):
         threshold_override: float | None = None,
         harness: str = "generic",
     ) -> ActionComparisonResult:
-        del harness
-
         declared_tool_schemas = self.build_declared_tool_schema_map(declared_tools)
 
         match expected_action.type:
@@ -110,6 +112,7 @@ class ActionComparator(BaseModel):
                     actual_tool_call=actual_action,
                     declared_tool_schemas=declared_tool_schemas,
                     threshold_override=threshold_override,
+                    harness=harness,
                 )
             case "function_call_batch":
                 if actual_action.type != "function_call_batch":
@@ -122,6 +125,7 @@ class ActionComparator(BaseModel):
                     actual_batch=actual_action,
                     declared_tool_schemas=declared_tool_schemas,
                     threshold_override=threshold_override,
+                    harness=harness,
                 )
             case _:
                 raise NotImplementedError
@@ -143,6 +147,7 @@ class ActionComparator(BaseModel):
         actual_tool_call: FunctionCallAction,
         declared_tool_schemas: dict[str, dict[str, Any]],
         threshold_override: float | None = None,
+        harness: str = "generic",
     ) -> ActionComparisonResult:
         expected_arguments_result = self.decode_arguments(expected_tool_call.arguments)
         if expected_arguments_result.category is not None:
@@ -177,20 +182,20 @@ class ActionComparator(BaseModel):
                 category=StepRewardCategory.UNEXPECTED_ARGUMENT_KEYS,
             )
 
-        match expected_tool_call.name:
-            case "exec_command":
-                return self.compare_exec_command(
-                    expected_arguments=expected_arguments,
-                    actual_arguments=actual_arguments,
-                    threshold_override=threshold_override,
-                )
-            case "update_plan":
-                return self.compare_update_plan(actual_arguments)
-            case _:
-                return ActionComparisonResult(
-                    matches=True,
-                    category=StepRewardCategory.EXPECTED_TOOL_CALL,
-                )
+        harness_specific_result = self.compare_harness_specific_tool_call(
+            harness=harness,
+            tool_name=expected_tool_call.name,
+            expected_arguments=expected_arguments,
+            actual_arguments=actual_arguments,
+            threshold_override=threshold_override,
+        )
+        if harness_specific_result is not None:
+            return harness_specific_result
+
+        return ActionComparisonResult(
+            matches=True,
+            category=StepRewardCategory.EXPECTED_TOOL_CALL,
+        )
 
     def compare_tool_call_batch(
         self,
@@ -198,6 +203,7 @@ class ActionComparator(BaseModel):
         actual_batch: FunctionCallBatchAction,
         declared_tool_schemas: dict[str, dict[str, Any]],
         threshold_override: float | None = None,
+        harness: str = "generic",
     ) -> ActionComparisonResult:
         if len(expected_batch.calls) != len(actual_batch.calls):
             return ActionComparisonResult(
@@ -205,14 +211,21 @@ class ActionComparator(BaseModel):
                 category=StepRewardCategory.FUNCTION_CALL_BATCH_LENGTH_DIFFERENT,
             )
 
-        expected_calls = sorted(expected_batch.calls, key=lambda call: call.name)
-        actual_calls = sorted(actual_batch.calls, key=lambda call: call.name)
+        expected_calls = sorted(
+            expected_batch.calls,
+            key=lambda call: self.batch_call_sort_key(call, harness=harness),
+        )
+        actual_calls = sorted(
+            actual_batch.calls,
+            key=lambda call: self.batch_call_sort_key(call, harness=harness),
+        )
         for expected_call, actual_call in zip(expected_calls, actual_calls):
             comparison_result = self.compare_tool_call(
                 expected_tool_call=expected_call,
                 actual_tool_call=actual_call,
                 declared_tool_schemas=declared_tool_schemas,
                 threshold_override=threshold_override,
+                harness=harness,
             )
             if not comparison_result.matches:
                 return comparison_result
@@ -270,6 +283,284 @@ class ActionComparator(BaseModel):
         return ActionComparisonResult(
             matches=False,
             category=StepRewardCategory.UPDATE_PLAN_EMPTY_PLAN,
+        )
+
+    def compare_todowrite(
+        self,
+        expected_arguments: dict[str, Any],
+        actual_arguments: dict[str, Any],
+    ) -> ActionComparisonResult:
+        expected_todos = expected_arguments.get("todos")
+        actual_todos = actual_arguments.get("todos")
+
+        if expected_todos == []:
+            if actual_todos == []:
+                return ActionComparisonResult(
+                    matches=True,
+                    category=StepRewardCategory.EXPECTED_TOOL_CALL,
+                )
+            return ActionComparisonResult(
+                matches=False,
+                category=StepRewardCategory.ARGUMENT_VALUE_MISMATCH,
+            )
+
+        if not isinstance(expected_todos, list) or not isinstance(actual_todos, list):
+            return ActionComparisonResult(
+                matches=False,
+                category=StepRewardCategory.TODOWRITE_EMPTY_TODOS,
+            )
+
+        if len(expected_todos) != len(actual_todos):
+            return ActionComparisonResult(
+                matches=False,
+                category=StepRewardCategory.ARGUMENT_VALUE_MISMATCH,
+            )
+
+        for expected_todo, actual_todo in zip(expected_todos, actual_todos):
+            if not isinstance(expected_todo, dict) or not isinstance(actual_todo, dict):
+                return ActionComparisonResult(
+                    matches=False,
+                    category=StepRewardCategory.ARGUMENT_VALUE_MISMATCH,
+                )
+            if expected_todo.get("status") != actual_todo.get("status"):
+                return ActionComparisonResult(
+                    matches=False,
+                    category=StepRewardCategory.ARGUMENT_VALUE_MISMATCH,
+                )
+            if expected_todo.get("priority") != actual_todo.get("priority"):
+                return ActionComparisonResult(
+                    matches=False,
+                    category=StepRewardCategory.ARGUMENT_VALUE_MISMATCH,
+                )
+
+        return ActionComparisonResult(
+            matches=True,
+            category=StepRewardCategory.EXPECTED_TOOL_CALL,
+        )
+
+    def compare_harness_specific_tool_call(
+        self,
+        harness: str,
+        tool_name: str,
+        expected_arguments: dict[str, Any],
+        actual_arguments: dict[str, Any],
+        threshold_override: float | None = None,
+    ) -> ActionComparisonResult | None:
+        match harness:
+            case "codex":
+                match tool_name:
+                    case "exec_command":
+                        return self.compare_exec_command(
+                            expected_arguments=expected_arguments,
+                            actual_arguments=actual_arguments,
+                            threshold_override=threshold_override,
+                        )
+                    case "update_plan":
+                        return self.compare_update_plan(actual_arguments)
+            case "opencode":
+                match tool_name:
+                    case "bash":
+                        return self.compare_bash(
+                            expected_arguments=expected_arguments,
+                            actual_arguments=actual_arguments,
+                            threshold_override=threshold_override,
+                        )
+                    case "todowrite":
+                        return self.compare_todowrite(
+                            expected_arguments=expected_arguments,
+                            actual_arguments=actual_arguments,
+                        )
+                    case "read":
+                        return self.compare_read(
+                            expected_arguments=expected_arguments,
+                            actual_arguments=actual_arguments,
+                        )
+                    case "write":
+                        return self.compare_write(
+                            expected_arguments=expected_arguments,
+                            actual_arguments=actual_arguments,
+                        )
+                    case "edit":
+                        return self.compare_edit(
+                            expected_arguments=expected_arguments,
+                            actual_arguments=actual_arguments,
+                        )
+                    case "glob":
+                        return self.compare_selected_arguments(
+                            expected_arguments=expected_arguments,
+                            actual_arguments=actual_arguments,
+                            keys=("pattern", "path"),
+                        )
+                    case "grep":
+                        return self.compare_selected_arguments(
+                            expected_arguments=expected_arguments,
+                            actual_arguments=actual_arguments,
+                            keys=("pattern", "path", "include"),
+                        )
+                    case "webfetch":
+                        return self.compare_selected_arguments(
+                            expected_arguments=expected_arguments,
+                            actual_arguments=actual_arguments,
+                            keys=("url", "format"),
+                        )
+                    case "skill":
+                        return self.compare_selected_arguments(
+                            expected_arguments=expected_arguments,
+                            actual_arguments=actual_arguments,
+                            keys=("name",),
+                        )
+                    case "task":
+                        return self.compare_selected_arguments(
+                            expected_arguments=expected_arguments,
+                            actual_arguments=actual_arguments,
+                            keys=("subagent_type",),
+                        )
+
+        return None
+
+    def compare_read(
+        self,
+        expected_arguments: dict[str, Any],
+        actual_arguments: dict[str, Any],
+    ) -> ActionComparisonResult:
+        expected_file_path = expected_arguments.get("filePath")
+        actual_file_path = actual_arguments.get("filePath")
+        if expected_file_path != actual_file_path:
+            return ActionComparisonResult(
+                matches=False,
+                category=StepRewardCategory.ARGUMENT_VALUE_MISMATCH,
+            )
+
+        return ActionComparisonResult(
+            matches=True,
+            category=StepRewardCategory.EXPECTED_TOOL_CALL,
+        )
+
+    def compare_write(
+        self,
+        expected_arguments: dict[str, Any],
+        actual_arguments: dict[str, Any],
+    ) -> ActionComparisonResult:
+        expected_file_path = expected_arguments.get("filePath")
+        actual_file_path = actual_arguments.get("filePath")
+        if expected_file_path != actual_file_path:
+            return ActionComparisonResult(
+                matches=False,
+                category=StepRewardCategory.ARGUMENT_VALUE_MISMATCH,
+            )
+
+        return ActionComparisonResult(
+            matches=True,
+            category=StepRewardCategory.EXPECTED_TOOL_CALL,
+        )
+
+    def compare_edit(
+        self,
+        expected_arguments: dict[str, Any],
+        actual_arguments: dict[str, Any],
+    ) -> ActionComparisonResult:
+        expected_file_path = expected_arguments.get("filePath")
+        actual_file_path = actual_arguments.get("filePath")
+        if expected_file_path != actual_file_path:
+            return ActionComparisonResult(
+                matches=False,
+                category=StepRewardCategory.ARGUMENT_VALUE_MISMATCH,
+            )
+
+        actual_old_string = actual_arguments.get("oldString")
+        actual_new_string = actual_arguments.get("newString")
+        if actual_old_string == actual_new_string:
+            return ActionComparisonResult(
+                matches=False,
+                category=StepRewardCategory.ARGUMENT_VALUE_MISMATCH,
+            )
+
+        expected_replace_all = expected_arguments.get("replaceAll")
+        actual_replace_all = actual_arguments.get("replaceAll")
+        if expected_replace_all != actual_replace_all:
+            return ActionComparisonResult(
+                matches=False,
+                category=StepRewardCategory.ARGUMENT_VALUE_MISMATCH,
+            )
+
+        return ActionComparisonResult(
+            matches=True,
+            category=StepRewardCategory.EXPECTED_TOOL_CALL,
+        )
+
+    def compare_bash(
+        self,
+        expected_arguments: dict[str, Any],
+        actual_arguments: dict[str, Any],
+        threshold_override: float | None = None,
+    ) -> ActionComparisonResult:
+        actual_command = actual_arguments.get("command")
+        if not isinstance(actual_command, str):
+            return ActionComparisonResult(
+                matches=False,
+                category=StepRewardCategory.BASH_MISSING_COMMAND,
+            )
+
+        expected_command = expected_arguments.get("command")
+        if not isinstance(expected_command, str):
+            return ActionComparisonResult(
+                matches=False,
+                category=StepRewardCategory.BASH_MISSING_COMMAND,
+            )
+
+        normalized_expected_command = self.normalize_command_text(expected_command)
+        normalized_actual_command = self.normalize_command_text(actual_command)
+        similarity_score = SequenceMatcher(
+            None,
+            normalized_expected_command,
+            normalized_actual_command,
+        ).ratio()
+        threshold = self.get_string_similarity_threshold(threshold_override)
+        if similarity_score < threshold:
+            return ActionComparisonResult(
+                matches=False,
+                category=StepRewardCategory.BASH_COMMAND_SIMILARITY_BELOW_THRESHOLD,
+                similarity_score=similarity_score,
+            )
+
+        return ActionComparisonResult(
+            matches=True,
+            category=StepRewardCategory.EXPECTED_TOOL_CALL,
+            similarity_score=similarity_score,
+        )
+
+    def compare_exact_arguments(
+        self,
+        expected_arguments: dict[str, Any],
+        actual_arguments: dict[str, Any],
+    ) -> ActionComparisonResult:
+        if expected_arguments != actual_arguments:
+            return ActionComparisonResult(
+                matches=False,
+                category=StepRewardCategory.ARGUMENT_VALUE_MISMATCH,
+            )
+
+        return ActionComparisonResult(
+            matches=True,
+            category=StepRewardCategory.EXPECTED_TOOL_CALL,
+        )
+
+    def compare_selected_arguments(
+        self,
+        expected_arguments: dict[str, Any],
+        actual_arguments: dict[str, Any],
+        keys: tuple[str, ...],
+    ) -> ActionComparisonResult:
+        for key in keys:
+            if expected_arguments.get(key) != actual_arguments.get(key):
+                return ActionComparisonResult(
+                    matches=False,
+                    category=StepRewardCategory.ARGUMENT_VALUE_MISMATCH,
+                )
+
+        return ActionComparisonResult(
+            matches=True,
+            category=StepRewardCategory.EXPECTED_TOOL_CALL,
         )
 
     def decode_arguments(self, arguments: str) -> "DecodedArgumentsResult":
@@ -333,6 +624,28 @@ class ActionComparator(BaseModel):
             return threshold_override
         return self.config.string_similarity_threshold
 
+    def batch_call_sort_key(self, call: FunctionCallAction, harness: str = "generic") -> tuple[str, str]:
+        normalized_arguments = self.normalize_arguments_for_batch_sort(call.arguments)
+
+        match harness:
+            case "codex":
+                return (call.name, normalized_arguments)
+            case "opencode":
+                return (call.name, normalized_arguments)
+            case _:
+                return (call.name, normalized_arguments)
+
+    def normalize_arguments_for_batch_sort(self, arguments: str) -> str:
+        decoded_arguments = self.decode_arguments(arguments)
+        if decoded_arguments.arguments is None:
+            return arguments
+
+        return json.dumps(
+            decoded_arguments.arguments,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
     def normalize_command_text(self, command_text: str) -> str:
         return command_text.replace("\r\n", "\n").replace("\r", "\n").strip()
 
@@ -344,7 +657,6 @@ class ActionComparator(BaseModel):
         if isinstance(value, (list, dict, tuple, set)):
             return bool(value)
         return True
-
 
 class DecodedArgumentsResult(BaseModel):
     arguments: dict[str, Any] | None = None

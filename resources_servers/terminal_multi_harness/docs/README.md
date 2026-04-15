@@ -20,6 +20,8 @@ implementation work starts.
 
 - Codex:
   - [codex-match-rules.md](./rulebooks/codex-match-rules.md)
+- Opencode:
+  - [opencode-match-rules.md](./rulebooks/opencode-match-rules.md)
 
 ## Current packaged harness envs
 
@@ -28,6 +30,11 @@ implementation work starts.
     - `resources_servers/terminal_multi_harness/configs/terminal_multi_harness_codex.yaml`
   - agent identity:
     - `terminal_multi_harness_codex_agent`
+- `opencode`
+  - config:
+    - `resources_servers/terminal_multi_harness/configs/terminal_multi_harness_opencode.yaml`
+  - agent identity:
+    - `terminal_multi_harness_opencode_agent`
 
 Future harnesses should usually follow the same pattern:
 
@@ -42,3 +49,5 @@ Future harnesses should usually follow the same pattern:
   - `resources_servers/terminal_multi_harness/README.md`
 - packaged Codex rulebook:
   - `resources_servers/terminal_multi_harness/docs/rulebooks/codex-match-rules.md`
+- packaged Opencode rulebook:
+  - `resources_servers/terminal_multi_harness/docs/rulebooks/opencode-match-rules.md`
