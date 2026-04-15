@@ -10,6 +10,7 @@ competitive_coding_challenges_resources_server:
       num_parallel_requests: 16
       time_scale: 2.0
       shared_dir: ${oc.env:SHARED_TEMP_DIR,/tmp}
+      verified: false
 competitive_coding_challenges_simple_agent:
   responses_api_agents:
     simple_agent:

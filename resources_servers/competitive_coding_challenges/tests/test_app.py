@@ -20,6 +20,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+
 GYM_ROOT = Path(__file__).resolve().parents[3]
 RESOURCE_SERVER_DIR = Path(__file__).resolve().parents[1]
 for import_path in (GYM_ROOT, RESOURCE_SERVER_DIR):
@@ -223,7 +224,7 @@ async def test_verify_full_problem_reward_requires_all_subtasks() -> None:
                 "sub2": {
                     "score": 0.0,
                     "outputs": [{"score": 0.0, "test_group": "secret"}],
-                }
+                },
             }
         }
     )
