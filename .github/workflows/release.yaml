@@ -35,18 +35,29 @@ on:
         description: Branch for version bump
         required: true
         type: string
-
+      skip-version-bump:
+        description: Skip version bump
+        required: true
+        default: true
+        type: boolean
+      publish-docs:
+        description: Publish docs
+        required: true
+        default: false
+        type: boolean
 jobs:
   release:
-    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_release_library.yml@v0.55.0
+    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_release_library.yml@v0.91.0
     with:
       release-ref: ${{ inputs.release-ref }}
       python-package: nemo_gym
       library-name: NeMo-Gym
       dry-run: ${{ inputs.dry-run }}
+      publish-docs: ${{ inputs.publish-docs }}
       version-bump-branch: ${{ inputs.version-bump-branch }}
       create-gh-release: ${{ inputs.create-gh-release }}
       packaging: uv
+      skip-version-bump: ${{ inputs.skip-version-bump }}
       app-id: ${{ vars.BOT_ID }}
     secrets:
       TWINE_USERNAME: ${{ secrets.TWINE_USERNAME }}
