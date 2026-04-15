@@ -1,0 +1,2 @@
+-e nemo-gym[dev] @ ../../
+-e hermes-agent @ ../../../hermes-agent
