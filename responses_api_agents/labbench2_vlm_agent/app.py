@@ -47,27 +47,18 @@ class LabbenchVLMAgentConfig(SimpleAgentConfig):
     )
 
 
-def _block_type(block) -> str | None:
-    if isinstance(block, dict):
-        return block.get("type")
-    return getattr(block, "type", None)
-
-
 def _strip_image_blocks(result: SimpleAgentVerifyResponse) -> SimpleAgentVerifyResponse:
-    """Remove input_image blocks from responses_create_params in the output."""
-    rcp = getattr(result, "responses_create_params", None)
-    if rcp is None:
-        return result
-    inp = getattr(rcp, "input", None) or rcp.get("input", []) if isinstance(rcp, dict) else []
-    for msg in inp:
-        content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", None)
+    """Remove input_image blocks from responses_create_params in the output.
+
+    Operates on a dict dump to avoid Pydantic model mutation/serialization issues,
+    then re-validates into the response model.
+    """
+    data = result.model_dump()
+    for msg in data.get("responses_create_params", {}).get("input", []):
+        content = msg.get("content")
         if isinstance(content, list):
-            filtered = [b for b in content if _block_type(b) != "input_image"]
-            if isinstance(msg, dict):
-                msg["content"] = filtered
-            else:
-                msg.content = filtered
-    return result
+            msg["content"] = [b for b in content if b.get("type") != "input_image"]
+    return SimpleAgentVerifyResponse.model_validate(data)
 
 
 class LabbenchVLMAgent(SimpleAgent):
