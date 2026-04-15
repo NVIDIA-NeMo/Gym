@@ -28,6 +28,7 @@ from pydantic import BaseModel, Field
 from tqdm.asyncio import tqdm
 from wandb import Table
 
+from nemo_gym import PARENT_DIR
 from nemo_gym.config_types import BaseNeMoGymCLIConfig, BaseServerConfig
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
@@ -141,10 +142,25 @@ class RolloutCollectionHelper(BaseModel):
         if num_repeats:
             print(f"Repeating rows {num_repeats} times (in a pattern of abc to aabbcc)!")
 
-        input_file = open(config.input_jsonl_fpath)
-        rows_iterator: Iterator[str] = input_file
-        rows_iterator: Iterator[str] = tqdm(rows_iterator, desc="Reading rows")
-        rows_iterator: Iterator[tuple[int, str]] = zip(range_iterator, rows_iterator)
+        # Load prompt config if specified
+        prompt_cfg = None
+        if config.prompt_config:
+            prompt_cfg = load_prompt_config(config.prompt_config)
+            print(f"Using prompt config: {config.prompt_config}")
+
+        _input_path = Path(config.input_jsonl_fpath)
+        if not _input_path.is_absolute():
+            _cwd_path = Path.cwd() / _input_path
+            _input_path = _cwd_path if _cwd_path.exists() else PARENT_DIR / _input_path
+        with open(_input_path) as input_file:
+            rows_iterator: Iterator[str] = tqdm(input_file, desc="Reading rows")
+            rows_iterator: Iterator[tuple[int, str]] = zip(range_iterator, rows_iterator)
+            raw_rows = [(row_idx, row_str, orjson.loads(row_str)) for row_idx, row_str in rows_iterator]
+
+        # Validate and apply prompt config before per-row processing
+        if prompt_cfg is not None:
+            validate_prompt_compatibility([row for _, _, row in raw_rows], prompt_cfg)
+            raw_rows = [(idx, s, apply_prompt_to_row(row, prompt_cfg)) for idx, s, row in raw_rows]
 
         # For ng_reward_profile to match rollouts to tasks
         row_to_task_idx: Dict[str, int] = dict()
