@@ -15,7 +15,6 @@
 import sys
 from contextlib import nullcontext as does_not_raise
 from pathlib import Path
-from socket import gethostbyname, gethostname
 from unittest.mock import MagicMock
 
 from omegaconf import OmegaConf
@@ -23,7 +22,7 @@ from pytest import MonkeyPatch, raises
 
 import nemo_gym.global_config
 import nemo_gym.server_utils
-from nemo_gym import CACHE_DIR, PARENT_DIR
+from nemo_gym import CACHE_DIR, WORKING_DIR
 from nemo_gym.global_config import (
     DEFAULT_HEAD_SERVER_PORT,
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
@@ -49,6 +48,7 @@ class TestGlobalConfig:
     @property
     def _default_global_config_dict_values(self) -> dict:
         return {
+            "use_absolute_ip": False,
             "head_server": {"host": "127.0.0.1", "port": 11000},
             "disallowed_ports": [11000],
             "port_range_low": 10_001,
@@ -59,7 +59,7 @@ class TestGlobalConfig:
             "skip_venv_if_present": False,
             "dry_run": False,
             "uv_cache_dir": str(CACHE_DIR / "uv"),
-            "uv_venv_dir": str(PARENT_DIR),
+            "uv_venv_dir": str(WORKING_DIR),
         }
 
     def test_get_global_config_dict_sanity(self, monkeypatch: MonkeyPatch) -> None:
@@ -128,8 +128,8 @@ class TestGlobalConfig:
 
         # Override OmegaConf.load to avoid file reads.
         omegaconf_load_mock = MagicMock()
-        omegaconf_load_mock.side_effect = (
-            lambda path: DictConfig({}) if "env" not in str(path) else DictConfig({"extra_dot_env_key": 2})
+        omegaconf_load_mock.side_effect = lambda path: (
+            DictConfig({}) if "env" not in str(path) else DictConfig({"extra_dot_env_key": 2})
         )
         monkeypatch.setattr(nemo_gym.server_utils.OmegaConf, "load", omegaconf_load_mock)
 
@@ -662,7 +662,9 @@ class TestGlobalConfig:
         hydra_main_mock.return_value = hydra_main_wrapper
         monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
 
-        expected_ip = gethostbyname(gethostname())
+        expected_ip = "abcd ip"
+        gethostbyname_mock = MagicMock(return_value=expected_ip)
+        monkeypatch.setattr(nemo_gym.global_config, "gethostbyname", gethostbyname_mock)
 
         global_config_dict = get_global_config_dict()
 
@@ -719,6 +721,17 @@ class TestGlobalConfig:
                     "test_resource_2": {"responses_api_models": {"test_model": {"entrypoint": "app.py"}}},
                     "a": {"b": {"c": 3}},
                     "a_prime": {"b_prime": "${inherit_from:a.b.c}"},
+                    "test_resource_3_copy1": "${copy:test_resource_3}",
+                    "test_resource_3": {"responses_api_models": {"test_model": {"entrypoint": "app.py"}}},
+                    "test_resource_3_copy2": {
+                        "_copy": "test_resource_3",
+                        "responses_api_models": {"test_model": {"entrypoint": "app2.py"}},
+                    },
+                    "test_resource_3_copy3_delete": {
+                        "_copy": "test_resource_3",
+                        "_delete_key": "responses_api_models",
+                        "responses_api_models_2": {"test_model": {"entrypoint": "app.py"}},
+                    },
                 }
             )
             return lambda: fn(config_dict)
@@ -734,9 +747,21 @@ class TestGlobalConfig:
             "policy_model_2": {
                 "responses_api_models": {"test_model": {"entrypoint": "app2.py", "host": "127.0.0.1", "port": 12345}}
             },
-            "disallowed_ports": [11000, 12345, 12345],
+            "test_resource_3_copy1": {
+                "responses_api_models": {"test_model": {"entrypoint": "app.py", "host": "127.0.0.1", "port": 12345}}
+            },
+            "test_resource_3": {
+                "responses_api_models": {"test_model": {"entrypoint": "app.py", "host": "127.0.0.1", "port": 12345}}
+            },
+            "test_resource_3_copy2": {
+                "responses_api_models": {"test_model": {"entrypoint": "app2.py", "host": "127.0.0.1", "port": 12345}},
+            },
+            "disallowed_ports": [11000, 12345, 12345, 12345, 12345, 12345],
             "a": {"b": {}},
             "a_prime": {"b_prime": 3},
+            "test_resource_3_copy3_delete": {
+                "responses_api_models_2": {"test_model": {"entrypoint": "app.py"}},
+            },
         }
 
         assert expected_global_config_dict == actual_global_config_dict
@@ -786,6 +811,106 @@ class TestGlobalConfig:
             "disallowed_ports": [11000, 12345, 12345],
             "a": {"b": {}},
             "a_prime": {"b_prime": 3},
+        }
+
+        assert expected_global_config_dict == actual_global_config_dict
+
+    def test_dummy_model_sanity(self, monkeypatch: MonkeyPatch) -> None:
+        self._mock_versions_for_testing(monkeypatch)
+
+        monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
+        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+
+        exists_mock = MagicMock()
+        exists_mock.return_value = False
+        monkeypatch.setattr(nemo_gym.global_config.Path, "exists", exists_mock)
+
+        find_open_port_mock = MagicMock()
+        find_open_port_mock.return_value = 12345
+        monkeypatch.setattr(nemo_gym.global_config, "_find_open_port_using_range", find_open_port_mock)
+
+        hydra_main_mock = MagicMock()
+
+        def hydra_main_wrapper(fn):
+            config_dict = DictConfig({})
+            return lambda: fn(config_dict)
+
+        hydra_main_mock.return_value = hydra_main_wrapper
+        monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
+
+        actual_global_config_dict = OmegaConf.to_container(
+            get_global_config_dict(
+                global_config_dict_parser_config=GlobalConfigDictParserConfig(
+                    initial_global_config_dict=GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+                )
+            )
+        )
+        expected_global_config_dict = self._default_global_config_dict_values | {
+            "disallowed_ports": [11000, 12345],
+            "policy_model": {
+                "responses_api_models": {
+                    "dummy_model": {
+                        "entrypoint": "app.py",
+                        "host": "127.0.0.1",
+                        "port": 12345,
+                    }
+                }
+            },
+            "policy_base_url": "",
+            "policy_api_key": "",
+            "policy_model_name": "",
+        }
+
+        assert expected_global_config_dict == actual_global_config_dict
+
+    def test_dummy_model_override(self, monkeypatch: MonkeyPatch) -> None:
+        self._mock_versions_for_testing(monkeypatch)
+
+        monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
+        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+
+        exists_mock = MagicMock()
+        exists_mock.return_value = False
+        monkeypatch.setattr(nemo_gym.global_config.Path, "exists", exists_mock)
+
+        find_open_port_mock = MagicMock()
+        find_open_port_mock.return_value = 12345
+        monkeypatch.setattr(nemo_gym.global_config, "_find_open_port_using_range", find_open_port_mock)
+
+        hydra_main_mock = MagicMock()
+
+        def hydra_main_wrapper(fn):
+            config_dict = DictConfig(
+                {
+                    "policy_model": {"responses_api_models": {"test_model": {"entrypoint": "app.py"}}},
+                }
+            )
+            return lambda: fn(config_dict)
+
+        hydra_main_mock.return_value = hydra_main_wrapper
+        monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
+
+        actual_global_config_dict = OmegaConf.to_container(
+            get_global_config_dict(
+                global_config_dict_parser_config=GlobalConfigDictParserConfig(
+                    initial_global_config_dict=GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+                )
+            )
+        )
+        expected_global_config_dict = self._default_global_config_dict_values | {
+            "disallowed_ports": [11000, 12345],
+            "policy_model": {
+                "responses_api_models": {
+                    "test_model": {
+                        "entrypoint": "app.py",
+                        "host": "127.0.0.1",
+                        "port": 12345,
+                    }
+                }
+            },
+            "policy_base_url": "",
+            "policy_api_key": "",
+            "policy_model_name": "",
         }
 
         assert expected_global_config_dict == actual_global_config_dict

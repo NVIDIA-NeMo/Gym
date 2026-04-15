@@ -7,3 +7,5 @@ policy_model:
       model: ${policy_model_name}
       return_token_id_information: false
       uses_reasoning_parser: true
+      chat_template_kwargs: null
+      extra_body: null

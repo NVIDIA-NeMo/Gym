@@ -1,0 +1,10 @@
+gpt-5_2-2025-12-11:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: https://api.openai.com/v1
+      openai_api_key: ???
+      openai_model: gpt-5.2-2025-12-11
+
+      extra_body:
+        max_output_tokens: null
