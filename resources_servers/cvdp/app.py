@@ -572,16 +572,11 @@ class CVDPResourcesServer(SimpleResourcesServer):
             if compose_content is None:
                 return 1, "No docker-compose.yml found in harness_files", []
 
-            # Write companion RTL files from input.context — mirrors
-            # repository.restore_files(self.context) which writes pre-existing
-            # RTL (e.g. floor_to_seven_segment.sv) that the model doesn't
-            # generate but iverilog needs for compilation.
+            # Write companion files from input.context — mirrors
+            # repository.restore_files(self.context). Preserves the full
+            # target path (e.g. verif/tb_foo.sv -> workdir/verif/tb_foo.sv).
             for filepath, code in context_files.items():
-                rel = Path(filepath)
-                if rel.parts[0] == "rtl":
-                    dest = (workdir_path / "rtl").joinpath(*rel.parts[1:])
-                else:
-                    dest = workdir_path / "rtl" / rel.name
+                dest = workdir_path / filepath
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 try:
                     with open(str(dest), "w+", encoding="utf-8") as f:
@@ -589,21 +584,16 @@ class CVDPResourcesServer(SimpleResourcesServer):
                 except Exception:
                     print(f"Failed to write context file: {filepath}")
 
-            # Write model-generated RTL files (overwrites context files for target slots)
+            # Write model-generated files (overwrites context files for target slots).
+            # Preserves the full target path, matching CVDP's restore_files().
             for filepath, code in rtl_files.items():
-                rel = Path(filepath)
-                if rel.parts[0] == "rtl":
-                    dest = (workdir_path / "rtl").joinpath(*rel.parts[1:])
-                else:
-                    dest = workdir_path / "rtl" / rel.name
+                dest = workdir_path / filepath
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 try:
                     with open(str(dest), "w+", encoding="utf-8") as f:
                         f.write(code)
                 except Exception:
                     print(f"Failed to write file: {filepath}")
-
-                # print(f"DEBUG: wrote model generated RTL files: {filepath}")
 
             # Run each service — mirrors repository.obj_harness()
             compose_data = yaml.safe_load(compose_content)
