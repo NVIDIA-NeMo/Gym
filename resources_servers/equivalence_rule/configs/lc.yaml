@@ -1,4 +1,4 @@
-# grading_rule options: seq_match, weighted_seq_match (default), exact
+# grading_rule options: seq_match, weighted_seq_match, exact (default)
 lc_equivalence_rule:
   resources_servers:
     equivalence_rule:
