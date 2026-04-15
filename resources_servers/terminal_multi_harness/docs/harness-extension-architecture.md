@@ -150,6 +150,9 @@ Only touch this file if the new harness needs:
 - a reusable comparison helper
 
 Do not use it as a dumping ground for harness-specific special cases.
+When tool-specific comparison is needed, dispatch it by `(harness, tool_name)`,
+not by `tool_name` alone. That keeps same-named tools in different harnesses
+from inheriting each other's match rules.
 
 ### `tests/`
 

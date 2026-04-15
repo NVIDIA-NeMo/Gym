@@ -1,6 +1,8 @@
 # Codex Match Rules
 
 This is the normative Codex verifier contract for `terminal_multi_harness`.
+These rules apply only when the verify request sets `harness = "codex"`.
+Same-named tools in other harnesses do not inherit Codex-specific checks.
 
 ## 1. Classify The Actual Response
 
@@ -30,7 +32,7 @@ Then:
 
 1. If expected is a single tool call, actual must also be a single tool call.
 2. If expected is multiple tool calls in one response, actual must also be multiple tool calls in one response with the same count.
-3. For multiple tool calls, sort expected and actual tool calls by tool name before comparing them.
+3. For multiple tool calls, sort expected and actual tool calls by tool name before comparing them. If tool names tie, use the canonicalized JSON argument string as a stable tie-breaker.
 4. Compare each aligned expected/actual tool-call pair using the single-tool-call rule below.
 5. If any aligned pair fails, the whole response fails.
 
