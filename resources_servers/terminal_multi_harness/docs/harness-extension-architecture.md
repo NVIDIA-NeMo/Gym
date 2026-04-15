@@ -28,11 +28,16 @@ Example:
     - `resources_servers/terminal_multi_harness/configs/terminal_multi_harness_codex.yaml`
   - agent:
     - `terminal_multi_harness_codex_agent`
-- future OpenCode env:
+- OpenCode env:
   - config:
     - `resources_servers/terminal_multi_harness/configs/terminal_multi_harness_opencode.yaml`
   - agent:
     - `terminal_multi_harness_opencode_agent`
+- Agent006 env:
+  - config:
+    - `resources_servers/terminal_multi_harness/configs/terminal_multi_harness_agent006.yaml`
+  - agent:
+    - `terminal_multi_harness_agent006_agent`
 
 The sample row can still keep a `harness` field for provenance, but the RL env
 identity should be harness-specific.

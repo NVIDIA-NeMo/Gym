@@ -63,6 +63,14 @@ class StepRewardCategory(StrEnum):
     BASH_MISSING_COMMAND = "The bash tool call does not contain a command argument"
     BASH_COMMAND_SIMILARITY_BELOW_THRESHOLD = "The bash command similarity is below threshold"
     UPDATE_PLAN_EMPTY_PLAN = "The update_plan tool call does not contain a non-empty plan argument"
+    EXECUTE_PYTHON_MISSING_CODE = "The execute_python tool call does not contain a code argument"
+    EXECUTE_PYTHON_CODE_SIMILARITY_BELOW_THRESHOLD = (
+        "The execute_python code similarity is below threshold"
+    )
+    RETURN_RESULT_MISSING_RESULT = "The return_result tool call does not contain a result argument"
+    RETURN_RESULT_SIMILARITY_BELOW_THRESHOLD = (
+        "The return_result result similarity is below threshold"
+    )
     TODOWRITE_EMPTY_TODOS = "The todowrite tool call does not contain a non-empty todos list"
     EXPECTED_TOOL_CALL = "A tool call that matches the expected tool call was found"
     EXPECTED_TOOL_CALL_BATCH = "A tool-call batch that matches the expected batch was found"
@@ -285,6 +293,72 @@ class ActionComparator(BaseModel):
             category=StepRewardCategory.UPDATE_PLAN_EMPTY_PLAN,
         )
 
+    def compare_execute_python(
+        self,
+        expected_arguments: dict[str, Any],
+        actual_arguments: dict[str, Any],
+        threshold_override: float | None = None,
+    ) -> ActionComparisonResult:
+        actual_code = actual_arguments.get("code")
+        if not isinstance(actual_code, str) or not actual_code.strip():
+            return ActionComparisonResult(
+                matches=False,
+                category=StepRewardCategory.EXECUTE_PYTHON_MISSING_CODE,
+            )
+
+        expected_code = expected_arguments.get("code")
+        if not isinstance(expected_code, str) or not expected_code.strip():
+            return ActionComparisonResult(
+                matches=False,
+                category=StepRewardCategory.EXECUTE_PYTHON_MISSING_CODE,
+            )
+
+        similarity_score = SequenceMatcher(None, expected_code, actual_code).ratio()
+        threshold = self.get_string_similarity_threshold(threshold_override)
+        if similarity_score < threshold:
+            return ActionComparisonResult(
+                matches=False,
+                category=StepRewardCategory.EXECUTE_PYTHON_CODE_SIMILARITY_BELOW_THRESHOLD,
+                similarity_score=similarity_score,
+            )
+
+        return ActionComparisonResult(
+            matches=True,
+            category=StepRewardCategory.EXPECTED_TOOL_CALL,
+            similarity_score=similarity_score,
+        )
+
+    def compare_return_result(
+        self,
+        expected_arguments: dict[str, Any],
+        actual_arguments: dict[str, Any],
+        threshold_override: float | None = None,
+    ) -> ActionComparisonResult:
+        if "result" not in actual_arguments:
+            return ActionComparisonResult(
+                matches=False,
+                category=StepRewardCategory.RETURN_RESULT_MISSING_RESULT,
+            )
+
+        expected_result = expected_arguments.get("result")
+        actual_result = actual_arguments.get("result")
+        expected_serialized = json.dumps(expected_result, sort_keys=True, default=str)
+        actual_serialized = json.dumps(actual_result, sort_keys=True, default=str)
+        similarity_score = SequenceMatcher(None, expected_serialized, actual_serialized).ratio()
+        threshold = self.get_string_similarity_threshold(threshold_override)
+        if similarity_score < threshold:
+            return ActionComparisonResult(
+                matches=False,
+                category=StepRewardCategory.RETURN_RESULT_SIMILARITY_BELOW_THRESHOLD,
+                similarity_score=similarity_score,
+            )
+
+        return ActionComparisonResult(
+            matches=True,
+            category=StepRewardCategory.EXPECTED_TOOL_CALL,
+            similarity_score=similarity_score,
+        )
+
     def compare_todowrite(
         self,
         expected_arguments: dict[str, Any],
@@ -357,6 +431,20 @@ class ActionComparator(BaseModel):
                         )
                     case "update_plan":
                         return self.compare_update_plan(actual_arguments)
+            case "agent006":
+                match tool_name:
+                    case "execute_python":
+                        return self.compare_execute_python(
+                            expected_arguments=expected_arguments,
+                            actual_arguments=actual_arguments,
+                            threshold_override=threshold_override,
+                        )
+                    case "return_result":
+                        return self.compare_return_result(
+                            expected_arguments=expected_arguments,
+                            actual_arguments=actual_arguments,
+                            threshold_override=threshold_override,
+                        )
             case "opencode":
                 match tool_name:
                     case "bash":
@@ -629,6 +717,8 @@ class ActionComparator(BaseModel):
 
         match harness:
             case "codex":
+                return (call.name, normalized_arguments)
+            case "agent006":
                 return (call.name, normalized_arguments)
             case "opencode":
                 return (call.name, normalized_arguments)

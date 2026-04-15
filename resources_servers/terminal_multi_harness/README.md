@@ -1,7 +1,8 @@
 # Description
 This is a harness-aware resources server for structured next-action verification across multiple agent harnesses.
 
-It is intended for harnesses such as `codex` and `opencode`, where the next step is naturally represented as:
+It is intended for harnesses such as `codex`, `opencode`, and `agent006`,
+where the next step is naturally represented as:
 
 - a chat message
 - a single tool call
@@ -11,7 +12,7 @@ Unlike `terminus_judge`, this server does not assume the model response is assis
 
 ## Current scope
 
-- immediate harnesses: `codex`, `opencode`
+- immediate harnesses: `codex`, `opencode`, `agent006`
 - current action types:
   - `message`
   - `function_call`
@@ -49,3 +50,5 @@ Unlike `terminus_judge`, this server does not assume the model response is assis
   - `resources_servers/terminal_multi_harness/docs/rulebooks/codex-match-rules.md`
 - Opencode rulebook:
   - `resources_servers/terminal_multi_harness/docs/rulebooks/opencode-match-rules.md`
+- Agent006 rulebook:
+  - `resources_servers/terminal_multi_harness/docs/rulebooks/agent006-match-rules.md`

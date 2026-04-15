@@ -71,6 +71,34 @@ def build_declared_tools() -> list[dict]:
         {
             "type": "function",
             "function": {
+                "name": "execute_python",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "code": {"type": "string"},
+                    },
+                    "required": ["code"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "return_result",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "result": {},
+                    },
+                    "required": ["result"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "bash",
                 "parameters": {
                     "type": "object",
@@ -872,6 +900,96 @@ class TestActionComparator:
         assert comparison_result.matches is False
         assert comparison_result.category == StepRewardCategory.UPDATE_PLAN_EMPTY_PLAN
 
+    def test_compare_agent006_execute_python_uses_similarity_and_records_score(
+        self,
+        action_comparator: ActionComparator,
+        declared_tools: list[dict],
+    ) -> None:
+        comparison_result = action_comparator.compare_action(
+            expected_action=FunctionCallAction(
+                type="function_call",
+                name="execute_python",
+                arguments=json.dumps({"code": "print('hello')\n"}),
+            ),
+            actual_action=FunctionCallAction(
+                type="function_call",
+                name="execute_python",
+                arguments=json.dumps({"code": "print('hello')\n"}),
+            ),
+            declared_tools=declared_tools,
+            harness="agent006",
+        )
+        assert comparison_result.matches is True
+        assert comparison_result.category == StepRewardCategory.EXPECTED_TOOL_CALL
+        assert comparison_result.similarity_score == approx(1.0)
+
+    def test_compare_agent006_execute_python_rejects_missing_code(
+        self,
+        action_comparator: ActionComparator,
+        declared_tools: list[dict],
+    ) -> None:
+        comparison_result = action_comparator.compare_action(
+            expected_action=FunctionCallAction(
+                type="function_call",
+                name="execute_python",
+                arguments=json.dumps({"code": "print('hello')"}),
+            ),
+            actual_action=FunctionCallAction(
+                type="function_call",
+                name="execute_python",
+                arguments=json.dumps({"code": "   "}),
+            ),
+            declared_tools=declared_tools,
+            harness="agent006",
+        )
+        assert comparison_result.matches is False
+        assert comparison_result.category == StepRewardCategory.EXECUTE_PYTHON_MISSING_CODE
+
+    def test_compare_agent006_return_result_uses_canonical_json_similarity(
+        self,
+        action_comparator: ActionComparator,
+        declared_tools: list[dict],
+    ) -> None:
+        comparison_result = action_comparator.compare_action(
+            expected_action=FunctionCallAction(
+                type="function_call",
+                name="return_result",
+                arguments=json.dumps({"result": {"a": 1, "b": 2}}),
+            ),
+            actual_action=FunctionCallAction(
+                type="function_call",
+                name="return_result",
+                arguments=json.dumps({"result": {"b": 2, "a": 1}}),
+            ),
+            declared_tools=declared_tools,
+            harness="agent006",
+        )
+        assert comparison_result.matches is True
+        assert comparison_result.category == StepRewardCategory.EXPECTED_TOOL_CALL
+        assert comparison_result.similarity_score == approx(1.0)
+
+    def test_compare_agent006_return_result_schema_validation_happens_before_missing_result_check(
+        self,
+        action_comparator: ActionComparator,
+        declared_tools: list[dict],
+    ) -> None:
+        comparison_result = action_comparator.compare_action(
+            expected_action=FunctionCallAction(
+                type="function_call",
+                name="return_result",
+                arguments=json.dumps({"result": {"a": 1}}),
+            ),
+            actual_action=FunctionCallAction(
+                type="function_call",
+                name="return_result",
+                arguments=json.dumps({}),
+            ),
+            declared_tools=declared_tools,
+            harness="agent006",
+        )
+        assert comparison_result.matches is False
+        assert comparison_result.category == StepRewardCategory.TOOL_SCHEMA_VALIDATION_FAILED
+
     def test_compare_todowrite_compares_status_and_priority_only(
         self,
         action_comparator: ActionComparator,
@@ -1186,6 +1304,28 @@ class TestActionComparator:
             ),
             declared_tools=declared_tools,
             harness="opencode",
+        )
+        assert comparison_result.matches is True
+        assert comparison_result.category == StepRewardCategory.EXPECTED_TOOL_CALL
+
+    def test_codex_does_not_inherit_agent006_execute_python_matching_rules(
+        self,
+        action_comparator: ActionComparator,
+        declared_tools: list[dict],
+    ) -> None:
+        comparison_result = action_comparator.compare_action(
+            expected_action=FunctionCallAction(
+                type="function_call",
+                name="execute_python",
+                arguments=json.dumps({"code": "print('teacher')"}),
+            ),
+            actual_action=FunctionCallAction(
+                type="function_call",
+                name="execute_python",
+                arguments=json.dumps({"code": "print('policy')"}),
+            ),
+            declared_tools=declared_tools,
+            harness="codex",
         )
         assert comparison_result.matches is True
         assert comparison_result.category == StepRewardCategory.EXPECTED_TOOL_CALL
