@@ -4,6 +4,7 @@ competitive_coding_challenges_resources_server:
       entrypoint: app.py
       domain: coding
       description: Execution of competitive programming competition questions
+      value: Improve competitive coding capabilities on contest-style problems
       test_file: ${oc.env:CCC_TEST_FILE,data/test_metadata.jsonl}
       test_batch_size: 32
       num_parallel_requests: 16
