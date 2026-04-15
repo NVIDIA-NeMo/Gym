@@ -103,8 +103,8 @@ dependencies = [
     "devtools",
 
     # FastAPI: Used for server infrastructure
-    # Updated Fri Jul 25, 2025 with fastapi==0.116.1
-    # License: MIT https://github.com/fastapi/fastapi/blob/6df50d40fe195adc026af169d6ebf298a1c183a5/LICENSE
+    # Updated Thu Mar 26, 2026 with fastapi==0.135.2
+    # License: MIT https://github.com/fastapi/fastapi/blob/25a3697cedc6e7dfb84e93c8ff965801486f00f4/LICENSE
     "fastapi",
 
     # itsdangerous: Requirement for Starlette SessionMiddleware
@@ -291,6 +291,9 @@ exclude-dependencies = [
     "waitress",
 ]
 
+[tool.setuptools.package-data]
+nemo_gym = ["resources/*.py"]
+
 [tool.setuptools.dynamic]
 version = {attr = "nemo_gym.__version__"}
 readme = {file = "README.md", content-type = "text/markdown"}
@@ -437,6 +440,7 @@ omit = [
     "temp*",
     "results/*",
     "/tmp/*",
+    "benchmarks/*",
 ]
 data_file = "results/.coverage"
 concurrency = ["thread", "multiprocessing"]
@@ -463,9 +467,6 @@ exclude_also = [
     "class .*\\bProtocol\\):",
     "@(abc\\.)?abstractmethod",
     "pass",
-]
-omit = [
-    "benchmarks/*/prepare.py",
 ]
 
 ################################################

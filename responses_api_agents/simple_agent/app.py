@@ -106,8 +106,9 @@ class SimpleAgent(SimpleResponsesAPIAgent):
 
             if not usage:
                 usage = model_response.usage
+                model_response.usage = None
 
-            if usage:
+            if usage and model_response.usage:
                 usage.input_tokens += model_response.usage.input_tokens
                 usage.output_tokens += model_response.usage.output_tokens
                 usage.total_tokens += model_response.usage.total_tokens
@@ -116,7 +117,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 usage.input_tokens_details.cached_tokens = 0
                 usage.output_tokens_details.reasoning_tokens = 0
 
-            if model_response.incomplete_details and model_response.incomplete_details.reason == "max_output_tokens":
+            if model_response.incomplete_details:
                 break
 
             all_fn_calls: List[NeMoGymResponseFunctionToolCall] = [o for o in output if o.type == "function_call"]
