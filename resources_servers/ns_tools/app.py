@@ -156,7 +156,7 @@ class NSToolsResourcesServer(SimpleResourcesServer):
         return app
 
     def _tool_uses_python_tool_sidecar(self, tool_spec: str) -> bool:
-        """Detect whether a tool spec refers to the legacy HTTP-backed PythonTool."""
+        """Detect whether a tool spec refers to the HTTP-backed PythonTool."""
         tool_cls_or_obj = locate(tool_spec)
         tool = tool_cls_or_obj() if inspect.isclass(tool_cls_or_obj) else tool_cls_or_obj
         if tool.__class__.__name__ != "PythonTool":
@@ -167,8 +167,8 @@ class NSToolsResourcesServer(SimpleResourcesServer):
         return "base_url" in client_params
 
     def _start_python_tool_server(self):
-        """Spawn the legacy python_tool HTTP sidecar as a subprocess."""
-        logger.info("Starting legacy python_tool HTTP server on port %s", self.config.python_tool_port)
+        """Spawn the python_tool HTTP sidecar as a subprocess."""
+        logger.info("Starting python_tool HTTP server on port %s", self.config.python_tool_port)
 
         # Build command with sandbox config
         cmd = [
@@ -196,7 +196,7 @@ class NSToolsResourcesServer(SimpleResourcesServer):
         logger.info(f"python_tool HTTP server started (PID: {self._python_tool_process.pid})")
 
     def _wait_for_server_ready(self, timeout: float = 30.0, poll_interval: float = 0.5):
-        """Wait for the legacy python_tool HTTP sidecar to be ready."""
+        """Wait for the python_tool HTTP sidecar to be ready."""
         url = f"http://127.0.0.1:{self.config.python_tool_port}/mcp"
         start_time = time.time()
 
@@ -448,7 +448,7 @@ class NSToolsResourcesServer(SimpleResourcesServer):
         if self.tool_manager:
             await self.tool_manager.shutdown()
 
-        # Terminate the legacy python_tool subprocess if one was started.
+        # Terminate the python_tool subprocess if one was started.
         if self._python_tool_process:
             logger.info(f"Terminating python_tool server (PID: {self._python_tool_process.pid})")
             self._python_tool_process.terminate()

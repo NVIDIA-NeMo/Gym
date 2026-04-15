@@ -24,8 +24,7 @@ ns_tools:
           name: math_with_judge
       
       # NeMo Skills tools to load
-      # DirectPythonTool is the main-compatible path: it calls the sandbox directly
-      # and avoids the legacy branch-only python_tool HTTP sidecar.
+      # DirectPythonTool is the preferred python tool path: it calls the sandbox directly
       nemo_skills_tools:
         - nemo_skills.mcp.servers.python_tool::DirectPythonTool
       

@@ -88,5 +88,5 @@ Code: Apache 2.0
 
 Dependencies
 - nemo_gym: Apache 2.0
-- nemo_skills-core: Apache 2.0
+- nemo-skills-tools: Apache 2.0
 - math-verify: [Apache 2.0](https://github.com/huggingface/Math-Verify/blob/5d148cfaaf99214c2e4ffb4bc497ab042c592a7a/LICENCE)
