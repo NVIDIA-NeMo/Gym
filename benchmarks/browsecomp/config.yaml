@@ -10,7 +10,7 @@ Qwen3-235B-A22B-Instruct-2507-FP8:
 
 browsecomp_benchmark_resources_server:
   resources_servers:
-    tavily_search:
+    browsecomp_advanced_harness:
       entrypoint: app.py
       domain: agent
       debug: false
