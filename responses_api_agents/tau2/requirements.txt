@@ -1,2 +1,2 @@
 -e nemo-gym[dev] @ ../../
-git+https://github.com/bxyu-nvidia/tau2-bench@bxyu/nemo_gym_stable
+git+https://github.com/bxyu-nvidia/tau2-bench@bxyu/ng-fix-valueerror
