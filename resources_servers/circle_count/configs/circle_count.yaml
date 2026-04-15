@@ -4,6 +4,7 @@ circle_count:
       entrypoint: app.py
       domain: other
       description: Count circles of a given color in images
+      value: Improve visual counting and color recognition
       verified: false
 circle_count_simple_agent:
   responses_api_agents:
