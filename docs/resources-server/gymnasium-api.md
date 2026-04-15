@@ -31,7 +31,7 @@ class MyEnv(GymnasiumServer):
     async def step(self, action: NeMoGymResponse, metadata: dict, session_id=None) -> tuple[str | None, float, bool, bool, dict]:
         # Called after each model response, executes any actions taken or implements other env logic (<action> tags, tool calls, user turns, or just single-step verification), computes rewards, determines if done.
         # Return (observation, reward, terminated, truncated, info)
-        # observation: next message to model (tool result, rendering of state, user msg etc), or None if episode is over.
+        # observation: next message to model (tool result, rendering of state, user message, and so on), or None if episode is over.
         # reward: per-step reward, accumulated across all steps by the agent.
         # terminated: True when the episode ends naturally (task solved, game over, etc). Tells the agent to stop.
         # truncated: True when the episode is cut short (step limit, timeout, etc).
@@ -41,11 +41,11 @@ class MyEnv(GymnasiumServer):
 
 The main method to implement is `step()`. Implementing a custom `reset()` is optional — use it to initialize environment state or return an opening message from the environment. The default implementation returns `(None, {})`.
 
-`metadata` is the `verifier_metadata` dict from your input JSONL, passed through unchanged. This is where you put task-specific data (expected answers, test cases, board configurations, etc.) that the environment needs for initialization or scoring. Access fields via `metadata.get("field_name")`.
+`metadata` is the `verifier_metadata` dict from your input JSONL, passed through unchanged. This is where you put task-specific data (expected answers, test cases, board configurations, and so on) that the environment needs for initialization or scoring. Access fields with `metadata.get("field_name")`.
 
-`session_id` is a unique string per rollout. Use it as a key to store per-episode state (e.g., game boards, conversation history) in a dict on your server. Stateless environments can ignore it.
+`session_id` is a unique string per rollout. Use it as a key to store per-episode state (such as game boards or conversation history) in a dict on your server. Stateless environments can ignore it.
 
-`action` is the full `NeMoGymResponse` from the model server. Your `step()` parses whatever it needs from it: text content, `<action>` tags, function calls, etc. Use `extract_text()` for text, or inspect `action.output` directly for structured output like tool calls.
+`action` is the full `NeMoGymResponse` from the model server. Your `step()` parses whatever it needs from it: text content, `<action>` tags, function calls, and so on. Use `extract_text()` for text, or inspect `action.output` directly for structured output like tool calls.
 
 :::{tip}
 For the full single-step and multi-step patterns using the standard `SimpleResourcesServer` API, see {doc}`/environment-tutorials/single-step-environment` and {doc}`/environment-tutorials/multi-step-environment`.
@@ -53,7 +53,7 @@ For the full single-step and multi-step patterns using the standard `SimpleResou
 
 ---
 
-## Single-step
+## Single-Step
 
 Single-step environments are the common non-agentic use case: one model call, then grade the output. Implement `step()` so it always returns `terminated=True`.
 
@@ -67,7 +67,7 @@ class MySingleStepEnv(GymnasiumServer):
 
 ---
 
-## Multi-step with action tags
+## Multi-Step with Action Tags
 
 Multiple model calls per episode without native tool calling. The model uses `<action>` tags in its output, `step()` parses them and returns the next observation or terminates.
 
@@ -101,7 +101,7 @@ class BlackjackEnv(GymnasiumServer):
 
 ---
 
-## Tool-use
+## Tool Use
 
 For tool-calling environments, `step()` checks `action.output` for items with `type == "function_call"`, executes them, and returns the results as the next observation. Tool schemas go in `responses_create_params.tools` in your JSONL data so the model knows what tools are available.
 
@@ -134,7 +134,7 @@ class MyToolEnv(GymnasiumServer):
 
 ---
 
-## Multi-turn
+## Multi-Turn
 
 `step()` returns the next user message as the observation. The `gymnasium_agent` appends it to the conversation and calls the model again. Return `None` to end.
 
@@ -160,9 +160,9 @@ class MyMultiTurnEnv(GymnasiumServer):
 
 ---
 
-## LLM-as-judge
+## LLM-as-Judge
 
-Use `step()` to call a judge model via `self.server_client` and score the output. The judge model must be configured as a separate model server. See {doc}`/environment-tutorials/llm-as-judge-verification` for the full pattern.
+Use `step()` to call a judge model through `self.server_client` and score the output. The judge model must be configured as a separate model server. See {doc}`/environment-tutorials/llm-as-judge-verification` for the full pattern.
 
 ```python
 class MyJudgeEnv(GymnasiumServer):
@@ -183,7 +183,7 @@ class MyJudgeEnv(GymnasiumServer):
 
 ---
 
-## Reward model
+## Reward Model
 
 Same pattern. Call a reward model endpoint and use its score directly.
 
@@ -203,9 +203,9 @@ class MyRewardModelEnv(GymnasiumServer):
 
 ---
 
-## YAML configuration
+## YAML Configuration
 
-`GymnasiumServer` pairs with `gymnasium_agent` instead of `simple_agent`. The agent config references the env server via `env_server`.
+`GymnasiumServer` pairs with `gymnasium_agent` instead of `simple_agent`. The agent config references the env server through `env_server`.
 
 ```yaml
 my_env_instance:
