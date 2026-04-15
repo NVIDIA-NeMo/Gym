@@ -1,0 +1,22 @@
+blackjack:
+  resources_servers:
+    blackjack:
+      entrypoint: app.py
+      domain: games
+      verified: false
+      description: Blackjack. Model hits or stands. Reward +1 win, 0 draw, -1 loss/bust.
+blackjack_gymnasium_agent:
+  responses_api_agents:
+    gymnasium_agent:
+      entrypoint: app.py
+      env_server:
+        type: resources_servers
+        name: blackjack
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      max_steps: 5
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/blackjack/data/example.jsonl
