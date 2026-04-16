@@ -493,7 +493,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         return JudgeEvaluation(
             judge_response_create_params=judge_create_params,
             reasoning="",
-            extracted_final_answer=None,
+            extracted_final_answer="",
             reward=0.0,
             judge_response=judge_response,
         )
@@ -525,17 +525,17 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         """
         matches = list(re.finditer(r"correct:\s*(yes|no)\b", text, re.IGNORECASE))
         if not matches:
-            return False, None, False
+            return False, "", False
 
         is_correct = matches[-1].group(1).lower() == "yes"
 
         ans_matches = list(re.finditer(
             r"extracted_final_answer:\s*(.+?)(?:\n|$)", text
         ))
-        extracted = ans_matches[-1].group(1).strip() if ans_matches else None
+        extracted = ans_matches[-1].group(1).strip() if ans_matches else ""
 
         if extracted and "The final exact answer extracted from the [response]" in extracted:
-            return False, None, False
+            return False, "", False
 
         return is_correct, extracted, True
 
