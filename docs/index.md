@@ -290,6 +290,7 @@ Ecosystem <about/ecosystem>
 
 Quickstart <get-started/index>
 Detailed Setup Guide <get-started/detailed-setup.md>
+Install from PyPI <get-started/pypi-install>
 Rollout Collection <get-started/rollout-collection.md>
 ```
 
@@ -341,6 +342,7 @@ Stateful Environment <environment-tutorials/stateful-environment>
 Real-World Environment <environment-tutorials/real-world-environment>
 Integrate external libraries <environment-tutorials/integrate-external-environments>
 Aggregate Metrics <environment-tutorials/aggregate-metrics>
+LLM-as-Judge Verification <environment-tutorials/llm-as-judge-verification>
 ```
 
 ```{toctree}

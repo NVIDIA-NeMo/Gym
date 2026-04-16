@@ -17,6 +17,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from omegaconf import OmegaConf
+from yaml import safe_load
 
 from nemo_gym.benchmarks import list_benchmarks, prepare_benchmark
 
@@ -73,7 +74,9 @@ class TestPrepareBenchmark:
         with (
             patch(
                 "nemo_gym.benchmarks.get_global_config_dict",
-                return_value=_mock_global_config({"config_paths": [str(config_path)]}),
+                return_value=_mock_global_config(
+                    {"config_paths": [str(config_path)], **safe_load(config_path.read_text())}
+                ),
             ),
             patch("nemo_gym.benchmarks.BENCHMARKS_DIR", bench_dir.parent),
             patch("nemo_gym.benchmarks.importlib.import_module", return_value=mock_module),
@@ -88,7 +91,9 @@ class TestPrepareBenchmark:
         with (
             patch(
                 "nemo_gym.benchmarks.get_global_config_dict",
-                return_value=_mock_global_config({"config_paths": [str(config_path)]}),
+                return_value=_mock_global_config(
+                    {"config_paths": [str(config_path)], **safe_load(config_path.read_text())}
+                ),
             ),
             patch("nemo_gym.benchmarks.BENCHMARKS_DIR", bench_dir.parent),
         ):
@@ -103,7 +108,9 @@ class TestPrepareBenchmark:
         with (
             patch(
                 "nemo_gym.benchmarks.get_global_config_dict",
-                return_value=_mock_global_config({"config_paths": [str(config_path)]}),
+                return_value=_mock_global_config(
+                    {"config_paths": [str(config_path)], **safe_load(config_path.read_text())}
+                ),
             ),
             patch("nemo_gym.benchmarks.BENCHMARKS_DIR", bench_dir.parent),
             patch("nemo_gym.benchmarks.importlib.import_module", return_value=mock_module),
@@ -124,3 +131,28 @@ class TestPrepareBenchmark:
         ):
             with pytest.raises(AssertionError, match="No benchmark config found in config_paths"):
                 prepare_benchmark()
+
+    def test_caching_sanity(self, tmp_path: Path) -> None:
+        bench_dir, config_path = self._make_bench_dir(tmp_path)
+        (tmp_path / "output.jsonl").write_text("blah blah text for file")
+
+        mock_module = MagicMock()
+        mock_module.prepare.return_value = tmp_path / "output.jsonl"
+
+        with (
+            patch(
+                "nemo_gym.benchmarks.get_global_config_dict",
+                return_value=_mock_global_config(
+                    {
+                        "use_cached_prepared_benchmarks": True,
+                        "config_paths": [str(config_path)],
+                        **safe_load(config_path.read_text()),
+                    }
+                ),
+            ),
+            patch("nemo_gym.benchmarks.BENCHMARKS_DIR", bench_dir.parent),
+            patch("nemo_gym.benchmarks.importlib.import_module", return_value=mock_module),
+        ):
+            prepare_benchmark()
+
+        assert mock_module.prepare.call_count == 0

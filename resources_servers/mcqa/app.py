@@ -24,7 +24,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.reward_profile import compute_pass_majority_metrics
+from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
 
 
 class MCQAResourcesServerConfig(BaseResourcesServerConfig):
@@ -206,25 +206,18 @@ class MCQAResourcesServer(SimpleResourcesServer):
             tasks,
             score_fn=lambda r: {"accuracy": r["reward"]},
             answer_key="extracted_answer",
-        )
+        )[0]
 
     def get_key_metrics(self, agent_metrics):
-        import re
-
-        # Find max k from pass@{k}/accuracy keys
-        max_k = max(
-            (int(m.group(1)) for k in agent_metrics if (m := re.match(r"^pass@(\d+)/accuracy$", k))),
-            default=1,
-        )
-        keys = [
-            "pass@1/accuracy",
-            f"pass@1[avg-of-{max_k}]/accuracy",
-            f"pass@1[avg-of-{max_k}]/no_answer",
-            f"majority@{max_k}/accuracy",
-            f"pass@{max_k}/no_answer",
-            "mean/reward",
-        ]
-        return {k: agent_metrics[k] for k in keys if k in agent_metrics}
+        key = {}
+        if "mean/reward" in agent_metrics:
+            key["mean/reward"] = agent_metrics["mean/reward"]
+        key.update(highest_k_metrics(agent_metrics, "pass@1[avg-of-{k}]", score_names=["accuracy", "no_answer"]))
+        key.update(highest_k_metrics(agent_metrics, "pass@{k}", score_names=["no_answer"]))
+        key.update(highest_k_metrics(agent_metrics, "majority@{k}", score_names=["accuracy"]))
+        if "pass@1/accuracy" in agent_metrics:
+            key["pass@1/accuracy"] = agent_metrics["pass@1/accuracy"]
+        return key
 
     async def verify(self, body: MCQAVerifyRequest) -> MCQAVerifyResponse:
         # Pull options/expected_answer from dataset-style metadata if available

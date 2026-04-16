@@ -868,7 +868,6 @@ class TestApp:
                     "required": ["order_id"],
                 },
                 "description": "Get the current status for a given order",
-                "strict": True,
             },
             {
                 "name": "get_delivery_date",
@@ -883,7 +882,6 @@ class TestApp:
                     "required": ["order_id"],
                 },
                 "description": "Get the estimated delivery date for a given order",
-                "strict": True,
             },
         ]
         assert expected_sent_tools == actual_sent_tools
@@ -1351,7 +1349,6 @@ class TestApp:
                     },
                     "required": ["order_id", "date"],
                 },
-                "strict": True,
             }
         ]
         assert expected_sent_tools == actual_sent_tools
@@ -2501,6 +2498,79 @@ class TestApp:
         ]
         actual_messages = mock_method.call_args.kwargs["messages"]
         assert expected_messages == actual_messages
+
+    def test_responses_sequential_reasoning_allowed_False(self, monkeypatch: MonkeyPatch):
+        server = self._setup_server(monkeypatch)
+        server.config.uses_reasoning_parser = True
+        server.config.sequential_reasoning_allowed = False
+
+        app = server.setup_webserver()
+        client = TestClient(app)
+
+        input_messages = [
+            NeMoGymEasyInputMessage(
+                type="message",
+                role="user",
+                content=[NeMoGymResponseInputText(text="Check my order status", type="input_text")],
+                status="completed",
+            ),
+            NeMoGymResponseReasoningItem(
+                id="rs_123",
+                status="completed",
+                type="reasoning",
+                summary=[
+                    NeMoGymSummary(
+                        type="summary_text",
+                        text="First reasoning item",
+                    )
+                ],
+            ),
+        ]
+
+        expected_response = NeMoGymResponse(
+            **COMMON_RESPONSE_PARAMS,
+            id="resp_123",
+            object="response",
+            tools=[],
+            created_at=FIXED_TIME,
+            model="dummy_model",
+            output=[
+                {
+                    "content": [
+                        {
+                            "annotations": [],
+                            "logprobs": None,
+                            "text": "",
+                            "type": "output_text",
+                        },
+                    ],
+                    "id": "msg_123",
+                    "role": "assistant",
+                    "status": "completed",
+                    "type": "message",
+                },
+            ],
+            incomplete_details={"reason": "content_filter"},
+        )
+
+        request_body = NeMoGymResponseCreateParamsNonStreaming(
+            input=input_messages,
+            tools=[],
+        )
+
+        monkeypatch.setattr("responses_api_models.vllm_model.app.time", lambda: FIXED_TIME)
+        monkeypatch.setattr("responses_api_models.vllm_model.app.uuid4", lambda: FakeUUID())
+
+        response = client.post(
+            "/v1/responses",
+            json=request_body.model_dump(exclude_unset=True, mode="json"),
+        )
+        assert response.status_code == 200
+
+        data = response.json()
+
+        expected_dict = expected_response.model_dump()
+        assert data == expected_dict
 
 
 class TestVLLMConverter:

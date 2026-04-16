@@ -1,0 +1,40 @@
+{% set language = instance.repo_language | default('python') %}
+I've uploaded a {{ language }} repository in the directory {{ workspace_path }}.
+
+<issue>
+{{ instance.problem_statement }}
+</issue>
+
+Implement the necessary changes to non-test files in {{ workspace_path }} to resolve this issue.
+
+You MUST follow these three phases strictly:
+
+## Phase 1: EXPLORE (spend significant effort here)
+
+Build comprehensive understanding before changing anything:
+
+1. **Understand the issue**: Parse the problem statement carefully. Identify the key error messages, method names, variables, file names, and stack traces mentioned.
+2. **Map the codebase**: Find all files and modules related to the issue. Use grep/search to locate relevant classes, functions, error messages, and variable names.
+3. **Trace the execution path**: Starting from the entry point mentioned in the issue, trace the code path that leads to the bug. Read each file involved.
+4. **Read the tests**: Examine test files related to the affected code to understand expected behavior and edge cases.
+5. **Check history**: Use `git log` and `git blame` on the affected files to understand recent changes and original intent.
+6. **Identify dependencies**: What other code depends on the code you'll change? What might break?
+
+Write down your findings before proceeding.
+
+## Phase 2: PLAN
+
+Based on your exploration, create a precise plan:
+
+1. List every file you will modify and the specific changes needed
+2. Explain why each change is necessary
+3. Identify risks and edge cases
+4. Describe how you will verify correctness
+
+## Phase 3: EXECUTE
+
+Now implement your plan:
+
+1. Make changes one file at a time
+2. After all changes, verify by running relevant tests
+3. If something doesn't work, return to Phase 1 to gather more information

@@ -33,7 +33,7 @@ from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 from ray import __version__ as ray_version
 from wandb import Run
 
-from nemo_gym import CACHE_DIR, PARENT_DIR, RESULTS_DIR
+from nemo_gym import CACHE_DIR, PARENT_DIR, RESULTS_DIR, WORKING_DIR
 from nemo_gym.config_types import (
     ServerInstanceConfig,
     WANDBConfig,
@@ -65,6 +65,9 @@ DRY_RUN_KEY_NAME = "dry_run"
 UV_CACHE_DIR_KEY_NAME = "uv_cache_dir"
 UV_VENV_DIR_KEY_NAME = "uv_venv_dir"
 INHERIT_FROM_KEY_NAME = "_inherit_from"
+COPY_KEY_NAME = "_copy"
+DELETE_KEY_KEY_NAME = "_delete_key"
+NEMO_GYM_LOG_DIR_KEY_NAME = "nemo_gym_log_dir"
 NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     CONFIG_PATHS_KEY_NAME,
     ENTRYPOINT_KEY_NAME,
@@ -85,6 +88,8 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     UV_CACHE_DIR_KEY_NAME,
     UV_VENV_DIR_KEY_NAME,
     INHERIT_FROM_KEY_NAME,
+    COPY_KEY_NAME,
+    NEMO_GYM_LOG_DIR_KEY_NAME,
 ]
 
 # Data keys
@@ -112,8 +117,14 @@ def get_wandb_run() -> Optional[Run]:
     return _WANDB_RUN
 
 
+# HuggingFace
+def get_hf_token() -> Optional[str]:
+    return get_global_config_dict().get(HF_TOKEN_KEY_NAME)
+
+
 # OmegaConf new resolvers
 OmegaConf.register_new_resolver("inherit_from", lambda a: f"${{inherit_from:{a}}}")
+OmegaConf.register_new_resolver("copy", lambda a: f"${{copy:{a}}}")
 
 
 class GlobalConfigDictParserConfig(BaseModel):
@@ -133,7 +144,7 @@ class GlobalConfigDictParserConfig(BaseModel):
             POLICY_BASE_URL_KEY_NAME: "",
             POLICY_API_KEY_KEY_NAME: "",
             POLICY_MODEL_NAME_KEY_NAME: "",
-            "policy_model": {"responses_api_models": {"dummy_model": {"entrypoint": "app.py"}}},
+            POLICY_MODEL_KEY_NAME: {"responses_api_models": {"dummy_model": {"entrypoint": "app.py"}}},
         }
     )
 
@@ -184,6 +195,7 @@ class GlobalConfigDictParser(BaseModel):
 
         extra_configs: List[DictConfig] = []
         duplicate_config_paths: List[str] = []
+        # Just a careful note here that we explicitly mutate config_paths as it is being appended to
         for config_path in config_paths:
             config_path = Path(config_path)
             # Check cwd first for user's local configs, then install location
@@ -277,9 +289,12 @@ Duplicate config paths:
             if isinstance(v, (DictConfig, dict)):
                 self._recursively_hide_secrets_helper(v)
             elif isinstance(v, (ListConfig, list)):
-                for inner_v in v:
-                    if isinstance(inner_v, (DictConfig, dict)):
-                        self._recursively_hide_secrets_helper(inner_v)
+                if "token" in k or "key" in k:
+                    dict_config[k] = ["****"] * len(v)
+                else:
+                    for inner_v in v:
+                        if isinstance(inner_v, (DictConfig, dict)):
+                            self._recursively_hide_secrets_helper(inner_v)
             else:
                 if "token" in k or "key" in k:
                     dict_config[k] = "****"
@@ -293,6 +308,19 @@ Duplicate config paths:
         self, dict_config: DictConfig, original_dict_config: DictConfig, frozen_dict_config: DictConfig
     ) -> None:
         for k, v in list(dict_config.items()):
+            is_delete_property = isinstance(v, DictConfig) and DELETE_KEY_KEY_NAME in v
+
+            if is_delete_property:
+                keys_to_delete = v.pop(DELETE_KEY_KEY_NAME).split(",")
+                keys_to_delete = set(map(str.strip, keys_to_delete))
+
+                # Delete first so we don't resolve the deleted keys
+                # but only delete keys that are present in case the key-to-delete comes from a downstream inherit or swap
+                existing_keys = set(k for k in keys_to_delete if k in v)
+                for key in existing_keys:
+                    v.pop(key)
+                keys_to_delete -= existing_keys
+
             if isinstance(v, (DictConfig, dict)):
                 self._recursively_swap_keys_helper(v, original_dict_config, frozen_dict_config)
             elif isinstance(v, (ListConfig, list)):
@@ -304,7 +332,11 @@ Duplicate config paths:
             is_swap_str = isinstance(v, str) and v.startswith("${inherit_from:")
             is_swap_property = isinstance(v, DictConfig) and INHERIT_FROM_KEY_NAME in v
             is_swap = is_swap_str or is_swap_property
-            if not is_swap:
+
+            is_copy_str = isinstance(v, str) and v.startswith("${copy:")
+            is_copy_property = isinstance(v, DictConfig) and COPY_KEY_NAME in v
+            is_copy = is_copy_str or is_copy_property
+            if not (is_swap or is_copy):
                 continue
 
             if is_swap_str:
@@ -312,20 +344,34 @@ Duplicate config paths:
             elif is_swap_property:
                 path_to_swap = v.pop(INHERIT_FROM_KEY_NAME)
 
+            if is_copy_str:
+                path_to_swap = v.removeprefix("${copy:").removesuffix("}")
+            elif is_copy_property:
+                path_to_swap = v.pop(COPY_KEY_NAME)
+
             path_to_swap = path_to_swap.split(".")
 
             # Pop the swapped value
             dict_containing_key_to_swap = self._recursive_index_dict_using_path(
                 original_dict_config, path_to_swap[:-1]
             )
-            # Pop with a default since multiple configs may refer to the same path
-            dict_containing_key_to_swap.pop(path_to_swap[-1], None)
+            if is_swap:
+                # Pop with a default since multiple configs may refer to the same path
+                # We don't want to pop if it's just a copy
+                dict_containing_key_to_swap.pop(path_to_swap[-1], None)
 
             swapped_value = self._recursive_index_dict_using_path(frozen_dict_config, path_to_swap)
-            if is_swap_property:
+            if is_swap_property or is_copy_property:
                 swapped_value = OmegaConf.merge(swapped_value, v)
 
             dict_config[k] = swapped_value
+
+            # TODO We may want to recurse again after swap since we are not guaranteed to traverse the swapped-from value before hitting this swap.
+
+            if is_delete_property:
+                # Enforce that every key-to-delete exists
+                for key in keys_to_delete:
+                    dict_config[k].pop(key)
 
     def _recursive_index_dict_using_path(self, dict_config: DictConfig, path: List[str]) -> DictConfig:
         for k in path:
@@ -379,6 +425,20 @@ Duplicate config paths:
             with open_dict(global_config_dict):
                 global_config_dict[CONFIG_PATHS_KEY_NAME] = config_paths
 
+        # TODO @bxyu-nvidia: We need a better way of handling dummy model configs
+        with open_dict(global_config_dict):
+            for top_level_value in global_config_dict.values():
+                if not (
+                    isinstance(top_level_value, (DictConfig))
+                    and "responses_api_models" in top_level_value
+                    # We check `len(top_level_value) > 1` in case the policy model is inherited from.
+                    and (len(top_level_value) > 1 or len(top_level_value["responses_api_models"]) > 1)
+                    and "dummy_model" in top_level_value["responses_api_models"]
+                ):
+                    continue
+
+                top_level_value["responses_api_models"].pop("dummy_model")
+
         self._recursively_swap_keys(global_config_dict)
 
         # Almost-server detection and reporting
@@ -396,13 +456,20 @@ Duplicate config paths:
 
             error_on_almost_servers = global_config_dict.get("error_on_almost_servers", True)
             if error_on_almost_servers:
-                error_msg = f"Found {len(almost_servers)} almost-server(s) with validation errors. "
-                error_msg += "Fix the issues above or set error_on_almost_servers=false to bypass this error."
+                config_dict_to_log = deepcopy(global_config_dict)
+                self._recursively_hide_secrets(config_dict_to_log)
+                config_to_log_yaml = OmegaConf.to_yaml(config_dict_to_log)
+
+                error_msg = f"""Found {len(almost_servers)} almost-server(s) with validation errors. Fix the issues above or set error_on_almost_servers=false to bypass this error.
+Found global config dict yaml:
+{config_to_log_yaml}"""
+
                 raise ValueError(error_msg)
 
         server_instance_configs = self.filter_for_server_instance_configs(global_config_dict)
 
-        use_absolute_ip = global_config_dict.get(USE_ABSOLUTE_IP, False)
+        with open_dict(global_config_dict):
+            use_absolute_ip = global_config_dict.setdefault(USE_ABSOLUTE_IP, False)
         if use_absolute_ip:
             default_host = gethostbyname(gethostname())
         else:
@@ -460,13 +527,13 @@ Duplicate config paths:
             # Set the appropriate environment variable here, and matche the config
             environ["UV_CACHE_DIR"] = global_config_dict[UV_CACHE_DIR_KEY_NAME]
             # By default, build the directories in their individual folders using the root repository
-            # e.g. PARENT_DIR/responses_api_models/my_server
-            global_config_dict.setdefault(UV_VENV_DIR_KEY_NAME, str(PARENT_DIR))
+            # e.g. WORKING_DIR/responses_api_models/my_server
+            global_config_dict.setdefault(UV_VENV_DIR_KEY_NAME, str(WORKING_DIR))
 
         if parse_config.hide_secrets:
             self._recursively_hide_secrets(global_config_dict)
 
-        # Set up W&B
+        # Set up W&B and log config. This must happen at the very last step.
         wandb_config = WANDBConfig.model_validate(global_config_dict)
         if wandb_config.is_available:  # pragma: no cover
             environ["WANDB_API_KEY"] = wandb_config.wandb_api_key
