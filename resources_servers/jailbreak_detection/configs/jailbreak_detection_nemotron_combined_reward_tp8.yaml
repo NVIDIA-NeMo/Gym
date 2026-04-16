@@ -16,7 +16,7 @@ jailbreak_detection:
       domain: safety
       verified: false
       description: Jailbreak detection with Nemotron judge + combined reward
-
+      value: Improve Jailbreak Robustness and Safety/Security Behavior Guide Enforcement
       judge_model_server:
         type: responses_api_models
         name: safety_judge_model

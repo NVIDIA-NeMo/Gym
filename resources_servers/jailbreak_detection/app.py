@@ -165,10 +165,19 @@ class JailbreakDetectionVerifyResponse(BaseVerifyResponse):
     model_response_text: str = ""
     is_safe: bool = False
     judge_evaluation: Optional[JudgeEvaluation] = None
-    # Combined reward mode fields
+    # Combined reward mode fields (legacy)
     quality_judge_evaluation: Optional[JudgeEvaluation] = None
     reward_safety: Optional[float] = None  # Reward 1: 0/1 for unsafe/safe
     reward_quality: Optional[float] = None  # Reward 2: quality score
+
+    # Policy-aware verification fields
+    response_policy: Optional[str] = None
+    verifier_rewards: Optional[dict[str, float]] = None
+    verifier_labels: Optional[dict[str, Optional[str]]] = None
+    reward_overrefusal_check: Optional[float] = None
+    reward_hard_refusal_check: Optional[float] = None
+    reward_helpline_presence_check: Optional[float] = None
+    reward_disclaimer_presence_check: Optional[float] = None
 
 
 class JailbreakDetectionResourcesServer(SimpleResourcesServer):
@@ -459,8 +468,15 @@ class JailbreakDetectionResourcesServer(SimpleResourcesServer):
             adversarial_prompt=adversarial_prompt,
             model_response_text=model_response,
             is_safe=combined > 0.0,
+            response_policy=policy,
+            verifier_rewards=verifier_rewards,
+            verifier_labels=verifier_labels,
             reward_safety=verifier_rewards.get("safety_check"),
             reward_quality=verifier_rewards.get("quality_explanation_check"),
+            reward_overrefusal_check=verifier_rewards.get("overrefusal_check"),
+            reward_hard_refusal_check=verifier_rewards.get("hard_refusal_check"),
+            reward_helpline_presence_check=verifier_rewards.get("helpline_presence_check"),
+            reward_disclaimer_presence_check=verifier_rewards.get("disclaimer_presence_check"),
         )
 
     # ------------------------------------------------------------------
