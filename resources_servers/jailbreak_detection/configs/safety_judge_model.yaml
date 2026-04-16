@@ -5,3 +5,5 @@ safety_judge_model:
       base_url: http://<host_url>:<port>/v1
       api_key: <api_key>
       model: nvidia/Nemotron-Content-Safety-Reasoning-4B
+      return_token_id_information: false
+      uses_reasoning_parser: true
