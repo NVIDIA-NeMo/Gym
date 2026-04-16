@@ -40,7 +40,6 @@ implementation work starts.
 - `agent006`
   - config:
     - `resources_servers/terminal_multi_harness/configs/terminal_multi_harness_agent006.yaml`
-    - `resources_servers/terminal_multi_harness/configs/terminal_multi_harness_agent006_vllm.yaml`
   - agent identity:
     - `terminal_multi_harness_agent006_agent`
 
