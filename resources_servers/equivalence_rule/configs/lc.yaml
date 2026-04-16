@@ -19,7 +19,6 @@ lc_equivalence_rule_simple_agent:
         type: responses_api_models
         name: policy_model
       datasets:
-      - name: mrcr
-        type: validation
-        license: TBD
-        jsonl_fpath: ../../../nano_v3/data/mrcr/processed/processed_p67_sampled_10pct_shuf_rl_fmt.val.jsonl
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/equivalence_rule/data/example.jsonl
