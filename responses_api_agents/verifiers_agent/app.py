@@ -110,9 +110,10 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
             if not model_server_url.endswith("/v1"):
                 model_server_url = model_server_url.rstrip("/") + "/v1"
 
-            # Pass an AsyncOpenAI client directly to avoid env var requirements
-            # for api_key. NeMo Gym model servers typically use api_key="EMPTY".
-            openai_client = AsyncOpenAI(base_url=model_server_url, api_key="EMPTY")
+            openai_client = AsyncOpenAI(  # pragma: allowlist secret
+                base_url=model_server_url,
+                api_key="EMPTY",
+            )
             self.client_cache[cache_key] = NeMoRLChatCompletionsClient(openai_client)
 
         return self.client_cache[cache_key]
