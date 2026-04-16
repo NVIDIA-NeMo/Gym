@@ -1,3 +1,4 @@
 -e nemo-gym[dev] @ ../../
 openapi-schema-validator==0.6.3
+tomli-w==1.2.0
 xmltodict==1.0.2
