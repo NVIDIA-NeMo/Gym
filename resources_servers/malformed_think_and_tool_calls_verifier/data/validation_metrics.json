@@ -1,0 +1,46 @@
+{
+    "name": "validation",
+    "type": "validation",
+    "jsonl_fpath": "resources_servers/malformed_think_and_tool_calls_verifier/data/validation.jsonl",
+    "num_repeats": 1,
+    "gitlab_identifier": {
+        "dataset_name": "malformed_think_and_tool_calls_verifier_super",
+        "version": "0.0.1",
+        "artifact_fpath": "260303_full_outputs_max_subset.jsonl"
+    },
+    "huggingface_identifier": null,
+    "license": "Apache 2.0",
+    "Number of examples": 598,
+    "Number of tools": {
+        "Total # non-null values": 598,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Standard deviation": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 598,
+        "Average": 81275.58,
+        "Min": 263.0,
+        "Max": 473573.0,
+        "Standard deviation": 46160.61
+    },
+    "Number of turns": {
+        "Total # non-null values": 598,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Standard deviation": 0.0
+    },
+    "Temperature": {
+        "Total # non-null values": 107,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Standard deviation": 0.0
+    },
+    "label": {
+        "unique_count": 2,
+        "total_count": 598
+    }
+}

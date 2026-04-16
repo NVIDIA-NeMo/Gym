@@ -1,0 +1,122 @@
+arena_hard_v2:
+  resources_servers:
+    arena:
+      entrypoint: app.py
+      judge_model_server:
+        type: responses_api_models
+        name: judge_model
+      judge_responses_create_params:
+        input: []
+        max_output_tokens: 65536
+        temperature: 0.0
+      domain: rlhf
+      verified: false
+      description: "arena-hard-v2.0 pairwise chat evaluation benchmark (750 questions, hard_prompt + creative_writing)"
+      value: Measure general chat quality via style-controlled win rate against per-category baselines
+      judge_prompt_template: "<|User Prompt|>\n{question}\n\n<|The Start of Assistant A's Answer|>\n{answer_a}\n<|The End of Assistant A's Answer|>\n\n<|The Start of Assistant B's Answer|>\n{answer_b}\n<|The End of Assistant B's Answer|>"
+      judge_system_message: |-
+        Please act as an impartial judge and evaluate the quality of the responses provided by two AI assistants to the user prompt displayed below. You will be given assistant A's answer and assistant B's answer. Your job is to evaluate which assistant's answer is better.
+
+        Begin your evaluation by generating your own answer to the prompt. You must provide your answers before judging any answers.
+
+        When evaluating the assistants' answers, compare both assistants' answers with your answer. You must identify and correct any mistakes or inaccurate information.
+
+        Then consider if the assistant's answers are helpful, relevant, and concise. Helpful means the answer correctly responds to the prompt or follows the instructions. Note when user prompt has any ambiguity or more than one interpretation, it is more helpful and appropriate to ask for clarifications or more information from the user than providing an answer based on assumptions. Relevant means all parts of the response closely connect or are appropriate to what is being asked. Concise means the response is clear and not verbose or excessive.
+
+        Then consider the creativity and novelty of the assistant's answers when needed. Finally, identify any missing important information in the assistants' answers that would be beneficial to include when responding to the user prompt.
+
+        After providing your explanation, you must output only one of the following choices as your final verdict with a label:
+
+        1. Assistant A is significantly better: [[A>>B]]
+        2. Assistant A is slightly better: [[A>B]]
+        3. Tie, relatively the same: [[A=B]]
+        4. Assistant B is slightly better: [[B>A]]
+        5. Assistant B is significantly better: [[B>>A]]
+
+        Example output: "My final verdict is tie: [[A=B]]".
+      judge_system_message_by_category:
+        hard_prompt: |-
+          Please act as an impartial judge and evaluate the quality of the responses provided by two AI assistants to the user prompt displayed below. You will be given assistant A's answer and assistant B's answer. Your job is to evaluate which assistant's answer is better.
+
+          Begin your evaluation by generating your own answer to the prompt. You must provide your answers before judging any answers.
+
+          When evaluating the assistants' answers, compare both assistants' answers with your answer. You must identify and correct any mistakes or inaccurate information.
+
+          Then consider if the assistant's answers are helpful, relevant, and concise. Helpful means the answer correctly responds to the prompt or follows the instructions. Note when user prompt has any ambiguity or more than one interpretation, it is more helpful and appropriate to ask for clarifications or more information from the user than providing an answer based on assumptions. Relevant means all parts of the response closely connect or are appropriate to what is being asked. Concise means the response is clear and not verbose or excessive.
+
+          Then consider the creativity and novelty of the assistant's answers when needed. Finally, identify any missing important information in the assistants' answers that would be beneficial to include when responding to the user prompt.
+
+          After providing your explanation, you must output only one of the following choices as your final verdict with a label:
+
+          1. Assistant A is significantly better: [[A>>B]]
+          2. Assistant A is slightly better: [[A>B]]
+          3. Tie, relatively the same: [[A=B]]
+          4. Assistant B is slightly better: [[B>A]]
+          5. Assistant B is significantly better: [[B>>A]]
+
+          Example output: "My final verdict is tie: [[A=B]]".
+        creative_writing: |-
+          Please act as an impartial judge and evaluate the quality of the responses provided by two AI assistants to the user prompt displayed below. You will be given assistant A's answer and assistant B's answer. Your job is to evaluate which assistant's answer is better.
+
+          When evaluating the assistants' answers, compare both assistants' answers. You must identify and correct any mistakes or inaccurate information.
+
+          Then consider if the assistant's answers are helpful, relevant, and concise. Helpful means the answer correctly responds to the prompt or follows the instructions. Note when user prompt has any ambiguity or more than one interpretation, it is more helpful and appropriate to ask for clarifications or more information from the user than providing an answer based on assumptions. Relevant means all parts of the response closely connect or are appropriate to what is being asked. Concise means the response is clear and not verbose or excessive.
+
+          Then consider the creativity and novelty of the assistant's answers when needed. Finally, identify any missing important information in the assistants' answers that would be beneficial to include when responding to the user prompt.
+
+          After providing your explanation, you must output only one of the following choices as your final verdict with a label:
+
+          1. Assistant A is significantly better: [[A>>B]]
+          2. Assistant A is slightly better: [[A>B]]
+          3. Tie, relatively the same: [[A=B]]
+          4. Assistant B is slightly better: [[B>A]]
+          5. Assistant B is significantly better: [[B>>A]]
+
+          Example output: "My final verdict is tie: [[A=B]]".
+      # Style normalization constants and BT coefficients pre-computed from
+      # scripts/precompute_style_constants.py with claude-opus-4-6 judge.
+      # Baselines: hard_prompt → o3-mini-2025-01-31, creative_writing → gemini-2.0-flash-001
+      # Feature dims: [token_len_diff, header_density_diff, list_density_diff, bold_density_diff]
+      style_control: true
+      style_norm_mean:
+        "creative_writing": [0.107914, 0.000657015, -0.00200812, 0.0007737]
+        "hard_prompt": [0.163126, 0.0021692, 0.00602647, 0.011611]
+      style_norm_std:
+        "creative_writing": [0.272912, 0.00202641, 0.00836978, 0.0153188]
+        "hard_prompt": [0.306351, 0.00407926, 0.00964094, 0.0108117]
+      style_coefs:
+        "creative_writing": [0.275775, 0.149176, -0.364782, -0.0755849]
+        "hard_prompt": [0.397752, 0.147192, 0.0981425, 0.103356]
+
+arena_hard_v2_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: arena_hard_v2
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: validation
+        type: validation
+        jsonl_fpath: resources_servers/arena/data/arena_hard_v2/arena_hard_v2_validation.jsonl
+        gitlab_identifier:
+          dataset_name: arena_hard_v2
+          version: 0.0.1
+          artifact_fpath: arena_hard_v2_validation.jsonl
+        license: TBD
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/arena/data/arena_hard_v2/example.jsonl
+
+judge_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: https://inference-api.nvidia.com/v1
+      api_key: sk-***
+      model: aws/anthropic/bedrock-claude-opus-4-6
+      return_token_id_information: false
+      uses_reasoning_parser: false

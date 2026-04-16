@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import ray
 import requests
-from pydantic import Field
+from pydantic import BaseModel, Field
 from ray import available_resources, cluster_resources
 from ray.util.placement_group import PlacementGroup
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
@@ -36,9 +36,9 @@ from vllm.entrypoints.openai.api_server import (
 
 from nemo_gym.global_config import (
     DISALLOWED_PORTS_KEY_NAME,
-    HF_TOKEN_KEY_NAME,
     find_open_port,
     get_global_config_dict,
+    get_hf_token,
 )
 from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
 
@@ -52,6 +52,8 @@ class LocalVLLMModelConfig(VLLMModelConfig):
     hf_home: Optional[str] = None
     vllm_serve_kwargs: Dict[str, Any]
     vllm_serve_env_vars: Dict[str, str]
+
+    ray_worker_py_executable: str = sys.executable
 
     show_vllm_engine_stats: bool = False
     debug: bool = False
@@ -401,6 +403,12 @@ class LocalVLLMModelActor:
         return self.server_thread.is_alive()
 
 
+class GetInnerVLLMConfigResponse(BaseModel):
+    base_url: List[str]
+    api_key: str
+    model: str
+
+
 class LocalVLLMModel(VLLMModel):
     config: LocalVLLMModelConfig
 
@@ -410,10 +418,19 @@ class LocalVLLMModel(VLLMModel):
         print("Starting vLLM server. This will take a few minutes...")
         self.start_vllm_server()
 
-        return super().setup_webserver()
+        app = super().setup_webserver()
 
-    def get_hf_token(self) -> Optional[str]:
-        return get_global_config_dict().get(HF_TOKEN_KEY_NAME)
+        # This route is only used to support LocalVLLMModelProxy
+        app.get("/get_inner_vllm_config")(self.get_inner_vllm_config)
+
+        return app
+
+    async def get_inner_vllm_config(self) -> GetInnerVLLMConfigResponse:
+        return GetInnerVLLMConfigResponse(
+            base_url=self.config.base_url,
+            api_key=self.config.api_key,
+            model=self.config.model,
+        )
 
     def get_cache_dir(self) -> str:
         # We need to reconstruct the cache dir as HF does it given HF_HOME. See https://github.com/huggingface/huggingface_hub/blob/b2723cad81f530e197d6e826f194c110bf92248e/src/huggingface_hub/constants.py#L146
@@ -435,7 +452,7 @@ class LocalVLLMModel(VLLMModel):
 
         env_vars = {"HF_HUB_ENABLE_HF_TRANSFER": "1"}
         # vLLM accepts a `hf_token` parameter but it's not used everywhere. We need to set HF_TOKEN environment variable here.
-        maybe_hf_token = self.get_hf_token()
+        maybe_hf_token = get_hf_token()
         if maybe_hf_token:
             env_vars["HF_TOKEN"] = maybe_hf_token
 
@@ -468,6 +485,10 @@ class LocalVLLMModel(VLLMModel):
         parser = make_arg_parser(parser)
         final_args = parser.parse_args(namespace=Namespace(**server_args))
         validate_parsed_serve_args(final_args)
+
+        # @bxyu-nvidia: TODO remove, specific to Nemotron 3 Ultra vLLM version
+        # this return_routed_experts argument isn't present in 0.17.0, so this must be from 0.16.x
+        final_args.return_routed_experts = final_args.enable_return_routed_experts
 
         if self.config.debug:
             env_vars_to_print = env_vars.copy()
@@ -518,7 +539,7 @@ Total Ray cluster resources: {cluster_resources()}""")
                 placement_group=head_node_placement_group,
             ),
             runtime_env=dict(
-                py_executable=sys.executable,
+                py_executable=self.config.ray_worker_py_executable,
                 env_vars={
                     "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
                     **env_vars,

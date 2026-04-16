@@ -8,6 +8,7 @@
         "repo_id": "nvidia/Nemotron-RL-math-OpenMathReasoning",
         "artifact_fpath": "validation.jsonl"
     },
+    "huggingface_identifier": null,
     "license": "Apache 2.0",
     "Number of examples": 30,
     "Number of tools": {
@@ -18,11 +19,19 @@
         "Standard deviation": 0.0
     },
     "Json-dumped number of words (proxy for token count)": {
+<<<<<<<< HEAD:resources_servers/math_with_judge/data/OpenMathReasoning_aime24_validation_metrics.json
         "Total # non-null values": 30,
         "Average": 80.47,
         "Min": 42.0,
         "Max": 149.0,
         "Standard deviation": 25.11
+========
+        "Total # non-null values": 984,
+        "Average": 59.59,
+        "Min": 35.0,
+        "Max": 121.0,
+        "Standard deviation": 13.62
+>>>>>>>> 1c22564076110365558b4c768ff723195fc2b8b5:resources_servers/crowdstrike_logscale_syntax/data/validation_metrics.json
     },
     "Number of turns": {
         "Total # non-null values": 30,

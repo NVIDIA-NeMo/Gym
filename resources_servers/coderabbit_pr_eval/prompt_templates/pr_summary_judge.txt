@@ -1,0 +1,13 @@
+Please evaluate the following candidate summary against the reference summary.
+
+## Reference Summary (Ground Truth)
+{reference}
+
+## Candidate Summary (To Evaluate)
+{candidate}
+
+Provide your evaluation in the following format:
+1. Brief reasoning (2-3 sentences)
+2. Score: [1-5]
+
+Your response must end with exactly "Score: X" where X is a number from 1 to 5.

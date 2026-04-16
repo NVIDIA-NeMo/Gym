@@ -1,0 +1,2 @@
+-e nemo-gym[dev] @ ../../
+tau2 @ git+https://gitlab-master.nvidia.com/nexus-team/ext-taubench-env.git@abhibha-change-sys-prompt

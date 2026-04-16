@@ -117,7 +117,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 usage.input_tokens_details.cached_tokens = 0
                 usage.output_tokens_details.reasoning_tokens = 0
 
-            if model_response.incomplete_details and model_response.incomplete_details.reason == "max_output_tokens":
+            if model_response.incomplete_details:
                 break
 
             all_fn_calls: List[NeMoGymResponseFunctionToolCall] = [o for o in output if o.type == "function_call"]

@@ -1,0 +1,29 @@
+dassault_tool_call_multistep:
+  resources_servers:
+    dassault_tool_call_multistep:
+      entrypoint: app.py
+      domain: agent
+      description: Multi-step tool orchestration benchmark testing sequence planning
+
+dassault_tool_call_multistep_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: dassault_tool_call_multistep
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: multistep
+        type: validation
+        jsonl_fpath: resources_servers/dassault_tool_call_multistep/data/multistep.jsonl
+        gitlab_identifier:
+          dataset_name: dassault_tool_call_multistep
+          version: 0.0.1
+          artifact_fpath: multistep.jsonl
+        license: Apache 2.0
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/dassault_tool_call_multistep/data/example.jsonl

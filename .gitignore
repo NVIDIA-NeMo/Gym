@@ -8,6 +8,9 @@ result
 *.pt
 tests/data/asr
 .DS_Store
+eval_flow_viewer.html
+experiments/
+env.yaml.bak*
 bert.pt.json
 work
 runs

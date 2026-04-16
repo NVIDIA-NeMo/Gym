@@ -23,7 +23,7 @@ from typing import Any, Callable, Optional
 from uuid import uuid4
 
 import ray
-from fastapi import Body, FastAPI
+from fastapi import Body
 from pydantic import BaseModel, ConfigDict
 
 from nemo_gym.base_resources_server import (
@@ -152,7 +152,7 @@ async def run_harbor_job(job_config_dict: dict) -> str:
                 continue
             result_path = trial_dir / "result.json"
             if result_path.exists():
-                return str(trial_dir)
+                return str(trial_dir.resolve())
 
     # No trial directory found — re-raise the original error if there was one,
     # otherwise raise FileNotFoundError.
@@ -195,12 +195,6 @@ class HarborAgent(SimpleResponsesAPIAgent):
 
     def model_post_init(self, __context: Any) -> None:
         self.sem = Semaphore(self.config.concurrency)
-
-    def setup_webserver(self) -> FastAPI:
-        app = FastAPI()
-        app.post("/v1/responses")(self.responses)
-        app.post("/run")(self.run)
-        return app
 
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         raise NotImplementedError

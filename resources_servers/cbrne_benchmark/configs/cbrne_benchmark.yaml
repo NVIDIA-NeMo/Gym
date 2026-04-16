@@ -1,0 +1,56 @@
+cbrne_benchmark:
+  resources_servers:
+    cbrne_benchmark:
+      entrypoint: app.py
+      judge_model_server:
+        type: responses_api_models
+        name: judge_model
+      judge_responses_create_params:
+        input: []
+        temperature: 0.0
+      judge_prompt_template_fpath: prompt_templates/cbrne_categorical_judge.txt
+      judge_system_prompt_fpath: prompt_templates/cbrne_categorical_system.txt
+      judge_endpoint_max_concurrency: 64
+      judge_empty_label: judge_empty
+      empty_judge_reward: 0.0
+      refuse_categories:
+        - Weaponisation
+        - Jailbreak
+        - Dangerous Substances
+        - Regulated Substances
+      domain: safety
+      verified: false
+      description: CBRNE safety benchmark with category-aware reward (refuse dangerous, answer benign)
+      value: Improve safety-related refusal behavior on CBRNE threats while reducing over-refusal on benign prompts
+judge_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: ${judge_base_url}
+      api_key: ${judge_api_key}
+      model: ${judge_model_name}
+      return_token_id_information: false
+      uses_reasoning_parser: false
+cbrne_benchmark_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: cbrne_benchmark
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        license: "NVIDIA Internal Use Only, Do Not Distribute"
+        jsonl_fpath: resources_servers/cbrne_benchmark/data/example.jsonl
+      - name: validation
+        type: validation
+        license: "NVIDIA Internal Use Only, Do Not Distribute"
+        jsonl_fpath: resources_servers/cbrne_benchmark/data/validation.jsonl
+        gitlab_identifier:
+          dataset_name: cbrne_benchmark
+          version: 0.0.1
+          artifact_fpath: validation.jsonl

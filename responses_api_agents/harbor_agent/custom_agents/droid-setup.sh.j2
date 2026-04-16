@@ -1,0 +1,19 @@
+#!/bin/bash
+
+apt-get update
+apt-get install -y curl xdg-utils procps
+
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.2/install.sh | bash
+
+source "$HOME/.nvm/nvm.sh"
+
+nvm install 22
+npm -v
+
+npm install -g droid@{{ version }}
+
+# Recreate ~/.factory/settings.json from the host config
+mkdir -p "$HOME/.factory"
+if [ -n "$_DROID_SETTINGS_JSON" ]; then
+    echo "$_DROID_SETTINGS_JSON" > "$HOME/.factory/settings.json"
+fi

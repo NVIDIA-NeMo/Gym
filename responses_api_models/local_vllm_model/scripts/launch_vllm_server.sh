@@ -27,11 +27,7 @@ hostname -i
 cd 3rdparty/Gym-workspace/Gym
 source .venv/bin/activate
 
-ng_run "+config_paths=[responses_api_models/local_vllm_model/configs/qwen3_235b_a22b_instruct_2507.yaml]" \
-    ++qwen3_235b_a22b_instruct_2507_model_server.responses_api_models.local_vllm_model.model=Qwen/Qwen3-30B-A3B-Instruct-2507 \
-    ++qwen3_235b_a22b_instruct_2507_model_server.responses_api_models.local_vllm_model.vllm_serve_kwargs.tensor_parallel_size=4 \
-    ++qwen3_235b_a22b_instruct_2507_model_server.responses_api_models.local_vllm_model.vllm_serve_kwargs.data_parallel_size=16 \
-    ++qwen3_235b_a22b_instruct_2507_model_server.responses_api_models.local_vllm_model.vllm_serve_kwargs.data_parallel_size_local=2 \
+ng_run "+config_paths=[responses_api_models/local_vllm_model/configs/openai/gpt-oss-20b-reasoning-high.yaml]" \
     ++use_absolute_ip=true
 
 EOF

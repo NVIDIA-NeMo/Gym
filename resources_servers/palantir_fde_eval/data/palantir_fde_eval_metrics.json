@@ -1,0 +1,42 @@
+{
+    "name": "palantir_fde_eval",
+    "type": "validation",
+    "jsonl_fpath": "resources_servers/palantir_fde_eval/data/palantir_fde_eval.jsonl",
+    "num_repeats": 1,
+    "gitlab_identifier": {
+        "dataset_name": "palantir_fde_eval",
+        "version": "0.0.1",
+        "artifact_fpath": "full_315_with_tools.jsonl"
+    },
+    "huggingface_identifier": null,
+    "license": "Apache 2.0",
+    "Number of examples": 315,
+    "Number of tools": {
+        "Total # non-null values": 315,
+        "Average": 105.0,
+        "Min": 105.0,
+        "Max": 105.0,
+        "Standard deviation": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 315,
+        "Average": 51410.7,
+        "Min": 50660.0,
+        "Max": 52665.0,
+        "Standard deviation": 488.22
+    },
+    "Number of turns": {
+        "Total # non-null values": 315,
+        "Average": 4.79,
+        "Min": 2.0,
+        "Max": 10.0,
+        "Standard deviation": 2.3
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    }
+}

@@ -1,0 +1,65 @@
+perplexity_summarizer_resources_server:
+  resources_servers:
+    perplexity_summarizer:
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: Search-augmented QA with reward model judge
+      value: Improve search-augmented QA across multiple evaluation dimensions
+      perplexity_api_key: ${perplexity_api_key}
+      search_max_concurrency: 20
+      search_rate_limit_qps: 45
+      max_search_results: 10
+      max_tokens_per_page: 500
+      judge_type: reward_model
+      judge_model_server:
+        type: responses_api_models
+        name: perplexity_summarizer_judge_model
+      judge_responses_create_params:
+        input: []
+        temperature: 0.6
+        top_p: 0.95
+        max_output_tokens: 8192
+        reasoning:
+          effort: medium
+      judge_endpoint_max_concurrency: 64
+
+perplexity_summarizer_judge_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: ${judge_base_url}
+      api_key: ${judge_api_key}
+      model: ${judge_model_name}
+      return_token_id_information: false
+      uses_reasoning_parser: true
+
+perplexity_summarizer:
+  responses_api_agents:
+    perplexity_summarizer_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: perplexity_summarizer_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      max_tool_calls: 0
+      bad_words:
+      - "<tool_call>"
+      - "</tool_call>"
+      temperature: 0.6
+      top_p: 1.0
+      max_output_tokens: 8192
+      datasets:
+      - name: perplexity_search
+        type: validation
+        jsonl_fpath: resources_servers/perplexity_summarizer/data/perplexity_search.jsonl
+        gitlab_identifier:
+          dataset_name: perplexity_search
+          version: 0.0.4
+          artifact_fpath: perplexity_search.jsonl
+        license: "NVIDIA Internal Use Only, Do Not Distribute"
+      - name: perplexity_search_example
+        type: example
+        jsonl_fpath: resources_servers/perplexity_summarizer/data/perplexity_search_example.jsonl

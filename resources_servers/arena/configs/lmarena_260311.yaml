@@ -1,0 +1,83 @@
+lmarena_260311:
+  resources_servers:
+    arena:
+      entrypoint: app.py
+      judge_model_server:
+        type: responses_api_models
+        name: judge_model
+      judge_responses_create_params:
+        input: []
+        max_output_tokens: 65536
+        temperature: 0.0
+      domain: rlhf
+      verified: false
+      description: "lmarena-260311 pairwise chat evaluation benchmark v0.2 (1,475 multi-lingual questions)"
+      value: Measure general chat quality via win rate against the baseline model
+      judge_prompt_template: "<|Conversation History|>\n{question}\n\n<|The Start of Assistant A's Answer|>\n{answer_a}\n<|The End of Assistant A's Answer|>\n\n<|The Start of Assistant B's Answer|>\n{answer_b}\n<|The End of Assistant B's Answer|>"
+      judge_system_message: |-
+        Please act as an impartial judge and evaluate the quality of the responses provided by two AI assistants to the user conversation displayed below. You will be given assistant A's answer and assistant B's answer. Your job is to evaluate which assistant's answer is better.
+
+        Begin your evaluation by generating your own last answer to the conversation. You must provide your answers before judging any answers.
+
+        When evaluating the assistants' answers, compare both assistants' answers with your answer. You must identify and correct any mistakes or inaccurate information.
+
+        Then consider if the assistant's answers are helpful, relevant, and concise. Helpful means the answer correctly responds to the prompt or follows the instructions. Note when user prompt has any ambiguity or more than one interpretation, it is more helpful and appropriate to ask for clarifications or more information from the user than providing an answer based on assumptions. Relevant means all parts of the response closely connect or are appropriate to what is being asked. Concise means the response is clear and not verbose or excessive.
+
+        Then consider the creativity and novelty of the assistant's answers when needed. Finally, identify any missing important information in the assistants' answers that would be beneficial to include when responding to the user prompt.
+
+        If neither assistant's answer adequately addresses the user prompt, you should judge both as bad rather than selecting a winner.
+
+        After providing your explanation, you must output only one of the following choices as your final verdict with a label:
+
+        1. Assistant A is significantly better: [[A>>B]]
+        2. Assistant A is slightly better: [[A>B]]
+        3. Tie, relatively the same: [[A=B]]
+        4. Assistant B is slightly better: [[B>A]]
+        5. Assistant B is significantly better: [[B>>A]]
+        6. Both assistant answers are bad: [[BB]]
+
+        Example output: "My final verdict is tie: [[A=B]]".
+      # Style normalization constants and BT coefficients pre-computed from
+      # scripts/precompute_style_constants.py with gemini-3.1-pro-preview judge.
+      # Baselines: baseline
+      # Feature dims: [token_len_diff, header_density_diff, list_density_diff, bold_density_diff]
+      style_control: true
+      style_norm_mean:
+        "default": [0.141031, -0.000312667, -0.00275801, -0.00129546]
+      style_norm_std:
+        "default": [0.315443, 0.00331336, 0.0122289, 0.0120024]
+      style_coefs:
+        "default": [0.313903, -0.0458032, -0.0310524, 0.0499534]
+
+lmarena_260311_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: lmarena_260311
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: validation
+        type: validation
+        jsonl_fpath: resources_servers/arena/data/lmarena_260311/lmarena_260311_validation.jsonl
+        gitlab_identifier:
+          dataset_name: lmarena_260311
+          version: 0.0.2
+          artifact_fpath: lmarena_260311_validation.jsonl
+        license: TBD
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/arena/data/lmarena_260311/example.jsonl
+
+judge_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: https://inference-api.nvidia.com/v1
+      api_key: sk-***
+      model: gcp/google/gemini-3.1-pro-preview
+      return_token_id_information: false
+      uses_reasoning_parser: false
