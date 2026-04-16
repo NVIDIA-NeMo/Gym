@@ -510,7 +510,7 @@ Found global config dict yaml:
                 # The ray extra [default] should also exactly match the extra in the top-level Gym pyproject.toml.
                 f"ray[default]=={ray_version}",
                 # OpenAI version is also sensitive since it changes so often and may introduce subtle incompatibilities.
-                f"'openai<={openai_version}'",
+                f"openai<={openai_version}",
             ]
 
             # Constrain python version since ray is sensitive to this.

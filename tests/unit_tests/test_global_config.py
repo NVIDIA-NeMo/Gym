@@ -54,7 +54,7 @@ class TestGlobalConfig:
             "port_range_low": 10_001,
             "port_range_high": 20_000,
             # From self._mock_versions_for_testing
-            "head_server_deps": ["ray[default]==test ray version", "openai==test openai version"],
+            "head_server_deps": ["ray[default]==test ray version", "openai<=test openai version"],
             "python_version": "test python version",
             "skip_venv_if_present": False,
             "dry_run": False,
