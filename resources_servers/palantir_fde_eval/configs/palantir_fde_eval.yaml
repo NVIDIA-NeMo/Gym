@@ -1,0 +1,46 @@
+palantir_fde_eval:
+  resources_servers:
+    palantir_fde_eval:
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      judge_model_server:
+        type: responses_api_models
+        name: judge_model
+      judge_responses_create_params:
+        input: []
+      judge_prompt_template_fpath: prompt_templates/tool_call_judge.txt
+      tool_schemas_fpath: data/tool_definitions.json
+      # judge_endpoint_max_concurrency: ${pltr_judge_concurrency}  # defaults to 64 in app.py
+judge_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: ${pltr_judge_base_url}
+      api_key: ${pltr_judge_api_key}
+      model: ${pltr_judge_model_name}
+      return_token_id_information: false
+      uses_reasoning_parser: false
+palantir_fde_eval_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      max_steps: 1
+      resources_server:
+        type: resources_servers
+        name: palantir_fde_eval
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/palantir_fde_eval/data/example.jsonl
+      - name: palantir_fde_eval
+        type: validation
+        jsonl_fpath: resources_servers/palantir_fde_eval/data/palantir_fde_eval.jsonl
+        gitlab_identifier:
+          dataset_name: palantir_fde_eval
+          version: 0.0.1
+          artifact_fpath: full_315_with_tools.jsonl
+        license: Apache 2.0
