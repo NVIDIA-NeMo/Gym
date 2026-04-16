@@ -68,18 +68,24 @@ After the single-tool-call rule passes:
    - verifier default threshold otherwise
 7. record the similarity score as verifier metadata
 
+If the actual `code` key is absent entirely, schema validation fails before this
+tool-specific comparator runs. If either side's `code` value is blank or not a
+string, this rule fails as an argument-value mismatch.
+
 ### `return_result`
 
 After the single-tool-call rule passes:
 
 1. parse the actual argument object
-2. actual `result` must be present
-3. serialize both expected and actual `result` values to canonical JSON:
+2. serialize both expected and actual `result` values to canonical JSON:
    - `json.dumps(value, sort_keys=True)`
-4. compute string similarity:
+3. compute string similarity:
    - `difflib.SequenceMatcher(None, expected_json, actual_json).ratio()`
-5. the `result` field matches only if that similarity score is at or above threshold
-6. record the similarity score as verifier metadata
+4. the `result` field matches only if that similarity score is at or above threshold
+5. record the similarity score as verifier metadata
+
+If the actual `result` key is absent entirely, schema validation fails before
+this tool-specific comparator runs.
 
 ## 6. String Similarity Policy
 

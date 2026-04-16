@@ -775,16 +775,12 @@ class TestActionComparator:
             expected_action=FunctionCallAction(
                 type="function_call",
                 name="grep",
-                arguments=json.dumps(
-                    {"pattern": "TODO", "path": "/repo", "include": "*.py"}
-                ),
+                arguments=json.dumps({"pattern": "TODO", "path": "/repo", "include": "*.py"}),
             ),
             actual_action=FunctionCallAction(
                 type="function_call",
                 name="grep",
-                arguments=json.dumps(
-                    {"pattern": "TODO", "path": "/repo", "include": "*.js"}
-                ),
+                arguments=json.dumps({"pattern": "TODO", "path": "/repo", "include": "*.js"}),
             ),
             declared_tools=declared_tools,
             harness="opencode",
@@ -801,16 +797,12 @@ class TestActionComparator:
             expected_action=FunctionCallAction(
                 type="function_call",
                 name="webfetch",
-                arguments=json.dumps(
-                    {"url": "https://example.com", "format": "markdown", "timeout": 10}
-                ),
+                arguments=json.dumps({"url": "https://example.com", "format": "markdown", "timeout": 10}),
             ),
             actual_action=FunctionCallAction(
                 type="function_call",
                 name="webfetch",
-                arguments=json.dumps(
-                    {"url": "https://example.com", "format": "markdown", "timeout": 30}
-                ),
+                arguments=json.dumps({"url": "https://example.com", "format": "markdown", "timeout": 30}),
             ),
             declared_tools=declared_tools,
             harness="opencode",
@@ -923,7 +915,7 @@ class TestActionComparator:
         assert comparison_result.category == StepRewardCategory.EXPECTED_TOOL_CALL
         assert comparison_result.similarity_score == approx(1.0)
 
-    def test_compare_agent006_execute_python_rejects_missing_code(
+    def test_compare_agent006_execute_python_rejects_blank_code(
         self,
         action_comparator: ActionComparator,
         declared_tools: list[dict],
@@ -943,7 +935,7 @@ class TestActionComparator:
             harness="agent006",
         )
         assert comparison_result.matches is False
-        assert comparison_result.category == StepRewardCategory.EXECUTE_PYTHON_MISSING_CODE
+        assert comparison_result.category == StepRewardCategory.ARGUMENT_VALUE_MISMATCH
 
     def test_compare_agent006_return_result_uses_canonical_json_similarity(
         self,

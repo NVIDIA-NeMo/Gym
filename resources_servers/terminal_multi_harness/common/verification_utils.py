@@ -63,14 +63,8 @@ class StepRewardCategory(StrEnum):
     BASH_MISSING_COMMAND = "The bash tool call does not contain a command argument"
     BASH_COMMAND_SIMILARITY_BELOW_THRESHOLD = "The bash command similarity is below threshold"
     UPDATE_PLAN_EMPTY_PLAN = "The update_plan tool call does not contain a non-empty plan argument"
-    EXECUTE_PYTHON_MISSING_CODE = "The execute_python tool call does not contain a code argument"
-    EXECUTE_PYTHON_CODE_SIMILARITY_BELOW_THRESHOLD = (
-        "The execute_python code similarity is below threshold"
-    )
-    RETURN_RESULT_MISSING_RESULT = "The return_result tool call does not contain a result argument"
-    RETURN_RESULT_SIMILARITY_BELOW_THRESHOLD = (
-        "The return_result result similarity is below threshold"
-    )
+    EXECUTE_PYTHON_CODE_SIMILARITY_BELOW_THRESHOLD = "The execute_python code similarity is below threshold"
+    RETURN_RESULT_SIMILARITY_BELOW_THRESHOLD = "The return_result result similarity is below threshold"
     TODOWRITE_EMPTY_TODOS = "The todowrite tool call does not contain a non-empty todos list"
     EXPECTED_TOOL_CALL = "A tool call that matches the expected tool call was found"
     EXPECTED_TOOL_CALL_BATCH = "A tool-call batch that matches the expected batch was found"
@@ -303,14 +297,14 @@ class ActionComparator(BaseModel):
         if not isinstance(actual_code, str) or not actual_code.strip():
             return ActionComparisonResult(
                 matches=False,
-                category=StepRewardCategory.EXECUTE_PYTHON_MISSING_CODE,
+                category=StepRewardCategory.ARGUMENT_VALUE_MISMATCH,
             )
 
         expected_code = expected_arguments.get("code")
         if not isinstance(expected_code, str) or not expected_code.strip():
             return ActionComparisonResult(
                 matches=False,
-                category=StepRewardCategory.EXECUTE_PYTHON_MISSING_CODE,
+                category=StepRewardCategory.ARGUMENT_VALUE_MISMATCH,
             )
 
         similarity_score = SequenceMatcher(None, expected_code, actual_code).ratio()
@@ -334,12 +328,6 @@ class ActionComparator(BaseModel):
         actual_arguments: dict[str, Any],
         threshold_override: float | None = None,
     ) -> ActionComparisonResult:
-        if "result" not in actual_arguments:
-            return ActionComparisonResult(
-                matches=False,
-                category=StepRewardCategory.RETURN_RESULT_MISSING_RESULT,
-            )
-
         expected_result = expected_arguments.get("result")
         actual_result = actual_arguments.get("result")
         expected_serialized = json.dumps(expected_result, sort_keys=True, default=str)
@@ -747,6 +735,7 @@ class ActionComparator(BaseModel):
         if isinstance(value, (list, dict, tuple, set)):
             return bool(value)
         return True
+
 
 class DecodedArgumentsResult(BaseModel):
     arguments: dict[str, Any] | None = None
