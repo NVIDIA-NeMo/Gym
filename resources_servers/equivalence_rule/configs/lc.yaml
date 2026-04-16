@@ -1,11 +1,14 @@
-# grading_rule options: seq_match, weighted_seq_match (default), exact
+# grading_rule options: seq_match, weighted_seq_match, exact (default)
 lc_equivalence_rule:
   resources_servers:
     equivalence_rule:
       entrypoint: app.py
+      grading_rule: exact
       domain: knowledge
       verified: false
-      grading_rule: weighted_seq_match
+      description: Question - Answering with rule-based reward
+      value: Improve retrieval and counting capabilities
+      
 lc_equivalence_rule_simple_agent:
   responses_api_agents:
     simple_agent:
@@ -17,7 +20,6 @@ lc_equivalence_rule_simple_agent:
         type: responses_api_models
         name: policy_model
       datasets:
-      - name: mrcr
-        type: validation
-        license: TBD
-        jsonl_fpath: ../../../nano_v3/data/mrcr/processed/processed_p67_sampled_10pct_shuf_rl_fmt.val.jsonl
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/equivalence_rule/data/example.jsonl
