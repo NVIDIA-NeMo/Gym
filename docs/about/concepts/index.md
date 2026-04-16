@@ -65,6 +65,7 @@ Essential vocabulary for agent training, RL workflows, and NeMo Gym.
 :maxdepth: 1
 
 Training Approaches <training-approaches>
+What is Data? <what-is-data>
 Environment Components <core-components>
 Configuration System <configuration>
 Architecture <architecture>
