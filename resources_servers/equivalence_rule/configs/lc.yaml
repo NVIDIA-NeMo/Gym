@@ -7,6 +7,7 @@ lc_equivalence_rule:
       domain: knowledge
       verified: false
       description: Question - Answering with rule-based reward
+      value: Improve retrieval and counting capabilities
       
 lc_equivalence_rule_simple_agent:
   responses_api_agents:
