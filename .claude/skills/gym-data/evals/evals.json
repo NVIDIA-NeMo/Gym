@@ -1,0 +1,44 @@
+{
+  "skill_name": "gym-data",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Validate the tool-calling dataset at evals/files/sample_tool_calling.jsonl for a search+calculation benchmark.",
+      "expected_output": "Validation confirming the JSONL schema is correct: tools array, function definitions, verifier_metadata with expected tool/args. Notes on parallel_tool_calls.",
+      "files": ["evals/files/sample_tool_calling.jsonl"],
+      "assertions": [
+        "responses_create_params.tools array validated with function definitions",
+        "Each tool has type 'function' with name, description, parameters",
+        "verifier_metadata specifies expected tool and arguments",
+        "The data is confirmed as valid for tool-calling benchmarks",
+        "Response notes that parallel_tool_calls should be set if multiple tools can be called"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Check evals/files/sample_bad_data.jsonl for data quality issues before I upload it.",
+      "expected_output": "Report identifying 3 issues: missing verifier_metadata on line 1, data leakage on line 2, missing responses_create_params.input on line 3.",
+      "files": ["evals/files/sample_bad_data.jsonl"],
+      "assertions": [
+        "Missing verifier_metadata on line 1 is flagged",
+        "Data leakage on line 2 is identified (expected answer '42' appears in system prompt)",
+        "Missing responses_create_params.input on line 3 is flagged",
+        "Response recommends fixing all 3 issues before upload",
+        "Response explains why data leakage undermines training signal"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "Generate 5 example entries for a SQL benchmark based on the schema in evals/files/sample_sql_benchmark.jsonl.",
+      "expected_output": "5 JSONL entries following the same schema: system prompt for SQL, user question, verifier_metadata with db_id, gold_sql, question, ignore_order.",
+      "files": ["evals/files/sample_sql_benchmark.jsonl"],
+      "assertions": [
+        "Generated entries follow the same schema as the sample",
+        "verifier_metadata contains db_id, gold_sql, question",
+        "ignore_order field is present",
+        "System prompt instructs model to output SQL",
+        "Exactly 5 entries are generated"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,44 @@
+{
+  "skill_name": "gym-scaffold-agent",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Review the multi-turn correction agent at evals/files/sample_correction_agent.py. It gives models 3 attempts to solve problems.",
+      "expected_output": "Review identifying missing cookie propagation and token ID accumulation, while noting the agent structure is otherwise correct.",
+      "files": ["evals/files/sample_correction_agent.py"],
+      "assertions": [
+        "Missing cookie propagation identified (no cookies=request.cookies on downstream calls)",
+        "Missing token ID accumulation identified (prompt_token_ids, generation_token_ids not collected across turns)",
+        "The fix for cookies references passing cookies=request.cookies and updating from each response",
+        "The fix for token IDs mentions accumulating across all turns and attaching to final response",
+        "Response notes the agent structure (loop, error feedback, think-strip, semaphore) is otherwise correct"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Review the external library wrapper at evals/files/sample_library_wrapper.py. It wraps a 3rd-party benchmark.",
+      "expected_output": "Review identifying httpx usage and missing Semaphore, while confirming pre/post-processing is correct.",
+      "files": ["evals/files/sample_library_wrapper.py"],
+      "assertions": [
+        "httpx usage identified as BLOCK issue",
+        "aiohttp adapter pattern recommended as replacement",
+        "Missing Semaphore for concurrent library calls identified",
+        "The fix references the AIOHTTPClient adapter pattern",
+        "Response notes pre/post-processing logic is correct"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "Review the tool-call loop agent at evals/files/sample_tool_loop_agent.py for correctness.",
+      "expected_output": "Clean review confirming all patterns are correct: cookies, tokens, bounds, semaphore.",
+      "files": ["evals/files/sample_tool_loop_agent.py"],
+      "assertions": [
+        "Cookie propagation confirmed as correct",
+        "Token ID accumulation confirmed as correct",
+        "Max iteration bound confirmed as present",
+        "Semaphore usage confirmed",
+        "Response confirms the agent is ready for use (no BLOCK findings)"
+      ]
+    }
+  ]
+}
