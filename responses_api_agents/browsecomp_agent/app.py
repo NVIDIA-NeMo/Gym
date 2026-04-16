@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+import re
 from typing import List
 
 from fastapi import Request, Response
@@ -142,7 +143,10 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
 
             # --- If the model decided to answer (no tool calls), we are done ---
             all_fn_calls: List[NeMoGymResponseFunctionToolCall] = [o for o in output if o.type == "function_call"]
-            if not all_fn_calls:
+            all_output_messages: List[NeMoGymResponseOutputMessage] = [
+                o for o in output if o.type == "message" and o.role == "assistant"
+            ]
+            if not all_fn_calls and all_output_messages:
                 break
 
             # --- Execute tool calls ---
@@ -241,6 +245,13 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             await raise_for_status(response)
             cookies = response.cookies
 
+            # Retry if the model only produced <think> content with no final answer.
+            response_json = await get_response_json(response)
+            raw_output_text = NeMoGymResponse.model_validate(response_json).output_text
+            cleaned_output_text = re.sub(r"<think>.*?</think>", "", raw_output_text, flags=re.DOTALL).strip()
+            if not cleaned_output_text:
+                continue
+
             verify_request = BrowsecompAgentVerifyRequest.model_validate(
                 body.model_dump() | {"response": await get_response_json(response)}
             )
@@ -256,8 +267,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             last_verify_response = BrowsecompAgentVerifyResponse.model_validate(
                 await get_response_json(verify_response)
             )
-            if last_verify_response.extracted_final_answer not in (None, "None"):
-                break
+            break
 
         return last_verify_response
 
