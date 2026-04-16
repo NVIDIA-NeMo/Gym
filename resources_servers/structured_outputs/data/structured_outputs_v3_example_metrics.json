@@ -1,0 +1,69 @@
+{
+    "name": "example",
+    "type": "example",
+    "jsonl_fpath": "resources_servers/structured_outputs/data/structured_outputs_v3_example.jsonl",
+    "num_repeats": 1,
+    "gitlab_identifier": null,
+    "huggingface_identifier": null,
+    "license": null,
+    "Number of examples": 5,
+    "Number of tools": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 5,
+        "Average": 2521.4,
+        "Min": 334.0,
+        "Max": 5408.0,
+        "Standard deviation": 2192.3
+    },
+    "Number of turns": {
+        "Total # non-null values": 5,
+        "Average": 3.6,
+        "Min": 1.0,
+        "Max": 5.0,
+        "Standard deviation": 1.95
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "schema_str": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "schema_type": {
+        "unique_count": 4,
+        "total_count": 5
+    },
+    "problem_type": {
+        "unique_count": 3,
+        "total_count": 5
+    },
+    "schema_repr": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "source_format": {
+        "unique_count": 2,
+        "total_count": 2
+    },
+    "num_turns": {
+        "Total # non-null values": 5,
+        "Average": 3.6,
+        "Min": 1.0,
+        "Max": 5.0,
+        "Standard deviation": 1.95
+    },
+    "source_record_id": {
+        "unique_count": 5,
+        "total_count": 5
+    }
+}
