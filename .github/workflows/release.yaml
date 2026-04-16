@@ -57,9 +57,9 @@ jobs:
       release-ref: ${{ inputs.release-ref || github.sha }}
       python-package: nemo_gym
       library-name: NeMo-Gym
-      dry-run: ${{ inputs.dry-run || false }}
+      dry-run: ${{ inputs.dry-run }}
       version-bump-branch: ${{ inputs.version-bump-branch || github.ref_name }}
-      create-gh-release: ${{ inputs.create-gh-release || true }}
+      create-gh-release: ${{ inputs.create-gh-release }}
       packaging: uv
       skip-test-wheel: true
       app-id: ${{ vars.BOT_ID }}
