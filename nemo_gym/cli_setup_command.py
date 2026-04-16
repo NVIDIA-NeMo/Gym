@@ -101,7 +101,7 @@ def _get_nemo_gym_version_spec(is_editable_install: bool) -> str:
 
 
 def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: str) -> str:
-    head_server_deps = [f"'{dep}'" for dep in global_config_dict[HEAD_SERVER_DEPS_KEY_NAME]]
+    head_server_deps = global_config_dict[HEAD_SERVER_DEPS_KEY_NAME]
 
     root_venv_path = global_config_dict[UV_VENV_DIR_KEY_NAME]
     if Path(root_venv_path).resolve() != PARENT_DIR.resolve():
@@ -147,7 +147,7 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
                 version_spec = _get_nemo_gym_version_spec(is_editable_install)
                 install_cmd = (
                     f"""uv pip install {verbose_flag}{uv_pip_python_flag}{install_flags}nemo-gym{version_spec} && """
-                    f"""uv pip install {verbose_flag}{uv_pip_python_flag}--no-sources '-e .' {" ".join(head_server_deps)}"""
+                    f"""uv pip install {verbose_flag}{uv_pip_python_flag}{install_flags}--no-sources '-e .' {" ".join(head_server_deps)}"""
                 )
         elif has_requirements_txt:
             if is_editable_install:
