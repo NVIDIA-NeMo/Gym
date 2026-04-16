@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from app import (
     NSToolsConfig,
@@ -54,6 +54,30 @@ class TestApp:
         assert len(server.config.verifiers) == 1
         assert "math_with_judge" in server.config.verifiers
         assert server.config.default_verifier == "math_with_judge"
+
+    def test_tool_sidecar_detection(self) -> None:
+        """Legacy HTTP PythonTool variants require a sidecar; direct tools do not."""
+
+        class PythonTool:
+            def default_config(self):
+                return {"client_params": {"base_url": "http://127.0.0.1:8765/mcp"}}
+
+        class DirectPythonTool:
+            def default_config(self):
+                return {"sandbox": {}}
+
+        server = NSToolsResourcesServer(
+            config=NSToolsConfig(host="0.0.0.0", port=8080, entrypoint="", name="ns_tools"),
+            server_client=MagicMock(spec=ServerClient),
+        )
+
+        with patch("app.locate", return_value=PythonTool):
+            assert server._tool_uses_python_tool_sidecar("legacy.python_tool.PythonTool") is True
+
+        with patch("app.locate", return_value=DirectPythonTool):
+            assert (
+                server._tool_uses_python_tool_sidecar("nemo_skills.mcp.servers.python_tool::DirectPythonTool") is False
+            )
 
     async def test_verify_delegates_to_math_with_judge(self) -> None:
         """Test that verification is delegated to math_with_judge verifier."""

@@ -290,6 +290,7 @@ Ecosystem <about/ecosystem>
 
 Quickstart <get-started/index>
 Detailed Setup Guide <get-started/detailed-setup.md>
+Install from PyPI <get-started/pypi-install>
 Rollout Collection <get-started/rollout-collection.md>
 ```
 

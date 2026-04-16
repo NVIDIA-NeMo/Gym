@@ -12,7 +12,7 @@ cvdp:
       description: CVDP benchmark dataset for code generation
       value: Evaluate RTL code generation capabilities
 
-cvdp_simple_agent:
+cvdp_agent:
   responses_api_agents:
     cvdp_agent:
       entrypoint: app.py

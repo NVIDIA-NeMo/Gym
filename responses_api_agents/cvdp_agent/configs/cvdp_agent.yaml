@@ -1,4 +1,4 @@
-cvdp_simple_agent:
+cvdp_agent:
   responses_api_agents:
     cvdp_agent:
       entrypoint: app.py
