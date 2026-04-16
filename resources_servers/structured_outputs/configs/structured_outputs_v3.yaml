@@ -1,0 +1,30 @@
+structured_outputs:
+  resources_servers:
+    structured_outputs:
+      entrypoint: app.py
+      domain: instruction_following
+      verified: false
+      description: Check if responses follow structured output requirements (JSON, YAML, XML, TOML, CSV). Created 20260409.
+      value: Improve schema adherence across all structured output formats
+structured_outputs_v3_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: structured_outputs
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: train
+        type: train
+        jsonl_fpath: resources_servers/structured_outputs/data/ds1_augmented_train.jsonl
+        gitlab_identifier:
+          dataset_name: structured_outputs_v3_augmented
+          version: 0.0.1
+          artifact_fpath: ds1_augmented_train.jsonl
+        license: Apache 2.0
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/structured_outputs/data/structured_outputs_v3_example.jsonl
