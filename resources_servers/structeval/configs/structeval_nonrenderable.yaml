@@ -20,7 +20,11 @@ structeval_nonrenderable_simple_agent:
       - name: train
         type: train
         jsonl_fpath: resources_servers/structeval/data/structeval_nonrenderable_train.jsonl
+        gitlab_identifier:
+          dataset_name: structeval_nonrenderable
+          version: 0.0.1
+          artifact_fpath: structeval_nonrenderable_train.jsonl
         license: Apache 2.0
       - name: example
         type: example
-        jsonl_fpath: resources_servers/structeval/data/structeval_nonrenderable_example.jsonl
+        jsonl_fpath: resources_servers/structeval/data/example.jsonl
