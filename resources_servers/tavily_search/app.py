@@ -12,7 +12,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import asyncio
 import json
 import re
 from asyncio import sleep
@@ -27,7 +26,6 @@ from fastapi import FastAPI, Request
 from httpx import AsyncClient
 from pydantic import BaseModel, Field, PrivateAttr, model_validator
 from tavily import AsyncTavilyClient
-from tavily.errors import BadRequestError
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -58,70 +56,31 @@ class TavilySearchResourcesServerConfig(BaseResourcesServerConfig):
 
 
 class TavilySearchRequest(BaseModel):
-    queries: Optional[List[str]] = None  # Make optional to handle missing args gracefully
-    max_total_length: int = 30000
-
-    @model_validator(mode="before")
-    @classmethod
-    def coerce_queries(cls, data: Any) -> Any:
-        if not isinstance(data, dict):
-            return data
-        queries = data.get("queries")
-        if queries is None:
-            return data
-
-        # Case 1: JSON-encoded string → parse it
-        if isinstance(queries, str):
-            try:
-                queries = json.loads(queries)
-            except (json.JSONDecodeError, ValueError):
-                queries = [queries]
-
-        # Case 2: nested list e.g. [["q1", "q2"]] → flatten one level
-        if isinstance(queries, list) and queries and isinstance(queries[0], list):
-            queries = [q for sublist in queries for q in sublist if isinstance(q, str)]
-
-        data = dict(data)
-        data["queries"] = queries
-        return data
+    query: Optional[str] = None  # Make optional to handle missing args gracefully
 
 
 class TavilySearchResponse(BaseModel):
     results_string: str
 
 
-class BrowseRequest(BaseModel):
-    urls: List[str]
-    goal: Optional[str] = None
-    max_total_length: int = 30000
-
-    @model_validator(mode="before")
-    @classmethod
-    def coerce_urls(cls, data: Any) -> Any:
-        if not isinstance(data, dict):
-            return data
-        urls = data.get("querurlsies")
-        if urls is None:
-            return data
-
-        # Case 1: JSON-encoded string → parse it
-        if isinstance(urls, str):
-            try:
-                urls = json.loads(urls)
-            except (json.JSONDecodeError, ValueError):
-                urls = [urls]
-
-        # Case 2: nested list e.g. [["q1", "q2"]] → flatten one level
-        if isinstance(urls, list) and urls and isinstance(urls[0], list):
-            urls = [q for sublist in urls for q in sublist if isinstance(q, str)]
-
-        data = dict(data)
-        data["urls"] = urls
-        return data
+class FindInPageRequest(BaseModel):
+    url: Optional[str] = None
+    query: Optional[str] = None
 
 
-class BrowseResponse(BaseModel):
+class FindInPageResponse(BaseModel):
     results_string: str
+
+
+class ScrollPageRequest(BaseModel):
+    url: Optional[str] = None
+    start_index: int = 0
+    n: int = 2000
+
+
+class ScrollPageResponse(BaseModel):
+    results_string: str
+    total_words: int
 
 
 class TavilySearchRunRequest(BaseRunRequest):
@@ -231,14 +190,14 @@ class TavilySearchAIOHTTPClient(BaseModel):
 
 class TavilySearchResourcesServer(SimpleResourcesServer):
     config: TavilySearchResourcesServerConfig
-    MAX_RESULTS: int = 5
+    MAX_RESULTS: int = 10
+    MAX_RESULT_CHARS: int = 2000
 
     _async_tavily_clients: Optional[List[AsyncTavilyClient]] = PrivateAttr(default=None)
     _num_requests: int = 0
     _session_id_to_metrics: Optional[Dict[str, TavilySearchMetrics]] = PrivateAttr(default=None)
 
     JUDGE_PROMPT_TEMPLATE: ClassVar[str] = JUDGE_PROMPT_TEMPLATE
-    JUDGE_MAX_ATTEMPTS: int = 10
 
     def model_post_init(self, __context) -> None:
         tavily_api_keys = self.config.tavily_api_key
@@ -262,8 +221,9 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
 
-        app.post("/search")(self.search)
-        app.post("/browse")(self.browse)
+        app.post("/web_search")(self.web_search)
+        app.post("/find_in_page")(self.find_in_page)
+        app.post("/scroll_page")(self.scroll_page)
 
         main_app_lifespan = app.router.lifespan_context
 
@@ -289,103 +249,151 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         self._num_requests += 1
         return client
 
-    async def _search_one(self, query: str, max_length: int) -> str:
-        if len(query) > 400:
-            return "Query is too long"
-
-        client = self._select_tavily_client()
-        try:
-            results = await client.search(
-                query,
-                max_results=self.MAX_RESULTS,
-                exclude_domains=self._exclude_domains,
-                search_depth="advanced",
-                include_raw_content=True,
-            )
-        except BadRequestError as e:
-            return f"Search failed: {e}"
-
-        postprocessed_results = self._postprocess_search_results(query, results, max_length)
-        return postprocessed_results
-
-    async def search(self, request: Request, body: TavilySearchRequest) -> TavilySearchResponse:
+    async def web_search(self, request: Request, body: TavilySearchRequest) -> TavilySearchResponse:
         metrics = self._session_id_to_metrics[request.session[SESSION_ID_KEY]]
 
         if self.config.debug:
-            print("\n\n body.queries: ", body.queries)
+            print("\n\n body.query: ", body.query)
+        if body.query is None:
+            return TavilySearchResponse(results_string="Query is none")
 
-        if body.queries is None or len(body.queries) == 0:
-            return TavilySearchResponse(results_string="Query is none or empty")
+        if len(body.query) > 400:
+            return TavilySearchResponse(results_string="Query is too long")
 
-        # set max length per query
-        max_per_query_length = body.max_total_length // len(body.queries)
-
-        # search for queries
+        async_tavily_client = self._select_tavily_client()
         start_time = time()
-        results = await asyncio.gather(*[self._search_one(q, max_per_query_length) for q in body.queries])
+        results = await async_tavily_client.search(
+            body.query,
+            max_results=self.MAX_RESULTS,
+            exclude_domains=self._exclude_domains,
+            search_depth="advanced",
+        )
         metrics.async_tavily_calls.append(
             TavilySearchSingleAsyncTavilyMetrics(
                 function="search", status="success", start_time=start_time, end_time=time()
             )
         )
 
-        # concat results
-        postprocessed_results = "\n\n".join(results)
-        return TavilySearchResponse(results_string=postprocessed_results)
+        postprocessed_results = self._postprocess_search_results(results)
+        return TavilySearchResponse(results_string="".join(postprocessed_results))
 
-    async def browse(self, request: Request, body: BrowseRequest) -> BrowseResponse:
+    async def find_in_page(self, request: Request, body: FindInPageRequest) -> FindInPageResponse:
         metrics = self._session_id_to_metrics[request.session[SESSION_ID_KEY]]
 
         if self.config.debug:
-            print("\n\n browse urls: ", body.urls)
-            print(f"goal={body.goal}")
+            print("\n\n find_in_page ")
+            print(f"url={body.url}, query={body.query}")
 
-        urls = [u for u in body.urls if not self._is_url_excluded(u)]
-        if not urls:
-            return BrowseResponse(results_string="Error: no URLs provided.")
-        urls = urls[:5]
+        if body.url is None:
+            return FindInPageResponse(results_string="URL is none")
+        if body.query is None:
+            return FindInPageResponse(results_string="Query is none")
 
-        # set max length per url
-        max_per_url_length = body.max_total_length // len(urls)
+        if self._is_url_excluded(body.url):
+            return FindInPageResponse(results_string="URL is in excluded domains")
 
-        # search for urls
         async_tavily_client = self._select_tavily_client()
         start_time = time()
-        try:
+        results = await async_tavily_client.extract(
+            urls=body.url,
+            query=body.query,
+        )
+        metrics.async_tavily_calls.append(
+            TavilySearchSingleAsyncTavilyMetrics(
+                function="extract", status="success", start_time=start_time, end_time=time()
+            )
+        )
+
+        # Extract raw_content from the first successful result
+        if results.get("results"):
+            raw_content = results["results"][0].get("raw_content", "")
+        else:
+            raw_content = ""
+
+        if not raw_content:
+            return FindInPageResponse(results_string="No content found.")
+
+        # Format: header + clean + truncate + line numbers
+        domain = self._extract_domain(body.url)
+        cleaned = self._clean_text(raw_content)
+        truncated, was_truncated = self._truncate_text(cleaned)
+        numbered = self._add_line_numbers(truncated)
+
+        header = (
+            f"Content from: {domain}\n"
+            f"URL: {body.url}\n"
+            f'Query: "{body.query}"\n'
+            f"========================================\n"
+        )
+        footer = ""
+        if was_truncated:
+            footer = "\n[...truncated, use scroll_page for full content]"
+
+        return FindInPageResponse(results_string=header + numbered + footer)
+
+    async def scroll_page(self, request: Request, body: ScrollPageRequest) -> ScrollPageResponse:
+        metrics = self._session_id_to_metrics[request.session[SESSION_ID_KEY]]
+
+        if self.config.debug:
+            print("\n\n scroll_page ")
+            print(f"url={body.url}, start_index={body.start_index}, n={body.n}")
+
+        if body.url is None:
+            return ScrollPageResponse(results_string="URL is none", total_words=0)
+
+        if self._is_url_excluded(body.url):
+            return ScrollPageResponse(results_string="URL is in excluded domains", total_words=0)
+
+        # Check cache first
+        if body.url in self._page_cache:
+            if self.config.debug:
+                print(f"Cache hit for {body.url}")
+            page_content = self._page_cache[body.url]
+        else:
+            if self.config.debug:
+                print(f"Cache miss for {body.url}, fetching with tavily extract")
+
+            async_tavily_client = self._select_tavily_client()
+            start_time = time()
             results = await async_tavily_client.extract(
-                urls=urls,
-                query=body.goal,  # optional hint to prioritize relevant content
+                urls=body.url,
             )
             metrics.async_tavily_calls.append(
                 TavilySearchSingleAsyncTavilyMetrics(
                     function="extract", status="success", start_time=start_time, end_time=time()
                 )
             )
-        except Exception as e:
-            # return if failed to call api
-            metrics.async_tavily_calls.append(
-                TavilySearchSingleAsyncTavilyMetrics(
-                    function="extract", status="error", start_time=start_time, end_time=time()
-                )
-            )
-            return BrowseResponse(results_string=f"Failed to extract content: {e}")
 
-        # return if no results
-        result_list = results.get("results", [])
-        if not result_list:
-            return BrowseResponse(results_string="No content extracted.")
+            if results.get("results"):
+                page_content = results["results"][0].get("raw_content", "")
+            else:
+                page_content = ""
 
-        # concat results
-        blocks = []
-        for result in result_list:
-            url = result.get("url", "")
-            content = result.get("raw_content", "")
-            if len(content) > max_per_url_length:
-                content = content[:max_per_url_length] + "\n... [truncated]"
-            blocks.append(f"[URL]: {url}\n[Content]:\n{content}\n")
+            # Store in cache
+            self._page_cache[body.url] = page_content
 
-        results_string = "\n\n".join(blocks)
-        return BrowseResponse(results_string=results_string)
+        words = page_content.split()
+        total_words = len(words)
+        sliced_words = words[body.start_index : body.start_index + body.n]
+        chunk_text = " ".join(sliced_words)
+
+        # Format: header + clean + line numbers
+        domain = self._extract_domain(body.url)
+        cleaned = self._clean_text(chunk_text)
+        numbered = self._add_line_numbers(cleaned)
+
+        end_index = min(body.start_index + body.n, total_words)
+        header = (
+            f"Page content from: {domain}\n"
+            f"URL: {body.url}\n"
+            f"Showing words [{body.start_index}-{end_index}] of {total_words}\n"
+            f"========================================\n"
+        )
+
+        return ScrollPageResponse(
+            results_string=header + numbered,
+            total_words=total_words,
+        )
 
     async def verify(self, request: Request, body: TavilySearchVerifyRequest) -> TavilySearchVerifyResponse:
         question = body.question
@@ -396,7 +404,6 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             judge_evaluation = await self._verify_answer_with_judge(question, ground_truth, last_assistant_response)
         else:
             judge_evaluation = self._verify_answer_with_regex(ground_truth, last_assistant_response)
-
         return TavilySearchVerifyResponse(
             **body.model_dump(),
             **judge_evaluation.model_dump(),
@@ -411,29 +418,62 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         hostname = urlparse(url).hostname or ""
         return any(hostname == domain or hostname.endswith("." + domain) for domain in self._exclude_domains)
 
+    def _extract_domain(self, url: str) -> str:
+        """Extract domain from URL."""
+        return urlparse(url).hostname or url
 
-    def _postprocess_search_results(self, query: str, results: dict, max_length: int) -> str:
-        blocks = [f"[Search Query]: {query}"]
-        running_len = len(blocks[0])
+    def _clean_text(self, text: str) -> str:
+        """Remove wiki/web navigation artifacts and normalize whitespace."""
+        # Strip [edit] markers
+        text = re.sub(r"\[edit\]", "", text)
+        # Strip wiki navigation chrome lines: [Jump to content], [Search...], [Read], [View history], etc.
+        text = re.sub(r"^\[(?:Jump to content|Search|Read|Edit|View history)[^\]]*\].*$", "", text, flags=re.MULTILINE)
+        # Strip wiki language sidebar links: [LangName](https://xx.wikipedia.org/...)
+        text = re.sub(r"\[[^\]]+\]\(https?://[a-z]{2,3}\.wikipedia\.org/[^\)]*\)", "", text)
+        # Strip table-of-contents anchor links: * [(Top)](#) etc.
+        text = re.sub(r"^\s*\*\s*\[[^\]]*\]\(#[^\)]*\)\s*$", "", text, flags=re.MULTILINE)
+        # Strip zero-width spaces and special unicode
+        text = text.replace("\u200b", "").replace("\u200c", "").replace("\u200d", "").replace("\ufeff", "")
+        text = text.replace("\u3010", "[").replace("\u3011", "]")
+        # Strip trailing whitespace per line
+        text = re.sub(r"[ \t]+$", "", text, flags=re.MULTILINE)
+        # Collapse 3+ consecutive newlines to 2 (one blank line)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text.strip()
 
-        for result in results["results"]:
-            title = result.get("title", "")
-            url = result.get("url", "")
-            content = result.get("raw_content") or result.get("content", "")
-            if len(content) > 5000:
-                content = content[:5000] + "\n... [truncated]"
-            entry = (
-                f"[Title]: {title}\n"
-                f"[URL]: {url}\n"
-                f"[Content]:\n{content}\n"
+    def _add_line_numbers(self, text: str) -> str:
+        """Add L0:, L1:, ... prefix per line."""
+        lines = text.split("\n")
+        return "\n".join(f"L{i}: {line}" for i, line in enumerate(lines))
+
+    def _truncate_text(self, text: str, max_chars: int = None) -> tuple:
+        """Truncate text to max_chars, snapping to last full line boundary.
+        Returns (truncated_text, was_truncated).
+        """
+        if max_chars is None:
+            max_chars = self.MAX_RESULT_CHARS
+        if len(text) <= max_chars:
+            return text, False
+        # Find the last newline within max_chars
+        cut = text.rfind("\n", 0, max_chars)
+        if cut == -1:
+            cut = max_chars
+        return text[:cut], True
+
+    def _postprocess_search_results(self, results: dict) -> list[str]:
+        # If an answer is present, return ONLY the answer (no individual search results)
+        answer = results.get("answer")
+        if answer is not None:
+            return [f"Search Answer\n==============\n{answer}\n"]
+
+        formatted_results = ["Search Results\n==============\n"]
+        for i, result in enumerate(results["results"], 1):
+            domain = self._extract_domain(result["url"])
+            snippet = self._clean_text(result.get("content", ""))
+            snippet, _ = self._truncate_text(snippet)
+            formatted_results.append(
+                f"[{i}] {result['title']} ({domain})\n    URL: {result['url']}\n    Summary: {snippet}\n\n"
             )
-
-            if running_len + len(entry) > max_length:
-                break
-            blocks.append(entry)
-            running_len += len(entry)
-
-        formatted_results = "\n".join(blocks)
         return formatted_results
 
     def _parse_exclude_domains(self) -> list[str]:
@@ -449,54 +489,49 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         return exclude_domains
 
     async def _verify_answer_with_judge(self, question: str, ground_truth: str, response: str) -> JudgeEvaluation:
-        response = re.sub(r"<think>.*?</think>", "", response, flags=re.DOTALL).strip()
+        async def _get_judge_response(
+            question: str, ground_truth: str, response: str
+        ) -> tuple[NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponse]:
+            judge_create_params = self.config.judge_responses_create_params.model_copy(deep=True)
+            judge_prompt = self.JUDGE_PROMPT_TEMPLATE.format(
+                question=question, correct_answer=ground_truth, response=response
+            )
+            judge_create_params.input = [
+                NeMoGymEasyInputMessage(
+                    role="user",
+                    content=judge_prompt,
+                ),
+            ]
+            http_response = await self.server_client.post(
+                server_name=self.config.judge_model_server.name,
+                url_path="/v1/responses",
+                json=judge_create_params,
+            )
+            judge_response = NeMoGymResponse.model_validate(await http_response.json())
+            return judge_create_params, judge_response
 
-        judge_prompt = self.JUDGE_PROMPT_TEMPLATE.format(
-            question=question,
-            correct_answer=ground_truth,
-            response=response
-        )
+        def _grade_sample(
+            judge_create_params: NeMoGymResponseCreateParamsNonStreaming, judge_response: NeMoGymResponse
+        ) -> JudgeEvaluation:
+            # Taken from: https://github.com/openai/simple-evals/blob/5e623c2b400af62a1278e23595f95b0853d7fe8a/browsecomp_eval.py#L79-L93
+            grading_response = judge_response.output[-1].content[-1].text
+            if self.config.debug:
+                print("\n\n grading_response \n\n")
+                print(grading_response)
+            match = re.search(r"correct: (yes|no)", grading_response)
+            extracted_final_answer = match.group(1) if match else ""
+            reward = 1.0 if extracted_final_answer == "yes" else 0.0
+            return JudgeEvaluation(
+                judge_response_create_params=judge_create_params,
+                reasoning=grading_response,
+                extracted_final_answer=extracted_final_answer,
+                reward=reward,
+                judge_response=judge_response,
+            )
 
-        judge_create_params = self.config.judge_responses_create_params.model_copy(deep=True)
-        judge_create_params.max_output_tokens = 2048
-        judge_create_params.input = [
-            NeMoGymEasyInputMessage(role="user", content=judge_prompt),
-        ]
-
-        judge_response = None
-        for attempt in range(self.JUDGE_MAX_ATTEMPTS):
-            try:
-                temp = 0.0 if attempt == 0 else min(0.3 + 0.1 * attempt, 1.0)
-                judge_create_params.temperature = temp
-
-                http_response = await self.server_client.post(
-                    server_name=self.config.judge_model_server.name,
-                    url_path="/v1/responses",
-                    json=judge_create_params,
-                )
-                judge_response = NeMoGymResponse.model_validate(await http_response.json())
-                text = judge_response.output[-1].content[-1].text
-
-                is_correct, extracted, parsed_ok = self._parse_judge(text)
-                if parsed_ok:
-                    return JudgeEvaluation(
-                        judge_response_create_params=judge_create_params,
-                        reasoning=text,
-                        extracted_final_answer=extracted,
-                        reward=1.0 if is_correct else 0.0,
-                        judge_response=judge_response,
-                    )
-
-            except Exception:
-                await sleep(min(2**attempt, 30))
-
-        return JudgeEvaluation(
-            judge_response_create_params=judge_create_params,
-            reasoning="",
-            extracted_final_answer=None,
-            reward=0.0,
-            judge_response=judge_response,
-        )
+        judge_create_params, judge_response = await _get_judge_response(question, ground_truth, response)
+        judge_evaluation = _grade_sample(judge_create_params, judge_response)
+        return judge_evaluation
 
     def _verify_answer_with_regex(self, ground_truth: str, response: str) -> JudgeEvaluation:
         """Verify answer by checking if ground_truth (as regex) matches in response."""
@@ -517,27 +552,6 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             judge_response=None,
         )
 
-    def _parse_judge(self, text: str) -> tuple[bool, str, bool]:
-        """Parse grading output. Returns (is_correct, extracted, parsed_ok).
-
-        Uses the LAST 'correct: yes/no' match to avoid picking up template
-        echoes or reasoning inside <think> blocks.
-        """
-        matches = list(re.finditer(r"correct:\s*(yes|no)\b", text, re.IGNORECASE))
-        if not matches:
-            return False, None, False
-
-        is_correct = matches[-1].group(1).lower() == "yes"
-
-        ans_matches = list(re.finditer(
-            r"extracted_final_answer:\s*(.+?)(?:\n|$)", text
-        ))
-        extracted = ans_matches[-1].group(1).strip() if ans_matches else None
-
-        if extracted and "The final exact answer extracted from the [response]" in extracted:
-            return False, None, False
-
-        return is_correct, extracted, True
 
 if __name__ == "__main__":
     TavilySearchResourcesServer.run_webserver()
