@@ -26,8 +26,14 @@ from pathlib import Path
 # ...
 ROOT_DIR = Path(__file__).absolute().parent
 PARENT_DIR = ROOT_DIR.parent
-CACHE_DIR = PARENT_DIR / "cache"
-RESULTS_DIR = PARENT_DIR / "results"
+
+# Editable install: PARENT_DIR is the repo root (has pyproject.toml)
+# Wheel install: PARENT_DIR is site-packages/ so use cwd instead
+_is_editable_install = (PARENT_DIR / "pyproject.toml").exists()
+WORKING_DIR = PARENT_DIR if _is_editable_install else Path.cwd()
+
+CACHE_DIR = WORKING_DIR / "cache"
+RESULTS_DIR = WORKING_DIR / "results"
 
 sys.path.append(str(PARENT_DIR))
 
@@ -37,8 +43,11 @@ sys.path.append(str(PARENT_DIR))
 environ["TOKENIZERS_PARALLELISM"] = "false"
 
 # Huggingface related caching directory overrides to local folders.
-environ["HF_DATASETS_CACHE"] = str(CACHE_DIR / "huggingface")
-environ["TRANSFORMERS_CACHE"] = environ["HF_DATASETS_CACHE"]
+# Only override if not already set by the user.
+if "HF_DATASETS_CACHE" not in environ:
+    environ["HF_DATASETS_CACHE"] = str(CACHE_DIR / "huggingface")
+if "TRANSFORMERS_CACHE" not in environ:
+    environ["TRANSFORMERS_CACHE"] = environ["HF_DATASETS_CACHE"]
 # TODO When `TRANSFORMERS_CACHE` is no longer supported in transformers>=5.0.0, migrate to `HF_HOME`
 # environ["HF_HOME"] = join(CACHE_DIR, "huggingface")
 
