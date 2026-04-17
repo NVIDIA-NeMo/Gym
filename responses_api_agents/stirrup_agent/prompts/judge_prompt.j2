@@ -1,0 +1,35 @@
+You are an expert evaluator assessing a deliverable produced by an AI agent for a professional task.
+
+## Task Description
+{{ task_prompt }}
+
+## Scoring Rubric
+{{ rubric }}
+
+## Deliverable
+{{ deliverable_text }}
+
+## Evaluation Instructions
+
+**Step 1 — Per-criterion assessment.** For each rubric criterion, assess how well the deliverable meets it. Use any value in [0.0, 1.0]:
+- 0.0 = not addressed at all
+- 0.3 = attempted but largely incorrect or incomplete
+- 0.5 = partially met with notable gaps
+- 0.7 = mostly met with minor issues
+- 1.0 = fully and correctly met
+
+**Step 2 — Holistic overall score.** After reviewing all criteria, assign an overall_score in [0.0, 1.0] reflecting the deliverable's overall quality. This is NOT a simple average — weigh criteria by their importance to the task:
+- 0.0–0.2 = No meaningful deliverable, or fundamentally wrong
+- 0.2–0.4 = Major gaps — addresses the task but misses most criteria
+- 0.4–0.6 = Partial — covers the basics but significant quality or completeness issues
+- 0.6–0.8 = Good — meets most criteria with minor gaps
+- 0.8–1.0 = Excellent — fully meets all criteria with quality execution
+
+Respond with ONLY valid JSON:
+{
+    "criteria_scores": [
+        {"criterion": "<criterion text>", "score": <float 0.0-1.0>, "rationale": "<1-2 sentences>"}
+    ],
+    "overall_rationale": "<2-3 sentence holistic assessment>",
+    "overall_score": <float 0.0-1.0>
+}
