@@ -24,7 +24,7 @@ We recommend formatting the dataset to test the model's ability to follow instru
 
 For any parsed outputs, we use the `openapi-schema-validator` library for verification.
 
-We currently have support for 3 different schema output types: JSON, YAML, and XML.
+We currently have support for 5 different schema output types: JSON, YAML, XML, TOML, and CSV.
 
 > [!IMPORTANT]
 > Evaluation is only based on the **schema adherence** of the generated output.
@@ -73,10 +73,20 @@ ng_prepare_data "+config_paths=[${config_paths}]" \
 ### Version 2 [260310] (JSON, YAML, XML)
 ```bash
 # prepare
-export config_paths="responses_api_models/vllm_model/configs/vllm_model_for_training.yaml,\
+config_paths="responses_api_models/vllm_model/configs/vllm_model_for_training.yaml,\
 resources_servers/structured_outputs/configs/structured_outputs_json_yaml_xml_v1.yaml"
 ng_prepare_data "+config_paths=[${config_paths}]" \
     +output_dirpath=data/structured_outputs/ \
+    +mode=train_preparation \
+    +should_download=true
+```
+
+### Version 3 [260409] (JSON, YAML, XML, TOML, CSV)
+```bash
+config_paths="responses_api_models/vllm_model/configs/vllm_model_for_training.yaml,\
+resources_servers/structured_outputs/configs/structured_outputs_v3.yaml"
+ng_prepare_data "+config_paths=[${config_paths}]" \
+    +output_dirpath=data/structured_outputs_v3/ \
     +mode=train_preparation \
     +should_download=true
 ```
