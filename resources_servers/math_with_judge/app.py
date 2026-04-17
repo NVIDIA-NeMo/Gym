@@ -45,6 +45,7 @@ class LibraryJudgeMathResourcesServerConfig(BaseResourcesServerConfig):
     judge_model_server: ModelServerRef
     judge_responses_create_params: NeMoGymResponseCreateParamsNonStreaming
     should_use_judge: bool = True
+    skip_symbolic: bool = False  # when True, bypass symbolic comparison and always use the judge
 
 
 class LibraryJudgeMathRunRequest(BaseRunRequest):
@@ -155,7 +156,7 @@ Example output: "My final verdict is different [[A!=B]]"."""
         """
 
         library_reward, extracted_answer = self._verify_answer_with_library(expected_answer, generated_answer)
-        if not self.config.should_use_judge or library_reward > 0.5:
+        if not self.config.should_use_judge or (not self.config.skip_symbolic and library_reward > 0.5):
             return library_reward, extracted_answer, library_reward, None
 
         judge_answer = extracted_answer if extracted_answer else generated_answer
