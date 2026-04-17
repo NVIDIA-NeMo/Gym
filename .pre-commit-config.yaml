@@ -58,8 +58,8 @@ repos:
         files: ^resources_servers/.*/configs/.*\.yaml$
         pass_filenames: true
       - id: update-readme-table
-        name: Update resources server list in README
+        name: Update environment list in README
         language: python
-        entry: python scripts/update_resource_servers.py
+        entry: python scripts/update_env_list.py
         additional_dependencies: [pyyaml]
-        files: ^README\.md$|^resources_servers/.*/configs/.*\.yaml$
+        files: ^README\.md$|^resources_servers/.*/configs/.*\.yaml$|^responses_api_agents/.*/configs/.*\.yaml$

@@ -25,12 +25,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import yaml
 
-from nemo_gym.server_metadata import ResourcesServerMetadata, visit_resources_server
+from nemo_gym.server_metadata import ResourcesServerMetadata, visit_agent_server, visit_resources_server
 
 
 README_PATH = Path("README.md")
 
-TARGET_FOLDER = Path("resources_servers")
+RESOURCES_SERVERS_FOLDER = Path("resources_servers")
+RESPONSES_API_AGENTS_FOLDER = Path("responses_api_agents")
 
 
 @dataclass
@@ -91,6 +92,7 @@ class ServerInfo:
     config_filename: str
     readme_path: str
     yaml_file: Path
+    base_folder: str = "resources_servers"
 
     @property
     def huggingface_repo_id(self) -> str | None:  # pragma: no cover
@@ -155,27 +157,48 @@ class ServerInfo:
 
 def visit_agent_datasets(data: dict) -> AgentDatasetsMetadata:  # pragma: no cover
     agent = AgentDatasetsMetadata()
-    for k1, v1 in data.items():
-        if k1.endswith("_agent") and isinstance(v1, dict):
-            v2 = v1.get("responses_api_agents")
-            if isinstance(v2, dict):
-                # Look for any agent key
-                for agent_key, v3 in v2.items():
-                    if isinstance(v3, dict):
-                        datasets = v3.get("datasets")
-                        if isinstance(datasets, list):
-                            for entry in datasets:
-                                if isinstance(entry, dict):
-                                    agent.types.append(entry.get("type"))
-                                    if entry.get("type") == "train":
-                                        agent.license = entry.get("license")
-                                        hf_id = entry.get("huggingface_identifier")
-                                        if hf_id and isinstance(hf_id, dict):
-                                            agent.huggingface_repo_id = hf_id.get("repo_id")
+    if not isinstance(data, dict):
+        return agent
+    for v1 in data.values():
+        if not isinstance(v1, dict):
+            continue
+        v2 = v1.get("responses_api_agents")
+        if not isinstance(v2, dict):
+            continue
+        for v3 in v2.values():
+            if not isinstance(v3, dict):
+                continue
+            datasets = v3.get("datasets")
+            if isinstance(datasets, list):
+                for entry in datasets:
+                    if isinstance(entry, dict):
+                        agent.types.append(entry.get("type"))
+                        if entry.get("type") == "train":
+                            agent.license = entry.get("license")
+                            hf_id = entry.get("huggingface_identifier")
+                            if hf_id and isinstance(hf_id, dict):
+                                agent.huggingface_repo_id = hf_id.get("repo_id")
+            elif v3.get("harbor_datasets") or v3.get("vf_env_id"):
+                agent.types.append("train")
     return agent
 
 
-def extract_config_metadata(yaml_path: Path) -> ConfigMetadata:  # pragma: no cover
+def agent_has_resources_server_ref(data: dict) -> bool:  # pragma: no cover
+    if not isinstance(data, dict):
+        return False
+    for v1 in data.values():
+        if not isinstance(v1, dict):
+            continue
+        v2 = v1.get("responses_api_agents")
+        if not isinstance(v2, dict):
+            continue
+        for v3 in v2.values():
+            if isinstance(v3, dict) and v3.get("resources_server"):
+                return True
+    return False
+
+
+def extract_config_metadata(yaml_path: Path, from_agent: bool = False) -> ConfigMetadata:  # pragma: no cover
     """
     Domain:
         {name}_resources_server:
@@ -203,7 +226,7 @@ def extract_config_metadata(yaml_path: Path) -> ConfigMetadata:  # pragma: no co
     with yaml_path.open() as f:
         data = yaml.safe_load(f)
 
-    resource_data = visit_resources_server(data)
+    resource_data = visit_agent_server(data) if from_agent else visit_resources_server(data)
     agent_data = visit_agent_datasets(data)
 
     return ConfigMetadata.from_yaml_data(resource_data, agent_data)
@@ -214,47 +237,56 @@ def get_example_and_training_server_info() -> tuple[list[ServerInfo], list[Serve
     example_only_servers = []
     training_servers = []
 
-    for subdir in TARGET_FOLDER.iterdir():
-        if not subdir.is_dir():
-            continue
-
-        configs_folder = subdir / "configs"
-        if not (configs_folder.exists() and configs_folder.is_dir()):
-            continue
-
-        yaml_files = list(configs_folder.glob("*.yaml"))
-        if not yaml_files:
-            continue
-
-        for yaml_file in yaml_files:
-            yaml_data = extract_config_metadata(yaml_file)
-            if not yaml_data.types:
+    for base_folder in (RESOURCES_SERVERS_FOLDER, RESPONSES_API_AGENTS_FOLDER):
+        from_agent = base_folder == RESPONSES_API_AGENTS_FOLDER
+        for subdir in base_folder.iterdir():
+            if not subdir.is_dir():
                 continue
 
-            server_name = subdir.name
-            is_example_only = server_name.startswith("example_")
+            configs_folder = subdir / "configs"
+            if not (configs_folder.exists() and configs_folder.is_dir()):
+                continue
 
-            display_name = (
-                (server_name[len("example_") :] if is_example_only else server_name).replace("_", " ").title()
-            )
+            yaml_files = list(configs_folder.glob("*.yaml"))
+            if not yaml_files:
+                continue
 
-            config_path = f"{TARGET_FOLDER.name}/{server_name}/configs/{yaml_file.name}"
-            readme_path = f"{TARGET_FOLDER.name}/{server_name}/README.md"
+            for yaml_file in yaml_files:
+                if from_agent:
+                    with yaml_file.open() as f:
+                        raw = yaml.safe_load(f) or {}
+                    if agent_has_resources_server_ref(raw):
+                        continue
 
-            server_info = ServerInfo(
-                name=server_name,
-                display_name=display_name,
-                config_metadata=yaml_data,
-                config_path=config_path,
-                config_filename=yaml_file.name,
-                readme_path=readme_path,
-                yaml_file=yaml_file,
-            )
+                yaml_data = extract_config_metadata(yaml_file, from_agent=from_agent)
+                if not yaml_data.types:
+                    continue
 
-            if is_example_only:
-                example_only_servers.append(server_info)
-            else:
-                training_servers.append(server_info)
+                server_name = subdir.name
+                is_example_only = server_name.startswith("example_")
+
+                display_name = (
+                    (server_name[len("example_") :] if is_example_only else server_name).replace("_", " ").title()
+                )
+
+                config_path = f"{base_folder.name}/{server_name}/configs/{yaml_file.name}"
+                readme_path = f"{base_folder.name}/{server_name}/README.md"
+
+                server_info = ServerInfo(
+                    name=server_name,
+                    display_name=display_name,
+                    config_metadata=yaml_data,
+                    config_path=config_path,
+                    config_filename=yaml_file.name,
+                    readme_path=readme_path,
+                    yaml_file=yaml_file,
+                    base_folder=base_folder.name,
+                )
+
+                if is_example_only:
+                    example_only_servers.append(server_info)
+                else:
+                    training_servers.append(server_info)
 
     return example_only_servers, training_servers
 
@@ -287,7 +319,7 @@ def generate_example_only_table(servers: list[ServerInfo]) -> str:  # pragma: no
 def generate_training_table(servers: list[ServerInfo]) -> str:  # pragma: no cover
     """Generate table for training resources servers."""
     col_names = [
-        "Resources Server",
+        "Environment",
         "Domain",
         "Description",
         "Value",
