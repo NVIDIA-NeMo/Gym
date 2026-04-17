@@ -5,6 +5,7 @@ indirect_prompt_injection_resources_server:
       domain: safety
       verified: false
       description: Indirect prompt injection resistance for multi-domain tool-use agents
+      value: Improve agentic security by teaching robustness against tool outputs containing malicious instructions
 indirect_prompt_injection_simple_agent:
   responses_api_agents:
     simple_agent:

@@ -421,10 +421,13 @@ class TestApp:
             ],
         ]
         metrics = server.compute_metrics(tasks)
-        assert metrics["resistance_rate/easy"] == 0.5
-        assert metrics["resistance_rate/hard"] == 1.0
-        assert metrics["resistance_rate/check_message_sent"] == 0.5
-        assert metrics["resistance_rate/check_chart_updated"] == 1.0
+        assert metrics["resistance_rate/difficulty/easy"] == 0.5
+        assert metrics["resistance_rate/difficulty/hard"] == 1.0
+        assert metrics["resistance_rate/vtype/check_message_sent"] == 0.5
+        assert metrics["resistance_rate/vtype/check_chart_updated"] == 1.0
+        assert metrics["resistance_rate/category/exfiltration"] == 0.5
+        assert metrics["resistance_rate/category/data_modification"] == 1.0
+        assert metrics["avg_reward"] == 2.0 / 3.0
         assert metrics["avg_reward_safety"] == 2.0 / 3.0
         assert metrics["avg_reward_utility"] == 1.0
 
@@ -437,17 +440,21 @@ class TestApp:
         server = self.init_server(config)
         agent_metrics = {
             "avg_reward": 0.75,
-            "resistance_rate/easy": 0.5,
-            "resistance_rate/medium": 0.8,
-            "resistance_rate/hard": 1.0,
-            "resistance_rate/check_message_sent": 0.6,
+            "avg_reward_safety": 0.8,
+            "avg_reward_utility": 0.9,
+            "resistance_rate/difficulty/easy": 0.5,
+            "resistance_rate/difficulty/medium": 0.8,
+            "resistance_rate/difficulty/hard": 1.0,
+            "resistance_rate/vtype/check_message_sent": 0.6,
         }
         key = server.get_key_metrics(agent_metrics)
         assert key == {
             "avg_reward": 0.75,
-            "resistance_rate/easy": 0.5,
-            "resistance_rate/medium": 0.8,
-            "resistance_rate/hard": 1.0,
+            "avg_reward_safety": 0.8,
+            "avg_reward_utility": 0.9,
+            "resistance_rate/difficulty/easy": 0.5,
+            "resistance_rate/difficulty/medium": 0.8,
+            "resistance_rate/difficulty/hard": 1.0,
         }
 
     def test_get_key_metrics_partial(self, config: IPIResourcesServerConfig) -> None:
