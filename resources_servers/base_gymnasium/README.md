@@ -1,6 +1,6 @@
 # Gymnasium
 
-Base class (`GymnasiumServer`) for gymnasium-style resources servers. Not a standalone server. Import from here:
+Base resources server (`GymnasiumServer`) for gymnasium-style environments. Not a standalone server. Import from here:
 
 ```python
 from resources_servers.base_gymnasium import GymnasiumServer
