@@ -240,57 +240,25 @@ class TestExecuteSqlite:
 
 
 # ---------------------------------------------------------------------------
-# execute_sqlite_async and execute_and_compare (mocked Ray)
+# execute_sqlite_async and execute_and_compare (asyncio.to_thread)
 # ---------------------------------------------------------------------------
 
 
-class _FakeRayFuture:
-    def __init__(self, result):
-        self._fut = asyncio.get_event_loop().create_future() if False else None  # unused
-        self._result = result
-
-    def future(self):
-        # Return a resolved concurrent.futures.Future so asyncio.wrap_future works.
-        import concurrent.futures
-
-        fut = concurrent.futures.Future()
-        fut.set_result(self._result)
-        return fut
-
-
-class _FakeRayTask:
-    def __init__(self, result):
-        self._result = result
-
-    def future(self):
-        import concurrent.futures
-
-        fut = concurrent.futures.Future()
-        fut.set_result(self._result)
-        return fut
-
-
-def _mock_ray(monkeypatch, gold_result, pred_result):
-    """Patch ray.remote execute to return canned results based on SQL string."""
+def _mock_execute_sqlite(monkeypatch, gold_result, pred_result):
+    """Patch eval_utils.execute_sqlite to return canned results based on SQL string."""
     calls = []
 
-    def fake_remote(db_path, sql):
+    def fake_execute(db_path, sql):
         calls.append(sql)
-        result = gold_result if "GOLD_SQL" in sql else pred_result
-        return _FakeRayTask(result)
+        return gold_result if "GOLD_SQL" in sql else pred_result
 
-    monkeypatch.setattr(
-        "resources_servers.bird_sql.eval_utils.execute_sqlite_remote",
-        MagicMock(remote=fake_remote),
-    )
-    monkeypatch.setattr("resources_servers.bird_sql.eval_utils.ray.cancel", lambda _t: None)
-    monkeypatch.setattr("resources_servers.bird_sql.eval_utils.ray.get", lambda t: t.future().result())
+    monkeypatch.setattr("resources_servers.bird_sql.eval_utils.execute_sqlite", fake_execute)
     return calls
 
 
 @pytest.mark.asyncio
 async def test_execute_sqlite_async_success(monkeypatch):
-    _mock_ray(monkeypatch, gold_result=[(1,)], pred_result=[(1,)])
+    _mock_execute_sqlite(monkeypatch, gold_result=[(1,)], pred_result=[(1,)])
     sem = asyncio.Semaphore(4)
     rows = await execute_sqlite_async(Path("/x.sqlite"), "SELECT 1 -- PRED", sem, timeout_s=5)
     assert rows == [(1,)]
@@ -298,33 +266,23 @@ async def test_execute_sqlite_async_success(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_execute_sqlite_async_timeout(monkeypatch):
-    """A never-resolving future trips the timeout path and returns None."""
+    """A slow execute trips the timeout path and returns None."""
+    import time
 
-    class _PendingTask:
-        def future(self):
-            import concurrent.futures
+    def slow_execute(db_path, sql):
+        time.sleep(10)
+        return [(1,)]
 
-            return concurrent.futures.Future()  # never resolves
-
-    monkeypatch.setattr(
-        "resources_servers.bird_sql.eval_utils.execute_sqlite_remote",
-        MagicMock(remote=lambda *_a, **_kw: _PendingTask()),
-    )
-    cancel_calls = []
-    monkeypatch.setattr(
-        "resources_servers.bird_sql.eval_utils.ray.cancel",
-        lambda t: cancel_calls.append(t),
-    )
+    monkeypatch.setattr("resources_servers.bird_sql.eval_utils.execute_sqlite", slow_execute)
 
     sem = asyncio.Semaphore(4)
     rows = await execute_sqlite_async(Path("/x.sqlite"), "SELECT 1", sem, timeout_s=0.05)
     assert rows is None
-    assert len(cancel_calls) == 1
 
 
 @pytest.mark.asyncio
 async def test_execute_and_compare_match(monkeypatch):
-    _mock_ray(monkeypatch, gold_result=[(1,), (2,)], pred_result=[(2,), (1,)])
+    _mock_execute_sqlite(monkeypatch, gold_result=[(1,), (2,)], pred_result=[(2,), (1,)])
     sem = asyncio.Semaphore(4)
     match, gold, pred, err = await execute_and_compare(
         Path("/x.sqlite"), gold_sql="SELECT GOLD_SQL", pred_sql="SELECT 1", semaphore=sem, timeout_s=5
@@ -334,7 +292,7 @@ async def test_execute_and_compare_match(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_execute_and_compare_pred_error(monkeypatch):
-    _mock_ray(monkeypatch, gold_result=[(1,)], pred_result=None)
+    _mock_execute_sqlite(monkeypatch, gold_result=[(1,)], pred_result=None)
     sem = asyncio.Semaphore(4)
     match, _gold, pred, err = await execute_and_compare(
         Path("/x.sqlite"), gold_sql="SELECT GOLD_SQL", pred_sql="BROKEN", semaphore=sem, timeout_s=5
@@ -344,7 +302,7 @@ async def test_execute_and_compare_pred_error(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_execute_and_compare_gold_error(monkeypatch):
-    _mock_ray(monkeypatch, gold_result=None, pred_result=[(1,)])
+    _mock_execute_sqlite(monkeypatch, gold_result=None, pred_result=[(1,)])
     sem = asyncio.Semaphore(4)
     match, gold, pred, err = await execute_and_compare(
         Path("/x.sqlite"), gold_sql="SELECT GOLD_SQL", pred_sql="SELECT 1", semaphore=sem, timeout_s=5

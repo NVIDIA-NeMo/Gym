@@ -5,15 +5,21 @@
 Mirrors the official BIRD eval (DAMO-ConvAI): execute both predicted and
 ground-truth SQL against the per-db_id SQLite file, compare result sets via
 ``set(predicted) == set(ground_truth)``.
+
+SQL execution uses ``asyncio.to_thread`` rather than Ray remote tasks.
+When this resource server runs alongside a Ray-coordinated multi-node DP
+vLLM (Gym's ``ng_run`` attaches to the same Ray cluster), the vLLM engines
+consume the Ray slots and ``@ray.remote`` sqlite tasks sit in the scheduler
+queue past the per-query timeout, get cancelled, and every rollout reports
+``gold_execution_error``. SQLite queries are fast and self-contained — no
+reason to cross process boundaries; run them in the asyncio event loop's
+default thread pool under a semaphore for bounded concurrency.
 """
 
 import asyncio
 import sqlite3
-import sys
 from pathlib import Path
 from typing import Any, Optional
-
-import ray
 
 
 ResultRow = tuple[Any, ...]
@@ -35,32 +41,21 @@ def execute_sqlite(db_path: Path, sql: str) -> Optional[ResultSet]:
         return None
 
 
-@ray.remote(
-    num_cpus=1,
-    scheduling_strategy="SPREAD",
-    runtime_env={"py_executable": sys.executable},
-)
-def execute_sqlite_remote(*args, **kwargs):
-    return execute_sqlite(*args, **kwargs)
-
-
 async def execute_sqlite_async(
     db_path: Path,
     sql: str,
     semaphore: asyncio.Semaphore,
     timeout_s: float = 30.0,
 ) -> Optional[ResultSet]:
-    """Execute SQL asynchronously via Ray remote, bounded by semaphore."""
+    """Execute SQL asynchronously in a worker thread, bounded by semaphore.
+
+    Returns ``None`` on timeout or query exception.
+    """
     async with semaphore:
-        task = execute_sqlite_remote.remote(db_path, sql)
-        fut: asyncio.Future = asyncio.wrap_future(task.future())
-
-        _, in_progress = await asyncio.wait([fut], timeout=timeout_s)
-
-        if in_progress:
-            ray.cancel(task)
+        try:
+            return await asyncio.wait_for(asyncio.to_thread(execute_sqlite, db_path, sql), timeout=timeout_s)
+        except asyncio.TimeoutError:
             return None
-        return ray.get(task)
 
 
 def result_sets_match(gold: ResultSet, pred: ResultSet) -> bool:
