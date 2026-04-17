@@ -96,4 +96,4 @@ class GymnasiumServer(SimpleResourcesServer):
     ) -> tuple[Optional[str], float, bool, bool, dict]: ...
 
     async def verify(self, body: BaseVerifyRequest) -> None:  # type: ignore[override]
-        raise NotImplementedError("GymnasiumServer uses /step instead of /verify. Pair with gymnasium_agent.")
+        raise NotImplementedError("GymnasiumServer uses /step instead of /verify. Use with gymnasium_agent.")
