@@ -23,9 +23,11 @@ list of OpenAI chat messages. We parse it into `responses_create_params.input`,
 count tokens with tiktoken `o200k_base` (same as Skills / the official MRCR
 grading setup), and filter to samples that fit in the model context.
 
-The 262144-token cap matches the Nemotron-3-Super-120B context window. This
-is applied symmetrically with the Skills prepare script so both pipelines
-evaluate the same subset — a parity requirement.
+The 200000-token cap leaves headroom for tokenizer drift: the model's
+Nemotron tokenizer produces ~7-10% more tokens than tiktoken o200k_base,
+so filtering at 200K tiktoken keeps Nemotron worst-case near 220K, which
+combined with 32K generation stays under the 262144 native context. Applied
+symmetrically to the Skills prepare for parity.
 """
 
 import json
@@ -41,7 +43,7 @@ DATA_DIR = BENCHMARK_DIR / "data"
 OUTPUT_FPATH = DATA_DIR / "mrcr_benchmark.jsonl"
 
 # Must match run_mrcr_ns_baseline.py / prepare_mrcr_ns.py.
-MAX_CONTEXT_TOKENS = 262144
+MAX_CONTEXT_TOKENS = 200000
 
 
 def _count_tokens(messages: list[dict]) -> int:

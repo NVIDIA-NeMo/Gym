@@ -152,10 +152,15 @@ dependencies = [
     "yappi",
 
     # Ray: Used for distributed processing
-    # Updated Mon Feb 10, 2026 with ray[default]==2.52.1 in uv.lock
-    # Security: Requires ray>=2.52.0 (currently resolves to 2.52.1 naturally)
+    # Updated Fri Apr 17, 2026 with ray[default]==2.53.0 to match the
+    # nemo-rl container's system Ray. Without this pin, Gym's .venv Ray
+    # resolves to 2.52.1 while vLLM on the head node starts Ray 2.53.0
+    # (from the container image), producing "Version mismatch: The cluster
+    # was started with Ray 2.53.0 ... this process on node X was started
+    # with Ray 2.52.1" and ng_run aborts.
+    # Security: Requires ray>=2.52.0.
     # License: Apache 2.0 https://github.com/ray-project/ray/blob/master/LICENSE
-    "ray[default]",
+    "ray[default]==2.53.0",
 
     # psutil: Cross-platform process and system utilities
     # Updated: Fri Nov 07, 2025 with psutil==6.1.1
