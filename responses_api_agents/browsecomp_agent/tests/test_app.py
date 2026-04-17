@@ -187,7 +187,7 @@ class TestApp:
 
         mock_http = MagicMock()
         mock_http.ok = True
-        mock_http.content.read = AsyncMock(return_value=json.dumps(final_response).encode())
+        mock_http.read = AsyncMock(return_value=json.dumps(final_response).encode())
         mock_http.cookies = {}
         agent.server_client.post = AsyncMock(return_value=mock_http)
 
@@ -212,11 +212,11 @@ class TestApp:
 
         tool_http = MagicMock()
         tool_http.ok = True
-        tool_http.content.read = AsyncMock(side_effect=[
-            json.dumps(tool_response_data).encode(),
-            b'{"results_string": "Paris is the capital"}',  # resources server tool response
-            json.dumps(final_response_data).encode(),
+        tool_http.read = AsyncMock(side_effect=[
+            json.dumps(tool_response_data).encode(),    # model call 1
+            json.dumps(final_response_data).encode(),   # model call 2
         ])
+        tool_http.content.read = AsyncMock(return_value=b'{"results_string": "Paris is the capital"}')  # tool call
         tool_http.cookies = {}
         agent.server_client.post = AsyncMock(return_value=tool_http)
 
@@ -244,7 +244,8 @@ class TestApp:
 
         mock_http = MagicMock()
         mock_http.ok = True
-        mock_http.content.read = AsyncMock(return_value=json.dumps(tool_response_data).encode())
+        mock_http.read = AsyncMock(return_value=json.dumps(tool_response_data).encode())
+        mock_http.content.read = AsyncMock(return_value=b'{}')
         mock_http.cookies = {}
         agent.server_client.post = AsyncMock(return_value=mock_http)
 
