@@ -1,19 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Prepare BIRD benchmark data for NeMo Gym.
+"""Prepare BIRD benchmark data.
 
-Replicates `nemo_skills/dataset/birdbench/prepare.py` so Skills and Gym see
-identical rows:
-
-    per-row output schema: {question, gt_sql, sql_context, difficulty, db_id, id}
+Per-row output schema: ``{question, gt_sql, sql_context, difficulty, db_id, id}``.
 
 The schema dump (``sql_context``) is produced via ``sqlite3.Connection.iterdump()``
-with the same INSERT-chain truncation Skills applies: at most 10 consecutive
-``INSERT`` statements are kept per run, and long ``INSERT ... VALUES (...), ...``
-chains are collapsed after 10 tuples.
+with INSERT-chain truncation applied: at most 10 consecutive ``INSERT``
+statements are kept per run, and long ``INSERT ... VALUES (...), ...`` chains
+are collapsed after 10 tuples.
 
-We call ``ensure_bird_sql()`` to reuse the same cached download as the
-``bird_sql`` resource server, avoiding duplicate ~1.4 GB downloads.
+Calls ``ensure_bird_sql()`` so the download cache is shared with the
+``bird_sql`` resource server (avoids a duplicate ~1.4 GB download).
 """
 
 import glob
@@ -32,10 +29,7 @@ OUTPUT_FPATH = DATA_DIR / "birdbench_benchmark.jsonl"
 
 
 def _read_tables_info(dev_databases_dir: Path) -> dict[str, str]:
-    """Dump each BIRD database's schema + (truncated) inserts to a string.
-
-    Port of `read_tables_file` from `nemo_skills/dataset/birdbench/prepare.py`.
-    """
+    """Dump each BIRD database's schema + (truncated) inserts to a string."""
     tables_info: dict[str, str] = {}
     db_dirs = glob.glob("*", root_dir=str(dev_databases_dir))
 

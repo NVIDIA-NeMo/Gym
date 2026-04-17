@@ -4,8 +4,8 @@
 
 Verifies a model-generated SQL query by executing it against the per-``db_id``
 SQLite database from the BIRD dev split, then comparing the result set against
-the ground-truth query's result set (unordered set equality — matches the
-official BIRD evaluator in NeMo Skills).
+the ground-truth query's result set via unordered set equality (the official
+BIRD evaluator's rule).
 """
 
 import asyncio
@@ -54,21 +54,20 @@ def has_sql_codeblock(text: Optional[str]) -> bool:
 
 
 def extract_sql_from_response(text: Optional[str]) -> str:
-    """Extract SQL from a model response — exact port of the Skills BIRD evaluator.
+    """Extract SQL from a model response (CODEBLOCK mode).
 
-    Port of ``BirdEvaluator._extract_answer`` with ``answer_format="CODEBLOCK"``
-    from ``nemo_skills/evaluation/evaluator/bird.py``. Contract matches Skills:
-
-    - No ` ```sql ``` ` block found → return ``"SELECT 1"`` (no-op filler that
-      executes harmlessly but mismatches almost any BIRD gold query).
+    Behavior:
+    - No ` ```sql ``` ` block found → return ``"SELECT 1"`` as a no-op filler
+      that executes harmlessly but mismatches almost any BIRD gold query.
     - Multiple blocks → use the LAST one.
-    - Strip SQL comments (``--...``, ``/*...*/``) via Skills' exact regex with
-      ``re.DOTALL``; note that ``--.*?$`` without ``re.MULTILINE`` eats to
-      end-of-string, so a comment line inside an otherwise valid block can
-      swallow the rest — replicated intentionally for parity.
-    - Collapse whitespace and drop a leading ``**bold**`` header.
-    - Post-strip empty output is returned as ``""`` (Skills returns the empty
-      string; downstream execution then fails and the reward is 0).
+    - Strip SQL comments (``--...``, ``/*...*/``) with ``re.DOTALL`` and no
+      ``re.MULTILINE``: ``--.*?$`` therefore eats to end-of-string, so a
+      ``--``-style comment line inside the block swallows the rest.
+      Intentional (matches the established BIRD evaluator rule); downstream
+      execution will fail on the empty SQL and the reward is 0.
+    - Collapse whitespace and drop a leading ``**bold**`` header that some
+      models emit before the query.
+    - Post-strip empty output is returned as ``""`` rather than the filler.
     """
     if not text:
         return _NO_ANSWER_FILLER
@@ -158,10 +157,10 @@ class BirdSqlResourcesServer(SimpleResourcesServer):
                 **kwargs,
             )
 
-        # Skills' extractor always returns a string: either the parsed SQL,
-        # the empty string (when comment stripping ate everything), or the
-        # filler ``"SELECT 1"`` when no fenced block was found. We mirror
-        # that exactly and let execution decide the reward.
+        # extract_sql_from_response always returns a string: the parsed SQL,
+        # the empty string (if comment stripping ate everything), or the
+        # "SELECT 1" filler when no fenced block was found. Execution below
+        # decides the reward in every case.
         extracted_sql = extract_sql_from_response(generated)
         had_codeblock = has_sql_codeblock(generated)
 

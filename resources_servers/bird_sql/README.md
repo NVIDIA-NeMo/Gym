@@ -32,8 +32,7 @@ ensure_bird_sql()
 ## Verification flow
 
 1. Extract SQL from the model output (last ` ```sql ... ``` ` code block, with
-   comments stripped and whitespace collapsed — matches the NeMo Skills BIRD
-   evaluator's `CODEBLOCK` extraction path).
+   comments stripped and whitespace collapsed).
 2. Execute the predicted SQL against the per-`db_id` SQLite database.
 3. Execute the ground-truth SQL against the same database.
 4. Compare result sets via unordered set equality.
@@ -76,6 +75,3 @@ Per-difficulty subsets (via `compute_subset_metrics(field="difficulty")`):
 - `simple/pass@1[avg-of-k]/accuracy`
 - `moderate/pass@1[avg-of-k]/accuracy`
 - `challenging/pass@1[avg-of-k]/accuracy`
-
-These map directly to the NeMo Skills BIRD metrics (`total_acc`, `simple_acc`,
-`moderate_acc`, `challenging_acc`).

@@ -16,13 +16,10 @@ ng_prepare_benchmark "+config_paths=[benchmarks/birdbench/config.yaml]"
 This downloads the BIRD `dev.zip` (≈1.4 GB) via
 `resources_servers.bird_sql.setup_bird_sql.ensure_bird_sql()`, dumps each
 database schema with truncated INSERTs via `sqlite3.Connection.iterdump()`,
-and writes `data/birdbench_benchmark.jsonl`.
-
-The output schema matches `nemo_skills/dataset/birdbench/prepare.py`
-(`question`, `gt_sql`, `sql_context`, `difficulty`, `db_id`, `id`).
+and writes `data/birdbench_benchmark.jsonl`. Each row has
+`question`, `gt_sql`, `sql_context`, `difficulty`, `db_id`, and `id`.
 
 ## Prompt
 
-`prompts/default.yaml` is a char-for-char copy of
-`nemo_skills/prompt/config/generic/text_to_sql.yaml` so Skills and Gym runs
-send the same prompt.
+Standard text-to-SQL prompt in `prompts/default.yaml`: the model reasons
+step-by-step and returns the final SQL inside a ` ```sql ``` ` block.

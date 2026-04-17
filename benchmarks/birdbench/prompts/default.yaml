@@ -1,6 +1,4 @@
-# Prompt used for text-to-SQL — char-for-char port of
-# nemo_skills/prompt/config/generic/text_to_sql.yaml so Skills and Gym
-# runs use the same prompt.
+# Prompt used for text-to-SQL.
 
 system: Please reason step by step, and put your final answer within the tags "```sql" and "```".
 

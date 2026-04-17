@@ -119,10 +119,8 @@ def server_with_mocked_dbs(tmp_path, monkeypatch):
 
 
 class TestExtractSqlFromResponse:
-    """Strict parity tests against NeMo Skills ``BirdEvaluator._extract_answer``."""
-
     def test_empty_returns_filler(self):
-        # Skills returns the "SELECT 1" no-op filler whenever extraction fails.
+        # "SELECT 1" no-op filler whenever extraction fails.
         assert extract_sql_from_response("") == _NO_ANSWER_FILLER
         assert extract_sql_from_response(None) == _NO_ANSWER_FILLER
 
@@ -143,26 +141,26 @@ class TestExtractSqlFromResponse:
         assert extract_sql_from_response(text) == "SELECT 1 FROM t"
 
     def test_line_comment_eats_to_eos(self):
-        # Faithful port of Skills' `--.*?$` regex with DOTALL and no MULTILINE.
-        # A `--` line inside the block swallows the rest of the string — this
-        # is a Skills "bug" we replicate for parity.
+        # Comment-strip uses DOTALL and no MULTILINE, so `--.*?$` consumes to
+        # end-of-string: a `--`-style comment inside the block swallows the
+        # rest. Execution then fails on the empty SQL and the reward is 0.
         text = "```sql\n-- comment\nSELECT 1 FROM t\n```"
         assert extract_sql_from_response(text) == ""
 
     def test_strips_leading_bold_header(self):
-        # Skills' `^\*\*.*\*\*` requires the ** at the very start — after the
-        # preceding whitespace collapse that means no space-before-** either.
+        # The `^\*\*.*\*\*` anchor requires ** at position 0 after whitespace
+        # collapse, so no space-before-** either.
         text = "```sql**Answer** SELECT 1 FROM t```"
         assert extract_sql_from_response(text) == "SELECT 1 FROM t"
 
     def test_bold_header_not_stripped_when_preceded_by_whitespace(self):
-        # Faithful to Skills: newline before ** means the anchor mismatches
-        # and the bold marker survives.
+        # A newline before ** pushes it past position 0, so the bold marker
+        # survives the strip.
         text = "```sql\n**Answer** SELECT 1 FROM t\n```"
         assert extract_sql_from_response(text) == "**Answer** SELECT 1 FROM t"
 
     def test_requires_alpha_inside_block(self):
-        # Skills regex requires at least one a-z letter inside the fenced block.
+        # The extraction regex requires at least one a-z letter inside the fenced block.
         text = "```sql\n12345\n```"
         assert extract_sql_from_response(text) == _NO_ANSWER_FILLER
 
@@ -317,12 +315,11 @@ async def test_execute_and_compare_gold_error(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_verify_no_codeblock_filler_runs(server_with_mocked_dbs, monkeypatch):
-    """No ```sql``` block → Skills returns "SELECT 1" filler, which executes
-    and mismatches almost any GT. We still record NO_SQL_EXTRACTED so the
-    diagnostic is preserved, but the reward matches Skills."""
+    """No ```sql``` block → "SELECT 1" filler, which executes and mismatches
+    almost any GT. NO_SQL_EXTRACTED is still recorded as a diagnostic flag."""
 
     async def fake(*, pred_sql, gold_sql, **_kw):
-        assert pred_sql == _NO_ANSWER_FILLER, "Should have used the Skills filler"
+        assert pred_sql == _NO_ANSWER_FILLER
         return False, [(42,)], [(1,)], None
 
     monkeypatch.setattr("resources_servers.bird_sql.app.execute_and_compare", fake)

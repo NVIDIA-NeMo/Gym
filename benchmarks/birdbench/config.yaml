@@ -23,8 +23,4 @@ birdbench_bird_sql_simple_agent:
           jsonl_fpath: benchmarks/birdbench/data/birdbench_benchmark.jsonl
           prompt_config: benchmarks/birdbench/prompts/default.yaml
           prepare_script: benchmarks/birdbench/prepare.py
-          # Per-job repeat count. Total rollouts per task = num_random_seeds
-          # (from the run script) × num_repeats (below). Kept at 1 so the run
-          # script's `num_random_seeds=N` gives exactly N rollouts per task,
-          # matching Skills' `birdbench:N` convention.
-          num_repeats: 1
+          num_repeats: 16
