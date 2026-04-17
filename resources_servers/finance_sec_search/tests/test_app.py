@@ -38,6 +38,15 @@ from resources_servers.finance_sec_search.app import (
 )
 
 
+_TEST_SESSION_ID = "test-session"
+
+
+def _mock_request(session_id: str = _TEST_SESSION_ID) -> MagicMock:
+    req = MagicMock()
+    req.session = {"session_id": session_id}
+    return req
+
+
 # ============================================================================
 # Mock Data
 # ============================================================================
@@ -73,14 +82,15 @@ def temp_cache_dir():
 @pytest.fixture
 def server_config(temp_cache_dir):
     """Create test server configuration."""
-    prompt_fpath = str(Path(__file__).resolve().parents[1] / "prompt_templates/finance_sec_search_judge.yaml")
+    _prompt_dir = Path(__file__).resolve().parents[1] / "prompt_templates"
     return FinanceAgentResourcesServerConfig(
         host="0.0.0.0",
         port=8080,
         entrypoint="",
         name="finance_sec_search_test",
         cache_dir=temp_cache_dir,
-        judge_prompt_template_fpath=prompt_fpath,
+        judge_prompt_template_fpath=str(_prompt_dir / "finance_sec_search_judge.yaml"),
+        retrieval_system_prompt_fpath=str(_prompt_dir / "finance_sec_search_retrieval.yaml"),
     )
 
 
@@ -289,8 +299,8 @@ class TestSECFilingSearch:
         }
         _write_filings_cache(server, "0000320193", test_filings)
 
-        request = FinanceAgentSearchRequest(ticker="AAPL")
-        response = await server.sec_filing_search(request)
+        body = FinanceAgentSearchRequest(ticker="AAPL")
+        response = await server.sec_filing_search(_mock_request(), body)
 
         results = json.loads(response.results)
         assert len(results) == 1
@@ -302,8 +312,8 @@ class TestSECFilingSearch:
         """Unknown ticker returns an error with suggestion."""
         server._initialized = True
 
-        request = FinanceAgentSearchRequest(ticker="NOTEXIST")
-        response = await server.sec_filing_search(request)
+        body = FinanceAgentSearchRequest(ticker="NOTEXIST")
+        response = await server.sec_filing_search(_mock_request(), body)
 
         results = json.loads(response.results)
         assert "error" in results
@@ -359,8 +369,8 @@ class TestSECFilingSearch:
         }
         _write_filings_cache(server, "0000320193", test_filings)
 
-        request = FinanceAgentSearchRequest(ticker="AAPL")
-        response = await server.sec_filing_search(request)
+        body = FinanceAgentSearchRequest(ticker="AAPL")
+        response = await server.sec_filing_search(_mock_request(), body)
 
         results = json.loads(response.results)
         assert len(results) == 5
@@ -401,8 +411,8 @@ class TestSECFilingSearch:
         }
         _write_filings_cache(server, "0000320193", test_filings)
 
-        request = FinanceAgentSearchRequest(ticker="AAPL", form_types=["10-K"])
-        response = await server.sec_filing_search(request)
+        body = FinanceAgentSearchRequest(ticker="AAPL", form_types=["10-K"])
+        response = await server.sec_filing_search(_mock_request(), body)
 
         results = json.loads(response.results)
         assert len(results) == 1
@@ -427,8 +437,8 @@ class TestSECFilingSearch:
         }
         _write_filings_cache(server, "0000320193", test_filings)
 
-        request = FinanceAgentSearchRequest(ticker="AAPL")
-        response = await server.sec_filing_search(request)
+        body = FinanceAgentSearchRequest(ticker="AAPL")
+        response = await server.sec_filing_search(_mock_request(), body)
 
         results = json.loads(response.results)
         assert len(results) == 200
@@ -484,8 +494,8 @@ class TestDateFiltering:
     @pytest.mark.asyncio
     async def test_start_date_only(self, server) -> None:
         """start_date filters out filings before the given date."""
-        request = FinanceAgentSearchRequest(ticker="AAPL", start_date="2024-01-01")
-        response = await server.sec_filing_search(request)
+        body = FinanceAgentSearchRequest(ticker="AAPL", start_date="2024-01-01")
+        response = await server.sec_filing_search(_mock_request(), body)
         results = json.loads(response.results)
         assert len(results) == 3
         assert all(r["filing_date"] >= "2024-01-01" for r in results)
@@ -493,8 +503,8 @@ class TestDateFiltering:
     @pytest.mark.asyncio
     async def test_end_date_only(self, server) -> None:
         """end_date filters out filings after the given date."""
-        request = FinanceAgentSearchRequest(ticker="AAPL", end_date="2024-07-15")
-        response = await server.sec_filing_search(request)
+        body = FinanceAgentSearchRequest(ticker="AAPL", end_date="2024-07-15")
+        response = await server.sec_filing_search(_mock_request(), body)
         results = json.loads(response.results)
         assert len(results) == 3
         assert all(r["filing_date"] <= "2024-07-15" for r in results)
@@ -502,10 +512,8 @@ class TestDateFiltering:
     @pytest.mark.asyncio
     async def test_start_and_end_date(self, server) -> None:
         """Combined date range narrows results."""
-        request = FinanceAgentSearchRequest(
-            ticker="AAPL", start_date="2024-01-01", end_date="2024-12-31"
-        )
-        response = await server.sec_filing_search(request)
+        body = FinanceAgentSearchRequest(ticker="AAPL", start_date="2024-01-01", end_date="2024-12-31")
+        response = await server.sec_filing_search(_mock_request(), body)
         results = json.loads(response.results)
         assert len(results) == 2
         for r in results:
@@ -514,10 +522,8 @@ class TestDateFiltering:
     @pytest.mark.asyncio
     async def test_date_filter_no_results(self, server) -> None:
         """Date range with no matching filings returns error with filter info."""
-        request = FinanceAgentSearchRequest(
-            ticker="AAPL", start_date="2030-01-01", end_date="2030-12-31"
-        )
-        response = await server.sec_filing_search(request)
+        body = FinanceAgentSearchRequest(ticker="AAPL", start_date="2030-01-01", end_date="2030-12-31")
+        response = await server.sec_filing_search(_mock_request(), body)
         results = json.loads(response.results)
         assert "error" in results
         assert "start_date=" in results["error"]
@@ -526,8 +532,8 @@ class TestDateFiltering:
     @pytest.mark.asyncio
     async def test_results_sorted_newest_first(self, server) -> None:
         """Results are sorted by filing_date descending."""
-        request = FinanceAgentSearchRequest(ticker="AAPL")
-        response = await server.sec_filing_search(request)
+        body = FinanceAgentSearchRequest(ticker="AAPL")
+        response = await server.sec_filing_search(_mock_request(), body)
         results = json.loads(response.results)
         dates = [r["filing_date"] for r in results]
         assert dates == sorted(dates, reverse=True)
@@ -575,19 +581,22 @@ class TestFilingsCache:
 
 
 class TestDumpFallback:
-    def test_lookup_dump_returns_none_without_config(self, server) -> None:
+    @pytest.mark.asyncio
+    async def test_lookup_dump_returns_none_without_config(self, server) -> None:
         """_lookup_dump returns None when sec_dump_path is not configured."""
         assert server.config.sec_dump_path is None
-        result = server._lookup_dump("https://www.sec.gov/Archives/edgar/data/320193/000032019325000001/doc.htm")
+        result = await server._lookup_dump("https://www.sec.gov/Archives/edgar/data/320193/000032019325000001/doc.htm")
         assert result is None
 
-    def test_lookup_dump_returns_none_without_metadata(self, server, tmp_path) -> None:
+    @pytest.mark.asyncio
+    async def test_lookup_dump_returns_none_without_metadata(self, server, tmp_path) -> None:
         """_lookup_dump returns None when metadata is not in _filings_cache."""
         server.config.sec_dump_path = str(tmp_path)
-        result = server._lookup_dump("https://www.sec.gov/Archives/edgar/data/320193/000032019325000001/doc.htm")
+        result = await server._lookup_dump("https://www.sec.gov/Archives/edgar/data/320193/000032019325000001/doc.htm")
         assert result is None
 
-    def test_lookup_dump_reads_from_dump(self, server, tmp_path) -> None:
+    @pytest.mark.asyncio
+    async def test_lookup_dump_reads_from_dump(self, server, tmp_path) -> None:
         """_lookup_dump reads HTML from dump, parses to text, returns it."""
         server.config.sec_dump_path = str(tmp_path)
 
@@ -605,7 +614,7 @@ class TestDumpFallback:
         (dump_dir / "primary-document.html").write_text("<html><body><p>Revenue was $100B</p></body></html>")
 
         url = "https://www.sec.gov/Archives/edgar/data/320193/000032019325000001/doc.htm"
-        result = server._lookup_dump(url)
+        result = await server._lookup_dump(url)
         assert result is not None
         assert "Revenue was $100B" in result
 
@@ -671,7 +680,9 @@ class TestRetrieveInformation:
     @pytest.mark.asyncio
     async def test_prompt_with_curly_braces_in_content(self, server) -> None:
         """Curly braces in document text must not break placeholder substitution."""
-        server._data_storage["doc"] = 'Revenue {"COGS": 500, "net": 1000} end of report'
+        server._data_storage[_TEST_SESSION_ID] = {
+            "doc": 'Revenue {"COGS": 500, "net": 1000} end of report',
+        }
 
         import orjson
 
@@ -700,32 +711,63 @@ class TestRetrieveInformation:
         server.server_client = MagicMock()
         server.server_client.post = AsyncMock(return_value=mock_response)
 
-        request = RetrieveInformationRequest(prompt="What is COGS in {{doc}}?")
-        response = await server.retrieve_information(request)
+        body = RetrieveInformationRequest(prompt="What is COGS in {{doc}}?")
+        response = await server.retrieve_information(_mock_request(), body)
         assert "COGS is 500" in response.results
 
     @pytest.mark.asyncio
     async def test_missing_key_error(self, server) -> None:
         """Referencing a key not in data storage returns an error."""
-        request = RetrieveInformationRequest(prompt="Tell me about {{nonexistent}}")
-        response = await server.retrieve_information(request)
-        assert "ERROR: Key 'nonexistent' not in data storage." in response.results
+        body = RetrieveInformationRequest(prompt="Tell me about {{nonexistent}}")
+        response = await server.retrieve_information(_mock_request(), body)
+        assert "ERROR" in response.results
+        assert "nonexistent" in response.results
+        assert "not found in the data storage" in response.results
 
     @pytest.mark.asyncio
     async def test_no_placeholder_error(self, server) -> None:
         """Prompt without {{key}} placeholders returns an error."""
-        request = RetrieveInformationRequest(prompt="What is the revenue?")
-        response = await server.retrieve_information(request)
-        assert "ERROR: Prompt must contain at least one {{key_name}} placeholder." in response.results
+        body = RetrieveInformationRequest(prompt="What is the revenue?")
+        response = await server.retrieve_information(_mock_request(), body)
+        assert "ERROR" in response.results
+        assert "key" in response.results.lower()
+        assert "{{key_name}}" in response.results
 
     @pytest.mark.asyncio
-    async def test_prompt_too_large(self, server) -> None:
-        """Prompt exceeding max_chars returns a size error."""
-        server._data_storage["huge"] = "x" * 600_000
-        request = RetrieveInformationRequest(prompt="Summarize {{huge}}")
-        response = await server.retrieve_information(request)
-        assert "ERROR: Prompt too large" in response.results
-        assert "huge: 600000 chars" in response.results
+    async def test_large_prompt_sent_to_llm(self, server) -> None:
+        """Large prompts are forwarded to the LLM (no client-side size rejection)."""
+        import orjson
+
+        server._data_storage[_TEST_SESSION_ID] = {"huge": "x" * 600_000}
+        server.config.retrieval_model_server = MagicMock()
+        payload = orjson.dumps(
+            {
+                "id": "resp_1",
+                "created_at": 0,
+                "model": "m",
+                "object": "response",
+                "output": [
+                    {
+                        "id": "msg_1",
+                        "content": [{"annotations": [], "text": "Summary of huge doc", "type": "output_text"}],
+                        "role": "assistant",
+                        "status": "completed",
+                        "type": "message",
+                    }
+                ],
+                "parallel_tool_calls": False,
+                "tool_choice": "auto",
+                "tools": [],
+            }
+        )
+        mock_response = MagicMock()
+        mock_response.read = AsyncMock(return_value=payload)
+        server.server_client = MagicMock()
+        server.server_client.post = AsyncMock(return_value=mock_response)
+
+        body = RetrieveInformationRequest(prompt="Summarize {{huge}}")
+        response = await server.retrieve_information(_mock_request(), body)
+        assert "Summary of huge doc" in response.results
 
 
 # ============================================================================
@@ -800,10 +842,11 @@ class TestVerify:
         ).model_dump_json()
 
     @staticmethod
-    def _prompt_template_fpath() -> str:
-        return str(Path(__file__).resolve().parents[1] / "prompt_templates/finance_sec_search_judge.yaml")
+    def _prompt_dir() -> Path:
+        return Path(__file__).resolve().parents[1] / "prompt_templates"
 
     def _create_server_with_judge(self, tmp_path: Path) -> FinanceAgentResourcesServer:
+        _pd = self._prompt_dir()
         config = FinanceAgentResourcesServerConfig(
             host="0.0.0.0",
             port=8080,
@@ -812,18 +855,27 @@ class TestVerify:
             cache_dir=str(tmp_path),
             judge_model_server=ModelServerRef(type="responses_api_models", name="judge"),
             judge_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
-            judge_prompt_template_fpath=self._prompt_template_fpath(),
+            judge_prompt_template_fpath=str(_pd / "finance_sec_search_judge.yaml"),
+            retrieval_system_prompt_fpath=str(_pd / "finance_sec_search_retrieval.yaml"),
         )
         return FinanceAgentResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
+    @staticmethod
+    def _mock_request() -> MagicMock:
+        req = MagicMock()
+        req.session = {}
+        return req
+
     def _create_server_no_judge(self, tmp_path: Path) -> FinanceAgentResourcesServer:
+        _pd = self._prompt_dir()
         config = FinanceAgentResourcesServerConfig(
             host="0.0.0.0",
             port=8080,
             entrypoint="",
             name="test",
             cache_dir=str(tmp_path),
-            judge_prompt_template_fpath=self._prompt_template_fpath(),
+            judge_prompt_template_fpath=str(_pd / "finance_sec_search_judge.yaml"),
+            retrieval_system_prompt_fpath=str(_pd / "finance_sec_search_retrieval.yaml"),
         )
         return FinanceAgentResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
@@ -841,7 +893,7 @@ class TestVerify:
             self._tool_call("submit_final_result", json.dumps({"final_result": "$391.0 billion"}))
         )
         req = self._make_verify_request(response, "$391.0 billion")
-        res = await server.verify(req)
+        res = await server.verify(self._mock_request(), req)
         assert res.reward == 1.0
         assert res.judge_rating == 2
         assert "[[2]]" in res.judge_text
@@ -860,7 +912,7 @@ class TestVerify:
             self._tool_call("submit_final_result", json.dumps({"final_result": "$391 billion"}))
         )
         req = self._make_verify_request(response, "$391.0 billion")
-        res = await server.verify(req)
+        res = await server.verify(self._mock_request(), req)
         assert res.reward == 0.0
 
     @pytest.mark.asyncio
@@ -875,7 +927,7 @@ class TestVerify:
             self._tool_call("submit_final_result", json.dumps({"final_result": "$100 million"}))
         )
         req = self._make_verify_request(response, "$391.0 billion")
-        res = await server.verify(req)
+        res = await server.verify(self._mock_request(), req)
         assert res.reward == 0.0
 
     @pytest.mark.asyncio
@@ -892,7 +944,7 @@ class TestVerify:
             self._tool_call("submit_final_result", json.dumps({"final_result": "$391.0 billion"}))
         )
         req = self._make_verify_request(response, "$391.0 billion")
-        res = await server.verify(req)
+        res = await server.verify(self._mock_request(), req)
         assert res.reward == 0.0
         assert res.judge_rating is None
 
@@ -909,7 +961,7 @@ class TestVerify:
             self._tool_call("submit_final_result", json.dumps({"final_result": "$391.0 billion"})),
         )
         req = self._make_verify_request(response, "$391.0 billion")
-        res = await server.verify(req)
+        res = await server.verify(self._mock_request(), req)
         assert res.reward == 1.0
 
         # Verify the judge was called with the tool call answer, not the text
@@ -928,7 +980,7 @@ class TestVerify:
 
         response = self._make_response(self._msg("The revenue was $391.0 billion."))
         req = self._make_verify_request(response, "$391.0 billion")
-        res = await server.verify(req)
+        res = await server.verify(self._mock_request(), req)
         assert res.reward == 1.0
 
     @pytest.mark.asyncio
@@ -940,7 +992,7 @@ class TestVerify:
             self._tool_call("submit_final_result", json.dumps({"final_result": "Revenue was $391.0 billion in 2024"}))
         )
         req = self._make_verify_request(response, "$391.0 billion")
-        res = await server.verify(req)
+        res = await server.verify(self._mock_request(), req)
         assert res.reward == 1.0
 
     @pytest.mark.asyncio
@@ -952,7 +1004,7 @@ class TestVerify:
             self._tool_call("submit_final_result", json.dumps({"final_result": "$100 million"}))
         )
         req = self._make_verify_request(response, "$391.0 billion")
-        res = await server.verify(req)
+        res = await server.verify(self._mock_request(), req)
         assert res.reward == 0.0
 
     @pytest.mark.asyncio
@@ -965,7 +1017,7 @@ class TestVerify:
             self._tool_call("submit_final_result", json.dumps({"final_result": "$391.0 billion"}))
         )
         req = self._make_verify_request(response, "$391.0 billion")
-        res = await server.verify(req)
+        res = await server.verify(self._mock_request(), req)
         assert res.reward == 0.0
 
     @pytest.mark.asyncio
@@ -980,5 +1032,5 @@ class TestVerify:
             self._tool_call("submit_final_result", json.dumps({"final_result": 'Revenue {"net": 1000}'}))
         )
         req = self._make_verify_request(response, '{"net": 1000}')
-        res = await server.verify(req)
+        res = await server.verify(self._mock_request(), req)
         assert res.reward == 1.0
