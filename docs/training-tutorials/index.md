@@ -20,6 +20,14 @@ Tutorial-series: GRPO training to improve multi-step tool calling on the Workpla
 {bdg-secondary}`nemo rl` {bdg-secondary}`grpo` {bdg-secondary}`3-5 hours`
 :::
 
+:::{grid-item-card} {octicon}`law;1.5em;sd-mr-1` RLHF (GenRM + HelpSteer3)
+:link: training-nemo-rl-grpo-rlhf-genrm-helpsteer3
+:link-type: ref
+Recipe: GRPO with GenRM pairwise rewards, HelpSteer3 → Gym JSONL, and Arena-Hard v2 evaluation.
++++
+{bdg-secondary}`genrm` {bdg-secondary}`nemotron`
+:::
+
 :::{grid-item-card} {octicon}`link-external;1.5em;sd-mr-1` OpenRLHF
 :link: https://github.com/OpenRLHF/OpenRLHF/blob/main/examples/python/agent_func_nemogym_executor.py
 :link-type: url

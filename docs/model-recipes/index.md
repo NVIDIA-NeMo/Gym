@@ -27,3 +27,7 @@ Distributed training of Nemotron 3 Super 120B across multiple nodes using Slurm 
 :::
 
 ::::
+
+## See also
+
+- {ref}`RLHF-style GRPO with GenRM and HelpSteer3 <training-nemo-rl-grpo-rlhf-genrm-helpsteer3>` — Gym JSONL from HelpSteer3, GenRM compare wiring, and Arena-Hard v2 evaluation (pairs with the Nemotron launch recipes above).
