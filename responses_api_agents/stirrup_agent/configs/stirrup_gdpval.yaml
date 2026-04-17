@@ -1,0 +1,43 @@
+# Generic Stirrup agent configured for GDPVal task
+#
+# To add a new task (e.g. "my_bench"), create a TaskStrategy subclass in
+# responses_api_agents/stirrup_agent/tasks/my_bench.py, register it in
+# stirrup_agent/app.py:_load_task_registry(), and set task: my_bench below.
+stirrup_agent:
+  responses_api_agents:
+    stirrup_agent:
+      entrypoint: app.py
+
+      # Which task strategy to use
+      task: gdpval
+
+      # Stirrup agent configuration
+      agent_max_turns: 100
+      concurrency: 32
+      temperature: 1.0
+
+      # Prompt templates (set via --export in sbatch)
+      system_prompt_template: ???
+      user_prompt_template: ???
+      judge_prompt_template: ???
+
+      # Optional: use a different model for rubric judging.
+      # If null, the same policy model is used for both agent and judge.
+      judge_model_name: null
+      judge_base_url: null
+      judge_api_key: null
+
+      # Apptainer container for isolated code execution (optional).
+      # Set to path of GDPVal .sif to enable containerized execution.
+      # When null, uses local sandbox (default for dev/testing).
+      gdpval_container_path: null
+
+      # Model server reference (resolved at runtime)
+      model_server:
+        name: policy_model
+        type: responses_api_models
+
+      datasets:
+        - name: gdpval_gold
+          type: example
+          jsonl_fpath: responses_api_agents/stirrup_agent/data/gdpval.jsonl
