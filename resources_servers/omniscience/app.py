@@ -58,11 +58,10 @@ from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_met
 
 
 # ---------------------------------------------------------------------------
-# Judge prompt (loaded from prompts/judge.yaml)
+# Default judge prompt path (relative to this file)
 # ---------------------------------------------------------------------------
 
-_JUDGE_PROMPT_PATH = Path(__file__).parent / "prompts" / "judge.yaml"
-_DEFAULT_JUDGE_PROMPT_TEMPLATE = yaml.safe_load(_JUDGE_PROMPT_PATH.read_text())["user"]
+_DEFAULT_JUDGE_PROMPT_PATH = str(Path(__file__).parent / "prompts" / "judge.yaml")
 
 
 # ---------------------------------------------------------------------------
@@ -140,9 +139,10 @@ class OmniscienceConfig(BaseResourcesServerConfig):
     judge_model_server: ModelServerRef
     judge_responses_create_params: NeMoGymResponseCreateParamsNonStreaming
 
-    judge_prompt_template: str = Field(
-        default=_DEFAULT_JUDGE_PROMPT_TEMPLATE,
-        description="Prompt sent to the LLM judge. Placeholders: {question}, {expected_answer}, {generation}.",
+    judge_prompt_path: str = Field(
+        default=_DEFAULT_JUDGE_PROMPT_PATH,
+        description="Path to a YAML file containing the judge prompt under a 'user' key. "
+        "Placeholders: {question}, {expected_answer}, {generation}.",
     )
     use_chat_completions_for_judge: bool = Field(
         default=False,
@@ -187,6 +187,11 @@ class OmniscienceVerifyResponse(BaseVerifyResponse):
 
 class OmniscienceServer(SimpleResourcesServer):
     config: OmniscienceConfig
+
+    def model_post_init(self, context):
+        prompt_data = yaml.safe_load(Path(self.config.judge_prompt_path).read_text())
+        self._judge_prompt_template = prompt_data["user"]
+        return super().model_post_init(context)
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -252,7 +257,7 @@ class OmniscienceServer(SimpleResourcesServer):
         question = body.question or ""
         expected_answer = body.expected_answer or ""
 
-        judge_prompt = self.config.judge_prompt_template.format(
+        judge_prompt = self._judge_prompt_template.format(
             question=question,
             expected_answer=expected_answer,
             generation=generation,
