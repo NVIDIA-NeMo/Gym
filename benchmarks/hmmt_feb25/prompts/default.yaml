@@ -1,0 +1,7 @@
+# Mirrors NeMo Skills' `nemo_skills/prompt/config/generic/math.yaml`
+# (user-only, no system, no few-shots). Skills renders the template with
+# `{examples}` empty by default, producing exactly this user message.
+user: |-
+  Solve the following math problem. Make sure to put the answer (and only answer) inside \boxed{{}}.
+
+  {question}
