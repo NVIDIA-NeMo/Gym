@@ -10,10 +10,10 @@ Tests factual recall across 6 domains: Humanities, Health, Software Engineering,
 
 ```bash
 # Prepare data
-uv run ng_prepare_data +benchmark=omniscience
+ng_prepare_data +benchmark=omniscience
 
 # Run benchmark
-uv run ng_collect_rollouts +benchmark=omniscience \
+ng_collect_rollouts +benchmark=omniscience \
     "+config_paths=[responses_api_models/vllm_model/configs/vllm_model.yaml]" \
     +output_jsonl_fpath=results/omniscience_rollouts.jsonl
 ```

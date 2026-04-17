@@ -27,17 +27,13 @@ Source: https://huggingface.co/datasets/ArtificialAnalysis/AA-Omniscience-Public
 import json
 from pathlib import Path
 
+import yaml
+
 
 BENCHMARK_DIR = Path(__file__).parent
 DATA_DIR = BENCHMARK_DIR / "data"
 OUTPUT_FPATH = DATA_DIR / "omniscience_benchmark.jsonl"
-
-SYSTEM_PROMPT = (
-    "You are answering questions about {domain}, and in particular {topic}. "
-    "You will be given a question, answer with JUST the answer (no explanation). "
-    "If you do not know the answer, or you need more context or tools to answer "
-    "the question, be clear about this - it is better that you say this than get the wrong answer."
-)
+PROMPT_CONFIG = BENCHMARK_DIR / "prompts" / "default.yaml"
 
 
 def prepare() -> Path:
@@ -47,6 +43,11 @@ def prepare() -> Path:
     print("Downloading AA-Omniscience-Public from HuggingFace...")
     ds = load_dataset("ArtificialAnalysis/AA-Omniscience-Public", split="train")
 
+    # Read prompt templates from prompts/default.yaml
+    prompt_config = yaml.safe_load(PROMPT_CONFIG.read_text())
+    system_template = prompt_config.get("system", "")
+    user_template = prompt_config.get("user", "{question}")
+
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
     rows = []
@@ -55,18 +56,18 @@ def prepare() -> Path:
         topic = entry["topic"]
         question = entry["question"]
 
+        messages = []
+        if system_template:
+            messages.append({"role": "system", "content": system_template.format(domain=domain, topic=topic)})
+        messages.append({"role": "user", "content": user_template.format(question=question)})
+
         row = {
             "id": entry["question_id"],
             "domain": domain,
             "topic": topic,
             "question": question,
             "expected_answer": entry["answer"],
-            "responses_create_params": {
-                "input": [
-                    {"role": "system", "content": SYSTEM_PROMPT.format(domain=domain, topic=topic)},
-                    {"role": "user", "content": question},
-                ]
-            },
+            "responses_create_params": {"input": messages},
         }
         rows.append(json.dumps(row, ensure_ascii=False) + "\n")
 
