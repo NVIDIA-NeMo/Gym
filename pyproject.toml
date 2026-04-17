@@ -152,13 +152,10 @@ dependencies = [
     "yappi",
 
     # Ray: Used for distributed processing
-    # Pinned to ==2.53.0 to match the Ray shipped in the nemo-rl container's
-    # vLLM environment. Multi-node DP vLLM spins up a Ray cluster on the
-    # head node; when Gym's ng_run attaches, Ray's version check rejects
-    # mismatched clients (RuntimeError: Version mismatch).
-    # Security: Requires ray>=2.52.0.
+    # Updated Mon Feb 10, 2026 with ray[default]==2.52.1 in uv.lock
+    # Security: Requires ray>=2.52.0 (currently resolves to 2.52.1 naturally)
     # License: Apache 2.0 https://github.com/ray-project/ray/blob/master/LICENSE
-    "ray[default]==2.53.0",
+    "ray[default]",
 
     # psutil: Cross-platform process and system utilities
     # Updated: Fri Nov 07, 2025 with psutil==6.1.1
