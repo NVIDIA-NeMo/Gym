@@ -389,3 +389,80 @@ class TestOmniscienceServer:
         judge_input = json_payload.input[0].content
         assert "What is the capital of France?" in judge_input
         assert "Paris" in judge_input
+
+    async def test_verify_no_think_tag_produces_empty(self, config: OmniscienceConfig) -> None:
+        """When model output has no </think>, generation should be empty (matching parse_reasoning=True)."""
+        server_mock = MagicMock(spec=ServerClient)
+        server = OmniscienceServer(config=config, server_client=server_mock)
+
+        response_mock = AsyncMock()
+        response_mock.json = AsyncMock(return_value=self._make_judge_response("D"))
+        server_mock.post = AsyncMock(return_value=response_mock)
+
+        # Model output without </think> — reasoning that never finished
+        model_response = self._make_model_response("Let me think about this... I'm not sure about the answer")
+        request = OmniscienceVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            response=model_response,
+            question="Some question?",
+            expected_answer="Some answer",
+        )
+
+        result = await server.verify(request)
+        assert result.extracted_answer == ""
+        assert result.verdict == "not_attempted"
+
+
+class TestOmniscienceScoreFn:
+    def test_correct(self) -> None:
+        assert OmniscienceServer._omni_score_fn({"verdict": "correct"}) == {
+            "judge_correct": 1.0,
+            "judge_incorrect": 0.0,
+            "judge_partially_correct": 0.0,
+            "judge_abstained": 0.0,
+        }
+
+    def test_incorrect(self) -> None:
+        scores = OmniscienceServer._omni_score_fn({"verdict": "incorrect"})
+        assert scores["judge_correct"] == 0.0
+        assert scores["judge_incorrect"] == -1.0
+
+    def test_partial(self) -> None:
+        scores = OmniscienceServer._omni_score_fn({"verdict": "partial"})
+        assert scores["judge_partially_correct"] == 1.0
+        assert scores["judge_correct"] == 0.0
+
+    def test_not_attempted(self) -> None:
+        scores = OmniscienceServer._omni_score_fn({"verdict": "not_attempted"})
+        assert scores["judge_abstained"] == 1.0
+        assert scores["judge_correct"] == 0.0
+
+
+class TestExtractTextNoStrip:
+    def _make_response(self, text: str) -> NeMoGymResponse:
+        return NeMoGymResponse(
+            id="test",
+            created_at=0.0,
+            model="test_model",
+            object="response",
+            output=[
+                NeMoGymResponseOutputMessage(
+                    id="msg",
+                    content=[NeMoGymResponseOutputText(annotations=[], text=text, type="output_text")],
+                    role="assistant",
+                    status="completed",
+                    type="message",
+                )
+            ],
+            parallel_tool_calls=False,
+            tool_choice="none",
+            tools=[],
+        )
+
+    def test_strip_false_preserves_reasoning(self) -> None:
+        response = self._make_response("reasoning here</think>answer")
+        assert extract_text_from_response(response, strip_thinking=False) == "reasoning here</think>answer"
+
+    def test_strip_true_removes_reasoning(self) -> None:
+        response = self._make_response("reasoning here</think>answer")
+        assert extract_text_from_response(response, strip_thinking=True) == "answer"
