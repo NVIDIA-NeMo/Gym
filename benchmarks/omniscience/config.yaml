@@ -17,6 +17,6 @@ omniscience_omniscience_simple_agent:
       - name: omniscience
         type: benchmark
         jsonl_fpath: benchmarks/omniscience/data/omniscience_benchmark.jsonl
-        prompt_config: benchmarks/omniscience/prompts/default.yaml
+        prompt_config: benchmarks/omniscience/prompts/generation.yaml
         prepare_script: benchmarks/omniscience/prepare.py
         num_repeats: 8
