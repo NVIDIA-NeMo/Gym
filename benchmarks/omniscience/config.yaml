@@ -1,6 +1,7 @@
-# Chain to the omniscience resource server + agent config
+# Chain to the omniscience resource server + agent config + default judge
 config_paths:
   - resources_servers/omniscience/configs/omniscience.yaml
+  - benchmarks/omniscience/judge_gptoss20b.yaml
 
 # Isolated benchmark instances via _inherit_from
 omniscience_omniscience_resources_server:
