@@ -1,0 +1,37 @@
+# LogScale (CQL) NL-to-query resources server
+#
+# Engine options:
+#   container  – execute CQL against a live LogScale instance (default)
+#   local      – execute CQL against a pandas DataFrame (requires logscale_evaluations/cql_engine.py)
+logscale_cql_resources_server:
+  resources_servers:
+    logscale_cql:
+      entrypoint: app.py
+      domain: knowledge
+      engine: container
+      container_runtime: apptainer  # "docker" or "apptainer"
+      logscale_url: http://localhost:8080
+      judge_model_server: null
+      judge_responses_create_params: null
+      verified: false
+      description: LogScale CQL NL-to-query evaluation with live container backend
+      value: Improve CrowdStrike LogScale CQL query generation from natural language
+logscale_cql_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: logscale_cql_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: validation
+        type: validation
+        jsonl_fpath: resources_servers/logscale_cql/data/all_questions.jsonl
+        gitlab_identifier:
+          dataset_name: logscale_cql
+          version: 0.0.2
+          artifact_fpath: all_questions.jsonl
+        license: NVIDIA Internal Use Only, Do Not Distribute

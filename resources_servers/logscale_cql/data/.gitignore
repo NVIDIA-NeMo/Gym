@@ -1,0 +1,6 @@
+# Large data files — download from GitLab registry instead
+benchmark_rollouts_*.jsonl
+datasets_v2/
+datasets_merged.zip
+logscale_benchmark_clean.json
+queries_verified.json

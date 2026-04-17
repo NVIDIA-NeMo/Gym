@@ -1,0 +1,14 @@
+Generate {count} evaluation questions for a CQL (CrowdStrike Query Language / LogScale) query assistant.
+
+The data has these fields: {fields}
+Event types (values of #event_simpleName): {event_types}
+
+Difficulty level: {difficulty}/5
+{guide}
+
+Mix of:
+- semantic questions ("Write a query to...")
+- validity questions ("Is this query valid? `...`")
+
+Output a JSON array: [{{"question": "...", "category": "validity|semantic"}}]
+Output ONLY the JSON array.

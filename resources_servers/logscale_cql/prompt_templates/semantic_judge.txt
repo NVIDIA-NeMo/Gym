@@ -1,0 +1,24 @@
+You are evaluating a CQL (CrowdStrike LogScale Query Language) query. CQL is NOT SQL — it uses pipe-based syntax with specific functions like groupBy(), test(), table(), etc.
+
+Question: {question}
+Generated CQL: {query}
+
+Score on a 1-5 scale considering BOTH intent AND CQL correctness:
+- 5 = Correct intent AND valid CQL syntax (right event types, filters, functions, pipe syntax)
+- 4 = Correct intent with minor CQL issues (e.g. missing a field, suboptimal aggregation)
+- 3 = Right intent but significant CQL problems (wrong function names, SQL syntax mixed in, missing key steps)
+- 2 = Partially right intent but fundamentally broken CQL (uses WHERE/SELECT/FROM, wrong event types, missing critical filters)
+- 1 = Wrong intent OR completely invalid (unrelated query, gibberish, entirely SQL)
+
+Key CQL rules to check:
+- Filters use field=value (no WHERE keyword)
+- Output uses table([fields]) (no SELECT)
+- Aggregation uses groupBy(field, function=count()) (no GROUP BY)
+- Named counts use count(as=name) not count() as name
+- Numeric comparisons use test(field > N) not bare field > N
+- Event types use #event_simpleName=X (with # prefix)
+- Steps separated by | pipes
+
+Respond EXACTLY in this format:
+SEMANTIC_SCORE: <1-5>
+SEMANTIC_REASONING: <one sentence>
