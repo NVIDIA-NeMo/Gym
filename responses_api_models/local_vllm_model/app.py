@@ -523,6 +523,12 @@ Environment variables: {env_vars_to_print}""")
         return head_node_placement_group
 
     def start_vllm_server(self) -> None:
+        # If base_url is already set, skip local launch — connect to external server.
+        if self.config.base_url:
+            print(f"External base_url configured: {self.config.base_url}. Skipping local vLLM launch.")
+            self._post_init()
+            return
+            
         if self.config.debug:
             print(f"""Currently available Ray cluster resources: {available_resources()}
 Total Ray cluster resources: {cluster_resources()}""")
