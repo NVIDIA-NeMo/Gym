@@ -574,6 +574,14 @@ svg.card-icon{
 .fern-docs-badge{
     border-radius: var(--rounded);
 }
+/* Space badges from preceding card body text */
+.fern-card .fern-docs-badge{
+    margin-top: 0.5rem;
+}
+/* Space adjacent badges horizontally */
+.fern-card .fern-docs-badge + .fern-docs-badge{
+    margin-left: 0.375rem;
+}
 .fern-page-actions button:hover{
     background-color: transparent !important;
 }
