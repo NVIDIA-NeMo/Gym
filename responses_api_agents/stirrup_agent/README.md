@@ -151,8 +151,38 @@ The agent reads its Hydra config at `configs/stirrup_gdpval.yaml`. Notable keys:
 | `judge_api_key` | `null` | Judge API key (prefer env vars). |
 | `gdpval_container_path` | `null` | Path to an Apptainer `.sif` (see below). |
 | `persist_deliverables_dir` | `null` | If set, deliverables survive the run. |
+| `model_id` | `null` | HF model id or local path used to load a tokenizer for dynamic output sizing. |
+| `completion_token_buffer` | `1000` | Safety margin (in tokens) reserved when sizing `max_completion_tokens` per call. |
 
 Env vars honored: `TAVILY_API_KEY`, `HF_TOKEN`, `OPENAI_API_KEY`.
+
+### Dynamic `max_completion_tokens` sizing
+
+Stirrup's `ChatCompletionsClient` sends a static
+`max_completion_tokens = self._max_tokens` on every call.  For long-context
+models (Ultra V3, Qwen3-Coder-30B's 131K, etc.), this can exceed
+`max_model_len − prompt_tokens` once the prompt grows, and the server
+returns an HTTP 400 (or `finish_reason=length` with zero output) that the
+agent cannot recover from.
+
+The wrapper ships a `DynamicMaxTokensChatCompletionsClient`
+(`nemo_client.py`) that, on every request:
+
+1. Tokenises the message history + tool schemas with a HuggingFace
+   `AutoTokenizer` loaded from `model_id`.
+2. Computes `max_completion_tokens = context_window − input_tokens − completion_token_buffer`.
+3. Replicates upstream's response parsing but does **not** raise
+   `ContextOverflowError` on `finish_reason=length`; the agent loop
+   terminates normally via the `finish` tool or `max_turns`.
+
+Set `model_id` to the same checkpoint (or HF id) you are serving via
+vLLM and the tokeniser match is exact.  Leave it unset and the client
+falls back to a conservative character-count estimate — slower to
+allocate completion budget but always safe.  `completion_token_buffer`
+absorbs the residual gap between our estimate and the exact prompt the
+server renders (chat-template wrappers, tool-schema injection).  The
+default `1000` works in practice; raise it (e.g. 2000–5000) if you see
+sporadic HTTP 400 responses at the vLLM proxy.
 
 ## Advanced Features
 
