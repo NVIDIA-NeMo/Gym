@@ -5,5 +5,5 @@ genrm_model:
     openai_model:
       entrypoint: app.py
       openai_base_url: https://integrate.api.nvidia.com/v1
-      openai_api_key: ${oc.env:NVIDIA_API_KEY}
+      openai_api_key: ${oc.env:NVIDIA_API_KEY,null}
       openai_model: openai/gpt-oss-20b
