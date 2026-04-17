@@ -134,6 +134,10 @@ python3 resources_servers/labbench2_vlm/prepare_data.py --example  # also popula
 
 ## Usage
 
+The judge model is defined in a separate config (`configs/judge_model_openai.yaml`)
+so users who want a non-OpenAI judge (e.g. a local vLLM) can swap it out by
+supplying their own `responses_api_models` instance named `judge_model`.
+
 Set `env.yaml` with policy and judge model credentials:
 
 ```yaml
@@ -148,7 +152,7 @@ judge_model_name: openai/openai/gpt-5-mini
 Start the servers:
 
 ```bash
-ng_run "+config_paths=[resources_servers/labbench2_vlm/configs/labbench2_vlm.yaml,responses_api_models/openai_model/configs/openai_model.yaml]"
+ng_run "+config_paths=[resources_servers/labbench2_vlm/configs/labbench2_vlm.yaml,resources_servers/labbench2_vlm/configs/judge_model_openai.yaml,responses_api_models/openai_model/configs/openai_model.yaml]"
 ```
 
 Collect rollouts:
@@ -156,7 +160,7 @@ Collect rollouts:
 ```bash
 ng_collect_rollouts \
   +agent_name=labbench2_vlm_simple_agent \
-  "+config_paths=[resources_servers/labbench2_vlm/configs/labbench2_vlm.yaml,responses_api_models/openai_model/configs/openai_model.yaml]" \
+  "+config_paths=[resources_servers/labbench2_vlm/configs/labbench2_vlm.yaml,resources_servers/labbench2_vlm/configs/judge_model_openai.yaml,responses_api_models/openai_model/configs/openai_model.yaml]" \
   +input_jsonl_fpath=resources_servers/labbench2_vlm/data/figqa2_img_validation.jsonl \
   +output_jsonl_fpath=results/figqa2_img_rollouts.jsonl \
   +num_repeats=1 \
@@ -174,7 +178,7 @@ because `data/test_media/` and `data/example.jsonl` are committed):
 ```bash
 ng_collect_rollouts \
   +agent_name=labbench2_vlm_simple_agent \
-  "+config_paths=[resources_servers/labbench2_vlm/configs/labbench2_vlm.yaml,responses_api_models/openai_model/configs/openai_model.yaml]" \
+  "+config_paths=[resources_servers/labbench2_vlm/configs/labbench2_vlm.yaml,resources_servers/labbench2_vlm/configs/judge_model_openai.yaml,responses_api_models/openai_model/configs/openai_model.yaml]" \
   +input_jsonl_fpath=resources_servers/labbench2_vlm/data/example.jsonl \
   +output_jsonl_fpath=resources_servers/labbench2_vlm/data/example_rollouts.jsonl \
   +num_repeats=1 \
@@ -183,6 +187,38 @@ ng_collect_rollouts \
 
 `example_rollouts.jsonl` is gitignored (42MB+ due to embedded base64 in the
 rollout output). Regenerate it locally with the command above.
+
+### One-shot alternative
+
+`ng_e2e_collect_rollouts` starts the server stack, preprocesses, and collects
+rollouts in a single command (don't run `ng_run` separately). Input path and
+agent ref are auto-derived from the dataset entry in the chained config
+(`++split` picks which one):
+
+```bash
+ng_e2e_collect_rollouts \
+  "+config_paths=[resources_servers/labbench2_vlm/configs/labbench2_vlm.yaml,resources_servers/labbench2_vlm/configs/judge_model_openai.yaml,responses_api_models/openai_model/configs/openai_model.yaml]" \
+  ++split=validation \
+  ++output_jsonl_fpath=results/labbench2_vlm_validation.jsonl \
+  +num_samples_in_parallel=16
+```
+
+For a fast smoke test, add `+limit=10 +num_repeats=1`.
+
+## Throttling
+
+Each in-flight sample fans out to one policy call + one judge call, so the
+endpoints see roughly `2 × num_samples_in_parallel` concurrent requests.
+On a hosted endpoint you'll likely hit rate limits or socket errors
+(`Hit N global ClientOSError`) well before saturating your machine.
+
+Cap concurrency with `+num_samples_in_parallel=<N>`:
+
+```bash
+ng_collect_rollouts ... +num_samples_in_parallel=16
+```
+
+Start around 16 and bump up if it holds.
 
 ## Licensing
 
