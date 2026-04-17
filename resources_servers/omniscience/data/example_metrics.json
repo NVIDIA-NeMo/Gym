@@ -6,7 +6,7 @@
     "gitlab_identifier": null,
     "huggingface_identifier": null,
     "license": null,
-    "Number of examples": 0,
+    "Number of examples": 5,
     "Number of tools": {
         "Total # non-null values": 0,
         "Average": 0.0,
@@ -15,17 +15,17 @@
         "Standard deviation": 0.0
     },
     "Json-dumped number of words (proxy for token count)": {
-        "Total # non-null values": 0,
-        "Average": 0.0,
-        "Min": 0.0,
-        "Max": 0.0,
-        "Standard deviation": 0.0
+        "Total # non-null values": 5,
+        "Average": 77.6,
+        "Min": 73.0,
+        "Max": 83.0,
+        "Standard deviation": 4.22
     },
     "Number of turns": {
-        "Total # non-null values": 0,
-        "Average": 0.0,
-        "Min": 0.0,
-        "Max": 0.0,
+        "Total # non-null values": 5,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
         "Standard deviation": 0.0
     },
     "Temperature": {
@@ -34,5 +34,25 @@
         "Min": 0.0,
         "Max": 0.0,
         "Standard deviation": 0.0
+    },
+    "id": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "domain": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "topic": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "question": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "expected_answer": {
+        "unique_count": 5,
+        "total_count": 5
     }
 }
