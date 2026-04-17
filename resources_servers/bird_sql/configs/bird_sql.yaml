@@ -30,4 +30,4 @@ bird_sql_simple_agent:
         - name: example
           type: example
           jsonl_fpath: resources_servers/bird_sql/data/example.jsonl
-          license: Creative Commons Attribution Non Commercial 4.0
+          license: Creative Commons Attribution-ShareAlike 4.0 International
