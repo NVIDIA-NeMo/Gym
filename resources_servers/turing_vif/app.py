@@ -199,7 +199,6 @@ class TuringVIFVerifyResponse(BaseVerifyResponse):
     follow_all_instructions: bool
     follow_instruction_list: List[bool]
     validation_results: List[ValidationResult] = Field(default_factory=list)
-    should_skip_rollout: bool = False
 
 
 class ValidationError(BaseModel):
@@ -760,7 +759,6 @@ class TuringVIFResourcesServer(SimpleResourcesServer):
 
         schema_errors = await self.validate_instructions_schema(all_instructions)
         if schema_errors:
-            # Return early with schema errors - rollout will be skipped
             for err in schema_errors:
                 validation_results.append(
                     ValidationResult(
@@ -777,7 +775,6 @@ class TuringVIFResourcesServer(SimpleResourcesServer):
                 follow_all_instructions=False,
                 follow_instruction_list=is_following_list,
                 validation_results=validation_results,
-                should_skip_rollout=True,
             )
 
         # Get language from request (defaults to "en")
@@ -791,8 +788,6 @@ class TuringVIFResourcesServer(SimpleResourcesServer):
                 unsupported_instructions.append(inst_id)
 
         if unsupported_instructions:
-            # Skip rollout: record error for errors.json and do not add to processed.
-            # The rollout collector treats this like schema_validation (skip + errors.json).
             validation_results.append(
                 ValidationResult(
                     instruction="language_compatibility",
@@ -808,7 +803,6 @@ class TuringVIFResourcesServer(SimpleResourcesServer):
                 follow_all_instructions=False,
                 follow_instruction_list=is_following_list,
                 validation_results=validation_results,
-                should_skip_rollout=True,
             )
 
         # Separate fast validators from LLM validators
