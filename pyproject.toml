@@ -169,10 +169,12 @@ dependencies = [
 
     # Stirrup: agent-loop framework used by the Stirrup agent wrapper.
     # Updated Feb 2026 with stirrup==0.1.7
-    # Pinned below 0.1.8 — 0.1.8 added a ContextOverflowError that misfires on
-    # finish_reason=length for long-context models. Revisit once upstream is fixed.
     # License: Apache 2.0 https://github.com/ArtificialAnalysis/Stirrup/blob/main/LICENSE
-    "stirrup>=0.1.7,<0.1.8",
+    "stirrup>=0.1.7",
+
+    "transformers>=4.40.0",
+
+    "Pillow>=10.0.0",
 
     # orjson: JSON library for faster serialization/deserialization
     # Updated: Thu Jan 08, 2026 with orjson==3.11.3

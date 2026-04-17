@@ -18,12 +18,12 @@
    as user messages (some models perform better this way).
 
 2. **skip_input_file_listing** — Suppresses the file-path listing that
-   upstream Stirrup injects into the system prompt via
-   ``_build_system_prompt()``.  When we build the GDPVal user prompt
-   externally (with its own ``<reference_files>`` section), the
-   duplicate listing wastes tokens and can confuse the model.
+   Stirrup injects into the system prompt via ``_build_system_prompt()``.
+   When we build the GDPVal user prompt externally (with its own
+   ``<reference_files>`` section), the duplicate listing wastes tokens
+   and can confuse the model.
 
-These two overrides allow using upstream Stirrup without a fork.
+These two overrides allow using Stirrup as-is, without a fork.
 """
 
 from __future__ import annotations

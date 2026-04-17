@@ -1,1 +1,14 @@
 -e nemo-gym[dev] @ ../../
+# Deliverable-processing deps (file_reader.py + tasks/_gdpval_scoring.py).  The
+# subprocess venv created by ng_run from this requirements.txt does not see
+# these via transitive resolution, so we pin them explicitly.
+jinja2>=3.1
+python-docx>=1.1
+python-pptx>=1.0
+openpyxl>=3.1
+pdfminer.six>=20240706
+trafilatura>=1.12
+httpx>=0.27
+# moviepy (transitive from stirrup) imports PIL at module load; Pillow must
+# be installed in the same venv or the whole stirrup import chain breaks.
+Pillow>=10.0.0

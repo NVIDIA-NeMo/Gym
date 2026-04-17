@@ -132,15 +132,21 @@ async def _run_stirrup_agent(
     persist_deliverables_dir: Optional[str] = None,
     task_id: Optional[str] = None,
     is_gdpval: bool = False,
+    model_id: Optional[str] = None,
+    completion_token_buffer: int = 1000,
 ) -> Dict[str, Any]:
     """Run a Stirrup agent session and return history + metadata.
 
     If *exec_provider_class* is given (as a dotted import path), it is
     used instead of the default ``LocalCodeExecToolProvider``.
-    """
-    from stirrup.clients.chat_completions_client import ChatCompletionsClient
 
+    *model_id* is the HuggingFace model id (or local path) used to load
+    a tokenizer that sizes ``max_completion_tokens`` dynamically per call
+    (see ``DynamicMaxTokensChatCompletionsClient``).  When unset, a
+    character-count fallback is used.
+    """
     from responses_api_agents.stirrup_agent.nemo_agent import NeMoAgent
+    from responses_api_agents.stirrup_agent.nemo_client import DynamicMaxTokensChatCompletionsClient
     from stirrup.tools import DEFAULT_TOOLS
     from stirrup.tools.code_backends.base import SHELL_TIMEOUT, CodeExecToolProvider, CommandResult
     from stirrup.tools.code_backends.local import LocalCodeExecToolProvider
@@ -180,11 +186,13 @@ async def _run_stirrup_agent(
         async def run_command(self, cmd: str, *, timeout: int = SHELL_TIMEOUT) -> CommandResult:
             return await super().run_command(self._env_prefix + cmd, timeout=timeout)
 
-    client = ChatCompletionsClient(
+    client = DynamicMaxTokensChatCompletionsClient(
         model=model_name,
         base_url=model_base_url,
         api_key=api_key,
         max_tokens=max_tokens,
+        model_id=model_id,
+        completion_token_buffer=completion_token_buffer,
     )
 
     if exec_provider_class:
@@ -484,13 +492,17 @@ class StirrupAgentWrapperConfig(BaseResponsesAPIAgentConfig):
     )
     model_id: Optional[str] = Field(
         default=None,
-        description="HuggingFace model ID for tokenizer (enables dynamic token sizing). "
-        "E.g. 'Qwen/Qwen3-Coder-30B-A3B-Instruct'. If None, completion_token_buffer is ignored.",
+        description="HuggingFace model ID (or local checkpoint path) used to load a tokenizer "
+        "for dynamic max_completion_tokens sizing. E.g. 'Qwen/Qwen3-Coder-30B-A3B-Instruct'. "
+        "When None, a character-count fallback is used (conservative, but slightly over-allocates "
+        "input tokens). See ``nemo_client.DynamicMaxTokensChatCompletionsClient``.",
     )
     completion_token_buffer: int = Field(
-        default=5000,
-        description="Token buffer reserved for completion (prevents context overflow). "
-        "Only used when model_id is set.",
+        default=1000,
+        description="Token budget reserved on top of input_tokens when computing per-call "
+        "max_completion_tokens. Absorbs the residual gap between our tokenizer estimate "
+        "(messages + tool-schema JSON) and the exact prompt the server sees after chat-template "
+        "rendering. See ``nemo_client.DynamicMaxTokensChatCompletionsClient``.",
     )
 
 
@@ -575,6 +587,8 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
                 "persist_deliverables_dir": self.config.persist_deliverables_dir,
                 "task_id": task_info.get("task_id"),
                 "is_gdpval": self.config.task == "gdpval",
+                "model_id": self.config.model_id,
+                "completion_token_buffer": self.config.completion_token_buffer,
             }
 
             future = run_stirrup_agent_remote.remote(params)
