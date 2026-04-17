@@ -1,0 +1,30 @@
+citation_format:
+  resources_servers:
+    format_verification:
+      entrypoint: app.py
+      domain: instruction_following
+      verified: false
+      description: Verify citation/reference markers in model responses via string matching
+      value: Improve instruction following for citation format adherence
+citation_format_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: citation_format
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: train
+        type: train
+        jsonl_fpath: resources_servers/format_verification/data/ds3_citation_format_train.jsonl
+        gitlab_identifier:
+          dataset_name: format_verification_citation
+          version: 0.0.1
+          artifact_fpath: ds3_citation_train.jsonl
+        license: Apache 2.0
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/format_verification/data/ds3_citation_format_example.jsonl
