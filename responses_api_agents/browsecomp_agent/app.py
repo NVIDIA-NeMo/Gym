@@ -141,6 +141,9 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 usage.input_tokens_details.cached_tokens = 0
                 usage.output_tokens_details.reasoning_tokens = 0
 
+            if model_response.incomplete_details and model_response.incomplete_details.reason == "max_output_tokens":
+                break
+
             # --- If the model decided to answer (no tool calls), we are done ---
             all_fn_calls: List[NeMoGymResponseFunctionToolCall] = [o for o in output if o.type == "function_call"]
             all_output_messages: List[NeMoGymResponseOutputMessage] = [
@@ -235,7 +238,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         cookies = seed_session_response.cookies
 
         last_verify_response = None
-        for _ in range(self.config.max_run_retries):
+        for attempt in range(self.config.max_run_retries):
             response = await self.server_client.post(
                 server_name=self.config.name,
                 url_path="/v1/responses",
@@ -249,11 +252,12 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             response_json = await get_response_json(response)
             raw_output_text = NeMoGymResponse.model_validate(response_json).output_text
             cleaned_output_text = re.sub(r"<think>.*?</think>", "", raw_output_text, flags=re.DOTALL).strip()
-            if not cleaned_output_text:
+            # Need to get last_verify_response if all attempts are exhausted
+            if not cleaned_output_text and attempt != self.config.max_run_retries - 1:
                 continue
 
             verify_request = BrowsecompAgentVerifyRequest.model_validate(
-                body.model_dump() | {"response": await get_response_json(response)}
+                body.model_dump() | {"response": response_json}
             )
 
             verify_response = await self.server_client.post(

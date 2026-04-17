@@ -539,5 +539,6 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
 
         return is_correct, extracted, True
 
+
 if __name__ == "__main__":
     TavilySearchResourcesServer.run_webserver()
