@@ -1,0 +1,21 @@
+# Chain to the omniscience resource server + agent config
+config_paths:
+  - resources_servers/omniscience/configs/omniscience.yaml
+
+# Isolated benchmark instances via _inherit_from
+omniscience_omniscience_resources_server:
+  _inherit_from: omniscience
+
+omniscience_omniscience_simple_agent:
+  _inherit_from: omniscience_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: omniscience_omniscience_resources_server
+      datasets:
+      - name: omniscience
+        type: benchmark
+        jsonl_fpath: benchmarks/omniscience/data/omniscience_benchmark.jsonl
+        prompt_config: benchmarks/omniscience/prompts/default.yaml
+        prepare_script: benchmarks/omniscience/prepare.py
+        num_repeats: 8
