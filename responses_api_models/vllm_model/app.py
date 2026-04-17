@@ -371,7 +371,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             )
 
         if self.config.return_token_id_information:
-            log_probs = choice_dict["logprobs"]["content"]
+            log_probs = (choice_dict.get("logprobs") or {}).get("content") or []
             generation_log_probs = [log_prob["logprob"] for log_prob in log_probs]
 
             """
