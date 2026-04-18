@@ -172,6 +172,32 @@ class RolloutCollectionHelper(BaseModel):
             rows_iterator: Iterator[tuple[int, str]] = zip(range_iterator, rows_iterator)
             raw_rows = [(row_idx, row_str, orjson.loads(row_str)) for row_idx, row_str in rows_iterator]
 
+        # Fallback: if prompt_config wasn't explicitly set, try to infer it from the
+        # agent's dataset catalog. Each BenchmarkDatasetConfig entry has a
+        # (jsonl_fpath, prompt_config) pair; when the user specifies input_jsonl_fpath
+        # matching one of those entries, use its declared prompt_config. This avoids
+        # forcing the user to re-specify the prompt that's already in the agent YAML.
+        if prompt_cfg is None and config.agent_name:
+            global_cfg = get_global_config_dict()
+            agent_cfg = global_cfg.get(config.agent_name) if global_cfg is not None else None
+            if agent_cfg is not None:
+                agents_section = agent_cfg.get("responses_api_agents") or {}
+                # agents_section has exactly one entry (enforced by schema: Dict[...] min=1 max=1)
+                inner = next(iter(agents_section.values()), None) or {}
+                for ds in inner.get("datasets") or []:
+                    ds_path = ds.get("jsonl_fpath")
+                    ds_prompt = ds.get("prompt_config")
+                    if not ds_path or not ds_prompt:
+                        continue
+                    try:
+                        same = Path(str(ds_path)).resolve() == _input_path.resolve()
+                    except OSError:
+                        same = str(ds_path) == str(_input_path)
+                    if same:
+                        prompt_cfg = load_prompt_config(str(ds_prompt))
+                        print(f"Using prompt config from agent '{config.agent_name}' dataset catalog: {ds_prompt}")
+                        break
+
         # Validate and apply prompt config before per-row processing
         if prompt_cfg is not None:
             validate_prompt_compatibility([row for _, _, row in raw_rows], prompt_cfg)
