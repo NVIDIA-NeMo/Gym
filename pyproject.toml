@@ -382,6 +382,10 @@ ng_pip_list = "nemo_gym.cli:pip_list"
 nemo_gym_version = "nemo_gym.cli:version"
 ng_version = "nemo_gym.cli:version"
 
+# Stop server(s)
+nemo_gym_stop = "nemo_gym.cli:stop"
+ng_stop = "nemo_gym.cli:stop"
+
 # Re-install Gym and dependencies
 nemo_gym_reinstall = "nemo_gym.cli:reinstall"
 ng_reinstall = "nemo_gym.cli:reinstall"
