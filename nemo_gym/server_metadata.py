@@ -39,6 +39,15 @@ class ResourcesServerMetadata:
 
 def visit_resources_server(data: dict, level: int = 1) -> ResourcesServerMetadata:  # pragma: no cover
     """Extract resources server metadata from YAML data."""
+    return _visit_server(data, "resources_servers", level)
+
+
+def visit_agent_server(data: dict, level: int = 1) -> ResourcesServerMetadata:  # pragma: no cover
+    """Extract agent server metadata from YAML data."""
+    return _visit_server(data, "responses_api_agents", level)
+
+
+def _visit_server(data: dict, server_type_key: str, level: int = 1) -> ResourcesServerMetadata:  # pragma: no cover
     resource = ResourcesServerMetadata()
     if level == 4:
         resource.domain = data.get("domain")
@@ -49,7 +58,7 @@ def visit_resources_server(data: dict, level: int = 1) -> ResourcesServerMetadat
         return resource
     elif isinstance(data, dict):
         for k, v in data.items():
-            if level == 2 and k != "resources_servers":
+            if level == 2 and k != server_type_key:
                 continue
-            return visit_resources_server(v, level + 1)
+            return _visit_server(v, server_type_key, level + 1)
     return resource
