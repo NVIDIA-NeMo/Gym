@@ -36,6 +36,7 @@ class SimpleModelServerConfig(BaseResponsesAPIModelConfig):
     openai_model: str
 
     extra_body: Dict[str, Any] = Field(default_factory=dict)
+    openai_default_headers: Dict[str, str] = Field(default_factory=dict)
 
 
 class SimpleModelServer(SimpleResponsesAPIModel):
@@ -45,6 +46,7 @@ class SimpleModelServer(SimpleResponsesAPIModel):
         self._client = NeMoGymAsyncOpenAI(
             base_url=self.config.openai_base_url,
             api_key=self.config.openai_api_key,
+            default_headers=self.config.openai_default_headers,
         )
 
         return super().model_post_init(context)

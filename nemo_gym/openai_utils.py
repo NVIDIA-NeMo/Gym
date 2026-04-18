@@ -476,10 +476,16 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         description="Set this to true if this particular client is only used to call internal NeMo Gym servers.",
     )
 
+    default_headers: Dict[str, str] = Field(
+        default_factory=dict,
+        description="Extra headers to include in every request (e.g. X-Prime-Team-ID).",
+    )
+
     async def _request(self, **request_kwargs: Dict) -> ClientResponse:
         request_kwargs = request_kwargs | {
             "headers": {
                 "Authorization": f"Bearer {self.api_key}",
+                **self.default_headers,
             },
             "_internal": self.internal,
         }
