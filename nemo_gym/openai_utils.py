@@ -262,6 +262,7 @@ class NeMoGymResponseCreateParamsNonStreaming(BaseModel):
     previous_response_id: Optional[str] = None
     prompt: Optional[ResponsePromptParam] = None
     reasoning: Optional[Reasoning] = None
+    seed: Optional[int] = None
     service_tier: Optional[Literal["auto", "default", "flex", "scale", "priority"]] = None
     store: Optional[bool] = None
     temperature: Optional[float] = None

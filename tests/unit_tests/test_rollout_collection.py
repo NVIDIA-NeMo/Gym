@@ -23,6 +23,7 @@ import yaml
 
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.global_config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.reward_profile import compute_aggregate_metrics
 from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
 
@@ -159,6 +160,36 @@ class TestRolloutCollection:
                 "agent_ref": {"name": "my_agent"},
             },
         ]
+
+    def test_preprocess_rows_num_repeats_add_seed_passes_pydantic_validation(self, tmp_path: Path) -> None:
+        """Rows emitted with num_repeats_add_seed=True must round-trip through the strict
+        NeMoGymResponseCreateParamsNonStreaming schema (extra='forbid'). Regression test for
+        422 Unprocessable Entity at the agent's /run endpoint when `seed` is rejected."""
+        fpath = tmp_path / "input.jsonl"
+        samples = [json.dumps({"responses_create_params": {"input": []}, "x": i}) for i in range(2)]
+        fpath.write_text("\n".join(samples) + "\n")
+
+        config = RolloutCollectionConfig(
+            agent_name="my_agent",
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+            num_repeats=3,
+            num_repeats_add_seed=True,
+        )
+
+        rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+
+        assert len(rows) == 6
+        seeds_seen = []
+        for row in rows:
+            rcp = row["responses_create_params"]
+            assert "seed" in rcp
+            seeds_seen.append(rcp["seed"])
+            # This is the validation that fails in production without the schema fix.
+            validated = NeMoGymResponseCreateParamsNonStreaming.model_validate(rcp)
+            assert validated.seed == rcp["seed"]
+        # Seeds should track rollout index within each task (0, 1, 2 per task).
+        assert seeds_seen == [0, 1, 2, 0, 1, 2]
 
     async def test_run_from_config_sanity(self, tmp_path: Path) -> None:
         input_jsonl_fpath = tmp_path / "input.jsonl"
