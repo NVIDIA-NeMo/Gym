@@ -1,0 +1,19 @@
+You are evaluating whether a CQL query produced correct results for the given question.
+
+Question: {question}
+Generated CQL: {query}
+Query Results:
+{results}
+
+Score the EXECUTION correctness on a 1-5 scale:
+- 5 = Results directly answer the question with correct data
+- 4 = Results are useful and mostly answer the question (minor issues like extra columns or slightly different ordering)
+- 3 = Results are partially relevant but miss key aspects of the question
+- 2 = Results exist but don't meaningfully answer the question (wrong fields, wrong event types, irrelevant data)
+- 1 = No results (error or empty), OR results are completely unrelated to the question
+
+If the results show an error message or are empty, score 1 regardless of the query intent.
+
+Respond EXACTLY in this format:
+EXECUTION_SCORE: <1-5>
+EXECUTION_REASONING: <one sentence>

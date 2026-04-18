@@ -114,6 +114,15 @@ CUSTOMER_EVALS: List[CustomerEval] = [
         ),
     ),
     CustomerEval(
+        eval_name="logscale_cql",
+        config_path="resources_servers/logscale_cql/configs/logscale_cql.yaml",
+        rollout_collection_config=RolloutCollectionConfig(
+            agent_name="logscale_cql_simple_agent",
+            input_jsonl_fpath="data/logscale_cql/validation.jsonl",
+            output_jsonl_fpath="resources_servers/logscale_cql/data/{model_short_name_for_upload}_validation_rollouts.jsonl",
+        ),
+    ),
+    CustomerEval(
         eval_name="servicenow_document_reasoning",
         config_path="resources_servers/servicenow_document_reasoning/configs/servicenow_document_reasoning.yaml",
         rollout_collection_config=RolloutCollectionConfig(

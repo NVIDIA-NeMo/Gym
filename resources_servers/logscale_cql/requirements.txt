@@ -1,0 +1,11 @@
+# LogScale CQL resources server
+pandas>=1.5.0
+requests>=2.28.0
+fastapi>=0.100.0
+uvicorn>=0.20.0
+pydantic>=2.0.0
+ray[default]>=2.9.0
+
+# Install the local NeMo Gym package so `import nemo_gym` works in the
+# isolated venv that `ng_run` creates for this resources server.
+-e ../..
