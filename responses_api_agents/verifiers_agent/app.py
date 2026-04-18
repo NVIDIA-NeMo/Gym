@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 from __future__ import annotations
 
 import logging
@@ -18,12 +19,10 @@ import traceback
 from typing import Any
 
 import verifiers as vf
-import verifiers.envs.multiturn_env as _multiturn_env_module
 from fastapi import Body, Request, Response
-from openai.types.chat.chat_completion import ChatCompletion
+from openai import AsyncOpenAI
 from pydantic import ConfigDict, Field
-from verifiers.utils.async_utils import maybe_semaphore
-from verifiers.utils.response_utils import parse_response_messages as _original_parse_response_messages
+from verifiers.clients import NeMoRLChatCompletionsClient
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
@@ -37,34 +36,9 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessageForTraining,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.server_utils import get_global_aiohttp_client
 
 
 logger = logging.getLogger(__name__)
-
-
-# patch verifiers to include prompt and generation token ids and logprobs for
-# re-tokenization correction in replace_prefix_tokens (https://github.com/NVIDIA-NeMo/RL/blob/main/nemo_rl/models/generation/vllm/vllm_worker_async.py#L40)
-async def _patched_parse_response_messages(response, message_type):
-    messages = await _original_parse_response_messages(response, message_type)
-    if message_type == "chat" and isinstance(messages, list):
-        for msg in messages:
-            if isinstance(msg, dict) and msg.get("role") == "assistant":
-                if hasattr(response, "prompt_token_ids"):
-                    msg["prompt_token_ids"] = response.prompt_token_ids
-                if response.choices and hasattr(response.choices[0], "token_ids"):
-                    msg["generation_token_ids"] = response.choices[0].token_ids
-                if (
-                    response.choices
-                    and response.choices[0].logprobs
-                    and hasattr(response.choices[0].logprobs, "content")
-                    and response.choices[0].logprobs.content
-                ):
-                    msg["generation_log_probs"] = [t.logprob for t in response.choices[0].logprobs.content]
-    return messages
-
-
-_multiturn_env_module.parse_response_messages = _patched_parse_response_messages
 
 
 class VerifiersNeMoGymResponse(NeMoGymResponse):
@@ -84,89 +58,12 @@ class VerifiersAgentVerifyResponse(BaseVerifyResponse):
     reward: float
 
 
-class VLLMOpenAIClient:
-    def __init__(self, base_url: str) -> None:
-        self._base_url = base_url.rstrip("/")
-        self.chat = self._Chat(self)
-
-    class _Chat:
-        def __init__(self, client: "VLLMOpenAIClient") -> None:
-            self.completions = client
-
-    async def create(self, *args: Any, **kwargs: Any) -> ChatCompletion:
-        request_body: dict[str, Any] = {
-            "model": kwargs.get("model", ""),
-            "messages": kwargs.get("messages", []),
-        }
-        for key in (
-            "temperature",
-            "max_tokens",
-            "max_completion_tokens",
-            "top_p",
-            "stop",
-            "n",
-            "tools",
-            "tool_choice",
-        ):
-            if key in kwargs and kwargs[key] is not None:
-                request_body[key] = kwargs[key]
-
-        url = f"{self._base_url}/chat/completions"
-        try:
-            session = get_global_aiohttp_client()
-            async with session.post(url, json=request_body) as resp:
-                if resp.status != 200:
-                    error_text = await resp.text()
-                    logger.error(f"Request to {url} failed with status {resp.status}: {error_text}")
-                    resp.raise_for_status()
-                response_dict = await resp.json()
-        except Exception as e:
-            logger.error(f"Exception calling {url}: {type(e).__name__}: {e}")
-            raise
-
-        choice_dict = response_dict["choices"][0]
-        message_dict = choice_dict.get("message", {})
-
-        prompt_token_ids = message_dict.pop("prompt_token_ids", [])
-        generation_token_ids = message_dict.pop("generation_token_ids", [])
-        generation_log_probs = message_dict.pop("generation_log_probs", [])
-
-        if not generation_token_ids:
-            logger.warning(
-                f"No generation_token_ids in response! Full message keys were: {list(choice_dict.get('message', {}).keys())}"
-            )
-
-        if prompt_token_ids and isinstance(prompt_token_ids[0], str):
-            prompt_token_ids = [int(tid) for tid in prompt_token_ids]
-
-        if generation_token_ids and isinstance(generation_token_ids[0], str):
-            generation_token_ids = [int(tid) for tid in generation_token_ids]
-
-        if generation_token_ids and generation_log_probs:
-            choice_dict["logprobs"] = {
-                "content": [
-                    {"token": f"token_id:{tid}", "logprob": lp, "top_logprobs": []}
-                    for tid, lp in zip(generation_token_ids, generation_log_probs)
-                ]
-            }
-
-        response = ChatCompletion.model_validate(response_dict)
-        setattr(response, "prompt_token_ids", prompt_token_ids)
-        setattr(response.choices[0], "token_ids", generation_token_ids)
-        return response
-
-
 class VerifiersAgentConfig(BaseResponsesAPIAgentConfig):
     model_server: ModelServerRef
     model_name: str = Field(default="", description="Model name")
 
     vf_env_id: str = Field(default="", description="Verifiers environment ID")
     vf_env_args: dict = Field(default_factory=dict, description="Verifiers environment arguments")
-
-    max_concurrent_generation: int = Field(
-        default=-1, description="Max concurrent generation requests (-1 = unlimited)"
-    )
-    max_concurrent_scoring: int = Field(default=-1, description="Max concurrent scoring requests (-1 = unlimited)")
 
     max_tokens: int = Field(default=8192, description="Max tokens for generation")
 
@@ -193,17 +90,17 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
     model_config = ConfigDict(arbitrary_types_allowed=True)
     config: VerifiersAgentConfig
 
-    envs_cache: dict[str, Any] = Field(default_factory=dict)  # vf.Environment
-    openai_client_cache: dict[str, VLLMOpenAIClient] = Field(default_factory=dict)
+    envs_cache: dict[str, Any] = Field(default_factory=dict)
+    client_cache: dict[str, NeMoRLChatCompletionsClient] = Field(default_factory=dict)
 
     def _get_env(self, vf_env_id: str) -> vf.Environment:
         if vf_env_id not in self.envs_cache:
             self.envs_cache[vf_env_id] = vf.load_environment(vf_env_id, **self.config.vf_env_args)
         return self.envs_cache[vf_env_id]
 
-    def _get_openai_client(self) -> VLLMOpenAIClient:
+    def _get_client(self) -> NeMoRLChatCompletionsClient:
         cache_key = self.config.model_server.name
-        if cache_key not in self.openai_client_cache:
+        if cache_key not in self.client_cache:
             server_config_dict = get_first_server_config_dict(
                 self.server_client.global_config_dict,
                 self.config.model_server.name,
@@ -213,25 +110,50 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
             if not model_server_url.endswith("/v1"):
                 model_server_url = model_server_url.rstrip("/") + "/v1"
 
-            self.openai_client_cache[cache_key] = VLLMOpenAIClient(base_url=model_server_url)
+            openai_client = AsyncOpenAI(  # pragma: allowlist secret
+                base_url=model_server_url,
+                api_key="EMPTY",
+            )
+            self.client_cache[cache_key] = NeMoRLChatCompletionsClient(openai_client)
 
-        return self.openai_client_cache[cache_key]
+        return self.client_cache[cache_key]
 
-    def _convert_trajectory_to_output(self, state: dict) -> list:
+    def _convert_trajectory_to_output(self, rollout_output: dict) -> list:
         output = []
-        trajectory = state.get("trajectory", [])
+        trajectory = rollout_output.get("trajectory", [])
 
-        for step in trajectory:
-            for msg in step.get("prompt", []):
-                if isinstance(msg, dict):
+        # Build steps from trajectory if present, otherwise fall back to
+        # top-level prompt/completion (single-turn environments).
+        if trajectory:
+            steps = trajectory
+        else:
+            steps = [
+                {
+                    "prompt": rollout_output.get("prompt", []),
+                    "completion": rollout_output.get("completion", []),
+                    "tokens": None,
+                }
+            ]
+
+        for step in steps:
+            for msg in step.get("prompt", []) or []:
+                # Handle both plain dicts (serialized RolloutOutput) and
+                # Pydantic CustomBaseModel messages (which support .get()).
+                if hasattr(msg, "get"):
                     role = msg.get("role", "user")
                     content = msg.get("content", "")
                     output.append(NeMoGymEasyInputMessage(role=role, content=content).model_dump())
 
-            tokens = step.get("tokens")
-            for msg in step.get("completion", []):
-                if isinstance(msg, dict):
+            step_tokens = step.get("tokens") if hasattr(step, "get") else None
+            for msg in step.get("completion", []) or []:
+                if hasattr(msg, "get"):
                     content = msg.get("content", "")
+                    # For trajectory steps, tokens are on the step.
+                    # For single-turn fallback, tokens may be on the message
+                    # (ResponseMessage.tokens from verifiers).
+                    tokens = step_tokens
+                    if tokens is None:
+                        tokens = msg.get("tokens") if hasattr(msg, "get") else getattr(msg, "tokens", None)
                     if tokens:
                         output.append(
                             NeMoGymResponseOutputMessageForTraining(
@@ -278,31 +200,28 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
                 example_id=body.example_id,
             )
 
-            client = self._get_openai_client()
+            client = self._get_client()
 
-            gen_sem = await maybe_semaphore(self.config.max_concurrent_generation)
-            score_sem = await maybe_semaphore(self.config.max_concurrent_scoring)
-
-            # prefer NeMo RL generation config set in responses_create_params https://github.com/NVIDIA-NeMo/RL/blob/main/nemo_rl/experience/rollouts.py#L1045-L1046
+            # prefer NeMo RL generation config set in responses_create_params
+            # https://github.com/NVIDIA-NeMo/RL/blob/main/nemo_rl/experience/rollouts.py#L1045-L1046
             sampling_args = {
                 "max_tokens": self.config.max_tokens,
                 "temperature": getattr(body.responses_create_params, "temperature", None) or self.config.temperature,
                 "top_p": getattr(body.responses_create_params, "top_p", None) or self.config.top_p,
             }
-            states = await vf_env.run_group(
+            outputs = await vf_env.run_group(
                 group_inputs=[rollout_input],
                 client=client,
                 model=self.config.model_name,
-                gen_sampling_args=sampling_args,
-                gen_sem=gen_sem,
-                score_sem=score_sem,
+                sampling_args=sampling_args,
+                state_columns=["trajectory"],
             )
 
-            state = states[0]
-            reward = state.get("reward", 0.0) or 0.0
-            metrics = state.get("metrics", {}) or {}
+            rollout_output = outputs[0]
+            reward = rollout_output.get("reward", 0.0) or 0.0
+            metrics = rollout_output.get("metrics", {}) or {}
 
-            output = self._convert_trajectory_to_output(state)
+            output = self._convert_trajectory_to_output(rollout_output)
 
             return VerifiersNeMoGymResponse(
                 id=f"verifiers-{vf_env_id}-{task_idx}",
