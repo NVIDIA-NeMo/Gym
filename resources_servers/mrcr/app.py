@@ -107,6 +107,11 @@ def _grade(response: str, expected_answer: str, random_string_to_prepend: str) -
     Mirrors nemo_skills/evaluation/evaluator/mrcr.py::eval_mrcr.grade:
       - response that doesn't start with `random_string_to_prepend` → 0.0
       - otherwise strip the prefix from both and return SequenceMatcher.ratio().
+
+    Note: for reasoning models like Nemotron-3, the vLLM server must be
+    started with `--reasoning-parser deepseek_r1` (or the appropriate parser
+    name) so that reasoning tokens are stripped upstream. Otherwise the raw
+    `<think>...</think>` preamble will defeat the prefix gate here.
     """
     if not response.startswith(random_string_to_prepend):
         return 0.0

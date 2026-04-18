@@ -96,6 +96,17 @@ class TestGrade:
         )
         assert score == 0.0
 
+    def test_reasoning_preamble_is_not_stripped_by_grade(self) -> None:
+        """Grade does NOT strip reasoning — the vLLM server is responsible for
+        that via `--reasoning-parser`. If a caller sends raw reasoning output
+        to grade, it will (correctly) score 0 because the prefix gate fails."""
+        score = _grade(
+            response="<think>Let me find the first song...</think>\n\nxyz123Song one lyrics",
+            expected_answer="xyz123Song one lyrics",
+            random_string_to_prepend="xyz123",
+        )
+        assert score == 0.0
+
 
 class TestScoreFn:
     def test_score_fn_returns_accuracy_equals_reward(self) -> None:
