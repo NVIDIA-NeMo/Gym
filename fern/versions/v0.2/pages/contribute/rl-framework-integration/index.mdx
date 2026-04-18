@@ -1,0 +1,69 @@
+---
+title: "Training Framework Integration"
+description: ""
+position: 4
+---
+These guides cover how to integrate NeMo Gym into a new RL training framework. Use them if you are:
+
+- A training framework maintainer adding NeMo Gym support
+- Contributing NeMo Gym integration for a training framework that does not have one yet
+
+<Tip>
+Just want to train models? See [Training Tutorials](/v0.2/training-tutorials) for supported frameworks.
+
+</Tip>
+
+## Prerequisites
+
+Before integrating Gym into your training framework, ensure you have:
+
+- An RL training framework with policy optimization support (PPO, GRPO, or similar)
+- A generation backend (vLLM, SGLang, or equivalent)
+- Familiarity with OpenAI-compatible HTTP server APIs
+
+## Integration Components
+
+Gym integration requires implementing the following components in your training framework:
+
+<Cards>
+
+<Card title="Generation Backend" href="/v0.2/contribute/rl-framework-integration/generation-backend-and-openai-compatible-http-server">
+
+OpenAI-compatible HTTP server requirements and existing implementations across RL frameworks.
+
+<Badge intent="success" minimal outlined>prerequisite</Badge>
+</Card>
+
+<Card title="On-Policy Corrections" href="/v0.2/contribute/rl-framework-integration/openai-compatible-http-server-on-policy-correction">
+
+Fixes for on-policy training in multi-step and multi-turn scenarios to prevent train-generation mismatch.
+
+<Badge intent="success" minimal outlined>prerequisite</Badge>
+</Card>
+
+<Card title="Integration Footprint" href="/v0.2/contribute/rl-framework-integration/gym-integration-footprint-and-form-factor">
+
+Implementation components, form factor, and reference implementations from NeMo RL.
+
+<Badge minimal outlined>implementation</Badge>
+</Card>
+
+<Card title="Success Criteria" href="/v0.2/contribute/rl-framework-integration/gym-rl-framework-integration-success-criteria">
+
+Validation criteria and benchmarks to verify correct Gym integration.
+
+<Badge minimal outlined>validation</Badge>
+</Card>
+
+</Cards>
+
+## Integration Workflow
+
+The typical integration workflow follows this sequence:
+
+| Step | Component | Description |
+| --- | --- | --- |
+| 1 | Generation backend | Expose your generation engine, such as vLLM or SGLang, as an OpenAI-compatible HTTP server |
+| 2 | On-policy corrections | Implement token ID fixes to prevent re-tokenization and re-templating issues |
+| 3 | Gym integration | Connect Gym to your training loop using the rollout orchestration APIs |
+| 4 | Validation | Verify integration using the success criteria benchmarks |

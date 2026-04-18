@@ -1,0 +1,40 @@
+---
+title: "Generating Training Data"
+description: ""
+position: 1
+---
+import { NavButton } from "../../../../../components/NavButton";
+
+Generate synthetic task data (user queries) for the [Workplace Assistant](/latest/environment-tutorials/real-world-environment) environment using [NeMo Data Designer](https://github.com/NVIDIA-NeMo/DataDesigner). 
+
+This pipeline focuses on generating tasks for use with the environment. It also simulates agent trajectories, but these are used for quality filtering and validation — the environment itself produces the actual model responses during rollout collection. The Workplace Assistant uses 27 tools across 6 databases, and NeMo Data Designer can produce realistic multi-step user queries at scale.
+
+<NavButton href="/latest/environment-tutorials/real-world-environment" label="Back to Workplace Assistant" direction="back" />
+
+---
+
+## Pipeline Overview
+
+The data generation pipeline:
+
+1. Load tool schemas for the Workplace Assistant environment
+2. Use NeMo Data Designer to generate realistic multi-step user queries
+3. Simulate agent trajectories (step-by-step tool-call solutions)
+4. Apply dual-level LLM judge filtering to ensure data quality
+5. Export task data in NeMo Gym JSONL format
+
+---
+
+## Notebook
+
+The tutorial is provided as a Jupyter notebook. See the [notebook README](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/workplace_assistant/notebooks/synthetic-data-generation/) for prerequisites and setup instructions.
+
+[View Notebook on GitHub](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/workplace_assistant/notebooks/synthetic-data-generation/multistep-toolcalling-sdg.ipynb)
+
+---
+
+## What's Next?
+
+After generating your task data, use it with the Workplace Assistant resources server to [collect rollouts](/latest/get-started/rollout-collection) (where the environment produces model responses) and then proceed to [GRPO training](/latest/training-tutorials/nemo-rl-grpo).
+
+<NavButton href="/latest/environment-tutorials/real-world-environment/resources-server-implementation" label="Resources Server Implementation" direction="next" />
