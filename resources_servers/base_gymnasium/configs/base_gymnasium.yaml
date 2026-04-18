@@ -1,0 +1,23 @@
+base_gymnasium:
+  resources_servers:
+    base_gymnasium:
+      entrypoint: __init__.py
+      domain: other
+      verified: false
+      description: Base class for Gymnasium-style servers. Not a standalone server.
+      value: Reusable base class for step/reset style environments
+base_gymnasium_agent:
+  responses_api_agents:
+    gymnasium_agent:
+      entrypoint: app.py
+      env_server:
+        type: resources_servers
+        name: base_gymnasium
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      max_steps: 1
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/base_gymnasium/data/example.jsonl
