@@ -1,9 +1,9 @@
 # Run instructions
 1. Update your env.yaml file with the necessary keys and configs. You can leave `exclude_domains_file_path` as a path to an empty json.
 ```yaml
-tavily_search_resources_server:
+browsecomp_benchmark_resources_server:
   resources_servers:
-    tavily_search:
+    browsecomp_advanced_harness:
       tavily_api_key: ???
       exclude_domains_file_path: ???
 Qwen3-235B-A22B-Instruct-2507-FP8:
@@ -19,7 +19,7 @@ config_paths="benchmarks/browsecomp/config.yaml"
 ng_prepare_benchmark "+config_paths=[$config_paths]"
 ```
 
-1. Run the benchmark against an VLLMModel
+3. Run the benchmark against a VLLMModel
 ```bash
 WANDB_PROJECT=
 EXPERIMENT_NAME=

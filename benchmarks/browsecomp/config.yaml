@@ -7,26 +7,35 @@ Qwen3-235B-A22B-Instruct-2507-FP8:
       replace_developer_role_with_system: true
       return_token_id_information: false
       uses_reasoning_parser: true
-browsecomp_tavily_search_resources_server:
+
+browsecomp_benchmark_resources_server:
   resources_servers:
-    tavily_search:
+    browsecomp_advanced_harness:
       entrypoint: app.py
       domain: agent
       debug: false
       use_judge: true
       judge_model_server:
         type: responses_api_models
-        name: Qwen3-235B-A22B-Instruct-2507-FP8
+        name: policy_model
       judge_responses_create_params:
         input: []
       verified: false
-browsecomp_tavily_search_simple_agent:
+
+browsecomp_benchmark_agent:
   responses_api_agents:
-    simple_agent:
+    browsecomp_agent:
       entrypoint: app.py
+      max_steps: 400
+      keep_rounds: 9999
+      nudge_steps: true
+      max_context_tokens: 196608
+      context_reset_pct: 0.3
+      context_reset_keep_rounds: 3
+      max_run_retries: 3
       resources_server:
         type: resources_servers
-        name: browsecomp_tavily_search_resources_server
+        name: browsecomp_benchmark_resources_server
       model_server:
         type: responses_api_models
         name: policy_model
