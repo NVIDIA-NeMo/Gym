@@ -15,8 +15,6 @@ browsecomp_benchmark_resources_server:
       domain: agent
       debug: false
       use_judge: true
-      tavily_api_key: ${tavily_api_key}
-      exclude_domains_file_path: ${exclude_domains_file_path}
       judge_model_server:
         type: responses_api_models
         name: policy_model
