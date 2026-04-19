@@ -83,7 +83,6 @@ def _make_model_response(outputs: list, response_id: str = "resp_001") -> dict:
 
 
 class TestApp:
-
     @fixture
     def agent(self) -> BrowsecompAgent:
         return BrowsecompAgent(config=_make_config(), server_client=MagicMock(spec=ServerClient))
@@ -212,10 +211,12 @@ class TestApp:
 
         tool_http = MagicMock()
         tool_http.ok = True
-        tool_http.read = AsyncMock(side_effect=[
-            json.dumps(tool_response_data).encode(),    # model call 1
-            json.dumps(final_response_data).encode(),   # model call 2
-        ])
+        tool_http.read = AsyncMock(
+            side_effect=[
+                json.dumps(tool_response_data).encode(),  # model call 1
+                json.dumps(final_response_data).encode(),  # model call 2
+            ]
+        )
         tool_http.content.read = AsyncMock(return_value=b'{"results_string": "Paris is the capital"}')  # tool call
         tool_http.cookies = {}
         agent.server_client.post = AsyncMock(return_value=tool_http)
@@ -245,7 +246,7 @@ class TestApp:
         mock_http = MagicMock()
         mock_http.ok = True
         mock_http.read = AsyncMock(return_value=json.dumps(tool_response_data).encode())
-        mock_http.content.read = AsyncMock(return_value=b'{}')
+        mock_http.content.read = AsyncMock(return_value=b"{}")
         mock_http.cookies = {}
         agent.server_client.post = AsyncMock(return_value=mock_http)
 
@@ -254,9 +255,7 @@ class TestApp:
         response_mock = MagicMock()
         response_mock.set_cookie = MagicMock()
 
-        body = NeMoGymResponseCreateParamsNonStreaming(
-            input=[{"role": "user", "content": "hard question"}]
-        )
+        body = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "hard question"}])
         await agent.responses(request_mock, response_mock, body)
 
         # max_steps=2: 2 model calls + 2 tool calls = 4 total posts

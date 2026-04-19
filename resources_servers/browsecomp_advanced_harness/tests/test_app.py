@@ -22,9 +22,7 @@ from nemo_gym.server_utils import SESSION_ID_KEY
 
 
 _TEST_DIR = os.path.dirname(os.path.abspath(__file__))
-_DUMMY_EXCLUDE_DOMAINS_FILE = os.path.join(
-    os.path.dirname(_TEST_DIR), "tests", "dummy_exclude_domains_file.json"
-)
+_DUMMY_EXCLUDE_DOMAINS_FILE = os.path.join(os.path.dirname(_TEST_DIR), "tests", "dummy_exclude_domains_file.json")
 
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import (
@@ -235,9 +233,9 @@ class TestApp:
         server = TavilySearchResourcesServer(config=config, server_client=server_client)
 
         post_mock = MagicMock()
-        post_mock.json = AsyncMock(return_value=self._create_judge_response(
-            "extracted_final_answer: Paris\ncorrect: yes"
-        ))
+        post_mock.json = AsyncMock(
+            return_value=self._create_judge_response("extracted_final_answer: Paris\ncorrect: yes")
+        )
         server_client.post = AsyncMock(return_value=post_mock)
 
         req = TavilySearchVerifyRequest(
@@ -256,9 +254,9 @@ class TestApp:
         server = TavilySearchResourcesServer(config=config, server_client=server_client)
 
         post_mock = MagicMock()
-        post_mock.json = AsyncMock(return_value=self._create_judge_response(
-            "extracted_final_answer: London\ncorrect: no"
-        ))
+        post_mock.json = AsyncMock(
+            return_value=self._create_judge_response("extracted_final_answer: London\ncorrect: no")
+        )
         server_client.post = AsyncMock(return_value=post_mock)
 
         req = TavilySearchVerifyRequest(

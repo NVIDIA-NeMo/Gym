@@ -194,8 +194,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                         "[SYSTEM NOTE: You have used %d out of %d turns — "
                         "you are halfway through your budget. You should start "
                         "formulating your final answer based on the research "
-                        "you have already done. Do not keep searching endlessly.]"
-                        % (step, self.config.max_steps)
+                        "you have already done. Do not keep searching endlessly.]" % (step, self.config.max_steps)
                     )
                 elif step == near_end:
                     nudge_msg = (

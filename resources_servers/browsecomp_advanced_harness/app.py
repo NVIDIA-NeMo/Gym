@@ -411,7 +411,6 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         hostname = urlparse(url).hostname or ""
         return any(hostname == domain or hostname.endswith("." + domain) for domain in self._exclude_domains)
 
-
     def _postprocess_search_results(self, query: str, results: dict, max_length: int) -> str:
         blocks = [f"[Search Query]: {query}"]
         running_len = len(blocks[0])
@@ -422,11 +421,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             content = result.get("raw_content") or result.get("content", "")
             if len(content) > 5000:
                 content = content[:5000] + "\n... [truncated]"
-            entry = (
-                f"[Title]: {title}\n"
-                f"[URL]: {url}\n"
-                f"[Content]:\n{content}\n"
-            )
+            entry = f"[Title]: {title}\n[URL]: {url}\n[Content]:\n{content}\n"
 
             if running_len + len(entry) > max_length:
                 break
@@ -452,9 +447,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         response = re.sub(r"<think>.*?</think>", "", response, flags=re.DOTALL).strip()
 
         judge_prompt = self.JUDGE_PROMPT_TEMPLATE.format(
-            question=question,
-            correct_answer=ground_truth,
-            response=response
+            question=question, correct_answer=ground_truth, response=response
         )
 
         judge_create_params = self.config.judge_responses_create_params.model_copy(deep=True)
@@ -529,9 +522,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
 
         is_correct = matches[-1].group(1).lower() == "yes"
 
-        ans_matches = list(re.finditer(
-            r"extracted_final_answer:\s*(.+?)(?:\n|$)", text
-        ))
+        ans_matches = list(re.finditer(r"extracted_final_answer:\s*(.+?)(?:\n|$)", text))
         extracted = ans_matches[-1].group(1).strip() if ans_matches else ""
 
         if extracted and "The final exact answer extracted from the [response]" in extracted:
