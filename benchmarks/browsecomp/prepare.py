@@ -74,9 +74,7 @@ TOOLS = [
                 "queries": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": (
-                        "Search queries. All queries are executed in parallel."
-                    ),
+                    "description": ("Search queries. All queries are executed in parallel."),
                 }
             },
             "required": ["queries"],
@@ -101,9 +99,7 @@ TOOLS = [
                 },
                 "goal": {
                     "type": "string",
-                    "description": (
-                        "What specific information you are looking for."
-                    ),
+                    "description": ("What specific information you are looking for."),
                 },
             },
             "required": ["urls"],
