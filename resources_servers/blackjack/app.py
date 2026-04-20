@@ -22,9 +22,7 @@ Reward: +1 win, 0 draw, -1 loss.
 
 import random
 import re
-from typing import Dict, Optional
-
-from pydantic import Field
+from typing import Optional
 
 from nemo_gym.openai_utils import NeMoGymResponse
 from resources_servers.base_gymnasium import GymnasiumServer, extract_text
@@ -33,8 +31,8 @@ from resources_servers.base_gymnasium import GymnasiumServer, extract_text
 _RANKS = ["2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K", "A"]
 
 
-def _deal():
-    return random.choice(_RANKS)
+def _deal(rng: random.Random) -> str:
+    return rng.choice(_RANKS)
 
 
 def _hand_value(hand: list[str]) -> int:
@@ -51,12 +49,11 @@ def _fmt(hand: list[str]) -> str:
 
 
 class BlackjackEnv(GymnasiumServer):
-    session_state: Dict[str, dict] = Field(default_factory=dict)
-
     async def reset(self, metadata: dict, session_id: Optional[str] = None) -> tuple[Optional[str], dict]:
-        player = [_deal(), _deal()]
-        dealer = [_deal(), _deal()]
-        self.session_state[session_id] = {"player": player, "dealer": dealer}
+        rng = random.Random()
+        player = [_deal(rng), _deal(rng)]
+        dealer = [_deal(rng), _deal(rng)]
+        self.session_state[session_id] = {"player": player, "dealer": dealer, "rng": rng}
         obs = (
             f"Your hand: {_fmt(player)} = {_hand_value(player)}\n"
             f"Dealer shows: {dealer[0]}\n"
@@ -70,12 +67,13 @@ class BlackjackEnv(GymnasiumServer):
         state = self.session_state.get(session_id, {})
         player = state.get("player", [])
         dealer = state.get("dealer", [])
+        rng = state.get("rng") or random.Random()
         text = extract_text(action)
         m = re.search(r"<action>\s*(hit|stand)\s*</action>", text, re.IGNORECASE)
-        decision = m.group(1).lower() if m else ("hit" if "hit" in text.lower() else "stand")
+        decision = m.group(1).lower() if m else "stand"
 
         if decision == "hit":
-            player.append(_deal())
+            player.append(_deal(rng))
             val = _hand_value(player)
             if val > 21:
                 return None, -1.0, True, False, {"result": "bust", "player": _fmt(player), "value": val}
@@ -86,9 +84,8 @@ class BlackjackEnv(GymnasiumServer):
             )
             return obs, 0.0, False, False, {}
 
-        # stand: dealer plays out
         while _hand_value(dealer) < 17:
-            dealer.append(_deal())
+            dealer.append(_deal(rng))
 
         pv, dv = _hand_value(player), _hand_value(dealer)
         if dv > 21 or pv > dv:

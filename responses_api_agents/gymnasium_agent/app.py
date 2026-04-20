@@ -16,7 +16,7 @@
 """Agent for GymnasiumServer resources servers (resources_servers.base_gymnasium) which implements the Gymnasium API."""
 
 from fastapi import Body, Request, Response
-from pydantic import ConfigDict
+from pydantic import ConfigDict, Field
 
 from nemo_gym.base_resources_server import (
     BaseRunRequest,
@@ -30,13 +30,13 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
-from resources_servers.base_gymnasium import EnvResetResponse, EnvStepResponse, extract_text
+from resources_servers.base_gymnasium import EnvResetResponse, EnvStepResponse
 
 
 class GymnasiumAgentConfig(BaseResponsesAPIAgentConfig):
     env_server: ResourcesServerRef
     model_server: ModelServerRef
-    max_steps: int = 10
+    max_steps: int = Field(10, ge=1)
 
 
 class GymnasiumAgentRunRequest(BaseRunRequest):
@@ -85,32 +85,28 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
         reset_data = EnvResetResponse.model_validate(await get_response_json(reset_resp))
         cookies = reset_resp.cookies
 
-        current_input = body.responses_create_params.model_copy(deep=True)
-        if isinstance(current_input.input, str):
-            current_input = current_input.model_copy(
-                update={"input": [NeMoGymEasyInputMessage(role="user", content=current_input.input)]}
-            )
+        base_body = body.responses_create_params.model_copy(deep=True)
+        if isinstance(base_body.input, str):
+            base_body.input = [NeMoGymEasyInputMessage(role="user", content=base_body.input)]
         if reset_data.observation:
-            current_input = current_input.model_copy(
-                update={
-                    "input": list(current_input.input)
-                    + [NeMoGymEasyInputMessage(role="user", content=reset_data.observation)]
-                }
-            )
+            base_body.input = list(base_body.input) + [
+                NeMoGymEasyInputMessage(role="user", content=reset_data.observation)
+            ]
 
-        all_outputs = []
+        new_outputs = []
         total_reward = 0.0
         usage = None
         model_server_cookies = None
         step_data = EnvStepResponse(terminated=False, truncated=True, reward=0.0)
         last_model_response = None
 
-        # step until done
         for _ in range(self.config.max_steps):
+            new_body = base_body.model_copy(update={"input": base_body.input + new_outputs})
+
             model_resp = await self.server_client.post(
                 server_name=self.config.model_server.name,
                 url_path="/v1/responses",
-                json=current_input,
+                json=new_body,
                 cookies=model_server_cookies,
             )
             await raise_for_status(model_resp)
@@ -118,7 +114,7 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
             model_server_cookies = model_resp.cookies
             last_model_response = model_response
 
-            all_outputs.extend(model_response.output)
+            new_outputs.extend(model_response.output)
 
             if model_response.usage:
                 if usage is None:
@@ -145,20 +141,12 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
                 break
 
             if step_data.observation:
-                current_input = current_input.model_copy(
-                    update={
-                        "input": list(current_input.input)
-                        + [
-                            NeMoGymEasyInputMessage(role="assistant", content=extract_text(model_response)),
-                            NeMoGymEasyInputMessage(role="user", content=step_data.observation),
-                        ]
-                    }
-                )
+                new_outputs.append(NeMoGymEasyInputMessage(role="user", content=step_data.observation))
 
-        else:  # loop completed without break, meaning max_steps reached
+        else:
             step_data = step_data.model_copy(update={"truncated": True})
 
-        last_model_response.output = all_outputs
+        last_model_response.output = new_outputs
         last_model_response.usage = usage
 
         return GymnasiumRunResponse(

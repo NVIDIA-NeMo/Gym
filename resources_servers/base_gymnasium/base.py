@@ -14,10 +14,10 @@
 # limitations under the License.
 
 from abc import abstractmethod
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from fastapi import FastAPI, Request
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from nemo_gym.base_resources_server import BaseVerifyRequest, SimpleResourcesServer
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
@@ -69,6 +69,8 @@ class GymnasiumServer(SimpleResourcesServer):
     step() returns (observation, reward, terminated, truncated, info).
     """
 
+    session_state: Dict[str, Any] = Field(default_factory=dict)
+
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
         self.setup_session_middleware(app)
@@ -85,6 +87,8 @@ class GymnasiumServer(SimpleResourcesServer):
     async def _step_endpoint(self, body: EnvStepRequest, request: Request) -> EnvStepResponse:
         session_id = request.session.get(SESSION_ID_KEY)
         obs, reward, terminated, truncated, info = await self.step(body.response, body.model_extra or {}, session_id)
+        if terminated or truncated:
+            await self.close_session(session_id)
         return EnvStepResponse(observation=obs, reward=reward, terminated=terminated, truncated=truncated, info=info)
 
     async def reset(self, metadata: dict, session_id: Optional[str] = None) -> tuple[Optional[str], dict]:
@@ -94,6 +98,9 @@ class GymnasiumServer(SimpleResourcesServer):
     async def step(
         self, action: NeMoGymResponse, metadata: dict, session_id: Optional[str] = None
     ) -> tuple[Optional[str], float, bool, bool, dict]: ...
+
+    async def close_session(self, session_id: Optional[str]) -> None:
+        self.session_state.pop(session_id, None)
 
     async def verify(self, body: BaseVerifyRequest) -> None:  # type: ignore[override]
         raise NotImplementedError("GymnasiumServer uses /step instead of /verify. Use with gymnasium_agent.")
