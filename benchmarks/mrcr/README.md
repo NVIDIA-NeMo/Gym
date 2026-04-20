@@ -36,19 +36,6 @@ ng_collect_rollouts \
     +num_repeats=4
 ```
 
-Notes on common footguns:
-
-- **`num_repeats` for `type: benchmark` datasets is a CLI flag**
-  (`+num_repeats=N`), not a honored YAML field. The `num_repeats: 4` entry
-  under `datasets:` in `benchmarks/mrcr/config.yaml` is a documentation
-  hint only — it only triggers row duplication for
-  `type: train`/`type: validation`.
-- **Do NOT pair with `+num_repeats_add_seed=true`.** That flag writes
-  `seed=<rollout_idx>` into `responses_create_params`, but
-  `NeMoGymResponseCreateParamsNonStreaming` has `extra="forbid"` and
-  rejects every rollout with `extra_forbidden`. Temperature-1.0 sampling
-  alone gives sufficient variance across repeats.
-
 ## Metrics
 
 `compute_metrics()` emits `pass@k/accuracy`, `pass@1[avg-of-k]/accuracy`
