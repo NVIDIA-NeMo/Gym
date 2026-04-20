@@ -4,6 +4,8 @@ mrcr_resources_server:
       entrypoint: app.py
       domain: other
       verified: false
+      description: Multi-round coreference resolution over multi-turn conversations with prefix-gated SequenceMatcher grading
+      value: Improve long-context in-context retrieval and needle-count-aware reasoning
 
 mrcr_simple_agent:
   responses_api_agents:
@@ -20,3 +22,4 @@ mrcr_simple_agent:
         type: example
         jsonl_fpath: resources_servers/mrcr/data/example.jsonl
         num_repeats: 1
+        license: MIT
