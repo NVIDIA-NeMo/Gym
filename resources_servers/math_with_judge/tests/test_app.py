@@ -585,6 +585,197 @@ class TestApp:
 from pytest import approx
 
 
+class TestSearchBoxed:
+    """Tests the brace-matching \\boxed{...} extractor used as judge input."""
+
+    @staticmethod
+    def search(text):
+        return LibraryJudgeMathResourcesServer._search_boxed(text)
+
+    def test_simple_numeric(self):
+        assert self.search(r"The answer is \boxed{204}.") == "204"
+
+    def test_nested_braces(self):
+        assert self.search(r"Thus \boxed{\frac{1}{2}} finally.") == r"\frac{1}{2}"
+
+    def test_preserves_latex_on_non_numeric(self):
+        # The IMO-answerbench "garbage to judge" case: math-verify would
+        # simplify a function definition down to "2" or similar.
+        # _search_boxed preserves the raw LaTeX.
+        body = (
+            r"After all this we conclude \boxed{g(x)=2x^{3}+C\quad\text{or}\quad "
+            r"g(x)=-2x^{3}+C,\; C\in\mathbb{R}} done."
+        )
+        extracted = self.search(body)
+        assert extracted is not None
+        assert "g(x)=2x^{3}+C" in extracted
+        assert r"C\in\mathbb{R}" in extracted
+
+    def test_returns_none_without_box(self):
+        assert self.search("no boxed answer here") is None
+
+    def test_picks_last_box_when_multiple(self):
+        # Mirrors Skills' search_boxed, which uses rfind to take the
+        # final \boxed so later restatements win over earlier ones.
+        assert self.search(r"first \boxed{1} then \boxed{42}") == "42"
+
+    def test_falls_back_to_fbox(self):
+        assert self.search(r"so \fbox{final answer}") == "final answer"
+
+    def test_unbalanced_braces_returns_none(self):
+        # Missing closing brace -> no return
+        assert self.search(r"\boxed{incomplete answer") is None
+
+
+class TestRawBoxedJudgeInput:
+    """When the symbolic-first cascade falls through to the LLM judge, the
+    raw \\boxed{...} content should be what the judge sees — not math-verify's
+    normalized extraction. Covers the IMO-answerbench garbage-to-judge fix.
+    """
+
+    def _wrap_response(self, text):
+        return NeMoGymResponse(
+            id="r",
+            created_at=0.0,
+            model="m",
+            object="response",
+            output=[
+                NeMoGymResponseOutputMessage(
+                    id="oi",
+                    content=[NeMoGymResponseOutputText(annotations=[], text=text, type="output_text")],
+                    role="assistant",
+                    status="completed",
+                    type="message",
+                )
+            ],
+            parallel_tool_calls=False,
+            tool_choice="none",
+            tools=[],
+        )
+
+    async def test_judge_sees_raw_latex_when_math_verify_mangles(self, tmp_path) -> None:
+        # Expected is a function; math-verify will likely extract only "2"
+        # or some degenerate numeric fragment from the boxed content.
+        # The fix: ensure the judge sees the full LaTeX.
+        expected_answer = r"g(x)=2x^{3}+c, g(x)=-2x^{3}+c"
+        raw_boxed_content = r"g(x)=2x^{3}+C\quad\text{or}\quad g(x)=-2x^{3}+C,\; C\in\mathbb{R}"
+        generation = rf"After reasoning I conclude \boxed{{{raw_boxed_content}}}."
+
+        config = LibraryJudgeMathResourcesServerConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="",
+            judge_model_server=ModelServerRef(type="responses_api_models", name="math_judge"),
+            judge_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            should_use_judge=True,
+        )
+        server = LibraryJudgeMathResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+        # Force math-verify to produce a degenerate extraction so the test
+        # exercises the fallback path. Stub it to return reward=0, extracted="2".
+        server._verify_answer_with_library = lambda e, g: (0.0, "2")  # type: ignore
+
+        post_mock = MagicMock()
+        post_mock.read = AsyncMock(
+            return_value=json.dumps(
+                NeMoGymResponse(
+                    id="judge",
+                    created_at=0.0,
+                    model="m",
+                    object="response",
+                    output=[
+                        NeMoGymResponseOutputMessage(
+                            id="oi",
+                            content=[NeMoGymResponseOutputText(annotations=[], text="[[A=B]]", type="output_text")],
+                            role="assistant",
+                            status="completed",
+                            type="message",
+                        )
+                    ],
+                    parallel_tool_calls=False,
+                    tool_choice="none",
+                    tools=[],
+                ).model_dump()
+            )
+        )
+        server.server_client.post = AsyncMock(return_value=post_mock)
+
+        req = LibraryJudgeMathVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "q"}]),
+            response=self._wrap_response(generation),
+            question="q",
+            expected_answer=expected_answer,
+        )
+        resp = await server.verify(req)
+
+        # math-verify's "2" still surfaces as `extracted_answer` (preserved for
+        # majority-vote grouping and symbolic_accuracy diagnostic).
+        assert resp.extracted_answer == "2"
+        # But the judge was fed the raw boxed content, not "2".
+        judge_eval = resp.judge_evaluations[0]
+        judge_prompt = judge_eval.responses_create_params.input[-1].content
+        assert raw_boxed_content in judge_prompt
+        # Negative: the degenerate math-verify extraction was NOT sent.
+        # Checking the slot the model's answer occupies — the default
+        # Arena-Hard template places it after "Assistant B's Answer|>\n".
+        assert "Assistant B's Answer|>\n2\n" not in judge_prompt
+
+    async def test_falls_back_to_math_verify_when_no_box(self, tmp_path) -> None:
+        """When the model never wrote \\boxed{...}, we should still send the
+        math-verify extraction (or full generation) to the judge, matching
+        the prior behavior."""
+        config = LibraryJudgeMathResourcesServerConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="",
+            judge_model_server=ModelServerRef(type="responses_api_models", name="math_judge"),
+            judge_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            should_use_judge=True,
+        )
+        server = LibraryJudgeMathResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        server._verify_answer_with_library = lambda e, g: (0.0, "x + 1")  # type: ignore
+
+        post_mock = MagicMock()
+        post_mock.read = AsyncMock(
+            return_value=json.dumps(
+                NeMoGymResponse(
+                    id="j",
+                    created_at=0.0,
+                    model="m",
+                    object="response",
+                    output=[
+                        NeMoGymResponseOutputMessage(
+                            id="oi",
+                            content=[NeMoGymResponseOutputText(annotations=[], text="[[A!=B]]", type="output_text")],
+                            role="assistant",
+                            status="completed",
+                            type="message",
+                        )
+                    ],
+                    parallel_tool_calls=False,
+                    tool_choice="none",
+                    tools=[],
+                ).model_dump()
+            )
+        )
+        server.server_client.post = AsyncMock(return_value=post_mock)
+
+        req = LibraryJudgeMathVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "q"}]),
+            # No \boxed in output — _search_boxed returns None.
+            response=self._wrap_response("My reasoning says x + 1."),
+            question="q",
+            expected_answer="x + 1",
+        )
+        resp = await server.verify(req)
+
+        judge_prompt = resp.judge_evaluations[0].responses_create_params.input[-1].content
+        # Fallback: math-verify's extraction reached the judge.
+        assert "x + 1" in judge_prompt
+
+
 class TestComputeMetricsIntegration:
     """Test the full compute_metrics method on LibraryJudgeMathResourcesServer."""
 
