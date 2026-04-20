@@ -64,7 +64,7 @@ def extract_text(response: NeMoGymResponse) -> str:
 
 
 class GymnasiumServer(SimpleResourcesServer):
-    """Gymnasium-style base class. Pair with gymnasium_agent.
+    """Gymnasium-style base class. Used with gymnasium_agent.
 
     step() returns (observation, reward, terminated, truncated, info).
     """
