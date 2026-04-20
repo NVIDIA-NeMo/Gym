@@ -23,7 +23,7 @@ Input JSONL format (one line per task):
      "overall_score_percentage": 73.75, "judgement_success": true}
 
 Usage:
-    python scripts/calculate_rubric_elo.py \\
+    python responses_api_agents/stirrup_agent/scripts/calculate_rubric_elo.py \\
         --model-a-scores-file output/gdpval/model_a_scores.jsonl \\
         --model-a-name "Qwen3-235B" \\
         --model-b-scores-file output/gdpval/model_b_scores.jsonl \\

@@ -15,12 +15,12 @@
 """Post-hoc standalone rubric scoring for GDPVal evaluation.
 
 Scores a SINGLE model's outputs against the GDPVal rubric using an LLM judge.
-This is the rubric analog of ``scripts/compare_elo.py`` (which does pairwise
+This is the rubric analog of ``responses_api_agents/stirrup_agent/scripts/compare_elo.py`` (which does pairwise
 comparison).
 
 
 Usage:
-    python scripts/run_rubric_judge.py \\
+    python responses_api_agents/stirrup_agent/scripts/run_rubric_judge.py \\
         --model-dir output/gdpval/NVIDIA-Nemotron-Super-V3 \\
         --model-name Nemotron-Super-V3 \\
         --server-address https://api.openai.com/v1 \\

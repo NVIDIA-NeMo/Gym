@@ -30,7 +30,7 @@ DATASET="${DATASET:-openai/gdpval}"
 SPLIT="${SPLIT:-train}"
 
 cd "${REPO_ROOT}"
-python3 scripts/prepare_gdpval_dataset.py \
+python3 responses_api_agents/stirrup_agent/scripts/prepare_gdpval_dataset.py \
     --dataset "${DATASET}" \
     --split "${SPLIT}" \
     --output "${OUTPUT}"

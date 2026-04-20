@@ -195,7 +195,7 @@ all `code_exec` calls through a persistent container.
 Build the supplied container definition:
 
 ```bash
-apptainer build gdpval.sif containers/gdpval.def
+apptainer build gdpval.sif responses_api_agents/stirrup_agent/containers/gdpval.def
 ```
 
 Then:
@@ -215,10 +215,10 @@ models' deliverables side-by-side and produces an ELO rating.
 
 ```bash
 # 1. Pre-convert Office docs to PDF (required for visual comparison).
-python scripts/preconvert_to_pdf.py --root-dir output/gdpval/my-model
+python responses_api_agents/stirrup_agent/scripts/preconvert_to_pdf.py --root-dir output/gdpval/my-model
 
 # 2. Run pairwise comparison against a reference set.
-python scripts/compare_elo.py \
+python responses_api_agents/stirrup_agent/scripts/compare_elo.py \
   --reference-model-dir output/gdpval/reference-model \
   --eval-model-dir      output/gdpval/my-model \
   --reference-model-name reference \

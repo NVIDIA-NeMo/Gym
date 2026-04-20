@@ -20,7 +20,7 @@ an LLM judge, then computes ELO ratings from win rates.
 Uses shared core functions from ``_gdpval_comparison.py``.
 
 Usage:
-    python scripts/compare_elo.py \\
+    python responses_api_agents/stirrup_agent/scripts/compare_elo.py \\
         --reference-model-dir output/gdpval/Qwen3-235B-A22B-Thinking-2507 \\
         --eval-model-dir output/gdpval/NVIDIA-Nemotron-Super-V3 \\
         --reference-model-name Qwen3-235B \\

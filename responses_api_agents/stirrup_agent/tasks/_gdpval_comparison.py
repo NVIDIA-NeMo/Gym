@@ -15,7 +15,7 @@
 
 Shared core used by both:
 - Inline comparison reward during ``ng_collect_rollouts``
-- Post-hoc ``scripts/compare_elo.py`` script
+- Post-hoc ``responses_api_agents/stirrup_agent/scripts/compare_elo.py`` script
 
 GDPVal pairwise comparison judging.
 """

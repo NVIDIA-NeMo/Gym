@@ -21,7 +21,7 @@ read them directly.
 
 
 Usage:
-    python scripts/preconvert_to_pdf.py \\
+    python responses_api_agents/stirrup_agent/scripts/preconvert_to_pdf.py \\
         --root-dir output/gdpval/Model-Name \\
         --max-concurrent-conversions 4 \\
         --log-file preconvert.log

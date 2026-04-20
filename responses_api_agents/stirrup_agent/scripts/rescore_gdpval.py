@@ -18,7 +18,7 @@ Reads an existing results JSONL, extracts deliverable text + rubric from
 each sample, and re-scores sequentially (one at a time) to avoid rate limits.
 
 Usage:
-    python scripts/rescore_gdpval.py \
+    python responses_api_agents/stirrup_agent/scripts/rescore_gdpval.py \
         --input results/.../0_selfjudge.jsonl \
         --output results/.../0_qwen397b_rescore.jsonl \
         --judge-model gpt-4.1-2025-04-14 \

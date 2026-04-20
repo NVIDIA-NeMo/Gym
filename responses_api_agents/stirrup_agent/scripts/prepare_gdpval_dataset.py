@@ -18,9 +18,9 @@ Download and convert the GDPVal dataset from HuggingFace to JSONL format
 compatible with nemo-gym's rollout collection.
 
 Usage:
-    python scripts/prepare_gdpval_dataset.py
-    python scripts/prepare_gdpval_dataset.py --output responses_api_agents/stirrup_agent/data/gdpval.jsonl
-    python scripts/prepare_gdpval_dataset.py --dataset openai/gdpval --split train
+    python responses_api_agents/stirrup_agent/scripts/prepare_gdpval_dataset.py
+    python responses_api_agents/stirrup_agent/scripts/prepare_gdpval_dataset.py --output responses_api_agents/stirrup_agent/data/gdpval.jsonl
+    python responses_api_agents/stirrup_agent/scripts/prepare_gdpval_dataset.py --dataset openai/gdpval --split train
 """
 
 import argparse
