@@ -75,6 +75,31 @@ def _tokenizer_for(target_language: str) -> str:
     return _TOKENIZER_BY_LANG_PREFIX.get(target_language[:2], "13a")
 
 
+# --- Thinking-preamble handling ---------------------------------------------
+# Matches NeMo-Skills' parse_reasoning=True behavior. Reasoning models
+# (e.g. Nemotron-3-Nano) emit a pre-reasoning preamble wrapped in
+# <think>...</think>. vLLM's reasoning parser strips the opening <think>
+# tag but keeps the closing </think>, so the raw response looks like
+#   "We need to translate ... </think>\nProlog"
+# Skills' parse_reasoning takes the text after the last </think>; if no
+# closing tag exists (model never finished reasoning), Skills produces an
+# empty string. We must replicate both branches or corpus BLEU is computed
+# against the reasoning text, which tanks the score (~3x lower BLEU).
+
+
+def _strip_reasoning_preamble(text: str) -> str:
+    """Remove a pre-answer reasoning preamble, matching Skills' parse_reasoning=True.
+
+    - If ``</think>`` is present, return everything after the *last* occurrence.
+    - If absent, return an empty string (model never finished reasoning).
+
+    Both branches match ``nemo_skills`` translation evaluation behavior.
+    """
+    if "</think>" in text:
+        return text.rsplit("</think>", 1)[1].lstrip("\n")
+    return ""
+
+
 # --- Request / response shapes ------------------------------------------------
 
 
@@ -97,6 +122,12 @@ class WmtTranslationResourcesServerConfig(BaseResourcesServerConfig):
     comet_model: str = "Unbabel/XCOMET-XXL"
     comet_batch_size: int = 16
     comet_num_gpus: int = 1
+    # When True, strip the reasoning preamble before computing BLEU/COMET, matching
+    # NeMo-Skills' parse_reasoning=True. Required for reasoning models that emit
+    # <think>...</think> preambles (e.g. Nemotron-3-Nano); otherwise the preamble
+    # is scored against the reference and collapses BLEU. Set False for plain
+    # instruction-tuned models that do not emit reasoning traces.
+    strip_reasoning: bool = True
 
 
 class WmtTranslationRunRequest(BaseRunRequest):
@@ -165,7 +196,13 @@ class WmtTranslationResourcesServer(SimpleResourcesServer):
         The authoritative corpus-BLEU (+ optional COMET) lives in
         ``compute_metrics`` and is what parity comparisons to Skills use.
         """
-        generation = (body.response.output_text or "").strip()
+        raw = body.response.output_text or ""
+        # Match Skills' parse_reasoning=True: drop the reasoning preamble
+        # before scoring so BLEU is computed against the actual translation
+        # only. Without this, reasoning models tank BLEU by ~3x.
+        if self.config.strip_reasoning:
+            raw = _strip_reasoning_preamble(raw)
+        generation = raw.strip()
         if not generation:
             return WmtTranslationVerifyResponse(
                 **body.model_dump(),

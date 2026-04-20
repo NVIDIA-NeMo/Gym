@@ -19,6 +19,7 @@ from app import (
     WmtTranslationResourcesServer,
     WmtTranslationResourcesServerConfig,
     WmtTranslationVerifyRequest,
+    _strip_reasoning_preamble,
     _tokenizer_for,
 )
 
@@ -47,13 +48,17 @@ def _make_response(text: str) -> NeMoGymResponse:
     )
 
 
-def _make_server(compute_comet: bool = False) -> WmtTranslationResourcesServer:
+def _make_server(compute_comet: bool = False, strip_reasoning: bool = False) -> WmtTranslationResourcesServer:
+    # Tests default strip_reasoning=False so plain-text generations in existing
+    # verify() tests score against the reference. The server default is True to
+    # match Skills' parse_reasoning=True on reasoning-model outputs.
     config = WmtTranslationResourcesServerConfig(
         host="0.0.0.0",
         port=8080,
         entrypoint="",
         name="",
         compute_comet=compute_comet,
+        strip_reasoning=strip_reasoning,
     )
     return WmtTranslationResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
@@ -73,6 +78,29 @@ def _make_request(text: str, translation: str, generation: str, target_language:
         source_lang_name="English",
         target_lang_name="German",
     )
+
+
+class TestStripReasoningPreamble:
+    def test_takes_text_after_close_tag(self) -> None:
+        text = "We need to translate the segment.\n</think>\nProlog"
+        assert _strip_reasoning_preamble(text) == "Prolog"
+
+    def test_strips_trailing_newlines_before_answer(self) -> None:
+        text = "Reasoning.\n</think>\n\nHallo Welt."
+        # Only leading newlines get lstripped; embedded newlines in the answer stay.
+        assert _strip_reasoning_preamble(text) == "Hallo Welt."
+
+    def test_uses_last_close_tag(self) -> None:
+        # Edge case: model emits </think> inside the reasoning (rare, but defensive).
+        text = "Step 1: </think> Step 2 thinking. </think>\nFinal."
+        assert _strip_reasoning_preamble(text) == "Final."
+
+    def test_empty_when_no_close_tag(self) -> None:
+        # Matches Skills parse_reasoning=True when reasoning never closes.
+        assert _strip_reasoning_preamble("unfinished reasoning...") == ""
+
+    def test_empty_input(self) -> None:
+        assert _strip_reasoning_preamble("") == ""
 
 
 class TestTokenizer:
@@ -130,6 +158,40 @@ class TestVerify:
         )
         result = await server.verify(request)
         assert result.reward < 0.1
+
+    async def test_strip_reasoning_recovers_score(self) -> None:
+        """With strip_reasoning=True, the model's English reasoning preamble
+        must not contaminate the scored generation. This is the bug that
+        tanked initial Gym BLEU 3x vs Skills."""
+        server = _make_server(strip_reasoning=True)
+        ref = "Der schnelle braune Fuchs springt \u00fcber den faulen Hund."
+        reasoning_preamble = (
+            "We need to translate to German, without additional explanation. "
+            "Output just the translated sentence.\n</think>\n"
+        )
+        request = _make_request(
+            text="The quick brown fox jumps over the lazy dog.",
+            translation=ref,
+            generation=reasoning_preamble + ref,
+            target_language="de_DE",
+        )
+        result = await server.verify(request)
+        # Exactly the reference should land in generation, giving near-perfect BLEU.
+        assert result.generation == ref
+        assert result.sentence_bleu > 50.0
+
+    async def test_strip_reasoning_empty_when_no_close_tag(self) -> None:
+        """Match Skills: if reasoning never closes, verify() emits no generation."""
+        server = _make_server(strip_reasoning=True)
+        request = _make_request(
+            text="Hello.",
+            translation="Hallo.",
+            generation="We are still thinking about the answer, no close tag.",
+            target_language="de_DE",
+        )
+        result = await server.verify(request)
+        assert result.generation == ""
+        assert result.reward == 0.0
 
 
 class TestComputeMetrics:
