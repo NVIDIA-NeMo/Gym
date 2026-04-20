@@ -70,6 +70,10 @@ LOGGER = logging.getLogger(__name__)
 # cannot produce a useful answer — treat as a hard minimum.
 _MIN_COMPLETION_TOKENS = 1024
 
+# Hard cap on per-call max_completion_tokens.  Oversized completion budgets
+# on long-context servers can degrade output quality for reasoning models.
+_MAX_COMPLETION_TOKENS = 64000
+
 
 def _load_tokenizer(model_id: Optional[str]):
     """Load a HuggingFace tokenizer, tolerating version differences in transformers."""
@@ -239,11 +243,18 @@ class DynamicMaxTokensChatCompletionsClient(ChatCompletionsClient):
             context_window - input_tokens - self._completion_token_buffer,
             _MIN_COMPLETION_TOKENS,
         )
+        capped_max = min(dynamic_max, _MAX_COMPLETION_TOKENS)
 
+        # Defaults tuned for reasoning-trained models: thinking enabled,
+        # temperature=1.0, top_p=0.95, capped completion budget.
+        # ``self._kwargs`` is spread last so explicit config overrides win.
         request_kwargs: dict[str, Any] = {
             "model": self._model,
             "messages": to_openai_messages(messages),
-            "max_completion_tokens": dynamic_max,
+            "temperature": 1.0,
+            "top_p": 0.95,
+            "max_completion_tokens": capped_max,
+            "extra_body": {"chat_template_kwargs": {"enable_thinking": True}},
             **self._kwargs,
         }
         if tools:
@@ -286,13 +297,14 @@ class DynamicMaxTokensChatCompletionsClient(ChatCompletionsClient):
         answer_tokens = completion_tokens - reasoning_tokens
 
         LOGGER.debug(
-            "response: input_est=%d ctx=%d buf=%d -> max_completion=%d | "
+            "response: input_est=%d ctx=%d buf=%d -> max_completion=%d (capped=%d) | "
             "actual prompt=%d completion=%d (reasoning=%d) finish=%s "
             "content_len=%d tool_calls=%d",
             input_tokens,
             context_window,
             self._completion_token_buffer,
             dynamic_max,
+            capped_max,
             prompt_tokens,
             completion_tokens,
             reasoning_tokens,

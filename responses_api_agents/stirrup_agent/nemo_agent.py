@@ -11,30 +11,65 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""NeMoAgent — Stirrup Agent subclass with two overrides for GDPVal.
+"""NeMoAgent — Stirrup ``Agent`` subclass with two behavioural overrides.
 
-1. **tool_response_as_user** — Converts ``ToolMessage`` objects to
-   ``UserMessage`` in the ``step()`` return so the LLM sees tool results
-   as user messages (some models perform better this way).
+1. **tool_response_as_user** — Return a ``UserMessage`` (not ``ToolMessage``)
+   from ``run_tool()`` so the conversation history presents tool results
+   with ``role=user``.  Reasoning-trained models tend to keep expanding the
+   work and emit auxiliary artifacts (charts, methodology notes) when they
+   see tool output as a user turn rather than terminating early.
 
-2. **skip_input_file_listing** — Suppresses the file-path listing that
-   Stirrup injects into the system prompt via ``_build_system_prompt()``.
-   When we build the GDPVal user prompt externally (with its own
-   ``<reference_files>`` section), the duplicate listing wastes tokens
-   and can confuse the model.
+2. **skip_input_file_listing** — Suppresses the file-path listing Stirrup
+   injects into the system prompt; useful when a task prompt already lists
+   its own reference files (e.g. GDPVal).
 
-These two overrides allow using Stirrup as-is, without a fork.
+To preserve tool-call metadata that ``Agent.step()`` reads immediately after
+``run_tool()`` returns (``.name``, ``.success``, ``.tool_call_id``), the
+conversion uses :class:`NeMoUserMessage` — a ``UserMessage`` subclass with
+those fields.  Serialisation still renders ``role=user`` so the LLM sees a
+user turn.
 """
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Optional
 
+from pydantic import ConfigDict
 from stirrup import Agent
+from stirrup.core.agent import SessionAgent
+from stirrup.core.models import ToolCall, ToolMessage, UserMessage
+
+
+class NeMoUserMessage(UserMessage):
+    """``UserMessage`` that also carries tool-call metadata.
+
+    When ``tool_response_as_user`` is enabled, ``run_tool()`` returns one of
+    these instead of a ``ToolMessage``.  The extra fields mirror what
+    ``Agent.step()`` reads on the returned object (``.success``, ``.name``)
+    so the agent loop keeps working after the conversion.  Serialisation
+    still yields ``role=user`` so the LLM sees a user turn.
+    """
+
+    # Allow ``model_dump()`` to include extra fields without the Pydantic
+    # V2 warning the base model would otherwise emit.
+    model_config = ConfigDict(extra="allow")
+
+    name: Optional[str] = None
+    success: bool = False
+    args_was_valid: bool = True
+    tool_call_id: Optional[str] = None
+    tool_start_time: Optional[float] = None
+    tool_end_time: Optional[float] = None
+
+
+# With `from __future__ import annotations`, Pydantic stores field types as
+# strings and resolves them lazily.  Force resolution now so construction
+# inside async code paths doesn't hit `PydanticUserError: not fully defined`.
+NeMoUserMessage.model_rebuild()
 
 
 class NeMoAgent(Agent):
-    """Agent with optional tool-response-as-user conversion and system prompt control."""
+    """``Agent`` with tool-response-as-user conversion and system-prompt control."""
 
     def __init__(
         self,
@@ -68,18 +103,60 @@ class NeMoAgent(Agent):
 
         return result
 
-    async def step(self, messages: list, run_metadata: Any, turn: int = 0, max_turns: int = 0) -> tuple:
-        assistant_msg, tool_msgs, finish_params = await super().step(
-            messages, run_metadata, turn=turn, max_turns=max_turns
+    async def run_tool(self, tool_call: ToolCall, run_metadata: dict[str, list[Any]]) -> ToolMessage:
+        """Run a tool and optionally return a ``NeMoUserMessage`` instead of ``ToolMessage``.
+
+        Preserves all tool metadata on the returned message but flips its
+        serialised role from ``tool`` to ``user``.  ``Agent.step()`` inspects
+        ``.success`` and ``.name`` on the returned object immediately, so
+        ``NeMoUserMessage`` carries those fields.
+        """
+        tool_message: ToolMessage = await super().run_tool(tool_call, run_metadata)
+
+        if not self._tool_response_as_user:
+            return tool_message
+
+        return NeMoUserMessage(  # type: ignore[return-value]
+            content=tool_message.content,
+            name=tool_message.name,
+            success=tool_message.success,
+            args_was_valid=getattr(tool_message, "args_was_valid", True),
+            tool_call_id=tool_message.tool_call_id,
+            tool_start_time=getattr(tool_message, "tool_start_time", None),
+            tool_end_time=getattr(tool_message, "tool_end_time", None),
         )
 
-        if self._tool_response_as_user and tool_msgs:
-            from stirrup.core.models import UserMessage
+    async def __aenter__(self):  # type: ignore[override]
+        """Upgrade the SessionAgent returned by Stirrup to a NeMoSessionAgent.
 
-            converted = []
-            for tm in tool_msgs:
-                content = tm.content if isinstance(tm.content, str) else str(tm.content)
-                converted.append(UserMessage(content=content))
-            tool_msgs = converted  # type: ignore[assignment]
+        Stirrup's ``Agent.__aenter__`` returns ``SessionAgent.from_agent(self)``,
+        a plain ``SessionAgent`` that inherits from ``Agent`` directly and
+        therefore bypasses any methods we override on ``NeMoAgent`` (MRO stops
+        at ``Agent``).  We cannot cleanly re-implement ``__aenter__`` (it runs
+        ~100 lines of tool/state setup), so we let Stirrup do its work, then
+        reassign the returned instance's ``__class__`` to ``NeMoSessionAgent``
+        — a layout-compatible subclass that inherits from both
+        ``SessionAgent`` (for tool/session state) and ``NeMoAgent`` (for our
+        overrides).  After the reassignment, ``self.run_tool`` and any
+        other NeMoAgent method dispatch through our overrides.
+        """
+        sa = await super().__aenter__()
+        sa.__class__ = NeMoSessionAgent
+        return sa
 
-        return assistant_msg, tool_msgs, finish_params
+
+class NeMoSessionAgent(SessionAgent, NeMoAgent):
+    """``SessionAgent`` variant whose MRO also includes ``NeMoAgent``.
+
+    Python's C3 linearisation gives us
+
+        NeMoSessionAgent -> SessionAgent -> NeMoAgent -> Agent -> ...
+
+    so method lookups for ``run_tool`` / ``_build_system_prompt`` (which
+    SessionAgent inherits from Agent without overriding) resolve to our
+    NeMoAgent overrides.  Used via ``agent.__aenter__`` → reassign
+    ``__class__``; no ``__init__`` is called (the instance's ``__dict__``
+    was already populated by ``Agent.__init__`` on the parent NeMoAgent).
+    """
+
+    pass
