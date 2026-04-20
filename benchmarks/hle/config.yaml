@@ -12,11 +12,12 @@ hle_math_with_judge_resources_server:
       skip_symbolic: true
       judge_model_server:
         type: responses_api_models
-        name: judge_model
+        name: policy_model
       judge_responses_create_params:
         input: []
       judge_system_message: ""
       judge_check_position_bias: false
+      judge_use_full_response: true
       judge_equal_label: "Judgement: yes"
       judge_not_equal_label: "Judgement: no"
       judge_prompt_template: |-

@@ -53,6 +53,7 @@ class LibraryJudgeMathResourcesServerConfig(BaseResourcesServerConfig):
     judge_equal_label: Optional[str] = None  # overrides JUDGE_EQUAL_LABEL
     judge_not_equal_label: Optional[str] = None  # overrides JUDGE_NOT_EQUAL_LABEL
     judge_check_position_bias: bool = True  # when False, makes a single judge call instead of two
+    judge_use_full_response: bool = False  # when True, always pass the full model response to the judge instead of the math_verify extracted answer
 
 
 class LibraryJudgeMathRunRequest(BaseRunRequest):
@@ -166,7 +167,9 @@ Example output: "My final verdict is different [[A!=B]]"."""
         if not self.config.should_use_judge or (not self.config.skip_symbolic and library_reward > 0.5):
             return library_reward, extracted_answer, library_reward, None
 
-        judge_answer = extracted_answer if extracted_answer else generated_answer
+        judge_answer = (
+            generated_answer if self.config.judge_use_full_response else (extracted_answer or generated_answer)
+        )
         judge_reward, judge_evaluations = await self._verify_answer_with_judge(question, expected_answer, judge_answer)
         return judge_reward, extracted_answer, library_reward, judge_evaluations
 
