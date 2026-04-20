@@ -1,0 +1,65 @@
+{
+    "name": "example",
+    "type": "example",
+    "jsonl_fpath": "resources_servers/bird_sql/data/example.jsonl",
+    "num_repeats": 1,
+    "gitlab_identifier": null,
+    "huggingface_identifier": null,
+    "license": "Creative Commons Attribution-ShareAlike 4.0 International",
+    "Number of examples": 5,
+    "Number of tools": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 5,
+        "Average": 980.0,
+        "Min": 979.0,
+        "Max": 982.0,
+        "Standard deviation": 1.22
+    },
+    "Number of turns": {
+        "Total # non-null values": 5,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Standard deviation": 0.0
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "question": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "gt_sql": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "sql_context": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "difficulty": {
+        "unique_count": 2,
+        "total_count": 5
+    },
+    "db_id": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "id": {
+        "Total # non-null values": 5,
+        "Average": 2.0,
+        "Min": 0.0,
+        "Max": 4.0,
+        "Standard deviation": 1.58
+    }
+}
