@@ -41,4 +41,5 @@ ng_collect_rollouts \
 `compute_metrics()` emits `pass@k/accuracy`, `pass@1[avg-of-k]/accuracy`
 via `compute_pass_majority_metrics`, plus per-`n_needles` subset breakdowns
 via `compute_subset_metrics(subset_key="n_needles")` — stratified pass@k
-keys like `2/pass@4/accuracy`, `4/pass@4/accuracy`, `8/pass@4/accuracy`.
+keys like `n_needles=2/pass@4/accuracy`, `n_needles=4/pass@4/accuracy`,
+`n_needles=8/pass@4/accuracy`.

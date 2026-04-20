@@ -89,6 +89,10 @@ class MRCRResourcesServer(SimpleResourcesServer):
         """
         metrics, _, _, _ = compute_pass_majority_metrics(tasks, score_fn=self._score_fn)
         subset_metrics = compute_subset_metrics(tasks, subset_key="n_needles", score_fn=self._score_fn)
+        # compute_subset_metrics emits keys like "<value>/pass@k/accuracy" where
+        # <value> is the raw subset value. Prepend the field name so the key
+        # stays self-describing: "n_needles=<value>/pass@k/accuracy".
+        subset_metrics = {(f"n_needles={k}" if "/" in k else k): v for k, v in subset_metrics.items()}
         metrics.update(subset_metrics)
         return metrics
 

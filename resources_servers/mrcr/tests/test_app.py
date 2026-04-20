@@ -149,15 +149,18 @@ class TestComputeMetrics:
         assert "pass@1[avg-of-2]/accuracy" in metrics
 
     def test_compute_metrics_includes_subset_breakdown(self, server: MRCRResourcesServer) -> None:
-        """Per-needle-count subset breakdown should appear as `{n_needles}/pass@k/...`."""
+        """Per-needle-count subset breakdown should appear as
+        `n_needles=<value>/pass@k/...` — prefixed with the field name so the
+        key stays self-describing."""
         tasks = [
             [{"reward": 1.0, "n_needles": 2}, {"reward": 0.5, "n_needles": 2}],
             [{"reward": 0.8, "n_needles": 4}, {"reward": 0.6, "n_needles": 4}],
         ]
         metrics = server.compute_metrics(tasks)
-        # compute_subset_metrics emits keys like "2/pass@1[avg-of-2]/accuracy"
-        assert any(k.startswith("2/pass@") for k in metrics)
-        assert any(k.startswith("4/pass@") for k in metrics)
+        assert any(k.startswith("n_needles=2/pass@") for k in metrics)
+        assert any(k.startswith("n_needles=4/pass@") for k in metrics)
+        # Bare "<value>/..." keys must NOT leak through from compute_subset_metrics.
+        assert not any(k.startswith(("2/", "4/")) for k in metrics)
 
     def test_compute_metrics_no_majority(self, server: MRCRResourcesServer) -> None:
         """majority@k is skipped because MRCR has no discrete answer_key."""
