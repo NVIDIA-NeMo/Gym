@@ -13,10 +13,15 @@ reproduce the Nth occurrence exactly, prefixed by a random token.
    answer, and `difflib.SequenceMatcher(...).ratio()` becomes the reward
    (continuous similarity in [0, 1]).
 
-Ported from
-[NeMo Skills MRCR evaluator](https://github.com/NVIDIA-NeMo/Skills/blob/main/nemo_skills/evaluation/evaluator/mrcr.py)
+Grader ported from
+https://github.com/NVIDIA-NeMo/Skills/blob/main/nemo_skills/evaluation/evaluator/mrcr.py
 which follows the
 [official MRCR grading](https://huggingface.co/datasets/openai/mrcr).
+
+For reasoning models, start the vLLM server with a matching reasoning
+parser (e.g. `--reasoning-parser deepseek_r1`) so the `<think>...</think>`
+preamble is stripped before reaching `message.content`; otherwise the
+prefix gate in `_grade` always fails.
 
 ## Data
 

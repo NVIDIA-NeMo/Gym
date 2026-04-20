@@ -12,22 +12,22 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Prepare the MRCR benchmark data (mirror of NeMo Skills prepare.py).
+"""Prepare the MRCR benchmark data.
 
 Source: https://huggingface.co/datasets/openai/mrcr
-Reference:
+
+Ported from:
     https://github.com/NVIDIA-NeMo/Skills/blob/main/nemo_skills/dataset/mrcr/prepare.py
 
 Each row in the upstream dataset has a `prompt` field that is a JSON-stringified
 list of OpenAI chat messages. We parse it into `responses_create_params.input`,
-count tokens with tiktoken `o200k_base` (same as Skills / the official MRCR
-grading setup), and filter to samples that fit in the model context.
+count tokens with tiktoken `o200k_base` (same tokenizer used by the official
+MRCR grading setup), and filter to samples that fit in the model context.
 
-The 200000-token cap leaves headroom for tokenizer drift: the model's
-Nemotron tokenizer produces ~7-10% more tokens than tiktoken o200k_base,
-so filtering at 200K tiktoken keeps Nemotron worst-case near 220K, which
-combined with 32K generation stays under the 262144 native context. Applied
-symmetrically to the Skills prepare for parity.
+The 200000-token cap leaves headroom for tokenizer drift: a model's own
+tokenizer can produce ~7-10% more tokens than tiktoken `o200k_base`, so
+filtering at 200K tiktoken keeps the model-side worst-case near 220K, which
+combined with ~32K generation stays under a 262144-token native context.
 """
 
 import json
@@ -42,7 +42,6 @@ BENCHMARK_DIR = Path(__file__).parent
 DATA_DIR = BENCHMARK_DIR / "data"
 OUTPUT_FPATH = DATA_DIR / "mrcr_benchmark.jsonl"
 
-# Must match run_mrcr_ns_baseline.py / prepare_mrcr_ns.py.
 MAX_CONTEXT_TOKENS = 200000
 
 

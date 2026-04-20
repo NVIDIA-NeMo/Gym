@@ -14,10 +14,11 @@
 # limitations under the License.
 """MRCR (OpenAI Multi-Round Coreference Resolution) resources server.
 
-Port of the NeMo Skills evaluator at
-https://github.com/NVIDIA-NeMo/Skills/blob/main/nemo_skills/evaluation/evaluator/mrcr.py
-following the official MRCR grading function at
+Implements the official MRCR grading function from
 https://huggingface.co/datasets/openai/mrcr.
+
+Ported from:
+    https://github.com/NVIDIA-NeMo/Skills/blob/main/nemo_skills/evaluation/evaluator/mrcr.py
 
 Scoring: the model's response must start with a `random_string_to_prepend`
 prefix (reward=0 if it doesn't). Otherwise, strip the prefix from both
@@ -104,14 +105,13 @@ class MRCRResourcesServer(SimpleResourcesServer):
 def _grade(response: str, expected_answer: str, random_string_to_prepend: str) -> float:
     """Official MRCR grading function.
 
-    Mirrors nemo_skills/evaluation/evaluator/mrcr.py::eval_mrcr.grade:
       - response that doesn't start with `random_string_to_prepend` → 0.0
       - otherwise strip the prefix from both and return SequenceMatcher.ratio().
 
-    Note: for reasoning models like Nemotron-3, the vLLM server must be
-    started with `--reasoning-parser deepseek_r1` (or the appropriate parser
-    name) so that reasoning tokens are stripped upstream. Otherwise the raw
-    `<think>...</think>` preamble will defeat the prefix gate here.
+    Note: for reasoning models the vLLM server must be started with a
+    reasoning parser (e.g. `--reasoning-parser deepseek_r1`) so that
+    reasoning tokens are stripped upstream. Otherwise a `<think>...</think>`
+    preamble in the response will defeat the prefix gate here.
     """
     if not response.startswith(random_string_to_prepend):
         return 0.0

@@ -39,8 +39,8 @@ class TestSanity:
 class TestGrade:
     """Tests for the MRCR grading function.
 
-    Gold reference: nemo_skills.evaluation.evaluator.mrcr.eval_mrcr.grade
-    and the official openai/mrcr grading function.
+    Reference: the official openai/mrcr grading function at
+    https://huggingface.co/datasets/openai/mrcr.
     """
 
     def test_missing_prefix_returns_zero(self) -> None:
