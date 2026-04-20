@@ -14,6 +14,7 @@
 # limitations under the License.
 import contextlib
 import logging
+import re
 from io import StringIO
 from typing import Any, ClassVar, Dict, List, Optional, Union
 
@@ -45,6 +46,47 @@ class LibraryJudgeMathResourcesServerConfig(BaseResourcesServerConfig):
     judge_model_server: ModelServerRef
     judge_responses_create_params: NeMoGymResponseCreateParamsNonStreaming
     should_use_judge: bool = True
+    # Optional path to a YAML file with `system` (optional) and `user`
+    # (required) keys providing a custom judge prompt — e.g. an IMO-style
+    # autograder. When None, falls back to the Arena-Hard ClassVars below.
+    # Matches the pattern used by the omniscience resource server.
+    # A missing or empty `system` key omits the system message.
+    judge_prompt_path: Optional[str] = None
+    # Verdict labels parsed out of the judge's raw output. None => use the
+    # Arena-Hard ClassVars.
+    judge_equal_label: Optional[str] = None
+    judge_not_equal_label: Optional[str] = None
+    # When False, skip the second-order (swapped-answers) judge call. Use
+    # for unidirectional autograder prompts whose template has a fixed
+    # "model solution" / "golden answer" role assignment.
+    judge_bidirectional: bool = True
+    # Mirror NeMo Skills' judge pipeline exactly for per-rollout parity.
+    # When True:
+    #   * Strip <think>...</think> (and pre-</think> content) from the
+    #     model output before extraction — mirrors Skills' parse_reasoning=True.
+    #   * Use the brace-matching _search_boxed extractor instead of
+    #     math-verify for the judge input AND for the `extracted_answer`
+    #     field (used by majority@k).
+    #   * Prefill shortcuts, mirroring nemo_skills.utils.prefill_judgement:
+    #     empty extraction -> reward 0 (no LLM call),
+    #     extracted.strip() == expected.strip() -> reward 1 (no LLM call).
+    #   * Call the LLM judge unconditionally when no prefill fires — the
+    #     judge is not gated by symbolic success, matching Skills.
+    #   * `reward` == final judge verdict (prefill or LLM), not
+    #     `library_reward OR judge`.
+    # `library_reward` is still computed for the `symbolic_accuracy`
+    # diagnostic metric, so parity runs can compare symbolic drift too.
+    skills_parity_mode: bool = False
+    # Apply Skills' parse_reasoning=True extraction path to the symbolic-only
+    # (no-judge) flow: strip <think>...</think> blocks, then extract via
+    # _search_boxed (brace-matching), then run math-verify on the raw boxed
+    # LaTeX. Use this for benchmarks whose Skills config is `eval_type=math`
+    # with `should_use_judge=false` (e.g. apex-shortlist, aime25, hmmt_feb25).
+    # Unlike skills_parity_mode, this does NOT route through the LLM judge —
+    # it preserves symbolic-only semantics. If the boxed extraction returns
+    # None (e.g. reasoning was truncated), reward is 0 (matches Skills'
+    # predicted_answer=None -> no_answer).
+    parse_reasoning_like_skills: bool = False
 
 
 class LibraryJudgeMathRunRequest(BaseRunRequest):
@@ -154,7 +196,24 @@ Example output: "My final verdict is different [[A!=B]]"."""
         specified question in comparison with the specified expected answer.
         """
 
+        # Symbolic-only parity path for Skills' `eval_type=math`
+        # (apex-shortlist / aime25 / hmmt_feb25 etc). Strip <think>...</think>,
+        # extract via brace-matcher, run math-verify on the raw boxed LaTeX.
+        # Short-circuits to reward=0 when extraction is None, mirroring
+        # Skills' predicted_answer=None -> no_answer.
+        if self.config.parse_reasoning_like_skills:
+            stripped = self._strip_think_tags(generated_answer)
+            raw_boxed = self._search_boxed(stripped)
+            if raw_boxed is None:
+                return 0.0, None, 0.0, None
+            library_reward, _ = self._verify_answer_with_library(expected_answer, f"\\boxed{{{raw_boxed}}}")
+            return library_reward, raw_boxed, library_reward, None
+
         library_reward, extracted_answer = self._verify_answer_with_library(expected_answer, generated_answer)
+
+        if self.config.skills_parity_mode:
+            return await self._verify_answer_skills_parity(question, expected_answer, generated_answer, library_reward)
+
         if not self.config.should_use_judge or library_reward > 0.5:
             return library_reward, extracted_answer, library_reward, None
 
@@ -210,6 +269,78 @@ Example output: "My final verdict is different [[A!=B]]"."""
             if retval.startswith(prefix) and retval.endswith("}"):
                 return retval[len(prefix) : -1]
         return None
+
+    # Think-tag patterns used by _strip_think_tags. Pre-compiled because the
+    # stripper runs on every verify() call when skills_parity_mode is on.
+    _THINK_PAIR_RE: ClassVar = re.compile(r"<think>.*?</think>", re.DOTALL)
+    _THINKING_PAIR_RE: ClassVar = re.compile(r"<thinking>.*?</thinking>", re.DOTALL)
+    _PRE_CLOSE_THINK_RE: ClassVar = re.compile(r"^.*?</think>", re.DOTALL)
+    _PRE_CLOSE_THINKING_RE: ClassVar = re.compile(r"^.*?</thinking>", re.DOTALL)
+
+    @classmethod
+    def _strip_think_tags(cls, text: str) -> str:
+        """Mirror Skills' parse_reasoning=True behavior on a single string.
+
+        - Drop paired <think>...</think> / <thinking>...</thinking> blocks.
+        - If only a closing </think> (or </thinking>) survives — common when
+          the reasoning parser ate the opening tag — drop everything up to
+          and including that tag.
+        - Leading / trailing whitespace is stripped so downstream extraction
+          isn't thrown off by a leading newline.
+        """
+        text = cls._THINK_PAIR_RE.sub("", text)
+        text = cls._THINKING_PAIR_RE.sub("", text)
+        text = cls._PRE_CLOSE_THINK_RE.sub("", text, count=1)
+        text = cls._PRE_CLOSE_THINKING_RE.sub("", text, count=1)
+        return text.strip()
+
+    async def _verify_answer_skills_parity(
+        self,
+        question: str,
+        expected_answer: str,
+        generated_answer: str,
+        library_reward: float,
+    ) -> tuple[float, Optional[str], float, Optional[list[JudgeEvaluation]]]:
+        r"""Skills-parity verification path (opt-in via skills_parity_mode).
+
+        Mirrors nemo_skills/inference/llm_math_judge.py end-to-end:
+          1. Strip <think>...</think> from the raw generation.
+          2. Extract the last balanced \boxed{...} content (raw LaTeX).
+          3. Prefill shortcuts (nemo_skills.utils.prefill_judgement):
+               empty extraction              -> reward 0, no LLM call
+               extracted.strip() == expected -> reward 1, no LLM call
+          4. Otherwise call the LLM judge unconditionally — symbolic result
+             never short-circuits the judge in this mode.
+
+        The returned `extracted_answer` is the raw-boxed content (matches
+        Skills' `predicted_answer` field, used for majority@k grouping).
+        `library_reward` continues to reflect math-verify's symbolic check
+        so the symbolic_accuracy metric stays a useful diagnostic.
+
+        `judge_evaluations` semantics:
+          - LLM was called        -> list populated (length 1 or 2, depending
+            on judge_bidirectional).
+          - prefill fired          -> empty list [] (non-None). This lets the
+            existing _math_score_fn pick up judge_accuracy for prefilled
+            rollouts the same way it does for LLM-judged ones (`is not None`
+            check). It is the truthful signal: in parity mode, every
+            rollout's reward IS a judge verdict, whether from the prefill
+            shortcut or an LLM call.
+        """
+        stripped = self._strip_think_tags(generated_answer)
+        extracted = self._search_boxed(stripped)
+
+        # Prefill: empty / missing extraction.
+        if not extracted:
+            return 0.0, extracted, library_reward, []
+
+        # Prefill: exact string match (Skills strips both sides before comparing).
+        if extracted.strip() == expected_answer.strip():
+            return 1.0, extracted, library_reward, []
+
+        # LLM judge on every non-prefilled rollout.
+        judge_reward, judge_evaluations = await self._verify_answer_with_judge(question, expected_answer, extracted)
+        return judge_reward, extracted, library_reward, judge_evaluations
 
     @classmethod
     @contextlib.contextmanager
