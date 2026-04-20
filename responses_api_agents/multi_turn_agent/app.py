@@ -13,25 +13,35 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Multi-turn agent with LLM user model.
+"""Multi-turn agent with a simulated user.
 
-Orchestrates a multi-turn dialogue between a policy model and a user model
-(LLM simulating the human user). The interaction has two nested loops:
+Orchestrates a multi-turn dialogue between a policy model and a user
+simulator. The user can be either a plain model server (an LLM with a
+persona system prompt) or another agent server (with its own tool-call
+loop). The interaction has two nested loops:
 
-Outer loop (run): alternates between policy turns and user model turns.
-    Each iteration = one conversational exchange. Controlled by max_turns.
+Outer loop (run): alternates between policy turns and user turns. Each
+    iteration = one conversational exchange. Controlled by max_turns.
 
-Inner loop (responses): within a single policy turn, the model may make
-    multiple tool calls before producing a final text response. This is
-    the same tool-call loop as SimpleAgent. Controlled by max_steps_per_turn.
+Inner loop (responses): within a single policy turn, the policy model
+    may make multiple tool calls before producing a final text response.
+    Same as SimpleAgent's loop. Controlled by max_steps_per_turn.
 
-The full conversation trajectory (all turns interleaved) is sent to the
-resources server for verification and reward computation.
+Each side keeps its OWN trajectory, stored from its owner's perspective:
+    policy_trajectory — policy's own outputs (assistant messages, tool
+        calls, tool outputs) interleaved with observations of what the
+        user replied (labeled "user" from the policy's view).
+    user_trajectory   — the user's persona system prompt, observations
+        of what the policy said (labeled "user"), and the user's own
+        replies (labeled "assistant").
+
+Only the policy trajectory is sent to /verify for scoring; the user
+trajectory is scaffolding for the simulated dialogue.
 """
 
 import json
 import logging
-from typing import List, Optional, Union
+from typing import Any, List, Optional, Tuple, Union
 
 from fastapi import Request, Response
 from pydantic import ConfigDict, ValidationError
@@ -95,6 +105,34 @@ class MultiTurnAgentVerifyRequest(BaseVerifyRequest):
 
 class MultiTurnAgentVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Helpers
+# ──────────────────────────────────────────────────────────────────────
+
+
+def _extract_text_from_outputs(outputs: list) -> str:
+    """Pull a text observation out of a turn's output items.
+
+    Strategy: return the last assistant-message text if any; otherwise the
+    last function_call_output's content (useful when a side only emitted a
+    tool call in a turn, e.g. O's make_move in tic-tac-toe). Empty string
+    if neither is present.
+    """
+    for item in reversed(outputs):
+        if item.get("type") == "message" and item.get("role") == "assistant":
+            for piece in item.get("content", []) or []:
+                if piece.get("type") == "output_text":
+                    text = piece.get("text")
+                    if text:
+                        return text
+    for item in reversed(outputs):
+        if item.get("type") == "function_call_output":
+            out = item.get("output")
+            if out:
+                return out
+    return ""
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -228,13 +266,16 @@ class MultiTurnAgent(SimpleResponsesAPIAgent):
 
         This is the OUTER loop. For each turn:
           1. Policy turn — call self /v1/responses (which runs the inner loop)
-          2. User model turn — generate the next user message via the user LLM
-        After all turns, verify the full conversation for a reward.
+          2. User turn — call the user server (model or agent) via /v1/responses
+        After all turns, verify the policy's conversation for a reward.
 
-        The conversation is represented as two parts:
-          - original_input: the initial messages from the JSONL data (system prompt, first user message)
-          - all_turn_outputs: everything generated during the conversation (policy responses,
-            tool calls, tool results, user model messages) — grows each turn
+        Each side keeps its OWN trajectory, labeled from its perspective:
+          - policy_trajectory: policy's own outputs (assistant, tool calls,
+            tool outputs) plus the user's replies as "user" observations
+          - user_trajectory:   user's persona system prompt, the policy's
+            text as "user" observations, and the user's own replies as
+            "assistant" messages
+        Only the policy trajectory is sent to /verify.
         """
         cookies = request.cookies
 
@@ -248,26 +289,43 @@ class MultiTurnAgent(SimpleResponsesAPIAgent):
         await raise_for_status(seed_response)
         cookies = seed_response.cookies
 
-        # Separate the static initial input from the growing conversation.
-        # original_params includes tools, temperature, etc. — reused each turn.
+        # If the user simulator is an agent, seed its session too.
+        if isinstance(self.config.user_model_server, AgentServerRef):
+            user_seed = await self.server_client.post(
+                server_name=self.config.user_model_server.name,
+                url_path="/seed_session",
+                json=body.model_dump(),
+                cookies=cookies,
+            )
+            await raise_for_status(user_seed)
+            cookies = user_seed.cookies
+
+        # original_params carries tools/temperature/etc. — reused for every policy turn.
         original_params = body.responses_create_params.model_dump(exclude_unset=True)
         original_input = original_params.get("input", [])
         if isinstance(original_input, str):
             original_input = [{"role": "user", "content": original_input, "type": "message"}]
 
-        all_turn_outputs = []  # Grows with each turn: policy outputs + user messages
+        # Per-task override from JSONL data takes precedence over config default
+        user_system_prompt = (
+            body.model_dump().get("user_model_system_prompt") or self.config.user_model_system_prompt
+        )
+
+        # Two trajectories, each stored from its owner's perspective.
+        policy_trajectory: list = list(original_input)
+        user_trajectory: list = [
+            {"role": "system", "content": user_system_prompt, "type": "message"}
+        ]
+
         last_model_response_json = None  # Used as the base for the final verify response
 
         # Phase 2: Multi-turn conversation loop
         for turn in range(self.config.max_turns):
             LOG.info("Turn %d: Policy turn", turn)
 
-            # Build this turn's input: original messages + everything from previous turns.
-            # The tools, temperature, etc. from original_params carry forward unchanged.
-            turn_params = {**original_params, "input": original_input + all_turn_outputs}
-
-            # Call this agent's own /v1/responses endpoint, which runs the inner
-            # tool-call loop (responses method above) via HTTP.
+            # Policy sees its canonical history; call own /v1/responses which
+            # runs the inner tool-call loop (responses method above) via HTTP.
+            turn_params = {**original_params, "input": policy_trajectory}
             policy_response = await self.server_client.post(
                 server_name=self.config.name,
                 url_path="/v1/responses",
@@ -279,9 +337,17 @@ class MultiTurnAgent(SimpleResponsesAPIAgent):
             model_response_json = await get_response_json(policy_response)
             last_model_response_json = model_response_json
 
-            # Append this turn's policy outputs to the growing conversation
-            policy_outputs = model_response_json.get("output", [])
-            all_turn_outputs.extend(policy_outputs)
+            # Append this turn's policy outputs to its own trajectory (verbatim,
+            # including reasoning/function_call/function_call_output items).
+            policy_outputs = model_response_json.get("output", []) or []
+            policy_trajectory.extend(policy_outputs)
+
+            # User's observation of this turn = last text (or tool output)
+            # the policy emitted. Labeled "user" from the user LLM's view.
+            policy_text = _extract_text_from_outputs(policy_outputs)
+            user_trajectory.append(
+                {"role": "user", "content": policy_text, "type": "message"}
+            )
 
             # Outer stop: context length exceeded
             incomplete = model_response_json.get("incomplete_details")
@@ -293,9 +359,14 @@ class MultiTurnAgent(SimpleResponsesAPIAgent):
             if turn >= self.config.max_turns - 1:
                 break
 
-            # Generate the next user message via the user LLM
-            user_text = await self._generate_user_response(body, original_input, all_turn_outputs, cookies)
-            if user_text is None:
+            # User turn — one call if agent (or tool-less model); tool-call
+            # loop here if user is a ModelServerRef with tool_choice set.
+            user_text, cookies = await self._call_user_server(
+                user_trajectory=user_trajectory,
+                original_params=original_params,
+                cookies=cookies,
+            )
+            if not user_text:
                 LOG.info("Turn %d: No user message generated, stopping", turn)
                 break
 
@@ -305,15 +376,21 @@ class MultiTurnAgent(SimpleResponsesAPIAgent):
                 break
 
             LOG.info("Turn %d: User message: %s", turn, user_text[:100])
-            user_msg = {"role": "user", "content": user_text, "type": "message"}
-            all_turn_outputs.append(user_msg)
+            # Append the user's reply to BOTH trajectories: as "assistant" in
+            # the user's own history (what it just said), and as "user" in the
+            # policy's history (an observation of what the other side said).
+            user_trajectory.append(
+                {"role": "assistant", "content": user_text, "type": "message"}
+            )
+            policy_trajectory.append(
+                {"role": "user", "content": user_text, "type": "message"}
+            )
 
-        # Phase 3: Verify the full conversation.
-        # Build a single NeMoGymResponse containing ALL outputs from ALL turns
-        # (policy outputs + user messages interleaved) and send to the resources
-        # server for reward computation.
-        final_response_json = dict(last_model_response_json)
-        final_response_json["output"] = all_turn_outputs
+        # Phase 3: Verify on the policy trajectory only.
+        # The user trajectory is scaffolding for the simulated dialogue; the
+        # resources server doesn't need to see it for scoring.
+        final_response_json = dict(last_model_response_json or {})
+        final_response_json["output"] = policy_trajectory
 
         verify_request = MultiTurnAgentVerifyRequest.model_validate(
             body.model_dump() | {"response": final_response_json}
@@ -330,129 +407,60 @@ class MultiTurnAgent(SimpleResponsesAPIAgent):
 
     # ── User model interaction ────────────────────────────────────────
 
-    async def _generate_user_response(
+    async def _call_user_server(
         self,
-        body: MultiTurnAgentRunRequest,
-        original_input: list,
-        all_turn_outputs: list,
+        user_trajectory: list,
+        original_params: dict,
         cookies,
-    ) -> Optional[str]:
-        """Call the user LLM to generate the next user message.
+    ) -> Tuple[str, Any]:
+        """Call the user simulator with its own trajectory.
 
-        Builds the user model's input as:
-          1. The user model system prompt (defines persona/behavior)
-          2. The conversation so far (original user messages + all turn outputs),
-             but with the policy's system/developer prompt stripped so the user
-             model only sees its own system prompt.
+        `run()` maintains `user_trajectory` from the user LLM's perspective
+        (its own replies as "assistant", the policy's observations as "user"),
+        so no role swapping or trajectory filtering is needed here.
 
-        If the original request includes tools, those are passed to the user
-        model too. If the user model makes tool calls, they are executed against
-        the resources server in a loop (same pattern as the policy's inner loop).
+        Behavior by user_model_server type:
+          - AgentServerRef: one call to /v1/responses; the agent runs its own
+            inner tool-call loop internally.
+          - ModelServerRef with user_model_tool_choice set (e.g. tic-tac-toe):
+            run a tool-call loop here against the resources server so the
+            user model can use tools.
+          - ModelServerRef without tool_choice (e.g. workplace_assistant):
+            single call, take the final text.
 
-        Only the user model's final text message is returned — its tool calls
-        are NOT included in the conversation trajectory since they are internal
-        to the user's "thinking" and not visible to the policy. The policy
-        observes the effects of user tool calls through environment state
-        (e.g. an updated game board) on its next turn.
-
-        When user_model_tool_choice is "required", the model is forced to call
-        a tool each iteration. If it never produces text, the last tool call
-        result is returned as the user message so the conversation continues.
-
-        Returns None only if the user model produces neither text nor tool calls.
+        Returns (user_text, updated_cookies). user_text is "" if the user
+        produced neither a text message nor a tool result.
         """
-        # Per-task override from JSONL data takes precedence over config default
-        user_system_prompt = body.model_dump().get("user_model_system_prompt") or self.config.user_model_system_prompt
+        is_agent = isinstance(self.config.user_model_server, AgentServerRef)
+        user_sees_tools = (not is_agent) and self.config.user_model_tool_choice is not None
 
-        # Build user model input from the user LLM's perspective:
-        #   - Its own prior outputs (originally "user" role in the trajectory)
-        #     need to be labeled "assistant" because the model always produces
-        #     assistant-role messages.
-        #   - The policy's outputs (originally "assistant") need to be labeled
-        #     "user" because the policy is the "other party" talking to it.
-        #
-        # Chat/completions (and especially Bedrock/Claude) require the
-        # conversation to end with a user message before the model produces
-        # the next assistant message. Swapping roles here gives us that shape.
-        #
-        # For user models that don't make tool calls (user_model_tool_choice
-        # is None), we also drop reasoning/function_call/function_call_output
-        # items from the trajectory so the user LLM sees a clean text-only
-        # conversation.
-        def _item_role(i):
-            return i.get("role") if isinstance(i, dict) else getattr(i, "role", None)
-
-        def _item_type(i):
-            return i.get("type") if isinstance(i, dict) else getattr(i, "type", None)
-
-        def _extract_text(i):
-            content = i.get("content") if isinstance(i, dict) else getattr(i, "content", None)
-            if isinstance(content, str):
-                return content
-            if isinstance(content, list):
-                parts = []
-                for piece in content:
-                    if isinstance(piece, dict):
-                        text = piece.get("text")
-                    else:
-                        text = getattr(piece, "text", None)
-                    if text:
-                        parts.append(text)
-                return "\n".join(parts)
-            return ""
-
-        def _swap_role(i):
-            role = _item_role(i)
-            new_role = {"user": "assistant", "assistant": "user"}.get(role, role)
-            # Flatten to the simple {role, content: str, type: "message"} shape
-            # (NeMoGymEasyInputMessage-compatible) so the swapped item passes
-            # pydantic validation regardless of original content format.
-            return {"role": new_role, "content": _extract_text(i), "type": "message"}
-
-        user_sees_tools = self.config.user_model_tool_choice is not None
-
-        user_model_input = [{"role": "system", "content": user_system_prompt, "type": "message"}]
-
+        user_model_params: dict = {"input": user_trajectory}
         if user_sees_tools:
-            # Original behavior: user sees the full trajectory verbatim
-            # (tool calls and outputs intact). Roles are not swapped because
-            # tool_calls belong to assistant messages.
-            for msg in original_input:
-                if _item_role(msg) not in ("system", "developer"):
-                    user_model_input.append(msg)
-            user_model_input.extend(all_turn_outputs)
-        else:
-            # Text-only view with swapped roles so the conversation ends on
-            # a "user" message (= policy's most recent reply from the user
-            # LLM's perspective).
-            for msg in original_input:
-                role = _item_role(msg)
-                if role in ("system", "developer"):
-                    continue
-                if role in ("user", "assistant"):
-                    user_model_input.append(_swap_role(msg))
-                else:
-                    user_model_input.append(msg)
-            for item in all_turn_outputs:
-                if _item_type(item) in ("function_call", "function_call_output", "reasoning"):
-                    continue
-                if _item_type(item) == "message" and _item_role(item) in ("user", "assistant"):
-                    user_model_input.append(_swap_role(item))
-                else:
-                    user_model_input.append(item)
-
-        original_params = body.responses_create_params.model_dump(exclude_unset=True)
-        user_model_params = {"input": user_model_input}
-
-        tools = original_params.get("tools")
-        if tools and user_sees_tools:
-            user_model_params["tools"] = tools
-        if self.config.user_model_tool_choice:
+            tools = original_params.get("tools")
+            if tools:
+                user_model_params["tools"] = tools
             user_model_params["tool_choice"] = self.config.user_model_tool_choice
 
-        user_outputs = []
-        resources_server_cookies = cookies
+        # Simple path: one call. Agent handles its own tool-call loop internally;
+        # a tool-less model just produces text.
+        if is_agent or not user_sees_tools:
+            user_response = await self.server_client.post(
+                server_name=self.config.user_model_server.name,
+                url_path="/v1/responses",
+                json=user_model_params,
+                cookies=cookies,
+            )
+            await raise_for_status(user_response)
+            cookies = user_response.cookies
+            user_response_json = await get_response_json(user_response)
+            outputs = user_response_json.get("output", []) or []
+            return _extract_text_from_outputs(outputs), cookies
 
+        # Tool-call loop for a user model with tools (mirrors the policy's
+        # inner loop in responses()): call model, execute tool calls against
+        # the resources server, feed back, repeat until text or max steps.
+        user_outputs: list = []
+        resources_server_cookies = cookies
         max_user_steps = self.config.max_steps_per_turn or 10
         for step in range(max_user_steps):
             user_response = await self.server_client.post(
@@ -462,9 +470,10 @@ class MultiTurnAgent(SimpleResponsesAPIAgent):
                 cookies=cookies,
             )
             await raise_for_status(user_response)
+            cookies = user_response.cookies
             user_response_json = await get_response_json(user_response)
 
-            outputs = user_response_json.get("output", [])
+            outputs = user_response_json.get("output", []) or []
             user_outputs.extend(outputs)
 
             # Stop: user model hit context limit
@@ -502,21 +511,7 @@ class MultiTurnAgent(SimpleResponsesAPIAgent):
             if not fn_calls and not text_msgs:
                 break
 
-        # Extract text from the user model's response.
-        for output_item in reversed(user_outputs):
-            if output_item.get("type") == "message" and output_item.get("role") == "assistant":
-                for content in output_item.get("content", []):
-                    if content.get("type") == "output_text":
-                        return content.get("text", "")
-
-        # Fallback: user model made tool calls but produced no text.
-        # Use the last tool result as the user message so the policy
-        # sees the environment state change and the conversation continues.
-        for output_item in reversed(user_outputs):
-            if output_item.get("type") == "function_call_output":
-                return output_item.get("output", "Your turn.")
-
-        return None
+        return _extract_text_from_outputs(user_outputs), cookies
 
     # ── Metrics proxy ─────────────────────────────────────────────────
 
