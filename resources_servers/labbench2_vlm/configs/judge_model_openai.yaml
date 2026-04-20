@@ -1,0 +1,17 @@
+# Judge model instance for the labbench2_vlm LLM-as-judge scorer.
+#
+# Split out of labbench2_vlm.yaml so a user who wants a non-OpenAI judge
+# (e.g. a local vLLM instance) can drop this file and supply their own
+# responses_api_models instance named `judge_model`.
+#
+# Env vars are wrapped in `oc.select` so that config parsing succeeds even
+# when env.yaml hasn't been loaded (e.g. during `ng_list_benchmarks`). At
+# runtime, set judge_base_url / judge_api_key / judge_model_name in env.yaml
+# (or on the CLI) — the real values will override the unset.* sentinels.
+judge_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${oc.select:judge_base_url,http://unset.local/v1}
+      openai_api_key: ${oc.select:judge_api_key,unset}
+      openai_model: ${oc.select:judge_model_name,unset}
