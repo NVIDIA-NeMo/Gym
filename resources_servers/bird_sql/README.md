@@ -29,6 +29,31 @@ from resources_servers.bird_sql.setup_bird_sql import ensure_bird_sql
 ensure_bird_sql()
 ```
 
+## Example usage
+
+### Running servers
+
+```bash
+config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
+resources_servers/bird_sql/configs/bird_sql.yaml"
+ng_run "+config_paths=[$config_paths]"
+```
+
+Requires `policy_base_url` / `policy_api_key` / `policy_model_name` in
+`env.yaml` (or passed as CLI overrides).
+
+### Collecting rollouts (5-example smoke test)
+
+```bash
+ng_collect_rollouts \
+    +agent_name=bird_sql_simple_agent \
+    +input_jsonl_fpath=resources_servers/bird_sql/data/example.jsonl \
+    +output_jsonl_fpath=results/bird_sql_rollouts.jsonl \
+    +num_repeats=1
+```
+
+For a full BIRD dev run, see `benchmarks/birdbench/README.md`.
+
 ## Verification flow
 
 1. Extract SQL from the model output (last ` ```sql ... ``` ` code block, with
