@@ -13,11 +13,9 @@
 # limitations under the License.
 """GDPVal pairwise comparison judging.
 
-Shared core used by both:
-- Inline comparison reward during ``ng_collect_rollouts``
-- Post-hoc ``responses_api_agents/stirrup_agent/scripts/compare_elo.py`` script
-
-GDPVal pairwise comparison judging.
+Used by the GDPVal resources server's ``verify`` (per-task pairwise judge
+between the eval model and a reference model's deliverables) and
+``aggregate_metrics`` (turns win/loss/tie counts into an ELO rating).
 """
 
 from __future__ import annotations

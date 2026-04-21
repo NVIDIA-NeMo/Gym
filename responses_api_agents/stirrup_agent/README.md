@@ -83,55 +83,32 @@ For each GDPVal task, the agent:
 
 ## Quick Start
 
-Run a single synthetic task end-to-end against OpenAI:
-
-1. Create `env.yaml` in the repo root:
-   ```yaml
-   policy_base_url: https://api.openai.com/v1
-   policy_api_key: {your OpenAI API key}
-   policy_model_name: gpt-4.1-2025-04-14
-   ```
-2. Start the Stirrup agent + model servers:
-   ```bash
-   config_paths="responses_api_agents/stirrup_agent/configs/stirrup_gdpval.yaml,\
-   responses_api_models/openai_model/configs/openai_model.yaml"
-
-   ng_run "+config_paths=[$config_paths]" \
-     "++stirrup_agent.responses_api_agents.stirrup_agent.system_prompt_template=$PWD/responses_api_agents/stirrup_agent/prompts/system_prompt.j2" \
-     "++stirrup_agent.responses_api_agents.stirrup_agent.user_prompt_template=$PWD/responses_api_agents/stirrup_agent/prompts/user_prompt.j2" \
-     "++stirrup_agent.responses_api_agents.stirrup_agent.judge_prompt_template=$PWD/responses_api_agents/stirrup_agent/prompts/judge_prompt.j2"
-   ```
-3. In another terminal, collect a rollout on the example task:
-   ```bash
-   ng_collect_rollouts +agent_name=stirrup_agent \
-     +input_jsonl_fpath=responses_api_agents/stirrup_agent/data/example.jsonl \
-     +output_jsonl_fpath=example_output.jsonl \
-     +num_repeats=1 \
-     +limit=1
-   ```
-
-Each output line contains `responses_create_params`, the full `response`, a `reward` in
-`[0, 1]`, and `judge_response` with per-criterion breakdown.
-
-## Full GDPVal Evaluation
+The canonical entry point for GDPVal is the benchmark at
+[`benchmarks/gdpval/`](../../benchmarks/gdpval/README.md), which composes this
+agent with the GDPVal resources server and supports
+`ng_prepare_benchmark` + `ng_e2e_collect_rollouts`:
 
 ```bash
-# 1. Download the dataset
-bash responses_api_agents/stirrup_agent/setup_scripts/gdpval.sh
+# 1. Prepare the GDPVal benchmark JSONL.
+ng_prepare_benchmark "+config_paths=[benchmarks/gdpval/config.yaml]"
 
-# 2. Run the agent (servers) — same ng_run command as Quick Start.
-
-# 3. Collect all 220 rollouts. Set persist_deliverables_dir to keep generated files for
-#    later re-scoring or pairwise comparison.
-ng_collect_rollouts +agent_name=stirrup_agent \
-  +input_jsonl_fpath=responses_api_agents/stirrup_agent/data/gdpval.jsonl \
-  +output_jsonl_fpath=results/gdpval/my-model.jsonl \
-  +num_repeats=1 \
-  +num_samples_in_parallel=32 \
-  +enable_cache=true \
-  +limit=220 \
-  "++stirrup_agent.responses_api_agents.stirrup_agent.persist_deliverables_dir=output/gdpval/my-model"
+# 2. Collect rollouts end-to-end (servers spin up automatically).
+config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
+benchmarks/gdpval/config.yaml"
+JUDGE_API_KEY=... HF_TOKEN=... \
+ng_e2e_collect_rollouts \
+  "+config_paths=[${config_paths}]" \
+  ++split=benchmark \
+  ++output_jsonl_fpath=results/gdpval_rubric.jsonl \
+  ++policy_base_url=https://api.openai.com/v1 \
+  ++policy_api_key=$OPENAI_API_KEY \
+  ++policy_model_name=gpt-4.1-2025-04-14
 ```
+
+Each output line contains `responses_create_params`, the full `response`, a
+`reward` in `[0, 1]`, and a `judge_response` with per-criterion breakdown.
+Aggregate metrics (`mean/reward` for rubric mode, ELO for comparison mode)
+land in `results/gdpval_rubric_metrics.json`.
 
 ## Configuration
 
@@ -145,12 +122,9 @@ The agent reads its Hydra config at `configs/stirrup_gdpval.yaml`. Notable keys:
 | `temperature` | `1.0` | Policy sampling temperature. |
 | `system_prompt_template` | `???` | Path to the system prompt Jinja2 template. |
 | `user_prompt_template` | `???` | Path to the user prompt Jinja2 template. |
-| `judge_prompt_template` | `???` | Path to the judge prompt Jinja2 template. |
-| `judge_model_name` | `null` | Optional distinct judge model. Falls back to policy. |
-| `judge_base_url` | `null` | Judge API base URL. |
-| `judge_api_key` | `null` | Judge API key (prefer env vars). |
+| `resources_server` | required | Reference to the GDPVal resources server (which scores the deliverable via `/verify`). |
 | `gdpval_container_path` | `null` | Path to an Apptainer `.sif` (see below). |
-| `persist_deliverables_dir` | `null` | If set, deliverables survive the run. |
+| `persist_deliverables_dir` | `null` | If set, each task's artifacts land in `<dir>/task_<task_id>/`. The resources server reads this dir to score the deliverable. |
 | `model_id` | `null` | HF model id or local path used to load a tokenizer for dynamic output sizing. |
 | `completion_token_buffer` | `1000` | Safety margin (in tokens) reserved when sizing `max_completion_tokens` per call. |
 
@@ -210,25 +184,21 @@ stirrup_agent:
 
 ### Pairwise ELO Judging
 
-Beyond per-task rubric scoring, the repo ships a pairwise judge script that compares two
-models' deliverables side-by-side and produces an ELO rating.
+Pairwise comparison vs. a reference model is built into the GDPVal resources
+server (`resources_servers/gdpval`). Drive it from the benchmark config:
 
 ```bash
-# 1. Pre-convert Office docs to PDF (required for visual comparison).
-python responses_api_agents/stirrup_agent/scripts/preconvert_to_pdf.py --root-dir output/gdpval/my-model
-
-# 2. Run pairwise comparison against a reference set.
-python responses_api_agents/stirrup_agent/scripts/compare_elo.py \
-  --reference-model-dir output/gdpval/reference-model \
-  --eval-model-dir      output/gdpval/my-model \
-  --reference-model-name reference \
-  --eval-model-name      my-model \
-  --server-address $JUDGE_BASE_URL \
-  --judge-model-name gpt-4.1-2025-04-14 \
-  --api-key $JUDGE_API_KEY \
-  --reference-model-elo 1000 \
-  --num-trials 4
+ng_e2e_collect_rollouts \
+  "+config_paths=[responses_api_models/vllm_model/configs/vllm_model.yaml,benchmarks/gdpval/config.yaml]" \
+  ++split=benchmark \
+  ++output_jsonl_fpath=results/gdpval_compare.jsonl \
+  ++gdpval_resources_server.resources_servers.gdpval.reward_mode=comparison \
+  ++gdpval_resources_server.resources_servers.gdpval.reference_deliverables_dir=output/gdpval/reference-model
 ```
+
+LibreOffice preconversion of Office docs runs inside `verify()` automatically;
+ELO is computed in `aggregate_metrics()`. See `benchmarks/gdpval/README.md`
+for the full recipe.
 
 ### Tavily Web Search
 

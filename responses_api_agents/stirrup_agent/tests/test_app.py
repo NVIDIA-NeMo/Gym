@@ -17,7 +17,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from nemo_gym.config_types import ModelServerRef
+from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.stirrup_agent.app import (
     StirrupAgentWrapper,
@@ -57,6 +57,10 @@ class TestApp:
             model_server=ModelServerRef(
                 type="responses_api_models",
                 name="policy_model",
+            ),
+            resources_server=ResourcesServerRef(
+                type="resources_servers",
+                name="gdpval_resources_server",
             ),
         )
         StirrupAgentWrapper(config=config, server_client=MagicMock(spec=ServerClient))

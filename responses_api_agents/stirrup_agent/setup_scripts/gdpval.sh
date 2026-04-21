@@ -13,10 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# Download the GDPVal dataset from HuggingFace and convert it to the JSONL
-# format expected by the Stirrup agent's rollout collection.
+# Download the GDPVal dataset from HuggingFace and convert it to the benchmark
+# JSONL format consumed by ``ng_e2e_collect_rollouts``.
 #
-# Output: responses_api_agents/stirrup_agent/data/gdpval.jsonl (220 tasks).
+# Output: benchmarks/gdpval/data/gdpval_benchmark.jsonl (220 tasks).
 #
 # Requires:
 #   - Active nemo-gym venv (uv sync --extra dev)
@@ -25,14 +25,8 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-OUTPUT="${OUTPUT:-responses_api_agents/stirrup_agent/data/gdpval.jsonl}"
-DATASET="${DATASET:-openai/gdpval}"
-SPLIT="${SPLIT:-train}"
-
 cd "${REPO_ROOT}"
-python3 responses_api_agents/stirrup_agent/scripts/prepare_gdpval_dataset.py \
-    --dataset "${DATASET}" \
-    --split "${SPLIT}" \
-    --output "${OUTPUT}"
 
-echo "Done. Output: ${OUTPUT}"
+ng_prepare_benchmark "+config_paths=[benchmarks/gdpval/config.yaml]"
+
+echo "Done. Output: benchmarks/gdpval/data/gdpval_benchmark.jsonl"

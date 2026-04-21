@@ -1,38 +1,29 @@
-#!/usr/bin/env python3
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Pre-convert Office documents to PDF for GDPVal comparison judging.
+"""Pre-convert Office documents to PDF for GDPVal judging.
 
-Walks a model output directory and converts .docx, .pptx, .xlsx files
-to PDFs using LibreOffice headless.  The PDFs are placed alongside the
-originals (same name, .pdf extension) so that the comparison judge can
-read them directly.
-
-
-Usage:
-    python responses_api_agents/stirrup_agent/scripts/preconvert_to_pdf.py \\
-        --root-dir output/gdpval/Model-Name \\
-        --max-concurrent-conversions 4 \\
-        --log-file preconvert.log
+Library form (no CLI). ``verify()`` calls ``preconvert_dir`` on a task's
+deliverable directory; the resulting PDFs land alongside the originals so
+the multimodal judge can read them.
 """
 
 from __future__ import annotations
 
-import argparse
+import asyncio
 import os
 import subprocess
-import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -48,7 +39,8 @@ def needs_conversion(path: Path) -> bool:
 def convert_to_pdf(path: Path) -> tuple[Path, bool, str]:
     """Convert a single file to PDF via LibreOffice headless.
 
-    Returns ``(path, success, message)``.
+    Returns ``(path, success, message)``. ``success=False`` on missing
+    libreoffice, timeout, or non-zero exit without a produced PDF.
     """
     output_dir = str(path.parent)
     try:
@@ -78,9 +70,9 @@ def convert_to_pdf(path: Path) -> tuple[Path, bool, str]:
         return path, False, f"Error converting {path}: {e}"
 
 
-def find_convertible_files(root_dir: str) -> list[Path]:
-    """Walk root_dir for Office files that need PDF conversion."""
-    files = []
+def find_convertible_files(root_dir: str | os.PathLike) -> list[Path]:
+    """Walk *root_dir* for Office files that still need PDF conversion."""
+    files: list[Path] = []
     for dirpath, _, filenames in os.walk(root_dir):
         for filename in filenames:
             path = Path(dirpath) / filename
@@ -89,47 +81,35 @@ def find_convertible_files(root_dir: str) -> list[Path]:
     return sorted(files)
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Pre-convert Office docs to PDF for GDPVal judging")
-    parser.add_argument("--root-dir", type=str, required=True, help="Model output directory to scan")
-    parser.add_argument("--max-concurrent-conversions", type=int, default=1, help="Parallel conversions")
-    parser.add_argument("--log-file", type=str, default=None, help="Log file path (optional)")
-    args = parser.parse_args()
+def preconvert_dir(root_dir: str | os.PathLike, max_concurrent: int = 1) -> tuple[int, int]:
+    """Convert every pending Office file under *root_dir* to PDF.
 
-    files = find_convertible_files(args.root_dir)
-    print(f"Found {len(files)} files to convert in {args.root_dir}")
+    Uses a ``ThreadPoolExecutor`` bounded by *max_concurrent* (LibreOffice
+    spawns its own processes; parallelism above ~4 tends to deadlock).
 
+    Returns ``(num_success, num_failed)``.
+    """
+    files = find_convertible_files(root_dir)
     if not files:
-        return
+        return 0, 0
 
-    log_f = open(args.log_file, "a", encoding="utf-8") if args.log_file else None
-
-    def log(msg: str):
-        print(msg, flush=True)
-        if log_f:
-            log_f.write(msg + "\n")
-            log_f.flush()
-
-    t0 = time.time()
     success_count = 0
     fail_count = 0
-
-    with ThreadPoolExecutor(max_workers=args.max_concurrent_conversions) as executor:
+    with ThreadPoolExecutor(max_workers=max_concurrent) as executor:
         futures = {executor.submit(convert_to_pdf, f): f for f in files}
         for future in as_completed(futures):
-            path, success, message = future.result()
-            log(message)
+            _, success, _ = future.result()
             if success:
                 success_count += 1
             else:
                 fail_count += 1
-
-    elapsed = time.time() - t0
-    log(f"\nDone: {success_count} converted, {fail_count} failed, {elapsed:.1f}s elapsed")
-
-    if log_f:
-        log_f.close()
+    return success_count, fail_count
 
 
-if __name__ == "__main__":
-    main()
+async def preconvert_dir_async(root_dir: str | os.PathLike, max_concurrent: int = 1) -> tuple[int, int]:
+    """Async wrapper over :func:`preconvert_dir`.
+
+    Delegates to a worker thread so the asyncio event loop stays
+    responsive while LibreOffice subprocesses run.
+    """
+    return await asyncio.to_thread(preconvert_dir, root_dir, max_concurrent)

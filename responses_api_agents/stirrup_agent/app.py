@@ -32,19 +32,21 @@ from typing import Any, Dict, Optional
 import ray
 from pydantic import ConfigDict, Field
 
-from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
+from fastapi import Request
+from nemo_gym.base_resources_server import BaseRunRequest
 from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     Body,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.config_types import ModelServerRef
+from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
+from nemo_gym.server_utils import get_response_json, raise_for_status
 from responses_api_agents.stirrup_agent.task_strategy import TaskSampleSkipError, TaskStrategy
 
 
@@ -421,6 +423,7 @@ async def _run_stirrup_agent(
 
 class StirrupAgentWrapperConfig(BaseResponsesAPIAgentConfig):
     model_server: ModelServerRef
+    resources_server: ResourcesServerRef
 
     task: str = Field(
         description="Name of the task strategy to use (e.g. 'gdpval'). Must match a key in the task registry.",
@@ -434,19 +437,6 @@ class StirrupAgentWrapperConfig(BaseResponsesAPIAgentConfig):
         default=None, description="Path to the system prompt Jinja2 template"
     )
     user_prompt_template: Optional[str] = Field(default=None, description="Path to the user prompt Jinja2 template")
-    judge_prompt_template: Optional[str] = Field(default=None, description="Path to the judge prompt Jinja2 template")
-    judge_model_name: Optional[str] = Field(
-        default=None,
-        description="Model to use for judging. If None, uses the same model as the agent.",
-    )
-    judge_base_url: Optional[str] = Field(
-        default=None,
-        description="Base URL for the judge model API. If None, uses the policy model's URL.",
-    )
-    judge_api_key: Optional[str] = Field(
-        default=None,
-        description="API key for the judge model. If None, uses 'dummy'.",
-    )
 
     container_formatter: Optional[Any] = Field(
         default=None,
@@ -467,28 +457,9 @@ class StirrupAgentWrapperConfig(BaseResponsesAPIAgentConfig):
     )
     persist_deliverables_dir: Optional[str] = Field(
         default=None,
-        description="Directory to persist deliverable files for human review. "
-        "If None (default), files are deleted after text extraction for scoring.",
-    )
-    reward_mode: str = Field(
-        default="rubric",
-        description="Reward mode: 'rubric' (default) for LLM judge scoring against rubric, "
-        "or 'comparison' for pairwise comparison against a reference model's outputs.",
-    )
-    reference_model_dir: Optional[str] = Field(
-        default=None,
-        description="Path to reference model output directory for comparison reward mode. "
-        "Must contain task_<id>/ subdirectories with deliverable files.",
-    )
-    num_judge_trials: int = Field(
-        default=4,
-        description="Number of judge trials per task (comparison mode: alternating swapped/unswapped, "
-        "structured_rubric mode: independent scoring rounds averaged).",
-    )
-    formatting_retries: int = Field(
-        default=3,
-        description="Number of times to retry a judge request when the response doesn't contain "
-        "parseable score tags (structured_rubric mode only).",
+        description="Directory to persist deliverable files for scoring by the resources server. "
+        "When set, each task's artifacts land in <dir>/task_<task_id>/; the resources server "
+        "reads deliverables_dir from the verify request to score them.",
     )
     model_id: Optional[str] = Field(
         default=None,
@@ -510,8 +481,21 @@ class StirrupRunRequest(BaseRunRequest):
     model_config = ConfigDict(extra="allow")
 
 
-class StirrupVerifyResponse(BaseVerifyResponse):
-    model_config = ConfigDict(extra="allow")
+# Top-level benchmark-row keys that need to be visible inside ``responses()``
+# (it only sees ``responses_create_params``). ``run()`` copies these from the
+# top-level body into ``responses_create_params.metadata`` before invoking the
+# agent, so ``TaskStrategy.extract_task_info`` can read them uniformly.
+_TASK_METADATA_FIELDS = (
+    "task_id",
+    "sector",
+    "occupation",
+    "prompt",
+    "reference_files",
+    "reference_file_urls",
+    "rubric_json",
+    "rubric_pretty",
+    "instance_id",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -646,88 +630,130 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
 
     # -- /run -------------------------------------------------------------
 
-    async def run(self, body: StirrupRunRequest):
+    async def run(self, request: Request, body: StirrupRunRequest):
         async with self.sem:
-            fixed_params = body.responses_create_params
-            if fixed_params.tool_choice is None:
-                fixed_params = fixed_params.model_copy(update={"tool_choice": "auto"})
+            cookies = request.cookies
+            body_dict = body.model_dump()
 
+            # Sync task-info fields between the top-level body and
+            # ``responses_create_params.metadata`` so both the agent
+            # (responses(), reads metadata) and the resources server
+            # (verify(), reads top-level) see them regardless of which side
+            # the benchmark JSONL populated.
+            fixed_params = body.responses_create_params
+            existing_metadata = dict(fixed_params.metadata or {})
+            for key in _TASK_METADATA_FIELDS:
+                top_value = body_dict.get(key)
+                meta_value = existing_metadata.get(key)
+                if top_value is not None and meta_value is None:
+                    existing_metadata[key] = top_value
+                elif meta_value is not None and top_value is None:
+                    body_dict[key] = meta_value
+            update: Dict[str, Any] = {"metadata": existing_metadata}
+            if fixed_params.tool_choice is None:
+                update["tool_choice"] = "auto"
+            fixed_params = fixed_params.model_copy(update=update)
+
+            # Optional: seed session so the resources server can set cookies
+            # if its benchmark is stateful.
+            try:
+                seed_response = await self.server_client.post(
+                    server_name=self.config.resources_server.name,
+                    url_path="/seed_session",
+                    json={"responses_create_params": fixed_params.model_dump(exclude_unset=True)},
+                    cookies=cookies,
+                )
+                await raise_for_status(seed_response)
+                cookies = seed_response.cookies
+            except Exception as exc:
+                print(f"[stirrup] seed_session failed (non-fatal): {exc}", flush=True)
+
+            # Run the Stirrup agent
             try:
                 response = await self.responses(fixed_params)
             except Exception as exc:
-                task_info = self.task_strategy.extract_task_info(body.responses_create_params.metadata)
+                task_info = self.task_strategy.extract_task_info(existing_metadata)
                 label = "skipped" if isinstance(exc, TaskSampleSkipError) else "failed"
-                instance_hint = task_info.get("instance_id", "unknown")
+                instance_hint = task_info.get("instance_id", task_info.get("task_id", "unknown"))
                 print(
                     f"[stirrup-{label}] {instance_hint}: {type(exc).__name__}: {exc}",
                     flush=True,
                 )
-                return self.task_strategy.build_skipped_verify_response(
-                    responses_create_params=fixed_params,
+                return self._build_failed_run_payload(
+                    body_dict=body_dict,
+                    fixed_params=fixed_params,
                     task_info=task_info,
                     reason=f"{type(exc).__name__}: {exc}",
+                    skipped=label == "skipped",
                 )
 
-            metadata = response.metadata or {}
             response_clean = response.model_copy(update={"metadata": None})
+            response_metadata = response.metadata or {}
 
-            task_info = self.task_strategy.extract_task_info(body.responses_create_params.metadata)
-            deliverable_text = metadata.get("deliverable_text", "")
+            # Locate the persisted deliverables dir for this task. Unset if
+            # persist_deliverables_dir is null or task_id is missing (the
+            # resources server will fall back to response.output_text).
+            deliverables_dir: Optional[str] = None
+            task_id = existing_metadata.get("task_id")
+            if self.config.persist_deliverables_dir and task_id:
+                deliverables_dir = str(Path(self.config.persist_deliverables_dir) / f"task_{task_id}")
 
-            # Enrich task_info with runtime artifacts for reward computation
-            if metadata.get("model_patch"):
-                task_info["model_patch"] = metadata["model_patch"]
+            verify_request_body = dict(body_dict)
+            verify_request_body["response"] = response_clean.model_dump(mode="json")
+            if deliverables_dir is not None:
+                verify_request_body["deliverables_dir"] = deliverables_dir
+            # Surface the agent's runtime metadata for downstream logging.
+            verify_request_body.setdefault("elapsed_seconds", float(response_metadata.get("elapsed_seconds", 0)))
 
-            judge_base_url = self.config.judge_base_url or self._get_model_base_url()
-            judge_model_name = self.config.judge_model_name or fixed_params.model
-            judge_api_key = self.config.judge_api_key or "dummy"
-
-            import json as _json
-
-            _blocks_str = metadata.get("deliverable_content_blocks", "[]")
-            deliverable_content_blocks = _json.loads(_blocks_str) if isinstance(_blocks_str, str) else _blocks_str
-
-            reward_result = await self.task_strategy.compute_reward(
-                deliverable_text=deliverable_text,
-                task_info=task_info,
-                config=self.config,
-                model_base_url=judge_base_url,
-                model_name=judge_model_name,
-                api_key=judge_api_key,
-                deliverable_content_blocks=deliverable_content_blocks,
+            verify_response = await self.server_client.post(
+                server_name=self.config.resources_server.name,
+                url_path="/verify",
+                json=verify_request_body,
+                cookies=cookies,
             )
-            # compute_reward returns (float, dict|None) or plain float for backward compat
-            if isinstance(reward_result, tuple):
-                reward, judge_response = reward_result
-            else:
-                reward, judge_response = reward_result, None
+            await raise_for_status(verify_response)
+            return await get_response_json(verify_response)
 
-            input_messages = [
-                item
-                for item in response_clean.output
-                if hasattr(item, "role") and item.role in ("system", "user", "developer")
-            ]
-            output_only = [item for item in response_clean.output if item not in input_messages]
-
-            response_clean = response_clean.model_copy(update={"output": output_only})
-            params_with_input = fixed_params.model_copy(
-                update={"input": input_messages, "tools": response_clean.tools or []}
-            )
-
-            elapsed_seconds = float(metadata.get("elapsed_seconds", 0))
-
-            verify_response = self.task_strategy.build_verify_response(
-                responses_create_params=params_with_input,
-                response=response_clean,
-                reward=reward,
-                task_info=task_info,
-                deliverable_text=deliverable_text,
-                elapsed_seconds=elapsed_seconds,
-                judge_response=judge_response,
-            )
-            # Return as dict to bypass FastAPI's response_model filtering,
-            # which would drop subclass fields like judge_response.
-            return verify_response.model_dump(mode="json")
+    def _build_failed_run_payload(
+        self,
+        *,
+        body_dict: Dict[str, Any],
+        fixed_params: NeMoGymResponseCreateParamsNonStreaming,
+        task_info: Dict[str, Any],
+        reason: str,
+        skipped: bool,
+    ) -> Dict[str, Any]:
+        """Return a verify-response-shaped dict for runs that never produced a deliverable."""
+        placeholder = NeMoGymResponse(
+            id=f"{self.task_strategy.response_id(task_info)}-{'skipped' if skipped else 'failed'}",
+            created_at=int(time.time()),
+            model=fixed_params.model or "unknown",
+            object="response",
+            output=[
+                NeMoGymResponseOutputMessage(
+                    id=self.task_strategy.fallback_message_id(task_info),
+                    content=[
+                        NeMoGymResponseOutputText(
+                            type="output_text",
+                            text=f"{'Skipped' if skipped else 'Failed'}: {reason}",
+                            annotations=[],
+                        )
+                    ],
+                    role="assistant",
+                    status="completed",
+                    type="message",
+                )
+            ],
+            parallel_tool_calls=False,
+            tool_choice="none",
+            tools=[],
+        )
+        payload = dict(body_dict)
+        payload["response"] = placeholder.model_dump(mode="json")
+        payload["reward"] = 0.0
+        payload["skipped"] = skipped
+        payload["error_message"] = reason
+        return payload
 
 
 if __name__ == "__main__":

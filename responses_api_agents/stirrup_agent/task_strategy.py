@@ -22,10 +22,7 @@ conversion, Ray execution) stay in one place.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional, Tuple
-
-from nemo_gym.base_resources_server import BaseVerifyResponse
-from nemo_gym.openai_utils import NeMoGymResponse
+from typing import Any, Dict, Optional
 
 
 class TaskSampleSkipError(Exception):
@@ -111,55 +108,3 @@ class TaskStrategy(ABC):
         """ID used for the empty-output fallback message."""
         return f"msg-{self.response_id(task_info)}-empty"
 
-    # ------------------------------------------------------------------
-    # Reward / scoring
-    # ------------------------------------------------------------------
-
-    @abstractmethod
-    async def compute_reward(
-        self,
-        deliverable_text: str,
-        task_info: Dict[str, Any],
-        config: Any,
-        model_base_url: str,
-        model_name: str,
-        api_key: str = "dummy",
-        deliverable_content_blocks: list | None = None,
-    ) -> float:
-        """Score the agent's deliverable.  Return a float in [0, 1]."""
-        ...
-
-    # ------------------------------------------------------------------
-    # Verify response construction
-    # ------------------------------------------------------------------
-
-    @abstractmethod
-    def build_verify_response(
-        self,
-        *,
-        responses_create_params: Any,
-        response: NeMoGymResponse,
-        reward: float,
-        task_info: Dict[str, Any],
-        deliverable_text: str,
-        elapsed_seconds: float,
-        judge_response: dict | None = None,
-    ) -> BaseVerifyResponse:
-        """Construct the task-specific ``BaseVerifyResponse`` subclass."""
-        ...
-
-    def build_skipped_verify_response(
-        self,
-        *,
-        responses_create_params: Any,
-        task_info: Dict[str, Any],
-        reason: str,
-    ) -> BaseVerifyResponse:
-        """Construct a verify response for a skipped sample.
-
-        Override in subclasses to add task-specific fields.
-        Raises ``NotImplementedError`` by default.
-        """
-        raise NotImplementedError(
-            f"{type(self).__name__} does not support skipping samples"
-        )
