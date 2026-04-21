@@ -174,7 +174,11 @@ class GDPValResourcesServer(SimpleResourcesServer):
         task_prompt = body.prompt or ""
         rubric_pretty = body.rubric_pretty or ""
 
-        if deliverable_content_blocks and "gemini" in judge_model_name.lower():
+        # Visual scoring when deliverable renders (PDFs/images) are available —
+        # the judge model is expected to be multimodal (configured via
+        # ``judge_model_server`` in the benchmark YAML). Falls back to text
+        # scoring only when no content blocks could be built.
+        if deliverable_content_blocks:
             from resources_servers.gdpval.scoring import score_with_rubric_visual
 
             reward, judge_result = await score_with_rubric_visual(
