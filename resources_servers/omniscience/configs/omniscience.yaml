@@ -1,0 +1,38 @@
+# Omniscience Benchmark
+# Evaluates factual knowledge using an LLM judge that grades answers on a
+# four-tier scale: CORRECT, INCORRECT, PARTIAL_ANSWER, NOT_ATTEMPTED.
+# Based on: https://huggingface.co/datasets/ArtificialAnalysis/AA-Omniscience-Public
+
+omniscience:
+  resources_servers:
+    omniscience:
+      entrypoint: app.py
+      domain: knowledge
+      verified: false
+      description: Omniscience factual knowledge QA with LLM judge verification
+      value: Evaluate factual recall and calibration via LLM-graded open-ended QA
+
+      judge_model_server:
+        type: responses_api_models
+        name: genrm_model
+      judge_responses_create_params:
+        input: []
+        max_output_tokens: 2048
+        temperature: 0.0
+        top_p: 1.0
+      use_chat_completions_for_judge: true
+
+omniscience_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: omniscience
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/omniscience/data/example.jsonl
