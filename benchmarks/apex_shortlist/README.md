@@ -15,7 +15,7 @@ symbolic equivalence of the model-extracted `\boxed{...}` answer against
 ## Prompt
 
 User-only prompt, character-for-character match with NeMo Skills'
-`generic/math.yaml` (no few-shots):
+`generic/math.yaml`:
 
 ```
 Solve the following math problem. Make sure to put the answer (and only answer) inside \boxed{}.
