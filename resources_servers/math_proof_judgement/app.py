@@ -31,7 +31,7 @@ are averaged across the K rollouts the same way Skills does.
 from __future__ import annotations
 
 import re
-from typing import Any, List, Optional
+from typing import List, Optional
 
 from pydantic import ConfigDict
 
@@ -232,26 +232,6 @@ def _per_sample_precision_recall_f1(
         100.0 * sum(recalls) / n,
         100.0 * sum(f1s) / n,
     )
-
-
-def _aggregate_tp_fp_fn(
-    tasks: List[List[dict]],
-    sample_idx: int,
-    parse_exp: Any,
-) -> tuple[float, float, float]:
-    """Sum TP/FP/FN across datapoints at a given sample_idx."""
-    tp = fp = fn = 0.0
-    for rollouts in tasks:
-        if sample_idx >= len(rollouts):
-            continue
-        r = rollouts[sample_idx]
-        pred = parse_exp(r.get("extracted_judgement"))
-        gt = parse_exp(r.get("expected_judgement"))
-        a, b, c, _ = _confusion(pred, gt)
-        tp += a
-        fp += b
-        fn += c
-    return tp, fp, fn
 
 
 def _select_pass_verdict(preds: List[Optional[bool]], gt: Optional[bool]) -> Optional[bool]:
