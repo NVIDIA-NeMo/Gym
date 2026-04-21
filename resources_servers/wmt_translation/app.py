@@ -113,23 +113,25 @@ class WmtTranslationResourcesServerConfig(BaseResourcesServerConfig):
         comet_model: HuggingFace repo for the COMET checkpoint. Resolved via
             ``comet.download_model`` (cached under HF_HOME).
         comet_batch_size: Batch size passed to ``model.predict``.
-        comet_num_gpus: GPUs requested for the Ray COMET actor. Default 1
-            is enough for xCOMET-XXL at batch size 16; bump for larger
-            benchmarks.
+        comet_num_gpus: Deprecated — scheduling now uses the `extra_gpu`
+            custom Ray resource (advertised by nemo_skills' patched
+            `get_ray_server_cmd` on DP-excess worker nodes).
     """
 
     compute_comet: bool = True
     comet_model: str = "Unbabel/XCOMET-XXL"
     comet_batch_size: int = 16
-    # Dedicated-GPU topology. Per-recipe requirement: run_<name>_gym.py must
-    # request server_nodes = dp_size + 1 so Ray sees an extra node with
-    # unclaimed GPUs. vLLM's strict-pack placement group reserves exactly
-    # dp_size * 1 node worth of GPUs (num_gpus=1 each), leaving the extra
-    # node's GPUs free. num_gpus=1 here picks a whole GPU on that extra
-    # node. Earlier num_gpus=0.01 "co-tenant" path doesn't survive the
-    # production DP setup: Ray sees vLLM's placement group holding all GPUs
-    # at 1.0/1.0, so any fractional request also queues.
-    comet_num_gpus: float = 1.0
+    # Dedicated-node topology with GPUs hidden from Ray:
+    #   * Recipe requests server_nodes = dp_size + 1.
+    #   * get_ray_server_cmd starts the extra node with `--num-gpus=0` +
+    #     `resources={"extra_gpu": 8}` so vLLM's compiled-DAG / Ray-DP
+    #     node scans don't see it (the extra node's presence was causing
+    #     a 300s RayChannelTimeoutError in vLLM's compiled DAG even after
+    #     placement-group creation was fixed upstream).
+    #   * The COMET Ray task asks for `resources={"extra_gpu": 1}` +
+    #     `num_gpus=0`, and sets RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES
+    #     so the physical GPUs stay visible to the task process.
+    comet_num_gpus: float = 1.0  # retained for backwards-compat; unused
     # When True, strip the reasoning preamble before computing BLEU/COMET, matching
     # NeMo-Skills' parse_reasoning=True. Required for reasoning models that emit
     # <think>...</think> preambles (e.g. Nemotron-3-Nano); otherwise the preamble
@@ -167,7 +169,7 @@ class WmtTranslationVerifyResponse(WmtTranslationVerifyRequest, BaseVerifyRespon
 # Build the remote function lazily so importing this module doesn't require
 # Ray to already be initialized. ``config.comet_num_gpus`` parameterises the
 # GPU allocation at call time.
-def _build_comet_remote(num_gpus: float):
+def _build_comet_remote():
     # runtime_env pins the Ray worker to THIS server's venv (py_executable)
     # and forces HF ONLINE mode for this task (env_vars). Gym's main venv
     # doesn't have unbabel-comet; the wmt_translation server's venv does
@@ -185,24 +187,40 @@ def _build_comet_remote(num_gpus: float):
     env_vars = {
         "HF_HUB_OFFLINE": "0",
         "TRANSFORMERS_OFFLINE": "0",
+        # Keep the task's CUDA_VISIBLE_DEVICES untouched — the extra node's
+        # Ray agent already advertises --num-gpus=0, so Ray would zero this
+        # out without this flag. We need the physical GPUs visible so COMET
+        # can torch.cuda() load.
+        "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
     }
     for k in ("HF_HOME", "HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"):
         if os.environ.get(k):
             env_vars[k] = os.environ[k]
 
-    @ray.remote(num_gpus=num_gpus, runtime_env={"py_executable": sys.executable, "env_vars": env_vars})
+    # Schedule on the "extra" (DP-unclaimed) node via the custom `extra_gpu`
+    # resource advertised by nemo_skills' get_ray_server_cmd on workers with
+    # SLURM_PROCID >= dp_size. num_gpus=0 because the extra node hides its
+    # GPUs from Ray's accounting (to dodge vLLM's compiled-DAG scan of
+    # ray.nodes() that hangs when untracked GPU nodes are present); the
+    # env_vars flag above preserves physical CUDA_VISIBLE_DEVICES.
+    @ray.remote(
+        num_gpus=0,
+        resources={"extra_gpu": 1},
+        runtime_env={"py_executable": sys.executable, "env_vars": env_vars},
+    )
     def _score_comet(triples: List[Tuple[str, str, str]], model_name: str, batch_size: int) -> List[float]:
         import torch
         from comet import download_model, load_from_checkpoint
 
-        # Hard-assert CUDA: with the extra-node topology the Ray worker
-        # schedules on the 5th (DP-unclaimed) node and gets a full GPU via
-        # num_gpus=1. If it lands on a CPU-only node the fallback would
-        # load xCOMET-XXL (10B params) on CPU and grind for hours — fail loud.
+        # Hard-assert CUDA: the task is pinned to the extra Ray node by the
+        # `extra_gpu` custom resource, and CUDA_VISIBLE_DEVICES is preserved
+        # via RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES=1. If this fires,
+        # the extra node didn't join Ray with --num-gpus=0 + extra_gpu
+        # resource (check get_ray_server_cmd wiring).
         assert torch.cuda.is_available(), (
             "wmt_translation COMET task requires a CUDA device. "
-            "Expected the Ray worker to land on the extra (DP-unclaimed) node "
-            "via num_gpus=1; got no CUDA. Check server_nodes vs dp_size."
+            "Expected the Ray worker to land on the extra node via the "
+            "extra_gpu custom resource; got no CUDA."
         )
 
         LOG.info("Loading xCOMET model %s on cuda", model_name)
@@ -327,11 +345,10 @@ class WmtTranslationResourcesServer(SimpleResourcesServer):
         comet_per_pair: Dict[Tuple[str, str], List[List[float]]] = defaultdict(lambda: [list() for _ in range(max_k)])
         if self.config.compute_comet and comet_triples:
             try:
-                remote_fn = _build_comet_remote(self.config.comet_num_gpus)
+                remote_fn = _build_comet_remote()
                 LOG.info(
-                    "Dispatching %d COMET triples to a Ray GPU actor (%d GPUs, batch=%d, model=%s)",
+                    "Dispatching %d COMET triples to a Ray task on the extra_gpu node (batch=%d, model=%s)",
                     len(comet_triples),
-                    self.config.comet_num_gpus,
                     self.config.comet_batch_size,
                     self.config.comet_model,
                 )
