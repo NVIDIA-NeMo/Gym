@@ -1,0 +1,42 @@
+browsecomp_advanced_harness_resources_server:
+  resources_servers:
+    browsecomp_advanced_harness:
+      entrypoint: app.py
+      domain: agent
+      debug: false
+      tavily_api_key: ${tavily_api_key}
+      exclude_domains_file_path: ${exclude_domains_file_path}
+      use_judge: true
+      judge_model_server:
+        type: responses_api_models
+        name: judge_model
+      judge_responses_create_params:
+        input: []
+      verified: false
+      description: Model uses search tools to satisfy a user query.
+      value: Measure agentic search capability
+
+judge_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: ${search_judge_model_base_url}
+      api_key: ${search_judge_model_api_key}
+      model: ${search_judge_model_name}
+      return_token_id_information: false
+      uses_reasoning_parser: true
+
+browsecomp_advanced_harness_agent:
+  responses_api_agents:
+    browsecomp_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: browsecomp_advanced_harness_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/browsecomp_advanced_harness/data/example.jsonl
