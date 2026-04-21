@@ -6,6 +6,11 @@ math_proof_judgement:
       verified: false
       description: "Binary judgement of math proofs — the policy model reads a problem plus a candidate proof and outputs Judgement: Yes/No."
       value: "Improve the NVIDIA ProofBench judge benchmark and math-proof verification skill."
+      # When true, run the Judgement: regex on the raw model response (including
+      # <think>…</think> CoT), matching NeMo Skills' is_correct_judgement exactly.
+      # Default false: strip CoT first (correct behaviour for reasoning models).
+      # Declared here so Hydra struct-mode accepts the CLI override at run time.
+      skills_parity_mode: false
 
 math_proof_judgement_simple_agent:
   responses_api_agents:
