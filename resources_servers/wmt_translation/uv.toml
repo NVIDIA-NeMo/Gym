@@ -1,0 +1,11 @@
+# uv configuration local to this resource server's venv.
+#
+# index-strategy = "unsafe-best-match" is required because we pin
+# torch==2.5.1+cu121 via --extra-index-url (pytorch cu121 wheel index) to
+# match the cluster driver's CUDA 12.9 runtime. That index carries outdated
+# copies of unrelated common packages (urllib3==1.26.13), and uv's default
+# "first index wins" policy would block nemo-gym's urllib3>=2.6.3 requirement.
+# "unsafe-best-match" lets uv pick the newest matching version across all
+# configured indexes — safe here because the indexes we use (pypi +
+# download.pytorch.org) are both trusted.
+index-strategy = "unsafe-best-match"

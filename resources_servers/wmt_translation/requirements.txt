@@ -4,13 +4,11 @@
 # torch 2.11+cu130 (via unbabel-comet's transitive deps), which fails with
 # `RuntimeError: The NVIDIA driver on your system is too old (found version
 # 12090)`.
-# `--index-strategy unsafe-best-match` lets uv pick the newest matching
-# version across all indexes. Pytorch's cu121 index carries outdated copies
-# of common packages (e.g. urllib3==1.26.13), and without this flag uv only
-# considers the first index where a package appears — shadowing pypi's
-# newer urllib3 that nemo-gym requires (>=2.6.3).
+# Pytorch's cu121 index carries outdated copies of common packages
+# (e.g. urllib3==1.26.13). By default uv uses "first index wins", which
+# shadows pypi's newer urllib3 that nemo-gym requires (>=2.6.3). See
+# uv.toml alongside this file for `index-strategy = "unsafe-best-match"`.
 --extra-index-url https://download.pytorch.org/whl/cu121
---index-strategy unsafe-best-match
 torch==2.5.1+cu121
 torchvision==0.20.1+cu121
 sacrebleu[ja,ko]>=2.4
