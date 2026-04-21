@@ -167,21 +167,17 @@ class WmtTranslationVerifyResponse(WmtTranslationVerifyRequest, BaseVerifyRespon
 # Ray to already be initialized. ``config.comet_num_gpus`` parameterises the
 # GPU allocation at call time.
 def _build_comet_remote(num_gpus: float):
-    @ray.remote(num_gpus=num_gpus)
+    # runtime_env={"py_executable": sys.executable} pins the Ray worker to
+    # THIS server's venv, not the Gym-head driver's. Gym's main venv doesn't
+    # have unbabel-comet; the wmt_translation server's venv does (via
+    # requirements.txt). Without this, the remote task runs in the head venv
+    # and fails with ModuleNotFoundError on `comet` (and the head venv also
+    # lacks pip, so a lazy subprocess install fails too).
+    # Pattern copied from resources_servers/code_gen (lcb_integration).
+    import sys
+
+    @ray.remote(num_gpus=num_gpus, runtime_env={"py_executable": sys.executable})
     def _score_comet(triples: List[Tuple[str, str, str]], model_name: str, batch_size: int) -> List[float]:
-        # unbabel-comet is not in Gym's main pyproject.toml (it's a
-        # wmt_translation-only heavyweight). Ray workers inherit the driver's
-        # Python env (Gym's main venv), which doesn't have it. Install on
-        # first use; subsequent calls hit the cache and skip the install.
-        import subprocess
-        import sys
-
-        try:
-            from comet import download_model, load_from_checkpoint  # noqa: F401
-        except ImportError:
-            LOG.info("unbabel-comet not installed in Ray worker env; installing")
-            subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet", "unbabel-comet"])
-
         import torch
         from comet import download_model, load_from_checkpoint
 
