@@ -1,0 +1,6 @@
+# Verbatim port of Skills' `generic/default` prompt config, which
+# arena-hard-v2's __init__.py sets as its GENERATION_ARGS prompt_config.
+# The benchmark answers must be free-form; no system prompt bias, no
+# formatting instructions — just the raw question.
+
+user: "{question}"
