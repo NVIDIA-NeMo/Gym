@@ -945,3 +945,175 @@ class TestApp:
 
         nullable_verify_response = await resources_server.verify(nullable_request)
         assert nullable_verify_response.reward == 1.0
+
+    async def test_verify_json_with_oneof_strictifies_branches(
+        self, config: StructuredOutputsResourcesServerConfig
+    ) -> None:
+        """strictify_schema must recurse into oneOf/anyOf/allOf branch lists so that
+        extra or missing fields inside a composite branch are caught by validation.
+        """
+        server_mock = MagicMock(spec=ServerClient)
+        resources_server = StructuredOutputsResourcesServer(config=config, server_client=server_mock)
+
+        # Tool-call-style schema: `arguments` is a oneOf over two object branches.
+        test_schema = {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "enum": ["run_migration", "list_migrations"]},
+                "arguments": {
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "properties": {
+                                "migration_name": {"type": "string"},
+                                "target_database": {"type": "string"},
+                            },
+                        },
+                        {
+                            "type": "object",
+                            "properties": {
+                                "limit": {"type": "integer"},
+                            },
+                        },
+                    ],
+                },
+            },
+        }
+        schema_str = json.dumps(test_schema)
+        dummy_create_params = NeMoGymResponseCreateParamsNonStreaming(input=[])
+
+        # --- Test 1: Valid output matching the first oneOf branch exactly ---
+        valid_completion = json.dumps(
+            {
+                "name": "run_migration",
+                "arguments": {"migration_name": "add_users_table", "target_database": "staging"},
+            }
+        )
+        valid_output_item = self._create_response_output_message(valid_completion)
+        valid_response = NeMoGymResponse(
+            id="valid_oneof_id",
+            created_at=1234.5,
+            model="test_model",
+            object="response",
+            output=[valid_output_item],
+            parallel_tool_calls=False,
+            tool_choice="none",
+            tools=[],
+        )
+        valid_request = StructuredOutputsVerifyRequest(
+            responses_create_params=dummy_create_params,
+            response=valid_response,
+            schema_str=schema_str,
+            schema_type=SchemaType.JSON,
+        )
+        valid_verify_response = await resources_server.verify(valid_request)
+        assert valid_verify_response.reward == 1.0
+
+        # --- Test 2: Extra field inside a oneOf branch must be rejected ---
+        # Before the fix, strictify_schema did not recurse into the oneOf list,
+        # so `additionalProperties: False` was never applied to the branch and
+        # this output would have been incorrectly accepted.
+        extra_in_branch_completion = json.dumps(
+            {
+                "name": "run_migration",
+                "arguments": {
+                    "migration_name": "add_users_table",
+                    "target_database": "staging",
+                    "unexpected_field": "should_be_rejected",
+                },
+            }
+        )
+        extra_output_item = self._create_response_output_message(extra_in_branch_completion)
+        extra_response = valid_response.model_copy(
+            deep=True, update={"id": "extra_in_branch_id", "output": [extra_output_item]}
+        )
+        extra_request = StructuredOutputsVerifyRequest(
+            responses_create_params=dummy_create_params,
+            response=extra_response,
+            schema_str=schema_str,
+            schema_type=SchemaType.JSON,
+        )
+        extra_verify_response = await resources_server.verify(extra_request)
+        assert extra_verify_response.reward == 0.0
+
+        # --- Test 3: Missing required field inside a oneOf branch must be rejected ---
+        missing_in_branch_completion = json.dumps(
+            {"name": "run_migration", "arguments": {"migration_name": "add_users_table"}}
+        )
+        missing_output_item = self._create_response_output_message(missing_in_branch_completion)
+        missing_response = valid_response.model_copy(
+            deep=True, update={"id": "missing_in_branch_id", "output": [missing_output_item]}
+        )
+        missing_request = StructuredOutputsVerifyRequest(
+            responses_create_params=dummy_create_params,
+            response=missing_response,
+            schema_str=schema_str,
+            schema_type=SchemaType.JSON,
+        )
+        missing_verify_response = await resources_server.verify(missing_request)
+        assert missing_verify_response.reward == 0.0
+
+    async def test_verify_xml_with_defs_refs(self, config: StructuredOutputsResourcesServerConfig) -> None:
+        """coerce_xml_types must resolve $ref pointers against the top-level schema's
+        $defs so that $ref-based fields with non-string types are coerced correctly.
+        """
+        server_mock = MagicMock(spec=ServerClient)
+        resources_server = StructuredOutputsResourcesServer(config=config, server_client=server_mock)
+
+        test_schema = {
+            "type": "object",
+            "properties": {
+                "root": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"$ref": "#/$defs/identifier"},
+                        "score": {"$ref": "#/$defs/score"},
+                    },
+                },
+            },
+            "$defs": {
+                "identifier": {"type": "integer"},
+                "score": {"type": "number"},
+            },
+        }
+        schema_str = json.dumps(test_schema)
+        dummy_create_params = NeMoGymResponseCreateParamsNonStreaming(input=[])
+
+        # --- Test 1: Valid XML where $ref-backed fields coerce correctly ---
+        # Before the fix, coerce_xml_types did not resolve $ref, so "42" stayed
+        # a string and validation failed against {"type": "integer"}.
+        valid_xml = xmltodict.unparse({"root": {"id": 42, "score": 87.5}})
+        valid_output_item = self._create_response_output_message(valid_xml)
+        valid_response = NeMoGymResponse(
+            id="valid_defs_xml_id",
+            created_at=1234.5,
+            model="test_model",
+            object="response",
+            output=[valid_output_item],
+            parallel_tool_calls=False,
+            tool_choice="none",
+            tools=[],
+        )
+        valid_request = StructuredOutputsVerifyRequest(
+            responses_create_params=dummy_create_params,
+            response=valid_response,
+            schema_str=schema_str,
+            schema_type=SchemaType.XML,
+        )
+        valid_verify_response = await resources_server.verify(valid_request)
+        assert valid_verify_response.reward == 1.0
+
+        # --- Test 2: Non-numeric content under a $ref integer field fails validation ---
+        invalid_xml = xmltodict.unparse({"root": {"id": "not-a-number", "score": 87.5}})
+        invalid_output_item = self._create_response_output_message(invalid_xml)
+        invalid_response = valid_response.model_copy(
+            deep=True, update={"id": "invalid_defs_xml_id", "output": [invalid_output_item]}
+        )
+        invalid_request = StructuredOutputsVerifyRequest(
+            responses_create_params=dummy_create_params,
+            response=invalid_response,
+            schema_str=schema_str,
+            schema_type=SchemaType.XML,
+        )
+        invalid_verify_response = await resources_server.verify(invalid_request)
+        assert invalid_verify_response.reward == 0.0

@@ -140,24 +140,55 @@ class StructuredOutputsResourcesServer(SimpleResourcesServer):
                 parsed = None
         return parsed
 
-    def strictify_schema(self, schema: Dict[str, Any]):
-        """Make a schema strict as per OpenAPI guidelines"""
-        if isinstance(schema, Dict):
+    def strictify_schema(self, schema: Any):
+        """Make a schema strict as per OpenAPI guidelines.
+
+        Recurses into dict values and list items so that object schemas nested
+        inside composite branches (``oneOf`` / ``anyOf`` / ``allOf``) are also
+        strictified. Without the list branch, extra or missing fields inside a
+        composite branch would not be caught by validation.
+        """
+        if isinstance(schema, list):
+            for item in schema:
+                self.strictify_schema(item)
+        elif isinstance(schema, dict):
             if "properties" in schema:
                 schema["required"] = list(schema["properties"])
                 schema["additionalProperties"] = False
             for k, v in schema.items():
                 self.strictify_schema(v)
 
-    def coerce_xml_types(self, data: Any, schema: Dict[str, Any]) -> Any:
+    def coerce_xml_types(
+        self,
+        data: Any,
+        schema: Dict[str, Any],
+        root_schema: Optional[Dict[str, Any]] = None,
+    ) -> Any:
         """Recursively coerce xmltodict string values to match the JSON schema types.
 
         xmltodict.parse() returns all leaf values as strings. This method walks the
         parsed data alongside the schema and converts values where possible.
         On conversion failure the original value is returned so that schema
         validation can report the error.
+
+        ``root_schema`` is threaded through the recursion so that ``$ref``
+        pointers can be resolved against the top-level schema's ``$defs``.
+        Without this, ``$ref``-based fields with non-string types (integer,
+        number, boolean) would not be coerced and would fail validation.
         """
-        if not isinstance(schema, dict) or "type" not in schema:
+        if not isinstance(schema, dict):
+            return data
+
+        # Resolve $ref pointers so coercion works with $defs-based schemas.
+        if "$ref" in schema and root_schema is not None:
+            ref_path = schema["$ref"]
+            parts = ref_path.lstrip("#/").split("/")
+            resolved = root_schema
+            for part in parts:
+                resolved = resolved[part]
+            return self.coerce_xml_types(data, resolved, root_schema)
+
+        if "type" not in schema:
             return data
 
         schema_type = schema["type"]
@@ -167,7 +198,7 @@ class StructuredOutputsResourcesServer(SimpleResourcesServer):
             coerced = {}
             for key, value in data.items():
                 if key in properties:
-                    coerced[key] = self.coerce_xml_types(value, properties[key])
+                    coerced[key] = self.coerce_xml_types(value, properties[key], root_schema)
                 else:
                     coerced[key] = value
             return coerced
@@ -184,7 +215,7 @@ class StructuredOutputsResourcesServer(SimpleResourcesServer):
                 data = next(iter(data.values()))
             if not isinstance(data, list):
                 data = [data] if data is not None else []
-            return [self.coerce_xml_types(item, items_schema) for item in data]
+            return [self.coerce_xml_types(item, items_schema, root_schema) for item in data]
 
         # xmltodict returns None for empty tags like <field/> or <field></field>.
         # Coerce to "" only for string types (parity with JSON/YAML where "" is valid).
@@ -282,7 +313,7 @@ class StructuredOutputsResourcesServer(SimpleResourcesServer):
 
         try:
             if schema_type == SchemaType.XML and self.config.xml_coerce_types:
-                response_obj = self.coerce_xml_types(response_obj, schema)
+                response_obj = self.coerce_xml_types(response_obj, schema, root_schema=schema)
             if schema_type == SchemaType.CSV:
                 response_obj = self.coerce_csv_types(response_obj, schema)
             validate_against_schema_openapi(response_obj, schema)
