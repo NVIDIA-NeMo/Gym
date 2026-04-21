@@ -1,0 +1,12 @@
+{
+    "notices": [
+      {
+        "properties": [
+          {
+            "type": "domain",
+            "value": "blacklisteddomain.com"
+          }
+        ]
+      }
+  ]
+}
