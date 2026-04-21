@@ -5,14 +5,16 @@
 # — e.g. self-hosted vLLM for CI or air-gapped runs.
 
 # Judge model server — routes verify() calls to inference-api.nvidia.com.
-# ``${oc.env:VAR}`` pulls from the submitting process env; the default
-# values make this usable out of the box for the arena-hard-v2 migration.
+# ``${oc.env:VAR,default}`` pulls from the submitting process env with a
+# fallback so config-load never fails for judge-unrelated jobs (prepare,
+# ng_dump_config, ng_test). The ``MISSING`` fallback means the judge will
+# only error at call time if the key actually isn't set.
 arena_judge_judge_model:
   responses_api_models:
     openai_model:
       entrypoint: app.py
       openai_base_url: ${oc.env:ARENA_JUDGE_BASE_URL,https://inference-api.nvidia.com/v1}
-      openai_api_key: ${oc.env:NVIDIA_INFERENCE_API_KEY}
+      openai_api_key: ${oc.env:NVIDIA_INFERENCE_API_KEY,MISSING}
       openai_model: ${oc.env:ARENA_JUDGE_MODEL,aws/anthropic/bedrock-claude-opus-4-6}
 
 arena_judge:
