@@ -92,8 +92,15 @@ def _strip_thinking_traces(text: str) -> str:
     return text.strip()
 
 
-def _extract_assistant_text(response: NeMoGymResponse) -> str:
-    """Return concatenated assistant text, with thinking traces stripped."""
+def _extract_assistant_text(response: NeMoGymResponse, *, strip_thinking: bool = True) -> str:
+    """Return concatenated assistant text.
+
+    With ``strip_thinking=True`` (default) removes ``<think>…</think>`` CoT
+    blocks so the Judgement regex only sees the final answer. Pass
+    ``strip_thinking=False`` for Skills-parity mode — matches
+    ``nemo_skills.evaluation.metrics.utils.is_correct_judgement`` which runs
+    its regex on the raw response text, CoT included.
+    """
     if response is None or not getattr(response, "output", None):
         return ""
     texts: List[str] = []
@@ -110,7 +117,8 @@ def _extract_assistant_text(response: NeMoGymResponse) -> str:
             t = getattr(c, "text", None)
             if isinstance(t, str):
                 texts.append(t)
-    return _strip_thinking_traces("\n".join(texts))
+    joined = "\n".join(texts)
+    return _strip_thinking_traces(joined) if strip_thinking else joined.strip()
 
 
 # ---------------------------------------------------------------------------
@@ -121,9 +129,18 @@ def _extract_assistant_text(response: NeMoGymResponse) -> str:
 class MathProofJudgementConfig(BaseResourcesServerConfig):
     """Configuration for the math_proof_judgement server.
 
-    No tunable fields — verification is fully determined by the input
-    ``expected_judgement`` string and the model's ``Judgement: Yes/No`` output.
+    Attributes:
+        skills_parity_mode: When True, run the ``Judgement: Yes/No`` regex on
+            the raw model response (CoT included), matching the exact behaviour
+            of NeMo Skills' ``is_correct_judgement`` evaluator. Default False:
+            strip ``<think>…</think>`` blocks before the regex so reasoning
+            models that say e.g. *"so the Judgement: No applies if…"* inside
+            their CoT don't poison the final verdict. Only flip to True to
+            reproduce Skills numbers bit-for-bit for cross-pipeline parity
+            checks; for reasoning-capable models it materially lowers accuracy.
     """
+
+    skills_parity_mode: bool = False
 
 
 class MathProofJudgementRunRequest(BaseRunRequest):
@@ -289,7 +306,7 @@ class MathProofJudgementResourcesServer(SimpleResourcesServer):
     # --- verify ------------------------------------------------------------
 
     async def verify(self, body: MathProofJudgementVerifyRequest) -> MathProofJudgementVerifyResponse:
-        text = _extract_assistant_text(body.response)
+        text = _extract_assistant_text(body.response, strip_thinking=not self.config.skills_parity_mode)
         pred = parse_judgement(text)
         gt = parse_judgement(body.expected_judgement)
 

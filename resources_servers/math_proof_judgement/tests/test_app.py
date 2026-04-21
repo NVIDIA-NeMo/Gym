@@ -40,8 +40,8 @@ def _make_response(text: str) -> NeMoGymResponse:
     )
 
 
-def _make_server() -> MathProofJudgementResourcesServer:
-    cfg = MathProofJudgementConfig(host="0.0.0.0", port=8080, entrypoint="", name="")
+def _make_server(**cfg_overrides) -> MathProofJudgementResourcesServer:
+    cfg = MathProofJudgementConfig(host="0.0.0.0", port=8080, entrypoint="", name="", **cfg_overrides)
     return MathProofJudgementResourcesServer(config=cfg, server_client=MagicMock(spec=ServerClient))
 
 
@@ -154,6 +154,30 @@ class TestVerify:
         server = _make_server()
         res = await server.verify(_make_req("<think>reasoning</think>\nJudgement: Yes", "Judgement: Yes"))
         assert res.reward == 1.0
+
+    async def test_skills_parity_mode_preserves_cot(self) -> None:
+        """In skills_parity_mode, the Judgement: regex runs on the raw text —
+        so a stray 'Judgement: No' inside <think> beats the final 'Judgement: Yes'."""
+        server_default = _make_server()
+        server_parity = _make_server(skills_parity_mode=True)
+        text = "<think>Maybe the Judgement: No applies?</think>\nJudgement: Yes"
+
+        # Default server strips <think> first → picks up the final "Yes".
+        res_default = await server_default.verify(_make_req(text, "Judgement: Yes"))
+        assert res_default.reward == 1.0
+        assert res_default.extracted_judgement == "Yes"
+
+        # Parity mode reads the raw text → first match is the "No" inside CoT.
+        res_parity = await server_parity.verify(_make_req(text, "Judgement: Yes"))
+        assert res_parity.reward == 0.0
+        assert res_parity.extracted_judgement == "No"
+
+    async def test_skills_parity_mode_no_cot(self) -> None:
+        """With no <think> block the two modes agree."""
+        server_parity = _make_server(skills_parity_mode=True)
+        res = await server_parity.verify(_make_req("Judgement: Yes", "Judgement: Yes"))
+        assert res.reward == 1.0
+        assert res.extracted_judgement == "Yes"
 
 
 class TestVerdictSelectors:
