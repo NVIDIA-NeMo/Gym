@@ -155,27 +155,31 @@ class TestVerify:
         res = await server.verify(_make_req("<think>reasoning</think>\nJudgement: Yes", "Judgement: Yes"))
         assert res.reward == 1.0
 
-    async def test_skills_parity_mode_preserves_cot(self) -> None:
-        """In skills_parity_mode, the Judgement: regex runs on the raw text —
-        so a stray 'Judgement: No' inside <think> beats the final 'Judgement: Yes'."""
-        server_default = _make_server()
-        server_parity = _make_server(skills_parity_mode=True)
+    async def test_cot_speculation_ignored(self) -> None:
+        """A `Judgement: X` inside <think>…</think> does NOT leak into the verdict."""
+        server = _make_server()
+        # CoT says No, final committed answer says Yes — Skills (without
+        # parse_reasoning) would pick the CoT "No"; Gym picks the final "Yes".
         text = "<think>Maybe the Judgement: No applies?</think>\nJudgement: Yes"
+        res = await server.verify(_make_req(text, "Judgement: Yes"))
+        assert res.reward == 1.0
+        assert res.extracted_judgement == "Yes"
 
-        # Default server strips <think> first → picks up the final "Yes".
-        res_default = await server_default.verify(_make_req(text, "Judgement: Yes"))
-        assert res_default.reward == 1.0
-        assert res_default.extracted_judgement == "Yes"
+    async def test_unterminated_cot_returns_no_answer(self) -> None:
+        """Model started thinking but never emitted </think> — nothing committed."""
+        server = _make_server()
+        # Even though the truncated CoT contains "Judgement: Yes", it's
+        # unclosed reasoning, not a committed answer. Match Skills'
+        # parse_reasoning=True: score as no_answer.
+        text = "<think>I'm still working on this… Judgement: Yes maybe"
+        res = await server.verify(_make_req(text, "Judgement: Yes"))
+        assert res.extracted_judgement is None
+        assert res.reward == 0.0
 
-        # Parity mode reads the raw text → first match is the "No" inside CoT.
-        res_parity = await server_parity.verify(_make_req(text, "Judgement: Yes"))
-        assert res_parity.reward == 0.0
-        assert res_parity.extracted_judgement == "No"
-
-    async def test_skills_parity_mode_no_cot(self) -> None:
-        """With no <think> block the two modes agree."""
-        server_parity = _make_server(skills_parity_mode=True)
-        res = await server_parity.verify(_make_req("Judgement: Yes", "Judgement: Yes"))
+    async def test_no_thinking_tags_parses_directly(self) -> None:
+        """Non-reasoning / instruct models that emit no <think> at all still work."""
+        server = _make_server()
+        res = await server.verify(_make_req("Judgement: Yes", "Judgement: Yes"))
         assert res.reward == 1.0
         assert res.extracted_judgement == "Yes"
 

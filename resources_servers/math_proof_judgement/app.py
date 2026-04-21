@@ -81,25 +81,45 @@ def parse_judgement(text: Optional[str]) -> Optional[bool]:
 
 
 def _strip_thinking_traces(text: str) -> str:
-    """Remove ``<think>...</think>`` / ``<thinking>...</thinking>`` blocks."""
-    text = _THINK_TAG_RE.sub("", text)
-    text = _THINKING_TAG_RE.sub("", text)
-    # When the reasoning parser strips the opening tag, the text starts with
-    # raw CoT followed by an unpaired </think>. Drop everything up to the
-    # closing tag so the judgement regex only runs on the answer.
-    text = re.sub(r"^.*?</think>", "", text, flags=re.DOTALL)
-    text = re.sub(r"^.*?</thinking>", "", text, flags=re.DOTALL)
+    """Extract the committed answer from a reasoning-model response.
+
+    Matches NeMo Skills' ``parse_reasoning=True`` behaviour on reasoning-model
+    output, with one robustness extension for non-reasoning models:
+
+    * If the text contains a closing ``</think>`` / ``</thinking>`` tag
+      (paired or unpaired — the vLLM reasoning parser sometimes eats the
+      opening tag), drop everything up to and including the last closing tag
+      and return what remains. That's the committed answer.
+    * Else if an *opening* ``<think>`` / ``<thinking>`` exists without a
+      closing tag, the model truncated mid-CoT and never committed. Return
+      an empty string so the Judgement regex matches nothing → scored as
+      ``no_answer``. Exact parity with Skills' ``parse_reasoning=True``.
+    * Else (no thinking tags at all — e.g. an instruct model), return the
+      text unchanged so downstream parsing can still find ``Judgement:``.
+      Skills' ``parse_reasoning=True`` would have returned empty here, but
+      for non-reasoning models that's a footgun — Gym's default stays useful.
+    """
+    has_close = "</think>" in text or "</thinking>" in text
+    if has_close:
+        text = _THINK_TAG_RE.sub("", text)
+        text = _THINKING_TAG_RE.sub("", text)
+        # When the reasoning parser strips the opening tag, the text starts
+        # with raw CoT followed by an unpaired </think>.
+        text = re.sub(r"^.*?</think>", "", text, flags=re.DOTALL)
+        text = re.sub(r"^.*?</thinking>", "", text, flags=re.DOTALL)
+        return text.strip()
+    has_open = "<think>" in text or "<thinking>" in text
+    if has_open:
+        return ""
     return text.strip()
 
 
-def _extract_assistant_text(response: NeMoGymResponse, *, strip_thinking: bool = True) -> str:
-    """Return concatenated assistant text.
+def _extract_assistant_text(response: NeMoGymResponse) -> str:
+    """Return the committed assistant text, with reasoning CoT stripped.
 
-    With ``strip_thinking=True`` (default) removes ``<think>…</think>`` CoT
-    blocks so the Judgement regex only sees the final answer. Pass
-    ``strip_thinking=False`` for Skills-parity mode — matches
-    ``nemo_skills.evaluation.metrics.utils.is_correct_judgement`` which runs
-    its regex on the raw response text, CoT included.
+    Mirrors NeMo Skills' ``parse_reasoning=True`` pre-processing so the
+    ``Judgement:`` regex only matches the model's committed answer and not
+    phrases it speculated about during ``<think>…</think>`` reasoning.
     """
     if response is None or not getattr(response, "output", None):
         return ""
@@ -117,8 +137,7 @@ def _extract_assistant_text(response: NeMoGymResponse, *, strip_thinking: bool =
             t = getattr(c, "text", None)
             if isinstance(t, str):
                 texts.append(t)
-    joined = "\n".join(texts)
-    return _strip_thinking_traces(joined) if strip_thinking else joined.strip()
+    return _strip_thinking_traces("\n".join(texts))
 
 
 # ---------------------------------------------------------------------------
@@ -129,18 +148,10 @@ def _extract_assistant_text(response: NeMoGymResponse, *, strip_thinking: bool =
 class MathProofJudgementConfig(BaseResourcesServerConfig):
     """Configuration for the math_proof_judgement server.
 
-    Attributes:
-        skills_parity_mode: When True, run the ``Judgement: Yes/No`` regex on
-            the raw model response (CoT included), matching the exact behaviour
-            of NeMo Skills' ``is_correct_judgement`` evaluator. Default False:
-            strip ``<think>…</think>`` blocks before the regex so reasoning
-            models that say e.g. *"so the Judgement: No applies if…"* inside
-            their CoT don't poison the final verdict. Only flip to True to
-            reproduce Skills numbers bit-for-bit for cross-pipeline parity
-            checks; for reasoning-capable models it materially lowers accuracy.
+    No tunable fields — the Judgement: regex runs on the response after CoT
+    reasoning is stripped (matches Skills' ``parse_reasoning=True`` behaviour
+    on reasoning-model output; see ``_strip_thinking_traces``).
     """
-
-    skills_parity_mode: bool = False
 
 
 class MathProofJudgementRunRequest(BaseRunRequest):
@@ -286,7 +297,7 @@ class MathProofJudgementResourcesServer(SimpleResourcesServer):
     # --- verify ------------------------------------------------------------
 
     async def verify(self, body: MathProofJudgementVerifyRequest) -> MathProofJudgementVerifyResponse:
-        text = _extract_assistant_text(body.response, strip_thinking=not self.config.skills_parity_mode)
+        text = _extract_assistant_text(body.response)
         pred = parse_judgement(text)
         gt = parse_judgement(body.expected_judgement)
 
