@@ -9,10 +9,12 @@ wmt_translation:
       compute_comet: true
       comet_model: Unbabel/XCOMET-XXL
       comet_batch_size: 16
-      # num_gpus=0: share a GPU with vLLM's DP engines rather than claim a
-      # dedicated one (Ray would queue forever because vLLM reserves all GPUs
-      # in its placement group). See app.py for the co-tenant rationale.
-      comet_num_gpus: 0
+      # num_gpus=0.01: fractional GPU share with vLLM's DP engines. num_gpus=0
+      # doesn't work — Ray sets CUDA_VISIBLE_DEVICES="" for 0-GPU tasks, so
+      # the worker can't see the hardware. A tiny fraction leaves Ray's GPU
+      # env-var injection alone, so the worker inherits the node's full
+      # CUDA_VISIBLE_DEVICES. Per Brian's suggestion. See app.py.
+      comet_num_gpus: 0.01
 
 wmt_translation_simple_agent:
   responses_api_agents:
