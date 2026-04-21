@@ -46,20 +46,6 @@ class LibraryJudgeMathResourcesServerConfig(BaseResourcesServerConfig):
     judge_model_server: ModelServerRef
     judge_responses_create_params: NeMoGymResponseCreateParamsNonStreaming
     should_use_judge: bool = True
-    # Optional path to a YAML file with `system` (optional) and `user`
-    # (required) keys providing a custom judge prompt — e.g. an IMO-style
-    # autograder. When None, falls back to the Arena-Hard ClassVars below.
-    # Matches the pattern used by the omniscience resource server.
-    # A missing or empty `system` key omits the system message.
-    judge_prompt_path: Optional[str] = None
-    # Verdict labels parsed out of the judge's raw output. None => use the
-    # Arena-Hard ClassVars.
-    judge_equal_label: Optional[str] = None
-    judge_not_equal_label: Optional[str] = None
-    # When False, skip the second-order (swapped-answers) judge call. Use
-    # for unidirectional autograder prompts whose template has a fixed
-    # "model solution" / "golden answer" role assignment.
-    judge_bidirectional: bool = True
     # Mirror NeMo Skills' judge pipeline exactly for per-rollout parity.
     # When True:
     #   * Strip <think>...</think> (and pre-</think> content) from the

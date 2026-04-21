@@ -783,7 +783,7 @@ class TestSkillsParityMode:
 
     _PARITY_EXPECTED = "42"
 
-    def _build(self, bidirectional=False, **extra):
+    def _build(self, **extra):
         config = LibraryJudgeMathResourcesServerConfig(
             host="0.0.0.0",
             port=8080,
@@ -793,7 +793,6 @@ class TestSkillsParityMode:
             judge_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
             should_use_judge=True,
             skills_parity_mode=True,
-            judge_bidirectional=bidirectional,
             **extra,
         )
         return LibraryJudgeMathResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))

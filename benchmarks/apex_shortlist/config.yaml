@@ -31,5 +31,3 @@ apex_shortlist_math_with_judge_simple_agent:
         jsonl_fpath: benchmarks/apex_shortlist/data/apex_shortlist_benchmark.jsonl
         prompt_config: benchmarks/apex_shortlist/prompts/default.yaml
         prepare_script: benchmarks/apex_shortlist/prepare.py
-        # num_repeats here is IGNORED for type=benchmark datasets. Pass it on
-        # the CLI via `+num_repeats=N` in the rollout script's ctx instead.
