@@ -28,12 +28,16 @@ arena_judge:
       judge_model_server:
         type: responses_api_models
         name: arena_judge_judge_model
-      judge_responses_create_params:
-        input: []
+      # ChatCompletion (NOT Responses API) — inference-api.nvidia.com's
+      # Bedrock proxy returns ``object: "chat.completion"`` from
+      # /v1/responses, which fails NeMoGymResponse validation. See
+      # app.py::_judge_once for the full context.
+      judge_chat_completions_create_params:
+        messages: []
         # Judge outputs are short (verdict + brief justification). 4k is
         # enough headroom for the judge to write its own answer first
         # (required by the `hard_prompt` prompt) before voting.
-        max_output_tokens: 4096
+        max_tokens: 4096
         # Temperature only — Bedrock (bedrock-claude-opus-4-6 via
         # inference-api.nvidia.com) rejects requests that specify BOTH
         # temperature and top_p. Matches the Skills baseline's

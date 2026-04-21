@@ -19,6 +19,7 @@ from pytest import approx, fixture
 
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import (
+    NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
@@ -33,6 +34,11 @@ from resources_servers.arena_judge.app import (
 
 
 def _make_response(text: str, model: str = "mock_model") -> NeMoGymResponse:
+    """Build a NeMoGymResponse mock — used for the POLICY model's output
+    (the candidate answer the judge scores). The candidate pathway still
+    uses Responses API because the policy model is a local vLLM that
+    returns the correct shape.
+    """
     return NeMoGymResponse(
         id="mock_resp",
         created_at=0.0,
@@ -51,6 +57,25 @@ def _make_response(text: str, model: str = "mock_model") -> NeMoGymResponse:
         tool_choice="none",
         tools=[],
     )
+
+
+def _make_chat_completion(text: str, model: str = "mock_judge") -> dict:
+    """Build a raw ChatCompletion dict — what server_client.post returns
+    for the JUDGE call (inference-api.nvidia.com via chat_completions)."""
+    return {
+        "id": "mock_chat",
+        "object": "chat.completion",
+        "created": 0,
+        "model": model,
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": text},
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+    }
 
 
 class TestParseVerdict:
@@ -92,11 +117,11 @@ class TestParseVerdict:
 
 
 class TestExtractOutputText:
-    def test_concatenates_text_chunks(self) -> None:
+    def test_response_concatenates_text_chunks(self) -> None:
         response = _make_response("Hello world")
-        assert ArenaJudgeServer._extract_output_text(response) == "Hello world"
+        assert ArenaJudgeServer._extract_response_output_text(response) == "Hello world"
 
-    def test_empty_output(self) -> None:
+    def test_response_empty_output(self) -> None:
         response = NeMoGymResponse(
             id="empty",
             created_at=0.0,
@@ -107,7 +132,13 @@ class TestExtractOutputText:
             tool_choice="none",
             tools=[],
         )
-        assert ArenaJudgeServer._extract_output_text(response) == ""
+        assert ArenaJudgeServer._extract_response_output_text(response) == ""
+
+    def test_chat_completion_extracts_content(self) -> None:
+        from nemo_gym.openai_utils import NeMoGymChatCompletion
+
+        completion = NeMoGymChatCompletion.model_validate(_make_chat_completion("judge verdict text"))
+        assert ArenaJudgeServer._extract_chat_completion_text(completion) == "judge verdict text"
 
 
 class TestArenaJudgeServer:
@@ -122,15 +153,16 @@ class TestArenaJudgeServer:
                 type="responses_api_models",
                 name="arena_judge_judge_model",
             ),
-            judge_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            judge_chat_completions_create_params=NeMoGymChatCompletionCreateParamsNonStreaming(messages=[]),
         )
 
     def _mock_judge_sequence(self, server_mock: MagicMock, judge_texts: list[str]) -> None:
-        """Configure server_client.post to return judge responses in order."""
+        """Configure server_client.post to return chat.completion responses
+        in order — matches what /v1/chat/completions actually returns."""
         response_mocks = []
         for text in judge_texts:
             resp = AsyncMock()
-            resp.json = AsyncMock(return_value=_make_response(text).model_dump())
+            resp.json = AsyncMock(return_value=_make_chat_completion(text))
             response_mocks.append(resp)
         server_mock.post = AsyncMock(side_effect=response_mocks)
 
@@ -295,10 +327,10 @@ class TestArenaJudgeServer:
     @pytest.mark.asyncio
     async def test_creative_writing_category_uses_creative_prompt(self, config: ArenaJudgeConfig) -> None:
         # Verify that distinct prompts are loaded per category by capturing
-        # the input messages sent to the judge.
+        # the messages sent to the judge.
         server_mock = MagicMock(spec=ServerClient)
         resp = AsyncMock()
-        resp.json = AsyncMock(return_value=_make_response("[[A>B]]").model_dump())
+        resp.json = AsyncMock(return_value=_make_chat_completion("[[A>B]]"))
         server_mock.post = AsyncMock(return_value=resp)
         server = ArenaJudgeServer(config=config, server_client=server_mock)
 
@@ -317,9 +349,9 @@ class TestArenaJudgeServer:
         assert len(all_calls) == 2
         for call in all_calls:
             request_params = call.kwargs["json"]
-            system_messages = [m for m in request_params.input if m.role == "system"]
+            system_messages = [m for m in request_params.messages if m["role"] == "system"]
             assert len(system_messages) == 1
-            assert "generating your own answer" not in system_messages[0].content
+            assert "generating your own answer" not in system_messages[0]["content"]
 
 
 class TestScoreFn:

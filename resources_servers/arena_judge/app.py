@@ -51,9 +51,8 @@ from nemo_gym.base_resources_server import (
 )
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import (
-    NeMoGymEasyInputMessage,
-    NeMoGymResponse,
-    NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymChatCompletion,
+    NeMoGymChatCompletionCreateParamsNonStreaming,
 )
 from nemo_gym.prompt import PromptConfig, load_prompt_config
 from nemo_gym.reward_profile import (
@@ -80,7 +79,12 @@ class ArenaJudgeConfig(BaseResourcesServerConfig):
     """Arena Hard v2 pairwise-judge server config."""
 
     judge_model_server: ModelServerRef
-    judge_responses_create_params: NeMoGymResponseCreateParamsNonStreaming
+    # Chat Completions (NOT Responses API) — inference-api.nvidia.com's
+    # Bedrock proxy returns ``object: "chat.completion"`` on /v1/responses
+    # calls, which fails Gym's strict NeMoGymResponse validation. The
+    # ChatCompletion endpoint is the stable path for external OpenAI-
+    # compatible judges on this endpoint.
+    judge_chat_completions_create_params: NeMoGymChatCompletionCreateParamsNonStreaming
 
     # Category → prompt-file mapping. Paths are resolved relative to the
     # Gym root by ``load_prompt_config``. The defaults match Skills'
@@ -162,7 +166,11 @@ class ArenaJudgeServer(SimpleResourcesServer):
     # ------------------------------------------------------------------
 
     async def verify(self, body: ArenaJudgeVerifyRequest) -> ArenaJudgeVerifyResponse:
-        candidate_answer = self._extract_output_text(body.response)
+        # Candidate answer comes from the POLICY model's /v1/responses call
+        # — that's a local vLLM, which returns the correct Responses API
+        # shape. Only the JUDGE call goes to inference-api.nvidia.com, and
+        # that's where we have to use chat_completions instead.
+        candidate_answer = self._extract_response_output_text(body.response)
         question = body.question or ""
         baseline_answer = body.baseline_answer or ""
         category = body.category or self.config.default_category
@@ -205,32 +213,37 @@ class ArenaJudgeServer(SimpleResourcesServer):
     async def _judge_once(
         self, category: str, question: str, answer_1: str, answer_2: str
     ) -> tuple[str, Optional[str]]:
-        """Run a single judge call. Returns (raw_text, parsed_verdict)."""
+        """Run a single judge call via /v1/chat/completions.
+
+        Returns (raw_text, parsed_verdict). Network or parse failures
+        return ("", None), mirroring Skills' "invalid score" handling in
+        ArenaMetrics.
+        """
         prompt = self._prompts[category]
         fill = {"question": question, "answer_1": answer_1, "answer_2": answer_2}
 
-        messages: List[NeMoGymEasyInputMessage] = []
+        messages: List[Dict[str, str]] = []
         if prompt.system is not None:
-            messages.append(NeMoGymEasyInputMessage(role="system", content=prompt.system.format_map(fill)))
-        messages.append(NeMoGymEasyInputMessage(role="user", content=prompt.user.format_map(fill)))
+            messages.append({"role": "system", "content": prompt.system.format_map(fill)})
+        messages.append({"role": "user", "content": prompt.user.format_map(fill)})
 
-        request_params = self.config.judge_responses_create_params.model_copy(deep=True)
-        request_params.input = messages
+        request_params = self.config.judge_chat_completions_create_params.model_copy(deep=True)
+        request_params.messages = messages
 
         try:
             response_obj = await self.server_client.post(
                 server_name=self.config.judge_model_server.name,
-                url_path="/v1/responses",
+                url_path="/v1/chat/completions",
                 json=request_params,
             )
-            judge_response = NeMoGymResponse.model_validate(await get_response_json(response_obj))
+            judge_response = NeMoGymChatCompletion.model_validate(await get_response_json(response_obj))
         except Exception:
-            # Network / parse failures mirror Skills' behaviour: treat as
-            # an invalid score (None verdict) rather than crashing verify.
+            # Network / validation failures mirror Skills' invalid-score
+            # handling rather than crashing verify.
             logger.exception("Judge call failed for category=%s; treating as invalid verdict.", category)
             return "", None
 
-        text = self._extract_output_text(judge_response)
+        text = self._extract_chat_completion_text(judge_response)
         verdict = self._parse_verdict(text)
         return text, verdict
 
@@ -258,8 +271,12 @@ class ArenaJudgeServer(SimpleResourcesServer):
         return verdict if verdict in _VALID_VERDICTS else None
 
     @staticmethod
-    def _extract_output_text(response: NeMoGymResponse) -> str:
-        """Concatenate all ``output_text`` content from a Response."""
+    def _extract_response_output_text(response: Any) -> str:
+        """Concatenate all ``output_text`` content from a NeMoGymResponse.
+
+        Used for the POLICY model's response (local vLLM, correct
+        Responses API shape), not the judge.
+        """
         chunks: List[str] = []
         for output_item in response.output:
             if output_item.type != "message":
@@ -269,6 +286,15 @@ class ArenaJudgeServer(SimpleResourcesServer):
                     continue
                 chunks.append(content_item.text)
         return "".join(chunks)
+
+    @staticmethod
+    def _extract_chat_completion_text(completion: NeMoGymChatCompletion) -> str:
+        """Extract assistant text from a ChatCompletion. Used for the JUDGE."""
+        if not completion.choices:
+            return ""
+        # Only first choice is meaningful at n=1 (default).
+        content = completion.choices[0].message.content
+        return content or ""
 
     # ------------------------------------------------------------------
     # Aggregate metrics overrides
