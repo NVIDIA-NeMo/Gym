@@ -34,8 +34,11 @@ arena_judge:
         # enough headroom for the judge to write its own answer first
         # (required by the `hard_prompt` prompt) before voting.
         max_output_tokens: 4096
+        # Temperature only — Bedrock (bedrock-claude-opus-4-6 via
+        # inference-api.nvidia.com) rejects requests that specify BOTH
+        # temperature and top_p. Matches the Skills baseline's
+        # extra_judge_args=++inference.top_p=null.
         temperature: 0.0
-        top_p: 1.0
       judge_prompt_paths:
         hard_prompt: resources_servers/arena_judge/prompts/arena.yaml
         creative_writing: resources_servers/arena_judge/prompts/arena_creative.yaml
