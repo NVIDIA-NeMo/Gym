@@ -59,11 +59,7 @@ def _verify_request(**fields) -> GDPValVerifyRequest:
                     type="message",
                     role="assistant",
                     status="completed",
-                    content=[
-                        NeMoGymResponseOutputText(
-                            type="output_text", text=deliverable_text, annotations=[]
-                        )
-                    ],
+                    content=[NeMoGymResponseOutputText(type="output_text", text=deliverable_text, annotations=[])],
                 )
             ],
             status="completed",
@@ -88,6 +84,7 @@ class TestApp:
 
     def test_comparison_requires_reference_dir(self) -> None:
         import pytest as _pytest
+
         with _pytest.raises(ValueError, match="reference_deliverables_dir"):
             _server(reward_mode="comparison")
 
@@ -114,8 +111,10 @@ class TestApp:
             deliverable_text="Deliverable body text.",
         )
 
-        with patch("resources_servers.gdpval.scoring.score_with_rubric", side_effect=fake_score_with_rubric), \
-             patch("resources_servers.gdpval.app.get_server_url", return_value="http://localhost:9999"):
+        with (
+            patch("resources_servers.gdpval.scoring.score_with_rubric", side_effect=fake_score_with_rubric),
+            patch("resources_servers.gdpval.app.get_server_url", return_value="http://localhost:9999"),
+        ):
             resp = await server.verify(body)
 
         assert resp.reward == 0.7
@@ -136,7 +135,6 @@ class TestApp:
         assert resp.judge_response == {"error": "reference_missing"}
 
     def test_aggregate_metrics_comparison_elo(self) -> None:
-        from resources_servers.gdpval.app import GDPValResourcesServer
         from nemo_gym.config_types import AggregateMetricsRequest
 
         server = _server(
@@ -144,6 +142,7 @@ class TestApp:
             reference_deliverables_dir="/tmp/fork-deliverables",
             reference_elo=1000.0,
         )
+
         def _row(task_idx, reward, win, loss, tie):
             return {
                 "_ng_task_index": task_idx,

@@ -21,6 +21,7 @@ independently.  Provides three scoring modes:
 - ``score_with_rubric_structured`` — structured scoring with tagged output
   format, multi-trial averaging, and formatting retries
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -28,6 +29,7 @@ import json
 import re
 from pathlib import Path
 from typing import Any
+
 
 # ---------------------------------------------------------------------------
 # Structured scoring constants (structured format)
@@ -120,7 +122,10 @@ async def score_with_rubric(
                 response = await client.chat.completions.create(
                     model=model_name,
                     messages=[
-                        {"role": "system", "content": "You are an expert evaluator. You must respond with valid JSON only."},
+                        {
+                            "role": "system",
+                            "content": "You are an expert evaluator. You must respond with valid JSON only.",
+                        },
                         {"role": "user", "content": judge_prompt},
                     ],
                     temperature=0.1,
@@ -131,8 +136,11 @@ async def score_with_rubric(
                 err_str = str(retry_err)
                 is_retryable = "429" in err_str or "503" in err_str or "504" in err_str or "rate" in err_str.lower()
                 if is_retryable and attempt < max_retries:
-                    delay = base_delay * (2 ** attempt) + asyncio.get_event_loop().time() % 1
-                    print(f"Rubric judge rate-limited (attempt {attempt + 1}/{max_retries + 1}), retrying in {delay:.1f}s...", flush=True)
+                    delay = base_delay * (2**attempt) + asyncio.get_event_loop().time() % 1
+                    print(
+                        f"Rubric judge rate-limited (attempt {attempt + 1}/{max_retries + 1}), retrying in {delay:.1f}s...",
+                        flush=True,
+                    )
                     await asyncio.sleep(delay)
                 else:
                     raise
@@ -247,7 +255,10 @@ async def score_with_rubric_visual(
                 response = await client.chat.completions.create(
                     model=model_name,
                     messages=[
-                        {"role": "system", "content": "You are an expert evaluator. You must respond with valid JSON only."},
+                        {
+                            "role": "system",
+                            "content": "You are an expert evaluator. You must respond with valid JSON only.",
+                        },
                         {"role": "user", "content": content},
                     ],
                     temperature=0.1,
@@ -258,8 +269,11 @@ async def score_with_rubric_visual(
                 err_str = str(retry_err)
                 is_retryable = "429" in err_str or "503" in err_str or "504" in err_str or "rate" in err_str.lower()
                 if is_retryable and attempt < max_retries:
-                    delay = base_delay * (2 ** attempt) + asyncio.get_event_loop().time() % 1
-                    print(f"Visual judge rate-limited (attempt {attempt + 1}/{max_retries + 1}), retrying in {delay:.1f}s...", flush=True)
+                    delay = base_delay * (2**attempt) + asyncio.get_event_loop().time() % 1
+                    print(
+                        f"Visual judge rate-limited (attempt {attempt + 1}/{max_retries + 1}), retrying in {delay:.1f}s...",
+                        flush=True,
+                    )
                     await asyncio.sleep(delay)
                 else:
                     raise
@@ -361,20 +375,19 @@ async def score_with_rubric_structured(
 
     # Build message content
     content: list[dict] = []
-    task_text = (
-        STRUCTURED_JUDGE_PROMPT
-        + f"<TASK_DESCRIPTION_START>\n{task_prompt}\n<TASK_DESCRIPTION_END>\n\n"
-    )
+    task_text = STRUCTURED_JUDGE_PROMPT + f"<TASK_DESCRIPTION_START>\n{task_prompt}\n<TASK_DESCRIPTION_END>\n\n"
 
     if deliverable_content_blocks:
         content.append({"type": "text", "text": task_text + "<SUBMISSION_START>\n"})
         content.extend(deliverable_content_blocks)
         content.append({"type": "text", "text": "\n<SUBMISSION_END>\n\n"})
     else:
-        content.append({
-            "type": "text",
-            "text": task_text + f"<SUBMISSION_START>\n{deliverable_text}\n<SUBMISSION_END>\n\n",
-        })
+        content.append(
+            {
+                "type": "text",
+                "text": task_text + f"<SUBMISSION_START>\n{deliverable_text}\n<SUBMISSION_END>\n\n",
+            }
+        )
 
     content.append({"type": "text", "text": f"<RUBRIC_START>\n{rubric_str}\n<RUBRIC_END>\n\n"})
 
@@ -404,10 +417,9 @@ async def score_with_rubric_structured(
                 err_str = str(e).lower()
                 is_retryable = any(m in err_str for m in ("429", "503", "504", "rate", "timeout"))
                 if is_retryable and retry < formatting_retries - 1:
-                    delay = 5.0 * (2 ** retry)
+                    delay = 5.0 * (2**retry)
                     print(
-                        f"[structured-rubric] trial {trial_num} retry {retry + 1}: {e}, "
-                        f"retrying in {delay:.0f}s",
+                        f"[structured-rubric] trial {trial_num} retry {retry + 1}: {e}, retrying in {delay:.0f}s",
                         flush=True,
                     )
                     await asyncio.sleep(delay)
@@ -432,8 +444,7 @@ async def score_with_rubric_structured(
                 trial_responses.append(resp_text)
                 parsed_ok = True
                 print(
-                    f"[structured-rubric] trial {trial_num}: score={score}/{parsed_max} "
-                    f"({percentages[-1]:.1f}%)",
+                    f"[structured-rubric] trial {trial_num}: score={score}/{parsed_max} ({percentages[-1]:.1f}%)",
                     flush=True,
                 )
                 break

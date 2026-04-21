@@ -160,15 +160,16 @@ class GDPValTask(TaskStrategy):
 
         if not os.path.exists(container_path):
             print(
-                f"[gdpval] WARNING: container not found at {container_path}, "
-                f"falling back to local sandbox",
+                f"[gdpval] WARNING: container not found at {container_path}, falling back to local sandbox",
                 flush=True,
             )
             return None
 
         from responses_api_agents.stirrup_agent.apptainer_provider import ApptainerCodeExecToolProvider
 
-        print(f"[gdpval] Using Apptainer container {container_path} for task {task_info.get('task_id', '?')}", flush=True)
+        print(
+            f"[gdpval] Using Apptainer container {container_path} for task {task_info.get('task_id', '?')}", flush=True
+        )
 
         return ApptainerCodeExecToolProvider(
             sif_path=container_path,
@@ -194,4 +195,3 @@ class GDPValTask(TaskStrategy):
 
     def response_id(self, task_info: Dict[str, Any]) -> str:
         return f"gdpval-{task_info['task_id']}"
-

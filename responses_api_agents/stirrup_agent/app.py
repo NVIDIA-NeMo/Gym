@@ -30,9 +30,9 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 import ray
+from fastapi import Request
 from pydantic import ConfigDict, Field
 
-from fastapi import Request
 from nemo_gym.base_resources_server import BaseRunRequest
 from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
@@ -147,11 +147,12 @@ async def _run_stirrup_agent(
     (see ``DynamicMaxTokensChatCompletionsClient``).  When unset, a
     character-count fallback is used.
     """
-    from responses_api_agents.stirrup_agent.nemo_agent import NeMoAgent
-    from responses_api_agents.stirrup_agent.nemo_client import DynamicMaxTokensChatCompletionsClient
     from stirrup.tools import DEFAULT_TOOLS
     from stirrup.tools.code_backends.base import SHELL_TIMEOUT, CodeExecToolProvider, CommandResult
     from stirrup.tools.code_backends.local import LocalCodeExecToolProvider
+
+    from responses_api_agents.stirrup_agent.nemo_agent import NeMoAgent
+    from responses_api_agents.stirrup_agent.nemo_client import DynamicMaxTokensChatCompletionsClient
 
     class _SandboxTolerantExecProvider(LocalCodeExecToolProvider):
         """LocalCodeExecToolProvider that ensures venv Python is on PATH,
@@ -173,6 +174,7 @@ async def _run_stirrup_agent(
             # so the model can use absolute paths like /workspace/report.pdf
             if self._temp_dir:
                 import os
+
                 for alias in ("/workspace", "/working_dir"):
                     try:
                         os.symlink(str(self._temp_dir), alias)
@@ -261,7 +263,9 @@ async def _run_stirrup_agent(
         if hasattr(finish_params, "paths") and finish_params.paths and not uses_container:
             sandbox_dir = getattr(exec_provider, "_temp_dir", None) or getattr(exec_provider, "temp_dir", None)
             output_dir_path = Path(output_dir)
-            existing_files = {f.name for f in output_dir_path.iterdir() if f.is_file()} if output_dir_path.exists() else set()
+            existing_files = (
+                {f.name for f in output_dir_path.iterdir() if f.is_file()} if output_dir_path.exists() else set()
+            )
 
             for src_path_str in finish_params.paths:
                 src = Path(src_path_str)
@@ -282,7 +286,11 @@ async def _run_stirrup_agent(
                     for prefix in ("/workspace/", "/working_dir/", "/tmp/local_exec_env_"):
                         if path_str.startswith(prefix):
                             # For /tmp/local_exec_env_xxxxx/file.pdf, strip everything up to the ID dir
-                            rel = path_str.split("/", 4)[-1] if prefix == "/tmp/local_exec_env_" else path_str[len(prefix):]
+                            rel = (
+                                path_str.split("/", 4)[-1]
+                                if prefix == "/tmp/local_exec_env_"
+                                else path_str[len(prefix) :]
+                            )
                             candidates.append(sandbox_dir / rel)
                             break
                     # Also try just the filename in sandbox root
@@ -538,7 +546,9 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
         if self.config.task == "gdpval":
             system_prompt = None
             # Raw task prompt — _run_stirrup_agent wraps it in GDPVal template when is_gdpval=True
-            user_prompt = f"Sector: {task_info['sector']}\nOccupation: {task_info['occupation']}\n\n{task_info['prompt']}"
+            user_prompt = (
+                f"Sector: {task_info['sector']}\nOccupation: {task_info['occupation']}\n\n{task_info['prompt']}"
+            )
         else:
             system_prompt = self.task_strategy.build_system_prompt(task_info, self.config)
             user_prompt = self.task_strategy.build_user_prompt(task_info, self.config)
@@ -696,7 +706,9 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
             deliverables_dir: Optional[str] = None
             task_id = existing_metadata.get("task_id")
             if self.config.persist_deliverables_dir and task_id:
-                deliverables_dir = str(Path(self.config.persist_deliverables_dir) / f"task_{task_id}")
+                # Absolute path so the resources server (which runs from its
+                # own subdir) resolves to the same filesystem location.
+                deliverables_dir = str((Path(self.config.persist_deliverables_dir) / f"task_{task_id}").absolute())
 
             verify_request_body = dict(body_dict)
             verify_request_body["response"] = response_clean.model_dump(mode="json")

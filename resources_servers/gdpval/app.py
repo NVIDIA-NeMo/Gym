@@ -40,7 +40,6 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest, ModelServerRef
-from nemo_gym.reward_profile import compute_aggregate_metrics
 from nemo_gym.server_utils import get_server_url
 
 
@@ -126,13 +125,9 @@ class GDPValResourcesServer(SimpleResourcesServer):
     config: GDPValResourcesServerConfig
 
     def model_post_init(self, context: Any) -> None:
-        self._judge_prompt_fpath: str = (
-            self.config.judge_prompt_template_fpath or _DEFAULT_JUDGE_PROMPT_FPATH
-        )
+        self._judge_prompt_fpath: str = self.config.judge_prompt_template_fpath or _DEFAULT_JUDGE_PROMPT_FPATH
         if self.config.reward_mode == "comparison" and not self.config.reference_deliverables_dir:
-            raise ValueError(
-                "reward_mode=comparison requires reference_deliverables_dir to be set"
-            )
+            raise ValueError("reward_mode=comparison requires reference_deliverables_dir to be set")
         super().model_post_init(context)
 
     async def verify(self, body: GDPValVerifyRequest) -> GDPValVerifyResponse:

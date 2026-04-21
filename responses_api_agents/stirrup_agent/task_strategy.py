@@ -19,6 +19,7 @@ calls these hooks at well-defined points during ``responses()`` and
 ``run()`` so that all Stirrup mechanics (agent creation, history
 conversion, Ray execution) stay in one place.
 """
+
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
@@ -58,9 +59,7 @@ class TaskStrategy(ABC):
         """Return the user/task prompt for the Stirrup agent."""
         ...
 
-    def prepare_input_files(
-        self, task_info: Dict[str, Any]
-    ) -> Optional[str]:
+    def prepare_input_files(self, task_info: Dict[str, Any]) -> Optional[str]:
         """Download / stage any input files the agent needs.
 
         Return the path to a directory containing the files, or ``None``
@@ -73,9 +72,7 @@ class TaskStrategy(ABC):
     # Execution provider
     # ------------------------------------------------------------------
 
-    def get_exec_provider(
-        self, task_info: Dict[str, Any], config: Any
-    ) -> Any:
+    def get_exec_provider(self, task_info: Dict[str, Any], config: Any) -> Any:
         """Return a custom ``CodeExecToolProvider``, or ``None`` for the default local one.
 
         Override this in tasks that need a specialised execution
@@ -107,4 +104,3 @@ class TaskStrategy(ABC):
     def fallback_message_id(self, task_info: Dict[str, Any]) -> str:
         """ID used for the empty-output fallback message."""
         return f"msg-{self.response_id(task_info)}-empty"
-
