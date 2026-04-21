@@ -9,7 +9,10 @@ wmt_translation:
       compute_comet: true
       comet_model: Unbabel/XCOMET-XXL
       comet_batch_size: 16
-      comet_num_gpus: 1
+      # num_gpus=0: share a GPU with vLLM's DP engines rather than claim a
+      # dedicated one (Ray would queue forever because vLLM reserves all GPUs
+      # in its placement group). See app.py for the co-tenant rationale.
+      comet_num_gpus: 0
 
 wmt_translation_simple_agent:
   responses_api_agents:

@@ -121,7 +121,14 @@ class WmtTranslationResourcesServerConfig(BaseResourcesServerConfig):
     compute_comet: bool = True
     comet_model: str = "Unbabel/XCOMET-XXL"
     comet_batch_size: int = 16
-    comet_num_gpus: int = 1
+    # num_gpus=0 lets the COMET task share GPUs with vLLM's DP engines. Ray's
+    # strict_pack placement group for vLLM DP reserves num_gpus=1 per GPU, so
+    # any positive request queues forever. A 0-GPU task skips Ray's GPU
+    # accounting entirely; the task still runs on a real GPU via CUDA_VISIBLE_
+    # DEVICES=<all> — we just co-tenant with vLLM. Enforced non-CPU via an
+    # assert at task entry so a missing GPU fails loud instead of loading
+    # xCOMET-XXL on CPU (~hours).
+    comet_num_gpus: int = 0
     # When True, strip the reasoning preamble before computing BLEU/COMET, matching
     # NeMo-Skills' parse_reasoning=True. Required for reasoning models that emit
     # <think>...</think> preambles (e.g. Nemotron-3-Nano); otherwise the preamble
@@ -159,7 +166,7 @@ class WmtTranslationVerifyResponse(WmtTranslationVerifyRequest, BaseVerifyRespon
 # Build the remote function lazily so importing this module doesn't require
 # Ray to already be initialized. ``config.comet_num_gpus`` parameterises the
 # GPU allocation at call time.
-def _build_comet_remote(num_gpus: int):
+def _build_comet_remote(num_gpus: float):
     @ray.remote(num_gpus=num_gpus)
     def _score_comet(triples: List[Tuple[str, str, str]], model_name: str, batch_size: int) -> List[float]:
         # Imports happen inside the remote so the head process doesn't need
@@ -167,11 +174,20 @@ def _build_comet_remote(num_gpus: int):
         import torch
         from comet import download_model, load_from_checkpoint
 
-        LOG.info("Loading xCOMET model %s on %s", model_name, "cuda" if torch.cuda.is_available() else "cpu")
+        # Hard-assert CUDA for the POC path: num_gpus=0 skips Ray's GPU
+        # accounting, so we rely on CUDA_VISIBLE_DEVICES exposing a real GPU
+        # on the Ray worker's node. Without this assert, the fallback would
+        # load xCOMET-XXL (10B params) on CPU and grind for hours.
+        assert torch.cuda.is_available(), (
+            "wmt_translation COMET task requires a CUDA device. "
+            "This path runs co-tenant with vLLM's DP engines via num_gpus=0; "
+            "if the Ray worker lands on a CPU-only node, fail loud."
+        )
+
+        LOG.info("Loading xCOMET model %s on cuda", model_name)
         ckpt_path = download_model(model_name)
         model = load_from_checkpoint(ckpt_path)
-        model.to("cuda" if torch.cuda.is_available() else "cpu")
-        model.eval()
+        model.to("cuda").eval()
 
         data = [{"src": s, "mt": m, "ref": r} for s, m, r in triples]
         LOG.info("Scoring %d (src, mt, ref) triples at batch_size=%d", len(data), batch_size)
