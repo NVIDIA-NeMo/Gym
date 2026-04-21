@@ -183,6 +183,17 @@ def _build_comet_remote():
     # Pattern copied from resources_servers/code_gen (lcb_integration).
     import os
     import sys
+    from pathlib import Path
+
+    # Resolve the venv site-packages under /opt/Gym (Lustre-mounted, visible
+    # to every node). The Python BINARY that sys.executable points at lives
+    # inside the container-local uv install dir on the head node — NOT
+    # reachable from the extra node's container (which only ran `ray start`,
+    # no uv). We point py_executable at a stock container Python (same
+    # image on every SLURM node) and inject the Lustre-shared site-packages
+    # via PYTHONPATH so `import comet` etc. still resolves.
+    venv_dir = Path(sys.executable).parent.parent  # .venv/bin/python -> .venv
+    site_packages = venv_dir / "lib" / "python3.12" / "site-packages"
 
     env_vars = {
         "HF_HUB_OFFLINE": "0",
@@ -192,10 +203,26 @@ def _build_comet_remote():
         # out without this flag. We need the physical GPUs visible so COMET
         # can torch.cuda() load.
         "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
+        # site-packages for comet, torch, etc. is Lustre-shared; merge it
+        # with whatever PYTHONPATH the inherited env has.
+        "PYTHONPATH": f"{site_packages}:{os.environ.get('PYTHONPATH', '')}",
     }
     for k in ("HF_HOME", "HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"):
         if os.environ.get(k):
             env_vars[k] = os.environ[k]
+
+    # Pick a stock Python 3.12 present in every node's container. The
+    # vllm/sandbox/nemo-skills containers ship python3.12 at
+    # /usr/local/bin (built from source) or /usr/bin (distro). Check in
+    # this order and fall back to bare `python3.12` on PATH.
+    stock_python = os.environ.get("COMET_RAY_PYTHON", "")
+    if not stock_python:
+        for cand in ("/usr/local/bin/python3.12", "/usr/bin/python3.12"):
+            if Path(cand).exists():
+                stock_python = cand
+                break
+        else:
+            stock_python = "python3.12"
 
     # Schedule on the "extra" (DP-unclaimed) node via the custom `extra_gpu`
     # resource advertised by nemo_skills' get_ray_server_cmd on workers with
@@ -206,7 +233,7 @@ def _build_comet_remote():
     @ray.remote(
         num_gpus=0,
         resources={"extra_gpu": 1},
-        runtime_env={"py_executable": sys.executable, "env_vars": env_vars},
+        runtime_env={"py_executable": stock_python, "env_vars": env_vars},
     )
     def _score_comet(triples: List[Tuple[str, str, str]], model_name: str, batch_size: int) -> List[float]:
         import torch
