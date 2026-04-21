@@ -169,8 +169,19 @@ class WmtTranslationVerifyResponse(WmtTranslationVerifyRequest, BaseVerifyRespon
 def _build_comet_remote(num_gpus: float):
     @ray.remote(num_gpus=num_gpus)
     def _score_comet(triples: List[Tuple[str, str, str]], model_name: str, batch_size: int) -> List[float]:
-        # Imports happen inside the remote so the head process doesn't need
-        # `comet` installed; only the Ray worker venv does.
+        # unbabel-comet is not in Gym's main pyproject.toml (it's a
+        # wmt_translation-only heavyweight). Ray workers inherit the driver's
+        # Python env (Gym's main venv), which doesn't have it. Install on
+        # first use; subsequent calls hit the cache and skip the install.
+        import subprocess
+        import sys
+
+        try:
+            from comet import download_model, load_from_checkpoint  # noqa: F401
+        except ImportError:
+            LOG.info("unbabel-comet not installed in Ray worker env; installing")
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet", "unbabel-comet"])
+
         import torch
         from comet import download_model, load_from_checkpoint
 
