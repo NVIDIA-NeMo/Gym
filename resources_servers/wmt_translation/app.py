@@ -168,28 +168,41 @@ class WmtTranslationVerifyResponse(WmtTranslationVerifyRequest, BaseVerifyRespon
 # Ray to already be initialized. ``config.comet_num_gpus`` parameterises the
 # GPU allocation at call time.
 def _build_comet_remote(num_gpus: float):
-    # runtime_env={"py_executable": sys.executable} pins the Ray worker to
-    # THIS server's venv, not the Gym-head driver's. Gym's main venv doesn't
-    # have unbabel-comet; the wmt_translation server's venv does (via
-    # requirements.txt). Without this, the remote task runs in the head venv
-    # and fails with ModuleNotFoundError on `comet` (and the head venv also
-    # lacks pip, so a lazy subprocess install fails too).
+    # runtime_env pins the Ray worker to THIS server's venv (py_executable)
+    # and forces HF ONLINE mode for this task (env_vars). Gym's main venv
+    # doesn't have unbabel-comet; the wmt_translation server's venv does
+    # (via requirements.txt). Without py_executable, the remote task runs
+    # in the head venv and fails with ModuleNotFoundError on `comet`.
+    # Env-var flip: vLLM needs HF_HUB_OFFLINE=1 at startup to dodge HF 429s
+    # on Nemotron model_info, but COMET's xlm-roberta-xxl tokenizer resolver
+    # needs online (returns `None` and throws OSError "Not found: None" in
+    # offline mode even with cached weights). We also propagate HF_TOKEN /
+    # HF_HOME explicitly because runtime_env sandboxes the worker's env.
     # Pattern copied from resources_servers/code_gen (lcb_integration).
+    import os
     import sys
 
-    @ray.remote(num_gpus=num_gpus, runtime_env={"py_executable": sys.executable})
+    env_vars = {
+        "HF_HUB_OFFLINE": "0",
+        "TRANSFORMERS_OFFLINE": "0",
+    }
+    for k in ("HF_HOME", "HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"):
+        if os.environ.get(k):
+            env_vars[k] = os.environ[k]
+
+    @ray.remote(num_gpus=num_gpus, runtime_env={"py_executable": sys.executable, "env_vars": env_vars})
     def _score_comet(triples: List[Tuple[str, str, str]], model_name: str, batch_size: int) -> List[float]:
         import torch
         from comet import download_model, load_from_checkpoint
 
-        # Hard-assert CUDA for the POC path: num_gpus=0 skips Ray's GPU
-        # accounting, so we rely on CUDA_VISIBLE_DEVICES exposing a real GPU
-        # on the Ray worker's node. Without this assert, the fallback would
-        # load xCOMET-XXL (10B params) on CPU and grind for hours.
+        # Hard-assert CUDA: with the extra-node topology the Ray worker
+        # schedules on the 5th (DP-unclaimed) node and gets a full GPU via
+        # num_gpus=1. If it lands on a CPU-only node the fallback would
+        # load xCOMET-XXL (10B params) on CPU and grind for hours — fail loud.
         assert torch.cuda.is_available(), (
             "wmt_translation COMET task requires a CUDA device. "
-            "This path runs co-tenant with vLLM's DP engines via num_gpus=0; "
-            "if the Ray worker lands on a CPU-only node, fail loud."
+            "Expected the Ray worker to land on the extra (DP-unclaimed) node "
+            "via num_gpus=1; got no CUDA. Check server_nodes vs dp_size."
         )
 
         LOG.info("Loading xCOMET model %s on cuda", model_name)
