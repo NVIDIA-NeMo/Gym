@@ -194,8 +194,14 @@ class ArenaJudgeServer(SimpleResourcesServer):
         # the gen-base call; ties and losses both score 0.
         reward = 1.0 if gen_base_verdict in ("A>>B", "A>B") else 0.0
 
+        # ``body.model_dump()`` already carries ``category`` (plus other
+        # declared fields). Drop it before spreading so the RESOLVED
+        # category (post fallback) isn't a duplicate kwarg to the
+        # response constructor.
+        body_dict = body.model_dump()
+        body_dict.pop("category", None)
         return ArenaJudgeVerifyResponse(
-            **body.model_dump(),
+            **body_dict,
             reward=reward,
             judgement_gen_base=gen_base_text,
             judgement_base_gen=base_gen_text,
