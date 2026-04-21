@@ -121,16 +121,15 @@ class WmtTranslationResourcesServerConfig(BaseResourcesServerConfig):
     compute_comet: bool = True
     comet_model: str = "Unbabel/XCOMET-XXL"
     comet_batch_size: int = 16
-    # Fractional (0.01) GPU: co-tenant with vLLM's DP engines. Ray zeroes
-    # CUDA_VISIBLE_DEVICES for num_gpus=0 tasks, which means the worker can't
-    # see the hardware at all — our CUDA assert then fires. A tiny fractional
-    # request keeps Ray's GPU env-var injection intact, so the task inherits
-    # the node's full CUDA_VISIBLE_DEVICES. Per Brian's suggestion. Ray's
-    # strict_pack placement group for DP reserves num_gpus=1 per GPU, so any
-    # fraction > 0 that fits will schedule; 0.01 is near-zero-impact on Ray's
-    # accounting. If the Gym Ray cluster is disjoint from vLLM's (single-node
-    # smoke), there's no contention either way.
-    comet_num_gpus: float = 0.01
+    # Dedicated-GPU topology. Per-recipe requirement: run_<name>_gym.py must
+    # request server_nodes = dp_size + 1 so Ray sees an extra node with
+    # unclaimed GPUs. vLLM's strict-pack placement group reserves exactly
+    # dp_size * 1 node worth of GPUs (num_gpus=1 each), leaving the extra
+    # node's GPUs free. num_gpus=1 here picks a whole GPU on that extra
+    # node. Earlier num_gpus=0.01 "co-tenant" path doesn't survive the
+    # production DP setup: Ray sees vLLM's placement group holding all GPUs
+    # at 1.0/1.0, so any fractional request also queues.
+    comet_num_gpus: float = 1.0
     # When True, strip the reasoning preamble before computing BLEU/COMET, matching
     # NeMo-Skills' parse_reasoning=True. Required for reasoning models that emit
     # <think>...</think> preambles (e.g. Nemotron-3-Nano); otherwise the preamble

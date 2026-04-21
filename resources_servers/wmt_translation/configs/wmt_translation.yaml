@@ -9,12 +9,11 @@ wmt_translation:
       compute_comet: true
       comet_model: Unbabel/XCOMET-XXL
       comet_batch_size: 16
-      # num_gpus=0.01: fractional GPU share with vLLM's DP engines. num_gpus=0
-      # doesn't work — Ray sets CUDA_VISIBLE_DEVICES="" for 0-GPU tasks, so
-      # the worker can't see the hardware. A tiny fraction leaves Ray's GPU
-      # env-var injection alone, so the worker inherits the node's full
-      # CUDA_VISIBLE_DEVICES. Per Brian's suggestion. See app.py.
-      comet_num_gpus: 0.01
+      # Full 1.0 GPU on a dedicated worker node. Gym rollout script requests
+      # server_nodes=N+1 while vLLM's DP=N uses N nodes via strict-pack; the
+      # extra node's 8 GPUs stay unclaimed in Ray's accounting, so this
+      # task schedules there cleanly. See app.py / run_wmt24pp_gym.py.
+      comet_num_gpus: 1
 
 wmt_translation_simple_agent:
   responses_api_agents:
