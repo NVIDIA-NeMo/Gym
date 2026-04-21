@@ -1,7 +1,7 @@
 [
   {
     "agent_ref": {
-      "name": "cvdp_simple_agent"
+      "name": "cvdp_agent"
     },
     "agent_metrics": {
       "mean/reward": 0.0,

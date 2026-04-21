@@ -17,11 +17,12 @@
 NeMo Skills Tools Resources Server.
 
 This resources server provides:
-- Integration with nemo_skills ToolManager for tool execution (e.g., PythonTool)
+- Integration with nemo_skills ToolManager for tool execution (e.g., DirectPythonTool)
 - Verification delegation to math_with_judge
 """
 
 import asyncio
+import inspect
 import json
 import logging
 import subprocess
@@ -34,6 +35,7 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse
 from nemo_skills.mcp.tool_manager import ToolManager
+from nemo_skills.mcp.utils import locate
 from pydantic import ConfigDict, Field
 
 from nemo_gym.base_resources_server import (
@@ -65,7 +67,7 @@ class NSToolsConfig(BaseResourcesServerConfig):
     # At minimum, should include math_with_judge
     verifiers: Dict[str, ResourcesServerRef] = Field(default_factory=dict)
 
-    # NeMo Skills tool modules to load (e.g., "nemo_skills.mcp.servers.python_tool.PythonTool")
+    # NeMo Skills tool modules to load (e.g., "nemo_skills.mcp.servers.python_tool::DirectPythonTool")
     nemo_skills_tools: List[str] = Field(default_factory=list)
 
     # Per-tool overrides for nemo_skills tools
@@ -75,7 +77,7 @@ class NSToolsConfig(BaseResourcesServerConfig):
     sandbox_host: str = "127.0.0.1"
     sandbox_port: str = "6000"
 
-    # python_tool HTTP server port (spawned automatically)
+    # Legacy python_tool HTTP server port (only used for pre-main HTTP PythonTool variants)
     python_tool_port: int = 8765
 
     # Verbose logging for tool execution timing (disabled by default)
@@ -132,14 +134,19 @@ class NSToolsResourcesServer(SimpleResourcesServer):
     _tool_name_map: Dict[str, str] = {}  # Maps tool names to qualified names
     _python_tool_process: Optional[subprocess.Popen] = None
     _timing_by_session: Dict[str, list] = {}  # session_id -> list of timing records
+    _uses_python_tool_sidecar: bool = False
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
 
         # Initialize nemo_skills ToolManager if tools are configured
         if self.config.nemo_skills_tools:
-            # Start the python_tool HTTP server first
-            self._start_python_tool_server()
+            self._uses_python_tool_sidecar = any(
+                self._tool_uses_python_tool_sidecar(tool_spec) for tool_spec in self.config.nemo_skills_tools
+            )
+            if self._uses_python_tool_sidecar:
+                # Legacy HTTP PythonTool variants require a local sidecar process.
+                self._start_python_tool_server()
             self._initialize_nemo_skills_tools()
 
             # Register a catch-all endpoint for tool execution
@@ -148,9 +155,20 @@ class NSToolsResourcesServer(SimpleResourcesServer):
 
         return app
 
+    def _tool_uses_python_tool_sidecar(self, tool_spec: str) -> bool:
+        """Detect whether a tool spec refers to the HTTP-backed PythonTool."""
+        tool_cls_or_obj = locate(tool_spec)
+        tool = tool_cls_or_obj() if inspect.isclass(tool_cls_or_obj) else tool_cls_or_obj
+        if tool.__class__.__name__ != "PythonTool":
+            return False
+
+        default_config = tool.default_config()
+        client_params = default_config.get("client_params", {})
+        return "base_url" in client_params
+
     def _start_python_tool_server(self):
-        """Spawn python_tool HTTP server as a subprocess."""
-        logger.info(f"Starting python_tool HTTP server on port {self.config.python_tool_port}")
+        """Spawn the python_tool HTTP sidecar as a subprocess."""
+        logger.info("Starting python_tool HTTP server on port %s", self.config.python_tool_port)
 
         # Build command with sandbox config
         cmd = [
@@ -178,7 +196,7 @@ class NSToolsResourcesServer(SimpleResourcesServer):
         logger.info(f"python_tool HTTP server started (PID: {self._python_tool_process.pid})")
 
     def _wait_for_server_ready(self, timeout: float = 30.0, poll_interval: float = 0.5):
-        """Wait for the python_tool HTTP server to be ready."""
+        """Wait for the python_tool HTTP sidecar to be ready."""
         url = f"http://127.0.0.1:{self.config.python_tool_port}/mcp"
         start_time = time.time()
 
@@ -234,14 +252,20 @@ class NSToolsResourcesServer(SimpleResourcesServer):
                 "sandbox_type": "local",
                 "host": self.config.sandbox_host,
                 "port": self.config.sandbox_port,
+                "disable_session_restore": self.config.disable_session_restore,
             }
         }
 
-        # Merge in PythonTool URL override to point to our spawned HTTP server
-        overrides = dict(self.config.nemo_skills_tool_overrides)
-        python_tool_url = f"http://127.0.0.1:{self.config.python_tool_port}/mcp"
-        overrides.setdefault("PythonTool", {})
-        overrides["PythonTool"]["client_params"] = {"base_url": python_tool_url}
+        overrides = {
+            tool_name: dict(tool_config) for tool_name, tool_config in self.config.nemo_skills_tool_overrides.items()
+        }
+        if self._uses_python_tool_sidecar:
+            # Legacy HTTP PythonTool expects an explicit sidecar URL.
+            python_tool_url = f"http://127.0.0.1:{self.config.python_tool_port}/mcp"
+            overrides.setdefault("PythonTool", {})
+            client_params = dict(overrides["PythonTool"].get("client_params", {}))
+            client_params["base_url"] = python_tool_url
+            overrides["PythonTool"]["client_params"] = client_params
 
         self.tool_manager = ToolManager(
             module_specs=self.config.nemo_skills_tools,
@@ -424,7 +448,7 @@ class NSToolsResourcesServer(SimpleResourcesServer):
         if self.tool_manager:
             await self.tool_manager.shutdown()
 
-        # Terminate the python_tool subprocess
+        # Terminate the python_tool subprocess if one was started.
         if self._python_tool_process:
             logger.info(f"Terminating python_tool server (PID: {self._python_tool_process.pid})")
             self._python_tool_process.terminate()

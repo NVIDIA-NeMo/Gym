@@ -23,6 +23,7 @@ import yaml
 
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.global_config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.reward_profile import compute_aggregate_metrics
 from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
 
@@ -119,46 +120,101 @@ class TestRolloutCollection:
             {
                 "_ng_task_index": 0,
                 "_ng_rollout_index": 0,
-                "responses_create_params": {"input": [], "seed": 0, "temperature": 0.1},
+                "responses_create_params": {
+                    "input": [],
+                    "metadata": {"extra_body": '{"seed": 0}'},
+                    "temperature": 0.1,
+                },
                 "x": 0,
                 "agent_ref": {"name": "my_agent"},
             },
             {
                 "_ng_task_index": 0,
                 "_ng_rollout_index": 1,
-                "responses_create_params": {"input": [], "seed": 1, "temperature": 0.1},
+                "responses_create_params": {
+                    "input": [],
+                    "metadata": {"extra_body": '{"seed": 1}'},
+                    "temperature": 0.1,
+                },
                 "x": 0,
                 "agent_ref": {"name": "my_agent"},
             },
             {
                 "_ng_task_index": 1,
                 "_ng_rollout_index": 0,
-                "responses_create_params": {"input": [], "seed": 0, "temperature": 0.1},
+                "responses_create_params": {
+                    "input": [],
+                    "metadata": {"extra_body": '{"seed": 0}'},
+                    "temperature": 0.1,
+                },
                 "x": 1,
                 "agent_ref": {"name": "my_agent"},
             },
             {
                 "_ng_task_index": 1,
                 "_ng_rollout_index": 1,
-                "responses_create_params": {"input": [], "seed": 1, "temperature": 0.1},
+                "responses_create_params": {
+                    "input": [],
+                    "metadata": {"extra_body": '{"seed": 1}'},
+                    "temperature": 0.1,
+                },
                 "x": 1,
                 "agent_ref": {"name": "my_agent"},
             },
             {
                 "_ng_task_index": 2,
                 "_ng_rollout_index": 0,
-                "responses_create_params": {"input": [], "seed": 0, "temperature": 0.1},
+                "responses_create_params": {
+                    "input": [],
+                    "metadata": {"extra_body": '{"seed": 0}'},
+                    "temperature": 0.1,
+                },
                 "x": 2,
                 "agent_ref": {"name": "my_agent"},
             },
             {
                 "_ng_task_index": 2,
                 "_ng_rollout_index": 1,
-                "responses_create_params": {"input": [], "seed": 1, "temperature": 0.1},
+                "responses_create_params": {
+                    "input": [],
+                    "metadata": {"extra_body": '{"seed": 1}'},
+                    "temperature": 0.1,
+                },
                 "x": 2,
                 "agent_ref": {"name": "my_agent"},
             },
         ]
+
+    def test_preprocess_rows_num_repeats_add_seed_passes_pydantic_validation(self, tmp_path: Path) -> None:
+        """Rows emitted with num_repeats_add_seed=True must round-trip through the strict
+        NeMoGymResponseCreateParamsNonStreaming schema (extra='forbid'). Seed is passed via
+        metadata.extra_body so it doesn't violate the OpenAI Responses schema."""
+        fpath = tmp_path / "input.jsonl"
+        samples = [json.dumps({"responses_create_params": {"input": []}, "x": i}) for i in range(2)]
+        fpath.write_text("\n".join(samples) + "\n")
+
+        config = RolloutCollectionConfig(
+            agent_name="my_agent",
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+            num_repeats=3,
+            num_repeats_add_seed=True,
+        )
+
+        rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+
+        assert len(rows) == 6
+        seeds_seen = []
+        for row in rows:
+            rcp = row["responses_create_params"]
+            # seed lives in metadata.extra_body, not at the top level
+            assert "seed" not in rcp
+            extra_body = json.loads(rcp["metadata"]["extra_body"])
+            seeds_seen.append(extra_body["seed"])
+            # Must still pass the strict schema validation
+            NeMoGymResponseCreateParamsNonStreaming.model_validate(rcp)
+        # Seeds should track rollout index within each task (0, 1, 2 per task).
+        assert seeds_seen == [0, 1, 2, 0, 1, 2]
 
     async def test_run_from_config_sanity(self, tmp_path: Path) -> None:
         input_jsonl_fpath = tmp_path / "input.jsonl"

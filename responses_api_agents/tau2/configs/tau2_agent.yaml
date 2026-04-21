@@ -1,0 +1,19 @@
+tau2_agent:
+  responses_api_agents:
+    tau2:
+      entrypoint: app.py
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      user_model_server:
+        type: responses_api_models
+        name: policy_model
+      num_workers: 1
+      user_llm_args: {}
+      max_steps: 200
+      debug: false
+      print_step_counts: false
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: responses_api_agents/tau2/data/example.jsonl
