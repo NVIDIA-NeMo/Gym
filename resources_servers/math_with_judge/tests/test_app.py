@@ -906,12 +906,15 @@ class TestSkillsParityMode:
         server.server_client.post = post
 
         # extracted ("forty-two") != expected ("42") -> no prefill -> LLM fires.
+        # _verify_answer_with_judge always runs bidirectional (up to 2 calls),
+        # so a mock judge that returns "[[A=B]]" first-order triggers a
+        # second-order call for positional-bias cross-check.
         resp = await server.verify(self._req("\\boxed{forty-two}", expected="42"))
-        assert post.await_count == 1
+        assert post.await_count == 2
         assert resp.reward == approx(1.0)
         assert resp.library_reward == approx(1.0)  # symbolic diagnostic preserved
         assert resp.extracted_answer == "forty-two"
-        assert len(resp.judge_evaluations) == 1
+        assert len(resp.judge_evaluations) == 2
 
     async def test_think_stripped_before_extraction(self) -> None:
         # A stray \boxed inside <think> should not be extracted — only the
@@ -1004,12 +1007,14 @@ class TestParseReasoningLikeSkills:
         assert resp.reward == approx(1.0)
         assert resp.extracted_answer == "42"
 
-    async def test_truncated_no_close_think_returns_no_answer(self):
-        # No </think> means reasoning was truncated mid-flight. Even if a
-        # \boxed{} appears in the reasoning trace, we drop it — Skills' metric
-        # treats predicted_answer=None as no_answer.
+    async def test_no_boxed_returns_no_answer(self):
+        # When the model's output contains no \boxed{...} at all (common on
+        # truncated rollouts that ran out of tokens before emitting a final
+        # answer), _search_boxed returns None and we short-circuit to
+        # reward=0 without calling math-verify — mirrors Skills'
+        # predicted_answer=None -> no_answer.
         server = self._build()
-        resp = await server.verify(self._req("First step \\boxed{99} more work", expected="42"))
+        resp = await server.verify(self._req("<think>still working on it</think>Need more time", expected="42"))
         assert resp.reward == approx(0.0)
         assert resp.extracted_answer is None
         assert resp.library_reward == approx(0.0)
