@@ -182,16 +182,51 @@ def _build_comet_remote():
     # HF_HOME explicitly because runtime_env sandboxes the worker's env.
     # Pattern copied from resources_servers/code_gen (lcb_integration).
     import os
+    import shutil
     import sys
     from pathlib import Path
 
-    # Resolve the venv site-packages under /opt/Gym (Lustre-mounted, visible
-    # to every node). The Python BINARY that sys.executable points at lives
-    # inside the container-local uv install dir on the head node — NOT
-    # reachable from the extra node's container (which only ran `ray start`,
-    # no uv). We point py_executable at a stock container Python (same
-    # image on every SLURM node) and inject the Lustre-shared site-packages
-    # via PYTHONPATH so `import comet` etc. still resolves.
+    # Cross-node Python setup. The wmt_translation venv's .venv/bin/python is
+    # a symlink into a CONTAINER-LOCAL uv install dir (created on the head
+    # when requirements.txt was installed) — the extra node's container
+    # never ran uv, so that path doesn't exist there. And the extra node's
+    # stock /usr/local/bin/python3.12 is ABI-incompatible with the venv's
+    # compiled extensions (torchvision fails with "partially initialized
+    # module" on import).
+    #
+    # Fix: make the uv-installed Python dir itself reachable over Lustre.
+    # python-build-standalone binaries (what uv ships) are relocatable, so
+    # we mirror the whole install dir under /opt/Gym/.cache/comet-python/
+    # (Lustre) and hand that path to Ray as py_executable. One-time copy on
+    # first invocation — subsequent calls are a no-op existence check.
+    venv_python = Path(sys.executable).resolve()
+    if not venv_python.exists():
+        raise RuntimeError(
+            f"Server-side sys.executable doesn't exist? {venv_python}. "
+            "Expected the venv's python to resolve into the local uv install."
+        )
+    uv_python_root = venv_python.parent.parent  # .../cpython-3.12.12-.../
+
+    lustre_python_root = Path("/opt/Gym/.cache/comet-python") / uv_python_root.name
+    lustre_python_bin = lustre_python_root / "bin" / venv_python.name
+    if not lustre_python_bin.exists():
+        LOG.info(
+            "Mirroring uv Python install %s -> %s for cross-node Ray tasks",
+            uv_python_root,
+            lustre_python_root,
+        )
+        lustre_python_root.parent.mkdir(parents=True, exist_ok=True)
+        # copytree refuses to overwrite, so use a two-stage atomic rename
+        # via a .tmp dir to avoid half-populated caches if we're interrupted.
+        tmp = lustre_python_root.with_suffix(".tmp")
+        if tmp.exists():
+            shutil.rmtree(tmp)
+        shutil.copytree(uv_python_root, tmp, symlinks=True)
+        tmp.rename(lustre_python_root)
+
+    # Resolve the venv site-packages (comet, torch, torchvision — all Lustre
+    # files already, not symlinks). Inject via PYTHONPATH so the Lustre-
+    # mirrored Python can import them.
     venv_dir = Path(sys.executable).parent.parent  # .venv/bin/python -> .venv
     site_packages = venv_dir / "lib" / "python3.12" / "site-packages"
 
@@ -211,19 +246,6 @@ def _build_comet_remote():
         if os.environ.get(k):
             env_vars[k] = os.environ[k]
 
-    # Pick a stock Python 3.12 present in every node's container. The
-    # vllm/sandbox/nemo-skills containers ship python3.12 at
-    # /usr/local/bin (built from source) or /usr/bin (distro). Check in
-    # this order and fall back to bare `python3.12` on PATH.
-    stock_python = os.environ.get("COMET_RAY_PYTHON", "")
-    if not stock_python:
-        for cand in ("/usr/local/bin/python3.12", "/usr/bin/python3.12"):
-            if Path(cand).exists():
-                stock_python = cand
-                break
-        else:
-            stock_python = "python3.12"
-
     # Schedule on the "extra" (DP-unclaimed) node via the custom `extra_gpu`
     # resource advertised by nemo_skills' get_ray_server_cmd on workers with
     # SLURM_PROCID >= dp_size. num_gpus=0 because the extra node hides its
@@ -233,7 +255,7 @@ def _build_comet_remote():
     @ray.remote(
         num_gpus=0,
         resources={"extra_gpu": 1},
-        runtime_env={"py_executable": stock_python, "env_vars": env_vars},
+        runtime_env={"py_executable": str(lustre_python_bin), "env_vars": env_vars},
     )
     def _score_comet(triples: List[Tuple[str, str, str]], model_name: str, batch_size: int) -> List[float]:
         import torch
