@@ -343,9 +343,12 @@ class ArenaJudgeServer(SimpleResourcesServer):
             answer_key="verdict_gen_base",
         )[0]
         # Per-category breakdown (hard_prompt vs creative_writing).
+        # Note: the Gym API parameter is ``subset_key``, not ``field`` (the
+        # migrate-benchmark skill doc shows ``field=`` but the actual
+        # signature in nemo_gym/reward_profile.py is ``subset_key=``).
         subset_metrics = compute_subset_metrics(
             tasks,
-            field="category",
+            subset_key="category",
             score_fn=self._arena_score_fn,
             answer_key="verdict_gen_base",
         )
