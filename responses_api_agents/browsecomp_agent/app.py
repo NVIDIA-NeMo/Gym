@@ -91,6 +91,16 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         if self.config.max_context_tokens and self.config.context_reset_pct:
             reset_threshold = int(self.config.max_context_tokens * self.config.context_reset_pct)
 
+        def print_log(label):
+            q = body.input[0].content if body.input else ""
+            last = new_outputs[-1] if new_outputs else None
+            print(
+                f"[browsecomp {label} step={step}]\n"
+                f"  q:    {q}\n"
+                f"  last: {getattr(last, 'type', 'none')} → {last}",
+                flush=True,
+            )
+
         while True:
             step += 1
 
@@ -212,9 +222,14 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                     new_output = last_tool.output + nudge_msg
                     new_outputs[-1] = last_tool.model_copy(update={"output": new_output})
 
+            if step % 10 == 0:
+                print_log("loop")
+
             # Check if max steps is not None and if we have exhausted it.
             if self.config.max_steps and step >= self.config.max_steps:
                 break
+
+        print_log("final")
 
         # Propogate any extra cookies necessary for downstream verification
         for k, v in (*resources_server_cookies.items(), *model_server_cookies.items()):
