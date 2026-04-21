@@ -9,6 +9,12 @@ math_with_judge:
         input: []
       }
       should_use_judge: false
+      # Default off. Benchmarks that mirror Skills' `eval_type=math`
+      # (apex-shortlist / aime25 / hmmt_feb25) flip this on in their own
+      # config to get Skills' parse_reasoning + search_boxed extraction
+      # on the symbolic-only path. OmegaConf struct mode requires the key
+      # be declared in the base config for `_inherit_from` overrides to work.
+      parse_reasoning_like_skills: false
       domain: math
       verified: false
       description: OpenMathReasoning math dataset with math-verify and LLM-as-a-judge
