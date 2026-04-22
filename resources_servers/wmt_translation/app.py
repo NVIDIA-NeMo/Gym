@@ -262,7 +262,9 @@ def _build_comet_remote():
         resources={"extra_gpu": 1},
         runtime_env={"py_executable": str(lustre_python_bin), "env_vars": env_vars},
     )
-    def _score_comet(triples: List[Tuple[str, str, str]], model_name: str, batch_size: int) -> List[float]:
+    def _score_comet(
+        triples: List[Tuple[str, str, str]], model_name: str, batch_size: int, gpu_idx: int = 0
+    ) -> List[float]:
         import torch
         from comet import download_model, load_from_checkpoint
 
@@ -276,15 +278,32 @@ def _build_comet_remote():
             "Expected the Ray worker to land on the extra node via the "
             "extra_gpu custom resource; got no CUDA."
         )
+        # Pin this shard to a specific GPU on the extra node. Without this
+        # every task defaults to cuda:0 and OOMs (8 × 10B-param xCOMET would
+        # need ~320 GB on the first GPU alone).
+        num_devices = torch.cuda.device_count()
+        assert num_devices > 0, "No CUDA devices visible to the Ray task."
+        device = f"cuda:{gpu_idx % num_devices}"
 
-        LOG.info("Loading xCOMET model %s on cuda", model_name)
+        LOG.info(
+            "Loading xCOMET model %s on %s (shard gpu_idx=%d, num_devices=%d)",
+            model_name,
+            device,
+            gpu_idx,
+            num_devices,
+        )
         ckpt_path = download_model(model_name)
         model = load_from_checkpoint(ckpt_path)
-        model.to("cuda").eval()
+        model.to(device).eval()
 
         data = [{"src": s, "mt": m, "ref": r} for s, m, r in triples]
-        LOG.info("Scoring %d (src, mt, ref) triples at batch_size=%d", len(data), batch_size)
-        result = model.predict(data, batch_size=batch_size)
+        LOG.info("Scoring %d (src, mt, ref) triples at batch_size=%d on %s", len(data), batch_size, device)
+        # Constrain lightning's pytorch_lightning `Trainer` (used under
+        # `model.predict`) to this task's GPU too. xCOMET's predict()
+        # instantiates a Trainer with `devices="auto"` which otherwise
+        # auto-detects all 8 visible GPUs and tries to DataParallel across
+        # them — fighting the other 7 sibling tasks. `gpus=[idx]` pins it.
+        result = model.predict(data, batch_size=batch_size, devices=[gpu_idx % num_devices])
         return list(result.scores)
 
     return _score_comet
@@ -422,7 +441,8 @@ class WmtTranslationResourcesServer(SimpleResourcesServer):
                     self.config.comet_model,
                 )
                 futures = [
-                    remote_fn.remote(shard, self.config.comet_model, self.config.comet_batch_size) for shard in shards
+                    remote_fn.remote(shard, self.config.comet_model, self.config.comet_batch_size, gpu_idx=i)
+                    for i, shard in enumerate(shards)
                 ]
                 shard_results: List[List[float]] = ray.get(futures)
                 scores: List[float] = [s for chunk in shard_results for s in chunk]
