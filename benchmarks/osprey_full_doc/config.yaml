@@ -1,0 +1,19 @@
+config_paths:
+  - resources_servers/osprey_full_doc/configs/osprey_full_doc.yaml
+
+osprey_full_doc_benchmark_resources_server:
+  _inherit_from: osprey_full_doc_resources_server
+
+osprey_full_doc_benchmark_agent:
+  _inherit_from: osprey_full_doc_agent
+  responses_api_agents:
+    tool_simulation_agent:
+      resources_server:
+        name: osprey_full_doc_benchmark_resources_server
+      datasets:
+      - name: osprey_full_doc
+        type: benchmark
+        jsonl_fpath: benchmarks/osprey_full_doc/data/osprey_full_doc_benchmark.jsonl
+        prompt_config: null
+        prepare_script: benchmarks/osprey_full_doc/prepare.py
+        num_repeats: 1

@@ -1,0 +1,20 @@
+osprey_full_doc_resources_server:
+  resources_servers:
+    osprey_full_doc:
+      entrypoint: app.py
+      domain: instruction_following
+      verified: false
+      description: Osprey Document AI exact-match extraction benchmark.
+      value: Preserve Osprey deterministic extraction scoring inside NeMo Gym.
+
+osprey_full_doc_agent:
+  responses_api_agents:
+    tool_simulation_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: osprey_full_doc_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets: []
