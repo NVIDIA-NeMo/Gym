@@ -14,6 +14,7 @@
 # limitations under the License.
 import json
 import re
+import time
 from typing import List
 
 from fastapi import Request, Response
@@ -91,15 +92,38 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         if self.config.max_context_tokens and self.config.context_reset_pct:
             reset_threshold = int(self.config.max_context_tokens * self.config.context_reset_pct)
 
+        # Per-step wall times since the last loop/start print; cleared after each loop log.
+        step_times: List[float] = []
+        # Step indices at which the context was reset, since the last loop/start print.
+        context_reset_steps: List[int] = []
+
         def print_log(label):
             q = body.input[0].content if body.input else ""
             last = new_outputs[-1] if new_outputs else None
+            if step_times:
+                stats = (
+                    f"n={len(step_times)} "
+                    f"min={min(step_times):.2f}s "
+                    f"avg={sum(step_times) / len(step_times):.2f}s "
+                    f"max={max(step_times):.2f}s"
+                )
+                series = "[" + ", ".join(f"{t:.2f}" for t in step_times) + "]"
+            else:
+                stats = "n=0"
+                series = "[]"
+            ctx = ", ".join(str(s) for s in context_reset_steps) if context_reset_steps else "none"
             print(
                 f"[browsecomp {label} step={step}]\n"
+                f"  step_times: {stats}\n"
+                f"  step_times_s: {series}\n"
+                f"  context_cleared_at: {ctx}\n"
                 f"  q:    {q}\n"
                 f"  last: {getattr(last, 'type', 'none')} → {last}",
                 flush=True,
             )
+
+        print_log("start")
+        step_start = time.monotonic()
 
         while True:
             step += 1
@@ -133,6 +157,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                     new_outputs = self._extract_last_rounds(new_outputs)
                 else:
                     new_outputs = []
+                context_reset_steps.append(step)
                 continue
 
             output = model_response.output
@@ -222,8 +247,14 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                     new_output = last_tool.output + nudge_msg
                     new_outputs[-1] = last_tool.model_copy(update={"output": new_output})
 
+            now = time.monotonic()
+            step_times.append(now - step_start)
+            step_start = now
+
             if step % 10 == 0:
                 print_log("loop")
+                step_times.clear()
+                context_reset_steps.clear()
 
             # Check if max steps is not None and if we have exhausted it.
             if self.config.max_steps and step >= self.config.max_steps:
