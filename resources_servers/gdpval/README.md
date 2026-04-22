@@ -7,7 +7,7 @@ Two modes via `reward_mode` config:
 - `rubric` (default) — LLM judge scores each deliverable against a per-task
   rubric, reward in `[0.0, 1.0]`.
 - `comparison` — pairwise judge compares eval deliverable vs. a reference
-  rollout (`reference_rollouts_fpath` must be set), reward in
+  rollout (`reference_deliverables_dir` must be set), reward in
   `{0.0, 0.5, 1.0}`. `aggregate_metrics` reduces to an ELO rating.
 
 Canonical entry point is the benchmark at `benchmarks/gdpval/`:
