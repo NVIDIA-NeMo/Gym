@@ -158,11 +158,18 @@ class TestArenaJudgeServer:
 
     def _mock_judge_sequence(self, server_mock: MagicMock, judge_texts: list[str]) -> None:
         """Configure server_client.post to return chat.completion responses
-        in order — matches what /v1/chat/completions actually returns."""
+        in order — matches what /v1/chat/completions actually returns.
+
+        The judge code path calls ``get_response_json(response)`` which
+        runs ``orjson.loads(await response.read())`` — so ``read()`` must
+        return the JSON-encoded bytes, not a dict.
+        """
+        import json as _json
+
         response_mocks = []
         for text in judge_texts:
             resp = AsyncMock()
-            resp.json = AsyncMock(return_value=_make_chat_completion(text))
+            resp.read = AsyncMock(return_value=_json.dumps(_make_chat_completion(text)).encode())
             response_mocks.append(resp)
         server_mock.post = AsyncMock(side_effect=response_mocks)
 
@@ -328,9 +335,11 @@ class TestArenaJudgeServer:
     async def test_creative_writing_category_uses_creative_prompt(self, config: ArenaJudgeConfig) -> None:
         # Verify that distinct prompts are loaded per category by capturing
         # the messages sent to the judge.
+        import json as _json
+
         server_mock = MagicMock(spec=ServerClient)
         resp = AsyncMock()
-        resp.json = AsyncMock(return_value=_make_chat_completion("[[A>B]]"))
+        resp.read = AsyncMock(return_value=_json.dumps(_make_chat_completion("[[A>B]]")).encode())
         server_mock.post = AsyncMock(return_value=resp)
         server = ArenaJudgeServer(config=config, server_client=server_mock)
 
@@ -352,6 +361,89 @@ class TestArenaJudgeServer:
             system_messages = [m for m in request_params.messages if m["role"] == "system"]
             assert len(system_messages) == 1
             assert "generating your own answer" not in system_messages[0]["content"]
+
+
+class TestComputeAndKeyMetrics:
+    """Cover the non-_score_fn branches of compute_metrics + get_key_metrics."""
+
+    def _cfg(self) -> ArenaJudgeConfig:
+        return ArenaJudgeConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="arena_judge",
+            judge_model_server=ModelServerRef(type="responses_api_models", name="m"),
+            judge_chat_completions_create_params=NeMoGymChatCompletionCreateParamsNonStreaming(messages=[]),
+        )
+
+    def test_compute_metrics_includes_category_subsets(self) -> None:
+        server = ArenaJudgeServer(config=self._cfg(), server_client=MagicMock(spec=ServerClient))
+        # 2 tasks × 2 rollouts with distinct categories.
+        tasks = [
+            [
+                {"verdict_gen_base": "A>B", "verdict_base_gen": "B>A", "category": "hard_prompt"},
+                {"verdict_gen_base": "A=B", "verdict_base_gen": "A=B", "category": "hard_prompt"},
+            ],
+            [
+                {"verdict_gen_base": "B>>A", "verdict_base_gen": "A>>B", "category": "creative_writing"},
+                {"verdict_gen_base": "B>A", "verdict_base_gen": "A>B", "category": "creative_writing"},
+            ],
+        ]
+        metrics = server.compute_metrics(tasks)
+        # Overall pass@1/wins should be present.
+        assert any(k.startswith("pass@1[avg-of-") and k.endswith("/wins") for k in metrics), metrics
+        # Per-category keys should be prefixed with the subset name.
+        assert any(k.startswith("hard_prompt/") for k in metrics)
+        assert any(k.startswith("creative_writing/") for k in metrics)
+
+    def test_get_key_metrics_picks_token_means_and_pass_k(self) -> None:
+        server = ArenaJudgeServer(config=self._cfg(), server_client=MagicMock(spec=ServerClient))
+        agent_metrics = {
+            "mean/input_tokens": 100.0,
+            "mean/output_tokens": 200.0,
+            "pass@1[avg-of-4]/wins": 0.5,
+            "pass@4/wins": 0.75,
+            "pass@4/no_answer": 0.01,  # excluded by exclude_names
+        }
+        key = server.get_key_metrics(agent_metrics)
+        assert key["mean/input_tokens"] == 100.0
+        assert key["mean/output_tokens"] == 200.0
+        assert "pass@1[avg-of-4]/wins" in key
+        assert "pass@4/wins" in key
+        assert "pass@4/no_answer" not in key
+
+
+class TestExtractChatCompletionEdgeCases:
+    def test_no_choices_returns_empty(self) -> None:
+        from nemo_gym.openai_utils import NeMoGymChatCompletion
+
+        completion = NeMoGymChatCompletion.model_validate(
+            {
+                "id": "x",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "m",
+                "choices": [],
+            }
+        )
+        assert ArenaJudgeServer._extract_chat_completion_text(completion) == ""
+
+
+class TestModelPostInitValidation:
+    def test_bad_default_category_raises(self) -> None:
+        cfg = ArenaJudgeConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="arena_judge",
+            judge_model_server=ModelServerRef(type="responses_api_models", name="m"),
+            judge_chat_completions_create_params=NeMoGymChatCompletionCreateParamsNonStreaming(messages=[]),
+            default_category="nonexistent",
+        )
+        # judge_prompt_paths defaults to {hard_prompt, creative_writing};
+        # default_category="nonexistent" should fail init.
+        with pytest.raises(ValueError, match="default_category"):
+            ArenaJudgeServer(config=cfg, server_client=MagicMock(spec=ServerClient))
 
 
 class TestScoreFn:
