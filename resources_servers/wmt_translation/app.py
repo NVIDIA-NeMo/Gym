@@ -116,11 +116,16 @@ class WmtTranslationResourcesServerConfig(BaseResourcesServerConfig):
         comet_num_gpus: Deprecated — scheduling now uses the `extra_gpu`
             custom Ray resource (advertised by nemo_skills' patched
             `get_ray_server_cmd` on DP-excess worker nodes).
+        comet_num_shards: Number of parallel Ray tasks to shard COMET
+            scoring across. Each task requests `extra_gpu: 1`, so the
+            upper limit is the extra node's GPU count (default 8 on the
+            A100 draco nodes). Set to 1 for single-GPU scoring.
     """
 
     compute_comet: bool = True
     comet_model: str = "Unbabel/XCOMET-XXL"
     comet_batch_size: int = 16
+    comet_num_shards: int = 8
     # Dedicated-node topology with GPUs hidden from Ray:
     #   * Recipe requests server_nodes = dp_size + 1.
     #   * get_ray_server_cmd starts the extra node with `--num-gpus=0` +
@@ -389,24 +394,41 @@ class WmtTranslationResourcesServer(SimpleResourcesServer):
                 per_run.append(corpus_bleu(preds, [refs], tokenize=tokenize).score)
             bleu_per_pair[(src, tgt)] = per_run
 
-        # 3. Optional: run COMET on one Ray GPU actor. Single remote call
-        #    so the xCOMET-XXL checkpoint is loaded exactly once.
+        # 3. Optional: fan out COMET across the full extra node. The extra
+        #    node advertises `extra_gpu: 8` (one per physical GPU); we
+        #    dispatch `comet_num_shards` parallel Ray tasks each requesting
+        #    `extra_gpu: 1`, so every GPU on that node scores one slice of
+        #    the triples concurrently. This keeps all 8 GPUs active during
+        #    the scoring phase (mitigates the cluster's idle-GPU timeout
+        #    on the extra node during the long-tail of a run).
         comet_per_pair: Dict[Tuple[str, str], List[List[float]]] = defaultdict(lambda: [list() for _ in range(max_k)])
         if self.config.compute_comet and comet_triples:
             try:
+                num_shards = max(1, min(self.config.comet_num_shards, len(comet_triples)))
+                # Stable contiguous sharding preserves a triple's position in
+                # the flat list, so zipping scores back to `comet_slots`
+                # after re-concatenation is 1:1.
+                shards: List[List[Tuple[str, str, str]]] = [[] for _ in range(num_shards)]
+                for i, t in enumerate(comet_triples):
+                    shards[i * num_shards // len(comet_triples)].append(t)
+                shards = [s for s in shards if s]  # drop empties
+
                 remote_fn = _build_comet_remote()
                 LOG.info(
-                    "Dispatching %d COMET triples to a Ray task on the extra_gpu node (batch=%d, model=%s)",
+                    "Dispatching %d COMET triples across %d parallel Ray tasks on extra_gpu nodes (batch=%d, model=%s)",
                     len(comet_triples),
+                    len(shards),
                     self.config.comet_batch_size,
                     self.config.comet_model,
                 )
-                scores_future = remote_fn.remote(
-                    comet_triples,
-                    self.config.comet_model,
-                    self.config.comet_batch_size,
+                futures = [
+                    remote_fn.remote(shard, self.config.comet_model, self.config.comet_batch_size) for shard in shards
+                ]
+                shard_results: List[List[float]] = ray.get(futures)
+                scores: List[float] = [s for chunk in shard_results for s in chunk]
+                assert len(scores) == len(comet_slots), (
+                    f"COMET scores ({len(scores)}) != slots ({len(comet_slots)}) — sharding bug"
                 )
-                scores: List[float] = ray.get(scores_future)
                 for score, (pair_key, k) in zip(scores, comet_slots):
                     comet_per_pair[pair_key][k].append(score)
             except Exception as e:  # don't let COMET failure kill BLEU reporting
