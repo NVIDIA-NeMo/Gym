@@ -14,7 +14,7 @@
 # limitations under the License.
 import json
 import re
-from typing import List
+from typing import List, Optional
 
 from fastapi import Request, Response
 from pydantic import ConfigDict, ValidationError
@@ -52,6 +52,7 @@ class BrowsecompAgentConfig(BaseResponsesAPIAgentConfig):
     max_context_tokens: int = 196608
     context_reset_pct: float = 0.3
     context_reset_keep_rounds: int = 3
+    max_reset_count: Optional[int] = None
     max_run_retries: int = 1
 
 
@@ -90,6 +91,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
 
         reset_threshold = 0
         reset_count = 0
+        max_reset_count = self.config.max_reset_count
         if self.config.max_context_tokens and self.config.context_reset_pct:
             reset_threshold = int(self.config.max_context_tokens * self.config.context_reset_pct)
 
@@ -120,7 +122,11 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
 
             # --- Check context reset threshold ---
             prompt_tokens = model_response.usage.input_tokens if model_response.usage else 0
-            if reset_threshold and prompt_tokens > reset_threshold:
+            if (
+                reset_threshold
+                and prompt_tokens > reset_threshold
+                and (max_reset_count is None or reset_count < max_reset_count)
+            ):
                 reset_count += 1
                 if self.config.context_reset_keep_rounds > 0:
                     new_outputs = self._extract_last_rounds(new_outputs)
