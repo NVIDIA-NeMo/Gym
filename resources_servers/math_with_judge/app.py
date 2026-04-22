@@ -63,16 +63,6 @@ class LibraryJudgeMathResourcesServerConfig(BaseResourcesServerConfig):
     # `library_reward` is still computed for the `symbolic_accuracy`
     # diagnostic metric, so parity runs can compare symbolic drift too.
     skills_parity_mode: bool = False
-    # Apply Skills' parse_reasoning=True extraction path to the symbolic-only
-    # (no-judge) flow: strip <think>...</think> blocks, then extract via
-    # _search_boxed (brace-matching), then run math-verify on the raw boxed
-    # LaTeX. Use this for benchmarks whose Skills config is `eval_type=math`
-    # with `should_use_judge=false` (e.g. apex-shortlist, aime25, hmmt_feb25).
-    # Unlike skills_parity_mode, this does NOT route through the LLM judge —
-    # it preserves symbolic-only semantics. If the boxed extraction returns
-    # None (e.g. reasoning was truncated), reward is 0 (matches Skills'
-    # predicted_answer=None -> no_answer).
-    parse_reasoning_like_skills: bool = False
 
 
 class LibraryJudgeMathRunRequest(BaseRunRequest):
@@ -181,19 +171,6 @@ Example output: "My final verdict is different [[A!=B]]"."""
         Verify the correctness of the specified model-generated answer to the
         specified question in comparison with the specified expected answer.
         """
-
-        # Symbolic-only parity path for Skills' `eval_type=math`
-        # (apex-shortlist / aime25 / hmmt_feb25 etc). Strip <think>...</think>,
-        # extract via brace-matcher, run math-verify on the raw boxed LaTeX.
-        # Short-circuits to reward=0 when extraction is None, mirroring
-        # Skills' predicted_answer=None -> no_answer.
-        if self.config.parse_reasoning_like_skills:
-            stripped = self._strip_think_tags(generated_answer)
-            raw_boxed = self._search_boxed(stripped)
-            if raw_boxed is None:
-                return 0.0, None, 0.0, None
-            library_reward, _ = self._verify_answer_with_library(expected_answer, f"\\boxed{{{raw_boxed}}}")
-            return library_reward, raw_boxed, library_reward, None
 
         library_reward, extracted_answer = self._verify_answer_with_library(expected_answer, generated_answer)
 

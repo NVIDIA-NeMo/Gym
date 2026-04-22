@@ -11,13 +11,11 @@ apex_shortlist_math_with_judge_resources_server:
       # Skills' apex-shortlist uses eval_type=math (symbolic-only) with no judge
       # pipeline by default. Disable the Gym judge fallback to keep parity.
       should_use_judge: false
-      # Skills' `eval_type=math` also strips <think>...</think> (parse_reasoning=True)
-      # and extracts via brace-matched \boxed{...} before symbolic grading. Without
-      # this flag, math-verify scans the whole raw output including the reasoning
-      # trace and picks up spurious mid-reasoning \boxed{} (or even plain integer)
-      # extractions — that's what drives the `no_answer` gap (26.6% Skills vs
-      # 1.0% Gym) and the +5pp pass@1 delta seen on the first parity run.
-      parse_reasoning_like_skills: true
+      # Reasoning/think-tag handling is done at the vLLM layer via
+      # `--reasoning-parser deepseek_r1` (see run_apex_shortlist_*.py in the
+      # recipe dir). With that flag set on both Skills' and Gym's vLLM
+      # servers, the resource server always sees content with reasoning
+      # already stripped, and no post-hoc think-tag surgery is needed here.
 
 apex_shortlist_math_with_judge_simple_agent:
   _inherit_from: math_with_judge_simple_agent
