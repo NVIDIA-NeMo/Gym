@@ -522,6 +522,18 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
     def model_post_init(self, __context: Any) -> None:
         self.sem = Semaphore(self.config.concurrency)
         self.task_strategy = get_task_strategy(self.config.task)
+        # persist_deliverables_dir must be absolute — the resources server
+        # reads it from a different subprocess CWD, so a relative path
+        # resolves to a different filesystem location and silently misses
+        # the deliverables (observed in testing: judge fell back to
+        # text-only scoring with rewards ~0 for tasks that produced real
+        # PDFs/docs).
+        if self.config.persist_deliverables_dir and not Path(self.config.persist_deliverables_dir).is_absolute():
+            raise ValueError(
+                f"persist_deliverables_dir must be an absolute path "
+                f"(got {self.config.persist_deliverables_dir!r}). Relative paths "
+                f"resolve differently in the agent vs. the resources server."
+            )
         print(f"Stirrup agent initialized with task={self.config.task!r}", flush=True)
 
     # -- helpers ----------------------------------------------------------
