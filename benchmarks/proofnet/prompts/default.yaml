@@ -1,0 +1,8 @@
+# Zero-shot port of NeMo-Skills `lean4/formal-proof.yaml`: the upstream template
+# has a `{examples}` few-shot placeholder that renders to an empty string when
+# `examples_type=None` (the default), so dropping it here is equivalent.
+user: |-
+  Complete the proof of the following Lean 4 statement. Start with the proof code right away and DO NOT repeat the given statement.
+
+  ```lean4
+  {header}{informal_prefix}{formal_statement}
