@@ -84,10 +84,12 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         new_outputs = []
         usage = None
         step = 0
+        num_tool_calls = 0
         model_server_cookies = None  # update the cookies on every model response
         resources_server_cookies = request.cookies  # update the cookies on every resources server response
 
         reset_threshold = 0
+        reset_count = 0
         if self.config.max_context_tokens and self.config.context_reset_pct:
             reset_threshold = int(self.config.max_context_tokens * self.config.context_reset_pct)
 
@@ -119,6 +121,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             # --- Check context reset threshold ---
             prompt_tokens = model_response.usage.input_tokens if model_response.usage else 0
             if reset_threshold and prompt_tokens > reset_threshold:
+                reset_count += 1
                 if self.config.context_reset_keep_rounds > 0:
                     new_outputs = self._extract_last_rounds(new_outputs)
                 else:
@@ -154,6 +157,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
 
             # --- Execute tool calls ---
             for output_function_call in all_fn_calls:
+                num_tool_calls += 1
                 api_response = await self.server_client.post(
                     server_name=self.config.resources_server.name,
                     url_path=f"/{output_function_call.name}",
@@ -222,6 +226,8 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
 
         model_response.output = new_outputs
         model_response.usage = usage
+        model_response.reset_count = reset_count
+        model_response.num_tool_calls = num_tool_calls
         return model_response
 
     async def run(self, request: Request, body: BrowsecompAgentRunRequest) -> BrowsecompAgentVerifyResponse:
