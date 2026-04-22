@@ -371,9 +371,17 @@ class WmtTranslationResourcesServer(SimpleResourcesServer):
 
         # 1. Bucket rollouts by (src, tgt) and by rollout index within task.
         #    Skills computes per-seed corpus_bleu, then averages; we replicate
-        #    by treating rollout index == seed index. The max k rollouts per
-        #    task defines the number of "runs".
-        max_k = max(len(rollouts) for rollouts in tasks)
+        #    by treating rollout index == seed index.
+        #
+        #    Use the MIN rollouts-per-task as the bucket count, not the max.
+        #    Gym's rollout collector occasionally retries a failed rollout,
+        #    producing a handful of tasks with extra positions (5-12) that
+        #    skew corpus BLEU hard: e.g. a size-1 bucket with a single
+        #    mismatched pred-ref pair scores 0.0 and drags the cross-run mean
+        #    down by 3×. Capping at the min keeps every bucket comparably
+        #    sized (one fully-covered sample per task).
+        rollout_counts = [len(r) for r in tasks]
+        max_k = min(rollout_counts) if rollout_counts else 0
 
         # per_pair_runs[(src, tgt)][k] = list of (mt, ref) across all tasks
         #                                for rollout index k
@@ -388,6 +396,8 @@ class WmtTranslationResourcesServer(SimpleResourcesServer):
 
         for task_rollouts in tasks:
             for k, rollout in enumerate(task_rollouts):
+                if k >= max_k:
+                    break
                 src = rollout.get("source_language")
                 tgt = rollout.get("target_language")
                 if not src or not tgt:
