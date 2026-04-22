@@ -36,7 +36,7 @@ OUTPUT_FPATH = DATA_DIR / "putnam_bench_benchmark.jsonl"
 REPO_URL = "https://github.com/trishullab/PutnamBench.git"
 # Pinned commit; drift in the upstream `rewrite_solutions.py` script is detected
 # by the `EXPECTED_TEST_ROWS` assertion below.
-COMMIT_HASH = "64cedd86ef523f3d5f5dc7a21c10e3f69564c7d4"
+COMMIT_HASH = "64cedd86ef523f3d5f5dc7a21c10e3f69564c7d4"  # pragma: allowlist secret
 EXPECTED_TEST_ROWS = 660
 
 _DOC_COMMENT_RE = re.compile(r"/--[\s\S]*?-/", re.MULTILINE)
