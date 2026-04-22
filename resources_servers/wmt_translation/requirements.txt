@@ -8,6 +8,11 @@
 # torch 2.5.x's pypi wheel is cu12-compatible, avoiding the need for
 # a separate PyTorch wheel index (which creates index-strategy issues
 # with urllib3 / nemo-gym).
+# torchmetrics imports pkg_resources (deprecated) which lives in setuptools.
+# Pin explicitly — python-build-standalone interpreters uv ships don't
+# bundle setuptools, and torch 2.5.1's fresh wheel resolution doesn't
+# pull it transitively.
+setuptools>=70
 torch==2.5.1
 torchvision==0.20.1
 sacrebleu[ja,ko]>=2.4
