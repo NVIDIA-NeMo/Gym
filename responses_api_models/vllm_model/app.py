@@ -71,6 +71,7 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     return_token_id_information: bool
 
     uses_reasoning_parser: bool
+    uses_interleaved_reasoning: bool = True
     replace_developer_role_with_system: bool = False
 
     # Whether or not the model can generate a reasoning output, and called again to produce additional reasoning output.
@@ -275,7 +276,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 if isinstance(content, str):
                     reasoning_matches, remaining_content = self._converter._extract_reasoning_from_content(content)
                     message_dict["content"] = remaining_content
-                    if reasoning_matches:
+                    if reasoning_matches and self.config.uses_interleaved_reasoning:
                         message_dict["reasoning_content"] = reasoning_matches[0]
 
                         # TODO when NeMo RL migrates to vLLM>=0.16.0, remove the reasoning_content support above.
@@ -293,7 +294,7 @@ class VLLMModel(SimpleResponsesAPIModel):
 
                         # Even though we set the reasoning content already here, we still loop through all the content item dicts for the assert above.
                         content_item_dict["text"] = remaining_content
-                        if reasoning_matches:
+                        if reasoning_matches and self.config.uses_interleaved_reasoning:
                             message_dict["reasoning_content"] = reasoning_matches[0]
                             # See the TODO wrt reasoning_content above
                             message_dict["reasoning"] = reasoning_matches[0]
