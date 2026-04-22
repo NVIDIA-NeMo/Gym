@@ -8,14 +8,7 @@ apex_shortlist_math_with_judge_resources_server:
   _inherit_from: math_with_judge
   resources_servers:
     math_with_judge:
-      # Skills' apex-shortlist uses eval_type=math (symbolic-only) with no judge
-      # pipeline by default. Disable the Gym judge fallback to keep parity.
       should_use_judge: false
-      # Reasoning/think-tag handling is done at the vLLM layer via
-      # `--reasoning-parser deepseek_r1` (see run_apex_shortlist_*.py in the
-      # recipe dir). With that flag set on both Skills' and Gym's vLLM
-      # servers, the resource server always sees content with reasoning
-      # already stripped, and no post-hoc think-tag surgery is needed here.
 
 apex_shortlist_math_with_judge_simple_agent:
   _inherit_from: math_with_judge_simple_agent
