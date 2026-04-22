@@ -592,7 +592,7 @@ class VLLMConverter(BaseModel):
 
                 # As of vLLM 0.17.1, vLLM Chat Completions does not accept this `strict` parameter on tool definitions that OpenAI accepts.
                 tool_dict.pop("strict", None)
-                responses_create_params["tools"].append(
+                converted_tools.append(
                     NeMoGymChatCompletionToolParam(type="function", function=NeMoGymFunctionDefinition(**tool_dict))
                 )
             responses_create_params["tools"] = converted_tools
