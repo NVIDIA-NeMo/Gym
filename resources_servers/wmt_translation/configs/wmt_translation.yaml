@@ -30,4 +30,4 @@ wmt_translation_simple_agent:
         type: example
         jsonl_fpath: resources_servers/wmt_translation/data/example.jsonl
         num_repeats: 1
-        license: Creative Commons Attribution Share Alike 4.0
+        license: Creative Commons Attribution-ShareAlike 4.0 International

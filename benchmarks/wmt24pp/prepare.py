@@ -32,7 +32,6 @@ import json
 from pathlib import Path
 
 from datasets import load_dataset
-from langcodes import Language
 
 
 BENCHMARK_DIR = Path(__file__).parent
@@ -44,6 +43,16 @@ HF_REPO_ID = "google/wmt24pp"
 # Same five targets + same order as Skills' default. Keeping the order
 # stable is what makes the interleaved JSONL byte-comparable.
 DEFAULT_TARGET_LANGUAGES = ["de_DE", "es_MX", "fr_FR", "it_IT", "ja_JP"]
+
+# Display names for the targets above. Matches NeMo-Skills'
+# `langcodes.Language(tgt[:2]).display_name()` output for these codes.
+_LANG_DISPLAY_NAMES = {
+    "de": "German",
+    "es": "Spanish",
+    "fr": "French",
+    "it": "Italian",
+    "ja": "Japanese",
+}
 
 
 def prepare(target_languages: list[str] | None = None) -> Path:
@@ -72,7 +81,7 @@ def prepare(target_languages: list[str] | None = None) -> Path:
                     "source_language": "en",
                     "target_language": tgt_lang,
                     "source_lang_name": "English",
-                    "target_lang_name": Language(tgt_lang[:2]).display_name(),
+                    "target_lang_name": _LANG_DISPLAY_NAMES[tgt_lang[:2]],
                 }
                 fout.write(json.dumps(row) + "\n")
                 count += 1

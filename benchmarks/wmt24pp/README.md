@@ -30,6 +30,7 @@ ng_run "+config_paths=[$config_paths]"
 ```bash
 ng_collect_rollouts \
     +agent_name=wmt24pp_wmt_translation_simple_agent \
+    +prompt_config=benchmarks/wmt24pp/prompts/default.yaml \
     +input_jsonl_fpath=benchmarks/wmt24pp/data/wmt24pp_benchmark.jsonl \
     +output_jsonl_fpath=results/wmt24pp_rollouts.jsonl \
     +num_repeats=4
