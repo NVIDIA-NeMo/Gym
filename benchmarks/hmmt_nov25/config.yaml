@@ -1,0 +1,32 @@
+# Chain to existing resource server + agent config
+config_paths:
+  - resources_servers/math_with_judge/configs/math_with_judge.yaml
+
+# We use `_inherit_from` directives to inherit from and not use the generic config
+# above to ensure this benchmark config is isolated.
+hmmt_nov25_math_with_judge_resources_server:
+  _inherit_from: math_with_judge
+  resources_servers:
+    math_with_judge:
+      # Skills' hmmt_nov25 uses eval_type=math (symbolic-only) with no judge
+      # pipeline by default. Disable the Gym judge fallback to keep parity.
+      should_use_judge: false
+
+hmmt_nov25_math_with_judge_simple_agent:
+  _inherit_from: math_with_judge_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: hmmt_nov25_math_with_judge_resources_server
+      datasets:
+      - name: hmmt_nov25
+        type: benchmark
+        jsonl_fpath: benchmarks/hmmt_nov25/data/hmmt_nov25_benchmark.jsonl
+        # Shared generic-math prompt (see benchmarks/prompts/generic_math.yaml
+        # — same prompt gsm8k, hendrycks_math, etc. use). Mirrors Skills'
+        # `++prompt_config=generic/math` default for eval_type=math benchmarks.
+        prompt_config: benchmarks/prompts/generic_math.yaml
+        prepare_script: benchmarks/hmmt_nov25/prepare.py
+        # NOTE: num_repeats here is NOT honored for type=benchmark. Pass it on
+        # the CLI via `+num_repeats=N +num_repeats_add_seed=true` in the
+        # run recipe (see run_hmmt_nov25_gym.py).
