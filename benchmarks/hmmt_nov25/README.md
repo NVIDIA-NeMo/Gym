@@ -23,11 +23,13 @@ few-shots).
 
 ## Reasoning parser
 
-Start vLLM with `--reasoning-parser deepseek_r1` (matches the model's
-`<think>…</think>` convention) so the grader never sees the reasoning
-preamble. Without it, `math_with_judge` may extract intermediate
-expressions from truncated rollouts, and Skills' `parse_reasoning=True`
-default diverges on the same inputs.
+Start vLLM with the `--reasoning-parser` that matches your model
+(e.g. `deepseek_r1` for models with a `<think>…</think>` convention;
+the parser name is declared in
+`responses_api_models/local_vllm_model/configs/nvidia/*.yaml`). Without
+one, `math_with_judge` may extract intermediate expressions from
+truncated rollouts, and Skills' `parse_reasoning=True` default diverges
+on the same inputs.
 
 ## Quickstart
 
