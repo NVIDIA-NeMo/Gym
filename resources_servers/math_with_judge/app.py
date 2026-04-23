@@ -45,15 +45,6 @@ class LibraryJudgeMathResourcesServerConfig(BaseResourcesServerConfig):
     judge_model_server: ModelServerRef
     judge_responses_create_params: NeMoGymResponseCreateParamsNonStreaming
     should_use_judge: bool = True
-    skip_symbolic: bool = False  # when True, bypass symbolic comparison and always use the judge
-    judge_system_message: Optional[str] = None  # overrides JUDGE_SYSTEM_MESSAGE; empty string = no system message
-    judge_prompt_template: Optional[str] = (
-        None  # overrides JUDGE_PROMPT_TEMPLATE; uses {question}, {first_answer}, {second_answer}
-    )
-    judge_equal_label: Optional[str] = None  # overrides JUDGE_EQUAL_LABEL
-    judge_not_equal_label: Optional[str] = None  # overrides JUDGE_NOT_EQUAL_LABEL
-    judge_check_position_bias: bool = True  # when False, makes a single judge call instead of two
-    judge_use_full_response: bool = False  # when True, always pass the full model response to the judge instead of the math_verify extracted answer
 
 
 class LibraryJudgeMathRunRequest(BaseRunRequest):
@@ -164,12 +155,10 @@ Example output: "My final verdict is different [[A!=B]]"."""
         """
 
         library_reward, extracted_answer = self._verify_answer_with_library(expected_answer, generated_answer)
-        if not self.config.should_use_judge or (not self.config.skip_symbolic and library_reward > 0.5):
+        if not self.config.should_use_judge or library_reward > 0.5:
             return library_reward, extracted_answer, library_reward, None
 
-        judge_answer = (
-            generated_answer if self.config.judge_use_full_response else (extracted_answer or generated_answer)
-        )
+        judge_answer = extracted_answer if extracted_answer else generated_answer
         judge_reward, judge_evaluations = await self._verify_answer_with_judge(question, expected_answer, judge_answer)
         return judge_reward, extracted_answer, library_reward, judge_evaluations
 
@@ -237,11 +226,6 @@ Example output: "My final verdict is different [[A!=B]]"."""
     async def _verify_answer_with_judge(
         self, question: str, expected_answer: str, generated_answer: str
     ) -> tuple[float, list[JudgeEvaluation]]:
-        if not self.config.judge_check_position_bias:
-            # Single call: generated answer is evaluated against the expected answer directly.
-            equal, evaluation = await self._generate_judge_evaluation(question, generated_answer, expected_answer)
-            return (1.0 if equal else 0.0), [evaluation]
-
         # The judge is asked to evaluate whether the answers are equal using both
         # orders of the answers, in case there is any positional bias in terms of
         # the order in which the answers are presented to the judge model.
@@ -268,33 +252,19 @@ Example output: "My final verdict is different [[A!=B]]"."""
         config = self.config
         responses_create_params = config.judge_responses_create_params.model_copy(deep=True)
 
-        system_message = (
-            self.config.judge_system_message
-            if self.config.judge_system_message is not None
-            else self.JUDGE_SYSTEM_MESSAGE
-        )
-        prompt_template = (
-            self.config.judge_prompt_template
-            if self.config.judge_prompt_template is not None
-            else self.JUDGE_PROMPT_TEMPLATE
-        )
-        equal_label = (
-            self.config.judge_equal_label if self.config.judge_equal_label is not None else self.JUDGE_EQUAL_LABEL
-        )
-        not_equal_label = (
-            self.config.judge_not_equal_label
-            if self.config.judge_not_equal_label is not None
-            else self.JUDGE_NOT_EQUAL_LABEL
-        )
-
-        judge_prompt = prompt_template.format(
+        judge_prompt = self.JUDGE_PROMPT_TEMPLATE.format(
             question=question, first_answer=first_answer, second_answer=second_answer
         )
-        input_messages = []
-        if system_message:
-            input_messages.append(NeMoGymEasyInputMessage(role="system", content=system_message))
-        input_messages.append(NeMoGymEasyInputMessage(role="user", content=judge_prompt))
-        responses_create_params.input = input_messages
+        responses_create_params.input = [
+            NeMoGymEasyInputMessage(
+                role="system",
+                content=self.JUDGE_SYSTEM_MESSAGE,
+            ),
+            NeMoGymEasyInputMessage(
+                role="user",
+                content=judge_prompt,
+            ),
+        ]
 
         response = await self.server_client.post(
             server_name=config.judge_model_server.name,
@@ -317,8 +287,8 @@ Example output: "My final verdict is different [[A!=B]]"."""
             return False, judge_evaluation
 
         output_text = last_content.text
-        equal_choice_position = output_text.find(equal_label)
-        not_equal_choice_position = output_text.find(not_equal_label)
+        equal_choice_position = output_text.find(self.JUDGE_EQUAL_LABEL)
+        not_equal_choice_position = output_text.find(self.JUDGE_NOT_EQUAL_LABEL)
 
         # The first label that appears in the text is used for the evaluation.
         if equal_choice_position < 0:

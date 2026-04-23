@@ -1,50 +1,33 @@
-# Chain to the math_with_judge resources server config
+# Chain to the equivalence_llm_judge resources server config
 config_paths:
-  - resources_servers/math_with_judge/configs/math_with_judge.yaml
+  - resources_servers/equivalence_llm_judge/configs/equivalence_llm_judge.yaml
 
-# HLE resources server: uses math_with_judge with the judge enabled.
-# Requires a separate judge model server.
-hle_math_with_judge_resources_server:
-  _inherit_from: math_with_judge
+# HLE resources server: pure LLM judge, no symbolic verification step.
+# Uses the official HLE judge prompt from centerforaisafety/hle.
+hle_equivalence_llm_judge_resources_server:
+  _inherit_from: equivalence_llm_judge
   resources_servers:
-    math_with_judge:
-      should_use_judge: true
-      skip_symbolic: true
+    equivalence_llm_judge:
       judge_model_server:
         type: responses_api_models
         name: policy_model
       judge_responses_create_params:
         input: []
       judge_system_message: ""
-      judge_check_position_bias: false
-      judge_use_full_response: true
       judge_equal_label: "Judgement: yes"
       judge_not_equal_label: "Judgement: no"
-      judge_prompt_template: |-
-        Judge whether the following [response] to [question] is correct or not based on the precise and unambiguous [correct_answer] below.
+      judge_prompt_template_fpath: benchmarks/hle/prompts/judge.txt
+      response_extract_regex: null
+      question_extract_regex: null
+      check_twice_swap: false
+      use_per_record_regex: false
 
-        [question]: {question}
-
-        [response]: {first_answer}
-
-        Your judgement must be in the format and criteria specified below:
-
-        extracted_final_answer: The final exact answer extracted from the [response]. Put the extracted answer as 'None' if there is no exact, final answer to extract from the response.
-
-        [correct_answer]: {second_answer}
-
-        Reasoning: Explain why the extracted_final_answer is correct or incorrect based on [correct_answer], focusing only on if there are meaningful differences between [correct_answer] and the extracted_final_answer. Do not comment on any background to the problem, do not attempt to solve the problem, do not argue for any answer different than [correct_answer], focus only on whether the answers match.
-
-        Judgement: Answer 'yes' if extracted_final_answer matches the [correct_answer] given above, or is within a small margin of error for numerical problems. Answer 'no' otherwise, i.e. if there if there is any inconsistency, ambiguity, non-equivalency, or if the extracted answer is incorrect.
-
-        Confidence: The extracted confidence score between 0% and 100% from [response]. Put 100 if there is no confidence score available.
-
-hle_math_with_judge_simple_agent:
-  _inherit_from: math_with_judge_simple_agent
+hle_equivalence_llm_judge_simple_agent:
+  _inherit_from: equivalence_llm_judge_simple_agent
   responses_api_agents:
     simple_agent:
       resources_server:
-        name: hle_math_with_judge_resources_server
+        name: hle_equivalence_llm_judge_resources_server
       datasets:
       - name: hle
         type: benchmark
