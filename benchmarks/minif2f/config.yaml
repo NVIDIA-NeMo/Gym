@@ -1,0 +1,21 @@
+# Chain to existing resource server + agent config
+config_paths:
+  - resources_servers/math_formal_lean/configs/math_formal_lean.yaml
+
+# We use `_inherit_from` directives to inherit from and not use the generic config above to ensure this benchmark config is isolated.
+minif2f_math_formal_lean_resources_server:
+  _inherit_from: math_formal_lean
+
+minif2f_math_formal_lean_simple_agent:
+  _inherit_from: math_formal_lean_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: minif2f_math_formal_lean_resources_server
+      datasets:
+      - name: minif2f
+        type: benchmark
+        jsonl_fpath: benchmarks/minif2f/data/minif2f_benchmark.jsonl
+        prompt_config: benchmarks/prompts/lean4_formal_proof_deepseek_prover_v2.yaml
+        prepare_script: benchmarks/minif2f/prepare.py
+        num_repeats: 32
