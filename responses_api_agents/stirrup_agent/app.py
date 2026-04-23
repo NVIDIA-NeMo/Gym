@@ -729,14 +729,29 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
             # Surface the agent's runtime metadata for downstream logging.
             verify_request_body.setdefault("elapsed_seconds", float(response_metadata.get("elapsed_seconds", 0)))
 
-            verify_response = await self.server_client.post(
-                server_name=self.config.resources_server.name,
-                url_path="/verify",
-                json=verify_request_body,
-                cookies=cookies,
-            )
-            await raise_for_status(verify_response)
-            return await get_response_json(verify_response)
+            try:
+                verify_response = await self.server_client.post(
+                    server_name=self.config.resources_server.name,
+                    url_path="/verify",
+                    json=verify_request_body,
+                    cookies=cookies,
+                )
+                await raise_for_status(verify_response)
+                return await get_response_json(verify_response)
+            except Exception as exc:
+                task_info = self.task_strategy.extract_task_info(existing_metadata)
+                instance_hint = task_info.get("instance_id", task_info.get("task_id", "unknown"))
+                print(
+                    f"[stirrup-verify-failed] {instance_hint}: {type(exc).__name__}: {exc}",
+                    flush=True,
+                )
+                return self._build_failed_run_payload(
+                    body_dict=body_dict,
+                    fixed_params=fixed_params,
+                    task_info=task_info,
+                    reason=f"verify failed: {type(exc).__name__}: {exc}",
+                    skipped=False,
+                )
 
     def _build_failed_run_payload(
         self,
