@@ -1,0 +1,87 @@
+[
+  {
+    "agent_ref": {
+      "name": "blackjack_agent"
+    },
+    "agent_metrics": {
+      "mean/reward": -0.6,
+      "mean/terminated": 1.0,
+      "mean/truncated": 0.0,
+      "mean/input_tokens": 64.2,
+      "mean/output_tokens": 9.6,
+      "mean/total_tokens": 73.8,
+      "max/reward": 1.0,
+      "max/terminated": 1.0,
+      "max/truncated": 0.0,
+      "max/input_tokens": 144.0,
+      "max/output_tokens": 16.0,
+      "max/total_tokens": 160.0,
+      "min/reward": -1.0,
+      "min/terminated": 1.0,
+      "min/truncated": 0.0,
+      "min/input_tokens": 43.0,
+      "min/output_tokens": 8.0,
+      "min/total_tokens": 51.0,
+      "median/reward": -1.0,
+      "median/terminated": 1.0,
+      "median/truncated": 0.0,
+      "median/input_tokens": 45.0,
+      "median/output_tokens": 8.0,
+      "median/total_tokens": 53.0,
+      "std/reward": 0.8944271909999161,
+      "std/terminated": 0.0,
+      "std/truncated": 0.0,
+      "std/input_tokens": 44.61726123374226,
+      "std/output_tokens": 3.5777087639996643,
+      "std/total_tokens": 48.19439801470706
+    },
+    "key_metrics": {
+      "mean/reward": -0.6,
+      "mean/terminated": 1.0,
+      "mean/truncated": 0.0,
+      "mean/input_tokens": 64.2,
+      "mean/output_tokens": 9.6,
+      "mean/total_tokens": 73.8
+    },
+    "group_level_metrics": [
+      {
+        "mean/reward": -0.6,
+        "mean/terminated": 1.0,
+        "mean/truncated": 0.0,
+        "mean/input_tokens": 64.2,
+        "mean/output_tokens": 9.6,
+        "mean/total_tokens": 73.8,
+        "max/reward": 1.0,
+        "max/terminated": 1.0,
+        "max/truncated": 0.0,
+        "max/input_tokens": 144.0,
+        "max/output_tokens": 16.0,
+        "max/total_tokens": 160.0,
+        "min/reward": -1.0,
+        "min/terminated": 1.0,
+        "min/truncated": 0.0,
+        "min/input_tokens": 43.0,
+        "min/output_tokens": 8.0,
+        "min/total_tokens": 51.0,
+        "median/reward": -1.0,
+        "median/terminated": 1.0,
+        "median/truncated": 0.0,
+        "median/input_tokens": 45.0,
+        "median/output_tokens": 8.0,
+        "median/total_tokens": 53.0,
+        "std/reward": 0.8944271909999161,
+        "std/terminated": 0.0,
+        "std/truncated": 0.0,
+        "std/input_tokens": 44.61726123374226,
+        "std/output_tokens": 3.5777087639996643,
+        "std/total_tokens": 48.19439801470706,
+        "sample": {
+          "agent_ref": {
+            "name": "agent"
+          }
+        },
+        "_ng_task_index": 0
+      }
+    ]
+  }
+]
