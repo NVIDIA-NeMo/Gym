@@ -23,6 +23,13 @@ xCOMET-XXL judge script at `nemo_skills/evaluation/evaluator/comet.py`.
 `get_key_metrics()` returns the headline aggregates
 (`xx->xx/bleu`, `xx->xx/comet`, `en->xx/bleu`, `en->xx/comet`).
 
+> **Note:** `compute_metrics()` emits corpus-level BLEU/COMET keyed by
+> language pair, not the `pass@k/{name}` pattern produced by
+> `compute_pass_majority_metrics()`. This is intentional — translation
+> quality is a corpus-level score, not a per-task correctness probability,
+> so the Tier 1 pass@k template in `migrate-benchmark` doesn't apply.
+> Parity with NeMo-Skills is on the corpus aggregates.
+
 ## Per-sample reward
 
 `verify()` returns `sentence_bleu(generation, [reference]) / 100` as the
