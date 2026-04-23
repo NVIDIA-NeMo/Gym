@@ -110,9 +110,9 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
             if not model_server_url.endswith("/v1"):
                 model_server_url = model_server_url.rstrip("/") + "/v1"
 
-            openai_client = AsyncOpenAI(  # pragma: allowlist secret
+            openai_client = AsyncOpenAI(
                 base_url=model_server_url,
-                api_key="EMPTY",
+                api_key="EMPTY",  # pragma: allowlist secret
             )
             self.client_cache[cache_key] = NeMoRLChatCompletionsClient(openai_client)
 
