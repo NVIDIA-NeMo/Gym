@@ -28,7 +28,7 @@ def _make_agent(max_steps=10):
         port=0,
         entrypoint="",
         name="test_gymnasium_agent",
-        env_server=ResourcesServerRef(type="resources_servers", name="my_env"),
+        resources_server=ResourcesServerRef(type="resources_servers", name="my_env"),
         model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
         max_steps=max_steps,
     )
@@ -116,7 +116,7 @@ class TestConfig:
                 port=0,
                 entrypoint="",
                 name="x",
-                env_server=ResourcesServerRef(type="resources_servers", name="e"),
+                resources_server=ResourcesServerRef(type="resources_servers", name="e"),
                 model_server=ModelServerRef(type="responses_api_models", name="m"),
                 max_steps=0,
             )
@@ -172,7 +172,7 @@ class TestRun:
         result = await agent.run(req, body)
         assert result.reward == 1.0
         assert result.terminated is True
-        # Inspect turn-2 model call body — its input must contain the full turn-1 output item,
+        # Inspect turn-2 model call body: its input must contain the full turn-1 output item,
         # not a flattened string, and the obs-1 appended as user message.
         turn2_body = [body for (s, u, body) in call_log if u == "/v1/responses"][1]
         turn2_input = turn2_body.input

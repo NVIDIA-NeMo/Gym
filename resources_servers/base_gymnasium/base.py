@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 from abc import abstractmethod
 from typing import Any, Dict, Optional
 
@@ -20,7 +21,11 @@ from fastapi import FastAPI, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from nemo_gym.base_resources_server import BaseVerifyRequest, SimpleResourcesServer
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.openai_utils import (
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseFunctionToolCall,
+)
 from nemo_gym.server_utils import SESSION_ID_KEY
 
 
@@ -101,6 +106,10 @@ class GymnasiumServer(SimpleResourcesServer):
 
     async def close_session(self, session_id: Optional[str]) -> None:
         self.session_state.pop(session_id, None)
+
+    @staticmethod
+    def tool_output(call: NeMoGymResponseFunctionToolCall, result: Any) -> dict:
+        return {"call_id": call.call_id, "output": json.dumps(result, default=str)}
 
     async def verify(self, body: BaseVerifyRequest) -> None:  # type: ignore[override]
         raise NotImplementedError("GymnasiumServer uses /step instead of /verify. Use with gymnasium_agent.")

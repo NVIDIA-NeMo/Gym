@@ -14,7 +14,7 @@ from nemo_gym.openai_utils import NeMoGymResponse
 
 class MyEnv(GymnasiumServer):
     async def reset(self, metadata: dict, session_id=None) -> tuple[str | None, dict]:
-        return None, {}  # (observation, info); None obs = use input as-is
+        return None, {}  # (observation, info); observation (if set) is appended to input
 
     async def step(self, action: NeMoGymResponse, metadata: dict, session_id=None) -> tuple[str | None, float, bool, bool, dict]:
         ...  # (observation, reward, terminated, truncated, info)
@@ -23,18 +23,18 @@ class MyEnv(GymnasiumServer):
 `reset()` runs once per episode. `step()` runs after each model response and returns the 5-tuple:
 
 - **observation**: next message to the model, or `None` to end the episode.
-- **reward**: per-step reward; the agent sums across steps.
+- **reward**: per-step reward; the agent sums across steps by default.
 - **terminated**: episode ended naturally (task solved, game over).
 - **truncated**: episode cut short (step limit, timeout).
-- **info**: passthrough dict. Set `info["tool_outputs"] = [{call_id, output}, ...]` to have the agent feed tool results back as proper `function_call_output` items instead of a user-message observation.
+- **info**: extra metadata the env wants to return (debug info, scores, stats). Also how the env sends `tool_outputs` to the agent (see Tool Use).
 
-Only `step()` is required. The default `reset()` returns `(None, {})`.
+Only `step()` is required. The default `reset()` returns `(None, {})`, meaning the prompt from the dataset is used as-is. A non-`None` observation from `reset()` is appended to the input as a user message before the first model call.
 
-`metadata` is the `verifier_metadata` dict from your input JSONL, passed through unchanged. This is where you put task-specific data (expected answers, test cases, board configurations, etc.) that the environment needs for initialization or scoring. Access fields with `metadata.get("field_name")`.
+The three arguments shown in the signatures above:
 
-`session_id` is a unique string per rollout. Use it as a key to store per-episode state (game boards, conversation history, etc.) in a dict on your server. Stateless environments can ignore it.
-
-`action` is the full `NeMoGymResponse` from the model server. Your `step()` parses whatever it needs from it: text content, `<action>` tags, function calls, etc. Use `extract_text()` for text, or inspect `action.output` directly for structured output like tool calls.
+- **`metadata`**: any extra fields from the JSONL row (e.g. `ground_truth`, `category`). Use for task config or scoring references. Access via `metadata.get("field")`.
+- **`session_id`**: unique string per rollout. Use as a key into `self.session_state` for per-episode state (game boards, conversation history, etc.). Stateless envs can ignore it.
+- **`action`**: the model's `NeMoGymResponse` for the current turn. Use `extract_text(action)` for text or iterate `action.output` for structured items like `function_call`.
 
 ## Single-Step
 
@@ -93,17 +93,15 @@ class MyToolEnv(GymnasiumServer):
         tool_calls = [o for o in action.output if o.type == "function_call"]
 
         if tool_calls:
-            state = self.session_state[session_id]
-            outputs = []
-            for call in tool_calls:
-                args = json.loads(call.arguments)
-                result = state["functions"][call.name](**args)
-                outputs.append({"call_id": call.call_id, "output": json.dumps(result, default=str)})
+            fns = self.session_state[session_id]["functions"]
+            outputs = [self.tool_output(c, fns[c.name](**json.loads(c.arguments))) for c in tool_calls]
             return None, 0.0, False, False, {"tool_outputs": outputs}
 
         reward = self._grade(action, metadata)
         return None, reward, True, False, {}
 ```
+
+`self.tool_output(call, result)` is a helper on `GymnasiumServer` that builds the `{"call_id", "output"}` dict the agent expects (JSON-serializes the result for you).
 
 ## Multi-Turn
 
@@ -169,7 +167,7 @@ class MyRewardModelEnv(GymnasiumServer):
 
 ## YAML Configuration
 
-`GymnasiumServer` pairs with `gymnasium_agent` instead of `simple_agent`. The agent config references the env server through `env_server`.
+`GymnasiumServer` pairs with `gymnasium_agent` instead of `simple_agent`. Same shape as the `simple_agent` config, with the agent referencing the environment through `resources_server`.
 
 ```yaml
 my_env_instance:
@@ -182,7 +180,7 @@ my_gymnasium_agent_instance:
   responses_api_agents:
     gymnasium_agent:
       entrypoint: app.py
-      env_server:
+      resources_server:
         type: resources_servers
         name: my_env
       model_server:
@@ -197,4 +195,4 @@ my_gymnasium_agent_instance:
 
 ## Examples
 
-- [`blackjack`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/blackjack) — Multi-step game with action tags.
+- [`blackjack`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/blackjack): multi-step game with action tags.

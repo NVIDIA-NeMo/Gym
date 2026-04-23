@@ -135,7 +135,7 @@ class TestActionParser:
     async def _decide(self, text: str) -> str:
         env = _make_env()
         env.session_state["sid"] = {
-            "player": ["2", "2"],  # 4 — can't bust on hit
+            "player": ["2", "2"],  # 4, can't bust on hit
             "dealer": ["10"],
             "rng": __import__("random").Random(0),
         }

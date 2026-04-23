@@ -35,7 +35,7 @@ from resources_servers.base_gymnasium import EnvResetResponse, EnvStepResponse
 
 
 class GymnasiumAgentConfig(BaseResponsesAPIAgentConfig):
-    env_server: ResourcesServerRef
+    resources_server: ResourcesServerRef
     model_server: ModelServerRef
     max_steps: int = Field(10, ge=1)
 
@@ -76,7 +76,7 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
         env_cookies = request.cookies
 
         reset_resp = await self.server_client.post(
-            server_name=self.config.env_server.name,
+            server_name=self.config.resources_server.name,
             url_path="/reset",
             json=body.model_dump(),
             cookies=env_cookies,
@@ -128,7 +128,7 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
                     usage.output_tokens_details.reasoning_tokens = 0
 
             step_resp = await self.server_client.post(
-                server_name=self.config.env_server.name,
+                server_name=self.config.resources_server.name,
                 url_path="/step",
                 json=body.model_dump() | {"response": model_response.model_dump()},
                 cookies=env_cookies,
@@ -171,7 +171,7 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
         response = await self.server_client.post(
-            server_name=self.config.env_server.name,
+            server_name=self.config.resources_server.name,
             url_path="/aggregate_metrics",
             json=body,
         )
