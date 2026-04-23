@@ -24,12 +24,13 @@ ns_tools:
           name: math_with_judge
       
       # NeMo Skills tools to load
+      # DirectPythonTool is the preferred python tool path: it calls the sandbox directly
       nemo_skills_tools:
-        - nemo_skills.mcp.servers.python_tool.PythonTool
+        - nemo_skills.mcp.servers.python_tool::DirectPythonTool
       
       # Per-tool configuration overrides
       nemo_skills_tool_overrides:
-        PythonTool:
+        DirectPythonTool:
           exec_timeout_s: 10
 
       # Sandbox configuration

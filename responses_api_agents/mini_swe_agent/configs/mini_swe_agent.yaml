@@ -1,1 +1,40 @@
-# The config is for this agent is defined in resources_servers/mini_swe_agent/configs/mini_swe_agent.yaml
+mini_swe_simple_agent:
+  responses_api_agents:
+    mini_swe_agent:
+      entrypoint: app.py
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: train
+        type: train
+        jsonl_fpath: responses_api_agents/mini_swe_agent/data/train.jsonl
+        gitlab_identifier:
+          dataset_name: mini_swe_agent
+          version: 0.0.1
+          artifact_fpath: train.jsonl
+        huggingface_identifier:
+          repo_id: SWE-Gym/SWE-Gym
+        license: MIT
+      - name: validation
+        type: validation
+        jsonl_fpath: responses_api_agents/mini_swe_agent/data/validation.jsonl
+        gitlab_identifier:
+          dataset_name: mini_swe_agent
+          version: 0.0.1
+          artifact_fpath: validation.jsonl
+        huggingface_identifier:
+          repo_id: princeton-nlp/SWE-bench_Verified
+        license: MIT
+      - name: example
+        type: example
+        jsonl_fpath: responses_api_agents/mini_swe_agent/data/example.jsonl
+      concurrency: 16
+      env: singularity
+      cache_dir_template: ???
+      run_golden: False
+      step_timeout: 600
+      eval_timeout: 1800
+      skip_if_exists: False
+      step_limit: 250
+      collapse_limit: 3
