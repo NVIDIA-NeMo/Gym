@@ -29,42 +29,66 @@ class TestRewardProfile:
             {
                 "_ng_task_index": 0,
                 "_ng_rollout_index": 0,
-                "responses_create_params": {"input": [], "seed": 0, "temperature": 0.1},
+                "responses_create_params": {
+                    "input": [],
+                    "metadata": {"extra_body": '{"seed": 0}'},
+                    "temperature": 0.1,
+                },
                 "x": 0,
                 "agent_ref": {"name": "my_agent"},
             },
             {
                 "_ng_task_index": 0,
                 "_ng_rollout_index": 1,
-                "responses_create_params": {"input": [], "seed": 1, "temperature": 0.1},
+                "responses_create_params": {
+                    "input": [],
+                    "metadata": {"extra_body": '{"seed": 1}'},
+                    "temperature": 0.1,
+                },
                 "x": 0,
                 "agent_ref": {"name": "my_agent"},
             },
             {
                 "_ng_task_index": 1,
                 "_ng_rollout_index": 0,
-                "responses_create_params": {"input": [], "seed": 0, "temperature": 0.1},
+                "responses_create_params": {
+                    "input": [],
+                    "metadata": {"extra_body": '{"seed": 0}'},
+                    "temperature": 0.1,
+                },
                 "x": 1,
                 "agent_ref": {"name": "my_agent"},
             },
             {
                 "_ng_task_index": 1,
                 "_ng_rollout_index": 1,
-                "responses_create_params": {"input": [], "seed": 1, "temperature": 0.1},
+                "responses_create_params": {
+                    "input": [],
+                    "metadata": {"extra_body": '{"seed": 1}'},
+                    "temperature": 0.1,
+                },
                 "x": 1,
                 "agent_ref": {"name": "my_agent"},
             },
             {
                 "_ng_task_index": 2,
                 "_ng_rollout_index": 0,
-                "responses_create_params": {"input": [], "seed": 0, "temperature": 0.1},
+                "responses_create_params": {
+                    "input": [],
+                    "metadata": {"extra_body": '{"seed": 0}'},
+                    "temperature": 0.1,
+                },
                 "x": 2,
                 "agent_ref": {"name": "my_agent"},
             },
             {
                 "_ng_task_index": 2,
                 "_ng_rollout_index": 1,
-                "responses_create_params": {"input": [], "seed": 1, "temperature": 0.1},
+                "responses_create_params": {
+                    "input": [],
+                    "metadata": {"extra_body": '{"seed": 1}'},
+                    "temperature": 0.1,
+                },
                 "x": 2,
                 "agent_ref": {"name": "my_agent"},
             },
@@ -140,7 +164,11 @@ class TestRewardProfile:
                 "histogram/reward": None,
                 "histogram/abc usage": None,
                 "sample": {
-                    "responses_create_params": {"input": [], "seed": 0, "temperature": 0.1},
+                    "responses_create_params": {
+                        "input": [],
+                        "metadata": {"extra_body": '{"seed": 0}'},
+                        "temperature": 0.1,
+                    },
                     "x": 0,
                     "agent_ref": {"name": "my_agent"},
                 },
@@ -165,7 +193,11 @@ class TestRewardProfile:
                 "histogram/reward": None,
                 "histogram/abc usage": None,
                 "sample": {
-                    "responses_create_params": {"input": [], "seed": 0, "temperature": 0.1},
+                    "responses_create_params": {
+                        "input": [],
+                        "metadata": {"extra_body": '{"seed": 0}'},
+                        "temperature": 0.1,
+                    },
                     "x": 1,
                     "agent_ref": {"name": "my_agent"},
                 },
@@ -190,7 +222,11 @@ class TestRewardProfile:
                 "histogram/reward": None,
                 "histogram/abc usage": None,
                 "sample": {
-                    "responses_create_params": {"input": [], "seed": 0, "temperature": 0.1},
+                    "responses_create_params": {
+                        "input": [],
+                        "metadata": {"extra_body": '{"seed": 0}'},
+                        "temperature": 0.1,
+                    },
                     "x": 2,
                     "agent_ref": {"name": "my_agent"},
                 },
@@ -228,19 +264,31 @@ class TestRewardProfile:
             {
                 "_ng_task_index": 0,
                 "_ng_rollout_index": 0,
-                "responses_create_params": {"input": [], "seed": 0, "temperature": 0.1},
+                "responses_create_params": {
+                    "input": [],
+                    "metadata": {"extra_body": '{"seed": 0}'},
+                    "temperature": 0.1,
+                },
                 "agent_ref": {"name": "my_agent"},
             },
             {
                 "_ng_task_index": 0,
                 "_ng_rollout_index": 1,
-                "responses_create_params": {"input": [], "seed": 0, "temperature": 0.1},
+                "responses_create_params": {
+                    "input": [],
+                    "metadata": {"extra_body": '{"seed": 0}'},
+                    "temperature": 0.1,
+                },
                 "agent_ref": {"name": "my_agent"},
             },
             {
                 "_ng_task_index": 1,
                 "_ng_rollout_index": 0,
-                "responses_create_params": {"input": [], "seed": 0, "temperature": 0.1},
+                "responses_create_params": {
+                    "input": [],
+                    "metadata": {"extra_body": '{"seed": 0}'},
+                    "temperature": 0.1,
+                },
                 "agent_ref": {"name": "my_agent"},
             },
         ]
@@ -270,13 +318,21 @@ class TestRewardProfile:
             {
                 "_ng_task_index": 0,
                 "_ng_rollout_index": 0,
-                "responses_create_params": {"input": [], "seed": 0, "temperature": 0.1},
+                "responses_create_params": {
+                    "input": [],
+                    "metadata": {"extra_body": '{"seed": 0}'},
+                    "temperature": 0.1,
+                },
                 "agent_ref": {"name": "my_agent"},
             },
             {
                 "_ng_task_index": 1,
                 "_ng_rollout_index": 0,
-                "responses_create_params": {"input": [], "seed": 0, "temperature": 0.1},
+                "responses_create_params": {
+                    "input": [],
+                    "metadata": {"extra_body": '{"seed": 0}'},
+                    "temperature": 0.1,
+                },
                 "agent_ref": {"name": "my_agent"},
             },
         ]
@@ -310,7 +366,11 @@ class TestRewardProfile:
                 "histogram/first_col": None,
                 "histogram/abc usage": None,
                 "sample": {
-                    "responses_create_params": {"input": [], "seed": 0, "temperature": 0.1},
+                    "responses_create_params": {
+                        "input": [],
+                        "metadata": {"extra_body": '{"seed": 0}'},
+                        "temperature": 0.1,
+                    },
                     "agent_ref": {"name": "my_agent"},
                 },
             },
@@ -328,7 +388,11 @@ class TestRewardProfile:
                 "histogram/abc usage": None,
                 "histogram/second_col": None,
                 "sample": {
-                    "responses_create_params": {"input": [], "seed": 0, "temperature": 0.1},
+                    "responses_create_params": {
+                        "input": [],
+                        "metadata": {"extra_body": '{"seed": 0}'},
+                        "temperature": 0.1,
+                    },
                     "agent_ref": {"name": "my_agent"},
                 },
             },
