@@ -43,6 +43,25 @@ and the model's response.
 }
 ```
 
+## Reasoning-model requirement
+
+For reasoning models that emit `<think>…</think>` CoT (Nemotron, DeepSeek-R1,
+Qwen3, …), **enable vLLM's `--reasoning-parser`** so the CoT is routed to a
+separate reasoning output item and doesn't reach the Judgement regex:
+
+```bash
+vllm serve <model> --reasoning-parser deepseek_r1   # for <think>-style models
+```
+
+Without the reasoning parser, a greedy first-match regex (this server, or
+Skills' `is_correct_judgement`) will pick up phrases like *"so Judgement: No
+applies if …"* inside the model's reasoning and score them as the committed
+verdict — materially lowering accuracy on reasoning models.
+
+The server itself does not strip CoT; that's the vLLM server's job. Pick the
+parser name that matches your model's reasoning tokens (see `vllm serve
+--help` → `--reasoning-parser`).
+
 ## Example usage
 
 ```bash
@@ -58,6 +77,3 @@ ng_collect_rollouts \
     +output_jsonl_fpath=results/math_proof_judgement_rollouts.jsonl \
     +num_repeats=1
 ```
-
-A vLLM reasoning parser (`--reasoning-parser deepseek_r1` etc.) is not required —
-the server strips `<think>…</think>` blocks before the regex match.

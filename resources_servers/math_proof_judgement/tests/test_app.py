@@ -88,17 +88,45 @@ class TestParseJudgement:
 
 
 class TestExtractAssistantText:
-    def test_strips_think_tags(self) -> None:
-        r = _make_response("<think>lots of CoT</think>\nJudgement: Yes")
-        assert "<think>" not in _extract_assistant_text(r)
-        assert "Judgement: Yes" in _extract_assistant_text(r)
+    def test_returns_message_text(self) -> None:
+        """The message content is concatenated verbatim — no in-server stripping.
 
-    def test_strips_unpaired_closing_think(self) -> None:
-        # vLLM reasoning parser eats the opening <think> tag.
-        r = _make_response("raw reasoning </think>\nJudgement: No")
+        With vLLM's ``--reasoning-parser`` active the CoT is routed to a
+        separate reasoning output item that we don't read, so whatever
+        lands in ``type="message"`` is the committed answer.
+        """
+        r = _make_response("Judgement: Yes")
+        assert _extract_assistant_text(r) == "Judgement: Yes"
+
+    def test_ignores_non_message_outputs(self) -> None:
+        """Reasoning items (or any non-message output) must be skipped."""
+        r = NeMoGymResponse(
+            id="resp",
+            created_at=0.0,
+            model="m",
+            object="response",
+            output=[
+                {
+                    "id": "rs_1",
+                    "summary": [],
+                    "type": "reasoning",
+                    "content": [{"text": "lots of CoT speculation Judgement: No", "type": "reasoning_text"}],
+                },
+                {
+                    "id": "msg_1",
+                    "content": [{"annotations": [], "text": "Judgement: Yes", "type": "output_text"}],
+                    "role": "assistant",
+                    "status": "completed",
+                    "type": "message",
+                },
+            ],
+            parallel_tool_calls=True,
+            tool_choice="auto",
+            tools=[],
+        )
         out = _extract_assistant_text(r)
-        assert "reasoning" not in out
-        assert "Judgement: No" in out
+        assert out == "Judgement: Yes"
+        assert "speculation" not in out
 
     def test_empty_response(self) -> None:
         r = NeMoGymResponse(
@@ -150,34 +178,11 @@ class TestVerify:
         # All four confusion counters are zero when pred is None
         assert res.tp == res.fp == res.fn == res.tn == 0.0
 
-    async def test_thinking_block_stripped(self) -> None:
-        server = _make_server()
-        res = await server.verify(_make_req("<think>reasoning</think>\nJudgement: Yes", "Judgement: Yes"))
-        assert res.reward == 1.0
-
-    async def test_cot_speculation_ignored(self) -> None:
-        """A `Judgement: X` inside <think>…</think> does NOT leak into the verdict."""
-        server = _make_server()
-        # CoT says No, final committed answer says Yes — Skills (without
-        # parse_reasoning) would pick the CoT "No"; Gym picks the final "Yes".
-        text = "<think>Maybe the Judgement: No applies?</think>\nJudgement: Yes"
-        res = await server.verify(_make_req(text, "Judgement: Yes"))
-        assert res.reward == 1.0
-        assert res.extracted_judgement == "Yes"
-
-    async def test_unterminated_cot_returns_no_answer(self) -> None:
-        """Model started thinking but never emitted </think> — nothing committed."""
-        server = _make_server()
-        # Even though the truncated CoT contains "Judgement: Yes", it's
-        # unclosed reasoning, not a committed answer. Match Skills'
-        # parse_reasoning=True: score as no_answer.
-        text = "<think>I'm still working on this… Judgement: Yes maybe"
-        res = await server.verify(_make_req(text, "Judgement: Yes"))
-        assert res.extracted_judgement is None
-        assert res.reward == 0.0
-
-    async def test_no_thinking_tags_parses_directly(self) -> None:
-        """Non-reasoning / instruct models that emit no <think> at all still work."""
+    async def test_message_content_parsed_verbatim(self) -> None:
+        """CoT stripping is the responsibility of vLLM's ``--reasoning-parser``;
+        this server only runs the Judgement regex over whatever the model
+        server delivered as ``type="message"`` content.
+        """
         server = _make_server()
         res = await server.verify(_make_req("Judgement: Yes", "Judgement: Yes"))
         assert res.reward == 1.0

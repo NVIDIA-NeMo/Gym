@@ -26,6 +26,13 @@ Ported from NeMo Skills' ``AnswerJudgementMetrics`` + ``is_correct_judgement``
 and are not needed here). The aggregate metrics are binary-classification
 style — accuracy, false_positives/false_negatives, precision/recall/F1 — and
 are averaged across the K rollouts the same way Skills does.
+
+CoT handling: CoT stripping happens at the vLLM server layer via
+``--reasoning-parser`` (e.g. ``deepseek_r1`` for ``<think>…</think>`` models).
+With the parser active, ``/v1/responses`` returns reasoning in a separate
+``type="reasoning"`` output item; this server only reads ``type="message"``
+items, so the Judgement regex never sees CoT text. The server README
+documents the required vLLM invocation.
 """
 
 from __future__ import annotations
@@ -53,12 +60,6 @@ from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_met
 
 _JUDGEMENT_PREFIX_RE = re.compile(r"\*{0,2}Judgement\*{0,2}\s*:", re.IGNORECASE)
 
-# Strip model chain-of-thought blocks (both explicit and implicit-opening
-# reasoning-parser variants) before regex matching, so the "Judgement:" regex
-# matches the post-reasoning answer text.
-_THINK_TAG_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
-_THINKING_TAG_RE = re.compile(r"<thinking>.*?</thinking>", re.DOTALL)
-
 
 def parse_judgement(text: Optional[str]) -> Optional[bool]:
     """Parse the first ``Judgement: Yes/No`` out of a text blob.
@@ -80,46 +81,14 @@ def parse_judgement(text: Optional[str]) -> Optional[bool]:
     return None
 
 
-def _strip_thinking_traces(text: str) -> str:
-    """Extract the committed answer from a reasoning-model response.
-
-    Matches NeMo Skills' ``parse_reasoning=True`` behaviour on reasoning-model
-    output, with one robustness extension for non-reasoning models:
-
-    * If the text contains a closing ``</think>`` / ``</thinking>`` tag
-      (paired or unpaired — the vLLM reasoning parser sometimes eats the
-      opening tag), drop everything up to and including the last closing tag
-      and return what remains. That's the committed answer.
-    * Else if an *opening* ``<think>`` / ``<thinking>`` exists without a
-      closing tag, the model truncated mid-CoT and never committed. Return
-      an empty string so the Judgement regex matches nothing → scored as
-      ``no_answer``. Exact parity with Skills' ``parse_reasoning=True``.
-    * Else (no thinking tags at all — e.g. an instruct model), return the
-      text unchanged so downstream parsing can still find ``Judgement:``.
-      Skills' ``parse_reasoning=True`` would have returned empty here, but
-      for non-reasoning models that's a footgun — Gym's default stays useful.
-    """
-    has_close = "</think>" in text or "</thinking>" in text
-    if has_close:
-        text = _THINK_TAG_RE.sub("", text)
-        text = _THINKING_TAG_RE.sub("", text)
-        # When the reasoning parser strips the opening tag, the text starts
-        # with raw CoT followed by an unpaired </think>.
-        text = re.sub(r"^.*?</think>", "", text, flags=re.DOTALL)
-        text = re.sub(r"^.*?</thinking>", "", text, flags=re.DOTALL)
-        return text.strip()
-    has_open = "<think>" in text or "<thinking>" in text
-    if has_open:
-        return ""
-    return text.strip()
-
-
 def _extract_assistant_text(response: NeMoGymResponse) -> str:
-    """Return the committed assistant text, with reasoning CoT stripped.
+    """Concatenate the assistant message text from a Responses-API payload.
 
-    Mirrors NeMo Skills' ``parse_reasoning=True`` pre-processing so the
-    ``Judgement:`` regex only matches the model's committed answer and not
-    phrases it speculated about during ``<think>…</think>`` reasoning.
+    Reasoning content is expected to be filtered out by vLLM's
+    ``--reasoning-parser`` at the server layer, which routes ``<think>…</think>``
+    tokens to a separate ``ResponseReasoningItem`` (type ``"reasoning"``).
+    We only read ``type == "message"`` items here, so the Judgement regex never
+    sees CoT. See the benchmark README for the required vLLM invocation.
     """
     if response is None or not getattr(response, "output", None):
         return ""
@@ -137,7 +106,7 @@ def _extract_assistant_text(response: NeMoGymResponse) -> str:
             t = getattr(c, "text", None)
             if isinstance(t, str):
                 texts.append(t)
-    return _strip_thinking_traces("\n".join(texts))
+    return "\n".join(texts).strip()
 
 
 # ---------------------------------------------------------------------------
@@ -148,9 +117,11 @@ def _extract_assistant_text(response: NeMoGymResponse) -> str:
 class MathProofJudgementConfig(BaseResourcesServerConfig):
     """Configuration for the math_proof_judgement server.
 
-    No tunable fields — the Judgement: regex runs on the response after CoT
-    reasoning is stripped (matches Skills' ``parse_reasoning=True`` behaviour
-    on reasoning-model output; see ``_strip_thinking_traces``).
+    No tunable fields — the Judgement: regex runs over the assistant message
+    content returned by the upstream model server. For reasoning models,
+    enable vLLM's ``--reasoning-parser`` (e.g. ``deepseek_r1``) so
+    ``<think>…</think>`` tokens are routed to a separate reasoning output
+    item and never reach the regex.
     """
 
 

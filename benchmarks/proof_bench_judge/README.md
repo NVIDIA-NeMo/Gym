@@ -17,6 +17,19 @@ The prepare script downloads from HuggingFace and uses the `Qwen/Qwen3-0.6B`
 tokenizer to apply the Skills <=10k-token filter on proof length. Ensure
 `HF_TOKEN` / network access is available.
 
+For reasoning models, **serve with `--reasoning-parser`** so `<think>…</think>`
+CoT is split out at the server layer and the Judgement regex only sees the
+model's committed answer:
+
+```bash
+vllm serve <model> --reasoning-parser deepseek_r1
+```
+
+Skipping the parser for a reasoning model drags pass@1 down ~10 pp on this
+benchmark — the regex picks up `Judgement: X` phrases inside CoT
+speculation. See `resources_servers/math_proof_judgement/README.md` for
+details.
+
 ## Example usage
 
 ```bash
