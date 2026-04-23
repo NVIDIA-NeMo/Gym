@@ -25,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import yaml
 
-from nemo_gym.server_metadata import ResourcesServerMetadata, visit_agent_server, visit_resources_server
+from nemo_gym.server_metadata import ServerMetadata, visit_agent_server, visit_resources_server
 
 
 README_PATH = Path("README.md")
@@ -66,7 +66,7 @@ class ConfigMetadata:
 
     @classmethod
     def from_yaml_data(
-        cls, resource: ResourcesServerMetadata, agent: AgentDatasetsMetadata
+        cls, resource: ServerMetadata, agent: AgentDatasetsMetadata
     ) -> "ConfigMetadata":  # pragma: no cover
         """Combine resources server and agent datasets metadata."""
         return cls(

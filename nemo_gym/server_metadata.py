@@ -17,8 +17,8 @@ from typing import Optional
 
 
 @dataclass
-class ResourcesServerMetadata:
-    """Metadata extracted from resources server YAML config."""
+class ServerMetadata:
+    """Metadata extracted from a resources-server or agent-server YAML config."""
 
     domain: Optional[str] = None
     description: Optional[str] = None
@@ -37,18 +37,18 @@ class ResourcesServerMetadata:
         }
 
 
-def visit_resources_server(data: dict, level: int = 1) -> ResourcesServerMetadata:  # pragma: no cover
+def visit_resources_server(data: dict, level: int = 1) -> ServerMetadata:  # pragma: no cover
     """Extract resources server metadata from YAML data."""
     return _visit_server(data, "resources_servers", level)
 
 
-def visit_agent_server(data: dict, level: int = 1) -> ResourcesServerMetadata:  # pragma: no cover
+def visit_agent_server(data: dict, level: int = 1) -> ServerMetadata:  # pragma: no cover
     """Extract agent server metadata from YAML data."""
     return _visit_server(data, "responses_api_agents", level)
 
 
-def _visit_server(data: dict, server_type_key: str, level: int = 1) -> ResourcesServerMetadata:  # pragma: no cover
-    resource = ResourcesServerMetadata()
+def _visit_server(data: dict, server_type_key: str, level: int = 1) -> ServerMetadata:  # pragma: no cover
+    resource = ServerMetadata()
     if level == 4:
         resource.domain = data.get("domain")
         resource.description = data.get("description")
