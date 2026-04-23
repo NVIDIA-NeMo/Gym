@@ -115,7 +115,7 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
     )
     num_repeats_add_seed: bool = Field(
         default=False,
-        description='When num_repeats > 1, add a "seed" parameter on the Responses create params.',
+        description='When num_repeats > 1, pass a per-rollout "seed" via metadata.extra_body (honored by vLLM model servers).',
     )
     resume_from_cache: bool = Field(
         default=False,
@@ -140,7 +140,9 @@ class RolloutCollectionHelper(BaseModel):
             print(f"Limiting the number of rows to {config.limit}")
 
         if config.num_repeats_add_seed:
-            print("Adding unique `seed` values to each input")
+            print(
+                "Adding unique `seed` values to each input via metadata.extra_body (only honored by vLLM model servers)"
+            )
 
         if config.agent_name:
             print(f"Using `{config.agent_name}` for rows that do not already have an agent ref")
@@ -205,7 +207,10 @@ class RolloutCollectionHelper(BaseModel):
                 task_idx_to_rollout_idx[row[TASK_INDEX_KEY_NAME]] += 1
 
                 if config.num_repeats_add_seed:
-                    row[RESPONSES_CREATE_PARAMS_KEY_NAME]["seed"] = row[ROLLOUT_INDEX_KEY_NAME]
+                    metadata = row[RESPONSES_CREATE_PARAMS_KEY_NAME].setdefault("metadata", {})
+                    extra_body = json.loads(metadata.get("extra_body", "{}"))
+                    extra_body["seed"] = row[ROLLOUT_INDEX_KEY_NAME]
+                    metadata["extra_body"] = json.dumps(extra_body)
 
                 rows.append(row)
 
