@@ -1,0 +1,21 @@
+# Chain to existing resource server + agent config
+config_paths:
+  - resources_servers/math_formal_lean/configs/math_formal_lean.yaml
+
+# We use `_inherit_from` directives to inherit from and not use the generic config above to ensure this benchmark config is isolated.
+putnam_bench_math_formal_lean_resources_server:
+  _inherit_from: math_formal_lean
+
+putnam_bench_math_formal_lean_simple_agent:
+  _inherit_from: math_formal_lean_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: putnam_bench_math_formal_lean_resources_server
+      datasets:
+      - name: putnam_bench
+        type: benchmark
+        jsonl_fpath: benchmarks/putnam_bench/data/putnam_bench_benchmark.jsonl
+        prompt_config: benchmarks/prompts/lean4_formal_proof_deepseek_prover_v2.yaml
+        prepare_script: benchmarks/putnam_bench/prepare.py
+        num_repeats: 32
