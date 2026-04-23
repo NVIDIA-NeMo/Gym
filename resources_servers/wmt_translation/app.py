@@ -90,14 +90,22 @@ def _tokenizer_for(target_language: str) -> str:
 def _strip_reasoning_preamble(text: str) -> str:
     """Remove a pre-answer reasoning preamble, matching Skills' parse_reasoning=True.
 
-    - If ``</think>`` is present, return everything after the *last* occurrence.
-    - If absent, return an empty string (model never finished reasoning).
-
-    Both branches match ``nemo_skills`` translation evaluation behavior.
+    Three cases:
+      1. ``</think>`` present: return everything after the *last* occurrence
+         (the actual answer, with the preamble dropped).
+      2. ``<think>`` present but no ``</think>``: reasoning started but didn't
+         close — the model truncated mid-reasoning. Return empty string so the
+         rollout counts as no-answer (matches Skills' ``parse_reasoning=True``).
+      3. Neither tag present: no inline reasoning preamble (e.g., when the
+         endpoint returned reasoning as a structured ``output[i].type="reasoning"``
+         block and ``output_text`` already contains only the answer). Return
+         the text unchanged.
     """
     if "</think>" in text:
         return text.rsplit("</think>", 1)[1].lstrip("\n")
-    return ""
+    if "<think>" in text:
+        return ""
+    return text
 
 
 # --- Request / response shapes ------------------------------------------------
@@ -212,7 +220,10 @@ def _build_comet_remote():
         )
     uv_python_root = venv_python.parent.parent  # .../cpython-3.12.12-.../
 
-    lustre_python_root = Path("/opt/Gym/.cache/comet-python") / uv_python_root.name
+    # Lustre cache root is overridable via env var for local testing / alternate
+    # cluster layouts. Default matches the draco-oci mount layout.
+    cache_root = Path(os.environ.get("WMT_TRANSLATION_COMET_PY_CACHE", "/opt/Gym/.cache/comet-python"))
+    lustre_python_root = cache_root / uv_python_root.name
     lustre_python_bin = lustre_python_root / "bin" / venv_python.name
     if not lustre_python_bin.exists():
         LOG.info(
@@ -262,7 +273,7 @@ def _build_comet_remote():
         resources={"extra_gpu": 1},
         runtime_env={"py_executable": str(lustre_python_bin), "env_vars": env_vars},
     )
-    def _score_comet(
+    def _score_comet(  # pragma: no cover - needs live Ray cluster + CUDA + unbabel-comet checkpoint
         triples: List[Tuple[str, str, str]], model_name: str, batch_size: int, gpu_idx: int = 0
     ) -> List[float]:
         import torch
