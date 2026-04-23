@@ -1,6 +1,6 @@
 # Gymnasium
 
-`GymnasiumServer` is a [Gymnasium](https://gymnasium.farama.org/)-style base class for resources servers. Implement `step()`, optionally `reset()`, and pair with `gymnasium_agent`. Not a standalone server.
+`GymnasiumServer` is a [Gymnasium](https://gymnasium.farama.org/)-style base class for resources servers. Implement `step()`, optionally `reset()`, and use with `gymnasium_agent`. Not a standalone server.
 
 ```python
 from resources_servers.base_gymnasium import GymnasiumServer
@@ -14,29 +14,21 @@ from nemo_gym.openai_utils import NeMoGymResponse
 
 class MyEnv(GymnasiumServer):
     async def reset(self, metadata: dict, session_id=None) -> tuple[str | None, dict]:
-        # Called once at the start of each episode to initialize the environment.
-        # Return (observation, info).
-        # None observation = use responses_create_params.input as-is.
-        return None, {}
+        return None, {}  # (observation, info); None obs = use input as-is
 
     async def step(self, action: NeMoGymResponse, metadata: dict, session_id=None) -> tuple[str | None, float, bool, bool, dict]:
-        # Called after each model response. Executes any actions taken or other env logic
-        # (<action> tags, tool calls, user turns, or single-step verification), computes
-        # rewards, determines if done.
-        # Return (observation, reward, terminated, truncated, info).
-        # observation: next message to the model (tool result, rendering of state,
-        #   user message, etc.), or None if the episode is over.
-        # reward: per-step reward, accumulated across all steps by the agent.
-        # terminated: True when the episode ends naturally (task solved, game over).
-        # truncated: True when the episode is cut short (step limit, timeout).
-        # info: arbitrary dict passed through to the final response. Use for diagnostics,
-        #   scores, metadata. Set info["tool_outputs"] = [{call_id, output}, ...] to have
-        #   the agent surface tool results as proper function_call_output items instead of
-        #   a plain user-message observation.
-        ...
+        ...  # (observation, reward, terminated, truncated, info)
 ```
 
-The main method to implement is `step()`. Implementing a custom `reset()` is optional; use it to initialize environment state or return an opening message from the environment. The default implementation returns `(None, {})`.
+`reset()` runs once per episode. `step()` runs after each model response and returns the 5-tuple:
+
+- **observation**: next message to the model, or `None` to end the episode.
+- **reward**: per-step reward; the agent sums across steps.
+- **terminated**: episode ended naturally (task solved, game over).
+- **truncated**: episode cut short (step limit, timeout).
+- **info**: passthrough dict. Set `info["tool_outputs"] = [{call_id, output}, ...]` to have the agent feed tool results back as proper `function_call_output` items instead of a user-message observation.
+
+Only `step()` is required. The default `reset()` returns `(None, {})`.
 
 `metadata` is the `verifier_metadata` dict from your input JSONL, passed through unchanged. This is where you put task-specific data (expected answers, test cases, board configurations, etc.) that the environment needs for initialization or scoring. Access fields with `metadata.get("field_name")`.
 
