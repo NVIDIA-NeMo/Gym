@@ -1,0 +1,20 @@
+# Chain to existing resource server + agent config
+config_paths:
+  - resources_servers/math_with_judge/configs/math_with_judge.yaml
+
+# Isolated benchmark-specific inheritance.
+gsm8k_math_with_judge_resources_server:
+  _inherit_from: math_with_judge
+
+gsm8k_math_with_judge_simple_agent:
+  _inherit_from: math_with_judge_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: gsm8k_math_with_judge_resources_server
+      datasets:
+      - name: gsm8k
+        type: benchmark
+        jsonl_fpath: benchmarks/gsm8k/data/gsm8k_benchmark.jsonl
+        prompt_config: benchmarks/prompts/generic_math.yaml
+        prepare_script: benchmarks/gsm8k/prepare.py
