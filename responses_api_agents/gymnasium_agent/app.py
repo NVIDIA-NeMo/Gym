@@ -26,6 +26,7 @@ from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Simpl
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest, ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
+    NeMoGymFunctionCallOutput,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
@@ -72,18 +73,17 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
         return result
 
     async def run(self, request: Request, body: GymnasiumAgentRunRequest) -> GymnasiumRunResponse:
-        cookies = request.cookies
+        env_cookies = request.cookies
 
-        # call reset to initialize the environment
         reset_resp = await self.server_client.post(
             server_name=self.config.env_server.name,
             url_path="/reset",
             json=body.model_dump(),
-            cookies=cookies,
+            cookies=env_cookies,
         )
         await raise_for_status(reset_resp)
         reset_data = EnvResetResponse.model_validate(await get_response_json(reset_resp))
-        cookies = reset_resp.cookies
+        env_cookies = reset_resp.cookies
 
         base_body = body.responses_create_params.model_copy(deep=True)
         if isinstance(base_body.input, str):
@@ -99,6 +99,7 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
         model_server_cookies = None
         step_data = EnvStepResponse(terminated=False, truncated=True, reward=0.0)
         last_model_response = None
+        finished = False
 
         for _ in range(self.config.max_steps):
             new_body = base_body.model_copy(update={"input": base_body.input + new_outputs})
@@ -130,20 +131,30 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
                 server_name=self.config.env_server.name,
                 url_path="/step",
                 json=body.model_dump() | {"response": model_response.model_dump()},
-                cookies=cookies,
+                cookies=env_cookies,
             )
             await raise_for_status(step_resp)
             step_data = EnvStepResponse.model_validate(await get_response_json(step_resp))
             total_reward += step_data.reward
-            cookies = step_resp.cookies
+            env_cookies = step_resp.cookies
 
             if step_data.terminated or step_data.truncated:
+                finished = True
                 break
+
+            for tool_output in (step_data.info or {}).get("tool_outputs", []):
+                new_outputs.append(
+                    NeMoGymFunctionCallOutput(
+                        type="function_call_output",
+                        call_id=tool_output["call_id"],
+                        output=tool_output["output"],
+                    )
+                )
 
             if step_data.observation:
                 new_outputs.append(NeMoGymEasyInputMessage(role="user", content=step_data.observation))
 
-        else:
+        if not finished:
             step_data = step_data.model_copy(update={"truncated": True})
 
         last_model_response.output = new_outputs
