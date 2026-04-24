@@ -47,7 +47,7 @@ GRPO training on instruction following and reasoning environments.
 :::{grid-item-card} {octicon}`server;1.5em;sd-mr-1` verl
 :link: verl
 :link-type: doc
-DAPO / GRPO / PPO training with NeMo Gym environments via the verl `nemo_gym` recipe.
+RL training with NeMo Gym environments via the verl `nemo_gym` recipe.
 +++
 {bdg-secondary}`verl` {bdg-secondary}`dapo` {bdg-secondary}`multi-node`
 :::

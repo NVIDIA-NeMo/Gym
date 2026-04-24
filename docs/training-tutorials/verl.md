@@ -2,9 +2,9 @@
 
 # Training with verl
 
-This tutorial shows how to run DAPO / GRPO / PPO training on NeMo Gym environments using the `nemo_gym` recipe in [verl](https://github.com/verl-project/verl).
+This tutorial shows how to run RL training on NeMo Gym environments using the `nemo_gym` recipe in [verl](https://github.com/verl-project/verl).
 
-**verl** is a flexible, efficient RL training framework. Its NeMo Gym integration ships as a recipe in the [verl-recipe](https://github.com/verl-project/verl-recipe) submodule under `recipe/nemo_gym/`, and is tested with vLLM 0.17 (`verlai/verl:vllm017.latest`).
+**verl** is a flexible, efficient RL training framework. The NeMo Gym integration is a recipe in the [verl-recipe](https://github.com/verl-project/verl-recipe) submodule under `recipe/nemo_gym/`, and is tested with vLLM 0.17 (`verlai/verl:vllm017.latest`).
 
 ## 1. Prepare training data
 
@@ -75,7 +75,7 @@ In your verl training script, swap in the NeMo Gym dataset loader and agent-loop
 
 ## 5. Launch
 
-The recipe ships ready-to-use Slurm templates (`submit_math.sh`, `submit_workplace.sh`, `submit_multienv.sh`). Update these with your slurm specific variables such as account and partition, then submit:
+The recipe includes example Slurm job submission scripts (`submit_math.sh`, `submit_workplace.sh`, `submit_multienv.sh`). Update these with your slurm specific variables such as account and partition, then submit:
 
 ```bash
 cd $VERL_ROOT
