@@ -319,6 +319,24 @@ def _load_metadata_file(path: str):
     return metadata_by_competition, dict(problem_index)
 
 
+def _patch_run_sh(run_code: str) -> str:
+    # Some problem-specific run.sh scripts (e.g. boi20/colors) hold FIFOs open
+    # via `exec N<>fifo` so the user process never gets EOF when the manager
+    # exits.  `wait "$user_pid"` then blocks until the user program finishes
+    # naturally, which can be 80+ seconds for TLE solutions.  Insert a kill
+    # before every bare `wait "$user_pid"` that isn't already preceded by one.
+    import re
+
+    def _add_kill(m: re.Match) -> str:
+        preceding = m.string[max(0, m.start() - 60) : m.start()]
+        if "kill" in preceding:
+            return m.group(0)
+        indent = m.group(1)
+        return f'{indent}kill "$user_pid" 2>/dev/null || true\n{m.group(0)}'
+
+    return re.sub(r'([ \t]*)wait "\$user_pid"', _add_kill, run_code)
+
+
 def _precompile_problem(
     problem_key: str,
     problem_id: str,
@@ -344,7 +362,7 @@ def _precompile_problem(
         with open(target_path, "w", encoding="utf-8") as f:
             f.write(content)
 
-    for script_name, script_content in (("compile.sh", compile_code), ("run.sh", run_code)):
+    for script_name, script_content in (("compile.sh", compile_code), ("run.sh", _patch_run_sh(run_code))):
         script_path = os.path.join(pre_dir, script_name)
         with open(script_path, "w", encoding="utf-8") as f:
             f.write(script_content)
@@ -392,7 +410,10 @@ def run_test_case(task_args: dict, worker_id: int) -> dict:
         if not result["compile_success"]:
             return result
 
-        run_timeout = max(1, int(120 * float(task_args.get("time_scale", 1.0))))
+        # 30s base gives enough headroom for the largest legitimate time limits
+        # (~20s) plus run.sh shell overhead, while still killing runaway
+        # processes far sooner than the old 120s base.
+        run_timeout = max(30, int(30 * float(task_args.get("time_scale", 1.0))))
         run_start = time.monotonic()
         run_result = _exec_sync(
             _test_loop_tls,
@@ -702,3 +723,5 @@ class CCCEvaluator(BaseEvaluator):
 
     async def eval_single(self, data_point: dict):
         return await self._evaluate_entry(data_point)
+
+
