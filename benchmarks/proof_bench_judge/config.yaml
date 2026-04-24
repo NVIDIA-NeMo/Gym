@@ -1,0 +1,22 @@
+# Chain to the math_proof_judgement resource server + agent config.
+config_paths:
+  - resources_servers/math_proof_judgement/configs/math_proof_judgement.yaml
+
+proof_bench_judge_math_proof_judgement_resources_server:
+  _inherit_from: math_proof_judgement
+  resources_servers:
+    math_proof_judgement: {}
+
+proof_bench_judge_math_proof_judgement_simple_agent:
+  _inherit_from: math_proof_judgement_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: proof_bench_judge_math_proof_judgement_resources_server
+      datasets:
+        - name: proof_bench_judge
+          type: benchmark
+          jsonl_fpath: benchmarks/proof_bench_judge/data/proof_bench_judge_benchmark.jsonl
+          prompt_config: benchmarks/proof_bench_judge/prompts/default.yaml
+          prepare_script: benchmarks/proof_bench_judge/prepare.py
+          license: Apache 2.0
