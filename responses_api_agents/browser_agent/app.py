@@ -589,8 +589,14 @@ class BrowserAgent(SimpleResponsesAPIAgent):
             env_id = seed_data.env_id
             screenshot_b64 = seed_data.screenshot
 
-            trajectory, local_storage_dump, initial_local_storage, usage, debug_rollout_dir = (
-                await self._responses_via_adapter(task_prompt, env_id, screenshot_b64, cookie_jar, viewport_w, viewport_h)
+            (
+                trajectory,
+                local_storage_dump,
+                initial_local_storage,
+                usage,
+                debug_rollout_dir,
+            ) = await self._responses_via_adapter(
+                task_prompt, env_id, screenshot_b64, cookie_jar, viewport_w, viewport_h
             )
 
         finally:
