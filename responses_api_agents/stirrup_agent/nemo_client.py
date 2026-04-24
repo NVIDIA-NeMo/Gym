@@ -45,11 +45,9 @@ When unset, a conservative character-count fallback is used.
 from __future__ import annotations
 
 import logging
-import os
 from time import perf_counter
 from typing import Any, Optional
 
-from openai import AsyncOpenAI
 from stirrup.clients.chat_completions_client import ChatCompletionsClient
 from stirrup.clients.utils import to_openai_messages, to_openai_tools
 from stirrup.core.models import (
@@ -63,6 +61,7 @@ from stirrup.core.models import (
     ToolMessage,
     UserMessage,
 )
+
 
 LOGGER = logging.getLogger(__name__)
 
@@ -203,14 +202,10 @@ class DynamicMaxTokensChatCompletionsClient(ChatCompletionsClient):
 
         # Strategy 2: apply_chat_template on messages only + separate tool JSON count
         try:
-            text = self._tokenizer.apply_chat_template(
-                oai_messages, tokenize=False, add_generation_prompt=True
-            )
+            text = self._tokenizer.apply_chat_template(oai_messages, tokenize=False, add_generation_prompt=True)
             total = len(self._tokenizer(text, add_special_tokens=False)["input_ids"])
             if oai_tools is not None:
-                total += len(
-                    self._tokenizer(_json.dumps(oai_tools), add_special_tokens=False)["input_ids"]
-                )
+                total += len(self._tokenizer(_json.dumps(oai_tools), add_special_tokens=False)["input_ids"])
             return total
         except Exception as exc:
             LOGGER.warning(f"apply_chat_template(messages) failed ({exc}); falling back to JSON count.")
@@ -220,9 +215,7 @@ class DynamicMaxTokensChatCompletionsClient(ChatCompletionsClient):
             blob = _json.dumps(oai_messages)
             total = len(self._tokenizer(blob, add_special_tokens=False)["input_ids"])
             if oai_tools is not None:
-                total += len(
-                    self._tokenizer(_json.dumps(oai_tools), add_special_tokens=False)["input_ids"]
-                )
+                total += len(self._tokenizer(_json.dumps(oai_tools), add_special_tokens=False)["input_ids"])
             return total
         except Exception as exc:
             LOGGER.warning(f"JSON tokenisation failed ({exc}); falling back to character count.")

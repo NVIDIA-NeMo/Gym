@@ -583,7 +583,7 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
                 "system_prompt": system_prompt,
                 "model_base_url": model_base_url,
                 "model_name": model_name,
-                "api_key": "dummy",
+                "api_key": "dummy",  # pragma: allowlist secret
                 "max_turns": self.config.agent_max_turns,
                 "temperature": temperature,
                 "max_tokens": max_tokens,

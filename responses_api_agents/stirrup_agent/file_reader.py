@@ -20,6 +20,7 @@ rather than just the agent's finish-tool summary.
 Also provides PDF conversion via LibreOffice headless for visual judging
 with multimodal models (e.g., Gemini 3 Pro).
 """
+
 from __future__ import annotations
 
 import base64
@@ -29,6 +30,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any
+
 
 MAX_TOTAL_CHARS = 20_000
 
@@ -191,8 +193,10 @@ def _convert_office_to_pdf(fpath: Path) -> Path | None:
             "--nodefault",
             "--norestore",
             f"-env:UserInstallation={user_install}",
-            "--convert-to", "pdf",
-            "--outdir", str(fpath.parent),
+            "--convert-to",
+            "pdf",
+            "--outdir",
+            str(fpath.parent),
             str(fpath),
         ]
         p = subprocess.run(cmd, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=120)
@@ -245,10 +249,12 @@ def convert_deliverables_to_content_blocks(output_dir: str) -> list[dict[str, An
                     data = pdf_path.read_bytes()
                     b64 = base64.b64encode(data).decode("ascii")
                     blocks.append({"type": "text", "text": f"\n{fpath.name} (converted to PDF):"})
-                    blocks.append({
-                        "type": "image_url",
-                        "image_url": {"url": f"data:application/pdf;base64,{b64}"},
-                    })
+                    blocks.append(
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:application/pdf;base64,{b64}"},
+                        }
+                    )
                 else:
                     # Fallback to text extraction
                     text = _extract_text(fpath, ext)
@@ -259,20 +265,24 @@ def convert_deliverables_to_content_blocks(output_dir: str) -> list[dict[str, An
                 data = fpath.read_bytes()
                 b64 = base64.b64encode(data).decode("ascii")
                 blocks.append({"type": "text", "text": f"\n{fpath.name}:"})
-                blocks.append({
-                    "type": "image_url",
-                    "image_url": {"url": f"data:application/pdf;base64,{b64}"},
-                })
+                blocks.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:application/pdf;base64,{b64}"},
+                    }
+                )
 
             elif ext in IMAGE_EXTS:
                 mime = MIME_TYPES.get(ext, "image/png")
                 data = fpath.read_bytes()
                 b64 = base64.b64encode(data).decode("ascii")
                 blocks.append({"type": "text", "text": f"\n{fpath.name}:"})
-                blocks.append({
-                    "type": "image_url",
-                    "image_url": {"url": f"data:{mime};base64,{b64}"},
-                })
+                blocks.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{mime};base64,{b64}"},
+                    }
+                )
         except Exception as exc:
             blocks.append({"type": "text", "text": f"\n{fpath.name}: [Error: {exc}]"})
 

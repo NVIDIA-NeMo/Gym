@@ -19,6 +19,7 @@ replacement for Stirrup's built-in ``WebToolProvider`` (Brave).
 
 Set ``TAVILY_API_KEY`` in the environment to enable.
 """
+
 from __future__ import annotations
 
 import os
@@ -28,9 +29,9 @@ from typing import Annotated, Any
 
 import httpx
 from pydantic import BaseModel, Field
-
 from stirrup.core.models import Tool, ToolProvider, ToolResult, ToolUseCountMetadata
 from stirrup.utils.text import truncate_msg
+
 
 MAX_LENGTH = 40_000
 TIMEOUT = 60 * 3
@@ -113,8 +114,7 @@ async def _fetch_executor(
 
         body_md = trafilatura.extract(resp.text, output_format="markdown") or ""
         return ToolResult(
-            content=f"<web_fetch><url>{params.url}</url><body>"
-            f"{truncate_msg(body_md, MAX_LENGTH)}</body></web_fetch>",
+            content=f"<web_fetch><url>{params.url}</url><body>{truncate_msg(body_md, MAX_LENGTH)}</body></web_fetch>",
             metadata=ToolUseCountMetadata(),
         )
     except httpx.HTTPError as exc:

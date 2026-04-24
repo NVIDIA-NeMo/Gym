@@ -21,6 +21,7 @@ Run the Stirrup + model servers first (see README.md), then::
 
     python responses_api_agents/stirrup_agent/client.py
 """
+
 import json
 from asyncio import run
 from pathlib import Path

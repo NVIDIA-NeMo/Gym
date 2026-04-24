@@ -17,7 +17,7 @@ gdpval_judge_model:
     openai_model:
       entrypoint: app.py
       openai_base_url: ${oc.env:JUDGE_BASE_URL,https://inference-api.nvidia.com/v1}
-      openai_api_key: ${oc.env:JUDGE_API_KEY}
+      openai_api_key: ${oc.env:JUDGE_API_KEY,dummy}
       openai_model: ${oc.env:JUDGE_MODEL_NAME,gcp/google/gemini-3.1-pro-preview}
 
 # GDPVal resources server (rubric scoring by default; switch to comparison via override).
@@ -63,4 +63,4 @@ gdpval_stirrup_agent:
           jsonl_fpath: benchmarks/gdpval/data/gdpval_benchmark.jsonl
           prompt_config: null
           prepare_script: benchmarks/gdpval/prepare.py
-          num_repeats: 4
+          num_repeats: 2

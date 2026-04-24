@@ -24,6 +24,7 @@ Uses the same ``apptainer exec`` invocation that already works in the
 restrictive ``apptainer instance start`` which requires extra kernel
 capabilities not available in all Slurm container environments.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -34,7 +35,6 @@ import shutil
 import tempfile
 import uuid
 from pathlib import Path
-from typing import Any
 
 from stirrup.core.models import ImageContentBlock, Tool, ToolUseCountMetadata
 from stirrup.tools.code_backends.base import (
@@ -47,6 +47,7 @@ from stirrup.tools.code_backends.base import (
     UploadedFile,
     UploadFilesResult,
 )
+
 
 logger = logging.getLogger(__name__)
 
@@ -164,9 +165,7 @@ class ApptainerCodeExecToolProvider(CodeExecToolProvider):
             appt_stderr = ""
             if self._stderr_log and self._stderr_log.exists():
                 appt_stderr = self._stderr_log.read_text(errors="replace")[:2000]
-            raise RuntimeError(
-                f"Failed to start Apptainer shell for {self._sif_path}: {appt_stderr}"
-            )
+            raise RuntimeError(f"Failed to start Apptainer shell for {self._sif_path}: {appt_stderr}")
 
         # Mark all directories as safe for git (needed because --cleanenv
         # strips the environment, and the container user may differ from the
@@ -288,10 +287,7 @@ class ApptainerCodeExecToolProvider(CodeExecToolProvider):
             if self._stderr_log and self._stderr_log.exists():
                 extra = self._stderr_log.read_text(errors="replace")[-2000:]
             rc = self._process.returncode if self._process else "N/A"
-            raise RuntimeError(
-                f"Apptainer shell exited (rc={rc}). "
-                f"Stderr tail: {extra or '(empty)'}"
-            )
+            raise RuntimeError(f"Apptainer shell exited (rc={rc}). Stderr tail: {extra or '(empty)'}")
 
         marker = f"{_MARKER_PREFIX}{uuid.uuid4().hex[:12]}"
         stderr_name = f".stderr_{marker}"
@@ -302,9 +298,7 @@ class ApptainerCodeExecToolProvider(CodeExecToolProvider):
         # shared bash stdin/stdout stream and ALL subsequent commands
         # (including the git-diff in __aexit__) time out as well.
         if self._has_timeout_cmd and timeout > 0:
-            wrapped_cmd = (
-                f"timeout -k 10 {timeout} bash -c {shlex.quote(cmd)}"
-            )
+            wrapped_cmd = f"timeout -k 10 {timeout} bash -c {shlex.quote(cmd)}"
             asyncio_timeout = timeout + 30
         else:
             wrapped_cmd = cmd
@@ -335,7 +329,8 @@ class ApptainerCodeExecToolProvider(CodeExecToolProvider):
                         extra = self._stderr_log.read_text(errors="replace")[-2000:]
                     logger.error(
                         "Apptainer shell died during command: %s | stderr: %s",
-                        cmd[:200], extra or "(empty)",
+                        cmd[:200],
+                        extra or "(empty)",
                     )
                     break
 
@@ -373,9 +368,7 @@ class ApptainerCodeExecToolProvider(CodeExecToolProvider):
                 except Exception:
                     pass
             timeout_msg = f"Command timed out after {timeout} seconds".encode()
-            combined = (
-                file_stderr + b"\n" + timeout_msg if file_stderr else timeout_msg
-            )
+            combined = file_stderr + b"\n" + timeout_msg if file_stderr else timeout_msg
             return 1, stdout_bytes, combined
 
         # Read per-command stderr from the bind mount file
@@ -416,9 +409,7 @@ class ApptainerCodeExecToolProvider(CodeExecToolProvider):
 
             for _ in range(1000):
                 try:
-                    line = await asyncio.wait_for(
-                        self._process.stdout.readline(), timeout=5
-                    )
+                    line = await asyncio.wait_for(self._process.stdout.readline(), timeout=5)
                 except asyncio.TimeoutError:
                     break
                 if not line:
@@ -426,9 +417,7 @@ class ApptainerCodeExecToolProvider(CodeExecToolProvider):
                 if drain_marker in line.decode("utf-8", errors="replace"):
                     logger.info("Stream resynchronized after timeout drain")
                     return
-            logger.warning(
-                "Stream drain did not find marker — subsequent commands may fail"
-            )
+            logger.warning("Stream drain did not find marker — subsequent commands may fail")
         except Exception as exc:
             logger.warning("Stream drain failed after timeout: %s", exc)
 
@@ -442,9 +431,7 @@ class ApptainerCodeExecToolProvider(CodeExecToolProvider):
     # CodeExecToolProvider interface
     # ------------------------------------------------------------------
 
-    async def run_command(
-        self, cmd: str, *, timeout: int = SHELL_TIMEOUT
-    ) -> CommandResult:
+    async def run_command(self, cmd: str, *, timeout: int = SHELL_TIMEOUT) -> CommandResult:
         if not self._check_allowed(cmd):
             return CommandResult(
                 exit_code=1,
@@ -479,9 +466,7 @@ class ApptainerCodeExecToolProvider(CodeExecToolProvider):
 
     async def read_file_bytes(self, path: str) -> bytes:
         container_path = self._resolve_path(path)
-        rc, stdout, stderr = await self._exec(
-            f"cat {shlex.quote(container_path)}", timeout=30
-        )
+        rc, stdout, stderr = await self._exec(f"cat {shlex.quote(container_path)}", timeout=30)
         if rc != 0:
             err = stderr.decode("utf-8", errors="replace")
             raise FileNotFoundError(f"Cannot read {path}: {err}")
@@ -511,9 +496,7 @@ class ApptainerCodeExecToolProvider(CodeExecToolProvider):
     async def file_exists(self, path: str) -> bool:
         try:
             container_path = self._resolve_path(path)
-            rc, _, _ = await self._exec(
-                f"test -f {shlex.quote(container_path)}", timeout=10
-            )
+            rc, _, _ = await self._exec(f"test -f {shlex.quote(container_path)}", timeout=10)
             return rc == 0
         except RuntimeError:
             return False
@@ -521,9 +504,7 @@ class ApptainerCodeExecToolProvider(CodeExecToolProvider):
     async def is_directory(self, path: str) -> bool:
         try:
             container_path = self._resolve_path(path)
-            rc, _, _ = await self._exec(
-                f"test -d {shlex.quote(container_path)}", timeout=10
-            )
+            rc, _, _ = await self._exec(f"test -d {shlex.quote(container_path)}", timeout=10)
             return rc == 0
         except RuntimeError:
             return False
@@ -544,7 +525,7 @@ class ApptainerCodeExecToolProvider(CodeExecToolProvider):
             if not line:
                 continue
             if line.startswith(base + "/"):
-                files.append(line[len(base) + 1:])
+                files.append(line[len(base) + 1 :])
             else:
                 files.append(line)
         return files

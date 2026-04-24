@@ -16,11 +16,12 @@
 These functions deal with Stirrup message types and history format —
 nothing task-specific lives here.
 """
+
 from __future__ import annotations
 
 import json
 import uuid
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, List, Tuple
 
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -60,16 +61,11 @@ def convert_stirrup_history_to_output_items(
                 if isinstance(msg.content, str):
                     content_text = msg.content
                 elif isinstance(msg.content, list):
-                    content_text = " ".join(
-                        part.text if hasattr(part, "text") else str(part)
-                        for part in msg.content
-                    )
+                    content_text = " ".join(part.text if hasattr(part, "text") else str(part) for part in msg.content)
                 else:
                     content_text = str(msg.content)
 
-                input_items.append(
-                    NeMoGymEasyInputMessage(role="user", content=content_text)
-                )
+                input_items.append(NeMoGymEasyInputMessage(role="user", content=content_text))
 
             elif msg_type == "AssistantMessage":
                 content_text = msg.content if isinstance(msg.content, str) else ""
