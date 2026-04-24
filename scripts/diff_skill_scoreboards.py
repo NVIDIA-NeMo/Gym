@@ -12,16 +12,22 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Compute per-skill with-vs-without deltas from a rollout JSONL.
+"""Compute per-skill deltas from rollout JSONLs.
 
-Single-file mode: prints a scoreboard (skill, with, without, delta, provenance).
-Two-file mode: diff of v1 vs v2 — per-skill delta-of-deltas with provenance
-changes highlighted so you can attribute a delta-of-delta to what actually
-changed (skill text, evals, fixtures, judge prompt, harness version).
+Supports two input shapes, auto-detected from `verifier_metadata`:
 
-Provenance fields read from `verifier_metadata`: skill_md_sha, evals_sha,
-fixtures_sha, judge_prompt_sha, harness_version. Missing fields are treated
-as empty — legacy rollouts still work, they just carry less information.
+  Two-arm (legacy): records have `with_skill` only. Renders with/without/Δ
+  per skill on three axes (reward, tool calls, output tokens).
+
+  2×2 (Phase-1+): records have `cell` in {blind, docs-only, skill-only,
+  skill+docs}. Renders one table per skill with four cells, plus "effects":
+    Δskill | refs=T   = skill+docs − docs-only (realistic reader)
+    Δskill | refs=F   = skill-only − blind     (skill standalone)
+    Δrefs  | skill=T  = skill+docs − skill-only
+    Δrefs  | skill=F  = docs-only  − blind
+
+Two-file mode: same-structure diff of v1 vs v2 with per-field provenance
+attribution (which inputs changed: md / evals / fx / judge / harness).
 """
 
 from __future__ import annotations
@@ -44,24 +50,42 @@ _PROV_ABBREV = {
     "harness_version": "harness",
 }
 
+_CELL_ORDER = ("blind", "docs-only", "skill-only", "skill+docs")
+
+
+@dataclass
+class CellStats:
+    rewards: list[float] = field(default_factory=list)
+    tool_calls: list[int] = field(default_factory=list)
+    output_tokens: list[int] = field(default_factory=list)
+
+    @property
+    def n(self) -> int:
+        return len(self.rewards)
+
+    @property
+    def mean_reward(self) -> float:
+        return statistics.fmean(self.rewards) if self.rewards else float("nan")
+
+    @property
+    def mean_tools(self) -> float:
+        return statistics.fmean(self.tool_calls) if self.tool_calls else float("nan")
+
+    @property
+    def mean_tokens(self) -> float:
+        return statistics.fmean(self.output_tokens) if self.output_tokens else float("nan")
+
 
 @dataclass
 class SkillStats:
-    with_scores: list[float] = field(default_factory=list)
-    without_scores: list[float] = field(default_factory=list)
+    cells: dict[str, CellStats] = field(default_factory=dict)
     prov: dict[str, str] = field(default_factory=dict)
 
-    @property
-    def mean_with(self) -> float:
-        return statistics.fmean(self.with_scores) if self.with_scores else float("nan")
-
-    @property
-    def mean_without(self) -> float:
-        return statistics.fmean(self.without_scores) if self.without_scores else float("nan")
-
-    @property
-    def delta(self) -> float:
-        return self.mean_with - self.mean_without
+    def add(self, cell_name: str, reward: float, n_tools: int, n_tokens: int) -> None:
+        cs = self.cells.setdefault(cell_name, CellStats())
+        cs.rewards.append(reward)
+        cs.tool_calls.append(n_tools)
+        cs.output_tokens.append(n_tokens)
 
 
 def _sha12(data: bytes) -> str:
@@ -70,68 +94,140 @@ def _sha12(data: bytes) -> str:
 
 def _extract_prov(md: dict, with_skill: bool) -> dict[str, str]:
     prov = {f: str(md.get(f) or "") for f in _PROV_FIELDS}
-    # Legacy rollouts carried skill_md but not skill_md_sha; back-fill when possible.
     if not prov["skill_md_sha"] and with_skill:
         prov["skill_md_sha"] = _sha12(str(md.get("skill_md") or "").encode("utf-8"))
     return prov
 
 
+def _cell_from_record(md: dict) -> str:
+    """Return the cell name. Pre-Phase-1 records lack `cell` but still have
+    `with_skill`; map those onto the two-arm legacy cells so downstream code
+    can treat both uniformly."""
+    if md.get("cell"):
+        return str(md["cell"])
+    return "legacy:with" if md.get("with_skill") else "legacy:without"
+
+
 def load_scoreboard(path: Path) -> dict[str, SkillStats]:
-    """Bucket rewards by skill + with_skill flag. Returns {skill_name: SkillStats}."""
     buckets: dict[str, SkillStats] = {}
     with path.open() as f:
         for line in f:
             r = json.loads(line)
             md = r.get("verifier_metadata") or {}
             skill_name = md.get("skill_name")
-            if not skill_name:
-                continue
             reward = r.get("reward")
-            if reward is None:
+            if not skill_name or reward is None:
                 continue
-            with_skill = bool(md.get("with_skill"))
-            record_prov = _extract_prov(md, with_skill=with_skill)
+            cell = _cell_from_record(md)
+            n_tools = len(md.get("tool_calls") or [])
+            usage = (r.get("response") or {}).get("usage") or {}
+            n_tokens = int(usage.get("output_tokens") or 0)
 
-            stats = buckets.get(skill_name)
-            if stats is None:
-                stats = SkillStats()
-                buckets[skill_name] = stats
-            # Fill in prov fields as we see them; don't overwrite established values.
+            stats = buckets.setdefault(skill_name, SkillStats())
+            stats.add(cell, float(reward), n_tools, n_tokens)
+
+            record_prov = _extract_prov(md, with_skill=bool(md.get("with_skill")))
             for k, v in record_prov.items():
                 if v and not stats.prov.get(k):
                     stats.prov[k] = v
-            (stats.with_scores if with_skill else stats.without_scores).append(float(reward))
     return buckets
 
 
-def _fmt_delta(d: float) -> str:
-    return f"{d:+.3f}"
+def _is_2x2(board: dict[str, SkillStats]) -> bool:
+    """True if at least one skill has any of the 2×2 cell labels."""
+    return any(cell in _CELL_ORDER for stats in board.values() for cell in stats.cells)
 
 
-def print_scoreboard(board: dict[str, SkillStats], label: str) -> None:
-    print(f"\n=== {label} ===")
-    print(
-        f"{'skill':24s}  {'with':>8s}  {'without':>8s}  {'delta':>8s}  "
-        f"{'n_with':>6s}  {'n_wo':>6s}  {'md':>13s}  {'evals':>13s}  {'fx':>13s}  {'judge':>13s}  {'harness':>13s}"
-    )
-    print("-" * 148)
-    for name in sorted(board):
-        s = board[name]
-        p = s.prov
-        print(
-            f"{name:24s}  {s.mean_with:8.3f}  {s.mean_without:8.3f}  "
-            f"{_fmt_delta(s.delta)}  {len(s.with_scores):6d}  {len(s.without_scores):6d}  "
-            f"{p.get('skill_md_sha') or '—':>13s}  {p.get('evals_sha') or '—':>13s}  "
-            f"{p.get('fixtures_sha') or '—':>13s}  {p.get('judge_prompt_sha') or '—':>13s}  "
-            f"{p.get('harness_version') or '—':>13s}"
+def _fmt_signed(d: float, width: int = 7, prec: int = 3) -> str:
+    if d != d:  # nan
+        return f"{'—':>{width}s}"
+    return f"{d:+{width}.{prec}f}"
+
+
+def _fmt_cell(stats: CellStats, width_r: int = 6) -> str:
+    if stats.n == 0:
+        return f"{'—':>{width_r}s}  {'—':>5s}  {'—':>6s}"
+    return f"{stats.mean_reward:{width_r}.3f}  {stats.mean_tools:5.1f}  {stats.mean_tokens:6.0f}"
+
+
+def _effects_2x2(stats: SkillStats) -> dict[str, tuple[float, float, float]]:
+    """Return the four marginal effects as (Δreward, Δtools, Δtokens) tuples.
+    NaN when a needed cell is missing."""
+    c = stats.cells
+    nan = float("nan")
+
+    def diff(a: str, b: str) -> tuple[float, float, float]:
+        if a not in c or b not in c:
+            return (nan, nan, nan)
+        return (
+            c[a].mean_reward - c[b].mean_reward,
+            c[a].mean_tools - c[b].mean_tools,
+            c[a].mean_tokens - c[b].mean_tokens,
         )
+
+    return {
+        "skill | refs=T": diff("skill+docs", "docs-only"),
+        "skill | refs=F": diff("skill-only", "blind"),
+        "refs | skill=T": diff("skill+docs", "skill-only"),
+        "refs | skill=F": diff("docs-only", "blind"),
+    }
+
+
+def print_scoreboard_2x2(board: dict[str, SkillStats], label: str) -> None:
+    print(f"\n=== {label} (2×2 mode) ===")
+    for name in sorted(board):
+        stats = board[name]
+        present = [c for c in _CELL_ORDER if c in stats.cells]
+        if not present:
+            continue
+        print(f"\n{name}")
+        print(f"  {'cell':12s}  {'reward':>6s}  {'tools':>5s}  {'tokens':>6s}  n")
+        for c in _CELL_ORDER:
+            if c in stats.cells:
+                cs = stats.cells[c]
+                print(f"  {c:12s}  {_fmt_cell(cs)}  {cs.n}")
+        print(f"  {'effect':14s}  {'Δreward':>8s}  {'Δtools':>7s}  {'Δtokens':>8s}")
+        for effect_name, (dr, dt, dk) in _effects_2x2(stats).items():
+            print(
+                f"  {effect_name:14s}  {_fmt_signed(dr, 8, 3)}  "
+                f"{_fmt_signed(dt, 7, 2)}  {_fmt_signed(dk, 8, 0)}"
+            )
+    _print_prov_footer(board)
+
+
+def print_scoreboard_legacy(board: dict[str, SkillStats], label: str) -> None:
+    """Pre-Phase-1 two-arm rendering. Kept for historical JSONLs."""
+    print(f"\n=== {label} (legacy 2-arm mode) ===")
+    print(
+        f"{'skill':24s}  {'with':>8s}  {'without':>8s}  {'Δreward':>8s}  "
+        f"{'Δtools':>7s}  {'Δtokens':>8s}  {'n':>4s}"
+    )
+    print("-" * 82)
+    for name in sorted(board):
+        stats = board[name]
+        w = stats.cells.get("legacy:with") or CellStats()
+        wo = stats.cells.get("legacy:without") or CellStats()
+        if w.n == 0 or wo.n == 0:
+            continue
+        dr = w.mean_reward - wo.mean_reward
+        dt = w.mean_tools - wo.mean_tools
+        dk = w.mean_tokens - wo.mean_tokens
+        print(
+            f"{name:24s}  {w.mean_reward:8.3f}  {wo.mean_reward:8.3f}  "
+            f"{_fmt_signed(dr, 8, 3)}  {_fmt_signed(dt, 7, 2)}  {_fmt_signed(dk, 8, 0)}  {w.n:4d}"
+        )
+    _print_prov_footer(board)
+
+
+def _print_prov_footer(board: dict[str, SkillStats]) -> None:
+    print(f"\n  provenance per skill:")
+    for name in sorted(board):
+        p = board[name].prov
+        tags = [f"{_PROV_ABBREV[f]}={p.get(f) or '—'}" for f in _PROV_FIELDS]
+        print(f"    {name:24s}  " + "  ".join(tags))
 
 
 def _prov_change_tag(p1: dict[str, str], p2: dict[str, str]) -> tuple[str, str]:
-    """Return (diff_tag, note). diff_tag lists which provenance fields changed;
-    note indicates attribution confidence — 'same-all' only when every field is
-    known on both sides and matches, 'partial' when some fields are unknown,
-    'legacy' when neither side has any provenance."""
     changed = []
     both_known = 0
     total_populated = 0
@@ -142,11 +238,9 @@ def _prov_change_tag(p1: dict[str, str], p2: dict[str, str]) -> tuple[str, str]:
             if a != b:
                 changed.append(_PROV_ABBREV[f])
         elif a or b:
-            # One side has provenance, the other doesn't — definitely a change.
             changed.append(f"{_PROV_ABBREV[f]}?")
         if a or b:
             total_populated += 1
-
     if total_populated == 0:
         return "—", "legacy"
     if changed:
@@ -157,30 +251,34 @@ def _prov_change_tag(p1: dict[str, str], p2: dict[str, str]) -> tuple[str, str]:
 
 
 def print_diff(v1: dict[str, SkillStats], v2: dict[str, SkillStats]) -> None:
-    print(
-        f"\n{'skill':24s}  {'v1 delta':>9s}  {'v2 delta':>9s}  {'change':>8s}  "
-        f"{'provenance diff':>20s}  {'note':>10s}"
-    )
-    print("-" * 92)
+    is_2x2 = _is_2x2(v1) and _is_2x2(v2)
+    print(f"\n=== diff ({'2×2' if is_2x2 else 'legacy'}) ===")
     for name in sorted(set(v1) | set(v2)):
         s1, s2 = v1.get(name), v2.get(name)
         if s1 is None or s2 is None:
-            side = "v2 only" if s1 is None else "v1 only"
-            print(
-                f"{name:24s}  {'—':>9s}  {'—':>9s}  {'—':>8s}  "
-                f"{'—':>20s}  {side:>10s}"
-            )
+            print(f"\n{name}  ({'v2 only' if s1 is None else 'v1 only'})")
             continue
-        change = s2.delta - s1.delta
         prov_diff, note = _prov_change_tag(s1.prov, s2.prov)
-        print(
-            f"{name:24s}  {_fmt_delta(s1.delta):>9s}  {_fmt_delta(s2.delta):>9s}  "
-            f"{_fmt_delta(change):>8s}  {prov_diff:>20s}  {note:>10s}"
-        )
+        print(f"\n{name}  [prov: {prov_diff}  {note}]")
+
+        cells = _CELL_ORDER if is_2x2 else ("legacy:with", "legacy:without")
+        print(f"  {'cell':12s}  {'Δreward':>9s}  {'Δtools':>8s}  {'Δtokens':>9s}")
+        for c in cells:
+            c1 = s1.cells.get(c)
+            c2 = s2.cells.get(c)
+            if c1 is None or c2 is None or c1.n == 0 or c2.n == 0:
+                continue
+            dr = c2.mean_reward - c1.mean_reward
+            dt = c2.mean_tools - c1.mean_tools
+            dk = c2.mean_tokens - c1.mean_tokens
+            print(
+                f"  {c:12s}  {_fmt_signed(dr, 9, 3)}  "
+                f"{_fmt_signed(dt, 8, 2)}  {_fmt_signed(dk, 9, 0)}"
+            )
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description=__doc__)
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("rollouts", type=Path, help="Rollout JSONL (v1 if --v2 is given, else just scoreboard).")
     p.add_argument("--v2", type=Path, default=None, help="If provided, diff v1 vs v2 per skill.")
     p.add_argument("--v1-label", type=str, default="v1")
@@ -188,15 +286,19 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _render(board: dict[str, SkillStats], label: str) -> None:
+    (print_scoreboard_2x2 if _is_2x2(board) else print_scoreboard_legacy)(board, label)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _build_arg_parser().parse_args(argv if argv is not None else sys.argv[1:])
     v1 = load_scoreboard(args.rollouts)
     if args.v2 is None:
-        print_scoreboard(v1, label=str(args.rollouts))
+        _render(v1, label=str(args.rollouts))
         return 0
     v2 = load_scoreboard(args.v2)
-    print_scoreboard(v1, label=f"{args.v1_label}: {args.rollouts}")
-    print_scoreboard(v2, label=f"{args.v2_label}: {args.v2}")
+    _render(v1, label=f"{args.v1_label}: {args.rollouts}")
+    _render(v2, label=f"{args.v2_label}: {args.v2}")
     print_diff(v1, v2)
     return 0
 
