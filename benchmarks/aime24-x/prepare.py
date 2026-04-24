@@ -26,6 +26,7 @@ from pathlib import Path
 
 from datasets import load_dataset
 
+
 BENCHMARK_DIR = Path(__file__).parent
 DATA_DIR = BENCHMARK_DIR / "data"
 OUTPUT_FPATH = DATA_DIR / "aime24-x_benchmark.jsonl"

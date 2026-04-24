@@ -13,4 +13,3 @@ MATH_INSTRUCTIONS = {
     "fr": r"Résolvez le problème mathématique suivant. Assurez-vous de mettre la réponse (et seulement la réponse) dans \boxed{}.",
     "ja": r"以下の数学問題を解いてください。答え（答えのみ）を\boxed{}の中に入れてください。",
 }
-
