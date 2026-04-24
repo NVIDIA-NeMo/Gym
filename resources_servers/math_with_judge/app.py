@@ -155,62 +155,12 @@ Example output: "My final verdict is different [[A!=B]]"."""
         """
 
         library_reward, extracted_answer = self._verify_answer_with_library(expected_answer, generated_answer)
-
         if not self.config.should_use_judge or library_reward > 0.5:
             return library_reward, extracted_answer, library_reward, None
 
-        # Judge input: prefer the raw \boxed{...} LaTeX the model wrote
-        # over math-verify's normalized form. math-verify is tuned for
-        # numeric/algebraic answers and can silently mangle non-numeric
-        # answers (function definitions, sets, conditions) into a
-        # degenerate fragment (e.g. "2" extracted from
-        #   \boxed{g(x)=2x^3+C \text{ or } g(x)=-2x^3+C, C\in\mathbb{R}}),
-        # which the judge then correctly grades as wrong. Falling back
-        # to math-verify's extraction preserves the prior behavior when
-        # no balanced \boxed{} is present; ultimately falls back to the
-        # full generation if neither is available.
-        raw_boxed = self._search_boxed(generated_answer)
-        judge_answer = raw_boxed if raw_boxed else (extracted_answer if extracted_answer else generated_answer)
+        judge_answer = extracted_answer if extracted_answer else generated_answer
         judge_reward, judge_evaluations = await self._verify_answer_with_judge(question, expected_answer, judge_answer)
         return judge_reward, extracted_answer, library_reward, judge_evaluations
-
-    @staticmethod
-    def _search_boxed(text: str) -> Optional[str]:
-        r"""Brace-matching extractor for \boxed{...} content.
-
-        Returns the raw LaTeX inside the last balanced \boxed{...} in the
-        string, preserving the form the model wrote (unlike math-verify,
-        which simplifies numerically). Returns None if no balanced
-        \boxed{...} (or \fbox{...}) is present.
-
-        Mirrors nemo_skills/evaluation/math_grader.py::search_boxed so that
-        Gym can pass the same LaTeX a Skills baseline would pass to its
-        judge.
-        """
-        if "\\boxed" not in text and "\\fbox" not in text:
-            return None
-        idx = text.rfind("\\boxed")
-        if idx < 0:
-            idx = text.rfind("\\fbox")
-            if idx < 0:
-                return None
-        num_open = 0
-        right_brace_idx = None
-        for i in range(idx, len(text)):
-            if text[i] == "{":
-                num_open += 1
-            elif text[i] == "}":
-                num_open -= 1
-                if num_open == 0:
-                    right_brace_idx = i
-                    break
-        if right_brace_idx is None:
-            return None
-        retval = text[idx : right_brace_idx + 1]
-        for prefix in ("\\boxed{", "\\fbox{"):
-            if retval.startswith(prefix) and retval.endswith("}"):
-                return retval[len(prefix) : -1]
-        return None
 
     @classmethod
     @contextlib.contextmanager
