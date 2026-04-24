@@ -1,8 +1,9 @@
-# Verbatim copy of nemo_skills/prompt/config/judge/arena.yaml to preserve
-# exact judge behaviour for the arena-hard-v2 Skills→Gym migration.
-# Source: https://github.com/lm-sys/arena-hard-auto/blob/main/config/judge_config.yaml
+# arena-hard-auto default judge prompt (used for the ``hard_prompt``
+# category). Mirrors upstream at commit-time of the port:
+# https://github.com/lmarena/arena-hard-auto/blob/main/config/judge_config.yaml
 #
-# This is the DEFAULT prompt (used for the `hard_prompt` category).
+# Asks the judge to write its own answer before voting, which acts as
+# a self-consistency check on the final verdict.
 
 system: |-
   Please act as an impartial judge and evaluate the quality of the responses provided by two AI assistants to the user prompt displayed below. You will be given assistant A's answer and assistant B's answer. Your job is to evaluate which assistant's answer is better.

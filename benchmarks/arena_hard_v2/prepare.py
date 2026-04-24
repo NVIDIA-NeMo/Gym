@@ -14,17 +14,18 @@
 # limitations under the License.
 """Prepare Arena Hard v2 benchmark data.
 
-Downloads questions + category-specific baseline answers from the
-arena-hard-auto repo, matching Skills'
-``nemo_skills/dataset/arena-hard-v2/prepare.py`` logic exactly:
+Downloads the arena-hard-auto v2 question set and the two
+category-specific baseline model-answer files, joins them by ``uid``,
+and writes one row per question with the fields the ``arena_judge``
+resources server consumes at the top level (``question``,
+``baseline_answer``, ``category``, ``uid``, ``subcategory``):
 
-- Questions from ``lmarena/arena-hard-auto/data/arena-hard-v2.0/question.jsonl``
-- ``hard_prompt`` baseline: o3-mini-2025-01-31
-- ``creative_writing`` baseline: gemini-2.0-flash-001
-
-Each output row carries the fields the ``arena_judge`` resources server
-consumes (``question``, ``baseline_answer``, ``category``, ``uid``) at
-the top level.
+- Questions:
+  https://github.com/lmarena/arena-hard-auto/blob/main/data/arena-hard-v2.0/question.jsonl
+- ``hard_prompt`` baseline (o3-mini-2025-01-31):
+  https://github.com/lmarena/arena-hard-auto/blob/main/data/arena-hard-v2.0/model_answer/o3-mini-2025-01-31.jsonl
+- ``creative_writing`` baseline (gemini-2.0-flash-001):
+  https://github.com/lmarena/arena-hard-auto/blob/main/data/arena-hard-v2.0/model_answer/gemini-2.0-flash-001.jsonl
 """
 
 import json
@@ -36,7 +37,6 @@ BENCHMARK_DIR = Path(__file__).parent
 DATA_DIR = BENCHMARK_DIR / "data"
 OUTPUT_FPATH = DATA_DIR / "arena_hard_v2_benchmark.jsonl"
 
-# Source URLs — must match Skills' arena-hard-v2 prepare.py byte-for-byte.
 URL_QUESTIONS = "https://raw.githubusercontent.com/lmarena/arena-hard-auto/main/data/arena-hard-v2.0/question.jsonl"
 URL_BASELINE_HARD_PROMPT = (
     "https://raw.githubusercontent.com/lmarena/arena-hard-auto/main/"
@@ -56,9 +56,8 @@ CATEGORY_BASELINES = {
 def _extract_answer_text(data: dict) -> str:
     """Extract the assistant answer from a baseline model's JSONL row.
 
-    Matches Skills' ``extract_answer_text`` in arena-hard-v2/prepare.py.
-    Assistant ``content`` can be either a plain string or a dict with an
-    ``answer`` key (the arena-hard-auto repo uses both shapes).
+    The arena-hard-auto baseline files use both shapes for the assistant
+    ``content``: a plain string or a dict with an ``answer`` key.
     """
     for msg in data["messages"]:
         if msg["role"] == "assistant":
@@ -91,11 +90,12 @@ def prepare() -> Path:
     with open(questions_fpath, "r", encoding="utf-8") as fin, open(OUTPUT_FPATH, "w", encoding="utf-8") as fout:
         for line in fin:
             row = json.loads(line)
-            # Skills renames `prompt` → `question` for template compatibility.
+            # arena-hard-auto stores the prompt under ``prompt`` but the
+            # resource server + prompt template expect ``question``.
             row["question"] = row.pop("prompt")
             category = row["category"]
-            # Fail loudly if a question's baseline answer is missing — matches
-            # Skills' KeyError semantics.
+            # Fail loudly if a question's baseline answer is missing — a
+            # silent skip would shrink the evaluation set.
             row["baseline_answer"] = baseline_answers[row["uid"]][category]
             fout.write(json.dumps(row) + "\n")
             count += 1

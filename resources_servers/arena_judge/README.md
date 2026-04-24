@@ -1,16 +1,15 @@
 # arena_judge
 
-Pairwise LLM-judge resources server ported from
-[`nemo_skills/inference/eval/arena_judge.py`](../../../nemo-skills/nemo_skills/inference/eval/arena_judge.py)
-and
-[`nemo_skills/evaluation/metrics/arena_metrics.py`](../../../nemo-skills/nemo_skills/evaluation/metrics/arena_metrics.py)
-to preserve the upstream [arena-hard-auto](https://github.com/lmarena/arena-hard-auto)
-judging protocol.
+Pairwise LLM-judge resources server implementing the
+[arena-hard-auto](https://github.com/lmarena/arena-hard-auto) judging
+protocol: two judge calls per rollout with swapped answer positions,
+category-specific prompts, and an Arena-Elo score (MLE logistic
+regression + 100-round bootstrap 95% CI) as the headline metric.
 
 ## What it does
 
-For each rollout, the server makes **two** judge calls with the answer
-order swapped to control for positional bias:
+For each rollout, the server makes **two** judge calls to control for
+positional bias:
 
 1. `gen-base` — A = candidate, B = baseline
 2. `base-gen` — A = baseline, B = candidate
@@ -22,15 +21,16 @@ Each call returns a verdict drawn from
 - `reward = 1.0` if the gen-base verdict is a candidate win
   (`A>B` or `A>>B`), else `0.0`
 - Raw judge outputs (`judgement_gen_base`, `judgement_base_gen`) and
-  parsed labels (`verdict_gen_base`, `verdict_base_gen`) so downstream
-  aggregate Arena-Elo metrics (MLE + bootstrap CI) can be recomputed
-  post-hoc by the consuming benchmark's comparison scripts.
+  parsed labels (`verdict_gen_base`, `verdict_base_gen`) so
+  `compute_metrics()` (and any downstream script) can rebuild the
+  pairwise battles without re-invoking the judge.
 
 Judge prompts are category-specific: `hard_prompt` uses
-[`prompts/arena.yaml`](prompts/arena.yaml) (judge writes its own answer
-first), `creative_writing` uses
+[`prompts/arena.yaml`](prompts/arena.yaml) (the judge writes its own
+answer first), `creative_writing` uses
 [`prompts/arena_creative.yaml`](prompts/arena_creative.yaml) (no
-own-answer step).
+own-answer step). Both prompts are ports of arena-hard-auto's upstream
+judge templates.
 
 ## Data schema
 
@@ -39,7 +39,8 @@ Each JSONL row must carry the following top-level fields (pydantic
 
 - `question` — the user prompt sent to the candidate model
 - `baseline_answer` — reference answer to compare against
-- `category` — one of `hard_prompt` / `creative_writing`
+- `category` — one of `hard_prompt` / `creative_writing` (rows without
+  one fall back to `default_category` in the config)
 - `uid` — arena-hard-auto problem id (optional)
 
 ## Example usage
@@ -58,21 +59,40 @@ ng_collect_rollouts \
     +num_repeats=1
 ```
 
-## Configuration
+## Configuring the judge
 
-The default config routes judge calls to
-`https://inference-api.nvidia.com/v1` with
-`aws/anthropic/bedrock-claude-opus-4-6`. Override via env vars:
+The judge model is an OpenAI-compatible endpoint specified by three
+environment variables (resolved via `${oc.env:...}` at config-load
+time):
 
-- `NVIDIA_INFERENCE_API_KEY` — required; pulled via `${oc.env:...}`
-- `ARENA_JUDGE_BASE_URL` — optional; e.g. self-hosted vLLM endpoint
-- `ARENA_JUDGE_MODEL` — optional; e.g. another judge model
+- `ARENA_JUDGE_BASE_URL` — base URL (must support `/v1/chat/completions`)
+- `ARENA_JUDGE_API_KEY` — API key; `MISSING` fallback keeps config-load
+  green for judge-unrelated jobs, but live `verify()` calls will fail
+  without a real key
+- `ARENA_JUDGE_MODEL` — model identifier accepted by the endpoint
+
+The judge call goes through `/v1/chat/completions` — the most widely
+supported path across OpenAI-compatible providers for a simple
+text-verdict judge.
 
 ## Metrics
 
-The server's `compute_metrics()` emits Tier-1 pass@k / majority@k for
-`wins`, `strict_wins`, `ties`, `losses`, `double_wins`, and
-`invalid_gen_base`, plus a per-category breakdown (via
-`compute_subset_metrics(field="category")`). The Arena-Elo headline
-metric (MLE logistic regression + bootstrap CI over pooled battles)
-lives in the consuming benchmark's recipe directory, not here.
+`compute_metrics()` emits:
+
+- **`arena_elo/score`** — headline Arena-Elo win-rate (%) vs baseline,
+  computed by MLE logistic regression over the pairwise battles and
+  clamped to 0-100. Bundled with a `ci_lower` / `ci_upper` pair from a
+  100-round bootstrap.
+- **`arena_elo/{category}/score` + CIs** — per-category breakdown (e.g.
+  `arena_elo/hard_prompt/score`) for any `category` field seen on the
+  input rows.
+- **`arena_elo/invalid_scores`** — count of judge calls that produced
+  no parseable verdict (mirrors arena-hard-auto's `num_invalid`).
+- **pass@k / pass@1[avg-of-k] / majority@k** for
+  `{wins, strict_wins, ties, losses, double_wins, invalid_gen_base}`
+  (from `compute_pass_majority_metrics`), plus a per-category
+  breakdown via `compute_subset_metrics(subset_key="category", ...)`.
+
+`get_key_metrics()` surfaces `arena_elo/score` and its CIs as the
+run's headline numbers alongside the highest-k `pass@1[avg-of-k]`
+flavors.

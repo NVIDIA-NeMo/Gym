@@ -34,10 +34,9 @@ from resources_servers.arena_judge.app import (
 
 
 def _make_response(text: str, model: str = "mock_model") -> NeMoGymResponse:
-    """Build a NeMoGymResponse mock — used for the POLICY model's output
-    (the candidate answer the judge scores). The candidate pathway still
-    uses Responses API because the policy model is a local vLLM that
-    returns the correct shape.
+    """Build a NeMoGymResponse mock — used as the POLICY model's output
+    (the candidate answer the judge scores). The policy server is
+    expected to return a Responses API shape, whatever backend it runs.
     """
     return NeMoGymResponse(
         id="mock_resp",
@@ -61,7 +60,7 @@ def _make_response(text: str, model: str = "mock_model") -> NeMoGymResponse:
 
 def _make_chat_completion(text: str, model: str = "mock_judge") -> dict:
     """Build a raw ChatCompletion dict — what server_client.post returns
-    for the JUDGE call (inference-api.nvidia.com via chat_completions)."""
+    for the JUDGE call via /v1/chat/completions."""
     return {
         "id": "mock_chat",
         "object": "chat.completion",
@@ -79,8 +78,9 @@ def _make_chat_completion(text: str, model: str = "mock_judge") -> dict:
 
 
 class TestParseVerdict:
-    """Contract tests for _parse_verdict — mirrors Skills
-    ArenaMetrics._get_judge_score semantics."""
+    """Contract tests for _parse_verdict — mirrors arena-hard-auto's
+    per-judgment score extraction (regex match, set-uniqueness, valid
+    label whitelist)."""
 
     def test_slight_win(self) -> None:
         assert ArenaJudgeServer._parse_verdict("my final verdict is [[A>B]]") == "A>B"
@@ -98,11 +98,11 @@ class TestParseVerdict:
         assert ArenaJudgeServer._parse_verdict("[[B>A]]") == "B>A"
 
     def test_multiple_matches_same_verdict_ok(self) -> None:
-        # Skills' semantics: len(set(matches)) == 1 is acceptable.
+        # len(set(matches)) == 1 is acceptable.
         assert ArenaJudgeServer._parse_verdict("first: [[A>B]] then again [[A>B]]") == "A>B"
 
     def test_multiple_distinct_matches_invalid(self) -> None:
-        # Skills' semantics: ambiguity → None.
+        # ambiguity → None.
         assert ArenaJudgeServer._parse_verdict("[[A>B]] ... [[B>A]]") is None
 
     def test_no_match_invalid(self) -> None:
@@ -376,25 +376,66 @@ class TestComputeAndKeyMetrics:
             judge_chat_completions_create_params=NeMoGymChatCompletionCreateParamsNonStreaming(messages=[]),
         )
 
-    def test_compute_metrics_includes_category_subsets(self) -> None:
+    def test_compute_metrics_includes_category_subsets_and_arena_elo(self) -> None:
         server = ArenaJudgeServer(config=self._cfg(), server_client=MagicMock(spec=ServerClient))
-        # 2 tasks × 2 rollouts with distinct categories.
+        # 4 tasks per category with varied outcomes — the logistic
+        # regression needs at least two classes of winners to fit.
         tasks = [
-            [
-                {"verdict_gen_base": "A>B", "verdict_base_gen": "B>A", "category": "hard_prompt"},
+            [  # candidate strong win
+                {"verdict_gen_base": "A>>B", "verdict_base_gen": "B>>A", "category": "hard_prompt"},
+            ],
+            [  # tie
                 {"verdict_gen_base": "A=B", "verdict_base_gen": "A=B", "category": "hard_prompt"},
             ],
-            [
-                {"verdict_gen_base": "B>>A", "verdict_base_gen": "A>>B", "category": "creative_writing"},
+            [  # candidate loss
+                {"verdict_gen_base": "B>>A", "verdict_base_gen": "A>>B", "category": "hard_prompt"},
+            ],
+            [  # creative: candidate slight win
+                {"verdict_gen_base": "A>B", "verdict_base_gen": "B>A", "category": "creative_writing"},
+            ],
+            [  # creative: loss
                 {"verdict_gen_base": "B>A", "verdict_base_gen": "A>B", "category": "creative_writing"},
             ],
         ]
         metrics = server.compute_metrics(tasks)
-        # Overall pass@1/wins should be present.
+        # pass@k on verdict-decomposition scores.
         assert any(k.startswith("pass@1[avg-of-") and k.endswith("/wins") for k in metrics), metrics
-        # Per-category keys should be prefixed with the subset name.
+        # Per-category pass@k subsets.
         assert any(k.startswith("hard_prompt/") for k in metrics)
         assert any(k.startswith("creative_writing/") for k in metrics)
+        # Arena-Elo headline + per-category.
+        assert "arena_elo/score" in metrics
+        assert "arena_elo/ci_lower" in metrics
+        assert "arena_elo/ci_upper" in metrics
+        assert "arena_elo/invalid_scores" in metrics
+        assert "arena_elo/hard_prompt/score" in metrics
+        assert "arena_elo/creative_writing/score" in metrics
+        # Score is a win-rate percentage, so 0-100.
+        assert 0.0 <= metrics["arena_elo/score"] <= 100.0
+
+    def test_compute_metrics_degenerate_sweep_all_losses(self) -> None:
+        """Regression test: if every battle has the same winner,
+        logistic regression can't fit — the server should return a
+        degenerate 0% / 100% headline instead of crashing."""
+        server = ArenaJudgeServer(config=self._cfg(), server_client=MagicMock(spec=ServerClient))
+        tasks = [
+            [{"verdict_gen_base": "B>>A", "verdict_base_gen": "A>>B", "category": "hard_prompt"}],
+            [{"verdict_gen_base": "B>>A", "verdict_base_gen": "A>>B", "category": "hard_prompt"}],
+        ]
+        metrics = server.compute_metrics(tasks)
+        assert metrics["arena_elo/score"] == approx(0.0)
+
+    def test_compute_metrics_invalid_judge_outputs_yield_nan(self) -> None:
+        server = ArenaJudgeServer(config=self._cfg(), server_client=MagicMock(spec=ServerClient))
+        tasks = [
+            [{"verdict_gen_base": None, "verdict_base_gen": None, "category": "hard_prompt"}],
+        ]
+        metrics = server.compute_metrics(tasks)
+        # NaN propagates when there are no usable battles.
+        import math as _math
+
+        assert _math.isnan(metrics["arena_elo/score"])
+        assert metrics["arena_elo/invalid_scores"] == 2
 
     def test_get_key_metrics_picks_token_means_and_pass_k(self) -> None:
         server = ArenaJudgeServer(config=self._cfg(), server_client=MagicMock(spec=ServerClient))
