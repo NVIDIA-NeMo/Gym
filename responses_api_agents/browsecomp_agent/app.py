@@ -161,12 +161,16 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         try:
             while True:
                 step += 1
+                step_iter_start = time.monotonic()
 
                 if self.config.keep_rounds is not None and new_outputs:
                     new_outputs = self._compact_old_tool_messages(new_outputs)
 
                 new_body = body.model_copy(update={"input": body.input + new_outputs})
 
+                # --- Model call (with explicit begin/end timing for bottleneck tracking) ---
+                log_event("model_call_begin")
+                model_call_start = time.monotonic()
                 model_response = await self.server_client.post(
                     server_name=self.config.model_server.name,
                     url_path="/v1/responses",
@@ -183,6 +187,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                     raise RuntimeError(
                         f"Received an invalid response from model server: {json.dumps(model_response_json)}"
                     ) from e
+                model_call_dur = time.monotonic() - model_call_start
 
                 # --- Check context reset threshold ---
                 prompt_tokens = model_response.usage.input_tokens if model_response.usage else 0
@@ -192,6 +197,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 had_issue = bool(incomplete) or will_reset
                 log_event(
                     "model_call",
+                    duration_s=round(model_call_dur, 3),
                     input_tokens=prompt_tokens,
                     output_tokens=output_tokens,
                     incomplete=incomplete,
@@ -234,8 +240,11 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 if not all_fn_calls and all_output_messages:
                     break
 
-                # --- Execute tool calls ---
+                # --- Execute tool calls (sequentially; timed individually) ---
+                tool_total_dur = 0.0
                 for output_function_call in all_fn_calls:
+                    log_event("tool_call_begin", name=output_function_call.name, args=output_function_call.arguments)
+                    tool_start = time.monotonic()
                     api_response = await self.server_client.post(
                         server_name=self.config.resources_server.name,
                         url_path=f"/{output_function_call.name}",
@@ -246,11 +255,15 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                     resources_server_cookies = api_response.cookies
 
                     tool_output = (await api_response.content.read()).decode()
+                    tool_dur = time.monotonic() - tool_start
+                    tool_total_dur += tool_dur
                     log_event(
                         "tool_call",
+                        duration_s=round(tool_dur, 3),
                         name=output_function_call.name,
                         args=output_function_call.arguments,
                         output=tool_output,
+                        output_len=len(tool_output),
                     )
                     if self.config.nudge_steps:
                         turns_left = self.config.max_steps - step
@@ -303,6 +316,29 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 now = time.monotonic()
                 step_times.append(now - step_start)
                 step_start = now
+
+                step_total_dur = now - step_iter_start
+                # Per-step summary (to trajectory JSONL and stdout) — makes bottleneck
+                # analysis a one-grep operation.
+                log_event(
+                    "step_end",
+                    duration_s=round(step_total_dur, 3),
+                    model_s=round(model_call_dur, 3),
+                    tool_s=round(tool_total_dur, 3),
+                    n_tools=len(all_fn_calls),
+                    input_tokens=prompt_tokens,
+                    output_tokens=output_tokens,
+                )
+                print(
+                    f"[browsecomp step_end sample={sample_id} step={step}] "
+                    f"dur={step_total_dur:.1f}s "
+                    f"model={model_call_dur:.1f}s "
+                    f"tools={tool_total_dur:.1f}s "
+                    f"n_tools={len(all_fn_calls)} "
+                    f"input_tokens={prompt_tokens} "
+                    f"output_tokens={output_tokens}",
+                    flush=True,
+                )
 
                 if step < 10:
                     print_log("loop")
@@ -368,6 +404,37 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             cleaned_output_text = re.sub(r"<think>.*?</think>", "", raw_output_text, flags=re.DOTALL).strip()
             # Need to get last_verify_response if all attempts are exhausted
             if not cleaned_output_text and attempt != self.config.max_run_retries - 1:
+                # Log the retry: stdout (agent log) + append to the trajectory file of the
+                # just-closed attempt so the next file plus the previous one together tell
+                # the whole story.
+                user_msg_content = next(
+                    (m.get("content") if isinstance(m, dict) else getattr(m, "content", "")
+                     for m in body.responses_create_params.get("input", [])
+                     if (m.get("role") if isinstance(m, dict) else getattr(m, "role", None)) == "user"),
+                    "",
+                )
+                sample_id = hashlib.sha1((user_msg_content or "").encode("utf-8")).hexdigest()[:12] if user_msg_content else "anon"
+                print(
+                    f"[browsecomp run_retry sample={sample_id} attempt={attempt + 1}/{self.config.max_run_retries}] "
+                    f"model produced <think>-only output (len={len(raw_output_text)}); restarting trajectory.",
+                    flush=True,
+                )
+                try:
+                    log_dir = Path(get_global_config_dict().get(NEMO_GYM_LOG_DIR_KEY_NAME) or "nemo_gym_logs")
+                    candidates = sorted((log_dir / "trajectories").glob(f"{sample_id}__*.jsonl"))
+                    if candidates:
+                        with candidates[-1].open("a", encoding="utf-8") as rf:
+                            rec = {
+                                "ts": datetime.utcnow().isoformat() + "Z",
+                                "event": "run_retry",
+                                "attempt": attempt + 1,
+                                "max_attempts": self.config.max_run_retries,
+                                "reason": "empty_after_think_strip",
+                                "raw_output_text": raw_output_text,
+                            }
+                            rf.write(json.dumps(rec, default=str) + "\n")
+                except Exception:
+                    pass  # best-effort, don't break the rollout
                 continue
 
             verify_request = BrowsecompAgentVerifyRequest.model_validate(

@@ -17,6 +17,7 @@ import atexit
 import json
 import resource
 import sys
+import time
 from abc import abstractmethod
 from contextlib import asynccontextmanager
 from logging import Filter as LoggingFilter
@@ -166,12 +167,19 @@ async def request(
 
     client = get_global_aiohttp_client()
     num_tries = 1
+    retries = 0
+    retry_start = time.monotonic()
     while True:
         try:
             return await client.request(method=method, url=url, **kwargs)
         except ServerDisconnectedError:
             global _NUM_SERVER_DISCONNECTED_ERROR
             _NUM_SERVER_DISCONNECTED_ERROR += 1
+            retries += 1
+            print(
+                f"[request_retry url={url} error=ServerDisconnectedError retry={retries} elapsed_s={time.monotonic() - retry_start:.1f}]",
+                flush=True,
+            )
             if _NUM_SERVER_DISCONNECTED_ERROR % DISCONNECTED_CLIENT_OS_PRINT_INTERVAL == 0:
                 print(
                     f"Hit {_NUM_SERVER_DISCONNECTED_ERROR} global `ServerDisconnectedError` while querying {url}.\n{DISCONNECTED_CLIENT_OS_HELP_TEXT}"
@@ -181,6 +189,11 @@ async def request(
         except ClientOSError:
             global _NUM_CLIENT_OS_ERROR
             _NUM_CLIENT_OS_ERROR += 1
+            retries += 1
+            print(
+                f"[request_retry url={url} error=ClientOSError retry={retries} elapsed_s={time.monotonic() - retry_start:.1f}]",
+                flush=True,
+            )
             if _NUM_CLIENT_OS_ERROR % DISCONNECTED_CLIENT_OS_PRINT_INTERVAL == 0:
                 print(
                     f"Hit {_NUM_CLIENT_OS_ERROR} global `ClientOSError` while querying {url}.\n{DISCONNECTED_CLIENT_OS_HELP_TEXT}"
