@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+import asyncio
 import re
 from copy import deepcopy
 from time import time
@@ -62,6 +63,8 @@ from nemo_gym.openai_utils import (
     TokenIDLogProbMixin,
 )
 from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_worker
+
+TRAFFIC_CONC_LIMIT = asyncio.Semaphore(256) # TODO: fix this hack to avoid broken pipe errors at large gbs
 
 
 class VLLMModelConfig(BaseResponsesAPIModelConfig):
@@ -305,6 +308,8 @@ class VLLMModel(SimpleResponsesAPIModel):
     async def chat_completions(
         self, request: Request, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
     ) -> NeMoGymChatCompletion:
+        global TRAFFIC_CONC_LIMIT
+
         body_dict = body.model_dump(exclude_unset=True)
         body_dict = self._preprocess_chat_completion_create_params(request, body_dict)
 

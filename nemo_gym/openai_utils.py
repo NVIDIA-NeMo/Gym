@@ -82,6 +82,8 @@ from openai.types.shared_params import FunctionDefinition
 from pydantic import BaseModel, ConfigDict, Field
 from typing_extensions import TypedDict
 
+from aiohttp import ClientConnectionError
+
 from nemo_gym.server_utils import (
     _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG,
     MAX_NUM_TRIES,
@@ -464,6 +466,9 @@ class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
 RATE_LIMIT_ERROR_CODES = [429, 502, 503, 504, 520]
 RETRY_ERROR_CODES = RATE_LIMIT_ERROR_CODES + [500]
 
+CONNECTION_ERROR_MAX_RETRIES = 3
+CONNECTION_ERROR_BASE_DELAY = 1.0  # seconds
+
 
 class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
     """This is just a stub class that wraps around aiohttp"""
@@ -484,28 +489,40 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
             "_internal": self.internal,
         }
 
-        max_num_tries = MAX_NUM_TRIES
-        tries = 0
-        while tries < max_num_tries:
-            tries += 1
-            response = await request(**request_kwargs)
+        for connection_attempt in range(1, CONNECTION_ERROR_MAX_RETRIES + 1):
+            try:
+                max_num_tries = MAX_NUM_TRIES
+                tries = 0
+                while tries < max_num_tries:
+                    tries += 1
+                    response = await request(**request_kwargs)
 
-            if response.status in RETRY_ERROR_CODES:
-                # If we hit a rate limit, we don't want to hit max num tries, so we increment both.
-                if response.status in RATE_LIMIT_ERROR_CODES:
-                    max_num_tries += 1
+                    if response.status in RETRY_ERROR_CODES:
+                        # If we hit a rate limit, we don't want to hit max num tries, so we increment both.
+                        if response.status in RATE_LIMIT_ERROR_CODES:
+                            max_num_tries += 1
 
-                content = (await response.content.read()).decode()
+                        content = (await response.content.read()).decode()
+                        print(
+                            f"Hit a {response.status} trying to query an OpenAI endpoint (try {tries}). Sleeping 0.5s. Error message: {content}"
+                        )
+                        await sleep(0.5)
+                        continue
+                    else:
+                        return response
+
+                # We've exited the loop
+                await raise_for_status(response)
+            except ClientConnectionError as e:
+                if connection_attempt >= CONNECTION_ERROR_MAX_RETRIES:
+                    raise
+                delay = CONNECTION_ERROR_BASE_DELAY * (2 ** (connection_attempt - 1))
                 print(
-                    f"Hit a {response.status} trying to query an OpenAI endpoint (try {tries}). Sleeping 0.5s. Error message: {content}"
+                    f"Hit a connection error querying an OpenAI endpoint "
+                    f"(attempt {connection_attempt}/{CONNECTION_ERROR_MAX_RETRIES}): "
+                    f"{type(e).__name__}: {e}. Retrying in {delay}s..."
                 )
-                await sleep(0.5)
-                continue
-            else:
-                return response
-
-        # We've exited the loop
-        await raise_for_status(response)
+                await sleep(delay)
 
     async def _raise_for_status(self, response: ClientResponse, request_kwargs: Dict[str, Any]) -> None:
         if not response.ok and _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:
