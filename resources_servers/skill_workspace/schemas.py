@@ -35,6 +35,12 @@ class SkillWorkspaceSeedSessionRequest(BaseSeedSessionRequest):
     skill_path: str
     scenario_id: int
     files: list[str] = Field(default_factory=list)
+    # Gate skill-adjacent payload on these flags so the "without skill" arm is a
+    # true control. SKILL.md is never seeded (it belongs in the system prompt
+    # when with_skill=True, nowhere otherwise). Defaults preserve pre-existing
+    # behavior for non-eval callers.
+    with_references: bool = True
+    with_scripts: bool = True
 
 
 class SkillWorkspaceSeedSessionResponse(BaseSeedSessionResponse):

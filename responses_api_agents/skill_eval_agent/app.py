@@ -144,12 +144,23 @@ class SkillEvalAgent(SimpleResponsesAPIAgent):
             raise RuntimeError("verifier_metadata must include skill_path and scenario_id")
         files = list(metadata.get("files") or [])
         with_skill = bool(metadata.get("with_skill", False))
+        # with_references defaults to `with_skill` for back-compat: earlier input
+        # JSONLs didn't carry the flag, and historical behavior was "references
+        # always on." New input JSONLs should stamp this explicitly per cell.
+        with_references = bool(metadata.get("with_references", with_skill))
+        with_scripts = bool(metadata.get("with_scripts", with_skill))
         skill_md = metadata.get("skill_md") or ""
 
         seed_resp = await self.server_client.post(
             server_name=self.config.workspace_server.name,
             url_path="/seed_session",
-            json={"skill_path": skill_path, "scenario_id": scenario_id, "files": files},
+            json={
+                "skill_path": skill_path,
+                "scenario_id": scenario_id,
+                "files": files,
+                "with_references": with_references,
+                "with_scripts": with_scripts,
+            },
         )
         await raise_for_status(seed_resp)
         env_id = (await get_response_json(seed_resp))["env_id"]

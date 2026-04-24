@@ -52,17 +52,47 @@ def _load_records(path: Path) -> list[dict]:
 
 
 class TestProvenance:
-    def test_emits_two_records_per_scenario(self, tmp_path: Path) -> None:
+    def test_emits_four_records_per_scenario_default(self, tmp_path: Path) -> None:
         skills = tmp_path / "skills"
         skills.mkdir()
         _write_skill(skills)
 
         out = tmp_path / "out.jsonl"
         n = build_jsonl(skills_dir=skills, output=out)
-        assert n == 2  # with + without
+        assert n == 4  # 2×2 default: blind, docs-only, skill-only, skill+docs
 
         records = _load_records(out)
-        assert {r["verifier_metadata"]["with_skill"] for r in records} == {True, False}
+        cells = sorted(r["verifier_metadata"]["cell"] for r in records)
+        assert cells == ["blind", "docs-only", "skill+docs", "skill-only"]
+
+        flag_pairs = sorted(
+            (r["verifier_metadata"]["with_skill"], r["verifier_metadata"]["with_references"])
+            for r in records
+        )
+        assert flag_pairs == [(False, False), (False, True), (True, False), (True, True)]
+
+    def test_cells_flag_restricts_emitted_records(self, tmp_path: Path) -> None:
+        skills = tmp_path / "skills"
+        skills.mkdir()
+        _write_skill(skills)
+
+        out = tmp_path / "out.jsonl"
+        n = build_jsonl(skills_dir=skills, output=out, cells=["blind", "skill+docs"])
+        assert n == 2
+
+        cells = {r["verifier_metadata"]["cell"] for r in _load_records(out)}
+        assert cells == {"blind", "skill+docs"}
+
+    def test_unknown_cell_raises(self, tmp_path: Path) -> None:
+        skills = tmp_path / "skills"
+        skills.mkdir()
+        _write_skill(skills)
+        try:
+            build_jsonl(skills_dir=skills, output=tmp_path / "out.jsonl", cells=["bogus"])
+        except ValueError as e:
+            assert "bogus" in str(e)
+        else:
+            raise AssertionError("expected ValueError for unknown cell")
 
     def test_every_record_has_all_provenance_fields(self, tmp_path: Path) -> None:
         skills = tmp_path / "skills"

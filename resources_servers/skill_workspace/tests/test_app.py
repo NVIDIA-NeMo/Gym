@@ -109,6 +109,60 @@ class TestSeedSession:
         assert (ws / "references" / "note.md").is_file()
 
     @pytest.mark.asyncio
+    async def test_with_references_false_omits_references_dir(self, tmp_path: Path) -> None:
+        """The 'no-docs' arm of the 2×2 must not leak skill references onto disk.
+        We observed 100% of without_skill rollouts reading references/*.md when
+        it was unconditionally seeded; this flag is how the control arm stays
+        clean."""
+        server = _make_server(tmp_path)
+        skill = _make_skill(tmp_path)
+        resp = await server.seed_session(
+            SkillWorkspaceSeedSessionRequest(
+                skill_path=str(skill), scenario_id=1, files=[], with_references=False
+            )
+        )
+        ws = server.env_id_to_workspace[resp.env_id]
+        assert not (ws / "references").exists()
+        # scripts still seeded by default, independent flag
+        assert (ws / "scripts").is_dir()
+
+    @pytest.mark.asyncio
+    async def test_with_scripts_false_omits_scripts_dir(self, tmp_path: Path) -> None:
+        server = _make_server(tmp_path)
+        skill = _make_skill(tmp_path)
+        resp = await server.seed_session(
+            SkillWorkspaceSeedSessionRequest(
+                skill_path=str(skill), scenario_id=1, files=[], with_scripts=False
+            )
+        )
+        ws = server.env_id_to_workspace[resp.env_id]
+        assert not (ws / "scripts").exists()
+        assert (ws / "references").is_dir()
+
+    @pytest.mark.asyncio
+    async def test_blind_arm_has_only_fixtures_and_sandbox_bin(self, tmp_path: Path) -> None:
+        """The 'blind' cell of the 2×2 (no skill, no docs) should contain only
+        scenario fixtures and the workspace-local python symlink — nothing the
+        skill author authored that could hint at the answer."""
+        server = _make_server(tmp_path)
+        skill = _make_skill(tmp_path)
+        resp = await server.seed_session(
+            SkillWorkspaceSeedSessionRequest(
+                skill_path=str(skill),
+                scenario_id=1,
+                files=["evals/files/input.txt"],
+                with_references=False,
+                with_scripts=False,
+            )
+        )
+        ws = server.env_id_to_workspace[resp.env_id]
+        assert not (ws / "SKILL.md").exists()
+        assert not (ws / "references").exists()
+        assert not (ws / "scripts").exists()
+        assert (ws / "evals" / "files" / "input.txt").is_file()
+        assert (ws / ".sandbox_bin" / "python").exists()
+
+    @pytest.mark.asyncio
     async def test_parallel_sessions_are_isolated(self, tmp_path: Path) -> None:
         server = _make_server(tmp_path)
         skill = _make_skill(tmp_path)

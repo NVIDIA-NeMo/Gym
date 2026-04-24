@@ -140,7 +140,12 @@ class SkillWorkspaceResourcesServer(SimpleResourcesServer):
             # supplementary artifacts the skill's scenarios may legitimately
             # reference by path.
 
-            for subdir in ("scripts", "references"):
+            seed_subdirs: list[str] = []
+            if body.with_scripts:
+                seed_subdirs.append("scripts")
+            if body.with_references:
+                seed_subdirs.append("references")
+            for subdir in seed_subdirs:
                 src = skill_src / subdir
                 if src.is_dir():
                     shutil.copytree(src, workspace / subdir)

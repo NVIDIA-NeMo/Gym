@@ -14,9 +14,22 @@
 # limitations under the License.
 """Generate an ng_collect_rollouts-compatible JSONL from agent skills.
 
-For every skill under --skills-dir that has an evals.json, emit 2 lines per
-scenario — one with_skill=True and one with_skill=False. The skill_eval_agent
-uses verifier_metadata.with_skill to decide whether to prepend SKILL.md.
+For every skill under --skills-dir that has an evals.json, emit up to 4 lines
+per scenario corresponding to the 2×2 over two independent flags:
+
+    (with_skill, with_references) ∈ {(F,F), (F,T), (T,F), (T,T)}
+
+- with_skill=True  → agent prepends SKILL.md as a system message
+- with_references=True → workspace seeds references/ and scripts/ into the tmpdir
+  (the skill's supporting artifacts that otherwise leak into a "blind" arm)
+
+Cells map onto reader settings:
+  (F, F) blind        — no skill in prompt, no docs on disk (model priors only)
+  (F, T) docs-only    — no skill, but references on disk (realistic user without the skill pack)
+  (T, F) skill-only   — skill prepended, no supporting artifacts
+  (T, T) skill+docs   — skill prepended + references on disk (realistic user with the skill pack)
+
+Use --cells to restrict (comma-separated, e.g. --cells=blind,skill+docs).
 
 Every record carries a provenance block so downstream tooling can attribute
 changes between runs to a specific input:
@@ -43,6 +56,16 @@ _DEFAULT_HARNESS_PATHS = (
     Path("resources_servers/skill_judge/app.py"),
     Path("responses_api_agents/skill_eval_agent/app.py"),
 )
+
+# The 2×2 cells. Each value is (with_skill, with_references). `with_scripts`
+# mirrors `with_references` — they are always seeded or always gated together
+# because both are part of the skill's supporting payload.
+_CELLS: dict[str, tuple[bool, bool]] = {
+    "blind": (False, False),
+    "docs-only": (False, True),
+    "skill-only": (True, False),
+    "skill+docs": (True, True),
+}
 
 
 def _sha12(data: bytes) -> str:
@@ -99,10 +122,16 @@ def build_jsonl(
     output: Path,
     judge_prompt: Path = _DEFAULT_JUDGE_PROMPT,
     harness_paths: list[Path] | None = None,
+    cells: list[str] | None = None,
 ) -> int:
     skills_dir = skills_dir.resolve()
     judge_prompt_sha = _file_sha12(judge_prompt)
     harness_version = _concat_file_sha12(list(harness_paths or _DEFAULT_HARNESS_PATHS))
+
+    active_cells = cells if cells is not None else list(_CELLS.keys())
+    unknown = [c for c in active_cells if c not in _CELLS]
+    if unknown:
+        raise ValueError(f"unknown cell(s): {unknown}. valid: {list(_CELLS.keys())}")
 
     lines: list[str] = []
     for skill_dir in sorted(p for p in skills_dir.iterdir() if p.is_dir()):
@@ -123,7 +152,8 @@ def build_jsonl(
                 continue
             fixtures_sha = _fixtures_sha12(skill_dir, files)
 
-            for with_skill in (True, False):
+            for cell_name in active_cells:
+                with_skill, with_references = _CELLS[cell_name]
                 record = {
                     "responses_create_params": {
                         "input": [{"role": "user", "content": prompt}],
@@ -138,7 +168,10 @@ def build_jsonl(
                         "harness_version": harness_version,
                         "scenario_id": int(sid),
                         "files": files,
+                        "cell": cell_name,
                         "with_skill": with_skill,
+                        "with_references": with_references,
+                        "with_scripts": with_references,
                         "skill_md": skill_md if with_skill else "",
                         "assertions": assertions,
                         "expected_output": expected_output,
@@ -171,16 +204,27 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
             "Repeat to include multiple files; defaults to the three skill-eval server app.py files."
         ),
     )
+    p.add_argument(
+        "--cells",
+        type=str,
+        default=None,
+        help=(
+            "Comma-separated subset of 2×2 cells to emit. "
+            f"Valid: {','.join(_CELLS.keys())}. Default: all four."
+        ),
+    )
     return p.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv if argv is not None else sys.argv[1:])
+    cells = [c.strip() for c in args.cells.split(",")] if args.cells else None
     n = build_jsonl(
         args.skills_dir,
         args.output,
         judge_prompt=args.judge_prompt,
         harness_paths=args.harness_path,
+        cells=cells,
     )
     print(f"wrote {n} lines → {args.output}")
     return 0
