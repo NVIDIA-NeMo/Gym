@@ -3,41 +3,41 @@
   "evals": [
     {
       "id": 1,
-      "prompt": "Validate the tool-calling dataset at evals/files/sample_tool_calling.jsonl for a search+calculation benchmark.",
-      "expected_output": "Validation confirming the JSONL schema is correct: tools array, function definitions, verifier_metadata with expected tool/args. Notes on parallel_tool_calls.",
-      "files": ["evals/files/sample_tool_calling.jsonl"],
+      "prompt": "Audit the tool-calling dataset at evals/files/sample_tool_schema_bugs.jsonl. For each entry that would fail OpenAI's function-tool schema or is internally inconsistent, identify the entry (by line number or content hint) and state exactly what's wrong. Return a summary with a pass/fail verdict per entry.",
+      "expected_output": "Four of five entries are flagged: line 2 (required field 'q' not in properties), line 3 (parallel_tool_calls=false contradicts expected_tool_calls as a list), line 4 (tool missing the outer 'function' wrapping), line 5 (parallel_tool_calls=true with a single tool and singular expected_tool — likely mistake). Line 1 is clean.",
+      "files": ["evals/files/sample_tool_schema_bugs.jsonl"],
       "assertions": [
-        "responses_create_params.tools array validated with function definitions",
-        "Each tool has type 'function' with name, description, parameters",
-        "verifier_metadata specifies expected tool and arguments",
-        "The data is confirmed as valid for tool-calling benchmarks",
-        "Response notes that parallel_tool_calls should be set if multiple tools can be called"
+        "Line 2's schema error is flagged: `required: ['q']` refers to a property name that doesn't exist (the only property is `query`)",
+        "Line 3 is flagged: `parallel_tool_calls=false` is inconsistent with `verifier_metadata.expected_tool_calls` being a list of multiple tool invocations",
+        "Line 4 is flagged: the tool entry is missing the outer `{type: 'function', function: {...}}` wrapping — the `name`/`description`/`parameters` are at the top level",
+        "Line 5 is flagged: `parallel_tool_calls=true` is inconsistent with having only one tool defined and a singular `expected_tool` in metadata",
+        "Line 1 is correctly identified as clean (no issues)"
       ]
     },
     {
       "id": 2,
-      "prompt": "Check evals/files/sample_bad_data.jsonl for data quality issues before I upload it.",
-      "expected_output": "Report identifying 3 issues: missing verifier_metadata on line 1, data leakage on line 2, missing responses_create_params.input on line 3.",
-      "files": ["evals/files/sample_bad_data.jsonl"],
+      "prompt": "Audit the benchmark at evals/files/sample_mislabeled_benchmark.jsonl. Some `expected_answer` values are wrong for the user's question. Identify every entry where the gold label is semantically incorrect — the schema is fine, I need you to check the actual content. Explain why each flagged answer is wrong.",
+      "expected_output": "Three mislabels: line 2 (capital of Australia is Canberra, not Sydney), line 4 (a leap year has 366 days, not 365), line 6 (chemical symbol for gold is Au, not Go).",
+      "files": ["evals/files/sample_mislabeled_benchmark.jsonl"],
       "assertions": [
-        "Missing verifier_metadata on line 1 is flagged",
-        "Data leakage on line 2 is identified (expected answer '42' appears in system prompt)",
-        "Missing responses_create_params.input on line 3 is flagged",
-        "Response recommends fixing all 3 issues before upload",
-        "Response explains why data leakage undermines training signal"
+        "Line 2 is flagged: the capital of Australia is Canberra, not Sydney",
+        "Line 4 is flagged: a leap year has 366 days, not 365",
+        "Line 6 is flagged: the chemical symbol for gold is Au, not Go (which is not a real symbol)",
+        "Lines 1, 3, 5, and 7 are NOT flagged (their answers are correct: 40, 479001600, 12, 5)",
+        "Response warns that wrong gold labels would train the model on false signal or cause otherwise-correct rollouts to be rejected by `verify()`"
       ]
     },
     {
       "id": 3,
-      "prompt": "Generate 5 example entries for a SQL benchmark based on the schema in evals/files/sample_sql_benchmark.jsonl.",
-      "expected_output": "5 JSONL entries following the same schema: system prompt for SQL, user question, verifier_metadata with db_id, gold_sql, question, ignore_order.",
-      "files": ["evals/files/sample_sql_benchmark.jsonl"],
+      "prompt": "Here is one entry of a multi-turn customer-support benchmark at evals/files/sample_multiturn_branching_schema.jsonl. Study the verifier_metadata schema carefully — note expected_tool_sequence, forbidden_sequence, partial_credit, and the tool-ordering constraint from the system prompt. Generate 3 additional entries that follow the same schema and exercise three distinct branching scenarios: (a) a legitimate refund that requires looking up account first because the user only gave an email, (b) an abuse attempt where the model should refuse, and (c) a partial refund where the amount is ambiguous and requires clarification.",
+      "expected_output": "Three new entries, each with the same schema: tools array with lookup_order / lookup_account / issue_refund, verifier_metadata with expected_tool_sequence, forbidden_sequence, scenario_id, partial_credit. Each entry covers one of the three branching scenarios.",
+      "files": ["evals/files/sample_multiturn_branching_schema.jsonl"],
       "assertions": [
-        "Generated entries follow the same schema as the sample",
-        "verifier_metadata contains db_id, gold_sql, question",
-        "ignore_order field is present",
-        "System prompt instructs model to output SQL",
-        "Exactly 5 entries are generated"
+        "All 3 generated entries include the same tools array as the sample (lookup_order, lookup_account, issue_refund) with matching function schemas",
+        "Each generated entry has a `verifier_metadata.expected_tool_sequence` that specifies the correct tool ordering for that branching scenario",
+        "The entry for scenario (a) (email-only refund) requires `lookup_account` before `lookup_order` in its expected_tool_sequence",
+        "The entry for scenario (b) (abuse attempt) has `expected_tool_sequence` empty or only lookup tools, and specifies a refusal in `correct_final_response_includes`",
+        "Each generated entry has a distinct `scenario_id` and includes `partial_credit` scores for plausible failure modes"
       ]
     }
   ]
