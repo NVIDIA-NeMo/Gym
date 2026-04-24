@@ -109,14 +109,14 @@ class BrowserGymResourcesServer(SimpleResourcesServer):
 
     async def dump_local_storage(self, body: CUADumpLocalStorageRequest) -> CUADumpLocalStorageResponse:
         try:
-            ls_dump = await self.browser_pool.dump_local_storage(body.env_id)
+            ls_dump, initial_ls = await self.browser_pool.dump_local_storage(body.env_id)
         except (TimeoutError, asyncio.TimeoutError):
             logger.warning("dump_local_storage timed out for env_id=%s — returning empty", body.env_id)
-            ls_dump = ""
+            ls_dump, initial_ls = "", "{}"
         except Exception as e:
             logger.warning("dump_local_storage failed for env_id=%s: %s", body.env_id, e)
-            ls_dump = ""
-        return CUADumpLocalStorageResponse(local_storage_dump=ls_dump)
+            ls_dump, initial_ls = "", "{}"
+        return CUADumpLocalStorageResponse(local_storage_dump=ls_dump, initial_local_storage=initial_ls)
 
     def _get_verify_session(self) -> aiohttp.ClientSession:
         if self._verify_session is None or self._verify_session.closed:
@@ -137,6 +137,10 @@ class BrowserGymResourcesServer(SimpleResourcesServer):
         local_storage_dump = ""
         if body.response and body.response.local_storage_dump:
             local_storage_dump = body.response.local_storage_dump
+
+        initial_local_storage = ""
+        if body.response and body.response.initial_local_storage:
+            initial_local_storage = body.response.initial_local_storage
 
         if not gym_url or not task_id:
             logger.warning("Missing gym_url or task_id in verifier_metadata, returning reward=0.0")
@@ -166,6 +170,13 @@ class BrowserGymResourcesServer(SimpleResourcesServer):
                     filename="localStorageDump.json",
                     content_type="application/json",
                 )
+                if initial_local_storage:
+                    form_data.add_field(
+                        "initialState",
+                        initial_local_storage,
+                        filename="initialState.json",
+                        content_type="application/json",
+                    )
                 if model_response:
                     form_data.add_field("modelResponse", model_response)
 

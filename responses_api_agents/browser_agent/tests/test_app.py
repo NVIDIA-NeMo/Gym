@@ -611,7 +611,7 @@ class TestBuildNemoResponse:
             initial_screenshot="base64data",
             final_message="All done!",
         )
-        resp = _build_nemo_response(traj, "env-123", '{"key": "val"}', "computer-use-preview")
+        resp = _build_nemo_response(traj, "env-123", '{"key": "val"}', '{"init": "ls"}', "computer-use-preview")
 
         assert resp.id.startswith("cua_")
         assert resp.model == "computer-use-preview"
@@ -628,7 +628,7 @@ class TestBuildNemoResponse:
         from responses_api_agents.browser_agent.app import _build_nemo_response
 
         traj = CUATrajectory(steps=[], task_prompt="test", initial_screenshot="")
-        resp = _build_nemo_response(traj, "env-1", None, "test-model")
+        resp = _build_nemo_response(traj, "env-1", None, None, "test-model")
         assert resp.output[0].content[0].text == "Task completed"
 
     def test_builds_response_with_usage(self):
@@ -647,7 +647,7 @@ class TestBuildNemoResponse:
             input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=0),
             output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
         )
-        resp = _build_nemo_response(traj, "env-1", None, "test-model", usage=usage)
+        resp = _build_nemo_response(traj, "env-1", None, None, "test-model", usage=usage)
         assert resp.usage is not None
         assert resp.usage.input_tokens == 100
         assert resp.usage.output_tokens == 50
@@ -657,7 +657,7 @@ class TestBuildNemoResponse:
         from responses_api_agents.browser_agent.app import _build_nemo_response
 
         traj = CUATrajectory(steps=[], task_prompt="test", initial_screenshot="")
-        resp = _build_nemo_response(traj, "env-1", None, "test-model")
+        resp = _build_nemo_response(traj, "env-1", None, None, "test-model")
         assert resp.usage is None
 
 
@@ -880,7 +880,7 @@ class TestBuildNemoResponseTokenIds:
             ),
         ]
         traj = CUATrajectory(steps=steps, task_prompt="test", initial_screenshot="init", final_message="Done")
-        resp = _build_nemo_response(traj, "env-1", None, "test-model")
+        resp = _build_nemo_response(traj, "env-1", None, None, "test-model")
 
         output_msg = resp.output[0]
         assert isinstance(output_msg, NeMoGymResponseOutputMessageForTraining)
@@ -893,7 +893,7 @@ class TestBuildNemoResponseTokenIds:
         from responses_api_agents.browser_agent.app import _build_nemo_response
 
         traj = CUATrajectory(steps=[], task_prompt="test", initial_screenshot="")
-        resp = _build_nemo_response(traj, "env-1", None, "test-model")
+        resp = _build_nemo_response(traj, "env-1", None, None, "test-model")
 
         output_msg = resp.output[0]
         assert isinstance(output_msg, NeMoGymResponseOutputMessage)
@@ -1382,7 +1382,7 @@ class TestBrowserAgentRunFlow:
             agent.server_client.post = AsyncMock(return_value=step_http_resp)
 
             cookie_jar = {"cookies": {}}
-            trajectory, ls_dump, usage, debug_dir = await agent._responses_via_adapter(
+            trajectory, ls_dump, initial_ls, usage, debug_dir = await agent._responses_via_adapter(
                 task_prompt="Click the button",
                 env_id="test-env-1",
                 screenshot_b64="aW5pdGlhbA==",
@@ -1404,7 +1404,7 @@ class TestBrowserAgentRunFlow:
 
         with patch.object(agent, "_create_adapter", return_value=mock_adapter):
             cookie_jar = {"cookies": {}}
-            trajectory, ls_dump, usage, debug_dir = await agent._responses_via_adapter(
+            trajectory, ls_dump, initial_ls, usage, debug_dir = await agent._responses_via_adapter(
                 task_prompt="Click the button",
                 env_id="test-env-fail",
                 screenshot_b64="aW5pdGlhbA==",
@@ -1413,6 +1413,7 @@ class TestBrowserAgentRunFlow:
 
         assert len(trajectory.steps) == 0
         assert ls_dump == ""
+        assert initial_ls == ""
         assert usage is None
         mock_adapter.reset.assert_called_once()
 
@@ -1438,7 +1439,7 @@ class TestBrowserAgentRunFlow:
             agent.server_client.post = AsyncMock(return_value=step_http_resp)
 
             cookie_jar = {"cookies": {}}
-            trajectory, ls_dump, usage, debug_dir = await agent._responses_via_adapter(
+            trajectory, ls_dump, initial_ls, usage, debug_dir = await agent._responses_via_adapter(
                 task_prompt="Do something",
                 env_id="test-env-step-fail",
                 screenshot_b64="aW5pdGlhbA==",
@@ -1471,7 +1472,7 @@ class TestBrowserAgentRunFlow:
             agent.server_client.post = AsyncMock(return_value=step_http_resp)
 
             cookie_jar = {"cookies": {}}
-            trajectory, ls_dump, usage, debug_dir = await agent._responses_via_adapter(
+            trajectory, ls_dump, initial_ls, usage, debug_dir = await agent._responses_via_adapter(
                 task_prompt="Navigate",
                 env_id="test-env-stuck",
                 screenshot_b64="aW5pdGlhbA==",
@@ -1545,7 +1546,7 @@ class TestBrowserAgentRunFlow:
             agent.server_client.post = AsyncMock(return_value=step_http_resp)
 
             cookie_jar = {"cookies": {}}
-            trajectory, ls_dump, usage, debug_dir = await agent._responses_via_adapter(
+            trajectory, ls_dump, initial_ls, usage, debug_dir = await agent._responses_via_adapter(
                 task_prompt="Fill form",
                 env_id="test-env-multi",
                 screenshot_b64="aW5pdGlhbA==",
@@ -1587,7 +1588,7 @@ class TestBrowserAgentRunFlow:
             agent.server_client.post = AsyncMock(return_value=step_http_resp)
 
             cookie_jar = {"cookies": {}}
-            trajectory, ls_dump, usage, debug_dir = await agent._responses_via_adapter(
+            trajectory, ls_dump, initial_ls, usage, debug_dir = await agent._responses_via_adapter(
                 task_prompt="Test usage",
                 env_id="test-env-usage",
                 screenshot_b64="aW5pdGlhbA==",

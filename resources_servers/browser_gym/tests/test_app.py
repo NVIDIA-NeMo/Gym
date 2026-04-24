@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -586,6 +587,24 @@ class TestSessionReaper:
         assert isinstance(session.last_accessed, float)
         assert session.last_accessed > 0
 
+    def test_session_has_initial_local_storage(self):
+        session = BrowserSession(
+            context=MagicMock(),
+            page=MagicMock(),
+            viewport_width=1280,
+            viewport_height=720,
+        )
+        assert session.initial_local_storage == "{}"
+
+        session_with_ls = BrowserSession(
+            context=MagicMock(),
+            page=MagicMock(),
+            viewport_width=1280,
+            viewport_height=720,
+            initial_local_storage='{"key": "value"}',
+        )
+        assert session_with_ls.initial_local_storage == '{"key": "value"}'
+
     def test_get_session_touches_last_accessed(self):
         pool = BrowserPool(session_ttl_seconds=60.0)
         mock_session = BrowserSession(
@@ -688,3 +707,184 @@ class TestBrowserActionClearBeforeTyping:
     def test_set_false(self):
         action = BrowserAction(action_type="type", text="hello", clear_before_typing=False)
         assert action.clear_before_typing is False
+
+
+class TestDumpLocalStorageEndpoint:
+    @pytest.mark.asyncio
+    async def test_dump_returns_both_current_and_initial(self):
+        with patch("resources_servers.browser_gym.app.ensure_playwright"):
+            config = _make_config()
+            server = BrowserGymResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+            server.browser_pool = MagicMock(spec=BrowserPool)
+            server.browser_pool.dump_local_storage = AsyncMock(
+                return_value=('{"current": "data"}', '{"initial": "data"}')
+            )
+
+            result = await server.dump_local_storage(CUADumpLocalStorageRequest(env_id="test-env"))
+            assert result.local_storage_dump == '{"current": "data"}'
+            assert result.initial_local_storage == '{"initial": "data"}'
+
+    @pytest.mark.asyncio
+    async def test_dump_timeout_returns_empty(self):
+        with patch("resources_servers.browser_gym.app.ensure_playwright"):
+            config = _make_config()
+            server = BrowserGymResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+            server.browser_pool = MagicMock(spec=BrowserPool)
+            server.browser_pool.dump_local_storage = AsyncMock(side_effect=asyncio.TimeoutError())
+
+            result = await server.dump_local_storage(CUADumpLocalStorageRequest(env_id="test-env"))
+            assert result.local_storage_dump == ""
+            assert result.initial_local_storage == "{}"
+
+    @pytest.mark.asyncio
+    async def test_dump_exception_returns_empty(self):
+        with patch("resources_servers.browser_gym.app.ensure_playwright"):
+            config = _make_config()
+            server = BrowserGymResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+            server.browser_pool = MagicMock(spec=BrowserPool)
+            server.browser_pool.dump_local_storage = AsyncMock(side_effect=RuntimeError("boom"))
+
+            result = await server.dump_local_storage(CUADumpLocalStorageRequest(env_id="test-env"))
+            assert result.local_storage_dump == ""
+            assert result.initial_local_storage == "{}"
+
+
+class TestVerifyInitialState:
+    @pytest.mark.asyncio
+    async def test_verify_sends_initial_state_in_form_data(self):
+        """Verify that initialState is included in the FormData when present."""
+        with patch("resources_servers.browser_gym.app.ensure_playwright"):
+            config = _make_config()
+            server = BrowserGymResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+            traj = CUATrajectory(steps=[], task_prompt="test", initial_screenshot="")
+            response = CUANeMoGymResponse(
+                id="cua_test",
+                created_at=1000,
+                model="test",
+                object="response",
+                output=[],
+                parallel_tool_calls=False,
+                tool_choice="auto",
+                tools=[],
+                env_id="env-1",
+                trajectory=traj,
+                local_storage_dump='{"final": "state"}',
+                initial_local_storage='{"initial": "state"}',
+            )
+            from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+
+            rcp = NeMoGymResponseCreateParamsNonStreaming(input="test")
+            body = CUAVerifyRequest(
+                responses_create_params=rcp,
+                response=response,
+                verifier_metadata={"gym_url": "http://localhost:3000", "task_id": "TEST-001"},
+            )
+
+            mock_response = AsyncMock()
+            mock_response.status = 200
+            mock_response.json = AsyncMock(return_value={"assertions": [{"result": "pass"}]})
+            mock_response.__aenter__ = AsyncMock(return_value=mock_response)
+            mock_response.__aexit__ = AsyncMock(return_value=None)
+
+            mock_session = MagicMock()
+            mock_session.post = MagicMock(return_value=mock_response)
+            mock_session.closed = False
+
+            with patch.object(server, "_get_verify_session", return_value=mock_session):
+                result = await server.verify(body)
+                assert result.reward == 1.0
+
+                call_kwargs = mock_session.post.call_args
+                form_data = call_kwargs[1]["data"] if "data" in call_kwargs[1] else call_kwargs[0][1]
+                fields = {f[0]["name"]: f[2] for f in form_data._fields}
+                assert "initialState" in fields
+                assert fields["initialState"] == '{"initial": "state"}'
+
+    @pytest.mark.asyncio
+    async def test_verify_omits_initial_state_when_empty(self):
+        """Verify that initialState is NOT sent when it is empty/None."""
+        with patch("resources_servers.browser_gym.app.ensure_playwright"):
+            config = _make_config()
+            server = BrowserGymResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+            traj = CUATrajectory(steps=[], task_prompt="test", initial_screenshot="")
+            response = CUANeMoGymResponse(
+                id="cua_test",
+                created_at=1000,
+                model="test",
+                object="response",
+                output=[],
+                parallel_tool_calls=False,
+                tool_choice="auto",
+                tools=[],
+                env_id="env-1",
+                trajectory=traj,
+                local_storage_dump='{"final": "state"}',
+            )
+            from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+
+            rcp = NeMoGymResponseCreateParamsNonStreaming(input="test")
+            body = CUAVerifyRequest(
+                responses_create_params=rcp,
+                response=response,
+                verifier_metadata={"gym_url": "http://localhost:3000", "task_id": "TEST-001"},
+            )
+
+            mock_response = AsyncMock()
+            mock_response.status = 200
+            mock_response.json = AsyncMock(return_value={"assertions": [{"result": "pass"}]})
+            mock_response.__aenter__ = AsyncMock(return_value=mock_response)
+            mock_response.__aexit__ = AsyncMock(return_value=None)
+
+            mock_session = MagicMock()
+            mock_session.post = MagicMock(return_value=mock_response)
+            mock_session.closed = False
+
+            with patch.object(server, "_get_verify_session", return_value=mock_session):
+                result = await server.verify(body)
+                assert result.reward == 1.0
+
+                call_kwargs = mock_session.post.call_args
+                form_data = call_kwargs[1]["data"] if "data" in call_kwargs[1] else call_kwargs[0][1]
+                field_names = {f[0]["name"] for f in form_data._fields}
+                assert "initialState" not in field_names
+
+
+class TestCUANeMoGymResponseInitialLocalStorage:
+    def test_default_none(self):
+        traj = CUATrajectory(steps=[], task_prompt="test", initial_screenshot="")
+        resp = CUANeMoGymResponse(
+            id="cua_test",
+            created_at=1000,
+            model="test",
+            object="response",
+            output=[],
+            parallel_tool_calls=False,
+            tool_choice="auto",
+            tools=[],
+            env_id="env-1",
+            trajectory=traj,
+        )
+        assert resp.initial_local_storage is None
+
+    def test_with_value(self):
+        traj = CUATrajectory(steps=[], task_prompt="test", initial_screenshot="")
+        resp = CUANeMoGymResponse(
+            id="cua_test",
+            created_at=1000,
+            model="test",
+            object="response",
+            output=[],
+            parallel_tool_calls=False,
+            tool_choice="auto",
+            tools=[],
+            env_id="env-1",
+            trajectory=traj,
+            local_storage_dump='{"final": "state"}',
+            initial_local_storage='{"initial": "state"}',
+        )
+        assert resp.initial_local_storage == '{"initial": "state"}'

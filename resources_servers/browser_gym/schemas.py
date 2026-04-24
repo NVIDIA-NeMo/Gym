@@ -117,7 +117,8 @@ class CUADumpLocalStorageRequest(BaseModel):
 
 
 class CUADumpLocalStorageResponse(BaseModel):
-    local_storage_dump: str  # JSON string of localStorage contents
+    local_storage_dump: str  # JSON string of current localStorage contents
+    initial_local_storage: str = "{}"  # JSON string of localStorage at session creation (for NEGATIVE_ASSERTION)
 
 
 ########################################
@@ -172,6 +173,7 @@ class CUANeMoGymResponse(NeMoGymResponse):
     env_id: str
     trajectory: CUATrajectory
     local_storage_dump: Optional[str] = None
+    initial_local_storage: Optional[str] = None
 
 
 ########################################

@@ -180,6 +180,7 @@ class BrowserSession:
     viewport_height: int
     slot_index: int = 0
     last_accessed: float = field(default_factory=time.monotonic)
+    initial_local_storage: str = "{}"
 
 
 class _BrowserSlot:
@@ -259,8 +260,16 @@ class BrowserPool:
         start_url: str,
         viewport_width: Optional[int] = None,
         viewport_height: Optional[int] = None,
+        initial_storage_wait_seconds: float = 60.0,
     ) -> str:
-        """Create a new browser session. Returns base64 screenshot of the initial page."""
+        """Create a new browser session. Returns base64 screenshot of the initial page.
+
+        After navigating to the start URL, waits for ``networkidle`` and then
+        sleeps for ``initial_storage_wait_seconds`` so the web app can fully
+        hydrate its localStorage.  The initial localStorage snapshot is stored
+        on the session and used later during verification to support
+        NEGATIVE_ASSERTION operators that compare against the initial state.
+        """
         await self._semaphore.acquire()
         slot_idx: Optional[int] = None
         context: Optional[BrowserContext] = None
@@ -275,10 +284,37 @@ class BrowserPool:
 
             context = await browser.new_context(viewport={"width": vw, "height": vh})
             page = await context.new_page()
-            await page.goto(start_url, wait_until="domcontentloaded", timeout=30000)
+            await page.goto(start_url, wait_until="domcontentloaded", timeout=120000)
+
+            try:
+                await page.wait_for_load_state("networkidle", timeout=60000)
+            except Exception:
+                logger.warning("networkidle timeout for env_id=%s, proceeding with localStorage capture", env_id)
+
+            if initial_storage_wait_seconds > 0:
+                logger.info(
+                    "Waiting %.0fs for app to stabilize before capturing initial localStorage (env_id=%s)",
+                    initial_storage_wait_seconds,
+                    env_id,
+                )
+                await asyncio.sleep(initial_storage_wait_seconds)
+
+            initial_ls = "{}"
+            try:
+                initial_ls = await asyncio.wait_for(
+                    page.evaluate("() => JSON.stringify(localStorage)"),
+                    timeout=10.0,
+                )
+            except Exception as e:
+                logger.warning("Failed to capture initial localStorage for env_id=%s: %s", env_id, e)
 
             session = BrowserSession(
-                context=context, page=page, viewport_width=vw, viewport_height=vh, slot_index=slot_idx
+                context=context,
+                page=page,
+                viewport_width=vw,
+                viewport_height=vh,
+                slot_index=slot_idx,
+                initial_local_storage=initial_ls,
             )
             async with self._lock:
                 self._sessions[env_id] = session
@@ -331,14 +367,17 @@ class BrowserPool:
         session = self.get_session(env_id)
         return session.page.url
 
-    async def dump_local_storage(self, env_id: str, timeout: float = 10.0) -> str:
-        """Dump localStorage as a JSON string (with timeout to guard against stuck browsers)."""
+    async def dump_local_storage(self, env_id: str, timeout: float = 10.0) -> tuple[str, str]:
+        """Dump current and initial localStorage as JSON strings.
+
+        Returns (current_local_storage, initial_local_storage).
+        """
         session = self.get_session(env_id)
         local_storage = await asyncio.wait_for(
             session.page.evaluate("() => JSON.stringify(localStorage)"),
             timeout=timeout,
         )
-        return local_storage
+        return local_storage, session.initial_local_storage
 
     async def close_session(self, env_id: str) -> bool:
         """Close a browser session with timeout-protected escalation.

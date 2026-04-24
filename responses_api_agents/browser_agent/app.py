@@ -97,6 +97,7 @@ def _build_nemo_response(
     trajectory: CUATrajectory,
     env_id: str,
     local_storage_dump: Optional[str],
+    initial_local_storage: Optional[str],
     model_name: str,
     usage: Optional[Any] = None,
 ) -> CUANeMoGymResponse:
@@ -149,6 +150,7 @@ def _build_nemo_response(
         env_id=env_id,
         trajectory=trajectory,
         local_storage_dump=local_storage_dump,
+        initial_local_storage=initial_local_storage,
     )
 
 
@@ -299,7 +301,7 @@ class BrowserAgent(SimpleResponsesAPIAgent):
         cookie_jar: Dict[str, Any],
         viewport_w: int = 1280,
         viewport_h: int = 720,
-    ) -> tuple[CUATrajectory, Optional[str], Optional[Any], Optional[Path]]:
+    ) -> tuple[CUATrajectory, Optional[str], Optional[str], Optional[Any], Optional[Path]]:
         """Run the CUA loop through the provider adapter.
 
         All providers (OpenAI, Anthropic, Gemini) follow the same path:
@@ -310,7 +312,7 @@ class BrowserAgent(SimpleResponsesAPIAgent):
         updated after every downstream ``server_client.post`` call so that
         session cookies propagate correctly.
 
-        Returns (trajectory, local_storage_dump, usage, debug_rollout_dir).
+        Returns (trajectory, local_storage_dump, initial_local_storage, usage, debug_rollout_dir).
         debug_rollout_dir is non-None only when debug trajectories are enabled
         and the directory was successfully created.
         """
@@ -329,7 +331,7 @@ class BrowserAgent(SimpleResponsesAPIAgent):
                 adapter_resp = await adapter.initialize(task_prompt, screenshot_b64)
             except Exception as init_err:
                 logger.error("[CUA %s] Adapter initialize failed: %s — returning empty trajectory", env_id, init_err)
-                return trajectory, "", None, None
+                return trajectory, "", "", None, None
 
             logger.info(
                 "[CUA %s] initialize done — actions=%d done=%s",
@@ -496,6 +498,7 @@ class BrowserAgent(SimpleResponsesAPIAgent):
                 trajectory.final_message = adapter_resp.message
 
             local_storage_dump = ""
+            initial_local_storage = ""
             if browser_crashed:
                 logger.warning("[CUA %s] skipping dump_local_storage — browser crashed", env_id)
             else:
@@ -510,6 +513,7 @@ class BrowserAgent(SimpleResponsesAPIAgent):
                     await raise_for_status(ls_resp)
                     ls_data = CUADumpLocalStorageResponse.model_validate(await get_response_json(ls_resp))
                     local_storage_dump = ls_data.local_storage_dump
+                    initial_local_storage = ls_data.initial_local_storage
                 except Exception as ls_err:
                     logger.warning("[CUA %s] dump_local_storage failed: %s", env_id, ls_err)
 
@@ -523,7 +527,7 @@ class BrowserAgent(SimpleResponsesAPIAgent):
                     output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
                 )
 
-            return trajectory, local_storage_dump, adapter_usage, debug_rollout_dir
+            return trajectory, local_storage_dump, initial_local_storage, adapter_usage, debug_rollout_dir
         finally:
             adapter.reset()
 
@@ -585,8 +589,8 @@ class BrowserAgent(SimpleResponsesAPIAgent):
             env_id = seed_data.env_id
             screenshot_b64 = seed_data.screenshot
 
-            trajectory, local_storage_dump, usage, debug_rollout_dir = await self._responses_via_adapter(
-                task_prompt, env_id, screenshot_b64, cookie_jar, viewport_w, viewport_h
+            trajectory, local_storage_dump, initial_local_storage, usage, debug_rollout_dir = (
+                await self._responses_via_adapter(task_prompt, env_id, screenshot_b64, cookie_jar, viewport_w, viewport_h)
             )
 
         finally:
@@ -601,7 +605,9 @@ class BrowserAgent(SimpleResponsesAPIAgent):
                 except Exception as e:
                     logger.warning(f"Error closing browser session: {e}")
 
-        nemo_resp = _build_nemo_response(trajectory, env_id, local_storage_dump, self.config.cua_model, usage)
+        nemo_resp = _build_nemo_response(
+            trajectory, env_id, local_storage_dump, initial_local_storage, self.config.cua_model, usage
+        )
         return nemo_resp, debug_rollout_dir
 
     async def responses(
