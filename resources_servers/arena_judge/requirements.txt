@@ -1,5 +1,6 @@
 -e nemo-gym[dev] @ ../../
 # Arena-Elo (MLE + bootstrap) scoring in compute_metrics().
 numpy
+scipy
 pandas
 scikit-learn
