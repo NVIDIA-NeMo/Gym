@@ -18,7 +18,6 @@ import os
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from ccc_eval import CCCEvaluator
 from fastapi import FastAPI
 from pydantic import ConfigDict, Field, PrivateAttr
 
@@ -28,6 +27,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from resources_servers.competitive_coding_challenges.ccc_eval import CCCEvaluator
 
 
 LOG = logging.getLogger(__name__)
