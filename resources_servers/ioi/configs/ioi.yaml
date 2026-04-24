@@ -1,0 +1,27 @@
+ioi_resources_server:
+  resources_servers:
+    ioi:
+      entrypoint: app.py
+      domain: coding
+      description: IOI competitive programming resource server (CCC-backed)
+      value: Evaluate IOI competitive programming problems on the native 0-600 total_score scale
+      test_file: ${oc.env:CCC_TEST_FILE,data/test_metadata.jsonl}
+      test_batch_size: 32
+      num_parallel_requests: 16
+      time_scale: 2.0
+      shared_dir: ${oc.env:SHARED_TEMP_DIR,/tmp}
+      verified: false
+ioi_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: ioi_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/ioi/data/example.jsonl
