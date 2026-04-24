@@ -2,6 +2,9 @@ mini_swe_simple_agent:
   responses_api_agents:
     mini_swe_agent:
       entrypoint: app.py
+      domain: coding
+      description: Software engineering tasks driven by mini-swe agent harness.
+      value: Improve agentic software engineering capabilities.
       model_server:
         type: responses_api_models
         name: policy_model

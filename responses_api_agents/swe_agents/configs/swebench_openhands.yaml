@@ -3,7 +3,10 @@ swe_agents:
   responses_api_agents:
     swe_agents:
       entrypoint: app.py
-      
+      domain: coding
+      description: SWE-bench driven by the OpenHands agent framework.
+      value: Eval software engineering capabilities on SWE-bench.
+
       # Agent framework configuration
       agent_framework: openhands
       agent_config: responses_api_agents/swe_agents/configs/oh_config.toml
