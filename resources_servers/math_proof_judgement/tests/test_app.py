@@ -8,6 +8,8 @@ from app import (
     MathProofJudgementResourcesServer,
     MathProofJudgementVerifyRequest,
     _extract_assistant_text,
+    _label_to_bool,
+    _per_sample_precision_recall_f1,
     _select_majority_verdict,
     _select_pass_verdict,
     parse_judgement,
@@ -87,7 +89,43 @@ class TestParseJudgement:
         assert parse_judgement(text) is None
 
 
+class TestLabelToBool:
+    def test_yes(self) -> None:
+        assert _label_to_bool("Yes") is True
+
+    def test_no(self) -> None:
+        assert _label_to_bool("No") is False
+
+    def test_none_or_unknown(self) -> None:
+        assert _label_to_bool(None) is None
+        assert _label_to_bool("Maybe") is None
+
+
+class TestPerSamplePrecisionRecallF1:
+    def test_empty(self) -> None:
+        assert _per_sample_precision_recall_f1([], 0) == (0.0, 0.0, 0.0)
+
+
 class TestExtractAssistantText:
+    def test_string_content(self) -> None:
+        """Some models return ``content`` as a bare string rather than a list
+        of content parts — that path must be extracted too."""
+        # Build a NeMoGymResponse with a duck-typed object (bypass pydantic
+        # schema, which only allows a list of typed parts) to exercise the
+        # str-content branch of _extract_assistant_text.
+        from types import SimpleNamespace
+
+        fake_response = SimpleNamespace(
+            output=[
+                SimpleNamespace(
+                    type="message",
+                    role="assistant",
+                    content="Judgement: Yes",
+                )
+            ]
+        )
+        assert _extract_assistant_text(fake_response) == "Judgement: Yes"
+
     def test_returns_message_text(self) -> None:
         """The message content is concatenated verbatim — no in-server stripping.
 
@@ -219,6 +257,32 @@ class TestComputeMetrics:
     def test_empty(self) -> None:
         server = _make_server()
         assert server.compute_metrics([]) == {}
+
+    def test_all_empty_task_groups(self) -> None:
+        """Every task has zero rollouts — max_k is 0; early-exit path."""
+        server = _make_server()
+        # compute_pass_majority_metrics always seeds a per_sample_aggregate
+        # placeholder; the important thing is that the custom
+        # classification block early-exited without crashing.
+        m = server.compute_metrics([[]])
+        assert "pass@1[avg-of-1]/accuracy" not in m
+        assert "total_positives" not in m
+
+    def test_task_with_no_rollouts_is_skipped_for_gold(self) -> None:
+        """When a task group is empty it contributes None to gold_per_task."""
+        server = _make_server()
+        yes_correct = {
+            "reward": 1.0,
+            "extracted_judgement": "Yes",
+            "expected_judgement": "Judgement: Yes",
+            "tp": 1.0,
+            "fp": 0.0,
+            "fn": 0.0,
+            "tn": 0.0,
+        }
+        # One normal task + one empty task — empty task is counted as no gold.
+        m = server.compute_metrics([[yes_correct], []])
+        assert m["total_positives"] == 1.0
 
     def test_all_correct_yes(self) -> None:
         """Two Yes-gold tasks, 2 rollouts each, all pred=Yes correctly."""
