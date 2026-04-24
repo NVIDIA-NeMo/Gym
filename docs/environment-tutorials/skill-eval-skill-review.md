@@ -127,6 +127,25 @@ Per-scenario (`skill | refs=T`): sc1 +0.00, sc2 +0.03, sc3 +0.06.
 
 **Status:** **context-dependent.** Keep the shrink if the deployment model assumes readers always have the repo checked out (then it's a pure win — same realistic effect, shorter doc, same efficiency). Revert or partially-restore if there's a "skill-only, no references" use case to support (e.g., plugin-style delivery of only SKILL.md). This is a product call, not a measurement call.
 
+**Before/after — what moved out vs stayed:**
+
+*Kept (load-bearing for the realistic deployment):*
+
+- Step 1: how to invoke `scripts/review.py` (one paragraph).
+- Step 2: what BLOCK vs WARN severity means (two sentences each).
+- Step 3: the five judgment checks the script can't do (bulleted).
+- Step 4: a one-line "report the findings" framing, with an affirmative *"if the script is quiet, the code is clean — say so"* sentence added.
+- Cross-references to `references/anti-patterns.md` and `references/fix-patterns.md`.
+
+*Dropped (moved into the references, which are already seeded into the workspace):*
+
+- The full BLOCK rules table (`httpx-usage`, `ray-get-async`, `missing-semaphore`, etc. with per-rule descriptions).
+- The full WARN rules table.
+- The verbose numbered "Apply judgment" list — kept as bullets, context now lives in the references.
+- The review report template.
+
+The shrink worked because `scripts/review.py` emits each finding with its rule name inline, so the model can look up the rule in `anti-patterns.md` on demand rather than carrying the full table in context. What broke the skill-only cell is that *when references aren't on disk*, neither is `anti-patterns.md` — and the SKILL.md no longer has the tables to fall back on. The shrink is deployment-model-dependent: a clean win when refs are guaranteed present, a regression when they aren't.
+
 ---
 
 ## `gym-scaffold-agent` — competes with refs on sc3
@@ -182,6 +201,29 @@ Per-scenario (`skill | refs=T`): sc1 +0.00, sc2 **−0.16**, sc3 **−0.16**.
 
 **Status:** keep. The "narrate to references" prescription is empirically validated on this skill.
 
+**Before/after — the patterns table:**
+
+*Before (v7) — two-column table, confirming field buried in a code block elsewhere:*
+
+```
+| Thinking model scores lower than instruct | `reasoning_format_violation_rate` may be high
+                                             — check if thinking tags are being stripped
+                                             before answer extraction |
+```
+
+*After (v8) — three-column table with the confirming field in prose:*
+
+```
+| Thinking model scores below instruct on the same tasks
+  | Think-block stripping failure — `<think>` tokens are leaking into the extraction regex
+  | `reasoning_format_violation_rate` (should be low; if high, read `extracted_model_code`
+     for those tasks and look for literal `<think>` or `</think>` in the extracted string) |
+```
+
+Same factual content. The v8 version forces the pattern → cause → **confirming field by name** chain to complete in prose, and adds a closing rule after the table: *"when you cite a pattern from this table, also cite the specific field you checked."*
+
+The `pass_threshold` change is structurally similar: in v7 it appeared once as a flag on an `ng_reward_profile` command (`+pass_threshold=1.0`); in v8 it has a standalone subsection titled *"pass_threshold — the knob that controls how partial credit counts"* with worked examples. The model now names the knob when reasoning about partial-reward scenarios.
+
 ---
 
 ## `gym-data` — ceiling-clipped; scenarios need rewriting
@@ -216,6 +258,34 @@ Per-scenario (`skill | refs=T`): all near-ceiling (blind=0.88–1.00, docs/skill
 - Provenance diff: `evals+fx` only. Clean single-skill attribution.
 
 **Status:** scenarios now interpretable. `blind` only dropped to 0.85 — the new scenarios are harder but still within the model's priors' reach. Even-more-adversarial scenarios could sharpen the measurement further, but the skill is no longer in a measurement dead zone.
+
+**Before/after — scenario prompts:**
+
+*sc1 — format validation becomes schema audit:*
+
+> **Before (v7):** *"Validate the tool-calling dataset at evals/files/sample_tool_calling.jsonl for a search+calculation benchmark."*
+> — fixture is well-formed; correct answer is "yes, valid." Trivial for a frontier model from priors alone.
+>
+> **After (v8):** *"Audit the tool-calling dataset at evals/files/sample_tool_schema_bugs.jsonl. For each entry that would fail OpenAI's function-tool schema or is internally inconsistent, identify the entry and state exactly what's wrong."*
+> — fixture has four planted bugs (required-field not in properties, `parallel_tool_calls` vs `expected_tool_calls` mismatch, missing `function` wrapping, single-tool with `parallel_tool_calls=true`) plus one clean line. Requires reading each entry and applying schema knowledge.
+
+*sc2 — format check becomes semantic audit:*
+
+> **Before:** *"Check evals/files/sample_bad_data.jsonl for data quality issues before I upload it."*
+> — three format-level issues (missing `verifier_metadata`, missing `input`, literal answer leakage in the prompt). Obvious.
+>
+> **After:** *"Audit the benchmark at evals/files/sample_mislabeled_benchmark.jsonl. Some `expected_answer` values are wrong for the user's question. Identify every entry where the gold label is semantically incorrect — the schema is fine."*
+> — seven entries, three with wrong gold labels: capital of Australia = "Sydney" (should be Canberra), leap year = 365 (should be 366), gold symbol = "Go" (should be Au). Model must apply domain judgment, not just schema validation.
+
+*sc3 — copy-the-schema becomes extend-the-schema:*
+
+> **Before:** *"Generate 5 example entries for a SQL benchmark based on the schema in evals/files/sample_sql_benchmark.jsonl."*
+> — fill-in-the-blank; the model copies the schema and generates five plausible SQL questions. Near-trivial.
+>
+> **After:** *"Here is one entry of a multi-turn customer-support benchmark … Generate 3 additional entries that follow the same schema and exercise three distinct branching scenarios: (a) a legitimate refund that requires looking up account first because the user only gave an email, (b) an abuse attempt where the model should refuse, and (c) a partial refund where the amount is ambiguous."*
+> — the base schema has `expected_tool_sequence`, `forbidden_sequence`, `partial_credit`, and branching logic. Requires reading the schema, understanding the constraints, and generating coherent new branches.
+
+In every case the "before" version could be solved by pattern-matching the fixture format; the "after" version requires reading the contents and applying real judgment. The scenarios moved from validating *format* to testing *understanding*.
 
 ---
 
