@@ -2,20 +2,26 @@
 # SPDX-License-Identifier: Apache-2.0
 """Prepare MMLU (Hendrycks) benchmark data for NeMo Gym (mcqa).
 
-Ports NeMo-Skills' ``mmlu`` benchmark: loads per-subject test splits from HuggingFace
-and writes Gym JSONL rows compatible with ``mcqa`` + ``lenient_answer_colon_md`` grading.
+Data preparation matches NeMo-Skills ``nemo_skills/dataset/mmlu/prepare.py``:
+Berkeley ``data.tar``, CSV layout ``question``, ``A``–``D``, ``expected_answer``, and the
+same ``subcategories`` mapping. Output is Gym ``mcqa`` JSONL (plus ``options_text``
+for the prompt template).
 """
 
+import argparse
+import csv
+import io
 import json
+import os
+import tarfile
+import urllib.request
 import uuid
 from pathlib import Path
 
-from datasets import load_dataset
-from tqdm.auto import tqdm
 
-
-# From https://github.com/hendrycks/test/blob/master/categories.py (NeMo-Skills / Hendrycks MMLU).
-MMLU_SUBJECT_TO_CATEGORY: dict[str, list[str]] = {
+# mmlu subcategories from https://github.com/hendrycks/test/blob/master/categories.py
+# (same dict as NeMo-Skills ``nemo_skills/dataset/mmlu/prepare.py``).
+subcategories = {
     "abstract_algebra": ["math"],
     "anatomy": ["health"],
     "astronomy": ["physics"],
@@ -75,105 +81,100 @@ MMLU_SUBJECT_TO_CATEGORY: dict[str, list[str]] = {
     "world_religions": ["philosophy"],
 }
 
-MMLU_SUBJECTS: tuple[str, ...] = tuple(MMLU_SUBJECT_TO_CATEGORY.keys())
+URL = "https://people.eecs.berkeley.edu/~hendrycks/data.tar"
 
 BENCHMARK_DIR = Path(__file__).parent
 DATA_DIR = BENCHMARK_DIR / "data"
 OUTPUT_FPATH = DATA_DIR / "mmlu_benchmark.jsonl"
 
-HF_CANDIDATES = ("lukaemon/mmlu", "cais/mmlu")
+
+def read_csv_files_from_tar(tar_file_path: str, split: str) -> dict:
+    """Same logic as NeMo-Skills ``mmlu/prepare.read_csv_files_from_tar``."""
+    result: dict[str, list] = {}
+    column_names = ["question", "A", "B", "C", "D", "expected_answer"]
+
+    with tarfile.open(tar_file_path, "r") as tar:
+        members = tar.getmembers()
+        csv_files = [
+            member for member in members if member.name.startswith(f"data/{split}/") and member.name.endswith(".csv")
+        ]
+
+        for csv_file in csv_files:
+            file_name = os.path.basename(csv_file.name)
+            file_content = tar.extractfile(csv_file)
+            if file_content is not None:
+                content_str = io.TextIOWrapper(file_content, encoding="utf-8")
+                csv_reader = csv.reader(content_str)
+                csv_data = []
+                for row in csv_reader:
+                    if len(row) == len(column_names):
+                        csv_data.append(dict(zip(column_names, row, strict=True)))
+                    else:
+                        print(f"Warning: Skipping row in {file_name} due to incorrect number of columns")
+
+                result[file_name.rsplit("_", 1)[0]] = csv_data
+
+    return result
 
 
-def _load_dataset_kwargs(repo_id: str) -> dict:
-    """``lukaemon/mmlu`` ships a dataset script (Hendrycks tarball) and needs trust_remote_code."""
-    if repo_id == "lukaemon/mmlu":
-        return {"trust_remote_code": True}
-    return {}
-
-
-def _load_mmlu_subject(repo_id: str, subject: str):
-    return load_dataset(repo_id, subject, split="test", **_load_dataset_kwargs(repo_id))
-
-
-def _find_hf_repo() -> str:
-    last_err: Exception | None = None
-    for repo in HF_CANDIDATES:
-        try:
-            _load_mmlu_subject(repo, MMLU_SUBJECTS[0])
-            return repo
-        except Exception as e:  # noqa: BLE001 — try next mirror
-            last_err = e
-    raise RuntimeError(f"Could not load MMLU from {HF_CANDIDATES}: {last_err}")
-
-
-def _normalize_hf_row(ex: dict) -> tuple[str, list[str], str]:
-    """Return ``(question_stem, [four choice strings], answer_letter)`` for different HF MMLU layouts.
-
-    - ``lukaemon/mmlu`` (script): ``input``, ``A``..``D``, ``target`` (letter).
-    - Other mirrors often use: ``question``, ``choices`` (list), ``answer`` (index or letter).
-    """
-    if "input" in ex and "target" in ex and all(k in ex for k in ("A", "B", "C", "D")):
-        stem = str(ex["input"]).strip()
-        choices = [str(ex[k]) for k in ("A", "B", "C", "D")]
-        letter = str(ex["target"]).strip().upper()
-        if len(letter) != 1 or letter not in "ABCD":
-            raise ValueError(f"Unexpected target label: {letter!r}")
-        return stem, choices, letter
-
-    if "choices" in ex and "answer" in ex:
-        stem = str(ex.get("question") or ex.get("input") or "").strip()
-        choices = [str(c) for c in ex["choices"]]
-        if len(choices) != 4:
-            raise ValueError(f"Expected 4 choices, got {len(choices)}")
-        ans = ex["answer"]
-        if isinstance(ans, str) and len(ans) == 1 and ans.upper() in "ABCD":
-            letter = ans.upper()
-        else:
-            letter = chr(ord("A") + int(ans))
-        return stem, choices, letter
-
-    raise ValueError(f"Unknown MMLU row schema; keys={sorted(ex.keys())}")
-
-
-def _row_from_parts(subject: str, stem: str, choices: list[str], letter: str) -> dict:
-    if len(choices) != 4:
-        raise ValueError(f"Expected 4 choices for {subject}, got {len(choices)}")
+def _gym_row(subject: str, question: dict) -> dict:
+    """NeMo CSV row -> Gym mcqa JSONL row."""
     letters = ["A", "B", "C", "D"]
+    choices = [question[k] for k in letters]
+    stem = question["question"].strip()
+    letter = str(question["expected_answer"]).strip().upper()
+    if len(letter) != 1 or letter not in letters:
+        raise ValueError(f"Bad expected_answer {letter!r} for subject={subject}")
     options = [{letters[i]: choices[i]} for i in range(4)]
     options_text = "\n".join(f"{letters[i]}) {choices[i]}" for i in range(4))
     seed = json.dumps({"subject": subject, "question": stem, "answer": letter}, sort_keys=True)
     row_uuid = str(uuid.uuid5(uuid.NAMESPACE_URL, seed))
-    subset = MMLU_SUBJECT_TO_CATEGORY[subject][0]
     return {
         "question": stem,
         "options_text": options_text,
         "options": options,
         "expected_answer": letter,
-        "subset_for_metrics": subset,
+        "subset_for_metrics": subcategories[subject][0],
         "subject": subject,
         "uuid": row_uuid,
     }
 
 
-def prepare() -> Path:
-    """Download MMLU test splits and write Gym JSONL."""
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    repo = _find_hf_repo()
-    print(f"Using HuggingFace dataset: {repo}")
+def _output_fpath_for_split(split: str) -> Path:
+    """Benchmark config pins ``test`` to ``mmlu_benchmark.jsonl``; other splits match NeMo filenames."""
+    if split == "test":
+        return OUTPUT_FPATH
+    return DATA_DIR / f"mmlu_{split}.jsonl"
 
+
+def prepare(split: str = "test") -> Path:
+    """Download Hendrycks ``data.tar`` and write Gym JSONL (NeMo-Skills-equivalent ingestion)."""
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    data_file = DATA_DIR / "data.tar"
+    out_path = _output_fpath_for_split(split)
+
+    print(f"Downloading {URL} ...")
+    urllib.request.urlretrieve(URL, data_file)
+
+    original_data = read_csv_files_from_tar(str(data_file), split)
     count = 0
-    with OUTPUT_FPATH.open("w", encoding="utf-8") as fout:
-        for subject in tqdm(MMLU_SUBJECTS, desc="MMLU subjects"):
-            ds = _load_mmlu_subject(repo, subject)
-            for ex in ds:
-                stem, choices, letter = _normalize_hf_row(ex)
-                row = _row_from_parts(subject, stem, choices, letter)
-                fout.write(json.dumps(row, ensure_ascii=False) + "\n")
+    with out_path.open("w", encoding="utf-8") as fout:
+        for subject, questions in original_data.items():
+            for q in questions:
+                fout.write(json.dumps(_gym_row(subject, q), ensure_ascii=False) + "\n")
                 count += 1
 
-    print(f"Wrote {count} problems to {OUTPUT_FPATH}")
-    return OUTPUT_FPATH
+    os.remove(data_file)
+    print(f"Wrote {count} problems to {out_path}")
+    return out_path
 
 
 if __name__ == "__main__":
-    prepare()
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--split",
+        default="test",
+        choices=("dev", "test", "val"),
+    )
+    args = parser.parse_args()
+    prepare(split=args.split)
