@@ -632,6 +632,13 @@ class CCCEvaluator(BaseEvaluator):
                 test_to_subtasks.setdefault(test_name, []).append(subtask_name)
 
         all_test_items = list(problem_metadata["all_tests"].items())
+        # When a specific subtask is requested only run that subtask's tests.
+        # Other subtasks' results aren't needed for reward computation and can
+        # easily double/triple the number of tests for progressive subtask structures.
+        target_subtask = entry.get("subtask")
+        if target_subtask and target_subtask in problem_metadata["subtasks"]:
+            target_tests = set(problem_metadata["subtasks"][target_subtask]["test_names"])
+            all_test_items = [(name, data) for name, data in all_test_items if name in target_tests]
         batch_size = self.eval_cfg.test_batch_size
         all_run_times: list[float] = []
         for i in range(0, len(all_test_items), batch_size):
@@ -667,7 +674,13 @@ class CCCEvaluator(BaseEvaluator):
                     if state["aggregation"] == "min" and state["failed"]:
                         continue
                     state["outputs"].append(dict(result))
-                    if state["aggregation"] == "min" and float(result.get("score", 0.0)) == 0.0:
+                    # For min-aggregation subtasks the reward is 1.0 only when
+                    # every test scores exactly 1.0.  Stop as soon as any test
+                    # falls short — the final reward will be 0 regardless of
+                    # how the remaining tests turn out.  This is critical for
+                    # partial-scoring problems (e.g. Communication tasks) where
+                    # the old `== 0.0` guard never fired and all tests ran.
+                    if state["aggregation"] == "min" and float(result.get("score", 0.0)) < 1.0:
                         state["failed"] = True
 
         test_case_results = {}
