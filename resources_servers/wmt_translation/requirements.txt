@@ -18,3 +18,7 @@ torch==2.5.1
 torchvision==0.20.1
 sacrebleu[ja,ko]>=2.4
 unbabel-comet>=2.2
+# scipy is a transitive dep of unbabel-comet (via comet.models.metrics →
+# scipy.stats) but uv's resolution doesn't pull it automatically here —
+# explicit pin avoids ModuleNotFoundError in the COMET Ray task.
+scipy
