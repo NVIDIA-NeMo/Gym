@@ -2,13 +2,13 @@
 config_paths:
   - resources_servers/mcqa/configs/mcqa.yaml
 
-"mmlu_mcqa_resources_server":
+mmlu_mcqa_resources_server:
   _inherit_from: mcqa
   resources_servers:
     mcqa:
-      grading_mode: lenient_answer_colon_md
+      grading_mode: strict_single_letter_boxed
 
-"mmlu_mcqa_simple_agent":
+mmlu_mcqa_simple_agent:
   _inherit_from: mcqa_simple_agent
   responses_api_agents:
     simple_agent:

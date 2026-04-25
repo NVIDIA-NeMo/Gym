@@ -1,21 +1,27 @@
 # MMMLU
 
-[MMMLU](https://huggingface.co/datasets/openai/MMMLU) (multilingual MMLU) extends MMLU across 14 languages (plus optional English via ``--include_english`` in the prepare script). Data CSVs are fetched from OpenAI public blob storage, matching NeMo-Skills.
+Migrates NeMo Skills' `mmmlu` benchmark to Gym on top of the shared `mcqa`
+resource server.
 
-Grading uses ``mcqa`` with per-row ``template_metadata.output_regex`` (combined multilingual ``Answer:`` prefixes and a greedy final-letter fallback), ported from NeMo-Skills ``mmmlu`` ``extract_regex`` behavior.
+## Details
 
-## Usage
+- Data source: OpenAI simple-evals public CSV files
+- Default languages: Skills' multilingual set, excluding English by default
+- Evaluation: multiple choice with multilingual answer extraction regexes
+- Prompt: shared passthrough prompt, matching Skills' `generic/default`
+
+## Prepare
 
 ```bash
-# Default: all supported non-English languages (same as NeMo-Skills default).
 ng_prepare_benchmark "+config_paths=[benchmarks/mmmlu/config.yaml]"
+```
 
-# Optional: restrict languages or add English (EN-US).
-python benchmarks/mmmlu/prepare.py --languages DE-DE FR-FR --include_english
+## Rollouts
 
-ng_run "+config_paths=[benchmarks/mmmlu/config.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
-
+```bash
 ng_collect_rollouts \
-  "+config_paths=[benchmarks/mmmlu/config.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]" \
-  +output_jsonl_fpath=results/mmmlu.jsonl
+    +agent_name=mmmlu_mcqa_simple_agent \
+    +input_jsonl_fpath=benchmarks/mmmlu/data/mmmlu_benchmark.jsonl \
+    +output_jsonl_fpath=results/mmmlu/rollouts.jsonl \
+    +prompt_config=benchmarks/prompts/generic_default.yaml
 ```

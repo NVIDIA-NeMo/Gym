@@ -1,15 +1,28 @@
 # MMLU-Redux
 
-[MMLU-Redux 2.0](https://huggingface.co/datasets/edinburgh-dawg/mmlu-redux) is a cleaned and corrected variant of MMLU (four-way MCQ). Rows with unresolved errors in the source dataset are skipped, matching NeMo-Skills behavior.
+Migrates NeMo Skills' `mmlu-redux` benchmark to Gym on top of the shared
+`mcqa` resource server.
 
-## Usage
+## Details
+
+- Data source: `edinburgh-dawg/mmlu-redux-2.0` on HuggingFace
+- Default split: `test`
+- Evaluation: multiple choice, boxed answer letter
+- Prompt: mirrors Skills' `generic/general-boxed`
+- `wrong_groundtruth` rows use the dataset's corrected answer label
+
+## Prepare
 
 ```bash
 ng_prepare_benchmark "+config_paths=[benchmarks/mmlu-redux/config.yaml]"
+```
 
-ng_run "+config_paths=[benchmarks/mmlu-redux/config.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
+## Rollouts
 
+```bash
 ng_collect_rollouts \
-  "+config_paths=[benchmarks/mmlu-redux/config.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]" \
-  +output_jsonl_fpath=results/mmlu-redux.jsonl
+    +agent_name=mmlu-redux_mcqa_simple_agent \
+    +input_jsonl_fpath=benchmarks/mmlu-redux/data/mmlu-redux_benchmark.jsonl \
+    +output_jsonl_fpath=results/mmlu-redux/rollouts.jsonl \
+    +prompt_config=benchmarks/mmlu-redux/prompts/default.yaml
 ```

@@ -6,7 +6,7 @@ config_paths:
   _inherit_from: mcqa
   resources_servers:
     mcqa:
-      grading_mode: lenient_answer_colon_md
+      grading_mode: strict_single_letter_boxed
 
 "mmlu-redux_mcqa_simple_agent":
   _inherit_from: mcqa_simple_agent

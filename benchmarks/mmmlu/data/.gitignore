@@ -1,2 +1,2 @@
-mmmlu_benchmark.jsonl
-*.csv
+*
+!.gitignore

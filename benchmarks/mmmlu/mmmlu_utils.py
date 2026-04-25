@@ -1,18 +1,13 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# Copied from NeMo-Skills ``nemo_skills/dataset/mmmlu/mmmlu_utils.py`` with:
-# - CSV loading uses stdlib ``csv`` (equivalent to ``pandas.read_csv(..., index_col=0)``)
-# - downloads go under ``benchmarks/mmmlu/data/`` next to this file
+"""Utilities for preparing MMMLU data."""
 
-import csv
 import os
 import urllib.request
-from io import StringIO
 from pathlib import Path
 
+import pandas
 
-_DATA_DIR = Path(__file__).resolve().parent / "data"
 
 SUPPORTED_LANGUAGES = [
     "AR-XY",
@@ -31,7 +26,7 @@ SUPPORTED_LANGUAGES = [
     "YO-NG",
 ]
 
-subject2category = {
+SUBJECT_TO_CATEGORY = {
     "abstract_algebra": "stem",
     "anatomy": "other",
     "astronomy": "stem",
@@ -103,107 +98,78 @@ D) {D}
 """.strip()
 
 MULTILINGUAL_ANSWER_PATTERN_TEMPLATE = "(?i){}[ \t]*([A-D]|[أ-د]|[অ]|[ব]|[ড]|[ঢ]|[Ａ]|[Ｂ]|[Ｃ]|[Ｄ])"
-
 MULTILINGUAL_ANSWER_REGEXES = [
-    r"Answer\s*:",
-    r"Answer\s*:​​​​​​",
-    r"উত্তর\s*:",
-    r"उत्तर\s*:",
-    r"উত্তরঃ",
-    r"উত্তর\s*:",
-    r"Antwort\s*:",
-    r"답변\s*:",
-    r"정답\s*:",
-    r"답\s*:",
-    r"答案\s*：",
-    r"答案\s*:",
-    r"答\s*：",
-    r"答\s*:",
-    r"答复\s*：",
-    r"答曰\s*：",
-    r"الإجابة:",
-    r"الجواب:",
-    r"إجابة:",
-    r"الإجابة النهائية:",
-    r"الإجابة الصحيحة:",
-    r"الإجابة الصحيحة هي:",
-    r"الإجابة هي:",
-    r"الجواب النهائي:",
-    r"Respuesta\s*:",
-    r"Risposta\s*:",
-    r"答え\s*:",
-    r"答え\s*：",
-    r"回答\s*:",
-    r"回答\s*：",
-    r"解答\s*:",
-    r"Jawaban\s*:",
-    r"Réponse\s*:",
-    r"Resposta\s*:",
-    r"Jibu\s*:",
-    r"Idahun\s*:",
-    r"Ìdáhùn\s*:",
-    r"Idáhùn\s*:",
-    r"Àmọ̀nà\s*:",
-    r"Àdáhùn\s*:",
-    r"Ànúgọ\s*:",
-    r"Àṣàyàn\s*:",
+    "Answer\\s*:",
+    "Answer\\s*:​​​​​​",
+    "উত্তর\\s*:",
+    "उत्तर\\s*:",
+    "উত্তরঃ",
+    "উত্তর\\s*:",
+    "Antwort\\s*:",
+    "답변\\s*:",
+    "정답\\s*:",
+    "답\\s*:",
+    "答案\\s*：",
+    "答案\\s*:",
+    "答\\s*：",
+    "答\\s*:",
+    "答复\\s*：",
+    "答曰\\s*：",
+    "الإجابة:",
+    "الجواب:",
+    "إجابة:",
+    "الإجابة النهائية:",
+    "الإجابة الصحيحة:",
+    "الإجابة الصحيحة هي:",
+    "الإجابة هي:",
+    "الجواب النهائي:",
+    "Respuesta\\s*:",
+    "Risposta\\s*:",
+    "答え\\s*:",
+    "答え\\s*：",
+    "回答\\s*:",
+    "回答\\s*：",
+    "解答\\s*:",
+    "Jawaban\\s*:",
+    "Réponse\\s*:",
+    "Resposta\\s*:",
+    "Jibu\\s*:",
+    "Idahun\\s*:",
+    "Ìdáhùn\\s*:",
+    "Idáhùn\\s*:",
+    "Àmọ̀nà\\s*:",
+    "Àdáhùn\\s*:",
+    "Ànúgọ\\s*:",
+    "Àṣàyàn\\s*:",
 ]
 
 
 class Schema:
-    ANSWER: str = "Answer"
-    QUESTION: str = "Question"
-    SUBJECT: str = "Subject"
-    OPTIONS: list[str] = ["A", "B", "C", "D"]
-
-
-def _read_mmmlu_csv(download_dst_path: Path) -> list[dict]:
-    """Match ``pandas.read_csv(path, index_col=0)`` row dicts (first column dropped from fields)."""
-    required = {Schema.QUESTION, "A", "B", "C", "D", Schema.SUBJECT, Schema.ANSWER}
-    text = download_dst_path.read_text(encoding="utf-8")
-    reader = csv.reader(StringIO(text))
-    header = next(reader)
-    if not header:
-        return []
-    if required.issubset(set(header)):
-        keys = header
-        strip_first = False
-    elif len(header) > 1 and required.issubset(set(header[1:])):
-        keys = header[1:]
-        strip_first = True
-    else:
-        raise ValueError(f"Unexpected MMMLU CSV header: {header!r}")
-
-    rows: list[dict] = []
-    for parts in reader:
-        if not parts:
-            continue
-        if strip_first and len(parts) > len(keys):
-            parts = parts[1:]
-        if len(parts) != len(keys):
-            continue
-        rows.append(dict(zip(keys, parts, strict=True)))
-    return rows
+    ANSWER = "Answer"
+    QUESTION = "Question"
+    SUBJECT = "Subject"
+    OPTIONS = ["A", "B", "C", "D"]
 
 
 def download_mmmlu_datasets(languages: list[str]) -> dict[str, list[dict]]:
-    OPENAI_PUBLIC_URL = "https://openaipublic.blob.core.windows.net/simple-evals/{}"
-    _DATA_DIR.mkdir(parents=True, exist_ok=True)
-    mmmlu_datasets: dict[str, list[dict]] = {}
+    openai_public_url = "https://openaipublic.blob.core.windows.net/simple-evals/{}"
+    data_dir = Path(__file__).parent
+    datasets = {}
+
     for language in languages:
         suffix = "mmlu.csv" if language == "EN-US" else f"mmlu_{language}.csv"
-        download_dst_path = _DATA_DIR / suffix
+        download_dst_path = data_dir / suffix
         if os.path.exists(download_dst_path):
             print(f"Skipping download of {suffix} because it already exists")
         else:
-            url = OPENAI_PUBLIC_URL.format(suffix)
-            urllib.request.urlretrieve(url, download_dst_path)
+            urllib.request.urlretrieve(openai_public_url.format(suffix), download_dst_path)
             if not os.path.exists(download_dst_path):
                 raise RuntimeError(f"Failed to download {suffix}")
 
-        examples = _read_mmmlu_csv(download_dst_path)
-        mmmlu_datasets[language] = examples
-    return mmmlu_datasets
+        df = pandas.read_csv(download_dst_path, index_col=0)
+        datasets[language] = [row.to_dict() for _, row in df.iterrows()]
+
+    return datasets
 
 
 def format_multichoice_question(row: dict) -> str:
@@ -213,5 +179,8 @@ def format_multichoice_question(row: dict) -> str:
 def get_mcq_fields(entry: dict) -> dict:
     options_dict = {letter: entry[letter] for letter in Schema.OPTIONS}
     options_text = "\n".join(f"{letter}) {option}" for letter, option in options_dict.items())
-    prompt = format_multichoice_question(entry)
-    return {"question": prompt, "options": options_text, **options_dict}
+    return {
+        "question": format_multichoice_question(entry),
+        "options_text": options_text,
+        **options_dict,
+    }

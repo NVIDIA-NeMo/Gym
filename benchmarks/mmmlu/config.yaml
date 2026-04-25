@@ -2,13 +2,14 @@
 config_paths:
   - resources_servers/mcqa/configs/mcqa.yaml
 
-"mmmlu_mcqa_resources_server":
+mmmlu_mcqa_resources_server:
   _inherit_from: mcqa
   resources_servers:
     mcqa:
+      # Each row supplies multilingual extraction regexes via template_metadata.
       grading_mode: null
 
-"mmmlu_mcqa_simple_agent":
+mmmlu_mcqa_simple_agent:
   _inherit_from: mcqa_simple_agent
   responses_api_agents:
     simple_agent:
@@ -18,6 +19,6 @@ config_paths:
       - name: mmmlu
         type: benchmark
         jsonl_fpath: benchmarks/mmmlu/data/mmmlu_benchmark.jsonl
-        prompt_config: benchmarks/mmmlu/prompts/default.yaml
+        prompt_config: benchmarks/prompts/generic_default.yaml
         prepare_script: benchmarks/mmmlu/prepare.py
         num_repeats: 1

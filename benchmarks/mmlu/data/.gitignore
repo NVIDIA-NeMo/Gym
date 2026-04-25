@@ -1,4 +1,2 @@
-mmlu_benchmark.jsonl
-mmlu_dev.jsonl
-mmlu_val.jsonl
-data.tar
+*
+!.gitignore
