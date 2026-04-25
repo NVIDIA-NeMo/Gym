@@ -10,11 +10,30 @@ from NeMo's flat ``images/<id>.png`` so the embedder loads one image per row).
 
 import ast
 import json
+import os
 import re
 import shutil
+import sys
 from pathlib import Path
+from typing import Optional
 
-from nemo_gym.global_config import HF_TOKEN_KEY_NAME, get_global_config_dict
+
+# Allow `python prepare.py` from this directory (without an editable `pip install`).
+_GYM_ROOT = Path(__file__).resolve().parents[2]
+if str(_GYM_ROOT) not in sys.path:
+    sys.path.insert(0, str(_GYM_ROOT))
+
+
+def _hf_token() -> Optional[str]:
+    """HuggingFace token: env first, else NeMo Gym global config (if importable)."""
+    t = os.environ.get("HUGGING_FACE_HUB_TOKEN") or os.environ.get("HF_TOKEN")
+    if t:
+        return t
+    try:
+        from nemo_gym.global_config import HF_TOKEN_KEY_NAME, get_global_config_dict
+    except Exception:
+        return None
+    return get_global_config_dict().get(HF_TOKEN_KEY_NAME)
 
 
 def get_mcq_fields(question: str, choices: list) -> dict:
@@ -107,7 +126,7 @@ def prepare() -> Path:
     from datasets import load_dataset
     from tqdm.auto import tqdm
 
-    hf_token = get_global_config_dict().get(HF_TOKEN_KEY_NAME)
+    hf_token = _hf_token()
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     IMAGES_DIR.mkdir(parents=True, exist_ok=True)
 
