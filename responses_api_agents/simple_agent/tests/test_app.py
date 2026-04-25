@@ -335,6 +335,76 @@ class TestApp:
         }
         assert expected_responses_dict == actual_responses_dict
 
+    async def test_responses_can_leave_tool_calls_terminal(self, monkeypatch: MonkeyPatch) -> None:
+        config = SimpleAgentConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="",
+            model_server=ModelServerRef(
+                type="responses_api_models",
+                name="my server name",
+            ),
+            resources_server=ResourcesServerRef(
+                type="resources_servers",
+                name="my resources server",
+            ),
+            execute_tool_calls=False,
+        )
+        server = SimpleAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        app = server.setup_webserver()
+        client = TestClient(app)
+
+        mock_response_data = {
+            "id": "resp_688babb004988199b26c5250ba69c1e80abdf302bcd600d3",
+            "created_at": 1753983920.0,
+            "model": "dummy_model",
+            "object": "response",
+            "output": [
+                {
+                    "arguments": '{"summary":"ok"}',
+                    "call_id": "call_123",
+                    "name": "summary",
+                    "type": "function_call",
+                    "id": "fc_123",
+                    "status": "completed",
+                }
+            ],
+            "parallel_tool_calls": True,
+            "tool_choice": "required",
+            "tools": [],
+        }
+
+        dotjson_mock = AsyncMock()
+        dotjson_mock.read.return_value = json.dumps(mock_response_data)
+        dotjson_mock.cookies = MagicMock()
+        server.server_client.post.return_value = dotjson_mock
+
+        res = client.post("/v1/responses", json={"input": [{"role": "user", "content": "hello"}]})
+        assert res.status_code == 200
+        assert server.server_client.post.call_args_list == [
+            call(
+                server_name="my server name",
+                url_path="/v1/responses",
+                json=NeMoGymResponseCreateParamsNonStreaming(
+                    input=[NeMoGymEasyInputMessage(content="hello", role="user", type="message")]
+                ),
+                cookies=None,
+            )
+        ]
+
+        output = res.json()["output"]
+        assert output == [
+            {
+                "arguments": '{"summary":"ok"}',
+                "call_id": "call_123",
+                "name": "summary",
+                "type": "function_call",
+                "id": "fc_123",
+                "status": "completed",
+            }
+        ]
+
     async def test_usage_sanity(self, monkeypatch: MonkeyPatch) -> None:
         config = SimpleAgentConfig(
             host="0.0.0.0",

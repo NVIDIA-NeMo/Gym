@@ -46,6 +46,7 @@ class SimpleAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
     max_steps: int = None
+    execute_tool_calls: bool = True
 
 
 class SimpleAgentRunRequest(BaseRunRequest):
@@ -125,6 +126,8 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 o for o in output if o.type == "message" and o.role == "assistant"
             ]
             if not all_fn_calls and all_output_messages:
+                break
+            if all_fn_calls and not self.config.execute_tool_calls:
                 break
 
             for output_function_call in all_fn_calls:

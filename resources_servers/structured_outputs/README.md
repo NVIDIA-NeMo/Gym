@@ -91,6 +91,14 @@ ng_prepare_data "+config_paths=[${config_paths}]" \
     +should_download=true
 ```
 
+### Version 4 [260424] (Tool-call structured outputs)
+Version 4 generates prompts where the schema is provided as an OpenAI Responses
+API function tool instead of prompt text. The prompt contains only the document
+and a short extraction instruction.
+
+Generation details and CLI examples are in
+`resources_servers/structured_outputs/misc/data_generation/structured_outputs_v4/README.md`.
+
 # Testing
 ```
 ng_test +entrypoint=resources_servers/structured_outputs

@@ -16,6 +16,7 @@ import json
 from typing import Any, Union
 from unittest.mock import AsyncMock, MagicMock
 
+from aiohttp.client_exceptions import ClientResponseError
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch, mark
 
@@ -52,7 +53,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseReasoningItem,
     NeMoGymSummary,
 )
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from responses_api_models.vllm_model.app import (
     VLLMConverter,
     VLLMModel,
@@ -682,6 +683,36 @@ class TestApp:
 
     async def test_sanity(self, monkeypatch: MonkeyPatch) -> None:
         self._setup_server(monkeypatch)
+
+    async def test_chat_completions_recoverable_http_error_returns_content_filter(self, monkeypatch: MonkeyPatch):
+        server = self._setup_server(monkeypatch)
+        server.config.recoverable_http_status_codes = [500]
+        mock_client = MagicMock()
+        error = ClientResponseError(
+            request_info=MagicMock(),
+            history=(),
+            status=500,
+            message="Internal Server Error",
+            headers=None,
+        )
+        error.response_content = b'{"error":{"message":"","type":"InternalServerError"}}'
+        mock_client.create_chat_completion = AsyncMock(side_effect=error)
+        server._clients = [mock_client]
+
+        monkeypatch.setattr("responses_api_models.vllm_model.app.time", lambda: FIXED_TIME)
+
+        request = MagicMock()
+        request.session = {SESSION_ID_KEY: "test-session"}
+        response = await server.chat_completions(
+            request,
+            NeMoGymChatCompletionCreateParamsNonStreaming(
+                messages=[NeMoGymChatCompletionUserMessageParam(role="user", content="hello")]
+            ),
+        )
+        assert response.choices[0].finish_reason == "content_filter"
+        assert response.choices[0].message.role == "assistant"
+        assert response.choices[0].message.content is None
+        assert response.choices[0].message.tool_calls is None
 
     def test_responses_multistep(self, monkeypatch: MonkeyPatch):
         server = self._setup_server(monkeypatch)
