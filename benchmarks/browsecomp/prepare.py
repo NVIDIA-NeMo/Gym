@@ -20,6 +20,7 @@ Downloads Browsecomp problems from OpenAI and converts them to the Gym benchmark
 import base64
 import hashlib
 import json
+from datetime import datetime
 from pathlib import Path
 
 import pandas
@@ -30,28 +31,81 @@ DATA_DIR = BENCHMARK_DIR / "data"
 OUTPUT_FPATH = DATA_DIR / "browsecomp_benchmark.jsonl"
 
 
-QUERY_TEMPLATE = """
-{Question}
+SYSTEM_PROMPT = (
+    "You are a General Agent. Today's date: {date}. "
+    "Your mission is to leverage a diverse set of tools to help the user conduct "
+    "an in-depth investigation of their question, continuously reflect, and "
+    "ultimately deliver a precise answer.\n\n"
+    "Throughout the investigation, strictly observe the following principles:\n"
+    "1. Whenever you encounter uncertain information, proactively invoke search "
+    "tools to verify it.\n"
+    "2. You can only invoke one tool in each round.\n"
+    "3. Prioritize high-credibility sources (authoritative websites, academic "
+    "databases, professional media) and maintain a critical stance toward "
+    "low-credibility ones. Cite the source of any information you use with "
+    "a format [^index^].\n"
+    "4. You should not respond to the user with a counter-question, but instead "
+    "do your best to provide an accurate answer.\n"
+    "5. When providing the final answer, begin by explaining the reasoning "
+    "process. Avoid presenting only the final answer, as this makes it "
+    "difficult to understand."
+)
 
-Your response should be in the following format:
-Explanation: {{your explanation for your final answer}}
-Exact Answer: {{your succinct, final answer}}
-Confidence: {{your confidence score between 0% and 100% for your answer}}
-""".strip()
+QUERY_SUFFIX = (
+    "\n\nYour response should be in the following format:\n"
+    "Explanation: {your explanation for your final answer}\n"
+    "Exact Answer: {your succinct, final answer}\n"
+    "Confidence: {your confidence score between 0% and 100% for your answer}"
+)
 
 TOOLS = [
     {
         "type": "function",
-        "name": "web_search",
-        "description": "Search the web for a query and return up to 10 search results with <link, summary> for each result.",
+        "name": "search",
+        "description": (
+            "Web Search API, works like Google Search. "
+            "All queries will be searched in parallel. "
+            "If you want to search with multiple keywords, "
+            "put them in a single query."
+        ),
         "parameters": {
             "type": "object",
-            "properties": {"query": {"type": "string", "description": "The term to search for"}},
-            "required": ["query"],
-            "additionalProperties": False,
+            "properties": {
+                "queries": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": ("Search queries. All queries are executed in parallel."),
+                }
+            },
+            "required": ["queries"],
         },
         "strict": False,
-    }
+    },
+    {
+        "type": "function",
+        "name": "browse",
+        "description": (
+            "Visit specific webpage(s) and return their full text content. "
+            "Use this to read the complete content of web pages found "
+            "during search."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "urls": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "URL(s) of webpage(s) to visit.",
+                },
+                "goal": {
+                    "type": "string",
+                    "description": ("What specific information you are looking for."),
+                },
+            },
+            "required": ["urls"],
+        },
+        "strict": False,
+    },
 ]
 
 BROWSECOMP_CSV_URL = "https://openaipublic.blob.core.windows.net/simple-evals/browse_comp_test_set.csv"
@@ -77,12 +131,11 @@ def map_browsecomp_sample_to_rl_sample(row: dict) -> dict:
     problem = decrypt(row["problem"], row["canary"])
     answer = decrypt(row["answer"], row["canary"])
 
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    base_system = SYSTEM_PROMPT.format(date=date_str)
     messages = [
-        {
-            "role": "system",
-            "content": "Please think step by step and reason about the problem. You are encouraged to use the tools provided to you to solve the problem, to make sure you can get to the right answer. You must only issue one tool call at a time. Once you are done issuing calls, then return your final answer.",
-        },
-        {"role": "user", "content": QUERY_TEMPLATE.format(Question=problem)},
+        {"role": "system", "content": base_system},
+        {"role": "user", "content": problem + QUERY_SUFFIX},
     ]
 
     return {

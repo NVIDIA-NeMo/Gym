@@ -1,0 +1,17 @@
+{
+  "name": "nemo-gym-docs",
+  "private": true,
+  "description": "Fern documentation site for NeMo Gym. Run `npm install` then `npm run dev`.",
+  "scripts": {
+    "check": "fern check",
+    "dev": "fern docs dev",
+    "generate": "fern generate --docs",
+    "generate:library": "fern docs md generate"
+  },
+  "devDependencies": {
+    "fern-api": "^4.80.3"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

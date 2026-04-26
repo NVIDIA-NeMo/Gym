@@ -1,0 +1,25 @@
+# Chain to existing resource server + agent config.
+config_paths:
+  - resources_servers/math_with_judge/configs/math_with_judge.yaml
+
+# Isolated benchmark-specific inheritance.
+"aime25-x_math_with_judge_resources_server":
+  _inherit_from: math_with_judge
+  resources_servers:
+    math_with_judge:
+      # Skills' aime25-x uses eval_type=math, so keep symbolic-only verification.
+      should_use_judge: false
+
+"aime25-x_math_with_judge_simple_agent":
+  _inherit_from: math_with_judge_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: aime25-x_math_with_judge_resources_server
+      datasets:
+      - name: aime25-x
+        type: benchmark
+        jsonl_fpath: benchmarks/aime25-x/data/aime25-x_benchmark.jsonl
+        prompt_config: benchmarks/prompts/generic_default.yaml
+        prepare_script: benchmarks/aime25-x/prepare.py
+        num_repeats: 32
