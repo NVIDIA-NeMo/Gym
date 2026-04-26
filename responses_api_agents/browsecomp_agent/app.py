@@ -136,9 +136,10 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 # Retry if the model only produced <think> content with no final answer.
                 raw_output_text = model_response.output_text
                 cleaned_output_text = re.sub(r"<think>.*?</think>", "", raw_output_text, flags=re.DOTALL).strip()
-                if not model_response.incomplete_details and (
-                    cleaned_output_text or any(o for o in model_response.output if o.type == "function_call")
-                ):
+                if (
+                    not model_response.incomplete_details
+                    or model_response.incomplete_details.reason == "content_filter"
+                ) and (cleaned_output_text or any(o for o in model_response.output if o.type == "function_call")):
                     break
 
                 print(f"A model call is missing the end think ({missing_end_think_count} for this sample)")
