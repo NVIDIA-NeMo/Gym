@@ -144,32 +144,6 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 print(f"A model call is missing the end think ({missing_end_think_count} for this sample)")
                 missing_end_think_count += 1
 
-            # --- Check context reset threshold ---
-            total_tokens = (
-                (model_response.usage.input_tokens + model_response.usage.output_tokens) if model_response.usage else 0
-            )
-            if (
-                reset_threshold
-                and total_tokens > reset_threshold
-                and (max_reset_count is None or reset_count < max_reset_count)
-            ):
-                reset_count += 1
-                # record current context
-                if self.config.snap_dir:
-                    self._save_snapshot(
-                        messages=body.input + new_outputs,
-                        task_index=task_index,
-                        attempt=attempt,
-                        reset_count=reset_count,
-                        is_final=False,
-                    )
-                # reset context
-                if self.config.context_reset_keep_rounds > 0:
-                    new_outputs = self._extract_last_rounds(new_outputs)
-                else:
-                    new_outputs = []
-                continue
-
             output = model_response.output
             new_outputs.extend(output)
 
@@ -261,6 +235,31 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             # Check if max steps is not None and if we have exhausted it.
             if self.config.max_steps and step >= self.config.max_steps:
                 break
+
+            # --- Check context reset threshold ---
+            total_tokens = (
+                (model_response.usage.input_tokens + model_response.usage.output_tokens) if model_response.usage else 0
+            )
+            if (
+                reset_threshold
+                and total_tokens > reset_threshold
+                and (max_reset_count is None or reset_count < max_reset_count)
+            ):
+                reset_count += 1
+                # record current context
+                if self.config.snap_dir:
+                    self._save_snapshot(
+                        messages=body.input + new_outputs,
+                        task_index=task_index,
+                        attempt=attempt,
+                        reset_count=reset_count,
+                        is_final=False,
+                    )
+                # reset context
+                if self.config.context_reset_keep_rounds > 0:
+                    new_outputs = self._extract_last_rounds(new_outputs)
+                else:
+                    new_outputs = []
 
         # record final context
         if self.config.snap_dir:
