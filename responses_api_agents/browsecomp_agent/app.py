@@ -264,7 +264,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 else:
                     new_outputs = []
 
-            if step % 10 == 0:
+            if step % 3 == 0:
                 print(
                     f"Step {step} | Time: {time() - time_taken:.2f}s | Missing end thinks count: {missing_end_think_count}"
                 )
