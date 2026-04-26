@@ -18,6 +18,7 @@ For implementation details, see:
 - [Row And Verifier Contract](#row-and-verifier-contract)
 - [Schema Normalization](#schema-normalization)
 - [Tool-Call Specific Design](#tool-call-specific-design)
+- [Serving Compatibility And Debuggability](#serving-compatibility-and-debuggability)
 - [Coverage Dimensions](#coverage-dimensions)
 - [Validation Feedback Loop](#validation-feedback-loop)
 
@@ -123,6 +124,9 @@ Common text-output fields include:
 
 Tool-call rows need additional fields that tell the verifier what to inspect:
 
+- `responses_create_params.tools`
+- `responses_create_params.tool_choice`
+- `responses_create_params.parallel_tool_calls`
 - `response_mode`
 - `tool_name`
 - `tool_payload_key`
@@ -181,6 +185,24 @@ equivalent no-op behavior for these rows. Otherwise the framework may try to
 route the answer-shaped function call as an actual tool action, which is a
 different environment.
 
+The minimum tool-call row contract should make this explicit:
+
+- `responses_create_params.tools` contains the model-facing function schema
+- `responses_create_params.tool_choice` forces or strongly selects the tool
+- `responses_create_params.parallel_tool_calls` is `false`
+- `response_mode` is `tool_call`
+- the agent config sets `execute_tool_calls: false`
+- verifier metadata records the expected `tool_name` and optional
+  `tool_payload_key`
+
+Use `parallel_tool_calls: false` for answer-as-tool-call rows. These tasks have
+one final structured answer, even when the request exposes distractor tools or a
+union schema. Allowing parallel calls gives the model a hedging surface and
+weakens the "select exactly one schema/tool" reward signal. Set
+`parallel_tool_calls: true` only for a separate task family where multiple
+function calls are the intended answer and the verifier checks the complete set
+of emitted calls.
+
 The tool schema should be the model-facing schema surface. The prompt should
 describe the document task, not restate the full schema. This prevents the task
 from collapsing back into text-prompt schema following.
@@ -190,6 +212,41 @@ when the endpoint has already accepted the request and begun generation. This
 is analogous to malformed JSON text in a text-output task. Schema/compiler
 errors are different: they indicate the model-facing schema or serving stack is
 incompatible and should fail before rollout collection.
+
+## Serving Compatibility And Debuggability
+
+Serving compatibility is part of structured-output data design when the schema
+is sent to the model endpoint. A valid verifier schema can still be rejected by
+the serving stack before generation, especially when a grammar compiler handles
+tool schemas.
+
+Keep these failure classes separate:
+
+- **request/schema compile failure**: the endpoint rejects
+  `responses_create_params.tools` before generation. Fix the generated
+  model-facing schema or choose a different serving stack.
+- **model output parse failure**: the endpoint accepted the request, generated,
+  and then could not parse the completion into the expected response surface.
+  Treat this as a model sample failure only if the collection path can record
+  it as a failed rollout rather than crashing the whole job.
+- **verifier failure**: Gym parsed the response, but the payload did not
+  validate against `schema_str`.
+
+Do not hide serving incompatibility inside a shared Responses-to-Chat
+converter. If a dataset targets vanilla vLLM/Outlines, generate an explicit
+vLLM-compatible tool schema surface and keep the verifier schema strict.
+
+When Gym only reports nested 500s, add temporary boundary logging before
+changing data semantics. The useful boundaries are:
+
+- rollout collection `/run` response: row id, agent, status, and nested body
+- agent `run`: row summary, model-call failure body, verifier failure
+  body
+- model adapter `/v1/responses`: request shape, provider error body, and
+  whether failure happened during conversion, provider call, or postprocess
+
+These logs should be temporary or explicitly gated. They are a debugging tool
+for classifying the layer, not a data or reward change.
 
 ## Coverage Dimensions
 
