@@ -79,7 +79,9 @@ def category_sort_key(value: str) -> tuple[int, int | str, str]:
     return (1, value.casefold(), value)
 
 
-def group_by(rows: list[dict[str, Any]], key: str, default: Any = USE_FIELD_DEFAULT) -> dict[str, list[dict[str, Any]]]:
+def group_by(
+    rows: list[dict[str, Any]], key: str, default: Any = USE_FIELD_DEFAULT
+) -> dict[str, list[dict[str, Any]]]:
     groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
         groups[field_value_to_key(row, key, default=default)].append(row)
@@ -239,7 +241,9 @@ def print_failure_error_table(failures: list[dict[str, Any]]) -> None:
         print(f"  {key:<34} {n:>9}  {pct(n, total_failures):>7}")
 
 
-def print_failure_count_table(title: str, rows: list[dict[str, Any]], failures: list[dict[str, Any]], key: str) -> bool:
+def print_failure_count_table(
+    title: str, rows: list[dict[str, Any]], failures: list[dict[str, Any]], key: str
+) -> bool:
     if not failures or not any(key in row for row in rows) or not has_multiple_values(rows, key):
         return False
 
@@ -258,10 +262,8 @@ def print_failure_count_table(title: str, rows: list[dict[str, Any]], failures: 
     error_cols = sorted(error_types, key=category_sort_key)
     category_width = max(18, max(len(row_key) for row_key in rows_by_key) + 2)
     error_width = max(12, max(len(error_type) for error_type in error_cols) + 2)
-    header = (
-        f"  {'Category':<{category_width}}"
-        f"{'Rows':>8}  {'Failures':>9}  {'Fail Rate':>9}"
-        + "".join(f"{error_type:>{error_width}}" for error_type in error_cols)
+    header = f"  {'Category':<{category_width}}{'Rows':>8}  {'Failures':>9}  {'Fail Rate':>9}" + "".join(
+        f"{error_type:>{error_width}}" for error_type in error_cols
     )
 
     print(f"\n  {title}")

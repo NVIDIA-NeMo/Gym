@@ -46,7 +46,7 @@ tool-call structured outputs in v4.
 
 Reusable guidance for designing structured-output data and verifiers across
 text-output and tool-call variants is in
-[misc/structured_outputs_design.md](misc/structured_outputs_design.md).
+[misc/structured-outputs-design.md](misc/structured-outputs-design.md).
 
 
 # Example usage
@@ -173,4 +173,5 @@ Data: CC BY 4.0
 Dependencies
 - nemo_gym: Apache 2.0
 - openapi-schema-validator: [BSD-3-Clause license](https://github.com/python-openapi/openapi-schema-validator/blob/master/LICENSE)
+- tomli-w: [MIT](https://github.com/hukkin/tomli-w/blob/master/LICENSE)
 - xmltodict: [MIT](https://github.com/martinblech/xmltodict/blob/master/LICENSE)

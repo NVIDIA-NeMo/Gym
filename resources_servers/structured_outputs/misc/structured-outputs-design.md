@@ -8,7 +8,7 @@ For implementation details, see:
 
 - `misc/data_generation/structured_outputs_v3/README.md`
 - `misc/data_generation/structured_outputs_v4/README.md`
-- `misc/data_generation/structured_outputs_v4/vllm_tool_schema_compatibility.md`
+- `misc/data_generation/structured_outputs_v4/vllm-tool-schema-compatibility.md`
 
 ## Contents
 
@@ -171,7 +171,7 @@ not permission for the model to invent new properties; unexpected fields should
 still fail against the strict verifier schema.
 
 For the v4 vLLM tool-call case, see
-`data_generation/structured_outputs_v4/vllm_tool_schema_compatibility.md`.
+`data_generation/structured_outputs_v4/vllm-tool-schema-compatibility.md`.
 
 ## Tool-Call Specific Design
 

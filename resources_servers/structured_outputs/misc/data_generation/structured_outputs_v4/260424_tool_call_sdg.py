@@ -51,8 +51,7 @@ DEFAULT_DISTRACTOR_STYLE_WEIGHTS = (
     "single_tool_anyof:18,single_tool_defs_oneof:27,single_tool_defs_anyof:27"
 )
 DEFAULT_DISTRACTOR_COUNT_WEIGHTS = (
-    "0:2,1:2,2:2,3:2,4:3,5:4,6:5,7:6,8:7,9:10,10:10,"
-    "11:11,12:11,13:9,14:7,15:4,16:2,17:1,18:1,19:0.5,20:0.5"
+    "0:2,1:2,2:2,3:2,4:3,5:4,6:5,7:6,8:7,9:10,10:10,11:11,12:11,13:9,14:7,15:4,16:2,17:1,18:1,19:0.5,20:0.5"
 )
 DEFAULT_TOOL_NAME_STYLE_WEIGHTS = "semantic:50,numbered:50"
 DEFAULT_TOOL_NAME_POOL = (

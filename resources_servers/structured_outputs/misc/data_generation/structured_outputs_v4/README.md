@@ -124,7 +124,7 @@ There are two schema surfaces in v4:
   vanilla vLLM/Outlines can compile the tool grammar.
 
 The vLLM compatibility transform is done in data generation, not in the shared
-Responses-to-Chat converter. See `vllm_tool_schema_compatibility.md`.
+Responses-to-Chat converter. See `vllm-tool-schema-compatibility.md`.
 
 | Mode | Probability | Shape |
 |---|---:|---|
