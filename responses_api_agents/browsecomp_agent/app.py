@@ -272,7 +272,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
 
             if step % 3 == 0:
                 print(
-                    f"Step {step} | Time: {time() - time_taken:.2f}s (model calls {time_taken_model_call:.2f}s, tool calls {time_taken_tool_call:.2f}s) | Missing end thinks count: {missing_end_think_count}"
+                    f"Step {step} | Time: {time() - time_taken:.2f}s (model {time_taken_model_call:.2f}s, tool {time_taken_tool_call:.2f}s) | Missing end thinks: {missing_end_think_count}"
                 )
 
         # record final context
