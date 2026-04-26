@@ -4,7 +4,7 @@
 
 This pipeline generates Gym-ready RL data for schema adherence through OpenAI
 Responses API tool calls. Unlike v3, the prompt does not show the schema or ask
-for JSON, YAML, XML, TOML, or CSV text. The model sees a document, a short task
+for JSON, YAML, XML, TOML, or CSV text. The model sees a document, a task
 instruction, and one or more function tools. The target structured output must
 be returned as function-call arguments.
 
@@ -42,13 +42,13 @@ Each generated row has a Responses API tool definition and verifier metadata:
 ```json
 {
   "responses_create_params": {
-    "input": [{"role": "user", "content": "Extract the relevant structured information from the document.\n\nDocument:\n..."}],
+    "input": [{"role": "user", "content": "Capture the key fields from the document in the appropriate function call.\n\nDocument:\n..."}],
     "tools": [
       {
         "type": "function",
         "name": "extract_record",
         "description": "Submit structured information extracted from the document.",
-        "parameters": {"type": "object", "properties": {"field": {"type": "string"}}, "required": ["field"], "additionalProperties": false},
+        "parameters": {"type": "object", "properties": {"field": {"type": "string"}}, "required": ["field"]},
         "strict": true
       }
     ],
@@ -69,6 +69,8 @@ Each generated row has a Responses API tool definition and verifier metadata:
   "num_distractors": 0,
   "has_distractors": false,
   "instruction_layout": "user_instruction_before_document",
+  "instruction_detail_level": "standard",
+  "system_instruction_style": "none",
   "source_schema_type": "json",
   "source_record_id": "DS1-..."
 }
@@ -83,19 +85,52 @@ Prompts intentionally contain only document/task language. They do not include:
 - source target format names such as JSON, YAML, XML, TOML, or CSV
 - examples of the expected output syntax
 
+Instructions vary by detail level:
+
+- `concise`: short commands such as "Return the relevant document facts with
+  the tool."
+- `standard`: one-sentence extraction instructions that name the document and
+  function-call surface.
+- `explicit`: more detailed instructions that say the tool call is the final
+  answer and the arguments should be grounded in the document.
+
 The instruction is randomly placed in layouts such as system prompt, before the
 document, after the document, split system/user, or compact single-user message.
+System prompts also vary between tool-required, tool-selection, no-prose, and
+final-answer-surface phrasing.
 
 ## Tool Argument Shapes
 
 The target schema is converted to an OpenAI function `parameters` schema. The
 default argument-shape mix is:
 
+During conversion, the generator also normalizes source-schema quirks that are
+common in the v3 corpus: non-array `enum` containers are flattened to JSON
+Schema enum arrays, `nullable` is converted into a `null` type union, `format`
+annotations are stripped, and local definition refs are emitted through
+`$defs`. Invalid scalar entries inside a `properties` map are dropped, since
+JSON Schema property values must be schema objects or booleans. Bool-like
+strings on schema keywords such as `additionalProperties` are converted to
+booleans.
+
+There are two schema surfaces in v4:
+
+- `schema_str` uses the strictified schema for reward verification. This keeps
+  all declared fields required and closes objects with `additionalProperties:
+  false`.
+- `responses_create_params.tools[].parameters` uses a vLLM-compatible version
+  of that schema. It removes boolean `additionalProperties` /
+  `additionalItems` and replaces remaining boolean schema nodes with `{}` so
+  vanilla vLLM/Outlines can compile the tool grammar.
+
+The vLLM compatibility transform is done in data generation, not in the shared
+Responses-to-Chat converter. See `vllm_tool_schema_compatibility.md`.
+
 | Mode | Probability | Shape |
 |---|---:|---|
-| `direct` | 40% | Use the object schema directly as function parameters |
-| `extraction_wrapper` | 25% | Wrap under required key `extraction` |
-| `random_wrapper` | 35% | Wrap under a sampled key such as `output`, `result`, `record`, `data`, `answer`, or `summary` |
+| `direct` | 10% | Use the object schema directly as function parameters |
+| `extraction_wrapper` | 35% | Wrap under required key `extraction` |
+| `random_wrapper` | 55% | Wrap under a sampled key such as `output`, `result`, `record`, `data`, `answer`, or `summary` |
 
 If the validation schema is not object-shaped, wrapper mode is forced because
 OpenAI function parameters must be object-shaped.
@@ -123,16 +158,22 @@ Some rows use numbered tool names instead, for example `extraction_tool_1`,
 Rows can include distractor schemas sampled from other source rows. The target
 is tracked by `tool_name` and, when needed, `tool_payload_key`.
 
-The default distractor-count distribution is:
+The default train distractor-count distribution is explicit rather than
+geometric:
 
-- 30%: no distractors
-- 70%: sample 1..20 distractors from a truncated geometric distribution
+```text
+0:2,1:2,2:2,3:2,4:3,5:4,6:5,7:6,8:7,9:10,10:10,
+11:11,12:11,13:9,14:7,15:4,16:2,17:1,18:1,19:0.5,20:0.5
+```
 
-This gives a decreasing tail: small numbers of distractors are common, while
-large 15..20 distractor cases are rare but present.
+This centers the data around 9..14 distractors, where rollout failures showed
+more useful training pressure. Small 0..4 distractor cases remain as anchors,
+and 15..20 distractor cases remain as a hard tail. Passing an empty
+`--distractor-count-weights` string falls back to the older
+`--no-distractor-ratio` plus geometric sampling knobs.
 
-For rows with at least one distractor, the default style weights are balanced
-across the six distractor renderings below.
+For rows with at least one distractor, the default style weights emphasize
+single-tool union branches while keeping separate and numbered tools present.
 
 Distractors are rendered in several styles:
 
@@ -164,20 +205,19 @@ python resources_servers/structured_outputs/misc/data_generation/structured_outp
 # Generate one sample for every loaded source row
 python resources_servers/structured_outputs/misc/data_generation/structured_outputs_v4/260424_tool_call_sdg.py \
     -i /path/to/ds1_verified.jsonl \
-    -o resources_servers/structured_outputs/data/ds1_tool_call_train.jsonl
+    -o resources_servers/structured_outputs/data/structured_outputs_v4_tool_call.jsonl
 
 # Generate multiple variants per source row
 python resources_servers/structured_outputs/misc/data_generation/structured_outputs_v4/260424_tool_call_sdg.py \
     -i /path/to/ds1_verified.jsonl \
-    -o resources_servers/structured_outputs/data/ds1_tool_call_train_large.jsonl \
+    -o resources_servers/structured_outputs/data/structured_outputs_v4_tool_call_large.jsonl \
     --samples-per-record 3
 
 # Heavier distractor setting
 python resources_servers/structured_outputs/misc/data_generation/structured_outputs_v4/260424_tool_call_sdg.py \
     -i /path/to/ds1_verified.jsonl \
     -o resources_servers/structured_outputs/data/ds1_tool_call_hard.jsonl \
-    --no-distractor-ratio 0.15 \
-    --distractor-geometric-p 0.15 \
+    --distractor-count-weights "0:0,1:0,2:0,3:0,4:1,5:2,6:3,7:4,8:5,9:8,10:10,11:12,12:12,13:10,14:8,15:6,16:4,17:3,18:2,19:1,20:1" \
     --max-distractors 20
 
 # Force union-style distractors only
@@ -197,6 +237,26 @@ python resources_servers/structured_outputs/misc/data_generation/structured_outp
     -i /path/to/ds1_verified.jsonl \
     -o /tmp/tool_modes.jsonl \
     --tool-schema-mode-weights "direct:0.25,extraction_wrapper:0.25,random_wrapper:0.50"
+```
+
+## Distribution Plot
+
+Run the static tool-call JSONL sanity check after regenerating data:
+
+```bash
+python resources_servers/structured_outputs/misc/check_tool_call_jsonl.py \
+    -i resources_servers/structured_outputs/data/structured_outputs_v4_tool_call.jsonl
+```
+
+This checks the row contract, target tool lookup, wrapper payload keys, JSON
+schema strings, and vLLM-sensitive tool-parameter constructs such as boolean
+schema nodes and `format` annotations.
+
+Regenerate the train distribution image after remaking the train JSONL:
+
+```bash
+MPLCONFIGDIR=/tmp/matplotlib-cache \
+python resources_servers/structured_outputs/misc/data_generation/structured_outputs_v4/plot_train_distribution.py
 ```
 
 ## Verifier Behavior
@@ -220,10 +280,11 @@ reward means by:
 
 - `response_mode`
 - `tool_schema_mode`
-- `source_schema_type`
 - `num_tools`
 - `has_distractors`
 - `instruction_layout`
+- `instruction_detail_level`
+- `system_instruction_style`
 - `tool_name_style`
 - `distractor_style`
 - `tool_union_mode`

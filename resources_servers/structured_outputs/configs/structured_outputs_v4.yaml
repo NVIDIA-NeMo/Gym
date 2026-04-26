@@ -6,12 +6,6 @@ structured_outputs:
       verified: false
       description: Check if responses follow tool-call structured output schemas. Created 20260424.
       value: Improve schema adherence when structured output is expressed through tool calls
-policy_model:
-  responses_api_models:
-    vllm_model:
-      recoverable_http_status_codes:
-      - 400
-      - 500
 structured_outputs_v4_simple_agent:
   responses_api_agents:
     simple_agent:
@@ -26,11 +20,11 @@ structured_outputs_v4_simple_agent:
       datasets:
       - name: train
         type: train
-        jsonl_fpath: resources_servers/structured_outputs/data/ds1_tool_call_train.jsonl
+        jsonl_fpath: resources_servers/structured_outputs/data/structured_outputs_v4_tool_call.jsonl
         gitlab_identifier:
           dataset_name: structured_outputs_v4_tool_call
           version: 0.0.1
-          artifact_fpath: ds1_tool_call_train.jsonl
+          artifact_fpath: structured_outputs_v4_tool_call.jsonl
         license: Apache 2.0
       - name: example
         type: example

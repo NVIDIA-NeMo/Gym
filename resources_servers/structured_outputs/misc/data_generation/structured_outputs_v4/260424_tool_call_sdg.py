@@ -44,13 +44,17 @@ DISTRACTOR_STYLES = (
     "single_tool_defs_anyof",
 )
 TOOL_NAME_STYLES = ("semantic", "numbered")
-DEFAULT_TOOL_SCHEMA_MODE_WEIGHTS = "direct:0.40,extraction_wrapper:0.25,random_wrapper:0.35"
+DEFAULT_TOOL_SCHEMA_MODE_WEIGHTS = "direct:10,extraction_wrapper:35,random_wrapper:55"
 DEFAULT_WRAPPER_KEY_POOL = "output,result,record,data,answer,summary,extracted_info,structured_response"
 DEFAULT_DISTRACTOR_STYLE_WEIGHTS = (
-    "separate_tools:1,numbered_tools:1,single_tool_oneof:1,"
-    "single_tool_anyof:1,single_tool_defs_oneof:1,single_tool_defs_anyof:1"
+    "separate_tools:6,numbered_tools:6,single_tool_oneof:16,"
+    "single_tool_anyof:18,single_tool_defs_oneof:27,single_tool_defs_anyof:27"
 )
-DEFAULT_TOOL_NAME_STYLE_WEIGHTS = "semantic:0.70,numbered:0.30"
+DEFAULT_DISTRACTOR_COUNT_WEIGHTS = (
+    "0:2,1:2,2:2,3:2,4:3,5:4,6:5,7:6,8:7,9:10,10:10,"
+    "11:11,12:11,13:9,14:7,15:4,16:2,17:1,18:1,19:0.5,20:0.5"
+)
+DEFAULT_TOOL_NAME_STYLE_WEIGHTS = "semantic:50,numbered:50"
 DEFAULT_TOOL_NAME_POOL = (
     "submit_structured_output,extract_record,record_answer,summarize_document,populate_schema,"
     "extraction,extract,summary,structured_output,submit_summary,return_record,document_summary,"
@@ -62,29 +66,53 @@ DEFAULT_UNION_PAYLOAD_KEY_POOL = (
 )
 DEFAULT_SOURCE_FORMATS = "json,yaml,xml,toml,csv"
 
-SHORT_INSTRUCTIONS = [
-    "Extract the relevant structured information from the document.",
-    "Use the available tool to return the structured answer.",
-    "Summarize the document using the provided tool.",
-    "Populate the available function call from the document.",
-    "Read the document and submit the structured result with the tool.",
-    "Return the document information by calling the most appropriate tool.",
-    "Use a tool call for the final answer.",
-    "Capture the key information from the document with a function call.",
-]
+INSTRUCTION_POOLS = {
+    "concise": [
+        "Extract the document into the available structured tool.",
+        "Return the relevant document facts with the tool.",
+        "Call the matching tool with the document's structured data.",
+        "Capture the source text as structured tool arguments.",
+    ],
+    "standard": [
+        "Read the document and use the provided function to submit the structured information.",
+        "Summarize the source text by filling the available tool arguments.",
+        "Capture the key fields from the document in the appropriate function call.",
+        "Use the matching tool to return the document information in structured form.",
+    ],
+    "explicit": [
+        "Use the tool call as the final answer; populate its arguments from the document instead of writing prose.",
+        "Choose the function that matches the document and fill its arguments only with information supported by the text.",
+        "Read the document, identify the requested fields from the available tool, and submit the structured result as function arguments.",
+        "Return a function call whose arguments contain the structured document summary; do not include a separate prose answer.",
+    ],
+}
 
-SYSTEM_INSTRUCTIONS = [
-    "Use the available tool for your final answer.",
-    "Choose the tool that matches the document extraction task.",
-    "Return the final answer as a function call.",
-    "Do not answer in prose when a tool can provide the final answer.",
-]
+SYSTEM_INSTRUCTION_POOLS = {
+    "tool_required": [
+        "The final answer must be a function call.",
+        "Use a provided function call for the final answer.",
+    ],
+    "tool_selection": [
+        "Select the provided tool that best matches the document.",
+        "Choose the matching function and fill it with facts from the source text.",
+    ],
+    "no_prose": [
+        "Do not write a prose answer; return the structured result through the tool.",
+        "Avoid free-form text and answer through the available function.",
+    ],
+    "final_answer_surface": [
+        "Treat the tool arguments as the answer surface.",
+        "The structured function arguments are the final response.",
+    ],
+}
 
 DOCUMENT_HEADERS = [
     "Document:",
     "<document>",
     "# Document",
     "Source text:",
+    "Input document:",
+    "Reference text:",
 ]
 
 DESCRIPTION_TEMPLATES = [
@@ -92,6 +120,10 @@ DESCRIPTION_TEMPLATES = [
     "Record the structured answer for this document.",
     "Return a structured summary for the source text.",
     "Capture the document information in a typed payload.",
+    "Record the document facts in the required argument shape.",
+    "Capture the relevant fields from the document.",
+    "Fill this function with information grounded in the source text.",
+    "Use this function to return the document-level structured answer.",
 ]
 
 
@@ -171,6 +203,25 @@ def parse_weights(weights_str: str, allowed: Tuple[str, ...], label: str) -> Dic
     return weights
 
 
+def parse_int_weights(weights_str: str, label: str) -> Optional[Dict[int, float]]:
+    if not weights_str.strip():
+        return None
+
+    weights: Dict[int, float] = {}
+    for pair in weights_str.split(","):
+        k, v = pair.strip().split(":")
+        key = int(k.strip())
+        if key < 0:
+            raise ValueError(f"{label} counts must be non-negative, got {key}")
+        weight = float(v.strip())
+        if weight < 0:
+            raise ValueError(f"{label} weights must be non-negative, got {weight}")
+        weights[key] = weight
+    if not weights or sum(weights.values()) <= 0:
+        raise ValueError(f"{label} weights must have positive total weight")
+    return weights
+
+
 def parse_csv_arg(value: str) -> List[str]:
     return [v.strip() for v in value.split(",") if v.strip()]
 
@@ -199,17 +250,119 @@ def is_object_schema(schema: Dict[str, Any]) -> bool:
     return schema.get("type") == "object" or ("properties" in schema and schema.get("type") is None)
 
 
-def strictify_tool_schema(schema: Dict[str, Any]) -> Dict[str, Any]:
-    strict_schema = deepcopy(schema)
+def resolve_json_pointer(root: Dict[str, Any], ref: str) -> Any:
+    if not ref.startswith("#/"):
+        raise ValueError(f"Only local JSON Schema refs are supported in tool schemas, got {ref}")
+    current: Any = root
+    for raw_part in ref[2:].split("/"):
+        part = raw_part.replace("~1", "/").replace("~0", "~")
+        if not isinstance(current, dict) or part not in current:
+            raise KeyError(f"Could not resolve JSON Schema ref {ref}")
+        current = current[part]
+    return current
 
-    def visit(node: Any) -> None:
+
+def is_definition_ref(ref: str) -> bool:
+    return ref.startswith("#/definitions/") or ref.startswith("#/$defs/")
+
+
+def inline_non_definition_refs(schema: Dict[str, Any]) -> Dict[str, Any]:
+    root = deepcopy(schema)
+
+    def visit(node: Any, ref_stack: Tuple[str, ...] = ()) -> Any:
         if isinstance(node, dict):
+            ref = node.get("$ref")
+            if isinstance(ref, str) and ref.startswith("#/") and not is_definition_ref(ref):
+                if ref in ref_stack:
+                    return node
+                resolved = visit(deepcopy(resolve_json_pointer(root, ref)), ref_stack + (ref,))
+                if not isinstance(resolved, dict):
+                    return resolved
+                for key, value in node.items():
+                    if key == "$ref":
+                        continue
+                    resolved[key] = visit(value, ref_stack)
+                return resolved
+            return {key: visit(value, ref_stack) for key, value in node.items()}
+        if isinstance(node, list):
+            return [visit(item, ref_stack) for item in node]
+        return node
+
+    return visit(root)
+
+
+def strictify_tool_schema(schema: Dict[str, Any]) -> Dict[str, Any]:
+    strict_schema = inline_non_definition_refs(schema)
+
+    def normalize_enum(value: Any) -> List[Any]:
+        if isinstance(value, list):
+            return value
+        if isinstance(value, dict):
+            for key in ("item", "items", "value", "values", "enum"):
+                if key in value:
+                    candidate = value[key]
+                    return candidate if isinstance(candidate, list) else [candidate]
+            if len(value) == 1:
+                candidate = next(iter(value.values()))
+                return candidate if isinstance(candidate, list) else [candidate]
+            return list(value.values())
+        return [value]
+
+    def normalize_nullable(node: Dict[str, Any]) -> None:
+        nullable = node.pop("nullable", None)
+        if isinstance(nullable, str):
+            nullable = nullable.lower() in ("1", "true", "yes", "y")
+        if not nullable:
+            return
+
+        schema_type = node.get("type")
+        if isinstance(schema_type, str):
+            if schema_type != "null":
+                node["type"] = [schema_type, "null"]
+        elif isinstance(schema_type, list):
+            if "null" not in schema_type:
+                node["type"] = [*schema_type, "null"]
+
+    def normalize_bool_schema_keyword(node: Dict[str, Any], key: str) -> None:
+        value = node.get(key)
+        if not isinstance(value, str):
+            return
+        lowered = value.lower()
+        if lowered in ("1", "true", "yes", "y"):
+            node[key] = True
+        elif lowered in ("0", "false", "no", "n"):
+            node[key] = False
+
+    def visit(node: Any, *, in_properties_map: bool = False) -> None:
+        if isinstance(node, dict):
+            if in_properties_map:
+                for key, value in list(node.items()):
+                    if isinstance(value, (dict, bool)):
+                        visit(value)
+                    else:
+                        node.pop(key, None)
+                return
+
             node.pop("optional", None)
+            normalize_nullable(node)
+            normalize_bool_schema_keyword(node, "additionalProperties")
+            normalize_bool_schema_keyword(node, "additionalItems")
+            if "enum" in node:
+                enum_values = normalize_enum(node["enum"])
+                if enum_values:
+                    node["enum"] = enum_values
+                else:
+                    node.pop("enum", None)
+            if isinstance(node.get("format"), str):
+                node.pop("format", None)
             if "properties" in node and isinstance(node["properties"], dict):
                 node.setdefault("type", "object")
                 node["required"] = list(node["properties"])
                 node["additionalProperties"] = False
-            for value in node.values():
+                visit(node["properties"], in_properties_map=True)
+            for key, value in node.items():
+                if key == "properties":
+                    continue
                 visit(value)
         elif isinstance(node, list):
             for item in node:
@@ -217,6 +370,94 @@ def strictify_tool_schema(schema: Dict[str, Any]) -> Dict[str, Any]:
 
     visit(strict_schema)
     return strict_schema
+
+
+def escape_json_pointer_part(value: str) -> str:
+    return value.replace("~", "~0").replace("/", "~1")
+
+
+def unescape_json_pointer_part(value: str) -> str:
+    return value.replace("~1", "/").replace("~0", "~")
+
+
+def rewrite_root_definition_refs(node: Any, prefix: str) -> None:
+    if isinstance(node, dict):
+        ref = node.get("$ref")
+        if isinstance(ref, str):
+            for base in ("#/definitions/", "#/$defs/"):
+                if ref.startswith(base):
+                    suffix = ref[len(base) :]
+                    first_part, sep, rest = suffix.partition("/")
+                    new_first_part = escape_json_pointer_part(prefix + unescape_json_pointer_part(first_part))
+                    node["$ref"] = f"#/$defs/{new_first_part}{sep}{rest}"
+                    break
+        for value in node.values():
+            rewrite_root_definition_refs(value, prefix)
+    elif isinstance(node, list):
+        for item in node:
+            rewrite_root_definition_refs(item, prefix)
+
+
+def hoist_root_definitions(schema: Dict[str, Any], prefix: str = "") -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    schema = deepcopy(schema)
+    definitions: Dict[str, Any] = {}
+    for key in ("definitions", "$defs"):
+        raw_definitions = schema.pop(key, None)
+        if not isinstance(raw_definitions, dict):
+            continue
+        for name, definition_schema in raw_definitions.items():
+            definitions[prefix + name] = definition_schema
+
+    if definitions:
+        rewrite_root_definition_refs(schema, prefix)
+        rewrite_root_definition_refs(definitions, prefix)
+
+    return schema, definitions
+
+
+def attach_definitions(schema: Dict[str, Any], definitions: Dict[str, Any]) -> Dict[str, Any]:
+    if definitions:
+        schema.setdefault("$defs", {}).update(definitions)
+    return schema
+
+
+def make_verification_schema(schema: Dict[str, Any]) -> Dict[str, Any]:
+    verification_schema, definitions = hoist_root_definitions(strictify_tool_schema(schema))
+    return attach_definitions(verification_schema, definitions)
+
+
+def relax_schema_for_vllm_tool_grammar(node: Any, *, key: Optional[str] = None) -> Any:
+    """Remove JSON Schema constructs that vanilla vLLM tool grammars reject.
+
+    This is intentionally applied only to generated tool `parameters`. The
+    verifier still uses the strictified schema from `make_verification_schema`.
+    """
+    if key in {"enum", "const", "default", "examples"}:
+        return deepcopy(node)
+
+    if isinstance(node, bool):
+        return {}
+
+    if isinstance(node, list):
+        return [relax_schema_for_vllm_tool_grammar(item, key=key) for item in node]
+
+    if not isinstance(node, dict):
+        return node
+
+    relaxed = {}
+    for child_key, child_value in node.items():
+        if child_key in {"additionalProperties", "additionalItems"} and isinstance(child_value, bool):
+            continue
+        relaxed[child_key] = relax_schema_for_vllm_tool_grammar(child_value, key=child_key)
+    return relaxed
+
+
+def make_vllm_tool_schema(schema: Dict[str, Any], prefix: str = "") -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    tool_schema, definitions = hoist_root_definitions(strictify_tool_schema(schema), prefix=prefix)
+    return (
+        relax_schema_for_vllm_tool_grammar(tool_schema),
+        relax_schema_for_vllm_tool_grammar(definitions),
+    )
 
 
 def choose_tool_schema_mode(schema: Dict[str, Any], weights: Dict[str, float], rng: random.Random) -> str:
@@ -238,18 +479,18 @@ def choose_wrapper_key(mode: str, wrapper_key_pool: List[str], rng: random.Rando
 
 
 def make_parameters(schema: Dict[str, Any], mode: str, payload_key: Optional[str]) -> Dict[str, Any]:
-    tool_schema = strictify_tool_schema(schema)
+    tool_schema, definitions = make_vllm_tool_schema(schema)
     if mode == "direct":
-        return tool_schema
+        return attach_definitions(tool_schema, definitions)
     assert payload_key is not None
-    return {
+    parameters = {
         "type": "object",
         "properties": {
             payload_key: tool_schema,
         },
         "required": [payload_key],
-        "additionalProperties": False,
     }
+    return attach_definitions(parameters, definitions)
 
 
 def make_union_parameters(
@@ -258,31 +499,35 @@ def make_union_parameters(
     use_defs: bool,
 ) -> Dict[str, Any]:
     branches = []
-    for spec in branch_specs:
+    definitions: Dict[str, Any] = {}
+    for i, spec in enumerate(branch_specs, start=1):
         payload_key = spec["payload_key"]
+        branch_schema, branch_definitions = make_vllm_tool_schema(spec["schema"], prefix=f"choice_{i}_")
+        definitions.update(branch_definitions)
         branches.append(
             {
                 "type": "object",
                 "properties": {
-                    payload_key: strictify_tool_schema(spec["schema"]),
+                    payload_key: branch_schema,
                 },
                 "required": [payload_key],
-                "additionalProperties": False,
             }
         )
 
     if use_defs:
         defs = {f"choice_{i}": branch for i, branch in enumerate(branches, start=1)}
-        return {
+        parameters = {
             "type": "object",
             "$defs": defs,
             composition_keyword: [{"$ref": f"#/$defs/choice_{i}"} for i in range(1, len(branches) + 1)],
         }
+        return attach_definitions(parameters, definitions)
 
-    return {
+    parameters = {
         "type": "object",
         composition_keyword: branches,
     }
+    return attach_definitions(parameters, definitions)
 
 
 def unique_tool_name(base_name: str, used_names: set[str]) -> str:
@@ -364,13 +609,27 @@ def make_union_tool(
 def sample_num_distractors(
     *,
     rng: random.Random,
+    distractor_count_weights: Optional[Dict[int, float]],
     no_distractor_ratio: float,
     geometric_p: float,
     max_distractors: int,
     available_distractors: int,
 ) -> int:
     max_count = min(max_distractors, available_distractors)
-    if max_count <= 0 or rng.random() < no_distractor_ratio:
+    if max_count <= 0:
+        return 0
+
+    if distractor_count_weights:
+        valid_weights = {
+            count: weight
+            for count, weight in distractor_count_weights.items()
+            if 0 <= count <= max_count and weight > 0
+        }
+        if not valid_weights:
+            return 0
+        return int(weighted_choice({str(k): v for k, v in valid_weights.items()}, rng))
+
+    if rng.random() < no_distractor_ratio:
         return 0
 
     weights = [(1.0 - geometric_p) ** (k - 1) * geometric_p for k in range(1, max_count + 1)]
@@ -439,14 +698,16 @@ def format_document(document: str, rng: random.Random) -> str:
     return f"{header}\n{document}"
 
 
-def make_input_messages(document: str, rng: random.Random) -> Tuple[List[Dict[str, str]], str]:
-    instruction = rng.choice(SHORT_INSTRUCTIONS)
-    system_instruction = rng.choice(SYSTEM_INSTRUCTIONS)
+def make_input_messages(document: str, rng: random.Random) -> Tuple[List[Dict[str, str]], str, str, str]:
+    instruction_detail_level = rng.choice(list(INSTRUCTION_POOLS))
+    instruction = rng.choice(INSTRUCTION_POOLS[instruction_detail_level])
+    system_instruction_style = rng.choice(list(SYSTEM_INSTRUCTION_POOLS))
+    system_instruction = rng.choice(SYSTEM_INSTRUCTION_POOLS[system_instruction_style])
     doc_block = format_document(document, rng)
 
     layouts = {
         "system_instruction_user_document": [
-            {"role": "system", "content": instruction},
+            {"role": "system", "content": system_instruction},
             {"role": "user", "content": doc_block},
         ],
         "user_instruction_before_document": [
@@ -464,7 +725,9 @@ def make_input_messages(document: str, rng: random.Random) -> Tuple[List[Dict[st
         ],
     }
     layout = rng.choice(list(layouts))
-    return layouts[layout], layout
+    if not any(msg.get("role") == "system" for msg in layouts[layout]):
+        system_instruction_style = "none"
+    return layouts[layout], layout, instruction_detail_level, system_instruction_style
 
 
 def make_gym_record(
@@ -482,17 +745,21 @@ def make_gym_record(
     tool_choice: str,
     parallel_tool_calls: bool,
     tool_strict: bool,
+    distractor_count_weights: Optional[Dict[int, float]],
     no_distractor_ratio: float,
     distractor_geometric_p: float,
     max_distractors: int,
 ) -> Dict[str, Any]:
     schema = record["_json_schema"]
     source_schema_type = record.get("target_output_format", "json")
-    input_msgs, instruction_layout = make_input_messages(record.get("document", ""), rng)
+    input_msgs, instruction_layout, instruction_detail_level, system_instruction_style = make_input_messages(
+        record.get("document", ""), rng
+    )
 
     distractor_pool = [r for r in all_records if r["_source_index"] != record["_source_index"]]
     num_distractors = sample_num_distractors(
         rng=rng,
+        distractor_count_weights=distractor_count_weights,
         no_distractor_ratio=no_distractor_ratio,
         geometric_p=distractor_geometric_p,
         max_distractors=max_distractors,
@@ -576,6 +843,7 @@ def make_gym_record(
         assert target_tool_name is not None
 
     num_user_turns = sum(1 for msg in input_msgs if msg.get("role") == "user")
+    verification_schema = make_verification_schema(schema)
 
     return {
         "responses_create_params": {
@@ -584,7 +852,7 @@ def make_gym_record(
             "tool_choice": tool_choice,
             "parallel_tool_calls": parallel_tool_calls,
         },
-        "schema_str": json.dumps(schema, ensure_ascii=False),
+        "schema_str": json.dumps(verification_schema, ensure_ascii=False),
         "schema_type": "json",
         "response_mode": "tool_call",
         "problem_type": "direct_tool_call",
@@ -602,6 +870,8 @@ def make_gym_record(
         "num_distractors": num_distractors,
         "has_distractors": num_distractors > 0,
         "instruction_layout": instruction_layout,
+        "instruction_detail_level": instruction_detail_level,
+        "system_instruction_style": system_instruction_style,
         "source_record_id": record.get("_record_id", "unknown"),
         "agent_ref": {
             "type": "responses_api_agents",
@@ -626,6 +896,7 @@ def generate_records(
     tool_choice: str,
     parallel_tool_calls: bool,
     tool_strict: bool,
+    distractor_count_weights: Optional[Dict[int, float]],
     no_distractor_ratio: float,
     distractor_geometric_p: float,
     max_distractors: int,
@@ -652,6 +923,7 @@ def generate_records(
                     tool_choice=tool_choice,
                     parallel_tool_calls=parallel_tool_calls,
                     tool_strict=tool_strict,
+                    distractor_count_weights=distractor_count_weights,
                     no_distractor_ratio=no_distractor_ratio,
                     distractor_geometric_p=distractor_geometric_p,
                     max_distractors=max_distractors,
@@ -694,6 +966,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--parallel-tool-calls", type=parse_bool, default=False)
     parser.add_argument("--tool-strict", type=parse_bool, default=True)
     parser.add_argument("--max-distractors", type=int, default=20)
+    parser.add_argument(
+        "--distractor-count-weights",
+        default=DEFAULT_DISTRACTOR_COUNT_WEIGHTS,
+        help="Comma-separated explicit distractor count weights. Empty string falls back to geometric sampling.",
+    )
     parser.add_argument("--no-distractor-ratio", type=float, default=0.30)
     parser.add_argument("--distractor-geometric-p", type=float, default=0.25)
     parser.add_argument("--exclude-substrings", default="", help="Comma-separated case-insensitive row filters")
@@ -720,6 +997,7 @@ def main() -> None:
     tool_name_pool = parse_csv_arg(args.tool_name_pool)
     numbered_tool_prefix_pool = parse_csv_arg(args.numbered_tool_prefix_pool)
     exclude_substrings = parse_csv_arg(args.exclude_substrings)
+    distractor_count_weights = parse_int_weights(args.distractor_count_weights, "distractor count")
 
     print(f"Loading records from {input_path}...")
     records = load_records(input_path, source_formats=source_formats, exclude_substrings=exclude_substrings)
@@ -744,6 +1022,7 @@ def main() -> None:
         tool_choice=args.tool_choice,
         parallel_tool_calls=args.parallel_tool_calls,
         tool_strict=args.tool_strict,
+        distractor_count_weights=distractor_count_weights,
         no_distractor_ratio=args.no_distractor_ratio,
         distractor_geometric_p=args.distractor_geometric_p,
         max_distractors=args.max_distractors,
@@ -763,13 +1042,14 @@ def main() -> None:
     print(f"  Output: {output_path}")
 
     for title, key in [
-        ("By source_schema_type", "source_schema_type"),
         ("By tool_schema_mode", "tool_schema_mode"),
         ("By distractor_style", "distractor_style"),
         ("By tool_name_style", "tool_name_style"),
         ("By tool_union_mode", "tool_union_mode"),
         ("By num_distractors", "num_distractors"),
         ("By instruction_layout", "instruction_layout"),
+        ("By instruction_detail_level", "instruction_detail_level"),
+        ("By system_instruction_style", "system_instruction_style"),
     ]:
         print(f"\n  {title}:")
         counts = Counter(sample.get(key, "?") for sample in samples)

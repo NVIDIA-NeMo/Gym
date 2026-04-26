@@ -30,6 +30,12 @@ We currently have support for 5 different schema output types: JSON, YAML, XML, 
 > Evaluation is only based on the **schema adherence** of the generated output.
 > **The actual content of the generation is *not* verified**, thus it is advised that the task used for prompt creation is not too difficult for the model.
 
+## Design Notes
+
+Reusable guidance for designing structured-output data and verifiers across
+text-output and tool-call variants is in
+[misc/structured_outputs_design.md](misc/structured_outputs_design.md).
+
 
 # Example usage
 

@@ -63,6 +63,8 @@ class StructuredOutputsVerifyRequest(BaseVerifyRequest):
     num_distractors: Optional[int] = None
     has_distractors: Optional[bool] = None
     instruction_layout: Optional[str] = None
+    instruction_detail_level: Optional[str] = None
+    system_instruction_style: Optional[str] = None
     tool_name_style: Optional[str] = None
     distractor_style: Optional[str] = None
     tool_union_mode: Optional[str] = None
@@ -87,6 +89,8 @@ class StructuredOutputsVerifyResponse(BaseVerifyResponse):
     num_distractors: Optional[int] = None
     has_distractors: Optional[bool] = None
     instruction_layout: Optional[str] = None
+    instruction_detail_level: Optional[str] = None
+    system_instruction_style: Optional[str] = None
     tool_name_style: Optional[str] = None
     distractor_style: Optional[str] = None
     tool_union_mode: Optional[str] = None
@@ -105,10 +109,11 @@ class StructuredOutputsResourcesServer(SimpleResourcesServer):
         by_repr: Dict[str, List[float]] = defaultdict(list)
         by_response_mode: Dict[str, List[float]] = defaultdict(list)
         by_tool_schema_mode: Dict[str, List[float]] = defaultdict(list)
-        by_source_schema_type: Dict[str, List[float]] = defaultdict(list)
         by_num_tools: Dict[str, List[float]] = defaultdict(list)
         by_has_distractors: Dict[str, List[float]] = defaultdict(list)
         by_instruction_layout: Dict[str, List[float]] = defaultdict(list)
+        by_instruction_detail_level: Dict[str, List[float]] = defaultdict(list)
+        by_system_instruction_style: Dict[str, List[float]] = defaultdict(list)
         by_tool_name_style: Dict[str, List[float]] = defaultdict(list)
         by_distractor_style: Dict[str, List[float]] = defaultdict(list)
         by_tool_union_mode: Dict[str, List[float]] = defaultdict(list)
@@ -129,9 +134,6 @@ class StructuredOutputsResourcesServer(SimpleResourcesServer):
                 tool_schema_mode = r.get("tool_schema_mode")
                 if tool_schema_mode:
                     by_tool_schema_mode[tool_schema_mode].append(reward)
-                source_schema_type = r.get("source_schema_type")
-                if source_schema_type:
-                    by_source_schema_type[source_schema_type].append(reward)
                 num_tools = r.get("num_tools")
                 if num_tools is not None:
                     by_num_tools[str(num_tools)].append(reward)
@@ -141,6 +143,12 @@ class StructuredOutputsResourcesServer(SimpleResourcesServer):
                 instruction_layout = r.get("instruction_layout")
                 if instruction_layout:
                     by_instruction_layout[instruction_layout].append(reward)
+                instruction_detail_level = r.get("instruction_detail_level")
+                if instruction_detail_level:
+                    by_instruction_detail_level[instruction_detail_level].append(reward)
+                system_instruction_style = r.get("system_instruction_style")
+                if system_instruction_style:
+                    by_system_instruction_style[system_instruction_style].append(reward)
                 tool_name_style = r.get("tool_name_style")
                 if tool_name_style:
                     by_tool_name_style[tool_name_style].append(reward)
@@ -156,10 +164,15 @@ class StructuredOutputsResourcesServer(SimpleResourcesServer):
         metrics.update({f"mean/reward_repr_{k}": mean(v) for k, v in by_repr.items() if v})
         metrics.update({f"mean/reward_response_mode_{k}": mean(v) for k, v in by_response_mode.items() if v})
         metrics.update({f"mean/reward_tool_schema_mode_{k}": mean(v) for k, v in by_tool_schema_mode.items() if v})
-        metrics.update({f"mean/reward_source_schema_type_{k}": mean(v) for k, v in by_source_schema_type.items() if v})
         metrics.update({f"mean/reward_num_tools_{k}": mean(v) for k, v in by_num_tools.items() if v})
         metrics.update({f"mean/reward_has_distractors_{k}": mean(v) for k, v in by_has_distractors.items() if v})
         metrics.update({f"mean/reward_instruction_layout_{k}": mean(v) for k, v in by_instruction_layout.items() if v})
+        metrics.update(
+            {f"mean/reward_instruction_detail_level_{k}": mean(v) for k, v in by_instruction_detail_level.items() if v}
+        )
+        metrics.update(
+            {f"mean/reward_system_instruction_style_{k}": mean(v) for k, v in by_system_instruction_style.items() if v}
+        )
         metrics.update({f"mean/reward_tool_name_style_{k}": mean(v) for k, v in by_tool_name_style.items() if v})
         metrics.update({f"mean/reward_distractor_style_{k}": mean(v) for k, v in by_distractor_style.items() if v})
         metrics.update({f"mean/reward_tool_union_mode_{k}": mean(v) for k, v in by_tool_union_mode.items() if v})
