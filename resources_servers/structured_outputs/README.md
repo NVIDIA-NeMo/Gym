@@ -1,14 +1,25 @@
 # Description
 > Keywords: Instruction Following, Structured Outputs, Schema Adherence
 
-This is a resources server for verifying the ability of the model to follow output formatting instructions under schema constraints.
+This resources server verifies whether a model can follow structured-output
+schema constraints. It supports two response surfaces:
 
-Each problem consists three components:
+- Text output, v1-v3: the schema is shown in the prompt and the model emits
+  JSON, YAML, XML, TOML, or CSV text.
+- Tool-call output, v4: the schema is supplied as an OpenAI Responses API
+  function tool in `responses_create_params.tools`, and the model's final
+  answer is a function call.
+
+Text-output problems consist of three components:
 1. Document
 2. Output Formatting Instruction (Schema)
 3. Question
 
-The dataset can be found at https://huggingface.co/datasets/nvidia/Nemotron-RL-instruction_following-structured_outputs 
+Tool-call rows keep the prompt schema-free. The model sees a document, a short
+instruction, and one or more tool schemas.
+
+The original text-output dataset can be found at
+https://huggingface.co/datasets/nvidia/Nemotron-RL-instruction_following-structured_outputs.
 
 
 We recommend formatting the dataset to test the model's ability to follow instructions under the following circumstances:
@@ -24,7 +35,8 @@ We recommend formatting the dataset to test the model's ability to follow instru
 
 For any parsed outputs, we use the `openapi-schema-validator` library for verification.
 
-We currently have support for 5 different schema output types: JSON, YAML, XML, TOML, and CSV.
+We currently support text outputs in JSON, YAML, XML, TOML, and CSV, plus
+tool-call structured outputs in v4.
 
 > [!IMPORTANT]
 > Evaluation is only based on the **schema adherence** of the generated output.
@@ -40,21 +52,37 @@ text-output and tool-call variants is in
 # Example usage
 
 ## Running servers
-The following are example commands for running this resources server, along with the simple agent and an OpenAI model:
+The following command runs the text-output JSON config with the simple agent and
+an OpenAI model:
 ```bash
 config_paths="responses_api_models/openai_model/configs/openai_model.yaml, \
 resources_servers/structured_outputs/configs/structured_outputs_json.yaml"
 ng_run "+config_paths=[$config_paths]"
 ```
 
-The dataset can be found at https://huggingface.co/datasets/nvidia/Nemotron-RL-instruction_following-structured_outputs 
-
-Then, rollouts can be collected using a command such as the following:
+Then, text-output rollouts can be collected using a command such as:
 ```bash
 ng_collect_rollouts \
     +agent_name=structured_outputs_simple_agent \
     +input_jsonl_fpath=resources_servers/structured_outputs/data/structured_outputs_260309_nano_v3_sdg_json_yaml_xml_val.jsonl \
     +output_jsonl_fpath=results/example_structured_outputs_json.jsonl \
+    +resume_from_cache=True \
+    +num_samples_in_parallel=256
+```
+
+For v4 tool-call structured outputs, use `structured_outputs_v4.yaml` and the
+v4 simple agent:
+```bash
+config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
+resources_servers/structured_outputs/configs/structured_outputs_v4.yaml"
+ng_run "+config_paths=[${config_paths}]"
+```
+
+```bash
+ng_collect_rollouts \
+    +agent_name=structured_outputs_v4_simple_agent \
+    +input_jsonl_fpath=resources_servers/structured_outputs/data/structured_outputs_v4_tool_call.jsonl \
+    +output_jsonl_fpath=results/example_structured_outputs_v4_tool_call.jsonl \
     +resume_from_cache=True \
     +num_samples_in_parallel=256
 ```
@@ -101,6 +129,33 @@ ng_prepare_data "+config_paths=[${config_paths}]" \
 Version 4 generates prompts where the schema is provided as an OpenAI Responses
 API function tool instead of prompt text. The prompt contains only the document
 and a short extraction instruction.
+
+The uploaded GitLab dataset is:
+
+- `dataset_name`: `structured_outputs_v4_tool_call`
+- `version`: `0.0.1`
+- `artifact_fpath`: `structured_outputs_v4_tool_call.jsonl`
+
+Prepare the v4 training data with:
+```bash
+config_paths="responses_api_models/vllm_model/configs/vllm_model_for_training.yaml,\
+resources_servers/structured_outputs/configs/structured_outputs_v4.yaml"
+ng_prepare_data "+config_paths=[${config_paths}]" \
+    +output_dirpath=data/structured_outputs_v4_tool_call/ \
+    +mode=train_preparation \
+    +should_download=true
+```
+
+The v4 config wires the train dataset to
+`resources_servers/structured_outputs/data/structured_outputs_v4_tool_call.jsonl`
+and the example dataset to
+`resources_servers/structured_outputs/data/structured_outputs_v4_example.jsonl`.
+
+For v4, `execute_tool_calls: false` is intentional. The tool call is the final
+answer being verified, not an action that should be executed by the agent. The
+verifier finds the matching function call, JSON-decodes its arguments, unwraps
+`tool_payload_key` when the row uses a wrapper mode, and validates the payload
+against `schema_str`.
 
 Generation details and CLI examples are in
 `resources_servers/structured_outputs/misc/data_generation/structured_outputs_v4/README.md`.

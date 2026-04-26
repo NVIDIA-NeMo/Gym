@@ -36,6 +36,7 @@ V4_KEYS = {
     "instruction_detail_level",
     "system_instruction_style",
 }
+USE_FIELD_DEFAULT: Any = object()
 
 
 def iter_jsonl(path: Path):
@@ -55,10 +56,33 @@ def value_to_key(value: Any) -> str:
     return str(value)
 
 
-def group_by(rows: list[dict[str, Any]], key: str, default: Any = "unknown") -> dict[str, list[dict[str, Any]]]:
+def default_for_key(key: str) -> Any:
+    return None if key == "error_type" else "unknown"
+
+
+def field_value_to_key(row: dict[str, Any], key: str, default: Any = USE_FIELD_DEFAULT) -> str:
+    if default is USE_FIELD_DEFAULT:
+        default = default_for_key(key)
+    return value_to_key(row.get(key, default))
+
+
+def failure_error_to_key(row: dict[str, Any]) -> str:
+    error_type = row.get("error_type")
+    if error_type is None:
+        return "unclassified"
+    return value_to_key(error_type)
+
+
+def category_sort_key(value: str) -> tuple[int, int | str, str]:
+    if value.isdigit() or (value.startswith("-") and value[1:].isdigit()):
+        return (0, int(value), value)
+    return (1, value.casefold(), value)
+
+
+def group_by(rows: list[dict[str, Any]], key: str, default: Any = USE_FIELD_DEFAULT) -> dict[str, list[dict[str, Any]]]:
     groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
-        groups[value_to_key(row.get(key, default))].append(row)
+        groups[field_value_to_key(row, key, default=default)].append(row)
     return groups
 
 
@@ -75,50 +99,35 @@ def stats(rows: list[dict[str, Any]]) -> tuple[int, int, float]:
     return n, n_pass, mean(rewards) if rewards else 0.0
 
 
-def print_table(title: str, groups: dict[str, list[dict[str, Any]]], total_n: int) -> None:
+def observed_values(rows: list[dict[str, Any]], key: str, default: Any = USE_FIELD_DEFAULT) -> set[str]:
+    return {field_value_to_key(row, key, default=default) for row in rows}
+
+
+def has_multiple_values(rows: list[dict[str, Any]], key: str, default: Any = USE_FIELD_DEFAULT) -> bool:
+    return len(observed_values(rows, key, default=default)) > 1
+
+
+def print_table(
+    title: str,
+    groups: dict[str, list[dict[str, Any]]],
+    total_n: int,
+    *,
+    skip_singleton: bool = False,
+) -> bool:
     if not groups:
-        return
+        return False
+    if skip_singleton and len(groups) <= 1:
+        return False
 
     print(f"\n  {title}")
     header = f"  {'Category':<34} {'N':>7}  {'Share':>7}  {'Pass':>7}  {'Rate':>7}  {'Mean':>7}"
     print(header)
     print("  " + "-" * (len(header) - 2))
 
-    for key, grouped_rows in sorted(groups.items(), key=lambda kv: (-len(kv[1]), kv[0])):
+    for key, grouped_rows in sorted(groups.items(), key=lambda kv: category_sort_key(kv[0])):
         n, n_pass, avg = stats(grouped_rows)
         print(f"  {key:<34} {n:>7}  {pct(n, total_n):>7}  {n_pass:>7}  {pct(n_pass, n):>7}  {avg:>7.4f}")
-
-
-def print_cross_tab(title: str, rows: list[dict[str, Any]], row_key: str, col_key: str) -> None:
-    by_row: dict[str, dict[str, list[dict[str, Any]]]] = defaultdict(lambda: defaultdict(list))
-    col_keys = set()
-    for row in rows:
-        row_value = value_to_key(row.get(row_key, "unknown"))
-        col_value = value_to_key(row.get(col_key, "unknown"))
-        by_row[row_value][col_value].append(row)
-        col_keys.add(col_value)
-
-    if not by_row or not col_keys:
-        return
-
-    cols = sorted(col_keys)
-    row_width = max(18, max(len(row_value) for row_value in by_row) + 2)
-    col_width = max(12, max(len(col) for col in cols) + 2)
-
-    print(f"\n  {title}")
-    print(f"  {'':>{row_width}}" + "".join(f"{col:>{col_width}}" for col in cols))
-    print("  " + "-" * (row_width + col_width * len(cols)))
-
-    for row_value in sorted(by_row):
-        cells = []
-        for col in cols:
-            cell_rows = by_row[row_value].get(col, [])
-            if not cell_rows:
-                cells.append("-")
-                continue
-            n, n_pass, _ = stats(cell_rows)
-            cells.append(f"{n_pass}/{n}")
-        print(f"  {row_value:>{row_width}}" + "".join(f"{cell:>{col_width}}" for cell in cells))
+    return True
 
 
 def is_v4_row(row: dict[str, Any]) -> bool:
@@ -154,9 +163,15 @@ def validate_v4_invariants(rows: list[dict[str, Any]]) -> list[str]:
     return errors
 
 
-def print_optional_tables(rows: list[dict[str, Any]], total_n: int, fields: list[tuple[str, str]]) -> None:
+def print_optional_tables(
+    rows: list[dict[str, Any]],
+    total_n: int,
+    fields: list[tuple[str, str]],
+    *,
+    skip_singletons: bool = True,
+) -> None:
     for title, key in fields:
-        print_table(title, optional_group_by(rows, key), total_n)
+        print_table(title, optional_group_by(rows, key), total_n, skip_singleton=skip_singletons)
 
 
 def print_legacy_breakdowns(rows: list[dict[str, Any]], total_n: int) -> None:
@@ -192,9 +207,8 @@ def print_v4_breakdowns(rows: list[dict[str, Any]], total_n: int) -> None:
         ("By has_distractors", "has_distractors"),
         ("By tool_name_style", "tool_name_style"),
         ("By instruction_layout", "instruction_layout"),
-        ("By error_type", "error_type"),
     ]:
-        print_table(title, group_by(rows, key), total_n)
+        print_table(title, group_by(rows, key), total_n, skip_singleton=True)
 
     print_optional_tables(
         rows,
@@ -205,32 +219,96 @@ def print_v4_breakdowns(rows: list[dict[str, Any]], total_n: int) -> None:
         ],
     )
 
-    print_cross_tab("Pass counts: distractor_style x tool_schema_mode", rows, "distractor_style", "tool_schema_mode")
-    print_cross_tab("Pass counts: num_distractors x error_type", rows, "num_distractors", "error_type")
+
+def print_failure_error_table(failures: list[dict[str, Any]]) -> None:
+    groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in failures:
+        groups[failure_error_to_key(row)].append(row)
+
+    if not groups:
+        return
+
+    print("\n  Failures by error_type")
+    header = f"  {'Error Type':<34} {'Failures':>9}  {'Share':>7}"
+    print(header)
+    print("  " + "-" * (len(header) - 2))
+
+    total_failures = len(failures)
+    for key, grouped_rows in sorted(groups.items(), key=lambda kv: category_sort_key(kv[0])):
+        n = len(grouped_rows)
+        print(f"  {key:<34} {n:>9}  {pct(n, total_failures):>7}")
 
 
-def print_failure_breakdowns(rows: list[dict[str, Any]], verbose: bool, include_source_schema_type: bool = False) -> None:
+def print_failure_count_table(title: str, rows: list[dict[str, Any]], failures: list[dict[str, Any]], key: str) -> bool:
+    if not failures or not any(key in row for row in rows) or not has_multiple_values(rows, key):
+        return False
+
+    rows_by_key = group_by(rows, key)
+    failures_by_key: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    error_types = set()
+    for row in failures:
+        row_key = field_value_to_key(row, key)
+        error_type = failure_error_to_key(row)
+        failures_by_key[row_key][error_type] += 1
+        error_types.add(error_type)
+
+    if not error_types:
+        return False
+
+    error_cols = sorted(error_types, key=category_sort_key)
+    category_width = max(18, max(len(row_key) for row_key in rows_by_key) + 2)
+    error_width = max(12, max(len(error_type) for error_type in error_cols) + 2)
+    header = (
+        f"  {'Category':<{category_width}}"
+        f"{'Rows':>8}  {'Failures':>9}  {'Fail Rate':>9}"
+        + "".join(f"{error_type:>{error_width}}" for error_type in error_cols)
+    )
+
+    print(f"\n  {title}")
+    print(header)
+    print("  " + "-" * (len(header) - 2))
+
+    for row_key, grouped_rows in sorted(rows_by_key.items(), key=lambda kv: category_sort_key(kv[0])):
+        error_counts = failures_by_key.get(row_key, {})
+        n_rows = len(grouped_rows)
+        n_failures = sum(error_counts.values())
+        cells = []
+        for error_type in error_cols:
+            count = error_counts.get(error_type, 0)
+            cells.append(str(count) if count else "-")
+        print(
+            f"  {row_key:<{category_width}}"
+            f"{n_rows:>8}  {n_failures:>9}  {pct(n_failures, n_rows):>9}"
+            + "".join(f"{cell:>{error_width}}" for cell in cells)
+        )
+    return True
+
+
+def print_failure_breakdowns(
+    rows: list[dict[str, Any]],
+    verbose: bool,
+    breakdown_keys: list[str],
+    *,
+    include_error_table: bool = True,
+) -> None:
     failures = [row for row in rows if row.get("reward", 0.0) != 1.0]
     if not failures:
+        return
+
+    printable_breakdown_keys = [
+        key for key in breakdown_keys if any(key in row for row in rows) and has_multiple_values(rows, key)
+    ]
+    if not include_error_table and not printable_breakdown_keys and not verbose:
         return
 
     print("\n" + "-" * 90)
     print(f"  Error breakdown ({len(failures)} failures)")
     print("-" * 90)
-    print_table("By error_type", group_by(failures, "error_type"), len(failures))
+    if include_error_table:
+        print_failure_error_table(failures)
 
-    row_col_keys = [
-        ("schema_type", "error_type"),
-        ("problem_type", "schema_type"),
-        ("distractor_style", "error_type"),
-        ("tool_schema_mode", "error_type"),
-    ]
-    if include_source_schema_type:
-        row_col_keys.insert(1, ("source_schema_type", "error_type"))
-
-    for row_key, col_key in row_col_keys:
-        if any(row_key in row and col_key in row for row in rows):
-            print_cross_tab(f"Pass counts: {row_key} x {col_key}", rows, row_key, col_key)
+    for key in printable_breakdown_keys:
+        print_failure_count_table(f"Failures by {key}", rows, failures, key)
 
     if not verbose:
         return
@@ -238,7 +316,7 @@ def print_failure_breakdowns(rows: list[dict[str, Any]], verbose: bool, include_
     print("\n  Sample failures")
     seen = set()
     for row in failures:
-        error_type = value_to_key(row.get("error_type", "unknown"))
+        error_type = failure_error_to_key(row)
         error_message = value_to_key(row.get("error_message", ""))[:200]
         key = (error_type, error_message[:80])
         if key in seen:
@@ -247,6 +325,22 @@ def print_failure_breakdowns(rows: list[dict[str, Any]], verbose: bool, include_
         print(f"    [{error_type}] {error_message}")
         if len(seen) >= 20:
             break
+
+
+def v4_error_breakdown_keys() -> list[str]:
+    return [
+        "distractor_style",
+        "tool_schema_mode",
+        "num_distractors",
+    ]
+
+
+def legacy_error_breakdown_keys() -> list[str]:
+    return [
+        "schema_type",
+        "source_schema_type",
+        "problem_type",
+    ]
 
 
 def print_section_header(title: str, rows: list[dict[str, Any]]) -> None:
@@ -259,6 +353,7 @@ def print_section_header(title: str, rows: list[dict[str, Any]]) -> None:
 def render_report(in_path: Path, rows: list[dict[str, Any]], verbose: bool) -> str:
     total_n, total_pass, total_mean = stats(rows)
     rows_by_version = group_by_version(rows)
+    multiple_versions = len(rows_by_version) > 1
 
     buf = io.StringIO()
     old_stdout = sys.stdout
@@ -267,33 +362,38 @@ def render_report(in_path: Path, rows: list[dict[str, Any]], verbose: bool) -> s
         print("=" * 90)
         print("  Structured Outputs - Rollout Metrics")
         print(f"  {in_path}")
-        detected_versions = ", ".join(
-            f"{version}={len(grouped_rows)}" for version, grouped_rows in rows_by_version.items()
-        )
-        print(f"  detected_versions={detected_versions}")
+        if multiple_versions:
+            detected_versions = ", ".join(
+                f"{version}={len(grouped_rows)}"
+                for version, grouped_rows in sorted(rows_by_version.items(), key=lambda kv: category_sort_key(kv[0]))
+            )
+            print(f"  detected_versions={detected_versions}")
         print("=" * 90)
         print(
             f"\n  OVERALL: n={total_n} pass={total_pass}/{total_n} ({pct(total_pass, total_n)}) "
             f"mean_reward={total_mean:.4f}"
         )
 
-        print_table("By detected_version", rows_by_version, total_n)
+        print_table("By detected_version", rows_by_version, total_n, skip_singleton=True)
 
         v4_rows = rows_by_version.get("v4_tool_call", [])
         if v4_rows:
-            print_section_header("V4 tool-call rows", v4_rows)
+            if multiple_versions:
+                print_section_header("V4 tool-call rows", v4_rows)
             print_v4_breakdowns(v4_rows, len(v4_rows))
-            print_failure_breakdowns(v4_rows, verbose)
+            print_failure_breakdowns(
+                v4_rows,
+                verbose,
+                v4_error_breakdown_keys(),
+            )
 
         legacy_rows = rows_by_version.get("legacy_text_output", [])
         if legacy_rows:
-            print_section_header("Legacy text-output rows", legacy_rows)
+            if multiple_versions:
+                print_section_header("Legacy text-output rows", legacy_rows)
             print_legacy_breakdowns(legacy_rows, len(legacy_rows))
-            print_failure_breakdowns(legacy_rows, verbose, include_source_schema_type=True)
+            print_failure_breakdowns(legacy_rows, verbose, legacy_error_breakdown_keys())
 
-        if len(rows_by_version) > 1:
-            print_section_header("All rows combined error view", rows)
-            print_failure_breakdowns(rows, verbose)
         print("=" * 90)
     finally:
         sys.stdout = old_stdout
