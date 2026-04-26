@@ -147,11 +147,6 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 print(f"A model call is missing the end think ({missing_end_think_count} for this sample)")
                 missing_end_think_count += 1
 
-                if step % 10 == 0:
-                    print(
-                        f"Step {step} | Time: {time() - time_taken:.2f}s | Missing end thinks count: {missing_end_think_count}"
-                    )
-
             output = model_response.output
             new_outputs.extend(output)
 
@@ -268,6 +263,11 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                     new_outputs = self._extract_last_rounds(new_outputs)
                 else:
                     new_outputs = []
+
+            if step % 10 == 0:
+                print(
+                    f"Step {step} | Time: {time() - time_taken:.2f}s | Missing end thinks count: {missing_end_think_count}"
+                )
 
         # record final context
         if self.config.snap_dir:
