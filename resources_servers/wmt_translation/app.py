@@ -387,6 +387,9 @@ def _build_comet_actor_class():
     )
     class _CometActor:  # pragma: no cover - needs live Ray cluster + CUDA + unbabel-comet checkpoint
         def __init__(self, gpu_idx: int, model_name: str):
+            import random
+            import time
+
             import torch
             from comet import download_model, load_from_checkpoint
 
@@ -400,9 +403,43 @@ def _build_comet_actor_class():
             self._device = f"cuda:{gpu_idx % num_devices}"
             self._lightning_devices = [gpu_idx % num_devices]
 
+            # Stagger actor model loads to soften the HF 429 burst when N
+            # actors all wake up at once. xCOMET-XXL pulls xlm-roberta-xxl
+            # tokenizer metadata (model_info call inside is_base_mistral)
+            # which the HF API rate-limits aggressively when 8-16 concurrent
+            # requests arrive from the same egress IP.
+            time.sleep(gpu_idx * 2.0)
+
             LOG.info("CometActor[%d]: loading %s on %s", gpu_idx, model_name, self._device)
             ckpt_path = download_model(model_name)
-            self._model = load_from_checkpoint(ckpt_path)
+
+            # Retry load_from_checkpoint on transient HF 429s. Backoff with
+            # jitter avoids thundering-herd retries from N actors. Total
+            # worst-case wait across 6 attempts is ~63s + jitter, well under
+            # the 300s actor-pool readiness budget in _ensure_comet_actors.
+            last_exc: Optional[BaseException] = None
+            for attempt in range(6):
+                try:
+                    self._model = load_from_checkpoint(ckpt_path)
+                    break
+                except Exception as e:
+                    msg = str(e)
+                    if "429" not in msg and "Too Many Requests" not in msg:
+                        raise
+                    last_exc = e
+                    wait = 2**attempt + random.uniform(0, 1)
+                    LOG.warning(
+                        "CometActor[%d]: HF 429 on attempt %d (%s); sleeping %.1fs",
+                        gpu_idx,
+                        attempt,
+                        msg.splitlines()[0][:120],
+                        wait,
+                    )
+                    time.sleep(wait)
+            else:
+                assert last_exc is not None
+                raise last_exc
+
             self._model.to(self._device).eval()
             LOG.info("CometActor[%d]: ready", gpu_idx)
 
