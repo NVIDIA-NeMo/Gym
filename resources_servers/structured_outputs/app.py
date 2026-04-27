@@ -58,6 +58,8 @@ class StructuredOutputsVerifyRequest(BaseVerifyRequest):
     tool_name: Optional[str] = None
     tool_schema_mode: Optional[str] = None
     tool_payload_key: Optional[str] = None
+    tool_choice: Optional[str] = None
+    parallel_tool_calls: Optional[bool] = None
     source_schema_type: Optional[str] = None
     num_tools: Optional[int] = None
     num_distractors: Optional[int] = None
@@ -84,6 +86,8 @@ class StructuredOutputsVerifyResponse(BaseVerifyResponse):
     tool_name: Optional[str] = None
     tool_schema_mode: Optional[str] = None
     tool_payload_key: Optional[str] = None
+    tool_choice: Optional[str] = None
+    parallel_tool_calls: Optional[bool] = None
     source_schema_type: Optional[str] = None
     num_tools: Optional[int] = None
     num_distractors: Optional[int] = None
@@ -109,6 +113,8 @@ class StructuredOutputsResourcesServer(SimpleResourcesServer):
         by_repr: Dict[str, List[float]] = defaultdict(list)
         by_response_mode: Dict[str, List[float]] = defaultdict(list)
         by_tool_schema_mode: Dict[str, List[float]] = defaultdict(list)
+        by_tool_choice: Dict[str, List[float]] = defaultdict(list)
+        by_parallel_tool_calls: Dict[str, List[float]] = defaultdict(list)
         by_num_tools: Dict[str, List[float]] = defaultdict(list)
         by_has_distractors: Dict[str, List[float]] = defaultdict(list)
         by_instruction_layout: Dict[str, List[float]] = defaultdict(list)
@@ -134,6 +140,12 @@ class StructuredOutputsResourcesServer(SimpleResourcesServer):
                 tool_schema_mode = r.get("tool_schema_mode")
                 if tool_schema_mode:
                     by_tool_schema_mode[tool_schema_mode].append(reward)
+                tool_choice = r.get("tool_choice")
+                if tool_choice:
+                    by_tool_choice[tool_choice].append(reward)
+                parallel_tool_calls = r.get("parallel_tool_calls")
+                if parallel_tool_calls is not None:
+                    by_parallel_tool_calls[str(bool(parallel_tool_calls)).lower()].append(reward)
                 num_tools = r.get("num_tools")
                 if num_tools is not None:
                     by_num_tools[str(num_tools)].append(reward)
@@ -164,6 +176,10 @@ class StructuredOutputsResourcesServer(SimpleResourcesServer):
         metrics.update({f"mean/reward_repr_{k}": mean(v) for k, v in by_repr.items() if v})
         metrics.update({f"mean/reward_response_mode_{k}": mean(v) for k, v in by_response_mode.items() if v})
         metrics.update({f"mean/reward_tool_schema_mode_{k}": mean(v) for k, v in by_tool_schema_mode.items() if v})
+        metrics.update({f"mean/reward_tool_choice_{k}": mean(v) for k, v in by_tool_choice.items() if v})
+        metrics.update(
+            {f"mean/reward_parallel_tool_calls_{k}": mean(v) for k, v in by_parallel_tool_calls.items() if v}
+        )
         metrics.update({f"mean/reward_num_tools_{k}": mean(v) for k, v in by_num_tools.items() if v})
         metrics.update({f"mean/reward_has_distractors_{k}": mean(v) for k, v in by_has_distractors.items() if v})
         metrics.update({f"mean/reward_instruction_layout_{k}": mean(v) for k, v in by_instruction_layout.items() if v})
@@ -227,6 +243,9 @@ class StructuredOutputsResourcesServer(SimpleResourcesServer):
         function_calls = [output_item for output_item in body.response.output if output_item.type == "function_call"]
         if not function_calls:
             return None, "missing_tool_call", "No function_call item found in assistant response"
+        if len(function_calls) > 1:
+            called_names = ", ".join(function_call.name for function_call in function_calls)
+            return None, "multiple_tool_calls", f"Expected exactly one function_call, got: {called_names}"
 
         selected_call = None
         if body.tool_name:

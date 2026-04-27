@@ -71,7 +71,8 @@ ng_collect_rollouts \
 ```
 
 For v4 tool-call structured outputs, use `structured_outputs_v4.yaml` and the
-v4 simple agent:
+v4 simple agent. The config routes through a non-executing agent because the
+emitted function call is the final answer, not an action to execute:
 ```bash
 config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
 resources_servers/structured_outputs/configs/structured_outputs_v4.yaml"
@@ -152,8 +153,11 @@ and the example dataset to
 `resources_servers/structured_outputs/data/structured_outputs_v4_example.jsonl`.
 
 For v4, `execute_tool_calls: false` is intentional. The tool call is the final
-answer being verified, not an action that should be executed by the agent. The
-verifier finds the matching function call, JSON-decodes its arguments, unwraps
+answer being verified, not an action that should be executed by the agent. Rows
+use `tool_choice: auto`, and some rows allow `parallel_tool_calls` for coverage,
+but the reward contract still requires exactly one final function call. Missing,
+multiple, wrong, or malformed tool calls receive zero reward. The verifier finds
+the matching function call, JSON-decodes its arguments, unwraps
 `tool_payload_key` when the row uses a wrapper mode, and validates the payload
 against `schema_str`.
 

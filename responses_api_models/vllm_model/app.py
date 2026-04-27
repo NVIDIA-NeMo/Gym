@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+import os
 import re
 from copy import deepcopy
 from time import time
@@ -62,6 +63,34 @@ from nemo_gym.openai_utils import (
     TokenIDLogProbMixin,
 )
 from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
+
+
+def _debug_http_errors_enabled() -> bool:
+    return os.environ.get("NEMO_GYM_DEBUG_HTTP_ERRORS", "").lower() in {"1", "true", "yes", "on"}
+
+
+def _truncate_debug_value(value: str, limit: int = 4000) -> str:
+    if len(value) <= limit:
+        return value
+    return value[:limit] + f"... [truncated {len(value) - limit} chars]"
+
+
+def _chat_request_debug_summary(body_dict: Dict[str, Any]) -> Dict[str, Any]:
+    tools = body_dict.get("tools") or []
+    messages = body_dict.get("messages") or []
+    return {
+        "model": body_dict.get("model"),
+        "max_tokens": body_dict.get("max_tokens"),
+        "max_completion_tokens": body_dict.get("max_completion_tokens"),
+        "temperature": body_dict.get("temperature"),
+        "tool_choice": body_dict.get("tool_choice"),
+        "parallel_tool_calls": body_dict.get("parallel_tool_calls"),
+        "num_messages": len(messages),
+        "num_tools": len(tools),
+        "tool_names": [
+            ((tool.get("function") or {}).get("name") if isinstance(tool, dict) else None) for tool in tools[:10]
+        ],
+    }
 
 
 class VLLMModelConfig(BaseResponsesAPIModelConfig):
@@ -338,7 +367,17 @@ class VLLMModel(SimpleResponsesAPIModel):
             3. https://github.com/vllm-project/vllm/blob/685c99ee77b4818dcdd15b30fe0e0eff0d5d22ec/vllm/entrypoints/openai/serving_engine.py#L948
             4. https://github.com/vllm-project/vllm/blob/685c99ee77b4818dcdd15b30fe0e0eff0d5d22ec/vllm/sampling_params.py#L463
             """
-            result_content_str = e.response_content.decode()
+            result_content_bytes = e.response_content or b""
+            result_content_str = result_content_bytes.decode(errors="replace")
+
+            if _debug_http_errors_enabled():
+                print(
+                    "[vllm_model] provider ClientResponseError "
+                    f"status={e.status} message={e.message!r} "
+                    f"url={e.request_info.real_url if e.request_info else None} "
+                    f"request_summary={json.dumps(_chat_request_debug_summary(body_dict), sort_keys=True)} "
+                    f"response_body={_truncate_debug_value(result_content_str)!r}"
+                )
 
             is_out_of_context_length = e.status == 400 and (
                 "context length" in result_content_str or "max_tokens" in result_content_str

@@ -14,6 +14,8 @@ DEFAULT_INPUT = "resources_servers/structured_outputs/data/structured_outputs_v4
 SCHEMA_VALUE_EXEMPT_KEYS = {"enum", "const", "default", "examples"}
 DIST_KEYS = [
     "response_mode",
+    "tool_choice",
+    "parallel_tool_calls",
     "num_tools",
     "num_distractors",
     "has_distractors",
@@ -171,6 +173,19 @@ def check_row(row_idx: int, row: dict[str, Any], *, require_response_mode: bool,
             source_record_id=source_record_id,
         )
         return issues
+
+    for mirrored_key in ("tool_choice", "parallel_tool_calls"):
+        row_value = row.get(mirrored_key)
+        params_value = responses_create_params.get(mirrored_key)
+        if row_value is not None and params_value is not None and row_value != params_value:
+            add_issue(
+                issues,
+                row_idx=row_idx,
+                severity="error",
+                code=f"{mirrored_key}_mismatch",
+                message=f"{mirrored_key}={row_value!r}, responses_create_params.{mirrored_key}={params_value!r}",
+                source_record_id=source_record_id,
+            )
 
     tools = responses_create_params.get("tools")
     if not isinstance(tools, list) or not tools:

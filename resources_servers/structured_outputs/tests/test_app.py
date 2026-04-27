@@ -92,15 +92,16 @@ class TestApp:
         valid_payload = {"name": "Alice", "age": 30}
         dummy_create_params = NeMoGymResponseCreateParamsNonStreaming(input=[])
 
-        def make_response(output_item: NeMoGymResponseOutputItem) -> NeMoGymResponse:
+        def make_response(output_item: NeMoGymResponseOutputItem | list[NeMoGymResponseOutputItem]) -> NeMoGymResponse:
+            output = output_item if isinstance(output_item, list) else [output_item]
             return NeMoGymResponse(
                 id="tool_call_response_id",
                 created_at=1234.5,
                 model="test_model",
                 object="response",
-                output=[output_item],
-                parallel_tool_calls=False,
-                tool_choice="required",
+                output=output,
+                parallel_tool_calls=True,
+                tool_choice="auto",
                 tools=[],
             )
 
@@ -112,6 +113,8 @@ class TestApp:
             response_mode="tool_call",
             tool_name="extract_record",
             tool_schema_mode="direct",
+            tool_choice="auto",
+            parallel_tool_calls=True,
         )
         direct_result = await resources_server.verify(direct_request)
         assert direct_result.reward == 1.0
@@ -160,6 +163,17 @@ class TestApp:
         missing_tool_result = await resources_server.verify(missing_tool_request)
         assert missing_tool_result.reward == 0.0
         assert missing_tool_result.error_type == "missing_tool_call"
+
+        multiple_tool_response = make_response(
+            [
+                self._create_response_function_call(arguments=json.dumps(valid_payload)),
+                self._create_response_function_call(name="distractor_tool", arguments=json.dumps(valid_payload)),
+            ]
+        )
+        multiple_tool_request = direct_request.model_copy(deep=True, update={"response": multiple_tool_response})
+        multiple_tool_result = await resources_server.verify(multiple_tool_request)
+        assert multiple_tool_result.reward == 0.0
+        assert multiple_tool_result.error_type == "multiple_tool_calls"
 
         invalid_json_response = make_response(self._create_response_function_call(arguments='{"name":'))
         invalid_json_request = direct_request.model_copy(deep=True, update={"response": invalid_json_response})

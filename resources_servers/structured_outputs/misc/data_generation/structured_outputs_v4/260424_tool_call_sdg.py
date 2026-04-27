@@ -38,6 +38,7 @@ TOOL_SCHEMA_MODES = ("direct", "extraction_wrapper", "random_wrapper")
 DISTRACTOR_STYLES = (
     "separate_tools",
     "numbered_tools",
+    "single_tool_multi_key",
     "single_tool_oneof",
     "single_tool_anyof",
     "single_tool_defs_oneof",
@@ -46,13 +47,11 @@ DISTRACTOR_STYLES = (
 TOOL_NAME_STYLES = ("semantic", "numbered")
 DEFAULT_TOOL_SCHEMA_MODE_WEIGHTS = "direct:10,extraction_wrapper:35,random_wrapper:55"
 DEFAULT_WRAPPER_KEY_POOL = "output,result,record,data,answer,summary,extracted_info,structured_response"
-DEFAULT_DISTRACTOR_STYLE_WEIGHTS = (
-    "separate_tools:6,numbered_tools:6,single_tool_oneof:16,"
-    "single_tool_anyof:18,single_tool_defs_oneof:27,single_tool_defs_anyof:27"
-)
+DEFAULT_DISTRACTOR_STYLE_WEIGHTS = "separate_tools:35,numbered_tools:35,single_tool_multi_key:30"
 DEFAULT_DISTRACTOR_COUNT_WEIGHTS = (
-    "0:2,1:2,2:2,3:2,4:3,5:4,6:5,7:6,8:7,9:10,10:10,11:11,12:11,13:9,14:7,15:4,16:2,17:1,18:1,19:0.5,20:0.5"
+    "0:1,1:1,2:1,3:1,4:1,5:2,6:2,7:3,8:4,9:5,10:7,11:8,12:10,13:11,14:12,15:12,16:10,17:8,18:6,19:4,20:3"
 )
+DEFAULT_PARALLEL_TOOL_CALLS_TRUE_RATIO = 0.25
 DEFAULT_TOOL_NAME_STYLE_WEIGHTS = "semantic:50,numbered:50"
 DEFAULT_TOOL_NAME_POOL = (
     "submit_structured_output,extract_record,record_answer,summarize_document,populate_schema,"
@@ -529,6 +528,17 @@ def make_union_parameters(
     return attach_definitions(parameters, definitions)
 
 
+def make_multi_key_parameters(branch_specs: List[Dict[str, Any]]) -> Dict[str, Any]:
+    properties: Dict[str, Any] = {}
+    definitions: Dict[str, Any] = {}
+    for i, spec in enumerate(branch_specs, start=1):
+        payload_key = spec["payload_key"]
+        branch_schema, branch_definitions = make_vllm_tool_schema(spec["schema"], prefix=f"choice_{i}_")
+        properties[payload_key] = branch_schema
+        definitions.update(branch_definitions)
+    return attach_definitions({"type": "object", "properties": properties}, definitions)
+
+
 def unique_tool_name(base_name: str, used_names: set[str]) -> str:
     if base_name not in used_names:
         used_names.add(base_name)
@@ -605,6 +615,22 @@ def make_union_tool(
     }
 
 
+def make_multi_key_tool(
+    *,
+    branch_specs: List[Dict[str, Any]],
+    name: str,
+    strict: bool,
+    rng: random.Random,
+) -> Dict[str, Any]:
+    return {
+        "type": "function",
+        "name": name,
+        "description": rng.choice(DESCRIPTION_TEMPLATES),
+        "parameters": make_multi_key_parameters(branch_specs=branch_specs),
+        "strict": strict,
+    }
+
+
 def sample_num_distractors(
     *,
     rng: random.Random,
@@ -669,6 +695,17 @@ def assign_union_payload_keys(
     used_keys: set[str] = set()
     for spec in tool_specs:
         spec["mode"] = "union_branch"
+        spec["payload_key"] = unique_payload_key(rng.choice(union_payload_key_pool), used_keys)
+
+
+def assign_multi_key_payload_keys(
+    tool_specs: List[Dict[str, Any]],
+    union_payload_key_pool: List[str],
+    rng: random.Random,
+) -> None:
+    used_keys: set[str] = set()
+    for spec in tool_specs:
+        spec["mode"] = "multi_key_object"
         spec["payload_key"] = unique_payload_key(rng.choice(union_payload_key_pool), used_keys)
 
 
@@ -810,6 +847,22 @@ def make_gym_record(
         ]
         target_spec = next(spec for spec in tool_specs if spec["is_target"])
         target_tool_name = tool_name
+    elif distractor_style == "single_tool_multi_key":
+        assign_multi_key_payload_keys(tool_specs, union_payload_key_pool, rng)
+        if tool_name_style == "numbered":
+            tool_name = choose_numbered_tool_names(numbered_tool_prefix_pool, 1, rng)[0]
+        else:
+            tool_name = choose_semantic_tool_name(tool_name_pool, rng)
+        tools = [
+            make_multi_key_tool(
+                branch_specs=tool_specs,
+                name=tool_name,
+                strict=tool_strict,
+                rng=rng,
+            )
+        ]
+        target_spec = next(spec for spec in tool_specs if spec["is_target"])
+        target_tool_name = tool_name
     else:
         if distractor_style == "numbered_tools":
             tool_names = choose_numbered_tool_names(numbered_tool_prefix_pool, len(tool_specs), rng)
@@ -858,6 +911,8 @@ def make_gym_record(
         "schema_repr": "tool",
         "source_format": source_schema_type,
         "source_schema_type": source_schema_type,
+        "tool_choice": tool_choice,
+        "parallel_tool_calls": parallel_tool_calls,
         "tool_name": target_tool_name,
         "tool_schema_mode": target_spec["mode"],
         "tool_payload_key": target_spec["payload_key"],
@@ -893,7 +948,8 @@ def generate_records(
     tool_name_pool: List[str],
     numbered_tool_prefix_pool: List[str],
     tool_choice: str,
-    parallel_tool_calls: bool,
+    parallel_tool_calls: Optional[bool],
+    parallel_tool_calls_true_ratio: float,
     tool_strict: bool,
     distractor_count_weights: Optional[Dict[int, float]],
     no_distractor_ratio: float,
@@ -907,6 +963,11 @@ def generate_records(
         for _ in range(samples_per_record):
             if max_total is not None and len(output) >= max_total:
                 return output
+            sampled_parallel_tool_calls = (
+                parallel_tool_calls
+                if parallel_tool_calls is not None
+                else rng.random() < parallel_tool_calls_true_ratio
+            )
             output.append(
                 make_gym_record(
                     record=record,
@@ -920,7 +981,7 @@ def generate_records(
                     tool_name_pool=tool_name_pool,
                     numbered_tool_prefix_pool=numbered_tool_prefix_pool,
                     tool_choice=tool_choice,
-                    parallel_tool_calls=parallel_tool_calls,
+                    parallel_tool_calls=sampled_parallel_tool_calls,
                     tool_strict=tool_strict,
                     distractor_count_weights=distractor_count_weights,
                     no_distractor_ratio=no_distractor_ratio,
@@ -942,6 +1003,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--samples-per-record must be positive")
     if args.max_total is not None and args.max_total <= 0:
         raise ValueError("--max-total must be positive")
+    if not 0.0 <= args.parallel_tool_calls_true_ratio <= 1.0:
+        raise ValueError("--parallel-tool-calls-true-ratio must be in [0, 1]")
 
 
 def parse_args() -> argparse.Namespace:
@@ -961,8 +1024,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--union-payload-key-pool", default=DEFAULT_UNION_PAYLOAD_KEY_POOL)
     parser.add_argument("--tool-name-pool", default=DEFAULT_TOOL_NAME_POOL)
     parser.add_argument("--numbered-tool-prefix-pool", default=DEFAULT_NUMBERED_TOOL_PREFIX_POOL)
-    parser.add_argument("--tool-choice", choices=["required", "auto"], default="required")
-    parser.add_argument("--parallel-tool-calls", type=parse_bool, default=False)
+    parser.add_argument("--tool-choice", choices=["required", "auto"], default="auto")
+    parser.add_argument(
+        "--parallel-tool-calls",
+        type=parse_bool,
+        default=None,
+        help="Force parallel_tool_calls for all rows. Omit to sample per row.",
+    )
+    parser.add_argument(
+        "--parallel-tool-calls-true-ratio",
+        type=float,
+        default=DEFAULT_PARALLEL_TOOL_CALLS_TRUE_RATIO,
+        help="Probability of parallel_tool_calls=true when --parallel-tool-calls is omitted.",
+    )
     parser.add_argument("--tool-strict", type=parse_bool, default=True)
     parser.add_argument("--max-distractors", type=int, default=20)
     parser.add_argument(
@@ -1020,6 +1094,7 @@ def main() -> None:
         numbered_tool_prefix_pool=numbered_tool_prefix_pool,
         tool_choice=args.tool_choice,
         parallel_tool_calls=args.parallel_tool_calls,
+        parallel_tool_calls_true_ratio=args.parallel_tool_calls_true_ratio,
         tool_strict=args.tool_strict,
         distractor_count_weights=distractor_count_weights,
         no_distractor_ratio=args.no_distractor_ratio,

@@ -26,6 +26,8 @@ from typing import Any
 
 V4_KEYS = {
     "response_mode",
+    "tool_choice",
+    "parallel_tool_calls",
     "tool_schema_mode",
     "distractor_style",
     "tool_union_mode",
@@ -67,7 +69,7 @@ def field_value_to_key(row: dict[str, Any], key: str, default: Any = USE_FIELD_D
 
 
 def failure_error_to_key(row: dict[str, Any]) -> str:
-    error_type = row.get("error_type")
+    error_type = row.get("error_type") or row.get("failure_signature") or row.get("verify_error_type")
     if error_type is None:
         return "unclassified"
     return value_to_key(error_type)
@@ -150,6 +152,9 @@ def group_by_version(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any
 def validate_v4_invariants(rows: list[dict[str, Any]]) -> list[str]:
     errors = []
     for i, row in enumerate(rows):
+        if "distractor_style" not in row and "tool_schema_mode" not in row:
+            continue
+
         num_distractors = row.get("num_distractors")
         tool_union_mode = row.get("tool_union_mode")
         num_tools = row.get("num_tools")
@@ -162,6 +167,9 @@ def validate_v4_invariants(rows: list[dict[str, Any]]) -> list[str]:
         if tool_union_mode is not None:
             if not num_distractors or num_tools != 1 or not tool_payload_key:
                 errors.append(f"row {i}: bad union shape")
+        if distractor_style == "single_tool_multi_key":
+            if not num_distractors or num_tools != 1 or not tool_payload_key or tool_union_mode is not None:
+                errors.append(f"row {i}: bad single-tool multi-key shape")
     return errors
 
 
@@ -202,9 +210,12 @@ def print_v4_breakdowns(rows: list[dict[str, Any]], total_n: int) -> None:
 
     for title, key in [
         ("By response_mode", "response_mode"),
+        ("By tool_choice", "tool_choice"),
+        ("By parallel_tool_calls", "parallel_tool_calls"),
         ("By tool_schema_mode", "tool_schema_mode"),
         ("By distractor_style", "distractor_style"),
         ("By tool_union_mode", "tool_union_mode"),
+        ("By num_tools", "num_tools"),
         ("By num_distractors", "num_distractors"),
         ("By has_distractors", "has_distractors"),
         ("By tool_name_style", "tool_name_style"),
@@ -249,22 +260,14 @@ def print_failure_count_table(
 
     rows_by_key = group_by(rows, key)
     failures_by_key: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
-    error_types = set()
     for row in failures:
         row_key = field_value_to_key(row, key)
         error_type = failure_error_to_key(row)
         failures_by_key[row_key][error_type] += 1
-        error_types.add(error_type)
 
-    if not error_types:
-        return False
-
-    error_cols = sorted(error_types, key=category_sort_key)
     category_width = max(18, max(len(row_key) for row_key in rows_by_key) + 2)
-    error_width = max(12, max(len(error_type) for error_type in error_cols) + 2)
-    header = f"  {'Category':<{category_width}}{'Rows':>8}  {'Failures':>9}  {'Fail Rate':>9}" + "".join(
-        f"{error_type:>{error_width}}" for error_type in error_cols
-    )
+    top_width = 54
+    header = f"  {'Category':<{category_width}}{'Rows':>8}  {'Pass':>8}  {'Rate':>7}  {'Failures':>9}  {'Fail Rate':>9}  {'Top failures':<{top_width}}"
 
     print(f"\n  {title}")
     print(header)
@@ -274,14 +277,18 @@ def print_failure_count_table(
         error_counts = failures_by_key.get(row_key, {})
         n_rows = len(grouped_rows)
         n_failures = sum(error_counts.values())
-        cells = []
-        for error_type in error_cols:
-            count = error_counts.get(error_type, 0)
-            cells.append(str(count) if count else "-")
+        _n, n_pass, _avg = stats(grouped_rows)
+        top_failures = ", ".join(
+            f"{error_type}={count}"
+            for error_type, count in sorted(
+                error_counts.items(), key=lambda item: (-item[1], category_sort_key(item[0]))
+            )[:3]
+        )
+        top_failures = top_failures or "-"
         print(
             f"  {row_key:<{category_width}}"
-            f"{n_rows:>8}  {n_failures:>9}  {pct(n_failures, n_rows):>9}"
-            + "".join(f"{cell:>{error_width}}" for cell in cells)
+            f"{n_rows:>8}  {n_pass:>8}  {pct(n_pass, n_rows):>7}  {n_failures:>9}  {pct(n_failures, n_rows):>9}  "
+            f"{top_failures:<{top_width}}"
         )
     return True
 
@@ -333,6 +340,9 @@ def v4_error_breakdown_keys() -> list[str]:
     return [
         "distractor_style",
         "tool_schema_mode",
+        "tool_choice",
+        "parallel_tool_calls",
+        "num_tools",
         "num_distractors",
     ]
 

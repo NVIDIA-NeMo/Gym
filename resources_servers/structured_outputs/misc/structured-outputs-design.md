@@ -128,6 +128,8 @@ Tool-call rows need additional fields that tell the verifier what to inspect:
 - `responses_create_params.tool_choice`
 - `responses_create_params.parallel_tool_calls`
 - `response_mode`
+- `tool_choice`
+- `parallel_tool_calls`
 - `tool_name`
 - `tool_payload_key`
 - `tool_schema_mode`
@@ -188,20 +190,28 @@ different environment.
 The minimum tool-call row contract should make this explicit:
 
 - `responses_create_params.tools` contains the model-facing function schema
-- `responses_create_params.tool_choice` forces or strongly selects the tool
-- `responses_create_params.parallel_tool_calls` is `false`
+- `responses_create_params.tool_choice` sets the endpoint tool-selection policy
+- `responses_create_params.parallel_tool_calls` records whether the endpoint is
+  allowed to emit parallel tool calls
 - `response_mode` is `tool_call`
 - the agent config sets `execute_tool_calls: false`
-- verifier metadata records the expected `tool_name` and optional
-  `tool_payload_key`
+- verifier metadata records the expected `tool_name`, optional
+  `tool_payload_key`, `tool_choice`, and `parallel_tool_calls`
 
-Use `parallel_tool_calls: false` for answer-as-tool-call rows. These tasks have
-one final structured answer, even when the request exposes distractor tools or a
-union schema. Allowing parallel calls gives the model a hedging surface and
-weakens the "select exactly one schema/tool" reward signal. Set
-`parallel_tool_calls: true` only for a separate task family where multiple
-function calls are the intended answer and the verifier checks the complete set
-of emitted calls.
+Tool-call structured-output rows should reward exactly one emitted function
+call. This remains true even when `parallel_tool_calls: true` is present in the
+request for coverage. In that case, parallel-call permission is an input
+condition, not a change in the answer contract. Missing tool calls and multiple
+tool calls should both receive zero reward.
+
+For v4-style tool-call rows, prefer `tool_choice: auto` over
+`tool_choice: required`. In vLLM, `required` forces tool calls through an
+internal structured-output constrained-decoding path. That can be useful for
+some serving modes, but it is not the intended task surface here. The dataset
+should expose tools and let the model decide whether to call one; the verifier
+then assigns zero reward for no call, multiple calls, the wrong call, or
+malformed arguments. This also handles documents where there may be little or
+nothing useful to extract.
 
 The tool schema should be the model-facing schema surface. The prompt should
 describe the document task, not restate the full schema. This prevents the task
@@ -267,6 +277,14 @@ Composition keywords such as `oneOf`, `anyOf`, and `$defs` are useful when
 they represent real competing branches, such as target plus distractor schemas.
 They are not useful as decoration. Avoid adding `oneOf`, `anyOf`, or `allOf`
 to no-distractor rows unless the data actually tests a meaningful schema choice.
+Also validate whether the target model can use the composition shape at all.
+For tool-call response surfaces, schema-composition shapes should be probed
+against the target model and serving stack before inclusion. In one probe,
+inline `oneOf`, inline `anyOf`, `$defs` + `oneOf`, `$defs` + `anyOf`, and
+`$defs`-only multi-branch schemas produced invalid typed tool arguments. The
+dominant failure was a JSON-stringified object inside the selected payload key.
+A plain single-tool multi-key object, separate tools, and numbered tools passed
+the same probe, so those shapes are safer defaults.
 
 Distractors should also be balanced deliberately. If one distractor style
 dominates by accident, aggregate results will mostly measure that style rather

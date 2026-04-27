@@ -14,6 +14,7 @@
 # limitations under the License.
 import asyncio
 import json
+import os
 from asyncio import Future, Semaphore
 from collections import Counter
 from contextlib import nullcontext
@@ -48,6 +49,35 @@ from nemo_gym.server_utils import (
     raise_for_status,
     set_global_aiohttp_client,
 )
+
+
+def _debug_http_errors_enabled() -> bool:
+    return os.environ.get("NEMO_GYM_DEBUG_HTTP_ERRORS", "").lower() in {"1", "true", "yes", "on"}
+
+
+def _truncate_debug_value(value: str, limit: int = 4000) -> str:
+    if len(value) <= limit:
+        return value
+    return value[:limit] + f"... [truncated {len(value) - limit} chars]"
+
+
+def _rollout_debug_summary(row: Dict[str, Any]) -> Dict[str, Any]:
+    responses_create_params = row.get(RESPONSES_CREATE_PARAMS_KEY_NAME) or {}
+    tools = responses_create_params.get("tools") or []
+    return {
+        TASK_INDEX_KEY_NAME: row.get(TASK_INDEX_KEY_NAME),
+        ROLLOUT_INDEX_KEY_NAME: row.get(ROLLOUT_INDEX_KEY_NAME),
+        "source_record_id": row.get("source_record_id"),
+        "agent_name": (row.get(AGENT_REF_KEY_NAME) or {}).get("name"),
+        "distractor_style": row.get("distractor_style"),
+        "tool_schema_mode": row.get("tool_schema_mode"),
+        "tool_union_mode": row.get("tool_union_mode"),
+        "num_distractors": row.get("num_distractors"),
+        "tool_name": row.get("tool_name"),
+        "tool_payload_key": row.get("tool_payload_key"),
+        "max_output_tokens": responses_create_params.get("max_output_tokens"),
+        "num_tools": len(tools),
+    }
 
 
 class SharedRolloutCollectionConfig(BaseNeMoGymCLIConfig):
@@ -445,7 +475,21 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
         async def _post_subroutine(row: Dict) -> Tuple[Dict, Dict]:
             async with semaphore:
                 res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
-                await raise_for_status(res)
+                try:
+                    await raise_for_status(res)
+                except Exception:
+                    if _debug_http_errors_enabled():
+                        try:
+                            response_body = await res.text()
+                        except Exception as text_error:
+                            response_body = f"<failed to read response body: {text_error!r}>"
+                        print(
+                            "[rollout_collection] /run failed "
+                            f"status={getattr(res, 'status', None)} url={getattr(res, 'url', None)} "
+                            f"row={json.dumps(_rollout_debug_summary(row), sort_keys=True)} "
+                            f"body={_truncate_debug_value(response_body)!r}"
+                        )
+                    raise
                 return row, await get_response_json(res)
 
         return tqdm.as_completed(

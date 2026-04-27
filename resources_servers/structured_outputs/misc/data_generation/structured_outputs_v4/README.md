@@ -52,13 +52,15 @@ Each generated row has a Responses API tool definition and verifier metadata:
         "strict": true
       }
     ],
-    "tool_choice": "required",
+    "tool_choice": "auto",
     "parallel_tool_calls": false
   },
   "schema_str": "{\"type\":\"object\",...}",
   "schema_type": "json",
   "response_mode": "tool_call",
   "problem_type": "direct_tool_call",
+  "tool_choice": "auto",
+  "parallel_tool_calls": false,
   "tool_name": "extract_record",
   "tool_schema_mode": "direct",
   "tool_payload_key": null,
@@ -162,18 +164,44 @@ The default train distractor-count distribution is explicit rather than
 geometric:
 
 ```text
-0:2,1:2,2:2,3:2,4:3,5:4,6:5,7:6,8:7,9:10,10:10,
-11:11,12:11,13:9,14:7,15:4,16:2,17:1,18:1,19:0.5,20:0.5
+0:1,1:1,2:1,3:1,4:1,5:2,6:2,7:3,8:4,9:5,
+10:7,11:8,12:10,13:11,14:12,15:12,16:10,17:8,18:6,19:4,20:3
 ```
 
-This centers the data around 9..14 distractors, where rollout failures showed
-more useful training pressure. Small 0..4 distractor cases remain as anchors,
-and 15..20 distractor cases remain as a hard tail. Passing an empty
-`--distractor-count-weights` string falls back to the older
+This centers the data around 12..16 distractors. Small 0..4 distractor cases
+remain as anchors, and 17..20 distractor cases remain as a hard tail. Passing
+an empty `--distractor-count-weights` string falls back to the older
 `--no-distractor-ratio` plus geometric sampling knobs.
 
 For rows with at least one distractor, the default style weights emphasize
-single-tool union branches while keeping separate and numbered tools present.
+separate and numbered tools. A single-tool multi-key object slice remains
+because it tests single-tool schema selection without relying on `oneOf` /
+`anyOf` composition. The current default weights are:
+
+```text
+separate_tools:35,numbered_tools:35,single_tool_multi_key:30
+```
+
+The union-style branches remain supported by CLI overrides for targeted
+compatibility probes, but they are not part of the default train blend. In
+shape probes, inline `oneOf`, inline `anyOf`, `$defs` + `oneOf`, `$defs` +
+`anyOf`, and `$defs`-only multi-branch schemas produced invalid typed tool
+arguments. The dominant failure was that the model placed a JSON string inside
+the selected payload key instead of passing an object or array directly.
+
+By default, rows use `tool_choice: auto`. The generator samples
+`parallel_tool_calls: true` for 25% of rows unless `--parallel-tool-calls` is
+passed to force a single value. This request setting is coverage only: the
+verifier still gives reward only when the model emits exactly one function
+call.
+
+`tool_choice: auto` is intentional for v4. With vLLM, `tool_choice: required`
+routes through vLLM's internal structured-output constrained-decoding path for
+forced tool calls. That is not the target surface for this dataset: v4 should
+test whether the model chooses and emits the correct tool call, while the
+verifier decides whether missing, multiple, or malformed tool calls receive
+reward. `auto` also matches rows where the document may contain little or
+nothing useful to extract.
 
 Distractors are rendered in several styles:
 
@@ -182,16 +210,21 @@ Distractors are rendered in several styles:
 | `none` | No distractors; emit only the target function tool |
 | `separate_tools` | Target and distractors are separate function tools with semantic names |
 | `numbered_tools` | Target and distractors are separate function tools named like `extraction_tool_1` |
+| `single_tool_multi_key` | One function tool whose top-level properties are branch payload keys, without `oneOf` / `anyOf` composition |
 | `single_tool_oneof` | One function tool whose parameters use inline `oneOf` branches |
 | `single_tool_anyof` | One function tool whose parameters use inline `anyOf` branches |
 | `single_tool_defs_oneof` | One function tool whose parameters use `$defs` plus `oneOf` |
 | `single_tool_defs_anyof` | One function tool whose parameters use `$defs` plus `anyOf` |
 
-For single-tool union styles, each branch uses a different payload key such as
-`extraction`, `summary`, `structured_output`, `record`, or `document_info`.
-The verifier only accepts the target branch key. Union styles are used only when
-there is at least one real distractor branch; no-distractor rows use a plain
-single target tool.
+For single-tool multi-branch styles, each branch uses a different payload key
+such as `extraction`, `summary`, `structured_output`, `record`, or
+`document_info`. The verifier only accepts the target branch key. Multi-branch
+styles are used only when there is at least one real distractor branch;
+no-distractor rows use a plain single target tool.
+
+The `single_tool_oneof`, `single_tool_anyof`, `single_tool_defs_oneof`, and
+`single_tool_defs_anyof` styles are diagnostic modes. They are kept for targeted
+schema-composition probes, not used by the default train blend.
 
 ## CLI Examples
 
@@ -220,7 +253,7 @@ python resources_servers/structured_outputs/misc/data_generation/structured_outp
     --distractor-count-weights "0:0,1:0,2:0,3:0,4:1,5:2,6:3,7:4,8:5,9:8,10:10,11:12,12:12,13:10,14:8,15:6,16:4,17:3,18:2,19:1,20:1" \
     --max-distractors 20
 
-# Force union-style distractors only
+# Force union-style distractors only for compatibility experiments
 python resources_servers/structured_outputs/misc/data_generation/structured_outputs_v4/260424_tool_call_sdg.py \
     -i /path/to/ds1_verified.jsonl \
     -o /tmp/union_tools.jsonl \
