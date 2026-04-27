@@ -157,7 +157,7 @@ def _iter_split_rows(split: str, work_dir: Path, audio_dir: Path) -> Iterator[di
         }
 
 
-def prepare(work_dir: Path | None = None, splits: tuple[str, ...] = DEFAULT_SPLITS) -> list[Path]:
+def prepare(work_dir: Path | None = None, splits: tuple[str, ...] = DEFAULT_SPLITS) -> Path:
     """Download LibriSpeech-PC and write per-split benchmark JSONLs.
 
     Args:
@@ -165,14 +165,15 @@ def prepare(work_dir: Path | None = None, splits: tuple[str, ...] = DEFAULT_SPLI
             ``benchmarks/librispeech_pc/data``. Reusing the same path across
             runs makes the prepare step idempotent — extracted audio + manifests
             persist between invocations.
-        splits: Which splits to download + emit. Defaults to both
-            ``test-clean`` and ``test-other`` so the benchmark's two
-            ``datasets:`` entries (test_clean / test_other) both find their
-            JSONL on disk. Pass a subset (e.g. ``("test-clean",)``) to skip
-            downloading the other audio tarball.
+        splits: Which splits to download + emit. Defaults to ``("test-clean",)``
+            (Skills' EVAL_SPLIT). When extra splits are requested they each
+            land in their own JSONL alongside test_clean (e.g. for users wiring
+            up a sibling benchmark dir for test-other).
 
     Returns:
-        List of written JSONL paths (one per split).
+        Path to ``librispeech_pc_test_clean.jsonl`` — the file the benchmark
+        config's ``datasets[0].jsonl_fpath`` references. Returning a single
+        Path matches the contract ``ng_prepare_benchmark`` enforces.
     """
     work_dir = work_dir or DATA_DIR
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -182,7 +183,7 @@ def prepare(work_dir: Path | None = None, splits: tuple[str, ...] = DEFAULT_SPLI
     for split in splits:
         _download_audio(split, work_dir)
 
-    output_paths: list[Path] = []
+    primary_path: Path | None = None
     for split in splits:
         out_path = DATA_DIR / _split_filename(split)
         count = 0
@@ -191,9 +192,19 @@ def prepare(work_dir: Path | None = None, splits: tuple[str, ...] = DEFAULT_SPLI
                 f.write(json.dumps(row, ensure_ascii=False) + "\n")
                 count += 1
         print(f"Wrote {count} rows ({split}) to {out_path}")
-        output_paths.append(out_path)
+        if split == "test-clean":
+            primary_path = out_path
 
-    return output_paths
+    # Always return the test-clean path (the dataset entry in config.yaml).
+    # If the caller asked only for test-other (sibling benchmark dir use case),
+    # they shouldn't have called this prepare — they'd have their own.
+    if primary_path is None:
+        raise RuntimeError(
+            "prepare() ran without test-clean. Add 'test-clean' to splits or "
+            "use a benchmark dir whose dataset.jsonl_fpath matches the split "
+            "you actually want."
+        )
+    return primary_path
 
 
 def main() -> None:
