@@ -500,20 +500,43 @@ class WmtTranslationResourcesServer(SimpleResourcesServer):
             # Block briefly for actor readiness — surfaces "no extra_gpu",
             # "comet checkpoint missing", "cuda init failed" etc as a clear
             # failure here instead of hanging until end-of-batch. Generous
-            # timeout because xCOMET-XXL load takes ~60s cold.
+            # timeout because xCOMET-XXL load takes ~60s cold; large fraction
+            # of that budget is consumed by HF 429 retry backoff.
+            pings = [a.ping.remote() for a in actors]
             ready, not_ready = ray.wait(
-                [a.ping.remote() for a in actors],
+                pings,
                 num_returns=n,
                 timeout=300.0,
             )
-            if not_ready:
+            # Tolerate partial failure: if some actors burn all their HF 429
+            # retries while others succeed, drop the failed ones and run with
+            # the survivors. Pool pessimization is just slower scoring, not
+            # a fatal abort. Require at least 1 surviving actor — otherwise
+            # fall back to the batch path.
+            ready_actors: List[Any] = []
+            for actor, fut in zip(actors, pings):
+                if fut not in ready:
+                    continue
+                try:
+                    ray.get(fut)
+                    ready_actors.append(actor)
+                except Exception:  # actor died during init (e.g. exhausted retries)
+                    LOG.exception("CometActor failed init, dropping from pool")
+            if not ready_actors:
                 raise RuntimeError(
-                    f"{len(not_ready)}/{n} CometActors not ready after 300s — "
-                    f"check Ray cluster has extra_gpu nodes available."
+                    f"0/{n} CometActors ready after 300s — check Ray cluster has extra_gpu "
+                    f"nodes available and HF Hub is reachable."
                 )
-            ray.get(ready)  # raises if any actor's ping aborted
-            self._comet_actors = actors
-            LOG.info("Streaming COMET: %d persistent actors ready on extra_gpu node", n)
+            self._comet_actors = ready_actors
+            if len(ready_actors) < n:
+                LOG.warning(
+                    "Streaming COMET: %d/%d actors ready (%d failed init); running with reduced pool",
+                    len(ready_actors),
+                    n,
+                    n - len(ready_actors),
+                )
+            else:
+                LOG.info("Streaming COMET: %d persistent actors ready on extra_gpu node", n)
         except Exception as e:
             LOG.exception("Streaming COMET init failed; falling back to batch dispatch: %s", e)
             self._comet_init_failed = True
