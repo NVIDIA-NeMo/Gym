@@ -14,6 +14,7 @@
 # limitations under the License.
 import hashlib
 import json
+import os
 import re
 import time
 import traceback
@@ -46,6 +47,8 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
+    NeMoGymResponseReasoningItem,
+    NeMoGymResponseUsage,
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
 
@@ -62,6 +65,13 @@ class BrowsecompAgentConfig(BaseResponsesAPIAgentConfig):
     max_reset_count: Optional[int] = None
     max_run_retries: int = 1
     snap_dir: Optional[str] = None
+    # When True, on /v1/responses entry, look for a per-sample checkpoint file
+    # ({sample_id}.ckpt.json under the trajectories directory) and restore agent
+    # state from it. The checkpoint is overwritten atomically at the end of every
+    # completed step iteration; on successful completion of the trajectory it is
+    # deleted. Lets a slurm restart resume from the last completed step instead
+    # of redoing the whole sample.
+    resume_from_trajectory: bool = False
 
 
 class BrowsecompAgentRunRequest(BaseRunRequest):
@@ -169,6 +179,56 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             prev_event_ts = now
 
         log_event("start", sample_id=sample_id, question=user_msg_content)
+
+        # --- Per-sample JSON checkpoint (one file per sample, overwritten each step) ---
+        ckpt_path = traj_dir / f"{sample_id}.ckpt.json"
+
+        def save_ckpt() -> None:
+            """Atomically dump the minimum state needed to resume after a crash."""
+            try:
+                tmp = ckpt_path.with_name(ckpt_path.name + ".tmp")
+                payload = {
+                    "step": step,
+                    "new_outputs": [o.model_dump(exclude_none=True) for o in new_outputs],
+                    "missing_end_think_count": missing_end_think_count,
+                    "num_tool_calls": num_tool_calls,
+                    "reset_count": reset_count,
+                    "usage": usage.model_dump(exclude_none=True) if usage is not None else None,
+                }
+                with tmp.open("w", encoding="utf-8") as f:
+                    json.dump(payload, f, default=str)
+                os.replace(tmp, ckpt_path)
+            except Exception as e:
+                log_event("checkpoint_save_failed", error_type=type(e).__name__, error_msg=str(e))
+
+        if self.config.resume_from_trajectory and ckpt_path.exists():
+            try:
+                ckpt = json.loads(ckpt_path.read_text(encoding="utf-8"))
+                new_outputs = [self._parse_output_item(d) for d in ckpt.get("new_outputs") or []]
+                step = int(ckpt.get("step") or 0)
+                missing_end_think_count = int(ckpt.get("missing_end_think_count") or 0)
+                num_tool_calls = int(ckpt.get("num_tool_calls") or 0)
+                reset_count = int(ckpt.get("reset_count") or 0)
+                saved_usage = ckpt.get("usage")
+                if saved_usage is not None:
+                    usage = NeMoGymResponseUsage.model_validate(saved_usage)
+                log_event(
+                    "resumed",
+                    from_step=step,
+                    n_outputs=len(new_outputs),
+                    missing_end_think_count=missing_end_think_count,
+                    num_tool_calls=num_tool_calls,
+                    reset_count=reset_count,
+                )
+                print(
+                    f"[browsecomp resumed sample={sample_id} from_step={step} "
+                    f"n_outputs={len(new_outputs)} reset_count={reset_count}]",
+                    flush=True,
+                )
+            except Exception as e:
+                # Corrupted checkpoint — start fresh, leave the file alone for inspection.
+                log_event("resume_failed", error_type=type(e).__name__, error_msg=str(e))
+
         print_log("start")
         step_start = time.monotonic()
 
@@ -416,6 +476,9 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                         new_outputs = []
                     context_reset_steps.append(step)
 
+                # End of iteration — checkpoint reflects the post-step (post-reset if any) state.
+                save_ckpt()
+
             print_log("final")
             log_event(
                 "final",
@@ -447,6 +510,12 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             raise
         finally:
             traj_f.close()
+
+        # Trajectory finished cleanly — drop the checkpoint so a future re-run starts fresh.
+        try:
+            ckpt_path.unlink(missing_ok=True)
+        except OSError:
+            pass  # best-effort; a stale ckpt won't be re-read because the driver caches this sample
 
         # Propogate any extra cookies necessary for downstream verification
         for k, v in (*resources_server_cookies.items(), *model_server_cookies.items()):
@@ -529,6 +598,20 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 update={"output": "[Previous tool result hidden for context management]"}
             )
         return messages
+
+    @staticmethod
+    def _parse_output_item(d: dict):
+        """Turn a serialized output-item dict (from a checkpoint JSON) back into its Pydantic model."""
+        t = d.get("type")
+        if t == "reasoning":
+            return NeMoGymResponseReasoningItem.model_validate(d)
+        if t == "function_call":
+            return NeMoGymResponseFunctionToolCall.model_validate(d)
+        if t == "message":
+            return NeMoGymResponseOutputMessage.model_validate(d)
+        if t == "function_call_output":
+            return NeMoGymFunctionCallOutput.model_validate(d)
+        raise ValueError(f"Unknown output item type in checkpoint: {t!r}")
 
     def _extract_last_rounds(self, new_outputs):
         """
