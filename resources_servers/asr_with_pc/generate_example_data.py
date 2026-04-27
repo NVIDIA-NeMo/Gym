@@ -3,16 +3,19 @@
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
-"""Generate ``data/example.jsonl`` for the librispeech_pc resource server.
+"""Generate ``data/example.jsonl`` for the asr_with_pc resource server.
 
-Produces 5 entries with 1-second silence WAVs base64-inlined into
-``responses_create_params.input``. These are smoke-test rows — they exercise
-the full schema (system + user with audio block, expected_answer pulled into
-``verifier_metadata``) but do NOT require the real LibriSpeech audio dataset
-to be on the submitting host.
+Produces 5 example rows. Each row has:
+  * a 1-second silence WAV data-URI in
+    ``responses_create_params.metadata.audio_url`` (the audio sidechannel
+    that ``vllm_audio_model`` reads at request time)
+  * pre-baked ``responses_create_params.input`` (system + user messages),
+    because the resource server's example dataset is wired without a
+    ``prompt_config`` — the example smoke test bakes its own messages so
+    it doesn't have to reach into a benchmark's prompts dir.
 
-The actual benchmark JSONL (~270 MB with real audio) is built by
-``benchmarks/librispeech_pc/prepare.py`` on the cluster.
+The actual benchmark JSONLs (with real audio + benchmark-specific prompt
+config) are built by each benchmark's own ``prepare.py``.
 """
 
 import argparse
@@ -25,6 +28,9 @@ import numpy as np
 import soundfile as sf
 
 
+# Same prompt strings the benchmarks/librispeech_pc/prompts/default.yaml
+# template uses, so example.jsonl exercises the same shape that production
+# rows will hit at rollout time after prompt_config materialization.
 SYSTEM_PROMPT = "You are a helpful assistant. /no_think"
 USER_PROMPT = "Transcribe the audio with proper punctuation and capitalization."
 
@@ -49,12 +55,6 @@ def _silent_wav_base64(duration_sec: float = 1.0, sample_rate: int = 16000) -> s
 
 def make_example(sample_id: str, expected_answer: str) -> dict:
     audio_b64 = _silent_wav_base64()
-    # Text-only Responses input + audio data-URI on `metadata.audio_url`.
-    # `vllm_audio_model` consumes metadata.audio_url and splices an
-    # `audio_url` block into the user message after Responses→Chat-Completions
-    # translation. Putting audio in `input.user.content` directly would be
-    # rejected by simple_agent's Pydantic validator (openai Responses API has
-    # no audio content type).
     return {
         "responses_create_params": {
             "input": [
@@ -70,7 +70,7 @@ def make_example(sample_id: str, expected_answer: str) -> dict:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Generate librispeech_pc example.jsonl")
+    parser = argparse.ArgumentParser(description="Generate asr_with_pc example.jsonl")
     parser.add_argument(
         "--out",
         type=str,

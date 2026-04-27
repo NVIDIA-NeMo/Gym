@@ -1,24 +1,25 @@
-librispeech_pc:
+asr_with_pc:
   resources_servers:
-    librispeech_pc:
+    asr_with_pc:
       entrypoint: app.py
       domain: other
-      description: ASR with punctuation and capitalization (LibriSpeech-PC)
+      description: ASR with WER scoring (standard, case-sensitive, punctuation+capitalization)
       value: Improve transcription quality with structural detail
       verified: false
-librispeech_pc_simple_agent:
+      task_type: ASR-PC
+asr_with_pc_simple_agent:
   responses_api_agents:
     simple_agent:
       entrypoint: app.py
       max_steps: 1
       resources_server:
         type: resources_servers
-        name: librispeech_pc
+        name: asr_with_pc
       model_server:
         type: responses_api_models
         name: policy_model
       datasets:
       - name: example
         type: example
-        jsonl_fpath: resources_servers/librispeech_pc/data/example.jsonl
+        jsonl_fpath: resources_servers/asr_with_pc/data/example.jsonl
         license: Creative Commons Attribution 4.0 International

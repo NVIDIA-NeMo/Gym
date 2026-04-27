@@ -12,16 +12,24 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""LibriSpeech-PC resources server: deterministic ASR with punctuation+capitalization WER.
+"""ASR-with-PC resources server: deterministic WER scoring for audio benchmarks.
 
-The WER computation is a direct port of
-``nemo_skills/evaluation/evaluator/audio.py::evaluate_asr_pc`` and the
-corpus-level aggregation in ``audio_metrics.py::AudioMetrics.get_metrics``.
-Skills is the gold standard; this server reproduces its scoring exactly.
+Generic enough to be reused across the audio-WER benchmark suite (LibriSpeech-PC,
+asr-leaderboard, numb3rs, etc.). Dispatches per row on ``task_type`` so the
+server can handle benchmarks that compute different WER variants:
+
+  * ``ASR-PC`` (default): full WER + WER_C + WER_PC + PER, like
+    ``nemo_skills/evaluation/evaluator/audio.py::evaluate_asr_pc``.
+  * ``ASR``: standard WER only (Whisper-normalized text, no
+    punctuation/capitalization scoring), like ``evaluate_asr``.
+
+Skills is the gold standard; this server reproduces its per-rollout scoring
+and aggregation exactly. ``task_type`` defaults to the server-level config
+value but may be overridden per row in ``verifier_metadata.task_type``.
 """
 
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 import numpy as np
 
@@ -137,22 +145,55 @@ def evaluate_asr_pc(reference: str, hypothesis: str) -> Dict[str, Any]:
     }
 
 
+def evaluate_asr(reference: str, hypothesis: str) -> Dict[str, Any]:
+    """Standard ASR WER (Whisper-normalized) — no PC scoring.
+
+    Mirrors ``evaluate_asr`` in ``nemo_skills/evaluation/evaluator/audio.py``.
+    Used by benchmarks that only score standard WER (e.g. asr-leaderboard).
+    Empty references are dropped (HF Open ASR Leaderboard convention).
+    """
+    import jiwer
+
+    ref = preprocess_asr_text(reference)
+    hyp = preprocess_asr_text(hypothesis)
+    if not ref:
+        return {
+            "wer": None,
+            "is_correct": None,
+            "text": "",
+            "pred_text": hyp or "",
+        }
+    if not hyp:
+        hyp = "empty"
+    wer = jiwer.wer(ref, hyp)
+    return {
+        "wer": wer,
+        "is_correct": wer < 0.5,
+        "text": ref,
+        "pred_text": hyp,
+    }
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Pydantic schemas
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-class LibriSpeechPCConfig(BaseResourcesServerConfig):
-    pass
+class ASRWithPCConfig(BaseResourcesServerConfig):
+    # Default scoring task type; can be overridden per-row via task_type on the
+    # request. Add ``ASR`` (standard WER, no PC scoring) as benchmarks need it.
+    task_type: Literal["ASR-PC", "ASR"] = "ASR-PC"
 
 
-class LibriSpeechPCVerifyRequest(BaseVerifyRequest):
+class ASRWithPCVerifyRequest(BaseVerifyRequest):
     expected_answer: str = ""
     sample_id: Optional[str] = None
     split: Optional[str] = None
+    # Optional per-row override of the server's default task_type.
+    task_type: Optional[Literal["ASR-PC", "ASR"]] = None
 
 
-class LibriSpeechPCVerifyResponse(BaseVerifyResponse):
+class ASRWithPCVerifyResponse(BaseVerifyResponse):
     text: str = ""
     pred_text: str = ""
     wer: float = 0.0
@@ -186,15 +227,39 @@ def _extract_assistant_text(response) -> str:
     return "".join(parts)
 
 
-class LibriSpeechPCResourcesServer(SimpleResourcesServer):
-    config: LibriSpeechPCConfig
+class ASRWithPCResourcesServer(SimpleResourcesServer):
+    config: ASRWithPCConfig
 
-    async def verify(self, body: LibriSpeechPCVerifyRequest) -> LibriSpeechPCVerifyResponse:
+    async def verify(self, body: ASRWithPCVerifyRequest) -> ASRWithPCVerifyResponse:
         hypothesis = _extract_assistant_text(body.response).strip()
         reference = (body.expected_answer or "").strip()
 
-        scores = evaluate_asr_pc(reference, hypothesis)
-        return LibriSpeechPCVerifyResponse(
+        # Per-row override beats the server-level default. Skills' AudioEvaluator
+        # uses the same override pattern via the ``task_type`` field on each row.
+        task_type = body.task_type or self.config.task_type
+        if task_type == "ASR-PC":
+            scores = evaluate_asr_pc(reference, hypothesis)
+        elif task_type == "ASR":
+            # Standard WER only — no PC variants. Fill the unused fields with
+            # neutral zeros so the response schema stays uniform.
+            asr = evaluate_asr(reference, hypothesis)
+            scores = {
+                "wer": asr["wer"] or 0.0,
+                "wer_c": 0.0,
+                "wer_pc": 0.0,
+                "per": 0.0,
+                "is_correct": bool(asr["is_correct"]),
+                "text": asr["text"],
+                "pred_text": asr["pred_text"],
+                "ref_pc_tok": "",
+                "hyp_pc_tok": "",
+                "ref_c": "",
+                "hyp_c": "",
+            }
+        else:
+            raise ValueError(f"Unsupported task_type: {task_type!r}. Use one of: ASR-PC, ASR.")
+
+        return ASRWithPCVerifyResponse(
             **body.model_dump(),
             reward=1.0 if scores["is_correct"] else 0.0,
             text=scores["text"],
@@ -316,4 +381,4 @@ class LibriSpeechPCResourcesServer(SimpleResourcesServer):
 
 
 if __name__ == "__main__":
-    LibriSpeechPCResourcesServer.run_webserver()
+    ASRWithPCResourcesServer.run_webserver()

@@ -34,7 +34,6 @@ from tqdm import tqdm
 
 BENCHMARK_DIR = Path(__file__).parent
 DATA_DIR = BENCHMARK_DIR / "data"
-OUTPUT_FPATH = DATA_DIR / "librispeech_pc_benchmark.jsonl"
 
 MANIFESTS_URL = "https://www.openslr.org/resources/145/manifests.tar.gz"
 AUDIO_URLS = {
@@ -43,13 +42,21 @@ AUDIO_URLS = {
 }
 
 # Skills' nemo_skills/dataset/librispeech-pc/__init__.py defines
-# `EVAL_SPLIT = "test-clean"`. Match that here so the Gym↔Skills parity
-# comparison is apples-to-apples by default. Test-other (~2.9k harder
-# utterances, higher WER) can be evaluated by passing --splits explicitly.
-DEFAULT_SPLITS = ("test-clean",)
+# `EVAL_SPLIT = "test-clean"` and the Skills parity comparison runs only
+# that split. Both splits are written so the benchmark's two `datasets:`
+# entries (test_clean / test_other) both find their JSONL on disk —
+# `ng_collect_rollouts +dataset_name=test_clean` selects which one is
+# used at rollout time.
+ALL_SPLITS = ("test-clean", "test-other")
 
-SYSTEM_PROMPT = "You are a helpful assistant. /no_think"
-USER_PROMPT = "Transcribe the audio with proper punctuation and capitalization."
+
+def _split_filename(split: str) -> str:
+    """Map ``test-clean`` → ``librispeech_pc_test_clean.jsonl`` etc.
+
+    The on-disk JSONL names mirror the dataset entries in config.yaml
+    (one JSONL per dataset entry, hyphen→underscore for filename hygiene).
+    """
+    return f"librispeech_pc_{split.replace('-', '_')}.jsonl"
 
 
 def _download_with_progress(url: str, output_path: Path, desc: str) -> None:
@@ -107,23 +114,16 @@ def _audio_file_to_base64(audio_path: Path) -> str:
     return base64.b64encode(audio_path.read_bytes()).decode("ascii")
 
 
-def _make_input_messages() -> list:
-    # Plain text-only Responses input. The audio data-URI rides on
-    # `responses_create_params.metadata.audio_url`; `vllm_audio_model` reads
-    # it there and splices an `audio_url` content block into the user
-    # message after Responses→Chat-Completions translation. This sidechannel
-    # is required because openai's `ResponseInputContentParam` (the message
-    # content union) has no audio variant — putting audio in
-    # `input.user.content` directly would be rejected by simple_agent's
-    # Pydantic validator at the agent layer.
-    return [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": USER_PROMPT},
-    ]
-
-
 def _iter_split_rows(split: str, work_dir: Path, audio_dir: Path) -> Iterator[dict]:
-    """Yield one Gym JSONL row per utterance in ``split``."""
+    """Yield one raw Gym JSONL row per utterance in ``split``.
+
+    Rows carry the audio data-URI on ``responses_create_params.metadata.audio_url``
+    (consumed by ``vllm_audio_model``) and the reference transcript on
+    ``expected_answer``. ``responses_create_params.input`` is intentionally
+    NOT pre-populated — the benchmark's ``prompt_config`` materializes the
+    system+user messages at rollout time, which is the canonical Gym pattern
+    and lets the prompt template change without re-preparing the JSONL.
+    """
     manifest_file = work_dir / f"{split}.json"
     with open(manifest_file, "r") as f:
         entries = [json.loads(line) for line in f if line.strip()]
@@ -146,11 +146,6 @@ def _iter_split_rows(split: str, work_dir: Path, audio_dir: Path) -> Iterator[di
 
         yield {
             "responses_create_params": {
-                "input": _make_input_messages(),
-                # Audio sidechannel: vllm_audio_model reads metadata.audio_url
-                # and splices an `audio_url` block into the user message before
-                # forwarding to vLLM Chat Completions. See
-                # responses_api_models/vllm_audio_model/README.md.
                 "metadata": {"audio_url": f"data:audio/wav;base64,{audio_b64}"},
             },
             "expected_answer": text,
@@ -159,20 +154,22 @@ def _iter_split_rows(split: str, work_dir: Path, audio_dir: Path) -> Iterator[di
         }
 
 
-def prepare(work_dir: Path | None = None, splits: tuple[str, ...] = DEFAULT_SPLITS) -> Path:
-    """Download LibriSpeech-PC and write the Gym benchmark JSONL.
+def prepare(work_dir: Path | None = None, splits: tuple[str, ...] = ALL_SPLITS) -> list[Path]:
+    """Download LibriSpeech-PC and write per-split benchmark JSONLs.
 
     Args:
         work_dir: Directory to use for manifest + audio downloads. Defaults to
             ``benchmarks/librispeech_pc/data``. Reusing the same path across
             runs makes the prepare step idempotent — extracted audio + manifests
             persist between invocations.
-        splits: Which splits to include in the output JSONL. Defaults to
-            ``("test-clean",)`` to match Skills' ``EVAL_SPLIT``. Pass
-            ``("test-clean", "test-other")`` to evaluate both.
+        splits: Which splits to download + emit. Defaults to both
+            ``test-clean`` and ``test-other`` so the benchmark's two
+            ``datasets:`` entries (test_clean / test_other) both find their
+            JSONL on disk. Pass a subset (e.g. ``("test-clean",)``) to skip
+            downloading the other audio tarball.
 
     Returns:
-        Path to the written benchmark JSONL.
+        List of written JSONL paths (one per split).
     """
     work_dir = work_dir or DATA_DIR
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -182,15 +179,18 @@ def prepare(work_dir: Path | None = None, splits: tuple[str, ...] = DEFAULT_SPLI
     for split in splits:
         _download_audio(split, work_dir)
 
-    count = 0
-    with open(OUTPUT_FPATH, "w") as f:
-        for split in splits:
+    output_paths: list[Path] = []
+    for split in splits:
+        out_path = DATA_DIR / _split_filename(split)
+        count = 0
+        with open(out_path, "w") as f:
             for row in _iter_split_rows(split, work_dir, work_dir):
                 f.write(json.dumps(row, ensure_ascii=False) + "\n")
                 count += 1
+        print(f"Wrote {count} rows ({split}) to {out_path}")
+        output_paths.append(out_path)
 
-    print(f"Wrote {count} rows ({', '.join(splits)}) to {OUTPUT_FPATH}")
-    return OUTPUT_FPATH
+    return output_paths
 
 
 def main() -> None:
@@ -206,8 +206,12 @@ def main() -> None:
         type=str,
         nargs="+",
         choices=list(AUDIO_URLS.keys()),
-        default=list(DEFAULT_SPLITS),
-        help="Which LibriSpeech splits to include in the JSONL. Default matches Skills' EVAL_SPLIT.",
+        default=list(ALL_SPLITS),
+        help=(
+            "Which LibriSpeech splits to download + emit. Default writes both. "
+            "Each emitted split lands in its own JSONL "
+            "(librispeech_pc_test_clean.jsonl, librispeech_pc_test_other.jsonl)."
+        ),
     )
     args = parser.parse_args()
 

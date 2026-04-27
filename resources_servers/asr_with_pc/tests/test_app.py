@@ -3,11 +3,12 @@
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
-"""Unit tests for the librispeech_pc resources server.
+"""Unit tests for the asr_with_pc resources server.
 
 Each test fixes the model output and the reference transcript and asserts the
-WER values match what Skills' ``evaluate_asr_pc`` produces for the same
-inputs. The numeric expectations were computed offline against jiwer 3.x.
+WER values match what Skills' ``evaluate_asr_pc`` / ``evaluate_asr`` produce
+for the same inputs. The numeric expectations were computed offline against
+jiwer 3.x.
 """
 
 from unittest.mock import MagicMock
@@ -16,11 +17,12 @@ import pytest
 
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.server_utils import ServerClient
-from resources_servers.librispeech_pc.app import (
-    LibriSpeechPCConfig,
-    LibriSpeechPCResourcesServer,
-    LibriSpeechPCVerifyRequest,
+from resources_servers.asr_with_pc.app import (
+    ASRWithPCConfig,
+    ASRWithPCResourcesServer,
+    ASRWithPCVerifyRequest,
     calculate_per,
+    evaluate_asr,
     evaluate_asr_pc,
     extract_punctuation,
     normalize_whitespace,
@@ -35,9 +37,9 @@ MINIMAL_RESPONSES_CREATE_PARAMS = {
 }
 
 
-def _make_server() -> LibriSpeechPCResourcesServer:
-    config = LibriSpeechPCConfig(host="0.0.0.0", port=8080, entrypoint="", name="")
-    return LibriSpeechPCResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+def _make_server(task_type: str = "ASR-PC") -> ASRWithPCResourcesServer:
+    config = ASRWithPCConfig(host="0.0.0.0", port=8080, entrypoint="", name="", task_type=task_type)
+    return ASRWithPCResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
 
 def _make_response(assistant_text: str) -> NeMoGymResponse:
@@ -61,8 +63,8 @@ def _make_response(assistant_text: str) -> NeMoGymResponse:
     )
 
 
-def _make_verify_request(assistant_text: str, expected_answer: str) -> LibriSpeechPCVerifyRequest:
-    return LibriSpeechPCVerifyRequest(
+def _make_verify_request(assistant_text: str, expected_answer: str) -> ASRWithPCVerifyRequest:
+    return ASRWithPCVerifyRequest(
         responses_create_params=MINIMAL_RESPONSES_CREATE_PARAMS,
         response=_make_response(assistant_text),
         expected_answer=expected_answer,
@@ -154,6 +156,24 @@ class TestEvaluateAsrPc:
         assert result["text"] == "hello world"
         assert result["pred_text"] == "hello world"
 
+    def test_evaluate_asr_perfect(self) -> None:
+        """task_type=ASR path: standard WER only, Whisper-normalized."""
+        result = evaluate_asr("Hello, world.", "Hello, world.")
+        assert result["wer"] == 0.0
+        assert result["is_correct"] is True
+
+    def test_evaluate_asr_empty_reference_returns_none(self) -> None:
+        """HF Open ASR Leaderboard convention: drop empty-reference rows."""
+        result = evaluate_asr("", "anything")
+        assert result["wer"] is None
+        assert result["is_correct"] is None
+
+    def test_evaluate_asr_empty_hypothesis_substitutes_empty(self) -> None:
+        result = evaluate_asr("hello world", "")
+        # `pred_text == "empty"` is what Skills' evaluate_asr substitutes
+        assert result["pred_text"] == "empty"
+        assert result["wer"] > 0.0
+
     def test_threshold_at_50_percent(self) -> None:
         # wer_pc < 0.5 → is_correct True; >= 0.5 → False
         good = evaluate_asr_pc("the quick brown fox", "the quick brown FOX")
@@ -169,7 +189,7 @@ class TestEvaluateAsrPc:
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-class TestLibriSpeechPCServer:
+class TestASRWithPCServer:
     def test_sanity(self) -> None:
         server = _make_server()
         assert server is not None
@@ -219,7 +239,7 @@ class TestLibriSpeechPCServer:
             tool_choice="auto",
             tools=[],
         )
-        body = LibriSpeechPCVerifyRequest(
+        body = ASRWithPCVerifyRequest(
             responses_create_params=MINIMAL_RESPONSES_CREATE_PARAMS,
             response=empty_response,
             expected_answer="some text",
@@ -227,6 +247,46 @@ class TestLibriSpeechPCServer:
         result = await server.verify(body)
         assert result.reward == 0.0
         assert result.pred_text == ""
+
+    async def test_asr_task_type_dispatch(self) -> None:
+        """task_type=ASR scores standard WER only (no PC)."""
+        server = _make_server(task_type="ASR")
+        body = _make_verify_request("hello world", "hello world")
+        result = await server.verify(body)
+        assert result.reward == 1.0
+        assert result.is_correct is True
+        assert result.wer == 0.0
+        # PC fields are zeroed under task_type=ASR
+        assert result.wer_pc == 0.0
+        assert result.wer_c == 0.0
+
+    async def test_per_row_task_type_overrides_server_default(self) -> None:
+        """A row with task_type=ASR beats the server's task_type=ASR-PC default."""
+        server = _make_server(task_type="ASR-PC")
+        body = ASRWithPCVerifyRequest(
+            responses_create_params=MINIMAL_RESPONSES_CREATE_PARAMS,
+            response=_make_response("hello world"),
+            expected_answer="hello world",
+            task_type="ASR",
+        )
+        result = await server.verify(body)
+        assert result.reward == 1.0
+        # Standard WER computed (PC variants left at zero, since task_type=ASR).
+        assert result.wer == 0.0
+        assert result.wer_pc == 0.0
+
+    async def test_unsupported_task_type_raises(self) -> None:
+        # Pydantic enforces the Literal so this raises at request validation,
+        # but we cover the server-side branch as a defense-in-depth check.
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            ASRWithPCVerifyRequest(
+                responses_create_params=MINIMAL_RESPONSES_CREATE_PARAMS,
+                response=_make_response("x"),
+                expected_answer="y",
+                task_type="Translation",  # not in the Literal union
+            )
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -295,7 +355,7 @@ class TestAggregateMetrics:
 
     def test_score_fn_no_answer_flag(self) -> None:
         """Empty pred_text → no_answer == 1.0; non-empty → 0.0."""
-        empty_score = LibriSpeechPCResourcesServer._score_fn({"is_correct": False, "per": 0.0, "pred_text": ""})
-        full_score = LibriSpeechPCResourcesServer._score_fn({"is_correct": True, "per": 0.0, "pred_text": "hello"})
+        empty_score = ASRWithPCResourcesServer._score_fn({"is_correct": False, "per": 0.0, "pred_text": ""})
+        full_score = ASRWithPCResourcesServer._score_fn({"is_correct": True, "per": 0.0, "pred_text": "hello"})
         assert empty_score["no_answer"] == 1.0
         assert full_score["no_answer"] == 0.0

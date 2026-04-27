@@ -1,21 +1,39 @@
 # LibriSpeech-PC
 
 ASR with Punctuation and Capitalization on the LibriSpeech-PC test splits
-(test-clean ~2.6k + test-other ~2.9k). Direct port of the Skills benchmark at
-`nemo_skills/dataset/librispeech-pc/`. Pairs with the
-[`librispeech_pc`](../../resources_servers/librispeech_pc/) resource server,
-which lifts WER computation from `nemo_skills/evaluation/evaluator/audio.py`.
+(`test-clean` ~2.4k utterances, `test-other` ~2.9k). Direct port of the Skills
+benchmark at `nemo_skills/dataset/librispeech-pc/`. Pairs with the
+[`asr_with_pc`](../../resources_servers/asr_with_pc/) resource server, which
+lifts WER computation from `nemo_skills/evaluation/evaluator/audio.py`.
 
-## Audio handling (v1)
+## Splits
 
-Audio WAVs are base64-inlined into `responses_create_params.input` at prepare
-time as `input_audio` content blocks. Mirrors the `circle_click` pattern of
-prep-time-baked multimodal content; no Gym model-runner change needed. Final
-JSONL is ~270 MB across both splits.
+The benchmark exposes two `datasets:` entries:
 
-The follow-up cleanup is to factor path→base64 inlining out of prepare.py
-into a `responses_api_models/vllm_audio_model` so longer-clip audio benchmarks
-(audiobench, asr-leaderboard) don't bloat their JSONLs at prep time.
+- `test_clean` → `data/librispeech_pc_test_clean.jsonl`
+  (Skills' `EVAL_SPLIT` default; the parity comparison runs against this one)
+- `test_other` → `data/librispeech_pc_test_other.jsonl`
+  (harder acoustic conditions, higher WER)
+
+Select one at rollout time via `+dataset_name=test_clean` (or `test_other`).
+
+## Audio handling
+
+Audio WAVs are downloaded by `prepare.py`, base64-encoded, and stored on
+`responses_create_params.metadata.audio_url`. The
+[`vllm_audio_model`](../../responses_api_models/vllm_audio_model/) wrapper
+reads that field and splices an `audio_url` content block into the user
+message before forwarding to vLLM Chat Completions. The Responses API content
+union has no audio variant, so audio cannot ride in `input.content` directly —
+the metadata sidechannel is the workaround until the schema is extended.
+
+## Prompt
+
+System + user templates live in [`prompts/default.yaml`](prompts/default.yaml).
+`prompt_config` materializes them into `responses_create_params.input` at
+rollout time, so `prepare.py` doesn't need to bake the messages into each row.
+Strings match Skills' `nemo_skills/dataset/librispeech-pc/prepare.py`
+byte-for-byte.
 
 ## Prepare benchmark data
 
@@ -23,14 +41,13 @@ into a `responses_api_models/vllm_audio_model` so longer-clip audio benchmarks
 ng_prepare_benchmark "+config_paths=[benchmarks/librispeech_pc/config.yaml]"
 ```
 
-Downloads OpenSLR-145 manifests and OpenSLR-12 audio (~1 GB total over both
-splits) into `benchmarks/librispeech_pc/data/`, then writes the base64-inlined
-JSONL alongside.
+Downloads OpenSLR-145 manifests and OpenSLR-12 audio (~1 GB over both
+splits) and writes per-split JSONLs into `benchmarks/librispeech_pc/data/`.
 
 ## Running servers
 
 ```bash
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
+config_paths="responses_api_models/vllm_audio_model/configs/vllm_audio_model.yaml,\
 benchmarks/librispeech_pc/config.yaml"
 ng_run "+config_paths=[$config_paths]"
 ```
@@ -39,18 +56,17 @@ ng_run "+config_paths=[$config_paths]"
 
 ```bash
 ng_collect_rollouts \
-    +agent_name=librispeech_pc_bench_simple_agent \
-    +input_jsonl_fpath=benchmarks/librispeech_pc/data/librispeech_pc_benchmark.jsonl \
-    +output_jsonl_fpath=results/librispeech_pc_rollouts.jsonl \
+    +agent_name=librispeech_pc_asr_with_pc_simple_agent \
+    +dataset_name=test_clean \
+    +output_jsonl_fpath=results/librispeech_pc_test_clean_rollouts.jsonl \
     +num_repeats=4
 ```
 
-Start vLLM with `--reasoning-parser <name>` (e.g. `deepseek_r1` for Nemotron-3-Nano)
-so the WER scorer doesn't see `<think>…</think>` reasoning blocks.
+Pass `+dataset_name=test_other` to evaluate the harder split.
 
 ## Verification
 
-Deterministic: `wer`, `wer_c`, `wer_pc`, `per` per rollout, plus corpus-level
-`corpus_wer`, `corpus_wer_c`, `corpus_wer_pc` aggregated via
-`jiwer.wer(refs, hyps)` over all rollouts at each k. The corpus-level numbers
-match Skills' `AudioMetrics.get_metrics` output exactly.
+Per-rollout: `wer`, `wer_c`, `wer_pc`, `per`, and a binary
+`is_correct = wer_pc < 0.5`. Corpus-level `wer` (Skills' headline) and
+sample-mean `wer_c` / `wer_pc` / `per` are aggregated by
+`compute_metrics()` to match Skills' `AudioMetrics.get_metrics` exactly.
