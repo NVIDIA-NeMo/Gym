@@ -207,16 +207,7 @@ class GeminiModelServer(SimpleResponsesAPIModel):
         from google.genai import types
 
         if not raw_config:
-            return types.GenerateContentConfig(
-                tools=[
-                    types.Tool(
-                        computer_use=types.ComputerUse(
-                            environment=types.Environment.ENVIRONMENT_BROWSER,
-                        )
-                    )
-                ],
-                temperature=0.0,
-            )
+            return types.GenerateContentConfig()
 
         tools = []
         for raw_tool in raw_config.get("tools", []):
@@ -225,19 +216,18 @@ class GeminiModelServer(SimpleResponsesAPIModel):
                 env_str = cu.get("environment", "ENVIRONMENT_BROWSER")
                 env_val = getattr(types.Environment, env_str, types.Environment.ENVIRONMENT_BROWSER)
                 tools.append(types.Tool(computer_use=types.ComputerUse(environment=env_val)))
-            else:
-                tools.append(
-                    types.Tool(
-                        computer_use=types.ComputerUse(
-                            environment=types.Environment.ENVIRONMENT_BROWSER,
-                        )
-                    )
-                )
+            elif "function_declarations" in raw_tool:
+                tools.append(types.Tool(function_declarations=raw_tool["function_declarations"]))
+            elif "code_execution" in raw_tool:
+                tools.append(types.Tool(code_execution=types.ToolCodeExecution()))
+            elif "google_search" in raw_tool:
+                tools.append(types.Tool(google_search=types.GoogleSearch()))
 
-        kwargs = {
-            "tools": tools,
-            "temperature": raw_config.get("temperature", 0.0),
-        }
+        kwargs: Dict[str, Any] = {}
+        if tools:
+            kwargs["tools"] = tools
+        if "temperature" in raw_config:
+            kwargs["temperature"] = raw_config["temperature"]
 
         if "system_instruction" in raw_config:
             kwargs["system_instruction"] = raw_config["system_instruction"]

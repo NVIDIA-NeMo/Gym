@@ -15,7 +15,6 @@
 import asyncio
 import atexit
 import json
-import random
 import resource
 import sys
 from abc import abstractmethod
@@ -182,8 +181,7 @@ async def request(
                     f"Hit {_NUM_SERVER_DISCONNECTED_ERROR} global `ServerDisconnectedError` while querying {url}.\n{DISCONNECTED_CLIENT_OS_HELP_TEXT}"
                 )
 
-            backoff = min(2 ** (num_tries - 1), 30) + random.uniform(0, 1)
-            await asyncio.sleep(backoff)
+            await asyncio.sleep(0.5)
         except ClientOSError:
             global _NUM_CLIENT_OS_ERROR
             _NUM_CLIENT_OS_ERROR += 1
@@ -192,32 +190,24 @@ async def request(
                     f"Hit {_NUM_CLIENT_OS_ERROR} global `ClientOSError` while querying {url}.\n{DISCONNECTED_CLIENT_OS_HELP_TEXT}"
                 )
 
-            backoff = min(2 ** (num_tries - 1), 30) + random.uniform(0, 1)
-            if not _internal:
-                print(
-                    f"ServerDisconnectedError (try {num_tries}/{MAX_NUM_TRIES}). "
-                    f"Sleeping {backoff:.1f}s and retrying...\n"
-                )
-                if num_tries >= MAX_NUM_TRIES:
-                    raise
-                num_tries += 1
-            await asyncio.sleep(backoff)
+            await asyncio.sleep(0.5)
         except Exception as e:
             if _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:
                 print_exc()
 
-            backoff = min(2 ** (num_tries - 1), 30) + random.uniform(0, 1)
+            # Don't increment internal since we know we are ok. If we are not, the head server will shut everything down anyways.
             if not _internal:
                 print(
-                    f"Hit an exception while making a request (try {num_tries}/{MAX_NUM_TRIES}): "
-                    f"{type(e)}: {e}\nSleeping {backoff:.1f}s and retrying...\n"
+                    f"""Hit an exception while making a request (try {num_tries}): {type(e)}: {e}
+Sleeping 0.5s and retrying...
+"""
                 )
                 if num_tries >= MAX_NUM_TRIES:
                     raise e
 
                 num_tries += 1
 
-            await asyncio.sleep(backoff)
+            await asyncio.sleep(0.5)
 
 
 async def raise_for_status(response: ClientResponse) -> None:  # pragma: no cover

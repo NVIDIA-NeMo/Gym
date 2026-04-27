@@ -95,11 +95,7 @@ class AnthropicModelServer(SimpleResponsesAPIModel):
             api_params["betas"],
         )
 
-        try:
-            response = await self._client.beta.messages.create(**api_params)
-        except Exception as e:
-            logger.error("Anthropic API call failed: %s", repr(e))
-            raise
+        response = await self._client.beta.messages.create(**api_params)
 
         logger.info("Anthropic proxy response: stop_reason=%s, blocks=%d", response.stop_reason, len(response.content))
 

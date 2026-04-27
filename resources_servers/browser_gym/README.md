@@ -338,113 +338,34 @@ ng_status
 
 ### Collect Rollouts
 
-Tasks can be loaded from either a **local JSONL file** or directly from a **gym URL** (via the gym's `/api/v1/get_expected_state` endpoint). The gym URL approach requires no data preparation -- just point to the gym and go.
-
 Debug trajectories (screenshots, `conversation.json`, `verification.json`) are saved to `results/cua_debug_trajectories/` when `cua_debug_trajectories: true` is set in `env.yaml` (disabled by default). This path is relative to the project root and lives alongside other output artifacts in the gitignored `results/` directory. All agents share this single setting.
 
-#### From a Gym URL (Recommended)
+#### Step 1: Prepare Data
 
-Instead of preparing a JSONL file, you can point `ng_collect_rollouts` directly at a gym URL. It will call the gym's `/api/v1/get_expected_state` endpoint to fetch all available tasks and automatically convert them to the standard input format.
-
-**OpenAI (Computer Use Preview) -- all tasks:**
+Use `prepare_data.py` to fetch tasks from a gym and write a standard JSONL file:
 
 ```bash
-ng_collect_rollouts \
-  +agent_name=browser_openai_agent \
-  +input_gym_url=https://your-gym-url.com \
-  +output_jsonl_fpath=results/cua_rollouts_openai.jsonl \
-  +num_repeats=5 \
-  +num_samples_in_parallel=10 \
-  "+responses_create_params={max_output_tokens: 16384, temperature: 1.0}"
-```
+# Fetch all tasks:
+python resources_servers/browser_gym/prepare_data.py \
+  --gym-url https://your-gym-url.com \
+  --output resources_servers/browser_gym/data/tasks.jsonl
 
-**Anthropic Claude Sonnet -- all tasks:**
-
-```bash
-ng_collect_rollouts \
-  +agent_name=browser_anthropic_sonnet_agent \
-  +input_gym_url=https://your-gym-url.com \
-  +output_jsonl_fpath=results/cua_rollouts_anthropic_sonnet.jsonl \
-  +num_repeats=5 \
-  +num_samples_in_parallel=10 \
-  "+responses_create_params={max_output_tokens: 4096, temperature: 1.0}"
-```
-
-**Anthropic Claude Opus -- all tasks:**
-
-```bash
-ng_collect_rollouts \
-  +agent_name=browser_anthropic_opus_agent \
-  +input_gym_url=https://your-gym-url.com \
-  +output_jsonl_fpath=results/cua_rollouts_anthropic_opus.jsonl \
-  +num_repeats=5 \
-  +num_samples_in_parallel=10 \
-  "+responses_create_params={max_output_tokens: 4096, temperature: 1.0}"
-```
-
-**Gemini 2.5 Computer Use -- all tasks:**
-
-```bash
-ng_collect_rollouts \
-  +agent_name=browser_gemini_agent \
-  +input_gym_url=https://your-gym-url.com \
-  +output_jsonl_fpath=results/cua_rollouts_gemini.jsonl \
-  +num_repeats=5 \
-  +num_samples_in_parallel=10 \
-  "+responses_create_params={max_output_tokens: 16384, temperature: 1.0}"
-```
-
-**Run specific task(s) by ID (any agent):**
-
-```bash
-# Single task:
-ng_collect_rollouts \
-  +agent_name=browser_openai_agent \
-  +input_gym_url=https://your-gym-url.com \
-  "+input_gym_task_id=[YOUR-TASK-ID]" \
-  +output_jsonl_fpath=results/cua_rollouts_single.jsonl \
-  +num_repeats=3 \
-  "+responses_create_params={max_output_tokens: 16384, temperature: 1.0}"
-
-# Multiple tasks:
-ng_collect_rollouts \
-  +agent_name=browser_openai_agent \
-  +input_gym_url=https://your-gym-url.com \
-  "+input_gym_task_id=[TASK-ID-001,TASK-ID-002,TASK-ID-003]" \
-  +output_jsonl_fpath=results/cua_rollouts_subset.jsonl \
-  +num_repeats=3 \
-  "+responses_create_params={max_output_tokens: 16384, temperature: 1.0}"
+# Fetch specific tasks by ID:
+python resources_servers/browser_gym/prepare_data.py \
+  --gym-url https://your-gym-url.com \
+  --task-id TASK-ID-001 TASK-ID-002 TASK-ID-003 \
+  --output resources_servers/browser_gym/data/tasks.jsonl
 ```
 
 If any task ID is not found, the command errors with the missing IDs and a list of available ones.
 
+The script calls the gym's `/api/v1/get_expected_state` endpoint and converts each task into the standard NeMo Gym JSONL format. Each verifier entry's `prompt` (or `task_statement`) becomes the user message, and the verifier key becomes the `task_id`. Fields `start_url` and `viewport_size` are used if present in the response, otherwise they default to the gym URL and 1280x720 respectively.
+
+#### Step 2: Collect Rollouts
+
 > **Tip:** `num_samples_in_parallel` controls how many rollouts run concurrently (default: unlimited). For browser-heavy CUA workloads, set it to match or stay below the `max_concurrent_browsers` value in the resource server config (default: 16). Override via CLI (`+num_samples_in_parallel=10`) or set a persistent default in `env.yaml`.
 
-**Gym URL parameters:**
-
-| Parameter | Required | Description |
-|-----------|----------|-------------|
-| `input_gym_url` | Yes | Base URL of the gym (e.g. `https://your-gym-url.com`) |
-| `input_gym_task_id` | No | Run only specific task ID(s). Use list syntax: `"[ID1,ID2]"`. Errors if any are not found. |
-
-The gym's `/api/v1/get_expected_state` response is expected to return:
-
-```json
-{
-  "verifiers": {
-    "TASK-ID-001": {
-      "prompt": "Task description...",
-      "assertions": [...]
-    }
-  }
-}
-```
-
-Each task's `prompt` (or `task_statement`) becomes the user message, and the task ID key becomes the `verifier_metadata.task_id`. Fields `start_url` and `viewport_size` are used if present in the response, otherwise they default to the gym URL and 1280x720 respectively.
-
-> **Note:** `input_jsonl_fpath` and `input_gym_url` are mutually exclusive -- use one or the other.
-
-#### From a Local JSONL File
+#### From a JSONL File
 
 **OpenAI (Computer Use Preview):**
 
@@ -800,7 +721,7 @@ curl -X POST http://127.0.0.1:10212/verify \
 
 ## Task Input
 
-Tasks can be provided via a **local JSONL file** (`+input_jsonl_fpath`) or fetched directly from a **gym URL** (`+input_gym_url`). See [Collect Rollouts](#collect-rollouts) for usage examples.
+Tasks are provided via a **JSONL file** (`+input_jsonl_fpath`). Use `prepare_data.py` to fetch tasks from a gym URL and write the JSONL file. See [Collect Rollouts](#collect-rollouts) for the full workflow.
 
 ### JSONL Task Format
 
@@ -827,9 +748,9 @@ Each line in the input JSONL:
 - `start_url`: URL the browser navigates to at the start of the task
 - `viewport`: Browser viewport dimensions
 
-### Gym URL (No JSONL Required)
+### Fetching from a Gym URL
 
-When using `+input_gym_url`, tasks are fetched from the gym's `/api/v1/get_expected_state` endpoint and automatically converted to the JSONL format above. Each verifier entry's `prompt` (or `task_statement`) becomes the user message, and the verifier key becomes the `task_id`. Use `"+input_gym_task_id=[ID1,ID2]"` to run specific tasks.
+Use `prepare_data.py` to fetch tasks from a gym's `/api/v1/get_expected_state` endpoint and write them as JSONL. See [Step 1: Prepare Data](#step-1-prepare-data) for usage.
 
 ## Rollout Output
 
@@ -899,7 +820,14 @@ All providers follow the same unified flow: **Adapter → Model Server → Exter
 
 **Option 1: Via gym URL** (recommended for gyms with `/api/v1/get_expected_state`)
 
-Tasks are fetched automatically -- just use `+input_gym_url` when collecting rollouts. No manual JSONL editing needed. To run specific tasks, add `"+input_gym_task_id=[YOUR-TASK-ID]"` (or multiple: `"+input_gym_task_id=[ID1,ID2,ID3]"`).
+Use `prepare_data.py` to fetch tasks from the gym and write a JSONL file. To fetch specific tasks, use `--task-id`:
+
+```bash
+python resources_servers/browser_gym/prepare_data.py \
+  --gym-url https://your-gym-url.com \
+  --task-id YOUR-TASK-ID \
+  --output data/tasks.jsonl
+```
 
 **Option 2: Via JSONL file**
 

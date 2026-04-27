@@ -211,7 +211,8 @@ class TestGeminiDeserializeContents:
 class TestGeminiDeserializeConfig:
     def test_empty_config_returns_default(self):
         config = GeminiModelServer._deserialize_config({})
-        assert config.temperature == 0.0
+        assert config.tools is None or config.tools == []
+        assert config.temperature is None
 
     def test_with_thinking_config(self):
         raw = {
