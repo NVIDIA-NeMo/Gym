@@ -43,10 +43,13 @@ AUDIO_URLS = {
 
 # Skills' nemo_skills/dataset/librispeech-pc/__init__.py defines
 # `EVAL_SPLIT = "test-clean"` and the Skills parity comparison runs only
-# that split. Both splits are written so the benchmark's two `datasets:`
-# entries (test_clean / test_other) both find their JSONL on disk —
-# `ng_collect_rollouts +dataset_name=test_clean` selects which one is
-# used at rollout time.
+# that split — so this benchmark's single `datasets:` entry points at the
+# test_clean JSONL. test_other (~2.9k harder utterances) can be enabled
+# either by adding a sibling benchmark dir (the idiomatic Gym shape, since
+# `ng_prepare_benchmark` enforces one dataset per agent) or by passing
+# `--splits test-other` and pointing a separate config at the resulting
+# JSONL. Default below downloads + emits only test-clean.
+DEFAULT_SPLITS = ("test-clean",)
 ALL_SPLITS = ("test-clean", "test-other")
 
 
@@ -154,7 +157,7 @@ def _iter_split_rows(split: str, work_dir: Path, audio_dir: Path) -> Iterator[di
         }
 
 
-def prepare(work_dir: Path | None = None, splits: tuple[str, ...] = ALL_SPLITS) -> list[Path]:
+def prepare(work_dir: Path | None = None, splits: tuple[str, ...] = DEFAULT_SPLITS) -> list[Path]:
     """Download LibriSpeech-PC and write per-split benchmark JSONLs.
 
     Args:
@@ -206,11 +209,12 @@ def main() -> None:
         type=str,
         nargs="+",
         choices=list(AUDIO_URLS.keys()),
-        default=list(ALL_SPLITS),
+        default=list(DEFAULT_SPLITS),
         help=(
-            "Which LibriSpeech splits to download + emit. Default writes both. "
-            "Each emitted split lands in its own JSONL "
-            "(librispeech_pc_test_clean.jsonl, librispeech_pc_test_other.jsonl)."
+            "Which LibriSpeech splits to download + emit. Default matches "
+            "Skills' EVAL_SPLIT (test-clean only). Each emitted split lands "
+            "in its own JSONL (librispeech_pc_test_clean.jsonl, "
+            "librispeech_pc_test_other.jsonl)."
         ),
     )
     args = parser.parse_args()

@@ -8,14 +8,12 @@ lifts WER computation from `nemo_skills/evaluation/evaluator/audio.py`.
 
 ## Splits
 
-The benchmark exposes two `datasets:` entries:
-
-- `test_clean` → `data/librispeech_pc_test_clean.jsonl`
-  (Skills' `EVAL_SPLIT` default; the parity comparison runs against this one)
-- `test_other` → `data/librispeech_pc_test_other.jsonl`
-  (harder acoustic conditions, higher WER)
-
-Select one at rollout time via `+dataset_name=test_clean` (or `test_other`).
+This benchmark exposes the `test_clean` split (Skills' `EVAL_SPLIT` default,
+~2.4k utterances). Gym's `ng_prepare_benchmark` enforces one benchmark
+dataset per agent, so the harder `test_other` split is left for a sibling
+benchmark dir as a future PR. `prepare.py` accepts `--splits test-other`
+on the command line and writes a separate `librispeech_pc_test_other.jsonl`
+if you want to evaluate against that split via a custom config.
 
 ## Audio handling
 
@@ -57,12 +55,9 @@ ng_run "+config_paths=[$config_paths]"
 ```bash
 ng_collect_rollouts \
     +agent_name=librispeech_pc_asr_with_pc_simple_agent \
-    +dataset_name=test_clean \
-    +output_jsonl_fpath=results/librispeech_pc_test_clean_rollouts.jsonl \
+    +output_jsonl_fpath=results/librispeech_pc_rollouts.jsonl \
     +num_repeats=4
 ```
-
-Pass `+dataset_name=test_other` to evaluate the harder split.
 
 ## Verification
 
