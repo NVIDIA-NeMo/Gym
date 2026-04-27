@@ -102,14 +102,19 @@ def _audio_file_to_base64(audio_path: Path) -> str:
 
 
 def _make_input_messages(audio_b64: str) -> list:
+    # ``audio_url`` data-URI form matches Skills' ``VLLMMultimodalModel``
+    # default for self-hosted vLLM (audio_utils.make_audio_content_block,
+    # audio_format="audio_url"). Format="wav" in the URI is a vLLM hint;
+    # vLLM auto-detects the actual codec from the bytes (LibriSpeech ships
+    # FLAC, but base64-encoding raw FLAC bytes is what Skills also does).
     return [
         {"role": "system", "content": SYSTEM_PROMPT},
         {
             "role": "user",
             "content": [
                 {
-                    "type": "input_audio",
-                    "input_audio": {"data": audio_b64, "format": "wav"},
+                    "type": "audio_url",
+                    "audio_url": {"url": f"data:audio/wav;base64,{audio_b64}"},
                 },
                 {"type": "input_text", "text": USER_PROMPT},
             ],

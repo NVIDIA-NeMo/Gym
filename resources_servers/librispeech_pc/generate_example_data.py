@@ -49,6 +49,8 @@ def _silent_wav_base64(duration_sec: float = 1.0, sample_rate: int = 16000) -> s
 
 def make_example(sample_id: str, expected_answer: str) -> dict:
     audio_b64 = _silent_wav_base64()
+    # audio_url data-URI form — matches Skills' VLLMMultimodalModel default
+    # for self-hosted vLLM (and the benchmark's prepare.py).
     return {
         "responses_create_params": {
             "input": [
@@ -57,8 +59,8 @@ def make_example(sample_id: str, expected_answer: str) -> dict:
                     "role": "user",
                     "content": [
                         {
-                            "type": "input_audio",
-                            "input_audio": {"data": audio_b64, "format": "wav"},
+                            "type": "audio_url",
+                            "audio_url": {"url": f"data:audio/wav;base64,{audio_b64}"},
                         },
                         {"type": "input_text", "text": USER_PROMPT},
                     ],
