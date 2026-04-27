@@ -3,13 +3,13 @@
 `GymnasiumServer` is a [Gymnasium](https://gymnasium.farama.org/)-style base class for resources servers. Implement `step()`, optionally `reset()`, and use with `gymnasium_agent`. Not a standalone server.
 
 ```python
-from resources_servers.base_gymnasium import GymnasiumServer
+from resources_servers.gymnasium import GymnasiumServer
 ```
 
 ## Interface
 
 ```python
-from resources_servers.base_gymnasium import GymnasiumServer
+from resources_servers.gymnasium import GymnasiumServer
 from nemo_gym.openai_utils import NeMoGymResponse
 
 class MyEnv(GymnasiumServer):
