@@ -151,6 +151,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             if self.config.save_model_call_using_vllm_tokenize_endpoint:
                 converter = VLLMConverter(return_token_id_information=False)
                 chat_completion_create_params = converter.responses_to_chat_completion_create_params(new_body)
+                chat_completion_create_params = chat_completion_create_params.model_dump()
 
                 # Taken from https://github.com/NVIDIA-NeMo/Gym/blob/9e447f7844d4f6a627039609c862acb80a045261/responses_api_models/vllm_model/app.py#L384
                 tokenize_body_dict = dict()
