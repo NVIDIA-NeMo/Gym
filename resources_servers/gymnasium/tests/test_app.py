@@ -20,7 +20,7 @@ import pytest
 from nemo_gym.base_resources_server import BaseResourcesServerConfig
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseOutputMessage, NeMoGymResponseOutputText
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
-from resources_servers.base_gymnasium import EnvResetRequest, EnvStepRequest, GymnasiumServer, extract_text
+from resources_servers.gymnasium import EnvResetRequest, EnvStepRequest, GymnasiumServer, extract_text
 
 
 def _make_response(*parts: str) -> NeMoGymResponse:
