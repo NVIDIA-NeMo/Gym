@@ -177,12 +177,17 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
         #     .venv/lib/python3.12/site-packages/pip-26.0.1.dist-info/RECORD
         # Serialize venv setup with `flock` keyed on a lockfile next to the venv;
         # re-source the activate script after the lock so the python entrypoint
-        # downstream still inherits the venv in the parent shell.
+        # downstream still inherits the venv in the parent shell. The `-w` timeout
+        # is well above any plausible cold-start install (heavy deps like vllm can
+        # take ~10 min and queued waiters mostly hit a warm cache afterwards) but
+        # bounded so a stuck lock holder fails loudly rather than hangs forever.
         lock_path = f"{venv_path}.lock"
+        lock_timeout_seconds = 1800
         inner_setup = f"{uv_venv_cmd}{prefix_cmd} && source {venv_activate_fpath} && {install_cmd}{prefix_cmd}"
         env_setup_cmd = (
             f"mkdir -p {shlex.quote(str(venv_path.parent))}"
-            f" && flock -x {shlex.quote(lock_path)} bash -c {shlex.quote(inner_setup)}"
+            f" && flock -w {lock_timeout_seconds} -x {shlex.quote(lock_path)}"
+            f" bash -c {shlex.quote(inner_setup)}"
             f" && source {venv_activate_fpath}"
         )
 

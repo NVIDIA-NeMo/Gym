@@ -47,10 +47,12 @@ class TestCLISetupCommandSetupEnvCommand:
     def _wrap_setup(server_dir: Path, venv_path: Path, inner_setup: str) -> str:
         """Mirror the production wrapping: serialize venv setup with flock keyed on a per-venv lockfile."""
         lock_path = f"{venv_path}.lock"
+        lock_timeout_seconds = 1800
         return (
             f"cd {server_dir} && "
             f"mkdir -p {shlex.quote(str(venv_path.parent))}"
-            f" && flock -x {shlex.quote(lock_path)} bash -c {shlex.quote(inner_setup)}"
+            f" && flock -w {lock_timeout_seconds} -x {shlex.quote(lock_path)}"
+            f" bash -c {shlex.quote(inner_setup)}"
             f" && source {venv_path}/bin/activate"
         )
 
@@ -316,7 +318,8 @@ class TestCLISetupCommandSetupEnvCommand:
         # Lockfile sits next to the target venv so the per-venv-path serialization is unambiguous.
         venv_path = server_dir / ".venv"
         expected_lock = f"{venv_path}.lock"
-        assert f"flock -x {shlex.quote(expected_lock)} bash -c " in actual_command, actual_command
+        # `-w 1800` bounds the wait so a stuck lock holder fails loudly instead of hanging forever.
+        assert f"flock -w 1800 -x {shlex.quote(expected_lock)} bash -c " in actual_command, actual_command
         # Activate is re-sourced after the locked subshell so the python entrypoint downstream
         # inherits the venv in the parent shell.
         assert actual_command.endswith(f" && source {venv_path}/bin/activate")
