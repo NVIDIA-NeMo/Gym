@@ -152,12 +152,12 @@ The v4 config wires the train dataset to
 and the example dataset to
 `resources_servers/structured_outputs/data/structured_outputs_v4_example.jsonl`.
 
-For v4, `execute_tool_calls: false` is intentional. The tool call is the final
-answer being verified, not an action that should be executed by the agent. Rows
-use `tool_choice: auto`, and some rows allow `parallel_tool_calls` for coverage,
-but the reward contract still requires exactly one final function call. Missing,
-multiple, wrong, or malformed tool calls receive zero reward. The verifier finds
-the matching function call, JSON-decodes its arguments, unwraps
+For v4, the config uses the non-executing simple agent because the tool call is
+the final answer being verified, not an action that should be executed by the
+agent. Rows use `tool_choice: auto`, and some rows allow `parallel_tool_calls`
+for coverage, but the reward contract still requires exactly one final function
+call. Missing, multiple, wrong, or malformed tool calls receive zero reward. The
+verifier finds the matching function call, JSON-decodes its arguments, unwraps
 `tool_payload_key` when the row uses a wrapper mode, and validates the payload
 against `schema_str`.
 

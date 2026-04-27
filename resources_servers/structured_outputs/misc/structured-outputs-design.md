@@ -194,7 +194,7 @@ The minimum tool-call row contract should make this explicit:
 - `responses_create_params.parallel_tool_calls` records whether the endpoint is
   allowed to emit parallel tool calls
 - `response_mode` is `tool_call`
-- the agent config sets `execute_tool_calls: false`
+- the environment uses an agent that does not execute tool calls
 - verifier metadata records the expected `tool_name`, optional
   `tool_payload_key`, `tool_choice`, and `parallel_tool_calls`
 
