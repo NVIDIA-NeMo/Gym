@@ -85,11 +85,6 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     # Corresponds to the extra_body of OpenAI Client.
     extra_body: Optional[Dict[str, Any]] = None
 
-    # Some vLLM tool-parser failures are returned as HTTP errors after generation.
-    # For data collection jobs, specific status codes can be treated as failed
-    # generations instead of fatal infrastructure errors.
-    recoverable_http_status_codes: List[int] = Field(default_factory=list)
-
     def model_post_init(self, context):
         if isinstance(self.base_url, str):
             self.base_url = [self.base_url]
@@ -351,14 +346,6 @@ class VLLMModel(SimpleResponsesAPIModel):
             if is_out_of_context_length:
                 res = self._create_empty_chat_completion()
                 res.choices[0].finish_reason = "length"
-                return res
-            elif e.status in self.config.recoverable_http_status_codes:
-                print(
-                    "Returning empty chat completion for recoverable model HTTP error "
-                    f"status={e.status}: {result_content_str[:1000]}"
-                )
-                res = self._create_empty_chat_completion()
-                res.choices[0].finish_reason = "content_filter"
                 return res
             else:
                 raise e

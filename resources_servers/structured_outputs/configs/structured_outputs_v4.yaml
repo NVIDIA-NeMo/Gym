@@ -8,7 +8,7 @@ structured_outputs:
       value: Improve schema adherence when structured output is expressed through tool calls
 structured_outputs_v4_simple_agent:
   responses_api_agents:
-    simple_agent:
+    non_executing_simple_agent:
       entrypoint: app.py
       resources_server:
         type: resources_servers
@@ -16,7 +16,6 @@ structured_outputs_v4_simple_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      execute_tool_calls: false
       datasets:
       - name: train
         type: train
