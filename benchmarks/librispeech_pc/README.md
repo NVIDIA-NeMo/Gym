@@ -19,7 +19,7 @@ if you want to evaluate against that split via a custom config.
 
 Audio WAVs are downloaded by `prepare.py`, base64-encoded, and stored on
 `responses_create_params.metadata.audio_url`. The
-[`vllm_audio_model`](../../responses_api_models/vllm_audio_model/) wrapper
+[`vllm_model`](../../responses_api_models/vllm_model/) wrapper
 reads that field and splices an `audio_url` content block into the user
 message before forwarding to vLLM Chat Completions. The Responses API content
 union has no audio variant, so audio cannot ride in `input.content` directly —
@@ -45,7 +45,7 @@ splits) and writes per-split JSONLs into `benchmarks/librispeech_pc/data/`.
 ## Running servers
 
 ```bash
-config_paths="responses_api_models/vllm_audio_model/configs/vllm_audio_model.yaml,\
+config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
 benchmarks/librispeech_pc/config.yaml"
 ng_run "+config_paths=[$config_paths]"
 ```

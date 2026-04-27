@@ -30,7 +30,7 @@ punctuation errors both count.
 
 Audio is carried separately from text content via
 `responses_create_params.metadata.audio_url` (a data-URI string). The
-[`vllm_audio_model`](../../responses_api_models/vllm_audio_model/) wrapper
+[`vllm_model`](../../responses_api_models/vllm_model/) wrapper
 reads that field and splices an `audio_url` content block into the user
 message before forwarding to vLLM Chat Completions. The Responses API content
 union has no audio variant, so audio cannot ride in `input.content` directly —
@@ -39,7 +39,7 @@ the metadata sidechannel is the workaround until the schema is extended.
 ## Running servers
 
 ```bash
-config_paths="responses_api_models/vllm_audio_model/configs/vllm_audio_model.yaml,\
+config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
 resources_servers/asr_with_pc/configs/asr_with_pc.yaml"
 ng_run "+config_paths=[$config_paths]"
 ```

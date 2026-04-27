@@ -8,7 +8,7 @@
 Produces 5 example rows. Each row has:
   * a 1-second silence WAV data-URI in
     ``responses_create_params.metadata.audio_url`` (the audio sidechannel
-    that ``vllm_audio_model`` reads at request time)
+    that ``vllm_model`` reads at request time)
   * pre-baked ``responses_create_params.input`` (system + user messages),
     because the resource server's example dataset is wired without a
     ``prompt_config`` — the example smoke test bakes its own messages so

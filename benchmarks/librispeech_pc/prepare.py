@@ -5,17 +5,19 @@
 # you may not use this file except in compliance with the License.
 """Prepare LibriSpeech-PC benchmark data for NeMo Gym.
 
-Downloads OpenSLR-145 manifests (with punctuation+capitalization) and OpenSLR-12
-audio (test-clean and test-other), then writes a single JSONL where each row's
-audio WAV is base64-inlined into ``responses_create_params.input`` as an
-``input_audio`` content block. This mirrors the ``circle_click`` pattern of
-baking multimodal content into the JSONL at prep time, so the Gym vllm_model
-server can forward it without any audio-loading logic.
+Downloads OpenSLR-145 manifests (with punctuation+capitalization) and
+OpenSLR-12 audio for the requested splits (default test-clean), then
+writes one JSONL per split. Each row carries the audio data-URI on
+``responses_create_params.metadata.audio_url`` (the sidechannel ``vllm_model``
+consumes) and the reference transcript on ``expected_answer``.
+``responses_create_params.input`` is left empty — Gym's ``prompt_config``
+materializes the system+user messages from
+``benchmarks/librispeech_pc/prompts/default.yaml`` at rollout time.
 
-The on-disk JSONL is large (~270 MB across both splits — ~50 KB base64 per
-~30 s WAV × 5,500 utterances). It is gitignored; the sister
-``resources_servers/librispeech_pc/data/example.jsonl`` provides 5 silence-WAV
-placeholders for smoke testing without the real audio.
+The on-disk JSONLs are large (~210 MB for test-clean alone — ~50 KB
+base64 per ~7 s WAV × 2,417 utterances) and are gitignored. Smoke-test
+data with silence-WAV placeholders lives at
+``resources_servers/asr_with_pc/data/example.jsonl``.
 """
 
 import argparse
@@ -121,7 +123,7 @@ def _iter_split_rows(split: str, work_dir: Path, audio_dir: Path) -> Iterator[di
     """Yield one raw Gym JSONL row per utterance in ``split``.
 
     Rows carry the audio data-URI on ``responses_create_params.metadata.audio_url``
-    (consumed by ``vllm_audio_model``) and the reference transcript on
+    (consumed by ``vllm_model``) and the reference transcript on
     ``expected_answer``. ``responses_create_params.input`` is intentionally
     NOT pre-populated — the benchmark's ``prompt_config`` materializes the
     system+user messages at rollout time, which is the canonical Gym pattern
