@@ -15,7 +15,5 @@ librispeech_pc_bench_simple_agent:
         type: benchmark
         jsonl_fpath: benchmarks/librispeech_pc/data/librispeech_pc_benchmark.jsonl
         prepare_script: benchmarks/librispeech_pc/prepare.py
-        # Audio is base64-baked into responses_create_params.input at prepare
-        # time; rollout-time prompt materialization is a no-op.
         prompt_config: null
         license: Creative Commons Attribution 4.0 International
