@@ -101,24 +101,18 @@ def _audio_file_to_base64(audio_path: Path) -> str:
     return base64.b64encode(audio_path.read_bytes()).decode("ascii")
 
 
-def _make_input_messages(audio_b64: str) -> list:
-    # ``audio_url`` data-URI form matches Skills' ``VLLMMultimodalModel``
-    # default for self-hosted vLLM (audio_utils.make_audio_content_block,
-    # audio_format="audio_url"). Format="wav" in the URI is a vLLM hint;
-    # vLLM auto-detects the actual codec from the bytes (LibriSpeech ships
-    # FLAC, but base64-encoding raw FLAC bytes is what Skills also does).
+def _make_input_messages() -> list:
+    # Plain text-only Responses input. The audio data-URI rides on
+    # `responses_create_params.metadata.audio_url`; `vllm_audio_model` reads
+    # it there and splices an `audio_url` content block into the user
+    # message after Responses→Chat-Completions translation. This sidechannel
+    # is required because openai's `ResponseInputContentParam` (the message
+    # content union) has no audio variant — putting audio in
+    # `input.user.content` directly would be rejected by simple_agent's
+    # Pydantic validator at the agent layer.
     return [
         {"role": "system", "content": SYSTEM_PROMPT},
-        {
-            "role": "user",
-            "content": [
-                {
-                    "type": "audio_url",
-                    "audio_url": {"url": f"data:audio/wav;base64,{audio_b64}"},
-                },
-                {"type": "input_text", "text": USER_PROMPT},
-            ],
-        },
+        {"role": "user", "content": USER_PROMPT},
     ]
 
 
@@ -145,7 +139,14 @@ def _iter_split_rows(split: str, work_dir: Path, audio_dir: Path) -> Iterator[di
         sample_id = local_audio_path.stem
 
         yield {
-            "responses_create_params": {"input": _make_input_messages(audio_b64)},
+            "responses_create_params": {
+                "input": _make_input_messages(),
+                # Audio sidechannel: vllm_audio_model reads metadata.audio_url
+                # and splices an `audio_url` block into the user message before
+                # forwarding to vLLM Chat Completions. See
+                # responses_api_models/vllm_audio_model/README.md.
+                "metadata": {"audio_url": f"data:audio/wav;base64,{audio_b64}"},
+            },
             "expected_answer": text,
             "sample_id": sample_id,
             "split": split,

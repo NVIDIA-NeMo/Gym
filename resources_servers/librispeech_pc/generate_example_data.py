@@ -49,23 +49,19 @@ def _silent_wav_base64(duration_sec: float = 1.0, sample_rate: int = 16000) -> s
 
 def make_example(sample_id: str, expected_answer: str) -> dict:
     audio_b64 = _silent_wav_base64()
-    # audio_url data-URI form — matches Skills' VLLMMultimodalModel default
-    # for self-hosted vLLM (and the benchmark's prepare.py).
+    # Text-only Responses input + audio data-URI on `metadata.audio_url`.
+    # `vllm_audio_model` consumes metadata.audio_url and splices an
+    # `audio_url` block into the user message after Responses→Chat-Completions
+    # translation. Putting audio in `input.user.content` directly would be
+    # rejected by simple_agent's Pydantic validator (openai Responses API has
+    # no audio content type).
     return {
         "responses_create_params": {
             "input": [
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "audio_url",
-                            "audio_url": {"url": f"data:audio/wav;base64,{audio_b64}"},
-                        },
-                        {"type": "input_text", "text": USER_PROMPT},
-                    ],
-                },
+                {"role": "user", "content": USER_PROMPT},
             ],
+            "metadata": {"audio_url": f"data:audio/wav;base64,{audio_b64}"},
         },
         "expected_answer": expected_answer,
         "sample_id": sample_id,

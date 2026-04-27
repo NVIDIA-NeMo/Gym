@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[project]
+name = "vllm-audio-model"
+version = "0.1.0rc0"
+requires-python = ">=3.12"
+dependencies = [
+    "nemo-gym[dev]",
+    "vllm-model",
+]
+
+[build-system]
+build-backend = "setuptools.build_meta"
+requires = ["setuptools>=61", "setuptools-scm"]
+
+[tool.setuptools.packages.find]
+where = [".."]
+include = ["vllm_audio_model"]
+
+[tool.uv.sources]
+nemo-gym = { path = "../..", editable = true }
+vllm-model = { path = "../vllm_model", editable = true }
