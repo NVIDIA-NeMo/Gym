@@ -39,9 +39,7 @@ class TestRolloutCollection:
             AGENT_REF_KEY_NAME: {"name": "my_agent"},
             TASK_INDEX_KEY_NAME: 12,
             ROLLOUT_INDEX_KEY_NAME: 3,
-            "source_record_id": "DS1-ABC",
-            "task_id": "task-123",
-            "problem_type": "tool_call",
+            "env_specific_metadata": "do not include",
             "responses_create_params": {"input": "large prompt", "tools": ["large schema"]},
         }
 
@@ -49,9 +47,6 @@ class TestRolloutCollection:
             "agent_name": "my_agent",
             TASK_INDEX_KEY_NAME: 12,
             ROLLOUT_INDEX_KEY_NAME: 3,
-            "source_record_id": "DS1-ABC",
-            "task_id": "task-123",
-            "problem_type": "tool_call",
         }
 
     @pytest.mark.parametrize("request_debug_enabled", [True, False])
@@ -65,7 +60,7 @@ class TestRolloutCollection:
             AGENT_REF_KEY_NAME: {"name": "my_agent"},
             TASK_INDEX_KEY_NAME: 7,
             ROLLOUT_INDEX_KEY_NAME: 0,
-            "source_record_id": "DS1-FAIL",
+            "env_specific_metadata": "do not log this either",
             "responses_create_params": {"input": "do not log this"},
         }
         response = MagicMock()
@@ -97,7 +92,8 @@ class TestRolloutCollection:
             assert '"_ng_task_index": 7' in captured.out
             assert '"_ng_rollout_index": 0' in captured.out
             assert '"agent_name": "my_agent"' in captured.out
-            assert '"source_record_id": "DS1-FAIL"' in captured.out
+            assert "env_specific_metadata" not in captured.out
+            assert "do not log this either" not in captured.out
             assert "responses_create_params" not in captured.out
             assert "do not log this" not in captured.out
         else:

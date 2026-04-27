@@ -29,8 +29,14 @@ When internal HTTP calls use `nemo_gym.server_utils.request()` and `raise_for_st
 - `Request info`: URL, method, and request headers for non-OK responses
 - `Response content`: raw response body from the inner server
 - `Request kwargs`: OpenAI/vLLM adapter request shape for failed provider calls
-- `[rollout_collection] /run failed`: compact task, rollout, agent, and source row identity for failed `/run` requests
+- `[rollout_collection] /run failed`: compact Gym task index, rollout index, and agent identity for failed `/run` requests
 - nested `Hit an exception in ... calling an inner server` messages from Gym middleware
+
+Example rollout marker:
+
+```text
+[rollout_collection] /run failed status=500 row={"_ng_rollout_index": 0, "_ng_task_index": 48, "agent_name": "my_agent"}
+```
 
 This is usually enough to classify:
 
@@ -39,7 +45,7 @@ This is usually enough to classify:
 - whether the inner server returned a useful error body
 - whether the failure should be investigated in Gym logs or provider logs
 
-If the innermost provider response is empty, for example `Response content: b''`, Gym cannot recover the missing provider-side details. Inspect the model server logs next.
+If the innermost provider call is visible but the provider response is empty, for example `Response content: b''` from a `/v1/chat/completions` request, Gym has exposed the request boundary but cannot recover the missing provider-side details. Inspect the model server logs next.
 
 ## vLLM Provider-Side Logging
 
