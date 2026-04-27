@@ -245,8 +245,12 @@ class TestAggregateMetrics:
         metrics = server.compute_metrics(tasks)
 
         assert metrics["pass@1[avg-of-2]/accuracy"] == pytest.approx(100.0)
+        # Standard WER: corpus-level (matches Skills `wer`).
         assert metrics["corpus_wer@k=2"] == pytest.approx(0.0)
-        assert metrics["corpus_wer_pc@k=2"] == pytest.approx(0.0)
+        # wer_pc / wer_c / per: mean-of-per-sample (matches Skills aggregation).
+        assert metrics["wer_pc@k=2"] == pytest.approx(0.0)
+        assert metrics["wer_c@k=2"] == pytest.approx(0.0)
+        assert metrics["per@k=2"] == pytest.approx(0.0)
 
     def test_compute_metrics_all_wrong(self) -> None:
         server = _make_server()
@@ -256,6 +260,8 @@ class TestAggregateMetrics:
 
         assert metrics["pass@1[avg-of-2]/accuracy"] == pytest.approx(0.0)
         assert metrics["corpus_wer@k=2"] > 0.0
+        # wer_pc is a sample-mean and should also be > 0 when all samples are wrong.
+        assert metrics["wer_pc@k=2"] > 0.0
 
     def test_compute_metrics_empty_tasks(self) -> None:
         server = _make_server()
@@ -270,8 +276,9 @@ class TestAggregateMetrics:
             "pass@4/accuracy": 90.0,
             "corpus_wer@k=2": 12.0,
             "corpus_wer@k=4": 11.0,
-            "corpus_wer_c@k=4": 9.0,
-            "corpus_wer_pc@k=4": 14.0,
+            "wer_c@k=4": 9.0,
+            "wer_pc@k=4": 14.0,
+            "per@k=4": 22.0,
             "mean/output_tokens": 42,
         }
         key = server.get_key_metrics(agent_metrics)
@@ -279,10 +286,11 @@ class TestAggregateMetrics:
         # Highest k for pass@1[avg-of-k] is 4
         assert key["pass@1[avg-of-4]/accuracy"] == 75.0
         assert key["pass@4/accuracy"] == 90.0
-        # Corpus WER picked at highest k
-        assert key["corpus_wer@k=4"] == 11.0
-        assert key["corpus_wer_c@k=4"] == 9.0
-        assert key["corpus_wer_pc@k=4"] == 14.0
+        # WER aggregates exposed under Skills-aligned headline names.
+        assert key["wer"] == 11.0  # corpus_wer@k=4
+        assert key["wer_c"] == 9.0
+        assert key["wer_pc"] == 14.0
+        assert key["per"] == 22.0
         assert key["mean/output_tokens"] == 42
 
     def test_score_fn_no_answer_flag(self) -> None:

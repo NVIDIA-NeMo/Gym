@@ -229,12 +229,16 @@ class LibriSpeechPCResourcesServer(SimpleResourcesServer):
         }
 
     def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
-        """Per-rollout pass@k + corpus-level WER aggregation matching Skills.
+        """Per-rollout pass@k + WER aggregation matching Skills exactly.
 
-        Skills' ``AudioMetrics.get_metrics`` aggregates WER values by passing
-        the full lists of references and hypotheses to ``jiwer.wer`` (corpus
-        level), not by averaging per-sample WERs. We replicate that here by
-        re-running jiwer over the rollouts at each k.
+        Skills' ``AudioMetrics.get_metrics`` aggregates the four WER variants
+        non-uniformly:
+            - ``wer`` (the headline standard WER): **corpus-level** via
+              ``jiwer.wer(refs, hyps)`` over the whole eval set.
+            - ``wer_c``, ``wer_pc``, ``per``: **mean-of-per-sample** —
+              ``sum(scores) / len(scores)``.
+        We mirror both choices here so the resulting numbers match Skills'
+        ``metrics.json`` columns column-for-column.
         """
         import jiwer
 
@@ -248,28 +252,36 @@ class LibriSpeechPCResourcesServer(SimpleResourcesServer):
             return metrics
 
         for k in range(1, max_k + 1):
+            # Corpus-level standard WER (matches Skills' `wer`).
             refs_std: List[str] = []
             hyps_std: List[str] = []
-            refs_pc: List[str] = []
-            hyps_pc: List[str] = []
-            refs_c: List[str] = []
-            hyps_c: List[str] = []
+            # Mean-of-per-sample buckets for case-sensitive / punct-aware WER
+            # and PER (match Skills' wer_c / wer_pc / per aggregation).
+            wer_c_scores: List[float] = []
+            wer_pc_scores: List[float] = []
+            per_scores: List[float] = []
 
             for rollouts in tasks:
                 for r in rollouts[:k]:
                     refs_std.append(r.get("text", ""))
                     hyps_std.append(r.get("pred_text", ""))
-                    refs_pc.append(r.get("ref_pc_tok", ""))
-                    hyps_pc.append(r.get("hyp_pc_tok", ""))
-                    refs_c.append(r.get("ref_c", ""))
-                    hyps_c.append(r.get("hyp_c", ""))
+                    if r.get("wer_c") is not None:
+                        wer_c_scores.append(float(r["wer_c"]))
+                    if r.get("wer_pc") is not None:
+                        wer_pc_scores.append(float(r["wer_pc"]))
+                    if r.get("per") is not None:
+                        per_scores.append(float(r["per"]))
 
             if not refs_std:
                 continue
 
             metrics[f"corpus_wer@k={k}"] = 100.0 * jiwer.wer(refs_std, hyps_std)
-            metrics[f"corpus_wer_c@k={k}"] = 100.0 * jiwer.wer(refs_c, hyps_c)
-            metrics[f"corpus_wer_pc@k={k}"] = 100.0 * jiwer.wer(refs_pc, hyps_pc)
+            if wer_c_scores:
+                metrics[f"wer_c@k={k}"] = 100.0 * sum(wer_c_scores) / len(wer_c_scores)
+            if wer_pc_scores:
+                metrics[f"wer_pc@k={k}"] = 100.0 * sum(wer_pc_scores) / len(wer_pc_scores)
+            if per_scores:
+                metrics[f"per@k={k}"] = 100.0 * sum(per_scores) / len(per_scores)
 
         return metrics
 
@@ -284,16 +296,21 @@ class LibriSpeechPCResourcesServer(SimpleResourcesServer):
         key.update(highest_k_metrics(agent_metrics, "pass@1[avg-of-{k}]"))
         key.update(highest_k_metrics(agent_metrics, "pass@{k}"))
 
-        # Corpus-level WER at the highest k — the parity-target headline.
+        # WER aggregates at the highest k. Skills' headline `wer` is corpus-level;
+        # `wer_c`, `wer_pc`, `per` are mean-of-per-sample. We expose the same set.
         max_k = 0
         for k_str_key in agent_metrics:
             if k_str_key.startswith("corpus_wer@k="):
                 max_k = max(max_k, int(k_str_key.split("=")[1]))
         if max_k:
-            for name in ("corpus_wer", "corpus_wer_c", "corpus_wer_pc"):
-                src = f"{name}@k={max_k}"
-                if src in agent_metrics:
-                    key[src] = agent_metrics[src]
+            for src_key, dst_key in (
+                (f"corpus_wer@k={max_k}", "wer"),
+                (f"wer_c@k={max_k}", "wer_c"),
+                (f"wer_pc@k={max_k}", "wer_pc"),
+                (f"per@k={max_k}", "per"),
+            ):
+                if src_key in agent_metrics:
+                    key[dst_key] = agent_metrics[src_key]
 
         return key
 

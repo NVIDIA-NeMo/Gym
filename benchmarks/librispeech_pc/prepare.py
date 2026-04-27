@@ -42,6 +42,12 @@ AUDIO_URLS = {
     "test-other": "https://www.openslr.org/resources/12/test-other.tar.gz",
 }
 
+# Skills' nemo_skills/dataset/librispeech-pc/__init__.py defines
+# `EVAL_SPLIT = "test-clean"`. Match that here so the Gym↔Skills parity
+# comparison is apples-to-apples by default. Test-other (~2.9k harder
+# utterances, higher WER) can be evaluated by passing --splits explicitly.
+DEFAULT_SPLITS = ("test-clean",)
+
 SYSTEM_PROMPT = "You are a helpful assistant. /no_think"
 USER_PROMPT = "Transcribe the audio with proper punctuation and capitalization."
 
@@ -153,7 +159,7 @@ def _iter_split_rows(split: str, work_dir: Path, audio_dir: Path) -> Iterator[di
         }
 
 
-def prepare(work_dir: Path | None = None) -> Path:
+def prepare(work_dir: Path | None = None, splits: tuple[str, ...] = DEFAULT_SPLITS) -> Path:
     """Download LibriSpeech-PC and write the Gym benchmark JSONL.
 
     Args:
@@ -161,6 +167,9 @@ def prepare(work_dir: Path | None = None) -> Path:
             ``benchmarks/librispeech_pc/data``. Reusing the same path across
             runs makes the prepare step idempotent — extracted audio + manifests
             persist between invocations.
+        splits: Which splits to include in the output JSONL. Defaults to
+            ``("test-clean",)`` to match Skills' ``EVAL_SPLIT``. Pass
+            ``("test-clean", "test-other")`` to evaluate both.
 
     Returns:
         Path to the written benchmark JSONL.
@@ -170,17 +179,17 @@ def prepare(work_dir: Path | None = None) -> Path:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
     _download_manifests(work_dir)
-    for split in ("test-clean", "test-other"):
+    for split in splits:
         _download_audio(split, work_dir)
 
     count = 0
     with open(OUTPUT_FPATH, "w") as f:
-        for split in ("test-clean", "test-other"):
+        for split in splits:
             for row in _iter_split_rows(split, work_dir, work_dir):
                 f.write(json.dumps(row, ensure_ascii=False) + "\n")
                 count += 1
 
-    print(f"Wrote {count} rows to {OUTPUT_FPATH}")
+    print(f"Wrote {count} rows ({', '.join(splits)}) to {OUTPUT_FPATH}")
     return OUTPUT_FPATH
 
 
@@ -192,10 +201,18 @@ def main() -> None:
         default=None,
         help="Directory for manifest + audio downloads (default: benchmarks/librispeech_pc/data).",
     )
+    parser.add_argument(
+        "--splits",
+        type=str,
+        nargs="+",
+        choices=list(AUDIO_URLS.keys()),
+        default=list(DEFAULT_SPLITS),
+        help="Which LibriSpeech splits to include in the JSONL. Default matches Skills' EVAL_SPLIT.",
+    )
     args = parser.parse_args()
 
     work_dir = Path(args.work_dir) if args.work_dir else None
-    prepare(work_dir=work_dir)
+    prepare(work_dir=work_dir, splits=tuple(args.splits))
 
 
 if __name__ == "__main__":
