@@ -152,17 +152,10 @@ dependencies = [
     "yappi",
 
     # Ray: Used for distributed processing
-    # Updated Mon Apr 20, 2026 with ray[default]>=2.53.0 to match the vLLM
-    # container's Ray version. When vLLM+Gym run in the same hetero SLURM
-    # job with --overlap, Gym's ray.init() auto-detects vLLM's Ray cluster
-    # via shared /tmp/ray, so the client-side Ray must match the server-side.
-    # Security: Requires ray>=2.52.0
+    # Updated Mon Feb 10, 2026 with ray[default]==2.52.1 in uv.lock
+    # Security: Requires ray>=2.52.0 (currently resolves to 2.52.1 naturally)
     # License: Apache 2.0 https://github.com/ray-project/ray/blob/master/LICENSE
-    # Bumped to 2.55.1 on 2026-04-24 to match vllm/vllm-openai:v0.18.1 base
-    # image (which ships ray 2.55.1). Cross-container Ray-cluster joins
-    # require GCS protocol match; 2.53.0 vs 2.55.1 fails with
-    # ConnectionError on `temp_dir` fetch from GCS.
-    "ray[default]==2.55.1",
+    "ray[default]",
 
     # psutil: Cross-platform process and system utilities
     # Updated: Fri Nov 07, 2025 with psutil==6.1.1

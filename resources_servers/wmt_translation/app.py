@@ -14,28 +14,21 @@
 # limitations under the License.
 """Generic machine-translation verifier for WMT-style benchmarks.
 
-Reproduces NeMo-Skills' `TranslationMetrics` corpus-BLEU + xCOMET-XXL
-aggregation in Gym's resource-server shape:
+Two scoring layers:
 
-  * `verify()` returns a per-sample sentence-BLEU reward (useful as an RL
-    signal) plus the fields `compute_metrics()` needs to recompute the
-    authoritative corpus-level numbers.
-  * `compute_metrics(tasks)` groups rollouts by
-    ``(source_language, target_language, rollout_index)`` and calls
-    ``sacrebleu.corpus_bleu`` with the language-specific tokenizer matching
-    Skills (``13a`` default, ``ja-mecab``/``ko-mecab``/``zh`` as needed).
-  * If ``compute_comet`` is true, the same method also fires a single
-    ``@ray.remote(num_gpus=comet_num_gpus)`` task that loads the xCOMET-XXL
-    checkpoint once and batch-predicts QE scores for every (src, mt, ref)
-    triple. This is the first Gym resource server to pull a heavyweight
-    neural eval metric onto a Ray-scheduled GPU — it's a model for how we
-    expect to integrate COMET-family or reward-model metrics in future
-    benchmarks.
-
-Skills' aggregation emits per-pair BLEU/COMET plus three cross-pair
-aggregates (``xx->xx``, ``<src>->xx``, ``xx->{tgt}``); this server does
-the same and annotates each with ``std_dev_across_runs`` so runs are
-directly comparable to Skills ``metrics.json``.
+  * ``verify()`` returns a per-sample sentence-BLEU reward (useful as an RL
+    signal) plus a per-rollout xCOMET-XXL ``comet_score``. The COMET score
+    is computed by a persistent Ray actor pool (one actor per GPU on the
+    extra_gpu node) that keeps the xCOMET-XXL checkpoint resident; each
+    verify() call awaits its own future before returning, so every
+    rollout in ``rollouts.jsonl`` carries a finite ``comet_score`` whenever
+    the model produced a non-empty translation.
+  * ``compute_metrics(tasks)`` groups rollouts by
+    ``(source_language, target_language, rollout_index)``, computes
+    corpus-BLEU with the language-specific sacrebleu tokenizer
+    (``13a`` default, ``ja-mecab``/``ko-mecab``/``zh`` as needed), and
+    aggregates the per-row COMET scores into per-pair + cross-pair means
+    (``xx->xx``, ``<src>->xx``, ``xx->{tgt}``) with ``std_dev_across_runs``.
 """
 
 from __future__ import annotations
@@ -63,9 +56,8 @@ LOG = logging.getLogger(__name__)
 
 
 # --- Tokenizer selection ------------------------------------------------------
-# Mirrors nemo_skills/evaluation/metrics/translation_metrics.py. The
-# ``13a`` default is SacreBLEU's default; ``ja-mecab`` / ``ko-mecab`` need
-# sacrebleu's [ja]/[ko] extras installed; ``zh`` is built in.
+# ``13a`` is sacrebleu's default; ``ja-mecab`` / ``ko-mecab`` need sacrebleu's
+# [ja]/[ko] extras installed; ``zh`` is built in.
 _TOKENIZER_BY_LANG_PREFIX = {
     "ja": "ja-mecab",
     "ko": "ko-mecab",
@@ -78,26 +70,23 @@ def _tokenizer_for(target_language: str) -> str:
 
 
 # --- Thinking-preamble handling ---------------------------------------------
-# Matches NeMo-Skills' parse_reasoning=True behavior. Reasoning models
-# (e.g. Nemotron-3-Nano) emit a pre-reasoning preamble wrapped in
+# Reasoning models emit a pre-answer reasoning preamble wrapped in
 # <think>...</think>. vLLM's reasoning parser strips the opening <think>
 # tag but keeps the closing </think>, so the raw response looks like
 #   "We need to translate ... </think>\nProlog"
-# Skills' parse_reasoning takes the text after the last </think>; if no
-# closing tag exists (model never finished reasoning), Skills produces an
-# empty string. We must replicate both branches or corpus BLEU is computed
-# against the reasoning text, which tanks the score (~3x lower BLEU).
+# We must drop the preamble before scoring or corpus BLEU is computed
+# against the reasoning text and collapses (~3x lower BLEU).
 
 
 def _strip_reasoning_preamble(text: str) -> str:
-    """Remove a pre-answer reasoning preamble, matching Skills' parse_reasoning=True.
+    """Remove a pre-answer reasoning preamble.
 
     Three cases:
       1. ``</think>`` present: return everything after the *last* occurrence
          (the actual answer, with the preamble dropped).
       2. ``<think>`` present but no ``</think>``: reasoning started but didn't
          close — the model truncated mid-reasoning. Return empty string so the
-         rollout counts as no-answer (matches Skills' ``parse_reasoning=True``).
+         rollout counts as no-answer.
       3. Neither tag present: no inline reasoning preamble (e.g., when the
          endpoint returned reasoning as a structured ``output[i].type="reasoning"``
          block and ``output_text`` already contains only the answer). Return
@@ -117,46 +106,29 @@ class WmtTranslationResourcesServerConfig(BaseResourcesServerConfig):
     """Config for the wmt_translation resource server.
 
     Attributes:
-        compute_comet: Run xCOMET-XXL in ``compute_metrics``. Default True.
-            Turn off for smoke tests or RL training runs where only BLEU
-            is needed.
+        compute_comet: Run xCOMET-XXL inside ``verify()`` and aggregate in
+            ``compute_metrics``. Default True. Turn off for smoke tests or
+            RL training runs where only BLEU is needed.
         comet_model: HuggingFace repo for the COMET checkpoint. Resolved via
             ``comet.download_model`` (cached under HF_HOME).
         comet_batch_size: Batch size passed to ``model.predict``.
-        comet_num_gpus: Deprecated — scheduling now uses the `extra_gpu`
-            custom Ray resource (advertised by nemo_skills' patched
-            `get_ray_server_cmd` on DP-excess worker nodes).
-        comet_num_shards: Number of parallel Ray tasks to shard COMET
-            scoring across. Each task requests `extra_gpu: 1`, so the
-            upper limit is the extra node's GPU count (default 8 on the
-            A100 draco nodes). Set to 1 for single-GPU scoring.
+        comet_num_shards: Number of CometActors to spawn — each loads
+            xCOMET-XXL once and serves score requests from the persistent
+            actor pool. Each actor requests one ``extra_gpu`` Ray resource,
+            so the upper limit is the extra node(s)' GPU count.
+        strip_reasoning: When True, drop a ``<think>...</think>`` preamble
+            before scoring. Required for reasoning models; safe to leave on
+            for instruction-tuned models that don't emit reasoning traces.
     """
 
     compute_comet: bool = True
     comet_model: str = "Unbabel/XCOMET-XXL"
     comet_batch_size: int = 16
     comet_num_shards: int = 8
-    # Dedicated-node topology with GPUs hidden from Ray:
-    #   * Recipe requests server_nodes = dp_size + 1.
-    #   * get_ray_server_cmd starts the extra node with `--num-gpus=0` +
-    #     `resources={"extra_gpu": 8}` so vLLM's compiled-DAG / Ray-DP
-    #     node scans don't see it (the extra node's presence was causing
-    #     a 300s RayChannelTimeoutError in vLLM's compiled DAG even after
-    #     placement-group creation was fixed upstream).
-    #   * The COMET Ray task asks for `resources={"extra_gpu": 1}` +
-    #     `num_gpus=0`, and sets RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES
-    #     so the physical GPUs stay visible to the task process.
-    comet_num_gpus: float = 1.0  # retained for backwards-compat; unused
-    # When True, strip the reasoning preamble before computing BLEU/COMET, matching
-    # NeMo-Skills' parse_reasoning=True. Required for reasoning models that emit
-    # <think>...</think> preambles (e.g. Nemotron-3-Nano); otherwise the preamble
-    # is scored against the reference and collapses BLEU. Set False for plain
-    # instruction-tuned models that do not emit reasoning traces.
     strip_reasoning: bool = True
 
 
 class WmtTranslationRunRequest(BaseRunRequest):
-    # Fields mirror Skills' wmt24pp prepare.py row shape.
     text: str
     translation: str
     source_language: str
@@ -170,179 +142,40 @@ class WmtTranslationVerifyRequest(WmtTranslationRunRequest, BaseVerifyRequest):
 
 
 class WmtTranslationVerifyResponse(WmtTranslationVerifyRequest, BaseVerifyResponse):
-    # Extraction of the model's translation (currently == generation text;
-    # future extensions may strip reasoning traces).
+    # Model's translation, post-strip-reasoning if enabled.
     generation: str
-    # Per-sample sentence-BLEU, useful as a dense RL reward. Corpus-level
-    # BLEU lives in compute_metrics() and is the parity target.
+    # Per-sample sentence-BLEU, useful as a dense RL reward.
     sentence_bleu: float
-    # Per-rollout xCOMET-XXL score. Populated when compute_comet=True and the
-    # streaming actor pool is available; None otherwise (no actor pool, empty
-    # generation, or actor failure). Score range matches xCOMET output (0-1).
-    # Aggregate corpus COMET still lives in compute_metrics(); this field is
-    # the per-row signal that survives in rollouts.jsonl.
+    # Per-rollout xCOMET-XXL score (0–1). None for empty generations or
+    # actor-pool failures; aggregate corpus COMET is computed in
+    # compute_metrics().
     comet_score: Optional[float] = None
 
 
 # --- Ray COMET scoring --------------------------------------------------------
 
 
-# Build the remote function lazily so importing this module doesn't require
-# Ray to already be initialized. ``config.comet_num_gpus`` parameterises the
-# GPU allocation at call time.
-def _build_comet_remote():
-    # runtime_env pins the Ray worker to THIS server's venv (py_executable)
-    # and forces HF ONLINE mode for this task (env_vars). Gym's main venv
-    # doesn't have unbabel-comet; the wmt_translation server's venv does
-    # (via requirements.txt). Without py_executable, the remote task runs
-    # in the head venv and fails with ModuleNotFoundError on `comet`.
-    # Env-var flip: vLLM needs HF_HUB_OFFLINE=1 at startup to dodge HF 429s
-    # on Nemotron model_info, but COMET's xlm-roberta-xxl tokenizer resolver
-    # needs online (returns `None` and throws OSError "Not found: None" in
-    # offline mode even with cached weights). We also propagate HF_TOKEN /
-    # HF_HOME explicitly because runtime_env sandboxes the worker's env.
-    # Pattern copied from resources_servers/code_gen (lcb_integration).
-    import os
-    import shutil
-    import sys
-    from pathlib import Path
-
-    # Cross-node Python setup. The wmt_translation venv's .venv/bin/python is
-    # a symlink into a CONTAINER-LOCAL uv install dir (created on the head
-    # when requirements.txt was installed) — the extra node's container
-    # never ran uv, so that path doesn't exist there. And the extra node's
-    # stock /usr/local/bin/python3.12 is ABI-incompatible with the venv's
-    # compiled extensions (torchvision fails with "partially initialized
-    # module" on import).
-    #
-    # Fix: make the uv-installed Python dir itself reachable over Lustre.
-    # python-build-standalone binaries (what uv ships) are relocatable, so
-    # we mirror the whole install dir under /opt/Gym/.cache/comet-python/
-    # (Lustre) and hand that path to Ray as py_executable. One-time copy on
-    # first invocation — subsequent calls are a no-op existence check.
-    venv_python = Path(sys.executable).resolve()
-    if not venv_python.exists():
-        raise RuntimeError(
-            f"Server-side sys.executable doesn't exist? {venv_python}. "
-            "Expected the venv's python to resolve into the local uv install."
-        )
-    uv_python_root = venv_python.parent.parent  # .../cpython-3.12.12-.../
-
-    # Lustre cache root is overridable via env var for local testing / alternate
-    # cluster layouts. Default matches the draco-oci mount layout.
-    cache_root = Path(os.environ.get("WMT_TRANSLATION_COMET_PY_CACHE", "/opt/Gym/.cache/comet-python"))
-    lustre_python_root = cache_root / uv_python_root.name
-    lustre_python_bin = lustre_python_root / "bin" / venv_python.name
-    if not lustre_python_bin.exists():
-        LOG.info(
-            "Mirroring uv Python install %s -> %s for cross-node Ray tasks",
-            uv_python_root,
-            lustre_python_root,
-        )
-        lustre_python_root.parent.mkdir(parents=True, exist_ok=True)
-        # copytree refuses to overwrite, so use a two-stage atomic rename
-        # via a .tmp dir to avoid half-populated caches if we're interrupted.
-        tmp = lustre_python_root.with_suffix(".tmp")
-        if tmp.exists():
-            shutil.rmtree(tmp)
-        shutil.copytree(uv_python_root, tmp, symlinks=True)
-        tmp.rename(lustre_python_root)
-
-    # Resolve the venv site-packages (comet, torch, torchvision — all Lustre
-    # files already, not symlinks). Inject via PYTHONPATH so the Lustre-
-    # mirrored Python can import them.
-    venv_dir = Path(sys.executable).parent.parent  # .venv/bin/python -> .venv
-    site_packages = venv_dir / "lib" / "python3.12" / "site-packages"
-
-    env_vars = {
-        "HF_HUB_OFFLINE": "0",
-        "TRANSFORMERS_OFFLINE": "0",
-        # Keep the task's CUDA_VISIBLE_DEVICES untouched — the extra node's
-        # Ray agent already advertises --num-gpus=0, so Ray would zero this
-        # out without this flag. We need the physical GPUs visible so COMET
-        # can torch.cuda() load.
-        "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
-        # site-packages for comet, torch, etc. is Lustre-shared; merge it
-        # with whatever PYTHONPATH the inherited env has.
-        "PYTHONPATH": f"{site_packages}:{os.environ.get('PYTHONPATH', '')}",
-    }
-    for k in ("HF_HOME", "HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"):
-        if os.environ.get(k):
-            env_vars[k] = os.environ[k]
-
-    # Schedule on the "extra" (DP-unclaimed) node via the custom `extra_gpu`
-    # resource advertised by nemo_skills' get_ray_server_cmd on workers with
-    # SLURM_PROCID >= dp_size. num_gpus=0 because the extra node hides its
-    # GPUs from Ray's accounting (to dodge vLLM's compiled-DAG scan of
-    # ray.nodes() that hangs when untracked GPU nodes are present); the
-    # env_vars flag above preserves physical CUDA_VISIBLE_DEVICES.
-    @ray.remote(
-        num_gpus=0,
-        resources={"extra_gpu": 1},
-        runtime_env={"py_executable": str(lustre_python_bin), "env_vars": env_vars},
-    )
-    def _score_comet(  # pragma: no cover - needs live Ray cluster + CUDA + unbabel-comet checkpoint
-        triples: List[Tuple[str, str, str]], model_name: str, batch_size: int, gpu_idx: int = 0
-    ) -> List[float]:
-        import torch
-        from comet import download_model, load_from_checkpoint
-
-        # Hard-assert CUDA: the task is pinned to the extra Ray node by the
-        # `extra_gpu` custom resource, and CUDA_VISIBLE_DEVICES is preserved
-        # via RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES=1. If this fires,
-        # the extra node didn't join Ray with --num-gpus=0 + extra_gpu
-        # resource (check get_ray_server_cmd wiring).
-        assert torch.cuda.is_available(), (
-            "wmt_translation COMET task requires a CUDA device. "
-            "Expected the Ray worker to land on the extra node via the "
-            "extra_gpu custom resource; got no CUDA."
-        )
-        # Pin this shard to a specific GPU on the extra node. Without this
-        # every task defaults to cuda:0 and OOMs (8 × 10B-param xCOMET would
-        # need ~320 GB on the first GPU alone).
-        num_devices = torch.cuda.device_count()
-        assert num_devices > 0, "No CUDA devices visible to the Ray task."
-        device = f"cuda:{gpu_idx % num_devices}"
-
-        LOG.info(
-            "Loading xCOMET model %s on %s (shard gpu_idx=%d, num_devices=%d)",
-            model_name,
-            device,
-            gpu_idx,
-            num_devices,
-        )
-        ckpt_path = download_model(model_name)
-        model = load_from_checkpoint(ckpt_path)
-        model.to(device).eval()
-
-        data = [{"src": s, "mt": m, "ref": r} for s, m, r in triples]
-        LOG.info("Scoring %d (src, mt, ref) triples at batch_size=%d on %s", len(data), batch_size, device)
-        # Constrain lightning's pytorch_lightning `Trainer` (used under
-        # `model.predict`) to this task's GPU too. xCOMET's predict()
-        # instantiates a Trainer with `devices="auto"` which otherwise
-        # auto-detects all 8 visible GPUs and tries to DataParallel across
-        # them — fighting the other 7 sibling tasks. `gpus=[idx]` pins it.
-        result = model.predict(data, batch_size=batch_size, devices=[gpu_idx % num_devices])
-        return list(result.scores)
-
-    return _score_comet
-
-
 def _build_comet_actor_class():
-    """Build the persistent CometActor class used by streaming COMET dispatch.
+    """Build the persistent CometActor class.
 
-    Same py_executable / runtime_env / GPU-pinning logic as `_build_comet_remote`
-    above, but as a Ray *actor* class so we can keep the xCOMET-XXL model
-    resident across the entire run instead of cold-loading per
-    ``compute_metrics()`` call. With N>=8 actors on the 8-GPU extra_gpu node,
-    every rollout's score request lands on a ready model immediately —
-    no idle GPUs during the rollout phase, fail-fast at server startup.
+    Each actor is a Ray actor that loads xCOMET-XXL once in ``__init__`` and
+    serves score requests from the resident model — no per-call cold load.
+    A pool of N actors (one per GPU on the extra_gpu node) is built lazily on
+    the first ``verify()`` call. Built lazily so importing this module doesn't
+    require Ray to already be initialized.
     """
     import os
     import shutil
     import sys
     from pathlib import Path
 
+    # Cross-node Python setup. The server's venv python may be a symlink into
+    # a container-local uv install dir that doesn't exist on remote Ray
+    # workers. Stock python on remote workers is ABI-incompatible with the
+    # venv's compiled extensions. Fix: mirror the uv-installed python (which
+    # ships relocatable python-build-standalone binaries) to a path Ray
+    # workers can reach, and hand that to runtime_env as py_executable.
+    # One-time copy on first invocation; subsequent calls are a no-op.
     venv_python = Path(sys.executable).resolve()
     if not venv_python.exists():
         raise RuntimeError(
@@ -352,38 +185,52 @@ def _build_comet_actor_class():
     uv_python_root = venv_python.parent.parent
 
     cache_root = Path(os.environ.get("WMT_TRANSLATION_COMET_PY_CACHE", "/opt/Gym/.cache/comet-python"))
-    lustre_python_root = cache_root / uv_python_root.name
-    lustre_python_bin = lustre_python_root / "bin" / venv_python.name
-    if not lustre_python_bin.exists():
+    mirrored_python_root = cache_root / uv_python_root.name
+    mirrored_python_bin = mirrored_python_root / "bin" / venv_python.name
+    if not mirrored_python_bin.exists():
         LOG.info(
             "Mirroring uv Python install %s -> %s for cross-node Ray tasks",
             uv_python_root,
-            lustre_python_root,
+            mirrored_python_root,
         )
-        lustre_python_root.parent.mkdir(parents=True, exist_ok=True)
-        tmp = lustre_python_root.with_suffix(".tmp")
+        mirrored_python_root.parent.mkdir(parents=True, exist_ok=True)
+        # copytree refuses to overwrite, so use a two-stage atomic rename
+        # via a .tmp dir to avoid half-populated caches if interrupted.
+        tmp = mirrored_python_root.with_suffix(".tmp")
         if tmp.exists():
             shutil.rmtree(tmp)
         shutil.copytree(uv_python_root, tmp, symlinks=True)
-        tmp.rename(lustre_python_root)
+        tmp.rename(mirrored_python_root)
 
     venv_dir = Path(sys.executable).parent.parent
     site_packages = venv_dir / "lib" / "python3.12" / "site-packages"
 
     env_vars = {
+        # COMET's xlm-roberta-xxl tokenizer resolver needs HF online (returns
+        # None and throws OSError "Not found: None" in offline mode even with
+        # cached weights). Override the parent process's offline flags here.
         "HF_HUB_OFFLINE": "0",
         "TRANSFORMERS_OFFLINE": "0",
+        # Keep CUDA_VISIBLE_DEVICES untouched: when an extra node joins Ray
+        # with --num-gpus=0 to hide GPUs from accounting, Ray would zero out
+        # CUDA_VISIBLE_DEVICES on the actor. We need physical GPUs visible.
         "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
+        # Site-packages (comet, torch, …) is on the shared filesystem; merge
+        # with whatever PYTHONPATH the inherited env has.
         "PYTHONPATH": f"{site_packages}:{os.environ.get('PYTHONPATH', '')}",
     }
     for k in ("HF_HOME", "HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"):
         if os.environ.get(k):
             env_vars[k] = os.environ[k]
 
+    # Schedule on the dedicated COMET node via the custom `extra_gpu` Ray
+    # resource. num_gpus=0 because the node hides its GPUs from Ray accounting
+    # (advertising them under `extra_gpu` instead); the env_vars flag above
+    # preserves physical CUDA_VISIBLE_DEVICES so torch can see them.
     @ray.remote(
         num_gpus=0,
         resources={"extra_gpu": 1},
-        runtime_env={"py_executable": str(lustre_python_bin), "env_vars": env_vars},
+        runtime_env={"py_executable": str(mirrored_python_bin), "env_vars": env_vars},
     )
     class _CometActor:  # pragma: no cover - needs live Ray cluster + CUDA + unbabel-comet checkpoint
         def __init__(self, gpu_idx: int, model_name: str):
@@ -400,23 +247,23 @@ def _build_comet_actor_class():
             num_devices = torch.cuda.device_count()
             assert num_devices > 0, "No CUDA devices visible to the actor."
             self._gpu_idx = gpu_idx
+            # Pin this actor to a specific GPU. Without this every actor
+            # defaults to cuda:0 and OOMs (8 × 10B-param xCOMET would need
+            # ~320 GB on the first GPU alone).
             self._device = f"cuda:{gpu_idx % num_devices}"
             self._lightning_devices = [gpu_idx % num_devices]
 
-            # Stagger actor model loads to soften the HF 429 burst when N
-            # actors all wake up at once. xCOMET-XXL pulls xlm-roberta-xxl
-            # tokenizer metadata (model_info call inside is_base_mistral)
-            # which the HF API rate-limits aggressively when 8-16 concurrent
-            # requests arrive from the same egress IP.
+            # Stagger actor loads so N concurrent xCOMET cold-loads don't
+            # thundering-herd HF Hub. xCOMET-XXL's tokenizer init calls
+            # model_info on facebook/xlm-roberta-xxl, which HF rate-limits.
             time.sleep(gpu_idx * 2.0)
 
             LOG.info("CometActor[%d]: loading %s on %s", gpu_idx, model_name, self._device)
             ckpt_path = download_model(model_name)
 
-            # Retry load_from_checkpoint on transient HF 429s. Backoff with
-            # jitter avoids thundering-herd retries from N actors. Total
-            # worst-case wait across 6 attempts is ~63s + jitter, well under
-            # the 300s actor-pool readiness budget in _ensure_comet_actors.
+            # Retry load_from_checkpoint on transient HF 429s with
+            # exponential backoff + jitter. Worst-case across 6 attempts is
+            # ~63s, well under the actor-pool readiness budget.
             last_exc: Optional[BaseException] = None
             for attempt in range(6):
                 try:
@@ -461,14 +308,13 @@ def _build_comet_actor_class():
 class WmtTranslationResourcesServer(SimpleResourcesServer):
     config: WmtTranslationResourcesServerConfig
 
-    # Streaming COMET state — populated lazily on first verify() call so
+    # COMET actor pool state — populated lazily on first verify() call so
     # actor creation happens after Ray is fully up and `extra_gpu` is
     # advertised. Pydantic PrivateAttr keeps these out of the config schema.
     _comet_actors: List[Any] = PrivateAttr(default_factory=list)
     _comet_state_lock: Any = PrivateAttr(default=None)
     _comet_actor_idx: int = PrivateAttr(default=0)
     _comet_init_attempted: bool = PrivateAttr(default=False)
-    _comet_init_failed: bool = PrivateAttr(default=False)
 
     def setup_webserver(self) -> FastAPI:
         return super().setup_webserver()
@@ -476,15 +322,10 @@ class WmtTranslationResourcesServer(SimpleResourcesServer):
     def _ensure_comet_actors(self) -> None:
         """Initialize the persistent COMET actor pool on first use.
 
-        Lazy on purpose: the resources server starts before the vLLM-side
-        Ray cluster is fully up (head + workers join asynchronously). Doing
-        actor creation at server startup races the Ray cluster bring-up. By
-        deferring to the first verify() call, we guarantee the cluster is
-        healthy and `extra_gpu` is advertised when we ask for actors.
-
-        On failure, set ``_comet_init_failed`` so subsequent verify() calls
-        skip the streaming dispatch (compute_metrics still falls back to the
-        legacy batch path with the same graceful BLEU-only behavior).
+        Lazy on purpose: the resources server may start before the Ray
+        cluster has fully stood up (head + workers join asynchronously).
+        Deferring actor creation to the first verify() call guarantees the
+        cluster is healthy when we ask for actors.
         """
         if self._comet_init_attempted:
             return
@@ -493,64 +334,49 @@ class WmtTranslationResourcesServer(SimpleResourcesServer):
         if self._comet_state_lock is None:
             self._comet_state_lock = threading.Lock()
 
-        try:
-            actor_class = _build_comet_actor_class()
-            n = max(1, self.config.comet_num_shards)
-            actors = [actor_class.remote(gpu_idx=i, model_name=self.config.comet_model) for i in range(n)]
-            # Block briefly for actor readiness — surfaces "no extra_gpu",
-            # "comet checkpoint missing", "cuda init failed" etc as a clear
-            # failure here instead of hanging until end-of-batch. Generous
-            # timeout because xCOMET-XXL load takes ~60s cold; large fraction
-            # of that budget is consumed by HF 429 retry backoff.
-            pings = [a.ping.remote() for a in actors]
-            ready, not_ready = ray.wait(
-                pings,
-                num_returns=n,
-                timeout=300.0,
+        actor_class = _build_comet_actor_class()
+        n = max(1, self.config.comet_num_shards)
+        actors = [actor_class.remote(gpu_idx=i, model_name=self.config.comet_model) for i in range(n)]
+        # Block for actor readiness so init failures surface here instead
+        # of stalling verify(). xCOMET-XXL cold-load takes ~60s; large fraction
+        # of the budget is consumed by HF 429 retry backoff.
+        pings = [a.ping.remote() for a in actors]
+        ready, _not_ready = ray.wait(pings, num_returns=n, timeout=300.0)
+        # Tolerate partial failure: if some actors exhaust their HF 429 retry
+        # budget while others succeed, drop the dead ones and run with the
+        # survivors. A reduced pool just scores more slowly.
+        ready_actors: List[Any] = []
+        for actor, fut in zip(actors, pings):
+            if fut not in ready:
+                continue
+            try:
+                ray.get(fut)
+                ready_actors.append(actor)
+            except Exception:
+                LOG.exception("CometActor failed init, dropping from pool")
+        if not ready_actors:
+            raise RuntimeError(
+                f"0/{n} CometActors ready after 300s — check Ray cluster has extra_gpu "
+                f"nodes available and HF Hub is reachable."
             )
-            # Tolerate partial failure: if some actors burn all their HF 429
-            # retries while others succeed, drop the failed ones and run with
-            # the survivors. Pool pessimization is just slower scoring, not
-            # a fatal abort. Require at least 1 surviving actor — otherwise
-            # fall back to the batch path.
-            ready_actors: List[Any] = []
-            for actor, fut in zip(actors, pings):
-                if fut not in ready:
-                    continue
-                try:
-                    ray.get(fut)
-                    ready_actors.append(actor)
-                except Exception:  # actor died during init (e.g. exhausted retries)
-                    LOG.exception("CometActor failed init, dropping from pool")
-            if not ready_actors:
-                raise RuntimeError(
-                    f"0/{n} CometActors ready after 300s — check Ray cluster has extra_gpu "
-                    f"nodes available and HF Hub is reachable."
-                )
-            self._comet_actors = ready_actors
-            if len(ready_actors) < n:
-                LOG.warning(
-                    "Streaming COMET: %d/%d actors ready (%d failed init); running with reduced pool",
-                    len(ready_actors),
-                    n,
-                    n - len(ready_actors),
-                )
-            else:
-                LOG.info("Streaming COMET: %d persistent actors ready on extra_gpu node", n)
-        except Exception as e:
-            LOG.exception("Streaming COMET init failed; falling back to batch dispatch: %s", e)
-            self._comet_init_failed = True
-            self._comet_actors = []
+        self._comet_actors = ready_actors
+        if len(ready_actors) < n:
+            LOG.warning(
+                "COMET pool: %d/%d actors ready (%d failed init); running with reduced pool",
+                len(ready_actors),
+                n,
+                n - len(ready_actors),
+            )
+        else:
+            LOG.info("COMET pool: %d actors ready", n)
 
     def _dispatch_comet_score(self, src_text: str, generation: str, reference: str) -> Optional[Any]:
         """Fire a per-rollout COMET score on the actor pool, return Ray future.
 
-        Returns the Ray ObjectRef so verify() can ``await`` it directly and
-        embed the score in the per-row response. Round-robins across the
-        actor pool under a small lock. Returns ``None`` if the pool is
-        unavailable (init failed, comet disabled), in which case verify()
-        will return ``comet_score=None`` and compute_metrics() will fall
-        back to the end-of-batch dispatch path.
+        Round-robins across the actor pool under a small lock; returns the
+        Ray ObjectRef so verify() can ``await`` it directly. Returns
+        ``None`` if the pool is unavailable, in which case verify() leaves
+        ``comet_score=None`` on that row.
         """
         if not self._comet_actors:
             return None
@@ -566,25 +392,20 @@ class WmtTranslationResourcesServer(SimpleResourcesServer):
     async def verify(self, body: WmtTranslationVerifyRequest) -> WmtTranslationVerifyResponse:
         """Return per-sample sentence-BLEU as the RL reward + per-row COMET.
 
-        The authoritative corpus-BLEU (+ corpus COMET) still lives in
-        ``compute_metrics`` and is what parity comparisons to Skills use.
-        This method *also* dispatches a per-rollout COMET score on the
-        persistent actor pool and ``await``s the future before returning,
-        so each row in rollouts.jsonl carries its own ``comet_score``.
-
-        Interleaving is preserved: ``num_samples_in_parallel`` verify()
-        coroutines all dispatch to the same N-actor pool concurrently, and
-        each ``await`` yields control back to the event loop while its
-        actor processes the triple. End-to-end throughput is bounded by
-        the pool's parallel scoring rate, not by the per-row await.
+        Dispatches a per-rollout COMET score on the persistent actor pool
+        and awaits the future before returning, so each row in
+        rollouts.jsonl carries its own ``comet_score``. Concurrent verify()
+        coroutines all dispatch into the same pool; each await yields
+        control while its actor processes the triple, so end-to-end
+        throughput is bounded by the pool's parallel scoring rate, not by
+        the per-row await.
         """
         if self.config.compute_comet:
             self._ensure_comet_actors()
 
         raw = body.response.output_text or ""
-        # Match Skills' parse_reasoning=True: drop the reasoning preamble
-        # before scoring so BLEU is computed against the actual translation
-        # only. Without this, reasoning models tank BLEU by ~3x.
+        # Drop the reasoning preamble before scoring so BLEU is computed
+        # against the actual translation only.
         if self.config.strip_reasoning:
             raw = _strip_reasoning_preamble(raw)
         generation = raw.strip()
@@ -625,26 +446,20 @@ class WmtTranslationResourcesServer(SimpleResourcesServer):
             comet_score=comet_score,
         )
 
-    # --- COMET aggregation (per-row + batch fallback) ------------------------
+    # --- COMET aggregation ----------------------------------------------------
 
     def _collect_per_row_comet(
         self,
         tasks: List[List[Dict[str, Any]]],
         max_k: int,
         comet_per_pair: Dict[Tuple[str, str], List[List[float]]],
-    ) -> bool:
+    ) -> None:
         """Read per-row ``comet_score`` from rollout dicts and bucket by pair/k.
 
         verify() awaits its COMET future and stores the resolved score on
         each rollout response, so by the time compute_metrics() runs, the
         scores are already in ``tasks``. This method just buckets them.
-
-        Returns True if any rollout carried a non-None comet_score (caller
-        skips the batch fallback). Returns False if no per-row scores are
-        present, signaling that the actor pool was unavailable during the
-        rollout phase and the batch path should run.
         """
-        found_any = False
         for task_rollouts in tasks:
             for k, rollout in enumerate(task_rollouts):
                 if k >= max_k:
@@ -657,58 +472,13 @@ class WmtTranslationResourcesServer(SimpleResourcesServer):
                 if not src or not tgt:
                     continue
                 comet_per_pair[(src, tgt)][k].append(float(score))
-                found_any = True
-        return found_any
-
-    def _dispatch_batch_comet(
-        self,
-        comet_triples: List[Tuple[str, str, str]],
-        comet_slots: List[Tuple[Tuple[str, str], int]],
-        comet_per_pair: Dict[Tuple[str, str], List[List[float]]],
-    ) -> None:
-        """End-of-batch COMET dispatch — fallback path when streaming is unavailable.
-
-        Same logic as the original implementation: shard triples across
-        ``comet_num_shards`` parallel Ray tasks each on one extra_gpu. Cold-
-        loads xCOMET-XXL per call (no persistent actors).
-        """
-        try:
-            num_shards = max(1, min(self.config.comet_num_shards, len(comet_triples)))
-            shards: List[List[Tuple[str, str, str]]] = [[] for _ in range(num_shards)]
-            for i, t in enumerate(comet_triples):
-                shards[i * num_shards // len(comet_triples)].append(t)
-            shards = [s for s in shards if s]
-
-            remote_fn = _build_comet_remote()
-            LOG.info(
-                "Batch COMET: dispatching %d triples across %d parallel Ray tasks "
-                "on extra_gpu nodes (batch=%d, model=%s)",
-                len(comet_triples),
-                len(shards),
-                self.config.comet_batch_size,
-                self.config.comet_model,
-            )
-            futures = [
-                remote_fn.remote(shard, self.config.comet_model, self.config.comet_batch_size, gpu_idx=i)
-                for i, shard in enumerate(shards)
-            ]
-            shard_results: List[List[float]] = ray.get(futures)
-            scores: List[float] = [s for chunk in shard_results for s in chunk]
-            assert len(scores) == len(comet_slots), (
-                f"COMET scores ({len(scores)}) != slots ({len(comet_slots)}) — sharding bug"
-            )
-            for score, (pair_key, k) in zip(scores, comet_slots):
-                comet_per_pair[pair_key][k].append(score)
-        except Exception as e:
-            LOG.exception("Batch COMET scoring failed, continuing with BLEU only: %s", e)
-            comet_per_pair.clear()
 
     # --- Aggregate metrics ---------------------------------------------------
 
     def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
-        """Compute Skills-equivalent corpus BLEU + (optional) COMET metrics.
+        """Compute corpus BLEU + (optional) COMET metrics.
 
-        Output keys mirror Skills' ``metrics.json`` for wmt24pp:
+        Output keys:
 
           <src>-><tgt>/bleu                 (mean across rollouts)
           <src>-><tgt>/bleu_std_dev_across_runs
@@ -720,31 +490,17 @@ class WmtTranslationResourcesServer(SimpleResourcesServer):
         if not tasks:
             return {}
 
-        # 1. Bucket rollouts by (src, tgt) and by rollout index within task.
-        #    Skills computes per-seed corpus_bleu, then averages; we replicate
-        #    by treating rollout index == seed index.
-        #
-        #    Use the MIN rollouts-per-task as the bucket count, not the max.
-        #    Gym's rollout collector occasionally retries a failed rollout,
-        #    producing a handful of tasks with extra positions (5-12) that
-        #    skew corpus BLEU hard: e.g. a size-1 bucket with a single
-        #    mismatched pred-ref pair scores 0.0 and drags the cross-run mean
-        #    down by 3×. Capping at the min keeps every bucket comparably
-        #    sized (one fully-covered sample per task).
+        # 1. Bucket rollouts by (src, tgt) × rollout index. Use the MIN
+        # rollouts-per-task as the bucket count so every bucket is
+        # comparably sized (one fully-covered sample per task).
         rollout_counts = [len(r) for r in tasks]
         max_k = min(rollout_counts) if rollout_counts else 0
 
-        # per_pair_runs[(src, tgt)][k] = list of (mt, ref) across all tasks
-        #                                for rollout index k
         per_pair_runs: Dict[Tuple[str, str], List[List[Tuple[str, str]]]] = defaultdict(
             lambda: [list() for _ in range(max_k)]
         )
-        # Flat triples for COMET (src_text, mt, ref) -> per-pair-per-rollout
-        # mapping so we can reassemble COMET scores after Ray returns.
-        comet_triples: List[Tuple[str, str, str]] = []
-        # comet_slots[i] = (pair_key, rollout_index) — aligned with comet_triples
-        comet_slots: List[Tuple[Tuple[str, str], int]] = []
 
+        any_comet_rows = False
         for task_rollouts in tasks:
             for k, rollout in enumerate(task_rollouts):
                 if k >= max_k:
@@ -755,11 +511,9 @@ class WmtTranslationResourcesServer(SimpleResourcesServer):
                     continue
                 ref = rollout.get("translation") or ""
                 mt = rollout.get("generation") or ""
-                src_text = rollout.get("text") or ""
                 per_pair_runs[(src, tgt)][k].append((mt, ref))
-                if self.config.compute_comet:
-                    comet_triples.append((src_text, mt, ref))
-                    comet_slots.append(((src, tgt), k))
+                if self.config.compute_comet and rollout.get("comet_score") is not None:
+                    any_comet_rows = True
 
         # 2. Per-(src, tgt) corpus BLEU per rollout.
         bleu_per_pair: Dict[Tuple[str, str], List[float]] = {}
@@ -774,32 +528,13 @@ class WmtTranslationResourcesServer(SimpleResourcesServer):
                 per_run.append(corpus_bleu(preds, [refs], tokenize=tokenize).score)
             bleu_per_pair[(src, tgt)] = per_run
 
-        # 3. COMET scoring. Two paths:
-        #    (a) Per-row scores (preferred): verify() awaited each rollout's
-        #        COMET future on the persistent actor pool and stored the
-        #        resolved score on the rollout response. Just bucket those
-        #        per-row scores by (pair, rollout-index) here. Wins: scores
-        #        survive in rollouts.jsonl for downstream analysis, no
-        #        end-of-batch GPU burst, all 8 extra_gpu GPUs working during
-        #        the rollout phase instead of idle-then-burst.
-        #    (b) Batch fallback: if the actor pool failed to init (Ray
-        #        cluster wasn't ready, extra_gpu unavailable, ...), no
-        #        rollout will have comet_score set. Run the end-of-batch
-        #        _build_comet_remote() path so the aggregate metrics still
-        #        come out (per-row scores will remain None on disk).
+        # 3. COMET aggregation: bucket the per-row comet_score values that
+        # verify() already populated.
         comet_per_pair: Dict[Tuple[str, str], List[List[float]]] = defaultdict(lambda: [list() for _ in range(max_k)])
-        if self.config.compute_comet and comet_triples:
-            collected = self._collect_per_row_comet(tasks=tasks, max_k=max_k, comet_per_pair=comet_per_pair)
-            if not collected:
-                self._dispatch_batch_comet(
-                    comet_triples=comet_triples,
-                    comet_slots=comet_slots,
-                    comet_per_pair=comet_per_pair,
-                )
+        if self.config.compute_comet and any_comet_rows:
+            self._collect_per_row_comet(tasks=tasks, max_k=max_k, comet_per_pair=comet_per_pair)
 
-        # Convert COMET per-rollout buckets into mean comet per (pair, rollout).
-        # (Skills averages per-sample comet scores per seed, then averages across
-        # seeds; we replicate.)
+        # Per-rollout-index mean COMET per (pair, k), then averaged across k.
         comet_mean_per_pair: Dict[Tuple[str, str], List[float]] = {}
         for pair_key, per_run in comet_per_pair.items():
             means = []
@@ -808,7 +543,7 @@ class WmtTranslationResourcesServer(SimpleResourcesServer):
                     means.append(100.0 * sum(run_scores) / len(run_scores))
             comet_mean_per_pair[pair_key] = means
 
-        # 4. Build output dict with Skills-style keys + aggregations.
+        # 4. Build output dict with per-pair + cross-pair aggregations.
         metrics: Dict[str, Any] = {}
         all_pairs = sorted(per_pair_runs.keys())
 
@@ -819,7 +554,7 @@ class WmtTranslationResourcesServer(SimpleResourcesServer):
             mean = sum(values) / n
             if n < 2:
                 return (mean, 0.0)
-            var = sum((v - mean) ** 2 for v in values) / n  # population std, matches Skills np.std default
+            var = sum((v - mean) ** 2 for v in values) / n  # population std
             return (mean, var**0.5)
 
         # Per-pair
@@ -837,9 +572,9 @@ class WmtTranslationResourcesServer(SimpleResourcesServer):
                     metrics[f"{pair_label}/comet"] = cm
                     metrics[f"{pair_label}/comet_std_dev_across_runs"] = cs
 
-        # Aggregations: xx->xx, <src>->xx, xx->{tgt}. Skills averages per-run
-        # BLEU across the contributing pairs (per-run mean of per-pair BLEU),
-        # then averages across runs.
+        # Aggregations: xx->xx, <src>->xx, xx->{tgt}. For each, average per-run
+        # BLEU across the contributing pairs first (per-run mean of per-pair
+        # BLEU), then average across runs.
         def _aggregate(pair_filter) -> Dict[str, List[float]]:
             """Return per-run aggregated BLEU/COMET across filtered pairs."""
             filtered_pairs = [p for p in all_pairs if pair_filter(p)]

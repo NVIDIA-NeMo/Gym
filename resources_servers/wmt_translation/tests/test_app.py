@@ -21,7 +21,7 @@ from app import (
     WmtTranslationResourcesServer,
     WmtTranslationResourcesServerConfig,
     WmtTranslationVerifyRequest,
-    _build_comet_remote,
+    _build_comet_actor_class,
     _strip_reasoning_preamble,
     _tokenizer_for,
 )
@@ -54,9 +54,9 @@ def _make_response(text: str) -> NeMoGymResponse:
 def _make_server(
     compute_comet: bool = False, strip_reasoning: bool = False, comet_num_shards: int = 8
 ) -> WmtTranslationResourcesServer:
-    # Tests default strip_reasoning=False so plain-text generations in existing
-    # verify() tests score against the reference. The server default is True to
-    # match Skills' parse_reasoning=True on reasoning-model outputs.
+    # Tests default strip_reasoning=False so plain-text generations score
+    # against the reference directly. Production default is True (drops the
+    # <think>...</think> preamble) for reasoning-model outputs.
     config = WmtTranslationResourcesServerConfig(
         host="0.0.0.0",
         port=8080,
@@ -103,7 +103,6 @@ class TestStripReasoningPreamble:
 
     def test_empty_when_truncated_mid_reasoning(self) -> None:
         # <think> opened but never closed → truncated reasoning, count as no-answer.
-        # Matches Skills parse_reasoning=True on truncated rollouts.
         assert _strip_reasoning_preamble("<think>unfinished reasoning...") == ""
 
     def test_returns_text_unchanged_when_no_reasoning_tags(self) -> None:
@@ -173,9 +172,8 @@ class TestVerify:
         assert result.reward < 0.1
 
     async def test_strip_reasoning_recovers_score(self) -> None:
-        """With strip_reasoning=True, the model's English reasoning preamble
-        must not contaminate the scored generation. This is the bug that
-        tanked initial Gym BLEU 3x vs Skills."""
+        """With strip_reasoning=True, a reasoning preamble must not
+        contaminate the scored generation."""
         server = _make_server(strip_reasoning=True)
         ref = "Der schnelle braune Fuchs springt \u00fcber den faulen Hund."
         reasoning_preamble = (
@@ -194,7 +192,7 @@ class TestVerify:
         assert result.sentence_bleu > 50.0
 
     async def test_strip_reasoning_empty_when_truncated_mid_reasoning(self) -> None:
-        """Match Skills: if <think> opens but never closes, verify() emits no generation."""
+        """If <think> opens but never closes, verify() emits no generation."""
         server = _make_server(strip_reasoning=True)
         request = _make_request(
             text="Hello.",
@@ -336,120 +334,13 @@ class TestComputeMetrics:
         key = server.get_key_metrics(agent)
         assert set(key.keys()) == {"xx->xx/bleu", "xx->xx/comet", "en->xx/bleu", "en->xx/comet"}
 
-    def test_comet_failure_falls_back_to_bleu_only(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """If the Ray COMET path raises, we still get BLEU metrics and no /comet keys."""
-        import app as app_module
-
-        def _broken_remote_builder():
-            class _Broken:
-                def remote(self, *args, **kwargs):
-                    raise RuntimeError("simulated ray failure")
-
-            return _Broken()
-
-        monkeypatch.setattr(app_module, "_build_comet_remote", _broken_remote_builder)
-
-        server = _make_server(compute_comet=True)
-        tasks = [
-            [
-                {
-                    "text": "The quick brown fox jumps over the lazy dog in the beautiful garden.",
-                    "translation": "Der schnelle braune Fuchs springt \u00fcber den faulen Hund im sch\u00f6nen Garten.",
-                    "generation": "Der schnelle braune Fuchs springt \u00fcber den faulen Hund im sch\u00f6nen Garten.",
-                    "source_language": "en",
-                    "target_language": "de_DE",
-                }
-            ]
-        ]
-        m = server.compute_metrics(tasks)
-        assert "en->de_DE/bleu" in m
-        assert not any(k.endswith("/comet") for k in m)
-
-    def test_comet_success_emits_per_pair_and_aggregate_comet(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Patch _build_comet_remote + ray.get so compute_metrics exercises the
-        full COMET success path without needing a real Ray cluster or GPUs."""
-        import app as app_module
-
-        captured_calls: list[dict] = []
-
-        def _fake_builder():
-            class _Fake:
-                def remote(self_inner, triples, model_name, batch_size, gpu_idx=0):
-                    captured_calls.append(
-                        {
-                            "triples": list(triples),
-                            "model_name": model_name,
-                            "batch_size": batch_size,
-                            "gpu_idx": gpu_idx,
-                        }
-                    )
-                    # The future is just the list of per-triple scores (0..1 scale).
-                    return [0.9] * len(triples)
-
-            return _Fake()
-
-        # ray.get on a "future" here is identity \u2014 fake_builder.remote already
-        # returned the final list rather than an ObjectRef.
-        monkeypatch.setattr(app_module, "_build_comet_remote", _fake_builder)
-        monkeypatch.setattr(app_module.ray, "get", lambda futures: list(futures))
-
-        server = _make_server(compute_comet=True, comet_num_shards=2)
-        de_ref = "Der schnelle braune Fuchs springt \u00fcber den faulen Hund im sch\u00f6nen Garten."
-        fr_ref = "Le renard brun rapide saute par dessus le chien paresseux dans le beau jardin."
-        tasks = [
-            [
-                {
-                    "text": "T1",
-                    "translation": de_ref,
-                    "generation": de_ref,
-                    "source_language": "en",
-                    "target_language": "de_DE",
-                },
-            ],
-            [
-                {
-                    "text": "T2",
-                    "translation": fr_ref,
-                    "generation": fr_ref,
-                    "source_language": "en",
-                    "target_language": "fr_FR",
-                },
-            ],
-        ]
-        m = server.compute_metrics(tasks)
-
-        # Per-pair COMET keys (mean of per-triple scores \u00d7 100).
-        assert m["en->de_DE/comet"] == pytest.approx(90.0)
-        assert m["en->fr_FR/comet"] == pytest.approx(90.0)
-        # Aggregate COMET keys exist and match.
-        assert m["xx->xx/comet"] == pytest.approx(90.0)
-        assert m["en->xx/comet"] == pytest.approx(90.0)
-        assert m["xx->de_DE/comet"] == pytest.approx(90.0)
-        assert m["xx->fr_FR/comet"] == pytest.approx(90.0)
-        # Sharding was exercised: 2 triples, num_shards=2 \u2192 2 shard calls,
-        # each with 1 triple, distinct gpu_idx.
-        assert len(captured_calls) == 2
-        assert {c["gpu_idx"] for c in captured_calls} == {0, 1}
-        # Each shard carries the configured model + batch size.
-        assert all(c["model_name"] == "Unbabel/XCOMET-XXL" for c in captured_calls)
-        assert all(c["batch_size"] == server.config.comet_batch_size for c in captured_calls)
-
-    def test_per_row_comet_scores_skip_batch_dispatch(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """When rollouts already carry comet_score (from verify()'s actor pool
-        await), compute_metrics buckets those values directly and never calls
-        the end-of-batch _build_comet_remote path."""
-        import app as app_module
-
-        called = {"n": 0}
-
-        def _should_not_be_called():
-            called["n"] += 1
-            raise AssertionError("batch dispatch must not run when per-row scores exist")
-
-        monkeypatch.setattr(app_module, "_build_comet_remote", _should_not_be_called)
-
+    def test_per_row_comet_scores_emit_aggregate_metrics(self) -> None:
+        """When rollouts carry comet_score (from verify()'s actor pool await),
+        compute_metrics buckets those values directly into per-pair and
+        cross-pair aggregates."""
         server = _make_server(compute_comet=True)
         de_ref = "Der schnelle braune Fuchs springt über den faulen Hund im schönen Garten."
+        fr_ref = "Le renard brun rapide saute par dessus le chien paresseux dans le beau jardin."
         tasks = [
             [
                 {
@@ -471,20 +362,57 @@ class TestComputeMetrics:
                     "comet_score": 0.95,
                 },
             ],
+            [
+                {
+                    "text": "T3",
+                    "translation": fr_ref,
+                    "generation": fr_ref,
+                    "source_language": "en",
+                    "target_language": "fr_FR",
+                    "comet_score": 0.90,
+                },
+            ],
         ]
         m = server.compute_metrics(tasks)
-        # Mean of (0.85, 0.95) × 100 = 90.0, batch path never invoked.
-        assert called["n"] == 0
+        # Per-pair: en->de_DE = mean(0.85, 0.95) × 100 = 90.0
+        # Per-pair: en->fr_FR = 0.90 × 100 = 90.0
         assert m["en->de_DE/comet"] == pytest.approx(90.0)
+        assert m["en->fr_FR/comet"] == pytest.approx(90.0)
+        # Cross-pair aggregations.
+        assert m["xx->xx/comet"] == pytest.approx(90.0)
+        assert m["en->xx/comet"] == pytest.approx(90.0)
+        assert m["xx->de_DE/comet"] == pytest.approx(90.0)
+        assert m["xx->fr_FR/comet"] == pytest.approx(90.0)
+
+    def test_no_comet_rows_emits_bleu_only(self) -> None:
+        """Rollouts without comet_score (compute_comet disabled mid-run, or
+        actor pool unavailable) yield BLEU metrics with no /comet keys."""
+        server = _make_server(compute_comet=True)
+        tasks = [
+            [
+                {
+                    "text": "The quick brown fox jumps over the lazy dog in the beautiful garden.",
+                    "translation": "Der schnelle braune Fuchs springt über den faulen Hund im schönen Garten.",
+                    "generation": "Der schnelle braune Fuchs springt über den faulen Hund im schönen Garten.",
+                    "source_language": "en",
+                    "target_language": "de_DE",
+                    # No comet_score field → simulates pool unavailable.
+                }
+            ]
+        ]
+        m = server.compute_metrics(tasks)
+        assert "en->de_DE/bleu" in m
+        assert not any(k.endswith("/comet") for k in m)
 
 
-class TestBuildCometRemote:
-    """Unit tests for _build_comet_remote() \u2014 the pre-dispatch setup logic.
+class TestBuildCometActorClass:
+    """Unit tests for _build_comet_actor_class() — the pre-dispatch setup logic.
 
-    The inner @ray.remote closure requires a live Ray cluster + GPUs + unbabel-comet
-    (a gated ~10B checkpoint), so we can't invoke the closure itself in unit tests.
-    What we *can* cover is the code that builds it: venv Python resolution,
-    cross-node Lustre mirror, env_vars propagation, and ray.remote decoration args.
+    The inner @ray.remote actor class requires a live Ray cluster + GPUs +
+    unbabel-comet (a gated ~10B checkpoint), so we can't construct the actor
+    itself in unit tests. What we *can* cover is the code that builds it:
+    venv Python resolution, cross-node Python mirror, env_vars propagation,
+    and ray.remote decoration args.
     """
 
     def _stub_ray_remote(self, captured: dict):
@@ -493,13 +421,13 @@ class TestBuildCometRemote:
         def _ray_remote(**decorator_kwargs):
             captured["decorator_kwargs"] = decorator_kwargs
 
-            def _decorate(fn):
+            def _decorate(cls_or_fn):
                 class _Decorated:
-                    _fn = fn
+                    _wrapped = cls_or_fn
 
                     @staticmethod
                     def remote(*args, **kwargs):
-                        raise AssertionError("closure must not execute in unit tests")
+                        raise AssertionError("actor must not instantiate in unit tests")
 
                 return _Decorated
 
@@ -521,17 +449,18 @@ class TestBuildCometRemote:
         return fake_python
 
     def test_propagates_hf_env_and_pins_py_executable(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        """_build_comet_remote must request ray.remote with an env_vars dict that
-        keeps HF online, preserves CUDA_VISIBLE_DEVICES, threads site-packages
-        onto PYTHONPATH, and pins py_executable to the Lustre-mirrored Python.
+        """_build_comet_actor_class must request ray.remote with an env_vars
+        dict that keeps HF online, preserves CUDA_VISIBLE_DEVICES, threads
+        site-packages onto PYTHONPATH, and pins py_executable to the
+        cross-node-mirrored Python.
         """
         import app as app_module
 
         fake_python = self._fake_venv(tmp_path)
-        lustre_root = tmp_path / "lustre_cache"
+        mirror_root = tmp_path / "mirror_cache"
 
         monkeypatch.setattr(sys, "executable", str(fake_python))
-        monkeypatch.setenv("WMT_TRANSLATION_COMET_PY_CACHE", str(lustre_root))
+        monkeypatch.setenv("WMT_TRANSLATION_COMET_PY_CACHE", str(mirror_root))
         monkeypatch.setenv("HF_TOKEN", "hf_test_token")
         monkeypatch.setenv("HF_HOME", "/tmp/hf_home")
         monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
@@ -540,7 +469,7 @@ class TestBuildCometRemote:
         captured = {}
         monkeypatch.setattr(app_module, "ray", MagicMock(remote=self._stub_ray_remote(captured)))
 
-        _build_comet_remote()
+        _build_comet_actor_class()
 
         kw = captured["decorator_kwargs"]
         assert kw["num_gpus"] == 0
@@ -557,30 +486,28 @@ class TestBuildCometRemote:
         assert "HUGGING_FACE_HUB_TOKEN" not in env  # unset vars don't leak
 
         py_exec = kw["runtime_env"]["py_executable"]
-        assert py_exec.startswith(str(lustre_root))
+        assert py_exec.startswith(str(mirror_root))
         assert py_exec.endswith("bin/python3.12")
         # Mirror was performed on first invocation.
-        assert (lustre_root / "cpython-3.12.12-linux-x86_64-gnu" / "bin" / "python3.12").exists()
+        assert (mirror_root / "cpython-3.12.12-linux-x86_64-gnu" / "bin" / "python3.12").exists()
 
-    def test_reuses_existing_lustre_mirror_without_recopy(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
+    def test_reuses_existing_mirror_without_recopy(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         """Second invocation must skip copytree when the mirror already exists."""
         import app as app_module
 
         fake_python = self._fake_venv(tmp_path)
-        lustre_root = tmp_path / "lustre_cache"
-        (lustre_root / "cpython-3.12.12-linux-x86_64-gnu" / "bin").mkdir(parents=True)
-        (lustre_root / "cpython-3.12.12-linux-x86_64-gnu" / "bin" / "python3.12").write_text("")
+        mirror_root = tmp_path / "mirror_cache"
+        (mirror_root / "cpython-3.12.12-linux-x86_64-gnu" / "bin").mkdir(parents=True)
+        (mirror_root / "cpython-3.12.12-linux-x86_64-gnu" / "bin" / "python3.12").write_text("")
 
         monkeypatch.setattr(sys, "executable", str(fake_python))
-        monkeypatch.setenv("WMT_TRANSLATION_COMET_PY_CACHE", str(lustre_root))
+        monkeypatch.setenv("WMT_TRANSLATION_COMET_PY_CACHE", str(mirror_root))
         monkeypatch.setattr(app_module, "ray", MagicMock(remote=self._stub_ray_remote({})))
 
         import shutil as shutil_mod
 
         with patch.object(shutil_mod, "copytree") as mock_copy:
-            _build_comet_remote()
+            _build_comet_actor_class()
             mock_copy.assert_not_called()
 
     def test_cleans_stale_tmp_before_copy(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -593,20 +520,20 @@ class TestBuildCometRemote:
         import app as app_module
 
         fake_python = self._fake_venv(tmp_path)
-        lustre_root = tmp_path / "lustre_cache"
-        stale_tmp = lustre_root / "cpython-3.12.tmp"
+        mirror_root = tmp_path / "mirror_cache"
+        stale_tmp = mirror_root / "cpython-3.12.tmp"
         stale_tmp.mkdir(parents=True)
         (stale_tmp / "leftover.txt").write_text("from prior run")
 
         monkeypatch.setattr(sys, "executable", str(fake_python))
-        monkeypatch.setenv("WMT_TRANSLATION_COMET_PY_CACHE", str(lustre_root))
+        monkeypatch.setenv("WMT_TRANSLATION_COMET_PY_CACHE", str(mirror_root))
         monkeypatch.setattr(app_module, "ray", MagicMock(remote=self._stub_ray_remote({})))
 
-        _build_comet_remote()
+        _build_comet_actor_class()
 
         # After the run, the .tmp dir is gone (rmtree'd + copytree'd + renamed).
         assert not stale_tmp.exists()
-        assert (lustre_root / "cpython-3.12.12-linux-x86_64-gnu" / "bin" / "python3.12").exists()
+        assert (mirror_root / "cpython-3.12.12-linux-x86_64-gnu" / "bin" / "python3.12").exists()
 
     def test_raises_if_sys_executable_missing(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         """Defensive: if sys.executable points at a vanished path, fail loudly."""
@@ -616,4 +543,4 @@ class TestBuildCometRemote:
         monkeypatch.setattr(app_module, "ray", MagicMock(remote=self._stub_ray_remote({})))
 
         with pytest.raises(RuntimeError, match="sys.executable doesn't exist"):
-            _build_comet_remote()
+            _build_comet_actor_class()
