@@ -1,9 +1,0 @@
-# Large evaluation artifacts — staged on cluster via recipe prep scripts.
-ioi24_benchmark.jsonl
-ioi24_ccc_benchmark.jsonl
-ioi24_metadata.json
-*train.jsonl
-*validation.jsonl
-*train_prepare.jsonl
-*validation_prepare.jsonl
-*example_prepare.jsonl

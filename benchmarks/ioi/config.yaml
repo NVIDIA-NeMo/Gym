@@ -1,27 +1,19 @@
-# IOI (International Olympiad in Informatics) benchmark.
-#
-# Layered on top of resources_servers/ioi — a thin subclass of
-# competitive_coding_challenges that adds IOI-specific aggregate metrics
-# (`ioi_total_score`, `per_problem_subtask_scores`) on top of CCC's inherited
-# verify path.
 config_paths:
-  - resources_servers/ioi/configs/ioi.yaml
+  - resources_servers/competitive_coding_challenges/configs/competitive_coding_challenges.yaml
 
-ioi_benchmark_resources_server:
-  _inherit_from: ioi_resources_server
+ioi_resources_server:
+  _inherit_from: competitive_coding_challenges_resources_server
   resources_servers:
-    ioi:
-      # Metadata lives under the benchmark so the server points inside the
-      # benchmark's own data dir (prepare.py emits both artifacts there).
+    competitive_coding_challenges:
       test_file: ${oc.env:CCC_TEST_FILE,benchmarks/ioi/data/ioi24_metadata.json}
       shared_dir: ${oc.env:SHARED_TEMP_DIR,/tmp}
 
-ioi_benchmark_simple_agent:
-  _inherit_from: ioi_simple_agent
+ioi_simple_agent:
+  _inherit_from: competitive_coding_challenges_simple_agent
   responses_api_agents:
     simple_agent:
       resources_server:
-        name: ioi_benchmark_resources_server
+        name: ioi_resources_server
       datasets:
         - name: ioi
           type: benchmark
