@@ -169,7 +169,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                     and (max_reset_count is None or reset_count < max_reset_count)
                 ):
                     reset_count += 1
-                    print(f"Step {step} hit {reset_count} reset(s) inside the tokenize flow")
+                    print(f"Step {step} hit {reset_count} reset(s) inside the tokenize flow at {prompt_tokens=}")
                     # record current context
                     if self.config.snap_dir:
                         self._save_snapshot(
@@ -231,7 +231,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 and (max_reset_count is None or reset_count < max_reset_count)
             ):
                 reset_count += 1
-                print(f"Step {step} hit {reset_count} reset(s) inside the model call flow")
+                print(f"Step {step} hit {reset_count} reset(s) inside the model call flow at {prompt_tokens=}")
                 # record current context
                 if self.config.snap_dir:
                     self._save_snapshot(
