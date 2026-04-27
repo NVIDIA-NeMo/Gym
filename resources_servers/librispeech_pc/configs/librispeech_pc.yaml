@@ -1,0 +1,24 @@
+librispeech_pc:
+  resources_servers:
+    librispeech_pc:
+      entrypoint: app.py
+      domain: other
+      description: ASR with punctuation and capitalization (LibriSpeech-PC)
+      value: Improve transcription quality with structural detail
+      verified: false
+librispeech_pc_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      max_steps: 1
+      resources_server:
+        type: resources_servers
+        name: librispeech_pc
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/librispeech_pc/data/example.jsonl
+        license: Creative Commons Attribution 4.0 International
