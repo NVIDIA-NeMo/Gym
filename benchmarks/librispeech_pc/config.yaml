@@ -1,15 +1,15 @@
 config_paths:
   - resources_servers/librispeech_pc/configs/librispeech_pc.yaml
 
-librispeech_pc_resources_server:
+librispeech_pc_bench_resources_server:
   _inherit_from: librispeech_pc
 
-librispeech_pc_simple_agent:
+librispeech_pc_bench_simple_agent:
   _inherit_from: librispeech_pc_simple_agent
   responses_api_agents:
     simple_agent:
       resources_server:
-        name: librispeech_pc_resources_server
+        name: librispeech_pc_bench_resources_server
       datasets:
       - name: librispeech_pc
         type: benchmark

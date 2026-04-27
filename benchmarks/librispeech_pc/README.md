@@ -39,7 +39,7 @@ ng_run "+config_paths=[$config_paths]"
 
 ```bash
 ng_collect_rollouts \
-    +agent_name=librispeech_pc_simple_agent \
+    +agent_name=librispeech_pc_bench_simple_agent \
     +input_jsonl_fpath=benchmarks/librispeech_pc/data/librispeech_pc_benchmark.jsonl \
     +output_jsonl_fpath=results/librispeech_pc_rollouts.jsonl \
     +num_repeats=4
