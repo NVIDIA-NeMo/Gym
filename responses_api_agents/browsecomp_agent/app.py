@@ -120,6 +120,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 new_body = new_body.model_dump(exclude={"metadata"}, exclude_none=True)
 
             time_taken_model_call -= time()
+            returned_valid_response = False
             for _ in range(self.config.max_run_retries):
                 model_response = await self.server_client.post(
                     server_name=self.config.model_server.name,
@@ -145,10 +146,16 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                     not model_response.incomplete_details
                     or model_response.incomplete_details.reason == "content_filter"
                 ) and (cleaned_output_text or any(o for o in model_response.output if o.type == "function_call")):
+                    returned_valid_response = True
                     break
 
                 missing_end_think_count += 1
                 print(f"A model call is missing the end think ({missing_end_think_count} for this sample)")
+
+            # If we retried all the way through and still didn't get a valid model call, break and return the response as is.
+            if not returned_valid_response:
+                break
+
             time_taken_model_call += time()
 
             output = model_response.output
