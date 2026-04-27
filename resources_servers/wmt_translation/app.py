@@ -42,7 +42,6 @@ from __future__ import annotations
 
 import logging
 import threading
-import uuid
 from collections import defaultdict
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -177,11 +176,12 @@ class WmtTranslationVerifyResponse(WmtTranslationVerifyRequest, BaseVerifyRespon
     # Per-sample sentence-BLEU, useful as a dense RL reward. Corpus-level
     # BLEU lives in compute_metrics() and is the parity target.
     sentence_bleu: float
-    # Streaming COMET key — when verify() dispatches a COMET score future to
-    # the persistent actor pool, this points at the server-side dict entry
-    # that compute_metrics() drains via ray.get. Optional so the response is
-    # backwards-compatible with rollouts collected before this hook landed.
-    comet_id: Optional[str] = None
+    # Per-rollout xCOMET-XXL score. Populated when compute_comet=True and the
+    # streaming actor pool is available; None otherwise (no actor pool, empty
+    # generation, or actor failure). Score range matches xCOMET output (0-1).
+    # Aggregate corpus COMET still lives in compute_metrics(); this field is
+    # the per-row signal that survives in rollouts.jsonl.
+    comet_score: Optional[float] = None
 
 
 # --- Ray COMET scoring --------------------------------------------------------
@@ -428,7 +428,6 @@ class WmtTranslationResourcesServer(SimpleResourcesServer):
     # actor creation happens after Ray is fully up and `extra_gpu` is
     # advertised. Pydantic PrivateAttr keeps these out of the config schema.
     _comet_actors: List[Any] = PrivateAttr(default_factory=list)
-    _comet_futures: Dict[str, Any] = PrivateAttr(default_factory=dict)
     _comet_state_lock: Any = PrivateAttr(default=None)
     _comet_actor_idx: int = PrivateAttr(default=0)
     _comet_init_attempted: bool = PrivateAttr(default=False)
@@ -483,37 +482,41 @@ class WmtTranslationResourcesServer(SimpleResourcesServer):
             self._comet_init_failed = True
             self._comet_actors = []
 
-    def _dispatch_comet_streaming(self, src_text: str, generation: str, reference: str) -> Optional[str]:
-        """Fire a per-rollout COMET score on the actor pool, return future ID.
+    def _dispatch_comet_score(self, src_text: str, generation: str, reference: str) -> Optional[Any]:
+        """Fire a per-rollout COMET score on the actor pool, return Ray future.
 
-        Returns ``None`` if streaming COMET is disabled or unavailable; the
-        rollout's response will simply not have a ``comet_id`` and
-        compute_metrics() will skip it (or fall back to batch path)."""
+        Returns the Ray ObjectRef so verify() can ``await`` it directly and
+        embed the score in the per-row response. Round-robins across the
+        actor pool under a small lock. Returns ``None`` if the pool is
+        unavailable (init failed, comet disabled), in which case verify()
+        will return ``comet_score=None`` and compute_metrics() will fall
+        back to the end-of-batch dispatch path.
+        """
         if not self._comet_actors:
             return None
         with self._comet_state_lock:
             actor = self._comet_actors[self._comet_actor_idx % len(self._comet_actors)]
             self._comet_actor_idx += 1
         try:
-            future = actor.score.remote([(src_text, generation, reference)], 1)
+            return actor.score.remote([(src_text, generation, reference)], 1)
         except Exception:
             LOG.exception("COMET actor.score.remote dispatch failed")
             return None
-        comet_id = uuid.uuid4().hex
-        with self._comet_state_lock:
-            self._comet_futures[comet_id] = future
-        return comet_id
 
     async def verify(self, body: WmtTranslationVerifyRequest) -> WmtTranslationVerifyResponse:
-        """Return per-sample sentence-BLEU as the RL reward.
+        """Return per-sample sentence-BLEU as the RL reward + per-row COMET.
 
-        The authoritative corpus-BLEU (+ optional COMET) lives in
+        The authoritative corpus-BLEU (+ corpus COMET) still lives in
         ``compute_metrics`` and is what parity comparisons to Skills use.
+        This method *also* dispatches a per-rollout COMET score on the
+        persistent actor pool and ``await``s the future before returning,
+        so each row in rollouts.jsonl carries its own ``comet_score``.
 
-        If streaming COMET is enabled, also fires a per-rollout COMET score
-        on the persistent actor pool and stashes the future server-side
-        keyed by ``comet_id``. compute_metrics() drains those futures
-        instead of doing a single end-of-batch dispatch.
+        Interleaving is preserved: ``num_samples_in_parallel`` verify()
+        coroutines all dispatch to the same N-actor pool concurrently, and
+        each ``await`` yields control back to the event loop while its
+        actor processes the triple. End-to-end throughput is bounded by
+        the pool's parallel scoring rate, not by the per-row await.
         """
         if self.config.compute_comet:
             self._ensure_comet_actors()
@@ -539,91 +542,63 @@ class WmtTranslationResourcesServer(SimpleResourcesServer):
         # Normalize to [0, 1] so the "reward" field stays conventional.
         reward = sent_score / 100.0
 
-        comet_id = self._dispatch_comet_streaming(
-            src_text=body.text or "",
-            generation=generation,
-            reference=body.translation or "",
-        )
+        comet_score: Optional[float] = None
+        if self.config.compute_comet:
+            comet_future = self._dispatch_comet_score(
+                src_text=body.text or "",
+                generation=generation,
+                reference=body.translation or "",
+            )
+            if comet_future is not None:
+                try:
+                    scores = await comet_future
+                    if scores:
+                        comet_score = float(scores[0])
+                except Exception:
+                    LOG.exception("COMET await failed for verify(); leaving comet_score=None")
 
         return WmtTranslationVerifyResponse(
             **body.model_dump(),
             reward=reward,
             generation=generation,
             sentence_bleu=sent_score,
-            comet_id=comet_id,
+            comet_score=comet_score,
         )
 
-    # --- COMET drainers (streaming + batch fallback) -------------------------
+    # --- COMET aggregation (per-row + batch fallback) ------------------------
 
-    def _drain_streaming_comet(
+    def _collect_per_row_comet(
         self,
         tasks: List[List[Dict[str, Any]]],
         max_k: int,
         comet_per_pair: Dict[Tuple[str, str], List[List[float]]],
     ) -> bool:
-        """Resolve COMET futures created by verify() and bucket scores by pair/k.
+        """Read per-row ``comet_score`` from rollout dicts and bucket by pair/k.
 
-        Returns True if streaming drain handled scoring (success OR the
-        graceful "no futures available" case where every rollout's
-        comet_id was empty and we should NOT fall back to batch dispatch),
-        False if we should fall back to the batch path.
+        verify() awaits its COMET future and stores the resolved score on
+        each rollout response, so by the time compute_metrics() runs, the
+        scores are already in ``tasks``. This method just buckets them.
+
+        Returns True if any rollout carried a non-None comet_score (caller
+        skips the batch fallback). Returns False if no per-row scores are
+        present, signaling that the actor pool was unavailable during the
+        rollout phase and the batch path should run.
         """
-        # Walk tasks, collecting (comet_id, pair_key, k) for rollouts that
-        # have a comet_id (i.e., verify() successfully dispatched).
-        slot_for_id: Dict[str, Tuple[Tuple[str, str], int]] = {}
+        found_any = False
         for task_rollouts in tasks:
             for k, rollout in enumerate(task_rollouts):
                 if k >= max_k:
                     break
-                cid = rollout.get("comet_id")
-                if not cid:
+                score = rollout.get("comet_score")
+                if score is None:
                     continue
                 src = rollout.get("source_language")
                 tgt = rollout.get("target_language")
                 if not src or not tgt:
                     continue
-                slot_for_id[cid] = ((src, tgt), k)
-
-        if not slot_for_id:
-            # No streaming dispatches happened (e.g., actors weren't ready
-            # during the rollout phase). Tell caller to use batch fallback.
-            return False
-
-        # Look up futures from server state. Some may have been popped
-        # already if compute_metrics is called more than once on the same
-        # server instance — that's fine, we only score what's still pending.
-        pending: List[Tuple[str, Any]] = []
-        with self._comet_state_lock:
-            for cid in slot_for_id:
-                fut = self._comet_futures.pop(cid, None)
-                if fut is not None:
-                    pending.append((cid, fut))
-
-        if not pending:
-            LOG.warning(
-                "Streaming COMET: %d rollouts had comet_id but no pending future "
-                "(already drained?). Falling back to batch dispatch.",
-                len(slot_for_id),
-            )
-            return False
-
-        LOG.info("Streaming COMET: draining %d futures from persistent actor pool", len(pending))
-        try:
-            # Each future returns a list of len-1 scores (one triple per
-            # actor.score call from verify()). Map back into per-pair buckets.
-            cids = [cid for cid, _ in pending]
-            futures = [fut for _, fut in pending]
-            results = ray.get(futures)  # raises if any actor.score failed
-            for cid, scores in zip(cids, results):
-                if not scores:
-                    continue
-                pair_key, k = slot_for_id[cid]
-                comet_per_pair[pair_key][k].append(scores[0])
-            return True
-        except Exception as e:
-            LOG.exception("Streaming COMET drain failed; falling back to batch: %s", e)
-            comet_per_pair.clear()
-            return False
+                comet_per_pair[(src, tgt)][k].append(float(score))
+                found_any = True
+        return found_any
 
     def _dispatch_batch_comet(
         self,
@@ -740,25 +715,22 @@ class WmtTranslationResourcesServer(SimpleResourcesServer):
             bleu_per_pair[(src, tgt)] = per_run
 
         # 3. COMET scoring. Two paths:
-        #    (a) Streaming COMET (preferred): verify() already fired
-        #        per-rollout score requests on a persistent actor pool and
-        #        stashed ObjectRefs in self._comet_futures keyed by
-        #        comet_id (a uuid stored on each verify response). Drain
-        #        them here. Wins: ~1-min xCOMET load amortized across the
-        #        whole run, all 8 extra_gpu GPUs working DURING the rollout
-        #        phase instead of idle-then-burst, fail-fast at server
-        #        startup if the actor pool can't initialize.
-        #    (b) Batch fallback: if streaming COMET init failed (e.g., Ray
-        #        cluster wasn't ready, extra_gpu unavailable), use the
-        #        end-of-batch _build_comet_remote() task from before.
+        #    (a) Per-row scores (preferred): verify() awaited each rollout's
+        #        COMET future on the persistent actor pool and stored the
+        #        resolved score on the rollout response. Just bucket those
+        #        per-row scores by (pair, rollout-index) here. Wins: scores
+        #        survive in rollouts.jsonl for downstream analysis, no
+        #        end-of-batch GPU burst, all 8 extra_gpu GPUs working during
+        #        the rollout phase instead of idle-then-burst.
+        #    (b) Batch fallback: if the actor pool failed to init (Ray
+        #        cluster wasn't ready, extra_gpu unavailable, ...), no
+        #        rollout will have comet_score set. Run the end-of-batch
+        #        _build_comet_remote() path so the aggregate metrics still
+        #        come out (per-row scores will remain None on disk).
         comet_per_pair: Dict[Tuple[str, str], List[List[float]]] = defaultdict(lambda: [list() for _ in range(max_k)])
         if self.config.compute_comet and comet_triples:
-            streaming_drained = False
-            if self._comet_actors and not self._comet_init_failed:
-                streaming_drained = self._drain_streaming_comet(
-                    tasks=tasks, max_k=max_k, comet_per_pair=comet_per_pair
-                )
-            if not streaming_drained:
+            collected = self._collect_per_row_comet(tasks=tasks, max_k=max_k, comet_per_pair=comet_per_pair)
+            if not collected:
                 self._dispatch_batch_comet(
                     comet_triples=comet_triples,
                     comet_slots=comet_slots,

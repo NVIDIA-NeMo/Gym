@@ -434,6 +434,49 @@ class TestComputeMetrics:
         assert all(c["model_name"] == "Unbabel/XCOMET-XXL" for c in captured_calls)
         assert all(c["batch_size"] == server.config.comet_batch_size for c in captured_calls)
 
+    def test_per_row_comet_scores_skip_batch_dispatch(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """When rollouts already carry comet_score (from verify()'s actor pool
+        await), compute_metrics buckets those values directly and never calls
+        the end-of-batch _build_comet_remote path."""
+        import app as app_module
+
+        called = {"n": 0}
+
+        def _should_not_be_called():
+            called["n"] += 1
+            raise AssertionError("batch dispatch must not run when per-row scores exist")
+
+        monkeypatch.setattr(app_module, "_build_comet_remote", _should_not_be_called)
+
+        server = _make_server(compute_comet=True)
+        de_ref = "Der schnelle braune Fuchs springt über den faulen Hund im schönen Garten."
+        tasks = [
+            [
+                {
+                    "text": "T1",
+                    "translation": de_ref,
+                    "generation": de_ref,
+                    "source_language": "en",
+                    "target_language": "de_DE",
+                    "comet_score": 0.85,
+                },
+            ],
+            [
+                {
+                    "text": "T2",
+                    "translation": de_ref,
+                    "generation": de_ref,
+                    "source_language": "en",
+                    "target_language": "de_DE",
+                    "comet_score": 0.95,
+                },
+            ],
+        ]
+        m = server.compute_metrics(tasks)
+        # Mean of (0.85, 0.95) × 100 = 90.0, batch path never invoked.
+        assert called["n"] == 0
+        assert m["en->de_DE/comet"] == pytest.approx(90.0)
+
 
 class TestBuildCometRemote:
     """Unit tests for _build_comet_remote() \u2014 the pre-dispatch setup logic.
