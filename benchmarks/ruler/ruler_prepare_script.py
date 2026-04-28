@@ -19,10 +19,13 @@
 
 import argparse
 import concurrent.futures
+import fcntl
 import json
 import subprocess
 import tempfile
 from pathlib import Path
+
+from ruler_thread_unsafe import ensure_thread_unsafe_resources
 
 
 DEFAULT_SETTINGS = """
@@ -135,6 +138,32 @@ def get_ruler_data(
             )
 
         max_seq_length -= template_tokens  # Adjusting for template tokens
+
+        # Run upstream RULER's thread-unsafe lazy-init once, under a
+        # process-wide flock, BEFORE fanning out the parallel
+        # `python prepare.py` subprocesses below.
+        #
+        # See `ruler_thread_unsafe.py` for the why; in short, RULER's
+        # `prepare.py` does `nltk.download(...)` at module load, NLTK's
+        # downloader is not multi-process-safe, and 13 concurrent
+        # subprocesses crash on the race. By pre-populating /root/nltk_data
+        # under the lock, the parallel `nltk.data.find(...)` calls inside
+        # those subprocesses hit the warmed cache and skip the racy
+        # `nltk.download(...)` branch entirely.
+        #
+        # The lock also coordinates across multiple `get_ruler_data`
+        # callers (e.g. `ng_prepare_benchmark` pool workers) on the same
+        # host — `tempfile.gettempdir()` is `/tmp`, host-shared, and
+        # `flock(2)` is a kernel-level lock, so it serializes correctly
+        # across processes regardless of which Python venv they run in.
+        nltk_init_lock_path = Path(tempfile.gettempdir()) / "gym_ruler_nltk_init.lock"
+        nltk_init_lock_path.touch(exist_ok=True)
+        with open(nltk_init_lock_path, "r") as _lock:
+            fcntl.flock(_lock.fileno(), fcntl.LOCK_EX)
+            try:
+                ensure_thread_unsafe_resources()
+            finally:
+                fcntl.flock(_lock.fileno(), fcntl.LOCK_UN)
 
         # preparing the datasets based on user options, in parallel
         def prepare_task(task):

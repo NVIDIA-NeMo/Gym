@@ -3309,3 +3309,130 @@ class TestVLLMConverter:
         assert captured_kwargs["guided_json"] == '{"type": "object"}'
         assert captured_kwargs["min_tokens"] == 20
         assert captured_kwargs["new_param"] == "value"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Audio sidechannel splice (metadata.audio_url → user-message content block)
+#
+# Lets audio benchmarks like librispeech_pc carry audio data-URIs through the
+# Responses API even though `ResponseInputContentParam` has no audio variant.
+# These tests exercise `_preprocess_chat_completion_create_params` directly
+# with synthetic body_dicts so they don't need a running vLLM endpoint.
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+_AUDIO_URL = "data:audio/wav;base64,QUFB"  # placeholder bytes
+
+
+def _make_minimal_audio_model() -> VLLMModel:
+    """A VLLMModel instance with the minimum config needed to hit the splice path."""
+    config = VLLMModelConfig(
+        host="0.0.0.0",
+        port=8080,
+        entrypoint="",
+        name="vllm_model",
+        base_url="http://localhost:9999/v1",
+        api_key="dummy_key",  # pragma: allowlist secret
+        model="dummy-model",
+        return_token_id_information=False,
+        uses_reasoning_parser=False,
+        uses_interleaved_reasoning=False,
+    )
+    return VLLMModel(config=config, server_client=MagicMock(spec=ServerClient))
+
+
+class TestAudioSidechannelSplice:
+    def test_no_metadata_passthrough(self) -> None:
+        """No audio_url in metadata → user message content stays a plain string."""
+        model = _make_minimal_audio_model()
+        body = {
+            "model": "dummy-model",
+            "messages": [
+                {"role": "system", "content": "sys"},
+                {"role": "user", "content": "hello"},
+            ],
+        }
+        result = model._preprocess_chat_completion_create_params(MagicMock(), body)
+        assert result["messages"][1]["content"] == "hello"
+
+    def test_splice_into_string_user_content(self) -> None:
+        model = _make_minimal_audio_model()
+        body = {
+            "model": "dummy-model",
+            "messages": [
+                {"role": "system", "content": "sys"},
+                {"role": "user", "content": "Transcribe please."},
+            ],
+            "metadata": {"audio_url": _AUDIO_URL},
+        }
+        result = model._preprocess_chat_completion_create_params(MagicMock(), body)
+
+        # metadata cleared because the only key was consumed
+        assert "metadata" not in result
+
+        user_content = result["messages"][1]["content"]
+        assert isinstance(user_content, list)
+        # Audio block must come BEFORE the text part (some audio models care).
+        assert user_content[0] == {"type": "audio_url", "audio_url": {"url": _AUDIO_URL}}
+        assert user_content[1] == {"type": "text", "text": "Transcribe please."}
+
+    def test_splice_into_list_user_content(self) -> None:
+        model = _make_minimal_audio_model()
+        body = {
+            "model": "dummy-model",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [{"type": "text", "text": "Transcribe please."}],
+                }
+            ],
+            "metadata": {"audio_url": _AUDIO_URL, "other": "keep"},
+        }
+        result = model._preprocess_chat_completion_create_params(MagicMock(), body)
+
+        # audio_url stripped, but the "other" key is preserved
+        assert result["metadata"] == {"other": "keep"}
+        assert result["messages"][0]["content"][0]["type"] == "audio_url"
+        assert result["messages"][0]["content"][1]["type"] == "text"
+
+    def test_splice_targets_most_recent_user(self) -> None:
+        """Multi-turn: audio attaches to the LATEST user message."""
+        model = _make_minimal_audio_model()
+        body = {
+            "model": "dummy-model",
+            "messages": [
+                {"role": "user", "content": "first turn"},
+                {"role": "assistant", "content": "ok"},
+                {"role": "user", "content": "second turn"},
+            ],
+            "metadata": {"audio_url": _AUDIO_URL},
+        }
+        result = model._preprocess_chat_completion_create_params(MagicMock(), body)
+
+        assert result["messages"][0]["content"] == "first turn"
+        assert isinstance(result["messages"][2]["content"], list)
+        assert result["messages"][2]["content"][0]["type"] == "audio_url"
+
+    def test_no_user_message_creates_one(self) -> None:
+        model = _make_minimal_audio_model()
+        body = {
+            "model": "dummy-model",
+            "messages": [{"role": "system", "content": "sys"}],
+            "metadata": {"audio_url": _AUDIO_URL},
+        }
+        result = model._preprocess_chat_completion_create_params(MagicMock(), body)
+
+        assert len(result["messages"]) == 2
+        assert result["messages"][1]["role"] == "user"
+        assert result["messages"][1]["content"][0]["type"] == "audio_url"
+
+    def test_empty_audio_url_is_noop(self) -> None:
+        """Falsy audio_url string skips the splice (and leaves metadata untouched)."""
+        model = _make_minimal_audio_model()
+        body = {
+            "model": "dummy-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "metadata": {"audio_url": ""},
+        }
+        result = model._preprocess_chat_completion_create_params(MagicMock(), body)
+        assert result["messages"][0]["content"] == "hi"

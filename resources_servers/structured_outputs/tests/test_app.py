@@ -23,6 +23,7 @@ from pytest import fixture
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputItem,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
@@ -66,6 +67,142 @@ class TestApp:
             status="in_progress",
             type="message",
         )
+
+    def _create_response_function_call(
+        self, *, name: str = "extract_record", arguments: str = "{}"
+    ) -> NeMoGymResponseFunctionToolCall:
+        return NeMoGymResponseFunctionToolCall(
+            arguments=arguments,
+            call_id="call_1",
+            name=name,
+            type="function_call",
+        )
+
+    async def test_verify_tool_call_modes(self, config: StructuredOutputsResourcesServerConfig) -> None:
+        server_mock = MagicMock(spec=ServerClient)
+        resources_server = StructuredOutputsResourcesServer(config=config, server_client=server_mock)
+        schema = {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "age": {"type": "integer"},
+            },
+        }
+        schema_str = json.dumps(schema)
+        valid_payload = {"name": "Alice", "age": 30}
+        dummy_create_params = NeMoGymResponseCreateParamsNonStreaming(input=[])
+
+        def make_response(output_item: NeMoGymResponseOutputItem | list[NeMoGymResponseOutputItem]) -> NeMoGymResponse:
+            output = output_item if isinstance(output_item, list) else [output_item]
+            return NeMoGymResponse(
+                id="tool_call_response_id",
+                created_at=1234.5,
+                model="test_model",
+                object="response",
+                output=output,
+                parallel_tool_calls=True,
+                tool_choice="auto",
+                tools=[],
+            )
+
+        direct_response = make_response(self._create_response_function_call(arguments=json.dumps(valid_payload)))
+        direct_request = StructuredOutputsVerifyRequest(
+            responses_create_params=dummy_create_params,
+            response=direct_response,
+            schema_str=schema_str,
+            response_mode="tool_call",
+            tool_name="extract_record",
+            tool_schema_mode="direct",
+            tool_choice="auto",
+            parallel_tool_calls=True,
+        )
+        direct_result = await resources_server.verify(direct_request)
+        assert direct_result.reward == 1.0
+        assert direct_result.error_type is None
+
+        extraction_wrapper_response = make_response(
+            self._create_response_function_call(arguments=json.dumps({"extraction": valid_payload}))
+        )
+        extraction_wrapper_request = direct_request.model_copy(
+            deep=True,
+            update={
+                "response": extraction_wrapper_response,
+                "tool_schema_mode": "extraction_wrapper",
+                "tool_payload_key": "extraction",
+            },
+        )
+        extraction_wrapper_result = await resources_server.verify(extraction_wrapper_request)
+        assert extraction_wrapper_result.reward == 1.0
+        assert extraction_wrapper_result.error_type is None
+
+        random_wrapper_response = make_response(
+            self._create_response_function_call(arguments=json.dumps({"summary": valid_payload}))
+        )
+        random_wrapper_request = direct_request.model_copy(
+            deep=True,
+            update={
+                "response": random_wrapper_response,
+                "tool_schema_mode": "random_wrapper",
+                "tool_payload_key": "summary",
+            },
+        )
+        random_wrapper_result = await resources_server.verify(random_wrapper_request)
+        assert random_wrapper_result.reward == 1.0
+        assert random_wrapper_result.error_type is None
+
+        wrong_tool_response = make_response(
+            self._create_response_function_call(name="distractor_tool", arguments=json.dumps(valid_payload))
+        )
+        wrong_tool_request = direct_request.model_copy(deep=True, update={"response": wrong_tool_response})
+        wrong_tool_result = await resources_server.verify(wrong_tool_request)
+        assert wrong_tool_result.reward == 0.0
+        assert wrong_tool_result.error_type == "wrong_tool_name"
+
+        missing_tool_response = make_response(self._create_response_output_message("I cannot extract that."))
+        missing_tool_request = direct_request.model_copy(deep=True, update={"response": missing_tool_response})
+        missing_tool_result = await resources_server.verify(missing_tool_request)
+        assert missing_tool_result.reward == 0.0
+        assert missing_tool_result.error_type == "missing_tool_call"
+
+        multiple_tool_response = make_response(
+            [
+                self._create_response_function_call(arguments=json.dumps(valid_payload)),
+                self._create_response_function_call(name="distractor_tool", arguments=json.dumps(valid_payload)),
+            ]
+        )
+        multiple_tool_request = direct_request.model_copy(deep=True, update={"response": multiple_tool_response})
+        multiple_tool_result = await resources_server.verify(multiple_tool_request)
+        assert multiple_tool_result.reward == 0.0
+        assert multiple_tool_result.error_type == "multiple_tool_calls"
+
+        invalid_json_response = make_response(self._create_response_function_call(arguments='{"name":'))
+        invalid_json_request = direct_request.model_copy(deep=True, update={"response": invalid_json_response})
+        invalid_json_result = await resources_server.verify(invalid_json_request)
+        assert invalid_json_result.reward == 0.0
+        assert invalid_json_result.error_type == "tool_arguments_parse_error"
+
+        missing_wrapper_response = make_response(
+            self._create_response_function_call(arguments=json.dumps({"result": valid_payload}))
+        )
+        missing_wrapper_request = direct_request.model_copy(
+            deep=True,
+            update={
+                "response": missing_wrapper_response,
+                "tool_schema_mode": "extraction_wrapper",
+                "tool_payload_key": "extraction",
+            },
+        )
+        missing_wrapper_result = await resources_server.verify(missing_wrapper_request)
+        assert missing_wrapper_result.reward == 0.0
+        assert missing_wrapper_result.error_type == "missing_tool_payload_key"
+
+        bad_payload_response = make_response(
+            self._create_response_function_call(arguments=json.dumps({"name": "Alice", "age": "thirty"}))
+        )
+        bad_payload_request = direct_request.model_copy(deep=True, update={"response": bad_payload_response})
+        bad_payload_result = await resources_server.verify(bad_payload_request)
+        assert bad_payload_result.reward == 0.0
+        assert bad_payload_result.error_type == "validation_error"
 
     async def test_verify_json(self, config: StructuredOutputsResourcesServerConfig) -> None:
         server_mock = MagicMock(spec=ServerClient)

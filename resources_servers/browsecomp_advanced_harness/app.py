@@ -159,7 +159,6 @@ class TavilySearchMetrics(BaseModel):
 
 
 class TavilySearchVerifyResponse(TavilySearchVerifyRequest, JudgeEvaluation):
-    num_tool_calls: int
     metrics: TavilySearchMetrics
 
 
@@ -400,7 +399,6 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         return TavilySearchVerifyResponse(
             **body.model_dump(),
             **judge_evaluation.model_dump(),
-            num_tool_calls=sum(o.type == "function_call" for o in body.response.output),
             metrics=self._session_id_to_metrics[request.session[SESSION_ID_KEY]],
         )
 

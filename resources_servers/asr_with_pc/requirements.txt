@@ -1,0 +1,3 @@
+-e nemo-gym[dev] @ ../../
+jiwer>=3.0.0
+whisper_normalizer>=0.1.0

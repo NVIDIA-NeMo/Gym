@@ -44,6 +44,7 @@ from nemo_gym.server_utils import (
     ServerClient,
     get_global_config_dict,
     get_response_json,
+    is_global_aiohttp_client_request_debug_enabled,
     is_global_aiohttp_client_setup,
     raise_for_status,
     set_global_aiohttp_client,
@@ -130,6 +131,16 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
     def materialized_jsonl_fpath(self) -> Path:
         output_fpath = Path(self.output_jsonl_fpath)
         return output_fpath.with_stem(output_fpath.stem + "_materialized_inputs").with_suffix(".jsonl")
+
+
+def _rollout_request_debug_summary(row: Dict[str, Any]) -> Dict[str, Any]:
+    agent_ref = row.get(AGENT_REF_KEY_NAME) or {}
+    summary = {
+        TASK_INDEX_KEY_NAME: row.get(TASK_INDEX_KEY_NAME),
+        ROLLOUT_INDEX_KEY_NAME: row.get(ROLLOUT_INDEX_KEY_NAME),
+        "agent_name": agent_ref.get("name") if isinstance(agent_ref, dict) else None,
+    }
+    return {k: v for k, v in summary.items() if v is not None}
 
 
 class RolloutCollectionHelper(BaseModel):
@@ -445,7 +456,17 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
         async def _post_subroutine(row: Dict) -> Tuple[Dict, Dict]:
             async with semaphore:
                 res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
-                await raise_for_status(res)
+                try:
+                    await raise_for_status(res)
+                except Exception:
+                    if is_global_aiohttp_client_request_debug_enabled():
+                        print(
+                            "[rollout_collection] /run failed "
+                            f"status={getattr(res, 'status', None)} "
+                            f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)}",
+                            flush=True,
+                        )
+                    raise
                 return row, await get_response_json(res)
 
         return tqdm.as_completed(
