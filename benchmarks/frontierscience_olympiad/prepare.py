@@ -45,17 +45,16 @@ HF_DATA_FILE = "olympiad/test.jsonl"
 SUBJECTS = ("chemistry", "biology", "physics")
 
 
-def _format_entry(entry: dict, problem_index: int) -> dict:
+def _format_entry(entry: dict, problem_index: int, subject: str) -> dict:
     """Convert a HF row to Gym JSONL format. Mirrors Skills' format_entry."""
-    answer = entry.get("answer", "") or ""
     # Remove surrounding backticks (handles `, ``, ```, etc.) — Skills does this too.
-    answer = re.sub(r"^`+|`+$", "", answer).strip()
+    answer = re.sub(r"^`+|`+$", "", entry.get("answer", "") or "").strip()
 
     return {
         "id": f"olympiad-{problem_index}",
         "question": entry.get("problem", ""),
         "expected_answer": answer,
-        "subject": entry.get("subject", "") or "",
+        "subject": subject,
         "task_group_id": entry.get("task_group_id", "") or "",
     }
 
@@ -72,7 +71,6 @@ def prepare() -> Path:
         data_files={HF_SPLIT: HF_DATA_FILE},
         split=HF_SPLIT,
     )
-
     print(f"Loaded {len(olympiad_data)} olympiad problems")
 
     count = 0
@@ -81,8 +79,7 @@ def prepare() -> Path:
             subject = (entry.get("subject", "") or "").lower()
             if subject not in SUBJECTS:
                 continue
-            row = _format_entry(entry, idx)
-            row["subject"] = subject
+            row = _format_entry(entry, idx, subject)
             out.write(json.dumps(row, ensure_ascii=False) + "\n")
             count += 1
 

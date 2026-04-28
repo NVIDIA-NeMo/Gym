@@ -36,7 +36,6 @@ from pathlib import Path
 from typing import List, Optional, Union
 
 import yaml
-from fastapi import FastAPI
 from pydantic import ConfigDict, Field
 
 from nemo_gym.base_resources_server import (
@@ -61,19 +60,11 @@ from nemo_gym.reward_profile import (
 )
 
 
-# ---------------------------------------------------------------------------
-# Default judge prompt path (relative to this file)
-# ---------------------------------------------------------------------------
-
 _DEFAULT_JUDGE_PROMPT_PATH = str(Path(__file__).parent / "prompts" / "judge.yaml")
-
-
-# ---------------------------------------------------------------------------
-# Thinking-trace stripping
-# ---------------------------------------------------------------------------
 
 _THINK_TAG_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 _THINKING_TAG_RE = re.compile(r"<thinking>.*?</thinking>", re.DOTALL)
+_JUDGEMENT_RE = re.compile(r"Judgement:\s*(YES|NO)", re.IGNORECASE)
 
 
 def _strip_thinking_traces(text: str) -> str:
@@ -104,9 +95,6 @@ def extract_text_from_response(response: NeMoGymResponse, strip_thinking: bool =
     return ""
 
 
-_JUDGEMENT_RE = re.compile(r"Judgement:\s*(YES|NO)", re.IGNORECASE)
-
-
 def parse_judgement(judge_text: str) -> Optional[str]:
     """Parse ``Judgement: YES`` / ``Judgement: NO`` from the judge response.
 
@@ -120,11 +108,6 @@ def parse_judgement(judge_text: str) -> Optional[str]:
     if not matches:
         return None
     return matches[-1].group(1).upper()
-
-
-# ---------------------------------------------------------------------------
-# Config, request / response models
-# ---------------------------------------------------------------------------
 
 
 class FrontierScienceJudgeConfig(BaseResourcesServerConfig):
@@ -169,11 +152,6 @@ class FrontierScienceJudgeVerifyResponse(BaseVerifyResponse):
     judge_output: Optional[str] = None
 
 
-# ---------------------------------------------------------------------------
-# Server
-# ---------------------------------------------------------------------------
-
-
 class FrontierScienceJudgeServer(SimpleResourcesServer):
     config: FrontierScienceJudgeConfig
 
@@ -181,9 +159,6 @@ class FrontierScienceJudgeServer(SimpleResourcesServer):
         prompt_data = yaml.safe_load(Path(self.config.judge_prompt_path).read_text())
         self._judge_prompt_template = prompt_data["user"]
         return super().model_post_init(context)
-
-    def setup_webserver(self) -> FastAPI:
-        return super().setup_webserver()
 
     @staticmethod
     def _score_fn(result: dict) -> dict:
@@ -225,22 +200,17 @@ class FrontierScienceJudgeServer(SimpleResourcesServer):
         return key
 
     async def verify(self, body: FrontierScienceJudgeVerifyRequest) -> FrontierScienceJudgeVerifyResponse:
-        # Match Skills' parse_reasoning=True behavior: when </think> is
-        # present, keep the text after it; when absent, treat as no answer.
-        # With --reasoning-parser deepseek_r1 on the vLLM side this is
-        # already done before we see the response, but the explicit
-        # post-processing here makes the server robust to non-parsed
-        # endpoints too.
+        # Skills' parse_reasoning=True: when </think> is missing but the
+        # model started reasoning (<think> present), treat as no answer
+        # (truncated mid-CoT). With --reasoning-parser deepseek_r1 vLLM
+        # already strips this; the post-process keeps the server correct
+        # against unparsed endpoints.
         raw_text = extract_text_from_response(body.response, strip_thinking=False)
         generation = extract_text_from_response(body.response)
-        if raw_text and "</think>" not in raw_text and "</thinking>" not in raw_text:
-            # Reasoning still in raw_text (no closing tag) => the model
-            # never finished thinking. Skills treats this as no answer.
-            # If raw_text is *already* clean (no <think> at all), the
-            # original heuristic would zero out a valid answer; only
-            # nuke generation if there's actual reasoning inside.
-            if "<think>" in raw_text or "<thinking>" in raw_text:
-                generation = ""
+        has_open = "<think>" in raw_text or "<thinking>" in raw_text
+        has_close = "</think>" in raw_text or "</thinking>" in raw_text
+        if has_open and not has_close:
+            generation = ""
 
         question = body.question or ""
         expected_answer = body.expected_answer or ""
