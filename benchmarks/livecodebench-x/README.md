@@ -39,10 +39,23 @@ source the existing monolingual `livecodebench/v5_2408_2502` and
 ng_prepare_benchmark "+config_paths=[benchmarks/livecodebench-x/config.yaml]"
 ```
 
-That writes `benchmarks/livecodebench-x/data/livecodebench-x_benchmark.jsonl`.
+That writes `benchmarks/livecodebench-x/data/livecodebench-x_benchmark.jsonl`
+(~19 GB; gitignored). The size comes from LCB's hidden test suites — a few
+problems carry 100–200 MB of test data each, duplicated 4× by language. The
+existing monolingual `livecodebench/v5_2408_2502` and `v6_2408_2505` benchmarks
+have the same characteristic; `code_gen.verify()` already handles it.
 
-If you want English instructions instead of target-language instructions in the
-prepared `question` field, run the script directly:
+For a smaller subset (e.g. one language × one version, ~300 rows) suitable
+for local smoke-testing, invoke the prepare script directly with its argparse
+flags — `ng_prepare_benchmark` calls `prepare()` with no kwargs and so cannot
+forward these:
+
+```bash
+python benchmarks/livecodebench-x/prepare.py --languages de --versions v5
+```
+
+`--prompt_language en` swaps the target-language instruction prefix for an
+English one (matches Skills' `--prompt_language en`):
 
 ```bash
 python benchmarks/livecodebench-x/prepare.py --prompt_language en
@@ -57,10 +70,20 @@ ng_run "+config_paths=[benchmarks/livecodebench-x/config.yaml,responses_api_mode
 Then in another shell:
 
 ```bash
+mkdir -p results/livecodebench-x
 ng_collect_rollouts \
+    "+config_paths=[benchmarks/livecodebench-x/config.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]" \
     +agent_name=livecodebench-x_code_gen_simple_agent \
     +input_jsonl_fpath=benchmarks/livecodebench-x/data/livecodebench-x_benchmark.jsonl \
     +output_jsonl_fpath=results/livecodebench-x/rollouts.jsonl \
+    +prompt_config=benchmarks/prompts/generic_default.yaml \
     +num_repeats=4 +num_repeats_add_seed=true \
     "+responses_create_params={temperature: 1.0, top_p: 0.95, max_output_tokens: 16384}"
 ```
+
+`+config_paths` and `+prompt_config` are required: the prepared JSONL ships
+raw benchmark rows (no `responses_create_params.input` baked in), and the
+agent's dataset-level `prompt_config` is metadata for `ng_run` only — the
+rollout CLI needs `+prompt_config=...` directly to apply the prompt template
+before merging `responses_create_params` overrides. `mkdir -p` is needed
+because `ng_collect_rollouts` does not create parent directories.
