@@ -33,5 +33,6 @@ ng_collect_rollouts \
     +agent_name=longbench_v2_mcqa_simple_agent \
     +input_jsonl_fpath=benchmarks/longbench_v2/data/longbench_v2_benchmark.jsonl \
     +output_jsonl_fpath=results/longbench_v2_rollouts.jsonl \
+    +prompt_config=benchmarks/longbench_v2/prompts/default.yaml \
     +num_repeats=4
 ```
