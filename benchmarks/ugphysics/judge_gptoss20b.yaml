@@ -1,0 +1,15 @@
+# Default judge model: openai/gpt-oss-20b via NVIDIA's public NIM API
+# (integrate.api.nvidia.com).  Uses NVIDIA_API_KEY from the environment.
+# Mirrors benchmarks/imo_answerbench/judge_gptoss20b.yaml so the two
+# benchmarks share one default-judge configuration pattern.
+#
+# For migration parity with NeMo Skills' UGPhysics baseline (Skills uses
+# o4-mini-2025-04-16 by default), override the three top-level vars in
+# the rollout recipe — see run_ugphysics_gym.py for the pattern.
+judge_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: https://integrate.api.nvidia.com/v1
+      openai_api_key: ${oc.env:NVIDIA_API_KEY,null}
+      openai_model: openai/gpt-oss-20b
