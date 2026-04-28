@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import json
 import os
-import tempfile
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -138,20 +137,6 @@ class GDPValTask(TaskStrategy):
         if config.user_prompt_template:
             return _render_template(config.user_prompt_template, task=task_info)
         return task_info["prompt"]
-
-    def prepare_input_files(self, task_info: Dict[str, Any]) -> Optional[str]:
-        ref_files = task_info.get("reference_files")
-        ref_urls = task_info.get("reference_file_urls")
-        if not ref_files or not ref_urls:
-            return None
-
-        input_files_dir = tempfile.mkdtemp(prefix="gdpval_ref_files_")
-        downloaded = _download_reference_files(ref_files, ref_urls, Path(input_files_dir))
-        if downloaded:
-            print(f"Downloaded {len(downloaded)} reference files to {input_files_dir}", flush=True)
-            return input_files_dir
-
-        return None
 
     def get_exec_provider(self, task_info: Dict[str, Any], config: Any) -> Any:
         container_path = getattr(config, "gdpval_container_path", None)
