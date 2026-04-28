@@ -122,12 +122,30 @@ def _build_gdpval_user_prompt(task_prompt: str, input_files_dir: Optional[str] =
 # rollout dies with `ModuleNotFoundError: No module named 'stirrup'` at
 # the `from stirrup.tools import DEFAULT_TOOLS` import inside
 # `_run_stirrup_agent` below.
+#
+# `num_cpus=0.25` lets Ray pack ~4× more stirrup tasks per node. These tasks
+# are I/O-bound (most wall-time is awaiting the policy / judge model);
+# reserving a full CPU each underutilises the cluster.
 @ray.remote(
+    num_cpus=0.25,
     scheduling_strategy="SPREAD",
     runtime_env={"py_executable": sys.executable},
 )
 def run_stirrup_agent_remote(params: dict[str, Any]) -> Any:
-    return asyncio.run(_run_stirrup_agent(**params))
+    try:
+        return asyncio.run(_run_stirrup_agent(**params))
+    except Exception as exc:
+        # OpenAI exceptions carry an httpx.Request that does not survive
+        # Ray's cross-process pickle, surfacing on the head as the opaque
+        # `RaySystemError: Failed to unpickle serialized exception`. Re-raise
+        # as a plain RuntimeError so the actual cause reaches the caller.
+        try:
+            from openai import APIError as _OpenAIAPIError
+        except ImportError:
+            _OpenAIAPIError = ()  # type: ignore[assignment]
+        if isinstance(exc, _OpenAIAPIError):
+            raise RuntimeError(f"{type(exc).__name__}: {exc}") from None
+        raise
 
 
 async def _run_stirrup_agent(

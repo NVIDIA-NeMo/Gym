@@ -44,6 +44,7 @@ When unset, a conservative character-count fallback is used.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from time import perf_counter
 from typing import Any, Optional
@@ -272,11 +273,45 @@ class DynamicMaxTokensChatCompletionsClient(ChatCompletionsClient):
             )
 
         request_start_time = perf_counter()
+        # Retry on transient APIConnectionError / RateLimitError. The OpenAI SDK
+        # default `max_retries=2` is too tight for the burst at agent startup
+        # against multiple remote endpoints (judge / Qwen / wildguard). Without
+        # this, a single transient connect-timeout on the very first turn fails
+        # the whole rollout.
         try:
-            response = await self._client.chat.completions.create(**request_kwargs)
-        except Exception as exc:
-            LOGGER.error("API call raised %s: %s", type(exc).__name__, exc)
-            raise
+            from openai import APIConnectionError as _APIConnectionError
+            from openai import APITimeoutError as _APITimeoutError
+            from openai import RateLimitError as _RateLimitError
+
+            _RETRYABLE = (_APIConnectionError, _APITimeoutError, _RateLimitError)
+        except ImportError:
+            _RETRYABLE = ()  # type: ignore[assignment]
+
+        response = None
+        last_retryable_exc: Optional[Exception] = None
+        for attempt in range(5):
+            try:
+                response = await self._client.chat.completions.create(**request_kwargs)
+                last_retryable_exc = None
+                break
+            except _RETRYABLE as exc:
+                last_retryable_exc = exc
+                backoff = min(2**attempt, 30)
+                LOGGER.warning(
+                    "API call raised %s on attempt %d/5; retrying in %ds: %s",
+                    type(exc).__name__,
+                    attempt + 1,
+                    backoff,
+                    exc,
+                )
+                await asyncio.sleep(backoff)
+            except Exception as exc:
+                LOGGER.error("API call raised %s: %s", type(exc).__name__, exc)
+                raise
+        if last_retryable_exc is not None:
+            # Re-raise as plain RuntimeError so the cause survives Ray pickling
+            # (the OpenAI exception's httpx.Request attribute does not).
+            raise RuntimeError(f"{type(last_retryable_exc).__name__} after 5 retries: {last_retryable_exc}")
         request_end_time = perf_counter()
 
         choice = response.choices[0]
