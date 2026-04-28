@@ -16,9 +16,11 @@
 """Prepare LongCodeBench (LongCodeQA) evaluation data for NeMo Gym.
 
 LongCodeBench is a multi-choice QA benchmark over long code contexts, ported
-1-to-1 from the NeMo Skills `longcodebench` dataset. Each row's prompt is
-fully baked: a long code question with options A/B/C/D plus the postfix that
-instructs the model to emit `Answer: \\boxed{X}`.
+1-to-1 from the NeMo Skills `longcodebench` dataset. Each row's `question`
+field is the long code prompt plus the postfix that instructs the model to
+emit `Answer: \\boxed{X}`. The shared `benchmarks/prompts/generic_default.yaml`
+template (`user: "{question}"`) wraps it as a single user message, mirroring
+Skills' `prompt_format=openai` behaviour.
 
 The resulting Gym JSONL is consumed by the `mcqa` resource server with
 `grading_mode=strict_single_letter_boxed`. We provide empty-text option dicts
@@ -64,15 +66,13 @@ def prepare() -> Path:
 
     rows = []
     for entry in data:
-        user_content = entry["prompt"].strip() + POSTFIX
+        question = entry["prompt"].strip() + POSTFIX
         row = {
-            "responses_create_params": {
-                "input": [{"role": "user", "content": user_content}],
-            },
+            "question": question,
             "options": options,
             "expected_answer": entry["correct_letter"],
             "grading_mode": "strict_single_letter_boxed",
-            "uuid": str(uuid.uuid5(uuid.NAMESPACE_URL, user_content)),
+            "uuid": str(uuid.uuid5(uuid.NAMESPACE_URL, question)),
             "repo": entry["repo"],
             "prompt_goal": entry["prompt_goal"],
             "is_hard": entry["is_hard"],
