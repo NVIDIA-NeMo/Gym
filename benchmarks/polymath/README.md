@@ -60,7 +60,7 @@ Collect rollouts (use `+num_repeats=4` for a quick parity pass,
 
 ```
 ng_collect_rollouts \
-    +agent_name=polymath_simple_agent \
+    +agent_name=polymath_benchmark_simple_agent \
     +input_jsonl_fpath=benchmarks/polymath/data/polymath_benchmark.jsonl \
     +output_jsonl_fpath=results/polymath_rollouts.jsonl \
     +num_repeats=4
