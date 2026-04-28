@@ -137,6 +137,9 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         max_output_tokens = 0
         while True:
             step += 1
+            # Check if max steps is not None and if we have exhausted it.
+            if self.config.max_steps and step >= self.config.max_steps:
+                break
 
             if self.config.keep_rounds is not None and new_outputs:
                 new_outputs = self._compact_old_tool_messages(new_outputs)
