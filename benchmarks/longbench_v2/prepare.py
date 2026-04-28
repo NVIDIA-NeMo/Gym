@@ -71,7 +71,11 @@ def prepare() -> Path:
                 "sub_domain": entry["sub_domain"],
                 "difficulty": entry["difficulty"],
                 "length": entry["length"],
-                "context_tokens": len(encoder.encode(entry["context"])),
+                # disallowed_special=() — some LongBench-v2 contexts contain
+                # raw `<|endoftext|>` strings that tiktoken would otherwise
+                # refuse to encode. We only need the count, so encode them
+                # as plain text.
+                "context_tokens": len(encoder.encode(entry["context"], disallowed_special=())),
                 # Gym-side additions consumed by the `mcqa` resource server.
                 # mcqa's verify() reads `options`, `expected_answer`, `grading_mode`.
                 "options": [
