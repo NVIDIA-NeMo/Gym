@@ -1,7 +1,7 @@
 # SuperGPQA
 
-Ports NeMo Skills' `supergpqa` benchmark to Gym on top of the shared `mcqa`
-resource server.
+Adds the `supergpqa` benchmark to Gym on top of the shared `mcqa` resource
+server.
 
 ## Details
 

@@ -1,7 +1,7 @@
 # Math-500
 
-Ports NeMo Skills' `math-500` benchmark to Gym on top of the shared
-`math_with_judge` resource server.
+Adds the `math-500` benchmark to Gym on top of the shared `math_with_judge`
+resource server.
 
 ## Details
 
@@ -24,7 +24,7 @@ ng_run "+config_paths=[$config_paths]"
 
 # Collecting rollouts
 ng_collect_rollouts \
-    +agent_name=math-500_math_with_judge_simple_agent \
+    +agent_name=math_500_math_with_judge_simple_agent \
     +input_jsonl_fpath=benchmarks/math-500/data/math-500_benchmark.jsonl \
     +output_jsonl_fpath=results/math-500/rollouts.jsonl \
     +prompt_config=benchmarks/prompts/generic_math.yaml

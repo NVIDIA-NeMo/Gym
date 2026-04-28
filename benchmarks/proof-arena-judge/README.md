@@ -1,6 +1,6 @@
 # Proof-Arena-Judge
 
-Ports NeMo Skills' `proof-arena-judge` benchmark to Gym.
+Adds the `proof-arena-judge` benchmark to Gym.
 
 ## Details
 
@@ -26,7 +26,7 @@ ng_run "+config_paths=[$config_paths]"
 
 # Collecting rollouts
 ng_collect_rollouts \
-    +agent_name=proof-arena-judge_math_proof_judgement_simple_agent \
+    +agent_name=proof_arena_judge_math_proof_judgement_simple_agent \
     +input_jsonl_fpath=benchmarks/proof-arena-judge/data/proof-arena-judge_benchmark.jsonl \
     +output_jsonl_fpath=results/proof-arena-judge/rollouts.jsonl \
     +prompt_config=benchmarks/prompts/math_proof_judge.yaml

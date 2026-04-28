@@ -1,17 +1,17 @@
 config_paths:
   - resources_servers/math_proof_judgement/configs/math_proof_judgement.yaml
 
-"proof-arena-judge_math_proof_judgement_resources_server":
+proof_arena_judge_math_proof_judgement_resources_server:
   _inherit_from: math_proof_judgement
   resources_servers:
     math_proof_judgement: {}
 
-"proof-arena-judge_math_proof_judgement_simple_agent":
+proof_arena_judge_math_proof_judgement_simple_agent:
   _inherit_from: math_proof_judgement_simple_agent
   responses_api_agents:
     simple_agent:
       resources_server:
-        name: proof-arena-judge_math_proof_judgement_resources_server
+        name: proof_arena_judge_math_proof_judgement_resources_server
       datasets:
         - name: proof-arena-judge
           type: benchmark

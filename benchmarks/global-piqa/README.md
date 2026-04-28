@@ -1,13 +1,14 @@
 # Global-PIQA
 
-Ports NeMo Skills' `global_piqa` benchmark to Gym on top of the shared `mcqa`
-resource server.
+Adds the `global_piqa` benchmark to Gym on top of the shared `mcqa` resource
+server.
 
 ## Details
 
 - Data source: `mrlbenchmarks/global-piqa-nonparallel`
 - Evaluation: 2-choice multiple choice
-- Prompting mirrors Skills' `generic/default` behavior
+- Prompt uses the benchmark-local template matching the original Global-PIQA
+  format
 - Each row carries the original Skills regex list via
   `template_metadata.output_regex`
 
@@ -24,8 +25,8 @@ ng_run "+config_paths=[$config_paths]"
 
 # Collecting rollouts
 ng_collect_rollouts \
-    +agent_name=global-piqa_mcqa_simple_agent \
+    +agent_name=global_piqa_mcqa_simple_agent \
     +input_jsonl_fpath=benchmarks/global-piqa/data/global-piqa_benchmark.jsonl \
     +output_jsonl_fpath=results/global-piqa/rollouts.jsonl \
-    +prompt_config=benchmarks/prompts/generic_default.yaml
+    +prompt_config=benchmarks/global-piqa/prompts/default.yaml
 ```

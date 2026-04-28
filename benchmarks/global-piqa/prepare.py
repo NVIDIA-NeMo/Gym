@@ -18,19 +18,6 @@ DATA_DIR = BENCHMARK_DIR / "data"
 OUTPUT_FPATH = DATA_DIR / "global-piqa_benchmark.jsonl"
 HF_REPO_ID = "mrlbenchmarks/global-piqa-nonparallel"
 
-QUERY_TEMPLATE = """
-Given the following situation, which option is more likely to be correct?
-
-Situation:
-{prompt} ...
-
-Option A: {solution0}
-
-Option B: {solution1}
-
-Your response should end with "The best answer is: [answer_letter]" where [answer_letter] is one of A or B.
-""".strip()
-
 EXTRACT_REGEX = [
     r"(?i)[Tt]he (?:[Bb]est [Aa]nswer|[Ff]inal [Aa]nswer|[Aa]nswer)[^A-B]*([A-B])",
     r"(?i)[Aa]nswer\s*:[^A-B]*([A-B])",
@@ -47,18 +34,16 @@ def _digit_to_letter(digit: int) -> str:
     return chr(ord("A") + digit)
 
 
-def _question_text(entry: dict) -> str:
-    return QUERY_TEMPLATE.format(**entry)
-
-
 def _to_row(entry: dict, language: str) -> dict:
-    question = _question_text(entry)
+    question = entry["prompt"].strip()
+    option_a = entry["solution0"].strip()
+    option_b = entry["solution1"].strip()
     seed = json.dumps(
         {
             "language": language,
-            "prompt": entry["prompt"],
-            "solution0": entry["solution0"],
-            "solution1": entry["solution1"],
+            "prompt": question,
+            "solution0": option_a,
+            "solution1": option_b,
             "label": entry["label"],
         },
         sort_keys=True,
@@ -67,7 +52,9 @@ def _to_row(entry: dict, language: str) -> dict:
     return {
         "question": question,
         "problem": question,
-        "options": [{"A": entry["solution0"]}, {"B": entry["solution1"]}],
+        "A": option_a,
+        "B": option_b,
+        "options": [{"A": option_a}, {"B": option_b}],
         "expected_answer": _digit_to_letter(int(entry["label"])),
         "template_metadata": {"output_regex": EXTRACT_REGEX},
         "subset_for_metrics": language,

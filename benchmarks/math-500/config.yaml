@@ -1,18 +1,18 @@
 config_paths:
   - resources_servers/math_with_judge/configs/math_with_judge.yaml
 
-"math-500_math_with_judge_resources_server":
+math_500_math_with_judge_resources_server:
   _inherit_from: math_with_judge
   resources_servers:
     math_with_judge:
       should_use_judge: false
 
-"math-500_math_with_judge_simple_agent":
+math_500_math_with_judge_simple_agent:
   _inherit_from: math_with_judge_simple_agent
   responses_api_agents:
     simple_agent:
       resources_server:
-        name: math-500_math_with_judge_resources_server
+        name: math_500_math_with_judge_resources_server
       datasets:
         - name: math-500
           type: benchmark

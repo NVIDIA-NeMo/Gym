@@ -1,8 +1,7 @@
 # Answer-Judge
 
-Ports NeMo Skills' `answer-judge` benchmark to Gym. Each row contains a math
-problem, a predicted answer, an expected answer, and the gold
-`Judgement: Yes/No` label.
+Adds the `answer-judge` benchmark to Gym. Each row contains a math problem, a
+predicted answer, an expected answer, and the gold `Judgement: Yes/No` label.
 
 ## Verification
 
@@ -23,7 +22,7 @@ ng_run "+config_paths=[$config_paths]"
 
 # Collecting rollouts
 ng_collect_rollouts \
-    +agent_name=answer-judge_math_proof_judgement_simple_agent \
+    +agent_name=answer_judge_math_proof_judgement_simple_agent \
     +input_jsonl_fpath=benchmarks/answer-judge/data/answer-judge_benchmark.jsonl \
     +output_jsonl_fpath=results/answer-judge/rollouts.jsonl \
     +prompt_config=benchmarks/prompts/math_answer_judge.yaml
