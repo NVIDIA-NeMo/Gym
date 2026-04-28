@@ -56,16 +56,15 @@ def prepare() -> Path:
     with open(RAW_FPATH, "rt", encoding="utf-8") as fin:
         for idx, line in enumerate(fin):
             entry = json.loads(line)
-            new_entry = dict(entry)
-            # Skills prepare.py also adds `question = prompt`. We keep that
-            # so the JSONL is a superset of Skills' output, but the existing
-            # Gym `instruction_following` server reads `prompt`.
-            new_entry["question"] = entry["prompt"]
-            # `id` matches the row index so cross-pipeline lookups by index work.
-            new_entry["id"] = idx
-            # Default grading mode mirrors Skills' `prompt_strict_accuracy`.
-            new_entry["grading_mode"] = "binary"
-            rows.append(new_entry)
+            # Skills prepare.py also writes `question = prompt`; keep it so
+            # the Gym JSONL is a strict superset of Skills'. The existing
+            # `instruction_following` server reads `prompt`.
+            entry["question"] = entry["prompt"]
+            entry["id"] = idx
+            # `binary` aligns the per-rollout reward with Skills' headline
+            # `prompt_strict_accuracy` (1 if all instructions pass, else 0).
+            entry["grading_mode"] = "binary"
+            rows.append(entry)
 
     with open(OUTPUT_FPATH, "wt", encoding="utf-8") as fout:
         for row in rows:
