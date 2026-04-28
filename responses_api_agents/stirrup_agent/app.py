@@ -139,7 +139,8 @@ async def _run_stirrup_agent(
     max_turns: int = 100,
     temperature: float = 0.6,
     max_tokens: int = 262144,
-    input_files_dir: Optional[str] = None,
+    reference_files: Optional[list] = None,
+    reference_file_urls: Optional[list] = None,
     exec_provider_class: Optional[str] = None,
     exec_provider_kwargs: Optional[Dict[str, Any]] = None,
     persist_deliverables_dir: Optional[str] = None,
@@ -262,6 +263,28 @@ async def _run_stirrup_agent(
     agent = NeMoAgent(**agent_kwargs)
 
     start_time = time.time()
+
+    # Stage GDPVal reference files on this Ray worker (not on the agent server).
+    # This is the cross-node /tmp fix from PR #1366. The worker container has
+    # /cache lustre-bound via deployment.cache_path; the agent-server container
+    # does not. Honor the GDPVAL_REF_FILES_DIR env var as an escape hatch for
+    # operators whose worker /tmp is tight.
+    input_files_dir: Optional[str] = None
+    if is_gdpval and reference_files and reference_file_urls:
+        import os as _os_ref
+
+        from responses_api_agents.stirrup_agent.tasks.gdpval import _download_reference_files
+
+        ref_root = _os_ref.environ.get("GDPVAL_REF_FILES_DIR")
+        if ref_root:
+            Path(ref_root).mkdir(parents=True, exist_ok=True)
+        input_files_dir = tempfile.mkdtemp(prefix="gdpval_ref_files_", dir=ref_root)
+        downloaded = _download_reference_files(reference_files, reference_file_urls, Path(input_files_dir))
+        if downloaded:
+            print(f"Downloaded {len(downloaded)} reference files to {input_files_dir}", flush=True)
+        else:
+            shutil.rmtree(input_files_dir, ignore_errors=True)
+            input_files_dir = None
 
     input_files = f"{input_files_dir}/" if input_files_dir else None
 
@@ -429,6 +452,17 @@ async def _run_stirrup_agent(
             print(f"[stirrup] persisted task artifacts to {task_dir}", flush=True)
     finally:
         shutil.rmtree(output_dir, ignore_errors=True)
+        if input_files_dir:
+            try:
+                shutil.rmtree(input_files_dir)
+            except Exception as cleanup_err:
+                # Don't mask the original exception; just log loudly so operators
+                # see the orphan accumulation (Chapter 3 / 1192-subfolder bug).
+                print(
+                    f"[gdpval_stirrup_agent] WARN: failed to cleanup {input_files_dir}: "
+                    f"{type(cleanup_err).__name__}: {cleanup_err}",
+                    flush=True,
+                )
 
     elapsed = time.time() - start_time
 
@@ -636,8 +670,6 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
 
         model_base_url = self._get_model_base_url()
 
-        input_files_dir = self.task_strategy.prepare_input_files(task_info)
-
         if self.config.task == "gdpval":
             system_prompt = None
             # Raw task prompt — _run_stirrup_agent wraps it in GDPVal template when is_gdpval=True
@@ -660,37 +692,36 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
             exec_provider_class = f"{cls.__module__}.{cls.__qualname__}"
             exec_provider_kwargs = exec_provider._serializable_kwargs()
 
-        try:
-            params = {
-                "task_prompt": user_prompt,
-                "system_prompt": system_prompt,
-                "model_base_url": model_base_url,
-                "model_name": model_name,
-                "api_key": "dummy",  # pragma: allowlist secret
-                "max_turns": self.config.agent_max_turns,
-                "temperature": temperature,
-                "max_tokens": max_tokens,
-                "input_files_dir": input_files_dir,
-                "exec_provider_class": exec_provider_class,
-                "exec_provider_kwargs": exec_provider_kwargs,
-                "persist_deliverables_dir": self.config.persist_deliverables_dir,
-                "task_id": task_info.get("task_id"),
-                "rollout_index": (body.metadata or {}).get("_ng_rollout_index"),
-                "is_gdpval": self.config.task == "gdpval",
-                "model_id": self.config.model_id,
-                "completion_token_buffer": self.config.completion_token_buffer,
-                "top_p": getattr(body, "top_p", None) or self.config.top_p,
-                "enable_thinking": self.config.enable_thinking,
-                "max_completion_tokens_cap": self.config.max_completion_tokens_cap,
-                "tavily_api_key": self.config.tavily_api_key,
-                "tavily_max_sweeps": self.config.tavily_max_sweeps,
-            }
+        # Reference files are downloaded on the Ray worker (see _run_stirrup_agent)
+        # because head-node /tmp is not visible to SPREAD-scheduled workers on other nodes.
+        params = {
+            "task_prompt": user_prompt,
+            "system_prompt": system_prompt,
+            "model_base_url": model_base_url,
+            "model_name": model_name,
+            "api_key": "dummy",  # pragma: allowlist secret
+            "max_turns": self.config.agent_max_turns,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "reference_files": task_info.get("reference_files") if self.config.task == "gdpval" else None,
+            "reference_file_urls": task_info.get("reference_file_urls") if self.config.task == "gdpval" else None,
+            "exec_provider_class": exec_provider_class,
+            "exec_provider_kwargs": exec_provider_kwargs,
+            "persist_deliverables_dir": self.config.persist_deliverables_dir,
+            "task_id": task_info.get("task_id"),
+            "rollout_index": (body.metadata or {}).get("_ng_rollout_index"),
+            "is_gdpval": self.config.task == "gdpval",
+            "model_id": self.config.model_id,
+            "completion_token_buffer": self.config.completion_token_buffer,
+            "top_p": getattr(body, "top_p", None) or self.config.top_p,
+            "enable_thinking": self.config.enable_thinking,
+            "max_completion_tokens_cap": self.config.max_completion_tokens_cap,
+            "tavily_api_key": self.config.tavily_api_key,
+            "tavily_max_sweeps": self.config.tavily_max_sweeps,
+        }
 
-            future = run_stirrup_agent_remote.remote(params)
-            result = await future
-        finally:
-            if input_files_dir:
-                shutil.rmtree(input_files_dir, ignore_errors=True)
+        future = run_stirrup_agent_remote.remote(params)
+        result = await future
 
         input_items = result["input_items"]
         output_items = result["output_items"]
