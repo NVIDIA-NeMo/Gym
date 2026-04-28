@@ -32,6 +32,7 @@ browsecomp_benchmark_agent:
   responses_api_agents:
     browsecomp_agent:
       entrypoint: app.py
+      num_workers: 4
       max_steps: 400
       keep_rounds: 9999
       nudge_steps: true

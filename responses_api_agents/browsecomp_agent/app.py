@@ -44,7 +44,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
 )
-from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.server_utils import get_response_json, is_nemo_gym_fastapi_entrypoint, raise_for_status
 from responses_api_models.vllm_model.app import VLLMConverter
 
 
@@ -537,3 +537,5 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     BrowsecompAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    app = BrowsecompAgent.run_webserver()  # noqa: F401
