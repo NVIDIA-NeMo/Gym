@@ -243,23 +243,48 @@ jobs:
           ng_run "+config_paths=[resources_servers/arc_agi/configs/arc_agi.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]" &
           NG_RUN_PID=$!
 
-          # Poll head server until ready (default port 11000), max 120s
-          echo "Waiting for ng_run head server to become ready..."
-          SERVER_READY="false"
-          for i in $(seq 1 60); do
-            if curl -sf http://127.0.0.1:11000/ > /dev/null 2>&1; then
-              echo "Head server ready after $((i*2))s"
-              SERVER_READY="true"
+          # 1. Wait for head server to respond (any HTTP status, max 60s)
+          echo "Waiting for head server..."
+          for i in $(seq 1 30); do
+            if curl -s -o /dev/null http://127.0.0.1:11000/server_instances 2>/dev/null; then
+              echo "Head server up after $((i*2))s"
               break
             fi
-            if ! kill -0 $NG_RUN_PID 2>/dev/null; then
-              echo "ng_run process exited unexpectedly"
-              exit 1
-            fi
+            if ! kill -0 $NG_RUN_PID 2>/dev/null; then echo "ng_run exited unexpectedly"; exit 1; fi
             sleep 2
           done
-          if [ "$SERVER_READY" != "true" ]; then
-            echo "Head server did not become ready within 120s"
+
+          # 2. Get child server URLs from head server, then poll each until ready (max 180s)
+          echo "Waiting for all child servers..."
+          ALL_READY="false"
+          for i in $(seq 1 90); do
+            URLS=$(curl -s http://127.0.0.1:11000/server_instances | python3 -c "
+          import json, sys
+          instances = json.load(sys.stdin)
+          print(' '.join(inst['url'] for inst in instances if inst.get('url')))" 2>/dev/null)
+            if [ -n "$URLS" ]; then
+              READY=0
+              TOTAL=0
+              for url in $URLS; do
+                TOTAL=$((TOTAL+1))
+                if curl -s -o /dev/null "$url/" 2>/dev/null; then
+                  READY=$((READY+1))
+                fi
+              done
+              if [ "$READY" -eq "$TOTAL" ] && [ "$TOTAL" -gt 0 ]; then
+                echo "All $TOTAL servers ready after $((i*2))s"
+                ALL_READY="true"
+                break
+              fi
+              if [ $((i % 15)) -eq 0 ]; then
+                echo "$READY / $TOTAL servers ready..."
+              fi
+            fi
+            if ! kill -0 $NG_RUN_PID 2>/dev/null; then echo "ng_run exited unexpectedly"; exit 1; fi
+            sleep 2
+          done
+          if [ "$ALL_READY" != "true" ]; then
+            echo "Servers did not become ready within 180s"
             exit 1
           fi
 
@@ -278,23 +303,48 @@ jobs:
           ng_run "+config_paths=[resources_servers/hello_world/configs/hello_world.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]" &
           NG_RUN_PID=$!
 
-          # Poll head server until ready (default port 11000), max 120s
-          echo "Waiting for ng_run head server to become ready..."
-          SERVER_READY="false"
-          for i in $(seq 1 60); do
-            if curl -sf http://127.0.0.1:11000/ > /dev/null 2>&1; then
-              echo "Head server ready after $((i*2))s"
-              SERVER_READY="true"
+          # 1. Wait for head server to respond (any HTTP status, max 60s)
+          echo "Waiting for head server..."
+          for i in $(seq 1 30); do
+            if curl -s -o /dev/null http://127.0.0.1:11000/server_instances 2>/dev/null; then
+              echo "Head server up after $((i*2))s"
               break
             fi
-            if ! kill -0 $NG_RUN_PID 2>/dev/null; then
-              echo "ng_run process exited unexpectedly"
-              exit 1
-            fi
+            if ! kill -0 $NG_RUN_PID 2>/dev/null; then echo "ng_run exited unexpectedly"; exit 1; fi
             sleep 2
           done
-          if [ "$SERVER_READY" != "true" ]; then
-            echo "Head server did not become ready within 120s"
+
+          # 2. Get child server URLs from head server, then poll each until ready (max 180s)
+          echo "Waiting for all child servers..."
+          ALL_READY="false"
+          for i in $(seq 1 90); do
+            URLS=$(curl -s http://127.0.0.1:11000/server_instances | python3 -c "
+          import json, sys
+          instances = json.load(sys.stdin)
+          print(' '.join(inst['url'] for inst in instances if inst.get('url')))" 2>/dev/null)
+            if [ -n "$URLS" ]; then
+              READY=0
+              TOTAL=0
+              for url in $URLS; do
+                TOTAL=$((TOTAL+1))
+                if curl -s -o /dev/null "$url/" 2>/dev/null; then
+                  READY=$((READY+1))
+                fi
+              done
+              if [ "$READY" -eq "$TOTAL" ] && [ "$TOTAL" -gt 0 ]; then
+                echo "All $TOTAL servers ready after $((i*2))s"
+                ALL_READY="true"
+                break
+              fi
+              if [ $((i % 15)) -eq 0 ]; then
+                echo "$READY / $TOTAL servers ready..."
+              fi
+            fi
+            if ! kill -0 $NG_RUN_PID 2>/dev/null; then echo "ng_run exited unexpectedly"; exit 1; fi
+            sleep 2
+          done
+          if [ "$ALL_READY" != "true" ]; then
+            echo "Servers did not become ready within 180s"
             exit 1
           fi
 
