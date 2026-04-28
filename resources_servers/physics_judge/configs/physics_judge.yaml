@@ -30,3 +30,4 @@ physics_judge_simple_agent:
         - name: example
           type: example
           jsonl_fpath: resources_servers/physics_judge/data/example.jsonl
+          license: Apache 2.0

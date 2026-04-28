@@ -58,9 +58,9 @@ Two-stage, matching NeMo Skills' `physics`:
    asked whether the model's full output is `[Correct]` or `[Incorrect]`
    against the expected answer.
 
-The default judge is configured by the recipe (see
-`migrate-gym-physics/run_physics_gym_aws_iad.py` — routes through NVIDIA's
-internal Gemini endpoint for parity with the Skills baseline).
+The judge model is wired via `benchmarks/physics/judge_openai.yaml`; set
+`+judge_base_url=…`, `+judge_api_key=…`, and `+judge_model_name=…` (or define
+the equivalents in `env.yaml`) to point it at any OpenAI-compatible endpoint.
 
 ## Metrics
 
