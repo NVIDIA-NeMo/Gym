@@ -25,6 +25,22 @@ Emitted by `competitive_coding_challenges`:
   `total.{score,max_score}` plus per-subtask `{score, max_score}`.
 - Plus the standard pass@k/accuracy stats from `compute_pass_majority_metrics`.
 
+## Sandbox prerequisite (local)
+
+The CCC server compiles and runs candidate solutions inside the NeMo Skills
+sandbox over HTTP. Bring one up locally before running the benchmark:
+
+```bash
+# From a NeMo-Skills checkout (no published image — build from source):
+docker build -t nemo-skills-sandbox -f dockerfiles/Dockerfile.sandbox .
+docker run --rm -p 6000:6000 nemo-skills-sandbox
+```
+
+CCC defaults to `http://127.0.0.1:6000/execute`; override with
+`NEMO_SKILLS_SANDBOX_HOST` / `NEMO_SKILLS_SANDBOX_PORT` if the sandbox is
+elsewhere. Cluster/SLURM users can co-launch the sandbox via Skills'
+`nemo_gym_rollouts(with_sandbox=True)` — separate path, not covered here.
+
 ## Running
 
 ```bash
