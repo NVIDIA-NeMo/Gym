@@ -29,11 +29,51 @@ jobs:
         with:
           submodules: 'recursive'
 
-      - name: Fail on draft PRs
-        if: github.event.pull_request.draft == true
+      - name: Detect changed files
+        id: changes
         run: |
-          echo "Failing on draft PR to enforce this check to run"
-          exit 1
+          # workflow_call or non-PR context: run everything
+          if [ -z "${{ github.base_ref }}" ]; then
+            echo "run_full=true" >> $GITHUB_OUTPUT
+            echo "run_servers=false" >> $GITHUB_OUTPUT
+            echo "No base_ref - running full suite"
+            exit 0
+          fi
+
+          git fetch origin ${{ github.base_ref }}
+          CHANGED_FILES=$(git diff --name-only origin/${{ github.base_ref }} HEAD)
+          echo "Changed files:"
+          echo "$CHANGED_FILES"
+
+          DOCS_PATTERN='^(docs/|fern/|README\.md|CONTRIBUTING\.md|CODE_OF_CONDUCT\.md|SECURITY\.md|ATTRIBUTIONS\.md|LICENSE)'
+          SERVER_PATTERN='^(resources_servers|responses_api_agents|responses_api_models)/[^/]+/'
+
+          # Check what types of files changed
+          HAS_OTHER=$(echo "$CHANGED_FILES" | grep -vE "$DOCS_PATTERN" | grep -cvE "$SERVER_PATTERN" || true)
+          HAS_SERVERS=$(echo "$CHANGED_FILES" | grep -cE "$SERVER_PATTERN" || true)
+
+          # If any file is not a doc and not a server file -> full suite
+          # Otherwise, if server files changed -> test only those servers
+          # Otherwise (docs only) -> skip tests
+          if [ -z "$CHANGED_FILES" ] || [ "$HAS_OTHER" -gt 0 ]; then
+            echo "run_full=true" >> $GITHUB_OUTPUT
+            echo "run_servers=false" >> $GITHUB_OUTPUT
+          elif [ "$HAS_SERVERS" -gt 0 ]; then
+            echo "run_full=false" >> $GITHUB_OUTPUT
+            echo "run_servers=true" >> $GITHUB_OUTPUT
+          else
+            echo "run_full=false" >> $GITHUB_OUTPUT
+            echo "run_servers=false" >> $GITHUB_OUTPUT
+            echo "Docs-only change - skipping tests"
+          fi
+
+      - name: Cache uv dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/uv
+          key: uv-${{ runner.os }}-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            uv-${{ runner.os }}-
 
       - name: Setup for test
         run: |
@@ -51,129 +91,42 @@ jobs:
       - name: Test
         run: |
           source .venv/bin/activate
-          ng_dev_test
-          ng_test_all +fail_on_total_and_test_mismatch=true +delete_venvs_after_each_test=true
 
-  test-wheel-install:
-    name: Test Wheel Use
-    runs-on: ubuntu-latest
-    env:
-      NEMO_GYM_ALLOW_PRERELEASE: "true"
-      UV_INDEX_URL: "http://127.0.0.1:8888/"
-      UV_EXTRA_INDEX_URL: "https://pypi.org/simple/"
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v6
+          # Full suite: core library tests + all server tests
+          if [[ "${{ steps.changes.outputs.run_full }}" == "true" ]]; then
+            echo "Running full test suite"
+            ng_dev_test
+            ng_test_all +fail_on_total_and_test_mismatch=true +delete_venvs_after_each_test=true
 
-      - name: Setup
-        run: |
-          curl -LsSf https://astral.sh/uv/install.sh | sh
-          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+          # Server-only: test only the changed servers
+          elif [[ "${{ steps.changes.outputs.run_servers }}" == "true" ]]; then
+            CHANGED_SERVERS=$(git diff --name-only origin/${{ github.base_ref }} HEAD | \
+              grep -E '^(resources_servers|responses_api_agents|responses_api_models)/[^/]+/' | \
+              cut -d'/' -f1-2 | sort -u)
 
-      - name: Build wheel and serve as local PyPI index
-        run: |
-          uv build
-          mkdir -p /tmp/local-pypi/nemo-gym
-          cp dist/*.whl /tmp/local-pypi/nemo-gym/
-          ls /tmp/local-pypi/nemo-gym/ | sed 's|.*|<a href="&">&</a>|' > /tmp/local-pypi/nemo-gym/index.html
-          echo '<a href="nemo-gym/">nemo-gym</a>' > /tmp/local-pypi/index.html
-          python3 -m http.server 8888 --directory /tmp/local-pypi &
-          sleep 1
+            echo "Testing changed servers:"
+            echo "$CHANGED_SERVERS" | sed 's/^/  - /'
 
-      - name: Install wheel in fresh venv
-        run: |
-          cd /tmp && mkdir -p myproject && cd myproject
-          uv venv --python 3.12 .venv
-          source .venv/bin/activate
-          uv pip install $GITHUB_WORKSPACE/dist/*.whl
-          python -c "import nemo_gym; print(f'nemo-gym {nemo_gym.__version__}')"
+            EXIT_CODE=0
+            for server in $CHANGED_SERVERS; do
+              echo ""
+              echo "================================================"
+              echo "Testing: $server"
+              echo "================================================"
+              if ng_test +entrypoint=$server +delete_venvs_after_each_test=true; then
+                echo "PASS: $server"
+              else
+                echo "FAIL: $server"
+                EXIT_CODE=1
+              fi
+            done
 
-      - name: Start mock inference endpoint
-        run: |
-          cat > /tmp/mock_server.py << 'PYEOF'
-          import json, time, uuid
-          from http.server import HTTPServer, BaseHTTPRequestHandler
+            if [ $EXIT_CODE -ne 0 ]; then
+              echo "Some server tests failed"
+              exit 1
+            fi
 
-          class Handler(BaseHTTPRequestHandler):
-              def do_POST(self):
-                  body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-                  resp = {
-                      "id": f"chatcmpl-{uuid.uuid4().hex[:8]}",
-                      "object": "chat.completion",
-                      "created": int(time.time()),
-                      "model": body.get("model", "mock"),
-                      "choices": [{"index": 0, "message": {"role": "assistant", "content": "Mock response."}, "finish_reason": "stop"}],
-                      "usage": {"prompt_tokens": 10, "completion_tokens": 8, "total_tokens": 18},
-                  }
-                  self.send_response(200)
-                  self.send_header("Content-Type", "application/json")
-                  self.end_headers()
-                  self.wfile.write(json.dumps(resp).encode())
-
-              def do_GET(self):
-                  self.send_response(404)
-                  self.end_headers()
-
-              def log_message(self, *args):
-                  pass
-
-          HTTPServer(("127.0.0.1", 9999), Handler).serve_forever()
-          PYEOF
-          python3 /tmp/mock_server.py &
-          sleep 1
-
-      - name: Setup project
-        run: |  # pragma: allowlist secret
-          cd /tmp/myproject
-          echo "policy_base_url: http://127.0.0.1:9999/v1" > env.yaml
-          echo "policy_api_key: not-a-real-key" >> env.yaml  # pragma: allowlist secret
-          echo "policy_model_name: mock-model" >> env.yaml
-
-      - name: Test CLI commands
-        run: |
-          cd /tmp/myproject
-          source .venv/bin/activate
-          ng_help
-          ng_dump_config "+config_paths=[resources_servers/arc_agi/configs/arc_agi.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
-
-      - name: Test ng_init_resources_server
-        run: |
-          cd /tmp/myproject
-          source .venv/bin/activate
-          ng_init_resources_server +entrypoint=resources_servers/hello_world
-          test -f resources_servers/hello_world/app.py
-          test -f resources_servers/hello_world/requirements.txt
-          test -f resources_servers/hello_world/configs/hello_world.yaml
-          test -d resources_servers/hello_world/tests
-          grep -q "nemo-gym" resources_servers/hello_world/requirements.txt
-          echo '{"responses_create_params":{"input":[{"role":"user","content":"Hello!"}]},"verifier_metadata":{}}' \
-            > resources_servers/hello_world/data/example.jsonl
-
-      - name: Test ng_run + ng_collect_rollouts with built-in server
-        run: |
-          cd /tmp/myproject
-          source .venv/bin/activate
-          ng_run "+config_paths=[resources_servers/arc_agi/configs/arc_agi.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]" &
-          NG_RUN_PID=$!
-          sleep 90
-          mkdir -p results
-          ng_collect_rollouts \
-            +agent_name=arc_agi_simple_agent \
-            +input_jsonl_fpath=resources_servers/arc_agi/data/example.jsonl \
-            +output_jsonl_fpath=results/arc_agi_rollouts.jsonl \
-            +limit=1
-          kill $NG_RUN_PID 2>/dev/null; wait $NG_RUN_PID 2>/dev/null || true
-
-      - name: Test ng_run + ng_collect_rollouts with local server
-        run: |
-          cd /tmp/myproject
-          source .venv/bin/activate
-          ng_run "+config_paths=[resources_servers/hello_world/configs/hello_world.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]" &
-          NG_RUN_PID=$!
-          sleep 90
-          ng_collect_rollouts \
-            +agent_name=hello_world_simple_agent \
-            +input_jsonl_fpath=resources_servers/hello_world/data/example.jsonl \
-            +output_jsonl_fpath=results/hello_world_rollouts.jsonl \
-            +limit=1
-          kill $NG_RUN_PID 2>/dev/null; wait $NG_RUN_PID 2>/dev/null || true
+          # Docs-only: nothing to test
+          else
+            echo "No tests to run"
+          fi

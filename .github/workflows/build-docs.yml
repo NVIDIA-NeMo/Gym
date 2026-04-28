@@ -19,6 +19,11 @@ on:
     branches:
       - main
       - "pull-request/[0-9]+"
+  pull_request:
+    paths:
+      - 'docs/**'
+      - 'nemo_gym/**'
+      - 'pyproject.toml'
 
 jobs:
   build-docs:
