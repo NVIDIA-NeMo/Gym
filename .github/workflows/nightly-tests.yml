@@ -186,3 +186,28 @@ jobs:
             +output_jsonl_fpath=results/hello_world_rollouts.jsonl \
             +limit=1
           kill $NG_RUN_PID 2>/dev/null; wait $NG_RUN_PID 2>/dev/null || true
+
+  notify-nightly-failure:
+    name: Notify nightly test failure
+    runs-on: ubuntu-latest
+    needs: [full-test-suite, test-wheel-install]
+    environment: main
+    if: ${{ always() && github.event_name == 'schedule' && (needs.full-test-suite.result == 'failure' || needs.test-wheel-install.result == 'failure') }}
+    steps:
+      - name: Send Slack notification
+        env:
+          SLACK_WEBHOOK: ${{ secrets.SLACK_TEAM_CHANNEL_WEBHOOK }}
+        run: |
+          MESSAGE='{
+            "blocks": [
+              {
+                "type": "section",
+                "text": {
+                  "type": "mrkdwn",
+                  "text": ":rotating_light: Nightly GitHub CI test failed on main branch\n\n• Repository: ${{ github.repository }}\n• Commit: `${{ github.sha }}`\n• Workflow: <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Run>"
+                }
+              }
+            ]
+          }'
+
+          curl -X POST -H "Content-type: application/json" --data "$MESSAGE" "$SLACK_WEBHOOK"
