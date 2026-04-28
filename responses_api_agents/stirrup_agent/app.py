@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import shutil
+import sys
 import tempfile
 import time
 from asyncio import Semaphore
@@ -114,7 +115,17 @@ def _build_gdpval_user_prompt(task_prompt: str, input_files_dir: Optional[str] =
     return _GDPVAL_PROMPT_TEMPLATE.format(task=task_prompt, reference_files=files_section)
 
 
-@ray.remote(scheduling_strategy="SPREAD")
+# Pin the Ray worker to this server's venv (same pattern as
+# swe_agents / harbor_agent / mini_swe_agent / code_gen / spider2_lite).
+# Without this, workers fall back to the cluster's default Python, which
+# does not have the per-server `stirrup` extra installed, and every
+# rollout dies with `ModuleNotFoundError: No module named 'stirrup'` at
+# the `from stirrup.tools import DEFAULT_TOOLS` import inside
+# `_run_stirrup_agent` below.
+@ray.remote(
+    scheduling_strategy="SPREAD",
+    runtime_env={"py_executable": sys.executable},
+)
 def run_stirrup_agent_remote(params: dict[str, Any]) -> Any:
     return asyncio.run(_run_stirrup_agent(**params))
 
