@@ -35,6 +35,8 @@ fallback) is unchanged from ``math_with_judge``.
 
 from __future__ import annotations
 
+import math
+from collections import Counter
 from typing import Any, Dict, List, Optional
 
 from nemo_gym.reward_profile import (
@@ -109,23 +111,19 @@ class PolyMathResourcesServer(LibraryJudgeMathResourcesServer):
         if not tasks:
             return {}
 
-        # --- Tier 1: unweighted, language-pooled ---
         metrics = compute_pass_majority_metrics(
             tasks,
             score_fn=self._math_score_fn,
             answer_key="extracted_answer",
         )[0]
-
-        # --- Tier 2: per-language ---
-        per_lang = compute_subset_metrics(
-            tasks,
-            subset_key="language",
-            score_fn=self._math_score_fn,
-            answer_key="extracted_answer",
+        metrics.update(
+            compute_subset_metrics(
+                tasks,
+                subset_key="language",
+                score_fn=self._math_score_fn,
+                answer_key="extracted_answer",
+            )
         )
-        metrics.update(per_lang)
-
-        # --- Tier 3: difficulty-weighted ---
         metrics.update(
             self._compute_weighted_pass_majority_metrics(
                 tasks,
@@ -133,7 +131,6 @@ class PolyMathResourcesServer(LibraryJudgeMathResourcesServer):
                 answer_key="extracted_answer",
             )
         )
-
         return metrics
 
     def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
@@ -181,12 +178,6 @@ class PolyMathResourcesServer(LibraryJudgeMathResourcesServer):
         if not tasks:
             return {}
 
-        import math
-        from collections import Counter
-
-        max_k = max(len(rollouts) for rollouts in tasks)
-
-        # Per-task: weight, ordered score dicts, ordered extracted answers.
         per_task = []
         for rollouts in tasks:
             if not rollouts:
@@ -199,59 +190,45 @@ class PolyMathResourcesServer(LibraryJudgeMathResourcesServer):
         if not per_task:
             return {}
 
+        max_k = max(len(sds) for _, sds, _ in per_task)
         score_names = sorted({n for _, sds, _ in per_task for sd in sds for n in sd})
-        total_weight = sum(w for w, _, _ in per_task)
-        if total_weight <= 0:
-            return {}
 
         out: Dict[str, float] = {}
-
         for k in range(1, max_k + 1):
             for name in score_names:
-                pass_at_k_num = 0.0
-                pass1_avg_of_k_num = 0.0
-                majority_at_k_num = 0.0
-                pass_at_k_w = 0.0
-                pass1_avg_of_k_w = 0.0
-                majority_at_k_w = 0.0
+                pass_k_num = 0.0
+                pass1_avg_num = 0.0
+                majority_num = 0.0
+                contributing_weight = 0.0
 
                 for weight, score_dicts, answers in per_task:
                     vals = [bool(sd.get(name, False)) for sd in score_dicts if name in sd]
-                    n_total = len(vals)
-                    if n_total == 0 or k > n_total:
+                    if not vals or k > len(vals):
                         continue
 
-                    # Weighted pass@k (combinatorial; binary scores).
                     n_incorrect = sum(1 for v in vals if not v)
                     if n_incorrect < k:
-                        pass_at_k_num += weight * 1.0
+                        pass_k_num += weight
                     else:
-                        pass_at_k_num += weight * (1.0 - math.comb(n_incorrect, k) / math.comb(n_total, k))
-                    pass_at_k_w += weight
+                        pass_k_num += weight * (1.0 - math.comb(n_incorrect, k) / math.comb(len(vals), k))
 
-                    # Weighted pass@1[avg-of-k].
-                    pass1_avg_of_k_num += weight * sum(1 if v else 0 for v in vals[:k]) / k
-                    pass1_avg_of_k_w += weight
+                    pass1_avg_num += weight * sum(1 if v else 0 for v in vals[:k]) / k
 
-                    # Weighted majority@k (k>=2 only; matches Skills).
                     if k >= 2:
                         valid = [(a, v) for a, v in zip(answers[:k], vals[:k]) if a is not None]
-                        if not valid:
-                            majority_score = 0.0
-                        else:
+                        if valid:
                             counter = Counter(valid)
-                            top_count = counter.most_common(1)[0][1]
-                            tied = [(a, v) for (a, v), c in counter.items() if c == top_count]
-                            majority_score = sum(1 if v else 0 for _, v in tied) / len(tied)
-                        majority_at_k_num += weight * majority_score
-                        majority_at_k_w += weight
+                            top = counter.most_common(1)[0][1]
+                            tied = [v for (_, v), c in counter.items() if c == top]
+                            majority_num += weight * sum(1 if v else 0 for v in tied) / len(tied)
 
-                if pass_at_k_w > 0:
-                    out[f"pass@{k}/{name}_weighted"] = 100.0 * pass_at_k_num / pass_at_k_w
-                if pass1_avg_of_k_w > 0:
-                    out[f"pass@1[avg-of-{k}]/{name}_weighted"] = 100.0 * pass1_avg_of_k_num / pass1_avg_of_k_w
-                if k >= 2 and majority_at_k_w > 0:
-                    out[f"majority@{k}/{name}_weighted"] = 100.0 * majority_at_k_num / majority_at_k_w
+                    contributing_weight += weight
+
+                if contributing_weight > 0:
+                    out[f"pass@{k}/{name}_weighted"] = 100.0 * pass_k_num / contributing_weight
+                    out[f"pass@1[avg-of-{k}]/{name}_weighted"] = 100.0 * pass1_avg_num / contributing_weight
+                    if k >= 2:
+                        out[f"majority@{k}/{name}_weighted"] = 100.0 * majority_num / contributing_weight
 
         return out
 
