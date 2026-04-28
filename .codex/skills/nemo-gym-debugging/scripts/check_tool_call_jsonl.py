@@ -50,12 +50,10 @@ def add_issue(
     severity: str,
     code: str,
     message: str,
-    source_record_id: Any = None,
 ) -> None:
     issues.append(
         {
             "row_idx": row_idx,
-            "source_record_id": source_record_id,
             "severity": severity,
             "code": code,
             "message": message,
@@ -130,9 +128,14 @@ def schema_contains_property_key(value: Any, property_key: str) -> bool:
     return False
 
 
-def check_row(row_idx: int, row: dict[str, Any], *, require_response_mode: bool, check_vllm_compat: bool):
+def check_row(
+    row_idx: int,
+    row: dict[str, Any],
+    *,
+    require_response_mode: bool,
+    check_vllm_compat: bool,
+):
     issues: list[dict[str, Any]] = []
-    source_record_id = row.get("source_record_id")
 
     if "__json_error__" in row:
         add_issue(
@@ -141,7 +144,6 @@ def check_row(row_idx: int, row: dict[str, Any], *, require_response_mode: bool,
             severity="error",
             code="json_parse_error",
             message=row["__json_error__"],
-            source_record_id=source_record_id,
         )
         return issues
 
@@ -152,7 +154,6 @@ def check_row(row_idx: int, row: dict[str, Any], *, require_response_mode: bool,
             severity="error",
             code="bad_response_mode",
             message=f"Expected response_mode='tool_call', got {row.get('response_mode')!r}",
-            source_record_id=source_record_id,
         )
 
     responses_create_params = row.get("responses_create_params")
@@ -163,7 +164,6 @@ def check_row(row_idx: int, row: dict[str, Any], *, require_response_mode: bool,
             severity="error",
             code="missing_responses_create_params",
             message="responses_create_params must be an object",
-            source_record_id=source_record_id,
         )
         return issues
 
@@ -175,7 +175,6 @@ def check_row(row_idx: int, row: dict[str, Any], *, require_response_mode: bool,
             severity="error",
             code="missing_tools",
             message="responses_create_params.tools must be a non-empty list",
-            source_record_id=source_record_id,
         )
         return issues
 
@@ -189,7 +188,6 @@ def check_row(row_idx: int, row: dict[str, Any], *, require_response_mode: bool,
                 severity="error",
                 code="bad_tool",
                 message=f"tools[{tool_idx}] must be an object",
-                source_record_id=source_record_id,
             )
             continue
 
@@ -201,7 +199,6 @@ def check_row(row_idx: int, row: dict[str, Any], *, require_response_mode: bool,
                 severity="error",
                 code="bad_tool_name",
                 message=f"tools[{tool_idx}].name must be a non-empty string",
-                source_record_id=source_record_id,
             )
             continue
         tool_names.append(name)
@@ -212,7 +209,6 @@ def check_row(row_idx: int, row: dict[str, Any], *, require_response_mode: bool,
                 severity="error",
                 code="duplicate_tool_name",
                 message=f"Duplicate tool name {name!r}",
-                source_record_id=source_record_id,
             )
         tool_by_name[name] = tool
 
@@ -223,7 +219,6 @@ def check_row(row_idx: int, row: dict[str, Any], *, require_response_mode: bool,
                 severity="error",
                 code="bad_tool_type",
                 message=f"tools[{tool_idx}].type must be 'function', got {tool.get('type')!r}",
-                source_record_id=source_record_id,
             )
 
         parameters = tool.get("parameters")
@@ -234,7 +229,6 @@ def check_row(row_idx: int, row: dict[str, Any], *, require_response_mode: bool,
                 severity="error",
                 code="bad_tool_parameters",
                 message=f"tools[{tool_idx}].parameters must be an object",
-                source_record_id=source_record_id,
             )
             continue
         for code, path, value in walk_tool_schema(parameters, check_vllm_compat=check_vllm_compat):
@@ -244,7 +238,6 @@ def check_row(row_idx: int, row: dict[str, Any], *, require_response_mode: bool,
                 severity="error",
                 code=code,
                 message=f"tools[{tool_idx}].parameters{path[1:]} = {value!r}",
-                source_record_id=source_record_id,
             )
 
     expected_tool_name = row.get("tool_name")
@@ -256,7 +249,6 @@ def check_row(row_idx: int, row: dict[str, Any], *, require_response_mode: bool,
             severity="error",
             code="target_tool_missing",
             message=f"tool_name {expected_tool_name!r} not found in tools {tool_names}",
-            source_record_id=source_record_id,
         )
 
     tool_payload_key = row.get("tool_payload_key")
@@ -269,7 +261,6 @@ def check_row(row_idx: int, row: dict[str, Any], *, require_response_mode: bool,
                 severity="error",
                 code="payload_key_not_in_target_tool_schema",
                 message=f"tool_payload_key {tool_payload_key!r} not found in target tool parameters",
-                source_record_id=source_record_id,
             )
 
     schema_str = row.get("schema_str")
@@ -283,7 +274,6 @@ def check_row(row_idx: int, row: dict[str, Any], *, require_response_mode: bool,
                 severity="error",
                 code="schema_str_parse_error",
                 message=f"{type(exc).__name__}: {exc}",
-                source_record_id=source_record_id,
             )
 
     num_tools = row.get("num_tools")
@@ -294,7 +284,6 @@ def check_row(row_idx: int, row: dict[str, Any], *, require_response_mode: bool,
             severity="error",
             code="num_tools_mismatch",
             message=f"num_tools={num_tools!r}, actual tools={len(tools)}",
-            source_record_id=source_record_id,
         )
 
     return issues
@@ -357,10 +346,7 @@ def main() -> None:
     if issues:
         print(f"\nFirst {min(args.max_errors, len(issues))} issues:")
         for issue in issues[: args.max_errors]:
-            print(
-                f"  row={issue['row_idx']} source_record_id={issue.get('source_record_id')} "
-                f"{issue['severity']} {issue['code']}: {issue['message']}"
-            )
+            print(f"  row={issue['row_idx']} {issue['severity']} {issue['code']}: {issue['message']}")
         sys.exit(1)
 
 
