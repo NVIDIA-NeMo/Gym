@@ -82,12 +82,11 @@ SUPPORTED_VERSIONS = _utils.SUPPORTED_VERSIONS
 
 
 def _build_canonical_index(version: str) -> dict[str, dict]:
-    """Return {task_id: {unit_tests, difficulty, fn_name}} for the given LCB version.
+    """Return {task_id: {unit_tests, difficulty}} for the given LCB version.
 
-    Decodes private+public test cases from `livecodebench/code_generation_lite`.
-    Mirrors `benchmarks/livecodebench/prepare_utils.py::prepare_from_hf_raw`,
-    but keyed by `task_id` (== upstream `question_id`) instead of producing rows
-    directly.
+    `unit_tests` carries `inputs`, `outputs`, and optional `fn_name`. Mirrors
+    `benchmarks/livecodebench/prepare_utils.py::prepare_from_hf_raw`, but keyed
+    by `task_id` (== upstream `question_id`) instead of producing rows directly.
     """
     print(f"Downloading LiveCodeBench {version} from HuggingFace ({CANONICAL_HF_REPO_ID})...")
     ds = load_dataset(
@@ -138,17 +137,12 @@ def format_entry(entry: dict, lang: str, prompt_language: str, canonical: dict) 
     canonical_row = canonical[task_id]
 
     return {
-        # Skills produces this composite question. Keep it verbatim so the
-        # `prompts/generic_default.yaml` passthrough emits the same user text.
         "question": f"{instruction}\n\n{entry['question']}",
-        # Raw translated problem (without instruction prefix), matches Skills.
         "problem": entry["question"],
         "task_id": task_id,
         "release_version": entry["release_version"],
         "subset_for_metrics": lang,
         "target_language": lang,
-        # `code_gen.verify()` consumes this. Test cases come from the canonical
-        # LCB join, not the multilingual dataset.
         "verifier_metadata": {
             "unit_tests": canonical_row["unit_tests"],
             "difficulty": canonical_row["difficulty"],
@@ -169,13 +163,13 @@ def prepare(
     if versions is None:
         versions = list(SUPPORTED_VERSIONS)
 
-    canonical_indexes = {v: _build_canonical_index(v) for v in versions}
-
     count = 0
     skipped = 0
+    # Build each version's canonical index lazily so we can free it before
+    # moving on. Each index can hold hundreds of MB of decoded test cases.
     with OUTPUT_FPATH.open("w", encoding="utf-8") as fout:
         for version in versions:
-            canonical = canonical_indexes[version]
+            canonical = _build_canonical_index(version)
             for lang in languages:
                 print(f"Loading multilingual ({version}/{lang}) from {MULTILINGUAL_HF_REPO_ID}")
                 ds = load_dataset(MULTILINGUAL_HF_REPO_ID, version, split=lang)
@@ -186,6 +180,7 @@ def prepare(
                         continue
                     fout.write(json.dumps(row, ensure_ascii=False) + "\n")
                     count += 1
+            del canonical
 
     print(f"Wrote {count} problems to {OUTPUT_FPATH} (skipped {skipped} with missing canonical match)")
     return OUTPUT_FPATH
