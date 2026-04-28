@@ -1,4 +1,4 @@
 interface:
   display_name: "Nemo Gym Reward Profiling"
-  short_description: "Run Nemo Gym reward profiling workflows"
-  default_prompt: "Use $nemo-gym-reward-profiling to run or modify Nemo Gym reward profiling workflows."
+  short_description: "Get started with Nemo Gym reward profiling"
+  default_prompt: "Use $nemo-gym-reward-profiling to start or explain a Nemo Gym reward profiling run."

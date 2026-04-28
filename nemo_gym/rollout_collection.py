@@ -128,8 +128,8 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
         description="Path to a prompt YAML file. Builds responses_create_params.input from the template at rollout time. Mutually exclusive with pre-populated responses_create_params.input in the JSONL data.",
     )
     inflight_reward_profile: bool = Field(
-        default=False,
-        description="Write task-level reward profile rows while collection is running, then rewrite the final file through the canonical RewardProfiler path.",
+        default=True,
+        description="Write task-level reward profile rows while collection is running, then rewrite the final file through the canonical RewardProfiler path. Set to False to skip reward profiling during collection.",
     )
     inflight_reward_profile_fpath: Optional[str] = Field(
         default=None,
@@ -419,14 +419,18 @@ class RolloutCollectionHelper(BaseModel):
         final_reward_profiling_fpath = None
         if config.inflight_reward_profile:
             print("Writing canonical reward profiling output")
-            group_level_metrics, agent_level_metrics = reward_profiler.profile_from_data(rows, results)
-            final_reward_profiling_fpath, _ = reward_profiler.write_to_disk(
-                group_level_metrics,
-                agent_level_metrics,
-                output_fpath,
-                reward_profiling_fpath=reward_profiling_fpath,
-                write_agent_metrics=False,
-            )
+            if rows:
+                group_level_metrics, agent_level_metrics = reward_profiler.profile_from_data(rows, results)
+                final_reward_profiling_fpath, _ = reward_profiler.write_to_disk(
+                    group_level_metrics,
+                    agent_level_metrics,
+                    output_fpath,
+                    reward_profiling_fpath=reward_profiling_fpath,
+                    write_agent_metrics=False,
+                )
+            else:
+                reward_profiling_fpath.write_bytes(b"")
+                final_reward_profiling_fpath = reward_profiling_fpath
 
         # Compute and write aggregate metrics via /aggregate_metrics on each agent server
         print("Computing aggregate metrics")

@@ -1,68 +1,55 @@
 ---
 name: nemo-gym-reward-profiling
 description: >-
-  Use when designing, running, or modifying Nemo Gym reward profiling workflows. Covers
-  ng_collect_rollouts, ng_reward_profile, repeated rollouts, materialized inputs, task/rollout
-  identity, rollout JSONL artifacts, scaling collection, inflight reward profiling,
-  raw reward-to-token/length mappings, and optional Nemo-RL ray.sub orchestration. For failures,
-  prefer nemo-gym-debugging first.
+  Use to help users get started with Nemo Gym reward profiling. Covers the basic
+  ng_run, ng_collect_rollouts, and ng_reward_profile workflow, repeated rollouts,
+  materialized inputs, rollout JSONL artifacts, task and rollout identity, output
+  inspection, and simple scaling knobs. For failed jobs, prefer nemo-gym-debugging.
 ---
 
 # Nemo Gym Reward Profiling
 
 ## Invocation Check
 
-Use this skill for reward profiling workflows and code paths around Nemo Gym. Start from the stable Gym flow:
+Use this skill when the user wants to run, understand, or lightly modify Nemo Gym reward profiling. Keep the first answer oriented around the normal workflow:
 
-`ng_run` starts the model/resource servers, `ng_collect_rollouts` writes rollout JSONL plus materialized inputs, and `ng_reward_profile` profiles those rollouts. Repeated rollouts make per-task variability meaningful, but `num_repeats=1` is valid.
+`ng_run` starts model/resource servers, `ng_collect_rollouts` writes rollout artifacts and reward profiling by default, and `ng_reward_profile` can rerun profiling from completed artifacts.
 
-Some checkouts also support inflight reward profiling through `ng_collect_rollouts +inflight_reward_profile=True`. When present, collection writes profile rows while the run is active, then rewrites the final output through the same canonical `RewardProfiler` path used by `ng_reward_profile`.
+If the user is primarily debugging a failed job or stack trace, use `$nemo-gym-debugging` first.
 
-First classify the target:
+## Basic Workflow
 
-- **Current Gym profiling path**: prefer `nemo_gym/rollout_collection.py`, `nemo_gym/reward_profile.py`, `ng_collect_rollouts`, and `ng_reward_profile`.
-- **Checkout-specific launcher or extension**: inspect the target branch before relying on local scripts, inflight flags, or launcher-specific environment variables.
+1. Identify the environment config paths and input JSONL.
+2. Start Gym servers with `ng_run`.
+3. Collect rollouts with `ng_collect_rollouts`; by default this writes `*_reward_profiling.jsonl` during collection and rewrites the final file through the canonical profiler.
+4. Optionally run `ng_reward_profile` on the materialized inputs and rollout JSONL to regenerate or validate the profile.
+5. Inspect line counts and profile rows before scaling up.
 
-If the user is only asking why a job failed, use `$nemo-gym-debugging` instead or alongside this skill.
+Repeated rollouts are the main profiling lever. `num_repeats=1` is valid, but per-task averages, variance, and pass-rate-style interpretation are only meaningful with multiple rollouts per task.
 
-## Core Workflow
+## Core Concepts
 
-1. Inspect the target repo before changing behavior:
-   - `nemo_gym/rollout_collection.py`
-   - `nemo_gym/reward_profile.py`
-   - `tests/unit_tests/test_reward_profile.py`
-   - relevant CLI docs or entrypoints
-2. Validate the command shape in that checkout. Some docs/branches expose different `ng_reward_profile` flags; trust the code and CLI help over memory.
-3. Treat `ng_collect_rollouts` as the collection lifecycle:
-   - source data JSONL
-   - materialized inputs JSONL
-   - rollout output JSONL
-4. Treat `ng_reward_profile` as the reusable profiling path:
-   - common input contract: materialized inputs plus rollout results
-   - common output contract: task-level aggregate rows, rollout-level compact info, and agent/global metrics
-   - current task-level rows preserve `_ng_task_index`, `num_rollouts`, and `rollout_infos`
-5. Preserve identity through profiling outputs and extensions:
-   - task index identifies the original sample/task
-   - rollout index identifies repeated samples for that task
-   - never compute reward/length/token mappings without a task and rollout join key
-6. If adding checkout-specific fields, clearly mark them as extensions:
-   - raw reward/length/token mappings
-   - profiling rows written during collection
-   - launcher conventions
+- `*_materialized_inputs.jsonl`: expanded collection inputs after repeat expansion, agent defaults, and task/rollout id assignment.
+- `rollouts.jsonl`: one completed rollout/result per materialized input row.
+- `*_reward_profiling.jsonl`: one summarized profile row per original task.
+- `_ng_task_index`: original task/sample id.
+- `_ng_rollout_index`: repeated rollout id for that task.
+- `rollout_infos`: compact per-rollout info inside each task profile row, including reward and token usage when available.
+
+Keep reward-to-length or reward-to-token analysis keyed by both `_ng_task_index` and `_ng_rollout_index`.
 
 ## Reference Loading
 
-Load references only when needed:
+Load references only when the user needs that detail:
 
-- Read `references/collection-lifecycle.md` for the concrete `ng_run -> ng_collect_rollouts -> ng_reward_profile` flow, scaling rollout collection, cache/resume behavior, materialized inputs, and rollout identity.
-- Read `references/reward-profile-api.md` when changing profiling metrics, output files, `RewardProfiler`, aggregate metrics, or raw reward/length/token extensions.
-- Read `references/inflight-reward-profiling.md` when using `+inflight_reward_profile=True`, validating that collection-written profiles match `ng_reward_profile`, or running the current StructEval smoke wrapper.
-- Read `references/nemo-rl-ray-sub.md` if the user wants to do reward profiling using Nemo-RL to orchestrate the Slurm/Ray allocation, start vLLM on Ray, or add optional sandbox sidecars.
+- Read `references/quick-start.md` for a generic command template and the minimal run sequence.
+- Read `references/output-format.md` to explain materialized inputs, rollout JSONL, reward profile rows, `rollout_infos`, and pass-rate recovery.
+- Read `references/scaling-and-validation.md` for `num_repeats`, `num_samples_in_parallel`, cache/resume checks, and smoke-test validation.
 
 ## Practical Defaults
 
-- Prefer upstream `ng_reward_profile` for reusable profiling behavior.
-- Prefer `RewardProfiler.profile_from_data(...)` as the single canonical code path when adding new profile outputs.
-- Keep launcher-specific behavior out of shared claims unless the user explicitly asks about that launcher.
-- Validate changes with the repo's reward-profile and rollout-collection unit tests when available.
-- For new profiling fields, add focused tests that cover repeated rollouts, missing usage fields, and stable task/rollout identity.
+- Treat inflight reward profiling as the default collection behavior in current Gym.
+- Use `+inflight_reward_profile=False` only when a rollout-only collection is needed.
+- Use post-hoc `ng_reward_profile` to regenerate or validate profile output from completed artifacts.
+- Trust the target checkout's CLI help and `nemo_gym/reward_profile.py` over memory if flags differ.
+- For code changes, validate with reward-profile and rollout-collection unit tests when available.
