@@ -400,3 +400,210 @@ class TestServer:
         assert "pass@1[avg-of-4]/judge_accuracy" in key
         assert "pass@4/judge_accuracy" in key
         assert "majority@4/judge_accuracy" in key
+
+    async def test_verify_skips_non_message_outputs(
+        self,
+        config: UGPhysicsJudgeResourcesServerConfig,
+        model_create_params: NeMoGymResponseCreateParamsNonStreaming,
+    ) -> None:
+        """`verify` must skip non-message output items and non-text content
+        when concatenating the assistant response.
+
+        Covers the two ``continue`` branches in ``verify`` (the
+        ``output_item.type != "message"`` skip and the
+        ``content_item.type != "output_text"`` skip).
+        """
+        from nemo_gym.openai_utils import NeMoGymResponseReasoningItem, NeMoGymSummary
+
+        server_mock = MagicMock(spec=ServerClient)
+        server = UGPhysicsJudgeResourcesServer(config=config, server_client=server_mock)
+
+        # Build a response that has:
+        #   - a reasoning item (non-message)        → skipped
+        #   - a message with a real text content    → kept
+        # The message content also includes a tool-call-style item which
+        # is not output_text so the inner-loop continue is exercised.
+        reasoning_item = NeMoGymResponseReasoningItem(
+            id="r-1", summary=[NeMoGymSummary(text="cot", type="summary_text")]
+        )
+        message_item = NeMoGymResponseOutputMessage(
+            id="m-1",
+            content=[
+                NeMoGymResponseOutputText(annotations=[], text="\\boxed{8}", type="output_text"),
+            ],
+            role="assistant",
+            status="completed",
+            type="message",
+        )
+        response = NeMoGymResponse(
+            id="combined",
+            created_at=0.0,
+            model="m",
+            object="response",
+            output=[reasoning_item, message_item],
+            parallel_tool_calls=False,
+            tool_choice="none",
+            tools=[],
+        )
+
+        request = UGPhysicsJudgeVerifyRequest(
+            responses_create_params=deepcopy(model_create_params),
+            response=response,
+            question="3+5?",
+            expected_answer="8",
+            solution="3+5=8",
+            subject="ClassicalMechanics",
+        )
+        result = await server.verify(request)
+        # The reasoning item was ignored; only the message text was scored.
+        assert result.reward == approx(1.0)
+        assert result.library_reward == approx(1.0)
+        assert result.extracted_verdict == "TRUE"
+        assert not server_mock.post.called
+
+    async def test_judge_evaluation_uses_parent_signature(
+        self,
+        config: UGPhysicsJudgeResourcesServerConfig,
+    ) -> None:
+        """`_generate_judge_evaluation` accepts the parent's
+        ``first_answer`` / ``second_answer`` kwargs and routes them onto
+        our placeholders.
+
+        Covers the ``if first_answer is not None and second_answer is
+        not None`` branch (lines 271–273).
+        """
+        server_mock = MagicMock(spec=ServerClient)
+        server = UGPhysicsJudgeResourcesServer(config=config, server_client=server_mock)
+        post_mock = MagicMock()
+        post_mock.read = AsyncMock(
+            return_value=json.dumps(
+                _make_response(
+                    "judge_compat",
+                    _msg("## Equivalence Judgement\nTRUE\n## Justification\n..."),
+                )
+            )
+        )
+        server_mock.post = AsyncMock(return_value=post_mock)
+
+        equal, evaluation, verdict = await server._generate_judge_evaluation(
+            question="Q",
+            expected_answer="ignored",
+            solution="ref soln",
+            generation="ignored",
+            first_answer="STUDENT",
+            second_answer="REFERENCE",
+        )
+        assert equal is True
+        assert verdict == "TRUE"
+        # The parent-style kwargs replaced both `generation` and `expected_answer`.
+        rendered = evaluation.responses_create_params.input[0].content
+        assert "STUDENT" in rendered  # routed onto {generation}
+        assert "REFERENCE" in rendered  # routed onto {expected_answer}
+
+    async def test_judge_evaluation_empty_output_returns_false(
+        self,
+        config: UGPhysicsJudgeResourcesServerConfig,
+    ) -> None:
+        """Judge response with no output items → (False, evaluation, None).
+
+        Covers line 302 (``if not judge_response.output: return False…``).
+        """
+        server_mock = MagicMock(spec=ServerClient)
+        server = UGPhysicsJudgeResourcesServer(config=config, server_client=server_mock)
+        empty_response = NeMoGymResponse(
+            id="empty",
+            created_at=0.0,
+            model="m",
+            object="response",
+            output=[],
+            parallel_tool_calls=False,
+            tool_choice="none",
+            tools=[],
+        ).model_dump()
+        post_mock = MagicMock()
+        post_mock.read = AsyncMock(return_value=json.dumps(empty_response))
+        server_mock.post = AsyncMock(return_value=post_mock)
+        equal, _evaluation, verdict = await server._generate_judge_evaluation(
+            question="Q",
+            expected_answer="A",
+            solution="S",
+            generation="G",
+        )
+        assert equal is False
+        assert verdict is None
+
+    async def test_judge_evaluation_non_message_last_output(
+        self,
+        config: UGPhysicsJudgeResourcesServerConfig,
+    ) -> None:
+        """Judge response whose last output item is a reasoning item →
+        (False, evaluation, None).
+
+        Covers line 305 (``if last_output.type != "message": return …``).
+        """
+        from nemo_gym.openai_utils import NeMoGymResponseReasoningItem, NeMoGymSummary
+
+        server_mock = MagicMock(spec=ServerClient)
+        server = UGPhysicsJudgeResourcesServer(config=config, server_client=server_mock)
+        reasoning_only = NeMoGymResponse(
+            id="reasoning_only",
+            created_at=0.0,
+            model="m",
+            object="response",
+            output=[
+                NeMoGymResponseReasoningItem(id="r-1", summary=[NeMoGymSummary(text="thinking", type="summary_text")])
+            ],
+            parallel_tool_calls=False,
+            tool_choice="none",
+            tools=[],
+        ).model_dump()
+        post_mock = MagicMock()
+        post_mock.read = AsyncMock(return_value=json.dumps(reasoning_only))
+        server_mock.post = AsyncMock(return_value=post_mock)
+        equal, _evaluation, verdict = await server._generate_judge_evaluation(
+            question="Q",
+            expected_answer="A",
+            solution="S",
+            generation="G",
+        )
+        assert equal is False
+        assert verdict is None
+
+    async def test_judge_evaluation_message_with_no_text_content(
+        self,
+        config: UGPhysicsJudgeResourcesServerConfig,
+    ) -> None:
+        """Judge response whose last message has empty / non-text content
+        → (False, evaluation, None).
+
+        Covers line 308 (``if last_content is None or last_content.type
+        != "output_text": return …``).
+        """
+        # Empty content list path: last_content is None.
+        empty_message = NeMoGymResponse(
+            id="empty_message",
+            created_at=0.0,
+            model="m",
+            object="response",
+            output=[
+                NeMoGymResponseOutputMessage(
+                    id="m-empty", content=[], role="assistant", status="completed", type="message"
+                )
+            ],
+            parallel_tool_calls=False,
+            tool_choice="none",
+            tools=[],
+        ).model_dump()
+        server_mock = MagicMock(spec=ServerClient)
+        server = UGPhysicsJudgeResourcesServer(config=config, server_client=server_mock)
+        post_mock = MagicMock()
+        post_mock.read = AsyncMock(return_value=json.dumps(empty_message))
+        server_mock.post = AsyncMock(return_value=post_mock)
+        equal, _evaluation, verdict = await server._generate_judge_evaluation(
+            question="Q",
+            expected_answer="A",
+            solution="S",
+            generation="G",
+        )
+        assert equal is False
+        assert verdict is None
