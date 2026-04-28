@@ -1,7 +1,4 @@
 # Source: https://cdn.openai.com/pdf/2fcd284c-b468-4c21-8ee0-7a783933efcc/frontierscience-paper.pdf Page 13
-# Character-for-character match with NeMo Skills'
-# nemo_skills/prompt/config/judge/frontierscience-olympiad.yaml.
-# Placeholders: {question}, {expected_answer}, {generation}.
 user: |-
   You are grading an attempted answer to a science olympiad problem. You will be given the
   problem, attempted answer, and reference answer. Evaluate the solution against the provided

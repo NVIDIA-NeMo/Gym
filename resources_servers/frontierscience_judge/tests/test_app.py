@@ -338,6 +338,83 @@ class TestFrontierScienceJudgeServer:
         dump = result.model_dump()
         assert dump["subject"] == "chemistry"
 
+    async def test_verify_chat_completions_path(self, config: FrontierScienceJudgeConfig) -> None:
+        """Exercise the use_chat_completions_for_judge=True branch."""
+        chat_config = config.model_copy(deep=True)
+        chat_config.use_chat_completions_for_judge = True
+
+        server_mock = MagicMock(spec=ServerClient)
+        server = FrontierScienceJudgeServer(config=chat_config, server_client=server_mock)
+
+        chat_response_dict = {
+            "id": "chat-1",
+            "created": 0,
+            "model": "judge_model",
+            "object": "chat.completion",
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": "stop",
+                    "message": {
+                        "role": "assistant",
+                        "content": "Reasoning step 1...\nJudgement: YES",
+                    },
+                }
+            ],
+        }
+        response_mock = AsyncMock()
+        response_mock.json = AsyncMock(return_value=chat_response_dict)
+        server_mock.post = AsyncMock(return_value=response_mock)
+
+        model_response = self._make_model_response("Pancreas")
+        request = FrontierScienceJudgeVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            response=model_response,
+            question="What organ produces insulin?",
+            expected_answer="Pancreas",
+            subject="biology",
+        )
+
+        result = await server.verify(request)
+        # The chat-completions endpoint was hit, not /v1/responses.
+        call_kwargs = server_mock.post.call_args
+        assert call_kwargs.kwargs["url_path"] == "/v1/chat/completions"
+        assert result.reward == approx(1.0)
+        assert result.verdict == "YES"
+        assert "Judgement: YES" in (result.judge_output or "")
+
+    async def test_verify_chat_completions_empty_choices(self, config: FrontierScienceJudgeConfig) -> None:
+        """Chat completions response with empty choices => verdict=None, reward=0."""
+        chat_config = config.model_copy(deep=True)
+        chat_config.use_chat_completions_for_judge = True
+
+        server_mock = MagicMock(spec=ServerClient)
+        server = FrontierScienceJudgeServer(config=chat_config, server_client=server_mock)
+
+        chat_response_dict = {
+            "id": "chat-empty",
+            "created": 0,
+            "model": "judge_model",
+            "object": "chat.completion",
+            "choices": [],
+        }
+        response_mock = AsyncMock()
+        response_mock.json = AsyncMock(return_value=chat_response_dict)
+        server_mock.post = AsyncMock(return_value=response_mock)
+
+        model_response = self._make_model_response("anything")
+        request = FrontierScienceJudgeVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            response=model_response,
+            question="q",
+            expected_answer="a",
+            subject="physics",
+        )
+
+        result = await server.verify(request)
+        assert result.reward == approx(0.0)
+        assert result.verdict is None
+
     async def test_verify_response_fields(self, config: FrontierScienceJudgeConfig) -> None:
         server_mock = MagicMock(spec=ServerClient)
         server = FrontierScienceJudgeServer(config=config, server_client=server_mock)

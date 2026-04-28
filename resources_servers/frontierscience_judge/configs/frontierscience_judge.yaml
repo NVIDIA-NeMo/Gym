@@ -29,10 +29,8 @@ frontierscience_judge_simple_agent:
       - name: example
         type: example
         jsonl_fpath: resources_servers/frontierscience_judge/data/example.jsonl
+        license: Apache 2.0
 
-# Default judge model: o3-mini-2025-01-31 via OpenAI's public API.
-# Mirrors NeMo Skills' nemo_skills/dataset/frontierscience-olympiad/__init__.py
-# JUDGE_PIPELINE_ARGS. Override the top-level vars below to swap endpoints.
 judge_base_url: https://api.openai.com/v1
 judge_api_key: ${oc.env:OPENAI_API_KEY,null}
 judge_model_name: o3-mini-2025-01-31
