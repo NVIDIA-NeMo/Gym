@@ -307,6 +307,41 @@ class VLLMModel(SimpleResponsesAPIModel):
         if extra_body:
             body_dict = extra_body | body_dict
 
+        # Audio sidechannel: if the row carries an `audio_url` data-URI on
+        # `responses_create_params.metadata`, splice an `audio_url` content
+        # block into the most recent user message before forwarding to vLLM
+        # Chat Completions. OpenAI's Responses API content union has no
+        # audio variant (audio types exist as orphans in the SDK but aren't
+        # members of `ResponseInputContentParam`), so audio rows can't ride
+        # in `input.content` directly — the metadata-sidechannel hop lets
+        # audio benchmarks carry audio without a Gym schema change.
+        # Audio is placed BEFORE text in the content list (some audio
+        # models care). No-op when metadata.audio_url is absent, so
+        # non-audio benchmarks are unaffected.
+        audio_url = metadata.get("audio_url")
+        if audio_url:
+            metadata.pop("audio_url", None)
+            if not metadata and "metadata" in body_dict:
+                body_dict.pop("metadata", None)
+
+            audio_block = {"type": "audio_url", "audio_url": {"url": audio_url}}
+            messages = body_dict.get("messages", []) or []
+            for msg in reversed(messages):
+                if msg.get("role") != "user":
+                    continue
+                content = msg.get("content")
+                if isinstance(content, str):
+                    msg["content"] = [audio_block, {"type": "text", "text": content}]
+                elif isinstance(content, list):
+                    msg["content"] = [audio_block] + list(content)
+                else:
+                    # ``None`` / unexpected shape — replace with a fresh content list
+                    msg["content"] = [audio_block]
+                break
+            else:
+                # No user message found — create one with just the audio block.
+                body_dict.setdefault("messages", []).append({"role": "user", "content": [audio_block]})
+
         return body_dict
 
     async def chat_completions(
