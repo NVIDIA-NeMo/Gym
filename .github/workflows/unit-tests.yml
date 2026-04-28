@@ -30,35 +30,41 @@ jobs:
           submodules: 'recursive'
 
       - name: Detect changed files
+        id: changed-files
+        uses: step-security/changed-files@v45.0.1
+        with:
+          files_yaml: |
+            doc:
+              - '**.md'
+              - docs/**
+              - fern/**
+              - LICENSE
+            server:
+              - resources_servers/**
+              - responses_api_agents/**
+              - responses_api_models/**
+
+      - name: Classify changes
         id: changes
         run: |
           # workflow_call or non-PR context: run everything
-          if [ -z "${{ github.base_ref }}" ]; then
+          if [[ "${{ github.event_name }}" != "pull_request" ]]; then
             echo "run_full=true" >> $GITHUB_OUTPUT
             echo "run_servers=false" >> $GITHUB_OUTPUT
-            echo "No base_ref - running full suite"
+            echo "No PR context - running full suite"
             exit 0
           fi
 
-          git fetch origin ${{ github.base_ref }}
-          CHANGED_FILES=$(git diff --name-only origin/${{ github.base_ref }} HEAD)
-          echo "Changed files:"
-          echo "$CHANGED_FILES"
+          DOC_CHANGED="${{ steps.changed-files.outputs.doc_any_changed }}"
+          SERVER_CHANGED="${{ steps.changed-files.outputs.server_any_changed }}"
+          OTHER_COUNT="${{ steps.changed-files.outputs.other_changed_files_count }}"
 
-          DOCS_PATTERN='^(docs/|fern/|README\.md|CONTRIBUTING\.md|CODE_OF_CONDUCT\.md|SECURITY\.md|ATTRIBUTIONS\.md|LICENSE)'
-          SERVER_PATTERN='^(resources_servers|responses_api_agents|responses_api_models)/[^/]+/'
+          echo "doc_changed=$DOC_CHANGED server_changed=$SERVER_CHANGED other_count=$OTHER_COUNT"
 
-          # Check what types of files changed
-          HAS_OTHER=$(echo "$CHANGED_FILES" | grep -vE "$DOCS_PATTERN" | grep -cvE "$SERVER_PATTERN" || true)
-          HAS_SERVERS=$(echo "$CHANGED_FILES" | grep -cE "$SERVER_PATTERN" || true)
-
-          # If any file is not a doc and not a server file -> full suite
-          # Otherwise, if server files changed -> test only those servers
-          # Otherwise (docs only) -> skip tests
-          if [ -z "$CHANGED_FILES" ] || [ "$HAS_OTHER" -gt 0 ]; then
+          if [[ "$OTHER_COUNT" -gt 0 ]]; then
             echo "run_full=true" >> $GITHUB_OUTPUT
             echo "run_servers=false" >> $GITHUB_OUTPUT
-          elif [ "$HAS_SERVERS" -gt 0 ]; then
+          elif [[ "$SERVER_CHANGED" == "true" ]]; then
             echo "run_full=false" >> $GITHUB_OUTPUT
             echo "run_servers=true" >> $GITHUB_OUTPUT
           else
@@ -100,9 +106,8 @@ jobs:
 
           # Server-only: test only the changed servers
           elif [[ "${{ steps.changes.outputs.run_servers }}" == "true" ]]; then
-            CHANGED_SERVERS=$(git diff --name-only origin/${{ github.base_ref }} HEAD | \
-              grep -E '^(resources_servers|responses_api_agents|responses_api_models)/[^/]+/' | \
-              cut -d'/' -f1-2 | sort -u)
+            CHANGED_SERVERS=$(echo "${{ steps.changed-files.outputs.server_all_changed_files }}" | \
+              tr ' ' '\n' | cut -d'/' -f1-2 | sort -u)
 
             echo "Testing changed servers:"
             echo "$CHANGED_SERVERS" | sed 's/^/  - /'
