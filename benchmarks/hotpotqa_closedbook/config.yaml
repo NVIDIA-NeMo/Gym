@@ -11,3 +11,4 @@ hotpotqa_closedbook_simple_agent:
           jsonl_fpath: benchmarks/hotpotqa_closedbook/data/hotpotqa_closedbook_benchmark.jsonl
           prompt_config: benchmarks/hotpotqa_closedbook/prompts/default.yaml
           prepare_script: benchmarks/hotpotqa_closedbook/prepare.py
+          license: CC BY-SA 4.0

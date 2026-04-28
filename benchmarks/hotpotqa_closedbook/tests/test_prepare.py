@@ -27,7 +27,7 @@ from benchmarks.hotpotqa_closedbook import prepare as prepare_module
 
 _FIXTURE = [
     {
-        "id": "5a8b57f25542995d1e6f1371",
+        "id": "5a8b57f25542995d1e6f1371",  # pragma: allowlist secret
         "question": "Were Scott Derrickson and Ed Wood of the same nationality?",
         "answer": "yes",
         "type": "comparison",
@@ -39,7 +39,7 @@ _FIXTURE = [
         "supporting_facts": {"title": ["A"], "sent_id": [0]},
     },
     {
-        "id": "5a754ab35542993748c89819",
+        "id": "5a754ab35542993748c89819",  # pragma: allowlist secret
         "question": "Which magazine was started first, Arthur's Magazine or First for Women?",
         "answer": "Arthur's Magazine",
         "type": "comparison",

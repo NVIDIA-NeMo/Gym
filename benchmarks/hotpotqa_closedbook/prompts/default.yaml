@@ -1,8 +1,3 @@
-# Character-for-character match with Skills'
-# nemo_skills/prompt/config/eval/hotpotqa_closedbook.yaml.
-# Closed-book HotpotQA: the model answers from its own knowledge with
-# no provided context. The strict JSON output format is what the Gym
-# verify endpoint's parse_generation() looks for.
 user: |-
   Answer the following question using your own knowledge. No external context is provided.
 
