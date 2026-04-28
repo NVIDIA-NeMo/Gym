@@ -134,6 +134,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         time_taken = time()
         time_taken_model_call = 0
         time_taken_tool_call = 0
+        max_output_tokens = 0
         while True:
             step += 1
 
@@ -261,6 +262,8 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 model_response.usage = None
 
             if usage and model_response.usage:
+                max_output_tokens = max(max_output_tokens, model_response.usage.output_tokens)
+
                 usage.input_tokens += model_response.usage.input_tokens
                 usage.output_tokens += model_response.usage.output_tokens
                 usage.total_tokens += model_response.usage.total_tokens
@@ -374,7 +377,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
 
             if step % 3 == 0:
                 print(
-                    f"Step {step} | Time: {time() - time_taken:.2f}s (model {time_taken_model_call:.2f}s, tool {time_taken_tool_call:.2f}s) | Missing end thinks: {missing_end_think_count}"
+                    f"Step {step} | Time: {time() - time_taken:.2f}s (model {time_taken_model_call:.2f}s, tool {time_taken_tool_call:.2f}s) | Max output tokens: {max_output_tokens} | Missing end thinks: {missing_end_think_count}"
                 )
 
         # record final context
