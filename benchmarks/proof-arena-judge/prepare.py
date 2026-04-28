@@ -23,9 +23,10 @@ JUDGEMENT_NO = "Judgement: No"
 SUBSET_PROOFS = "proofs"
 MAX_QWEN_TOKENS = 10_000
 TOKENIZER_REPO = "Qwen/Qwen3-0.6B"
-IMO_OUTPUTS_REVISION = "d995fc906b58"
-USAMO_OUTPUTS_REVISION = "0fafbf629a32"
-IMC_OUTPUTS_REVISION = "d4f93c209272"
+# Pinned HuggingFace dataset revisions aligned with the Skills-side workaround.
+IMO_OUTPUTS_REVISION = "d995fc906b58"  # pragma: allowlist secret
+USAMO_OUTPUTS_REVISION = "0fafbf629a32"  # pragma: allowlist secret
+IMC_OUTPUTS_REVISION = "d4f93c209272"  # pragma: allowlist secret
 
 
 def _grading_scheme_to_rubric(grading_scheme, desc_key: str = "grading_scheme_desc") -> str:
