@@ -14,18 +14,16 @@
 # limitations under the License.
 """ASR-with-PC resources server: deterministic WER scoring for audio benchmarks.
 
-Generic enough to be reused across the audio-WER benchmark suite (LibriSpeech-PC,
-asr-leaderboard, numb3rs, etc.). Dispatches per row on ``task_type`` so the
-server can handle benchmarks that compute different WER variants:
+Generic across the audio-WER benchmark suite (LibriSpeech-PC, asr-leaderboard,
+numb3rs, etc.). Dispatches per row on ``task_type`` so the server can score
+either WER variant a benchmark needs:
 
-  * ``ASR-PC`` (default): full WER + WER_C + WER_PC + PER, like
-    ``nemo_skills/evaluation/evaluator/audio.py::evaluate_asr_pc``.
-  * ``ASR``: standard WER only (Whisper-normalized text, no
-    punctuation/capitalization scoring), like ``evaluate_asr``.
+  * ``ASR-PC`` (default): full WER + WER_C + WER_PC + PER.
+  * ``ASR``: standard WER only (Whisper-normalized, lowercased, no
+    punctuation/capitalization).
 
-Skills is the gold standard; this server reproduces its per-rollout scoring
-and aggregation exactly. ``task_type`` defaults to the server-level config
-value but may be overridden per row in ``verifier_metadata.task_type``.
+``task_type`` defaults to the server-level config value but may be
+overridden per row via the verify request body's ``task_type`` field.
 """
 
 import re
@@ -43,8 +41,7 @@ from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_met
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Text-normalization helpers — direct port from
-# nemo_skills/evaluation/evaluator/audio.py.
+# Text-normalization helpers
 # ──────────────────────────────────────────────────────────────────────────────
 
 
@@ -106,13 +103,15 @@ def calculate_per(reference: str, hypothesis: str) -> float:
 def evaluate_asr_pc(reference: str, hypothesis: str) -> Dict[str, Any]:
     """Compute per-sample WER, WER_C, WER_PC, PER for one (reference, hypothesis) pair.
 
-    Mirrors ``evaluate_asr_pc`` in ``nemo_skills/evaluation/evaluator/audio.py``
-    with ``normalize_standard_wer=True`` and ``normalization_mode="standard"``
-    (the LibriSpeech-PC defaults).
+    Standard WER uses Whisper text normalization + lowercase + punctuation
+    strip. WER_C is jiwer over de-punctuated whitespace-normalized text
+    (case-sensitive). WER_PC tokenizes punctuation as separate tokens so word
+    boundaries and punctuation errors both contribute. PER is the punctuation
+    error rate via DP alignment of punctuation tokens.
 
-    Also returns the normalized strings used for each WER variant; the resource
-    server keeps those on the verify response so corpus-level aggregation can
-    re-run jiwer over the whole corpus (matching Skills' AudioMetrics).
+    Also returns the normalized strings used for each WER variant; the
+    resource server keeps those on the verify response so corpus-level
+    aggregation can re-run jiwer over the whole corpus.
     """
     import jiwer
 
@@ -148,7 +147,6 @@ def evaluate_asr_pc(reference: str, hypothesis: str) -> Dict[str, Any]:
 def evaluate_asr(reference: str, hypothesis: str) -> Dict[str, Any]:
     """Standard ASR WER (Whisper-normalized) — no PC scoring.
 
-    Mirrors ``evaluate_asr`` in ``nemo_skills/evaluation/evaluator/audio.py``.
     Used by benchmarks that only score standard WER (e.g. asr-leaderboard).
     Empty references are dropped (HF Open ASR Leaderboard convention).
     """
@@ -201,8 +199,7 @@ class ASRWithPCVerifyResponse(BaseVerifyResponse):
     wer_pc: float = 0.0
     per: float = 0.0
     is_correct: bool = False
-    # Normalized strings retained for corpus-level aggregation (matches Skills'
-    # AudioMetrics, which keeps text/pred_text and re-runs jiwer over the corpus).
+    # Normalized strings retained for corpus-level aggregation in compute_metrics().
     ref_pc_tok: str = ""
     hyp_pc_tok: str = ""
     ref_c: str = ""
@@ -234,8 +231,7 @@ class ASRWithPCResourcesServer(SimpleResourcesServer):
         hypothesis = _extract_assistant_text(body.response).strip()
         reference = (body.expected_answer or "").strip()
 
-        # Per-row override beats the server-level default. Skills' AudioEvaluator
-        # uses the same override pattern via the ``task_type`` field on each row.
+        # Per-row override beats the server-level default.
         task_type = body.task_type or self.config.task_type
         if task_type == "ASR-PC":
             scores = evaluate_asr_pc(reference, hypothesis)
@@ -276,15 +272,14 @@ class ASRWithPCResourcesServer(SimpleResourcesServer):
         )
 
     # ──────────────────────────────────────────────────────────────────────
-    # Aggregate metrics — mirror Skills' AudioMetrics output.
+    # Aggregate metrics
     # ──────────────────────────────────────────────────────────────────────
 
     @staticmethod
     def _score_fn(r: dict) -> Dict[str, float]:
-        """Per-rollout scores routed through compute_pass_majority_metrics.
+        """Per-rollout scores routed through ``compute_pass_majority_metrics``.
 
-        ``per`` and ``no_answer`` are sample-mean metrics, matching the way
-        Skills reports them.
+        ``per`` and ``no_answer`` are sample-mean metrics.
         """
         pred = (r.get("pred_text") or "").strip()
         return {
@@ -294,16 +289,13 @@ class ASRWithPCResourcesServer(SimpleResourcesServer):
         }
 
     def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
-        """Per-rollout pass@k + WER aggregation matching Skills exactly.
+        """Per-rollout pass@k + WER aggregation.
 
-        Skills' ``AudioMetrics.get_metrics`` aggregates the four WER variants
-        non-uniformly:
-            - ``wer`` (the headline standard WER): **corpus-level** via
+        The four WER variants aggregate non-uniformly:
+            - ``wer`` (headline standard WER): **corpus-level** via
               ``jiwer.wer(refs, hyps)`` over the whole eval set.
             - ``wer_c``, ``wer_pc``, ``per``: **mean-of-per-sample** —
               ``sum(scores) / len(scores)``.
-        We mirror both choices here so the resulting numbers match Skills'
-        ``metrics.json`` columns column-for-column.
         """
         import jiwer
 
@@ -317,11 +309,10 @@ class ASRWithPCResourcesServer(SimpleResourcesServer):
             return metrics
 
         for k in range(1, max_k + 1):
-            # Corpus-level standard WER (matches Skills' `wer`).
+            # Corpus-level standard WER.
             refs_std: List[str] = []
             hyps_std: List[str] = []
-            # Mean-of-per-sample buckets for case-sensitive / punct-aware WER
-            # and PER (match Skills' wer_c / wer_pc / per aggregation).
+            # Mean-of-per-sample buckets for case-sensitive / punct-aware WER and PER.
             wer_c_scores: List[float] = []
             wer_pc_scores: List[float] = []
             per_scores: List[float] = []
@@ -361,8 +352,8 @@ class ASRWithPCResourcesServer(SimpleResourcesServer):
         key.update(highest_k_metrics(agent_metrics, "pass@1[avg-of-{k}]"))
         key.update(highest_k_metrics(agent_metrics, "pass@{k}"))
 
-        # WER aggregates at the highest k. Skills' headline `wer` is corpus-level;
-        # `wer_c`, `wer_pc`, `per` are mean-of-per-sample. We expose the same set.
+        # WER aggregates at the highest k: `wer` is corpus-level, `wer_c` /
+        # `wer_pc` / `per` are mean-of-per-sample. Exposed under headline names.
         max_k = 0
         for k_str_key in agent_metrics:
             if k_str_key.startswith("corpus_wer@k="):

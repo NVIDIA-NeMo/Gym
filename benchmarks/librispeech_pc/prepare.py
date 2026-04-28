@@ -43,14 +43,12 @@ AUDIO_URLS = {
     "test-other": "https://www.openslr.org/resources/12/test-other.tar.gz",
 }
 
-# Skills' nemo_skills/dataset/librispeech-pc/__init__.py defines
-# `EVAL_SPLIT = "test-clean"` and the Skills parity comparison runs only
-# that split — so this benchmark's single `datasets:` entry points at the
-# test_clean JSONL. test_other (~2.9k harder utterances) can be enabled
-# either by adding a sibling benchmark dir (the idiomatic Gym shape, since
-# `ng_prepare_benchmark` enforces one dataset per agent) or by passing
-# `--splits test-other` and pointing a separate config at the resulting
-# JSONL. Default below downloads + emits only test-clean.
+# test-clean is the standard LibriSpeech-PC eval split; test-other (~2.9k
+# harder utterances) can be enabled either by adding a sibling benchmark
+# dir (the idiomatic shape, since `ng_prepare_benchmark` enforces one
+# dataset per agent) or by passing `--splits test-other` and pointing a
+# separate config at the resulting JSONL. Default below emits only
+# test-clean.
 DEFAULT_SPLITS = ("test-clean",)
 ALL_SPLITS = ("test-clean", "test-other")
 
@@ -167,10 +165,10 @@ def prepare(work_dir: Path | None = None, splits: tuple[str, ...] = DEFAULT_SPLI
             ``benchmarks/librispeech_pc/data``. Reusing the same path across
             runs makes the prepare step idempotent — extracted audio + manifests
             persist between invocations.
-        splits: Which splits to download + emit. Defaults to ``("test-clean",)``
-            (Skills' EVAL_SPLIT). When extra splits are requested they each
-            land in their own JSONL alongside test_clean (e.g. for users wiring
-            up a sibling benchmark dir for test-other).
+        splits: Which splits to download + emit. Defaults to ``("test-clean",)``.
+            When extra splits are requested they each land in their own
+            JSONL alongside test_clean (e.g. for users wiring up a sibling
+            benchmark dir for test-other).
 
     Returns:
         Path to ``librispeech_pc_test_clean.jsonl`` — the file the benchmark
@@ -224,10 +222,9 @@ def main() -> None:
         choices=list(AUDIO_URLS.keys()),
         default=list(DEFAULT_SPLITS),
         help=(
-            "Which LibriSpeech splits to download + emit. Default matches "
-            "Skills' EVAL_SPLIT (test-clean only). Each emitted split lands "
-            "in its own JSONL (librispeech_pc_test_clean.jsonl, "
-            "librispeech_pc_test_other.jsonl)."
+            "Which LibriSpeech splits to download + emit. Default is "
+            "test-clean only. Each emitted split lands in its own JSONL "
+            "(librispeech_pc_test_clean.jsonl, librispeech_pc_test_other.jsonl)."
         ),
     )
     args = parser.parse_args()

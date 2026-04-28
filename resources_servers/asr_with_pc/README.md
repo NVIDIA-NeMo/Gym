@@ -1,25 +1,24 @@
 # ASR with PC (Word Error Rate)
 
-Generic ASR / ASR-PC scoring for audio benchmarks. Ported from NeMo-Skills'
-`nemo_skills/evaluation/evaluator/audio.py` (both `evaluate_asr` and
-`evaluate_asr_pc`). Reusable across benchmarks that score Word Error Rate;
-the LibriSpeech-PC benchmark is the first consumer, with `asr-leaderboard`,
-`numb3rs`, and `audiobench` as natural follow-ups.
+Generic ASR / ASR-PC scoring for audio benchmarks. Reusable across benchmarks
+that score Word Error Rate; the LibriSpeech-PC benchmark is the first
+consumer, with `asr-leaderboard`, `numb3rs`, and `audiobench` as natural
+follow-ups.
 
 ## What it scores
 
 Server config dispatches per row on `task_type` (default at the server level,
 overridable per-row in the verify request body):
 
-- **`task_type: ASR-PC`** — full WER + WER_C + WER_PC + PER. Mirrors Skills'
-  `evaluate_asr_pc`. `is_correct = wer_pc < 0.5`.
+- **`task_type: ASR-PC`** — full WER + WER_C + WER_PC + PER.
+  `is_correct = wer_pc < 0.5`.
 - **`task_type: ASR`** — standard WER only (Whisper-normalized, lowercased,
-  no punctuation). Mirrors Skills' `evaluate_asr`. `is_correct = wer < 0.5`.
+  no punctuation). `is_correct = wer < 0.5`.
 
-Aggregation matches Skills' `AudioMetrics.get_metrics` exactly:
+Aggregation:
 
-- `wer` (corpus-level, the headline) via `jiwer.wer(refs, hyps)` over the whole
-  eval set.
+- `wer` (corpus-level, the headline) via `jiwer.wer(refs, hyps)` over the
+  whole eval set.
 - `wer_c`, `wer_pc`, `per` are mean-of-per-sample.
 
 Standard WER uses Whisper's English text normalizer + lowercase + punctuation
@@ -30,11 +29,11 @@ punctuation errors both count.
 
 Audio is carried separately from text content via
 `responses_create_params.metadata.audio_url` (a data-URI string). The
-[`vllm_model`](../../responses_api_models/vllm_model/) wrapper
-reads that field and splices an `audio_url` content block into the user
-message before forwarding to vLLM Chat Completions. The Responses API content
-union has no audio variant, so audio cannot ride in `input.content` directly —
-the metadata sidechannel is the workaround until the schema is extended.
+`vllm_model` audio sidechannel reads that field and splices an `audio_url`
+content block into the user message before forwarding to vLLM Chat
+Completions. The Responses API content union has no audio variant, so audio
+cannot ride in `input.content` directly — the metadata sidechannel is the
+workaround until the schema is extended.
 
 ## Running servers
 

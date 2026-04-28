@@ -313,11 +313,11 @@ class VLLMModel(SimpleResponsesAPIModel):
         # Chat Completions. OpenAI's Responses API content union has no
         # audio variant (audio types exist as orphans in the SDK but aren't
         # members of `ResponseInputContentParam`), so audio rows can't ride
-        # in `input.content` directly — this metadata-sidechannel hop lets
-        # benchmarks like librispeech_pc carry audio without a Gym schema
-        # change. Mirrors NeMo-Skills' VLLMMultimodalModel.content_text_to_list
-        # placement (audio BEFORE text). No-op when metadata.audio_url is
-        # absent, so non-audio benchmarks are unaffected.
+        # in `input.content` directly — the metadata-sidechannel hop lets
+        # audio benchmarks carry audio without a Gym schema change.
+        # Audio is placed BEFORE text in the content list (some audio
+        # models care). No-op when metadata.audio_url is absent, so
+        # non-audio benchmarks are unaffected.
         audio_url = metadata.get("audio_url")
         if audio_url:
             metadata.pop("audio_url", None)

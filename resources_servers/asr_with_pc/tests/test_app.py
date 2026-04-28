@@ -6,9 +6,7 @@
 """Unit tests for the asr_with_pc resources server.
 
 Each test fixes the model output and the reference transcript and asserts the
-WER values match what Skills' ``evaluate_asr_pc`` / ``evaluate_asr`` produce
-for the same inputs. The numeric expectations were computed offline against
-jiwer 3.x.
+WER values against numeric expectations computed offline (jiwer 3.x).
 """
 
 from unittest.mock import MagicMock
@@ -170,7 +168,7 @@ class TestEvaluateAsrPc:
 
     def test_evaluate_asr_empty_hypothesis_substitutes_empty(self) -> None:
         result = evaluate_asr("hello world", "")
-        # `pred_text == "empty"` is what Skills' evaluate_asr substitutes
+        # ``evaluate_asr`` substitutes "empty" for an empty hypothesis
         assert result["pred_text"] == "empty"
         assert result["wer"] > 0.0
 
@@ -305,9 +303,9 @@ class TestAggregateMetrics:
         metrics = server.compute_metrics(tasks)
 
         assert metrics["pass@1[avg-of-2]/accuracy"] == pytest.approx(100.0)
-        # Standard WER: corpus-level (matches Skills `wer`).
+        # Standard WER: corpus-level.
         assert metrics["corpus_wer@k=2"] == pytest.approx(0.0)
-        # wer_pc / wer_c / per: mean-of-per-sample (matches Skills aggregation).
+        # wer_pc / wer_c / per: mean-of-per-sample.
         assert metrics["wer_pc@k=2"] == pytest.approx(0.0)
         assert metrics["wer_c@k=2"] == pytest.approx(0.0)
         assert metrics["per@k=2"] == pytest.approx(0.0)
@@ -346,7 +344,7 @@ class TestAggregateMetrics:
         # Highest k for pass@1[avg-of-k] is 4
         assert key["pass@1[avg-of-4]/accuracy"] == 75.0
         assert key["pass@4/accuracy"] == 90.0
-        # WER aggregates exposed under Skills-aligned headline names.
+        # WER aggregates exposed under headline names.
         assert key["wer"] == 11.0  # corpus_wer@k=4
         assert key["wer_c"] == 9.0
         assert key["wer_pc"] == 14.0
