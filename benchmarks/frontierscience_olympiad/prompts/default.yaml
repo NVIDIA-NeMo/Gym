@@ -1,0 +1,5 @@
+# Character-for-character match with NeMo Skills'
+# nemo_skills/prompt/config/generic/default.yaml — the prompt that
+# frontierscience-olympiad's __init__.py picks via
+# GENERATION_ARGS=++prompt_config=generic/default.
+user: "{question}"
