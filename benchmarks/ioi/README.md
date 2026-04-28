@@ -30,10 +30,13 @@ Emitted by `competitive_coding_challenges`:
 The CCC server compiles and runs candidate solutions inside the NeMo Skills
 sandbox over HTTP. Bring one up locally before running the benchmark:
 
+There is no published image — build it from the NeMo-Skills repo:
+
 ```bash
-# From a NeMo-Skills checkout (no published image — build from source):
-docker build -t nemo-skills-sandbox -f dockerfiles/Dockerfile.sandbox .
-docker run --rm -p 6000:6000 nemo-skills-sandbox
+git clone --depth 1 https://github.com/NVIDIA-NeMo/Skills.git /tmp/NeMo-Skills \
+  && docker build -t nemo-skills-sandbox \
+       -f /tmp/NeMo-Skills/dockerfiles/Dockerfile.sandbox /tmp/NeMo-Skills \
+  && docker run --rm -p 6000:6000 nemo-skills-sandbox
 ```
 
 CCC defaults to `http://127.0.0.1:6000/execute`; override with
