@@ -76,7 +76,7 @@ class BrowsecompAgentConfig(BaseResponsesAPIAgentConfig):
     # completed step iteration; on successful completion of the trajectory it is
     # deleted. Lets a slurm restart resume from the last completed step instead
     # of redoing the whole sample.
-    resume_from_trajectory: bool = False
+    resume_from_trajectory: bool = True
     # vLLM-specific optimization: before each model call, hit the model server's
     # /tokenize endpoint to get the prompt's token count. If it exceeds the reset
     # threshold, skip the model call entirely and reset context — saving the cost
@@ -156,6 +156,14 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         step_times: List[float] = []
         # Step indices at which the context was reset, since the last loop/start print.
         context_reset_steps: List[int] = []
+
+        user_query = [i for i in body.input if i.role == "user"][0].content
+        user_query = user_query if isinstance(user_query, str) else user_query[0]["text"]
+
+        time_taken = time.monotonic()
+        time_taken_model_call = 0.0
+        time_taken_tool_call = 0.0
+        max_output_tokens = 0
 
         def print_log(label):
             q = body.input[0].content if body.input else ""
@@ -368,6 +376,9 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                         raw_output_text_len=len(raw_output_text),
                     )
                 model_call_dur = time.monotonic() - model_call_start
+                time_taken_model_call += model_call_dur
+                if model_response.usage and model_response.usage.output_tokens:
+                    max_output_tokens = max(max_output_tokens, model_response.usage.output_tokens)
 
                 # If we retried all the way through and still didn't get a valid response, exit.
                 if not returned_valid_response:
@@ -533,6 +544,8 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                         new_output = last_tool.output + nudge_msg
                         new_outputs[-1] = last_tool.model_copy(update={"output": new_output})
 
+                time_taken_tool_call += tool_total_dur
+
                 now = time.monotonic()
                 step_times.append(now - step_start)
                 step_start = now
@@ -619,6 +632,10 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         # Propogate any extra cookies necessary for downstream verification
         for k, v in (*resources_server_cookies.items(), *model_server_cookies.items()):
             response.set_cookie(k, v)
+
+        print(
+            f"{user_query[:20]}... | FINISHED | Step {step} | Time: {time.monotonic() - time_taken:.2f}s (model {time_taken_model_call:.2f}s, tool {time_taken_tool_call:.2f}s) | Max output tokens: {max_output_tokens} | Missing end thinks: {missing_end_think_count}"
+        )
 
         model_response.output = new_outputs
         model_response.usage = usage
