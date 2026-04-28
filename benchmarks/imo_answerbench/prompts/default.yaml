@@ -1,0 +1,10 @@
+# Character-for-character match with Skills' nemo_skills/prompt/config/generic/math.yaml
+# (the prompt imo-answerbench's __init__.py picks via GENERATION_ARGS
+# '++prompt_config=generic/math').  The Skills template has no system
+# message — only a user turn with {problem} substituted into a short
+# instruction.  Keeping the two in sync is what makes the Skills<->Gym
+# comparison apples-to-apples.
+user: |-
+  Solve the following math problem. Make sure to put the answer (and only answer) inside \boxed{{}}.
+
+  {question}
