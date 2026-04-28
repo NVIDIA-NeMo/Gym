@@ -1,0 +1,14 @@
+config_paths:
+  - resources_servers/code_gen/configs/code_gen.yaml
+
+"livecodebench-x_code_gen_simple_agent":
+  _inherit_from: code_gen_simple_agent
+  responses_api_agents:
+    simple_agent:
+      datasets:
+      - name: livecodebench-x
+        type: benchmark
+        jsonl_fpath: benchmarks/livecodebench-x/data/livecodebench-x_benchmark.jsonl
+        prompt_config: benchmarks/prompts/generic_default.yaml
+        prepare_script: benchmarks/livecodebench-x/prepare.py
+        license: CC-BY-4.0
