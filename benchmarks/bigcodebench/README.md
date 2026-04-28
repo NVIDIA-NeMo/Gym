@@ -22,7 +22,7 @@ ng_run "+config_paths=[$config_paths]"
 
 # Collecting rollouts
 ng_collect_rollouts \
-    +agent_name=bigcodebench_simple_agent \
+    +agent_name=bigcodebench_benchmark_simple_agent \
     +input_jsonl_fpath=benchmarks/bigcodebench/data/bigcodebench_benchmark.jsonl \
     +output_jsonl_fpath=results/bigcodebench_rollouts.jsonl \
     +num_repeats=4 \

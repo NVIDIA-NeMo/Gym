@@ -1,15 +1,15 @@
 config_paths:
   - resources_servers/bigcodebench/configs/bigcodebench.yaml
 
-bigcodebench_resources_server:
+bigcodebench_benchmark_resources_server:
   _inherit_from: bigcodebench
 
-bigcodebench_simple_agent:
+bigcodebench_benchmark_simple_agent:
   _inherit_from: bigcodebench_simple_agent
   responses_api_agents:
     simple_agent:
       resources_server:
-        name: bigcodebench_resources_server
+        name: bigcodebench_benchmark_resources_server
       datasets:
       - name: bigcodebench
         type: benchmark
