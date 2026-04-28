@@ -5,24 +5,24 @@ Use this as the general shape for a first reward profiling run. Substitute envir
 ## Minimal Flow
 
 ```bash
-CONFIG_PATHS="responses_api_models/vllm_model/configs/vllm_model.yaml,__ENV_CONFIG_PATHS__"
+CONFIG_PATHS="responses_api_models/vllm_model/configs/vllm_model.yaml,your_env_config_paths"
 
-POLICY_MODEL_NAME="__POLICY_MODEL_NAME__"
-POLICY_BASE_URL="__POLICY_BASE_URL__"
-POLICY_API_KEY="__POLICY_API_KEY__"
+POLICY_MODEL_NAME="your_policy_model_name"
+POLICY_BASE_URL="your_policy_base_url"
+POLICY_ENDPOINT_KEY="your_policy_endpoint_key"
 
-DATA_JSONL="__DATA_JSONL__"
-ROLLOUTS_JSONL="__ROLLOUTS_JSONL__"
+DATA_JSONL="/path/to/your_input.jsonl"
+ROLLOUTS_JSONL="/path/to/your_rollouts.jsonl"
 MATERIALIZED_JSONL="${ROLLOUTS_JSONL%.jsonl}_materialized_inputs.jsonl"
 
-AGENT_NAME="__AGENT_NAME__"
-NUM_REPEATS="__NUM_REPEATS__"
-NUM_SAMPLES_IN_PARALLEL="__NUM_SAMPLES_IN_PARALLEL__"
+AGENT_NAME="your_agent_name"
+NUM_REPEATS=4
+NUM_SAMPLES_IN_PARALLEL=64
 
 ng_run "+config_paths=[$CONFIG_PATHS]" \
     +policy_model_name="$POLICY_MODEL_NAME" \
     +policy_base_url="$POLICY_BASE_URL" \
-    +policy_api_key="$POLICY_API_KEY" &
+    +policy_api_key="$POLICY_ENDPOINT_KEY" &
 NG_RUN_PID=$!
 trap 'kill "$NG_RUN_PID" 2>/dev/null || true' EXIT
 
