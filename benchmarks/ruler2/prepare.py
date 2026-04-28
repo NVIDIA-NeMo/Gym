@@ -384,12 +384,39 @@ def _convert_row_to_gym(row: dict, task: str) -> dict:
     }
 
 
+def _parse_tasks_arg(value: str | None) -> tuple[str, ...]:
+    if not value:
+        return ALL_TASKS
+    items = tuple(s.strip() for s in value.split(",") if s.strip())
+    for item in items:
+        if item not in TASK_TO_ARGS:
+            raise ValueError(f"Unknown task {item!r}. Valid options: {list(ALL_TASKS)}")
+    return items
+
+
 def prepare(
-    tasks: Iterable[str] = ALL_TASKS,
-    model: str = DEFAULT_MODEL,
-    max_seq_length: int = DEFAULT_MAX_SEQ_LENGTH,
-    dataset_size: int = DEFAULT_DATASET_SIZE,
+    tasks: Iterable[str] | None = None,
+    model: str | None = None,
+    max_seq_length: int | None = None,
+    dataset_size: int | None = None,
 ) -> Path:
+    """Run the 12 sub-task generators and concatenate outputs.
+
+    Parameters default to the ``RULER2_*`` environment variables (or the
+    module-level defaults if those aren't set), so the function can be
+    invoked from ``ng_prepare_benchmark`` (which calls ``prepare()`` with
+    no arguments) and still respect the per-cluster overrides documented
+    in the README.
+    """
+    if tasks is None:
+        tasks = _parse_tasks_arg(os.environ.get("RULER2_TASKS"))
+    if model is None:
+        model = os.environ.get("RULER2_MODEL", DEFAULT_MODEL)
+    if max_seq_length is None:
+        max_seq_length = int(os.environ.get("RULER2_MAX_SEQ_LENGTH", DEFAULT_MAX_SEQ_LENGTH))
+    if dataset_size is None:
+        dataset_size = int(os.environ.get("RULER2_DATASET_SIZE", DEFAULT_DATASET_SIZE))
+
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     TMP_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -427,16 +454,6 @@ def prepare(
         shutil.rmtree(TMP_DIR, ignore_errors=True)
 
     return OUTPUT_FPATH
-
-
-def _parse_tasks_arg(value: str | None) -> tuple[str, ...]:
-    if not value:
-        return ALL_TASKS
-    items = tuple(s.strip() for s in value.split(",") if s.strip())
-    for item in items:
-        if item not in TASK_TO_ARGS:
-            raise ValueError(f"Unknown task {item!r}. Valid options: {list(ALL_TASKS)}")
-    return items
 
 
 def main() -> None:
