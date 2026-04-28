@@ -163,6 +163,26 @@ class TestRewardProfile:
                 "histogram/bool": None,
                 "histogram/reward": None,
                 "histogram/abc usage": None,
+                "_ng_task_index": 0,
+                "num_rollouts": 2,
+                "rollout_infos": [
+                    {
+                        "rollout_id": "0:0",
+                        "_ng_task_index": 0,
+                        "_ng_rollout_index": 0,
+                        "reward": 0,
+                        "abc usage": 1,
+                        "bool": 1,
+                    },
+                    {
+                        "rollout_id": "0:1",
+                        "_ng_task_index": 0,
+                        "_ng_rollout_index": 1,
+                        "reward": 1,
+                        "abc usage": 1,
+                        "bool": 0,
+                    },
+                ],
                 "sample": {
                     "responses_create_params": {
                         "input": [],
@@ -192,6 +212,26 @@ class TestRewardProfile:
                 "histogram/bool": None,
                 "histogram/reward": None,
                 "histogram/abc usage": None,
+                "_ng_task_index": 1,
+                "num_rollouts": 2,
+                "rollout_infos": [
+                    {
+                        "rollout_id": "1:0",
+                        "_ng_task_index": 1,
+                        "_ng_rollout_index": 0,
+                        "reward": 0,
+                        "abc usage": 1,
+                        "bool": 1,
+                    },
+                    {
+                        "rollout_id": "1:1",
+                        "_ng_task_index": 1,
+                        "_ng_rollout_index": 1,
+                        "reward": 1,
+                        "abc usage": 1,
+                        "bool": 0,
+                    },
+                ],
                 "sample": {
                     "responses_create_params": {
                         "input": [],
@@ -221,6 +261,26 @@ class TestRewardProfile:
                 "histogram/bool": None,
                 "histogram/reward": None,
                 "histogram/abc usage": None,
+                "_ng_task_index": 2,
+                "num_rollouts": 2,
+                "rollout_infos": [
+                    {
+                        "rollout_id": "2:0",
+                        "_ng_task_index": 2,
+                        "_ng_rollout_index": 0,
+                        "reward": 0,
+                        "abc usage": 1,
+                        "bool": 1,
+                    },
+                    {
+                        "rollout_id": "2:1",
+                        "_ng_task_index": 2,
+                        "_ng_rollout_index": 1,
+                        "reward": 1,
+                        "abc usage": 1,
+                        "bool": 0,
+                    },
+                ],
                 "sample": {
                     "responses_create_params": {
                         "input": [],
@@ -313,6 +373,70 @@ class TestRewardProfile:
         # We just check that this doesn't error
         RewardProfiler().profile_from_data(rows, results)
 
+    def test_rollout_infos_are_sorted_and_pass_rate_is_recoverable(self) -> None:
+        rows = [
+            {
+                "_ng_task_index": 0,
+                "_ng_rollout_index": 0,
+                "responses_create_params": {"input": []},
+                "agent_ref": {"name": "my_agent"},
+            },
+            {
+                "_ng_task_index": 0,
+                "_ng_rollout_index": 1,
+                "responses_create_params": {"input": []},
+                "agent_ref": {"name": "my_agent"},
+            },
+        ]
+        results = [
+            {
+                "_ng_task_index": 0,
+                "_ng_rollout_index": 1,
+                "response": {"usage": {"input_tokens": 5, "output_tokens": 7, "total_tokens": 12}},
+                "reward": 1.0,
+                "verifier_score": 3.5,
+            },
+            {
+                "_ng_task_index": 0,
+                "_ng_rollout_index": 0,
+                "response": {"usage": {"input_tokens": 3, "output_tokens": 4, "total_tokens": 7}},
+                "reward": 0.0,
+                "verifier_score": 1.5,
+            },
+        ]
+
+        group_level_metrics, _ = RewardProfiler().profile_from_data(rows, results)
+        row = RewardProfiler().prepare_for_serialization(group_level_metrics)[0]
+
+        assert row["_ng_task_index"] == 0
+        assert row["num_rollouts"] == 2
+        assert row["rollout_infos"] == [
+            {
+                "rollout_id": "0:0",
+                "_ng_task_index": 0,
+                "_ng_rollout_index": 0,
+                "reward": 0.0,
+                "input_tokens": 3,
+                "output_tokens": 4,
+                "total_tokens": 7,
+                "verifier_score": 1.5,
+            },
+            {
+                "rollout_id": "0:1",
+                "_ng_task_index": 0,
+                "_ng_rollout_index": 1,
+                "reward": 1.0,
+                "input_tokens": 5,
+                "output_tokens": 7,
+                "total_tokens": 12,
+                "verifier_score": 3.5,
+            },
+        ]
+        pass_rate_passed = sum(1 for info in row["rollout_infos"] if info["reward"] == 1.0)
+        assert pass_rate_passed == 1
+        assert row["num_rollouts"] == 2
+        assert pass_rate_passed / row["num_rollouts"] == row["mean/reward"]
+
     def test_profile_from_data_mismatched_keys(self) -> None:
         rows = [
             {
@@ -365,6 +489,17 @@ class TestRewardProfile:
                 "std/abc usage": 0.0,
                 "histogram/first_col": None,
                 "histogram/abc usage": None,
+                "_ng_task_index": 0,
+                "num_rollouts": 1,
+                "rollout_infos": [
+                    {
+                        "rollout_id": "0:0",
+                        "_ng_task_index": 0,
+                        "_ng_rollout_index": 0,
+                        "abc usage": 1,
+                        "first_col": 1,
+                    },
+                ],
                 "sample": {
                     "responses_create_params": {
                         "input": [],
@@ -387,6 +522,17 @@ class TestRewardProfile:
                 "std/second_col": 0.0,
                 "histogram/abc usage": None,
                 "histogram/second_col": None,
+                "_ng_task_index": 1,
+                "num_rollouts": 1,
+                "rollout_infos": [
+                    {
+                        "rollout_id": "1:0",
+                        "_ng_task_index": 1,
+                        "_ng_rollout_index": 0,
+                        "abc usage": 1,
+                        "second_col": 2,
+                    },
+                ],
                 "sample": {
                     "responses_create_params": {
                         "input": [],

@@ -15,7 +15,7 @@
 import asyncio
 import json
 from asyncio import Future, Semaphore
-from collections import Counter
+from collections import Counter, defaultdict
 from contextlib import nullcontext
 from copy import deepcopy
 from itertools import repeat
@@ -39,6 +39,7 @@ from nemo_gym.global_config import (
     get_wandb_run,
 )
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
+from nemo_gym.reward_profile import RewardProfiler
 from nemo_gym.server_utils import (
     GlobalAIOHTTPAsyncClientConfig,
     ServerClient,
@@ -126,11 +127,27 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
         default=None,
         description="Path to a prompt YAML file. Builds responses_create_params.input from the template at rollout time. Mutually exclusive with pre-populated responses_create_params.input in the JSONL data.",
     )
+    inflight_reward_profile: bool = Field(
+        default=False,
+        description="Write task-level reward profile rows while collection is running, then rewrite the final file through the canonical RewardProfiler path.",
+    )
+    inflight_reward_profile_fpath: Optional[str] = Field(
+        default=None,
+        description="Optional path for inflight reward profiling output. Defaults to <output_stem>_reward_profiling.jsonl.",
+    )
 
     @property
     def materialized_jsonl_fpath(self) -> Path:
         output_fpath = Path(self.output_jsonl_fpath)
         return output_fpath.with_stem(output_fpath.stem + "_materialized_inputs").with_suffix(".jsonl")
+
+    @property
+    def reward_profiling_jsonl_fpath(self) -> Path:
+        if self.inflight_reward_profile_fpath:
+            return Path(self.inflight_reward_profile_fpath)
+
+        output_fpath = Path(self.output_jsonl_fpath)
+        return output_fpath.with_stem(output_fpath.stem + "_reward_profiling").with_suffix(".jsonl")
 
 
 def _rollout_request_debug_summary(row: Dict[str, Any]) -> Dict[str, Any]:
@@ -144,6 +161,18 @@ def _rollout_request_debug_summary(row: Dict[str, Any]) -> Dict[str, Any]:
 
 
 class RolloutCollectionHelper(BaseModel):
+    def _write_inflight_reward_profile_row(
+        self,
+        reward_profiler: RewardProfiler,
+        rows: List[Dict[str, Any]],
+        results: List[Dict[str, Any]],
+        f,
+    ) -> None:
+        group_level_metrics, _ = reward_profiler.profile_from_data(rows, results)
+        for row in reward_profiler.prepare_for_serialization(group_level_metrics):
+            f.write(orjson.dumps(row) + b"\n")
+        f.flush()
+
     def _preprocess_rows_from_config(self, config: RolloutCollectionConfig) -> List[Dict]:
         range_iterator = repeat(0)
         if config.limit:
@@ -260,6 +289,7 @@ class RolloutCollectionHelper(BaseModel):
 
     async def run_from_config(self, config: RolloutCollectionConfig) -> Tuple[List[Dict]]:
         output_fpath = Path(config.output_jsonl_fpath)
+        reward_profiling_fpath = config.reward_profiling_jsonl_fpath
 
         if config.resume_from_cache and config.materialized_jsonl_fpath.exists() and output_fpath.exists():
             (
@@ -292,12 +322,41 @@ class RolloutCollectionHelper(BaseModel):
 
             output_fpath.unlink(missing_ok=True)
 
+        if config.inflight_reward_profile:
+            reward_profiling_fpath.parent.mkdir(exist_ok=True, parents=True)
+            reward_profiling_fpath.unlink(missing_ok=True)
+
         semaphore = nullcontext()
         if config.num_samples_in_parallel:
             print(f"Querying with {config.num_samples_in_parallel} concurrent requests")
             semaphore = Semaphore(config.num_samples_in_parallel)
 
         output_fpath.parent.mkdir(exist_ok=True, parents=True)
+
+        reward_profiler = RewardProfiler()
+        profiled_task_indices = set()
+        task_idx_to_rows: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+        task_idx_to_results: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+        inflight_reward_profile_file = None
+        if config.inflight_reward_profile:
+            print(f"Inflight reward profiling enabled: writing completed tasks to {reward_profiling_fpath}")
+            for row in rows + input_rows:
+                task_idx_to_rows[row[TASK_INDEX_KEY_NAME]].append(row)
+            for task_rows in task_idx_to_rows.values():
+                task_rows.sort(key=lambda r: r[ROLLOUT_INDEX_KEY_NAME])
+            for result in results:
+                task_idx_to_results[result[TASK_INDEX_KEY_NAME]].append(result)
+
+            inflight_reward_profile_file = reward_profiling_fpath.open("ab")
+            for task_idx in sorted(task_idx_to_rows):
+                if len(task_idx_to_results[task_idx]) == len(task_idx_to_rows[task_idx]):
+                    self._write_inflight_reward_profile_row(
+                        reward_profiler,
+                        task_idx_to_rows[task_idx],
+                        task_idx_to_results[task_idx],
+                        inflight_reward_profile_file,
+                    )
+                    profiled_task_indices.add(task_idx)
 
         pcts_to_print = [20, 40, 60, 80, 90, 95, 98, 99, 100]
         counts_left = Counter(r[AGENT_REF_KEY_NAME]["name"] for r in input_rows)
@@ -315,6 +374,20 @@ class RolloutCollectionHelper(BaseModel):
             results_file.write(result_strs[-1][0] + b"\n")
             results_file.flush()
 
+            if config.inflight_reward_profile and inflight_reward_profile_file is not None:
+                task_idx = result[TASK_INDEX_KEY_NAME]
+                task_idx_to_results[task_idx].append(result)
+                if task_idx not in profiled_task_indices and len(task_idx_to_results[task_idx]) == len(
+                    task_idx_to_rows[task_idx]
+                ):
+                    self._write_inflight_reward_profile_row(
+                        reward_profiler,
+                        task_idx_to_rows[task_idx],
+                        task_idx_to_results[task_idx],
+                        inflight_reward_profile_file,
+                    )
+                    profiled_task_indices.add(task_idx)
+
             counts_left[row[AGENT_REF_KEY_NAME]["name"]] -= 1
             if counts_left[row[AGENT_REF_KEY_NAME]["name"]] <= 0:
                 counts_left.pop(row[AGENT_REF_KEY_NAME]["name"])
@@ -331,6 +404,8 @@ class RolloutCollectionHelper(BaseModel):
                     tqdm.write(f"Examples left:\n{top_left_str}")
 
         results_file.close()
+        if inflight_reward_profile_file is not None:
+            inflight_reward_profile_file.close()
 
         if config.upload_rollouts_to_wandb and get_wandb_run():  # pragma: no cover
             print("Uploading rollouts to W&B. This may take a few minutes if your data is large.")
@@ -341,13 +416,28 @@ class RolloutCollectionHelper(BaseModel):
         rows.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
         results.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
 
+        final_reward_profiling_fpath = None
+        if config.inflight_reward_profile:
+            print("Writing canonical reward profiling output")
+            group_level_metrics, agent_level_metrics = reward_profiler.profile_from_data(rows, results)
+            final_reward_profiling_fpath, _ = reward_profiler.write_to_disk(
+                group_level_metrics,
+                agent_level_metrics,
+                output_fpath,
+                reward_profiling_fpath=reward_profiling_fpath,
+                write_agent_metrics=False,
+            )
+
         # Compute and write aggregate metrics via /aggregate_metrics on each agent server
         print("Computing aggregate metrics")
         aggregate_metrics_fpath = await self._call_aggregate_metrics(results, rows, output_fpath)
 
+        reward_profiling_line = (
+            f"\nReward profiling: {final_reward_profiling_fpath}" if final_reward_profiling_fpath else ""
+        )
         print(f"""Finished rollout collection! View results at:
 Fully materialized inputs: {config.materialized_jsonl_fpath}
-Rollouts: {output_fpath}
+Rollouts: {output_fpath}{reward_profiling_line}
 Aggregate metrics: {aggregate_metrics_fpath}""")
 
         return results

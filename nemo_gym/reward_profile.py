@@ -42,7 +42,70 @@ class RewardProfileConfig(BaseNeMoGymCLIConfig):
     rollouts_jsonl_fpath: str = Field(description="The file path of the rollouts as output by ng_collect_rollouts.")
 
 
+def _rollout_key(row: Dict[str, Any]) -> Tuple[int, int]:
+    return row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME]
+
+
+def _rollout_id(task_idx: int, rollout_idx: int) -> str:
+    return f"{task_idx}:{rollout_idx}"
+
+
 class RewardProfiler:
+    def _index_by_rollout_key(self, rows: List[Dict[str, Any]], name: str) -> Dict[Tuple[int, int], Dict[str, Any]]:
+        indexed: Dict[Tuple[int, int], Dict[str, Any]] = {}
+        for row in rows:
+            key = _rollout_key(row)
+            if key in indexed:
+                raise ValueError(f"Duplicate {name} row for rollout key {key}")
+            indexed[key] = row
+        return indexed
+
+    def align_rows_and_results(
+        self,
+        rows: List[Dict[str, Any]],
+        results: List[Dict[str, Any]],
+    ) -> List[Tuple[Dict[str, Any], Dict[str, Any]]]:
+        rows_by_key = self._index_by_rollout_key(rows, "materialized input")
+        results_by_key = self._index_by_rollout_key(results, "result")
+
+        if rows_by_key.keys() != results_by_key.keys():
+            missing_results = sorted(rows_by_key.keys() - results_by_key.keys())
+            missing_rows = sorted(results_by_key.keys() - rows_by_key.keys())
+            raise ValueError(
+                "Materialized input rows and rollout results do not have matching rollout keys. "
+                f"Missing results: {missing_results[:10]}; missing materialized rows: {missing_rows[:10]}"
+            )
+
+        return [(rows_by_key[key], results_by_key[key]) for key in sorted(rows_by_key)]
+
+    def rollout_info_from_result(self, result: Dict[str, Any]) -> Dict[str, Any]:
+        task_idx, rollout_idx = _rollout_key(result)
+        rollout_info: Dict[str, Any] = {
+            "rollout_id": _rollout_id(task_idx, rollout_idx),
+            TASK_INDEX_KEY_NAME: task_idx,
+            ROLLOUT_INDEX_KEY_NAME: rollout_idx,
+        }
+
+        if "reward" in result:
+            rollout_info["reward"] = result.get("reward")
+
+        usage = (result.get("response") or {}).get("usage") or {}
+        for k, v in usage.items():
+            if isinstance(v, bool):
+                rollout_info[k] = int(v)
+            elif isinstance(v, (int, float)):
+                rollout_info[k] = v
+
+        for k, v in result.items():
+            if k in {TASK_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, "reward", "response"}:
+                continue
+            if isinstance(v, bool):
+                rollout_info[k] = int(v)
+            elif isinstance(v, (int, float)):
+                rollout_info[k] = v
+
+        return rollout_info
+
     def histogram(self, data: Series) -> Optional[Histogram]:
         # W&B doesn't accept empty histograms
         data = data.dropna()
@@ -89,14 +152,24 @@ class RewardProfiler:
         rows: List[Dict[str, Any]],
         results: List[Dict[str, Any]],
     ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        aligned_rows_and_results = self.align_rows_and_results(rows, results)
+
         filtered_results: List[Dict] = []
         task_idx_to_row: Dict[int, Dict] = dict()
-        for row, result in zip(rows, results):
+        task_idx_to_rollout_infos: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+        for row, result in aligned_rows_and_results:
+            task_idx, rollout_idx = _rollout_key(row)
+            result = result if "response" in result else {**result, "response": {}}
+
             # Add additional helpful information
-            result = result | (result["response"].get("usage") or {})
+            result = result | (result.get("response", {}).get("usage") or {})
 
             # agent_name is a temporary column used for aggregations below
-            numeric_result = {"agent_name": row["agent_ref"]["name"]}
+            numeric_result = {
+                "agent_name": row["agent_ref"]["name"],
+                TASK_INDEX_KEY_NAME: task_idx,
+                ROLLOUT_INDEX_KEY_NAME: rollout_idx,
+            }
             for k, v in result.items():
                 if isinstance(v, bool):
                     numeric_result[k] = int(v)
@@ -104,22 +177,27 @@ class RewardProfiler:
                     numeric_result[k] = v
 
             filtered_results.append(numeric_result)
-            task_idx_to_row.setdefault(row[TASK_INDEX_KEY_NAME], row)
+            task_idx_to_row.setdefault(task_idx, row)
+            task_idx_to_rollout_infos[task_idx].append(self.rollout_info_from_result(result))
 
         df = DataFrame.from_records(filtered_results)
 
         group_level_df = df.drop(columns=[ROLLOUT_INDEX_KEY_NAME, "agent_name"]).groupby(TASK_INDEX_KEY_NAME)
         group_level_metrics = self.calculate_metrics_single_df(group_level_df)
         for group_metrics in group_level_metrics:
-            row = task_idx_to_row[group_metrics[TASK_INDEX_KEY_NAME]]
+            task_idx = group_metrics[TASK_INDEX_KEY_NAME]
+            row = task_idx_to_row[task_idx]
 
             row = row.copy()
             row.pop(TASK_INDEX_KEY_NAME)
             row.pop(ROLLOUT_INDEX_KEY_NAME)
 
             group_metrics["sample"] = row
-
-            group_metrics.pop(TASK_INDEX_KEY_NAME)
+            group_metrics["num_rollouts"] = len(task_idx_to_rollout_infos[task_idx])
+            group_metrics["rollout_infos"] = sorted(
+                task_idx_to_rollout_infos[task_idx],
+                key=lambda r: r[ROLLOUT_INDEX_KEY_NAME],
+            )
 
         agent_level_df = df.drop(columns=[ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME]).groupby("agent_name")
         agent_level_metrics = self.calculate_metrics_single_df(agent_level_df)
@@ -148,18 +226,23 @@ class RewardProfiler:
         group_level_metrics: List[Dict[str, Any]],
         agent_level_metrics: List[Dict[str, Any]],
         base_output_fpath: Path,
-    ) -> Tuple[Path, Path]:
-        reward_profiling_fpath = base_output_fpath.with_stem(base_output_fpath.stem + "_reward_profiling").with_suffix(
-            ".jsonl"
-        )
+        reward_profiling_fpath: Optional[Path] = None,
+        write_agent_metrics: bool = True,
+    ) -> Tuple[Path, Optional[Path]]:
+        if reward_profiling_fpath is None:
+            reward_profiling_fpath = base_output_fpath.with_stem(
+                base_output_fpath.stem + "_reward_profiling"
+            ).with_suffix(".jsonl")
         with reward_profiling_fpath.open("wb") as f:
             for row in self.prepare_for_serialization(group_level_metrics):
                 f.write(orjson.dumps(row) + b"\n")
 
-        agent_level_metrics_fpath = base_output_fpath.with_stem(base_output_fpath.stem + "_agent_metrics").with_suffix(
-            ".json"
-        )
-        agent_level_metrics_fpath.write_bytes(orjson.dumps(self.prepare_for_serialization(agent_level_metrics)))
+        agent_level_metrics_fpath = None
+        if write_agent_metrics:
+            agent_level_metrics_fpath = base_output_fpath.with_stem(
+                base_output_fpath.stem + "_agent_metrics"
+            ).with_suffix(".json")
+            agent_level_metrics_fpath.write_bytes(orjson.dumps(self.prepare_for_serialization(agent_level_metrics)))
 
         return reward_profiling_fpath, agent_level_metrics_fpath
 
@@ -500,15 +583,20 @@ def compute_aggregate_metrics(
 
     rows = []
     results = []
+    task_idx_to_next_rollout_idx: Dict[int, int] = Counter()
     for vr in verify_responses:
+        task_idx = vr.get(TASK_INDEX_KEY_NAME, 0)
+        rollout_idx = vr.get(ROLLOUT_INDEX_KEY_NAME, task_idx_to_next_rollout_idx[task_idx])
+        task_idx_to_next_rollout_idx[task_idx] = max(task_idx_to_next_rollout_idx[task_idx], rollout_idx + 1)
         rows.append(
             {
-                TASK_INDEX_KEY_NAME: vr.get(TASK_INDEX_KEY_NAME, 0),
-                ROLLOUT_INDEX_KEY_NAME: vr.get(ROLLOUT_INDEX_KEY_NAME, 0),
+                TASK_INDEX_KEY_NAME: task_idx,
+                ROLLOUT_INDEX_KEY_NAME: rollout_idx,
                 "agent_ref": {"name": "agent"},
             }
         )
-        results.append(vr if "response" in vr else {**vr, "response": {}})
+        result = vr if "response" in vr else {**vr, "response": {}}
+        results.append({**result, TASK_INDEX_KEY_NAME: task_idx, ROLLOUT_INDEX_KEY_NAME: rollout_idx})
 
     group_level_metrics, agent_level_metrics = rp.profile_from_data(rows, results)
 

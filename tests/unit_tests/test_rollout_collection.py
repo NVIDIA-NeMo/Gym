@@ -25,7 +25,7 @@ import nemo_gym.rollout_collection
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.global_config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.reward_profile import compute_aggregate_metrics
+from nemo_gym.reward_profile import RewardProfiler, compute_aggregate_metrics
 from nemo_gym.rollout_collection import (
     RolloutCollectionConfig,
     RolloutCollectionHelper,
@@ -399,6 +399,158 @@ class TestRolloutCollection:
             }
         ]
         assert expected_aggregate_metrics == actual_aggregate_metrics
+        assert not (tmp_path / "output_reward_profiling.jsonl").exists()
+
+    async def test_run_from_config_inflight_reward_profile_matches_canonical_output(self, tmp_path: Path) -> None:
+        input_jsonl_fpath = tmp_path / "input.jsonl"
+        samples = [
+            json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "my agent name"}, "x": i})
+            for i in range(3)
+        ]
+        input_jsonl_fpath.write_text("\n".join(samples) + "\n")
+        output_jsonl_fpath = tmp_path / "output.jsonl"
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_jsonl_fpath),
+            output_jsonl_fpath=str(output_jsonl_fpath),
+            limit=3,
+            num_repeats=2,
+            inflight_reward_profile=True,
+        )
+
+        class TestRolloutCollectionHelper(RolloutCollectionHelper):
+            def run_examples(
+                self,
+                examples: list[dict],
+                *args,
+                **kwargs,
+            ):
+                futures = []
+                for example in examples:
+                    future = Future()
+                    reward = 1.0 if example[ROLLOUT_INDEX_KEY_NAME] == 1 else 0.0
+                    future.set_result(
+                        (
+                            example,
+                            {
+                                "response": {
+                                    "usage": {
+                                        "input_tokens": example[TASK_INDEX_KEY_NAME] + 1,
+                                        "output_tokens": example[ROLLOUT_INDEX_KEY_NAME] + 2,
+                                        "total_tokens": example[TASK_INDEX_KEY_NAME]
+                                        + example[ROLLOUT_INDEX_KEY_NAME]
+                                        + 3,
+                                    }
+                                },
+                                "reward": reward,
+                            },
+                        )
+                    )
+                    futures.append(future)
+
+                return reversed(futures)
+
+            async def _call_aggregate_metrics(self, results, rows, output_fpath):
+                return None
+
+        actual_returned_results = await TestRolloutCollectionHelper().run_from_config(config)
+
+        with (tmp_path / "output_materialized_inputs.jsonl").open() as f:
+            materialized_rows = [json.loads(line) for line in f]
+
+        reward_profiler = RewardProfiler()
+        expected_group_level_metrics, _ = reward_profiler.profile_from_data(materialized_rows, actual_returned_results)
+        expected_profile_rows = reward_profiler.prepare_for_serialization(expected_group_level_metrics)
+
+        with (tmp_path / "output_reward_profiling.jsonl").open() as f:
+            actual_profile_rows = [json.loads(line) for line in f]
+
+        assert expected_profile_rows == actual_profile_rows
+        assert len(actual_profile_rows) == 3
+        for row in actual_profile_rows:
+            pass_rate_passed = sum(1 for info in row["rollout_infos"] if info["reward"] == 1.0)
+            assert pass_rate_passed == 1
+            assert row["num_rollouts"] == 2
+            assert pass_rate_passed / row["num_rollouts"] == row["mean/reward"]
+
+    async def test_run_from_config_inflight_reward_profile_resume_does_not_duplicate_rows(
+        self, tmp_path: Path
+    ) -> None:
+        input_jsonl_fpath = tmp_path / "input.jsonl"
+        input_jsonl_fpath.write_text("")
+        output_jsonl_fpath = tmp_path / "output.jsonl"
+
+        materialized_rows = [
+            {
+                TASK_INDEX_KEY_NAME: task_idx,
+                ROLLOUT_INDEX_KEY_NAME: rollout_idx,
+                "responses_create_params": {"input": []},
+                AGENT_REF_KEY_NAME: {"name": "my agent name"},
+            }
+            for task_idx in range(2)
+            for rollout_idx in range(2)
+        ]
+        (tmp_path / "output_materialized_inputs.jsonl").write_bytes(
+            b"\n".join(map(orjson.dumps, materialized_rows)) + b"\n"
+        )
+
+        cached_outputs = [
+            {
+                TASK_INDEX_KEY_NAME: 0,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+                "response": {"usage": {"total_tokens": 1}},
+                "reward": 0.0,
+            },
+            {
+                TASK_INDEX_KEY_NAME: 0,
+                ROLLOUT_INDEX_KEY_NAME: 1,
+                "response": {"usage": {"total_tokens": 2}},
+                "reward": 1.0,
+            },
+        ]
+        output_jsonl_fpath.write_bytes(b"\n".join(map(orjson.dumps, cached_outputs)) + b"\n")
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_jsonl_fpath),
+            output_jsonl_fpath=str(output_jsonl_fpath),
+            num_repeats=2,
+            resume_from_cache=True,
+            inflight_reward_profile=True,
+        )
+
+        class TestRolloutCollectionHelper(RolloutCollectionHelper):
+            def run_examples(
+                self,
+                examples: list[dict],
+                *args,
+                **kwargs,
+            ):
+                futures = []
+                for example in examples:
+                    future = Future()
+                    future.set_result(
+                        (
+                            example,
+                            {
+                                "response": {"usage": {"total_tokens": example[ROLLOUT_INDEX_KEY_NAME] + 3}},
+                                "reward": float(example[ROLLOUT_INDEX_KEY_NAME]),
+                            },
+                        )
+                    )
+                    futures.append(future)
+
+                return futures
+
+            async def _call_aggregate_metrics(self, results, rows, output_fpath):
+                return None
+
+        await TestRolloutCollectionHelper().run_from_config(config)
+
+        with (tmp_path / "output_reward_profiling.jsonl").open() as f:
+            actual_profile_rows = [json.loads(line) for line in f]
+
+        assert [row[TASK_INDEX_KEY_NAME] for row in actual_profile_rows] == [0, 1]
+        assert [row["num_rollouts"] for row in actual_profile_rows] == [2, 2]
 
     async def test_run_from_config_sorted(self, tmp_path: Path) -> None:
         input_jsonl_fpath = tmp_path / "input.jsonl"
