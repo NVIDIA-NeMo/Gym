@@ -228,6 +228,8 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 total_run_retries += 1
                 print(f"A model call is missing the end think ({missing_end_think_count} for this sample)")
 
+            time_taken_model_call += time()
+
             # If we retried all the way through and still didn't get a valid model call, break and return the response as is.
             if not returned_valid_response:
                 print(
@@ -259,8 +261,6 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 else:
                     new_outputs = []
                 continue
-
-            time_taken_model_call += time()
 
             output = model_response.output
             new_outputs.extend(output)
