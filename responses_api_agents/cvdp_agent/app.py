@@ -59,6 +59,7 @@ class SimpleAgentVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
 
 
+# Dummy comment
 class SimpleAgent(SimpleResponsesAPIAgent):
     config: SimpleAgentConfig
 
