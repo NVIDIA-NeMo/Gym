@@ -98,33 +98,47 @@ jobs:
             ng_dev_test
             ng_test_all +fail_on_total_and_test_mismatch=true +delete_venvs_after_each_test=true
 
-          # Server-only: test just the changed servers
+          # Server-only: test changed servers + their dependents
           elif [[ "${{ steps.changes.outputs.run_servers }}" == "true" ]]; then
-            echo "Testing changed servers only"
+            # Find changed servers and expand with dependents
             CHANGED_SERVERS=$(git diff --name-only origin/${{ github.base_ref }} HEAD | \
               grep -E '^(resources_servers|responses_api_agents|responses_api_models)/[^/]+/' | \
               cut -d'/' -f1-2 | sort -u)
 
+            SERVERS_TO_TEST=$(echo "$CHANGED_SERVERS" | $GITHUB_WORKSPACE/scripts/find_dependent_servers.sh)
+            SERVER_COUNT=$(echo "$SERVERS_TO_TEST" | wc -l | tr -d ' ')
+
             echo "Changed servers:"
             echo "$CHANGED_SERVERS" | sed 's/^/  - /'
+            echo ""
+            echo "Servers to test (including dependents): $SERVER_COUNT"
+            echo "$SERVERS_TO_TEST" | sed 's/^/  - /'
 
-            EXIT_CODE=0
-            for server in $CHANGED_SERVERS; do
+            # If too many servers affected, just run the full suite
+            if [ "$SERVER_COUNT" -gt 5 ]; then
               echo ""
-              echo "================================================"
-              echo "Testing: $server"
-              echo "================================================"
-              if ng_test +entrypoint=$server; then
-                echo "PASS: $server"
-              else
-                echo "FAIL: $server"
-                EXIT_CODE=1
-              fi
-            done
+              echo "$SERVER_COUNT servers affected (threshold: 5) - running full suite instead"
+              ng_dev_test
+              ng_test_all +fail_on_total_and_test_mismatch=true +delete_venvs_after_each_test=true
+            else
+              EXIT_CODE=0
+              for server in $SERVERS_TO_TEST; do
+                echo ""
+                echo "================================================"
+                echo "Testing: $server"
+                echo "================================================"
+                if ng_test +entrypoint=$server; then
+                  echo "PASS: $server"
+                else
+                  echo "FAIL: $server"
+                  EXIT_CODE=1
+                fi
+              done
 
-            if [ $EXIT_CODE -ne 0 ]; then
-              echo "Some server tests failed"
-              exit 1
+              if [ $EXIT_CODE -ne 0 ]; then
+                echo "Some server tests failed"
+                exit 1
+              fi
             fi
 
           # Docs-only: nothing to test
