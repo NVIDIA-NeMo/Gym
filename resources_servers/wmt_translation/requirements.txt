@@ -1,10 +1,4 @@
 -e nemo-gym[dev] @ ../../
-# Ray version must match the vLLM container's bundled ray for cross-container
-# Ray-cluster joins to work — Gym's ng_run attaches to the vLLM-started Ray
-# cluster, and GCS protocol mismatches surface as
-# `ConnectionError: Could not read 'temp_dir' from GCS`. 2.55.1 matches
-# vllm/vllm-openai:v0.18.1; bump in lockstep with vLLM container upgrades.
-ray[default]==2.55.1
 # Cluster driver reports CUDA 12.9; pin torch to a version whose PyPI
 # default wheel targets CUDA 12 (not 13). unbabel-comet's transitive
 # resolution otherwise pulls torch 2.11+cu130, which fails at
