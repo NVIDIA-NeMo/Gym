@@ -3332,7 +3332,7 @@ def _make_minimal_audio_model() -> VLLMModel:
         entrypoint="",
         name="vllm_model",
         base_url="http://localhost:9999/v1",
-        api_key="dummy",
+        api_key="dummy_key",  # pragma: allowlist secret
         model="dummy-model",
         return_token_id_information=False,
         uses_reasoning_parser=False,
