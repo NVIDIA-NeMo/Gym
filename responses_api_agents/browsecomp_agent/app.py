@@ -138,6 +138,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         time_taken_model_call = 0
         time_taken_tool_call = 0
         max_output_tokens = 0
+        total_run_retries = 0
         while True:
             step += 1
             # Check if max steps is not None and if we have exhausted it.
@@ -195,7 +196,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
 
             time_taken_model_call -= time()
             returned_valid_response = False
-            for _ in range(self.config.max_run_retries):
+            for _ in range(self.config.max_run_retries - total_run_retries):
                 model_response = await self.server_client.post(
                     server_name=self.config.model_server.name,
                     url_path="/v1/responses",
@@ -224,6 +225,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                     break
 
                 missing_end_think_count += 1
+                total_run_retries += 1
                 print(f"A model call is missing the end think ({missing_end_think_count} for this sample)")
 
             # If we retried all the way through and still didn't get a valid model call, break and return the response as is.
