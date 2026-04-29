@@ -147,8 +147,11 @@ class GDPValResourcesServer(SimpleResourcesServer):
 
         overrides = dict(self.config.judge_responses_create_params_overrides or {})
         judge_base_url = get_server_url(self.config.judge_model_server.name) + "/v1"
-        judge_model_name = overrides.get("model", "judge")
-        judge_api_key = overrides.get("api_key", "dummy")
+        judge_model_name = overrides.pop("model", "judge")
+        judge_api_key = overrides.pop("api_key", "dummy")
+        # Anything left in `overrides` (max_tokens, temperature, top_p, …) is
+        # merged into the judge's chat.completions.create kwargs.
+        judge_create_overrides = overrides or None
 
         deliverable_text = _safe_output_text(body.response)
         deliverable_content_blocks: Optional[List[Dict[str, Any]]] = None
@@ -185,6 +188,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 model_base_url=judge_base_url,
                 model_name=judge_model_name,
                 api_key=judge_api_key,
+                create_overrides=judge_create_overrides,
             )
         else:
             from resources_servers.gdpval.scoring import score_with_rubric
@@ -198,6 +202,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 model_base_url=judge_base_url,
                 model_name=judge_model_name,
                 api_key=judge_api_key,
+                create_overrides=judge_create_overrides,
             )
 
         return GDPValVerifyResponse(
