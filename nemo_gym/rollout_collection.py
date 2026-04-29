@@ -54,8 +54,7 @@ from nemo_gym.server_utils import (
 class SharedRolloutCollectionConfig(BaseNeMoGymCLIConfig):
     output_jsonl_fpath: str = Field(description="The output data jsonl file path.")
     num_samples_in_parallel: Optional[int] = Field(
-        default=None,
-        description="Limit the number of concurrent samples running at once. Set to null/None for unlimited.",
+        default=None, description="Limit the number of concurrent samples running at once."
     )
     responses_create_params: Dict[str, Any] = Field(
         default_factory=dict,
@@ -106,7 +105,7 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
         description="The agent to collect rollouts from. If not specified, uses agent_ref from each data row.",
     )
     input_jsonl_fpath: str = Field(
-        description="The input data source to use to collect rollouts, in the form of a file path to a jsonl file.",
+        description="The input data source to use to collect rollouts, in the form of a file path to a jsonl file."
     )
     limit: Optional[int] = Field(
         default=None, description="Maximum number of examples to load and take from the input dataset."
@@ -144,7 +143,6 @@ def _rollout_request_debug_summary(row: Dict[str, Any]) -> Dict[str, Any]:
     return {k: v for k, v in summary.items() if v is not None}
 
 
-
 class RolloutCollectionHelper(BaseModel):
     def _preprocess_rows_from_config(self, config: RolloutCollectionConfig) -> List[Dict]:
         range_iterator = repeat(0)
@@ -172,6 +170,7 @@ class RolloutCollectionHelper(BaseModel):
         if num_repeats:
             print(f"Repeating rows {num_repeats} times (in a pattern of abc to aabbcc)!")
 
+        # Load prompt config if specified.
         prompt_cfg = None
         if config.prompt_config:
             prompt_cfg = load_prompt_config(config.prompt_config)
@@ -186,6 +185,7 @@ class RolloutCollectionHelper(BaseModel):
             rows_iterator: Iterator[tuple[int, str]] = zip(range_iterator, rows_iterator)
             raw_rows = [(row_idx, row_str, orjson.loads(row_str)) for row_idx, row_str in rows_iterator]
 
+        # Validate and apply prompt config before per-row processing
         if prompt_cfg is not None:
             validate_prompt_compatibility([row for _, _, row in raw_rows], prompt_cfg)
             raw_rows = [(idx, s, apply_prompt_to_row(row, prompt_cfg)) for idx, s, row in raw_rows]

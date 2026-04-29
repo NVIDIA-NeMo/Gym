@@ -517,8 +517,8 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         while tries < max_num_tries:
             tries += 1
             response = await request(**request_kwargs)
-
             if response.status in RETRY_ERROR_CODES:
+                # If we hit a rate limit, we don't want to hit max num tries, so we increment both.
                 if response.status in RATE_LIMIT_ERROR_CODES:
                     max_num_tries += 1
 

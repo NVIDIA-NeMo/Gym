@@ -231,13 +231,16 @@ resources_servers/browser_gym/
 ├── browser_pool.py                 # Playwright browser lifecycle + action execution
 ├── schemas.py                      # All shared Pydantic schemas
 ├── setup_playwright.py             # Auto-installs Chromium on first startup
+├── prepare_data.py                 # CLI for fetching tasks from gym URL → JSONL
 ├── configs/browser_gym.yaml        # Server + agent YAML config
 ├── data/
 │   ├── example.jsonl               # Example tasks (committed to git)
+│   ├── example_rollouts.jsonl      # Example rollout output
 │   └── .gitignore
 ├── tests/
 │   ├── conftest.py
-│   └── test_app.py
+│   ├── test_app.py
+│   └── test_prepare_data.py
 ├── requirements.txt
 └── README.md                       # This file
 
@@ -357,7 +360,7 @@ python resources_servers/browser_gym/prepare_data.py \
 
 If any task ID is not found, the command errors with the missing IDs and a list of available ones.
 
-The script calls the gym's `/api/v1/get_expected_state` endpoint and converts each task into the standard NeMo Gym JSONL format. Each verifier entry's `prompt` (or `task_statement`) becomes the user message, and the verifier key becomes the `task_id`. Fields `start_url` and `viewport_size` are used if present in the response, otherwise they default to the gym URL and 1280x720 respectively.
+The script calls the gym's `/api/v1/get_expected_state` endpoint and converts each task into the standard NeMo Gym JSONL format. Each verifier entry's `task_statement` (or `prompt`) becomes the user message, and the verifier key becomes the `task_id`. Fields `start_url` and `viewport_size` are used if present in the response, otherwise they default to the gym URL and 1280x720 respectively.
 
 #### Step 2: Collect Rollouts
 
@@ -509,7 +512,8 @@ results/cua_debug_trajectories/<env_id>/
 │   ├── 01_after.png
 │   ├── 02_after.png
 │   └── ...
-├── conversation.json       # Full agent interaction (actions, URLs, raw provider responses — no base64)
+├── conversation.jsonl      # One JSON line per step, appended in real-time
+├── conversation.json       # Final consolidated conversation (actions, URLs, raw provider responses — no base64)
 └── verification.json       # Reward, assertions, localStorage dump, verifier_metadata
 ```
 
@@ -592,9 +596,9 @@ Then:
 2. Open **Run and Debug** (Cmd+Shift+D)
 3. Select **"Browser Gym Full Stack (Resource Server + Agent)"** and press F5
 4. Set breakpoints in:
-   - `browser_pool.py` line ~509 (`execute_action`) — see Playwright calls
-   - `openai_adapter.py` line ~129 (`_map_openai_action`) — see action parsing
-   - `app.py` (agent) line ~327 — see the main CUA loop
+   - `browser_pool.py` line ~729 (`execute_action`) — see Playwright calls
+   - `openai_adapter.py` line ~151 (`_map_openai_action`) — see action parsing
+   - `app.py` (agent) line ~334 — see the main CUA loop
 5. Trigger a run via curl:
 
 ```bash
