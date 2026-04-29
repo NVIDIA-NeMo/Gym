@@ -24,6 +24,7 @@ ng_collect_rollouts \
     +agent_name=imo_answerbench_math_with_autograder_simple_agent \
     +input_jsonl_fpath=benchmarks/imo_answerbench/data/imo_answerbench_benchmark.jsonl \
     +output_jsonl_fpath=results/imo_answerbench_rollouts.jsonl \
+    +prompt_config=benchmarks/imo_answerbench/prompts/default.yaml \
     +num_repeats=4 \
     +num_repeats_add_seed=true
 ```

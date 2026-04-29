@@ -1,12 +1,3 @@
-# Character-for-character copy of Skills'
-# nemo_skills/prompt/config/judge/imo_answerbench.yaml, with only the
-# Jinja-style `{problem}` / `{predicted_answer}` / `{expected_answer}`
-# placeholders preserved (those get substituted at runtime by the
-# math_with_judge resource server's prompt-loader).  Any divergence from
-# the Skills prompt breaks parity with the ns eval baseline.
-#
-# No `system:` key -> the resource server omits the system message,
-# matching Skills' judge pipeline which only sends a user message.
 user: |-
   # System Role: Deterministic Mathematical Autograder
 

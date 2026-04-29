@@ -35,9 +35,14 @@ existing math_with_judge consumers.
 ## Run servers
 
 ```bash
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,resources_servers/math_with_autograder/configs/math_with_autograder.yaml"
+config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,resources_servers/math_with_autograder/configs/math_with_autograder.yaml,resources_servers/math_with_autograder/configs/judge_gptoss20b.yaml"
 ng_run "+config_paths=[$config_paths]"
 ```
+
+The bundled `judge_gptoss20b.yaml` wires the autograder judge to
+`openai/gpt-oss-20b` via NVIDIA's public NIM API (reads `NVIDIA_API_KEY`
+from the environment). Override with your own `judge_model` config to
+swap to a different OpenAI-compatible endpoint.
 
 ## Collect rollouts
 
