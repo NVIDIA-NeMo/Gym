@@ -45,6 +45,7 @@ ng_collect_rollouts \
     +agent_name=imo_gradingbench_imo_gradingbench_simple_agent \
     +input_jsonl_fpath=benchmarks/imo_gradingbench/data/imo_gradingbench_benchmark.jsonl \
     +output_jsonl_fpath=results/imo_gradingbench_rollouts.jsonl \
+    +prompt_config=benchmarks/imo_gradingbench/prompts/default.yaml \
     +num_repeats=4
 ```
 
