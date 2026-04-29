@@ -32,7 +32,6 @@ Computes:
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 from typing import List, Optional, Union
 
@@ -60,32 +59,13 @@ from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_met
 _DEFAULT_JUDGE_PROMPT_PATH = str(Path(__file__).parent / "prompts" / "judge.yaml")
 
 
-# ---------------------------------------------------------------------------
-# Thinking-trace stripping (matches Skills' parse_reasoning=True default)
-# ---------------------------------------------------------------------------
-
-_THINK_TAG_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
-_THINKING_TAG_RE = re.compile(r"<thinking>.*?</thinking>", re.DOTALL)
-
-
-def _strip_thinking_traces(text: str) -> str:
-    """Remove <think>...</think> and <thinking>...</thinking> blocks."""
-    text = _THINK_TAG_RE.sub("", text)
-    text = _THINKING_TAG_RE.sub("", text)
-    text = re.sub(r"^.*?</think>", "", text, flags=re.DOTALL)
-    text = re.sub(r"^.*?</thinking>", "", text, flags=re.DOTALL)
-    return text.strip()
-
-
-def extract_text_from_response(response: NeMoGymResponse, strip_thinking: bool = True) -> str:
+def extract_text_from_response(response: NeMoGymResponse) -> str:
     """Return the last assistant message text.
 
-    Args:
-        response: The model response.
-        strip_thinking: If True, remove <think>/<thinking> blocks (default).
-            Set False to preserve reasoning traces — needed when the judge
-            should see the same raw text that Skills passes with
-            parse_reasoning=False.
+    Reasoning-trace handling is the model server's responsibility — start
+    vLLM with --reasoning-parser <name> so <think>/<thinking> blocks are
+    split into a separate output item before the response leaves the
+    server. This function returns the message content verbatim.
     """
     for output in reversed(response.output):
         if getattr(output, "type", None) == "message" and getattr(output, "role", None) == "assistant":
@@ -99,8 +79,7 @@ def extract_text_from_response(response: NeMoGymResponse, strip_thinking: bool =
             elif isinstance(content, str):
                 texts = [content]
             if texts:
-                full_text = "\n".join(texts).strip()
-                return _strip_thinking_traces(full_text) if strip_thinking else full_text
+                return "\n".join(texts).strip()
     return ""
 
 
@@ -250,13 +229,10 @@ class SimpleQAServer(SimpleResourcesServer):
         return key
 
     async def verify(self, body: SimpleQAVerifyRequest) -> SimpleQAVerifyResponse:
-        # Match Skills' parse_reasoning=True behavior:
-        # 1. </think> present: keep text after it (stripped reasoning)
-        # 2. </think> absent (truncated mid-reasoning): generation = ""
-        raw_text = extract_text_from_response(body.response, strip_thinking=False)
+        # Reasoning-trace handling is the model server's responsibility:
+        # start vLLM with --reasoning-parser <name> so <think>...</think>
+        # blocks are split off before the response reaches us.
         generation = extract_text_from_response(body.response)
-        if "</think>" not in raw_text and "</thinking>" not in raw_text:
-            generation = ""
 
         question = body.question or ""
         expected_answer = body.expected_answer or ""

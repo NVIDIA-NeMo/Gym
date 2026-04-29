@@ -28,30 +28,9 @@ from resources_servers.simpleqa.app import (
     SimpleQAConfig,
     SimpleQAServer,
     SimpleQAVerifyRequest,
-    _strip_thinking_traces,
     extract_text_from_response,
     parse_judge_grade,
 )
-
-
-class TestStripThinkingTraces:
-    def test_strips_think_tags(self) -> None:
-        assert _strip_thinking_traces("<think>some reasoning</think>The answer is 42") == "The answer is 42"
-
-    def test_strips_thinking_tags(self) -> None:
-        assert _strip_thinking_traces("<thinking>deep thought</thinking>Result: yes") == "Result: yes"
-
-    def test_strips_unpaired_closing_think(self) -> None:
-        assert _strip_thinking_traces("reasoning here</think>The actual answer") == "The actual answer"
-
-    def test_strips_unpaired_closing_thinking(self) -> None:
-        assert _strip_thinking_traces("reasoning here</thinking>The actual answer") == "The actual answer"
-
-    def test_no_tags(self) -> None:
-        assert _strip_thinking_traces("plain text") == "plain text"
-
-    def test_multiline_think(self) -> None:
-        assert _strip_thinking_traces("<think>\nline1\nline2\n</think>\nAnswer") == "Answer"
 
 
 class TestParseJudgeGrade:
@@ -111,9 +90,13 @@ class TestExtractTextFromResponse:
         response = self._make_response("Hello world")
         assert extract_text_from_response(response) == "Hello world"
 
-    def test_strips_thinking(self) -> None:
+    def test_returns_content_with_inline_think_tags_verbatim(self) -> None:
+        # If <think> blocks reach this function, the model server is
+        # misconfigured (no --reasoning-parser). The function does NOT
+        # strip them — it returns the message content verbatim and the
+        # judge sees the same garbled text. Operator must fix server-side.
         response = self._make_response("<think>reasoning</think>Answer")
-        assert extract_text_from_response(response) == "Answer"
+        assert extract_text_from_response(response) == "<think>reasoning</think>Answer"
 
     def test_empty_output(self) -> None:
         response = NeMoGymResponse(
@@ -128,13 +111,12 @@ class TestExtractTextFromResponse:
         )
         assert extract_text_from_response(response) == ""
 
-    def test_strip_false_preserves_reasoning(self) -> None:
-        response = self._make_response("reasoning here</think>answer")
-        assert extract_text_from_response(response, strip_thinking=False) == "reasoning here</think>answer"
-
-    def test_strip_true_removes_reasoning(self) -> None:
-        response = self._make_response("reasoning here</think>answer")
-        assert extract_text_from_response(response, strip_thinking=True) == "answer"
+    def test_returns_content_verbatim(self) -> None:
+        # Reasoning-trace stripping is the model server's responsibility
+        # (vLLM --reasoning-parser <name>); this function never inspects
+        # <think> tags itself.
+        response = self._make_response("Uzo Njoku was born in 1991.")
+        assert extract_text_from_response(response) == "Uzo Njoku was born in 1991."
 
 
 def _make_response(text: str) -> NeMoGymResponse:
@@ -269,7 +251,10 @@ class TestSimpleQAServer:
         assert result.verdict == "not_attempted"
         assert result.is_not_attempted == approx(1.0)
 
-    async def test_verify_with_thinking_traces(self, config: SimpleQAConfig) -> None:
+    async def test_verify_passes_message_content_verbatim(self, config: SimpleQAConfig) -> None:
+        """The model-server's --reasoning-parser strips <think> blocks
+        before they reach the resource server, so verify() forwards the
+        message content as-is to the judge — no inline tag handling."""
         server_mock = MagicMock(spec=ServerClient)
         server = SimpleQAServer(config=config, server_client=server_mock)
         response_mock = AsyncMock()
@@ -278,7 +263,7 @@ class TestSimpleQAServer:
 
         request = SimpleQAVerifyRequest(
             responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
-            response=_make_response("<think>Let me recall...</think>Pancreas"),
+            response=_make_response("Pancreas"),
             question="What organ in the human body produces insulin?",
             expected_answer="Pancreas",
         )
@@ -286,26 +271,6 @@ class TestSimpleQAServer:
         result = await server.verify(request)
         assert result.verdict == "correct"
         assert result.extracted_answer == "Pancreas"
-
-    async def test_verify_no_think_tag_produces_empty(self, config: SimpleQAConfig) -> None:
-        """Truncated mid-reasoning (no </think>): generation should be empty
-        — matches Skills' parse_reasoning=True behavior."""
-        server_mock = MagicMock(spec=ServerClient)
-        server = SimpleQAServer(config=config, server_client=server_mock)
-        response_mock = AsyncMock()
-        response_mock.json = AsyncMock(return_value=_make_judge_response_dict("C"))
-        server_mock.post = AsyncMock(return_value=response_mock)
-
-        request = SimpleQAVerifyRequest(
-            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
-            response=_make_response("Let me think... I'm not sure"),
-            question="Some question?",
-            expected_answer="Some answer",
-        )
-
-        result = await server.verify(request)
-        assert result.extracted_answer == ""
-        assert result.verdict == "not_attempted"
 
     async def test_verify_chat_completions_path(self, config: SimpleQAConfig) -> None:
         config.use_chat_completions_for_judge = True
