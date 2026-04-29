@@ -92,12 +92,17 @@ async def score_with_rubric(
     model_base_url: str,
     model_name: str,
     api_key: str = "dummy",
+    create_overrides: dict | None = None,
 ) -> tuple[float, dict | None]:
     """Score a deliverable against a rubric using an LLM judge.
 
     Returns ``(score, judge_response)`` where *score* is a float in [0, 1]
     and *judge_response* is the parsed JSON dict from the judge (or ``None``
     on failure).
+
+    *create_overrides* is merged into the kwargs passed to
+    ``client.chat.completions.create``; user-supplied keys win over defaults.
+    Use it to bump ``max_tokens`` (default 8192), tweak ``temperature``, etc.
     """
     from openai import AsyncOpenAI
 
@@ -119,18 +124,21 @@ async def score_with_rubric(
         response = None
         for attempt in range(max_retries + 1):
             try:
-                response = await client.chat.completions.create(
-                    model=model_name,
-                    messages=[
+                create_kwargs: dict = {
+                    "model": model_name,
+                    "messages": [
                         {
                             "role": "system",
                             "content": "You are an expert evaluator. You must respond with valid JSON only.",
                         },
                         {"role": "user", "content": judge_prompt},
                     ],
-                    temperature=0.1,
-                    max_tokens=8192,
-                )
+                    "temperature": 0.1,
+                    "max_tokens": 8192,
+                }
+                if create_overrides:
+                    create_kwargs.update(create_overrides)
+                response = await client.chat.completions.create(**create_kwargs)
                 break
             except Exception as retry_err:
                 err_str = str(retry_err)
@@ -217,6 +225,7 @@ async def score_with_rubric_visual(
     model_base_url: str,
     model_name: str,
     api_key: str = "dummy",
+    create_overrides: dict | None = None,
 ) -> tuple[float, dict | None]:
     """Score deliverables visually using a multimodal judge (e.g., Gemini 3 Pro).
 
@@ -225,6 +234,10 @@ async def score_with_rubric_visual(
 
     *deliverable_content_blocks* is a list of OpenAI-compatible content blocks
     (text and image_url) produced by ``file_reader.convert_deliverables_to_content_blocks()``.
+
+    *create_overrides* is merged into the kwargs passed to
+    ``client.chat.completions.create``; user-supplied keys win over defaults.
+    Use it to bump ``max_tokens`` (default 8192), tweak ``temperature``, etc.
 
     Returns ``(score, judge_response)`` — same contract as ``score_with_rubric``.
     """
@@ -252,18 +265,21 @@ async def score_with_rubric_visual(
         response = None
         for attempt in range(max_retries + 1):
             try:
-                response = await client.chat.completions.create(
-                    model=model_name,
-                    messages=[
+                create_kwargs: dict = {
+                    "model": model_name,
+                    "messages": [
                         {
                             "role": "system",
                             "content": "You are an expert evaluator. You must respond with valid JSON only.",
                         },
                         {"role": "user", "content": content},
                     ],
-                    temperature=0.1,
-                    max_tokens=8192,
-                )
+                    "temperature": 0.1,
+                    "max_tokens": 8192,
+                }
+                if create_overrides:
+                    create_kwargs.update(create_overrides)
+                response = await client.chat.completions.create(**create_kwargs)
                 break
             except Exception as retry_err:
                 err_str = str(retry_err)

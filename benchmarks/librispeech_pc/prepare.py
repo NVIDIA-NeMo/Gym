@@ -8,7 +8,7 @@
 Downloads OpenSLR-145 manifests (with punctuation+capitalization) and
 OpenSLR-12 audio for the requested splits (default test-clean), then
 writes one JSONL per split. Each row carries the audio data-URI on
-``responses_create_params.metadata.audio_url`` (the sidechannel ``vllm_model``
+``responses_create_params.metadata.audio_data`` (the sidechannel ``vllm_model``
 consumes) and the reference transcript on ``expected_answer``.
 ``responses_create_params.input`` is left empty — Gym's ``prompt_config``
 materializes the system+user messages from
@@ -120,7 +120,7 @@ def _audio_file_to_base64(audio_path: Path) -> str:
 def _iter_split_rows(split: str, work_dir: Path, audio_dir: Path) -> Iterator[dict]:
     """Yield one raw Gym JSONL row per utterance in ``split``.
 
-    Rows carry the audio data-URI on ``responses_create_params.metadata.audio_url``
+    Rows carry the audio data-URI on ``responses_create_params.metadata.audio_data``
     (consumed by ``vllm_model``) and the reference transcript on
     ``expected_answer``. ``responses_create_params.input`` is intentionally
     NOT pre-populated — the benchmark's ``prompt_config`` materializes the
@@ -149,7 +149,7 @@ def _iter_split_rows(split: str, work_dir: Path, audio_dir: Path) -> Iterator[di
 
         yield {
             "responses_create_params": {
-                "metadata": {"audio_url": f"data:audio/wav;base64,{audio_b64}"},
+                "metadata": {"audio_data": f"data:audio/wav;base64,{audio_b64}"},
             },
             "expected_answer": text,
             "sample_id": sample_id,

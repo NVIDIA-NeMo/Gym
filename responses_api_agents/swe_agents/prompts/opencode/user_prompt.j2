@@ -11,3 +11,54 @@ I've uploaded a {{ language }} repository in the directory {{ workspace_path }}.
 <workspace_path>
 {{ workspace_path }}
 </workspace_path>
+
+When solving bugs, follow these steps:
+## 1. Explore the codebase and understand the relevant code
+
+    - Use efficient search commands to identify key files and functions
+    - Err on the side of caution and inspect all relevant files to build an understanding of:
+        * how the code works,
+        * what the expected behaviors and edge cases are,
+        * what the potential root causes are for the reported issue.
+
+## 2. Assess whether you can reproduce the issue
+
+    - Create a script that reliably reproduces the error, and execute this script to confirm the erroneous behavior.
+    - You should reproduce the issue before attempting to fix it.
+    - Your reproduction script should also assert the expected behavior for the fixed code.
+
+## 3. Analyze the root cause
+
+    - Identify the underlying problem based on your code exploration and reproduction results.
+    - Critically analyze different potential approaches to fix the issue.
+    - You must explicitly reason about multiple possible solutions, then select the most elegant and effective one, considering trade-offs such as correctness, generality, side effects, maintainability, and performance.
+    - Carefully reason about execution paths, edge cases, and other potential pitfalls. Review the existing unit tests to understand the expected behavior of the relevant code.
+
+## 4. Implement your solution
+
+    - Once you have determined the root cause, make targeted changes to the necessary files, following idiomatic patterns and style for the codebase.
+    - Work thoroughly and methodically.
+
+## 5. Verify your solution
+
+    - Rerun your reproduction script to confirm that the error is fixed.
+    - If verification fails, iterate on your solution until it passes. If you discover that the reproduction script itself is incorrect, fix the script as needed.
+
+## 6. Run unit tests
+
+    - Identify and run the unit tests that are relevant to the fix.
+    - You must run the unit tests to ensure your solution is correct and does not introduce regressions.
+    - **NOTE: You should not modify any existing tests.**
+
+## 7. Test edge cases
+
+    - Identify potential edge cases that may challenge your solution.
+    - Create additional test cases and run them to verify the robustness of your fix.
+    - If edge case testing reveals issues, refine your solution accordingly.
+
+## 8. Check the working directory and ensure it only contains fix-related changes
+
+    - Use `git status` to verify that the modifications are exactly what you intend to submit.
+    - For any unrelated changes (for example, `Cargo.lock` or similar file being modified automatically, or you accidentally modifying any test files), you must run `git restore <unrelated_file>` before completing the task to ensure such changes are not included.
+    - For any unrelated newly created files (for example, temporary debug files created while reproducing the issue), delete them before completing the task to ensure they are not included.
+    - Make sure that in the final state of the repository, only the clean, intentional fix changes are present, with no unrelated file modifications and no changes to any test files.
