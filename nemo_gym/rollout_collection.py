@@ -170,7 +170,7 @@ class RolloutCollectionHelper(BaseModel):
         if num_repeats:
             print(f"Repeating rows {num_repeats} times (in a pattern of abc to aabbcc)!")
 
-        # Load prompt config if specified.
+        # Load prompt config if specified
         prompt_cfg = None
         if config.prompt_config:
             prompt_cfg = load_prompt_config(config.prompt_config)
