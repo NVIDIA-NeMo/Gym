@@ -2,6 +2,9 @@ tau2_agent:
   responses_api_agents:
     tau2:
       entrypoint: app.py
+      domain: agent
+      description: Tau2 benchmark integration
+      value: Evaluate multi-turn agentic capability with user simulation.
       model_server:
         type: responses_api_models
         name: policy_model

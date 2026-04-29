@@ -1,0 +1,22 @@
+# Chain to existing resource server + agent config
+config_paths:
+  - resources_servers/math_with_judge/configs/math_with_judge.yaml
+
+hmmt_nov25_math_with_judge_resources_server:
+  _inherit_from: math_with_judge
+  resources_servers:
+    math_with_judge:
+      should_use_judge: false
+
+hmmt_nov25_math_with_judge_simple_agent:
+  _inherit_from: math_with_judge_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: hmmt_nov25_math_with_judge_resources_server
+      datasets:
+      - name: hmmt_nov25
+        type: benchmark
+        jsonl_fpath: benchmarks/hmmt_nov25/data/hmmt_nov25_benchmark.jsonl
+        prompt_config: benchmarks/prompts/generic_math.yaml
+        prepare_script: benchmarks/hmmt_nov25/prepare.py

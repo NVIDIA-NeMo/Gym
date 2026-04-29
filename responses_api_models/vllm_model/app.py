@@ -71,6 +71,7 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     return_token_id_information: bool
 
     uses_reasoning_parser: bool
+    uses_interleaved_reasoning: bool = True
     replace_developer_role_with_system: bool = False
 
     # Whether or not the model can generate a reasoning output, and called again to produce additional reasoning output.
@@ -275,7 +276,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 if isinstance(content, str):
                     reasoning_matches, remaining_content = self._converter._extract_reasoning_from_content(content)
                     message_dict["content"] = remaining_content
-                    if reasoning_matches:
+                    if reasoning_matches and self.config.uses_interleaved_reasoning:
                         message_dict["reasoning_content"] = reasoning_matches[0]
 
                         # TODO when NeMo RL migrates to vLLM>=0.16.0, remove the reasoning_content support above.
@@ -293,7 +294,7 @@ class VLLMModel(SimpleResponsesAPIModel):
 
                         # Even though we set the reasoning content already here, we still loop through all the content item dicts for the assert above.
                         content_item_dict["text"] = remaining_content
-                        if reasoning_matches:
+                        if reasoning_matches and self.config.uses_interleaved_reasoning:
                             message_dict["reasoning_content"] = reasoning_matches[0]
                             # See the TODO wrt reasoning_content above
                             message_dict["reasoning"] = reasoning_matches[0]
@@ -305,6 +306,41 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         if extra_body:
             body_dict = extra_body | body_dict
+
+        # Audio sidechannel: if the row carries an `audio_url` data-URI on
+        # `responses_create_params.metadata`, splice an `audio_url` content
+        # block into the most recent user message before forwarding to vLLM
+        # Chat Completions. OpenAI's Responses API content union has no
+        # audio variant (audio types exist as orphans in the SDK but aren't
+        # members of `ResponseInputContentParam`), so audio rows can't ride
+        # in `input.content` directly — the metadata-sidechannel hop lets
+        # audio benchmarks carry audio without a Gym schema change.
+        # Audio is placed BEFORE text in the content list (some audio
+        # models care). No-op when metadata.audio_url is absent, so
+        # non-audio benchmarks are unaffected.
+        audio_url = metadata.get("audio_url")
+        if audio_url:
+            metadata.pop("audio_url", None)
+            if not metadata and "metadata" in body_dict:
+                body_dict.pop("metadata", None)
+
+            audio_block = {"type": "audio_url", "audio_url": {"url": audio_url}}
+            messages = body_dict.get("messages", []) or []
+            for msg in reversed(messages):
+                if msg.get("role") != "user":
+                    continue
+                content = msg.get("content")
+                if isinstance(content, str):
+                    msg["content"] = [audio_block, {"type": "text", "text": content}]
+                elif isinstance(content, list):
+                    msg["content"] = [audio_block] + list(content)
+                else:
+                    # ``None`` / unexpected shape — replace with a fresh content list
+                    msg["content"] = [audio_block]
+                break
+            else:
+                # No user message found — create one with just the audio block.
+                body_dict.setdefault("messages", []).append({"role": "user", "content": [audio_block]})
 
         return body_dict
 
@@ -370,7 +406,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 f"NeMo Gym server `{self.config.name}` config has explicitly been set to not use a reasoning parser i.e. `uses_reasoning_parser: false`. Please do not use a reasoning parser in your vLLM endpoint, or fix the `{self.config.name}` server config!"
             )
 
-        if self.config.return_token_id_information:
+        if self.config.return_token_id_information and "prompt_token_ids" not in choice_dict["message"]:
             log_probs = choice_dict["logprobs"]["content"]
             generation_log_probs = [log_prob["logprob"] for log_prob in log_probs]
 

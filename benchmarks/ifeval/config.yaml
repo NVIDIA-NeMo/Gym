@@ -1,0 +1,14 @@
+config_paths:
+  - resources_servers/instruction_following/configs/instruction_following.yaml
+
+ifeval_instruction_following_simple_agent:
+  _inherit_from: instruction_following_simple_agent
+  responses_api_agents:
+    simple_agent:
+      datasets:
+      - name: ifeval
+        type: benchmark
+        jsonl_fpath: benchmarks/ifeval/data/ifeval_benchmark.jsonl
+        prompt_config: benchmarks/prompts/generic_default.yaml
+        prepare_script: benchmarks/ifeval/prepare.py
+        license: Apache 2.0

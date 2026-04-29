@@ -146,6 +146,24 @@ def _match_option_text(text: str, options: list[dict[str, str]], allowed_letters
     return None
 
 
+def _normalize_extracted_answer(text: str) -> str:
+    return (
+        text.replace("أ", " A")
+        .replace("ب", " B")
+        .replace("ج", " C")
+        .replace("د", " D")
+        .replace("অ", " A")
+        .replace("ব", " B")
+        .replace("ড", " C")
+        .replace("ঢ", " D")
+        .replace("Ａ", " A")
+        .replace("Ｂ", " B")
+        .replace("Ｃ", " C")
+        .replace("Ｄ", " D")
+        .strip()
+    )
+
+
 def _parse_answer_with_custom_regex(
     text: str, regex_pattern: str, allowed_letters: set[str], options: Optional[list[dict[str, str]]]
 ) -> Optional[str]:
@@ -164,7 +182,7 @@ def _parse_answer_with_custom_regex(
             return None
 
         # Take the LAST match (rightmost)
-        captured = matches[-1].strip().upper()
+        captured = _normalize_extracted_answer(matches[-1].strip()).upper()
 
         # Try direct letter match first
         if len(captured) == 1 and captured.isalpha():
@@ -192,6 +210,19 @@ def _parse_answer_with_custom_regex(
     except re.error:
         # Invalid regex pattern, return None
         return None
+
+
+def _parse_answer_with_custom_regexes(
+    text: str, regex_patterns: str | list[str], allowed_letters: set[str], options: Optional[list[dict[str, str]]]
+) -> Optional[str]:
+    if isinstance(regex_patterns, str):
+        return _parse_answer_with_custom_regex(text, regex_patterns, allowed_letters, options)
+
+    for regex_pattern in regex_patterns:
+        pred = _parse_answer_with_custom_regex(text, regex_pattern, allowed_letters, options)
+        if pred is not None:
+            return pred
+    return None
 
 
 class MCQAResourcesServer(SimpleResourcesServer):
@@ -241,8 +272,8 @@ class MCQAResourcesServer(SimpleResourcesServer):
 
         # Check for template_metadata first (highest priority)
         if body.template_metadata and "output_regex" in body.template_metadata:
-            regex_pattern = body.template_metadata["output_regex"]
-            pred = _parse_answer_with_custom_regex(text, regex_pattern, allowed_letters, options)
+            regex_patterns = body.template_metadata["output_regex"]
+            pred = _parse_answer_with_custom_regexes(text, regex_patterns, allowed_letters, options)
 
         # Fallback to existing grading_mode logic if template_metadata didn't work
         if pred is None:
