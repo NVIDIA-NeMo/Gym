@@ -52,6 +52,7 @@ ng_collect_rollouts \
     +agent_name=simpleqa_simpleqa_simple_agent \
     +input_jsonl_fpath=benchmarks/simpleqa/data/simpleqa_benchmark.jsonl \
     +output_jsonl_fpath=results/simpleqa_rollouts.jsonl \
+    +prompt_config=benchmarks/simpleqa/prompts/default.yaml \
     +num_repeats=4
 ```
 

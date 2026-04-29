@@ -30,18 +30,19 @@ matching Skills' `DEFAULT_GRADE_IF_UNPARSEABLE = "C"`.
   R = correct/total — the SimpleQA-Verified headline metric.
 - **`accuracy_given_attempted`** = correct/(correct+incorrect).
 
-A short reasoning-parser note: when running with a vLLM-served reasoning
-model, start the policy server with `--reasoning-parser <name>` (e.g.
-`deepseek_r1` for Nemotron-3 Nano) so `<think>...</think>` is stripped at
-the model-output layer before the judge sees the response. The server also
-falls back to text-side stripping if the parser is absent.
+A short reasoning-parser note: the server passes message content to the
+judge verbatim and does not inspect `<think>...</think>` blocks. When
+running with a vLLM-served reasoning model, start the policy server with
+`--reasoning-parser <name>` (e.g. `deepseek_r1` for Nemotron-3 Nano) so
+the reasoning trace is split off before the response reaches this server.
 
 ## Running servers
 
 ```bash
 config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
 resources_servers/simpleqa/configs/simpleqa.yaml"
-ng_run "+config_paths=[$config_paths]"
+ng_run "+config_paths=[$config_paths]" \
+    +simpleqa.resources_servers.simpleqa.judge_model_server.name=policy_model
 ```
 
 ## Collecting rollouts (5-example smoke test)

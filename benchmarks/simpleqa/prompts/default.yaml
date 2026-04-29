@@ -1,5 +1,1 @@
-# Default prompt that does not contain any extra instructions.
-# Matches Skills' generic/default character-for-character (Skills' simpleqa
-# __init__.py sets ++prompt_config=generic/default).
-
 user: "{question}"
