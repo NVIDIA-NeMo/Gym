@@ -1,6 +1,6 @@
 # Gemini Model
 
-Stateless proxy that forwards requests to the Google Gemini `generate_content` API and returns raw responses. All context management (conversation history, trimming) is handled by the agent/adapter layer — this server is a pure API relay.
+Accepts OpenAI Responses API format (`NeMoGymResponseCreateParamsNonStreaming`), translates to the Google Gemini `generate_content` API, calls the Gemini backend, and translates the response back to `NeMoGymResponse`. All context management (conversation history, trimming) is handled by the agent/adapter layer — this server is a stateless translator.
 
 Uses the native async client (`client.aio.models.generate_content`) from the `google-genai` SDK with application-level retry logic for transient errors (429, 500, 503, etc.).
 
@@ -9,8 +9,7 @@ Uses the native async client (`client.aio.models.generate_content`) from the `go
 Set up your `env.yaml` file:
 
 ```yaml
-policy_api_key: <YOUR_GEMINI_API_KEY>
-policy_model_name: gemini-2.5-computer-use-preview-10-2025
+cua_gemini_api_key: <YOUR_GEMINI_API_KEY>
 ```
 
 ### Config fields
@@ -21,6 +20,8 @@ policy_model_name: gemini-2.5-computer-use-preview-10-2025
 | `gemini_model` | `gemini-2.5-computer-use-preview-10-2025` | Model name |
 | `gemini_timeout` | `300.0` | Request timeout in seconds |
 | `gemini_max_retries` | `4` | Max retries for transient errors |
+| `thinking_level` | `MEDIUM` | Gemini thinking config level (used for Gemini 3 models) |
+| `include_thoughts` | `true` | Include thought parts in the thinking config |
 
 ## Usage
 

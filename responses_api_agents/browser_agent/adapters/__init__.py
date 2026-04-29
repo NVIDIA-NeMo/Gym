@@ -12,27 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from responses_api_agents.browser_agent.adapters.base import BaseCUAAdapter, CUAAdapterResponse
+from responses_api_agents.browser_agent.adapters.generic_adapter import GenericCUAAdapter
 from responses_api_agents.browser_agent.adapters.openai_adapter import OpenAICUAAdapter
 
 
 _ADAPTER_REGISTRY: dict[str, type[BaseCUAAdapter]] = {
     "openai": OpenAICUAAdapter,
+    "anthropic_sonnet": GenericCUAAdapter,
+    "anthropic_opus": GenericCUAAdapter,
+    "gemini": GenericCUAAdapter,
 }
-
-try:
-    from responses_api_agents.browser_agent.adapters.anthropic_adapter import AnthropicCUAAdapter
-
-    _ADAPTER_REGISTRY["anthropic_sonnet"] = AnthropicCUAAdapter
-    _ADAPTER_REGISTRY["anthropic_opus"] = AnthropicCUAAdapter
-except ImportError:
-    pass
-
-try:
-    from responses_api_agents.browser_agent.adapters.gemini_adapter import GeminiCUAAdapter
-
-    _ADAPTER_REGISTRY["gemini"] = GeminiCUAAdapter
-except ImportError:
-    pass
 
 
 class AdapterFactory:

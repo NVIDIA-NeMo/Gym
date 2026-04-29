@@ -15,18 +15,23 @@
 """
 Gemini model server for NeMo-Gym.
 
-Stateless proxy that receives ready-to-send Gemini API parameters,
-forwards them to the Google Gemini generate_content API, and returns the raw response.
+Accepts OpenAI Responses API format (NeMoGymResponseCreateParamsNonStreaming),
+translates to Gemini generate_content API, calls the Gemini backend, and
+translates the response back to NeMoGymResponse.
+
 All context management (conversation history, trimming) is handled by the
-agent/adapter layer — this server is a pure API relay.
+agent/adapter layer — this server is a stateless translator + API relay.
 """
 
 import asyncio
+import base64
 import logging
 import random
-from typing import Any, Dict, List, Optional
+from time import time
+from typing import Any, Dict, Optional
+from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field
+from fastapi import HTTPException
 
 from nemo_gym.base_responses_api_model import (
     BaseResponsesAPIModelConfig,
@@ -36,6 +41,14 @@ from nemo_gym.base_responses_api_model import (
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
+    NeMoGymComputerToolCall,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseInputTokensDetails,
+    NeMoGymResponseOutputMessage,
+    NeMoGymResponseOutputText,
+    NeMoGymResponseOutputTokensDetails,
+    NeMoGymResponseUsage,
 )
 
 
@@ -74,21 +87,8 @@ class GeminiModelServerConfig(BaseResponsesAPIModelConfig):
     gemini_model: str = "gemini-2.5-computer-use-preview-10-2025"
     gemini_timeout: float = 300.0
     gemini_max_retries: int = 4
-
-
-class GeminiProxyRequest(BaseModel):
-    """Request body for the Gemini proxy endpoint.
-
-    Contains Gemini-native API parameters, prepared by the adapter.
-    The 'contents' field holds serialized Content objects; 'config' holds
-    the serialized GenerateContentConfig.
-    """
-
-    model_config = ConfigDict(extra="allow")
-
-    contents: List[Dict[str, Any]]
-    config: Dict[str, Any] = Field(default_factory=dict)
-    model: Optional[str] = None
+    thinking_level: str = "MEDIUM"
+    include_thoughts: bool = True
 
 
 class GeminiModelServer(SimpleResponsesAPIModel):
@@ -100,11 +100,13 @@ class GeminiModelServer(SimpleResponsesAPIModel):
         self._client = genai.Client(api_key=self.config.gemini_api_key)
         return super().model_post_init(context)
 
-    async def responses(self, body: GeminiProxyRequest = Body()):  # type: ignore[override]
-        model_name = body.model or self.config.gemini_model
+    # ── OpenAI Responses API endpoint ────────────────────────────
 
-        contents = self._deserialize_contents(body.contents)
-        gen_config = self._deserialize_config(body.config)
+    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
+        model_name = self.config.gemini_model
+
+        contents = self._translate_input_to_contents(body)
+        gen_config = self._build_generate_config(body)
 
         logger.info(
             "Gemini proxy: model=%s, num_contents=%d",
@@ -129,7 +131,7 @@ class GeminiModelServer(SimpleResponsesAPIModel):
 
                 candidates_count = len(response.candidates) if response.candidates else 0
                 logger.info("Gemini proxy response: candidates=%d", candidates_count)
-                return self._serialize_response(response)
+                return self._translate_response(response, body)
 
             except Exception as e:
                 last_exception = e
@@ -138,7 +140,6 @@ class GeminiModelServer(SimpleResponsesAPIModel):
                     raise
 
                 attempt += 1
-
                 logger.warning(
                     "Gemini API call failed (attempt %d/%d): %s",
                     attempt,
@@ -161,147 +162,299 @@ class GeminiModelServer(SimpleResponsesAPIModel):
     async def chat_completions(
         self, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
     ) -> NeMoGymChatCompletion:
-        raise NotImplementedError("Gemini model server does not support /v1/chat/completions")
+        raise HTTPException(status_code=501, detail="Gemini model server does not support /v1/chat/completions")
 
-    @staticmethod
-    def _deserialize_contents(raw_contents: List[Dict[str, Any]]):
-        """Convert serialized content dicts back into google.genai Content objects."""
-        import base64
+    # ── Provider config helpers ──────────────────────────────────
 
-        from google.genai.types import Content, FunctionCall, FunctionResponse, Part
-
-        contents = []
-        for raw in raw_contents:
-            role = raw.get("role", "user")
-            parts = []
-            for raw_part in raw.get("parts", []):
-                if "text" in raw_part:
-                    parts.append(Part(text=raw_part["text"]))
-                elif "function_call" in raw_part:
-                    fc = raw_part["function_call"]
-                    parts.append(Part(function_call=FunctionCall(name=fc["name"], args=fc.get("args", {}))))
-                elif "function_response" in raw_part:
-                    fr = raw_part["function_response"]
-                    parts.append(
-                        Part(
-                            function_response=FunctionResponse(
-                                name=fr["name"],
-                                response=fr.get("response", {}),
-                            )
-                        )
-                    )
-                elif "inline_data" in raw_part:
-                    data_info = raw_part["inline_data"]
-                    mime_type = data_info.get("mime_type", "image/png")
-                    data_b64 = data_info.get("data", "")
-                    data_bytes = base64.b64decode(data_b64) if isinstance(data_b64, str) else data_b64
-                    parts.append(Part.from_bytes(data=data_bytes, mime_type=mime_type))
-                elif raw_part.get("thought"):
-                    parts.append(Part(text=raw_part.get("text", ""), thought=True))
-            contents.append(Content(role=role, parts=parts))
-        return contents
-
-    @staticmethod
-    def _deserialize_config(raw_config: Dict[str, Any]):
-        """Convert serialized config dict back into GenerateContentConfig."""
+    def _build_generate_config(self, body: NeMoGymResponseCreateParamsNonStreaming):
         from google.genai import types
 
-        if not raw_config:
-            return types.GenerateContentConfig()
-
-        tools = []
-        for raw_tool in raw_config.get("tools", []):
-            if "computer_use" in raw_tool:
-                cu = raw_tool["computer_use"]
-                env_str = cu.get("environment", "ENVIRONMENT_BROWSER")
-                env_val = getattr(types.Environment, env_str, types.Environment.ENVIRONMENT_BROWSER)
-                tools.append(types.Tool(computer_use=types.ComputerUse(environment=env_val)))
-            elif "function_declarations" in raw_tool:
-                tools.append(types.Tool(function_declarations=raw_tool["function_declarations"]))
-            elif "code_execution" in raw_tool:
-                tools.append(types.Tool(code_execution=types.ToolCodeExecution()))
-            elif "google_search" in raw_tool:
-                tools.append(types.Tool(google_search=types.GoogleSearch()))
+        is_gemini_3 = "gemini-3" in self.config.gemini_model.lower()
 
         kwargs: Dict[str, Any] = {}
-        if tools:
-            kwargs["tools"] = tools
-        if "temperature" in raw_config:
-            kwargs["temperature"] = raw_config["temperature"]
 
-        if "system_instruction" in raw_config:
-            kwargs["system_instruction"] = raw_config["system_instruction"]
-        if "top_p" in raw_config:
-            kwargs["top_p"] = raw_config["top_p"]
-        if "top_k" in raw_config:
-            kwargs["top_k"] = raw_config["top_k"]
-        if "max_output_tokens" in raw_config:
-            kwargs["max_output_tokens"] = raw_config["max_output_tokens"]
+        gemini_tools = self._derive_tools(body)
+        if gemini_tools:
+            kwargs["tools"] = gemini_tools
 
-        if "thinking_config" in raw_config:
-            tc = raw_config["thinking_config"]
+        if body.instructions:
+            kwargs["system_instruction"] = body.instructions
+
+        if is_gemini_3:
+            kwargs["temperature"] = body.temperature if body.temperature is not None else 1.0
             kwargs["thinking_config"] = types.ThinkingConfig(
-                thinking_level=tc.get("thinking_level", "THINKING_LEVEL_MEDIUM"),
-                include_thoughts=tc.get("include_thoughts", True),
+                thinking_level=self.config.thinking_level,
+                include_thoughts=self.config.include_thoughts,
             )
+        else:
+            kwargs["temperature"] = body.temperature if body.temperature is not None else 0.0
+
+        if body.max_output_tokens is not None:
+            kwargs["max_output_tokens"] = body.max_output_tokens
+        if body.top_p is not None:
+            kwargs["top_p"] = body.top_p
 
         return types.GenerateContentConfig(**kwargs)
 
     @staticmethod
-    def _serialize_response(response) -> Dict[str, Any]:
-        """Convert Gemini response into a JSON-serializable dict."""
-        result: Dict[str, Any] = {"candidates": []}
+    def _derive_tools(body: NeMoGymResponseCreateParamsNonStreaming) -> list:
+        """Inspect body.tools to derive Gemini-native tools.
 
-        for candidate in response.candidates or []:
-            cand_dict: Dict[str, Any] = {}
+        If body.tools contains a computer_use_preview tool, translates it to
+        Gemini's ComputerUse tool. Otherwise returns an empty list.
+        """
+        from google.genai import types
 
-            if candidate.finish_reason:
-                cand_dict["finish_reason"] = str(candidate.finish_reason)
+        if not body.tools:
+            return []
 
-            if candidate.content:
-                parts_list = []
-                for part in candidate.content.parts or []:
-                    part_dict: Dict[str, Any] = {}
-                    if part.text:
-                        part_dict["text"] = part.text
-                        if getattr(part, "thought", False):
-                            part_dict["thought"] = True
-                        thought_sig = getattr(part, "thoughtSignature", None) or getattr(
-                            part, "thought_signature", None
+        gemini_tools = []
+        for t in body.tools:
+            t_dict = t.model_dump() if hasattr(t, "model_dump") else t
+            if t_dict.get("type") == "computer_use_preview":
+                gemini_tools.append(
+                    types.Tool(
+                        computer_use=types.ComputerUse(
+                            environment=types.Environment.ENVIRONMENT_BROWSER,
+                        ),
+                    )
+                )
+
+        return gemini_tools
+
+    # ── Inbound: OpenAI input items → Gemini contents ────────────
+
+    def _translate_input_to_contents(self, body: NeMoGymResponseCreateParamsNonStreaming) -> list:
+        from google.genai.types import Content, FunctionCall, FunctionResponse, Part
+
+        raw_input = body.input
+        if isinstance(raw_input, str):
+            return [Content(role="user", parts=[Part(text=raw_input)])]
+
+        input_items = [item.model_dump() if hasattr(item, "model_dump") else item for item in raw_input]
+
+        contents: list = []
+        for item in input_items:
+            item_type = item.get("type", "")
+
+            if item_type == "message":
+                contents.append(self._translate_message_to_content(item))
+
+            elif item_type == "computer_call":
+                action = item.get("action", {})
+                fn_name = action.get("type", "click_at")
+                fn_args = {k: v for k, v in action.items() if k not in ("type", "safety_decision")}
+                safety = action.get("safety_decision")
+                if safety:
+                    fn_args["safety_decision"] = safety
+                contents.append(
+                    Content(
+                        role="model",
+                        parts=[Part(function_call=FunctionCall(name=fn_name, args=fn_args))],
+                    )
+                )
+
+            elif item_type == "computer_call_output":
+                output = item.get("output", {})
+                call_id = item.get("call_id", "")
+                parts: list = []
+
+                current_url = output.get("current_url", "about:blank")
+                response_dict: Dict[str, Any] = {"url": current_url, "status": "success"}
+                if current_url.startswith("error:"):
+                    response_dict["status"] = "error"
+                    response_dict["error"] = current_url
+                if item.get("acknowledged_safety_checks"):
+                    response_dict["safety_acknowledgement"] = "true"
+
+                fn_name_for_resp = self._find_function_name_for_call_id(
+                    contents, call_id, item.get("action_name", "click_at")
+                )
+                parts.append(
+                    Part(
+                        function_response=FunctionResponse(
+                            name=fn_name_for_resp,
+                            response=response_dict,
                         )
-                        if thought_sig:
-                            part_dict["thought_signature"] = thought_sig
-                    elif part.function_call:
-                        part_dict["function_call"] = {
-                            "name": part.function_call.name,
-                            "args": dict(part.function_call.args or {}),
-                        }
-                    elif part.function_response:
-                        fr_dict: Dict[str, Any] = {
-                            "name": part.function_response.name,
-                            "response": dict(part.function_response.response or {}),
-                        }
-                        part_dict["function_response"] = fr_dict
-                    parts_list.append(part_dict)
+                    )
+                )
 
-                cand_dict["content"] = {
-                    "role": candidate.content.role,
-                    "parts": parts_list,
-                }
+                screenshot_b64 = self._extract_screenshot_b64(output)
+                if screenshot_b64:
+                    screenshot_bytes = base64.b64decode(screenshot_b64)
+                    parts.append(Part.from_bytes(data=screenshot_bytes, mime_type="image/png"))
 
-            result["candidates"].append(cand_dict)
+                contents.append(Content(role="user", parts=parts))
 
-        usage = getattr(response, "usage_metadata", None)
-        if usage:
-            result["usage_metadata"] = {
-                "prompt_token_count": getattr(usage, "prompt_token_count", 0),
-                "candidates_token_count": getattr(usage, "candidates_token_count", 0),
-                "total_token_count": getattr(usage, "total_token_count", 0),
-                "cached_content_token_count": getattr(usage, "cached_content_token_count", 0),
-                "thoughts_token_count": getattr(usage, "thoughts_token_count", 0),
-            }
+        return contents
 
-        return result
+    @staticmethod
+    def _translate_message_to_content(item: Dict[str, Any]):
+        from google.genai.types import Content, Part
+
+        role = item.get("role", "user")
+        gemini_role = "model" if role == "assistant" else "user"
+        content = item.get("content", "")
+
+        if isinstance(content, str):
+            return Content(role=gemini_role, parts=[Part(text=content)])
+
+        parts = []
+        for part in content:
+            part_type = part.get("type", "")
+            if part_type in ("input_text", "output_text", "text"):
+                parts.append(Part(text=part.get("text", "")))
+            elif part_type == "input_image":
+                image_url = part.get("image_url", "")
+                b64_data = _extract_b64_from_data_url(image_url)
+                if b64_data:
+                    img_bytes = base64.b64decode(b64_data)
+                    parts.append(Part.from_bytes(data=img_bytes, mime_type="image/png"))
+
+        if not parts:
+            parts.append(Part(text=str(content)))
+
+        return Content(role=gemini_role, parts=parts)
+
+    @staticmethod
+    def _find_function_name_for_call_id(contents: list, call_id: str, fallback: str) -> str:
+        """Walk backwards through contents to find the function_call name matching a call_id.
+
+        Since Gemini doesn't use call_ids natively, we match by looking at the
+        immediately preceding model content's function_call names.
+        """
+        for i in range(len(contents) - 1, -1, -1):
+            c = contents[i]
+            if c.role == "model":
+                for part in c.parts or []:
+                    if hasattr(part, "function_call") and part.function_call:
+                        return part.function_call.name
+        return fallback
+
+    @staticmethod
+    def _extract_screenshot_b64(output: Dict[str, Any]) -> Optional[str]:
+        image_url = output.get("image_url", "")
+        if not image_url:
+            return None
+        return _extract_b64_from_data_url(image_url)
+
+    # ── Outbound: Gemini response → NeMoGymResponse ──────────────
+
+    def _translate_response(
+        self,
+        response,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+    ) -> NeMoGymResponse:
+        output_items = []
+
+        candidates = response.candidates or []
+        if candidates:
+            candidate = candidates[0]
+            if candidate.content:
+                for part in candidate.content.parts or []:
+                    if hasattr(part, "function_call") and part.function_call:
+                        fn_name = part.function_call.name
+                        fn_args = dict(part.function_call.args or {})
+                        safety_decision = fn_args.pop("safety_decision", None)
+                        action_dict = {"type": fn_name, **fn_args}
+                        pending_safety = []
+                        if safety_decision:
+                            action_dict["safety_decision"] = safety_decision
+                            pending_safety = [safety_decision]
+                        output_items.append(
+                            NeMoGymComputerToolCall(
+                                id=f"cu_{uuid4().hex}",
+                                action=action_dict,
+                                call_id=f"call_{uuid4().hex}",
+                                pending_safety_checks=pending_safety,
+                                status="completed",
+                                type="computer_call",
+                            ).model_dump()
+                        )
+                    elif hasattr(part, "text") and part.text and not getattr(part, "thought", False):
+                        output_items.append(
+                            NeMoGymResponseOutputMessage(
+                                id=f"msg_{uuid4().hex}",
+                                content=[
+                                    NeMoGymResponseOutputText(
+                                        type="output_text",
+                                        text=part.text,
+                                        annotations=[],
+                                    )
+                                ],
+                                role="assistant",
+                                status="completed",
+                                type="message",
+                            ).model_dump()
+                        )
+
+        if not output_items:
+            output_items.append(
+                NeMoGymResponseOutputMessage(
+                    id=f"msg_{uuid4().hex}",
+                    content=[
+                        NeMoGymResponseOutputText(
+                            type="output_text",
+                            text="",
+                            annotations=[],
+                        )
+                    ],
+                    role="assistant",
+                    status="completed",
+                    type="message",
+                ).model_dump()
+            )
+
+        usage = None
+        usage_meta = getattr(response, "usage_metadata", None)
+        if usage_meta:
+            input_tokens = getattr(usage_meta, "prompt_token_count", 0) or 0
+            output_tokens = getattr(usage_meta, "candidates_token_count", 0) or 0
+            usage = NeMoGymResponseUsage(
+                input_tokens=input_tokens,
+                input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=0),
+                output_tokens=output_tokens,
+                output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
+                total_tokens=input_tokens + output_tokens,
+            )
+
+        incomplete_details = None
+        if candidates:
+            finish_reason = str(getattr(candidates[0], "finish_reason", "") or "")
+            if "MAX_TOKENS" in finish_reason:
+                incomplete_details = {"reason": "max_output_tokens"}
+
+        return NeMoGymResponse(
+            id=f"resp_{uuid4().hex}",
+            created_at=int(time()),
+            model=self.config.gemini_model,
+            object="response",
+            output=output_items,
+            tool_choice=body.tool_choice if hasattr(body, "tool_choice") else "auto",
+            parallel_tool_calls=body.parallel_tool_calls,
+            tools=body.tools,
+            temperature=body.temperature,
+            top_p=body.top_p,
+            background=body.background,
+            max_output_tokens=body.max_output_tokens,
+            max_tool_calls=body.max_tool_calls,
+            previous_response_id=body.previous_response_id,
+            reasoning=body.reasoning,
+            truncation=body.truncation,
+            metadata=body.metadata,
+            instructions=body.instructions,
+            user=body.user,
+            incomplete_details=incomplete_details,
+            usage=usage,
+        )
+
+
+def _extract_b64_from_data_url(data_url: str) -> Optional[str]:
+    """Extract base64 data from a data URL like 'data:image/png;base64,...'."""
+    if data_url.startswith("data:"):
+        parts = data_url.split(",", 1)
+        return parts[1] if len(parts) == 2 else None
+    return data_url if data_url else None
 
 
 if __name__ == "__main__":

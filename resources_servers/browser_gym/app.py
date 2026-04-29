@@ -199,14 +199,14 @@ class BrowserGymResourcesServer(SimpleResourcesServer):
                         await asyncio.sleep(wait)
                         continue
 
-                    logger.warning(f"Verification API returned {resp.status}: {resp_text}")
+                    logger.warning("Verification API returned %d: %s", resp.status, resp_text)
                     return CUAVerifyResponse(
                         **body.model_dump(),
                         reward=0.0,
                         verification_result={"error": resp_text, "status_code": resp.status},
                     )
             else:
-                logger.warning(f"Verification API returned {resp_status}: {resp_text}")
+                logger.warning("Verification API returned %d: %s", resp_status, resp_text)
                 return CUAVerifyResponse(
                     **body.model_dump(),
                     reward=0.0,

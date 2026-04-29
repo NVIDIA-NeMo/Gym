@@ -209,3 +209,35 @@ class TestWriteJsonl:
         count = write_jsonl([], str(output))
         assert count == 0
         assert output.read_text() == ""
+
+
+class TestMain:
+    def test_main_calls_fetch_and_write(self, tmp_path: Path) -> None:
+        output = tmp_path / "out.jsonl"
+        with (
+            patch(
+                "resources_servers.browser_gym.prepare_data.fetch_gym_tasks", return_value=[{"row": 1}]
+            ) as mock_fetch,
+            patch("resources_servers.browser_gym.prepare_data.write_jsonl", return_value=1) as mock_write,
+            patch("sys.argv", ["prepare_data", "--gym-url", "https://example.com", "--output", str(output)]),
+        ):
+            from resources_servers.browser_gym.prepare_data import main
+
+            main()
+            mock_fetch.assert_called_once_with("https://example.com", None)
+            mock_write.assert_called_once_with([{"row": 1}], str(output))
+
+    def test_main_with_task_ids(self, tmp_path: Path) -> None:
+        output = tmp_path / "out.jsonl"
+        with (
+            patch("resources_servers.browser_gym.prepare_data.fetch_gym_tasks", return_value=[]) as mock_fetch,
+            patch("resources_servers.browser_gym.prepare_data.write_jsonl", return_value=0),
+            patch(
+                "sys.argv",
+                ["prepare_data", "--gym-url", "https://example.com", "--task-id", "t1", "t2", "--output", str(output)],
+            ),
+        ):
+            from resources_servers.browser_gym.prepare_data import main
+
+            main()
+            mock_fetch.assert_called_once_with("https://example.com", ["t1", "t2"])

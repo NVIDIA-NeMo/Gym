@@ -58,16 +58,13 @@ logger = logging.getLogger(__name__)
 
 class BrowserAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
-    model_server: Optional[ModelServerRef] = None
+    model_server: ModelServerRef
 
     cua_adapter_type: str = "openai"
     cua_model: str = "computer-use-preview"
-    cua_is_opus: bool = False
     cua_effort_level: str = "high"
     cua_max_tokens: int = 4096
     cua_turns_to_keep: int = 8
-    cua_screenshot_turn_limit: int = 8
-    cua_max_conversation_turns: int = 8
     max_steps: int = 250
     run_timeout_seconds: float = 7200.0
     viewport_width: int = 1280
@@ -172,33 +169,43 @@ class BrowserAgent(SimpleResponsesAPIAgent):
         cookie_jar is a mutable ``{"cookies": ...}`` dict shared with the
         model-server callers so that session cookies propagate across calls.
         """
-        if not self._uses_model_server():
-            raise ValueError(
-                f"model_server must be configured for adapter '{self.config.cua_adapter_type}'. "
-                "All provider API calls must route through a model server."
-            )
-
         adapter_type = self.config.cua_adapter_type
-        kwargs = {
-            "model": self.config.cua_model,
-            "viewport_width": viewport_width or self.config.viewport_width,
-            "viewport_height": viewport_height or self.config.viewport_height,
-        }
+        vw = viewport_width or self.config.viewport_width
+        vh = viewport_height or self.config.viewport_height
 
         if adapter_type == "openai":
-            kwargs["api_caller"] = self._make_openai_model_server_caller(cookie_jar)
-
+            kwargs: Dict[str, Any] = {
+                "model": self.config.cua_model,
+                "viewport_width": vw,
+                "viewport_height": vh,
+                "api_caller": self._make_openai_model_server_caller(cookie_jar),
+            }
         elif adapter_type in ("anthropic_sonnet", "anthropic_opus"):
-            kwargs["is_opus"] = self.config.cua_is_opus
-            kwargs["max_tokens"] = self.config.cua_max_tokens
-            kwargs["turns_to_keep"] = self.config.cua_turns_to_keep
-            kwargs["screenshot_turn_limit"] = self.config.cua_screenshot_turn_limit
-            kwargs["effort_level"] = self.config.cua_effort_level
-            kwargs["api_caller"] = self._make_anthropic_model_server_caller(cookie_jar)
+            from responses_api_agents.browser_agent.adapters.generic_adapter import ANTHROPIC_CUA_SYSTEM_PROMPT
 
+            kwargs = {
+                "model": self.config.cua_model,
+                "viewport_width": vw,
+                "viewport_height": vh,
+                "turns_to_keep": self.config.cua_turns_to_keep,
+                "denormalize_coords": False,
+                "system_prompt": ANTHROPIC_CUA_SYSTEM_PROMPT,
+                "api_caller": self._make_generic_model_server_caller(cookie_jar),
+            }
         elif adapter_type == "gemini":
-            kwargs["max_conversation_turns"] = self.config.cua_max_conversation_turns
-            kwargs["api_caller"] = self._make_gemini_model_server_caller(cookie_jar)
+            from responses_api_agents.browser_agent.adapters.generic_adapter import GEMINI_CUA_SYSTEM_PROMPT
+
+            kwargs = {
+                "model": self.config.cua_model,
+                "viewport_width": vw,
+                "viewport_height": vh,
+                "turns_to_keep": self.config.cua_turns_to_keep,
+                "denormalize_coords": True,
+                "system_prompt": GEMINI_CUA_SYSTEM_PROMPT,
+                "api_caller": self._make_generic_model_server_caller(cookie_jar),
+            }
+        else:
+            raise ValueError(f"Unknown adapter type: {adapter_type}")
 
         return AdapterFactory.create(adapter_type, **kwargs)
 
@@ -225,69 +232,29 @@ class BrowserAgent(SimpleResponsesAPIAgent):
 
         return caller
 
-    def _make_anthropic_model_server_caller(self, cookie_jar: Dict[str, Any]):
-        """Create an async callable that routes Anthropic API calls through the model server.
+    def _make_generic_model_server_caller(self, cookie_jar: Dict[str, Any]):
+        """Create an async callable that routes API calls through a model server
+        that accepts NeMoGymResponseCreateParamsNonStreaming and returns NeMoGymResponse.
 
         The cookie_jar is a mutable dict with a "cookies" key that is read and
         updated after every call so that session affinity is maintained.
         """
 
         async def caller(api_params: Dict[str, Any]):
-            proxy_body = {
-                "messages": api_params["messages"],
-                "system": api_params.get("system", ""),
-                "tools": api_params.get("tools", []),
-                "betas": api_params.get("betas", []),
-                "max_tokens": api_params.get("max_tokens", 4096),
-            }
-            if api_params.get("output_config"):
-                proxy_body["output_config"] = api_params["output_config"]
-
             resp = await self.server_client.post(
                 server_name=self.config.model_server.name,
                 url_path="/v1/responses",
-                json=proxy_body,
+                json=api_params,
                 cookies=cookie_jar["cookies"],
             )
             cookie_jar["cookies"] = resp.cookies
             if not resp.ok:
                 err_body = await resp.content.read()
-                logger.error("Anthropic model server error (status=%s): %s", resp.status, err_body)
+                logger.error("Model server error (status=%s): %s", resp.status, err_body)
             await raise_for_status(resp)
             return await get_response_json(resp)
 
         return caller
-
-    def _make_gemini_model_server_caller(self, cookie_jar: Dict[str, Any]):
-        """Create an async callable that routes Gemini API calls through the model server.
-
-        The cookie_jar is a mutable dict with a "cookies" key that is read and
-        updated after every call so that session affinity is maintained.
-        """
-
-        async def caller(api_params: Dict[str, Any]):
-            proxy_body = {
-                "contents": api_params["contents"],
-                "config": api_params.get("config", {}),
-            }
-
-            resp = await self.server_client.post(
-                server_name=self.config.model_server.name,
-                url_path="/v1/responses",
-                json=proxy_body,
-                cookies=cookie_jar["cookies"],
-            )
-            cookie_jar["cookies"] = resp.cookies
-            if not resp.ok:
-                err_body = await resp.content.read()
-                logger.error("Gemini model server error (status=%s): %s", resp.status, err_body)
-            await raise_for_status(resp)
-            return await get_response_json(resp)
-
-        return caller
-
-    def _uses_model_server(self) -> bool:
-        return self.config.model_server is not None
 
     # ──────────────────────────────────────────────────────────────
     # Unified CUA loop -- all providers go through their adapter
@@ -609,7 +576,7 @@ class BrowserAgent(SimpleResponsesAPIAgent):
                         cookies=cookie_jar["cookies"],
                     )
                 except Exception as e:
-                    logger.warning(f"Error closing browser session: {e}")
+                    logger.warning("Error closing browser session: %s", e)
 
         nemo_resp = _build_nemo_response(
             trajectory, env_id, local_storage_dump, initial_local_storage, self.config.cua_model, usage
@@ -657,7 +624,7 @@ class BrowserAgent(SimpleResponsesAPIAgent):
                         verification_result=getattr(result, "verification_result", None),
                     )
                 except Exception as e:
-                    logger.warning(f"Failed to finalize debug trajectory: {e}")
+                    logger.warning("Failed to finalize debug trajectory: %s", e)
 
             return result
         except Exception:

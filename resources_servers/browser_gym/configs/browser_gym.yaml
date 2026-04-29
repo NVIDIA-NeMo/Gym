@@ -30,6 +30,12 @@ browser_gym_anthropic_opus_model:
       entrypoint: app.py
       anthropic_api_key: ${cua_anthropic_api_key}
       anthropic_model: claude-opus-4-6
+      zoom_enabled: true
+      effort_level: high
+      computer_tool_version: computer_20251124
+      computer_betas:
+        - computer-use-2025-11-24
+        - token-efficient-tools-2025-02-19
 browser_openai_agent:
   responses_api_agents:
     browser_agent:
@@ -59,10 +65,8 @@ browser_anthropic_sonnet_agent:
       entrypoint: app.py
       cua_adapter_type: anthropic_sonnet
       cua_model: claude-sonnet-4-20250514
-      cua_is_opus: false
       cua_max_tokens: 4096
       cua_turns_to_keep: 8
-      cua_screenshot_turn_limit: 8
       max_steps: 250
       viewport_width: 1280
       viewport_height: 720
@@ -86,11 +90,9 @@ browser_anthropic_opus_agent:
       entrypoint: app.py
       cua_adapter_type: anthropic_opus
       cua_model: claude-opus-4-6
-      cua_is_opus: true
       cua_effort_level: high
       cua_max_tokens: 4096
       cua_turns_to_keep: 8
-      cua_screenshot_turn_limit: 8
       max_steps: 250
       viewport_width: 1280
       viewport_height: 720
@@ -120,7 +122,7 @@ browser_gemini_agent:
       entrypoint: app.py
       cua_adapter_type: gemini
       cua_model: gemini-2.5-computer-use-preview-10-2025
-      cua_max_conversation_turns: 8
+      cua_turns_to_keep: 8
       max_steps: 250
       viewport_width: 1280
       viewport_height: 720

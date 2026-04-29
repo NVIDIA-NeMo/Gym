@@ -232,9 +232,7 @@ class RolloutCollectionHelper(BaseModel):
 
         return rows
 
-    def _load_from_cache(
-        self, config: RolloutCollectionConfig
-    ) -> Tuple[List[Dict], List[Dict], List[Dict]]:
+    def _load_from_cache(self, config: RolloutCollectionConfig) -> Tuple[List[Dict], List[Dict], List[Dict]]:
         """Load cache and return (remaining_input_rows, already_completed_rows, cached_results)."""
         with config.materialized_jsonl_fpath.open() as f:
             original_input_rows = list(map(orjson.loads, f))

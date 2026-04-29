@@ -8,11 +8,11 @@ This integration adds Browser Agent support to NeMo-Gym, enabling LLMs to intera
 
 The integration follows NeMo-Gym's three-server architecture:
 
-All three providers follow the same unified flow: **Agent → Adapter → Model Server → External API**. Each provider has a dedicated adapter (in the agent layer) that handles context management and action mapping, and a dedicated model server that acts as a stateless API proxy handling authentication, retries, and transport.
+All three providers follow the same unified flow: **Agent → Adapter → Model Server → External API**. The model servers accept OpenAI Responses API format (`NeMoGymResponseCreateParamsNonStreaming`) and return `NeMoGymResponse`, translating to/from each provider's native API internally.
 
-- **OpenAI**: Adapter manages server-side context via `previous_response_id`; `openai_model` server proxies to `api.openai.com`
-- **Anthropic**: Adapter manages client-side context (turn-based trimming, tool pair validation, screenshot GC); `anthropic_model` server proxies to Anthropic API
-- **Gemini**: Adapter manages client-side context (paired-turn trimming, function pair validation, screenshot GC); `gemini_model` server proxies to Google Gemini API
+- **OpenAI**: `OpenAICUAAdapter` manages server-side context via `previous_response_id`; `openai_model` server proxies to `api.openai.com`
+- **Anthropic**: `GenericCUAAdapter` manages client-side context in OpenAI format (turn trimming, screenshot GC); `anthropic_model` server translates OpenAI format ↔ Anthropic Messages API
+- **Gemini**: `GenericCUAAdapter` manages client-side context in OpenAI format (turn trimming, screenshot GC); `gemini_model` server translates OpenAI format ↔ Gemini generate_content API
 
 ```
                               EXTERNAL LLM PROVIDERS
@@ -39,14 +39,15 @@ All three providers follow the same unified flow: **Agent → Adapter → Model 
 │  │  ┌────────────────────────────┴──────────────────┴───────┐   │   │
 │  │  │  Adapters (unified flow for all providers)            │   │   │
 │  │  │                                                       │   │   │
-│  │  │  ┌─────────────┐ ┌──────────────┐ ┌──────────────┐    │   │   │
-│  │  │  │ OpenAI      │ │ Anthropic    │ │ Gemini       │    │   │   │
-│  │  │  │ • Server-   │ │ • Client-    │ │ • Client-    │    │   │   │
-│  │  │  │   side ctx  │ │   side ctx   │ │   side ctx   │    │   │   │
-│  │  │  │ • prev_resp │ │ • Turn trim  │ │ • Pair trim  │    │   │   │
-│  │  │  │   _id chain │ │ • Tool valid │ │ • Func valid │    │   │   │
-│  │  │  └──────┬──────┘ └──────┬───────┘ └──────┬───────┘    │   │   │
-│  │  │         └───────────────┼────────────────┘            │   │   │
+│  │  │  ┌─────────────┐ ┌────────────────────────────────┐   │   │   │
+│  │  │  │ OpenAI      │ │ GenericCUAAdapter              │   │   │   │
+│  │  │  │ Adapter     │ │ (Anthropic + Gemini)            │   │   │   │
+│  │  │  │ • Server-   │ │ • Client-side ctx in OpenAI fmt │   │   │   │
+│  │  │  │   side ctx  │ │ • Turn trimming + screenshot GC │   │   │   │
+│  │  │  │ • prev_resp │ │ • Model server does translation │   │   │   │
+│  │  │  │   _id chain │ │   to/from provider native API   │   │   │   │
+│  │  │  └──────┬──────┘ └───────────────┬────────────────┘   │   │   │
+│  │  │         └────────────────────────┘                    │   │   │
 │  │  │                         │ unified BrowserAction       │   │   │
 │  │  └─────────────────────────┼─────────────────────────────┘   │   │
 │  │                            │                                 │   │
@@ -77,14 +78,14 @@ All three providers follow the same unified flow: **Agent → Adapter → Model 
 │  │                              │  │  │    Semaphore bounded)  │  │   │
 │  │  ┌────────────────────────┐  │  │  └───────────────────────┘  │   │
 │  │  │ anthropic_model        │  │  │                             │   │
-│  │  │ • Stateless API proxy  │  │  │  ┌───────────────────────┐  │   │
-│  │  │ • AsyncAnthropic       │  │  │  │    Verification       │  │   │
+│  │  │ • OpenAI ↔ Anthropic   │  │  │  ┌───────────────────────┐  │   │
+│  │  │   format translator    │  │  │  │    Verification       │  │   │
 │  │  └────────────────────────┘  │  │  │  taskId + LS dump     │  │   │
 │  │                              │  │  │         │             │  │   │
 │  │  ┌────────────────────────┐  │  │  │         ▼             │  │   │
 │  │  │ gemini_model           │  │  │  │  POST /api/v1/        │──┼───┼──┐
-│  │  │ • Stateless API proxy  │  │  │  │   get_actual_state    │  │   │  │
-│  │  │ • genai Client         │  │  │  │         │             │  │   │  │
+│  │  │ • OpenAI ↔ Gemini      │  │  │  │   get_actual_state    │  │   │  │
+│  │  │   format translator    │  │  │  │         │             │  │   │  │
 │  │  └────────────────────────┘  │  │  │         ▼             │  │   │  │
 │  │                              │  │  │  assertions → reward  │  │   │  │
 │  │                              │  │  │  (0.0 or 1.0)         │  │   │  │
@@ -107,10 +108,10 @@ All three providers follow the same unified flow: **Agent → Adapter → Model 
 ```
 
 **Key points:**
-- **All providers** follow the same unified flow: Adapter → Model Server → External API. No direct API calls are made from the agent layer. Each adapter receives an injected `api_caller` that routes requests through the model server.
-- **OpenAI** adapter manages server-side context via `previous_response_id` and maps `computer_call` / `computer_call_output` items to `BrowserAction`. The `openai_model` server proxies to `api.openai.com` with token tracking and retry logic.
-- **Anthropic** adapter manages full conversation history with turn-based trimming, tool pair validation, and screenshot memory GC. The `anthropic_model` server acts as a stateless API proxy.
-- **Gemini** adapter manages full conversation history with paired-turn trimming, function pair validation, and screenshot GC. The `gemini_model` server acts as a stateless API proxy.
+- **All providers** follow the same unified flow: Adapter → Model Server → External API. No direct API calls are made from the agent layer. Each adapter receives an injected `api_caller` that routes requests through the model server. All model servers accept `NeMoGymResponseCreateParamsNonStreaming` and return `NeMoGymResponse`.
+- **OpenAI** uses `OpenAICUAAdapter` which manages server-side context via `previous_response_id` and maps `computer_call` / `computer_call_output` items to `BrowserAction`. The `openai_model` server proxies to `api.openai.com` with token tracking.
+- **Anthropic** uses `GenericCUAAdapter` which manages client-side context in OpenAI format with turn trimming and screenshot GC. The `anthropic_model` server translates OpenAI Responses format to/from the Anthropic Messages API.
+- **Gemini** uses `GenericCUAAdapter` which manages client-side context in OpenAI format with turn trimming and screenshot GC. The `gemini_model` server translates OpenAI Responses format to/from the Gemini generate_content API.
 - The resource server manages browser lifecycle **and** verification in one process.
 - Gym environments are external -- they can be remote (deployed URLs) or local.
 
@@ -124,7 +125,7 @@ All three providers follow the same unified flow: **Agent → Adapter → Model 
 │  │  CLI / Orchestrator Layer                                     │  │
 │  │  ng_collect_rollouts / ng_reward_profile                      │  │
 │  │                                                               │  │
-│  │  • Reads input JSONL (tasks) or fetches from gym URL          │  │
+│  │  • Reads input JSONL (tasks)                                  │  │
 │  │  • Dispatches /run requests to agent servers                  │  │
 │  │  • Writes output JSONL (rollouts with rewards)                │  │
 │  └───────────────────────────┬───────────────────────────────────┘  │
@@ -155,21 +156,19 @@ All three providers follow the same unified flow: **Agent → Adapter → Model 
 │  │  │  openai_model          │ │  │   browser_gym)               │  │
 │  │  │  • api.openai.com      │ │  │                              │  │
 │  │  │  • Token tracking      │ │  │  • BrowserPool (Playwright)  │  │
-│  │  │  • Retry with backoff  │ │  │  • Action execution          │  │
-│  │  │  • Org header          │ │  │  • Screenshot capture        │  │
-│  │  └────────────────────────┘ │  │  • localStorage dump         │  │
-│  │                             │  │  • Verification via gym API  │  │
-│  │  ┌────────────────────────┐ │  └──────────────────┬───────────┘  │
-│  │  │  anthropic_model       │ │                     │              │
-│  │  │  • Stateless API proxy │ │                     │              │
-│  │  │  • AsyncAnthropic      │ │                     │              │
+│  │  │  • Org header          │ │  │  • Action execution          │  │
+│  │  └────────────────────────┘ │  │  • Screenshot capture        │  │
+│  │                             │  │  • localStorage dump         │  │
+│  │  ┌────────────────────────┐ │  │  • Verification via gym API  │  │
+│  │  │  anthropic_model       │ │  └──────────────────┬───────────┘  │
+│  │  │  • OpenAI ↔ Anthropic  │ │                     │              │
+│  │  │    format translator   │ │                     │              │
 │  │  └────────────────────────┘ │                     │              │
 │  │                             │                     │              │
 │  │  ┌────────────────────────┐ │                     │              │
 │  │  │  gemini_model          │ │                     │              │
-│  │  │  • Stateless API proxy │ │                     │              │
-│  │  │  • genai.Client        │ │                     │              │
-│  │  │  • asyncio.to_thread   │ │                     │              │
+│  │  │  • OpenAI ↔ Gemini     │ │                     │              │
+│  │  │    format translator   │ │                     │              │
 │  │  └────────────────────────┘ │                     │              │
 │  └─────────┬───────────────────┘                     │              │
 │            │                                         │              │
@@ -195,34 +194,34 @@ All three providers follow the same unified flow: **Agent → Adapter → Model 
 |------|----|----------|---------|----------|
 | CLI | Agent | `POST /run` | task prompt + verifier_metadata | CUAVerifyResponse (reward + trajectory) |
 | Agent | OpenAI Model | `POST /v1/responses` | screenshot + input items | NeMoGymResponse (computer_call actions) |
-| Agent | Anthropic Model | `POST /v1/responses` | pre-built Anthropic API params (messages, tools, betas) | raw Anthropic response dict |
-| Agent | Gemini Model | `POST /v1/responses` | serialized contents + config | serialized Gemini response dict |
+| Agent | Anthropic Model | `POST /v1/responses` | NeMoGymResponseCreateParamsNonStreaming (OpenAI format) | NeMoGymResponse (OpenAI format) |
+| Agent | Gemini Model | `POST /v1/responses` | NeMoGymResponseCreateParamsNonStreaming (OpenAI format) | NeMoGymResponse (OpenAI format) |
 | Agent | Resource | `POST /seed_session` | start_url, viewport_width, viewport_height | env_id + initial screenshot |
 | Agent | Resource | `POST /step` | env_id + BrowserAction | screenshot + current_url |
-| Agent | Resource | `POST /dump_local_storage` | env_id | localStorage JSON string |
+| Agent | Resource | `POST /dump_local_storage` | env_id | current localStorage + initial localStorage |
 | Agent | Resource | `POST /close` | env_id | status |
 | Agent | Resource | `POST /verify` | response + verifier_metadata + localStorage | reward (0.0 or 1.0) |
 | CLI | Gym | `POST /api/v1/get_expected_state` | (none) | verifiers dict (task IDs, prompts, assertions) |
-| Resource | Gym | `POST /api/v1/get_actual_state` | taskId + localStorageDump | assertions array |
+| Resource | Gym | `POST /api/v1/get_actual_state` | taskId + localStorageDump + initialState + modelResponse (form data) | assertions array |
 
 ### Data Flow
 
 1. Agent receives task prompt + `verifier_metadata` (task_id, gym_url, start_url)
 2. Agent seeds a browser session via resource server (navigates to start_url)
 3. Agent enters CUA loop (same flow for all providers):
-   - Adapter receives screenshot → manages context (provider-specific: OpenAI uses server-side `previous_response_id`; Anthropic/Gemini maintain client-side conversation history with trimming, validation, and screenshot GC) → prepares API params → routes through model server (stateless proxy) via injected `api_caller` → parses response → maps provider-specific actions to unified `BrowserAction` → executes via resource server `/step` → repeat
-4. On completion (model says "done" or max_steps reached), agent dumps localStorage from the browser
+   - Adapter receives screenshot → manages context (OpenAI uses server-side `previous_response_id`; Anthropic/Gemini use `GenericCUAAdapter` with client-side context in OpenAI format and turn trimming) → sends `NeMoGymResponseCreateParamsNonStreaming` via injected `api_caller` to model server (which translates to/from provider-native API) → receives `NeMoGymResponse` → maps actions to unified `BrowserAction` → executes via resource server `/step` → repeat
+4. On completion (model says "done" or max_steps reached), agent dumps localStorage from the browser (both current and initial state)
 5. Agent closes the browser session
-6. Resource server verifies by sending localStorage to the gym's `/api/v1/get_actual_state` endpoint
+6. Resource server verifies by sending taskId, localStorageDump, initialState, and modelResponse to the gym's `/api/v1/get_actual_state` endpoint
 7. Reward is 1.0 if all assertions pass, 0.0 otherwise
 
 ### Provider Support
 
 | Provider | Execution Path | Context Management | Token Tracking |
 |----------|---------------|-------------------|----------------|
-| **OpenAI** (CUA Preview) | Adapter → model server (`openai_model`) | Server-side via `previous_response_id` | Yes (via `NeMoGymResponseUsage`) |
-| **Anthropic** (Sonnet/Opus) | Adapter → model server (stateless proxy) | Client-side in adapter: turn-based trimming, tool pair validation, screenshot GC | Yes (via usage in response) |
-| **Gemini** (2.5 Computer Use) | Adapter → model server (stateless proxy) | Client-side in adapter: paired-turn trimming, function pair validation, screenshot GC | Yes (via usage_metadata in response) |
+| **OpenAI** (CUA Preview) | `OpenAICUAAdapter` → `openai_model` (proxy) | Server-side via `previous_response_id` | Yes (via `NeMoGymResponseUsage`) |
+| **Anthropic** (Sonnet/Opus) | `GenericCUAAdapter` → `anthropic_model` (translator) | Client-side in adapter: turn trimming, screenshot GC (OpenAI format) | Yes (via `NeMoGymResponseUsage`) |
+| **Gemini** (2.5 Computer Use) | `GenericCUAAdapter` → `gemini_model` (translator) | Client-side in adapter: turn trimming, screenshot GC (OpenAI format) | Yes (via `NeMoGymResponseUsage`) |
 
 ## File Structure
 
@@ -243,11 +242,11 @@ resources_servers/browser_gym/
 └── README.md                       # This file
 
 responses_api_models/anthropic_model/
-├── app.py                          # Anthropic model server (stateless API proxy, /v1/responses)
+├── app.py                          # Anthropic model server (OpenAI ↔ Anthropic translator, /v1/responses)
 └── requirements.txt
 
 responses_api_models/gemini_model/
-├── app.py                          # Gemini model server (stateless API proxy, /v1/responses)
+├── app.py                          # Gemini model server (OpenAI ↔ Gemini translator, /v1/responses)
 └── requirements.txt
 
 responses_api_agents/browser_agent/
@@ -256,9 +255,8 @@ responses_api_agents/browser_agent/
 ├── adapters/
 │   ├── __init__.py                 # AdapterFactory registry
 │   ├── base.py                     # BaseCUAAdapter abstract class
-│   ├── openai_adapter.py           # OpenAI Computer Use Preview (context mgmt, action mapping, API routing)
-│   ├── anthropic_adapter.py        # Anthropic Sonnet / Opus (context mgmt, trimming, API routing)
-│   └── gemini_adapter.py           # Google Gemini (context mgmt, paired-turn trimming, API routing)
+│   ├── openai_adapter.py           # OpenAI Computer Use Preview (server-side context, action mapping)
+│   └── generic_adapter.py          # Generic adapter for Anthropic + Gemini (client-side context in OpenAI format)
 ├── tests/
 │   ├── __init__.py
 │   └── test_app.py
@@ -689,10 +687,10 @@ pytest resources_servers/browser_gym/tests/test_app.py -x -v -k "NormalizeKey"
 | Test File | What It Covers |
 |---|---|
 | `resources_servers/browser_gym/tests/test_app.py` | BrowserPool, BrowserAction schema, key normalization, verify endpoint |
-| `responses_api_agents/browser_agent/tests/test_app.py` | Adapter parsing (OpenAI, Gemini), denormalization, URL tracking, adapter factory |
+| `responses_api_agents/browser_agent/tests/test_app.py` | Adapter parsing (OpenAI, Generic), denormalization, URL tracking, adapter factory |
 | `responses_api_models/openai_model/tests/test_app.py` | OpenAI model server proxy, model config, responses/chat_completions |
-| `responses_api_models/anthropic_model/tests/test_app.py` | Anthropic model server proxy, model fallback, error propagation |
-| `responses_api_models/gemini_model/tests/test_app.py` | Gemini model server proxy, content serialization/deserialization, config parsing |
+| `responses_api_models/anthropic_model/tests/test_app.py` | Anthropic model server translator, format conversion, error propagation |
+| `responses_api_models/gemini_model/tests/test_app.py` | Gemini model server translator, format conversion, config parsing |
 
 ---
 
@@ -790,8 +788,8 @@ The trajectory captures everything needed for RL training: task prompt, every ac
 
 Verification uses **localStorage assertions**. After the CUA agent completes a task:
 
-1. The agent dumps the browser's `localStorage` (which the gym app uses to track state)
-2. The resource server sends `taskId` + `localStorageDump` to the gym's `/api/v1/get_actual_state` endpoint
+1. The agent dumps the browser's `localStorage` (current state + initial state captured at session creation)
+2. The resource server sends `taskId` + `localStorageDump` + `initialState` + `modelResponse` (as form data) to the gym's `/api/v1/get_actual_state` endpoint, with retry logic for transient 502/503/504 errors
 3. The gym returns assertions like:
    ```json
    {
@@ -807,14 +805,12 @@ Verification uses **localStorage assertions**. After the CUA agent completes a t
 
 All providers follow the same unified flow: **Adapter → Model Server → External API**. No direct API calls from the agent layer.
 
-1. Create an adapter in `responses_api_agents/browser_agent/adapters/your_adapter.py` extending `BaseCUAAdapter`
-2. Implement `initialize()`, `step()`, and `reset()` -- handle context management (history, trimming, validation) in the adapter
-3. The adapter receives an `api_caller` callable (injected by the agent) that routes API calls through the model server
-4. Map provider-specific actions to the unified `BrowserAction` schema
-5. Create a stateless model server in `responses_api_models/your_model/app.py` that relays API calls (handles auth, retries, transport)
-6. Register the adapter in `responses_api_agents/browser_agent/adapters/__init__.py` (AdapterFactory)
-7. Add model server + agent config blocks in `configs/browser_gym.yaml` with `model_server` reference
-8. Add `requirements.txt` with the provider's SDK in both server directories
+1. Create a model server in `responses_api_models/your_model/app.py` that accepts `NeMoGymResponseCreateParamsNonStreaming` and returns `NeMoGymResponse`, translating to/from the provider's native API internally
+2. If the provider's action format matches OpenAI's `computer_call` / `computer_call_output`, reuse `GenericCUAAdapter` — just provide a system prompt and set `denormalize_coords` as needed
+3. If the provider needs custom action mapping, create a new adapter in `responses_api_agents/browser_agent/adapters/your_adapter.py` extending `BaseCUAAdapter` and implement `initialize()`, `step()`, and `reset()`
+4. Register the adapter in `responses_api_agents/browser_agent/adapters/__init__.py` (AdapterFactory)
+5. Add model server + agent config blocks in `configs/browser_gym.yaml` with `model_server` reference
+6. Add `requirements.txt` with the provider's SDK in the model server directory
 
 ## Adding a New Task
 
