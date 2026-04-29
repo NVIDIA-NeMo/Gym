@@ -227,7 +227,7 @@ class ImoGradingBenchResourcesServer(SimpleResourcesServer):
             score_diff = None
 
         return ImoGradingBenchVerifyResponse(
-            **body.model_dump(),
+            **body.model_dump(exclude={"reward"}),
             reward=1.0 if exact_match else 0.0,
             extracted_grade=pred_grade,
             binary_match=binary_match,
