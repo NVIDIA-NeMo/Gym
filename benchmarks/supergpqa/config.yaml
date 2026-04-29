@@ -1,0 +1,22 @@
+config_paths:
+  - resources_servers/mcqa/configs/mcqa.yaml
+
+supergpqa_mcqa_resources_server:
+  _inherit_from: mcqa
+  resources_servers:
+    mcqa:
+      grading_mode: lenient_answer_colon_md
+
+supergpqa_mcqa_simple_agent:
+  _inherit_from: mcqa_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: supergpqa_mcqa_resources_server
+      datasets:
+        - name: supergpqa
+          type: benchmark
+          jsonl_fpath: benchmarks/supergpqa/data/supergpqa_benchmark.jsonl
+          prompt_config: benchmarks/prompts/mcq_10choices.yaml
+          prepare_script: benchmarks/supergpqa/prepare.py
+          num_repeats: 1
