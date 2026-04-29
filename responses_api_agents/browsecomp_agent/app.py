@@ -136,6 +136,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
 
         time_taken = time()
         time_taken_model_call = 0
+        time_taken_tokenize_call = 0
         time_taken_tool_call = 0
         max_output_tokens = 0
         total_run_retries = 0
@@ -157,6 +158,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             This logic also assumes an underlying Chat Completions model (not compatible with Responses native models)
             """
             if self.config.save_model_call_using_vllm_tokenize_endpoint:
+                time_taken_tokenize_call -= time()
                 converter = VLLMConverter(return_token_id_information=False)
                 chat_completion_create_params = converter.responses_to_chat_completion_create_params(new_body)
                 chat_completion_create_params = chat_completion_create_params.model_dump()
@@ -168,6 +170,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                         tokenize_body_dict[key] = chat_completion_create_params[key]
 
                 tokenize_response = await self._policy_model_openai_client.create_tokenize(**tokenize_body_dict)
+                time_taken_tokenize_call += time()
 
                 prompt_tokens_ids = tokenize_response["tokens"]
                 prompt_tokens = len(prompt_tokens_ids)
@@ -385,7 +388,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
 
             if step % 3 == 0:
                 print(
-                    f"{user_query[:20]}... | Step {step} | Time: {time() - time_taken:.2f}s (model {time_taken_model_call:.2f}s, tool {time_taken_tool_call:.2f}s) | Max output tokens: {max_output_tokens} | Missing end thinks: {missing_end_think_count}"
+                    f"{user_query[:20]}... | Step {step} | Time: {time() - time_taken:.2f}s (model {time_taken_model_call:.2f}s, tool {time_taken_tool_call:.2f}s, tokenize {time_taken_tokenize_call:.2f}s) | Max output tokens: {max_output_tokens} | Missing end thinks: {missing_end_think_count}"
                 )
 
         # record final context
@@ -403,7 +406,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             response.set_cookie(k, v)
 
         print(
-            f"{user_query[:20]}... | FINISHED | Step {step} | Time: {time() - time_taken:.2f}s (model {time_taken_model_call:.2f}s, tool {time_taken_tool_call:.2f}s) | Max output tokens: {max_output_tokens} | Missing end thinks: {missing_end_think_count}"
+            f"{user_query[:20]}... | FINISHED | Step {step} | Time: {time() - time_taken:.2f}s (model {time_taken_model_call:.2f}s, tool {time_taken_tool_call:.2f}s, tokenize {time_taken_tokenize_call:.2f}s) | Max output tokens: {max_output_tokens} | Missing end thinks: {missing_end_think_count}"
         )
 
         model_response.output = new_outputs
