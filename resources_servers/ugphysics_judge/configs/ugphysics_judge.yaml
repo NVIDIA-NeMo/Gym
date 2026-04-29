@@ -15,6 +15,7 @@ ugphysics_judge:
         max_output_tokens: 2048
         temperature: 0.0
         top_p: 1.0
+      use_chat_completions_for_judge: true
 
 ugphysics_judge_simple_agent:
   responses_api_agents:
