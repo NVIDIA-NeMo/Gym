@@ -1,4 +1,16 @@
-#!/usr/bin/env python3
+# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """Test framework output configuration mapping."""
 
 from typing import Dict
@@ -117,10 +129,13 @@ def get_framework_config(framework: str, test_command: str = "") -> Dict:
         framework: Test framework name
         test_command: The test command (optional, used to detect Gradle vs Maven)
     """
-    config = FRAMEWORK_CONFIGS.get(framework, {
-        'output_flag': None,
-        'result_file': None,
-    })
+    config = FRAMEWORK_CONFIGS.get(
+        framework,
+        {
+            "output_flag": None,
+            "result_file": None,
+        },
+    )
 
     # Special handling for JUnit: detect Gradle vs Maven from command
     if framework == "junit" and test_command:
@@ -128,8 +143,8 @@ def get_framework_config(framework: str, test_command: str = "") -> Dict:
             # Gradle uses different output location than Maven
             # Use */TEST-*.xml to match both standard Gradle (test/) and Android (testDebugUnitTest/)
             config = {
-                'output_flag': None,
-                'result_file': "find:/workspace/repo:*/build/test-results*:TEST-*.xml",
+                "output_flag": None,
+                "result_file": "find:/workspace/repo:*/build/test-results*:TEST-*.xml",
             }
 
     # Special handling for xctest: detect Swift Testing vs XCTest from command
@@ -149,7 +164,7 @@ def get_test_command_with_output(base_command: str, framework: str) -> str:
     Returns: command_with_output_flags
     """
     config = get_framework_config(framework, base_command)
-    output_flag = config.get('output_flag')
+    output_flag = config.get("output_flag")
 
     enhanced = f"{base_command} {output_flag}" if output_flag else base_command
 

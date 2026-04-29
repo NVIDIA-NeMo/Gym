@@ -1292,6 +1292,7 @@ def update_metrics(metrics_fpath: Path, update_dict: Dict[str, Any]) -> None:
     with metrics_fpath.open("w") as f:
         json.dump(existing_dict | update_dict, f)
 
+
 # _TOOL_PARAM_BOOL_FIELDS_DEFAULT_FALSE = ("defer_loading",)
 
 
@@ -1535,8 +1536,7 @@ class RunOpenHandsAgent(BaseModel):
             # Detect wall-clock eval timeout: final_eval_time (elapsed since eval start)
             # reached or exceeded the configured swebench_tests_timeout.
             metrics.eval_timed_out = (
-                metrics.final_eval_time is not None
-                and metrics.final_eval_time >= self.config.swebench_tests_timeout
+                metrics.final_eval_time is not None and metrics.final_eval_time >= self.config.swebench_tests_timeout
             )
             update_metrics(self.config.metrics_fpath, metrics.model_dump())
             if self.config.debug:
@@ -1560,19 +1560,16 @@ class RunOpenHandsAgent(BaseModel):
     async def _run_golden_patch_verification(self) -> Optional[Path]:
         instance_id = self.config.instance_id
         dataset_name = self.config.problem_info.get("dataset_name")
-        #TODO(sugam): add support for other datasets
+        # TODO(sugam): add support for other datasets
         if dataset_name != "swe-bench-ext":
             raise NotImplementedError(
-                f"verify_golden_patch is only supported for dataset_name=='swe-bench-ext' "
-                f"(got {dataset_name!r})."
+                f"verify_golden_patch is only supported for dataset_name=='swe-bench-ext' (got {dataset_name!r})."
             )
 
         instance_dict = json.loads(self.config.problem_info["instance_dict"])
         golden_patch = instance_dict.get("patch") or ""
         if not golden_patch.strip():
-            raise ValueError(
-                f"No golden patch found in instance_dict['patch'] for {instance_id}."
-            )
+            raise ValueError(f"No golden patch found in instance_dict['patch'] for {instance_id}.")
         if not golden_patch.endswith("\n"):
             golden_patch += "\n"
 
@@ -1850,10 +1847,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
         # Add SWE-bench setup directory mount if available (for evaluation)
         # swe-bench-ext and nv-internal-1 don't use the swebench harness
-        if (
-            command.mode == "eval"
-            and data_point["dataset_name"] not in ("nv-internal-1", "swe-bench-ext")
-        ):
+        if command.mode == "eval" and data_point["dataset_name"] not in ("nv-internal-1", "swe-bench-ext"):
             # Mount the entire setup directory at both /swebench_setup and its original absolute path
             # This is needed because uv venv has hardcoded absolute paths
             mount_args.append(f"--mount type=bind,src={params.swebench_setup_dir},dst=/swebench_setup")

@@ -26,6 +26,7 @@ Usage from SweBenchExtDatasetProcessor.postprocess_after_run():
     )
     # result["resolved"] -> bool
 """
+
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
@@ -93,9 +94,7 @@ def parse_and_check_tests(
     pass_to_pass: List[str],
     instance_id: str = "",
 ) -> Dict[str, Any]:
-    """Parse test output and check FAIL_TO_PASS / PASS_TO_PASS resolution.
-
-    """
+    """Parse test output and check FAIL_TO_PASS / PASS_TO_PASS resolution."""
     # Try to extract result file content from markers (same as task.py)
     result_file_content = _extract_between_markers(test_output, _RESULT_FILE_START, _RESULT_FILE_END)
 
@@ -122,9 +121,7 @@ def parse_and_check_tests(
             parsed[tid] = "PASSED"
 
     # Identify packages that failed to build
-    build_failed_packages = {
-        pkg for pkg, status in parsed.items() if status == "FAILED" and "::" not in pkg
-    }
+    build_failed_packages = {pkg for pkg, status in parsed.items() if status == "FAILED" and "::" not in pkg}
 
     # Match FAIL_TO_PASS
     f2p_results = {}
