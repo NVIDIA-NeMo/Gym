@@ -138,7 +138,9 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                     tool_response = NeMoGymFunctionCallOutput(
                         type="function_call_output",
                         call_id=output_function_call.call_id,
-                        output=json.dumps({"error": f"Invalid tool call arguments: {e}"}),
+                        # Use repr(e) so the exception type name is always
+                        # included even when str(e) would be empty.
+                        output=json.dumps({"error": f"Invalid tool call arguments: {e!r}"}),
                     )
                     new_outputs.append(tool_response)
                     continue

@@ -268,6 +268,9 @@ class TestApp:
         error_payload = json.loads(error_outputs[0].output)
         assert "error" in error_payload
         assert "Invalid tool call arguments" in error_payload["error"]
+        # The exception type must be visible to the model — repr(e) on a
+        # JSONDecodeError starts with the class name.
+        assert "JSONDecodeError" in error_payload["error"]
 
     async def test_responses_continues_on_reasoning_only(self, monkeypatch: MonkeyPatch) -> None:
         config = SimpleAgentConfig(
