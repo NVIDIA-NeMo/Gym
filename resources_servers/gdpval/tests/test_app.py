@@ -134,7 +134,7 @@ class TestApp:
             reward_mode="rubric",
             judge_responses_create_params_overrides={
                 "model": "custom-judge",
-                "api_key": "sk-custom",
+                "api_key": "sk-custom", # pragma: allowlist secret
                 "max_tokens": 16384,
                 "temperature": 0.0,
             },
@@ -155,7 +155,7 @@ class TestApp:
             await server.verify(body)
 
         assert captured["model_name"] == "custom-judge"
-        assert captured["api_key"] == "sk-custom"
+        assert captured["api_key"] == "sk-custom" # pragma: allowlist secret
         assert captured["create_overrides"] == {"max_tokens": 16384, "temperature": 0.0}
 
     @pytest.mark.asyncio
