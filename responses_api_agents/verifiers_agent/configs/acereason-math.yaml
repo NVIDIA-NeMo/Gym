@@ -2,6 +2,9 @@ verifiers_agent:
   responses_api_agents:
     verifiers_agent:
       entrypoint: app.py
+      domain: math
+      description: Prime intellect verifiers and environments hub integration, ace-reason math environment example.
+      value: Improve math reasoning capabilities.
       model_server:
         type: responses_api_models
         name: policy_model

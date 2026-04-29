@@ -127,6 +127,10 @@ def is_global_aiohttp_client_setup() -> bool:  # pragma: no cover
     return _GLOBAL_AIOHTTP_CLIENT is not None
 
 
+def is_global_aiohttp_client_request_debug_enabled() -> bool:
+    return _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG
+
+
 def global_aiohttp_client_exit():  # pragma: no cover
     if not is_global_aiohttp_client_setup():
         return

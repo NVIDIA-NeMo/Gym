@@ -18,7 +18,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -102,10 +102,6 @@ def create_test_config(
         host=host,
         port=port,
         entrypoint="",
-        resources_server=ResourcesServerRef(
-            type="resources_servers",
-            name="mini_swe_agent",
-        ),
         model_server=ModelServerRef(
             type="responses_api_models",
             name=model_name,
