@@ -3,7 +3,7 @@
 
 
 def preprocess_code_completion(completion: str, language: str = "python", strip_whitespace: bool = True) -> str:
-    """Port of NeMo-Skills' nemo_skills.evaluation.evaluator.code.preprocess_code.
+    r"""Port of NeMo-Skills' nemo_skills.evaluation.evaluator.code.preprocess_code.
 
     Skills uses this to extract a Python solution from a model rollout before
     running the bigcodebench unittest. We replicate the logic byte-for-byte so

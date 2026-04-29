@@ -12,7 +12,6 @@ from setup_bcb_venv import ensure_bcb_venv
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
-    BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
@@ -35,7 +34,7 @@ class BigCodeBenchResourcesServerConfig(BaseResourcesServerConfig):
     subprocess_timeout: float = 240.0
 
 
-class BigCodeBenchVerifyRequest(BaseRunRequest, BaseVerifyRequest):
+class BigCodeBenchVerifyRequest(BaseVerifyRequest):
     verifier_metadata: Optional[Dict[str, Any]] = None
 
 
