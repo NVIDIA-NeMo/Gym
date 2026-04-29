@@ -1,0 +1,21 @@
+config_paths:
+  - resources_servers/math_proof_judgement/configs/math_proof_judgement.yaml
+
+proof_arena_judge_math_proof_judgement_resources_server:
+  _inherit_from: math_proof_judgement
+  resources_servers:
+    math_proof_judgement: {}
+
+proof_arena_judge_math_proof_judgement_simple_agent:
+  _inherit_from: math_proof_judgement_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: proof_arena_judge_math_proof_judgement_resources_server
+      datasets:
+        - name: proof-arena-judge
+          type: benchmark
+          jsonl_fpath: benchmarks/proof-arena-judge/data/proof-arena-judge_benchmark.jsonl
+          prompt_config: benchmarks/prompts/math_proof_judge.yaml
+          prepare_script: benchmarks/proof-arena-judge/prepare.py
+          num_repeats: 1
