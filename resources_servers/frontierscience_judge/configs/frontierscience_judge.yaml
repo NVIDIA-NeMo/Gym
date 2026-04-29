@@ -13,7 +13,7 @@ frontierscience_judge:
       judge_responses_create_params:
         input: []
         max_output_tokens: 2048
-      use_chat_completions_for_judge: false
+      use_chat_completions_for_judge: true
 
 frontierscience_judge_simple_agent:
   responses_api_agents:
@@ -31,9 +31,9 @@ frontierscience_judge_simple_agent:
         jsonl_fpath: resources_servers/frontierscience_judge/data/example.jsonl
         license: Apache 2.0
 
-judge_base_url: https://api.openai.com/v1
-judge_api_key: ${oc.env:OPENAI_API_KEY,null}
-judge_model_name: o3-mini-2025-01-31
+judge_base_url: https://integrate.api.nvidia.com/v1
+judge_api_key: ${oc.env:NVIDIA_API_KEY,null}
+judge_model_name: openai/gpt-oss-20b
 
 judge_model:
   responses_api_models:
