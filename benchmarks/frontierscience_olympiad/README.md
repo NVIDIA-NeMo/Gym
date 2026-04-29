@@ -16,10 +16,13 @@ judge (`Judgement: YES/NO`).
 
 Uses the [`frontierscience_judge`](../../resources_servers/frontierscience_judge/)
 resource server. The judge prompt is the verbatim FrontierScience grading
-rubric from page 13 of the paper. Skills uses `o3-mini-2025-01-31` via
-`api.openai.com`; this benchmark's default config inherits that. Override
-the top-level `judge_base_url` / `judge_api_key` / `judge_model_name` vars
-to swap in another judge.
+rubric from page 13 of the paper. The default config routes the judge to
+`openai/gpt-oss-20b` on the public NVIDIA inference API
+(`https://integrate.api.nvidia.com/v1`), reading the key from
+`NVIDIA_API_KEY`. Override the top-level `judge_base_url` /
+`judge_api_key` / `judge_model_name` vars to swap in another judge — for
+example, the original Skills configuration uses `o3-mini-2025-01-31` via
+`api.openai.com`.
 
 ## Metrics
 
@@ -44,6 +47,7 @@ ng_run "+config_paths=[$config_paths]"
 ng_collect_rollouts \
     +agent_name=frontierscience_olympiad_frontierscience_judge_simple_agent \
     +input_jsonl_fpath=benchmarks/frontierscience_olympiad/data/frontierscience_olympiad_benchmark.jsonl \
+    +prompt_config=benchmarks/frontierscience_olympiad/prompts/default.yaml \
     +output_jsonl_fpath=results/frontierscience_olympiad_rollouts.jsonl \
     +num_repeats=4
 ```

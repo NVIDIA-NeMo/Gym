@@ -36,10 +36,12 @@ ng_collect_rollouts \
     +num_repeats=1
 ```
 
-The default `judge_model` config points at OpenAI's public API
-(`api.openai.com`) and `o3-mini-2025-01-31`, requiring `OPENAI_API_KEY` in
-the environment. To swap in a different judge endpoint, override the
-top-level `judge_base_url` / `judge_api_key` / `judge_model_name` vars in
+The default `judge_model` config points at the public NVIDIA inference
+API (`https://integrate.api.nvidia.com/v1`) and `openai/gpt-oss-20b`,
+reading the key from `NVIDIA_API_KEY`. To swap in a different judge
+endpoint — for example, the original Skills configuration of
+`o3-mini-2025-01-31` via `api.openai.com` — override the top-level
+`judge_base_url` / `judge_api_key` / `judge_model_name` vars in
 `configs/frontierscience_judge.yaml`.
 
 For Nemotron-3-Nano and other reasoning models, start vLLM with
