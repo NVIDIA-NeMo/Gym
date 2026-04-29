@@ -45,7 +45,12 @@ from typing import Any, ClassVar, Dict, List, Optional
 
 from pydantic import Field
 
-from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymResponse
+from nemo_gym.openai_utils import (
+    NeMoGymChatCompletion,
+    NeMoGymChatCompletionCreateParamsNonStreaming,
+    NeMoGymEasyInputMessage,
+    NeMoGymResponse,
+)
 from nemo_gym.prompt import PromptConfig, fill_prompt, load_prompt_config
 from nemo_gym.reward_profile import compute_subset_metrics
 from nemo_gym.server_utils import get_response_json
@@ -62,6 +67,13 @@ _DEFAULT_JUDGE_PROMPT_PATH = "resources_servers/physics_judge/prompts/judge.yaml
 
 
 class PhysicsJudgeResourcesServerConfig(LibraryJudgeMathResourcesServerConfig):
+    use_chat_completions_for_judge: bool = Field(
+        default=False,
+        description="Use /v1/chat/completions instead of /v1/responses for the judge model. "
+        "Required for endpoints that don't support the OpenAI Responses API "
+        "(NVIDIA NIM, OpenAI public API).",
+    )
+
     judge_prompt_path: str = Field(
         default=_DEFAULT_JUDGE_PROMPT_PATH,
         description=(
@@ -144,6 +156,50 @@ class PhysicsJudgeResourcesServer(LibraryJudgeMathResourcesServer):
         responses_create_params.input = [
             NeMoGymEasyInputMessage(role=msg["role"], content=msg["content"]) for msg in message_dicts
         ]
+
+        if config.use_chat_completions_for_judge:
+            chat_params = NeMoGymChatCompletionCreateParamsNonStreaming(
+                messages=[{"role": msg["role"], "content": msg["content"]} for msg in message_dicts],
+                max_tokens=responses_create_params.max_output_tokens or 2048,
+                temperature=responses_create_params.temperature or 0.0,
+                top_p=responses_create_params.top_p or 1.0,
+            )
+            response = await self.server_client.post(
+                server_name=config.judge_model_server.name,
+                url_path="/v1/chat/completions",
+                json=chat_params,
+            )
+            chat_response = NeMoGymChatCompletion.model_validate(await get_response_json(response))
+            content = chat_response.choices[0].message.content if chat_response.choices else None
+            # Wrap chat content into a minimal NeMoGymResponse so JudgeEvaluation
+            # (which requires a NeMoGymResponse) stays consistent for downstream
+            # diagnostics. Single message output with the verdict text.
+            synthesized_response = NeMoGymResponse.model_validate(
+                {
+                    "id": chat_response.id,
+                    "created_at": chat_response.created,
+                    "model": chat_response.model,
+                    "object": "response",
+                    "output": [
+                        {
+                            "id": "msg_chat",
+                            "type": "message",
+                            "role": "assistant",
+                            "status": "completed",
+                            "content": [{"type": "output_text", "text": content or "", "annotations": []}],
+                        }
+                    ],
+                    "parallel_tool_calls": False,
+                    "tool_choice": "none",
+                    "tools": [],
+                }
+            )
+            judge_evaluation = JudgeEvaluation(
+                responses_create_params=responses_create_params, response=synthesized_response
+            )
+            if not content:
+                return False, judge_evaluation
+            return self._parse_verdict(content), judge_evaluation
 
         response = await self.server_client.post(
             server_name=config.judge_model_server.name,
