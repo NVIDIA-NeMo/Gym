@@ -3312,16 +3312,19 @@ class TestVLLMConverter:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Audio sidechannel splice (metadata.audio_url → user-message content block)
+# Audio sidechannel splice (metadata.audio_data → user-message content block)
 #
 # Lets audio benchmarks like librispeech_pc carry audio data-URIs through the
 # Responses API even though `ResponseInputContentParam` has no audio variant.
 # These tests exercise `_preprocess_chat_completion_create_params` directly
 # with synthetic body_dicts so they don't need a running vLLM endpoint.
+# Note that the spliced *content block* is still typed ``audio_url`` because
+# that's vLLM's wire format — only the *metadata key* on the JSONL row is
+# named ``audio_data``.
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-_AUDIO_URL = "data:audio/wav;base64,QUFB"  # placeholder bytes
+_AUDIO_DATA = "data:audio/wav;base64,QUFB"  # placeholder bytes
 
 
 def _make_minimal_audio_model() -> VLLMModel:
@@ -3341,9 +3344,9 @@ def _make_minimal_audio_model() -> VLLMModel:
     return VLLMModel(config=config, server_client=MagicMock(spec=ServerClient))
 
 
-class TestAudioSidechannelSplice:
+class TestAudioDataSplice:
     def test_no_metadata_passthrough(self) -> None:
-        """No audio_url in metadata → user message content stays a plain string."""
+        """No audio_data in metadata → user message content stays a plain string."""
         model = _make_minimal_audio_model()
         body = {
             "model": "dummy-model",
@@ -3363,7 +3366,7 @@ class TestAudioSidechannelSplice:
                 {"role": "system", "content": "sys"},
                 {"role": "user", "content": "Transcribe please."},
             ],
-            "metadata": {"audio_url": _AUDIO_URL},
+            "metadata": {"audio_data": _AUDIO_DATA},
         }
         result = model._preprocess_chat_completion_create_params(MagicMock(), body)
 
@@ -3373,7 +3376,7 @@ class TestAudioSidechannelSplice:
         user_content = result["messages"][1]["content"]
         assert isinstance(user_content, list)
         # Audio block must come BEFORE the text part (some audio models care).
-        assert user_content[0] == {"type": "audio_url", "audio_url": {"url": _AUDIO_URL}}
+        assert user_content[0] == {"type": "audio_url", "audio_url": {"url": _AUDIO_DATA}}
         assert user_content[1] == {"type": "text", "text": "Transcribe please."}
 
     def test_splice_into_list_user_content(self) -> None:
@@ -3386,11 +3389,11 @@ class TestAudioSidechannelSplice:
                     "content": [{"type": "text", "text": "Transcribe please."}],
                 }
             ],
-            "metadata": {"audio_url": _AUDIO_URL, "other": "keep"},
+            "metadata": {"audio_data": _AUDIO_DATA, "other": "keep"},
         }
         result = model._preprocess_chat_completion_create_params(MagicMock(), body)
 
-        # audio_url stripped, but the "other" key is preserved
+        # audio_data stripped, but the "other" key is preserved
         assert result["metadata"] == {"other": "keep"}
         assert result["messages"][0]["content"][0]["type"] == "audio_url"
         assert result["messages"][0]["content"][1]["type"] == "text"
@@ -3405,7 +3408,7 @@ class TestAudioSidechannelSplice:
                 {"role": "assistant", "content": "ok"},
                 {"role": "user", "content": "second turn"},
             ],
-            "metadata": {"audio_url": _AUDIO_URL},
+            "metadata": {"audio_data": _AUDIO_DATA},
         }
         result = model._preprocess_chat_completion_create_params(MagicMock(), body)
 
@@ -3418,7 +3421,7 @@ class TestAudioSidechannelSplice:
         body = {
             "model": "dummy-model",
             "messages": [{"role": "system", "content": "sys"}],
-            "metadata": {"audio_url": _AUDIO_URL},
+            "metadata": {"audio_data": _AUDIO_DATA},
         }
         result = model._preprocess_chat_completion_create_params(MagicMock(), body)
 
@@ -3426,13 +3429,195 @@ class TestAudioSidechannelSplice:
         assert result["messages"][1]["role"] == "user"
         assert result["messages"][1]["content"][0]["type"] == "audio_url"
 
-    def test_empty_audio_url_is_noop(self) -> None:
-        """Falsy audio_url string skips the splice (and leaves metadata untouched)."""
+    def test_empty_audio_data_is_noop(self) -> None:
+        """Falsy audio_data string skips the splice (and leaves metadata untouched)."""
         model = _make_minimal_audio_model()
         body = {
             "model": "dummy-model",
             "messages": [{"role": "user", "content": "hi"}],
-            "metadata": {"audio_url": ""},
+            "metadata": {"audio_data": ""},
         }
         result = model._preprocess_chat_completion_create_params(MagicMock(), body)
         assert result["messages"][0]["content"] == "hi"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Audio sidechannel: file-path mode (metadata.audio_path)
+#
+# Path-mode is the size-friendly alternative to the data-URI form: the JSONL
+# only carries a path, and the URL is materialized at request time per
+# ``audio_path_mode``. Tests below exercise the splice with a real on-disk
+# WAV-shaped file so the data-URI branch has bytes to encode.
+# ──────────────────────────────────────────────────────────────────────────────
+
+import base64 as _b64  # noqa: E402  (kept local to the audio_path tests)
+
+
+_AUDIO_BYTES = b"RIFF" + b"\x00" * 8 + b"WAVEfmt "  # not a valid WAV — splice doesn't decode
+
+
+def _make_audio_path_model(audio_root: str | None = None) -> VLLMModel:
+    """Like _make_minimal_audio_model but lets tests pin audio_root."""
+    config = VLLMModelConfig(
+        host="0.0.0.0",
+        port=8080,
+        entrypoint="",
+        name="vllm_model",
+        base_url="http://localhost:9999/v1",
+        api_key="dummy_key",  # pragma: allowlist secret
+        model="dummy-model",
+        return_token_id_information=False,
+        uses_reasoning_parser=False,
+        uses_interleaved_reasoning=False,
+        audio_root=audio_root,
+    )
+    return VLLMModel(config=config, server_client=MagicMock(spec=ServerClient))
+
+
+class TestAudioPathSplice:
+    def test_absolute_path_encodes_to_data_uri(self, tmp_path) -> None:
+        wav = tmp_path / "clip.wav"
+        wav.write_bytes(_AUDIO_BYTES)
+
+        model = _make_audio_path_model()
+        body = {
+            "model": "dummy-model",
+            "messages": [{"role": "user", "content": "Transcribe."}],
+            "metadata": {"audio_path": str(wav)},
+        }
+        result = model._preprocess_chat_completion_create_params(MagicMock(), body)
+
+        # audio_path consumed; metadata empty → dropped.
+        assert "metadata" not in result
+
+        audio_block = result["messages"][0]["content"][0]
+        assert audio_block["type"] == "audio_url"
+        url = audio_block["audio_url"]["url"]
+        prefix = "data:audio/wav;base64,"
+        assert url.startswith(prefix)
+        assert _b64.b64decode(url[len(prefix) :]) == _AUDIO_BYTES
+
+    def test_relative_path_resolves_against_audio_root(self, tmp_path) -> None:
+        (tmp_path / "sub").mkdir()
+        wav = tmp_path / "sub" / "clip.flac"
+        wav.write_bytes(_AUDIO_BYTES)
+
+        model = _make_audio_path_model(audio_root=str(tmp_path))
+        body = {
+            "model": "dummy-model",
+            "messages": [{"role": "user", "content": "Transcribe."}],
+            "metadata": {"audio_path": "sub/clip.flac"},
+        }
+        result = model._preprocess_chat_completion_create_params(MagicMock(), body)
+
+        url = result["messages"][0]["content"][0]["audio_url"]["url"]
+        # MIME picked from extension, not hard-coded to wav.
+        assert url.startswith("data:audio/flac;base64,")
+
+    def test_relative_path_without_audio_root_raises(self) -> None:
+        model = _make_audio_path_model(audio_root=None)
+        body = {
+            "model": "dummy-model",
+            "messages": [{"role": "user", "content": "Transcribe."}],
+            "metadata": {"audio_path": "sub/clip.wav"},
+        }
+        try:
+            model._preprocess_chat_completion_create_params(MagicMock(), body)
+        except ValueError as e:
+            assert "audio_root" in str(e)
+        else:
+            raise AssertionError("expected ValueError for relative path without audio_root")
+
+    def test_missing_file_raises(self, tmp_path) -> None:
+        model = _make_audio_path_model()
+        body = {
+            "model": "dummy-model",
+            "messages": [{"role": "user", "content": "Transcribe."}],
+            "metadata": {"audio_path": str(tmp_path / "does_not_exist.wav")},
+        }
+        try:
+            model._preprocess_chat_completion_create_params(MagicMock(), body)
+        except FileNotFoundError as e:
+            assert "does_not_exist.wav" in str(e)
+        else:
+            raise AssertionError("expected FileNotFoundError for missing audio file")
+
+    def test_unknown_extension_raises(self, tmp_path) -> None:
+        weird = tmp_path / "clip.xyz"
+        weird.write_bytes(_AUDIO_BYTES)
+
+        model = _make_audio_path_model()
+        body = {
+            "model": "dummy-model",
+            "messages": [{"role": "user", "content": "Transcribe."}],
+            "metadata": {"audio_path": str(weird)},
+        }
+        try:
+            model._preprocess_chat_completion_create_params(MagicMock(), body)
+        except ValueError as e:
+            assert ".xyz" in str(e)
+        else:
+            raise AssertionError("expected ValueError for unknown audio extension")
+
+    def test_audio_paths_list_emits_one_block_per_clip_in_order(self, tmp_path) -> None:
+        # Mirrors Skills' ``audios`` multi-clip schema: each entry becomes a
+        # separate audio block, all placed before the text in order.
+        a = tmp_path / "a.wav"
+        b = tmp_path / "b.flac"
+        a.write_bytes(b"AAAA")
+        b.write_bytes(b"BBBB")
+
+        model = _make_audio_path_model()
+        body = {
+            "model": "dummy-model",
+            "messages": [{"role": "user", "content": "Compare these."}],
+            "metadata": {"audio_paths": [str(a), str(b)]},
+        }
+        result = model._preprocess_chat_completion_create_params(MagicMock(), body)
+
+        content = result["messages"][0]["content"]
+        assert len(content) == 3  # two audio + one text
+        assert content[0]["type"] == "audio_url"
+        assert content[0]["audio_url"]["url"].startswith("data:audio/wav;base64,")
+        assert _b64.b64decode(content[0]["audio_url"]["url"].split(",", 1)[1]) == b"AAAA"
+        assert content[1]["type"] == "audio_url"
+        assert content[1]["audio_url"]["url"].startswith("data:audio/flac;base64,")
+        assert _b64.b64decode(content[1]["audio_url"]["url"].split(",", 1)[1]) == b"BBBB"
+        assert content[2] == {"type": "text", "text": "Compare these."}
+
+    def test_audio_paths_must_be_a_list(self, tmp_path) -> None:
+        model = _make_audio_path_model()
+        body = {
+            "model": "dummy-model",
+            "messages": [{"role": "user", "content": "x"}],
+            "metadata": {"audio_paths": str(tmp_path / "a.wav")},  # string, not list
+        }
+        try:
+            model._preprocess_chat_completion_create_params(MagicMock(), body)
+        except ValueError as e:
+            assert "must be a list" in str(e)
+        else:
+            raise AssertionError("expected ValueError when audio_paths is not a list")
+
+    def test_audio_keys_mutually_exclusive(self, tmp_path) -> None:
+        wav = tmp_path / "clip.wav"
+        wav.write_bytes(_AUDIO_BYTES)
+
+        model = _make_audio_path_model()
+        # Any pairing of the three keys should raise — we spot-check two
+        # combinations rather than the full three pairs.
+        for metadata in (
+            {"audio_data": _AUDIO_DATA, "audio_path": str(wav)},
+            {"audio_path": str(wav), "audio_paths": [str(wav)]},
+        ):
+            body = {
+                "model": "dummy-model",
+                "messages": [{"role": "user", "content": "Transcribe."}],
+                "metadata": metadata,
+            }
+            try:
+                model._preprocess_chat_completion_create_params(MagicMock(), body)
+            except ValueError as e:
+                assert "mutually exclusive" in str(e)
+            else:
+                raise AssertionError(f"expected ValueError for metadata={metadata}")
