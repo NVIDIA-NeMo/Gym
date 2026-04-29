@@ -37,10 +37,11 @@ from nemo_gym.server_utils import ServerClient
 # ----------------------------
 # Mock dataset / expected_output so tests don't require evalplus + HF
 # ----------------------------
+_MOCK_PROMPT = "def f(x):\n"
 _MOCK_DATASET = {
     "HumanEval/0": {
         "task_id": "HumanEval/0",
-        "prompt": "def f(x):\n",
+        "prompt": _MOCK_PROMPT,
         "entry_point": "f",
         "base_input": [[1]],
         "plus_input": [[2]],
@@ -230,6 +231,52 @@ class TestApp:
         res = EvalPlusVerifyResponse.model_validate(resp.json())
         assert res.reward == 0.0
         assert "missing task_id" in (res.metadata or {}).get("error", "")
+
+    async def test_verify_prepends_prompt_when_missing(self, evalplus_client, monkeypatch):
+        """Mirrors evalplus.evaluate.evaluate(): if the extracted code doesn't already
+        start with problem['prompt'], prepend it before calling check_correctness.
+        Without this, check_correctness gets a body-only fragment and fails.
+        """
+        captured = {}
+
+        def _remote_capture(dataset, problem, solution, expected, *args):
+            captured["dataset"] = dataset
+            captured["solution"] = solution
+            return _FakeFuture({"base_status": "pass", "plus_status": "pass"})
+
+        with (
+            patch("app.check_correctness_remote.remote", side_effect=_remote_capture),
+            patch(
+                "app.ray.get",
+                side_effect=_ray_get_returns({"base_status": "pass", "plus_status": "pass"}),
+            ),
+        ):
+            # Body-only completion (no `def` line, no imports) — Skills-style
+            self._post_verify(evalplus_client, "```python\n    return x\n```")
+        assert captured["solution"].startswith(_MOCK_PROMPT)
+        assert captured["solution"] == _MOCK_PROMPT + "return x"
+
+    async def test_verify_does_not_double_prepend(self, evalplus_client):
+        """If extracted code already starts with problem['prompt'], we should NOT
+        prepend again. Otherwise the resulting source has duplicated imports +
+        function signature.
+        """
+        captured = {}
+
+        def _remote_capture(dataset, problem, solution, expected, *args):
+            captured["solution"] = solution
+            return _FakeFuture({"base_status": "pass", "plus_status": "pass"})
+
+        full_code = _MOCK_PROMPT + "    return x"
+        with (
+            patch("app.check_correctness_remote.remote", side_effect=_remote_capture),
+            patch(
+                "app.ray.get",
+                side_effect=_ray_get_returns({"base_status": "pass", "plus_status": "pass"}),
+            ),
+        ):
+            self._post_verify(evalplus_client, f"```python\n{full_code}\n```")
+        assert captured["solution"] == full_code  # NOT _MOCK_PROMPT + full_code
 
     def test_verify_missing_response_validation_error(self):
         with pytest.raises(ValidationError):

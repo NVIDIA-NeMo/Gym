@@ -196,12 +196,23 @@ class EvalPlusResourcesServer(SimpleResourcesServer):
         problem = self._dataset[task_id]
         expected_output = self._expected_output[task_id]
 
+        # Match `evalplus.evaluate.evaluate()`'s completion-style behaviour:
+        # if the JSONL row has `completion` (no `solution`), it prepends
+        # `problem["prompt"]` before calling check_correctness. The prompt
+        # carries the imports and the function signature; the model usually
+        # emits just the body (or the body + a redundant `def`), so without
+        # this prepend the candidate hits NameError on type annotations like
+        # `List[float]` and check_correctness reports a hard fail with empty
+        # details. Skills' `eval_evalplus` evaluator goes through `evaluate()`
+        # and gets this prepend for free; check_correctness does NOT.
+        solution = code if code.startswith(problem["prompt"]) else problem["prompt"] + code
+
         async with self._semaphore:
             loop = get_running_loop()
             future = check_correctness_remote.remote(
                 self.config.dataset,
                 problem,
-                code,
+                solution,
                 expected_output,
                 self.config.min_time_limit,
                 self.config.gt_time_limit_factor,
