@@ -203,3 +203,7 @@ class MathWithAutograderResourcesServer(LibraryJudgeMathResourcesServer):
             if retval.startswith(prefix) and retval.endswith("}"):
                 return retval[len(prefix) : -1]
         return None
+
+
+if __name__ == "__main__":
+    MathWithAutograderResourcesServer.run_webserver()
