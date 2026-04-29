@@ -1,0 +1,12 @@
+# Prompt matching the original Global-PIQA benchmark formatting.
+user: |-
+  Given the following situation, which option is more likely to be correct?
+
+  Situation:
+  {question} ...
+
+  Option A: {A}
+
+  Option B: {B}
+
+  Your response should end with "The best answer is: [answer_letter]" where [answer_letter] is one of A or B.

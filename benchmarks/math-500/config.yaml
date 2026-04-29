@@ -1,0 +1,22 @@
+config_paths:
+  - resources_servers/math_with_judge/configs/math_with_judge.yaml
+
+math_500_math_with_judge_resources_server:
+  _inherit_from: math_with_judge
+  resources_servers:
+    math_with_judge:
+      should_use_judge: false
+
+math_500_math_with_judge_simple_agent:
+  _inherit_from: math_with_judge_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: math_500_math_with_judge_resources_server
+      datasets:
+        - name: math-500
+          type: benchmark
+          jsonl_fpath: benchmarks/math-500/data/math-500_benchmark.jsonl
+          prompt_config: benchmarks/prompts/generic_math.yaml
+          prepare_script: benchmarks/math-500/prepare.py
+          num_repeats: 1
