@@ -50,13 +50,37 @@ def ensure_bcb_venv(venv_path: Path, python_version: str = "3.10") -> Path:
     if venv_path.exists():
         shutil.rmtree(venv_path)
 
-    subprocess.check_call(["uv", "venv", "--python", python_version, str(venv_path)])
+    # ``--seed`` populates pip in the new venv so we can use it below for the
+    # bigcodebench requirements-eval install (uv's resolver chokes on the upstream
+    # pin conflicts; pip handles them permissively).
+    subprocess.check_call(["uv", "venv", "--seed", "--python", python_version, str(venv_path)])
 
     # numpy first to lock in 1.26.4 before bigcodebench's transitive deps pull a different version.
     subprocess.check_call(["uv", "pip", "install", "--python", str(python_bin), NUMPY_PIN, BIGCODEBENCH_VERSION_SPEC])
-    subprocess.check_call(["uv", "pip", "install", "--python", str(python_bin), "-r", REQUIREMENTS_EVAL_URL])
 
-    subprocess.check_call([str(python_bin), "-c", "from bigcodebench.eval import untrusted_check"])
+    # bigcodebench's upstream requirements-eval.txt has hard-conflicting pins
+    # (numpy 1.21.2 vs tensorflow 2.11.0 vs keras 2.11.0 vs matplotlib 3.7.0).
+    # uv refuses to resolve and silently leaves transitive deps un-installed,
+    # so matplotlib ends up with cycler / kiwisolver / fonttools / etc. missing
+    # and ``unsafe_execute``'s ``import matplotlib.pyplot`` raises ModuleNotFoundError
+    # during ``reliability_guard`` — which then surfaces as 100% test timeouts
+    # (the fork's stat.value never gets set, untrusted_check returns TIMEOUT).
+    # Plain pip is more permissive about partial resolution, mirroring Skills'
+    # eval_bigcodebench install path inside the nemo-skills container.
+    subprocess.check_call([str(python_bin), "-m", "pip", "install", "-r", REQUIREMENTS_EVAL_URL])
+
+    # Ensure numpy stays at 1.26.4 — requirements-eval.txt downgrades to 1.21.2
+    # which is ABI-incompatible with the matplotlib wheel we just pulled.
+    subprocess.check_call(["uv", "pip", "install", "--python", str(python_bin), NUMPY_PIN])
+
+    # Smoke-test the actual chain that ``untrusted_check`` exercises.
+    subprocess.check_call(
+        [
+            str(python_bin),
+            "-c",
+            "from bigcodebench.eval import untrusted_check; import matplotlib.pyplot as plt; plt.close('all')",
+        ]
+    )
 
     sentinel.touch()
     return python_bin
