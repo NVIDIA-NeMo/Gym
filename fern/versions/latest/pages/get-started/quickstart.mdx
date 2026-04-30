@@ -1,10 +1,10 @@
 ---
 title: "Quickstart"
-description: "Run your first NeMo Gym rollout end-to-end against the Blackjack environment in about 10 minutes."
+description: "Install NeMo Gym, configure your model, and score a Blackjack agent end-to-end in about 10 minutes."
 position: 4
 ---
 
-Score an LLM agent at [`blackjack`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/blackjack) and read the rewards. **Time**: about 10 minutes. **Cost**: about $0.05 in OpenAI API usage.
+Install NeMo Gym, configure your model credentials, and score an LLM agent at [`blackjack`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/blackjack). **Time**: about 10 minutes. **Cost**: about $0.05 in OpenAI API usage.
 
 Each rollout in the output JSONL has a top-level `"reward"` key:
 
@@ -18,13 +18,43 @@ Averaging those over 10 rollouts gives GPT-4.1 around `-0.6` against a fixed dea
 
 ## Prerequisites
 
-1. NeMo Gym installed via the [Source path](/latest/get-started/installation).
-2. `env.yaml` configured with your model credentials ([Configuration](/latest/get-started/configuration)).
-3. Virtual environment activated: `source .venv/bin/activate`.
+1. Python 3.12+ on a [verified configuration](/latest/get-started/prerequisites#verified-configurations).
+2. An OpenAI API key, or another OpenAI-compatible endpoint (Azure, NIM, self-hosted vLLM).
 
 ## Quickstart Steps
 
-1. **Start the Servers** (Terminal 1)
+1. **Install NeMo Gym**
+
+   ```bash
+   git clone git@github.com:NVIDIA-NeMo/Gym.git
+   cd Gym
+   uv venv --python 3.12 && source .venv/bin/activate
+   uv sync
+   ```
+
+   <Tip>
+   Already installed? Skip to step 3. For PyPI or container install paths, refer to [Installation](/latest/get-started/installation).
+   </Tip>
+
+2. **Configure Your Model Credentials**
+
+   Create `env.yaml` in the project root:
+
+   ```bash
+   cat > env.yaml << 'EOF'
+   policy_base_url: https://api.openai.com/v1
+   policy_api_key: sk-your-actual-key-here
+   policy_model_name: gpt-4.1-2025-04-14
+   EOF
+   ```
+
+   Replace the placeholder API key with your real key.
+
+   <Tip>
+   Already have `env.yaml`? Skip to step 3. For Azure, NIM, or self-hosted vLLM, refer to [Configuration — Provider Examples](/latest/get-started/configuration#provider-examples).
+   </Tip>
+
+3. **Start the Servers** (Terminal 1)
 
    ```bash
    ng_run "+config_paths=[\
@@ -40,7 +70,7 @@ Averaging those over 10 rollouts gives GPT-4.1 around `-0.6` against a fixed dea
    On a repeat run with no dependency changes, append `+skip_venv_if_present=true` to `ng_run` to skip venv re-creation.
    </Tip>
 
-2. **Collect Rollouts** (Terminal 2)
+4. **Collect Rollouts** (Terminal 2)
 
    ```bash
    mkdir -p results
@@ -66,7 +96,7 @@ Averaging those over 10 rollouts gives GPT-4.1 around `-0.6` against a fixed dea
    | `+num_samples_in_parallel` | Concurrency. Defaults to unlimited. |
    </Accordion>
 
-3. **See the Results** (Terminal 2)
+5. **See the Results** (Terminal 2)
 
    ```bash
    python3 -c "
@@ -78,7 +108,7 @@ Averaging those over 10 rollouts gives GPT-4.1 around `-0.6` against a fixed dea
 
    **✅ Success Check**: Prints something like `mean reward: -0.60 (10 rollouts)`. For a stable evaluation, raise `+num_repeats` to 16 or higher.
 
-4. **Stop the Servers**
+6. **Stop the Servers**
 
    In Terminal 1: `Ctrl+C`.
 
@@ -93,7 +123,14 @@ source .venv/bin/activate
 </Accordion>
 
 <Accordion title="Missing mandatory value: policy_api_key">
-You have not created `env.yaml` yet. Refer to [Configuration](/latest/get-started/configuration).
+`env.yaml` is missing or in the wrong directory. From the project root:
+
+```bash
+ls env.yaml
+cat env.yaml | head -3
+```
+
+Re-create the file using the snippet in step 2.
 </Accordion>
 
 <Accordion title="OpenAI 429: quota exceeded">
