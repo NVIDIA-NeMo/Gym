@@ -40,8 +40,6 @@ jobs:
           node-version: '20'
 
       - name: Validate Fern configuration
-        env:
-          FERN_TOKEN: ${{ secrets.DOCS_FERN_TOKEN }}
         working-directory: ./fern
         env:
           FERN_TOKEN: ${{ secrets.DOCS_FERN_TOKEN }}
