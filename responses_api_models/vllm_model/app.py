@@ -490,7 +490,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 # We wrap this here in think tags for Gym's sake and to return a valid OpenAI Chat Completions response.
                 choice_dict["message"]["content"] = self._converter._wrap_reasoning_in_think_tags(
                     [reasoning_content]
-                ) + (choice_dict["message"]["content"] or "")
+                ) + (choice_dict["message"].get("content") or "")
         else:
             # See the TODO wrt reasoning_content above
             assert not (choice_dict["message"].get("reasoning_content") or choice_dict["message"].get("reasoning")), (
