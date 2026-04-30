@@ -19,6 +19,10 @@ on:
     types: [opened, synchronize, reopened, labeled, unlabeled]
   workflow_call:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     name: Test
@@ -74,6 +78,7 @@ jobs:
           fi
 
       - name: Cache uv dependencies
+        if: steps.changes.outputs.run_full == 'true' || steps.changes.outputs.run_servers == 'true'
         uses: actions/cache@v4
         with:
           path: ~/.cache/uv
@@ -82,6 +87,7 @@ jobs:
             uv-${{ runner.os }}-
 
       - name: Setup for test
+        if: steps.changes.outputs.run_full == 'true' || steps.changes.outputs.run_servers == 'true'
         run: |
           sudo apt-get update
           # Curl is required for setup_nvidia.sh to download uv
@@ -95,6 +101,7 @@ jobs:
           uv sync --extra dev
 
       - name: Test
+        if: steps.changes.outputs.run_full == 'true' || steps.changes.outputs.run_servers == 'true'
         run: |
           source .venv/bin/activate
 

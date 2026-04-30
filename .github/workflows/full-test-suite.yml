@@ -20,6 +20,10 @@ on:
       - main
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   full-test-suite:
     name: Full Test Suite
@@ -198,6 +202,11 @@ jobs:
         env:
           SLACK_WEBHOOK: ${{ secrets.SLACK_TEAM_CHANNEL_WEBHOOK }}
         run: |
+          if [ -z "$SLACK_WEBHOOK" ]; then
+            echo "::error::SLACK_TEAM_CHANNEL_WEBHOOK secret is not set"
+            exit 1
+          fi
+
           MESSAGE='{
             "blocks": [
               {
