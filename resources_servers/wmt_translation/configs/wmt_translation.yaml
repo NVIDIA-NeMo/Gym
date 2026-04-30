@@ -9,16 +9,7 @@ wmt_translation:
       compute_comet: true
       comet_model: Unbabel/XCOMET-XXL
       comet_batch_size: 16
-      # Full 1.0 GPU on a dedicated worker node. Gym rollout script requests
-      # server_nodes=N+1 while vLLM's DP=N uses N nodes via strict-pack; the
-      # extra node's 8 GPUs stay unclaimed in Ray's accounting, so this
-      # task schedules there cleanly. See app.py / run_wmt24pp_gym.py.
-      comet_num_gpus: 1
-      # Number of parallel Ray COMET shards on the extra_gpu node. Default
-      # matches the 8 GPUs/node on most cluster shapes. Listed here so
-      # `++...comet_num_shards=N` CLI overrides are accepted by OmegaConf's
-      # struct check (without an explicit YAML entry, struct mode rejects
-      # the key even though the Python class has a default).
+      # Listed explicitly so OmegaConf struct mode accepts `++…comet_num_shards=N` CLI overrides.
       comet_num_shards: 8
 
 wmt_translation_simple_agent:
