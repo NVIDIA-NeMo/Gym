@@ -971,17 +971,16 @@ class TestVerify:
         assert "$391.0 billion" in judge_input_text
 
     @pytest.mark.asyncio
-    async def test_verify_falls_back_to_text_message(self, tmp_path) -> None:
-        """When no submit_final_result tool call, extracts from last assistant message."""
+    async def test_verify_hard_gate_rejects_without_submit(self, tmp_path) -> None:
+        """Without submit_final_result tool call, hard gate returns reward=0."""
         server = self._create_server_with_judge(tmp_path)
-        post_mock = MagicMock()
-        post_mock.read = AsyncMock(return_value=self._make_judge_response("[[2]]"))
-        server.server_client.post = AsyncMock(return_value=post_mock)
 
         response = self._make_response(self._msg("The revenue was $391.0 billion."))
         req = self._make_verify_request(response, "$391.0 billion")
         res = await server.verify(self._mock_request(), req)
-        assert res.reward == 1.0
+        assert res.reward == 0.0
+        assert res.judge_rating == 0
+        assert "submit_final_result" in res.judge_text
 
     @pytest.mark.asyncio
     async def test_verify_no_judge_substring_match(self, tmp_path) -> None:
