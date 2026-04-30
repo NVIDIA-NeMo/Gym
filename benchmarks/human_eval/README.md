@@ -27,10 +27,14 @@ config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
 benchmarks/human_eval/config.yaml"
 ng_run "+config_paths=[$config_paths]"
 
-# Collecting rollouts
+# Collecting rollouts. The +prompt_config= override is required because
+# the prepared JSONL stores raw `question` rows (no `responses_create_params.input`);
+# ng_collect_rollouts does not pick up the `prompt_config:` field on the dataset
+# entry in config.yaml the way ng_run does.
 ng_collect_rollouts \
     +agent_name=human_eval_evalplus_simple_agent \
     +input_jsonl_fpath=benchmarks/human_eval/data/human_eval_benchmark.jsonl \
+    +prompt_config=benchmarks/human_eval/prompts/default.yaml \
     +output_jsonl_fpath=results/human_eval_rollouts.jsonl \
     +num_repeats=4
 ```
