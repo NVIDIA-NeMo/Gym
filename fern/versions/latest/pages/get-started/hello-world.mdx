@@ -1,0 +1,156 @@
+---
+title: "Hello World"
+description: "Build your first NeMo Gym environment by subclassing GymnasiumServer."
+position: 5
+---
+
+# Hello World
+
+You ran an environment in the [Quickstart](/latest/get-started/quickstart). Now build one. We'll write a tiny **"Guess the Number"** environment — the model picks a number 1-5, the env scores it. The whole thing is ~25 lines of Python plus one YAML and one JSONL row.
+
+The shape is identical to [`blackjack`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/blackjack) — subclass `GymnasiumServer`, implement `step()`, return a 5-tuple. No FastAPI plumbing.
+
+## 1. Files
+
+```text
+resources_servers/guess_number/
+├── app.py
+├── configs/guess_number.yaml
+├── data/example.jsonl
+└── requirements.txt
+```
+
+## 2. The Environment (`app.py`)
+
+```python
+import random
+import re
+from typing import Optional
+
+from nemo_gym.openai_utils import NeMoGymResponse
+from resources_servers.gymnasium import GymnasiumServer, extract_text
+
+
+class GuessNumberEnv(GymnasiumServer):
+    async def reset(self, metadata: dict, session_id: Optional[str] = None) -> tuple[Optional[str], dict]:
+        secret = random.randint(1, 5)
+        self.session_state[session_id] = {"secret": secret}
+        return f"Guess a number between 1 and 5. Respond with <answer>N</answer>.", {}
+
+    async def step(
+        self, action: NeMoGymResponse, metadata: dict, session_id: Optional[str] = None
+    ) -> tuple[Optional[str], float, bool, bool, dict]:
+        secret = self.session_state[session_id]["secret"]
+        text = extract_text(action)
+        m = re.search(r"<answer>\s*(\d+)\s*</answer>", text)
+        guess = int(m.group(1)) if m else -1
+        reward = 1.0 if guess == secret else 0.0
+        return None, reward, True, False, {"secret": secret, "guess": guess}
+
+
+if __name__ == "__main__":
+    GuessNumberEnv.run_webserver()
+```
+
+That's the entire environment. `reset()` picks a secret and primes the model; `step()` parses the model's `<answer>` tag, scores it, terminates.
+
+## 3. Config (`configs/guess_number.yaml`)
+
+```yaml
+guess_number:
+  resources_servers:
+    guess_number:
+      entrypoint: app.py
+      domain: games
+      verified: false
+
+guess_number_gymnasium_agent:
+  responses_api_agents:
+    gymnasium_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: guess_number
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      max_steps: 1
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/guess_number/data/example.jsonl
+```
+
+## 4. Data (`data/example.jsonl`)
+
+One line per task. The system prompt sets up the rules; `reset()` appends the actual prompt at rollout time.
+
+```json
+{"responses_create_params": {"input": [{"role": "system", "content": "You are playing a guessing game. Reply with <answer>N</answer>."}, {"role": "user", "content": "Begin."}]}, "agent_ref": {"type": "responses_api_agents", "name": "guess_number_gymnasium_agent"}}
+```
+
+Add 4 more identical rows to give the model 5 chances.
+
+## 5. Requirements
+
+```text
+-e nemo-gym[dev] @ ../../
+```
+
+## 6. Run It
+
+Same three commands you ran in the Quickstart, with your config:
+
+```bash
+# Terminal 1
+ng_run "+config_paths=[\
+resources_servers/guess_number/configs/guess_number.yaml,\
+responses_api_models/openai_model/configs/openai_model.yaml]"
+
+# Terminal 2
+mkdir -p results
+ng_collect_rollouts \
+    +agent_name=guess_number_gymnasium_agent \
+    +input_jsonl_fpath=resources_servers/guess_number/data/example.jsonl \
+    +output_jsonl_fpath=results/guess_rollouts.jsonl \
+    +num_repeats=4
+
+ng_reward_profile \
+    +materialized_inputs_jsonl_fpath=results/guess_rollouts_materialized_inputs.jsonl \
+    +rollouts_jsonl_fpath=results/guess_rollouts.jsonl
+```
+
+Random guessing on 1-5 should land near `mean/reward = 0.2`. A model that anchors on a single number will hit higher or lower variance depending on the secret distribution.
+
+## What You Just Built
+
+That's the whole pattern:
+
+- **`reset(metadata, session_id) -> (observation, info)`** — set up state, return the first message to the model.
+- **`step(action, metadata, session_id) -> (observation, reward, terminated, truncated, info)`** — score the response, return the next message or terminate.
+
+Multi-step? Return a non-`None` observation from `step()`. Tool use? Inspect `action.output` for `function_call` items. LLM-as-judge? Call another model server through `self.server_client`. The [Gymnasium API reference](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/gymnasium) covers all of these patterns.
+
+## Next Steps
+
+<Cards>
+
+<Card title="Read blackjack/app.py" href="https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/blackjack">
+Same shape, multi-step. The reference implementation.
+
+<Badge minimal outlined>example</Badge>
+</Card>
+
+<Card title="Environment Tutorials" href="/latest/environment-tutorials">
+Tool calling, multi-turn, LLM-as-judge, real-world environments.
+
+<Badge minimal outlined>tutorials</Badge>
+</Card>
+
+<Card title="Contribute" href="/latest/contribute/environments">
+Submit your environment to the NeMo Gym hub.
+
+<Badge minimal outlined>contribute</Badge>
+</Card>
+
+</Cards>

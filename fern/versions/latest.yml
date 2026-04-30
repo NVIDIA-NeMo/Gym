@@ -13,10 +13,11 @@ navigation:
         contents:
           - page: "Home"
             path: ./latest/pages/index.mdx
-          - page: "Getting Started"
-            path: ./latest/pages/getting-started.mdx
       - folder: ./latest/pages/about
         title: "About"
+        title-source: frontmatter
+      - folder: ./latest/pages/get-started
+        title: "Get Started"
         title-source: frontmatter
       - folder: ./latest/pages/agent-server
         title: "Agent Server"

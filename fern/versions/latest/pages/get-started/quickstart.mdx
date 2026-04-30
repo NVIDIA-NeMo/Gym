@@ -1,0 +1,141 @@
+---
+title: "Quickstart"
+description: "Run your first NeMo Gym rollout end-to-end against the Blackjack environment."
+position: 4
+---
+
+# Quickstart
+
+NeMo Gym environments use the same **`reset()` / `step()` API** you know from [Gymnasium](https://gymnasium.farama.org/) — except the agent is an LLM and the actions are model outputs. This page walks you from "nothing running" to "I have a scored win rate" in about ten minutes, using **Blackjack** as the worked example.
+
+You should already have NeMo Gym [installed](/latest/get-started/installation) and `env.yaml` [configured](/latest/get-started/configuration).
+
+## 1. Orient
+
+```bash
+ng_help
+```
+
+Lists every CLI command. Append `+h=true` to any of them for detailed usage:
+
+```bash
+ng_run +h=true
+ng_collect_rollouts +h=true
+```
+
+## 2. Discover Benchmarks
+
+```bash
+ng_list_benchmarks
+```
+
+```text
+Available benchmarks in NeMo Gym
+┏━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━┓
+┃ Benchmark name   ┃ Agent name                        ┃ Num repeats ┃
+┡━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━┩
+│ aime25           │ aime25_math_with_judge_simple_ag… │ 32          │
+│ gpqa             │ gpqa_mcqa_simple_agent            │ 8           │
+│ ifbench          │ ifbench_benchmark_simple_agent    │ 5           │
+│ tau2             │ tau2_benchmark_agent              │ 8           │
+│ ...              │ ...                               │ ...         │
+└──────────────────┴───────────────────────────────────┴─────────────┘
+```
+
+These are the canonical, baselined benchmarks under `benchmarks/`. You'll run one in a moment. First, run the smaller, self-contained Blackjack environment to learn the flow.
+
+## 3. Start the Servers
+
+In **terminal 1**, point `ng_run` at the Blackjack environment plus an OpenAI model server:
+
+```bash
+ng_run "+config_paths=[\
+resources_servers/blackjack/configs/blackjack.yaml,\
+responses_api_models/openai_model/configs/openai_model.yaml]"
+```
+
+You'll see a head server on port 11000 and three more servers (resources, model, agent) on auto-assigned ports. Leave this running.
+
+<Tip>
+List the running servers any time:
+
+```bash
+curl http://localhost:11000/server_instances
+```
+</Tip>
+
+## 4. Collect Rollouts
+
+In **terminal 2**, score the agent on Blackjack's example dataset (5 hands):
+
+```bash
+mkdir -p results
+ng_collect_rollouts \
+    +agent_name=blackjack_gymnasium_agent \
+    +input_jsonl_fpath=resources_servers/blackjack/data/example.jsonl \
+    +output_jsonl_fpath=results/blackjack_rollouts.jsonl \
+    +num_repeats=2
+```
+
+| Flag | Meaning |
+|---|---|
+| `+agent_name` | Which agent server to invoke (from `ng_list_benchmarks` or your YAML). |
+| `+input_jsonl_fpath` | Input dataset, one task per line. |
+| `+output_jsonl_fpath` | Where to write rollouts (also writes `<output>_materialized_inputs.jsonl`). |
+| `+num_repeats` | Rollouts per task — increase for stable metrics, decrease for speed. |
+| `+limit` | Cap the number of input tasks (great for smoke tests). |
+| `+num_samples_in_parallel` | Concurrency. Defaults to unlimited. |
+
+You'll see a progress bar:
+
+```text
+Collecting rollouts: 100%|████████████| 10/10 [00:08<00:00,  1.25s/it]
+```
+
+Each rollout is a full transcript: the model saw its hand, decided `<action>hit</action>` or `<action>stand</action>`, and `step()` returned a reward of +1 (win), 0 (draw), or -1 (loss/bust).
+
+## 5. Read the Win Rate
+
+```bash
+ng_reward_profile \
+    +materialized_inputs_jsonl_fpath=results/blackjack_rollouts_materialized_inputs.jsonl \
+    +rollouts_jsonl_fpath=results/blackjack_rollouts.jsonl
+```
+
+The profiler prints aggregate metrics — mean / max / min reward, token usage, win/loss distribution. For Blackjack, GPT-4.1 lands around **`mean/reward = -0.6`** on this 10-rollout sample (small sample, naive policy — a real evaluation needs `+num_repeats=16` or more).
+
+That's the full eval loop: discover → run → collect → score. The same three commands work for every environment in `ng_list_benchmarks` — only the config paths and dataset change.
+
+## 6. Stop the Servers
+
+In terminal 1: `Ctrl+C`.
+
+## Next Steps
+
+<Cards>
+
+<Card title="Hello World" href="/latest/get-started/hello-world">
+Build your own environment by subclassing `GymnasiumServer`.
+
+<Badge intent="success" minimal outlined>build your own</Badge>
+</Card>
+
+<Card title="Run a Real Benchmark" href="https://github.com/NVIDIA-NeMo/Gym#-available-environments">
+Pick a benchmark from `ng_list_benchmarks` and run it with the same flow.
+
+<Badge minimal outlined>benchmarks</Badge>
+</Card>
+
+<Card title="Resources Server" href="/latest/resources-server">
+How environments define tasks, tools, and verification.
+
+<Badge minimal outlined>concepts</Badge>
+</Card>
+
+<Card title="Training Tutorials" href="/latest/training-tutorials">
+Improve your agent or model with RL or fine-tuning.
+
+<Badge minimal outlined>training</Badge>
+</Card>
+
+</Cards>

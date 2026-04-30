@@ -1,0 +1,33 @@
+---
+title: "Prerequisites"
+description: "What you need before installing NeMo Gym."
+position: 1
+---
+
+# Prerequisites
+
+## System
+
+- **Python** 3.12 or higher
+- **OS**: Linux (Ubuntu 20.04+), macOS (11+ Intel, 12+ Apple Silicon), or Windows via WSL2
+- **CPU**: any modern x86_64 or ARM64
+- **RAM**: 8 GB minimum; 16 GB recommended
+- **Disk**: 2 GB free
+- **GPU**: not required for the library itself; required if you plan to train with NeMo RL or run local model inference with vLLM
+
+## API Key
+
+The Quickstart and most examples call an OpenAI-compatible inference endpoint. Pick one:
+
+- **OpenAI** — get a key at [platform.openai.com](https://platform.openai.com/api-keys). The Quickstart costs ~$0.05.
+- **Azure OpenAI** — same shape, different `base_url` and key.
+- **Self-hosted** via vLLM or any OpenAI-compatible server with function calling.
+
+You configure this in [`env.yaml`](/latest/get-started/configuration) after installing.
+
+## Tools
+
+- **Git** for cloning the repo (only the `git clone` install path).
+- **Docker** for the container install path.
+
+That's it. Move on to [Installation](/latest/get-started/installation).

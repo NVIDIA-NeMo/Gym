@@ -25,7 +25,7 @@ NeMo Gym is part of [NVIDIA NeMo](https://docs.nvidia.com/nemo/gym/latest/about/
 
 ## 🚀 Quick Start
 
-Requires Python 3.12+ on x86_64 or ARM64 (Linux, macOS, Windows via WSL2). No GPU required. See the [Getting Started](https://docs.nvidia.com/nemo/gym/latest/getting-started) guide for full setup options.
+Requires Python 3.12+ on x86_64 or ARM64 (Linux, macOS, Windows via WSL2). No GPU required. See the [Get Started](https://docs.nvidia.com/nemo/gym/latest/get-started) guide for full setup options.
 
 Install NeMo Gym:
 ```bash
@@ -71,7 +71,7 @@ ng_reward_profile \
 
 - **Browse environments** — Explore available benchmarks and training environments in the [Available Environments](#-available-environments) table below.
 - **Agents** — Explore available agent harnesses and learn how to integrate your own. See [Agent Server](https://docs.nvidia.com/nemo/gym/latest/agent-server/index.html).
-- **Evaluation** — Run benchmarks and custom evals at scale. See [Getting Started](https://docs.nvidia.com/nemo/gym/latest/getting-started#run-evaluation).
+- **Evaluation** — Run benchmarks and custom evals at scale. See the [Quickstart](https://docs.nvidia.com/nemo/gym/latest/get-started/quickstart).
 - **Training** — Improve your agent or model with RL or fine-tuning. See the [Training Tutorials](https://docs.nvidia.com/nemo/gym/latest/training-tutorials/index.html).
 - **Build custom environments** — Create your own evaluation or training environments. See the [Environment Tutorials](https://docs.nvidia.com/nemo/gym/latest/environment-tutorials/index.html).
 

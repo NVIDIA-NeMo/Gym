@@ -1,0 +1,68 @@
+---
+title: "Installation"
+description: "Install NeMo Gym via git clone, pip, or container."
+position: 2
+---
+
+# Installation
+
+<Tabs>
+<Tab title="Git clone (recommended)">
+
+```bash
+git clone git@github.com:NVIDIA-NeMo/Gym.git
+cd Gym
+uv venv --python 3.12 && source .venv/bin/activate
+uv sync
+```
+
+If you don't have `uv`:
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+source $HOME/.local/bin/env
+```
+
+The git clone path gives you the full set of bundled environments, benchmarks, and example data — the [Quickstart](/latest/get-started/quickstart) and [Hello World](/latest/get-started/hello-world) both assume this layout.
+
+</Tab>
+<Tab title="pip install">
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate
+pip install nemo-gym
+```
+
+<Warning>
+The pip release does not yet ship the bundled benchmarks or `ng_list_benchmarks`. If you want to run the Quickstart end-to-end, use the **Git clone** path until the next release.
+</Warning>
+
+</Tab>
+<Tab title="Container">
+
+For RL training with NeMo RL, pull the latest NGC image:
+
+```bash
+docker pull nvcr.io/nvidia/nemo-rl:v0.5.0.nemotron_3_super
+```
+
+See the [NeMo RL training tutorial](/latest/training-tutorials/nemo-rl-grpo/setup) for full container setup.
+
+</Tab>
+</Tabs>
+
+## Verify
+
+```bash
+ng_help
+```
+
+If you see the list of `ng_*` commands, the install worked.
+
+```bash
+ng_list_benchmarks
+```
+
+Lists every benchmark bundled with the repo (gpqa, aime25, ifbench, and ~30 more). Empty or missing? You're on the pip path — switch to git clone.
+
+Continue to [Configuration](/latest/get-started/configuration) to set up your model credentials.
