@@ -39,17 +39,28 @@ class TestPreprocessCodeCompletion:
         assert "return 42" in out
         assert "return 1" not in out
 
-    def test_generic_fence_fallback(self):
+    def test_generic_fence_with_no_python_fence_returns_empty(self):
+        # Quirk of Skills' preprocess_code (ported byte-for-byte): when no
+        # ```python fence is present, the fallback uses str.rfind on the
+        # generic ``` token. For a generic-only block, rfind returns the
+        # position of the *closing* fence, the slice points past end-of-string,
+        # and the function returns "". Bigcodebench's prompt explicitly asks
+        # for ```python so the generic-only path is never hit in practice;
+        # we encode the actual behaviour to keep parity with Skills.
         text = "```\nprint('hi')\n```"
-        assert preprocess_code_completion(text) == "print('hi')"
+        assert preprocess_code_completion(text) == ""
 
     def test_strips_think_block(self):
         text = "<think>reasoning here</think>\n```python\nx = 1\n```"
         assert preprocess_code_completion(text) == "x = 1"
 
-    def test_unclosed_think_returns_empty(self):
-        # Skills uses str.partition: missing </think> → empty separator → "".
-        assert preprocess_code_completion("<think>never closed reasoning") == ""
+    def test_unclosed_think_keeps_raw_text(self):
+        # Skills' preprocess_code only enters the </think> strip branch when
+        # the closing tag IS present in the completion. With a missing closing
+        # tag, the raw text falls through to the fence-extraction step
+        # untouched. (The else branch in Skills' code is unreachable — guarded
+        # by the outer ``if "</think>" in completion``.)
+        assert preprocess_code_completion("<think>never closed reasoning") == "<think>never closed reasoning"
 
     def test_unclosed_fence_strict_mode_returns_empty(self):
         text = "```python\ndef f(): return 1\n# no closer here"
