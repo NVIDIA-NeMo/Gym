@@ -80,8 +80,8 @@ for the full schema; this recipe needs:
 | `containers.vllm_dp_ray` | the policy server image | based on `vllm/vllm-openai:v0.18.1` (or any 0.18.x with `ray>=2.48`) |
 | `containers.nemo-gym` | the Gym + xCOMET-XXL image | any image with `nemo-gym[dev]` + `unbabel-comet` installed |
 | `containers.sandbox` | required by `ns nemo_gym_rollouts` even though wmt24pp doesn't sandbox | any NeMo-Skills sandbox image |
-| `mounts:` | persistent `HF_HOME` (so the COMET prefetch survives across jobs) and a writable `/workspace` (or whatever the recipe writes to) | `<host-hf-dir>:/hf_home`, `<host-workspace>:/workspace` |
-| `env_vars:` (optional) | `HF_HOME=/hf_home` if your mount differs from the container default. Bump `VLLM_ENGINE_READY_TIMEOUT_S` above vLLM's 600s default only if your model's cold-load (weights + KV-cache init + warmup) exceeds it — typical cases are very large models or cross-node TP. | as above |
+| `mounts:` | a directory for the HF cache (paired with the `HF_HOME` env var below — Skills requires both) and a writable workspace dir for `--output_dir` | `<host-hf-dir>:/models`, `<host-workspace>:/workspace` |
+| `env_vars:` | `HF_HOME=<in-container-path>` is **required** by Skills and must point inside one of your mounts (so the COMET prefetch survives across jobs). Optionally bump `VLLM_ENGINE_READY_TIMEOUT_S` above vLLM's 600s default if your model's cold-load (weights + KV-cache init + warmup) exceeds it — typical triggers are very large models or cross-node TP. | `HF_HOME=/models/hf-cache` (matching the `:/models` mount above) |
 
 The two container fields that aren't trivial:
 
