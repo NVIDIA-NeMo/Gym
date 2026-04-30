@@ -4,16 +4,22 @@ description: "System requirements, verified configurations, and pre-installation
 position: 1
 ---
 
-Use this page to confirm your machine has the CPU, memory, disk, optional GPU support, and required runtime dependencies before installing NeMo Gym.
+Confirm your machine meets the requirements below before installing NeMo Gym.
+
+<Tip>
+**30-second check**: Python 3.12+, 8 GB RAM, an OpenAI-compatible API key. If all three are true, skip to [Installation](/latest/get-started/installation).
+</Tip>
 
 ## Hardware Requirements
 
 NeMo Gym itself runs on a standard development laptop. GPU resources are only required for local model inference (vLLM) or RL training (NeMo RL).
 
-- **CPU**: Any modern x86_64 or ARM64 processor (Intel, AMD, Apple Silicon).
-- **GPU**: Not required for the library itself. Required for local inference with vLLM or RL training with NeMo RL.
-- **RAM**: Minimum 8 GB; 16 GB+ recommended for larger environments and concurrent rollouts.
-- **Storage**: Minimum 2 GB free for the source install plus benchmark data.
+| Component | Minimum | Recommended | Notes |
+| --- | --- | --- | --- |
+| **CPU** | Any modern x86_64 or ARM64 | — | Intel, AMD, or Apple Silicon. |
+| **RAM** | 8 GB | 16 GB+ | More for larger environments and concurrent rollouts. |
+| **Storage** | 2 GB free | 5 GB+ | Source install plus benchmark data. |
+| **GPU** | None | NVIDIA GPU 16 GB+ VRAM | Only required for local vLLM inference or NeMo RL training. |
 
 <Note>
 Some bundled environments (e.g. local model inference, vision-language tasks) have GPU requirements above the base library. Check the per-environment README for specifics.

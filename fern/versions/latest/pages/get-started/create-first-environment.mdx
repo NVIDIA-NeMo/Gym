@@ -148,11 +148,13 @@ if __name__ == "__main__":
            jsonl_fpath: resources_servers/guess_number/data/example.jsonl
    ```
 
-2. **Add the example dataset** at `resources_servers/guess_number/data/example.jsonl`. One line per task — duplicate this row 5 times so the agent gets 5 chances:
+2. **Add the example dataset** at `resources_servers/guess_number/data/example.jsonl`. One JSON object per line — duplicate the row below 5 times so the agent gets 5 chances.
 
+   <Accordion title="Show the JSONL row">
    ```json
    {"responses_create_params": {"input": [{"role": "system", "content": "You are playing a guessing game. Reply with <answer>N</answer>."}, {"role": "user", "content": "Begin."}]}, "agent_ref": {"type": "responses_api_agents", "name": "guess_number_gymnasium_agent"}}
    ```
+   </Accordion>
 
 **✅ Success Check**: `wc -l resources_servers/guess_number/data/example.jsonl` returns 5.
 

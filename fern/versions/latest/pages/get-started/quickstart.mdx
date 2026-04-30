@@ -96,6 +96,7 @@ Follow these steps to discover environments, run a rollout, and read the win rat
        +num_repeats=2
    ```
 
+   <Accordion title="Flag reference">
    | Flag | Meaning |
    |---|---|
    | `+agent_name` | Which agent server to invoke (from `ng_list_benchmarks` or your YAML). |
@@ -104,6 +105,7 @@ Follow these steps to discover environments, run a rollout, and read the win rat
    | `+num_repeats` | Rollouts per task — increase for stable metrics, decrease for speed. |
    | `+limit` | Cap the number of input tasks (great for smoke tests). |
    | `+num_samples_in_parallel` | Concurrency. Defaults to unlimited. |
+   </Accordion>
 
    **✅ Success Check**: A progress bar finishes at `10/10`:
 
