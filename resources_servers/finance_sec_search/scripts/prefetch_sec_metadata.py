@@ -30,6 +30,7 @@ from typing import Any, Dict, Optional
 
 import aiohttp
 
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
@@ -131,9 +132,7 @@ async def fetch_company_filings(
             filename = file_ref.get("name", "")
             if not filename:
                 continue
-            extra_data = await fetch_with_retry(
-                session, f"https://data.sec.gov/submissions/{filename}", rate_limiter
-            )
+            extra_data = await fetch_with_retry(session, f"https://data.sec.gov/submissions/{filename}", rate_limiter)
             if extra_data:
                 try:
                     extra = json.loads(extra_data)
@@ -195,9 +194,7 @@ async def prefetch(cache_dir: str, tickers: list[str], force: bool = False) -> N
 
     rate_limiter = RateLimiter()
     connector = aiohttp.TCPConnector(limit=50, limit_per_host=10)
-    async with aiohttp.ClientSession(
-        headers={"User-Agent": USER_AGENT}, connector=connector
-    ) as session:
+    async with aiohttp.ClientSession(headers={"User-Agent": USER_AGENT}, connector=connector) as session:
         companies = await resolve_tickers(session, tickers, rate_limiter)
         logger.info("Resolved %d / %d tickers", len(companies), len(tickers))
 
@@ -226,14 +223,18 @@ async def prefetch(cache_dir: str, tickers: list[str], force: bool = False) -> N
 
         logger.info(
             "Prefetch complete: %d fetched, %d skipped (cached), %d failed",
-            fetched, skipped, failed,
+            fetched,
+            skipped,
+            failed,
         )
 
 
 def main():
     parser = argparse.ArgumentParser(description="Pre-fetch SEC filing metadata cache")
     parser.add_argument("--cache_dir", required=True, help="Cache directory (same as app.py cache_dir)")
-    parser.add_argument("--force", action="store_true", help="Re-fetch even if cache exists (use after adding pagination)")
+    parser.add_argument(
+        "--force", action="store_true", help="Re-fetch even if cache exists (use after adding pagination)"
+    )
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--ticker_config", help="YAML file with ticker list")
     group.add_argument("--tickers", nargs="+", help="Explicit list of tickers")
