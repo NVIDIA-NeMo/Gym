@@ -47,17 +47,21 @@ _DEFAULT_JUDGE_PROMPT_FPATH = str(Path(__file__).parent / "prompts" / "judge_pro
 _DEFAULT_REFERENCE_ELO = 1000.0
 
 
-def _resolve_repeat_dir(task_dir: Path) -> Optional[Path]:
-    """Pick a deliverable dir for a task, supporting both layouts.
+def _iter_ref_repeat_dirs(task_dir: Path) -> List[Path]:
+    """All reference deliverable dirs for a task, supporting both layouts.
 
-    New: ``task_<id>/repeat_<n>/`` — return the lowest-numbered repeat that
-    exists. Old: flat ``task_<id>/`` — return as-is for backwards compat with
-    pre-existing reference dirs.
+    New: ``task_<id>/repeat_<n>/`` — return every repeat dir, sorted. Old:
+    flat ``task_<id>/`` — return ``[task_dir]``. Missing → ``[]``.
+
+    Returning every repeat lets the comparison verifier judge each eval
+    rollout against *all* reference rollouts so the win rate (and ELO)
+    averages over reference variance instead of being anchored to a single
+    sample.
     """
     if not task_dir.is_dir():
-        return None
+        return []
     repeats = sorted(p for p in task_dir.iterdir() if p.is_dir() and p.name.startswith("repeat_"))
-    return repeats[0] if repeats else task_dir
+    return repeats or [task_dir]
 
 
 def _safe_output_text(response: Any) -> str:
@@ -129,9 +133,17 @@ class GDPValVerifyResponse(GDPValVerifyRequest, BaseVerifyResponse):
     verify_mode: Literal["rubric", "comparison"] = "rubric"
     judge_response: Optional[Dict[str, Any]] = None
     invalid_judge_response: Optional[bool] = None
+    # Majority-decision flags across all (ref_repeat × trial) judge votes —
+    # kept for back-compat with older verify responses (still bool-valued).
     win: Optional[bool] = None
     loss: Optional[bool] = None
     tie: Optional[bool] = None
+    # Raw judge vote counts aggregated over every reference repeat × trial.
+    # ``aggregate_metrics`` prefers these so the win rate reflects all
+    # comparisons rather than treating each verify call as a single vote.
+    total_wins: Optional[int] = None
+    total_losses: Optional[int] = None
+    total_ties: Optional[int] = None
 
 
 class GDPValResourcesServer(SimpleResourcesServer):
@@ -231,17 +243,17 @@ class GDPValResourcesServer(SimpleResourcesServer):
 
         from resources_servers.gdpval.comparison import (
             build_file_section,
-            compute_comparison_reward,
             run_trials,
             task_attempted,
         )
         from resources_servers.gdpval.preconvert import preconvert_dir_async
 
         ref_root = Path(self.config.reference_deliverables_dir)
-        ref_task_dir = _resolve_repeat_dir(ref_root / f"task_{body.task_id}")
+        ref_task_root = ref_root / f"task_{body.task_id}"
+        ref_task_dirs = [d for d in _iter_ref_repeat_dirs(ref_task_root) if task_attempted(str(d))]
         eval_task_dir = Path(body.deliverables_dir) if body.deliverables_dir else None
 
-        if ref_task_dir is None or not task_attempted(str(ref_task_dir)):
+        if not ref_task_dirs:
             print(f"[gdpval] no reference deliverable for task {body.task_id}", flush=True)
             return GDPValVerifyResponse(
                 **body.model_dump(),
@@ -262,39 +274,71 @@ class GDPValResourcesServer(SimpleResourcesServer):
 
         if self.config.preconvert_office_to_pdf:
             await preconvert_dir_async(eval_task_dir, max_concurrent=self.config.preconvert_max_concurrent)
-            await preconvert_dir_async(ref_task_dir, max_concurrent=self.config.preconvert_max_concurrent)
+            for ref_dir in ref_task_dirs:
+                await preconvert_dir_async(ref_dir, max_concurrent=self.config.preconvert_max_concurrent)
 
-        refs_dir = ref_task_dir / "reference_files"
-        refs = build_file_section(str(refs_dir) if refs_dir.is_dir() else None)
-        ref_submission = build_file_section(str(ref_task_dir))
         eval_submission = build_file_section(str(eval_task_dir))
 
         overrides = dict(self.config.judge_responses_create_params_overrides or {})
         judge_base_url = get_server_url(self.config.judge_model_server.name) + "/v1"
         judge_model_name = overrides.get("model", "judge")
         judge_api_key = overrides.get("api_key", "dummy")
-
         client = OpenAI(base_url=judge_base_url, api_key=judge_api_key)
-        result = await asyncio.to_thread(
-            run_trials,
-            client=client,
-            model=judge_model_name,
-            task_prompt=body.prompt or "",
-            refs=refs,
-            submission_a=ref_submission,
-            submission_b=eval_submission,
-            num_trials=self.config.num_comparison_trials,
-        )
 
-        reward = compute_comparison_reward(result["winner"])
+        # Judge eval submission against every available reference repeat. Raw
+        # vote counts (not just per-matchup majority) are summed so the win
+        # rate averages over reference variance — see ``_iter_ref_repeat_dirs``.
+        total_wins = 0
+        total_losses = 0
+        total_ties = 0
+        per_ref_results: List[Dict[str, Any]] = []
+        for ref_dir in ref_task_dirs:
+            refs_subdir = ref_dir / "reference_files"
+            refs = build_file_section(str(refs_subdir) if refs_subdir.is_dir() else None)
+            ref_submission = build_file_section(str(ref_dir))
+            result = await asyncio.to_thread(
+                run_trials,
+                client=client,
+                model=judge_model_name,
+                task_prompt=body.prompt or "",
+                refs=refs,
+                submission_a=ref_submission,
+                submission_b=eval_submission,
+                num_trials=self.config.num_comparison_trials,
+            )
+            # ``run_trials`` casts submission_a=ref, submission_b=eval, so
+            # ``win_count_b`` is eval wins.
+            total_wins += result["win_count_b"]
+            total_losses += result["win_count_a"]
+            total_ties += result["tie_count"]
+            per_ref_results.append({"ref_repeat": ref_dir.name, **result})
+
+        total_judged = total_wins + total_losses + total_ties
+        if total_wins > total_losses:
+            reward = 1.0
+        elif total_losses > total_wins:
+            reward = 0.0
+        else:
+            reward = 0.5
+
         return GDPValVerifyResponse(
             **body.model_dump(),
             reward=reward,
             verify_mode="comparison",
-            judge_response=result,
+            judge_response={
+                "per_ref_repeat": per_ref_results,
+                "total_wins": total_wins,
+                "total_losses": total_losses,
+                "total_ties": total_ties,
+                "total_judged": total_judged,
+                "ref_repeat_count": len(ref_task_dirs),
+            },
             win=reward == 1.0,
             loss=reward == 0.0,
             tie=reward == 0.5,
+            total_wins=total_wins,
+            total_losses=total_losses,
+            total_ties=total_ties,
         )
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest) -> AggregateMetrics:
@@ -303,9 +347,23 @@ class GDPValResourcesServer(SimpleResourcesServer):
 
         from resources_servers.gdpval.comparison import calculate_elo
 
-        wins = sum(1 for vr in body.verify_responses if vr.get("win"))
-        losses = sum(1 for vr in body.verify_responses if vr.get("loss"))
-        ties = sum(1 for vr in body.verify_responses if vr.get("tie"))
+        # Prefer the raw judge vote counts (``total_wins``/``total_losses``/
+        # ``total_ties``) when present so the win rate reflects every
+        # eval×ref_repeat×trial comparison. Fall back to the bool flags for
+        # verify responses produced before this field existed — those count as
+        # one vote each.
+        def _votes(vr: Dict[str, Any]) -> tuple[int, int, int]:
+            tw, tl, tt = vr.get("total_wins"), vr.get("total_losses"), vr.get("total_ties")
+            if tw is not None or tl is not None or tt is not None:
+                return int(tw or 0), int(tl or 0), int(tt or 0)
+            return int(bool(vr.get("win"))), int(bool(vr.get("loss"))), int(bool(vr.get("tie")))
+
+        wins = losses = ties = 0
+        for vr in body.verify_responses:
+            w, ls, t = _votes(vr)
+            wins += w
+            losses += ls
+            ties += t
         judged = wins + losses + ties
 
         if judged == 0:
