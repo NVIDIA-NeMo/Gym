@@ -25,18 +25,17 @@ no HF Hub calls during `verify()`, no rate-limit retries.
 
 ## Running servers
 
-The `wmt_translation` resource server's COMET actor pool mirrors the
-local uv-installed Python under `WMT_TRANSLATION_COMET_PY_CACHE` so that
-cross-node Ray actors can use it. The default value (`/opt/Gym/.cache/...`)
-matches the canonical container mount; for non-cluster runs, override it
-to any user-writable path:
+The xCOMET-XXL actor pool requires the `extra_gpu` Ray resource, which
+is only advertised on multi-node SLURM deployments via NeMo-Skills'
+`get_ray_server_cmd` (see the SLURM block below). Local / single-node
+runs disable COMET via Hydra override and rely on corpus-BLEU only;
+xCOMET scoring still works end-to-end on the cluster path:
 
 ```bash
-export WMT_TRANSLATION_COMET_PY_CACHE="$HOME/.cache/wmt_translation/comet-python"
-
 config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
 benchmarks/wmt24pp/config.yaml"
-ng_run "+config_paths=[$config_paths]"
+ng_run "+config_paths=[$config_paths]" \
+    "++wmt24pp_wmt_translation_resources_server.resources_servers.wmt_translation.compute_comet=false"
 ```
 
 ## Collecting rollouts

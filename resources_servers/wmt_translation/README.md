@@ -62,18 +62,18 @@ startup.
 
 ## Example usage
 
-The COMET actor pool mirrors the local uv-installed Python under
-`WMT_TRANSLATION_COMET_PY_CACHE` so cross-node Ray actors can use it.
-The default (`/opt/Gym/.cache/comet-python`) matches the canonical
-container mount; override for non-cluster runs:
+The xCOMET-XXL actor pool requires the `extra_gpu` Ray resource, which
+is only advertised on multi-node SLURM deployments. Local / single-node
+runs disable COMET via Hydra override and rely on corpus-BLEU only.
+For an end-to-end SLURM run with COMET enabled, see the
+[`ns nemo_gym_rollouts` block in benchmarks/wmt24pp/README.md](../../benchmarks/wmt24pp/README.md#end-to-end-reproduction-on-a-slurm-cluster-via-nemo-skills).
 
 ```bash
-export WMT_TRANSLATION_COMET_PY_CACHE="$HOME/.cache/wmt_translation/comet-python"
-
-# Running servers
+# Running servers (BLEU-only locally; flip compute_comet=true on cluster)
 config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
 resources_servers/wmt_translation/configs/wmt_translation.yaml"
-ng_run "+config_paths=[$config_paths]"
+ng_run "+config_paths=[$config_paths]" \
+    "++wmt_translation.resources_servers.wmt_translation.compute_comet=false"
 
 # Collecting rollouts (5-example smoke test)
 ng_collect_rollouts \
