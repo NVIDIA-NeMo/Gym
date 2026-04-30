@@ -8,16 +8,9 @@ position: 2
 
 ## Installation
 
-Requires Python 3.12+
+Requires Python 3.12+ on x86_64 or ARM64 (Linux, macOS, Windows via WSL2). No GPU required.
 
 <Tabs>
-<Tab title="pip install">
-
-```bash
-pip install nemo-gym
-```
-
-</Tab>
 <Tab title="Git clone">
 
 ```bash
@@ -28,15 +21,23 @@ uv sync
 ```
 
 </Tab>
+<Tab title="pip install">
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate
+pip install nemo-gym
+```
+
+</Tab>
 <Tab title="Container">
 
-For RL training with NeMo RL, use the NGC container:
+For RL training with NeMo RL, use the latest NGC container:
 
 ```bash
 docker pull nvcr.io/nvidia/nemo-rl:v0.5.0.nemotron_3_super
 ```
 
-See the [NeMo RL training tutorial](/latest/training-tutorials/nemo-rl-grpo/setup) and [RL framework compatibility](/latest/reference/rl-framework-compatibility) for container setup details.
+See the [NeMo RL training tutorial](/latest/training-tutorials/nemo-rl-grpo/setup) for setup details.
 
 </Tab>
 </Tabs>
@@ -131,7 +132,7 @@ Explore available benchmarks and training environments.
 Explore available agent harnesses and learn how to integrate your own.
 </Card>
 
-<Card title="Evaluation" href="/latest/reference/cli-commands">
+<Card title="Evaluation" href="/latest/getting-started#run-evaluation">
 Run benchmarks and custom evals at scale.
 </Card>
 

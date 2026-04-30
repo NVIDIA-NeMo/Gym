@@ -1,6 +1,6 @@
 # NeMo Gym
 
-**[Requirements](#-requirements)** • **[Quick Start](#-quick-start)** • **[Available Environments](#-available-environments)** • **[Documentation & Resources](#-documentation--resources)** • **[Community & Support](#-community--support)** • **[Citations](#-citations)**
+**[Quick Start](#-quick-start)** • **[Available Environments](#-available-environments)** • **[Documentation & Resources](#-documentation--resources)** • **[Community & Support](#-community--support)** • **[Citations](#-citations)**
 
 NeMo Gym is a library for building reinforcement learning (RL) training environments for large language models (LLMs). It provides infrastructure to develop environments, scale rollout collection, and integrate seamlessly with your preferred training framework.
 
@@ -23,107 +23,57 @@ NeMo Gym is part of [NVIDIA NeMo](https://docs.nvidia.com/nemo/gym/latest/about/
 
 **Environment Libraries:** [Reasoning Gym](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/reasoning_gym) • [Aviary](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/aviary) • [more →](https://docs.nvidia.com/nemo/gym/latest/about/ecosystem.html#environment-library-integrations)
 
-## 📋 Requirements
-
-NeMo Gym is designed to run on standard development machines:
-
-| Hardware Requirements | Software Requirements |
-| --------------------- | --------------------- |
-| **GPU**: Not required for NeMo Gym library operation<br>• GPU may be needed for specific resources servers or model inference (see individual server documentation) | **Operating System**:<br>• Linux (Ubuntu 20.04+, or equivalent)<br>• macOS (11.0+ for x86_64, 12.0+ for Apple Silicon)<br>• Windows (via WSL2) |
-| **CPU**: Any modern x86_64 or ARM64 processor (e.g., Intel, AMD, Apple Silicon) | **Python**: 3.12 or higher |
-| **RAM**: Minimum 8 GB (16 GB+ recommended for larger environments) | **Git**: For cloning the repository |
-| **Storage**: Minimum 5 GB free disk space for installation and basic usage | **Internet Connection**: Required for downloading dependencies and API access |
-
-**Additional Requirements**
-
-- **API Keys**: OpenAI API key with available credits (for the quickstart examples)
-  - Other model providers supported (Azure OpenAI, self-hosted models via vLLM)
-- **Ray**: Automatically installed as a dependency (no separate setup required)
-
 ## 🚀 Quick Start
 
-Install NeMo Gym, start the servers, and collect your first verified rollouts for RL training.
+Requires Python 3.12+ on x86_64 or ARM64 (Linux, macOS, Windows via WSL2). No GPU required. See the [Getting Started](https://docs.nvidia.com/nemo/gym/latest/getting-started) guide for full setup options.
 
-### Setup
+Install NeMo Gym:
 ```bash
-# Clone the repository
 git clone git@github.com:NVIDIA-NeMo/Gym.git
 cd Gym
-
-# Install UV (Python package manager)
-curl -LsSf https://astral.sh/uv/install.sh | sh
-source $HOME/.local/bin/env
-
-# Create virtual environment
-uv venv --python 3.12
-source .venv/bin/activate
-
-# Install NeMo Gym
-uv sync --extra dev --group docs
+uv venv --python 3.12 && source .venv/bin/activate
+uv sync
 ```
 
-### Configure Your API Key
-Create an `env.yaml` file that contains your OpenAI API key and the [policy model](https://docs.nvidia.com/nemo/gym/latest/about/concepts/key-terminology.html#term-Policy-Model) you want to use. Replace `your-openai-api-key` with your actual key. This file helps keep your secrets out of version control while still making them available to NeMo Gym.
+Explore available commands and environments:
 
 ```bash
-echo "policy_base_url: https://api.openai.com/v1
-policy_api_key: your-openai-api-key
-policy_model_name: gpt-4.1-2025-04-14" > env.yaml
+ng_help
+ng_list_benchmarks
 ```
 
-> [!NOTE]
-> We use GPT-4.1 in this quickstart because it provides low latency (no reasoning step) and works reliably out-of-the-box. NeMo Gym is **not limited to OpenAI models**—you can use self-hosted models via vLLM or any OpenAI-compatible inference server. See the [documentation](https://docs.nvidia.com/nemo/gym/latest/get-started/detailed-setup.html) for details.
+### Run Evaluation
 
-### Start Servers
+Start your model and agent servers:
 
-**Terminal 1 (start servers)**:
 ```bash
-# Start servers (this will keep running)
-config_paths="resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml,\
-responses_api_models/openai_model/configs/openai_model.yaml"
-ng_run "+config_paths=[${config_paths}]"
+ng_run "+config_paths=[<model_config>,<agent_config>]"
 ```
 
-**Terminal 2 (interact with agent)**:
+Evaluate your agent on your task dataset:
+
 ```bash
-# In a NEW terminal, activate environment
-source .venv/bin/activate
-
-# Interact with your agent
-python responses_api_agents/simple_agent/client.py
-```
-
-### Collect Rollouts
-
-**Terminal 2** (keep servers running in Terminal 1):
-```bash
-# Create a simple dataset with one query
-echo '{"responses_create_params":{"input":[{"role":"developer","content":"You are a helpful assistant."},{"role":"user","content":"What is the weather in Seattle?"}]}}' > weather_query.jsonl
-
-# Collect verified rollouts
 ng_collect_rollouts \
-    +agent_name=example_single_tool_call_simple_agent \
-    +input_jsonl_fpath=weather_query.jsonl \
-    +output_jsonl_fpath=weather_rollouts.jsonl
-
-# View the result
-cat weather_rollouts.jsonl | python -m json.tool
+    +agent_name=<agent> \
+    +input_jsonl_fpath=<data> \
+    +output_jsonl_fpath=<output>
 ```
-This generates training data with verification scores!
 
-### Clean Up Servers
+Calculate evaluation metrics:
 
-**Terminal 1** with the running servers: Ctrl+C to stop the ng_run process.
+```bash
+ng_reward_profile \
+    +materialized_inputs_jsonl_fpath=<data> \
+    +rollouts_jsonl_fpath=<output>
+```
 
 ### Next Steps
 
-Now that you can generate rollouts, choose your path:
-
-- **Start training** — Train models using NeMo Gym with your preferred RL framework. See the [Training Tutorials](https://docs.nvidia.com/nemo/gym/latest/training-tutorials/index.html).
-
-- **Use an existing environment** — Browse the [Available Environments](#-available-environments) below to find an environment that matches your goals.
-
-- **Build a custom environment** — Implement or integrate existing tools and define task verification logic. Get started with the [Creating a Training Environment](https://docs.nvidia.com/nemo/gym/latest/environment-tutorials/creating-training-environment.html) tutorial.
+- **Browse environments** — Explore available benchmarks and training environments in the [Available Environments](#-available-environments) table below.
+- **Agents** — Explore available agent harnesses and learn how to integrate your own. See [Agent Server](https://docs.nvidia.com/nemo/gym/latest/agent-server/index.html).
+- **Evaluation** — Run benchmarks and custom evals at scale. See [Getting Started](https://docs.nvidia.com/nemo/gym/latest/getting-started#run-evaluation).
+- **Training** — Improve your agent or model with RL or fine-tuning. See the [Training Tutorials](https://docs.nvidia.com/nemo/gym/latest/training-tutorials/index.html).
+- **Build custom environments** — Create your own evaluation or training environments. See the [Environment Tutorials](https://docs.nvidia.com/nemo/gym/latest/environment-tutorials/index.html).
 
 
 ## 📦 Available Environments
