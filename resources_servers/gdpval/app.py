@@ -47,6 +47,19 @@ _DEFAULT_JUDGE_PROMPT_FPATH = str(Path(__file__).parent / "prompts" / "judge_pro
 _DEFAULT_REFERENCE_ELO = 1000.0
 
 
+def _resolve_repeat_dir(task_dir: Path) -> Optional[Path]:
+    """Pick a deliverable dir for a task, supporting both layouts.
+
+    New: ``task_<id>/repeat_<n>/`` — return the lowest-numbered repeat that
+    exists. Old: flat ``task_<id>/`` — return as-is for backwards compat with
+    pre-existing reference dirs.
+    """
+    if not task_dir.is_dir():
+        return None
+    repeats = sorted(p for p in task_dir.iterdir() if p.is_dir() and p.name.startswith("repeat_"))
+    return repeats[0] if repeats else task_dir
+
+
 def _safe_output_text(response: Any) -> str:
     """Extract concatenated assistant text from a response without relying on
     ``response.output_text`` — that property raises ``AttributeError`` when
@@ -225,10 +238,10 @@ class GDPValResourcesServer(SimpleResourcesServer):
         from resources_servers.gdpval.preconvert import preconvert_dir_async
 
         ref_root = Path(self.config.reference_deliverables_dir)
-        ref_task_dir = ref_root / f"task_{body.task_id}"
+        ref_task_dir = _resolve_repeat_dir(ref_root / f"task_{body.task_id}")
         eval_task_dir = Path(body.deliverables_dir) if body.deliverables_dir else None
 
-        if not task_attempted(str(ref_task_dir)):
+        if ref_task_dir is None or not task_attempted(str(ref_task_dir)):
             print(f"[gdpval] no reference deliverable for task {body.task_id}", flush=True)
             return GDPValVerifyResponse(
                 **body.model_dump(),
