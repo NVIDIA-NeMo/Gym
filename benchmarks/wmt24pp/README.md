@@ -78,10 +78,10 @@ for the full schema; this recipe needs:
 | `ssh_tunnel:` | so `ns` submits jobs over SSH | `host:`, `user:`, `job_dir:`, `identity:` |
 | `account` / `partition` / `cpu_partition` | SLURM accounting + queue | per-cluster values |
 | `containers.vllm_dp_ray` | the policy server image | based on `vllm/vllm-openai:v0.18.1` (or any 0.18.x with `ray>=2.48`) |
-| `containers.nemo-rl` | the Gym + xCOMET-XXL image | any image with `nemo-gym[dev]` + `unbabel-comet` installed |
+| `containers.nemo-gym` | the Gym + xCOMET-XXL image | any image with `nemo-gym[dev]` + `unbabel-comet` installed |
 | `containers.sandbox` | required by `ns nemo_gym_rollouts` even though wmt24pp doesn't sandbox | any NeMo-Skills sandbox image |
 | `mounts:` | persistent `HF_HOME` (so the COMET prefetch survives across jobs) and a writable `/workspace` (or whatever the recipe writes to) | `<host-hf-dir>:/hf_home`, `<host-workspace>:/workspace` |
-| `env_vars:` (optional) | `HF_HOME=/hf_home`, `HF_HUB_OFFLINE=1` (post-prefetch), `VLLM_ENGINE_READY_TIMEOUT_S=1200` for cross-node TP | as above |
+| `env_vars:` (optional) | `HF_HOME=/hf_home` if your mount differs from the container default. Bump `VLLM_ENGINE_READY_TIMEOUT_S` above vLLM's 600s default only if your model's cold-load (weights + KV-cache init + warmup) exceeds it — typical cases are very large models or cross-node TP. | as above |
 
 The two container fields that aren't trivial:
 
@@ -91,7 +91,7 @@ The two container fields that aren't trivial:
   in this image MUST match the `ray` resolved by `nemo-gym`'s `uv.lock`**
   — cross-container Ray-cluster joins fail with `ConnectionError: Could
   not read 'temp_dir' from GCS` on protocol mismatch.
-- **`nemo-rl`**: any image where `pip install -e <gym>[dev]` resolves
+- **`nemo-gym`**: any image where `pip install -e <gym>[dev]` resolves
   cleanly AND has `unbabel-comet`, `torch>=2.5`, `sacrebleu` baked in.
   The lazy-install path in `resources_servers/wmt_translation/.venv`
   works as a fallback but adds 2–3 min to first-job startup.
@@ -101,14 +101,14 @@ The two container fields that aren't trivial:
 The local `ng_prepare_benchmark` from [above](#prepare-benchmark-data)
 writes the JSONL to your dev workstation. For a SLURM run, the JSONL
 plus the `Unbabel/XCOMET-XXL` cache need to live on the cluster's
-filesystem. Dispatch the prepare via `ns run_cmd` with the `nemo-rl`
+filesystem. Dispatch the prepare via `ns run_cmd` with the `nemo-gym`
 container (which has `unbabel-comet` so the prefetch step actually
 runs):
 
 ```bash
 ns run_cmd \
     --cluster <your-cluster> \
-    --container nemo-rl \
+    --container nemo-gym \
     --expname wmt24pp_prepare \
     --command 'ng_prepare_benchmark "+config_paths=[benchmarks/wmt24pp/config.yaml]"'
 ```
