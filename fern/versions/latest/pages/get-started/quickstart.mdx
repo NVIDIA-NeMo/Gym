@@ -48,7 +48,7 @@ That is GPT-4.1's win rate playing 10 hands of Blackjack against the dealer. Bel
    responses_api_models/openai_model/configs/openai_model.yaml]"
    ```
 
-   **✅ Success Check**: Four `Uvicorn running on http://127.0.0.1:<port>` lines print. Leave this terminal running.
+   **✅ Success Check**: Four `Uvicorn running on http://127.0.0.1:<port>` lines print — one each for the head, [resources, model, and agent servers](/latest/about/concepts/core-components). Leave this terminal running.
 
 4. **Collect Rollouts** (Terminal 2)
 
@@ -61,12 +61,12 @@ That is GPT-4.1's win rate playing 10 hands of Blackjack against the dealer. Bel
        +num_repeats=2
    ```
 
-   **✅ Success Check**: `Collecting rollouts: 100%|████| 10/10` prints. Each rollout is one full hand: the model saw its cards, replied `<action>hit</action>` or `<action>stand</action>`, and the env returned reward `+1` (win), `0` (draw), or `-1` (loss/bust).
+   **✅ Success Check**: `Collecting rollouts: 100%|████| 10/10` prints. Each [rollout](/latest/about/concepts/key-terminology#rollout--data-collection-terms) is one full hand: the model saw its cards, replied `<action>hit</action>` or `<action>stand</action>`, and the env returned reward `+1` (win), `0` (draw), or `-1` (loss/bust).
 
    <Accordion title="Flag reference">
    | Flag | Meaning |
    |---|---|
-   | `+agent_name` | Agent server to invoke (from `ng_list_benchmarks` or your YAML). |
+   | `+agent_name` | [Agent server](/latest/about/concepts/core-components) to invoke (from `ng_list_benchmarks` or your YAML). |
    | `+input_jsonl_fpath` | Input dataset, one task per line. |
    | `+output_jsonl_fpath` | Output file. Also writes `<output>_materialized_inputs.jsonl`. |
    | `+num_repeats` | Rollouts per task. Higher = stabler metrics. |

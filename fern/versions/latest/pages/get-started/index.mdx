@@ -12,18 +12,18 @@ Already installed and have an API key? Jump straight to the [Quickstart](/latest
 
 ## Pick Your Path
 
-Most readers fall into one of three groups based on their RL background. Pick the row that matches you and follow that path; you can come back to this landing page any time.
+Pick the row that matches what you want to do first. Each path is in-order; you can switch between them any time.
 
-| If you... | Recommended path | Why |
+| If you want to... | Start here | Notes |
 | --- | --- | --- |
-| Have trained models with **SFT** but are new to RL | [Prerequisites](/latest/get-started/prerequisites) → [Installation](/latest/get-started/installation) → [Configuration](/latest/get-started/configuration) → [Quickstart](/latest/get-started/quickstart) → [Create Your First Environment](/latest/get-started/create-first-environment) | You'll need terminology grounding (rollouts, verifiers, server concepts) — full path is fastest. |
-| Have done **RL training** but not agentic / Gym-style | Skim [Configuration](/latest/get-started/configuration) → [Quickstart](/latest/get-started/quickstart) → [Create Your First Environment](/latest/get-started/create-first-environment) | RL terms are familiar; main gap is NeMo Gym's server architecture and `reset()`/`step()` shape. |
-| Have built **agentic RL** environments before | Skim [Quickstart](/latest/get-started/quickstart), then jump to [Environment Tutorials](/latest/environment-tutorials) and [Training Tutorials](/latest/training-tutorials) | The Quickstart anchors NeMo Gym's CLI and config conventions; everything else maps to concepts you know. |
+| **Understand the architecture before running anything** | [About](/latest/about) → [Concepts](/latest/about/concepts) → [Prerequisites](/latest/get-started/prerequisites) → [Installation](/latest/get-started/installation) → [Configuration](/latest/get-started/configuration) → [Quickstart](/latest/get-started/quickstart) | Best if RL-for-LLMs is new to you. Concept grounding before commands recovers fastest if a step surprises you. |
+| **Run an evaluation right now and learn as you go** | [Installation](/latest/get-started/installation) → [Configuration](/latest/get-started/configuration) → [Quickstart](/latest/get-started/quickstart) | Best if you've trained with RL frameworks before. Inline concept links in each page take you to the glossary when you hit unfamiliar terms. |
+| **Build a custom environment** | [Installation](/latest/get-started/installation) → [Configuration](/latest/get-started/configuration) → [Create Your First Environment](/latest/get-started/create-first-environment) | Best if you've built agentic RL environments before. Skips the eval Quickstart since the tutorial covers the same flow against your own env. |
 
-**What you need before any path:**
+**What you need regardless of path:**
 
 1. Python 3.12+ on a [verified configuration](/latest/get-started/prerequisites#verified-configurations).
-2. An OpenAI-compatible inference endpoint and API key.
+2. An OpenAI-compatible inference endpoint and API key (or self-hosted vLLM — refer to [Configuration](/latest/get-started/configuration#do-you-need-an-api-key)).
 3. Familiarity with the command line and basic Python.
 
 ## Section Pages
