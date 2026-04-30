@@ -41,14 +41,37 @@ def convert_stirrup_history_to_output_items(
     system/user messages and *output_items* are assistant messages +
     tool calls/results.
     """
+    from stirrup.core.models import (
+        AssistantMessage,
+        SystemMessage,
+        ToolMessage,
+        UserMessage,
+    )
+
     input_items: list = []
     output_items: list = []
 
     for turn in history:
         for msg in turn:
-            msg_type = type(msg).__name__
+            # Tool result. ``ToolMessage`` is the canonical case; ``NeMoUserMessage``
+            # (a ``UserMessage`` subclass produced by ``NeMoAgent.run_tool`` when
+            # ``tool_response_as_user=True``) carries the same metadata but
+            # serialises as ``role=user`` for the LLM. Detect both via the
+            # ``tool_call_id`` attribute so the rollout always retains a
+            # ``function_call_output`` paired with the upstream ``function_call``.
+            tool_call_id = getattr(msg, "tool_call_id", None)
+            if isinstance(msg, ToolMessage) or tool_call_id:
+                call_id = tool_call_id or f"call-{uuid.uuid4().hex[:8]}"
+                content = msg.content if isinstance(msg.content, str) else str(msg.content)
+                output_items.append(
+                    NeMoGymFunctionCallOutput(
+                        call_id=call_id,
+                        output=content,
+                        type="function_call_output",
+                    )
+                )
 
-            if msg_type == "SystemMessage":
+            elif isinstance(msg, SystemMessage):
                 input_items.append(
                     NeMoGymEasyInputMessage(
                         role="system",
@@ -56,7 +79,7 @@ def convert_stirrup_history_to_output_items(
                     )
                 )
 
-            elif msg_type == "UserMessage":
+            elif isinstance(msg, UserMessage):
                 content_text = ""
                 if isinstance(msg.content, str):
                     content_text = msg.content
@@ -67,7 +90,7 @@ def convert_stirrup_history_to_output_items(
 
                 input_items.append(NeMoGymEasyInputMessage(role="user", content=content_text))
 
-            elif msg_type == "AssistantMessage":
+            elif isinstance(msg, AssistantMessage):
                 content_text = msg.content if isinstance(msg.content, str) else ""
                 if content_text:
                     output_items.append(
@@ -88,7 +111,11 @@ def convert_stirrup_history_to_output_items(
 
                 if hasattr(msg, "tool_calls") and msg.tool_calls:
                     for tc in msg.tool_calls:
-                        call_id = tc.id if hasattr(tc, "id") else f"call-{uuid.uuid4().hex[:8]}"
+                        # Stirrup ``ToolCall`` exposes ``tool_call_id``; preserve it so the
+                        # downstream ``function_call_output`` (keyed on the same id) pairs.
+                        call_id = (
+                            getattr(tc, "tool_call_id", None) or getattr(tc, "id", None) or f"call-{uuid.uuid4().hex[:8]}"
+                        )
                         output_items.append(
                             NeMoGymResponseFunctionToolCall(
                                 id=f"fc-{uuid.uuid4().hex[:8]}",
@@ -99,17 +126,6 @@ def convert_stirrup_history_to_output_items(
                                 status="completed",
                             )
                         )
-
-            elif msg_type == "ToolMessage":
-                call_id = msg.tool_call_id if hasattr(msg, "tool_call_id") else f"call-{uuid.uuid4().hex[:8]}"
-                content = msg.content if isinstance(msg.content, str) else str(msg.content)
-                output_items.append(
-                    NeMoGymFunctionCallOutput(
-                        call_id=call_id,
-                        output=content,
-                        type="function_call_output",
-                    )
-                )
 
     return input_items, output_items
 
