@@ -37,6 +37,15 @@ jobs:
         id: changed-files
         uses: step-security/changed-files@v45.0.1
         with:
+          # 'files' input enables global other_changed_files_count for uncategorized files
+          files: |
+            **.md
+            docs/**
+            fern/**
+            LICENSE
+            resources_servers/**
+            responses_api_agents/**
+            responses_api_models/**
           files_yaml: |
             doc:
               - '**.md'
@@ -63,14 +72,17 @@ jobs:
           SERVER_CHANGED="${{ steps.changed-files.outputs.server_any_changed }}"
           OTHER_COUNT="${{ steps.changed-files.outputs.other_changed_files_count }}"
 
-          echo "doc_changed=$DOC_CHANGED server_changed=$SERVER_CHANGED other_count=$OTHER_COUNT"
+          echo "doc_changed=$DOC_CHANGED server_changed=$SERVER_CHANGED other_count=${OTHER_COUNT:-0}"
 
-          if [[ "$OTHER_COUNT" -gt 0 ]]; then
+          # Files outside doc/server categories (CI, core library, config, etc.) → full suite
+          if [[ "${OTHER_COUNT:-0}" -gt 0 ]]; then
             echo "run_full=true" >> $GITHUB_OUTPUT
             echo "run_servers=false" >> $GITHUB_OUTPUT
+          # Only server files changed (possibly with doc changes) → test changed servers
           elif [[ "$SERVER_CHANGED" == "true" ]]; then
             echo "run_full=false" >> $GITHUB_OUTPUT
             echo "run_servers=true" >> $GITHUB_OUTPUT
+          # Only doc files changed → skip tests
           else
             echo "run_full=false" >> $GITHUB_OUTPUT
             echo "run_servers=false" >> $GITHUB_OUTPUT
