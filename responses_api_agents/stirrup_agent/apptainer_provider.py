@@ -128,17 +128,27 @@ class ApptainerCodeExecToolProvider(CodeExecToolProvider):
             mount_args.append(extra)
         mount_str = " ".join(mount_args)
 
+        # NOTE: ``HOME`` inside the container is set via the ``--home`` flag
+        # (not ``--env HOME=...``). Apptainer 1.4+ rejects setting HOME via
+        # ``--env`` because that flag forwards values through the
+        # ``APPTAINERENV_HOME`` mechanism, which it explicitly disallows for
+        # HOME with a startup-time stderr warning. That warning is harmless
+        # in isolation but our ``echo ready`` health-check below treats any
+        # non-empty stderr as fatal, so the agent fails to enter the shell
+        # even though apptainer would otherwise run fine. ``--home`` is the
+        # supported way to set ``$HOME`` in the container.
         env_args = " ".join(
             f"--env {var}={shlex.quote(os.environ.get(var, ''))}"
             for var in self._env_passthrough
             if os.environ.get(var)
         )
-        env_section = f"--env HOME=/root {env_args}" if env_args else "--env HOME=/root"
+        env_section = env_args
 
         exec_cmd = (
             f"apptainer exec "
             f"--writable-tmpfs --cleanenv --pid "
             f"--no-mount home,tmp,bind-paths "
+            f"--home /root "
             f"{env_section} "
             f"{mount_str} "
             f"{shlex.quote(self._sif_path)} "
