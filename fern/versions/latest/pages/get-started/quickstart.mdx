@@ -6,17 +6,17 @@ position: 4
 
 Score an LLM agent at [`blackjack`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/blackjack) and read the win rate. **Time**: about 10 minutes. **Cost**: about $0.05 in OpenAI API usage.
 
-The final command (`ng_reward_profile`) prints something like:
+`ng_reward_profile` writes an aggregate-metrics JSON file containing a `key_metrics` block like:
 
-```text
-key_metrics:
-  mean/reward:  -0.60
-  max/reward:    1.00
-  min/reward:   -1.00
-  mean/total_tokens:  73.8
+```json
+"key_metrics": {
+  "mean/reward":        -0.6,
+  "mean/terminated":     1.0,
+  "mean/total_tokens":  73.8
+}
 ```
 
-That's GPT-4.1's win rate playing 10 hands of Blackjack against the dealer.
+That `mean/reward = -0.6` is GPT-4.1's win rate playing 10 hands of Blackjack against the dealer.
 
 ## Prerequisites
 
@@ -40,7 +40,7 @@ That's GPT-4.1's win rate playing 10 hands of Blackjack against the dealer.
    ng_list_benchmarks
    ```
 
-   **✅ Success Check**: A table prints with about 30 benchmarks (`gpqa`, `aime25`, `ifbench`, and others). For this Quickstart, you'll run the smaller, self-contained Blackjack environment to learn the flow.
+   **✅ Success Check**: A table prints with about 45 benchmarks (`gpqa`, `aime25`, `ifbench`, and others). For this Quickstart, you'll run the smaller, self-contained Blackjack environment to learn the flow.
 
 3. **Start the Servers** (Terminal 1)
 
@@ -58,7 +58,7 @@ That's GPT-4.1's win rate playing 10 hands of Blackjack against the dealer.
    ng_status
    ```
 
-   **✅ Success Check**: `ng_status` reports `4 servers found (4 healthy, 0 unhealthy)`.
+   **✅ Success Check**: `ng_status` reports `3 servers found (3 healthy, 0 unhealthy)` — the [resources, model, and agent servers](/latest/about/concepts/core-components). The head server runs separately on port 11000.
 
    <Tip>
    On a repeat run with no dependency changes, append `+skip_venv_if_present=true` to `ng_run` to skip venv re-creation and start the servers faster.
@@ -96,7 +96,21 @@ That's GPT-4.1's win rate playing 10 hands of Blackjack against the dealer.
        +rollouts_jsonl_fpath=results/blackjack_rollouts.jsonl
    ```
 
-   **✅ Success Check**: The output at the top of this page prints. GPT-4.1 lands around `mean/reward = -0.6` on this 10-rollout sample. A real evaluation uses `+num_repeats=16` or higher for stable numbers.
+   `ng_reward_profile` writes two JSON files and prints their paths:
+
+   ```text
+   Profiling outputs:
+   Reward profiling outputs: results/blackjack_rollouts_reward_profiling.json
+   Agent-level metrics: results/blackjack_rollouts_agent_metrics.json
+   ```
+
+   Read the headline win rate from the agent-metrics file:
+
+   ```bash
+   cat results/blackjack_rollouts_agent_metrics.json | python -m json.tool
+   ```
+
+   **✅ Success Check**: The `key_metrics` block at the top of the file shows the mean reward (and other averaged metrics — see the intro at the top of this page for the shape). GPT-4.1 lands around `mean/reward = -0.6` on this 10-rollout sample. A real evaluation uses `+num_repeats=16` or higher for stable numbers.
 
 6. **Stop the Servers**
 
