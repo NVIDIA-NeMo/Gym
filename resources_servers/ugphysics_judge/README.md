@@ -50,10 +50,17 @@ message.
 
 ## Example usage
 
+The server config references a `judge_model` that callers must
+provide.  The bundled `benchmarks/ugphysics/judge_gptoss20b.yaml`
+(`openai/gpt-oss-20b` via NVIDIA's public NIM) is a runnable default;
+swap it for any other `responses_api_models/*` config that exposes a
+`judge_model` server name to use a different judge.
+
 ```bash
 # Running servers
 config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
-resources_servers/ugphysics_judge/configs/ugphysics_judge.yaml"
+resources_servers/ugphysics_judge/configs/ugphysics_judge.yaml,\
+benchmarks/ugphysics/judge_gptoss20b.yaml"
 ng_run "+config_paths=[$config_paths]"
 
 # Collecting rollouts (5-example smoke test)

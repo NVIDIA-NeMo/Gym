@@ -73,5 +73,7 @@ ng_collect_rollouts \
     +agent_name=ugphysics_ugphysics_judge_simple_agent \
     +input_jsonl_fpath=benchmarks/ugphysics/data/ugphysics_benchmark.jsonl \
     +output_jsonl_fpath=results/ugphysics_rollouts.jsonl \
-    +num_repeats=4
+    +prompt_config=benchmarks/ugphysics/prompts/default.yaml \
+    +num_repeats=4 \
+    "+responses_create_params={max_output_tokens: 16384, temperature: 1.0, top_p: 0.95}"
 ```
