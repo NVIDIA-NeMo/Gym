@@ -47,6 +47,19 @@ _DEFAULT_JUDGE_PROMPT_FPATH = str(Path(__file__).parent / "prompts" / "judge_pro
 _DEFAULT_REFERENCE_ELO = 1000.0
 
 
+def _resolve_repeat_dir(task_dir: Path) -> Optional[Path]:
+    """Pick a deliverable dir for a task, supporting both layouts.
+
+    New: ``task_<id>/repeat_<n>/`` — return the lowest-numbered repeat that
+    exists. Old: flat ``task_<id>/`` — return as-is for backwards compat with
+    pre-existing reference dirs.
+    """
+    if not task_dir.is_dir():
+        return None
+    repeats = sorted(p for p in task_dir.iterdir() if p.is_dir() and p.name.startswith("repeat_"))
+    return repeats[0] if repeats else task_dir
+
+
 def _safe_output_text(response: Any) -> str:
     """Extract concatenated assistant text from a response without relying on
     ``response.output_text`` — that property raises ``AttributeError`` when
@@ -147,8 +160,11 @@ class GDPValResourcesServer(SimpleResourcesServer):
 
         overrides = dict(self.config.judge_responses_create_params_overrides or {})
         judge_base_url = get_server_url(self.config.judge_model_server.name) + "/v1"
-        judge_model_name = overrides.get("model", "judge")
-        judge_api_key = overrides.get("api_key", "dummy")
+        judge_model_name = overrides.pop("model", "judge")
+        judge_api_key = overrides.pop("api_key", "dummy")
+        # Anything left in `overrides` (max_tokens, temperature, top_p, …) is
+        # merged into the judge's chat.completions.create kwargs.
+        judge_create_overrides = overrides or None
 
         deliverable_text = _safe_output_text(body.response)
         deliverable_content_blocks: Optional[List[Dict[str, Any]]] = None
@@ -185,6 +201,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 model_base_url=judge_base_url,
                 model_name=judge_model_name,
                 api_key=judge_api_key,
+                create_overrides=judge_create_overrides,
             )
         else:
             from resources_servers.gdpval.scoring import score_with_rubric
@@ -198,6 +215,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 model_base_url=judge_base_url,
                 model_name=judge_model_name,
                 api_key=judge_api_key,
+                create_overrides=judge_create_overrides,
             )
 
         return GDPValVerifyResponse(
@@ -220,10 +238,10 @@ class GDPValResourcesServer(SimpleResourcesServer):
         from resources_servers.gdpval.preconvert import preconvert_dir_async
 
         ref_root = Path(self.config.reference_deliverables_dir)
-        ref_task_dir = ref_root / f"task_{body.task_id}"
+        ref_task_dir = _resolve_repeat_dir(ref_root / f"task_{body.task_id}")
         eval_task_dir = Path(body.deliverables_dir) if body.deliverables_dir else None
 
-        if not task_attempted(str(ref_task_dir)):
+        if ref_task_dir is None or not task_attempted(str(ref_task_dir)):
             print(f"[gdpval] no reference deliverable for task {body.task_id}", flush=True)
             return GDPValVerifyResponse(
                 **body.model_dump(),

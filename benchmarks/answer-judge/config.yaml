@@ -1,0 +1,22 @@
+# Reuses the deterministic Judgement: Yes/No verifier.
+config_paths:
+  - resources_servers/math_proof_judgement/configs/math_proof_judgement.yaml
+
+answer_judge_math_proof_judgement_resources_server:
+  _inherit_from: math_proof_judgement
+  resources_servers:
+    math_proof_judgement: {}
+
+answer_judge_math_proof_judgement_simple_agent:
+  _inherit_from: math_proof_judgement_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: answer_judge_math_proof_judgement_resources_server
+      datasets:
+        - name: answer-judge
+          type: benchmark
+          jsonl_fpath: benchmarks/answer-judge/data/answer-judge_benchmark.jsonl
+          prompt_config: benchmarks/prompts/math_answer_judge.yaml
+          prepare_script: benchmarks/answer-judge/prepare.py
+          num_repeats: 1
