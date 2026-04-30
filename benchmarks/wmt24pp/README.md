@@ -64,23 +64,65 @@ placement-group setup, and Gym launch in one shot.
 # 1. Install NeMo-Skills (provides the `ns` CLI). Pinned to the SHA where
 #    server_type=vllm_dp_ray landed on main; bump as new Skills releases tag.
 pip install git+https://github.com/NVIDIA-NeMo/Skills.git@f57b1735b
-
-# 2. Define a cluster config at cluster_configs/<your-cluster>.yaml.
-#    See https://nvidia-nemo.github.io/Skills/basics/cluster-configs/
-#    for the schema. It must declare the `vllm` (or `vllm_dp_ray`),
-#    `nemo-rl`, and `sandbox` containers and either mount or pre-cache
-#    Unbabel/XCOMET-XXL + the policy model under HF_HOME.
 ```
+
+#### Cluster config
+
+Define a cluster config at `cluster_configs/<your-cluster>.yaml`. See
+[the NeMo-Skills cluster-configs docs](https://nvidia-nemo.github.io/Skills/basics/cluster-configs/)
+for the full schema; this recipe needs:
+
+| Field | Why | Example |
+|---|---|---|
+| `executor: slurm` | recipe is SLURM-only | `slurm` |
+| `ssh_tunnel:` | so `ns` submits jobs over SSH | `host:`, `user:`, `job_dir:`, `identity:` |
+| `account` / `partition` / `cpu_partition` | SLURM accounting + queue | per-cluster values |
+| `containers.vllm_dp_ray` | the policy server image | based on `vllm/vllm-openai:v0.18.1` (or any 0.18.x with `ray>=2.48`) |
+| `containers.nemo-rl` | the Gym + xCOMET-XXL image | any image with `nemo-gym[dev]` + `unbabel-comet` installed |
+| `containers.sandbox` | required by `ns nemo_gym_rollouts` even though wmt24pp doesn't sandbox | any NeMo-Skills sandbox image |
+| `mounts:` | persistent `HF_HOME` (so the COMET prefetch survives across jobs) and a writable `/workspace` (or whatever the recipe writes to) | `<host-hf-dir>:/hf_home`, `<host-workspace>:/workspace` |
+| `env_vars:` (optional) | `HF_HOME=/hf_home`, `HF_HUB_OFFLINE=1` (post-prefetch), `VLLM_ENGINE_READY_TIMEOUT_S=1200` for cross-node TP | as above |
+
+The two container fields that aren't trivial:
+
+- **`vllm_dp_ray`**: any vLLM 0.18.x image. The Skills repo ships
+  `dockerfiles/Dockerfile.vllm` which builds on `vllm/vllm-openai:v0.18.1`
+  with `ray[cgraph]` + audio/Qwen-VL extras. **The bundled `ray` version
+  in this image MUST match the `ray` resolved by `nemo-gym`'s `uv.lock`**
+  — cross-container Ray-cluster joins fail with `ConnectionError: Could
+  not read 'temp_dir' from GCS` on protocol mismatch.
+- **`nemo-rl`**: any image where `pip install -e <gym>[dev]` resolves
+  cleanly AND has `unbabel-comet`, `torch>=2.5`, `sacrebleu` baked in.
+  The lazy-install path in `resources_servers/wmt_translation/.venv`
+  works as a fallback but adds 2–3 min to first-job startup.
+
+#### Prepare benchmark data on the cluster
+
+The local `ng_prepare_benchmark` from [above](#prepare-benchmark-data)
+writes the JSONL to your dev workstation. For a SLURM run, the JSONL
+plus the `Unbabel/XCOMET-XXL` cache need to live on the cluster's
+filesystem. Dispatch the prepare via `ns run_cmd` with the `nemo-rl`
+container (which has `unbabel-comet` so the prefetch step actually
+runs):
+
+```bash
+ns run_cmd \
+    --cluster <your-cluster> \
+    --container nemo-rl \
+    --expname wmt24pp_prepare \
+    --command 'ng_prepare_benchmark "+config_paths=[benchmarks/wmt24pp/config.yaml]"'
+```
+
+This populates `benchmarks/wmt24pp/data/wmt24pp_benchmark.jsonl` and
+prefetches `Unbabel/XCOMET-XXL` + its `xlm-roberta-xxl` tokenizer into
+the cluster's `HF_HOME`. Subsequent rollout jobs read both from the
+shared filesystem.
 
 ### 2-node smoke topology (1 model node + 1 extra_gpu COMET node)
 
 Sized to fit on an `interactive` partition for fast iteration. Bump
 `server_nodes` for DP>1 (`server_nodes = dp_size + num_extra_gpu_nodes`)
 and switch to a batch partition for larger evaluations.
-
-**Prerequisite:** run the `ng_prepare_benchmark` step from
-[above](#prepare-benchmark-data) first — `--input_file` below points at
-the JSONL it writes.
 
 ```bash
 # Pick a translation-capable policy model accessible from your cluster.
