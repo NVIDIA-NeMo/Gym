@@ -89,31 +89,13 @@ For full container setup including GPU passthrough and volume mounts, refer to t
 
 ## Installation Verification
 
-Verify that the install succeeded and core CLIs are accessible.
+Run these commands to confirm the install succeeded:
 
-1. **Version check**:
-
-   ```bash
-   ng_help
-   ```
-
-   **✅ Success Check**: A table of `ng_*` commands prints. If you get `command not found`, the virtual environment is not activated — re-run `source .venv/bin/activate`.
-
-2. **Discover bundled benchmarks** (Source install only):
-
-   ```bash
-   ng_list_benchmarks
-   ```
-
-   **✅ Success Check**: A table of ~30 benchmarks prints (`gpqa`, `aime25`, `ifbench`, and others). Empty or missing? You are on the PyPI path — switch to Source to pick up the benchmarks directory.
-
-3. **Basic import test**:
-
-   ```bash
-   python -c "import nemo_gym; print(f'NeMo Gym version: {nemo_gym.__version__}')"
-   ```
-
-   **✅ Success Check**: A version number prints.
+| Command | Success Check | If it fails |
+| --- | --- | --- |
+| `ng_help` | A table of `ng_*` commands prints | Activate the venv: `source .venv/bin/activate` |
+| `ng_list_benchmarks` (Source only) | A table of ~30 benchmarks (`gpqa`, `aime25`, `ifbench`, and others) | You are on the PyPI path — switch to Source |
+| `python -c "import nemo_gym; print(nemo_gym.__version__)"` | A version number prints | Reinstall: `uv sync` (Source) or `pip install nemo-gym` (PyPI) |
 
 ## Troubleshoot Installation
 

@@ -47,9 +47,11 @@ flowchart LR
     class E highlight
 ```
 
-- **`reset(metadata, session_id)`** — set up per-rollout state, return the first message to the model.
-- **`step(action, metadata, session_id)`** — score the model's response and return `(observation, reward, terminated, truncated, info)`. Return a non-`None` `observation` to continue the episode; return `None` and `terminated=True` to end it.
-- **`session_state`** — a per-rollout dict on `GymnasiumServer` for storing game state across steps.
+| Method | Returns | Purpose |
+| --- | --- | --- |
+| `reset(metadata, session_id)` | `(observation, info)` | Set up per-rollout state; return the first message to the model |
+| `step(action, metadata, session_id)` | `(observation, reward, terminated, truncated, info)` | Score the response. Non-`None` `observation` continues the episode; `None` + `terminated=True` ends it |
+| `self.session_state` | `dict` | Per-rollout state storage on `GymnasiumServer` |
 
 <Note title="See Also">
 For multi-step, tool-calling, and LLM-as-judge patterns, refer to the [Gymnasium API reference](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/gymnasium).
@@ -204,16 +206,11 @@ Here is what you built.
 
 **You completed:**
 
-- ✅ Subclassed `GymnasiumServer` and implemented `reset()` / `step()`.
-- ✅ Wired the environment to `gymnasium_agent` with a single YAML config.
-- ✅ Authored a JSONL dataset that drives the rollouts.
-- ✅ Ran the env end-to-end and read the agent's reward.
+- ✅ Subclassed `GymnasiumServer` with `reset()` / `step()`
+- ✅ Wired the environment to `gymnasium_agent` with YAML
+- ✅ Authored a JSONL dataset and ran rollouts end-to-end
 
-**Learn more about the concepts:**
-
-- **Resources Server** — [/latest/resources-server](/latest/resources-server)
-- **Agent Server** — [/latest/agent-server](/latest/agent-server)
-- **Task Verification** — [/latest/about/concepts/task-verification](/latest/about/concepts/task-verification)
+**Learn more:** [Resources Server](/latest/resources-server) · [Agent Server](/latest/agent-server) · [Task Verification](/latest/about/concepts/task-verification)
 
 ## Next Steps
 

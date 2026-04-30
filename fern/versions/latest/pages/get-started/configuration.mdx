@@ -18,35 +18,25 @@ Already have `env.yaml` from a previous run? Jump to the [Quickstart](/latest/ge
 
 ## Configure Your Model Credentials
 
-Create `env.yaml` in the project root:
-
-1. **Create the file**:
-
-   ```bash
-   cat > env.yaml << 'EOF'
-   policy_base_url: https://api.openai.com/v1
-   policy_api_key: sk-your-actual-key-here
-   policy_model_name: gpt-4.1-2025-04-14
-   EOF
-   ```
-
-2. **Replace the placeholder API key** with your real key.
-
-3. **Verify the file is not tracked by git** (it is gitignored by default):
-
-   ```bash
-   git status env.yaml   # should show no output
-   ```
-
-   **✅ Success Check**: `env.yaml` exists in the project root and is not staged.
-
-The three required fields:
+Create `env.yaml` in the project root with three required fields:
 
 | Field | Description |
-|---|---|
-| `policy_base_url` | OpenAI-compatible endpoint URL. |
-| `policy_api_key` | Your key for that endpoint. |
-| `policy_model_name` | The model to call. |
+| --- | --- |
+| `policy_base_url` | OpenAI-compatible endpoint URL |
+| `policy_api_key` | Your API key for that endpoint |
+| `policy_model_name` | The model to call |
+
+```bash
+cat > env.yaml << 'EOF'
+policy_base_url: https://api.openai.com/v1
+policy_api_key: sk-your-actual-key-here
+policy_model_name: gpt-4.1-2025-04-14
+EOF
+```
+
+Replace the placeholder API key with your real key.
+
+**✅ Success Check**: `git status env.yaml` returns no output (the file is gitignored).
 
 <Tip>
 **Why `gpt-4.1-2025-04-14` for the Quickstart?** Low latency (no reasoning step) and reliable function-calling support, so the Quickstart runs in seconds without configuration surprises. Swap in any model later.
@@ -56,41 +46,13 @@ The three required fields:
 
 Same three fields, different endpoint shape per provider.
 
-<Tabs>
+| Provider | `policy_base_url` | `policy_api_key` | `policy_model_name` |
+| --- | --- | --- | --- |
+| **OpenAI** | `https://api.openai.com/v1` | `sk-...` | `gpt-4.1-2025-04-14` |
+| **Azure OpenAI** | `https://<resource>.openai.azure.com/openai/v1` | Azure key | `gpt-4.1-2025-04-14` |
+| **vLLM (self-hosted)** | `http://localhost:8000/v1` | `not-needed` | `Qwen/Qwen3-4B-Instruct-2507` |
 
-<Tab title="OpenAI">
-
-```yaml
-policy_base_url: https://api.openai.com/v1
-policy_api_key: sk-your-actual-key-here
-policy_model_name: gpt-4.1-2025-04-14
-```
-
-</Tab>
-
-<Tab title="Azure OpenAI">
-
-```yaml
-policy_base_url: https://<your-resource>.openai.azure.com/openai/v1
-policy_api_key: <your-azure-key>
-policy_model_name: gpt-4.1-2025-04-14
-```
-
-</Tab>
-
-<Tab title="vLLM (self-hosted)">
-
-```yaml
-policy_base_url: http://localhost:8000/v1
-policy_api_key: not-needed
-policy_model_name: Qwen/Qwen3-4B-Instruct-2507
-```
-
-The model must support function calling for tool-using agents.
-
-</Tab>
-
-</Tabs>
+For self-hosted models, function-calling support is required for tool-using agents.
 
 ## CLI Overrides
 
