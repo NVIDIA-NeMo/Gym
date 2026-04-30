@@ -12,12 +12,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-name: Nightly tests
+name: Full test suite
 
 on:
-  schedule:
-    # Run at 2 AM UTC every day
-    - cron: '0 2 * * *'
+  push:
+    branches:
+      - main
   workflow_dispatch:
 
 jobs:
@@ -187,12 +187,12 @@ jobs:
             +limit=1
           kill $NG_RUN_PID 2>/dev/null; wait $NG_RUN_PID 2>/dev/null || true
 
-  notify-nightly-failure:
-    name: Notify nightly test failure
+  notify-failure:
+    name: Notify test failure
     runs-on: ubuntu-latest
     needs: [full-test-suite, test-wheel-install]
     environment: main
-    if: ${{ always() && github.event_name == 'schedule' && (needs.full-test-suite.result == 'failure' || needs.test-wheel-install.result == 'failure') }}
+    if: ${{ always() && (needs.full-test-suite.result == 'failure' || needs.test-wheel-install.result == 'failure') }}
     steps:
       - name: Send Slack notification
         env:
@@ -204,7 +204,7 @@ jobs:
                 "type": "section",
                 "text": {
                   "type": "mrkdwn",
-                  "text": ":rotating_light: Nightly GitHub CI test failed on main branch\n\n• Repository: ${{ github.repository }}\n• Commit: `${{ github.sha }}`\n• Workflow: <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Run>"
+                  "text": ":rotating_light: Full test suite failed on main branch\n\n• Repository: ${{ github.repository }}\n• Commit: `${{ github.sha }}`\n• Workflow: <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Run>"
                 }
               }
             ]
