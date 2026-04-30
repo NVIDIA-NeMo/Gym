@@ -14,18 +14,21 @@
 # limitations under the License.
 """Prepare WMT24++ benchmark data.
 
-Mirrors NeMo-Skills' `nemo_skills/dataset/wmt24pp/prepare.py` row-for-row:
-one config per en-<tgt> language pair from `google/wmt24pp` (`train` split,
-which is the only split upstream), interleaved by language in the order
-they are listed.
+Two steps:
 
-Per-row fields match Skills:
-  - text, translation, source_language, target_language,
-    source_lang_name, target_lang_name
+1. Download the WMT24++ dataset from ``google/wmt24pp`` and write the
+   interleaved benchmark JSONL (one config per en-<tgt> pair).
+2. Pre-fetch the xCOMET-XXL checkpoint AND its underlying
+   xlm-roberta-xxl tokenizer into HF_HOME so the ``wmt_translation``
+   resource server can run fully offline. Without this, every fresh
+   ``CometActor`` resolves the tokenizer from HF Hub on startup, which
+   hits the rate limiter when N actors initialize concurrently.
 
-Those field names are referenced by both the prompt template
-(benchmarks/wmt24pp/prompts/default.yaml) and the wmt_translation
-resource server's verify() / compute_metrics().
+Per-row fields are referenced by both the prompt template
+(``benchmarks/wmt24pp/prompts/default.yaml``) and the
+``wmt_translation`` resource server: ``text``, ``translation``,
+``source_language``, ``target_language``, ``source_lang_name``,
+``target_lang_name``.
 """
 
 import json
@@ -39,6 +42,13 @@ DATA_DIR = BENCHMARK_DIR / "data"
 OUTPUT_FPATH = DATA_DIR / "wmt24pp_benchmark.jsonl"
 
 HF_REPO_ID = "google/wmt24pp"
+
+# Default COMET model used by the wmt_translation resource server.
+# Pre-downloading it (plus its xlm-roberta-xxl backbone tokenizer)
+# populates HF_HOME so the server can run with HF_HUB_OFFLINE=1 — no
+# online tokenizer resolution at verify() time and no per-actor HF
+# rate-limit retries.
+COMET_MODEL = "Unbabel/XCOMET-XXL"
 
 # Same five targets + same order as Skills' default. Keeping the order
 # stable is what makes the interleaved JSONL byte-comparable.
@@ -55,8 +65,43 @@ _LANG_DISPLAY_NAMES = {
 }
 
 
-def prepare(target_languages: list[str] | None = None) -> Path:
-    """Download and interleave WMT24++ en-<tgt> pairs. Returns the output file path."""
+def _prefetch_comet_model(model_name: str = COMET_MODEL) -> None:
+    """Pre-download xCOMET-XXL + its xlm-roberta-xxl tokenizer to HF_HOME.
+
+    ``download_model`` fetches just the COMET checkpoint files; the
+    actual tokenizer + transformer backbone are pulled when
+    ``load_from_checkpoint`` instantiates the model. We do both here so
+    the cache is fully primed before any actor starts. Skipped silently
+    if ``unbabel-comet`` is not installed in the active Python env (e.g.
+    when ``prepare()`` is invoked from a venv that doesn't carry the
+    server's heavy deps — the resource server's own venv will fetch on
+    first use in that case).
+    """
+    try:
+        from comet import download_model, load_from_checkpoint
+    except ImportError:
+        print(f"unbabel-comet not installed; skipping {model_name} prefetch")
+        return
+
+    print(f"Pre-fetching {model_name} checkpoint...")
+    ckpt_path = download_model(model_name)
+    # Instantiating the model triggers the xlm-roberta-xxl tokenizer +
+    # transformer download into HF_HOME. We don't keep the model object
+    # — we just need the cache populated.
+    print(f"Loading {model_name} once to populate xlm-roberta-xxl cache...")
+    load_from_checkpoint(ckpt_path)
+    print(f"{model_name} + tokenizer cached")
+
+
+def prepare(target_languages: list[str] | None = None, prefetch_comet: bool = True) -> Path:
+    """Download and interleave WMT24++ en-<tgt> pairs. Returns the output file path.
+
+    If ``prefetch_comet`` is True (the default), also pre-downloads
+    xCOMET-XXL and its tokenizer into HF_HOME so the server can run
+    offline. Pass ``prefetch_comet=False`` for benchmark prep on a
+    machine without GPU / unbabel-comet (the cache will be populated on
+    first server use instead).
+    """
     if target_languages is None:
         target_languages = DEFAULT_TARGET_LANGUAGES
 
@@ -87,6 +132,10 @@ def prepare(target_languages: list[str] | None = None) -> Path:
                 count += 1
 
     print(f"Wrote {count} rows to {OUTPUT_FPATH}")
+
+    if prefetch_comet:
+        _prefetch_comet_model()
+
     return OUTPUT_FPATH
 
 

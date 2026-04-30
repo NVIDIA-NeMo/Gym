@@ -448,11 +448,16 @@ class TestBuildCometActorClass:
         (venv_bin.parent / "lib" / "python3.12" / "site-packages").mkdir(parents=True)
         return fake_python
 
-    def test_propagates_hf_env_and_pins_py_executable(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    def test_propagates_runtime_env_and_pins_py_executable(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
         """_build_comet_actor_class must request ray.remote with an env_vars
-        dict that keeps HF online, preserves CUDA_VISIBLE_DEVICES, threads
-        site-packages onto PYTHONPATH, and pins py_executable to the
-        cross-node-mirrored Python.
+        dict that preserves CUDA_VISIBLE_DEVICES, threads site-packages onto
+        PYTHONPATH, propagates HF_HOME so actors find the prepared cache,
+        and pins py_executable to the cross-node-mirrored Python. HF
+        offline/online flags are intentionally NOT overridden — the
+        benchmark prepare step pre-fetches the COMET model + tokenizer
+        into HF_HOME so runtime is fully offline.
         """
         import app as app_module
 
@@ -461,9 +466,7 @@ class TestBuildCometActorClass:
 
         monkeypatch.setattr(sys, "executable", str(fake_python))
         monkeypatch.setenv("WMT_TRANSLATION_COMET_PY_CACHE", str(mirror_root))
-        monkeypatch.setenv("HF_TOKEN", "hf_test_token")
         monkeypatch.setenv("HF_HOME", "/tmp/hf_home")
-        monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
         monkeypatch.setenv("PYTHONPATH", "/existing/pp")
 
         captured = {}
@@ -476,14 +479,16 @@ class TestBuildCometActorClass:
         assert kw["resources"] == {"extra_gpu": 1}
 
         env = kw["runtime_env"]["env_vars"]
-        assert env["HF_HUB_OFFLINE"] == "0"
-        assert env["TRANSFORMERS_OFFLINE"] == "0"
         assert env["RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES"] == "1"
         assert "site-packages" in env["PYTHONPATH"]
         assert "/existing/pp" in env["PYTHONPATH"]
-        assert env["HF_TOKEN"] == "hf_test_token"
         assert env["HF_HOME"] == "/tmp/hf_home"
-        assert "HUGGING_FACE_HUB_TOKEN" not in env  # unset vars don't leak
+        # No HF online/offline overrides — actors inherit from parent.
+        assert "HF_HUB_OFFLINE" not in env
+        assert "TRANSFORMERS_OFFLINE" not in env
+        # No token propagation — runtime is offline post-prepare.
+        assert "HF_TOKEN" not in env
+        assert "HUGGING_FACE_HUB_TOKEN" not in env
 
         py_exec = kw["runtime_env"]["py_executable"]
         assert py_exec.startswith(str(mirror_root))

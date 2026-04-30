@@ -17,6 +17,12 @@ details and the Ray GPU-scheduled COMET path.
 ng_prepare_benchmark "+config_paths=[benchmarks/wmt24pp/config.yaml]"
 ```
 
+In addition to writing `data/wmt24pp_benchmark.jsonl`, the prepare step
+pre-fetches the xCOMET-XXL checkpoint and its xlm-roberta-xxl tokenizer
+into `HF_HOME` (when `unbabel-comet` is installed in the active env).
+That keeps the resource server's Ray actors fully offline at runtime —
+no HF Hub calls during `verify()`, no rate-limit retries.
+
 ## Running servers
 
 ```bash

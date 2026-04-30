@@ -206,11 +206,6 @@ def _build_comet_actor_class():
     site_packages = venv_dir / "lib" / "python3.12" / "site-packages"
 
     env_vars = {
-        # COMET's xlm-roberta-xxl tokenizer resolver needs HF online (returns
-        # None and throws OSError "Not found: None" in offline mode even with
-        # cached weights). Override the parent process's offline flags here.
-        "HF_HUB_OFFLINE": "0",
-        "TRANSFORMERS_OFFLINE": "0",
         # Keep CUDA_VISIBLE_DEVICES untouched: when an extra node joins Ray
         # with --num-gpus=0 to hide GPUs from accounting, Ray would zero out
         # CUDA_VISIBLE_DEVICES on the actor. We need physical GPUs visible.
@@ -219,9 +214,13 @@ def _build_comet_actor_class():
         # with whatever PYTHONPATH the inherited env has.
         "PYTHONPATH": f"{site_packages}:{os.environ.get('PYTHONPATH', '')}",
     }
-    for k in ("HF_HOME", "HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"):
-        if os.environ.get(k):
-            env_vars[k] = os.environ[k]
+    # Propagate HF_HOME so actors find the cache populated by the
+    # benchmark prepare step. Other HF env vars (HF_HUB_OFFLINE,
+    # HF_TOKEN, etc.) are inherited from the parent process — we don't
+    # need to override since the prepared cache makes runtime fully
+    # offline.
+    if os.environ.get("HF_HOME"):
+        env_vars["HF_HOME"] = os.environ["HF_HOME"]
 
     # Schedule on the dedicated COMET node via the custom `extra_gpu` Ray
     # resource. num_gpus=0 because the node hides its GPUs from Ray accounting
@@ -234,9 +233,6 @@ def _build_comet_actor_class():
     )
     class _CometActor:  # pragma: no cover - needs live Ray cluster + CUDA + unbabel-comet checkpoint
         def __init__(self, gpu_idx: int, model_name: str):
-            import random
-            import time
-
             import torch
             from comet import download_model, load_from_checkpoint
 
@@ -253,40 +249,14 @@ def _build_comet_actor_class():
             self._device = f"cuda:{gpu_idx % num_devices}"
             self._lightning_devices = [gpu_idx % num_devices]
 
-            # Stagger actor loads so N concurrent xCOMET cold-loads don't
-            # thundering-herd HF Hub. xCOMET-XXL's tokenizer init calls
-            # model_info on facebook/xlm-roberta-xxl, which HF rate-limits.
-            time.sleep(gpu_idx * 2.0)
-
+            # Both download_model() and load_from_checkpoint() resolve
+            # from the HF cache populated by the benchmark prepare step
+            # (see benchmarks/wmt24pp/prepare.py:_prefetch_comet_model).
+            # If the cache is missing, this falls back to fetching from
+            # HF Hub at startup, subject to HF_HUB_OFFLINE.
             LOG.info("CometActor[%d]: loading %s on %s", gpu_idx, model_name, self._device)
             ckpt_path = download_model(model_name)
-
-            # Retry load_from_checkpoint on transient HF 429s with
-            # exponential backoff + jitter. Worst-case across 6 attempts is
-            # ~63s, well under the actor-pool readiness budget.
-            last_exc: Optional[BaseException] = None
-            for attempt in range(6):
-                try:
-                    self._model = load_from_checkpoint(ckpt_path)
-                    break
-                except Exception as e:
-                    msg = str(e)
-                    if "429" not in msg and "Too Many Requests" not in msg:
-                        raise
-                    last_exc = e
-                    wait = 2**attempt + random.uniform(0, 1)
-                    LOG.warning(
-                        "CometActor[%d]: HF 429 on attempt %d (%s); sleeping %.1fs",
-                        gpu_idx,
-                        attempt,
-                        msg.splitlines()[0][:120],
-                        wait,
-                    )
-                    time.sleep(wait)
-            else:
-                assert last_exc is not None
-                raise last_exc
-
+            self._model = load_from_checkpoint(ckpt_path)
             self._model.to(self._device).eval()
             LOG.info("CometActor[%d]: ready", gpu_idx)
 
