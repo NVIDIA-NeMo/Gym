@@ -1,6 +1,6 @@
 config_paths:
   - resources_servers/physics_judge/configs/physics_judge.yaml
-  - benchmarks/physics/judge_openai.yaml
+  - resources_servers/physics_judge/configs/judge_openai.yaml
 
 physics_physics_judge_simple_agent:
   _inherit_from: physics_judge_simple_agent

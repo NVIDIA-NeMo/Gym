@@ -33,9 +33,17 @@ existing math_with_judge consumers (`aime24`, `aime25`, `gsm8k`,
 
 ```bash
 config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
-resources_servers/physics_judge/configs/physics_judge.yaml"
+resources_servers/physics_judge/configs/physics_judge.yaml,\
+resources_servers/physics_judge/configs/judge_openai.yaml"
 ng_run "+config_paths=[$config_paths]"
 ```
+
+The bundled `judge_openai.yaml` defaults the judge to `openai/gpt-oss-20b`
+on `https://integrate.api.nvidia.com/v1` and reads the API key from
+`NVIDIA_API_KEY`. To use a different judge, override any of the
+`judge_model.responses_api_models.openai_model.openai_*` fields on the
+CLI, or replace `judge_openai.yaml` with your own config that defines a
+`judge_model:` server.
 
 > Reasoning-model note: start the policy vLLM server with
 > `--reasoning-parser deepseek_r1` (or the model-specific parser).

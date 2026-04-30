@@ -58,9 +58,12 @@ Two-stage, matching NeMo Skills' `physics`:
    asked whether the model's full output is `[Correct]` or `[Incorrect]`
    against the expected answer.
 
-The judge model is wired via `benchmarks/physics/judge_openai.yaml`; set
-`+judge_base_url=…`, `+judge_api_key=…`, and `+judge_model_name=…` (or define
-the equivalents in `env.yaml`) to point it at any OpenAI-compatible endpoint.
+The judge model is wired via
+`resources_servers/physics_judge/configs/judge_openai.yaml`, which
+defaults to `openai/gpt-oss-20b` on `https://integrate.api.nvidia.com/v1`
+and reads its API key from `NVIDIA_API_KEY`. Override the
+`judge_model.responses_api_models.openai_model.openai_*` fields on the
+CLI to point it at a different OpenAI-compatible endpoint.
 
 ## Metrics
 
