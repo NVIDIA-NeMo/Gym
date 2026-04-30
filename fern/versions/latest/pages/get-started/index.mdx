@@ -6,26 +6,48 @@ position: 2
 
 # Get Started
 
-NeMo Gym is **a Gymnasium for LLMs** — RL training environments with a familiar `reset()` / `step()` API. This section gets you from zero to your first scored rollout, then to your first custom environment.
+NeMo Gym is **a Gymnasium for LLMs** — RL training environments with a familiar `reset()` / `step()` API. This section gets you from zero to your first scored rollout, then to your first custom environment. Pick the path that matches your goal: skim the Quickstart for an immediate result, or work through Prerequisites → Installation → Configuration → Quickstart → Hello World for a thorough first run.
+
+## Prerequisites
+
+Before you start, identify your use case and confirm you meet the requirements below.
+
+**Who are these guides for?**
+
+| Audience | Use Cases |
+| --- | --- |
+| AI/ML engineers and researchers | Run existing benchmarks, evaluate models, prototype new environments |
+| Environment authors | Wrap a benchmark or task as a NeMo Gym environment for training and eval |
+| Training engineers | Generate scored rollouts at scale for RL training (NeMo RL, Unsloth, etc.) |
+
+**What you need (complete in order):**
+
+1. Python 3.12+ on a [verified configuration](/latest/get-started/prerequisites#verified-configurations).
+2. An OpenAI-compatible inference endpoint and API key.
+3. Familiarity with the command line and basic Python.
+
+## Choose Your Path
+
+Select the guide that matches your experience level and goals.
 
 <Cards>
 
 <Card title="Prerequisites" href="/latest/get-started/prerequisites">
-Python, OS, and API key requirements before you install.
+Detailed system requirements, verified configurations, and pre-installation checklist.
 
 <Badge minimal outlined>requirements</Badge>
 </Card>
 
 <Card title="Installation" href="/latest/get-started/installation">
-Three install paths: git clone, pip, or container.
+Three install paths — Source, PyPI, or Container — plus verification and troubleshooting.
 
 <Badge minimal outlined>install</Badge>
 </Card>
 
 <Card title="Configuration" href="/latest/get-started/configuration">
-Set up `env.yaml` with your model credentials.
+Set up `env.yaml` with your model credentials before running anything.
 
-<Badge minimal outlined>env.yaml</Badge> <Badge minimal outlined>credentials</Badge>
+<Badge minimal outlined>env.yaml</Badge>
 </Card>
 
 <Card title="Quickstart" href="/latest/get-started/quickstart">
@@ -35,9 +57,42 @@ Run an end-to-end rollout against the Blackjack environment and read the win rat
 </Card>
 
 <Card title="Hello World" href="/latest/get-started/hello-world">
-Build your first environment by subclassing `GymnasiumServer`.
+Build your first environment by subclassing `GymnasiumServer` in 25 lines.
 
 <Badge minimal outlined>build your own</Badge> <Badge minimal outlined>15 min</Badge>
 </Card>
 
 </Cards>
+
+## Suggested Learning Path
+
+If you are new to NeMo Gym, follow one of these recommended sequences.
+
+```mermaid
+flowchart LR
+    subgraph fast["Fast Track"]
+        Q[Quickstart]
+    end
+
+    subgraph comprehensive["Comprehensive"]
+        A[Prerequisites] --> B[Installation]
+        B --> C[Configuration]
+        C --> D[Quickstart]
+        D --> E[Hello World]
+    end
+
+    Q --> F[Environment & Training Tutorials]
+    E --> F
+
+    classDef default fill:#f6f8fa,stroke:#d0d7de,color:#24292f
+    classDef fast fill:#e3f2fd,stroke:#2196f3,stroke-width:2px
+    classDef comp fill:#e1f5e1,stroke:#4caf50,stroke-width:2px
+
+    class Q fast
+    class A,B,C,D,E comp
+```
+
+**Choose your path:**
+
+- **Fast Track**: Quickstart → Tutorials. Skim if you have NeMo Gym installed and credentials configured already.
+- **Comprehensive**: Prerequisites → Installation → Configuration → Quickstart → Hello World → Tutorials. Best for first-time users or production planning.

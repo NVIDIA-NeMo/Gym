@@ -1,16 +1,62 @@
 ---
 title: "Configuration"
-description: "Set up env.yaml with your model credentials."
+description: "Set up env.yaml with model credentials before running NeMo Gym."
 position: 3
 ---
 
 # Configuration
 
-NeMo Gym reads model credentials from a top-level `env.yaml` file in the project root. This keeps secrets out of your YAML configs and out of version control (`env.yaml` is gitignored).
+NeMo Gym reads model credentials from a top-level `env.yaml` file in the project root. This keeps secrets out of YAML configs and out of version control (`env.yaml` is gitignored).
 
-## env.yaml
+## Prerequisites
+
+1. NeMo Gym installed via the [Installation Guide](/latest/get-started/installation).
+2. An OpenAI-compatible inference endpoint and API key (see [Prerequisites — API and Service Access](/latest/get-started/prerequisites#api-and-service-access)).
+3. Virtual environment activated.
+
+## Configure Your Model Credentials
 
 Create `env.yaml` in the project root:
+
+1. **Create the file**:
+
+   ```bash
+   cat > env.yaml << 'EOF'
+   policy_base_url: https://api.openai.com/v1
+   policy_api_key: sk-your-actual-key-here
+   policy_model_name: gpt-4.1-2025-04-14
+   EOF
+   ```
+
+2. **Replace the placeholder API key** with your real key.
+
+3. **Verify the file isn't tracked by git** (it's gitignored by default):
+
+   ```bash
+   git status env.yaml   # should show no output
+   ```
+
+   **✅ Success Check**: `env.yaml` exists in the project root and is not staged.
+
+The three required fields:
+
+| Field | Description |
+|---|---|
+| `policy_base_url` | OpenAI-compatible endpoint URL. |
+| `policy_api_key` | Your key for that endpoint. |
+| `policy_model_name` | The model to call. |
+
+<Tip>
+**Why `gpt-4.1-2025-04-14` for the Quickstart?** Low latency (no reasoning step) and reliable function-calling support, so the Quickstart runs in seconds without configuration surprises. Swap in any model later.
+</Tip>
+
+## Provider Examples
+
+Same three fields, different endpoint shape per provider.
+
+<Tabs>
+
+<Tab title="OpenAI">
 
 ```yaml
 policy_base_url: https://api.openai.com/v1
@@ -18,17 +64,8 @@ policy_api_key: sk-your-actual-key-here
 policy_model_name: gpt-4.1-2025-04-14
 ```
 
-Three fields, all required:
+</Tab>
 
-- **`policy_base_url`** — the OpenAI-compatible endpoint
-- **`policy_api_key`** — your key for that endpoint
-- **`policy_model_name`** — the model to call
-
-## Other Providers
-
-The same three fields work for any OpenAI-compatible endpoint:
-
-<Tabs>
 <Tab title="Azure OpenAI">
 
 ```yaml
@@ -38,6 +75,7 @@ policy_model_name: gpt-4.1-2025-04-14
 ```
 
 </Tab>
+
 <Tab title="vLLM (self-hosted)">
 
 ```yaml
@@ -49,15 +87,12 @@ policy_model_name: Qwen/Qwen3-4B-Instruct-2507
 The model must support function calling for tool-using agents.
 
 </Tab>
-</Tabs>
 
-<Tip>
-**Why `gpt-4.1-2025-04-14` for the Quickstart?** It has low latency (no reasoning step) and reliable function-calling support, so the Quickstart runs in seconds without configuration surprises. Swap in any model later.
-</Tip>
+</Tabs>
 
 ## CLI Overrides
 
-You can override any field on the command line with `+key=value`:
+Override any field on the command line with `++key=value`:
 
 ```bash
 ng_run "+config_paths=[...]" ++policy_model_name=gpt-4o-mini
@@ -65,4 +100,31 @@ ng_run "+config_paths=[...]" ++policy_model_name=gpt-4o-mini
 
 Use this for one-off runs without editing `env.yaml`.
 
-You're set. Run the [Quickstart](/latest/get-started/quickstart).
+## Troubleshoot Configuration
+
+<Accordion title="Missing mandatory value: policy_api_key">
+`env.yaml` doesn't exist or isn't in the project root. From the project root:
+
+```bash
+ls env.yaml
+cat env.yaml | head -3
+```
+
+Re-create the file using the snippet above.
+</Accordion>
+
+<Accordion title="OpenAI 401: invalid API key">
+Verify the key matches one of your active keys at [platform.openai.com/api-keys](https://platform.openai.com/api-keys). Ensure no quotes, whitespace, or newlines around the value.
+</Accordion>
+
+<Accordion title="Model not found / 404">
+The model name in `policy_model_name` may not be available on your account. Try `gpt-4o-mini` or check the model list with:
+
+```bash
+python -c "from openai import OpenAI; c = OpenAI(); print([m.id for m in c.models.list().data])"
+```
+</Accordion>
+
+## Next Steps
+
+You're configured. Run the [Quickstart](/latest/get-started/quickstart) to score your first rollout.

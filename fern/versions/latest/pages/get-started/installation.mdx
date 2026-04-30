@@ -1,32 +1,62 @@
 ---
 title: "Installation"
-description: "Install NeMo Gym via git clone, pip, or container."
+description: "Install NeMo Gym from source, PyPI, or a container image."
 position: 2
 ---
 
 # Installation
 
+This guide covers three installation paths: **Source** for the full set of bundled environments and benchmarks (recommended), **PyPI** for quick library-only evaluation, and **Container** for reproducible RL training.
+
+## Prerequisites
+
+Before you start, verify the following:
+
+1. Operating system matches a [verified configuration](/latest/get-started/prerequisites#verified-configurations).
+2. Python 3.12+ is installed and on PATH.
+3. You have at least 2 GB of free disk space for dependencies.
+4. (Optional) GPU drivers installed for local inference or RL training.
+
+<Note title="See Also">
+For comprehensive system requirements, refer to [Prerequisites](/latest/get-started/prerequisites).
+</Note>
+
+## Installation Methods
+
+Choose the method that fits your use case.
+
 <Tabs>
-<Tab title="Git clone (recommended)">
 
-```bash
-git clone git@github.com:NVIDIA-NeMo/Gym.git
-cd Gym
-uv venv --python 3.12 && source .venv/bin/activate
-uv sync
-```
+<Tab title="Source (Recommended)">
 
-If you don't have `uv`:
+The Source path gives you the full set of bundled environments, benchmarks, and example data. The [Quickstart](/latest/get-started/quickstart) and [Hello World](/latest/get-started/hello-world) both assume this layout.
 
-```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
-source $HOME/.local/bin/env
-```
+1. **Clone the repository**:
 
-The git clone path gives you the full set of bundled environments, benchmarks, and example data — the [Quickstart](/latest/get-started/quickstart) and [Hello World](/latest/get-started/hello-world) both assume this layout.
+   ```bash
+   git clone git@github.com:NVIDIA-NeMo/Gym.git
+   cd Gym
+   ```
+
+2. **Create the virtual environment and install**:
+
+   ```bash
+   uv venv --python 3.12 && source .venv/bin/activate
+   uv sync
+   ```
+
+3. **Install `uv` if you don't have it**:
+
+   ```bash
+   curl -LsSf https://astral.sh/uv/install.sh | sh
+   source $HOME/.local/bin/env
+   ```
 
 </Tab>
-<Tab title="pip install">
+
+<Tab title="PyPI">
+
+The simplest path, but it does not yet ship the bundled benchmarks or `ng_list_benchmarks`.
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
@@ -34,35 +64,120 @@ pip install nemo-gym
 ```
 
 <Warning>
-The pip release does not yet ship the bundled benchmarks or `ng_list_benchmarks`. If you want to run the Quickstart end-to-end, use the **Git clone** path until the next release.
+The current PyPI release lacks the bundled benchmarks and `ng_list_benchmarks`. To run the [Quickstart](/latest/get-started/quickstart) end-to-end, use the **Source** path until the next release.
 </Warning>
 
 </Tab>
+
 <Tab title="Container">
 
-For RL training with NeMo RL, pull the latest NGC image:
+For RL training with NeMo RL, pull the latest NGC container:
 
 ```bash
 docker pull nvcr.io/nvidia/nemo-rl:v0.5.0.nemotron_3_super
 ```
 
-See the [NeMo RL training tutorial](/latest/training-tutorials/nemo-rl-grpo/setup) for full container setup.
+<Note title="See Also">
+For full container setup including GPU passthrough and volume mounts, refer to the [NeMo RL training tutorial](/latest/training-tutorials/nemo-rl-grpo/setup).
+</Note>
 
 </Tab>
+
 </Tabs>
 
-## Verify
+## Installation Verification
+
+Verify that the install succeeded and core CLIs are accessible.
+
+1. **Version check**:
+
+   ```bash
+   ng_help
+   ```
+
+   **✅ Success Check**: A table of `ng_*` commands prints. If you get `command not found`, the virtual environment isn't activated — re-run `source .venv/bin/activate`.
+
+2. **Discover bundled benchmarks** (Source install only):
+
+   ```bash
+   ng_list_benchmarks
+   ```
+
+   **✅ Success Check**: A table of ~30 benchmarks prints (`gpqa`, `aime25`, `ifbench`, etc.). Empty or missing? You're on the PyPI path — switch to Source to pick up the benchmarks directory.
+
+3. **Basic import test**:
+
+   ```bash
+   python -c "import nemo_gym; print(f'NeMo Gym version: {nemo_gym.__version__}')"
+   ```
+
+   **✅ Success Check**: A version number prints.
+
+## Troubleshoot Installation
+
+<Accordion title="Command not found: ng_run / ng_help">
+Activate the virtual environment in the terminal you're using:
 
 ```bash
-ng_help
+source .venv/bin/activate
 ```
 
-If you see the list of `ng_*` commands, the install worked.
+Verify the install:
 
 ```bash
-ng_list_benchmarks
+pip show nemo-gym
 ```
+</Accordion>
 
-Lists every benchmark bundled with the repo (gpqa, aime25, ifbench, and ~30 more). Empty or missing? You're on the pip path — switch to git clone.
+<Accordion title="ng_list_benchmarks shows no benchmarks">
+You're on the PyPI install path. The bundled benchmarks under `benchmarks/` only ship via the Source path. Switch to the Source install or wait for the next PyPI release.
+</Accordion>
 
-Continue to [Configuration](/latest/get-started/configuration) to set up your model credentials.
+<Accordion title="uv sync fails on dependency resolution">
+Use a fresh venv:
+
+```bash
+rm -rf .venv
+uv venv --python 3.12 && source .venv/bin/activate
+uv sync
+```
+</Accordion>
+
+<Accordion title="ImportError: No module named 'nemo_gym'">
+The package isn't installed in the active environment. Verify and reinstall:
+
+```bash
+pip list | grep nemo-gym
+uv sync   # Source path
+# or
+pip install nemo-gym   # PyPI path
+```
+</Accordion>
+
+<Accordion title="Ray socket path error on cluster filesystem">
+On systems with long working directory paths (e.g. Lustre), Ray's AF_UNIX socket can exceed the 107-byte Linux limit. Set:
+
+```bash
+export RAY_TMPDIR=/tmp
+```
+</Accordion>
+
+## Next Steps
+
+Installation complete. Continue to [Configuration](/latest/get-started/configuration) to set up your model credentials.
+
+<Cards>
+
+<Card title="Configuration" href="/latest/get-started/configuration">
+Set up `env.yaml` with your model credentials.
+
+<Badge minimal outlined>env.yaml</Badge>
+</Card>
+
+<Card title="Quickstart" href="/latest/get-started/quickstart">
+Run your first scored rollout end-to-end against Blackjack.
+
+<Badge intent="success" minimal outlined>10 min</Badge>
+</Card>
+
+</Cards>
