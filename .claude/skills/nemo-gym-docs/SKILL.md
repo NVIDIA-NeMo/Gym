@@ -181,6 +181,12 @@ The MDX body should still open with `# <Page Title>` matching the frontmatter ti
 
 ## Validate
 
+First-time setup: authenticate the CLI against the `nvidia` Fern org via Google SSO (one-time, browser flow):
+
+```bash
+npx -y fern-api@latest login    # opens browser → sign in with your @nvidia.com Google account
+```
+
 Run from `fern/` (no install step — scripts shell out to `npx -y fern-api@latest`):
 
 ```bash
