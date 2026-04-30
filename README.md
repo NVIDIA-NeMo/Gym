@@ -39,7 +39,7 @@ generative AI models. NeMo Gym is integrated with the broader agentic ecosystem.
 **Agent Harnesses:** Popular agent harnesses for evaluation and training available out of the box.
 [Mini SWE Agent](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/mini_swe_agent) • [OpenHands](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/swe_agents) • [SWE Agent](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/swe_agents)
 
-**Agent Framework Libraries:** Use your custom agent harnesses with environments.
+**Agent Framework Libraries:** Use your custom agent framework with environments.
 [LangGraph](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/langgraph_agent)
 
 > [!IMPORTANT]
