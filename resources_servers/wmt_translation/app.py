@@ -184,6 +184,11 @@ def _build_comet_actor_class():
         )
     uv_python_root = venv_python.parent.parent
 
+    # Default cache root assumes the canonical container mount at /opt/Gym
+    # (cluster deployments). For local dev or non-standard mounts, override
+    # via the WMT_TRANSLATION_COMET_PY_CACHE env var to any user-writable
+    # path; on multi-node clusters the override must point at a shared
+    # filesystem path so cross-node Ray actors find the mirror.
     cache_root = Path(os.environ.get("WMT_TRANSLATION_COMET_PY_CACHE", "/opt/Gym/.cache/comet-python"))
     mirrored_python_root = cache_root / uv_python_root.name
     mirrored_python_bin = mirrored_python_root / "bin" / venv_python.name

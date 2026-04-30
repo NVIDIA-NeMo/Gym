@@ -62,7 +62,14 @@ startup.
 
 ## Example usage
 
+The COMET actor pool mirrors the local uv-installed Python under
+`WMT_TRANSLATION_COMET_PY_CACHE` so cross-node Ray actors can use it.
+The default (`/opt/Gym/.cache/comet-python`) matches the canonical
+container mount; override for non-cluster runs:
+
 ```bash
+export WMT_TRANSLATION_COMET_PY_CACHE="$HOME/.cache/wmt_translation/comet-python"
+
 # Running servers
 config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
 resources_servers/wmt_translation/configs/wmt_translation.yaml"

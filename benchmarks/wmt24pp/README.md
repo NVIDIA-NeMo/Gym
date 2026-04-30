@@ -25,7 +25,15 @@ no HF Hub calls during `verify()`, no rate-limit retries.
 
 ## Running servers
 
+The `wmt_translation` resource server's COMET actor pool mirrors the
+local uv-installed Python under `WMT_TRANSLATION_COMET_PY_CACHE` so that
+cross-node Ray actors can use it. The default value (`/opt/Gym/.cache/...`)
+matches the canonical container mount; for non-cluster runs, override it
+to any user-writable path:
+
 ```bash
+export WMT_TRANSLATION_COMET_PY_CACHE="$HOME/.cache/wmt_translation/comet-python"
+
 config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
 benchmarks/wmt24pp/config.yaml"
 ng_run "+config_paths=[$config_paths]"
