@@ -27,6 +27,7 @@ from resources_servers.gdpval.app import (
     GDPValResourcesServer,
     GDPValResourcesServerConfig,
     GDPValVerifyRequest,
+    _resolve_repeat_dir,
 )
 
 
@@ -75,6 +76,24 @@ def _verify_request(**fields) -> GDPValVerifyRequest:
     )
 
 
+class TestResolveRepeatDir:
+    def test_picks_lowest_repeat(self, tmp_path) -> None:
+        td = tmp_path / "task_x"
+        (td / "repeat_1").mkdir(parents=True)
+        (td / "repeat_0").mkdir()
+        (td / "repeat_2").mkdir()
+        assert _resolve_repeat_dir(td) == td / "repeat_0"
+
+    def test_falls_back_to_flat_layout(self, tmp_path) -> None:
+        td = tmp_path / "task_x"
+        td.mkdir()
+        (td / "deliverable.docx").write_text("x")
+        assert _resolve_repeat_dir(td) == td
+
+    def test_missing_dir_returns_none(self, tmp_path) -> None:
+        assert _resolve_repeat_dir(tmp_path / "does-not-exist") is None
+
+
 class TestApp:
     def test_sanity_rubric(self) -> None:
         _server(reward_mode="rubric")
@@ -121,6 +140,42 @@ class TestApp:
         assert resp.verify_mode == "rubric"
         assert resp.invalid_judge_response is False
         assert resp.judge_response == canned_result
+
+    @pytest.mark.asyncio
+    async def test_verify_rubric_passes_create_overrides_through(self) -> None:
+        """``judge_responses_create_params_overrides`` must reach the scoring fn.
+
+        ``model`` and ``api_key`` are pulled out as their own kwargs; everything
+        else (e.g. ``max_tokens``, ``temperature``) flows through as
+        ``create_overrides`` and gets merged into ``client.chat.completions.create``.
+        """
+        server = _server(
+            reward_mode="rubric",
+            judge_responses_create_params_overrides={
+                "model": "custom-judge",
+                "api_key": "sk-custom",  # pragma: allowlist secret
+                "max_tokens": 16384,
+                "temperature": 0.0,
+            },
+        )
+
+        captured: dict = {}
+
+        async def fake_score_with_rubric(**kwargs):
+            captured.update(kwargs)
+            return 0.5, {"overall_score": 0.5}
+
+        body = _verify_request(rubric_json=[{"criterion": "clarity", "score": 1}])
+
+        with (
+            patch("resources_servers.gdpval.scoring.score_with_rubric", side_effect=fake_score_with_rubric),
+            patch("resources_servers.gdpval.app.get_server_url", return_value="http://localhost:9999"),
+        ):
+            await server.verify(body)
+
+        assert captured["model_name"] == "custom-judge"
+        assert captured["api_key"] == "sk-custom"  # pragma: allowlist secret
+        assert captured["create_overrides"] == {"max_tokens": 16384, "temperature": 0.0}
 
     @pytest.mark.asyncio
     async def test_verify_comparison_missing_reference(self, tmp_path) -> None:

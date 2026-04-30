@@ -56,13 +56,19 @@ def _download_reference_files(
     reference_file_urls: list[str],
     dest_dir: Path,
 ) -> list[str]:
-    """Download reference files with HF auth + retry-on-429/5xx.
+    """Materialize reference files into ``dest_dir``.
 
-    Anonymous HuggingFace downloads hit an aggressive rate limit when the
-    agent runs tasks concurrently; the previous urlretrieve-based version
-    silently dropped files, leaving subsequent judging/scoring without
-    the reference context.  We now pass the ``HF_TOKEN`` env var as a
-    bearer token and retry with exponential backoff on HTTP 429 / 5xx.
+    Each entry in ``reference_file_urls`` is one of:
+    - an HTTP(S) URL — downloaded with HF auth + retry-on-429/5xx (anonymous
+      HuggingFace downloads hit an aggressive rate limit when the agent runs
+      tasks concurrently; the previous urlretrieve-based version silently
+      dropped files, leaving subsequent judging/scoring without the reference
+      context — we now pass ``HF_TOKEN`` as a bearer token and retry with
+      exponential backoff);
+    - an absolute filesystem path or ``file://`` URL — copied directly with
+      ``shutil.copy2``, bypassing the urllib retry loop. Benchmarks whose
+      reference files already live on the agent's filesystem (rather than on
+      the HuggingFace Hub) use this path.
     """
     import shutil as _shutil
     import time
@@ -79,6 +85,15 @@ def _download_reference_files(
         rel_path = file_path.lstrip("/")
         local_path = dest_dir / rel_path
         local_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if not (url.startswith("http://") or url.startswith("https://")):
+            src = url[len("file://") :] if url.startswith("file://") else url
+            try:
+                _shutil.copy2(src, local_path)
+                downloaded.append(rel_path)
+            except Exception as e:
+                print(f"Warning: failed to copy local file {src} -> {rel_path}: {e}", flush=True)
+            continue
 
         req = urllib.request.Request(url)
         if token:

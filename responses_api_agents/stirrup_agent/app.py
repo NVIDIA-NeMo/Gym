@@ -144,6 +144,7 @@ async def _run_stirrup_agent(
     exec_provider_kwargs: Optional[Dict[str, Any]] = None,
     persist_deliverables_dir: Optional[str] = None,
     task_id: Optional[str] = None,
+    rollout_index: Optional[int] = None,
     is_gdpval: bool = False,
     model_id: Optional[str] = None,
     completion_token_buffer: int = 1000,
@@ -339,8 +340,11 @@ async def _run_stirrup_agent(
             import pickle as _persist_pickle
             import uuid
 
+            # ``<persist>/task_<task_id>/repeat_<rollout_index>/`` so concurrent
+            # repeats of the same task don't clobber each other.
             dir_name = f"task_{task_id}" if task_id else f"task_{uuid.uuid4().hex[:8]}"
-            task_dir = Path(persist_deliverables_dir) / dir_name
+            repeat_name = f"repeat_{rollout_index}" if rollout_index is not None else "repeat_0"
+            task_dir = Path(persist_deliverables_dir) / dir_name / repeat_name
             task_dir.mkdir(parents=True, exist_ok=True)
 
             # 1. Deliverable files
@@ -514,6 +518,7 @@ _TASK_METADATA_FIELDS = (
     "rubric_json",
     "rubric_pretty",
     "instance_id",
+    "_ng_rollout_index",
 )
 
 
@@ -603,6 +608,7 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
                 "exec_provider_kwargs": exec_provider_kwargs,
                 "persist_deliverables_dir": self.config.persist_deliverables_dir,
                 "task_id": task_info.get("task_id"),
+                "rollout_index": (body.metadata or {}).get("_ng_rollout_index"),
                 "is_gdpval": self.config.task == "gdpval",
                 "model_id": self.config.model_id,
                 "completion_token_buffer": self.config.completion_token_buffer,
@@ -728,10 +734,12 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
             # resources server will fall back to response.output_text).
             deliverables_dir: Optional[str] = None
             task_id = existing_metadata.get("task_id")
+            rollout_index = existing_metadata.get("_ng_rollout_index")
             if self.config.persist_deliverables_dir and task_id:
-                # Absolute path so the resources server (which runs from its
-                # own subdir) resolves to the same filesystem location.
-                deliverables_dir = str((Path(self.config.persist_deliverables_dir) / f"task_{task_id}").absolute())
+                repeat_name = f"repeat_{rollout_index}" if rollout_index is not None else "repeat_0"
+                deliverables_dir = str(
+                    (Path(self.config.persist_deliverables_dir) / f"task_{task_id}" / repeat_name).absolute()
+                )
 
             verify_request_body = dict(body_dict)
             verify_request_body["response"] = response_clean.model_dump(mode="json")
