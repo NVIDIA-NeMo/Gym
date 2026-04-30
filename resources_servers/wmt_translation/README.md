@@ -4,8 +4,8 @@ Generic machine-translation verifier for WMT-style benchmarks. Computes
 corpus-level BLEU per `(source_language, target_language)` pair via
 sacrebleu, with language-specific tokenizers (`13a` default; `ja-mecab`,
 `ko-mecab`, `zh` as appropriate). Optionally augments with xCOMET-XXL
-neural QE scores, scheduled onto a Ray GPU actor so the heavy checkpoint
-is loaded exactly once per aggregation.
+neural QE scores, served by a persistent Ray actor pool that loads the
+checkpoint once per actor and stays resident for the whole run.
 
 Ported from NeMo-Skills' `TranslationMetrics`
 (`nemo_skills/evaluation/metrics/translation_metrics.py`) plus the
@@ -30,21 +30,35 @@ xCOMET-XXL judge script at `nemo_skills/evaluation/evaluator/comet.py`.
 > so the Tier 1 pass@k template in `migrate-benchmark` doesn't apply.
 > Parity with NeMo-Skills is on the corpus aggregates.
 
-## Per-sample reward
+## Per-sample reward + per-row COMET
 
 `verify()` returns `sentence_bleu(generation, [reference]) / 100` as the
 `reward` field. This is a useful dense RL signal but it is NOT the
 parity target — corpus-level BLEU in `compute_metrics()` is.
 
-## COMET via Ray GPU scheduling
+When `compute_comet: true`, `verify()` also dispatches a per-row score
+request to the persistent xCOMET-XXL actor pool and awaits the result
+before returning. Each rollout in `rollouts.jsonl` therefore carries
+its own `comet_score` (or `None` when the model produced an empty
+generation), and `compute_metrics()` aggregates those per-row scores
+into per-pair / cross-pair means and std-dev keys.
 
-When `compute_comet: true`, `compute_metrics()` dispatches a single
-`@ray.remote(num_gpus=<comet_num_gpus>)` task that loads
-`Unbabel/XCOMET-XXL` and batch-predicts scores for every (src, mt, ref)
-triple across all tasks and rollouts. The checkpoint is resolved via
-`comet.download_model()` (cached under HF_HOME). If Ray dispatch fails
-for any reason, BLEU metrics still emit and only `/comet` keys are
-skipped.
+## COMET actor pool
+
+When `compute_comet: true`, `_ensure_comet_actors()` lazily spawns
+`comet_num_shards` Ray actors (one per GPU on the extra_gpu node) on the
+first `verify()` call. Each actor loads `Unbabel/XCOMET-XXL` once in
+`__init__` and serves score requests from the resident model — no
+per-call cold-load. `verify()` round-robins requests across the pool
+under a small lock and awaits the future inline so per-row scoring is
+interleaved with rollout collection.
+
+The checkpoint and its xlm-roberta-xxl tokenizer are resolved via
+`comet.download_model()` and `load_from_checkpoint()`, both of which hit
+HF_HOME. The benchmark prepare step (`benchmarks/wmt24pp/prepare.py`)
+pre-populates the cache so actors initialize fully offline; if the cache
+is missing, the first actor falls back to fetching from HF Hub on
+startup.
 
 ## Example usage
 
@@ -69,12 +83,13 @@ COMET actor pool) and launches Gym in one shot, see the
 
 ## Config
 
-| Key                 | Default               | Meaning                                               |
-| ------------------- | --------------------- | ----------------------------------------------------- |
-| `compute_comet`     | `true`                | Toggle xCOMET-XXL scoring                             |
-| `comet_model`       | `Unbabel/XCOMET-XXL`  | HF repo passed to `comet.download_model`              |
-| `comet_batch_size`  | `16`                  | Batch size for `model.predict`                        |
-| `comet_num_gpus`    | `1`                   | GPU allocation for the Ray COMET actor                |
+| Key                 | Default               | Meaning                                                         |
+| ------------------- | --------------------- | --------------------------------------------------------------- |
+| `compute_comet`     | `true`                | Toggle xCOMET-XXL scoring                                       |
+| `comet_model`       | `Unbabel/XCOMET-XXL`  | HF repo passed to `comet.download_model`                        |
+| `comet_batch_size`  | `16`                  | Batch size for `model.predict`                                  |
+| `comet_num_shards`  | `8`                   | Number of CometActors in the pool; cap at the extra node's GPU count |
+| `strip_reasoning`   | `true`                | Drop a `<think>...</think>` preamble before scoring             |
 
 ## Licensing
 
