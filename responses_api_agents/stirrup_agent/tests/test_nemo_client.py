@@ -23,7 +23,7 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from stirrup.core.models import AssistantMessage, SystemMessage, UserMessage
+from stirrup.core.models import SystemMessage, UserMessage
 
 from responses_api_agents.stirrup_agent.nemo_client import (
     DynamicMaxTokensChatCompletionsClient,
