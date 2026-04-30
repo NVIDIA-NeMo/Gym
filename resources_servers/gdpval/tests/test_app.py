@@ -27,6 +27,7 @@ from resources_servers.gdpval.app import (
     GDPValResourcesServer,
     GDPValResourcesServerConfig,
     GDPValVerifyRequest,
+    _resolve_repeat_dir,
 )
 
 
@@ -73,6 +74,24 @@ def _verify_request(**fields) -> GDPValVerifyRequest:
         rubric_pretty=fields.pop("rubric_pretty", ""),
         **fields,
     )
+
+
+class TestResolveRepeatDir:
+    def test_picks_lowest_repeat(self, tmp_path) -> None:
+        td = tmp_path / "task_x"
+        (td / "repeat_1").mkdir(parents=True)
+        (td / "repeat_0").mkdir()
+        (td / "repeat_2").mkdir()
+        assert _resolve_repeat_dir(td) == td / "repeat_0"
+
+    def test_falls_back_to_flat_layout(self, tmp_path) -> None:
+        td = tmp_path / "task_x"
+        td.mkdir()
+        (td / "deliverable.docx").write_text("x")
+        assert _resolve_repeat_dir(td) == td
+
+    def test_missing_dir_returns_none(self, tmp_path) -> None:
+        assert _resolve_repeat_dir(tmp_path / "does-not-exist") is None
 
 
 class TestApp:
