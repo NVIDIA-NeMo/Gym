@@ -10,6 +10,18 @@ NeMo Gym reads model credentials from a top-level `env.yaml` file in the project
 Already have `env.yaml` from a previous run? Jump to the [Quickstart](/latest/get-started/quickstart).
 </Tip>
 
+## Do You Need an API Key?
+
+Not always. Three modes:
+
+| Scenario | API key needed? |
+| --- | --- |
+| Calling **OpenAI**, **Azure OpenAI**, or any auth'd endpoint | ✅ Yes — real key, validated by the provider |
+| Calling **self-hosted vLLM** or any local OpenAI-compatible server | ⚠️ The `policy_api_key` field must exist in `env.yaml`, but the value is ignored by the local server. Use any string (e.g. `not-needed`) |
+| Running metadata-only CLIs: `ng_help`, `ng_list_benchmarks`, `ng_dump_config`, `ng_prepare_data` | ❌ Not needed at all — these commands skip the model config entirely |
+
+If you're only listing benchmarks or preparing data, you can skip the rest of this page.
+
 ## Prerequisites
 
 1. NeMo Gym installed using the [Installation Guide](/latest/get-started/installation).

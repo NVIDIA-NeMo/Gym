@@ -62,9 +62,13 @@ The Quickstart and most bundled environments call an OpenAI-compatible inference
 
 - **OpenAI**: API key from [platform.openai.com](https://platform.openai.com/api-keys). Quickstart cost: ~$0.05.
 - **Azure OpenAI**: same shape, different `base_url` and key.
-- **Self-hosted**: vLLM or any OpenAI-compatible server with function-calling support.
+- **Self-hosted**: vLLM or any OpenAI-compatible server with function-calling support. No real key required — the field exists but is ignored.
 
 The model must support function calling for tool-using agents.
+
+<Note>
+Metadata-only CLIs (`ng_help`, `ng_list_benchmarks`, `ng_dump_config`, `ng_prepare_data`) do not need an API key or any model configuration. Refer to [Configuration — Do You Need an API Key?](/latest/get-started/configuration#do-you-need-an-api-key) for the full breakdown.
+</Note>
 
 ## Pre-Installation Checklist
 
