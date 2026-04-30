@@ -62,6 +62,11 @@ ng_collect_rollouts \
     +num_repeats=1
 ```
 
+For a fully reproducible end-to-end SLURM run that brings up vLLM with
+the right Ray topology (model node + a hidden `extra_gpu` node for the
+COMET actor pool) and launches Gym in one shot, see the
+[`ns nemo_gym_rollouts` block in benchmarks/wmt24pp/README.md](../../benchmarks/wmt24pp/README.md#end-to-end-reproduction-on-a-slurm-cluster-via-nemo-skills).
+
 ## Config
 
 | Key                 | Default               | Meaning                                               |
