@@ -113,6 +113,18 @@ python -c "from openai import OpenAI; c = OpenAI(); print([m.id for m in c.model
 ```
 </Accordion>
 
+<Accordion title="404 with double-slash in the URL">
+A trailing slash on `policy_base_url` produces double-slash request paths (for example, `https://api.example.com/v1//responses`) that some providers reject as 404. Remove the trailing slash:
+
+```yaml
+# Wrong
+policy_base_url: https://api.example.com/v1/
+
+# Right
+policy_base_url: https://api.example.com/v1
+```
+</Accordion>
+
 ## Next Steps
 
 You're configured. Run the [Quickstart](/latest/get-started/quickstart) to score your first rollout.

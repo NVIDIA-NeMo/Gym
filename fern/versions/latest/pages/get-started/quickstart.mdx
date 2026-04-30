@@ -50,7 +50,19 @@ That's GPT-4.1's win rate playing 10 hands of Blackjack against the dealer.
    responses_api_models/openai_model/configs/openai_model.yaml]"
    ```
 
-   **✅ Success Check**: Four `Uvicorn running on http://127.0.0.1:<port>` lines print — one each for the head, [resources, model, and agent servers](/latest/about/concepts/core-components). Leave this terminal running.
+   `ng_run` blocks while the [resources, model, and agent servers](/latest/about/concepts/core-components) run. Leave this terminal running and open a second terminal for the next steps.
+
+   In Terminal 2, verify the servers came up healthy:
+
+   ```bash
+   ng_status
+   ```
+
+   **✅ Success Check**: `ng_status` reports `4 servers found (4 healthy, 0 unhealthy)`.
+
+   <Tip>
+   On a repeat run with no dependency changes, append `+skip_venv_if_present=true` to `ng_run` to skip venv re-creation and start the servers faster.
+   </Tip>
 
 4. **Collect Rollouts** (Terminal 2)
 
