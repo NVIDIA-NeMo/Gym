@@ -51,6 +51,18 @@ if "TRANSFORMERS_CACHE" not in environ:
 # TODO When `TRANSFORMERS_CACHE` is no longer supported in transformers>=5.0.0, migrate to `HF_HOME`
 # environ["HF_HOME"] = join(CACHE_DIR, "huggingface")
 
+
+OLD_PRINT = print
+
+
+def print_always_flushes(*args, **kwargs) -> None:
+    kwargs["flush"] = True
+    OLD_PRINT(*args, **kwargs)
+
+
+__builtins__["print"] = print_always_flushes
+
+
 from nemo_gym.package_info import (
     __contact_emails__,
     __contact_names__,

@@ -1,15 +1,12 @@
 {
   "name": "nemo-gym-docs",
   "private": true,
-  "description": "Fern documentation site for NeMo Gym. Run `npm install` then `npm run dev`.",
+  "description": "Fern documentation site for NeMo Gym. Run `npm run dev` to preview locally.",
   "scripts": {
-    "check": "fern check",
-    "dev": "fern docs dev",
-    "generate": "fern generate --docs",
-    "generate:library": "fern docs md generate"
-  },
-  "devDependencies": {
-    "fern-api": "^4.80.3"
+    "check": "npx -y fern-api@latest check",
+    "dev": "npx -y fern-api@latest docs dev",
+    "generate": "npx -y fern-api@latest generate --docs",
+    "generate:library": "npx -y fern-api@latest docs md generate"
   },
   "engines": {
     "node": ">=20"

@@ -52,12 +52,6 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version: '20'
-          cache: 'npm'
-          cache-dependency-path: fern/package-lock.json
-
-      - name: Install Fern CLI
-        working-directory: ./fern
-        run: npm ci
 
       - name: Publish Docs
         env:
