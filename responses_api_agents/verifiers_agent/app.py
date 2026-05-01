@@ -221,6 +221,24 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
             else:
                 output.append(NeMoGymEasyInputMessage(role=role, content=_text(msg.get("content"))).model_dump())
 
+        if not any(item.get("generation_token_ids") for item in output):
+            err = rollout_output.get("error") or {}
+            err_msg = err.get("error") or err.get("error_chain_repr") or "unknown (no error info on rollout_output)"
+            logger.warning(
+                "[verifiers_agent] rollout produced no trainable tokens. This can happen when sandbox concurrency quota is exceeded. Returning empty trajectory. "
+                "Underlying error: %s",
+                err_msg,
+            )
+            output.append(
+                NeMoGymResponseOutputMessageForTraining(
+                    id="msg_empty",
+                    content=[NeMoGymResponseOutputText(text="", annotations=[])],
+                    prompt_token_ids=[0],
+                    generation_token_ids=[0],
+                    generation_log_probs=[0.0],
+                ).model_dump()
+            )
+
         return output
 
     @staticmethod
