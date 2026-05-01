@@ -56,7 +56,17 @@ def ensure_bcb_venv(venv_path: Path, python_version: str = "3.10") -> Path:
     subprocess.check_call(["uv", "venv", "--seed", "--python", python_version, str(venv_path)])
 
     # numpy first to lock in 1.26.4 before bigcodebench's transitive deps pull a different version.
-    subprocess.check_call(["uv", "pip", "install", "--python", str(python_bin), NUMPY_PIN, BIGCODEBENCH_VERSION_SPEC])
+    # ``--no-deps`` on bigcodebench: the package's own ``install_requires`` pulls
+    # ``vllm`` + ``torch`` (~847 MB) for its gen/serve modules, neither of which
+    # we use. The resource server only calls ``bigcodebench.eval.untrusted_check``,
+    # whose runtime deps come from requirements-eval.txt below. Skipping the
+    # transitive install saves ~15 min on cold-start and avoids ENOSPC on
+    # cluster nodes whose container ``/root/.cache`` is too small for the torch
+    # wheel.
+    subprocess.check_call(["uv", "pip", "install", "--python", str(python_bin), NUMPY_PIN])
+    subprocess.check_call(
+        ["uv", "pip", "install", "--python", str(python_bin), "--no-deps", BIGCODEBENCH_VERSION_SPEC]
+    )
 
     # bigcodebench's upstream requirements-eval.txt has hard-conflicting pins
     # (numpy 1.21.2 vs tensorflow 2.11.0 vs keras 2.11.0 vs matplotlib 3.7.0).
