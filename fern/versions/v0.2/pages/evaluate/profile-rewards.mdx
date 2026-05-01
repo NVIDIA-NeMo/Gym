@@ -1,0 +1,124 @@
+---
+title: "Profile Rewards"
+description: "Compute per-task pass rates from a rollouts JSONL: pass@1, pass@k, success threshold. The bridge from raw rollouts to actionable evaluation results."
+position: 7
+---
+
+Once `ng_collect_rollouts` finishes you have a rollouts JSONL — one line per (task, repeat) pair. That file answers "what did the model say?" but not "which tasks did the model pass?" `ng_reward_profile` joins rollouts back to their inputs and produces a per-task profile: average reward, max reward, pass rate against a configurable threshold. This page covers the workflow, the flags, and how to read the output.
+
+## The flow
+
+Three commands turn rollouts into a dataset-level score:
+
+1. `ng_collect_rollouts` produces `rollouts.jsonl` — one line per rollout (`N` tasks × `+num_repeats` lines).
+2. `ng_reward_profile` produces `profiled.jsonl` — one line per task, with per-task aggregates.
+3. `python scripts/print_aggregate_results.py` collapses the per-task lines into a single dataset-level pass@1 / pass@k.
+
+`ng_reward_profile` is the middle step. The same flow works for any benchmark — `gpqa_diamond`, `aime25`, `bigcodebench`, your own customer eval.
+
+## The command
+
+```bash
+ng_reward_profile \
+    +input_jsonl_fpath=resources_servers/gpqa_diamond/data/example.jsonl \
+    +rollouts_jsonl_fpath=results/gpqa_diamond_rollouts.jsonl \
+    +output_jsonl_fpath=results/gpqa_diamond_profiled.jsonl \
+    +pass_threshold=1.0
+```
+
+Each line of `profiled.jsonl` carries the original task fields plus `avg_reward`, `std_reward`, `min_reward`, `max_reward`, `total_samples`. With `+pass_threshold` set, it also carries `pass_rate`, `pass_rate_total`, `pass_rate_passed`, and `pass_threshold`.
+
+<Accordion title="Flag reference">
+| Flag | Required | Meaning |
+|---|---|---|
+| `+input_jsonl_fpath` | yes | The original task dataset — same path you passed to `ng_collect_rollouts`. Profiled output preserves its fields. |
+| `+rollouts_jsonl_fpath` | yes | The rollouts JSONL produced by `ng_collect_rollouts`. Must come from a run with `+num_repeats >= 1`. |
+| `+output_jsonl_fpath` | yes | Destination for the per-task profiled JSONL. |
+| `+pass_threshold` | no | Reward value at or above which a rollout counts as a pass. Omit to skip the pass-rate columns. |
+</Accordion>
+
+For the full per-flag reference, refer to [`ng_reward_profile` in the CLI Commands page](/v0.2/reference/cli-commands#ng_reward_profile--nemo_gym_reward_profile).
+
+## pass@1 vs pass@k
+
+`ng_reward_profile` reports per-task aggregates. The dataset-level pass@1 / pass@k metrics are derived from those aggregates downstream — by `print_aggregate_results.py` for a quick read, or by the agent's `/aggregate_metrics` endpoint (which `ng_collect_rollouts` calls automatically) for the precise combinatorial form.
+
+| Metric | What it answers | Where you see it |
+|---|---|---|
+| **pass@1** | Single-rollout success rate, averaged across tasks. With binary rewards it's straight accuracy. | `avg_reward` in `profiled.jsonl`; `pass@1[avg-of-k]/accuracy` in agent metrics. |
+| **pass@k** | "At least one of `k` attempts succeeds" — Codex combinatorial estimator for binary rewards, `max` over `k` rollouts for graded ones. | `max_reward` in `profiled.jsonl`; `pass@k/accuracy` in agent metrics. |
+
+Both are the same quantity for `+num_repeats=1` and diverge as `+num_repeats` grows. For the precise definitions and the unbiased combinatorial estimator, refer to [Reward Semantics — pass@1 vs pass@k](/v0.2/about/concepts/reward-semantics#pass1-vs-passk).
+
+## Choosing a threshold
+
+`+pass_threshold` decides what counts as a pass when computing `pass_rate`. The right value depends on how your verifier rewards behave:
+
+| Reward shape | Threshold |
+|---|---|
+| Binary `{0.0, 1.0}` (most coding benchmarks, multiple-choice) | `+pass_threshold=1.0` |
+| Game-style `{-1.0, 0.0, 1.0}` (e.g. `blackjack`) | `+pass_threshold=1.0` for "win-only", or `+pass_threshold=0.0` for "win or draw". |
+| Graded `[0.0, 1.0]` (judge models, partial credit) | Whatever counts as success for your benchmark — `+pass_threshold=0.8` is common. |
+
+Skipping `+pass_threshold` gives you `avg_reward` / `max_reward` only — useful when the reward scale isn't binary and "pass rate" doesn't apply.
+
+## Variance and confidence
+
+`+num_repeats` controls how many independent rollouts are collected per task. `ng_reward_profile` aggregates across those repeats:
+
+- **`avg_reward`** is the per-task pass@1.
+- **`std_reward`** is the within-task standard deviation across the `+num_repeats` rollouts. High `std_reward` on a task means the model's behavior is flaky on that task; low means it's consistent.
+- **`max_reward`** is the per-task pass@k for binary rewards (continuous form for graded rewards).
+
+The standard servers target run-to-run variance below 1% on the same model. Raise `+num_repeats` until you're below that — for stable pass@1, 5-10 is typical; for tight confidence intervals, 16+. For pass@k, you need `+num_repeats >= k` rollouts per task or the metric is undefined.
+
+For across-run variance (running the same eval twice and comparing), refer to [Reward Semantics — Aggregation rules](/v0.2/about/concepts/reward-semantics#aggregation-rules).
+
+## Reading the profiled output
+
+One line of `profiled.jsonl` looks roughly like:
+
+```json
+{
+  "responses_create_params": { "input": [{"role": "user", "content": "..."}] },
+  "verifier_metadata": { "answer": "C" },
+  "task_index": 0,
+  "avg_reward": 0.6,
+  "std_reward": 0.5477,
+  "min_reward": 0.0,
+  "max_reward": 1.0,
+  "total_samples": 5,
+  "pass_rate": 0.6,
+  "pass_rate_total": 5,
+  "pass_rate_passed": 3,
+  "pass_threshold": 1.0
+}
+```
+
+The original task fields (`responses_create_params`, `verifier_metadata`, `task_index`) are preserved unchanged. The aggregates are appended. To find the tasks the model consistently fails, filter for `pass_rate == 0`; for consistently-passing tasks, `pass_rate == 1`; partially-flaky tasks sit between.
+
+## From profiled to a single score
+
+For a quick dataset-level read, aggregate the per-task lines:
+
+```bash
+python scripts/print_aggregate_results.py +jsonl_fpath=results/gpqa_diamond_profiled.jsonl
+```
+
+The script averages every numeric field across rows. `avg_reward` becomes pass@1 (single-rollout accuracy), `max_reward` becomes pass@k (best-of-k), `pass_rate` is the fraction of tasks that passed at the threshold.
+
+For the canonical, combinatorial pass@k report — the form most papers cite — `ng_collect_rollouts` already invoked the agent's `/aggregate_metrics` endpoint after rollouts finished and wrote the result alongside `rollouts.jsonl`. Refer to [Run a Benchmark](/v0.2/evaluate/run-a-benchmark) for the full flow.
+
+## Common mistakes
+
+- **`+num_repeats < k` for pass@k.** The combinatorial estimator needs at least `k` rollouts per task; with fewer, pass@k is undefined or collapses to pass@1.
+- **Wrong `+pass_threshold` for graded rewards.** A judge that returns 0.7 for "mostly correct" gets a pass rate of 0 if `+pass_threshold=1.0`. Match the threshold to the reward scale.
+- **Mixing rollouts from different models or agent configs.** `ng_reward_profile` joins on `task_index` and doesn't check provenance. If `rollouts.jsonl` has rollouts from two different runs concatenated, the profile is meaningless.
+- **Profiling before rollouts finished.** If `ng_collect_rollouts` was killed mid-run, `rollouts.jsonl` is partial. Re-run with `+resume_from_cache=true` to fill in the gaps before profiling.
+- **Forgetting that errored rollouts that didn't write a row aren't aggregated.** Per [Reward Semantics — Aggregation rules](/v0.2/about/concepts/reward-semantics#aggregation-rules), only rollouts that wrote a JSONL line count. If your verifier crashed and dropped rows, the score is computed against the surviving subset.
+
+## Next steps
+
+- [Inspect Failures](/v0.2/evaluate/inspect-failures) — drill into the tasks where `pass_rate == 0`.
+- [Reward Semantics](/v0.2/about/concepts/reward-semantics) — the full scoring contract: errors, retries, aggregation.
+- [Footguns](/v0.2/troubleshooting/footguns) — symptom-driven fixes for common eval failures.

@@ -1,0 +1,160 @@
+---
+title: "Validate Your Setup"
+description: "Confirm your NeMo Gym install + model credentials produce expected results before running real evals. Every official benchmark ships a smoke-test command."
+position: 3
+---
+
+Don't run a real eval until your setup produces expected results on a known benchmark. This page is the smoke-test pattern: pick a small benchmark, run a few rollouts, compare to expected scores. If the smoke test passes, your install, your `env.yaml`, and your model endpoint are all correctly wired.
+
+## Why Validate First
+
+A real eval can run for hours and cost real money. If your `env.yaml` points at the wrong endpoint, your model name has a typo, or a benchmark dependency failed to install, you'd rather know in two minutes than four hours. Validation is a cheap pre-flight: small dataset slice, small repeat count, known-good baseline.
+
+It also de-risks divergence. SWE-bench's issue queue has years of "I'm not getting the published number" reports — most resolved into install drift, not framework bugs. Running a smoke test against an expected-output contract makes drift visible immediately.
+
+## The Smoke-Test Pattern
+
+Three steps. The whole flow takes about two minutes on a small benchmark.
+
+1. **Pick a small benchmark.** [`blackjack`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/blackjack) is the canonical one — its dataset is generated on the fly, and a 10-rollout run costs about $0.05 in OpenAI usage. Other fast options: `gpqa_diamond` (5 graduate-level science MCQs), `example_single_tool_call` (one tool call per task).
+
+2. **Run with a known model.** Whatever's in your `env.yaml` as `policy_model_name` — typically `gpt-4.1` or another OpenAI-compatible model with a published baseline.
+
+3. **Compare to expected output.** Every official benchmark publishes an expected reward distribution. If your aggregate metric lands within the documented tolerance, your setup is correct. If it doesn't, fix the install before debugging the model.
+
+## Worked Example: Blackjack
+
+`blackjack` is the recommended smoke-test target. Reward scale is `{-1.0, 0.0, 1.0}`, so a "correct" run produces a clearly negative mean (the dealer wins more often than a naive policy hits).
+
+1. **Start the servers** (Terminal 1).
+
+   ```bash
+   ng_run "+config_paths=[\
+   resources_servers/blackjack/configs/blackjack.yaml,\
+   responses_api_models/openai_model/configs/openai_model.yaml]"
+   ```
+
+2. **Confirm health** (Terminal 2).
+
+   ```bash
+   ng_status
+   ```
+
+   Expect `3 servers found (3 healthy, 0 unhealthy)`.
+
+3. **Collect rollouts.**
+
+   ```bash
+   mkdir -p results
+   ng_collect_rollouts \
+       +agent_name=blackjack_gymnasium_agent \
+       +input_jsonl_fpath=resources_servers/blackjack/data/example.jsonl \
+       +output_jsonl_fpath=results/blackjack_validation.jsonl \
+       +num_repeats=10
+   ```
+
+   The example dataset is identical rows; each rollout deals a fresh hand. Ten repeats produce ten independent games per row.
+
+4. **Profile rewards.**
+
+   ```bash
+   ng_reward_profile \
+       +input_jsonl_fpath=resources_servers/blackjack/data/example.jsonl \
+       +rollouts_jsonl_fpath=results/blackjack_validation.jsonl \
+       +output_jsonl_fpath=results/blackjack_profiled.jsonl \
+       +pass_threshold=1.0
+   ```
+
+5. **Print aggregate.**
+
+   ```bash
+   python scripts/print_aggregate_results.py +jsonl_fpath=results/blackjack_profiled.jsonl
+   ```
+
+### Expected Output
+
+GPT-4.1 lands around `-0.6 ± 0.1` mean reward over 10 repeats against the fixed dealer. That negative mean is the validation contract: a correctly-wired install on a competent model produces a clearly losing player against the house.
+
+| Outcome | What to do |
+|---|---|
+| Mean reward in `[-0.7, -0.5]` | Validation passed. Setup is correct. Proceed to your real eval. |
+| Mean reward way off (e.g. `0.0`, `-1.0`, all-NaN) | Setup is misconfigured. Skip ahead to [Troubleshooting Validation Failures](#troubleshooting-validation-failures). |
+| Rollouts errored out | Install or `env.yaml` issue. Re-check [Configuration](/v0.2/about/concepts/configuration) and [Footguns](/v0.2/troubleshooting/footguns). |
+
+For the full reward semantics — why blackjack uses `{-1.0, 0.0, 1.0}` and how `pass@k` is computed for non-binary rewards — refer to [Task Verification](/v0.2/about/concepts/task-verification).
+
+## Per-Benchmark Validation Contracts
+
+Every official environment ships a validation recipe in its README. The contract has four fields:
+
+```
+Benchmark:          <name>
+Validation command: ng_collect_rollouts +input_jsonl_fpath=data/example.jsonl ...
+Expected reward:    <value> ± <tolerance> over <k> rollouts on <model>
+Dataset version:    <version> (committed example.jsonl)
+```
+
+If you don't see expected results, fix the install before debugging the model. The smoke test isolates framework, install, and credentials — model behavior is downstream of those.
+
+A few examples that ship today:
+
+| Benchmark | Validation slice | Expected on GPT-4.1 |
+|---|---|---|
+| `blackjack` | `data/example.jsonl`, `+num_repeats=10` | mean reward `-0.6 ± 0.1` |
+| `gpqa_diamond` | `data/example.jsonl` (5 tasks), `+num_repeats=5` | accuracy `0.55 - 0.65` |
+| `example_single_tool_call` | `data/example.jsonl`, `+num_repeats=3` | reward `~1.0` (smoke test, deterministic) |
+
+Cross-check the benchmark's README before relying on a specific tolerance — published numbers are the source of truth, this table is a snapshot.
+
+## Troubleshooting Validation Failures
+
+Three common patterns when validation diverges. Diagnose in order.
+
+<Accordion title="Rollouts errored — no JSONL output">
+Almost always an install or `env.yaml` problem. The `/run` endpoint failed before it could verify. Common causes: missing `policy_base_url`, wrong `policy_api_key`, model name typo, or the resources server's tool dependency didn't install (e.g. Lean for `math_formal_lean`).
+
+Check Terminal 1 for the stack trace. Cross-reference [Footguns](/v0.2/troubleshooting/footguns) — the symptom-indexed page covers the common ones: Hydra quoting, `RAY_TMPDIR`, Responses-vs-Chat endpoint confusion, cookies-not-propagating.
+</Accordion>
+
+<Accordion title="Mean reward way below expected">
+Usually a model-server misconfiguration. Most likely:
+
+- **Wrong endpoint.** `policy_base_url` points at a chat-completions endpoint when the agent expects `/v1/responses`, or vice versa. Refer to [Configuration](/v0.2/about/concepts/configuration).
+- **Wrong model name.** Provider returns 4xx; the agent reports the failure as a low reward. Check Terminal 1 for `404 Not Found` or `model not found`.
+- **API key without access.** Provider returns 401/403. The aiohttp client retries 3x, then gives up; the rollout records a failure that profiles as `reward=0.0`.
+
+Run `ng_dump_config "+config_paths=[...]"` to confirm the merged config is what you expect.
+</Accordion>
+
+<Accordion title="Mean reward slightly off">
+Probably normal variance. Models are stochastic; a run of 10 rollouts on 5 tasks has real run-to-run jitter. Two checks:
+
+- **Raise `+num_repeats`.** Push it until variance is below 1% across runs on the same model — that's the threshold the standard servers target.
+- **Confirm temperature.** `+responses_create_params={temperature: 0}` removes most variance for a sanity check. If `temperature: 0` lands inside the expected range and `temperature: 1.0` doesn't, your variance is just sampling jitter.
+
+If variance settles down but the mean is still off the published number, you may have a real divergence — re-check the dataset version and tool versions called by the verifier.
+</Accordion>
+
+## What Validation Does Not Catch
+
+Validation is a smoke test, not a correctness proof. It confirms:
+
+- Framework install is functional.
+- Provider credentials authenticate.
+- The benchmark's tool chain (compilers, judges, sandboxes) runs.
+- Reward signal flows end-to-end.
+
+It does not confirm:
+
+- Your training pipeline integration is correct — that's a different harness.
+- Custom code changes preserve scoring semantics — you need full-dataset baselines for that.
+- Numbers will reproduce on a different cluster — Lustre filesystems, locale settings, and tool versions can drift. Validate again on the new machine.
+- Your model is good — a low mean reward against an honest baseline is the model's problem, not the framework's.
+
+For the broader reproducibility picture, refer to [Task Verification](/v0.2/about/concepts/task-verification) (scoring contract), [Footguns](/v0.2/troubleshooting/footguns) (known operational gotchas), and the per-benchmark README (dataset version + expected output).
+
+## Next Steps
+
+- [Run a Benchmark Suite](/v0.2/benchmarks/run-benchmark-suite) — once validation passes, run the full eval.
+- [Benchmark Catalog](/v0.2/evaluate/benchmark-catalog) — pick a different benchmark; every entry links to its README and validation recipe.
+- [Task Verification](/v0.2/about/concepts/task-verification) — the scoring contract: what counts as a pass, how errors are handled.

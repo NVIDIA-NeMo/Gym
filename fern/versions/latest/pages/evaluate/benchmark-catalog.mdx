@@ -1,0 +1,179 @@
+---
+title: "Benchmark Catalog"
+description: "Every shipped NeMo Gym environment grouped by domain (coding, math, reasoning, agentic) with verified-flag status and config paths."
+position: 9
+---
+
+Every environment that ships with NeMo Gym lives in [`resources_servers/`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers) and has a config under `resources_servers/<name>/configs/`. This catalog groups them by domain so you can pick one without browsing the directory tree.
+
+<Tip>
+Each row links to the resources server's README on GitHub. For the live programmatic listing, run `ng_list_benchmarks` in your shell — it scans the repo and prints every config it finds.
+</Tip>
+
+## Status Legend
+
+The `verified:` field in each YAML config tracks whether the team has baselined and reviewed the benchmark.
+
+| Status | Meaning |
+|---|---|
+| **Verified** | `verified: true` — baselined by the team, expected output documented, reward profile reviewed. Safe to use as a published-number reference. |
+| **Provisional** | `verified: false` — runnable, but expected output is not locked. Fine for development; cross-check before publishing numbers. |
+| **External wrapper** | Wraps a third-party benchmark library (Aviary, Reasoning Gym, OpenEnv, VLMEvalKit). Status mirrors the upstream library; verify in their docs. |
+
+Most shipped benchmarks today are `verified: false`. That's not a quality signal — it tracks formal baselining, not whether the benchmark works. The team is actively raising coverage; new entries to the catalog start as Provisional and graduate as baselines are locked.
+
+## Coding
+
+Code generation, execution-based grading, and SQL.
+
+| Name | Status | Description | Config |
+|---|---|---|---|
+| [`code_gen`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/code_gen) | Verified | Sandboxed code execution with binary reward. Subprocess-via-Ray for compilation/run. | `resources_servers/code_gen/configs/code_gen.yaml` |
+| [`competitive_coding_challenges`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/competitive_coding_challenges) | Provisional | Execution of competitive programming competition questions. | `resources_servers/competitive_coding_challenges/configs/competitive_coding_challenges.yaml` |
+| [`swerl_gen`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/swerl_gen) | Provisional | SWE-style sandboxed evaluation: patch generation or reproduction-test generation. | `resources_servers/swerl_gen/configs/swerl_gen.yaml` |
+| [`swerl_llm_judge`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/swerl_llm_judge) | Provisional | SWE-style multiple-choice tasks scored via `<solution>` choice with LLM judge. | `resources_servers/swerl_llm_judge/configs/swerl_llm_judge.yaml` |
+| [`bird_sql`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/bird_sql) | Provisional | Text-to-SQL on BIRD dev (1534 SQLite tasks). Binary reward from result-set equality. | `resources_servers/bird_sql/configs/bird_sql.yaml` |
+| [`spider2_lite`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/spider2_lite) | Provisional | Text-to-SQL on Spider 2.0-Lite (135 SQLite tasks). Binary reward from result-set equivalence. | `resources_servers/spider2_lite/configs/spider2_lite.yaml` |
+| [`text_to_sql`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/text_to_sql) | Provisional | Text-to-SQL with LLM-as-judge equivalence checking. | `resources_servers/text_to_sql/configs/text_to_sql.yaml` |
+| [`cvdp`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/cvdp) | Provisional | CVDP benchmark dataset for code generation. | `resources_servers/cvdp/configs/cvdp.yaml` |
+
+## Math
+
+Symbolic verification, formal proofs, and judge-graded math QA.
+
+| Name | Status | Description | Config |
+|---|---|---|---|
+| [`math_with_autograder`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/math_with_autograder) | Provisional | Math QA verified by Skills-style autograder LLM judge with math-verify symbolic fallback. | `resources_servers/math_with_autograder/configs/math_with_autograder.yaml` |
+| [`math_with_judge`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/math_with_judge) | Provisional | OpenMathReasoning, MathStackOverflow, DAPO17k variants. math-verify + LLM-as-judge. | `resources_servers/math_with_judge/configs/math_with_judge.yaml` |
+| [`math_with_code`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/math_with_code) | Provisional | Competitive math problems solved with calculator tools. | `resources_servers/math_with_code/configs/math_with_code.yaml` |
+| [`math_advanced_calculations`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/math_advanced_calculations) | Provisional | Instruction-following math with counter-intuitive calculators. | `resources_servers/math_advanced_calculations/configs/math_advanced_calculations.yaml` |
+| [`math_formal_lean`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/math_formal_lean) | Provisional | Lean4 formal proof verification, single-turn and multi-turn variants. | `resources_servers/math_formal_lean/configs/math_formal_lean.yaml` |
+| [`math_proof_judgement`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/math_proof_judgement) | Provisional | Binary judgement of math proofs (Yes/No). | `resources_servers/math_proof_judgement/configs/math_proof_judgement.yaml` |
+| [`proof_verification`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/proof_verification) | Provisional | Proof verification scored against ground truth and meta-verifier. | `resources_servers/proof_verification/configs/proof_verification.yaml` |
+| [`proof_judge`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/proof_judge) | Provisional | Theorem proving with verifier + meta-verifier judge. | `resources_servers/proof_judge/configs/proof_judge.yaml` |
+| [`proof_genselect`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/proof_genselect) | Provisional | Pairwise proof selection with binary correctness reward. | `resources_servers/proof_genselect/configs/proof_genselect.yaml` |
+| [`ns_tools`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/ns_tools) | Provisional | NeMo Skills tool execution with math verification. | `resources_servers/ns_tools/configs/ns_tools.yaml` |
+| [`newton_bench`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/newton_bench) | Provisional | Scientific law discovery via agentic experimentation across 12 physics domains. | `resources_servers/newton_bench/configs/newton_bench.yaml` |
+
+## Knowledge & Reasoning
+
+Multiple-choice QA, factual benchmarks, ARC-AGI variants, and the Reasoning Gym wrapper.
+
+| Name | Status | Description | Config |
+|---|---|---|---|
+| [`gpqa_diamond`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/gpqa_diamond) | Provisional | GPQA Diamond graduate-level multiple-choice science. | `resources_servers/gpqa_diamond/configs/gpqa_diamond.yaml` |
+| [`mcqa`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/mcqa) | Provisional | Generic multi-choice question answering. | `resources_servers/mcqa/configs/mcqa.yaml` |
+| [`omniscience`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/omniscience) | Provisional | Factual knowledge QA with LLM judge verification. | `resources_servers/omniscience/configs/omniscience.yaml` |
+| [`mrcr`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/mrcr) | Provisional | Multi-round coreference resolution over multi-turn conversations. | `resources_servers/mrcr/configs/mrcr.yaml` |
+| [`multichallenge`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/multichallenge) | Provisional | Inference memory, instruction retention, version editing, self-coherence. | `resources_servers/multichallenge/configs/multichallenge.yaml` |
+| [`arc_agi`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/arc_agi) | Provisional | ARC-AGI puzzle benchmark. | `resources_servers/arc_agi/configs/arc_agi.yaml` |
+| [`nvarc`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/nvarc) | Provisional | ARC-AGI transductive (grid-output) and inductive (Python `transform()`) modes. | `resources_servers/nvarc/configs/transductive.yaml` |
+| [`ether0`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/ether0) | Provisional | ether0 chemistry benchmark verifiers. | `resources_servers/ether0/configs/ether0.yaml` |
+| [`rdkit_chemistry`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/rdkit_chemistry) | Provisional | RDKit-based chemistry verification, with optional ns_tools Python tool-use wrapper. | `resources_servers/rdkit_chemistry/configs/rdkit_chemistry.yaml` |
+| [`reasoning_gym`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/reasoning_gym) | Verified (wrapper) | 100+ tasks: algebra, arithmetic, computation, cognition, geometry, graph theory, logic, games. Wraps Prime Intellect's [Reasoning Gym](https://github.com/open-thought/reasoning-gym). | `resources_servers/reasoning_gym/configs/reasoning_gym.yaml` |
+| [`equivalence_llm_judge`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/equivalence_llm_judge) | Verified (variant) | Short-answer questions with LLM-as-judge. `nl2bash-equivalency` variant is verified. | `resources_servers/equivalence_llm_judge/configs/equivalence_llm_judge.yaml` |
+| [`equivalence_rule`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/equivalence_rule) | Provisional | Question-answering with rule-based reward. | `resources_servers/equivalence_rule/configs/lc.yaml` |
+
+## Agentic & Multi-Turn
+
+Multi-step environments, search agents, terminal-style task execution.
+
+| Name | Status | Description | Config |
+|---|---|---|---|
+| [`browsecomp_advanced_harness`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/browsecomp_advanced_harness) | Provisional | Search-based query-satisfaction harness. | `resources_servers/browsecomp_advanced_harness/configs/browsecomp_advanced_harness.yaml` |
+| [`tavily_search`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/tavily_search) | Provisional | Search-tool agent using Tavily, with OpenAI or vLLM judge variants. | `resources_servers/tavily_search/configs/tavily_search_judge_openai_model.yaml` |
+| [`google_search`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/google_search) | Provisional | MCQA with search tools integrated. | `resources_servers/google_search/configs/google_search.yaml` |
+| [`finance_sec_search`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/finance_sec_search) | Provisional | SEC EDGAR filing search for financial analysis questions. | `resources_servers/finance_sec_search/configs/finance_sec_search.yaml` |
+| [`terminal_multi_harness`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/terminal_multi_harness) | Provisional | Next-step pivot RL with OpenCode, Codex, and Agent006 harnesses. | `resources_servers/terminal_multi_harness/configs/terminal_multi_harness_codex.yaml` |
+| [`terminus_judge`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/terminus_judge) | Provisional | Single-step terminal tasks with judge variants (string-only, simple, rubrics-v4). | `resources_servers/terminus_judge/configs/terminus_judge.yaml` |
+| [`single_step_tool_use_with_argument_comparison`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/single_step_tool_use_with_argument_comparison) | Provisional | Conversational tool-use RL from expert trajectories. SWE, search, and tool-call schema variants. | `resources_servers/single_step_tool_use_with_argument_comparison/configs/single_step_tool_use_with_argument_comparison.yaml` |
+| [`workplace_assistant`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/workplace_assistant) | Provisional | Multi-step workplace tool-using assistant. | `resources_servers/workplace_assistant/configs/workplace_assistant.yaml` |
+| [`calendar`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/calendar) | Provisional | Multi-turn calendar scheduling with natural-language constraints. | `resources_servers/calendar/configs/calendar.yaml` |
+| [`xlam_fc`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/xlam_fc) | Provisional | Salesforce xlam-function-calling-60k tool calling tasks. | `resources_servers/xlam_fc/configs/xlam_fc.yaml` |
+
+## Instruction Following
+
+Format compliance, structured output, and IFEval-style benchmarks.
+
+| Name | Status | Description | Config |
+|---|---|---|---|
+| [`ifbench`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/ifbench) | Provisional | AllenAI IFBench instruction-following (57 instruction types). | `resources_servers/ifbench/configs/ifbench.yaml` |
+| [`instruction_following`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/instruction_following) | Provisional | IFEval and IFBench-style instruction-following tasks. | `resources_servers/instruction_following/configs/instruction_following.yaml` |
+| [`format_verification`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/format_verification) | Provisional | Citation/reference markers (string match) and freeform formatting (regex). | `resources_servers/format_verification/configs/citation_format.yaml` |
+| [`structured_outputs`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/structured_outputs) | Provisional | JSON, YAML, XML, TOML, CSV structured-output verification. v3 and v4 schemas. | `resources_servers/structured_outputs/configs/structured_outputs_v4.yaml` |
+| [`structeval`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/structeval) | Provisional | StructEval non-renderable format verification. | `resources_servers/structeval/configs/structeval_nonrenderable.yaml` |
+
+## Safety & Alignment
+
+Refusal behavior, jailbreak detection, prompt injection resistance.
+
+| Name | Status | Description | Config |
+|---|---|---|---|
+| [`xstest`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/xstest) | Provisional | XSTest exaggerated-safety (over-refusal) evaluation. | `resources_servers/xstest/configs/xstest.yaml` |
+| [`over_refusal_detection`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/over_refusal_detection) | Provisional | XSTest-based over-refusal detection. Variants for Nemotron judge and TP8. | `resources_servers/over_refusal_detection/configs/over_refusal_detection.yaml` |
+| [`jailbreak_detection`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/jailbreak_detection) | Provisional | Jailbreak detection with Nemotron judge + combined reward. | `resources_servers/jailbreak_detection/configs/jailbreak_detection_nemotron_combined_reward_tp8.yaml` |
+| [`indirect_prompt_injection`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/indirect_prompt_injection) | Provisional | Indirect prompt injection resistance for tool-use agents. | `resources_servers/indirect_prompt_injection/configs/indirect_prompt_injection.yaml` |
+| [`abstention`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/abstention) | Provisional | Three-tier reward for abstention training on HotPotQA with LLM judge. | `resources_servers/abstention/configs/abstention.yaml` |
+| [`genrm_compare`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/genrm_compare) | Provisional | GenRM pairwise comparison for RLHF training. | `resources_servers/genrm_compare/configs/genrm_compare.yaml` |
+
+## Vision & Multimodal
+
+VLM evaluation kits and image-grounded tasks.
+
+| Name | Status | Description | Config |
+|---|---|---|---|
+| [`vlm_eval_kit`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/vlm_eval_kit) | External wrapper | Wraps [VLMEvalKit](https://github.com/open-compass/VLMEvalKit). MMBench and OCRBench variants ship as separate configs. | `resources_servers/vlm_eval_kit/configs/vlm_eval_kit.yaml` |
+| [`labbench2_vlm`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/labbench2_vlm) | Provisional | Scientific figure/table QA (figqa2, tableqa2) with LLM-as-judge. | `resources_servers/labbench2_vlm/configs/labbench2_vlm.yaml` |
+| [`circle_count`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/circle_count) | Provisional | Count circles of a given color in images. | `resources_servers/circle_count/configs/circle_count.yaml` |
+| [`circle_click`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/circle_click) | Provisional | Click on circles in images. | `resources_servers/circle_click/configs/circle_click.yaml` |
+| [`asr_with_pc`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/asr_with_pc) | Provisional | ASR with WER scoring (standard, case-sensitive, punctuation+capitalization). | `resources_servers/asr_with_pc/configs/asr_with_pc.yaml` |
+
+## Long-Context & Other
+
+Long-context retrieval stress tests, miscellaneous and standalone evals.
+
+| Name | Status | Description | Config |
+|---|---|---|---|
+| [`ruler`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/ruler) | Provisional | RULER long-context retrieval benchmark. | `resources_servers/ruler/configs/ruler.yaml` |
+| [`aalcr`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/aalcr) | Provisional | Standalone evaluation. | `resources_servers/aalcr/configs/aalcr.yaml` |
+| [`gdpval`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/gdpval) | Provisional | Standalone evaluation. | `resources_servers/gdpval/configs/gdpval.yaml` |
+
+## Games & Smoke Testing
+
+Gymnasium-style multi-step environments and minimal examples.
+
+| Name | Status | Description | Config |
+|---|---|---|---|
+| [`blackjack`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/blackjack) | Provisional | Multi-step gymnasium-style blackjack. Reward `{-1, 0, 1}`. Recommended for [Validate Your Setup](/latest/evaluate/validate-your-setup). | `resources_servers/blackjack/configs/blackjack.yaml` |
+| [`gymnasium`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/gymnasium) | Base class | Base class for Gymnasium-style servers. Not a standalone benchmark. | `resources_servers/gymnasium/configs/gymnasium.yaml` |
+| [`example_single_tool_call`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/example_single_tool_call) | Provisional | Simplest example: one tool call per task. Template for new servers. | `resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml` |
+| [`example_multi_step`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/example_multi_step) | Provisional | Multi-step tool calling example. | `resources_servers/example_multi_step/configs/example_multi_step.yaml` |
+| [`example_session_state_mgmt`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/example_session_state_mgmt) | Provisional | Session state management example (in-memory). | `resources_servers/example_session_state_mgmt/configs/example_session_state_mgmt.yaml` |
+
+## External Library Wrappers
+
+Environments that wrap third-party benchmark libraries. Status mirrors the upstream library — check upstream docs for expected scores and dataset versions.
+
+| Name | Wraps | Description | Config |
+|---|---|---|---|
+| [`aviary`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/aviary) | [FutureHouse Aviary](https://github.com/Future-House/aviary) | GSM8k, HotPotQA, BBH (bundled and remote), BixBench. Multiple configs ship per task. | `resources_servers/aviary/configs/aviary.yaml` |
+| [`reasoning_gym`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/reasoning_gym) | [Reasoning Gym](https://github.com/open-thought/reasoning-gym) | 100+ reasoning tasks. ReWOO, reflection, parallel-thinking, orchestrator agent variants. | `resources_servers/reasoning_gym/configs/reasoning_gym.yaml` |
+| [`openenv`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/openenv) | OpenEnv (MCP) | Echo, coding, and maze environments. Length-based rewards on echo; stdout/stderr-graded coding. | `resources_servers/openenv/configs/openenv_coding.yaml` |
+| [`vlm_eval_kit`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/vlm_eval_kit) | [VLMEvalKit](https://github.com/open-compass/VLMEvalKit) | All VLMEvalKit benchmarks. MMBench-DEV-EN-V11 and OCRBench ship as separate configs. | `resources_servers/vlm_eval_kit/configs/vlm_eval_kit.yaml` |
+
+## How to Add a Benchmark to This Catalog
+
+The pre-commit hook `update-readme-table` auto-adds new YAML configs to the root `README.md` table. This catalog page is curated separately to group entries by domain and call out external wrappers — when you add a new benchmark, add a row here too.
+
+For the full author flow — resources server, verifier, dataset, baselining — refer to:
+
+- [Add a Benchmark](/latest/evaluate/add-a-benchmark) — short eval-side flow.
+- [Adding a Benchmark](/latest/environment-tutorials/adding-a-benchmark) — full author tutorial.
+
+A new benchmark earns the `Verified` flag once it has a baselined expected output, a documented validation recipe (refer to [Validate Your Setup](/latest/evaluate/validate-your-setup)), and team review.
+
+## Next Steps
+
+- [Run a Benchmark](/latest/evaluate/run-a-benchmark) — end-to-end eval flow.
+- [Validate Your Setup](/latest/evaluate/validate-your-setup) — confirm install before running a real eval.
+- [Reward Semantics](/latest/about/concepts/reward-semantics) — what the reward field means and how pass@k is computed.

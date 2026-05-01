@@ -1,0 +1,188 @@
+---
+title: "Inspect Failures"
+description: "Where to find rollout JSONL, model responses, verifier outputs, and server logs after a failed eval. How to replay a single task locally."
+position: 8
+---
+
+When a benchmark scores lower than expected, the first job is to see what actually happened on the failing tasks — the model's raw output, the verifier's reward, the server logs. This page is a map of where those artifacts live, how to find a specific failed task, and how to replay one task locally without re-running the whole eval.
+
+NeMo Gym today ships a JSONL-and-logs debugging surface, not a trajectory viewer UI. The flows below are what works with the artifacts the framework already writes.
+
+## What gets recorded
+
+After `ng_collect_rollouts` finishes, three artifacts exist on disk:
+
+| Artifact | Where | What's in it |
+|---|---|---|
+| **Rollouts JSONL** | `+output_jsonl_fpath` | One line per (task, repeat). Full verify response: reward, model output text, task index, plus environment-specific fields. |
+| **Materialized inputs JSONL** | `<output>_materialized_inputs.jsonl` (next to the rollouts file) | One line per task. The exact prompt, system messages, and verifier metadata sent to the agent. |
+| **Server logs** | The terminal running `ng_run` (Terminal 1 in the [Quickstart](/v0.2/get-started/quickstart)) | uvicorn / FastAPI logs from each server: head, agent, model, resources. HTTP status codes, exceptions, retry messages. |
+
+If you ran `ng_reward_profile` afterward, you also have a fourth artifact — the per-task profiled JSONL — covered in [Profile Rewards](/v0.2/evaluate/profile-rewards).
+
+## Anatomy of a rollouts JSONL line
+
+One line of `rollouts.jsonl` carries the verify response for a single rollout, plus a few framework fields. The shape depends on the resources server, but every line has the fields below at minimum:
+
+```json
+{
+  "reward": 0.0,
+  "response": {
+    "output_text": "<the model's full response text>",
+    "usage": { "input_tokens": 412, "output_tokens": 88 }
+  },
+  "task_index": 3,
+  "rollout_index": 1
+}
+```
+
+| Field | What it means |
+|---|---|
+| `reward` | The verifier's score. The single source of truth for whether this rollout passed. Refer to [Reward Semantics](/v0.2/about/concepts/reward-semantics) for the contract. |
+| `response.output_text` | What the model produced. The raw text before parsing — `<think>` blocks included if the model emitted any. |
+| `response.usage` | Token counts. Useful when investigating "model ran out of tokens before answering" failures. |
+| `task_index` | Index into the input dataset. Same `task_index` across `+num_repeats` rollouts for the same task. |
+| `rollout_index` | Repeat number for this task, `0..+num_repeats-1`. |
+
+Resources servers add their own fields by extending `BaseVerifyResponse`. Common additions: extracted answer (e.g. `extracted_answer: "C"`), per-test-case breakdowns for code-gen (`tests_passed: 3, tests_total: 5`), parser failure flags (`parse_failed: true`), judge rationales. Inspect the server's `app.py` — or the line itself — to see what's available for your benchmark.
+
+## Finding the failed tasks
+
+Three lookups cover most debug sessions.
+
+### Filter the rollouts JSONL for failures
+
+For binary-reward benchmarks, "failure" means `reward == 0.0`:
+
+```bash
+python3 -c "
+import json
+for line in open('results/gpqa_diamond_rollouts.jsonl'):
+    row = json.loads(line)
+    if row['reward'] == 0.0:
+        print(f\"task {row['task_index']} rollout {row['rollout_index']}: {row['response']['output_text'][:120]}...\")
+"
+```
+
+For graded rewards, swap the comparison for whatever counts as failure (e.g. `< 0.5`).
+
+### Match a failed `task_index` back to the input
+
+The materialized inputs file preserves task order. To see what was asked on a failed task:
+
+```bash
+python3 -c "
+import json
+target_idx = 3
+for line in open('results/gpqa_diamond_rollouts_materialized_inputs.jsonl'):
+    row = json.loads(line)
+    if row['task_index'] == target_idx:
+        print(json.dumps(row, indent=2))
+        break
+"
+```
+
+### Profile first, then drill in
+
+If you've run `ng_reward_profile`, the profiled JSONL already groups rollouts by task. Filter for `pass_rate == 0` to find tasks the model consistently fails — the most actionable failures (one-off errors are noise; consistent failures are signal). Refer to [Profile Rewards — Reading the profiled output](/v0.2/evaluate/profile-rewards#reading-the-profiled-output).
+
+## Server logs
+
+`ng_run` prints uvicorn logs for every server to the terminal it was launched from. The four streams are interleaved by default — head, agent, model, and resources servers all log to the same place.
+
+What to look for when a rollout failed:
+
+- **HTTP 5xx from a server** — a server raised an unhandled exception. The stack trace is in the same log stream a few lines above.
+- **HTTP 4xx from the model endpoint** — usually rate limit (429) or auth (401/403). Refer to [Footguns — Quota exceeded / 429](/v0.2/troubleshooting/footguns).
+- **Retry messages** — the aiohttp client retries 3 times with exponential backoff on transport-level failures. If you see retries succeeding, no action needed; if they all fail, the rollout aborts and no row is written.
+- **Cookie / session warnings on multi-turn agents** — multi-turn rollouts that lose session state report tools failing in the middle of the trajectory. Refer to [Footguns — Cookies / session state missing](/v0.2/troubleshooting/footguns).
+
+For "server returns 500 / `ng_run` fails to start" symptoms, refer to [Footguns](/v0.2/troubleshooting/footguns).
+
+## Replaying a single task locally
+
+Two paths, depending on how deep you need to go.
+
+### Subset the input and re-run
+
+Fastest. Build a one-task JSONL and re-run `ng_collect_rollouts`:
+
+```bash
+# Pull task 3 from the input file
+python3 -c "
+import json
+target_idx = 3
+with open('resources_servers/gpqa_diamond/data/example.jsonl') as f, \
+     open('/tmp/one_task.jsonl', 'w') as out:
+    for i, line in enumerate(f):
+        if i == target_idx:
+            out.write(line)
+            break
+"
+
+# Re-run with one repeat — fast, deterministic with temperature=0
+ng_collect_rollouts \
+    +agent_name=gpqa_diamond_simple_agent \
+    +input_jsonl_fpath=/tmp/one_task.jsonl \
+    +output_jsonl_fpath=/tmp/one_task_rollout.jsonl \
+    +num_repeats=1 \
+    "+responses_create_params={max_output_tokens: 16384, temperature: 0.0}"
+```
+
+Inspect `/tmp/one_task_rollout.jsonl` — the full verify response for that one task. Iterate: tweak the prompt, change the model, re-run.
+
+### Call the verifier directly
+
+When the failure is in `verify()` and not in the model, skip the agent entirely. Start the resources server (`ng_run` with just the resources server config) and POST to `/verify` directly with the model's known output. The request schema is the resources server's `VerifyRequest` class — same shape that the agent constructs internally. Refer to the [API Reference](/v0.2/api-reference) for endpoint details.
+
+This is the path for "the model output is correct but my verifier returns 0.0" — the verifier signature mismatch case. Refer to [Footguns — Reward is always zero](/v0.2/troubleshooting/footguns).
+
+## Side-by-side comparison
+
+NeMo Gym does not yet ship a built-in trajectory viewer or side-by-side diff UI. The recommended workflow today is to profile rewards from each run and join on `task_index` outside the framework:
+
+```bash
+# Run A
+ng_collect_rollouts +agent_name=... +output_jsonl_fpath=results/run_a.jsonl ...
+ng_reward_profile +rollouts_jsonl_fpath=results/run_a.jsonl +output_jsonl_fpath=results/run_a_profiled.jsonl ...
+
+# Run B (different model / agent / config)
+ng_collect_rollouts +agent_name=... +output_jsonl_fpath=results/run_b.jsonl ...
+ng_reward_profile +rollouts_jsonl_fpath=results/run_b.jsonl +output_jsonl_fpath=results/run_b_profiled.jsonl ...
+
+# Join in pandas / jq / your tool of choice
+python3 -c "
+import json
+a = {json.loads(l)['task_index']: json.loads(l) for l in open('results/run_a_profiled.jsonl')}
+b = {json.loads(l)['task_index']: json.loads(l) for l in open('results/run_b_profiled.jsonl')}
+for idx in sorted(a):
+    print(f\"task {idx}: A={a[idx]['avg_reward']:.2f} B={b[idx]['avg_reward']:.2f}\")
+"
+```
+
+Built-in trajectory viewing and automatic side-by-side comparison are on the roadmap.
+
+## Common debug patterns
+
+- **Every reward is 0.0.** Almost always a verifier signature mismatch — the verifier expects a different output format than the model produces. Refer to [Footguns — Reward is always zero](/v0.2/troubleshooting/footguns).
+- **Some rewards are 0, others fine.** Genuine failures: model errors, hard tasks, edge cases. Use `ng_reward_profile` to find the consistently-failing tasks (`pass_rate == 0`) and inspect their `response.output_text`.
+- **Rewards inconsistent across runs of the same model.** Non-determinism in the verifier (judge models with `temperature > 0`, network-backed search, wall-clock-dependent sandboxes) or in the model (`temperature > 0` in `responses_create_params`). Refer to [Reward Semantics — What we don't do (yet)](/v0.2/about/concepts/reward-semantics#what-we-dont-do-yet).
+- **Rollouts hang / never finish.** Long-running verifier with no per-`verify()` timeout. Set your own subprocess / sandbox timeouts inside the resources server. Refer to [Footguns](/v0.2/troubleshooting/footguns).
+- **Rollouts errored and didn't write a row.** Aggregates are computed against rollouts that wrote rows; missing rows are silently dropped from pass@1. Re-run with `+resume_from_cache=true` to fill the gaps. Refer to [Reward Semantics — Aggregation rules](/v0.2/about/concepts/reward-semantics#aggregation-rules).
+
+## What's missing today
+
+The framework does not yet ship:
+
+- A built-in trajectory viewer UI for stepping through multi-turn rollouts.
+- Automatic side-by-side diff between two runs (model A vs. model B, agent A vs. agent B).
+- Replay with input mutation — "re-run this rollout but change one message in the prompt."
+- Aggregated, structured server logs (logs are uvicorn-stream interleaved today).
+
+These are tracked. For the supported workflows in the meantime, the JSONL-and-logs path above covers the same ground with a few more lines of script.
+
+## Next steps
+
+- [Profile Rewards](/v0.2/evaluate/profile-rewards) — group rollouts by task to find consistent failures.
+- [Reward Semantics](/v0.2/about/concepts/reward-semantics) — the scoring contract for what counts as a pass and how errors flow through aggregation.
+- [Footguns](/v0.2/troubleshooting/footguns) — symptom-driven fixes for the most common eval failure modes.

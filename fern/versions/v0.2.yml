@@ -37,6 +37,9 @@ navigation:
       - folder: ./v0.2/pages/benchmarks
         title: "Benchmarks"
         title-source: frontmatter
+      - folder: ./v0.2/pages/evaluate
+        title: "Evaluate Models"
+        title-source: frontmatter
       - folder: ./v0.2/pages/training-tutorials
         title: "Training Tutorials"
         title-source: frontmatter
