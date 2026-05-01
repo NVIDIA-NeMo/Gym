@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from pydantic import Field
 
@@ -38,6 +38,15 @@ class SimpleModelServerConfig(BaseResponsesAPIModelConfig):
     extra_body: Dict[str, Any] = Field(default_factory=dict)
     openai_default_headers: Dict[str, str] = Field(default_factory=dict)
 
+    max_concurrent_requests: Optional[int] = Field(
+        default=None,
+        description=(
+            "Cap on in-flight upstream requests from this server (per-process "
+            "asyncio.Semaphore). Set on rate-limited endpoints (e.g. Gemini) "
+            "to stay under quota; None = unlimited."
+        ),
+    )
+
 
 class SimpleModelServer(SimpleResponsesAPIModel):
     config: SimpleModelServerConfig
@@ -47,6 +56,7 @@ class SimpleModelServer(SimpleResponsesAPIModel):
             base_url=self.config.openai_base_url,
             api_key=self.config.openai_api_key,
             default_headers=self.config.openai_default_headers,
+            max_concurrent_requests=self.config.max_concurrent_requests,
         )
 
         return super().model_post_init(context)
