@@ -1,0 +1,182 @@
+---
+title: "Supported Patterns"
+description: "Pattern catalog for environment authors: pick the right shape (single-turn, multi-turn, tool use, sandboxed code, external wrapper, eval-only, RL training) before you start coding."
+position: 2
+---
+
+Before you build a new environment, pick the pattern that matches your task. Each pattern below maps to at least one shipped reference environment and one tutorial. Use this catalog to avoid building the wrong shape.
+
+---
+
+## Pattern catalog
+
+### Single-turn
+
+The agent gets one prompt, emits one answer, and the verifier scores it. Most evals fit this shape.
+
+**Use when:**
+- The task is a single question, problem, or instruction with a single response.
+- Verification can run on the final assistant message alone.
+- No environment state needs to persist between calls.
+
+**Reference environment:** [`resources_servers/example_single_tool_call`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/example_single_tool_call) — minimal weather tool with single-call verification.
+
+**Tutorial:** [Single-Step Environment](/latest/environment-tutorials/single-step-environment).
+
+---
+
+### Multi-turn dialog
+
+The agent and a simulated user (or evaluator) exchange messages over multiple turns. Reward is computed at the end of the conversation, on a per-turn basis, or both.
+
+**Use when:**
+- The task models a conversation: clarifying questions, multi-step planning, or progressive disclosure of information.
+- The model must propagate context across user turns.
+- The environment plays the user role, not just a tool provider.
+
+**Reference environment:** [`resources_servers/multichallenge`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/multichallenge) — multi-turn conversational benchmark.
+
+**Tutorial:** [Multi-Step Environment](/latest/environment-tutorials/multi-step-environment) covers iterative tool calls; multi-turn dialog reuses the same agent loop but with the environment producing user-role messages.
+
+---
+
+### Stateful environment
+
+The resources server holds per-episode state across tool calls (counter, game state, file system, simulator). State is keyed by `SESSION_ID_KEY` and torn down after `verify()`.
+
+**Use when:**
+- Tool outputs depend on prior tool calls within the episode.
+- The environment models a game, simulation, or sandboxed mutable resource.
+- Verification reads server-side state, not just the model's output.
+
+**Reference environment:** [`resources_servers/example_session_state_mgmt`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/example_session_state_mgmt) — counter with per-session state. [`resources_servers/blackjack`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/blackjack) is a fuller game-state example.
+
+**Tutorial:** [Stateful Environment](/latest/environment-tutorials/stateful-environment).
+
+---
+
+### Tool use
+
+The resources server registers structured tool endpoints; the agent decides when to call them based on the task. Often combined with single- or multi-turn.
+
+**Use when:**
+- The model needs to fetch information (search, lookup, retrieval) or execute actions (write file, run query) to solve the task.
+- Tools are deterministic functions you can describe in JSON Schema.
+- Reward depends on whether tools were called correctly and whether their outputs were used.
+
+**Reference environment:** [`resources_servers/example_multi_step`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/example_multi_step) — two tools called in sequence, ground-truth verification. [`resources_servers/tavily_search`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/tavily_search) is a real external-API tool.
+
+**Tutorial:** [Multi-Step Environment](/latest/environment-tutorials/multi-step-environment).
+
+---
+
+### Sandboxed code execution
+
+The agent emits code (Python, SQL, Lean, shell). The resources server runs it in a subprocess or Ray task with a timeout, then scores against unit tests, expected output, or a proof checker.
+
+**Use when:**
+- The benchmark is competitive programming, SQL, or formal proofs.
+- Verification requires actually running the code, not just string-matching.
+- You can bound runtime and memory per execution.
+
+**Reference environment:** [`resources_servers/code_gen`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/code_gen) — subprocess execution with Ray for compilation/execution benchmarks. [`resources_servers/math_with_code`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/math_with_code) and [`resources_servers/math_formal_lean`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/math_formal_lean) are domain-specific variants.
+
+**Tutorial:** Adapt the [Single-Step Environment](/latest/environment-tutorials/single-step-environment) `verify()` to shell out to a subprocess. See `code_gen/app.py` for the bounded-concurrency pattern with `asyncio.Semaphore`.
+
+---
+
+### LLM-as-a-judge
+
+A second model grades open-ended output against a rubric or reference answer. Used when deterministic equality checks are too brittle.
+
+**Use when:**
+- Multiple correct answers exist and string-match is a false-negative trap.
+- The task requires rubric-based grading (helpfulness, factual accuracy, style).
+- A cheaper/smaller verifier model is acceptable.
+
+**Reference environment:** [`resources_servers/math_with_judge`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/math_with_judge) — math problems graded by a judge model. [`resources_servers/equivalence_llm_judge`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/equivalence_llm_judge) is the general-purpose pattern.
+
+**Tutorial:** [LLM-as-a-judge in verification](/latest/environment-tutorials/llm-as-judge-verification).
+
+---
+
+### External library wrapper
+
+The environment wraps an existing third-party benchmark library (Aviary, Reasoning Gym, Verifiers, BrowserGym, Gymnasium). Orchestration lives in the third-party code; NeMo Gym pre/post-processes the schemas at the agent server.
+
+**Use when:**
+- The benchmark already exists as a Python library with its own rollout loop.
+- Reproducing the library's reported numbers is a hard requirement.
+- Rewriting the benchmark from scratch would lose fidelity.
+
+**Reference environment:** [`resources_servers/aviary`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/aviary) (paired with [`responses_api_agents/aviary_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/aviary_agent)). [`resources_servers/reasoning_gym`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/reasoning_gym), [`resources_servers/gymnasium`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/gymnasium), and the [`responses_api_agents/verifiers_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/verifiers_agent) follow the same shape.
+
+**Tutorial:** [Integrate external libraries](/latest/environment-tutorials/integrate-external-environments).
+
+---
+
+### Eval-only
+
+The environment is suitable for scoring a model but not for generating training rollouts. Common reasons: tasks are one-shot benchmarks with no scalable train split, the verifier is non-deterministic, or rewards are too sparse for RL.
+
+**Use when:**
+- The dataset is a fixed eval set (GPQA, MMLU, ARC-AGI) with no train split.
+- Reward variance is high and `num_repeats` cannot stabilize it.
+- The pattern is rubric-graded with judge variability above the RL signal floor.
+
+**Reference environment:** [`resources_servers/gpqa_diamond`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/gpqa_diamond) — graduate-level multiple choice; pair with `simple_agent`.
+
+**Cross-link:** [Run a Benchmark](/latest/evaluate/run-a-benchmark).
+
+---
+
+### RL training
+
+The environment generates rollouts usable for training: deterministic verifier, dense or sparse rewards above noise floor, train and validation splits, baseline reward profile under 1% variance across runs on the same model.
+
+**Use when:**
+- You have a verifier that returns 0.0 or 1.0 (or a continuous score) deterministically given the same model output.
+- A train split exists with at least a few hundred prompts.
+- Baseline pass rate on a strong model is between roughly 20% and 80% — neither saturated nor zero.
+
+**Reference environment:** [`resources_servers/instruction_following`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/instruction_following) — deterministic rule-based verification with train and validation splits. [`resources_servers/math_with_code`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/math_with_code) is the math/code analog.
+
+**Cross-link:** [NeMo RL (GRPO)](/latest/training-tutorials/nemo-rl-grpo) and [Reward Semantics](/latest/about/concepts/reward-semantics).
+
+---
+
+## Pattern × interaction model matrix
+
+| Pattern | Interaction model | Resources server complexity | Sandbox needed? |
+|---|---|---|---|
+| Single-turn | Single-step | Low — one `verify()` | No |
+| Multi-turn dialog | Multi-turn | Medium — env produces user-role messages | No |
+| Stateful environment | Multi-step + session state | Medium — `seed_session` + per-session dict | No |
+| Tool use | Multi-step | Low to medium — one endpoint per tool | No |
+| Sandboxed code execution | Single-step or multi-step | High — subprocess + timeout + bounded concurrency | Yes |
+| LLM-as-a-judge | Single-step | Medium — judge model client + parser | No |
+| External library wrapper | Library-driven | Medium to high — schema pre/post-processing | Depends on library |
+| Eval-only | Single-step | Low | Usually no |
+| RL training | Any of the above | Inherits from underlying pattern | Inherits |
+
+---
+
+## Picking a pattern
+
+Answer these three questions before writing code.
+
+1. **Is the agent's job a single shot or a conversation?** Single shot points at single-turn or eval-only. Conversation points at multi-turn dialog or stateful.
+2. **Does the environment need to remember state across turns?** No: single-turn or stateless tool use. Yes: stateful environment.
+3. **Does verification need to execute code or just compare strings/numbers?** Strings/numbers: deterministic verifier in `verify()`. Code: sandboxed execution. Open-ended text: LLM-as-a-judge.
+
+If your benchmark already exists as a Python library, default to external library wrapper before reimplementing — reproducing reported numbers is the hardest part of a benchmark integration, and wrapping preserves them.
+
+---
+
+## What if my use case doesn't fit?
+
+Two paths.
+
+**Combine patterns.** Most real environments compose two or more shapes. A SWE-Bench-style environment is sandboxed code execution + stateful + multi-step + RL training. A long-context QA environment is single-turn + LLM-as-a-judge. Start from the closest reference environment and add complexity one piece at a time.
+
+**Open an issue.** If your task genuinely doesn't fit any pattern above (multi-modal beyond text, distributed multi-agent, novel reward shape), open a [GitHub issue](https://github.com/NVIDIA-NeMo/Gym/issues) describing the use case. Pattern coverage gaps are tracked there.

@@ -1,0 +1,223 @@
+---
+title: "Environment Quality Checklist"
+description: "What every official NeMo Gym environment must satisfy: deterministic verification, no oracle leakage, locked dependencies, validation command, expected baseline variance."
+position: 11
+---
+
+The environment is the product. Before you submit a new environment for inclusion in NeMo Gym, run through this checklist. Reviewers use it during PR review.
+
+---
+
+## Why this checklist exists
+
+When environment contributions are accepted without a quality bar, task QA failures accumulate: oracle answers leak into prompts, verifiers turn out to be cheatable, gold solutions break under dependency drift, and reported pass rates drift run to run. Once that happens, the benchmark loses trust and downstream training runs inherit the noise.
+
+Other agent eval frameworks have walked this path. Their public issue queues are full of reports about leaked solutions, mutable test fixtures, and gold patches that fail on re-run. NeMo Gym pre-empts those failures with an explicit, testable bar that every official environment ships against.
+
+---
+
+## The checklist
+
+### Deterministic verifier
+
+**What.** Given the same model output and the same `verifier_metadata`, `verify()` returns the same reward every call.
+
+**Why.** Non-determinism in the verifier inflates or deflates pass rates run to run. RL training treats the reward as ground truth; noise in the verifier becomes noise in the policy gradient.
+
+**How to verify.** Call `verify()` twice with identical inputs in a unit test and assert reward equality. If you use an LLM judge, set temperature to 0 and document any residual variance in the README.
+
+---
+
+### No oracle leakage
+
+**What.** The solution, expected answer, or reference output is not present in any field the agent sees — `responses_create_params.input`, tool descriptions, system prompt, or tool responses during the episode. Ground truth lives in `verifier_metadata`, which the agent never reads.
+
+**Why.** A leaked oracle turns the benchmark into a pattern-match exercise. Pass rates look high, training extracts no signal, and downstream evals on similar tasks reveal the gap.
+
+**How to verify.** For each row in `data/example.jsonl`, grep the rendered prompt and tool definitions for the expected answer. Add a unit test that asserts the answer string does not appear in `responses_create_params.input` after rendering.
+
+---
+
+### No test mutation
+
+**What.** The agent cannot modify the verifier, test fixture, or ground-truth state during execution. Sandboxed code-execution environments must mount tests read-only or run them in a separate process the agent cannot reach.
+
+**Why.** If the agent can edit the test, every verifier becomes cheatable. This is the most common cheat on code-execution benchmarks.
+
+**How to verify.** For sandboxed environments, run a deliberately adversarial rollout that attempts `rm`, `chmod`, or in-place edits of the test directory and assert reward stays at 0.0. Document the sandbox's read-only enforcement in the README.
+
+---
+
+### Locked dependencies
+
+**What.** `requirements.txt` and any setup script pin exact versions, not version ranges. The environment reproduces across machines and across time.
+
+**Why.** Unpinned dependencies break gold solutions. A benchmark that scored 65% on submission day scores 40% six months later because a transitive dependency changed default behavior.
+
+**How to verify.** `pip freeze` after install matches `requirements.txt` versions. CI re-runs the example reward profile after dependency updates and fails the PR if the profile drifts beyond the documented variance band.
+
+---
+
+### Linux compatibility
+
+**What.** All executables, build scripts, and external tool installers run on Linux. macOS support is welcome for development; Linux is the deployment target.
+
+**Why.** NeMo Gym deploys on Linux clusters. An environment that only runs on macOS is not shippable.
+
+**How to verify.** Run `ng_test +entrypoint=resources_servers/<your-server>` on a Linux container or CI runner. If the environment auto-installs an external tool, verify the build-from-source path works on Linux.
+
+---
+
+### Concurrency-safe
+
+**What.** `verify()` and all tool endpoints are async-safe. Subprocess work is bounded by `asyncio.Semaphore` so a burst of concurrent rollouts doesn't fork-bomb the host.
+
+**Why.** Per CLAUDE.md: "Must handle 4k-65k concurrent requests without crashing." A single instance routinely sees thousands of rollouts in flight during training.
+
+**How to verify.** Load-test with a concurrent rollout collection at the upper end of expected throughput. Watch for file descriptor exhaustion, subprocess pile-up, or memory growth. See [Async Patterns](https://github.com/NVIDIA-NeMo/Gym/blob/main/CLAUDE.md#async-patterns) for the aiohttp + Semaphore + Ray-await idioms.
+
+---
+
+### Data licensing
+
+**What.** Every dataset has a `license:` field in the YAML config. The README documents the source and license of any external data. License-incompatible data is rejected at PR review.
+
+**Why.** Datasets shipped with NeMo Gym are redistributed under their declared license. Ambiguity here blocks downstream use.
+
+**How to verify.** Check the `license:` field on every dataset entry in your config YAML. Confirm the source dataset's license permits redistribution.
+
+---
+
+### Example data committed, train/validation hosted
+
+**What.** `data/example.jsonl` ships in git with 5 entries for smoke testing. Train and validation splits are hosted in the GitLab dataset registry and referenced via `gitlab_identifier:` in the YAML config. Train and validation files are gitignored — never committed.
+
+**Why.** Example data needs to be present at clone time so `ng_test` and the validation command run with no download step. Train and validation are too large for git and need versioning, which the dataset registry provides.
+
+**How to verify.** `data/example.jsonl` exists with 5 rows. `data/.gitignore` covers `*train.jsonl` and `*validation.jsonl`. Train/validation entries in the YAML have a `gitlab_identifier` block. See the [Dataset Management section in CLAUDE.md](https://github.com/NVIDIA-NeMo/Gym/blob/main/CLAUDE.md#dataset-management) for the registry workflow.
+
+---
+
+### Validation command
+
+**What.** The README includes a copy-paste recipe — server start command, rollout collection invocation, and expected aggregate reward — that lets a new user verify their setup is working.
+
+**Why.** Without a validation command, "is my setup correct?" devolves into reading source code and guessing. A working recipe is the cheapest way for a contributor to confirm an environment is healthy after install.
+
+**How to verify.** Follow your own README on a fresh clone. The expected reward should match what you document, within the variance band you cite.
+
+---
+
+### Baseline reward variance under 1%
+
+**What.** Rerunning the example reward profile on the same model with sufficient `+num_repeats` produces aggregate rewards within roughly 1% across runs. Document the model, num_repeats, and observed band in the README.
+
+**Why.** Variance above 1% means either the verifier is non-deterministic, the dataset is too small, or the agent loop has timing-dependent behavior. Any of those make the benchmark unreliable as an RL signal.
+
+**How to verify.** Run `ng_collect_rollouts` three times with the same config and `+num_repeats` (typically 5 or 10). Compute aggregate reward each time. If the spread exceeds 1%, increase `num_repeats` until variance drops or root-cause the non-determinism.
+
+---
+
+### Handles errors gracefully
+
+**What.** Tool failures, malformed model outputs, parse errors, and timeouts return a meaningful error response with reward 0.0. The server does not crash, leak file descriptors, or hang downstream rollouts.
+
+**Why.** Per CLAUDE.md: tool failures and bad model outputs return meaningful error responses, not crashes; the server must handle 4k-65k concurrent requests without crashing.
+
+**How to verify.** Add unit tests that exercise the error paths: malformed JSON in tool arguments, subprocess timeout, missing required fields, judge model 5xx response. Each path returns a `BaseVerifyResponse` with reward 0.0 and a documented error field.
+
+---
+
+### Tests skip gracefully when external tools are missing
+
+**What.** Tests that depend on an external binary or package use `pytest.mark.skipif(shutil.which("tool") is None, reason="tool not installed")` rather than failing.
+
+**Why.** Contributors run the full test suite without every external dependency installed. Hard failures here mask real failures elsewhere.
+
+**How to verify.** Run the test suite with the external tool uninstalled. The relevant tests skip with a clear reason. The rest of the suite passes.
+
+---
+
+### External tool auto-install hook
+
+**What.** If your environment requires an external tool (compiler, runtime, proof checker), ship a `setup_<tool>.py` with an `ensure_<tool>()` function. It checks `shutil.which("tool")`, installs via brew on macOS or builds from source on Linux, and updates `os.environ["PATH"]` and `os.environ["LD_LIBRARY_PATH"]` for the current process. Call it from `model_post_init()` so it runs once at server startup.
+
+**Why.** Manual install steps in a README are followed inconsistently and break for new contributors. Auto-install closes the gap.
+
+**How to verify.** On a fresh machine without the tool installed, `ng_run` should install it on first start. A `pytest_configure` hook in `conftest.py` calls `ensure_<tool>()` before collection so `skipif` markers see the installed tool. See the [External Tool Auto-Install pattern in CLAUDE.md](https://github.com/NVIDIA-NeMo/Gym/blob/main/CLAUDE.md#external-tool-auto-install).
+
+---
+
+### Reward profile baselined on instruct + thinking models
+
+**What.** The README documents the example reward profile against at least one instruct model and at least one thinking model (Qwen3, GPT-5, Claude). Pass rates are listed.
+
+**Why.** Thinking models emit `<think>` and `<thinking>` blocks before their final answer. A verifier that works on an instruct model's clean output may fail on thinking-model output, and vice versa. Both surfaces need explicit coverage.
+
+**How to verify.** Run `ng_collect_rollouts` and `ng_reward_profile` on both model types. Document the results in the README.
+
+---
+
+### Strips reasoning blocks before parsing
+
+**What.** Verifier extraction logic strips `<think>...</think>` and `<thinking>...</thinking>` blocks before regex or JSON parsing of the model's final answer.
+
+**Why.** Without this, thinking models score zero on extraction-based verifiers because the regex matches inside the reasoning block, or the JSON parser fails on partial XML.
+
+**How to verify.** Add a unit test that feeds a `<think>...</think>` prefix plus a valid answer to `verify()` and asserts reward 1.0. Add a second test where the reasoning block contains a wrong answer and the final answer is correct, and assert reward 1.0.
+
+---
+
+## PR review process
+
+Reviewers run two commands on the PR branch.
+
+```bash
+ng_test +entrypoint=resources_servers/<your-server>
+```
+
+Tests pass with the documented dependencies installed. External-tool tests either auto-install or skip with a clear reason.
+
+```bash
+# The validation recipe from your README
+ng_run "+config_paths=[...]"
+ng_collect_rollouts +agent_name=<your-agent> +input_jsonl_fpath=resources_servers/<your-server>/data/example.jsonl ...
+```
+
+Aggregate reward lands in the documented variance band on the documented model. Both pass on a clean clone — the environment is ready to merge.
+
+---
+
+## What gets a Verified flag
+
+Every new resources server YAML has `verified: false` set automatically by the `add-verified-flag` pre-commit hook.
+
+```yaml
+my_server:
+  resources_servers:
+    my_server:
+      entrypoint: app.py
+      domain: <category>
+      verified: false   # set by pre-commit; flip to true after baseline review
+```
+
+`verified: true` means a maintainer has run the validation recipe, confirmed the reward profile reproduces, and reviewed the checklist above. New environments stay at `false` until a baseline review. The flag drives [Run a Benchmark](/latest/evaluate/run-a-benchmark) filtering and dataset cataloging.
+
+---
+
+## Common issues we reject
+
+We reject PRs for any of the following. Each maps to a checklist item above; use this list as a pre-flight scan.
+
+- **Oracle leaked into the prompt.** The expected answer or solution is visible to the agent in the rendered conversation, tool descriptions, or tool responses.
+- **Non-deterministic verifier.** `verify()` returns different rewards for identical inputs. Most often: an LLM judge with non-zero temperature and no documented variance.
+- **Missing example data.** `data/example.jsonl` is empty, has fewer than 5 rows, or doesn't ship in git.
+- **No validation command.** README has no copy-paste recipe with expected output. New users have no way to confirm their setup.
+- **Untested on Linux.** `ng_test` was not run on a Linux container. Build scripts assume macOS paths or tools.
+- **Dependencies not locked.** `requirements.txt` uses `>=` or wildcards; the environment doesn't reproduce six months later.
+- **Crashes under concurrency.** Subprocess pile-up, file-descriptor leaks, or judge-model timeouts that propagate as 500s instead of reward 0.0.
+- **No data license.** Dataset entries lack a `license:` field, or the README doesn't document data provenance.
+
+If you hit one of these, fix it before requesting review. Cross-link to the relevant checklist item above when responding to review comments.
+
+For runtime symptoms during development — Hydra quoting, Ray socket paths, cookie propagation — see [Footguns](/latest/troubleshooting/footguns). For scoring contracts — pass@1 vs pass@k, error handling, retries — see [Reward Semantics](/latest/about/concepts/reward-semantics).
