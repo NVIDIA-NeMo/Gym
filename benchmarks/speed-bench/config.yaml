@@ -15,10 +15,12 @@ speed_bench_speed_bench_simple_agent:
       - name: speed_bench_qualitative
         type: benchmark
         jsonl_fpath: benchmarks/speed-bench/data/speed_bench_qualitative_benchmark.jsonl
+        prompt_config: null
         prepare_script: benchmarks/speed-bench/prepare.py
         license: NVIDIA Evaluation Dataset License Agreement
       - name: speed_bench_throughput_2k
         type: benchmark
         jsonl_fpath: benchmarks/speed-bench/data/speed_bench_throughput_2k_benchmark.jsonl
+        prompt_config: null
         prepare_script: benchmarks/speed-bench/prepare.py
         license: NVIDIA Evaluation Dataset License Agreement
