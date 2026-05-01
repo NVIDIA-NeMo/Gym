@@ -52,6 +52,9 @@ navigation:
       - folder: ./latest/pages/troubleshooting
         title: "Troubleshooting"
         title-source: frontmatter
+      - folder: ./latest/pages/resources
+        title: "Resources"
+        title-source: frontmatter
       - folder: ./latest/pages/contribute
         title: "Contribute"
         title-source: frontmatter

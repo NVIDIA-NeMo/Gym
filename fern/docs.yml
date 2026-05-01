@@ -98,6 +98,8 @@ redirects:
     destination: "/latest/get-started/create-first-environment"
   - source: "/latest/about/why-nemo-gym"
     destination: "/latest/about/ecosystem"
+  - source: "/latest/about/concepts/key-terminology"
+    destination: "/latest/resources/glossary"
   - source: "nemo/gym/how-to-faq.html"
     destination: "/reference/faq"
   - source: "nemo/gym/infrastructure/aiohttp-vs-httpx.html"
