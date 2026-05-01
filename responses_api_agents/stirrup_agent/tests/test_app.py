@@ -16,6 +16,9 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from stirrup import Agent
+from stirrup.clients.utils import to_openai_messages
+from stirrup.core.models import AssistantMessage, TokenUsage, ToolCall
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.server_utils import ServerClient
@@ -27,9 +30,6 @@ from responses_api_agents.stirrup_agent.app import (
 )
 from responses_api_agents.stirrup_agent.nemo_agent import NeMoAgent, NeMoUserMessage
 from responses_api_agents.stirrup_agent.task_strategy import TaskStrategy
-from stirrup import Agent
-from stirrup.clients.utils import to_openai_messages
-from stirrup.core.models import AssistantMessage, TokenUsage, ToolCall
 
 
 STIRRUP_AGENT_DIR = Path(__file__).resolve().parent.parent
