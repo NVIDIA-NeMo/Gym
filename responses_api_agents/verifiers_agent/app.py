@@ -81,7 +81,10 @@ def _normalize_tool_call(tool_call: Any) -> dict:
 def _build_tool_result_item(msg: dict, raw: Any) -> dict:
     call_id = msg.get("tool_call_id") or f"call_{id(raw)}"
     return NeMoGymFunctionCallOutput(
-        call_id=call_id, id=call_id, output=_text(msg.get("content")), status="completed",
+        call_id=call_id,
+        id=call_id,
+        output=_text(msg.get("content")),
+        status="completed",
     ).model_dump()
 
 
@@ -94,7 +97,11 @@ def _build_function_call_item(tool_call: Any, tokens: dict | None) -> dict:
 
     cls = NeMoGymResponseFunctionToolCallForTraining if tokens else NeMoGymResponseFunctionToolCall
     return cls(
-        id=call_id, call_id=call_id, name=name, arguments=arguments, status="completed",
+        id=call_id,
+        call_id=call_id,
+        name=name,
+        arguments=arguments,
+        status="completed",
         **_tok_kwargs(tokens),
     ).model_dump()
 
