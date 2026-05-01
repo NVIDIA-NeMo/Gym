@@ -36,6 +36,7 @@ per-task verdict collation. Per-category breakdowns are emitted for any
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 import re
@@ -85,6 +86,19 @@ _VALID_VERDICTS: ClassVar = ("A>>B", "A>B", "A=B", "B>A", "B>>A")
 _STRICT_WEIGHT = 3
 
 
+def sanitize_generation(generation: str) -> str:
+    """Drop UTF-8 surrogate halves and null bytes that break OpenAI-compatible judges.
+
+    Multilingual generations occasionally carry lone surrogate halves
+    (model decoding artifacts) or NULs that the judge's HTTP layer rejects
+    with 400. Mirrors Skills' ``nemo_skills.inference.eval.arena_judge.sanitize_generation``.
+    """
+    s = json.dumps(generation, ensure_ascii=False)
+    s = s.encode("utf-8", errors="surrogatepass").decode("utf-8", errors="replace")
+    s = s.replace("\x00", "")
+    return json.loads(s)
+
+
 class ArenaJudgeConfig(BaseResourcesServerConfig):
     """Arena Hard v2 pairwise-judge server config."""
 
@@ -114,6 +128,11 @@ class ArenaJudgeConfig(BaseResourcesServerConfig):
     # ``show_result.py``.
     arena_elo_bootstrap_rounds: int = 100
     arena_elo_bootstrap_seed: int = 42
+
+    # Multilingual benchmarks (m-arena-hard, m-arena-hard-v2) occasionally
+    # produce generations with lone UTF-8 surrogate halves or NULs that
+    # break the judge's HTTP layer; enable to scrub those before judging.
+    sanitize_generations: bool = False
 
 
 class ArenaJudgeRunRequest(BaseRunRequest):
@@ -186,6 +205,9 @@ class ArenaJudgeServer(SimpleResourcesServer):
         candidate_answer = self._extract_response_output_text(body.response)
         question = body.question or ""
         baseline_answer = body.baseline_answer or ""
+        if self.config.sanitize_generations:
+            candidate_answer = sanitize_generation(candidate_answer)
+            baseline_answer = sanitize_generation(baseline_answer)
         category = body.category or self.config.default_category
         if category not in self._prompts:
             logger.warning(

@@ -43,6 +43,9 @@ arena_judge:
         hard_prompt: resources_servers/arena_judge/prompts/arena.yaml
         creative_writing: resources_servers/arena_judge/prompts/arena_creative.yaml
       default_category: hard_prompt
+      # Default off — only multilingual benchmarks (m-arena-hard, m-arena-hard-v2)
+      # produce surrogate halves / NULs that need scrubbing before judging.
+      sanitize_generations: false
 
 arena_judge_simple_agent:
   responses_api_agents:

@@ -30,6 +30,7 @@ from resources_servers.arena_judge.app import (
     ArenaJudgeConfig,
     ArenaJudgeServer,
     ArenaJudgeVerifyRequest,
+    sanitize_generation,
 )
 
 
@@ -75,6 +76,32 @@ def _make_chat_completion(text: str, model: str = "mock_judge") -> dict:
         ],
         "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
     }
+
+
+class TestSanitizeGeneration:
+    """Helper that scrubs UTF-8 surrogate halves + NULs from generations
+    before they're embedded in a judge prompt."""
+
+    def test_clean_text_passthrough(self) -> None:
+        assert sanitize_generation("hello world") == "hello world"
+
+    def test_strips_lone_surrogates(self) -> None:
+        result = sanitize_generation("hello \ud83d world")
+        assert "\ud83d" not in result
+        assert "hello" in result and "world" in result
+
+    def test_preserves_valid_surrogate_pair(self) -> None:
+        # 🐀 is U+1F400 — a complete surrogate pair, not a lone half.
+        # Sanitization should leave valid characters untouched.
+        assert sanitize_generation("hello 🐀 world") == "hello 🐀 world"
+
+    def test_strips_lone_surrogate_pair_halves(self) -> None:
+        # Both halves of a "broken" surrogate pair (high without low, low
+        # without high) must be scrubbed — these are the multilingual
+        # decode artifacts that trip OpenAI-compatible judge HTTP layers.
+        result = sanitize_generation("\ud83d mixed \udc00")
+        assert "\ud83d" not in result and "\udc00" not in result
+        assert "mixed" in result
 
 
 class TestParseVerdict:
@@ -330,6 +357,39 @@ class TestArenaJudgeServer:
         )
         assert result.category == "hard_prompt"
         assert result.reward == approx(1.0)
+
+    @pytest.mark.asyncio
+    async def test_sanitize_generations_strips_bad_unicode_before_judging(self, config: ArenaJudgeConfig) -> None:
+        """When ``sanitize_generations`` is enabled, lone UTF-8 surrogate halves
+        and NULs in candidate/baseline must be scrubbed before the judge
+        prompt is rendered — otherwise the surrogate trips the judge HTTP layer."""
+        import json as _json
+
+        config.sanitize_generations = True
+        server_mock = MagicMock(spec=ServerClient)
+        resp = AsyncMock()
+        resp.read = AsyncMock(return_value=_json.dumps(_make_chat_completion("[[A>B]]")).encode())
+        server_mock.post = AsyncMock(return_value=resp)
+        server = ArenaJudgeServer(config=config, server_client=server_mock)
+
+        bad_candidate = "candidate \ud83d answer"
+        bad_baseline = "baseline \udc00 answer"
+        await server.verify(
+            ArenaJudgeVerifyRequest(
+                responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+                response=_make_response(bad_candidate),
+                question="q",
+                baseline_answer=bad_baseline,
+                category="hard_prompt",
+            )
+        )
+
+        for call in server_mock.post.call_args_list:
+            request_params = call.kwargs["json"]
+            for message in request_params.messages:
+                content = message["content"]
+                assert "\ud83d" not in content
+                assert "\udc00" not in content
 
     @pytest.mark.asyncio
     async def test_creative_writing_category_uses_creative_prompt(self, config: ArenaJudgeConfig) -> None:
