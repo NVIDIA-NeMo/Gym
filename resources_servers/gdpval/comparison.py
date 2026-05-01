@@ -291,18 +291,27 @@ def send_judge_request(
     model: str,
     messages: list[dict],
     max_output_tokens: int = 65535,
+    create_overrides: dict | None = None,
 ) -> str:
-    """Send a judge request with exponential-backoff retry.  Returns response text."""
+    """Send a judge request with exponential-backoff retry.  Returns response text.
+
+    *create_overrides* is merged into the kwargs passed to
+    ``client.chat.completions.create``; user-supplied keys win over defaults.
+    Mirrors the override mechanism used by ``scoring.score_with_rubric``.
+    """
     backoff = REQUEST_INITIAL_BACKOFF_SECONDS
 
     for attempt in range(1, REQUEST_MAX_ATTEMPTS + 1):
         try:
-            response = client.chat.completions.create(
-                model=model,
-                messages=messages,
-                max_tokens=max_output_tokens,
-                temperature=1.0,
-            )
+            create_kwargs: dict = {
+                "model": model,
+                "messages": messages,
+                "max_tokens": max_output_tokens,
+                "temperature": 1.0,
+            }
+            if create_overrides:
+                create_kwargs.update(create_overrides)
+            response = client.chat.completions.create(**create_kwargs)
             return (response.choices[0].message.content or "").strip()
         except Exception as error:
             retryable = _is_retryable(error)
@@ -375,11 +384,16 @@ def run_trials(
     submission_b: list[dict],
     num_trials: int = 4,
     max_output_tokens: int = 65535,
+    create_overrides: dict | None = None,
 ) -> dict:
     """Run ``num_trials`` judge calls, alternating swapped/unswapped positions.
 
     Returns a dict with ``winner``, ``win_count_a``, ``win_count_b``,
     ``tie_count``, and ``task_count``.
+
+    *create_overrides* flows through to ``send_judge_request`` and lets the
+    caller override any ``chat.completions.create`` kwarg (``max_tokens``,
+    ``temperature``, …).
     """
     win_count_a = 0
     win_count_b = 0
@@ -396,7 +410,9 @@ def run_trials(
             submission_a=current_a,
             submission_b=current_b,
         )
-        response_text = send_judge_request(client, model, messages, max_output_tokens)
+        response_text = send_judge_request(
+            client, model, messages, max_output_tokens, create_overrides=create_overrides
+        )
         judgement = parse_judgement(response_text)
         win_count_a, win_count_b, tie_count = tally_result(judgement, swapped, win_count_a, win_count_b, tie_count)
 
