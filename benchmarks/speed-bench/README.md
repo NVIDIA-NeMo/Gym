@@ -60,7 +60,7 @@ ng_run "+config_paths=[$config_paths]"
 
 # Collecting rollouts
 ng_collect_rollouts \
-    +agent_name=speed_bench_speed_bench_simple_agent \
+    +agent_name=speed_bench_qualitative_simple_agent \
     +input_jsonl_fpath=benchmarks/speed-bench/data/speed_bench_qualitative_benchmark.jsonl \
     +output_jsonl_fpath=results/speed_bench_qualitative_rollouts.jsonl \
     +num_repeats=1
