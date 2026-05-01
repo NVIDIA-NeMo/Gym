@@ -45,6 +45,87 @@ from nemo_gym.openai_utils import (
 logger = logging.getLogger(__name__)
 
 
+def _as_dict(msg: Any) -> dict:
+    if isinstance(msg, dict):
+        return msg
+    return {k: getattr(msg, k, None) for k in ("role", "content", "tool_calls", "tool_call_id", "tokens")}
+
+
+def _text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if content is None:
+        return ""
+    return json.dumps(content, default=str)
+
+
+def _tok_kwargs(tokens: dict | None) -> dict:
+    if not tokens:
+        return {}
+    return {
+        "prompt_token_ids": tokens.get("prompt_ids", []),
+        "generation_token_ids": tokens.get("completion_ids", []),
+        "generation_log_probs": tokens.get("completion_logprobs", []),
+    }
+
+
+def _normalize_tool_call(tool_call: Any) -> dict:
+    if isinstance(tool_call, str):
+        try:
+            return json.loads(tool_call)
+        except json.JSONDecodeError:
+            return {"arguments": tool_call}
+    return tool_call
+
+
+def _build_tool_result_item(msg: dict, raw: Any) -> dict:
+    call_id = msg.get("tool_call_id") or f"call_{id(raw)}"
+    return NeMoGymFunctionCallOutput(
+        call_id=call_id, id=call_id, output=_text(msg.get("content")), status="completed",
+    ).model_dump()
+
+
+def _build_function_call_item(tool_call: Any, tokens: dict | None) -> dict:
+    tc = _normalize_tool_call(tool_call)
+    function = tc.get("function") if isinstance(tc.get("function"), dict) else {}
+    call_id = tc.get("id") or tc.get("call_id") or f"call_{id(tool_call)}"
+    name = tc.get("name") or function.get("name", "")
+    arguments = _text(tc.get("arguments") or function.get("arguments") or "{}")
+
+    cls = NeMoGymResponseFunctionToolCallForTraining if tokens else NeMoGymResponseFunctionToolCall
+    return cls(
+        id=call_id, call_id=call_id, name=name, arguments=arguments, status="completed",
+        **_tok_kwargs(tokens),
+    ).model_dump()
+
+
+def _build_message_item(raw: Any, body: str, tokens: dict | None) -> dict:
+    cls = NeMoGymResponseOutputMessageForTraining if tokens else NeMoGymResponseOutputMessage
+    return cls(
+        id=f"msg_{id(raw)}",
+        content=[NeMoGymResponseOutputText(text=body, annotations=[])],
+        **_tok_kwargs(tokens),
+    ).model_dump()
+
+
+def _build_assistant_items(msg: dict, raw: Any, tokens: dict | None) -> list[dict]:
+    tool_calls = msg.get("tool_calls") or []
+    body = _text(msg.get("content"))
+    items: list[dict] = []
+
+    if body:
+        items.append(_build_message_item(raw, body, tokens if not tool_calls else None))
+
+    for i, tool_call in enumerate(tool_calls):
+        is_last = i == len(tool_calls) - 1
+        items.append(_build_function_call_item(tool_call, tokens if is_last else None))
+
+    if not items:
+        items.append(_build_message_item(raw, "", tokens))
+
+    return items
+
+
 class VerifiersNeMoGymResponse(NeMoGymResponse):
     env_id: str
     group_id: str
@@ -123,85 +204,36 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
         return self.client_cache[cache_key]
 
     def _convert_trajectory_to_output(self, rollout_output: dict) -> list:
-        def as_dict(m):
-            return m if isinstance(m, dict) else {
-                k: getattr(m, k, None) for k in ("role", "content", "tool_calls", "tool_call_id", "tokens")
-            }
-
-        def text(c):
-            return c if isinstance(c, str) else ("" if c is None else json.dumps(c, default=str))
-
-        def tok_kwargs(t):
-            return {} if not t else {
-                "prompt_token_ids": t.get("prompt_ids", []),
-                "generation_token_ids": t.get("completion_ids", []),
-                "generation_log_probs": t.get("completion_logprobs", []),
-            }
-
-        # One token bundle per assistant turn, in trajectory order.
-        a_tokens: list[dict | None] = []
-        for step in rollout_output.get("trajectory") or []:
-            if not isinstance(step, dict):
-                continue
-            st = step.get("tokens")
-            for m in step.get("completion") or []:
-                if as_dict(m).get("role") == "assistant":
-                    a_tokens.append(st or as_dict(m).get("tokens"))
+        assistant_tokens = self._collect_assistant_tokens(rollout_output.get("trajectory") or [])
 
         output: list[dict] = []
-        ai = 0
-        for m in rollout_output.get("completion") or []:
-            msg = as_dict(m)
+        assist_idx = 0
+        for raw in rollout_output.get("completion") or []:
+            msg = _as_dict(raw)
             role = msg.get("role", "user")
 
             if role == "tool":
-                cid = msg.get("tool_call_id") or f"call_{id(m)}"
-                output.append(NeMoGymFunctionCallOutput(
-                    call_id=cid, id=cid, output=text(msg.get("content")), status="completed",
-                ).model_dump())
-                continue
-
-            if role == "assistant":
-                tokens = a_tokens[ai] if ai < len(a_tokens) else None
-                ai += 1
-                calls = msg.get("tool_calls") or []
-                body = text(msg.get("content"))
-
-                if body:
-                    cls = NeMoGymResponseOutputMessageForTraining if (tokens and not calls) else NeMoGymResponseOutputMessage
-                    output.append(cls(
-                        id=f"msg_{id(m)}",
-                        content=[NeMoGymResponseOutputText(text=body, annotations=[])],
-                        **(tok_kwargs(tokens) if not calls else {}),
-                    ).model_dump())
-
-                for i, tc in enumerate(calls):
-                    if isinstance(tc, str):
-                        try:
-                            tc = json.loads(tc)
-                        except json.JSONDecodeError:
-                            tc = {"arguments": tc}
-                    fn = tc.get("function") if isinstance(tc.get("function"), dict) else {}
-                    cid = tc.get("id") or tc.get("call_id") or f"call_{id(tc)}"
-                    t = tokens if i == len(calls) - 1 else None
-                    cls = NeMoGymResponseFunctionToolCallForTraining if t else NeMoGymResponseFunctionToolCall
-                    output.append(cls(
-                        id=cid, call_id=cid,
-                        name=tc.get("name") or fn.get("name", ""),
-                        arguments=text(tc.get("arguments") or fn.get("arguments") or "{}"),
-                        status="completed", **tok_kwargs(t),
-                    ).model_dump())
-
-                if not body and not calls:
-                    output.append(NeMoGymResponseOutputMessage(
-                        id=f"msg_{id(m)}",
-                        content=[NeMoGymResponseOutputText(text="", annotations=[])],
-                    ).model_dump())
-                continue
-
-            output.append(NeMoGymEasyInputMessage(role=role, content=text(msg.get("content"))).model_dump())
+                output.append(_build_tool_result_item(msg, raw))
+            elif role == "assistant":
+                tokens = assistant_tokens[assist_idx] if assist_idx < len(assistant_tokens) else None
+                assist_idx += 1
+                output.extend(_build_assistant_items(msg, raw, tokens))
+            else:
+                output.append(NeMoGymEasyInputMessage(role=role, content=_text(msg.get("content"))).model_dump())
 
         return output
+
+    @staticmethod
+    def _collect_assistant_tokens(trajectory: list) -> list[dict | None]:
+        tokens_per_turn: list[dict | None] = []
+        for step in trajectory:
+            if not isinstance(step, dict):
+                continue
+            step_tokens = step.get("tokens")
+            for m in step.get("completion") or []:
+                if _as_dict(m).get("role") == "assistant":
+                    tokens_per_turn.append(step_tokens)
+        return tokens_per_turn
 
     async def responses(
         self,
