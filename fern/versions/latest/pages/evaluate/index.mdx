@@ -1,0 +1,51 @@
+---
+title: "Evaluate Models"
+description: "Score, compare, and inspect agent behavior on existing benchmarks or your own customer evals."
+position: 1
+---
+
+Run a benchmark, compare agents and models, score against your own data, profile the rewards. This section is for users whose primary goal is evaluation, not training. Eval-native vocabulary is the surface here — pass@1, accuracy, score — and the underlying training plumbing surfaces only when it's load-bearing.
+
+## The Mental Model — `gym eval`
+
+The conceptual one-liner is straightforward: pick a benchmark, an agent, and a model, and you get a score. Today, that flow is split across three commands:
+
+```bash
+1. ng_run +config_paths=[...]                # start servers
+2. ng_collect_rollouts +agent_name=... ...   # collect responses
+3. ng_reward_profile +input_jsonl_fpath=...  # compute pass rates
+```
+
+Future versions may consolidate these into a single `gym eval` invocation. For now, the [Run a Benchmark](/latest/evaluate/run-a-benchmark) page walks through each command end-to-end.
+
+## What You Choose
+
+Every eval run is the combination of four components. Pick them once, and the same flow scores any task.
+
+- **Environment** — The benchmark or customer eval. Defines the task, the verification logic, and the dataset.
+- **Agent** — The harness that orchestrates the rollout. `simple_agent` covers single-turn tasks; multi-turn or refinement loops use a richer agent.
+- **Model** — The LLM under evaluation. Any OpenAI-compatible endpoint works — OpenAI proper, Azure, build.nvidia.com, self-hosted vLLM.
+- **Sandbox** — Where code runs, when applicable. Local subprocess, Ray, or Docker, depending on the benchmark's isolation needs.
+
+## Pick Your Path
+
+If you want to...
+
+| Goal | Page |
+|---|---|
+| Run an existing benchmark end-to-end | [Run a Benchmark](/latest/evaluate/run-a-benchmark) |
+| Validate that a benchmark is set up correctly | [Validate Your Setup](/latest/evaluate/validate-your-setup) |
+| Compare agents on the same benchmark | [Compare Agents](/latest/evaluate/compare-agents) |
+| Score a model against your own data | [Score Customer Data](/latest/evaluate/score-customer-data) |
+| Add a new benchmark | [Add a Benchmark](/latest/evaluate/add-a-benchmark) |
+| Profile rewards to find easy/hard tasks | [Profile Rewards](/latest/evaluate/profile-rewards) |
+| Inspect failures | [Inspect Failures](/latest/evaluate/inspect-failures) |
+| Browse the catalog | [Benchmark Catalog](/latest/evaluate/benchmark-catalog) |
+
+## What Lives Elsewhere
+
+A few related workflows have homes outside this section:
+
+- **Build a new benchmark from scratch** — [Adding a Benchmark](/latest/environment-tutorials/adding-a-benchmark) covers the full author flow (resources server, verifier, dataset).
+- **Train a model with rollouts** — [Training Tutorials](/latest/training-tutorials) picks up after eval and walks through GRPO and friends.
+- **Reward semantics — errors, retries, pass@k** — [Reward Semantics](/latest/about/concepts/reward-semantics) is the scoring contract: what counts as a pass, how errors are handled, how aggregation works.

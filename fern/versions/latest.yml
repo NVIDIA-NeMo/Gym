@@ -34,6 +34,9 @@ navigation:
       - folder: ./latest/pages/environment-tutorials
         title: "Environment Tutorials"
         title-source: frontmatter
+      - folder: ./latest/pages/evaluate
+        title: "Evaluate Models"
+        title-source: frontmatter
       - folder: ./latest/pages/training-tutorials
         title: "Training Tutorials"
         title-source: frontmatter
