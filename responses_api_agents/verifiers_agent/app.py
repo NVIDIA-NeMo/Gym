@@ -122,202 +122,84 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
 
         return self.client_cache[cache_key]
 
-    @staticmethod
-    def _get_msg_value(obj: Any, key: str, default: Any = None) -> Any:
-        if hasattr(obj, "get"):
-            return obj.get(key, default)
-        return getattr(obj, key, default)
+    def _convert_trajectory_to_output(self, rollout_output: dict) -> list:
+        def as_dict(m):
+            return m if isinstance(m, dict) else {
+                k: getattr(m, k, None) for k in ("role", "content", "tool_calls", "tool_call_id", "tokens")
+            }
 
-    @staticmethod
-    def _normalize_tool_call(tool_call: Any) -> Any:
-        if isinstance(tool_call, str):
-            try:
-                return json.loads(tool_call)
-            except json.JSONDecodeError:
-                return {"arguments": tool_call}
-        return tool_call
+        def text(c):
+            return c if isinstance(c, str) else ("" if c is None else json.dumps(c, default=str))
 
-    @staticmethod
-    def _content_to_text(content: Any) -> str:
-        if content is None:
-            return ""
-        if isinstance(content, str):
-            return content
-        try:
-            return json.dumps(content, default=str)
-        except TypeError:
-            return str(content)
+        def tok_kwargs(t):
+            return {} if not t else {
+                "prompt_token_ids": t.get("prompt_ids", []),
+                "generation_token_ids": t.get("completion_ids", []),
+                "generation_log_probs": t.get("completion_logprobs", []),
+            }
 
-    def _function_tool_call_to_output(self, tool_call: Any, tokens: dict | None = None) -> dict[str, Any]:
-        tool_call = self._normalize_tool_call(tool_call)
-        call_id = (
-            self._get_msg_value(tool_call, "id", None)
-            or self._get_msg_value(tool_call, "call_id", None)
-            or f"call_{id(tool_call)}"
-        )
-        name = self._get_msg_value(tool_call, "name", "")
-        arguments = self._get_msg_value(tool_call, "arguments", "{}")
-        arguments = self._content_to_text(arguments)
-
-        kwargs = {
-            "arguments": arguments,
-            "call_id": call_id,
-            "name": name,
-            "id": call_id,
-            "status": "completed",
-        }
-        if tokens:
-            return NeMoGymResponseFunctionToolCallForTraining(
-                **kwargs,
-                prompt_token_ids=tokens.get("prompt_ids", []),
-                generation_token_ids=tokens.get("completion_ids", []),
-                generation_log_probs=tokens.get("completion_logprobs", []),
-            ).model_dump()
-        return NeMoGymResponseFunctionToolCall(**kwargs).model_dump()
-
-    def _assistant_content_to_output(self, msg: Any, content: Any, tokens: dict | None = None) -> dict[str, Any]:
-        kwargs = {
-            "id": f"msg_{id(msg)}",
-            "content": [NeMoGymResponseOutputText(text=self._content_to_text(content), annotations=[])],
-        }
-        if tokens:
-            return NeMoGymResponseOutputMessageForTraining(
-                **kwargs,
-                prompt_token_ids=tokens.get("prompt_ids", []),
-                generation_token_ids=tokens.get("completion_ids", []),
-                generation_log_probs=tokens.get("completion_logprobs", []),
-            ).model_dump()
-        return NeMoGymResponseOutputMessage(**kwargs).model_dump()
-
-    def _assistant_message_to_output_items(self, msg: Any, tokens: dict | None = None) -> list[dict[str, Any]]:
-        output: list[dict[str, Any]] = []
-        content = self._get_msg_value(msg, "content", "")
-        tool_calls = self._get_msg_value(msg, "tool_calls", None) or []
-
-        content_text = self._content_to_text(content)
-        if content_text:
-            output.append(self._assistant_content_to_output(msg, content_text, None if tool_calls else tokens))
-
-        for idx, tool_call in enumerate(tool_calls):
-            # Mirror the vLLM converter: attach token information to the final
-            # assistant output item for the completion.
-            tool_tokens = tokens if idx == len(tool_calls) - 1 else None
-            output.append(self._function_tool_call_to_output(tool_call, tool_tokens))
-
-        if not content_text and not tool_calls:
-            output.append(self._assistant_content_to_output(msg, "", tokens))
-
-        return output
-
-    def _convert_message_sequence_to_output(
-        self,
-        messages: list[Any],
-        assistant_tokens: list[dict | None] | None = None,
-    ) -> list[dict[str, Any]]:
-        output: list[dict[str, Any]] = []
-        token_idx = 0
-
-        for msg in messages or []:
-            # Handle both plain dicts (serialized RolloutOutput) and Pydantic
-            # CustomBaseModel messages (which support .get()).
-            if not (hasattr(msg, "get") or hasattr(msg, "role")):
+        # One token bundle per assistant turn, in trajectory order.
+        a_tokens: list[dict | None] = []
+        for step in rollout_output.get("trajectory") or []:
+            if not isinstance(step, dict):
                 continue
+            st = step.get("tokens")
+            for m in step.get("completion") or []:
+                if as_dict(m).get("role") == "assistant":
+                    a_tokens.append(st or as_dict(m).get("tokens"))
 
-            role = self._get_msg_value(msg, "role", "user")
-            content = self._get_msg_value(msg, "content", "")
+        output: list[dict] = []
+        ai = 0
+        for m in rollout_output.get("completion") or []:
+            msg = as_dict(m)
+            role = msg.get("role", "user")
 
             if role == "tool":
-                call_id = (
-                    self._get_msg_value(msg, "tool_call_id", None)
-                    or self._get_msg_value(msg, "call_id", None)
-                    or f"call_{id(msg)}"
-                )
-                output.append(
-                    NeMoGymFunctionCallOutput(
-                        call_id=call_id,
-                        id=call_id,
-                        output=self._content_to_text(content),
-                        status="completed",
-                    ).model_dump()
-                )
+                cid = msg.get("tool_call_id") or f"call_{id(m)}"
+                output.append(NeMoGymFunctionCallOutput(
+                    call_id=cid, id=cid, output=text(msg.get("content")), status="completed",
+                ).model_dump())
                 continue
 
             if role == "assistant":
-                tokens = None
-                if assistant_tokens is not None and token_idx < len(assistant_tokens):
-                    tokens = assistant_tokens[token_idx]
-                token_idx += 1
-                output.extend(self._assistant_message_to_output_items(msg, tokens))
+                tokens = a_tokens[ai] if ai < len(a_tokens) else None
+                ai += 1
+                calls = msg.get("tool_calls") or []
+                body = text(msg.get("content"))
+
+                if body:
+                    cls = NeMoGymResponseOutputMessageForTraining if (tokens and not calls) else NeMoGymResponseOutputMessage
+                    output.append(cls(
+                        id=f"msg_{id(m)}",
+                        content=[NeMoGymResponseOutputText(text=body, annotations=[])],
+                        **(tok_kwargs(tokens) if not calls else {}),
+                    ).model_dump())
+
+                for i, tc in enumerate(calls):
+                    if isinstance(tc, str):
+                        try:
+                            tc = json.loads(tc)
+                        except json.JSONDecodeError:
+                            tc = {"arguments": tc}
+                    fn = tc.get("function") if isinstance(tc.get("function"), dict) else {}
+                    cid = tc.get("id") or tc.get("call_id") or f"call_{id(tc)}"
+                    t = tokens if i == len(calls) - 1 else None
+                    cls = NeMoGymResponseFunctionToolCallForTraining if t else NeMoGymResponseFunctionToolCall
+                    output.append(cls(
+                        id=cid, call_id=cid,
+                        name=tc.get("name") or fn.get("name", ""),
+                        arguments=text(tc.get("arguments") or fn.get("arguments") or "{}"),
+                        status="completed", **tok_kwargs(t),
+                    ).model_dump())
+
+                if not body and not calls:
+                    output.append(NeMoGymResponseOutputMessage(
+                        id=f"msg_{id(m)}",
+                        content=[NeMoGymResponseOutputText(text="", annotations=[])],
+                    ).model_dump())
                 continue
 
-            if content is None:
-                content = ""
-            output.append(NeMoGymEasyInputMessage(role=role, content=content).model_dump())
-
-        return output
-
-    def _trajectory_assistant_tokens(self, trajectory: list[Any]) -> list[dict | None]:
-        assistant_tokens: list[dict | None] = []
-        for step in trajectory or []:
-            step_tokens = step.get("tokens") if hasattr(step, "get") else None
-            for msg in (step.get("completion", []) if hasattr(step, "get") else []) or []:
-                if not (hasattr(msg, "get") or hasattr(msg, "role")):
-                    continue
-                if self._get_msg_value(msg, "role", None) != "assistant":
-                    continue
-                tokens = step_tokens
-                if tokens is None:
-                    tokens = self._get_msg_value(msg, "tokens", None)
-                assistant_tokens.append(tokens)
-        return assistant_tokens
-
-    def _convert_trajectory_to_output(self, rollout_output: dict) -> list:
-        # Verifiers renders top-level completion as the full conversation after
-        # the original prompt. This matches the simple_agent `new_outputs`
-        # convention and avoids duplicating trajectory prompts at every turn.
-        completion = rollout_output.get("completion")
-        if completion is not None:
-            return self._convert_message_sequence_to_output(
-                completion,
-                assistant_tokens=self._trajectory_assistant_tokens(rollout_output.get("trajectory", [])),
-            )
-
-        output = []
-        seen_tool_outputs: set[tuple[str, str]] = set()
-        for step in rollout_output.get("trajectory", []) or []:
-            for msg in step.get("prompt", []) or []:
-                if not (hasattr(msg, "get") or hasattr(msg, "role")):
-                    continue
-                if self._get_msg_value(msg, "role", None) != "tool":
-                    continue
-                call_id = (
-                    self._get_msg_value(msg, "tool_call_id", None)
-                    or self._get_msg_value(msg, "call_id", None)
-                    or f"call_{id(msg)}"
-                )
-                content_text = self._content_to_text(self._get_msg_value(msg, "content", ""))
-                key = (call_id, content_text)
-                if key in seen_tool_outputs:
-                    continue
-                seen_tool_outputs.add(key)
-                output.append(
-                    NeMoGymFunctionCallOutput(
-                        call_id=call_id,
-                        id=call_id,
-                        output=content_text,
-                        status="completed",
-                    ).model_dump()
-                )
-
-            step_tokens = step.get("tokens") if hasattr(step, "get") else None
-            for msg in step.get("completion", []) or []:
-                if not (hasattr(msg, "get") or hasattr(msg, "role")):
-                    continue
-                if self._get_msg_value(msg, "role", None) == "assistant":
-                    tokens = step_tokens or self._get_msg_value(msg, "tokens", None)
-                    output.extend(self._assistant_message_to_output_items(msg, tokens))
-                else:
-                    output.extend(self._convert_message_sequence_to_output([msg]))
+            output.append(NeMoGymEasyInputMessage(role=role, content=text(msg.get("content"))).model_dump())
 
         return output
 
@@ -329,6 +211,8 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
     ) -> VerifiersNeMoGymResponse:
         try:
             vf_env_id = body.vf_env_id or self.config.vf_env_id
+            if not vf_env_id:
+                raise ValueError("vf_env_id must be set on the request or in the agent config")
             vf_env = self._get_env(vf_env_id)
             task_idx = body.task_idx
 
