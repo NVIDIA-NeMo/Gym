@@ -1,0 +1,135 @@
+---
+title: "Score a Model Against Customer Data"
+description: "Run an existing benchmark's scoring logic over your own JSONL dataset — for production validation, customer pilots, and internal regressions."
+position: 5
+---
+
+When you need to score a model against your own dataset — production validation, a customer pilot, an internal regression — point an existing resources_server at your JSONL and run. This page covers the simple case: same scoring logic, different data. The eval flow doesn't change; only `+input_jsonl_fpath` does.
+
+## Two Paths
+
+| Your data fits an existing scorer | Your data needs custom scoring |
+|---|---|
+| Reuse the resources_server's `verify()` logic. Author a JSONL in the shape that scorer expects, point `ng_collect_rollouts` at it. **Covered on this page.** | Build a new resources_server with your own `verify()`. Refer to [Design a Customer Evaluation](/latest/environment-tutorials/designing-customer-evaluation). |
+
+If your customer's task is "math problems with a single boxed answer," reuse `math_with_judge`. If it's "did the model call the right tool with the right arguments," reuse `single_step_tool_use_with_argument_comparison`. If it's "domain-specific structured output that needs a custom checker," build a new resources_server.
+
+## What Your Data Needs to Look Like
+
+Each line of your JSONL is one task. The shape:
+
+```json
+{
+  "responses_create_params": {
+    "input": [
+      {"role": "system", "content": "..."},
+      {"role": "user", "content": "..."}
+    ]
+  },
+  "verifier_metadata": {
+    "...": "shape depends on the resources_server"
+  }
+}
+```
+
+`responses_create_params.input` follows OpenAI message format — system prompt, user prompt, and any prior turns the model should see. `verifier_metadata` is opaque to the framework — its fields are defined by whichever resources_server's `verify()` will score the rollout. Read that env's README for the authoritative field list.
+
+## Worked Example: Score a Model on Custom Math Problems
+
+Say your customer has 200 internal math problems with known answers and wants to know how `gpt-4.1` scores against them. The [`math_with_judge`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/math_with_judge) resources_server already implements math grading — boxed-answer extraction, math-verify equivalence, optional LLM judge fallback. Reuse it.
+
+1. **Author your JSONL.** Each line follows the shape `math_with_judge` expects: a user prompt with the math problem, and `expected_answer` in `verifier_metadata`.
+
+   ```json
+   {"responses_create_params":{"input":[{"role":"user","content":"Solve the following math problem. Make sure to put the answer (and only answer) inside \\boxed{}.\n\nA contractor bills 14 hours at $85/hour and adds 8.5% sales tax. What is the total invoice?"}]},"question":"A contractor bills 14 hours at $85/hour and adds 8.5% sales tax.","expected_answer":"1291.15"}
+   ```
+
+   Save as `/path/to/customer_math.jsonl` (one line per problem). Skip `verifier_metadata` wrapping if the env reads its fields off the top level — `math_with_judge` reads `expected_answer` directly off the row.
+
+2. **Start the servers** (Terminal 1).
+
+   ```bash
+   ng_run "+config_paths=[\
+   resources_servers/math_with_judge/configs/math_with_judge.yaml,\
+   responses_api_models/openai_model/configs/openai_model.yaml]"
+   ```
+
+   Same `ng_run` invocation as any other math eval. The benchmark's config wires up the verifier, the agent, and the model server — your custom data plugs in at rollout time.
+
+3. **Confirm health** (Terminal 2).
+
+   ```bash
+   ng_status
+   ```
+
+   Expect `3 servers found (3 healthy, 0 unhealthy)`.
+
+4. **Collect rollouts against your JSONL.**
+
+   ```bash
+   mkdir -p results
+   ng_collect_rollouts \
+       +agent_name=math_with_judge_simple_agent \
+       +input_jsonl_fpath=/path/to/customer_math.jsonl \
+       +output_jsonl_fpath=results/customer_math_rollouts.jsonl \
+       +num_repeats=5 \
+       "+responses_create_params={max_output_tokens: 16384, temperature: 1.0}"
+   ```
+
+   The only difference from a stock benchmark run is `+input_jsonl_fpath`. Everything else — the agent, the verifier, the model wiring — is reused as-is.
+
+5. **Profile the score.**
+
+   ```bash
+   ng_reward_profile \
+       +input_jsonl_fpath=/path/to/customer_math.jsonl \
+       +rollouts_jsonl_fpath=results/customer_math_rollouts.jsonl \
+       +output_jsonl_fpath=results/customer_math_profiled.jsonl \
+       +pass_threshold=1.0
+
+   python scripts/print_aggregate_results.py +jsonl_fpath=results/customer_math_profiled.jsonl
+   ```
+
+   Output reports pass@1 (per-rollout accuracy), pass@k (best-of-k), and the count of consistently-passed and consistently-failed problems. That's your customer-data score.
+
+The score is interpreted exactly like a public benchmark score: pass@1 is the model's accuracy on your data; pass@k is whether it can solve a problem if it tries `k` times; per-task pass rate from the profiled JSONL surfaces the consistently-failed problems for follow-up.
+
+## Mapping Your Data to verifier_metadata
+
+The exact field names live in each env's README. The common shapes:
+
+| Your data | Reuse | Required fields |
+|---|---|---|
+| Math problems with a known answer | [`math_with_judge`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/math_with_judge), [`math_with_code`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/math_with_code) | `expected_answer` |
+| Code generation with unit tests | [`code_gen`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/code_gen), [`bigcodebench`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/competitive_coding_challenges) | `test_cases`, entry-point function name (env-specific) |
+| Multiple-choice questions | [`mcqa`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/mcqa), [`gpqa_diamond`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/gpqa_diamond) | gold answer letter (e.g. `answer: "C"`) |
+| Tool / function calls | [`single_step_tool_use_with_argument_comparison`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/single_step_tool_use_with_argument_comparison), [`xlam_fc`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/xlam_fc) | expected tool name + arguments |
+| Free-form output graded by judge | [`equivalence_llm_judge`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/equivalence_llm_judge), [`math_with_judge`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/math_with_judge) (judge mode) | reference answer or rubric |
+| SQL queries with expected results | [`text_to_sql`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/text_to_sql), [`bird_sql`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/bird_sql) | gold SQL + database fixture |
+| Instruction following | [`instruction_following`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/instruction_following), [`ifbench`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/ifbench) | instruction constraint list |
+
+When in doubt, open the env's `data/example.jsonl` — it's five working rows that match what the verifier expects. Mirror the keys.
+
+## Validate Before You Trust the Score
+
+Run the env's stock `data/example.jsonl` first, get a known-good score, then swap in your data. If the example slice produces an off-baseline score, your install or `env.yaml` is broken — fixing that before you point at customer data saves hours of confused debugging.
+
+For the smoke-test pattern and per-benchmark expected outputs, refer to [Validate Your Setup](/latest/evaluate/validate-your-setup).
+
+## When This Won't Work
+
+Reuse stops paying off the moment your task diverges from what the env scores. Build a custom resources_server when:
+
+- **Your scoring logic is different.** "Did the answer match the gold string" works against `math_with_judge`; "did the answer match within 0.1% of the customer's tolerance band" needs custom `verify()`.
+- **You need tools or a sandbox the existing env doesn't provide.** A code-gen env with a Python sandbox won't run your customer's Java service.
+- **Your rollout shape doesn't match.** A single-turn env can't score a multi-turn refinement loop, and vice versa. Pick the agent that matches your interaction shape, or author a new one.
+- **Your reward isn't binary and the env's is.** If you need partial credit graded against a rubric and the env returns `{0.0, 1.0}`, the verifier is the wrong tool.
+
+For the build-side flow — designing custom verification, fitting messy production data, working with customers to define "good" — refer to [Design a Customer Evaluation](/latest/environment-tutorials/designing-customer-evaluation).
+
+## Next Steps
+
+- [Validate Your Setup](/latest/evaluate/validate-your-setup) — confirm the install on the env's `example.jsonl` before pointing at your data.
+- [Profile Rewards](/latest/evaluate/profile-rewards) — drill from aggregate score into per-task pass rates.
+- [Inspect Failures](/latest/evaluate/inspect-failures) — open the rollouts JSONL on the customer-data tasks the model failed.
+- [Design a Customer Evaluation](/latest/environment-tutorials/designing-customer-evaluation) — build-side counterpart for when reuse isn't enough.
