@@ -19,7 +19,18 @@ From: python:3.12-bookworm
     Description GDPVal Apptainer container with all document generation dependencies
 
 %post
-    apt-get update && apt-get install -y --no-install-recommends \
+    set -ex
+
+    # System packages.  The previous version chained these with ``&&`` and let
+    # ``pip install`` run on a separate line, so an apt failure (e.g. a build
+    # host with no DNS, or an ARM-only Debian variant where one package isn't
+    # in the default mirrors) silently skipped to the pip block — producing a
+    # sif missing libreoffice/tesseract/etc. while still appearing to build.
+    # ``set -ex`` aborts on the first failure, and the ``command -v`` checks
+    # below fail loud if any binary we expect didn't actually install.
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update
+    apt-get install -y --no-install-recommends \
         git \
         build-essential \
         gcc \
@@ -43,9 +54,18 @@ From: python:3.12-bookworm
         ffmpeg \
         graphviz \
         curl \
-        wget \
-        && rm -rf /var/lib/apt/lists/*
+        wget
+    rm -rf /var/lib/apt/lists/*
 
+    command -v libreoffice
+    command -v tesseract
+    command -v pandoc
+    command -v pdftotext
+    command -v gs
+    command -v ffmpeg
+    command -v dot
+
+    # Python packages matching GDPVal deliverable + agent needs.
     pip install --no-cache-dir \
         python-docx fpdf2 reportlab weasyprint PyPDF2 beautifulsoup4 \
         seaborn python-pptx markdown2 pdfminer.six openpyxl lxml Pillow \

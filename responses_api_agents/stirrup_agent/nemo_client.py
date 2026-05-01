@@ -71,7 +71,7 @@ _MIN_COMPLETION_TOKENS = 1024
 
 # Hard cap on per-call max_completion_tokens.  Oversized completion budgets
 # on long-context servers can degrade output quality for reasoning models.
-_MAX_COMPLETION_TOKENS = 64000
+_DEFAULT_MAX_COMPLETION_TOKENS_CAP = 64000
 
 
 def _load_tokenizer(model_id: Optional[str]):
@@ -124,10 +124,18 @@ class DynamicMaxTokensChatCompletionsClient(ChatCompletionsClient):
         *args: Any,
         model_id: Optional[str] = None,
         completion_token_buffer: int = 1000,
+        temperature: float = 1.0,
+        top_p: float = 0.95,
+        enable_thinking: bool = True,
+        max_completion_tokens_cap: int = _DEFAULT_MAX_COMPLETION_TOKENS_CAP,
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
         self._completion_token_buffer = completion_token_buffer
+        self._temperature = temperature
+        self._top_p = top_p
+        self._enable_thinking = enable_thinking
+        self._max_completion_tokens_cap = max_completion_tokens_cap
         self._tokenizer = _load_tokenizer(model_id)
         if model_id and self._tokenizer is None:
             LOGGER.warning(
@@ -236,18 +244,17 @@ class DynamicMaxTokensChatCompletionsClient(ChatCompletionsClient):
             context_window - input_tokens - self._completion_token_buffer,
             _MIN_COMPLETION_TOKENS,
         )
-        capped_max = min(dynamic_max, _MAX_COMPLETION_TOKENS)
+        capped_max = min(dynamic_max, self._max_completion_tokens_cap)
 
-        # Defaults tuned for reasoning-trained models: thinking enabled,
-        # temperature=1.0, top_p=0.95, capped completion budget.
-        # ``self._kwargs`` is spread last so explicit config overrides win.
+        # ``self._kwargs`` is spread last so explicit per-request kwargs override
+        # the agent-level defaults.
         request_kwargs: dict[str, Any] = {
             "model": self._model,
             "messages": to_openai_messages(messages),
-            "temperature": 1.0,
-            "top_p": 0.95,
+            "temperature": self._temperature,
+            "top_p": self._top_p,
             "max_completion_tokens": capped_max,
-            "extra_body": {"chat_template_kwargs": {"enable_thinking": True}},
+            "extra_body": {"chat_template_kwargs": {"enable_thinking": self._enable_thinking}},
             **self._kwargs,
         }
         if tools:

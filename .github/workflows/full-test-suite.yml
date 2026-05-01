@@ -1,0 +1,222 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+name: Full test suite
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  full-test-suite:
+    name: Full Test Suite
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          submodules: 'recursive'
+
+      - name: Cache uv dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/uv
+          key: uv-${{ runner.os }}-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            uv-${{ runner.os }}-
+
+      - name: Setup for test
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends git curl ca-certificates
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          uv venv --python 3.12
+          source .venv/bin/activate
+          uv sync --extra dev
+
+      - name: Test
+        run: |
+          source .venv/bin/activate
+          ng_dev_test
+          ng_test_all +fail_on_total_and_test_mismatch=true +delete_venvs_after_each_test=true
+
+  test-wheel-install:
+    name: Test Wheel Use
+    runs-on: ubuntu-latest
+    env:
+      NEMO_GYM_ALLOW_PRERELEASE: "true"
+      UV_INDEX_URL: "http://127.0.0.1:8888/"
+      UV_EXTRA_INDEX_URL: "https://pypi.org/simple/"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Cache uv dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/uv
+          key: uv-${{ runner.os }}-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            uv-${{ runner.os }}-
+
+      - name: Setup
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
+      - name: Build wheel and serve as local PyPI index
+        run: |
+          uv build
+          mkdir -p /tmp/local-pypi/nemo-gym
+          cp dist/*.whl /tmp/local-pypi/nemo-gym/
+          ls /tmp/local-pypi/nemo-gym/ | sed 's|.*|<a href="&">&</a>|' > /tmp/local-pypi/nemo-gym/index.html
+          echo '<a href="nemo-gym/">nemo-gym</a>' > /tmp/local-pypi/index.html
+          python3 -m http.server 8888 --directory /tmp/local-pypi &
+          sleep 1
+
+      - name: Install wheel in fresh venv
+        run: |
+          cd /tmp && mkdir -p myproject && cd myproject
+          uv venv --python 3.12 .venv
+          source .venv/bin/activate
+          uv pip install $GITHUB_WORKSPACE/dist/*.whl
+          python -c "import nemo_gym; print(f'nemo-gym {nemo_gym.__version__}')"
+
+      - name: Start mock inference endpoint
+        run: |
+          cat > /tmp/mock_server.py << 'PYEOF'
+          import json, time, uuid
+          from http.server import HTTPServer, BaseHTTPRequestHandler
+
+          class Handler(BaseHTTPRequestHandler):
+              def do_POST(self):
+                  body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                  resp = {
+                      "id": f"chatcmpl-{uuid.uuid4().hex[:8]}",
+                      "object": "chat.completion",
+                      "created": int(time.time()),
+                      "model": body.get("model", "mock"),
+                      "choices": [{"index": 0, "message": {"role": "assistant", "content": "Mock response."}, "finish_reason": "stop"}],
+                      "usage": {"prompt_tokens": 10, "completion_tokens": 8, "total_tokens": 18},
+                  }
+                  self.send_response(200)
+                  self.send_header("Content-Type", "application/json")
+                  self.end_headers()
+                  self.wfile.write(json.dumps(resp).encode())
+
+              def do_GET(self):
+                  self.send_response(404)
+                  self.end_headers()
+
+              def log_message(self, *args):
+                  pass
+
+          HTTPServer(("127.0.0.1", 9999), Handler).serve_forever()
+          PYEOF
+          python3 /tmp/mock_server.py &
+          sleep 1
+
+      - name: Setup project
+        run: |  # pragma: allowlist secret
+          cd /tmp/myproject
+          echo "policy_base_url: http://127.0.0.1:9999/v1" > env.yaml
+          echo "policy_api_key: not-a-real-key" >> env.yaml  # pragma: allowlist secret
+          echo "policy_model_name: mock-model" >> env.yaml
+
+      - name: Test CLI commands
+        run: |
+          cd /tmp/myproject
+          source .venv/bin/activate
+          ng_help
+          ng_dump_config "+config_paths=[resources_servers/arc_agi/configs/arc_agi.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
+
+      - name: Test ng_init_resources_server
+        run: |
+          cd /tmp/myproject
+          source .venv/bin/activate
+          ng_init_resources_server +entrypoint=resources_servers/hello_world
+          test -f resources_servers/hello_world/app.py
+          test -f resources_servers/hello_world/requirements.txt
+          test -f resources_servers/hello_world/configs/hello_world.yaml
+          test -d resources_servers/hello_world/tests
+          grep -q "nemo-gym" resources_servers/hello_world/requirements.txt
+          echo '{"responses_create_params":{"input":[{"role":"user","content":"Hello!"}]},"verifier_metadata":{}}' \
+            > resources_servers/hello_world/data/example.jsonl
+
+      - name: Test ng_run + ng_collect_rollouts with built-in server
+        run: |
+          cd /tmp/myproject
+          source .venv/bin/activate
+          ng_run "+config_paths=[resources_servers/arc_agi/configs/arc_agi.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]" &
+          NG_RUN_PID=$!
+          $GITHUB_WORKSPACE/scripts/wait_for_servers.sh $NG_RUN_PID
+
+          mkdir -p results
+          ng_collect_rollouts \
+            +agent_name=arc_agi_simple_agent \
+            +input_jsonl_fpath=resources_servers/arc_agi/data/example.jsonl \
+            +output_jsonl_fpath=results/arc_agi_rollouts.jsonl \
+            +limit=1
+          kill $NG_RUN_PID 2>/dev/null; wait $NG_RUN_PID 2>/dev/null || true
+
+      - name: Test ng_run + ng_collect_rollouts with local server
+        run: |
+          cd /tmp/myproject
+          source .venv/bin/activate
+          ng_run "+config_paths=[resources_servers/hello_world/configs/hello_world.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]" &
+          NG_RUN_PID=$!
+          $GITHUB_WORKSPACE/scripts/wait_for_servers.sh $NG_RUN_PID
+
+          ng_collect_rollouts \
+            +agent_name=hello_world_simple_agent \
+            +input_jsonl_fpath=resources_servers/hello_world/data/example.jsonl \
+            +output_jsonl_fpath=results/hello_world_rollouts.jsonl \
+            +limit=1
+          kill $NG_RUN_PID 2>/dev/null; wait $NG_RUN_PID 2>/dev/null || true
+
+  notify-failure:
+    name: Notify test failure
+    runs-on: ubuntu-latest
+    needs: [full-test-suite, test-wheel-install]
+    environment: main
+    if: ${{ always() && (needs.full-test-suite.result == 'failure' || needs.test-wheel-install.result == 'failure') }}
+    steps:
+      - name: Send Slack notification
+        env:
+          SLACK_WEBHOOK: ${{ secrets.SLACK_TEAM_CHANNEL_WEBHOOK }}
+        run: |
+          if [ -z "$SLACK_WEBHOOK" ]; then
+            echo "::error::SLACK_TEAM_CHANNEL_WEBHOOK secret is not set"
+            exit 1
+          fi
+
+          MESSAGE='{
+            "blocks": [
+              {
+                "type": "section",
+                "text": {
+                  "type": "mrkdwn",
+                  "text": ":rotating_light: Full test suite failed on main branch\n\n• Repository: ${{ github.repository }}\n• Commit: `${{ github.sha }}`\n• Workflow: <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Run>"
+                }
+              }
+            ]
+          }'
+
+          curl -X POST -H "Content-type: application/json" --data "$MESSAGE" "$SLACK_WEBHOOK"
