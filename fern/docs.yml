@@ -2,10 +2,12 @@ instances:
   - url: gym.docs.buildwithfern.com/nemo/gym
     custom-domain: docs.nvidia.com/nemo/gym
 
+# Test: only missing-redirects, paired with FERN_TOKEN in fern-docs-ci.yml.
+# Probing whether the silent-exit fern bug is fixed by passing the token
+# (per fern docs, missing-redirects requires auth and should otherwise be
+# skipped). broken-links left out for now — looks like a separate bug.
 check:
   rules:
-    broken-links: error
-    example-validation: warn
     missing-redirects: error
 
 title: NeMo Gym
