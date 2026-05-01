@@ -5,7 +5,7 @@
     "num_repeats": 1,
     "gitlab_identifier": null,
     "huggingface_identifier": null,
-    "license": null,
+    "license": "Apache 2.0",
     "Number of examples": 5,
     "Number of tools": {
         "Total # non-null values": 0,
@@ -16,10 +16,10 @@
     },
     "Json-dumped number of words (proxy for token count)": {
         "Total # non-null values": 5,
-        "Average": 117.8,
+        "Average": 108.2,
         "Min": 83.0,
-        "Max": 189.0,
-        "Standard deviation": 45.26
+        "Max": 141.0,
+        "Standard deviation": 28.3
     },
     "Number of turns": {
         "Total # non-null values": 5,
