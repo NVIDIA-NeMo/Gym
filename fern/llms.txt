@@ -1,0 +1,139 @@
+# NeMo Gym
+
+> NeMo Gym is the open environment and rollout layer for training and evaluating agentic models. It turns benchmarks, tools, sandboxes, and reward functions into scalable RL-ready environments.
+
+NeMo Gym is part of the NVIDIA NeMo platform. It separates an agentic environment into four components — dataset, agent harness, model, and reward verifier — that are independently varied. The same environment that scores a model produces training rollouts, which is the bridge competing eval-only frameworks don't have.
+
+## About
+
+What NeMo Gym is, where it fits in the NVIDIA NeMo platform, and the core concepts behind RL-ready environments.
+
+- [Overview](https://docs.nvidia.com/nemo/gym/latest/about): Motivation, what NeMo Gym solves, and how the pieces fit together.
+- [Ecosystem](https://docs.nvidia.com/nemo/gym/latest/about/ecosystem): Where NeMo Gym fits in the NVIDIA NeMo platform, how it compares to external RL and eval frameworks, and which tools to pair it with.
+- [Concepts](https://docs.nvidia.com/nemo/gym/latest/about/concepts): Mental model behind building RL training environments — when to use RL over SFT, how environment components work together, and how verification signals drive learning.
+- [Architecture](https://docs.nvidia.com/nemo/gym/latest/about/concepts/architecture): How NeMo Gym separates dataset, agent harness, model, and reward into four independently-varied components.
+- [Configuration System](https://docs.nvidia.com/nemo/gym/latest/about/concepts/configuration): How YAML configuration files define Model, Resources, and Agent servers as modular blocks.
+- [Environment Components](https://docs.nvidia.com/nemo/gym/latest/about/concepts/core-components): The Model, Resources, and Agent server building blocks that compose a NeMo Gym environment.
+- [Reward semantics](https://docs.nvidia.com/nemo/gym/latest/about/concepts/reward-semantics): Exactly what NeMo Gym does on verifier errors, timeouts, retries, multiple rollouts per task, pass@1 vs pass@k, and aggregation.
+- [Task Verification](https://docs.nvidia.com/nemo/gym/latest/about/concepts/task-verification): What task verification is and how rewards drive model training.
+- [Training Approaches](https://docs.nvidia.com/nemo/gym/latest/about/concepts/training-approaches): The differences between SFT, DPO, and GRPO, and why RLVR puts the focus on environments.
+- [Release Notes](https://docs.nvidia.com/nemo/gym/latest/about/release-notes): What's new, what's fixed, and what's deprecated in each NeMo Gym release.
+
+## Get Started
+
+Install NeMo Gym, configure your model, and run a first benchmark.
+
+- [Get Started](https://docs.nvidia.com/nemo/gym/latest/get-started): Install NeMo Gym, run your first benchmark, and build your first environment.
+- [Prerequisites](https://docs.nvidia.com/nemo/gym/latest/get-started/prerequisites): System requirements for running NeMo Gym.
+- [Installation](https://docs.nvidia.com/nemo/gym/latest/get-started/installation): Install NeMo Gym from source, PyPI, or a container image.
+- [Configuration](https://docs.nvidia.com/nemo/gym/latest/get-started/configuration): Set up env.yaml with model credentials before running NeMo Gym.
+- [Quickstart](https://docs.nvidia.com/nemo/gym/latest/get-started/quickstart): Install NeMo Gym, configure your model, and score a Blackjack agent end-to-end in about 10 minutes.
+- [Create Your First Environment](https://docs.nvidia.com/nemo/gym/latest/get-started/create-first-environment): Build a single-decision Blackjack environment by subclassing GymnasiumServer.
+- [Choose an Agent](https://docs.nvidia.com/nemo/gym/latest/get-started/choose-an-agent): Pick the right agent harness for your task: simple, proof-refinement, verifiers integration, or a custom external harness.
+
+## Build Environments
+
+Patterns and end-to-end guides for authoring new training and evaluation environments.
+
+- [Overview](https://docs.nvidia.com/nemo/gym/latest/build-environments): Learn how to build custom environments for training or evaluation using NeMo Gym.
+- [Supported Patterns](https://docs.nvidia.com/nemo/gym/latest/build-environments/supported-patterns): Pattern catalog for environment authors — pick the right shape (single-turn, multi-turn, tool use, sandboxed code, external wrapper, eval-only, RL training) before you start coding.
+- [Single-Step Environment](https://docs.nvidia.com/nemo/gym/latest/build-environments/single-step-environment): Build a single-step environment where the model produces one answer that the verifier scores.
+- [Multi-Step Environment](https://docs.nvidia.com/nemo/gym/latest/build-environments/multi-step-environment): Build a multi-step environment where the agent loops over model and tool calls until the task is complete.
+- [Stateful Environment](https://docs.nvidia.com/nemo/gym/latest/build-environments/stateful-environment): Build an environment whose tools maintain per-rollout state via session cookies.
+- [Real-World Environment](https://docs.nvidia.com/nemo/gym/latest/build-environments/real-world-environment): End-to-end walkthrough of converting a real-world task (Workplace Assistant) into a NeMo Gym environment.
+- [Generating Training Data](https://docs.nvidia.com/nemo/gym/latest/build-environments/real-world-environment/generating-training-data): Generate the JSONL training data for a real-world environment by sampling from your task source.
+- [Resources Server Implementation](https://docs.nvidia.com/nemo/gym/latest/build-environments/real-world-environment/resources-server-implementation): Implement the resources server for the real-world Workplace Assistant environment.
+- [Integrate external libraries](https://docs.nvidia.com/nemo/gym/latest/build-environments/integrate-external-environments): Wrap an existing third-party benchmark or environment library at the agent server level.
+- [Add a benchmark](https://docs.nvidia.com/nemo/gym/latest/build-environments/adding-a-benchmark): Steps and best practices for adding a high-fidelity benchmark to NeMo Gym.
+- [Design a customer evaluation](https://docs.nvidia.com/nemo/gym/latest/build-environments/designing-customer-evaluation): Guiding principles for designing an evaluation against a customer's real workflow.
+- [Aggregate Metrics](https://docs.nvidia.com/nemo/gym/latest/build-environments/aggregate-metrics): How NeMo Gym computes aggregate metrics for each agent via the /aggregate_metrics endpoint after rollout collection.
+- [Environment Quality Checklist](https://docs.nvidia.com/nemo/gym/latest/build-environments/quality-checklist): What every official NeMo Gym environment must satisfy — deterministic verification, no oracle leakage, locked dependencies, validation command, expected baseline variance.
+- [LLM-as-a-judge in verification](https://docs.nvidia.com/nemo/gym/latest/build-environments/llm-as-judge-verification): Use an LLM as the judge for verifying open-ended outputs that don't have a single deterministic answer.
+- [Data](https://docs.nvidia.com/nemo/gym/latest/build-environments/data): How NeMo Gym datasets use JSONL format and connect agent servers to resources servers.
+- [Prepare and Validate](https://docs.nvidia.com/nemo/gym/latest/build-environments/data/prepare-validate): Format and validate JSONL datasets for NeMo Gym training using ng_prepare_data.
+- [Download from Hugging Face](https://docs.nvidia.com/nemo/gym/latest/build-environments/data/download-huggingface): Download JSONL datasets from Hugging Face Hub for NeMo Gym training.
+- [Prompt Config](https://docs.nvidia.com/nemo/gym/latest/build-environments/data/prompt-config): Apply YAML-based prompt templates at rollout time to enable prompt sweeps without re-preparing JSONL data.
+
+## Evaluate Models
+
+Score, compare, and inspect agent behavior on existing benchmarks or your own customer evals.
+
+- [Evaluate Models](https://docs.nvidia.com/nemo/gym/latest/evaluate): Score, compare, and inspect agent behavior on existing benchmarks or your own customer evals.
+- [Run a Benchmark](https://docs.nvidia.com/nemo/gym/latest/evaluate/run-a-benchmark): End-to-end — pick a benchmark from the catalog, configure your model, score it. About 10 minutes from zero to scored output.
+- [Validate Your Setup](https://docs.nvidia.com/nemo/gym/latest/evaluate/validate-your-setup): Confirm your NeMo Gym install + model credentials produce expected results before running real evals. Every official benchmark ships a smoke-test command.
+- [Compare Agents Across Benchmarks](https://docs.nvidia.com/nemo/gym/latest/evaluate/compare-agents): Run the same benchmark with two or more agent harnesses, then compare per-task pass rates side by side. Useful for picking simple_agent vs proof_refinement_agent vs custom.
+- [Score a Model Against Customer Data](https://docs.nvidia.com/nemo/gym/latest/evaluate/score-customer-data): Run an existing benchmark's scoring logic over your own JSONL dataset for production validation, customer pilots, and internal regressions.
+- [Profile Rewards](https://docs.nvidia.com/nemo/gym/latest/evaluate/profile-rewards): Compute per-task pass rates from a rollouts JSONL — pass@1, pass@k, success threshold. The bridge from raw rollouts to actionable evaluation results.
+- [Inspect Failures](https://docs.nvidia.com/nemo/gym/latest/evaluate/inspect-failures): Where to find rollout JSONL, model responses, verifier outputs, and server logs after a failed eval. How to replay a single task locally.
+- [Benchmark Catalog](https://docs.nvidia.com/nemo/gym/latest/evaluate/benchmark-catalog): Every shipped NeMo Gym environment grouped by domain (coding, math, reasoning, agentic) with verified-flag status and config paths.
+
+## Train Models
+
+Hands-on tutorials for running RL training with NeMo Gym environments across supported frameworks.
+
+- [Overview](https://docs.nvidia.com/nemo/gym/latest/train-models): Hands-on tutorials with supported training frameworks for training models on NeMo Gym environments.
+- [NeMo RL](https://docs.nvidia.com/nemo/gym/latest/train-models/nemo-rl-grpo): Train Nemotron Nano 9B v2 to improve multi-step tool-calling using GRPO on the Workplace Assistant environment.
+- [Setup](https://docs.nvidia.com/nemo/gym/latest/train-models/nemo-rl-grpo/setup): Set up the host environment, dependencies, and credentials needed to run the NeMo RL GRPO tutorial.
+- [About Workplace Assistant](https://docs.nvidia.com/nemo/gym/latest/train-models/nemo-rl-grpo/about-workplace-assistant): Overview of the Workplace Assistant environment used in the NeMo RL GRPO tutorial.
+- [Gym Configuration](https://docs.nvidia.com/nemo/gym/latest/train-models/nemo-rl-grpo/gym-configuration): Configure the NeMo Gym side of the NeMo RL GRPO training run.
+- [NeMo RL Configuration](https://docs.nvidia.com/nemo/gym/latest/train-models/nemo-rl-grpo/nemo-rl-configuration): Configure the NeMo RL trainer for the GRPO Workplace Assistant run.
+- [Single Node Training](https://docs.nvidia.com/nemo/gym/latest/train-models/nemo-rl-grpo/single-node-training): Launch a single-node NeMo RL GRPO training job against a NeMo Gym environment.
+- [Multi-Node Training](https://docs.nvidia.com/nemo/gym/latest/train-models/nemo-rl-grpo/multi-node-training): Scale the NeMo RL GRPO training run across multiple nodes.
+- [Unsloth](https://docs.nvidia.com/nemo/gym/latest/train-models/unsloth): Fine-tune models with Unsloth using NeMo Gym environments.
+- [Multi-Environment Training](https://docs.nvidia.com/nemo/gym/latest/train-models/multi-environment-training): Train on multiple NeMo Gym environments simultaneously (multi-verifier training).
+- [Offline Training (SFT/DPO)](https://docs.nvidia.com/nemo/gym/latest/train-models/offline-training-w-rollouts): Use collected rollouts to do offline training (SFT/DPO) outside of the RL loop. Experimental.
+- [Model Recipes](https://docs.nvidia.com/nemo/gym/latest/train-models/recipes): Tutorials for running Gym with the data recipes used to train shipped models.
+- [Nemotron 3 Nano](https://docs.nvidia.com/nemo/gym/latest/train-models/recipes/nemotron-3-nano): Complete setup for distributed training of Nemotron 3 Nano 30B across multiple nodes using Slurm and Ray.
+- [Nemotron 3 Super](https://docs.nvidia.com/nemo/gym/latest/train-models/recipes/nemotron-3-super): Pointer to the NeMo RL recipe for training Nemotron 3 Super with NeMo Gym.
+
+## Reference
+
+Quick lookup for configuration syntax, CLI commands, server APIs, deployment topology, and design notes.
+
+- [Reference](https://docs.nvidia.com/nemo/gym/latest/reference): Quick lookup for configuration syntax, options, and specifications.
+- [Configuration](https://docs.nvidia.com/nemo/gym/latest/reference/configuration): Complete syntax and field specifications for NeMo Gym configuration files.
+- [CLI Commands](https://docs.nvidia.com/nemo/gym/latest/reference/cli-commands): Reference for all available NeMo Gym CLI commands.
+- [Provider Compatibility](https://docs.nvidia.com/nemo/gym/latest/reference/provider-compatibility): Tested model and provider matrix — vLLM, Azure/OpenAI, OpenAI-compatible endpoints, Responses vs chat completions, tool calling, reasoning blocks.
+- [Sandbox & Execution Matrix](https://docs.nvidia.com/nemo/gym/latest/reference/sandbox-execution-matrix): Where rollouts run — local, Ray, Docker, cloud sandboxes. Network behavior, dependency installation, timeout semantics, security boundaries per backend.
+- [Environment Variables](https://docs.nvidia.com/nemo/gym/latest/reference/environment-variables): Environment variables NeMo Gym reads at startup or runtime — Ray paths, server configuration injection, optional logging overrides.
+- [RL Framework Compatibility](https://docs.nvidia.com/nemo/gym/latest/reference/rl-framework-compatibility): NeMo Gym version compatibility with supported RL training frameworks (NeMo RL, TRL, Unsloth).
+- [Agent Server](https://docs.nvidia.com/nemo/gym/latest/reference/agent-server): The Agent server — central component of environment design, defines whether a rollout is single-step, multi-step, single-turn, or multi-turn.
+- [Model Server](https://docs.nvidia.com/nemo/gym/latest/reference/model-server): Stateless LLM inference endpoints that receive a conversation and return the model's next output.
+- [vLLM](https://docs.nvidia.com/nemo/gym/latest/reference/model-server/vllm): The VLLMModel server wrapping vLLM's Chat Completions endpoint and converting it to the OpenAI Responses API schema.
+- [Resources Server](https://docs.nvidia.com/nemo/gym/latest/reference/resources-server): The "world" the agent interacts with — defines the task, the tools and actions, and the verification logic that returns reward.
+- [Deployment Topology](https://docs.nvidia.com/nemo/gym/latest/reference/deployment-topology): Training framework deployment topology and how NeMo Gym servers connect to RL trainers.
+- [Engineering Notes](https://docs.nvidia.com/nemo/gym/latest/reference/design-docs): Technical notes documenting infrastructure decisions, performance investigations, and design rationale behind NeMo Gym.
+- [aiohttp vs httpx](https://docs.nvidia.com/nemo/gym/latest/reference/design-docs/aiohttp-vs-httpx): Why NeMo Gym uses aiohttp — httpx is O(n^2) in queued requests and stalls under heavy concurrency.
+- [Responses API](https://docs.nvidia.com/nemo/gym/latest/reference/design-docs/responses-api-evolution): Why NeMo Gym uses the OpenAI Responses API as its native schema and how it differs from Chat Completions.
+- [SWE RL Case Study](https://docs.nvidia.com/nemo/gym/latest/reference/design-docs/swe-rl-case-study): Case study (Feb 2026) covering the SWE-RL environment design and lessons learned.
+- [FAQ](https://docs.nvidia.com/nemo/gym/latest/reference/faq): Quick answers to commonly asked NeMo Gym questions.
+- [Migration Guide 0.2 → 0.3](https://docs.nvidia.com/nemo/gym/latest/reference/migration-guide-0.2-to-0.3): What's changing in 0.3.0 and how to update existing 0.2.x setups — breaking changes, deprecations, new options, step-by-step upgrade checklist.
+
+## Troubleshooting
+
+Symptom-driven index of common failure modes, configuration errors, and known footguns.
+
+- [Troubleshooting](https://docs.nvidia.com/nemo/gym/latest/troubleshooting): Solutions for common errors and issues.
+- [Footguns](https://docs.nvidia.com/nemo/gym/latest/troubleshooting/footguns): Symptom-driven index of NeMo Gym gotchas — Hydra quoting, vLLM context length, Ray socket paths, and other non-obvious failure modes.
+- [Configuration Errors](https://docs.nvidia.com/nemo/gym/latest/troubleshooting/configuration): Errors that appear when running ng_run or ng_collect_rollouts. NeMo Gym validates configuration at startup before launching servers.
+
+## Resources
+
+Glossary, FAQs, and supplementary lookup material that supports the rest of the documentation.
+
+- [Resources](https://docs.nvidia.com/nemo/gym/latest/resources): Glossary, FAQs, and supplementary lookup material.
+- [Glossary](https://docs.nvidia.com/nemo/gym/latest/resources/glossary): Definitions of NeMo Gym terms — training environment, agent harness, resources server, rollout, verifier, RLVR, and more.
+
+## Contribute
+
+Set up a development environment, contribute new environments, or integrate NeMo Gym with a new RL training framework.
+
+- [Overview](https://docs.nvidia.com/nemo/gym/latest/contribute): How to contribute new training environments, RL framework integrations, documentation, and bug fixes.
+- [Development Setup](https://docs.nvidia.com/nemo/gym/latest/contribute/development-setup): Set up your development environment and submit contributions to NeMo Gym.
+- [Environments](https://docs.nvidia.com/nemo/gym/latest/contribute/environments): Ways to contribute new environments to advance RL training for the community.
+- [New Environment](https://docs.nvidia.com/nemo/gym/latest/contribute/environments/new-environment): Create a new environment — usually a new resources server paired with an existing agent and model server.
+- [Integrate RL Frameworks](https://docs.nvidia.com/nemo/gym/latest/contribute/rl-framework-integration): Guides for integrating NeMo Gym into a new RL training framework.
+- [Generation Backend](https://docs.nvidia.com/nemo/gym/latest/contribute/rl-framework-integration/generation-backend-and-openai-compatible-http-server): Requirements for the OpenAI-compatible HTTP server NeMo Gym calls during training, plus existing implementations across popular RL frameworks.
+- [Integration Footprint](https://docs.nvidia.com/nemo/gym/latest/contribute/rl-framework-integration/gym-integration-footprint-and-form-factor): Reference for the components required to integrate Gym into your training framework, with links to NeMo RL reference implementations and tests.
+- [Success Criteria](https://docs.nvidia.com/nemo/gym/latest/contribute/rl-framework-integration/gym-rl-framework-integration-success-criteria): Validation criteria for confirming a Gym integration works correctly across the standard benchmarks.
+- [On-Policy Corrections](https://docs.nvidia.com/nemo/gym/latest/contribute/rl-framework-integration/openai-compatible-http-server-on-policy-correction): Fundamental issues with using an OpenAI-compatible HTTP server in multi-step and multi-turn RL training, and the corrections required for on-policy training.
