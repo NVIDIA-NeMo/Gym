@@ -1,0 +1,25 @@
+verifiers_agent:
+  responses_api_agents:
+    verifiers_agent:
+      entrypoint: app.py
+      domain: knowledge
+      description: Prime Intellect verifiers integration, Humanity's Last Exam text-only environment.
+      value: Evaluate expert-level knowledge and reasoning with an LLM judge.
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model_name: ""
+      vf_env_id: hle
+      vf_env_args:
+        multimodal: false
+        tools: true
+        judge_model: openai/openai/gpt-5.5
+        judge_base_url: https://inference-api.nvidia.com/v1
+        judge_api_key_var: NVIDIA_API_KEY # must use this, it reads: os.getenv("NVIDIA_API_KEY"). Do not hard code
+        max_turns: 11 # max tool calls + 1 for the final answer
+      group_size: 1
+      max_concurrent_generation: -1
+      max_concurrent_scoring: -1
+      max_tokens: 64000
+      temperature: 1.0
+      top_p: 1.0
