@@ -136,6 +136,10 @@ class Tau2Agent(SimpleResponsesAPIAgent):
         } | self.config.user_llm_args
 
         extra_agent_args = {k: v for k, v in responses_create_params.items() if k in ("temperature", "top_p")}
+        if responses_create_params.get("max_output_tokens"):
+            # Convert to chat completions
+            extra_agent_args["max_tokens"] = responses_create_params["max_output_tokens"]
+
         # Need `openai/` provider prefix for LiteLLM
         config.llm_agent = "openai/dummy agent model"
         config.llm_args_agent = {
