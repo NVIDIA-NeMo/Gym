@@ -90,12 +90,17 @@ verdict-type decomposition (`wins`, `strict_wins`, `ties`, `losses`,
 Arena-Elo headline and a rollout-level verdict distribution without
 extra post-processing.
 
+## Generation sanitization
+
+The benchmark sets `sanitize_generations: true` on its
+`arena_judge` resources server (see [`config.yaml`](config.yaml)) to
+scrub UTF-8 surrogate halves and NULs from candidate and baseline
+generations before judging — mirrors Skills'
+`++sanitize_generations=true` for the multilingual variant.
+
 ## Deferred follow-ups
 
 - **Per-language Arena-Elo aggregation.** Rows already carry
   `language` and `subset_for_metrics: <language_code>`; wiring those
   into `arena_judge`'s subset-aware metric output is a follow-up. For
   now the headline is global + per-category, not per-language.
-- **`sanitize_generations` parity.** The Skills pipeline runs a
-  generation-cleanup step before judging; Gym has no equivalent yet,
-  so judge inputs here are raw model outputs.
