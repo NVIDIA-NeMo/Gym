@@ -39,7 +39,7 @@ Today, **every shipped backend inherits the host's network**. There is no first-
 Practical guidance:
 
 - For verifiers that shell out to a tool, restrict the tool's network access at the OS level (firewall rules, network namespaces, or a `requests` mock injected into the subprocess environment).
-- For verifiers that import a third-party library with hidden HTTP calls, prefer `aiohttp` mocks over `httpx` mocks. See [aiohttp vs httpx](/latest/infrastructure/engineering-notes/aiohttp-vs-httpx) for why the framework standardized on `aiohttp`.
+- For verifiers that import a third-party library with hidden HTTP calls, prefer `aiohttp` mocks over `httpx` mocks. See [aiohttp vs httpx](/latest/reference/design-docs/aiohttp-vs-httpx) for why the framework standardized on `aiohttp`.
 - For benchmarks where offline operation is a correctness contract, document it in the environment's quality checklist entry (see [Environment Quality Checklist](/latest/build-environments/quality-checklist)) so reviewers can verify it.
 
 Container and cloud-sandbox backends ([#1048](https://github.com/NVIDIA-NeMo/Gym/issues/1048)) will provide per-backend offline modes as a first-class option.
@@ -161,7 +161,7 @@ These show up at scale and are easy to miss in single-node testing. Full symptom
 | Ray fails to start with `OSError: AF_UNIX path too long` | Default Ray TMPDIR is the working directory; on Lustre or other long-path filesystems this exceeds the 107-byte AF_UNIX limit. | Set `RAY_TMPDIR=/tmp` before running `ng_run` or `ng_test`. |
 | `ng_test` ignores `RAY_TMPDIR` set in Python | `ng_test` creates an isolated venv per server. `os.environ` changes inside Python don't propagate into the subprocess venv. | Set the env var **externally** before invoking `ng_test`: `RAY_TMPDIR=/tmp ng_test +entrypoint=resources_servers/my_server`. |
 | Ray socket errors on first run, fine on retry | Stale Ray runtime at `/tmp/ray` from a prior crashed run. | `ray stop --force` (or remove the stale socket directory) before restarting. |
-| Rollouts hang at high concurrency | Underlying HTTP transport is `httpx`, which has O(n²) connection-pool behavior. | Use `aiohttp` via `nemo_gym.server_utils.request()`. See [aiohttp vs httpx](/latest/infrastructure/engineering-notes/aiohttp-vs-httpx). |
+| Rollouts hang at high concurrency | Underlying HTTP transport is `httpx`, which has O(n²) connection-pool behavior. | Use `aiohttp` via `nemo_gym.server_utils.request()`. See [aiohttp vs httpx](/latest/reference/design-docs/aiohttp-vs-httpx). |
 
 ---
 
@@ -186,5 +186,5 @@ This is a roadmap. No dates are committed. Subscribe to [#1048](https://github.c
 - [Footguns](/latest/troubleshooting/footguns) — symptom-driven failure index.
 - [Reward Semantics](/latest/about/concepts/reward-semantics) — scoring contract when verifiers error or time out.
 - [Environment Quality Checklist](/latest/build-environments/quality-checklist) — author quality bar, including offline-operation and determinism checks.
-- [aiohttp vs httpx](/latest/infrastructure/engineering-notes/aiohttp-vs-httpx) — why the framework's HTTP transport matters for concurrency.
+- [aiohttp vs httpx](/latest/reference/design-docs/aiohttp-vs-httpx) — why the framework's HTTP transport matters for concurrency.
 - [RL Framework Compatibility](/latest/reference/rl-framework-compatibility) — version matrix for NeMo RL, Unsloth, and TRL.

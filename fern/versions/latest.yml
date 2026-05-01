@@ -19,18 +19,6 @@ navigation:
       - folder: ./latest/pages/get-started
         title: "Get Started"
         title-source: frontmatter
-      - folder: ./latest/pages/agent-server
-        title: "Agent Server"
-        title-source: frontmatter
-      - folder: ./latest/pages/model-server
-        title: "Model Server"
-        title-source: frontmatter
-      - folder: ./latest/pages/resources-server
-        title: "Resources Server"
-        title-source: frontmatter
-      - folder: ./latest/pages/data
-        title: "Data"
-        title-source: frontmatter
       - folder: ./latest/pages/build-environments
         title: "Build Environments"
         title-source: frontmatter
@@ -39,12 +27,6 @@ navigation:
         title-source: frontmatter
       - folder: ./latest/pages/train-models
         title: "Train Models"
-        title-source: frontmatter
-      - folder: ./latest/pages/model-recipes
-        title: "Model Recipes"
-        title-source: frontmatter
-      - folder: ./latest/pages/infrastructure
-        title: "Infrastructure"
         title-source: frontmatter
       - folder: ./latest/pages/reference
         title: "Reference"

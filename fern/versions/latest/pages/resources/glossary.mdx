@@ -10,7 +10,7 @@ Definitions of the vocabulary used across NeMo Gym tutorials, reference material
 ## A
 
 **Agent harness** (also: agent server)
-: The orchestrator that runs the model-and-tools loop for a single task. Implemented as a [Response API Agent](/latest/agent-server) extending `SimpleResponsesAPIAgent`; exposes `/run` and `/responses` endpoints. `simple_agent` is the default single-turn agent; `proof_refinement_agent`, `verifiers_agent`, and `swe_agents` are multi-turn variants.
+: The orchestrator that runs the model-and-tools loop for a single task. Implemented as a [Response API Agent](/latest/reference/agent-server) extending `SimpleResponsesAPIAgent`; exposes `/run` and `/responses` endpoints. `simple_agent` is the default single-turn agent; `proof_refinement_agent`, `verifiers_agent`, and `swe_agents` are multi-turn variants.
 
 ## B
 
@@ -28,7 +28,7 @@ Definitions of the vocabulary used across NeMo Gym tutorials, reference material
 : The complete pipeline from input prompt to scored rollout — orchestration, model inference, tool usage, and verification.
 
 **Dataset**
-: In NeMo Gym, a JSONL file with one [task](#task) per line. Each line carries `responses_create_params.input` (the messages) and `verifier_metadata` (task-specific verification data). See [Data](/latest/data).
+: In NeMo Gym, a JSONL file with one [task](#task) per line. Each line carries `responses_create_params.input` (the messages) and `verifier_metadata` (task-specific verification data). See [Data](/latest/build-environments/data).
 
 **Demonstration data**
 : Training data format for [SFT](#sft-supervised-fine-tuning) consisting of input prompts paired with successful rollouts. Shows models examples of correct behavior.
@@ -76,7 +76,7 @@ Definitions of the vocabulary used across NeMo Gym tutorials, reference material
 : The [verifier](#verifier)'s score for a single [rollout](#rollout). Numerical, typically `0.0` or `1.0` in RLVR, indicating whether the task was accomplished. See [Reward Semantics](/latest/about/concepts/reward-semantics).
 
 **Resources server**
-: The server type that hosts the [verifier](#verifier) and verification logic. Implements `verify()`; extends `SimpleResourcesServer`. One resources server defines one [training environment](#training-environment). See [Resources Server](/latest/resources-server).
+: The server type that hosts the [verifier](#verifier) and verification logic. Implements `verify()`; extends `SimpleResourcesServer`. One resources server defines one [training environment](#training-environment). See [Resources Server](/latest/reference/resources-server).
 
 **Responses API**
 : OpenAI's standard interface for rollouts, including function calls and multi-turn conversations. NeMo Gym's native format. Use `openai_model` for endpoints supporting `/v1/responses`.
