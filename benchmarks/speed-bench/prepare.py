@@ -25,9 +25,17 @@ so we don't have to re-port the 14-source interpolation logic.
 """
 
 import argparse
+import sys
 from pathlib import Path
 
-from _prepare_common import prepare_one_config
+
+# The benchmark dir name has a hyphen, so importlib's dotted-path import
+# (`benchmarks.speed-bench.prepare`) is not a valid identifier and the
+# parent dir isn't auto-added to sys.path. Prepend it so the sibling
+# `_prepare_common` module is importable.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from _prepare_common import prepare_one_config  # noqa: E402
 
 
 def prepare() -> Path:
