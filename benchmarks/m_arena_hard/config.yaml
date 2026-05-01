@@ -6,6 +6,11 @@ config_paths:
 # via ``_inherit_from`` so overrides here don't leak.
 m_arena_hard_arena_judge_resources_server:
   _inherit_from: arena_judge
+  resources_servers:
+    arena_judge:
+      # Multilingual rollouts emit UTF-8 surrogate halves / embedded NULs
+      # that break the judge's JSON serialization; scrub them before judging.
+      sanitize_generations: true
 
 m_arena_hard_arena_judge_simple_agent:
   _inherit_from: arena_judge_simple_agent

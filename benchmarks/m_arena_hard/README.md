@@ -81,6 +81,14 @@ verdict-type decomposition (`wins`, `strict_wins`, `ties`, `losses`,
 Arena-Elo headline and a rollout-level verdict distribution without
 extra post-processing.
 
+## Generation sanitization
+
+This benchmark sets `sanitize_generations: true` on the inherited
+`arena_judge` resources server (see `config.yaml`) so the judge scrubs
+UTF-8 surrogate halves and embedded NULs out of multilingual rollouts
+before serializing them into the judge prompt. Mirrors Skills'
+`++sanitize_generations=true` for the multilingual variant.
+
 ## Deferred follow-ups
 
 - **Per-language Arena-Elo aggregation.** Rows already carry
@@ -88,8 +96,3 @@ extra post-processing.
   server does not split Arena-Elo by `subset_key=language`. Adding
   per-language breakdowns is a future `arena_judge` change and is
   intentionally out of scope here.
-- **`sanitize_generations` parity.** Skills sets
-  `++sanitize_generations=true` for multilingual variants to strip
-  reasoning traces from rollouts before judging. Gym has no equivalent
-  knob yet; this is a deferred follow-up rather than a Gym-side
-  prepare change.
