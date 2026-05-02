@@ -1,0 +1,13 @@
+ns_tools_particle:
+  resources_servers:
+    ns_tools_particle:
+      entrypoint: app.py
+      default_verifier: math_with_judge
+      verifiers: {}
+      nemo_skills_tools:
+        - nemo_skills.mcp.servers.particle_tool.ParticleTool
+      domain: agent
+      verified: false
+      description: NeMo Skills particle physics lookup tool
+      value: Enable PDG particle lookup through NeMo Skills MCP tools
+
