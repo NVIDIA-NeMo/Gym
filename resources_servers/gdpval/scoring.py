@@ -375,13 +375,25 @@ async def score_with_rubric_structured(
     """
     from openai import AsyncOpenAI
 
-    # Compute max possible score from rubric
+    # Compute max possible score from rubric. Different upstream formats name
+    # the per-criterion point field differently — accept either ``score`` or
+    # ``weight`` so multiple datasets can mix in the same training run without
+    # a per-source pre-pass.
+    def _criterion_points(item: Any) -> float:
+        if not isinstance(item, dict):
+            return 0
+        for key in ("score", "weight"):
+            v = item.get(key)
+            if isinstance(v, (int, float)):
+                return v
+        return 0
+
     if isinstance(rubric_json, str):
         rubric_json = json.loads(rubric_json) if rubric_json else []
     if isinstance(rubric_json, list):
-        max_possible = sum(item.get("score", 0) for item in rubric_json)
+        max_possible = sum(_criterion_points(item) for item in rubric_json)
     elif isinstance(rubric_json, dict) and "criteria" in rubric_json:
-        max_possible = sum(c.get("score", 0) for c in rubric_json["criteria"])
+        max_possible = sum(_criterion_points(c) for c in rubric_json["criteria"])
     else:
         max_possible = 0
 
