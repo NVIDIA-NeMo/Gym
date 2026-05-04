@@ -150,6 +150,8 @@ redirects:
     destination: "/latest/reference/rl-framework-integration"
   - source: "/latest/contribute"
     destination: "https://github.com/NVIDIA-NeMo/Gym/blob/main/CONTRIBUTING.md"
+  - source: "/latest/reference/migration-guide-0.2-to-0.3"
+    destination: "/latest/about/release-notes/migration-0.2-to-0.3"
   - source: "nemo/gym/how-to-faq.html"
     destination: "/reference/faq"
   - source: "nemo/gym/infrastructure/aiohttp-vs-httpx.html"
