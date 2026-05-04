@@ -12,6 +12,9 @@ tabs:
 navigation:
   - tab: docs
     layout:
+      - page: "Welcome"
+        path: ./latest/pages/index.mdx
+        slug: ""
       - folder: ./latest/pages/about
         title: "About"
         title-source: frontmatter
