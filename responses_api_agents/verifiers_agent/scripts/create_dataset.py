@@ -28,7 +28,10 @@ def load_verifiers_dataset(vf_env: vf.Environment, n: int = -1, seed: int | None
     try:
         dataset = vf_env.get_dataset(n=n, seed=seed)
     except ValueError:
-        dataset = None
+        try:
+            dataset = vf_env.get_eval_dataset(n=n, seed=seed)
+        except ValueError:
+            dataset = None
         for attr in ["dataset", "train_dataset", "eval_dataset"]:
             ds = getattr(vf_env, attr, None)
             if ds is not None:
