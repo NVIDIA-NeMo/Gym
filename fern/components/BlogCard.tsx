@@ -14,7 +14,7 @@ import { authors as REGISTRY } from "./devnotes/authors-data";
  * from MDX (e.g. `import hero from "@/assets/foo/hero.png"`), which the
  * bundler resolves to the correct URL in both dev and production.
  */
-const BASEPATH = "/nemo/datadesigner";
+const BASEPATH = "/nemo/gym";
 
 /** Prepend BASEPATH to a root-relative path if not already present. */
 function withBasepath(path: string): string {
