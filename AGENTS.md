@@ -128,6 +128,12 @@ Steward findings should be contract-oriented, evidence-backed, and collateral-aw
 - Confidence:
 ```
 
+### Convergence
+
+When two or more stewards independently flag the same finding, that finding is **automatically P0** regardless of either steward's individual severity rating. Cross-steward convergence is a confidence multiplier the synthesis step privileges. Note convergence explicitly in the synthesis ("X stewards independently flagged Y") so future audits can see the pattern.
+
+When the same shape of finding recurs across multiple Content Audit passes — fabricated CLI flags, fabricated config fields, miscounted entities, stale version pins — escalate to a Known Regression Pattern (see § Known Regression Patterns) and treat the pattern as a class to be hunted for proactively, not waited on.
+
 ## Steward Swarms
 
 Stewards spawn as independent agents, each reading root + its closest scoped `AGENTS.md`, each advocating only for its domain, each returning findings in the Steward Signal Format above. The implementing agent owns synthesis and final decisions; stewards advise and create useful tension but do not own integrated implementation. Keep PR scope bounded to accepted findings and their proof/collateral; defer unrelated steward suggestions to not-now/follow-up.
@@ -154,18 +160,33 @@ Severity meanings shift in this mode:
 
 Doc-shaped PRs that don't run a content audit before merge are a known regression source. Make it part of the merge gate, not a follow-up.
 
+#### Doc Autopilot — keeping docs accurate via stewards
+
+The Content Audit mode is the primary mechanism for keeping NeMo Gym docs accurate over time. Stewards are the autopilot — each one already knows what doc pages it owns, what source files are the source of truth, and what shape of claim is stale-by-default. The implementing agent's job is to invoke the swarm at the right cadence and synthesize.
+
+Three triggers shape the cadence:
+
+1. **Merge gate.** Doc-shaped PRs gate on a Content Audit having run. P0/P1 findings actioned or explicitly deferred before merge. Already in the Done Criteria.
+2. **Periodic re-audit.** Independent of any PR — spawn a full Content Audit swarm at every release boundary and on a recurring cadence (every 4–6 weeks is a reasonable default). Drift accumulates between PRs even when no doc-shaped PR has landed; periodic re-audit catches it.
+3. **Source-triggered targeted re-audit.** When source files change in ways a steward owns, the relevant scoped steward's Content Audit on related doc pages should run. E.g. a change to `nemo_gym/cli.py` triggers a targeted re-audit of `api-reference/cli/*.mdx`; a change to `responses_api_models/*/app.py` triggers `reference/compatibility/providers.mdx` and `reference/servers/model/*.mdx`. Surface this trigger when reviewing a code change that touches public surface contracts.
+
+Each scoped `AGENTS.md` lists the doc pages that steward owns under "Own" — that's the audit surface for that steward in autopilot mode.
+
 ### Backlog / roadmap / prioritization
 
 Consult all scoped stewards and produce raw steward signals, confidence, dependencies, risks, convergence, minority reports, ranked backlog, and not-now items.
 
 ## Known Regression Patterns
 
-Patterns the steward system has surfaced repeatedly. Each is a candidate for automation; until automated, they're stale-by-default fields the next content audit must re-verify.
+Patterns the steward system has surfaced repeatedly. Stewards in autopilot mode hunt these by default — each pattern names the verification the audit must do, not just the symptom.
 
-- **Doc-snippet rot** — `ng_*` CLI invocations in docs drift from real signatures (param renames, dropped flags, fabricated output fields). Highest-leverage automation: snippet test that runs every `bash`-tagged code block against the actual command (`--help` parse + arg validation).
-- **Naming and counting drift** — any doc claim that includes a count ("four model servers"), a name (`simple_agent` framed as "single-turn"), or a version pin (`openai<=2.6.1`) is stale-by-default. Code evolves, claim doesn't.
-- **Pedagogy creep** — voice rubric violations (Success Check ceremony, "In this guide you will…", skip-ahead Tips) accumulate when the rubric is enforced by review, not by lint. Highest-leverage automation: programmatic voice lint in docs CI.
-- **llms.txt drift** — when section structure or page slugs change, `llms.txt` rots silently. Highest-leverage automation: a check that every URL in `llms.txt` resolves to a page in `versions/latest.yml`.
+- **Fabricated CLI / config fields.** Invented parameter names, output field names, or YAML config fields that don't exist in source. Confirmed cases: `+pass_threshold` and `+output_jsonl_fpath` on `ng_reward_profile` (audit 1); `start_idx` / `end_idx` on `DatasetConfig` (audit 3, two stewards converged independently). **Audit verification:** every CLI flag and every YAML config field documented anywhere must trace to a Pydantic class field or `argparse` declaration. If the audit finds a doc claim that names a flag or field, the next step is `grep` against the relevant source file.
+- **Doc-snippet rot.** `ng_*` CLI invocations drift from real signatures (param renames, dropped flags, type changes). Confirmed cases: `ng_collect_rollouts +agent_name` documented as required but is `Optional[str]`; `ng_e2e_collect_rollouts +split` required field omitted from the param table. **Audit verification:** every `bash`-tagged code block in a doc page must round-trip against the actual command's signature.
+- **Naming and counting drift.** Any doc claim with a count ("four model servers"), a name (`simple_agent` framed as "single-turn"), or a version pin (`openai<=2.6.1`) is stale-by-default. Confirmed cases: 4 → 6 model servers; openai pin 2.6.1 → 2.7.2; `simple_agent` framed as single-turn when it's a multi-step loop. **Audit verification:** any doc page that names a count, names an entity, or pins a version must be re-verified against current source on every audit pass.
+- **Wrong endpoint or contract shapes.** Docs claim an endpoint shape, retry policy, or interaction pattern that doesn't match the implementation. Confirmed cases: `azure_openai_model` documented as `/v1/responses` but it actually calls `chat.completions.create()` and synthesizes Responses-shaped output; "exponential backoff" documented but actual is fixed 0.5s. **Audit verification:** for any claim about *how a server works*, read the `app.py` of that server type and trace one full request path before accepting the claim.
+- **Pedagogy creep.** Voice rubric violations (Success Check ceremony, "In this guide you will…", skip-ahead Tips) accumulate when the rubric is enforced by review, not by lint. **Audit verification:** the docs steward greps for the known violation patterns on every audit pass and reports residue.
+- **llms.txt drift.** When section structure or page slugs change, `llms.txt` rots silently. **Audit verification:** every URL in `llms.txt` of the form `https://docs.nvidia.com/nemo/gym/latest/<path>` must resolve to an `.mdx` file under `fern/versions/latest/pages/<path>` or `<path>/index.mdx`.
+- **Cross-page inconsistency.** Same fact stated differently on different pages — most often in default values, command parameters, or counts. Confirmed case: `+data_source` default documented as `huggingface` on one page and `gitlab` on another (the latter was the regression). **Audit verification:** the cross-steward synthesis step explicitly checks for two pages disagreeing on the same fact.
 
 ## Steward Feedback Loop
 
@@ -189,7 +210,7 @@ Trigger phrases: `ask stewards`, `bugbash`, `review swarm`, `steward synthesis` 
 
 For implementation work: consult affected stewards and return synthesis before or during the change. Include accepted/deferred findings, merged duplicates, minority reports, required proof, collateral updates, and not-now items.
 
-For content audit: spawn stewards across all domains the docs touch (default: all six on a site-wide IA refactor); synthesize into a triaged P0/P1/P2 punch list cited at file:line; gate the merge on P0/P1.
+For content audit: spawn stewards across all domains the docs touch (default: all six on a site-wide IA refactor); synthesize into a triaged P0/P1/P2 punch list cited at file:line; gate the merge on P0/P1. Always run the swarm in parallel — independent stewards surface convergence (see § Steward Signal Format → Convergence), and the convergence pattern itself is a P0 signal.
 
 For multi-surface work, include a parity matrix:
 
