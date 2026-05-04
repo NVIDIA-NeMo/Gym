@@ -48,9 +48,21 @@ navigation:
       - section: "CLI"
         slug: cli
         contents:
-          - page: "Commands"
-            path: ./latest/pages/api-reference/cli.mdx
+          - page: "Overview"
+            path: ./latest/pages/api-reference/cli/index.mdx
             slug: ""
+          - page: "Servers"
+            path: ./latest/pages/api-reference/cli/servers.mdx
+            slug: servers
+          - page: "Rollouts"
+            path: ./latest/pages/api-reference/cli/rollouts.mdx
+            slug: rollouts
+          - page: "Data"
+            path: ./latest/pages/api-reference/cli/data.mdx
+            slug: data
+          - page: "Diagnostics"
+            path: ./latest/pages/api-reference/cli/diagnostics.mdx
+            slug: diagnostics
   - tab: blog
     layout:
       - page: "Overview"

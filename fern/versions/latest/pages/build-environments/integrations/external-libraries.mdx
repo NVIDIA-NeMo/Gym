@@ -15,7 +15,7 @@ Wrapping an external training environment, benchmark, or agent requires extra ca
 1. External libraries include their own rollout orchestration (model + tool call coordination) and sometimes return their own reward, so integrate at the NeMo Gym agent server level.
 2. Add the third-party library as a dependency in `requirements.txt`. For more complex needs (beyond pip or GitHub installs), use `setup.py` and `pyproject.toml`.
 3. Import the dependency in `app.py` like any other Python module.
-4. Run `ng_test` to test your agent server. See the [ng_test CLI reference](https://docs.nvidia.com/nemo/gym/api/cli.html#ng-test-nemo-gym-test) for details.
+4. Run `ng_test` to test your agent server. See the [ng_test CLI reference](https://docs.nvidia.com/nemo/gym/api/cli/servers#ng_test) for details.
 5. Typically wrap the external library inside `/run` and omit `/responses`.
 6. Inside `/run` before the call: preprocess from NeMo Gym schema into the external library's config.
 7. Inside `/run` after the call: postprocess from the library result into a NeMo Gym response.

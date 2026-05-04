@@ -1,0 +1,176 @@
+---
+title: "Data"
+description: "CLI reference for data preparation and the GitLab and HuggingFace dataset registries: ng_prepare_data plus upload, download, and delete commands."
+content_type: reference
+audience_level: intermediate
+journey_stage: build
+position: 4
+---
+
+Commands for preparing training data and managing datasets in the GitLab Model Registry and HuggingFace Hub.
+
+## `ng_prepare_data`
+
+Prepare and validate training data, generating metrics and statistics for datasets.
+
+**Parameters**
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `output_dirpath` | str | Directory path where processed datasets and metrics will be saved. |
+| `mode` | Literal["train_preparation", "example_validation"] | Processing mode. Use `train_preparation` to prepare train and validation datasets for training, or `example_validation` to validate example data for PR submission. |
+| `should_download` | bool | Whether to automatically download missing datasets from remote registries. Default: `False`. |
+| `overwrite_metrics_conflicts` | bool | Whether or not to overwrite metrics conflicts. Default: `False`. |
+
+**Example**
+
+```bash
+config_paths="resources_servers/example_multi_step/configs/example_multi_step.yaml,\
+responses_api_models/openai_model/configs/openai_model.yaml"
+ng_prepare_data "+config_paths=[${config_paths}]" \
+    +output_dirpath=data/example_multi_step \
+    +mode=example_validation
+```
+
+---
+
+## GitLab Dataset Registry
+
+Commands for uploading, downloading, and managing datasets in the GitLab Model Registry.
+
+### `ng_upload_dataset_to_gitlab`
+
+Upload a local JSONL dataset artifact to GitLab.
+
+**Parameters**
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `dataset_name` | str | The dataset name. |
+| `version` | str | The version of this dataset. Must be in the format `x.x.x`. |
+| `input_jsonl_fpath` | str | Path to the JSONL file to upload. |
+
+**Example**
+
+```bash
+ng_upload_dataset_to_gitlab \
+    +dataset_name=example_multi_step \
+    +version=0.0.1 \
+    +input_jsonl_fpath=data/train.jsonl
+```
+
+### `ng_download_dataset_from_gitlab`
+
+Download a JSONL dataset from GitLab Model Registry.
+
+**Parameters**
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `dataset_name` | str | The dataset name. |
+| `version` | str | The version of this dataset. Must be in the format `x.x.x`. |
+| `artifact_fpath` | str | The filepath to the artifact to download. |
+| `output_fpath` | str | Path where the downloaded dataset will be saved. |
+
+**Example**
+
+```bash
+ng_download_dataset_from_gitlab \
+    +dataset_name=example_multi_step \
+    +version=0.0.1 \
+    +artifact_fpath=train.jsonl \
+    +output_fpath=data/train.jsonl
+```
+
+### `ng_delete_dataset_from_gitlab`
+
+Delete a dataset from GitLab Model Registry. Prompts for confirmation.
+
+**Parameters**
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `dataset_name` | str | Name of the dataset to delete from GitLab. |
+
+**Example**
+
+```bash
+ng_delete_dataset_from_gitlab +dataset_name=old_dataset
+```
+
+---
+
+## HuggingFace Hub
+
+Commands for uploading and downloading datasets to/from HuggingFace Hub.
+
+### `ng_upload_dataset_to_hf`
+
+Upload a JSONL dataset to HuggingFace Hub with optional GitLab deletion after successful upload.
+
+**Parameters**
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `hf_token` | str | HuggingFace API token for authentication. |
+| `hf_organization` | str | HuggingFace organization name where the dataset will be uploaded. |
+| `hf_collection_name` | str | HuggingFace collection name for organizing datasets. |
+| `hf_collection_slug` | str | Alphanumeric collection slug found at the end of the collection URI. |
+| `dataset_name` | str | Name of the dataset. Will be combined with domain and resources server name. |
+| `input_jsonl_fpath` | str | Path to the local JSONL file to upload. |
+| `resource_config_path` | str | Path to resources server config file. Used to extract domain for naming convention. |
+| `hf_dataset_prefix` | str | Prefix prepended to dataset name. Default: `NeMo-Gym`. |
+| `delete_from_gitlab` | Optional[bool] | Delete the dataset from GitLab after successful upload to HuggingFace. Default: `False`. |
+
+**Example**
+
+```bash
+resource_config_path="resources_servers/example_multi_step/configs/example_multi_step.yaml"
+ng_upload_dataset_to_hf \
+    +dataset_name=my_dataset \
+    +input_jsonl_fpath=data/train.jsonl \
+    +resource_config_path=${resource_config_path} \
+    +delete_from_gitlab=true
+```
+
+### `ng_download_dataset_from_hf`
+
+Download a JSONL dataset from HuggingFace Hub to local filesystem.
+
+**Parameters**
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `output_fpath` | str | Local file path where the downloaded dataset will be saved. |
+| `hf_token` | str | HuggingFace API token for authentication. |
+| `artifact_fpath` | str | Name of the artifact file to download from the repository. |
+| `repo_id` | str | HuggingFace repository ID in format `organization/dataset-name`. |
+
+**Example**
+
+```bash
+ng_download_dataset_from_hf \
+    +repo_id=NVIDIA/NeMo-Gym-Math-example_multi_step-v1 \
+    +artifact_fpath=train.jsonl \
+    +output_fpath=data/train.jsonl
+```
+
+### `ng_gitlab_to_hf_dataset`
+
+Upload a JSONL dataset to HuggingFace Hub and automatically delete from GitLab after successful upload.
+
+This command always deletes the dataset from GitLab after uploading to HuggingFace. Use `ng_upload_dataset_to_hf` if you want optional deletion control.
+
+**Parameters**
+
+Same as `ng_upload_dataset_to_hf` but `delete_from_gitlab` is not available. This command always deletes.
+
+**Example**
+
+```bash
+resource_config_path="resources_servers/example_multi_step/configs/example_multi_step.yaml"
+ng_gitlab_to_hf_dataset \
+    +dataset_name=my_dataset \
+    +input_jsonl_fpath=data/train.jsonl \
+    +resource_config_path=${resource_config_path}
+```
