@@ -29,7 +29,10 @@ from app import (
     SpeedBenchResourcesServer,
     SpeedBenchResourcesServerConfig,
     _compute_running_delta,
+    _compute_sglang_running_delta,
+    _parse_sglang_metrics,
     _parse_vllm_metrics,
+    _weighted_delta_average,
 )
 
 from nemo_gym.server_utils import ServerClient
@@ -335,8 +338,110 @@ async def test_verify_marks_unavailable_when_scrape_fails(monkeypatch):
     assert out.acceptance_rate is None
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# SGLang Prometheus path
+# ──────────────────────────────────────────────────────────────────────────────
+
+SGLANG_METRICS_TEXT = """\
+# HELP sglang:spec_accept_length Acceptance length running average.
+# TYPE sglang:spec_accept_length gauge
+sglang:spec_accept_length{model="m"} 2.65
+sglang:spec_accept_rate{model="m"} 0.55
+sglang:num_requests_total{model="m"} 250
+sglang:generation_tokens_total{model="m"} 75000
+"""
+
+
+def test_parse_sglang_metrics_basic():
+    snap = _parse_sglang_metrics(SGLANG_METRICS_TEXT)
+    assert snap.spec_accept_length == pytest.approx(2.65)
+    assert snap.spec_accept_rate == pytest.approx(0.55)
+    assert snap.num_requests == 250
+    assert snap.generation_tokens == 75000
+
+
+def test_parse_sglang_metrics_no_spec_accept_raises():
+    text = '# nothing here\nsglang:num_requests_total{m="a"} 1\n'
+    with pytest.raises(SpecDecodeMetricsUnavailable):
+        _parse_sglang_metrics(text)
+
+
+def test_weighted_delta_average_basic():
+    # Before: 100 requests at AL=2.0 (weighted=200)
+    # After:  300 requests at AL=2.5 (weighted=750)
+    # Benchmark window: 200 requests, weighted=550 → AL=2.75
+    assert _weighted_delta_average(2.0, 2.5, 100, 300) == pytest.approx(2.75)
+
+
+def test_weighted_delta_average_first_window_returns_after():
+    # Before count=0 → can't weight; just return the after average.
+    assert _weighted_delta_average(0.0, 3.1, 0, 50) == pytest.approx(3.1)
+
+
+def test_weighted_delta_average_no_new_requests_returns_none():
+    assert _weighted_delta_average(2.0, 2.5, 100, 100) is None
+    assert _weighted_delta_average(2.0, 2.5, 100, 50) is None
+
+
+def test_compute_sglang_running_delta_basic():
+    before = SpecDecodeMetricsSnapshot(
+        spec_accept_length=2.0, spec_accept_rate=0.5, num_requests=100, generation_tokens=10000
+    )
+    after = SpecDecodeMetricsSnapshot(
+        spec_accept_length=2.5, spec_accept_rate=0.6, num_requests=300, generation_tokens=40000
+    )
+    d = _compute_sglang_running_delta(before, after)
+    assert d is not None
+    assert d["num_drafts"] == 200  # delta_requests
+    assert d["draft_tokens"] == 30000  # delta_gen_tokens
+    # weighted AR: (0.6 * 300 - 0.5 * 100) / 200 = (180 - 50) / 200 = 0.65
+    assert d["acceptance_rate"] == pytest.approx(65.0)
+    # weighted AL: (2.5 * 300 - 2.0 * 100) / 200 = (750 - 200) / 200 = 2.75
+    assert d["acceptance_length"] == pytest.approx(2.75)
+    # accepted_tokens ≈ delta_gen_tokens * ar_fraction = 30000 * 0.65 = 19500
+    assert d["accepted_tokens"] == 19500
+    assert d["per_position_acceptance_rates"] == []
+
+
+def test_compute_sglang_running_delta_no_traffic_returns_none():
+    before = SpecDecodeMetricsSnapshot(num_requests=100)
+    after = SpecDecodeMetricsSnapshot(num_requests=100)
+    assert _compute_sglang_running_delta(before, after) is None
+
+
 @pytest.mark.asyncio
-async def test_sglang_scrape_is_stubbed():
-    s = _make_server(vllm_base_url="http://host:8000/v1", server_type_for_metrics="sglang")
-    with pytest.raises(NotImplementedError, match="SGLang"):
-        await s._scrape_metrics()
+async def test_verify_sglang_path_uses_sglang_delta(monkeypatch):
+    """End-to-end: SGLang config + sglang snapshots → SGLang weighted-delta arithmetic."""
+    s = _make_server(vllm_base_url="http://host:8000", server_type_for_metrics="sglang")
+    s._init_lock = asyncio.Lock()
+
+    snapshots = iter(
+        [
+            SpecDecodeMetricsSnapshot(
+                spec_accept_length=2.0, spec_accept_rate=0.5, num_requests=10, generation_tokens=1000
+            ),
+            SpecDecodeMetricsSnapshot(
+                spec_accept_length=2.5, spec_accept_rate=0.6, num_requests=30, generation_tokens=4000
+            ),
+        ]
+    )
+
+    async def fake_scrape():
+        return next(snapshots)
+
+    monkeypatch.setattr(s, "_scrape_metrics", fake_scrape)
+    from app import SpeedBenchVerifyResponse
+
+    monkeypatch.setattr(
+        "app.SpeedBenchVerifyResponse",
+        lambda **kw: SpeedBenchVerifyResponse.model_construct(**kw),
+    )
+
+    out = await s.verify(_make_fake_body(42))
+    # weighted AL: (2.5*30 - 2.0*10)/20 = (75-20)/20 = 2.75
+    assert out.acceptance_length == pytest.approx(2.75)
+    # weighted AR fraction: (0.6*30 - 0.5*10)/20 = (18-5)/20 = 0.65 → 65%
+    assert out.acceptance_rate == pytest.approx(65.0)
+    assert out.num_drafts == 20  # delta_requests
+    assert out.draft_tokens == 3000  # delta_gen_tokens
+    assert out.spec_decode_unavailable is False

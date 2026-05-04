@@ -31,9 +31,13 @@ This server reproduces Skills' approach:
    `spec_acceptance_rate`. This matches Skills' final value, since Skills also
    computes a single before/after delta over the whole run.
 
-SGLang is supported in Skills via either Prometheus delta or per-request
-metrics file. This port stubs SGLang — the scrape function raises
-`NotImplementedError`. Add the SGLang flow as a follow-up.
+SGLang is supported via Prometheus delta on
+`sglang:spec_accept_length` / `sglang:spec_accept_rate` (running-average
+gauges) combined with `sglang:num_requests_total` /
+`sglang:generation_tokens_total` counters; the benchmark-only average is
+recovered with a weighted delta. Skills also supports an SGLang per-request
+metrics-file fallback (`--export-metrics-to-file`) — that path is not
+ported here; the Prometheus delta is sufficient for parity comparisons.
 """
 
 from __future__ import annotations
@@ -59,13 +63,26 @@ LOG = logging.getLogger(__name__)
 
 @dataclass
 class SpecDecodeMetricsSnapshot:
-    """Cumulative spec-decode counters scraped from `/metrics`."""
+    """Cumulative spec-decode counters scraped from `/metrics`.
+
+    vLLM exposes raw counters (drafts, draft_tokens, accepted_tokens, plus
+    per-position breakdowns); SGLang exposes acceptance length and rate as
+    *running-average gauges* alongside request and generation_tokens
+    counters. Both worlds populate this struct; consumers downstream pick
+    the fields relevant to the backend they're scraping.
+    """
 
     # vLLM counters
     num_drafts: int = 0
     num_draft_tokens: int = 0
     num_accepted_tokens: int = 0
     accepted_per_pos: Dict[int, int] = field(default_factory=dict)
+
+    # SGLang gauges + counters
+    spec_accept_length: float = 0.0
+    spec_accept_rate: float = 0.0
+    num_requests: int = 0
+    generation_tokens: int = 0
 
 
 def _parse_vllm_metrics(text: str) -> SpecDecodeMetricsSnapshot:
@@ -116,6 +133,101 @@ def _parse_vllm_metrics(text: str) -> SpecDecodeMetricsSnapshot:
         )
 
     return snapshot
+
+
+def _parse_sglang_metrics(text: str) -> SpecDecodeMetricsSnapshot:
+    """Parse SGLang's Prometheus exposition for `sglang:spec_accept_*` + counters.
+
+    Mirrors `fetch_sglang_spec_decode_metrics` in Skills' specdec.py. SGLang
+    treats acceptance length / rate as *running-average gauges* — combined
+    with `num_requests_total` and `generation_tokens_total` counters we can
+    back out the benchmark-only average via a weighted delta (see
+    `_compute_sglang_running_delta`).
+    """
+    snapshot = SpecDecodeMetricsSnapshot()
+    found_spec = False
+
+    for line in text.split("\n"):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+
+        with contextlib.suppress(ValueError):
+            if "sglang:spec_accept_length{" in line or line.startswith("sglang:spec_accept_length "):
+                snapshot.spec_accept_length = float(parts[-1])
+                found_spec = True
+            elif "sglang:spec_accept_rate{" in line or line.startswith("sglang:spec_accept_rate "):
+                snapshot.spec_accept_rate = float(parts[-1])
+                found_spec = True
+            elif "sglang:num_requests_total{" in line or line.startswith("sglang:num_requests_total "):
+                snapshot.num_requests = int(float(parts[-1]))
+            elif "sglang:generation_tokens_total{" in line or line.startswith("sglang:generation_tokens_total "):
+                snapshot.generation_tokens = int(float(parts[-1]))
+
+    if not found_spec:
+        raise SpecDecodeMetricsUnavailable(
+            "No sglang:spec_accept_* metrics found on the server (speculative decoding may not be enabled)."
+        )
+    return snapshot
+
+
+def _weighted_delta_average(
+    before_avg: float, after_avg: float, before_count: int, after_count: int
+) -> Optional[float]:
+    """Recover the benchmark-only average from two running-average gauges.
+
+        weighted_after  = after_avg  * after_count
+        weighted_before = before_avg * before_count
+        benchmark_avg   = (weighted_after - weighted_before) / (after_count - before_count)
+
+    Returns None if the request counter didn't advance (no benchmark traffic).
+    """
+    delta_count = after_count - before_count
+    if delta_count <= 0:
+        return None
+    if before_count == 0:
+        return after_avg
+    return (after_avg * after_count - before_avg * before_count) / delta_count
+
+
+def _compute_sglang_running_delta(
+    before: SpecDecodeMetricsSnapshot, after: SpecDecodeMetricsSnapshot
+) -> Optional[Dict[str, Any]]:
+    """SGLang equivalent of `_compute_running_delta`.
+
+    Mirrors Skills' `compute_sglang_spec_decode_delta`. Uses weighted-delta
+    arithmetic on the running-average gauges to recover benchmark-window
+    acceptance length and rate.
+    """
+    delta_requests = after.num_requests - before.num_requests
+    delta_gen_tokens = after.generation_tokens - before.generation_tokens
+    if delta_requests <= 0:
+        return None
+
+    al = _weighted_delta_average(
+        before.spec_accept_length, after.spec_accept_length, before.num_requests, after.num_requests
+    )
+    ar_fraction = _weighted_delta_average(
+        before.spec_accept_rate, after.spec_accept_rate, before.num_requests, after.num_requests
+    )
+    if al is None or ar_fraction is None:
+        return None
+
+    return {
+        # SGLang doesn't expose draft counts directly — Skills approximates
+        # `num_drafts ≈ delta_requests` (one round of drafting per request)
+        # and `accepted_tokens ≈ delta_gen_tokens * ar_fraction`. Per-position
+        # rates aren't available from SGLang's gauges.
+        "num_drafts": delta_requests,
+        "draft_tokens": delta_gen_tokens,
+        "accepted_tokens": int(delta_gen_tokens * ar_fraction) if delta_gen_tokens > 0 else 0,
+        "acceptance_rate": ar_fraction * 100,
+        "acceptance_length": al,
+        "per_position_acceptance_rates": [],
+    }
 
 
 def _compute_running_delta(
@@ -274,12 +386,6 @@ class SpeedBenchResourcesServer(SimpleResourcesServer):
         return f"{base}/metrics"
 
     async def _scrape_metrics(self) -> SpecDecodeMetricsSnapshot:
-        if self.config.server_type_for_metrics == "sglang":
-            # Stub — see module docstring. SGLang has two fetch paths in Skills
-            # (Prometheus delta + per-request metrics file), neither of which
-            # is implemented here.
-            raise NotImplementedError("SGLang metrics scrape is not yet ported. Use server_type_for_metrics=vllm.")
-
         url = self._resolve_metrics_url()
         async with await global_request(
             method="GET",
@@ -289,6 +395,9 @@ class SpeedBenchResourcesServer(SimpleResourcesServer):
             if response.status != 200:
                 raise SpecDecodeMetricsUnavailable(f"GET {url} returned status {response.status}")
             text = await response.text()
+
+        if self.config.server_type_for_metrics == "sglang":
+            return _parse_sglang_metrics(text)
         return _parse_vllm_metrics(text)
 
     async def _take_before_snapshot(self) -> None:
@@ -332,7 +441,10 @@ class SpeedBenchResourcesServer(SimpleResourcesServer):
         if not self._spec_decode_unavailable:
             try:
                 after = await self._scrape_metrics()
-                running = _compute_running_delta(self._before_snapshot, after)
+                if self.config.server_type_for_metrics == "sglang":
+                    running = _compute_sglang_running_delta(self._before_snapshot, after)
+                else:
+                    running = _compute_running_delta(self._before_snapshot, after)
             except SpecDecodeMetricsUnavailable as exc:
                 # Treat as a one-time transition: spec decoding is off on the
                 # server. Don't keep retrying every task.

@@ -33,8 +33,16 @@ or an Eagle/MTP method). Without spec-decode, the server's `/metrics`
 endpoint omits `vllm:spec_decode_*` lines and every row carries
 `spec_decode_unavailable: true`.
 
-SGLang is currently a stub — set `server_type_for_metrics: sglang` to
-exercise the code path, but it raises `NotImplementedError`.
+SGLang is supported via Prometheus delta on
+`sglang:spec_accept_length` / `sglang:spec_accept_rate` (running-average
+gauges) combined with `sglang:num_requests_total` and
+`sglang:generation_tokens_total` counters; the benchmark-only average is
+recovered via a weighted delta (matches Skills'
+`compute_sglang_spec_decode_delta`). Set `server_type_for_metrics: sglang`
+in `configs/speed_bench.yaml` and launch the model server with
+`server_type=sglang` on the rollout side. Skills' SGLang per-request
+metrics-file fallback (`--export-metrics-to-file`) is not ported — the
+Prometheus delta is sufficient for parity comparisons.
 
 ## Configuration
 
