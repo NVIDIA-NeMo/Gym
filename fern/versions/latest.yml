@@ -58,7 +58,10 @@ navigation:
         slug: ""
       - page: "aiohttp vs httpx"
         path: ./latest/pages/blog/aiohttp-vs-httpx.mdx
+        slug: aiohttp-vs-httpx
       - page: "Responses API Evolution"
         path: ./latest/pages/blog/responses-api-evolution.mdx
+        slug: responses-api-evolution
       - page: "SWE-RL Case Study"
         path: ./latest/pages/blog/swe-rl-case-study.mdx
+        slug: swe-rl-case-study
