@@ -6,7 +6,11 @@ audience_level: intermediate
 journey_stage: scale
 position: 2
 ---
-Different deployments call for different execution backends. This page documents what NeMo Gym supports today, what's coming with the unified sandbox infrastructure ([#1048](https://github.com/NVIDIA-NeMo/Gym/issues/1048)), and the network, install, and timeout behavior per backend.
+import { CompatibilityMatrix } from "../../../../components/compatibility/CompatibilityMatrix";
+
+Different deployments call for different execution backends. The matrix below covers what NeMo Gym supports today, what's coming with the unified sandbox infrastructure ([#1048](https://github.com/NVIDIA-NeMo/Gym/issues/1048)), and the network, install, and timeout behavior per backend.
+
+<CompatibilityMatrix kind="sandbox" />
 
 <Note>
 [Footguns](/latest/troubleshooting/footguns) for the symptom-driven failure index, [Reward Semantics](/latest/about/concepts/reward-semantics) for what the framework reports when execution misbehaves.

@@ -6,8 +6,13 @@ audience_level: intermediate
 journey_stage: build
 position: 3
 ---
+import { ScorerCatalog } from "../../../../../components/scorers/ScorerCatalog";
 
-Every shipped resources server in `resources_servers/` ships a `verify()` function — what other tools call a "scorer" or "evaluator." This page catalogs the patterns by category. Use it to find a starting point when authoring a new environment, or to discover a built-in scorer when running an eval against your own data.
+Every shipped resources server in `resources_servers/` ships a `verify()` function — what other tools call a "scorer" or "evaluator." Filter the catalog below by pattern, domain, or whether a scorer requires a judge model. Each card cites the actual `verify()` line so you can copy the closest match.
+
+<ScorerCatalog />
+
+The narrative below covers the same six patterns in prose for readers who want context rather than a filterable lookup.
 
 | Pattern | Use when |
 |---|---|

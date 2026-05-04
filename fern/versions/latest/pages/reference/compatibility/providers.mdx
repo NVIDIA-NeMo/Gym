@@ -6,8 +6,11 @@ audience_level: intermediate
 journey_stage: build
 position: 1
 ---
+import { CompatibilityMatrix } from "../../../../components/compatibility/CompatibilityMatrix";
 
-NeMo Gym ships six model server types: `openai_model`, `azure_openai_model`, `vllm_model`, `local_vllm_model`, `local_vllm_model_proxy`, and `genrm_model`. This page documents what each supports, the endpoint shapes they expect, and the known gotchas per provider. For symptom-side fixes, see [Footguns](/latest/troubleshooting/footguns); for config field shapes, see [Configuration](/latest/reference/configuration).
+NeMo Gym ships six model server types: `openai_model`, `azure_openai_model`, `vllm_model`, `local_vllm_model`, `local_vllm_model_proxy`, and `genrm_model`. The matrix below is the canonical view; the per-provider sections that follow add config detail, tested versions, and known gotchas. For symptom-side fixes, see [Footguns](/latest/troubleshooting/footguns); for config field shapes, see [Configuration](/latest/reference/configuration).
+
+<CompatibilityMatrix kind="provider" />
 
 <Note>
 Provider compatibility is the most common source of late-stage failures. Pick the server type that matches your endpoint shape *before* you write the YAML — mismatches surface as 404s, empty outputs, or silent reward zeros.

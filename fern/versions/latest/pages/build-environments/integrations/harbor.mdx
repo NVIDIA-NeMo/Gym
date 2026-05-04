@@ -6,6 +6,9 @@ audience_level: intermediate
 journey_stage: build
 position: 3
 ---
+import { VerifiedBadge } from "../../../../../components/VerifiedBadge";
+
+<VerifiedBadge verified={false} />
 
 Run an existing [Harbor](https://github.com/laude-institute/harbor) `terminus-2` / `claude-code` / `aider` agent inside a Harbor environment as a NeMo Gym agent server. Harbor owns the sandbox and the verifier; the Gym wrapper adapts each trial result back into the Responses API shape.
 

@@ -51,6 +51,9 @@ css:
   - ./styles/notebook-viewer.css
   - ./styles/authors.css
   - ./styles/blog-card.css
+  - ./styles/verified-badge.css
+  - ./styles/scorer-catalog.css
+  - ./styles/compat-matrix.css
 
 navbar-links:
   - type: github
