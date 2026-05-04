@@ -12,7 +12,6 @@ navigation:
       - page: "Home"
         path: ./latest/pages/index.mdx
         slug: ""
-        hidden: true
       - folder: ./latest/pages/about
         title: "About"
         title-source: frontmatter
