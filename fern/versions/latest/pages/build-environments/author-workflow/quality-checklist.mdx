@@ -93,7 +93,7 @@ Other agent eval frameworks have walked this path. Their public issue queues are
 
 ### Example data committed, train/validation hosted
 
-**What.** `data/example.jsonl` ships in git with 5 entries for smoke testing. Train and validation splits are hosted in the GitLab dataset registry and referenced via `gitlab_identifier:` in the YAML config. Train and validation files are gitignored — never committed.
+**What.** `data/example.jsonl` ships in git with 5 entries for smoke testing. Train and validation splits are hosted in the GitLab dataset registry (NVIDIA-internal) or on Hugging Face Hub (public), and referenced via `gitlab_identifier:` and/or `huggingface_identifier:` in the YAML config. Train and validation files are gitignored — never committed.
 
 **Why.** Example data needs to be present at clone time so `ng_test` and the validation command run with no download step. Train and validation are too large for git and need versioning, which the dataset registry provides.
 
@@ -143,7 +143,7 @@ Other agent eval frameworks have walked this path. Their public issue queues are
 
 ### External tool auto-install hook
 
-**What.** If your environment requires an external tool or library (compiler, runtime, proof checker, third-party Python package not on PyPI), ship a `setup_<tool>.py` with an `ensure_<tool>()` function. It checks an `INSTALL_MARKER` file under a gitignored local prefix (e.g. `.<tool>/`), git-clones a pinned commit, and mutates `sys.path` (or `os.environ["PATH"]` if a real binary is needed) so the artifact is reachable in the current process. Call it from your server class's `__init__` or `model_post_init()` — pick whichever neighboring servers use. Reference: `resources_servers/ifbench/setup_ifbench.py`.
+**What.** If your environment requires an external tool or library (compiler, runtime, proof checker, third-party Python package not on PyPI), ship a `setup_<tool>.py` with an `ensure_<tool>()` function. It uses an idempotency check under a gitignored local prefix (e.g. `.<tool>/`) — most servers gate on an `INSTALL_MARKER` file (`ifbench/setup_ifbench.py`), but other patterns ship too (`bird_sql/setup_bird_sql.py` gates on the presence of downloaded `*.sqlite` files). The install step is typically a git clone of a pinned commit OR a download of pinned artifacts; the function then mutates `sys.path` (or `os.environ["PATH"]` if a real binary is needed) so the artifact is reachable in the current process. Call it from your server class's `__init__` or `model_post_init()` — pick whichever neighboring servers use. Reference: `resources_servers/ifbench/setup_ifbench.py` (canonical), `resources_servers/bird_sql/setup_bird_sql.py` (download variant).
 
 **Why.** Manual install steps in a README are followed inconsistently and break for new contributors. Auto-install closes the gap.
 

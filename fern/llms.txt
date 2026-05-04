@@ -15,8 +15,10 @@ What NeMo Gym is, where it fits in the NVIDIA NeMo platform, and the core concep
 - [Configuration System](https://docs.nvidia.com/nemo/gym/latest/about/concepts/configuration): How YAML configuration files define Model, Resources, and Agent servers as modular blocks.
 - [Environment Components](https://docs.nvidia.com/nemo/gym/latest/about/concepts/core-components): The Model, Resources, and Agent server building blocks that compose a NeMo Gym environment.
 - [Reward Semantics](https://docs.nvidia.com/nemo/gym/latest/about/concepts/reward-semantics): What NeMo Gym does on verifier errors, timeouts, retries, multiple rollouts per task, pass@1 vs pass@k, and aggregation.
+- [Reward Debugging](https://docs.nvidia.com/nemo/gym/latest/about/concepts/reward-debugging): Diagnose wrong rewards systematically — read the rollout JSONL, name the symptom, find the source-of-truth file, fix the contract.
 - [Task Verification](https://docs.nvidia.com/nemo/gym/latest/about/concepts/task-verification): What task verification is and how rewards drive model training.
 - [Training Approaches](https://docs.nvidia.com/nemo/gym/latest/about/concepts/training-approaches): The differences between SFT, DPO, and GRPO, and why RLVR puts the focus on environments.
+- [Versioning and Provenance](https://docs.nvidia.com/nemo/gym/latest/about/concepts/versioning-provenance): What gets pinned vs. floats across NeMo Gym runs — datasets, model IDs, prompt configs, judges, and the gaps where reproduction silently drifts.
 - [Release Notes](https://docs.nvidia.com/nemo/gym/latest/about/release-notes): What's new, what's fixed, and what's deprecated in each NeMo Gym release.
 - [Migration Guide 0.2 → 0.3](https://docs.nvidia.com/nemo/gym/latest/about/release-notes/migration-guide): What's changing in 0.3.0 and how to update existing 0.2.x setups.
 
@@ -47,6 +49,13 @@ Patterns and end-to-end guides for authoring new training and evaluation environ
 - [Integrations](https://docs.nvidia.com/nemo/gym/latest/build-environments/integrations): Integration patterns for third-party benchmark libraries and adding new benchmarks.
 - [Add a Benchmark](https://docs.nvidia.com/nemo/gym/latest/build-environments/integrations/add-a-benchmark): Steps and best practices for adding a high-fidelity benchmark to NeMo Gym.
 - [Integrate External Libraries](https://docs.nvidia.com/nemo/gym/latest/build-environments/integrations/external-libraries): Wrap an existing third-party benchmark or environment library at the agent server level.
+- [Harbor](https://docs.nvidia.com/nemo/gym/latest/build-environments/integrations/harbor): Run a Harbor terminus-2 / claude-code / aider agent + Harbor environment as a NeMo Gym agent server.
+- [Verifiers](https://docs.nvidia.com/nemo/gym/latest/build-environments/integrations/verifiers): Run a Prime Intellect Verifiers vf.Environment (Environments Hub or local) inside Gym.
+- [Aviary](https://docs.nvidia.com/nemo/gym/latest/build-environments/integrations/aviary): Run a FutureHouse Aviary multi-turn tool-calling environment as a NeMo Gym rollout.
+- [LangGraph](https://docs.nvidia.com/nemo/gym/latest/build-environments/integrations/langgraph): Run a LangGraph StateGraph (orchestrator, reflection, parallel-thinking, ReWOO) as a NeMo Gym agent server.
+- [Gymnasium](https://docs.nvidia.com/nemo/gym/latest/build-environments/integrations/gymnasium): Drive any classic-RL gymnasium.Env reset/step loop with an LLM as the policy.
+- [OpenEnv](https://docs.nvidia.com/nemo/gym/latest/build-environments/integrations/openenv): OpenEnv parity status — resources-server-side configs ship; agent wrapper roadmap.
+- [Terminology Translation](https://docs.nvidia.com/nemo/gym/latest/build-environments/integrations/terminology-translation): Vocabulary lookup for users migrating from Harbor, Verifiers, Aviary, LangGraph, or gymnasium.
 - [Verification](https://docs.nvidia.com/nemo/gym/latest/build-environments/verification): How verification logic plugs into NeMo Gym — `verify()` returns reward, `compute_metrics()` aggregates across rollouts.
 - [Aggregate Metrics](https://docs.nvidia.com/nemo/gym/latest/build-environments/verification/aggregate-metrics): How NeMo Gym computes aggregate metrics for each agent via the /aggregate_metrics endpoint after rollout collection.
 - [LLM-as-a-judge in Verification](https://docs.nvidia.com/nemo/gym/latest/build-environments/verification/llm-as-judge): Use an LLM as the judge for verifying open-ended outputs that don't have a single deterministic answer.
@@ -91,6 +100,8 @@ Hands-on tutorials for running RL training with NeMo Gym environments across sup
 - [Multi-Environment Training](https://docs.nvidia.com/nemo/gym/latest/train-models/multi-environment-training): Train on multiple NeMo Gym environments simultaneously (multi-verifier training).
 - [Offline Training (SFT/DPO)](https://docs.nvidia.com/nemo/gym/latest/train-models/offline-training-w-rollouts): Use collected rollouts to do offline training (SFT/DPO) outside of the RL loop. Experimental.
 - [Model Recipes](https://docs.nvidia.com/nemo/gym/latest/train-models/recipes): Tutorials for running Gym with the data recipes used to train shipped models.
+- [Cost and Resource Planning](https://docs.nvidia.com/nemo/gym/latest/train-models/cost-resource-planning): Estimate GPU hours, token volume, and concurrency before kicking off a training run or large rollout collection.
+- [Checkpoint and Resume](https://docs.nvidia.com/nemo/gym/latest/train-models/checkpoint-and-resume): Resume a crashed or killed ng_collect_rollouts job without re-running completed tasks.
 - [Nemotron 3 Nano](https://docs.nvidia.com/nemo/gym/latest/train-models/recipes/nemotron-3-nano): Complete setup for distributed training of Nemotron 3 Nano 30B across multiple nodes using Slurm and Ray.
 - [Nemotron 3 Super](https://docs.nvidia.com/nemo/gym/latest/train-models/recipes/nemotron-3-super): Pointer to the NeMo RL recipe for training Nemotron 3 Super with NeMo Gym.
 

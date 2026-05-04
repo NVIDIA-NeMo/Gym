@@ -148,7 +148,7 @@ Download a JSONL dataset from HuggingFace Hub to local filesystem.
 | Parameter | Type | Description |
 | --- | --- | --- |
 | `repo_id` | str | HuggingFace repository ID in format `organization/dataset-name`. |
-| `hf_token` | str | HuggingFace API token for authentication. |
+| `hf_token` | Optional[str] | HuggingFace API token. Default: `None` (uses unauthenticated access; required for private repos). |
 | `output_fpath` | Optional[str] | Local file path where the downloaded dataset will be saved. Mutually exclusive with `output_dirpath`. |
 | `output_dirpath` | Optional[str] | Local directory to download the full dataset into (one file per split). Mutually exclusive with `output_fpath`. |
 | `artifact_fpath` | Optional[str] | Name of a specific artifact file to download. Mutually exclusive with `split`. |

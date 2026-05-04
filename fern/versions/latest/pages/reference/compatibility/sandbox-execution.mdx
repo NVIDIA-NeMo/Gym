@@ -112,7 +112,7 @@ NeMo Gym provides **no global per-rollout or per-tool timeout** today. Timeouts 
 | --- | --- | --- |
 | Subprocess inside `verify()` | `subprocess.run(..., timeout=N)` | Recommended pattern. Catch `subprocess.TimeoutExpired` and return a `BaseVerifyResponse` with `reward=0.0` and an error field. |
 | Ray remote task | Ray-native task timeout via `ray.wait` or `ray.cancel` | Ray futures are awaitable directly in async code: `result = await future`. |
-| HTTP call between servers | `aiohttp` request-level timeout (default in `nemo_gym.server_utils.request()`) | Retries are bounded: 3 tries with exponential backoff. |
+| HTTP call between servers | `aiohttp` request-level timeout (default in `nemo_gym.server_utils.request()`) | Retries are bounded: 3 tries with a fixed 0.5 s sleep; rate-limit codes (429/502/503/504/520) retry independently until success. |
 | Model inference call | Provider-side timeout (vLLM, OpenAI, Azure) | NeMo Gym does not impose a wall clock here. |
 | Per-rollout (end to end) | **Not implemented.** | Track in [#1048](https://github.com/NVIDIA-NeMo/Gym/issues/1048). Until then, agent authors enforce per-rollout caps explicitly inside `run()`. |
 

@@ -66,11 +66,11 @@ Most environments also include `verifier_metadata` (or per-environment top-level
 |---|---|---|
 | `Number of examples` lower than 5 | Invalid rows excluded from metrics | Use the invalid-sample finder below to locate offending lines. |
 | `AssertionError: count == 5` | More or fewer than 5 rows in `example.jsonl` | Trim or extend the file to exactly 5 rows. |
-| `Missing 'responses_create_params'` printed for a row | Required key absent | Add the field with a valid `input` list. |
-| `Invalid JSON` printed for a row | Syntax error in the JSONL line | Fix the JSON. |
-| Invalid role | Role isn't `user` / `assistant` / `developer` / `system` | Replace with a valid role per the [JSONL schema](/latest/build-environments/data/jsonl-schema#message-roles). |
+| Required key absent (e.g. missing `responses_create_params`) | `Number of examples` drops below 5 | Add the field with a valid `input` list. |
+| Syntax error in the JSONL line | `Number of examples` drops below 5 | Fix the JSON. |
+| Invalid role | `Number of examples` drops below 5 | Use a role per the [JSONL schema](/latest/build-environments/data/jsonl-schema#message-roles). |
 
-Invalid rows are excluded from metrics and their indices are printed to stdout — they are **not** silently skipped, despite older copies of this advice.
+Invalid rows don't print their own log lines — they're excluded from the aggregate metrics, which causes `Number of examples` to fall below 5 and triggers the assertion at `nemo_gym/cli.py:520`. The user-visible signal is the count drop, not a per-row error message. Use the snippet below to find offending rows directly.
 
 ### Find invalid samples
 

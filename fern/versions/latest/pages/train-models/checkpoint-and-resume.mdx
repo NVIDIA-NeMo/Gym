@@ -57,7 +57,7 @@ If you need to change any of these, expect a full re-run. Save the partial outpu
 
 **Unrecoverable:**
 
-- An in-process exception that corrupts the agent-level metrics JSON written at the end (`results/<stem>_agent_metrics.json`). The resume re-runs only missing rollouts; the aggregate metrics are recomputed at the end on the full combined set.
+- An in-process exception that corrupts the aggregate metrics JSON written at the end (`results/<stem>_aggregate_metrics.json`, written by `ng_collect_rollouts` per `nemo_gym/rollout_collection.py:439`; the `_agent_metrics.json` file is a separate output of `ng_reward_profile`). The resume re-runs only missing rollouts; the aggregate metrics are recomputed at the end on the full combined set.
 - Cache invalidation via input mutation (see above).
 
 ## Interaction with `ng_e2e_collect_rollouts`

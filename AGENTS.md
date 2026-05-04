@@ -160,6 +160,10 @@ Severity meanings shift in this mode:
 
 Doc-shaped PRs that don't run a content audit before merge are a known regression source. Make it part of the merge gate, not a follow-up.
 
+#### Global sweep on accepted P0s
+
+When the implementing agent accepts a P0 finding that names a wrong factual claim (a wrong default, a wrong endpoint shape, a wrong retry behavior, a wrong file name, etc.), the required action is **not** "fix the page where it was flagged." It's **grep the entire docs site for the same claim and fix every instance** before the P0 is closed. Stewards only check their primary owned pages; cross-page propagation of the same wrong claim is the dominant failure mode of narrowly-scoped fixes (audit 3 confirmed three instances: "exponential backoff" survived on 5 other pages after audit 2 fixed `providers.mdx` only; `ng_dev_test` "runs in server dir" survived on `footguns.mdx` after audit 2 fixed `servers.mdx`; the Azure routing bug propagated). Promote the global sweep to a gate on every P0 closure.
+
 #### Doc Autopilot — keeping docs accurate via stewards
 
 The Content Audit mode is the primary mechanism for keeping NeMo Gym docs accurate over time. Stewards are the autopilot — each one already knows what doc pages it owns, what source files are the source of truth, and what shape of claim is stale-by-default. The implementing agent's job is to invoke the swarm at the right cadence and synthesize.

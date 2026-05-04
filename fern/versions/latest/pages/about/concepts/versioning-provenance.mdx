@@ -13,7 +13,7 @@ When you run an eval or a training job, some things are pinned and some things f
 
 ### Dataset version
 
-`gitlab_identifier.version` is required on every YAML dataset entry pointing at the GitLab dataset registry (`nemo_gym/cli.py:774-787`). Versions follow `x.x.x` semver convention; the version + dataset name + artifact path uniquely identify the JSONL artifact. MLflow tags every upload with `gitlab.version` (`nemo_gym/gitlab_utils.py:57`). The Hugging Face mirror uses a parallel `huggingface_identifier` field (`nemo_gym/dataset_orchestrator.py:55-65`).
+`gitlab_identifier.version` is required on every YAML dataset entry pointing at the GitLab dataset registry (`nemo_gym/cli.py:774-787`). Versions follow `x.x.x` semver convention; the version + dataset name + artifact path uniquely identify the JSONL artifact. MLflow tags every upload with `gitlab.version` (`nemo_gym/gitlab_utils.py:57`). The Hugging Face mirror uses a parallel `huggingface_identifier` field on the same `DatasetConfig` (`nemo_gym/config_types.py:204-209` for the identifier shape; `:368` for where it sits on the dataset config).
 
 ### Model identity
 
@@ -21,7 +21,7 @@ When you run an eval or a training job, some things are pinned and some things f
 
 ### Prompt config
 
-`prompt_config: <path-to-yaml>` on the agent config or the rollout-collection invocation pins the template that builds `responses_create_params.input` at rollout time (`nemo_gym/rollout_collection.py:125-128`, `nemo_gym/config_types.py:394`). `ng_materialize_prompts` records the resolved path under a `prompt_config_used` field (`nemo_gym/prompt.py:141`).
+`prompt_config: <path-to-yaml>` on the rollout-collection invocation pins the template that builds `responses_create_params.input` at rollout time (`nemo_gym/rollout_collection.py:125-128`). The `BenchmarkDatasetConfig` (curated eval suites under `benchmarks/`) carries its own `prompt_config` field (`nemo_gym/config_types.py:394`). `ng_materialize_prompts` records the resolved path under a `prompt_config_used` field (`nemo_gym/prompt.py:141`).
 
 ### `verified` flag
 

@@ -97,7 +97,7 @@ What to look for when a rollout failed:
 
 - **HTTP 5xx from a server** — a server raised an unhandled exception. The stack trace is in the same log stream a few lines above.
 - **HTTP 4xx from the model endpoint** — usually rate limit (429) or auth (401/403). Refer to [Footguns — Quota exceeded / 429](/latest/troubleshooting/footguns).
-- **Retry messages** — the aiohttp client retries 3 times with exponential backoff on transport-level failures. If you see retries succeeding, no action needed; if they all fail, the rollout aborts and no row is written.
+- **Retry messages** — the aiohttp client retries 3 times with a fixed 0.5 s sleep on transport-level failures; rate-limit codes (429/502/503/504/520) retry independently of that cap. If you see retries succeeding, no action needed; if they all fail, the rollout aborts and no row is written.
 - **Cookie / session warnings on multi-turn agents** — multi-turn rollouts that lose session state report tools failing in the middle of the trajectory. Refer to [Footguns — Cookies / session state missing](/latest/troubleshooting/footguns).
 
 For "server returns 500 / `ng_run` fails to start" symptoms, refer to [Footguns](/latest/troubleshooting/footguns).

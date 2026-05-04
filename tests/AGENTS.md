@@ -4,7 +4,7 @@
 
 Related docs:
 - root `AGENTS.md`
-- `fern/versions/latest/pages/contribute/development-setup.mdx`
+- `fern/versions/latest/pages/resources/development-setup.mdx`
 - `fern/versions/latest/pages/troubleshooting/footguns.mdx` (test isolation gotchas)
 
 ## Point Of View
@@ -74,5 +74,5 @@ When changing or adding tests:
 - `pyproject.toml` `[tool.pytest.ini_options]` (if exists) and `[tool.coverage.*]`
 - `.github/workflows/unit-tests.yml`
 - `.github/workflows/code-linting.yml`
-- `fern/versions/latest/pages/contribute/development-setup.mdx` (test commands section)
+- `fern/versions/latest/pages/resources/development-setup.mdx` (test commands section)
 - Test-isolation footguns in `fern/versions/latest/pages/troubleshooting/footguns.mdx`

@@ -134,7 +134,7 @@ Verify the servers came up healthy with `ng_status`. Expect `3 servers found (3 
 </Accordion>
 
 <Accordion title="Model returns 429 (rate limit) or 502 (bad gateway)">
-The model endpoint is rate-limiting or unhealthy. Lower `+num_samples_in_parallel` to throttle, or switch to a higher-tier API key. The aiohttp client retries with exponential backoff; persistent 429s mean concurrency is above your account's ceiling. Refer to [Footguns](/latest/troubleshooting/footguns) for retry configuration.
+The model endpoint is rate-limiting or unhealthy. Lower `+num_samples_in_parallel` to throttle, or switch to a higher-tier API key. The aiohttp client retries 3x with a fixed 0.5 s sleep on transport errors; rate-limit codes retry independently until success. Persistent 429s mean concurrency is above your account's ceiling. Refer to [Footguns](/latest/troubleshooting/footguns) for retry configuration.
 </Accordion>
 
 <Accordion title="Benchmark validation fails (reward always 0)">

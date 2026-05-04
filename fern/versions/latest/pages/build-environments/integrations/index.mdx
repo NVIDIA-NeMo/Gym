@@ -1,17 +1,35 @@
 ---
 title: "Integrations"
-description: "Wrap external benchmark libraries (Aviary, Reasoning Gym, Verifiers, BrowserGym) and add existing benchmarks to NeMo Gym as resources servers."
+description: "Bring an existing environment from Harbor, Verifiers, Aviary, LangGraph, gymnasium, or any third-party library into NeMo Gym. Per-library wrapper pages plus the generic external-library path."
 content_type: index
 audience_level: intermediate
 journey_stage: build
-position: 5
+position: 1
 ---
 
-Two paths for bringing external content into NeMo Gym instead of building from scratch:
+Bring an existing environment from another framework into NeMo Gym. Two flavors:
+
+- **Per-library wrappers** for the libraries that already ship a NeMo Gym agent harness — Harbor, Verifiers, Aviary, LangGraph, gymnasium. Each per-library page documents what the wrapper does, the terminology mapping, the minimum-viable wiring, and the parity-validation pattern.
+- **Generic path** for any third-party library that doesn't already have a wrapper.
+
+## By source library
+
+| Source library | Wrapper status | Page |
+|---|---|---|
+| Harbor (laude-institute) | Ships `harbor_agent` | [Harbor](/latest/build-environments/integrations/harbor) |
+| Prime Intellect Verifiers | Ships `verifiers_agent` | [Verifiers](/latest/build-environments/integrations/verifiers) |
+| FutureHouse Aviary | Ships `aviary_agent` | [Aviary](/latest/build-environments/integrations/aviary) |
+| LangGraph | Ships `langgraph_agent` (abstract base; 4 reference subclasses) | [LangGraph](/latest/build-environments/integrations/langgraph) |
+| gymnasium | Ships `gymnasium_agent` | [Gymnasium](/latest/build-environments/integrations/gymnasium) |
+| OpenEnv | Resources-server-side only; no agent wrapper yet | [OpenEnv](/latest/build-environments/integrations/openenv) |
+
+For source-vocabulary lookups across all five wrappers, refer to [Terminology Translation](/latest/build-environments/integrations/terminology-translation).
+
+## Generic paths
 
 | Pattern | When to use |
 | --- | --- |
-| [External libraries](/latest/build-environments/integrations/external-libraries) | A whole upstream library (Aviary, Reasoning Gym, Verifiers, BrowserGym) — wrap it once, get every environment it ships. Replace the library's HTTP transport with the aiohttp adapter pattern to avoid the httpx O(n²) connection-pool issue. |
-| [Add a benchmark](/latest/build-environments/integrations/add-a-benchmark) | A specific named benchmark from a paper or repo (SWE-Bench, Tau Bench, GPQA, etc.) — author one resources server that loads the benchmark dataset, implements `verify()`, and ships with example data. |
+| [External libraries](/latest/build-environments/integrations/external-libraries) | A library without a dedicated wrapper. Subclass `SimpleResponsesAPIAgent`, drive the library's loop from `/run`, post-process its output back to `BaseVerifyResponse`. Use the aiohttp adapter pattern to avoid the httpx O(n²) connection-pool issue. |
+| [Add a Benchmark](/latest/build-environments/integrations/add-a-benchmark) | A specific named benchmark from a paper or repo (SWE-Bench, Tau Bench, GPQA, etc.) — author one resources server that loads the dataset, implements `verify()`, and ships with example data. |
 
-Both end in a working resources server you can run with `ng_run` and rollout-collect with `ng_collect_rollouts`.
+Both paths end in a working resources server you can run with `ng_run` and rollout-collect with `ng_collect_rollouts`.

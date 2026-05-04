@@ -23,7 +23,7 @@ Like the Harbor wrapper, this one has no Gym resources server — Verifiers owns
 | `vf.Rubric` | reward returned by `vf_env.run_group()`'s `reward` field | **Load-bearing:** a Verifiers rubric does **not** map onto Gym `verify()`. The rubric runs inside Verifiers; the wrapper surfaces a scalar. |
 | `vf.RolloutInput` (`prompt`, `answer`, `task`, `info`, `example_id`) | flat fields on `VerifiersAgentRunRequest` (JSONL row) | `responses_create_params.input` becomes `prompt`. |
 | `NeMoRLChatCompletionsClient` | wraps the Gym model server's `/v1/chat/completions` | Hard requirement; Verifiers' default OpenAI client would skip the Gym model tier. |
-| Environments Hub `vf_env_id` | `vf_env_id` config field | Pinned at `verifiers==0.1.9.post3` per `requirements.txt`. |
+| Environments Hub `vf_env_id` | `vf_env_id` config field | Tested against `verifiers==0.1.9.post3`; the shipped `requirements.txt` is unpinned, but newer versions can break monotonic-token training. |
 
 ## Wiring
 
@@ -47,7 +47,7 @@ Install the Verifiers environment via `prime env install <id>`, run `vf.load_env
 
 ## Caveats
 
-- **Pinned to `verifiers==0.1.9.post3`** for the token-ID pass-through patch. Newer versions break monotonic-token training (`README.md:111-115`); don't bump without re-validating.
+- **Tested against `verifiers==0.1.9.post3`** for the token-ID pass-through patch. The shipped `requirements.txt` is unpinned (per `responses_api_agents/verifiers_agent/requirements.txt`); newer versions can break monotonic-token training (`README.md:111-115`). Pin in your own fork before re-validating.
 - **New environments live in a separate prime venv.** Avoids `pyproject.toml` `exclude-dependencies` conflicts (`README.md:46-56`).
 
 ## Related

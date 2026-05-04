@@ -8,8 +8,8 @@ Related docs:
 - `fern/versions/latest/pages/reference/compatibility/providers.mdx` — model & provider matrix
 - `fern/versions/latest/pages/reference/servers/model/index.mdx` — model server reference
 - `fern/versions/latest/pages/reference/servers/model/vllm.mdx` — vLLM-specific config surface
-- `fern/blog/aiohttp-vs-httpx.mdx` — async HTTP transport (now lives in the Blog tab)
-- `fern/blog/responses-api-evolution.mdx` — Responses vs chat completions (now lives in the Blog tab)
+- `fern/versions/latest/pages/blog/aiohttp-vs-httpx.mdx` — async HTTP transport (lives in the Blog tab)
+- `fern/versions/latest/pages/blog/responses-api-evolution.mdx` — Responses vs chat completions (lives in the Blog tab)
 
 ## Point Of View
 
@@ -54,7 +54,7 @@ When changing or adding a `responses_api_models/<name>/`:
 - **Resources servers** — provide a deterministic temperature / seed knob via config so verifiers can pin variance.
 - **Agent harnesses** — keep tool-call shape and reasoning-block delivery consistent so harnesses can be model-family-agnostic.
 - **Tests** — provide a "mock model server" fixture for unit tests so other servers don't need real provider credentials.
-- **Docs** — keep `provider-compatibility.mdx` honest. If a model family is "tested informally" or "community reports welcome," say so.
+- **Docs** — keep `reference/compatibility/providers.mdx` honest. If a model family is "tested informally" or "community reports welcome," say so.
 
 ## Do Not
 

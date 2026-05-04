@@ -276,10 +276,11 @@ rm -rf ~/.cache/huggingface/hub/datasets--<org>--<dataset>
 
 | Section | Source |
 |---------|--------|
-| Config schema | `nemo_gym/config_types.py:306-349` |
-| Download logic | `nemo_gym/hf_utils.py:57-115` |
-| Validation rules | `nemo_gym/config_types.py:334-349` |
-| Auto-download | `nemo_gym/train_data_utils.py:476-494` |
+| `JsonlDatasetHuggingFaceIdentifer` | `nemo_gym/config_types.py:204-209` |
+| `DownloadJsonlDatasetHuggingFaceConfig` | `nemo_gym/config_types.py:312-355` |
+| `check_output_path` validator | `nemo_gym/config_types.py:340-355` |
+| Download logic | `nemo_gym/hf_utils.py` |
+| Auto-download | `nemo_gym/train_data_utils.py` |
 </Accordion>
 
 ## Upload to Hugging Face

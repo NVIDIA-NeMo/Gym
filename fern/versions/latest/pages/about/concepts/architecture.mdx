@@ -58,7 +58,7 @@ NeMo Gym ships several agent servers:
 
 - `simple_agent` — the default. Runs the model + tool-call loop until the model emits a final assistant message (or hits `max_steps`). Works for most benchmarks, single-turn or multi-step.
 - `proof_refinement_agent` — multi-turn correction loop where the model sees error feedback and retries.
-- `verifiers_agent`, `swe_agents`, and 13 other harnesses — task-shaped wrappers for specific benchmark families. See [Choose an Agent](/latest/get-started/choose-an-agent) for the full catalog.
+- `verifiers_agent`, `swe_agents`, and 12 other harnesses — task-shaped wrappers for specific benchmark families. See [Choose an Agent](/latest/get-started/choose-an-agent) for the full catalog.
 
 Pick a harness when you wire up your YAML config; refer to the [Agent server](/latest/reference/servers/agent) reference for the full list.
 

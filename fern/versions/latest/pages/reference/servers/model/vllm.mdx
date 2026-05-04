@@ -57,7 +57,7 @@ If you do not have a HuggingFace token, please follow the instructions [here](ht
 vLLM server configuration
 - If you want to use tools, find the appropriate vLLM arguments regarding the tool call parser to use. In this example, we use `Qwen/Qwen3-4B-Thinking-2507`, which is suggested to use the `hermes` tool call parser.
 - If you are using a reasoning model, find the appropriate vLLM arguments regarding reasoning parser to use. In this example, we use `Qwen/Qwen3-4B-Thinking-2507`, which is suggested to use the `deepseek_r1` reasoning parser.
-- The example below uses `--tensor-parallel-size 1` which requires 1 GPU.
+- The example below uses `--tensor-parallel-size 4` which requires 4 GPUs. Drop to `1` for a single-GPU setup; raise per the model's actual size.
 
 The spinup step will take a few minutes.
 

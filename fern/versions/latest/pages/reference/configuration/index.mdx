@@ -64,7 +64,7 @@ my_resource:                                  # Server ID (your choice — agent
       value: "What this improves"             # Training value provided
 ```
 
-**Domain values:** `math`, `coding`, `agent`, `knowledge`, `instruction_following`, `long_context`, `safety`, `games`, `e2e`, `other` (see `Domain`)
+**Domain values:** `math`, `coding`, `agent`, `knowledge`, `instruction_following`, `long_context`, `safety`, `games`, `translation`, `e2e`, `rlhf`, `other` (see `Domain` enum in `nemo_gym/config_types.py`)
 
 ### Agent Server Fields
 
@@ -114,7 +114,7 @@ datasets:
 - `train` — Training data (requires `license`)
 - `validation` — Evaluation data (requires `license`)
 
-**License values:** `Apache 2.0`, `MIT`, `Creative Commons Attribution 4.0 International`, `Creative Commons Attribution-ShareAlike 4.0 International`, `TBD` (see `license`)
+**License values:** `Apache 2.0`, `MIT`, `Creative Commons Attribution 4.0 International`, `Creative Commons Attribution-ShareAlike 4.0 International`, `NVIDIA Internal Use Only, Do Not Distribute`, `TBD`, `GNU General Public License v3.0` (see [JSONL Schema — Allowed license values](/latest/build-environments/data/jsonl-schema#allowed-license-values))
 
 ---
 

@@ -60,7 +60,7 @@ Full table of startup errors: [Configuration Errors](/latest/troubleshooting/con
 
 **Cause**: `openai_model` calls `/v1/responses` (the OpenAI Responses API). `vllm_model` calls `/v1/chat/completions`. Pointing one at the wrong backend produces 404s or schema-mismatch errors.
 
-**Fix**: Use `openai_model` only for endpoints that implement `/v1/responses` (OpenAI proper, build.nvidia.com, Azure OpenAI). Use `vllm_model` for vLLM, OpenRouter, Together, and most local servers. The endpoint contract is one of the things `ng_dump_config` will not catch — verify by hitting the URL with `curl`.
+**Fix**: Use `openai_model` for endpoints that implement `/v1/responses` (OpenAI proper, build.nvidia.com NIMs that expose Responses). For Azure-hosted OpenAI deployments use `azure_openai_model` — it calls `chat.completions.create()` internally and synthesizes a Responses-shaped output, so the wire shape isn't `/v1/responses` despite the surface API. Use `vllm_model` for vLLM, OpenRouter, Together, and most local servers. The endpoint contract is one of the things `ng_dump_config` will not catch — verify by hitting the URL with `curl`.
 
 </Accordion>
 
@@ -103,7 +103,7 @@ RAY_TMPDIR=/tmp ng_test +entrypoint=resources_servers/my_server
 RAY_TMPDIR=/tmp HF_HOME=/scratch/hf ng_test +entrypoint=resources_servers/my_server
 ```
 
-For day-to-day iteration without venv overhead, use `ng_dev_test` — it runs pytest directly in the server directory.
+For day-to-day iteration on the core library (`nemo_gym/`), use `ng_dev_test` — it runs `pytest --cov=. --durations=10` from the repo root with no per-server venv setup. It accepts but ignores `+entrypoint=...`; use `ng_test +entrypoint=...` for per-server tests.
 
 </Accordion>
 
@@ -141,7 +141,7 @@ To continue past invalid servers during debugging, set `error_on_almost_servers:
 
 **Cause**: Hosted endpoints rate-limit aggressively. Without a concurrency cap, `ng_collect_rollouts` will saturate the quota and trigger cascading 429s.
 
-**Fix**: Cap concurrency on the agent server (`asyncio.Semaphore` around the model call, or a `max_concurrent` config field). Bounded retries with exponential backoff are already wired into `ServerClient`, but the underlying client must surface the 429 — confirm by tailing logs. See [Inspect AI #1208](https://github.com/UKGovernmentBEIS/inspect_ai/issues/1208) for related context on provider rate limits.
+**Fix**: Cap concurrency on the agent server (`asyncio.Semaphore` around the model call, or a `max_concurrent` config field). `ServerClient` retries up to 3x with a fixed 0.5 s sleep on transport errors, and rate-limit codes (429/502/503/504/520) retry independently of that cap until success — the underlying client must surface the 429, confirm by tailing logs. See [#1208](https://github.com/NVIDIA-NeMo/Gym/issues/1208) for the bounded-retry contract.
 
 </Accordion>
 

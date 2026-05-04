@@ -1,65 +1,121 @@
 ---
 title: "Resources"
-description: "Reference for the Resources server — the world the agent interacts with — including session management, tool endpoints, and verify() reward logic."
+description: "Reference for the Resources server — base class, endpoints, request/response shapes, session middleware, and the verify() reward contract."
 content_type: reference
 audience_level: intermediate
 journey_stage: build
 position: 4
 ---
-The Resources server is the "world" the agent interacts with. It defines the task, the tools and actions available to the agent, and the verification logic that evaluates performance and returns reward signals for training.
 
-```python
-# Resources Server - pseudocode
-class MyResourceServer(SimpleResourcesServer):
-    
-    # Initialize the "sandbox" for this specific rollout
-    async def seed_session(self, session_id, task_data):
-        self.state[session_id] = initialize_environment(task_data)
+The Resources server hosts the **environment side of the rollout**: the tools the agent can call, any sandbox or external state the environment maintains, and the `verify()` method that scores the final output. Per-rollout state is keyed by session cookie so concurrent rollouts don't bleed into each other.
 
-    # Define tool implementations
-    async def my_tool(self, session_id, tool_args):
-        result = execute_action(self.state[session_id], tool_args)
-        return result
+## Endpoints
 
-    # Define verification logic
-    async def verify(self, session_id, response, ground_truth):
-        # 1. Extract what the agent actually did
-        actual_outcome = self.state[session_id].get_final_state()
-        
-        # 2. Reward if the actual outcome matches expected outcome
-        if actual_outcome == ground_truth:
-            return reward(1.0)
-        return reward(0.0)
+`SimpleResourcesServer` (the canonical base class) registers these routes via `setup_webserver` (`nemo_gym/base_resources_server.py:60-69`):
+
+| Method | Path | Body | Returns |
+|---|---|---|---|
+| `POST` | `/seed_session` | `BaseSeedSessionRequest` (extensible per env) | `BaseSeedSessionResponse` |
+| `POST` | `/verify` | `BaseVerifyRequest` (request + response) | `BaseVerifyResponse` (`reward: float` plus per-env fields) |
+| `POST` | `/aggregate_metrics` | `AggregateMetricsRequest` (rollouts JSONL) | `AggregateMetrics` |
+| `POST` | `/<tool_name>` | per-tool request body | per-tool response body |
+
+Subclasses can register additional tool endpoints in their own `setup_webserver` override.
+
+## Base class hierarchy
+
+```
+BaseServer
+└── BaseResourcesServer (carries Pydantic config)
+    └── SimpleResourcesServer (FastAPI + session middleware + AggregateMetricsMixin)
 ```
 
-## Session Management
+`SimpleResourcesServer` is the entry point for environment authors. It implements `seed_session` as a no-op default and leaves `verify` abstract — the only required method to implement.
 
-NeMo Gym uses a `session_id` to maintain isolated state for every parallel rollout. This ensures that concurrent rollouts never interfere with each other, and for multi-step environments, preserves state across steps within a single rollout.
+## Request and response shapes
 
-## Tool Implementations
+The shapes are defined in `nemo_gym/base_resources_server.py:37-54`:
 
-Tools are exposed as HTTP endpoints that the Agent server calls during a rollout. Each tool receives the `session_id` to access the correct rollout state, executes an action, and returns the result as an observation back to the model. Tools may also mutate the session state (e.g., updating a database), which the verifier can later inspect to evaluate performance.
+```python
+class BaseRunRequest(BaseModel):
+    responses_create_params: NeMoGymResponseCreateParamsNonStreaming
 
-## Verification Logic
+class BaseVerifyRequest(BaseRunRequest):
+    response: NeMoGymResponse
 
-Every Resources server implements a `verify()` function that evaluates the result of a rollout and returns a reward signal for training. See [Task Verification](/latest/about/concepts/task-verification) for verification approaches, patterns, and best practices.
+class BaseVerifyResponse(BaseVerifyRequest):
+    reward: float
 
-For semantic or rubric-based scoring, `verify()` may call a **second language model** (LLM-as-a-judge); the concept is outlined in [task-verification](/latest/about/concepts/task-verification) under *What is LLM-as-a-judge?*. For configuration, deployment, and implementation patterns, see [Llm As Judge Verification](/latest/build-environments/verification/llm-as-judge).
+class BaseSeedSessionRequest(BaseModel):
+    pass
 
-## Example Resources Servers
+class BaseSeedSessionResponse(BaseModel):
+    pass
+```
 
-**[`workplace_assistant`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/workplace_assistant)** — Multi-step tool calling in a workplace setting.
-- **Task**: Execute business activities such as sending emails, scheduling meetings, and managing projects.
-- **Actions**: 26 tools across 5 databases (email, calendar, analytics, project management, CRM). Each tool can read and mutate the database state.
-- **Verification**: State matching: executes both the agent's actions and the ground truth actions against fresh databases, then compares the resulting states.
+`BaseVerifyResponse` is the only one with a hard-required field beyond what subclasses add. The `reward: float` contract has no enforced range — `[0, 1]` is convention; partial-credit envs return values in between, and a few envs return negative values for penalty-shaped rewards. Subclasses extend the response with per-environment fields (extracted answers, judge rationales, per-test breakdowns).
 
-**[`math_with_code`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/math_with_code)** — Mathematical reasoning with code execution.
-- **Task**: Solve math problems using Python as a reasoning tool.
-- **Actions**: `execute_python()` runs code in an isolated per-session process with numpy, scipy, and pandas available. State persists across steps so the agent can build on previous computations.
-- **Verification**: Answer correctness: extracts the boxed answer from the model's final response and compares it against the expected result.
+## Implementing a verifier
 
-## Server Configuration
-<Note>
-[Resources Server Fields](/latest/reference/configuration#resources-server-fields) for server configuration syntax and fields.
+The minimum a `SimpleResourcesServer` subclass must provide:
 
-</Note>
+```python
+from nemo_gym.base_resources_server import (
+    BaseVerifyRequest,
+    BaseVerifyResponse,
+    SimpleResourcesServer,
+)
+
+class MyEnvServer(SimpleResourcesServer):
+    async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
+        model_text = body.response.output_text
+        expected = body.responses_create_params.input  # or a custom field
+        reward = 1.0 if model_text.strip() == expected else 0.0
+        return BaseVerifyResponse(**body.model_dump(), reward=reward)
+```
+
+For tool endpoints, override `setup_webserver` and register the routes:
+
+```python
+def setup_webserver(self):
+    app = super().setup_webserver()
+    app.post("/calculate")(self.calculate)
+    return app
+
+async def calculate(self, request: Request, body: CalculateRequest) -> CalculateResponse:
+    ...
+```
+
+## Session middleware
+
+`SimpleResourcesServer.setup_webserver` calls `self.setup_session_middleware(app)` (`nemo_gym/base_resources_server.py:63`). The middleware assigns each rollout a unique `session_id` and propagates it via cookies. Stateful environments key per-rollout state on `request.session[SESSION_ID_KEY]`.
+
+For the cookie-propagation contract that custom agent harnesses must implement to keep session state alive, refer to [Stateful Environment](/latest/build-environments/supported-patterns/stateful#cookie-propagation-contract-required-for-stateful-agents).
+
+## Reward contract
+
+| Behavior | Source |
+|---|---|
+| `reward: float` is required on every verify response. | `nemo_gym/base_resources_server.py:46` |
+| No range is enforced; `[0, 1]` is convention. Partial credit and penalties are allowed. | Per shipped envs (e.g. `equivalence_llm_judge` returns 0.5 for partial matches). |
+| Errors must not crash the rollout; `verify()` should catch its own exceptions and return `reward=0.0` with an error field. | Per `resources_servers/AGENTS.md` invariants. |
+| Aggregate metrics (mean/max/min/median/std per numeric field) are computed by `RewardProfiler`. | `nemo_gym/reward_profile.py:54-74`. |
+
+For the full reward contract — what happens on errors, retries, multiple rollouts, pass@k aggregation — refer to [Reward Semantics](/latest/about/concepts/reward-semantics). For the diagnostic playbook when reward is wrong, refer to [Reward Debugging](/latest/about/concepts/reward-debugging).
+
+## Example resources servers
+
+**[`workplace_assistant`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/workplace_assistant)** — Multi-step tool calling in a workplace setting. Tools cover email, calendar, analytics, project management, and CRM toolkits across 5 databases. Verification matches the agent's final database state against ground-truth state.
+
+**[`math_with_code`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/math_with_code)** — Mathematical reasoning with code execution. `execute_python()` runs in an isolated per-session process; state persists across steps. Verification extracts the boxed answer and compares against the expected result.
+
+**[`example_session_state_mgmt`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/example_session_state_mgmt)** — Minimum stateful-environment reference. Demonstrates the `SESSION_ID_KEY` middleware pattern and the cookie-propagation contract.
+
+For the full catalog grouped by domain, refer to [Benchmark Catalog](/latest/evaluate/benchmark-catalog).
+
+## Related
+
+- [Build a Single-Step Environment](/latest/build-environments/supported-patterns/single-step) — first-environment walkthrough.
+- [Build a Stateful Environment](/latest/build-environments/supported-patterns/stateful) — session middleware and cookie propagation.
+- [Task Verification](/latest/about/concepts/task-verification) — verification approaches and patterns.
+- [Quality Checklist](/latest/build-environments/author-workflow/quality-checklist) — pre-merge bar for new resources servers.

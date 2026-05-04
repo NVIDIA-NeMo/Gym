@@ -38,7 +38,7 @@ See [Wrap a Harbor environment](/latest/build-environments/integrations/harbor) 
 | `vf.Environment` | the agent harness + implicit verifier | Verifiers owns scoring. |
 | `Rubric` | scalar reward returned by `run_group()` | **Does not** map to Gym `verify()`. |
 | `RolloutInput` (`prompt`, `answer`, `task`, `info`, `example_id`) | flat fields on `VerifiersAgentRunRequest` | `responses_create_params.input` becomes `prompt`. |
-| Environments Hub `env_id` | `vf_env_id` config field | Pinned at `verifiers==0.1.9.post3`. |
+| Environments Hub `env_id` | `vf_env_id` config field | Tested against `verifiers==0.1.9.post3`; `requirements.txt` is unpinned. |
 
 See [Wrap a Prime Intellect Verifiers environment](/latest/build-environments/integrations/verifiers).
 

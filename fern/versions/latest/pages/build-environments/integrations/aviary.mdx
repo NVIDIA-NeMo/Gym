@@ -11,7 +11,9 @@ Run a [FutureHouse Aviary](https://github.com/Future-House/aviary) multi-turn to
 
 ## What the wrapper does
 
-`AviaryAgent.responses()` calls the paired Aviary resources server's `/seed_session` for tools and the initial observation, then loops model `/v1/responses` ↔ resources `/step` with cookie and token-ID propagation, ending on environment `done` or `max_steps`. Finally it calls `/close` and the resources server's `/verify` (`responses_api_agents/aviary_agent/app.py:139-269`).
+`AviaryAgent.responses()` calls the paired Aviary resources server's `/seed_session` for tools and the initial observation, then loops model `/v1/responses` ↔ resources `/step`, ending on environment `done` or `max_steps`. The `/close` call wraps up the trajectory. The verifier call (`/verify`) is then issued from `AviaryAgent.run()`, not from `responses()` itself (`responses_api_agents/aviary_agent/app.py:139-266`).
+
+Model-side cookies propagate across `/v1/responses` turns within the loop. **The wrapper does not currently forward `request.cookies` to the resources server's `/seed_session`, `/step`, `/close`, or `/verify` calls** — pair this harness only with stateless Aviary envs, or extend the wrapper if your env keys state on session cookies.
 
 Unlike Harbor and Verifiers, **this wrapper uses a real Gym resources server**. Aviary's environment maps cleanly onto Gym's four-component model: dataset, agent harness, model server, resources server (verifier).
 

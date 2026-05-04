@@ -63,6 +63,7 @@ Spin up all necessary servers and perform a batch of rollout collection using ea
 ```bash
 ng_e2e_collect_rollouts \
     +output_jsonl_fpath=weather_rollouts.jsonl \
+    +split=validation \
     +num_samples_in_parallel=10
 ```
 
