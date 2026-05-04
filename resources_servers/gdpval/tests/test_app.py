@@ -355,7 +355,10 @@ class TestApp:
 
         async def fake_score_structured(**kwargs):
             captured_kwargs.update(kwargs)
-            return 0.7, {"scoring_method": "structured_rubric", "raw_responses": ["FINAL_SCORE[7]\nMAX_POSSIBLE_SCORE[10]"]}
+            return 0.7, {
+                "scoring_method": "structured_rubric",
+                "raw_responses": ["FINAL_SCORE[7]\nMAX_POSSIBLE_SCORE[10]"],
+            }
 
         body = _verify_request(rubric_json=[{"criterion": "clarity", "score": 1}])
 
