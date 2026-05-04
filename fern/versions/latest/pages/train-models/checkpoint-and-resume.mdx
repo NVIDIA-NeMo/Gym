@@ -4,7 +4,7 @@ description: "Resume a crashed or killed ng_collect_rollouts job without re-runn
 content_type: how-to
 audience_level: intermediate
 journey_stage: scale
-position: 7
+position: 8
 ---
 
 Recover a long rollout collection job that crashed, was SIGKILLed, or hit a network blip. The recoverable state is two files written by `ng_collect_rollouts`: the rollout output JSONL and a materialized-inputs sidecar. Re-run the same command with `+resume_from_cache=true` and completed `(task_index, rollout_index)` pairs are skipped.
