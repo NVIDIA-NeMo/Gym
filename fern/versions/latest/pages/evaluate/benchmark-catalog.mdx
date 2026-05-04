@@ -147,7 +147,7 @@ Gymnasium-style multi-step environments and minimal examples.
 
 | Name | Status | Description | Config |
 |---|---|---|---|
-| [`blackjack`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/blackjack) | Provisional | Multi-step gymnasium-style blackjack. Reward `{-1, 0, 1}`. Recommended for [Validate Your Setup](/latest/evaluate/validate-your-setup). | `resources_servers/blackjack/configs/blackjack.yaml` |
+| [`blackjack`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/blackjack) | Provisional | Multi-step gymnasium-style blackjack. Reward `{-1, 0, 1}`. Recommended for [Validate Your Setup](/latest/evaluate/run/validate-your-setup). | `resources_servers/blackjack/configs/blackjack.yaml` |
 | [`gymnasium`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/gymnasium) | Base class | Base class for Gymnasium-style servers. Not a standalone benchmark. | `resources_servers/gymnasium/configs/gymnasium.yaml` |
 | [`example_single_tool_call`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/example_single_tool_call) | Provisional | Simplest example: one tool call per task. Template for new servers. | `resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml` |
 | [`example_multi_step`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/example_multi_step) | Provisional | Multi-step tool calling example. | `resources_servers/example_multi_step/configs/example_multi_step.yaml` |
@@ -173,10 +173,10 @@ For the full author flow — resources server, verifier, dataset, baselining —
 - [Add a Benchmark](/latest/evaluate/add-a-benchmark) — short eval-side flow.
 - [Adding a Benchmark](/latest/build-environments/integrations/add-a-benchmark) — full author tutorial.
 
-A new benchmark earns the `Verified` flag once it has a baselined expected output, a documented validation recipe (refer to [Validate Your Setup](/latest/evaluate/validate-your-setup)), and team review.
+A new benchmark earns the `Verified` flag once it has a baselined expected output, a documented validation recipe (refer to [Validate Your Setup](/latest/evaluate/run/validate-your-setup)), and team review.
 
 ## Next Steps
 
-- [Run a Benchmark](/latest/evaluate/run-a-benchmark) — end-to-end eval flow.
-- [Validate Your Setup](/latest/evaluate/validate-your-setup) — confirm install before running a real eval.
+- [Run a Benchmark](/latest/evaluate/run/run-a-benchmark) — end-to-end eval flow.
+- [Validate Your Setup](/latest/evaluate/run/validate-your-setup) — confirm install before running a real eval.
 - [Reward Semantics](/latest/about/concepts/reward-semantics) — what the reward field means and how pass@k is computed.

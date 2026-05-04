@@ -4,7 +4,7 @@ description: "Run an existing benchmark's scoring logic over your own JSONL data
 content_type: how-to
 audience_level: intermediate
 journey_stage: build
-position: 5
+position: 2
 ---
 
 When you need to score a model against your own dataset — production validation, a customer pilot, an internal regression — point an existing resources_server at your JSONL and run. This page covers the simple case: same scoring logic, different data. The eval flow doesn't change; only `+input_jsonl_fpath` does.
@@ -117,7 +117,7 @@ When in doubt, open the env's `data/example.jsonl` — it's five working rows th
 
 Run the env's stock `data/example.jsonl` first, get a known-good score, then swap in your data. If the example slice produces an off-baseline score, your install or `env.yaml` is broken — fixing that before you point at customer data saves hours of confused debugging.
 
-For the smoke-test pattern and per-benchmark expected outputs, refer to [Validate Your Setup](/latest/evaluate/validate-your-setup).
+For the smoke-test pattern and per-benchmark expected outputs, refer to [Validate Your Setup](/latest/evaluate/run/validate-your-setup).
 
 ## When This Won't Work
 
@@ -132,7 +132,7 @@ For the build-side flow — designing custom verification, fitting messy product
 
 ## Next Steps
 
-- [Validate Your Setup](/latest/evaluate/validate-your-setup) — confirm the install on the env's `example.jsonl` before pointing at your data.
-- [Profile Rewards](/latest/evaluate/profile-rewards) — drill from aggregate score into per-task pass rates.
-- [Inspect Failures](/latest/evaluate/inspect-failures) — open the rollouts JSONL on the customer-data tasks the model failed.
+- [Validate Your Setup](/latest/evaluate/run/validate-your-setup) — confirm the install on the env's `example.jsonl` before pointing at your data.
+- [Profile Rewards](/latest/evaluate/analyze/profile-rewards) — drill from aggregate score into per-task pass rates.
+- [Inspect Failures](/latest/evaluate/analyze/inspect-failures) — open the rollouts JSONL on the customer-data tasks the model failed.
 - [Design a Customer Evaluation](/latest/build-environments/designing-customer-evaluation) — build-side counterpart for when reuse isn't enough.

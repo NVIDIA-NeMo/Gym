@@ -130,7 +130,7 @@ Run through these steps in order. Each step is independent — stop and diagnose
 
    First run is slow because `ng_test` builds an isolated venv per server. Subsequent runs reuse the venv.
 
-4. **Run the smoke test for an existing benchmark.** Cross-link: [Validate Your Setup](/latest/evaluate/validate-your-setup). This confirms the end-to-end loop (agent → model → verifier) still works against your provider.
+4. **Run the smoke test for an existing benchmark.** Cross-link: [Validate Your Setup](/latest/evaluate/run/validate-your-setup). This confirms the end-to-end loop (agent → model → verifier) still works against your provider.
 
 5. **Re-baseline reward profiles if you depend on aggregate numbers.** If your training pipeline gates on a specific pass@1 or pass@k, re-run rollout collection and reward profiling on a fixed model:
 
@@ -203,7 +203,7 @@ For sensitive reports (security, internal-only benchmark issues), email the main
 
 - [Release Notes](/latest/about/release-notes) — canonical changelog per release.
 - [Reward Semantics](/latest/about/concepts/reward-semantics) — error, timeout, and retry contracts.
-- [Validate Your Setup](/latest/evaluate/validate-your-setup) — smoke test before and after upgrade.
+- [Validate Your Setup](/latest/evaluate/run/validate-your-setup) — smoke test before and after upgrade.
 - [Configuration](/latest/reference/configuration) — YAML field reference.
 - [RL Framework Compatibility](/latest/reference/compatibility/rl-frameworks) — container pin matrix.
 - [Architecture](/latest/about/concepts/architecture) — four-component model.

@@ -4,7 +4,7 @@ description: "Run the same benchmark with two or more agent harnesses, then comp
 content_type: how-to
 audience_level: intermediate
 journey_stage: build
-position: 4
+position: 1
 ---
 
 Compare two or more agent harnesses on the same benchmark to pick the right harness for your task. The pattern is mechanical: run each harness against the same dataset, profile rewards separately, then join on `task_index`. The difference in per-task pass rates tells you which harness wins on which slice.
@@ -117,13 +117,13 @@ for idx in sorted(simple):
 
 Tasks where `refinement > simple` are the wins from iterative correction. Tasks where `refinement < simple` are concerning — they suggest the correction loop is destabilizing successful first attempts (e.g. the model overthinks, or the error feedback misleads it). A few of these are noise; a pattern is signal.
 
-For the rollout-level view — which exact responses passed and failed — refer to [Inspect Failures](/latest/evaluate/inspect-failures).
+For the rollout-level view — which exact responses passed and failed — refer to [Inspect Failures](/latest/evaluate/analyze/inspect-failures).
 
 ## Statistical confidence
 
 Per-task pass rates over 5 rollouts have a noise floor around 20% — a single flipped rollout swings `pass_rate` by 0.2. Increase `+num_repeats` until run-to-run variance on the same model and the same agent is below 1% before drawing harness-level conclusions. For stable pass@1 on a small example slice, 8-16 is typical; for tight comparisons on the full validation slice, 16+.
 
-If a "win" survives only at low `+num_repeats`, it isn't a win. Run the comparison twice end-to-end and confirm the deltas reproduce. Refer to [Reward Semantics — Aggregation rules](/latest/about/concepts/reward-semantics#aggregation-rules) for the variance contract and [Profile Rewards — Variance and confidence](/latest/evaluate/profile-rewards#variance-and-confidence) for the per-task view.
+If a "win" survives only at low `+num_repeats`, it isn't a win. Run the comparison twice end-to-end and confirm the deltas reproduce. Refer to [Reward Semantics — Aggregation rules](/latest/about/concepts/reward-semantics#aggregation-rules) for the variance contract and [Profile Rewards — Variance and confidence](/latest/evaluate/analyze/profile-rewards#variance-and-confidence) for the per-task view.
 
 ## What this doesn't tell you
 
@@ -134,6 +134,6 @@ If a "win" survives only at low `+num_repeats`, it isn't a win. Run the comparis
 
 ## Next steps
 
-- [Profile Rewards](/latest/evaluate/profile-rewards) — the per-task aggregates this comparison joins on.
-- [Inspect Failures](/latest/evaluate/inspect-failures) — drill into individual rollouts for tasks where the harnesses disagree.
-- [Run a Benchmark](/latest/evaluate/run-a-benchmark) — the single-agent flow this page parallelizes.
+- [Profile Rewards](/latest/evaluate/analyze/profile-rewards) — the per-task aggregates this comparison joins on.
+- [Inspect Failures](/latest/evaluate/analyze/inspect-failures) — drill into individual rollouts for tasks where the harnesses disagree.
+- [Run a Benchmark](/latest/evaluate/run/run-a-benchmark) — the single-agent flow this page parallelizes.

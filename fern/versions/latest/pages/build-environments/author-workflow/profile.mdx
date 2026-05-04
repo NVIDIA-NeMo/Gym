@@ -71,7 +71,7 @@ Sort by `ttot` to find the bottleneck. Sort by `tavg` to find slow per-call path
 ## What to fix first
 
 - A high-`ncall`, high-`tsub` row in `verify()` is your hot path. Push expensive setup out of the request path.
-- If a third-party library dominates `ttot`, push it onto a Ray actor pool. See [Ray and distributed execution](/latest/reference/ray-and-distributed).
+- If a third-party library dominates `ttot`, push it onto a Ray actor pool. See [Ray and distributed execution](/latest/reference/configuration/ray-and-distributed).
 - If subprocess work dominates, bound it with `asyncio.Semaphore` so concurrent calls don't oversubscribe CPUs.
 
 Re-run the profile after each change. Cross-reference your numbers against the [Environment Quality Checklist](/latest/build-environments/author-workflow/quality-checklist) before submitting.

@@ -4,7 +4,7 @@ description: "Where to find rollout JSONL, model responses, verifier outputs, an
 content_type: how-to
 audience_level: intermediate
 journey_stage: build
-position: 8
+position: 2
 ---
 
 When a benchmark scores lower than expected, the first job is to see what actually happened on the failing tasks — the model's raw output, the verifier's reward, the server logs. This page is a map of where those artifacts live, how to find a specific failed task, and how to replay one task locally without re-running the whole eval.
@@ -21,7 +21,7 @@ After `ng_collect_rollouts` finishes, three artifacts exist on disk:
 | **Materialized inputs JSONL** | `<output>_materialized_inputs.jsonl` (next to the rollouts file) | One line per task. The exact prompt, system messages, and verifier metadata sent to the agent. |
 | **Server logs** | The terminal running `ng_run` (Terminal 1 in the [Quickstart](/latest/get-started/quickstart)) | uvicorn / FastAPI logs from each server: head, agent, model, resources. HTTP status codes, exceptions, retry messages. |
 
-If you ran `ng_reward_profile` afterward, you also have a fourth artifact — the per-task profiled JSONL — covered in [Profile Rewards](/latest/evaluate/profile-rewards).
+If you ran `ng_reward_profile` afterward, you also have a fourth artifact — the per-task profiled JSONL — covered in [Profile Rewards](/latest/evaluate/analyze/profile-rewards).
 
 ## Anatomy of a rollouts JSONL line
 
@@ -87,7 +87,7 @@ for line in open('results/gpqa_diamond_rollouts_materialized_inputs.jsonl'):
 
 ### Profile first, then drill in
 
-If you've run `ng_reward_profile`, the profiled JSONL already groups rollouts by task. Filter for `pass_rate == 0` to find tasks the model consistently fails — the most actionable failures (one-off errors are noise; consistent failures are signal). Refer to [Profile Rewards — Reading the profiled output](/latest/evaluate/profile-rewards#reading-the-profiled-output).
+If you've run `ng_reward_profile`, the profiled JSONL already groups rollouts by task. Filter for `pass_rate == 0` to find tasks the model consistently fails — the most actionable failures (one-off errors are noise; consistent failures are signal). Refer to [Profile Rewards — Reading the profiled output](/latest/evaluate/analyze/profile-rewards#reading-the-profiled-output).
 
 ## Server logs
 
@@ -186,6 +186,6 @@ These are tracked. For the supported workflows in the meantime, the JSONL-and-lo
 
 ## Next steps
 
-- [Profile Rewards](/latest/evaluate/profile-rewards) — group rollouts by task to find consistent failures.
+- [Profile Rewards](/latest/evaluate/analyze/profile-rewards) — group rollouts by task to find consistent failures.
 - [Reward Semantics](/latest/about/concepts/reward-semantics) — the scoring contract for what counts as a pass and how errors flow through aggregation.
 - [Footguns](/latest/troubleshooting/footguns) — symptom-driven fixes for the most common eval failure modes.

@@ -4,7 +4,7 @@ description: "Compute per-task pass rates from a rollouts JSONL: pass@1, pass@k,
 content_type: how-to
 audience_level: intermediate
 journey_stage: build
-position: 7
+position: 1
 ---
 
 Once `ng_collect_rollouts` finishes you have a rollouts JSONL — one line per (task, repeat) pair. That file answers "what did the model say?" but not "which tasks did the model pass?" `ng_reward_profile` joins rollouts back to their inputs and produces a per-task profile: average reward, max reward, pass rate against a configurable threshold. This page covers the workflow, the flags, and how to read the output.
@@ -110,7 +110,7 @@ python scripts/print_aggregate_results.py +jsonl_fpath=results/gpqa_diamond_prof
 
 The script averages every numeric field across rows. `avg_reward` becomes pass@1 (single-rollout accuracy), `max_reward` becomes pass@k (best-of-k), `pass_rate` is the fraction of tasks that passed at the threshold.
 
-For the canonical, combinatorial pass@k report — the form most papers cite — `ng_collect_rollouts` already invoked the agent's `/aggregate_metrics` endpoint after rollouts finished and wrote the result alongside `rollouts.jsonl`. Refer to [Run a Benchmark](/latest/evaluate/run-a-benchmark) for the full flow.
+For the canonical, combinatorial pass@k report — the form most papers cite — `ng_collect_rollouts` already invoked the agent's `/aggregate_metrics` endpoint after rollouts finished and wrote the result alongside `rollouts.jsonl`. Refer to [Run a Benchmark](/latest/evaluate/run/run-a-benchmark) for the full flow.
 
 ## Common mistakes
 
@@ -122,6 +122,6 @@ For the canonical, combinatorial pass@k report — the form most papers cite —
 
 ## Next steps
 
-- [Inspect Failures](/latest/evaluate/inspect-failures) — drill into the tasks where `pass_rate == 0`.
+- [Inspect Failures](/latest/evaluate/analyze/inspect-failures) — drill into the tasks where `pass_rate == 0`.
 - [Reward Semantics](/latest/about/concepts/reward-semantics) — the full scoring contract: errors, retries, aggregation.
 - [Footguns](/latest/troubleshooting/footguns) — symptom-driven fixes for common eval failures.
