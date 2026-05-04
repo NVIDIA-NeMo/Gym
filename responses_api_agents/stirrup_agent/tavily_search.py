@@ -42,11 +42,23 @@ from stirrup.utils.text import truncate_msg
 MAX_LENGTH = 40_000
 TIMEOUT = 60 * 3
 
-# HTTP statuses that indicate the *current key* is the problem (auth or quota).
-# On these, we rotate to the next key and retry. Other failures (404, 5xx,
-# network errors) aren't key-specific so retrying with another key wouldn't
-# help — they fail through to the model after one attempt.
+# HTTP statuses that indicate the *current key* is the problem (auth or
+# quota). On these, we rotate to the next key and retry.
 KEY_ROTATION_RETRY_STATUSES = frozenset({401, 403, 429})
+
+
+def _should_rotate_on_status(status: int) -> bool:
+    """Whether to rotate to the next key after seeing this HTTP status.
+
+    Rotates on key-specific 4xx (auth/quota) AND any 5xx. The 5xx rationale
+    is conservative: even though all keys hit the same upstream
+    (api.tavily.com), Tavily fronts multiple backends and occasional 5xx
+    are observed for individual requests; a free retry with the next key
+    costs nothing and often succeeds. Non-rotating failures (404, 4xx that
+    aren't auth/quota, malformed-query) bail after one attempt — rotating
+    wouldn't help and would mask the real issue.
+    """
+    return status in KEY_ROTATION_RETRY_STATUSES or 500 <= status < 600
 
 
 # ---------------------------------------------------------------------------
@@ -82,7 +94,7 @@ async def _search_executor(
                 metadata=ToolUseCountMetadata(),
             )
 
-        if resp.status_code in KEY_ROTATION_RETRY_STATUSES:
+        if _should_rotate_on_status(resp.status_code):
             last_status = resp.status_code
             continue  # rotate to next key
 
@@ -114,11 +126,11 @@ async def _search_executor(
             metadata=ToolUseCountMetadata(),
         )
 
-    # All keys exhausted on auth/quota errors.
+    # All keys exhausted on retryable errors (auth, quota, or 5xx).
     return ToolResult(
         content=(
-            f"<error>All {n_keys} Tavily key(s) returned auth/quota error "
-            f"(last status={last_status}). Rotate or refresh keys.</error>"
+            f"<error>All {n_keys} Tavily key(s) returned a retryable error "
+            f"(last status={last_status}). Refresh keys or check upstream.</error>"
         ),
         success=False,
         metadata=ToolUseCountMetadata(),

@@ -26,6 +26,7 @@ from responses_api_agents.stirrup_agent.tavily_search import (
     TavilyToolProvider,
     _search_executor,
     _SearchParams,
+    _should_rotate_on_status,
 )
 
 
@@ -80,6 +81,20 @@ class TestRotation:
     def test_empty_keys_returns_empty_string(self):
         p = TavilyToolProvider(api_keys=[])
         assert p._next_key() == ""
+
+
+class TestShouldRotateOnStatus:
+    @pytest.mark.parametrize("status", [401, 403, 429])
+    def test_auth_quota_rotates(self, status):
+        assert _should_rotate_on_status(status) is True
+
+    @pytest.mark.parametrize("status", [500, 501, 502, 503, 504, 599])
+    def test_5xx_rotates(self, status):
+        assert _should_rotate_on_status(status) is True
+
+    @pytest.mark.parametrize("status", [200, 201, 301, 400, 404, 405, 410, 600])
+    def test_other_does_not_rotate(self, status):
+        assert _should_rotate_on_status(status) is False
 
 
 class TestEnvVarFallback:
@@ -191,9 +206,10 @@ class TestSearchExecutorRotation:
         assert seen_keys == ["Bearer k1", "Bearer k2", "Bearer k3"]
         assert "All 3 Tavily key(s)" in result.content
         assert "last status=401" in result.content
+        assert "retryable error" in result.content
 
     async def test_404_does_NOT_trigger_rotation(self):
-        # 404 isn't key-specific — should fail through after one attempt.
+        # 404 isn't a rotation-worthy status — should fail through after one attempt.
         provider = TavilyToolProvider(api_keys=["k1", "k2"])
         seen_keys: list[str] = []
 
@@ -205,7 +221,41 @@ class TestSearchExecutorRotation:
         client.post = fake_post
         result = await _search_executor(_SearchParams(query="x"), provider=provider, client=client)
         assert result.success is False
-        # Only ONE key attempted — 404 isn't in KEY_ROTATION_RETRY_STATUSES.
+        # Only ONE key attempted — 404 doesn't trigger rotation.
+        assert seen_keys == ["Bearer k1"]
+
+    @pytest.mark.parametrize("status", [500, 502, 503, 504, 599])
+    async def test_rotates_on_5xx(self, status):
+        # 5xx is also key-rotation-worthy: free retry costs nothing and often
+        # the next attempt lands on a healthy backend.
+        provider = TavilyToolProvider(api_keys=["k1", "k2"])
+        seen_keys: list[str] = []
+
+        async def fake_post(url, **kwargs):
+            seen_keys.append(kwargs["headers"]["Authorization"])
+            if "k1" in kwargs["headers"]["Authorization"]:
+                return _mock_response(status)
+            return _mock_response(200, {"answer": "ok", "results": []})
+
+        client = AsyncMock()
+        client.post = fake_post
+        result = await _search_executor(_SearchParams(query="x"), provider=provider, client=client)
+        assert result.success is True
+        assert seen_keys == ["Bearer k1", "Bearer k2"]
+
+    async def test_4xx_400_does_NOT_trigger_rotation(self):
+        # 400 (e.g. malformed query) isn't fixable by changing keys.
+        provider = TavilyToolProvider(api_keys=["k1", "k2"])
+        seen_keys: list[str] = []
+
+        async def fake_post(url, **kwargs):
+            seen_keys.append(kwargs["headers"]["Authorization"])
+            return _mock_response(400)
+
+        client = AsyncMock()
+        client.post = fake_post
+        result = await _search_executor(_SearchParams(query="x"), provider=provider, client=client)
+        assert result.success is False
         assert seen_keys == ["Bearer k1"]
 
     async def test_network_error_does_NOT_trigger_rotation(self):
