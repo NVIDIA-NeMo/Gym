@@ -1,10 +1,10 @@
 ---
-title: "Agent Server"
+title: "Agent"
 description: "Reference for the Agent server, the orchestration component that runs single- or multi-step rollouts by calling the Model and Resources servers."
 content_type: reference
 audience_level: intermediate
 journey_stage: build
-position: 7
+position: 2
 ---
 The Agent server is the central component of environment design. It defines whether a rollout is single-step or multi-step, single-turn or multi-turn, and orchestrates all interaction logic — calling the model, executing tool calls through resources, and collecting the final reward. The Agent server does not run an LLM itself, it is orchestration code that delegates all text generation to the Model server.
 

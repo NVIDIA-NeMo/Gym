@@ -1,10 +1,10 @@
 ---
-title: "Model Server"
+title: "Model"
 description: "Reference for Model servers — stateless OpenAI-compatible inference endpoints exposing /v1/responses and /v1/chat/completions during rollouts."
 content_type: reference
 audience_level: intermediate
 journey_stage: build
-position: 8
+position: 3
 ---
 Model servers are stateless LLM inference endpoints. They receive a conversation and return the model's next output (text, tool calls, or code) with no memory or orchestration logic. During training, you will typically have at least one active Model server: the "policy" model being trained.
 
@@ -22,7 +22,7 @@ Guides for OpenAI and Azure OpenAI Responses API models and more are coming soon
 
 <Cards>
 
-<Card title="vLLM" href="/latest/reference/model-server/vllm">
+<Card title="vLLM" href="/latest/reference/servers/model/vllm">
 Self-hosted inference with vLLM for maximum control.
 
 <Badge minimal outlined>self-hosted</Badge> <Badge minimal outlined>open-source</Badge>

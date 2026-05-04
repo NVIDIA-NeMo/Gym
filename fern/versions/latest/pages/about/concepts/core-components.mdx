@@ -13,9 +13,9 @@ An environment defines the task the agent accomplishes, the actions the agent ta
 
 These concepts map to three server components:
 
-- **[Agent](/latest/reference/agent-server)** servers (the agent harness) determine whether a rollout is single-step or multi-step, single-turn or multi-turn, and orchestrate the full rollout lifecycle: calling the model, routing tool calls to resources, and collecting the final reward. The agent server does not run an LLM itself — it delegates all text generation to the model server.
-- **[Model](/latest/reference/model-server)** servers (LLM inference endpoints) are stateless. They receive a conversation and return the model's next output (text, tool calls, or code) with no memory or orchestration logic.
-- **[Resources](/latest/reference/resources-server)** servers (the environment backend) provide the tasks agents solve, the tools and external state they interact with, and the verification logic that scores performance and returns reward signals for training. Each resources server manages isolated per-rollout state via session IDs.
+- **[Agent](/latest/reference/servers/agent)** servers (the agent harness) determine whether a rollout is single-step or multi-step, single-turn or multi-turn, and orchestrate the full rollout lifecycle: calling the model, routing tool calls to resources, and collecting the final reward. The agent server does not run an LLM itself — it delegates all text generation to the model server.
+- **[Model](/latest/reference/servers/model)** servers (LLM inference endpoints) are stateless. They receive a conversation and return the model's next output (text, tool calls, or code) with no memory or orchestration logic.
+- **[Resources](/latest/reference/servers/resources)** servers (the environment backend) provide the tasks agents solve, the tools and external state they interact with, and the verification logic that scores performance and returns reward signals for training. Each resources server manages isolated per-rollout state via session IDs.
 
 ```
 ┌──────────────────────────────────────────┐

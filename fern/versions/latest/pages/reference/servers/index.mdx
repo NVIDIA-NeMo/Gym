@@ -1,0 +1,18 @@
+---
+title: "Servers"
+description: "Reference for the three server types in the NeMo Gym four-component architecture: agent (the harness), model (LLM inference), and resources (verifier + tools)."
+content_type: index
+audience_level: intermediate
+journey_stage: build
+position: 7
+---
+
+NeMo Gym splits an environment into three independently-running FastAPI servers that communicate over async HTTP. Each is a separate process with its own venv, lifecycle, and config block. The dataset is the fourth component — see [Architecture](/latest/about/concepts/architecture) for the full picture.
+
+| Server | What it does | Implements |
+| --- | --- | --- |
+| [Agent](/latest/reference/servers/agent) | The agent harness — orchestrator. Runs the model + tools loop and routes the final output to the verifier. | `responses()`, `run()` |
+| [Model](/latest/reference/servers/model) | Stateless LLM inference. No memory, no orchestration. Endpoint shape varies (Responses vs chat completions). | `chat_completions()`, `responses()` |
+| [Resources](/latest/reference/servers/resources) | Verifier, verification logic, and any task-specific tools, sandboxes, or environment state. | `verify()` and any tool endpoints |
+
+Each server type has its own page with config schema, endpoint reference, and integration notes.

@@ -59,7 +59,7 @@ NeMo Gym ships several agent servers:
 - `proof_refinement_agent` — multi-turn correction loop where the model sees error feedback and retries.
 - `verifiers_agent`, `swe_agents`, and others — task-shaped harnesses for specific benchmark families.
 
-Pick a harness when you wire up your YAML config; refer to the [Agent server](/latest/reference/agent-server) reference for the full list.
+Pick a harness when you wire up your YAML config; refer to the [Agent server](/latest/reference/servers/agent) reference for the full list.
 
 ### Model server
 
@@ -281,6 +281,6 @@ A `HeadServer` coordinates lifecycles, config, and Ray cluster init across the t
 - [Configuration](/latest/about/concepts/configuration) — how YAML configs map to running servers.
 - [Task verification](/latest/about/concepts/task-verification) — how `verify()` returns reward and what `BaseVerifyResponse` carries.
 - [Glossary](/latest/resources/glossary) — canonical definitions for agent harness, environment, task, dataset.
-- [Agent server reference](/latest/reference/agent-server) — the agent harnesses that ship with NeMo Gym.
-- [Resources server reference](/latest/reference/resources-server) — verifier and tool implementation details.
+- [Agent server reference](/latest/reference/servers/agent) — the agent harnesses that ship with NeMo Gym.
+- [Resources server reference](/latest/reference/servers/resources) — verifier and tool implementation details.
 - [Build environments](/latest/build-environments) — wire up a dataset, harness, model, and verifier from scratch.
