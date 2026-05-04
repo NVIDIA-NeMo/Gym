@@ -204,7 +204,8 @@ class TestSearchExecutorRotation:
         assert result.success is False
         # Tried each key exactly once.
         assert seen_keys == ["Bearer k1", "Bearer k2", "Bearer k3"]
-        assert "All 3 Tavily key(s)" in result.content
+        assert "exhausted 3 attempt(s)" in result.content
+        assert "3 key(s) × 1 sweep(s)" in result.content
         assert "last status=401" in result.content
         assert "retryable error" in result.content
 
@@ -242,6 +243,53 @@ class TestSearchExecutorRotation:
         result = await _search_executor(_SearchParams(query="x"), provider=provider, client=client)
         assert result.success is True
         assert seen_keys == ["Bearer k1", "Bearer k2"]
+
+    async def test_max_sweeps_2_tries_each_key_twice(self):
+        # max_sweeps=2 should give us 2 × len(keys) = 4 attempts before giving up.
+        provider = TavilyToolProvider(api_keys=["k1", "k2"], max_sweeps=2)
+        seen_keys: list[str] = []
+
+        async def fake_post(url, **kwargs):
+            seen_keys.append(kwargs["headers"]["Authorization"])
+            return _mock_response(429)
+
+        client = AsyncMock()
+        client.post = fake_post
+        result = await _search_executor(_SearchParams(query="x"), provider=provider, client=client)
+        assert result.success is False
+        # Each key attempted twice in round-robin.
+        assert seen_keys == ["Bearer k1", "Bearer k2", "Bearer k1", "Bearer k2"]
+        assert "exhausted 4 attempt(s)" in result.content
+        assert "2 key(s) × 2 sweep(s)" in result.content
+
+    async def test_max_sweeps_3_succeeds_on_third_sweep(self):
+        # Single key, fails twice, succeeds on third attempt (third sweep).
+        provider = TavilyToolProvider(api_keys=["only"], max_sweeps=3)
+        call_count = {"n": 0}
+
+        async def fake_post(url, **kwargs):
+            call_count["n"] += 1
+            if call_count["n"] < 3:
+                return _mock_response(503)
+            return _mock_response(200, {"answer": "ok", "results": []})
+
+        client = AsyncMock()
+        client.post = fake_post
+        result = await _search_executor(_SearchParams(query="x"), provider=provider, client=client)
+        assert result.success is True
+        assert call_count["n"] == 3
+
+    def test_max_sweeps_default_is_1(self):
+        provider = TavilyToolProvider(api_keys=["k1", "k2", "k3"])
+        assert provider._max_sweeps == 1
+
+    def test_max_sweeps_zero_rejected(self):
+        with pytest.raises(ValueError, match="max_sweeps must be >= 1"):
+            TavilyToolProvider(api_keys=["k1"], max_sweeps=0)
+
+    def test_max_sweeps_negative_rejected(self):
+        with pytest.raises(ValueError, match="max_sweeps must be >= 1"):
+            TavilyToolProvider(api_keys=["k1"], max_sweeps=-1)
 
     async def test_4xx_400_does_NOT_trigger_rotation(self):
         # 400 (e.g. malformed query) isn't fixable by changing keys.

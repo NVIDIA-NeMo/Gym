@@ -152,6 +152,7 @@ async def _run_stirrup_agent(
     enable_thinking: bool = True,
     max_completion_tokens_cap: int = 64000,
     tavily_api_key: Optional[Union[str, List[str]]] = None,
+    tavily_max_sweeps: int = 1,
 ) -> Dict[str, Any]:
     """Run a Stirrup agent session and return history + metadata.
 
@@ -241,7 +242,12 @@ async def _run_stirrup_agent(
     if tavily_api_key or _os.environ.get("TAVILY_API_KEY"):
         from responses_api_agents.stirrup_agent.tavily_search import TavilyToolProvider
 
-        tools = [TavilyToolProvider(api_keys=tavily_api_key) if isinstance(t, WebToolProvider) else t for t in tools]
+        tools = [
+            TavilyToolProvider(api_keys=tavily_api_key, max_sweeps=tavily_max_sweeps)
+            if isinstance(t, WebToolProvider)
+            else t
+            for t in tools
+        ]
 
     agent_kwargs: Dict[str, Any] = {
         "client": client,
@@ -533,8 +539,17 @@ class StirrupAgentWrapperConfig(BaseResponsesAPIAgentConfig):
         "Accepts a single key, a Python list of keys, or a comma-separated string with optional "
         "surrounding ``[...]`` brackets (the format EFB injects via ``host:TAVILY_API_KEY``). "
         "When multiple keys are present, the provider rotates round-robin per call AND retries "
-        "on key-specific failures (401/403/429) with the next key. Falls back to the "
+        "on key-specific failures (401/403/429/5xx) with the next key. Falls back to the "
         "``TAVILY_API_KEY`` env var when None.",
+    )
+    tavily_max_sweeps: int = Field(
+        default=1,
+        description="Number of full passes through the Tavily key list before giving up on a "
+        "single tool call. Total attempts per call = ``max_sweeps × len(api_keys)``. Default 1 "
+        "exhausts cleanly after one sweep and lets the model decide whether to retry on the "
+        "next turn. Bump to 2-3 for endurance against a flaky upstream at the cost of more "
+        "wallclock per stuck call.",
+        ge=1,
     )
 
 
@@ -654,6 +669,7 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
                 "enable_thinking": self.config.enable_thinking,
                 "max_completion_tokens_cap": self.config.max_completion_tokens_cap,
                 "tavily_api_key": self.config.tavily_api_key,
+                "tavily_max_sweeps": self.config.tavily_max_sweeps,
             }
 
             future = run_stirrup_agent_remote.remote(params)

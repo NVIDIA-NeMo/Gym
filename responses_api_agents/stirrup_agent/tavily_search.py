@@ -78,7 +78,8 @@ async def _search_executor(
 ) -> ToolResult[ToolUseCountMetadata]:
     last_status: Optional[int] = None
     n_keys = max(1, len(provider._api_keys))
-    for _ in range(n_keys):
+    n_attempts = provider._max_sweeps * n_keys
+    for _ in range(n_attempts):
         api_key = provider._next_key()
         try:
             resp = await client.post(
@@ -126,10 +127,11 @@ async def _search_executor(
             metadata=ToolUseCountMetadata(),
         )
 
-    # All keys exhausted on retryable errors (auth, quota, or 5xx).
+    # All attempts exhausted on retryable errors (auth, quota, or 5xx).
     return ToolResult(
         content=(
-            f"<error>All {n_keys} Tavily key(s) returned a retryable error "
+            f"<error>Tavily exhausted {n_attempts} attempt(s) "
+            f"({n_keys} key(s) × {provider._max_sweeps} sweep(s)) on retryable errors "
             f"(last status={last_status}). Refresh keys or check upstream.</error>"
         ),
         success=False,
@@ -200,12 +202,21 @@ class TavilyToolProvider(ToolProvider):
         *,
         api_keys: Optional[Union[str, List[str]]] = None,
         timeout: float = TIMEOUT,
+        max_sweeps: int = 1,
     ) -> None:
         if api_keys is None:
             api_keys = os.getenv("TAVILY_API_KEY", "")
+        if max_sweeps < 1:
+            raise ValueError(f"max_sweeps must be >= 1, got {max_sweeps}")
         self._api_keys: List[str] = self._parse_keys(api_keys)
         self._key_idx: int = 0
         self._timeout = timeout
+        # Total attempts per tool call = ``max_sweeps × len(api_keys)``. With
+        # the default 1, a single sweep through the keys exits gracefully on
+        # full exhaustion — the model is the natural backoff for the next
+        # tool call. Bump to 2-3 if the upstream is flaky in short bursts and
+        # an extra wallclock minute or two is acceptable.
+        self._max_sweeps = max_sweeps
         self._client: httpx.AsyncClient | None = None
 
     @staticmethod
