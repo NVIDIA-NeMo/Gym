@@ -12,12 +12,6 @@ tabs:
 navigation:
   - tab: docs
     layout:
-      - section: "Home"
-        slug: ""
-        contents:
-          - page: "Welcome"
-            path: ./latest/pages/index.mdx
-            slug: ""
       - folder: ./latest/pages/about
         title: "About"
         title-source: frontmatter
