@@ -1,64 +1,102 @@
 ---
 title: "Agent"
-description: "Reference for the Agent server, the orchestration component that runs single- or multi-step rollouts by calling the Model and Resources servers."
+description: "Reference for the Agent server: endpoints, base class, the 16 shipped harnesses, and how the orchestration loop interacts with Model and Resources servers."
 content_type: reference
 audience_level: intermediate
 journey_stage: build
 position: 2
 ---
-The Agent server is the central component of environment design. It defines whether a rollout is single-step or multi-step, single-turn or multi-turn, and orchestrates all interaction logic — calling the model, executing tool calls through resources, and collecting the final reward. The Agent server does not run an LLM itself, it is orchestration code that delegates all text generation to the Model server.
+The Agent server is the orchestration component of an environment. It receives a task, calls the Model server for generation, dispatches any tool calls to the Resources server, and returns the verified reward. It does not run an LLM itself — all generation goes to the Model server, all tools and verification go to the Resources server.
 
-## Rollout Lifecycle
+For picking a harness for a new environment, see [Choose an Agent](/latest/get-started/choose-an-agent). For the high-level four-component model, see [Architecture](/latest/about/concepts/architecture).
 
-The following pseudocode illustrates a typical agent rollout in three phases: initialize the episode, run the agent loop, and grade the result. During the agent loop, the agent sends the conversation to the model, gets back a response, and if the model makes any tool calls, it routes them to the Resources server and feeds the results back to the model. The loop repeats until stop criteria are met, such as model max sequence length or the agent reaching a defined max steps or turns. Once the loop completes, the agent calls the Resources server to verify the result and collect a reward.
+## Base class
+
+All agent harnesses extend `SimpleResponsesAPIAgent` (defined in `nemo_gym/base_responses_api_agent.py`):
 
 ```python
-# Agent Server - pseudocode
-class Agent:
-    async def run(self, task_data):
-        # 1. Initialize episode
-        resources_server.seed_session(task_data)
+class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, SimpleServer):
+    config: BaseResponsesAPIAgentConfig
 
-        # 2. Run the agent loop
-        response = self.responses(task_data.prompt, task_data.tools)
+    @abstractmethod
+    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse: ...
 
-        # 3. Grade the result
-        reward = resources_server.verify(response, task_data.ground_truth)
-        return response, reward
+    @abstractmethod
+    async def run(self, body: BaseRunRequest) -> BaseVerifyResponse: ...
 
-    async def responses(self, prompt, tools):
-        conversation = prompt
-        step = 0
-
-        # Agent loop
-        while step < max_steps:
-            model_output = model_server.responses(conversation, tools)
-            conversation.append(model_output)
-
-            if model_output is text:
-                break # model is done, no more tool calls
-
-            for tool_call in model_output.function_calls:
-                result = resources_server.post(f"/{tool_call.name}", tool_call.arguments)
-                conversation.append(result)
-
-            step += 1
-
-        return conversation
+    async def aggregate_metrics(self, body: AggregateMetricsRequest) -> AggregateMetrics: ...
 ```
 
-## Integrate Existing Agents
+`responses()` runs the model + tool-call loop and returns the final assistant response. `run()` runs a single end-to-end rollout (seed → respond → verify) and returns the verified reward. `aggregate_metrics()` runs the same `RewardProfiler` aggregation as the resources server by default; override to proxy.
 
-You can use an existing agent in NeMo Gym, integrate an external one, or build your own from scratch.
+## Endpoints
 
-[`SimpleAgent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/simple_agent) is a native NeMo Gym agent that handles general-purpose multi-step tool calling with configurable max steps, and works with any Resources server out of the box. NeMo Gym also includes agents that integrate external tools: for example, [`MiniSWEAgent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/mini_swe_agent) wraps an external coding harness running in Docker containers and converts its output back into the NeMo Gym format.
+| Path | Method | Purpose |
+| --- | --- | --- |
+| `/v1/responses` | POST | Run the model + tool-call loop. Body: `NeMoGymResponseCreateParamsNonStreaming` (OpenAI Responses-compatible). Returns `NeMoGymResponse`. |
+| `/run` | POST | Run a full rollout: seed the resources server, drive `/v1/responses`, then call `verify`. Body: `BaseRunRequest`. Returns `BaseVerifyResponse` with `reward`. |
+| `/aggregate_metrics` | POST | Aggregate per-task metrics across rollouts. Body: `AggregateMetricsRequest`. Returns `AggregateMetrics`. |
 
-### Tools in Agent vs. Resources Server
+Session middleware is wired automatically (`setup_session_middleware(app)`); cookies set on the first response carry session state across subsequent calls when the agent forwards them downstream.
 
-Existing agents may come with predefined tools, allowing you to leverage them directly and use the Resources server to supplement with any additional external tools. When building a new environment, prefer defining tools in the Resources server rather than the Agent server. This separation of concerns allows different agents to share the same Resources server without duplicating tool logic.
+## Cookie and token-ID propagation
 
-## Server Configuration
-<Note>
-[Agent Server Fields](/latest/reference/configuration#agent-server-fields) for server configuration syntax and fields.
+For multi-turn or stateful environments, the agent must carry cookies and message-level token-IDs across calls. This is what makes per-rollout state work and what makes the resulting trajectories trainable.
 
-</Note>
+- **Cookies** — pass `cookies=request.cookies` on every downstream call (resources server, model server). Capture the response cookies and forward them to the next call. See [Stateful environments](/latest/build-environments/supported-patterns/stateful) for the full pattern.
+- **Token IDs** — `prompt_token_ids`, `generation_token_ids`, and `generation_log_probs` are attached by the model server to every output item. They ride along when you re-send the previous `output` list as the next turn's input — don't strip them. NeMo RL needs these for on-policy correction.
+
+`simple_agent` and `proof_refinement_agent` are reference implementations of both contracts.
+
+## Shipped harnesses
+
+NeMo Gym ships 16 agent harnesses under [`responses_api_agents/`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents). Pick one when you wire up your YAML config; refer to [Choose an Agent](/latest/get-started/choose-an-agent) for the full comparison and decision criteria.
+
+| Harness | Purpose |
+| --- | --- |
+| [`simple_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/simple_agent) | Default. Loops `/v1/responses` calls, dispatches tool calls back to the resources server, terminates on a final assistant message or `max_steps`. |
+| [`non_executing_simple_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/non_executing_simple_agent) | Single forward pass; passes the model response straight to the verifier without executing tool calls. |
+| [`proof_refinement_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/proof_refinement_agent) | Multi-turn correction loop with verifier error feedback. |
+| [`gymnasium_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/gymnasium_agent) | Drives a Gymnasium-style `reset()` / `step()` loop. |
+| [`tool_simulation_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/tool_simulation_agent) | Simulated tool execution (deterministic outputs for evals or SDG). |
+| [`verifiers_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/verifiers_agent) | Bridges Prime Intellect's Verifiers library. |
+| [`langgraph_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/langgraph_agent) | Adapter for LangGraph graphs. |
+| [`harbor_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/harbor_agent) | Runs Harbor agents (e.g. `terminus-2`) inside Gym. |
+| [`aviary_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/aviary_agent) | Bridges FutureHouse's Aviary framework. |
+| [`stirrup_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/stirrup_agent) | Stirrup loop over GDPVal tasks. |
+| [`mini_swe_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/mini_swe_agent) | Mini-SWE-Agent for SWE-Bench. |
+| [`swe_agents`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/swe_agents) | Larger-footprint SWE-style harnesses. |
+| [`browsecomp_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/browsecomp_agent) | Browse-and-answer harness for BrowseComp. |
+| [`tau2`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/tau2) | τ²-bench customer-service harness. |
+| [`cvdp_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/cvdp_agent) | Hardware-design harness (CVDP). |
+| [`labbench2_vlm_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/labbench2_vlm_agent) | Extends `simple_agent` with image/PDF inputs from disk. |
+
+## Configuration
+
+Agent configs reference a resources server, a model server, and one or more datasets:
+
+```yaml
+my_agent_instance:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: my_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+        - name: my_dataset
+          type: train
+          jsonl_fpath: path/to/data.jsonl
+```
+
+For full configuration syntax see [Configuration](/latest/reference/configuration).
+
+## Where to next
+
+- [Choose an Agent](/latest/get-started/choose-an-agent) — pick the right harness.
+- [Stateful environments](/latest/build-environments/supported-patterns/stateful) — cookie-propagation contract for custom harnesses.
+- [Integrate external libraries](/latest/build-environments/integrations/external-libraries) — wrap a third-party agent runtime as a Gym agent.
+- [Architecture](/latest/about/concepts/architecture) — how the four components fit together.

@@ -1,37 +1,85 @@
 ---
 title: "Model"
-description: "Reference for Model servers — stateless OpenAI-compatible inference endpoints exposing /v1/responses and /v1/chat/completions during rollouts."
+description: "Reference for Model servers — six shipped server types, the Responses vs chat completions endpoint shapes they target, and where to find provider-specific configuration."
 content_type: reference
 audience_level: intermediate
 journey_stage: build
 position: 3
 ---
-Model servers are stateless LLM inference endpoints. They receive a conversation and return the model's next output (text, tool calls, or code) with no memory or orchestration logic. During training, you will typically have at least one active Model server: the "policy" model being trained.
+Model servers are stateless LLM inference endpoints. They receive a conversation and return the model's next output (text, tool calls, or reasoning items) with no memory or orchestration. Every rollout has at least one Model server — the policy model under evaluation or training.
 
-Any OpenAI-compatible inference backend can serve as a Model server. NeMo Gym provides middleware to bridge format differences (e.g., converting between Chat Completions and Responses API schemas).
+For the per-provider tested-version matrix, env.yaml fields, and known caveats, see [Provider Compatibility](/latest/reference/compatibility/providers). For the full architecture, see [Architecture](/latest/about/concepts/architecture).
 
-Model servers implement `ResponsesAPIModel` and expose two endpoints:
+## Base class
 
-- **`/v1/responses`** — [OpenAI Responses API](https://developers.openai.com/api/reference/resources/responses/methods/create)
-  - This is the default input/output schema for all NeMo Gym rollouts.
-- **`/v1/chat/completions`** — [OpenAI Chat Completions API](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create)
+All model servers extend `SimpleResponsesAPIModel` (defined in `nemo_gym/base_responses_api_model.py`):
 
-## Backend Guides
+```python
+class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
+    config: BaseResponsesAPIModelConfig
 
-Guides for OpenAI and Azure OpenAI Responses API models and more are coming soon!
+    @abstractmethod
+    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse: ...
 
-<Cards>
+    @abstractmethod
+    async def chat_completions(self, body: NeMoGymChatCompletionCreateParamsNonStreaming) -> NeMoGymChatCompletion: ...
+```
 
-<Card title="vLLM" href="/latest/reference/servers/model/vllm">
-Self-hosted inference with vLLM for maximum control.
+`responses()` returns the OpenAI Responses-shaped output (with `output_text`, tool calls, and reasoning items). `chat_completions()` returns the OpenAI Chat Completions object. NeMo Gym buffers full responses; streaming endpoints are not exercised.
 
-<Badge minimal outlined>self-hosted</Badge> <Badge minimal outlined>open-source</Badge>
-</Card>
+## Endpoints
 
-</Cards>
+| Path | Method | Purpose |
+| --- | --- | --- |
+| `/v1/responses` | POST | OpenAI Responses-shaped output. Default schema for all NeMo Gym rollouts. |
+| `/v1/chat/completions` | POST | OpenAI Chat Completions output. |
 
-## Server Configuration
-<Note>
-[Model Server Fields](/latest/reference/configuration#model-server-fields) for server configuration syntax and fields.
+The agent server only ever calls `/v1/responses`. Servers backed by chat-completions-only providers (e.g. `vllm_model` against OpenRouter) synthesize a Responses-shaped response via the bundled converter, so the agent doesn't need to know which underlying API the model server hit.
 
-</Note>
+## Shipped server types
+
+Six model server types ship under [`responses_api_models/`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_models). Pick the one whose underlying API your provider exposes.
+
+| Server | Underlying call | Use when |
+| --- | --- | --- |
+| [`openai_model`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_models/openai_model) | `/v1/responses` (native) | OpenAI proper, build.nvidia.com NIMs that expose Responses, gpt-oss endpoints. |
+| [`azure_openai_model`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_models/azure_openai_model) | `/v1/chat/completions` (synthesized into Responses-shape) | Azure-hosted OpenAI deployments. |
+| [`vllm_model`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_models/vllm_model) | `/v1/chat/completions` | Self-hosted vLLM (remote), OpenAI-compatible gateways (OpenRouter, Together, Anyscale). |
+| [`local_vllm_model`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_models/local_vllm_model) | `/v1/chat/completions` (NeMo Gym manages vLLM lifecycle) | Run a local vLLM server inside the NeMo Gym process tree. |
+| [`local_vllm_model_proxy`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_models/local_vllm_model_proxy) | `/v1/chat/completions` (proxied) | Forward to a local vLLM whose lifecycle is owned by another process. |
+| [`genrm_model`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_models/genrm_model) | `/v1/chat/completions` (managed local vLLM, custom roles) | Generative reward model with `response_1` / `response_2` / `principle` roles for pairwise comparison. |
+
+Any `vllm_model`-family server can serve `/v1/responses` natively when its config sets `is_responses_native: true` (used today by gpt-oss-via-local-vLLM).
+
+## Provider compatibility, retries, concurrency
+
+Per-provider tested versions, endpoint URLs, env.yaml fields, tool-calling support, and reasoning-block handling live in [Provider Compatibility](/latest/reference/compatibility/providers). That page also documents the retry contract and concurrency cap.
+
+## vLLM-specific reference
+
+| Topic | Page |
+| --- | --- |
+| `tool_call_parser`, `reasoning_parser`, `is_responses_native`, and the full `vllm_serve_kwargs` config surface | [vLLM Model Server](/latest/reference/servers/model/vllm) |
+
+## Configuration
+
+Model server configs are referenced by an agent's `model_server` field:
+
+```yaml
+policy_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${policy_base_url}
+      openai_api_key: ${policy_api_key}
+      openai_model: ${policy_model_name}
+```
+
+For full configuration syntax see [Configuration](/latest/reference/configuration).
+
+## Where to next
+
+- [Provider Compatibility](/latest/reference/compatibility/providers) — tested-version matrix and per-provider env.yaml fields.
+- [vLLM Model Server](/latest/reference/servers/model/vllm) — vLLM-specific config surface.
+- [Architecture](/latest/about/concepts/architecture) — how Model server fits in the four-component model.
+- [aiohttp vs httpx](/latest/blog/aiohttp-vs-httpx) — why the inter-server transport is aiohttp.

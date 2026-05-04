@@ -59,7 +59,7 @@ Refer to [Integrate External Environments](/latest/build-environments/integratio
 Subclass [`SimpleResponsesAPIAgent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents) and implement `responses()` and `run()`. For multi-turn agents:
 
 - Propagate cookies through every downstream call: `cookies=request.cookies`. Stateful resources servers depend on this.
-- Carry token IDs (`prompt_token_ids`, `generation_token_ids`, `generation_log_probs`) from each model response into the next turn's input. NeMo RL training needs them.
+- Token IDs (`prompt_token_ids`, `generation_token_ids`, `generation_log_probs`) ride along on each output item the model server returns. The harness propagates them by re-sending the full prior `output` list as the next turn's input — don't drop or rebuild output items, since NeMo RL training reads those fields off them. (Note: `proof_refinement_agent` deliberately resets context per correction turn, so it is not directly trainable as a multi-turn trajectory.)
 - Handle tool failures and bad model outputs as meaningful error responses, not crashes — `/run` must survive 4k–65k concurrent requests.
 
 [`proof_refinement_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/proof_refinement_agent) is a clean reference for a multi-turn correction loop. For state machines, copy [`gymnasium_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/gymnasium_agent).

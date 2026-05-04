@@ -21,11 +21,13 @@ Provider compatibility is the most common source of late-stage failures. Pick th
 | Server Type         | Endpoint Shape           | Use For                                           | Config Example                                                                        |
 |---------------------|--------------------------|---------------------------------------------------|---------------------------------------------------------------------------------------|
 | `openai_model`      | `/v1/responses`          | OpenAI proper, build.nvidia.com (Responses-native), gpt-oss endpoints supporting Responses | `responses_api_models/openai_model/configs/openai_model.yaml`                         |
-| `azure_openai_model`| `/v1/responses`          | Azure-hosted OpenAI deployments                   | `responses_api_models/azure_openai_model/configs/azure_openai_model.yaml`             |
+| `azure_openai_model`| `/v1/chat/completions` (returned as Responses-shaped) | Azure-hosted OpenAI deployments. Internally calls `client.chat.completions.create()` and synthesizes a Responses-shaped output via the vLLM converter. | `responses_api_models/azure_openai_model/configs/azure_openai_model.yaml`             |
 | `vllm_model`        | `/v1/chat/completions`   | Self-hosted vLLM (remote), OpenAI-compatible endpoints (OpenRouter, Together, Anyscale) without Responses support | `responses_api_models/vllm_model/configs/vllm_model.yaml`                             |
 | `local_vllm_model`  | `/v1/chat/completions` (managed) | NeMo Gym manages the vLLM server lifecycle on the local machine | `responses_api_models/local_vllm_model/configs/Qwen/Qwen3-30B-A3B-Thinking-2507.yaml` |
 | `local_vllm_model_proxy` | `/v1/chat/completions` (proxied) | Forward to an externally managed local vLLM (another process owns the lifecycle) | `responses_api_models/local_vllm_model_proxy/configs/`                                |
-| `genrm_model`       | `/v1/responses` (custom roles) | Generative reward model with `response_1`/`response_2`/`principle` roles for pairwise comparison | `responses_api_models/genrm_model/configs/`                                           |
+| `genrm_model`       | `/v1/chat/completions` (managed local vLLM, custom roles) | Generative reward model on top of `local_vllm_model` with `response_1`/`response_2`/`principle` roles for pairwise comparison | `responses_api_models/genrm_model/configs/`                                           |
+
+Any `vllm_model`-family server can serve `/v1/responses` natively when its config sets `is_responses_native: true` (used today by gpt-oss-via-local-vLLM).
 
 ---
 
@@ -35,8 +37,8 @@ OpenAI ships two distinct API shapes. They are *not* interchangeable.
 
 | API                   | URL fragment           | Returns                                       | Servers that target it                      |
 |-----------------------|------------------------|-----------------------------------------------|---------------------------------------------|
-| Responses             | `/v1/responses`        | Structured response with `output_text`, tool calls, reasoning items | `openai_model`, `azure_openai_model`        |
-| Chat Completions      | `/v1/chat/completions` | OpenAI chat completions object                | `vllm_model`, `local_vllm_model`            |
+| Responses             | `/v1/responses`        | Structured response with `output_text`, tool calls, reasoning items | `openai_model`; `vllm_model`-family servers when `is_responses_native: true` |
+| Chat Completions      | `/v1/chat/completions` | OpenAI chat completions object                | `azure_openai_model` (synthesized into Responses-shaped output), `vllm_model`, `local_vllm_model`, `local_vllm_model_proxy`, `genrm_model` |
 
 **Decision rule:** Use `openai_model` for endpoints that implement `/v1/responses`. Use `vllm_model` for endpoints that only implement `/v1/chat/completions`. Most self-hosted vLLM deployments and most OpenAI-compatible third-party gateways are chat-completions only.
 
@@ -64,7 +66,7 @@ Probe an unknown endpoint with `curl <base_url>/responses` and `curl <base_url>/
 - **Tool calling:** Supported on GPT-4, GPT-4.1, GPT-4o, and o-series.
 - **Reasoning blocks:** o-series and GPT-5 emit reasoning items in the Responses output. The agent passes them through; reward extraction must strip them. See [Reward Semantics](/latest/about/concepts/reward-semantics).
 - **Context length:** Model-dependent. Set `max_output_tokens` in `responses_create_params` when collecting rollouts.
-- **Retry behavior:** `ServerClient` retries 3x with exponential backoff on transport errors. 4xx responses are not retried.
+- **Retry behavior:** `ServerClient` retries up to 3x with a fixed 0.5 s sleep on transport errors. Rate-limit codes (429, 502, 503, 504, 520) retry independently until success. 4xx semantic responses bubble up unchanged.
 - **Known issues:** None tracked. Tested by the team.
 
 ### Azure OpenAI
@@ -119,7 +121,7 @@ Probe an unknown endpoint with `curl <base_url>/responses` and `curl <base_url>/
 - **Tool calling:** Requires `--enable-auto-tool-choice` and a matching `--tool-call-parser` on the vLLM server (e.g. `hermes` for Qwen3, `openai` for gpt-oss). Without it, vLLM emits tool calls as raw text.
 - **Reasoning blocks:** `uses_reasoning_parser: true` and `--reasoning-parser deepseek_r1` (Qwen3 thinking) parse `<think>` blocks server-side. Set `uses_interleaved_reasoning: true` for models that interleave reasoning with tool calls.
 - **Context length:** Set `--max-model-len` on the vLLM CLI. If you exceed it, vLLM returns an HTTP 400 with the offending token count. There is no automatic truncation.
-- **Retry behavior:** Same `ServerClient` retry policy.
+- **Retry behavior:** Same `ServerClient` retry policy (3 tries with 0.5 s sleep on transport errors; rate-limit codes retry until success).
 - **Known issues:** The `max_model_len` exceeded error is the #1 vLLM complaint across competitor issue queues. See [Footguns](/latest/troubleshooting/footguns).
 
 ### local_vllm_model (NeMo Gym manages the vLLM lifecycle)
@@ -210,7 +212,7 @@ For per-provider context limits, consult the provider's model card. NeMo Gym doe
 
 | Behavior                  | Default                                          | Where to override                                    |
 |---------------------------|--------------------------------------------------|------------------------------------------------------|
-| HTTP retries              | 3 attempts, exponential backoff                  | `nemo_gym/server_utils.py` `request()` helper        |
+| HTTP retries              | 3 attempts, fixed 0.5 s sleep on transport errors; rate-limit codes (429/502/503/504/520) retry independently until success | `nemo_gym/server_utils.py` `request()` and `nemo_gym/openai_utils.py`        |
 | Concurrent requests       | Unbounded for `openai_model` / `vllm_model`      | `num_concurrent_requests` field (Azure)              |
 | Connection pool           | Singleton aiohttp client, pooled connections     | `nemo_gym/server_utils.py`                           |
 | Subprocess concurrency    | Bounded by `asyncio.Semaphore` per server        | Per-server config (e.g. `code_gen` `num_workers`)    |

@@ -151,6 +151,32 @@ To access session state:
 2. Read the session ID with `request.session[SESSION_ID_KEY]`.
 3. Store state in an instance-level dictionary keyed by session ID.
 
+### Cookie propagation contract (required for stateful agents)
+
+Session state only persists when the **agent** forwards cookies on every downstream call. The session middleware sets a cookie on the first response from the resources server; without that cookie on subsequent requests, each call gets a fresh `session_id` and the state appears empty.
+
+If you write a custom agent harness, propagate cookies on every call:
+
+```python
+# Inside the agent's /run or /responses endpoint
+api_response = await self.server_client.post(
+    server_name=self.config.resources_server.name,
+    url_path="/increment_counter",
+    json=arguments,
+    cookies=request.cookies,           # incoming cookies → resources server
+)
+resources_server_cookies = api_response.cookies  # carry forward to next call
+
+model_response = await self.server_client.post(
+    server_name=self.config.model_server.name,
+    url_path="/v1/responses",
+    json=body,
+    cookies=model_server_cookies,      # propagate model-side cookies too
+)
+```
+
+`simple_agent` and `proof_refinement_agent` already do this — pair your stateful resources server with one of them and it just works. The contract matters only when you write your own harness. See [`responses_api_agents/simple_agent/app.py`](https://github.com/NVIDIA-NeMo/Gym/blob/main/responses_api_agents/simple_agent/app.py) for the reference implementation, and [Footguns](/latest/troubleshooting/footguns) for symptoms when cookies are dropped (counter resets to 0 every tool call, every rollout shows reward = 0).
+
 <Note>
 In `seed_session`, use direct assignment (`self.session_id_to_counter[session_id] = body.initial_count`) rather than `setdefault`. `setdefault` silently ignores re-seed attempts when the session already exists, which causes subtle bugs when session IDs are reused across episodes. The current `example_session_state_mgmt` implementation still uses `setdefault` here — the direct assignment shown above is preferred.
 

@@ -1,6 +1,6 @@
 # Docs Site Steward
 
-`fern/` is the Fern MDX docs site at `docs.nvidia.com/nemo/gym`. The IA was reorganized for the 0.3.0 release into 8 top-level documentation sections (About, Get Started, Build Environments, Evaluate Models, Train Models, Reference, Troubleshooting, Resources) following NVIDIA standard documentation IA, plus two additional tabs: "API and CLI" (auto-generated Python API + a 5-page CLI reference split by command category) and "Blog" (engineering notes / design rationale). The `Welcome` landing page lives at `fern/pages/welcome.mdx` and is wired to `/` via the `landing-page` block in `fern/docs.yml` — it is not a sidebar entry. Every page has controlled-vocab frontmatter; `llms.txt` is the AX index; the voice rubric and the verb-first naming pattern shape every new page.
+`fern/` is the Fern MDX docs site at `docs.nvidia.com/nemo/gym`. The IA was reorganized for the 0.3.0 release into 8 top-level documentation sections (About, Get Started, Build Environments, Evaluate Models, Train Models, Reference, Troubleshooting, Resources) following NVIDIA standard documentation IA, plus two additional tabs: "API and CLI" (auto-generated Python API + a 5-page CLI reference split by command category) and "Blog" (engineering notes / design rationale). The site-level landing page is **not configured** today — Fern routes `/` and `/latest/` to the first sidebar item (currently About). A `versions/latest/pages/index.mdx` file exists from an earlier landing-page experiment but is not wired into nav; treat it as legacy. Every page has controlled-vocab frontmatter; `llms.txt` is the AX index; the voice rubric and the verb-first naming pattern shape every new page.
 
 Related docs:
 - root `AGENTS.md`
@@ -19,7 +19,7 @@ The Docs Steward speaks for two audiences: cold readers arriving from a Nemotron
 
 - **Content fidelity to source.** Every claim about the implementation must match the code at the time the doc lands: CLI flag names, output schemas, server counts, agent labels, version pins, link targets. Doc-shaped PRs (IA refactors, release notes, large content updates, README sweeps) **must run a Content Audit** steward swarm (see root `AGENTS.md` § Steward Swarms) and triage P0/P1 findings before merge. Reorganization without an accuracy pass is a known regression source.
 - **Top-level nav stays at 8 doc sections + 2 tabs.** Doc sections: About, Get Started, Build Environments, Evaluate Models, Train Models, Reference, Troubleshooting, Resources. Tabs: API and CLI, Blog. Don't add a 9th doc section or a 3rd tab without a steward swarm signoff.
-- **Site landing page (`/`) is configured at the site level via `fern/docs.yml` `landing-page`** pointing at `fern/pages/welcome.mdx`. It is intentionally not a sidebar entry — Fern routes `/latest/` to the first sidebar item (currently About). Don't move `welcome.mdx` into `versions/latest/pages/` without updating `docs.yml`.
+- **Site landing page is not configured.** A previous attempt to wire `fern/pages/welcome.mdx` via `landing-page` was abandoned; today `/latest/` falls back to the first sidebar item (About). If a site-level landing page is reintroduced, create `fern/pages/welcome.mdx`, add `landing-page: ./pages/welcome.mdx` to `fern/docs.yml`, and decide whether the legacy `versions/latest/pages/index.mdx` should be deleted or repurposed.
 - **Controlled-vocab frontmatter is mandatory** on every `latest/pages/**/*.mdx`. Required fields: `title`, `description`, `content_type`, `audience_level`, `journey_stage`. Vocab values are constrained — see `scripts/validate_docs_frontmatter.py`.
 - **Voice rubric** applies to all new pages and major rewrites: imperative verb-first, no pedagogy openers ("Goal:", "In this tutorial you will…"), no skip-ahead Tips, no `**✅ Success Check**` ceremony, lead with the familiar synonym ("the agent server (the agent harness)"), concrete metrics in intros.
 - **Verb-first naming pattern** for tutorial / how-to titles ("Build a single-step environment"); "Understand X" for explanation pages; noun-only for reference; section name for index/landing.
@@ -81,8 +81,7 @@ When changing `fern/`:
 
 - `fern/versions/latest/**/*.mdx`
 - `fern/versions/latest.yml`
-- `fern/pages/welcome.mdx` (site-level landing page; routed via `fern/docs.yml` `landing-page`)
-- `fern/docs.yml` (including the `landing-page` block, `tabs`, redirects, and `experimental.mdx-components`)
+- `fern/docs.yml` (`tabs`, redirects, `experimental.mdx-components`; plus a `landing-page` block if/when a site landing is added)
 - `fern/llms.txt`
 - `fern/components/` (Authors, BlogCard, NotebookViewer, devnotes, notebooks)
 - `scripts/validate_docs_frontmatter.py`

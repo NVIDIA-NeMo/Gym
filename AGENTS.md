@@ -11,7 +11,7 @@ NeMo Gym exists to prove that **the same environment that scores a model can pro
 - All commits require DCO sign-off (`-s`) and cryptographic signature (`-S`).
 - Tests must pass on Python 3.12+. Async-first; subprocess output decoded with `errors="replace"`.
 - Servers must handle errors gracefully and survive 4k–65k concurrent requests without crashing.
-- Test coverage ≥ 95% on changed code.
+- Test coverage ≥ 96% on changed code (gate is `[tool.coverage.report] fail_under = 96.0` in `pyproject.toml`).
 - Line length 119; ruff for linting and formatting; double quotes; isort.
 
 ## Architecture Boundaries

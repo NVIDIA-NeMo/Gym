@@ -5,10 +5,11 @@
 Related docs:
 - root `AGENTS.md`
 - `nemo_gym/AGENTS.md` — `SimpleResponsesAPIModel` base class
-- `fern/versions/latest/pages/reference/provider-compatibility.mdx` — model & provider matrix
-- `fern/versions/latest/pages/reference/model-server/index.mdx` — model server reference
-- `fern/versions/latest/pages/reference/design-docs/aiohttp-vs-httpx.mdx` — async HTTP transport
-- `fern/versions/latest/pages/reference/design-docs/responses-api-evolution.mdx` — Responses vs chat completions
+- `fern/versions/latest/pages/reference/compatibility/providers.mdx` — model & provider matrix
+- `fern/versions/latest/pages/reference/servers/model/index.mdx` — model server reference
+- `fern/versions/latest/pages/reference/servers/model/vllm.mdx` — vLLM-specific config surface
+- `fern/blog/aiohttp-vs-httpx.mdx` — async HTTP transport (now lives in the Blog tab)
+- `fern/blog/responses-api-evolution.mdx` — Responses vs chat completions (now lives in the Blog tab)
 
 ## Point Of View
 
@@ -33,8 +34,8 @@ When changing or adding a `responses_api_models/<name>/`:
 - `tests/test_app.py` covers happy path, error path, retry behavior, concurrency cap.
 - `requirements.txt` pins `openai<=2.7.2` (and any provider SDK at compatible versions).
 - `README.md` documents: provider, endpoint shape (Responses vs chat completions), tested model families, known caveats per family.
-- `fern/versions/latest/pages/reference/provider-compatibility.mdx` updated with the new server type / provider / tested-version row.
-- `fern/versions/latest/pages/reference/model-server/index.mdx` updated.
+- `fern/versions/latest/pages/reference/compatibility/providers.mdx` updated with the new server type / provider / tested-version row.
+- `fern/versions/latest/pages/reference/servers/model/index.mdx` updated.
 - `fern/versions/latest/pages/troubleshooting/footguns.mdx` updated for any new operational gotcha (context length, retry, JSON mode, reasoning blocks).
 - For changes to retry / concurrency: update `fern/versions/latest/pages/about/concepts/reward-semantics.mdx` if rollout retry semantics shift.
 
@@ -71,7 +72,6 @@ When changing or adding a `responses_api_models/<name>/`:
 - `responses_api_models/<name>/configs/<name>.yaml`
 - `responses_api_models/<name>/README.md`
 - `responses_api_models/<name>/requirements.txt`
-- `fern/versions/latest/pages/reference/provider-compatibility.mdx`
-- `fern/versions/latest/pages/reference/model-server/*.mdx`
-- `fern/versions/latest/pages/reference/design-docs/responses-api-evolution.mdx`
+- `fern/versions/latest/pages/reference/compatibility/providers.mdx`
+- `fern/versions/latest/pages/reference/servers/model/*.mdx`
 - Footguns related to model endpoints in `fern/versions/latest/pages/troubleshooting/footguns.mdx`

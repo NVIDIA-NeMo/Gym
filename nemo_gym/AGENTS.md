@@ -21,7 +21,7 @@ The Core Library Steward is the contract guardian for everyone subclassing `Base
 - **JSONL schema** (input + output). `responses_create_params.input` (OpenAI message format) + `verifier_metadata`. Output adds top-level `reward`, `task_index`, `rollout_index`, plus the verifier's response fields.
 - **Inter-server HTTP protocol.** `/global_config_dict_yaml`, `/server_instances`, `/v1/responses`, `/v1/chat/completions`, `/run`, `/verify`. Cookies propagate session state. Headers: standard.
 - **Async-first.** All `/run` endpoints async. `nemo_gym.server_utils.request()` is the canonical async HTTP call (aiohttp; never httpx).
-- **`ServerClient` retry contract.** 3 retries, exponential backoff, on transport errors only. Not on 4xx/5xx semantic errors.
+- **`ServerClient` retry contract.** Up to 3 tries with a fixed 0.5 s sleep on transport errors only (`ServerDisconnectedError`, `ClientOSError`, generic `Exception` from aiohttp). 4xx and 5xx semantic responses bubble up via `raise_for_status` unchanged. Rate-limit codes (429, 502, 503, 504, 520) retry independently of the 3-try cap until they succeed.
 - **`asyncio.Semaphore` discipline** for bounded concurrency around subprocess work.
 
 ## Contract Checklist

@@ -30,7 +30,7 @@ To run a benchmark and score a model, complete the following steps.
    ng_list_benchmarks
    ```
 
-   The output lists every benchmark in the catalog with its config path. Pick one — `gpqa_diamond`, `ifbench`, `math_with_judge`, `code_gen`, `competitive_coding_challenges`, and many others ship in-tree. The rest of this page uses `gpqa_diamond` as the worked example.
+   `ng_list_benchmarks` lists curated eval suites under `benchmarks/` (`gpqa`, `aime25`, `ifbench`, `math-500`, and others). Each one chains to a resources server. You can also run any resources server config directly — every shipped environment under `resources_servers/<name>/configs/<name>.yaml` is a valid benchmark target. The rest of this page uses [`gpqa_diamond`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/gpqa_diamond) (a resources server) as the worked example because its `example.jsonl` is small enough for a quick smoke test.
 
 2. **Start the servers** (Terminal 1).
 
@@ -120,7 +120,7 @@ The same flow scores any benchmark in the catalog. Swap two paths.
 
 | Substitute | With |
 |---|---|
-| `resources_servers/gpqa_diamond/configs/gpqa_diamond.yaml` | The benchmark's config from `ng_list_benchmarks`. |
+| `resources_servers/gpqa_diamond/configs/gpqa_diamond.yaml` | The resources server's config. (Curated eval suites under `benchmarks/` chain to the same config via `_inherit_from`.) |
 | `+agent_name=gpqa_diamond_simple_agent` | The agent name defined inside that config (usually `<benchmark>_simple_agent`). |
 
 Dataset paths and verifier behavior are wired up by the config — you don't need to touch them per benchmark.

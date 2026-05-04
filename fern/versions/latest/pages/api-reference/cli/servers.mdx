@@ -59,6 +59,7 @@ Run tests for all server modules in the project.
 | Parameter | Type | Description |
 | --- | --- | --- |
 | `fail_on_total_and_test_mismatch` | bool | Fail if the number of server modules does not match the number with tests. Default: `False`. |
+| `delete_venvs_after_each_test` | bool | Remove each per-server venv after its tests run. Useful in CI to reclaim disk. Default: `False`. |
 
 **Example**
 

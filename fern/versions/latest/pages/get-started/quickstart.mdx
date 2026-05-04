@@ -105,7 +105,7 @@ Averaging those over 10 rollouts gives GPT-4.1 around `-0.6` against a fixed dea
 
    In Terminal 1: `Ctrl+C`.
 
-Blackjack is wired up for fast smoke testing. The same `ng_run` + `ng_collect_rollouts` flow runs any benchmark from `ng_list_benchmarks` (`gpqa_diamond`, `ifbench`, `math_with_judge`, and others) — only the config paths and dataset change.
+Blackjack is wired up for fast smoke testing. The same `ng_run` + `ng_collect_rollouts` flow runs any benchmark from `ng_list_benchmarks` (curated eval suites under `benchmarks/` — `gpqa`, `aime25`, `ifbench`, `math-500`, and others) or any resources server config under `resources_servers/<name>/configs/` — only the config paths and dataset change.
 
 ## Troubleshooting
 
@@ -147,7 +147,7 @@ Build a Gymnasium-style env from scratch — same shape as Blackjack.
 </Card>
 
 <Card title="Run a Real Benchmark" href="https://github.com/NVIDIA-NeMo/Gym#-available-environments">
-Run `gpqa_diamond`, `math_with_judge`, or any other entry from `ng_list_benchmarks`.
+Run `gpqa`, `aime25`, or any other entry from `ng_list_benchmarks`.
 
 <Badge minimal outlined>benchmarks</Badge>
 </Card>

@@ -57,7 +57,7 @@ NeMo Gym ships several agent servers:
 
 - `simple_agent` — the default. Runs the model + tool-call loop until the model emits a final assistant message (or hits `max_steps`). Works for most benchmarks, single-turn or multi-step.
 - `proof_refinement_agent` — multi-turn correction loop where the model sees error feedback and retries.
-- `verifiers_agent`, `swe_agents`, and others — task-shaped harnesses for specific benchmark families.
+- `verifiers_agent`, `swe_agents`, and 13 other harnesses — task-shaped wrappers for specific benchmark families. See [Choose an Agent](/latest/get-started/choose-an-agent) for the full catalog.
 
 Pick a harness when you wire up your YAML config; refer to the [Agent server](/latest/reference/servers/agent) reference for the full list.
 
@@ -95,7 +95,7 @@ Frameworks that bundle these at the task level force you to edit every task when
 
 All servers talk over HTTP via aiohttp. There is no shared memory.
 
-- **`ServerClient`** wraps aiohttp with retry logic — 3 tries, exponential backoff. The global aiohttp client is a singleton with connection pooling.
+- **`ServerClient`** wraps aiohttp with bounded retry on transport-level errors — 3 tries with a fixed 0.5 s sleep between attempts. Rate-limit responses (HTTP 429, 502, 503, 504, 520) retry independently of that count until they succeed. 4xx and 5xx semantic responses bubble up unchanged. The global aiohttp client is a singleton with connection pooling.
 - **Session cookies** propagate through the call stack so stateful resources servers can pin tool calls and verification to a single rollout.
 - **OpenAI API compatibility** — model servers expose `/v1/responses`, so any OpenAI-compatible client can talk to them.
 - **uvicorn + FastAPI** — every server is a FastAPI app served by [uvicorn](https://uvicorn.dev/).
@@ -160,7 +160,7 @@ flowchart TB
    - The global config is passed via environment variable `NEMO_GYM_CONFIG_DICT`.
    - The specific server identity is passed via `NEMO_GYM_CONFIG_PATH`.
    - Server URLs are registered in the global config so other servers can discover and call them.
-3. **Health Check**: The main process polls each server's HTTP endpoint until all return 200, then reports "All servers ready!"
+3. **Health Check**: The main process polls each server's HTTP endpoint until each one responds (any HTTP status counts as "up"; a 404 on `/` is expected), then reports "All servers ready!"
 
 ### Running state
 

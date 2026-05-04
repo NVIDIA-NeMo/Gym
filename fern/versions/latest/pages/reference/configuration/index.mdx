@@ -156,14 +156,26 @@ ng_run "+config_paths=${my_config_paths}"
 
 ### Overriding Values
 
+NeMo Gym exposes three Hydra override forms, all of which are part of the public CLI surface:
+
+| Form | Meaning |
+| --- | --- |
+| `+key=value` | Set a key. Errors if the key already has a value. |
+| `++key=value` | Force-set a key. Overwrites any existing value, including from the YAML. |
+| `~key` | Unset a key (remove it from the resolved config). |
+
 ```bash
-# Override nested values (use dot notation after server ID)
+# +key=value: set a value (errors if already set)
 ng_run "+config_paths=[config.yaml]" \
     +my_server.resources_servers.my_impl.domain=coding
 
-# Override policy model
+# ++key=value: force-set, overrides any value the YAML provided
 ng_run "+config_paths=[config.yaml]" \
-    +policy_model_name=gpt-4o-mini
+    ++policy_model_name=gpt-4o-mini
+
+# ~key: unset a value already provided by the YAML
+ng_run "+config_paths=[config.yaml]" \
+    ~my_server.resources_servers.my_impl.optional_field
 
 # Disable strict validation
 ng_run "+config_paths=[config.yaml]" +error_on_almost_servers=false

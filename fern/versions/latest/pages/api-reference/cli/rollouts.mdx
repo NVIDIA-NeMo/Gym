@@ -17,14 +17,17 @@ Perform a batch of rollout collection.
 
 | Parameter | Type | Description |
 | --- | --- | --- |
-| `agent_name` | str | The agent to collect rollouts from. |
-| `input_jsonl_fpath` | str | The input data source to use to collect rollouts, in the form of a file path to a JSONL file. |
-| `output_jsonl_fpath` | str | The output data JSONL file path. |
+| `input_jsonl_fpath` | str | Required. The input data source to use to collect rollouts, in the form of a file path to a JSONL file. |
+| `output_jsonl_fpath` | str | Required. The output data JSONL file path. A sidecar `<stem>_materialized_inputs.jsonl` is written alongside it for downstream `ng_reward_profile`. |
+| `agent_name` | Optional[str] | The agent to collect rollouts from. If unset, falls back to each data row's `agent_ref.name`. |
 | `limit` | Optional[int] | Maximum number of examples to load and take from the input dataset. |
-| `num_repeats` | Optional[int] | The number of times to repeat each example to run. Useful if you want to calculate mean@k, such as mean@4 or mean@16. |
-| `num_repeats_add_seed` | bool | When num_repeats &gt;1, add a "seed" parameter on the Responses create params. |
+| `num_repeats` | Optional[int] | The number of times to repeat each example to run. Useful for calculating mean@k (e.g. mean@4 or mean@16). |
+| `num_repeats_add_seed` | bool | When `num_repeats` > 1, pass a per-rollout `seed` via `metadata.extra_body` (honored by vLLM model servers). Default: `False`. |
 | `num_samples_in_parallel` | Optional[int] | Limit the number of concurrent samples running at once. |
-| `responses_create_params` | Dict | Overrides for the `responses_create_params`, such as `temperature` and `max_output_tokens`. |
+| `responses_create_params` | Dict | Overrides for the `responses_create_params` (e.g. `temperature`, `max_output_tokens`). |
+| `prompt_config` | Optional[str] | Path to a prompt YAML file. Builds `responses_create_params.input` from the template at rollout time. Mutually exclusive with pre-populated `responses_create_params.input` in the JSONL. |
+| `resume_from_cache` | bool | If the same command is re-run, skip inputs that have already been processed in `output_jsonl_fpath`. Default: `False`. |
+| `upload_rollouts_to_wandb` | bool | Upload the rollouts to W&B. Disable for very large rollout sets. Default: `True`. |
 
 **Example**
 
@@ -48,9 +51,12 @@ Spin up all necessary servers and perform a batch of rollout collection using ea
 
 | Parameter | Type | Description |
 | --- | --- | --- |
-| `output_jsonl_fpath` | str | The output data JSONL file path. |
+| `split` | Literal["train", "validation", "benchmark"] | **Required.** Which dataset split (per the `datasets` list in each agent config) to read from. No default — must be specified. |
+| `output_jsonl_fpath` | str | Required. The output data JSONL file path. |
 | `num_samples_in_parallel` | Optional[int] | Limit the number of concurrent samples running at once. |
-| `responses_create_params` | Dict | Overrides for the `responses_create_params`, such as `temperature` and `max_output_tokens`. |
+| `responses_create_params` | Dict | Overrides for the `responses_create_params` (e.g. `temperature`, `max_output_tokens`). |
+| `reuse_existing_data_preparation` | bool | Skip data prep if the prepared input JSONL already exists at the expected path. Default: `False`. |
+| `upload_rollouts_to_wandb` | bool | Upload the rollouts to W&B. Default: `True`. |
 
 **Examples**
 

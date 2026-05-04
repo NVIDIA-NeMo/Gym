@@ -59,7 +59,7 @@ What does synonym_value mean?
 +--------------------------------------------------------------------------------+
 ```
 
-The `simple_agent` (the agent harness) loop from the [single-step tutorial](/latest/build-environments/supported-patterns/single-step) drives this: the model emits a `function_call`, the tool executes, the result appends back into the conversation, and the model is called again with the updated context. The cycle repeats until the model produces a final text response or hits `max_steps`. The multi-step environment is where the agent learns to chain tool calls correctly.
+The `simple_agent` (the agent harness) model + tool-call loop ([source](https://github.com/NVIDIA-NeMo/Gym/blob/main/responses_api_agents/simple_agent/app.py)) drives this: the model emits a `function_call`, the tool executes, the result appends back into the conversation, and the model is called again with the updated context. The cycle repeats until the model produces a final text response or hits `max_steps`. The multi-step environment is where the agent learns to chain tool calls correctly.
 
 ---
 

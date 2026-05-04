@@ -20,6 +20,7 @@ Prepare and validate training data, generating metrics and statistics for datase
 | `output_dirpath` | str | Directory path where processed datasets and metrics will be saved. |
 | `mode` | Literal["train_preparation", "example_validation"] | Processing mode. Use `train_preparation` to prepare train and validation datasets for training, or `example_validation` to validate example data for PR submission. |
 | `should_download` | bool | Whether to automatically download missing datasets from remote registries. Default: `False`. |
+| `data_source` | Literal["gitlab", "huggingface"] | Which registry to download from when `should_download=true`. Default: `gitlab`. |
 | `overwrite_metrics_conflicts` | bool | Whether or not to overwrite metrics conflicts. Default: `False`. |
 
 **Example**
@@ -119,7 +120,12 @@ Upload a JSONL dataset to HuggingFace Hub with optional GitLab deletion after su
 | `dataset_name` | str | Name of the dataset. Will be combined with domain and resources server name. |
 | `input_jsonl_fpath` | str | Path to the local JSONL file to upload. |
 | `resource_config_path` | str | Path to resources server config file. Used to extract domain for naming convention. |
-| `hf_dataset_prefix` | str | Prefix prepended to dataset name. Default: `NeMo-Gym`. |
+| `hf_dataset_prefix` | str | Prefix prepended to dataset name. Default: `Nemotron-RL`. |
+| `split` | Literal["train", "validation", "test"] | Which split to upload. Default: `train`. |
+| `create_pr` | bool | Open a pull request on the dataset repo instead of pushing directly. Default: `False`. |
+| `revision` | Optional[str] | Branch or revision to upload to. Default: `None` (main). |
+| `commit_message` | Optional[str] | Commit message for the upload. Default: auto-generated. |
+| `commit_description` | Optional[str] | Optional longer description on the commit. |
 | `delete_from_gitlab` | Optional[bool] | Delete the dataset from GitLab after successful upload to HuggingFace. Default: `False`. |
 
 **Example**
@@ -141,10 +147,12 @@ Download a JSONL dataset from HuggingFace Hub to local filesystem.
 
 | Parameter | Type | Description |
 | --- | --- | --- |
-| `output_fpath` | str | Local file path where the downloaded dataset will be saved. |
-| `hf_token` | str | HuggingFace API token for authentication. |
-| `artifact_fpath` | str | Name of the artifact file to download from the repository. |
 | `repo_id` | str | HuggingFace repository ID in format `organization/dataset-name`. |
+| `hf_token` | str | HuggingFace API token for authentication. |
+| `output_fpath` | Optional[str] | Local file path where the downloaded dataset will be saved. Mutually exclusive with `output_dirpath`. |
+| `output_dirpath` | Optional[str] | Local directory to download the full dataset into (one file per split). Mutually exclusive with `output_fpath`. |
+| `artifact_fpath` | Optional[str] | Name of a specific artifact file to download. Mutually exclusive with `split`. |
+| `split` | Optional[Literal["train", "validation", "test"]] | Which split to download. Required when using `output_fpath` without `artifact_fpath`. |
 
 **Example**
 

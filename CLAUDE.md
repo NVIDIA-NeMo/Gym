@@ -45,8 +45,9 @@ ng_reward_profile +input_jsonl_fpath=<data.jsonl> +rollouts_jsonl_fpath=<rollout
 # Check server health
 ng_status
 
-# Dev test (runs pytest directly in server dir, no venv isolation)
-ng_dev_test +entrypoint=resources_servers/example_single_tool_call
+# Dev test (runs `pytest --cov=. --durations=10` from repo root; no venv isolation)
+# Always tests the core library; ignores `+entrypoint`. Use `ng_test +entrypoint=...` for per-server tests.
+ng_dev_test
 
 # Dump merged config
 ng_dump_config "+config_paths=[...]"
@@ -314,7 +315,7 @@ Use `openai_model` for endpoints supporting `/v1/responses`, `vllm_model` for `/
 - Line length: 119
 - Python 3.12+, async-first
 - Ruff for linting and formatting (double quotes, isort)
-- Test coverage must be >= 95%
+- Test coverage must be >= 96% (gate is `fail_under = 96.0` in `pyproject.toml`)
 - All commits require DCO sign-off (`-s`) and cryptographic signature (`-S`)
 
 ## Pre-commit Hooks
@@ -337,21 +338,21 @@ git checkout -- resources_servers/other_server/
 
 ## External Tool Auto-Install
 
-When a benchmark requires an external tool (compiler, runtime, etc.), auto-install it on server startup so users don't need manual setup:
+When a benchmark requires an external tool or library (compiler, runtime, third-party Python package not on PyPI), auto-install it on server startup so users don't need manual setup. Reference implementation: `resources_servers/ifbench/setup_ifbench.py`.
 
 1. Create a `setup_<tool>.py` module with an `ensure_<tool>()` function that:
-   - Checks `shutil.which("tool")` — returns early if already on PATH
-   - Forks on `sys.platform`: macOS (brew), Linux (build from source via bash script)
-   - Updates `os.environ["PATH"]` and `os.environ["LD_LIBRARY_PATH"]` for the current process
-   - Verifies the tool runs successfully after install
-2. Call `ensure_<tool>()` in the server's `model_post_init()` (runs once at startup)
-3. For tests: add a `pytest_configure` hook in `conftest.py` that calls `ensure_<tool>()` before collection, so `skipif(shutil.which("tool") is None)` markers see the installed tool
-4. Build-from-source scripts should be idempotent (skip if artifacts exist) and install into a local prefix (e.g. `.<tool_name>/` in the server dir, gitignored)
+   - Checks an `INSTALL_MARKER` file (e.g. `.<tool>/.installed`) — returns early if already installed
+   - Git-clones a pinned commit into a local prefix (`.<tool>/` in the server dir, gitignored)
+   - Mutates `sys.path` (or `os.environ` if a real binary needs to be on `PATH`) so the artifact is importable / runnable in the current process
+   - Optionally downloads any side-data (NLTK corpora, model weights) under the same prefix
+2. Call `ensure_<tool>()` from the server class — `__init__` (as in `ifbench/app.py`) or `model_post_init`. Both run once at startup; pick the one consistent with neighboring servers.
+3. For tests: add a `pytest_configure` hook in `conftest.py` that calls `ensure_<tool>()` before collection, so `skipif(shutil.which("tool") is None)` markers see the installed artifact.
+4. Install steps must be idempotent (skip when `INSTALL_MARKER` exists) and produce only files under the local prefix.
 
 ## Cluster / HPC Gotchas
 
 - **Ray socket path length**: On systems with long working directory paths (e.g. Lustre mounts), Ray's AF_UNIX socket paths can exceed the 107-byte Linux limit. Fix: `RAY_TMPDIR=/tmp` before running tests or `ray.init()`.
-- **`ng_test` venv isolation**: `ng_test` creates isolated venvs per resources server. `os.environ` changes in Python don't propagate — set env vars externally (e.g. `RAY_TMPDIR=/tmp ng_test ...`).
+- **`ng_test` venv isolation**: `ng_test` creates an isolated venv per server module (resources / agents / models) and re-execs into a child shell. `os.environ` changes inside Python don't propagate to that child shell — set env vars in the parent shell instead (e.g. `RAY_TMPDIR=/tmp ng_test ...`).
 
 ## Async Patterns
 

@@ -13,20 +13,20 @@ The Test Steward speaks for the contributor running `pytest` and the CI bot tryi
 
 ## Protect
 
-- **`ng_test` venv isolation.** Each `resources_servers/<name>` and `responses_api_agents/<name>` is tested in its own venv. Tests must not assume shared global state across servers.
-- **`os.environ` does NOT propagate** into the venv-isolated test process. Set env vars (e.g., `RAY_TMPDIR=/tmp ng_test ...`) externally, not via `os.environ.update(...)` in test code.
+- **`ng_test` venv isolation.** Each server module under `resources_servers/<name>`, `responses_api_agents/<name>`, and `responses_api_models/<name>` is tested in its own venv. `ng_test_all` iterates all three. Tests must not assume shared global state across servers.
+- **`os.environ` mutations don't reach the child shell.** `ng_test` builds a shell command and re-execs into a child via `bash -c`. The child inherits the parent shell's env at fork time only — `os.environ.update(...)` from Python after fork doesn't propagate. Set env vars in the parent shell (e.g., `RAY_TMPDIR=/tmp ng_test ...`).
 - **Async-first.** Tests of `/run`, `/verify`, `/v1/responses`, `/v1/chat/completions` use `pytest.mark.asyncio`. Subprocess output decoded with `errors="replace"`.
 - **No mocking the database/server stack.** Use real subprocesses + real HTTP for functional tests. Unit tests mock at module boundaries only.
-- **Coverage ≥ 95%** on changed code in PRs.
+- **Coverage ≥ 96%** on changed code in PRs (gate is `[tool.coverage.report] fail_under = 96.0` in `pyproject.toml`).
 - **Skip gracefully** when external tool deps aren't installed: `pytest.mark.skipif(shutil.which("tool") is None, reason="...")`.
 - **Auto-install hooks before collection.** When a benchmark auto-installs an external tool (compilers, runtimes), tests need a `pytest_configure` hook in `conftest.py` that calls `ensure_<tool>()` BEFORE `skipif` markers evaluate.
-- **`ng_dev_test` for fast iteration.** Runs pytest directly in the server dir without venv isolation — meant for inner-loop development. Don't depend on `ng_dev_test`-specific behavior in tests that also need to pass under `ng_test`.
+- **`ng_dev_test` for fast iteration on the core library.** Runs `pytest --cov=. --durations=10` from the repo root with no venv isolation — meant for inner-loop work on `nemo_gym/`. It accepts but ignores `+entrypoint=...`; use `ng_test +entrypoint=...` for per-server tests.
 
 ## Contract Checklist
 
 When changing or adding tests:
 
-- New `nemo_gym/<module>.py` → corresponding `tests/unit_tests/test_<module>.py` with ≥ 95% coverage.
+- New `nemo_gym/<module>.py` → corresponding `tests/unit_tests/test_<module>.py` with ≥ 96% coverage.
 - New `resources_servers/<name>/app.py` → corresponding `resources_servers/<name>/tests/test_app.py`.
 - New `responses_api_agents/<name>/app.py` → corresponding tests.
 - New `responses_api_models/<name>/app.py` → corresponding tests.
