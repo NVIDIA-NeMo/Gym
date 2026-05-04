@@ -1,0 +1,27 @@
+# Chain to existing resource server + agent config
+config_paths:
+  - resources_servers/math_with_judge/configs/math_with_judge.yaml
+
+# We use `_inherit_from` directives to inherit from and not use the generic config
+# above to ensure this benchmark config is isolated.
+hmmt_feb25_math_with_judge_resources_server:
+  _inherit_from: math_with_judge
+  resources_servers:
+    math_with_judge:
+      # Skills' hmmt_feb25 uses eval_type=math (symbolic-only) with no judge
+      # pipeline by default. Disable the Gym judge fallback to keep parity.
+      should_use_judge: false
+
+hmmt_feb25_math_with_judge_simple_agent:
+  _inherit_from: math_with_judge_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: hmmt_feb25_math_with_judge_resources_server
+      datasets:
+      - name: hmmt_feb25
+        type: benchmark
+        jsonl_fpath: benchmarks/hmmt_feb25/data/hmmt_feb25_benchmark.jsonl
+        prompt_config: benchmarks/hmmt_feb25/prompts/default.yaml
+        prepare_script: benchmarks/hmmt_feb25/prepare.py
+        num_repeats: 4

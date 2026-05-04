@@ -1,0 +1,4 @@
+# Downloaded GDPVal dataset (see setup_scripts/gdpval.sh). The example.jsonl
+# is intentionally tracked — it is a tiny synthetic task for smoke testing.
+*.jsonl
+!example.jsonl
