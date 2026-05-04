@@ -134,6 +134,14 @@ class GDPValResourcesServerConfig(BaseResourcesServerConfig):
     rubric_structured_num_trials: int = 2
     rubric_structured_formatting_retries: int = 3
 
+    # When True, every judge call's raw response text is preserved on
+    # ``verify_response.judge_response`` (per-trial in comparison mode under
+    # ``per_ref_repeat[i].raw_responses``; under top-level ``raw_responses``
+    # in rubric modes). Off by default — raw responses are 10-50 KB each and
+    # multiply by num_trials × num_ref_repeats × num_tasks. Turn on for debug
+    # runs to post-mortem judge verdicts.
+    persist_raw_judge_responses: bool = False
+
 
 class GDPValVerifyRequest(BaseVerifyRequest):
     task_id: str
@@ -232,6 +240,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 num_trials=self.config.rubric_structured_num_trials,
                 formatting_retries=self.config.rubric_structured_formatting_retries,
                 deliverable_content_blocks=deliverable_content_blocks,
+                include_raw_responses=self.config.persist_raw_judge_responses,
             )
         elif deliverable_content_blocks:
             from resources_servers.gdpval.scoring import score_with_rubric_visual
@@ -246,6 +255,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 model_name=judge_model_name,
                 api_key=judge_api_key,
                 create_overrides=judge_create_overrides,
+                include_raw_responses=self.config.persist_raw_judge_responses,
             )
         else:
             from resources_servers.gdpval.scoring import score_with_rubric
@@ -260,6 +270,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 model_name=judge_model_name,
                 api_key=judge_api_key,
                 create_overrides=judge_create_overrides,
+                include_raw_responses=self.config.persist_raw_judge_responses,
             )
 
         return GDPValVerifyResponse(
@@ -339,6 +350,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 submission_b=eval_submission,
                 num_trials=self.config.num_comparison_trials,
                 create_overrides=judge_create_overrides,
+                return_raw_responses=self.config.persist_raw_judge_responses,
             )
             # ``run_trials`` casts submission_a=ref, submission_b=eval, so
             # ``win_count_b`` is eval wins.

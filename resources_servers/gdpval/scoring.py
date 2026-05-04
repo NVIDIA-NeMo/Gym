@@ -93,6 +93,7 @@ async def score_with_rubric(
     model_name: str,
     api_key: str = "dummy",
     create_overrides: dict | None = None,
+    include_raw_responses: bool = False,
 ) -> tuple[float, dict | None]:
     """Score a deliverable against a rubric using an LLM judge.
 
@@ -164,6 +165,7 @@ async def score_with_rubric(
             return 0.0, None
 
         response_text = content.strip()
+        raw_response_text = response_text
         print(
             f"Rubric judge response length: {len(response_text)} chars, "
             f"finish_reason: {response.choices[0].finish_reason}",
@@ -206,6 +208,8 @@ async def score_with_rubric(
             score = 0.0
 
         print(f"Rubric final score: {score}", flush=True)
+        if include_raw_responses and isinstance(result, dict):
+            result["raw_responses"] = [raw_response_text]
         return max(0.0, min(1.0, score)), result
 
     except Exception as e:
@@ -226,6 +230,7 @@ async def score_with_rubric_visual(
     model_name: str,
     api_key: str = "dummy",
     create_overrides: dict | None = None,
+    include_raw_responses: bool = False,
 ) -> tuple[float, dict | None]:
     """Score deliverables visually using a multimodal judge (e.g., Gemini 3 Pro).
 
@@ -295,6 +300,7 @@ async def score_with_rubric_visual(
                     raise
 
         response_text = (response.choices[0].message.content or "").strip()
+        raw_response_text = response_text
         print(
             f"Visual judge response length: {len(response_text)} chars, "
             f"finish_reason: {response.choices[0].finish_reason}, "
@@ -337,6 +343,8 @@ async def score_with_rubric_visual(
             score = 0.0
 
         print(f"Visual judge final score: {score}", flush=True)
+        if include_raw_responses and isinstance(result, dict):
+            result["raw_responses"] = [raw_response_text]
         return max(0.0, min(1.0, score)), result
 
     except Exception as e:
@@ -363,6 +371,7 @@ async def score_with_rubric_structured(
     num_trials: int = 2,
     formatting_retries: int = 3,
     deliverable_content_blocks: list[dict] | None = None,
+    include_raw_responses: bool = False,
 ) -> tuple[float, dict | None]:
     """Score a deliverable using structured tagged output format.
 
@@ -488,7 +497,10 @@ async def score_with_rubric_structured(
 
     if not scores:
         print("[structured-rubric] no valid scores from any trial", flush=True)
-        return 0.0, {"error": "no_valid_scores", "num_trials": num_trials}
+        no_valid_metadata: dict = {"error": "no_valid_scores", "num_trials": num_trials}
+        if include_raw_responses:
+            no_valid_metadata["raw_responses"] = trial_responses
+        return 0.0, no_valid_metadata
 
     avg_score = sum(scores) / len(scores)
     avg_pct = sum(percentages) / len(percentages)
@@ -509,6 +521,8 @@ async def score_with_rubric_structured(
         "num_trials_completed": len(scores),
         "num_trials_requested": num_trials,
     }
+    if include_raw_responses:
+        metadata["raw_responses"] = trial_responses
 
     print(
         f"[structured-rubric] final: avg={avg_score:.1f}/{effective_max} ({avg_pct:.1f}%), "
