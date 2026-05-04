@@ -1,0 +1,71 @@
+---
+title: "External Libraries"
+description: "Integrate third-party benchmarks, agents, or training libraries by wrapping them in a NeMo Gym agent server with proper async, schema, and token ID handling."
+content_type: how-to
+audience_level: intermediate
+journey_stage: build
+position: 1
+---
+A NeMo Gym training environment is Python logic that performs a sequence or graph of model and tool calls. Native environments place those calls inside an agent server (the agent harness) like [SimpleAgent](https://github.com/NVIDIA-NeMo/Gym/blob/main/responses_api_agents/simple_agent/app.py). External environments offload that orchestration to a third-party library.
+
+Wrapping an external training environment, benchmark, or agent requires extra care. The integration template and best practices below cover the typical pitfalls.
+
+## Integration form factor
+
+1. External libraries include their own rollout orchestration (model + tool call coordination) and sometimes return their own reward, so integrate at the NeMo Gym agent server level.
+2. Add the third-party library as a dependency in `requirements.txt`. For more complex needs (beyond pip or GitHub installs), use `setup.py` and `pyproject.toml`.
+3. Import the dependency in `app.py` like any other Python module.
+4. Run `ng_test` to test your agent server. See [Servers — `ng_test`](/api/cli/servers#ng_test) for details.
+5. Typically wrap the external library inside `/run` and omit `/responses`.
+6. Inside `/run` before the call: preprocess from NeMo Gym schema into the external library's config.
+7. Inside `/run` after the call: postprocess from the library result into a NeMo Gym response.
+
+## Best practices
+
+1. Technical design
+   1. Keep `/run` async to match NeMo Gym's first-party server design.
+      1. Avoid extra threads or processes unless absolutely necessary. To scale, use Ray workers and await the `ray.remote` call.
+      2. A single NeMo Gym instance (three FastAPI servers) handles 65,000 concurrent math rollouts without crashing and stays reasonably efficient.
+   2. Use the [NeMo Gym custom OpenAI client](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/openai_utils.py) — not OpenAI, Anthropic, or LiteLLM clients.
+      1. The NeMo Gym client is designed to scale to 4k–65k concurrent rollouts; see [aiohttp vs httpx](/latest/blog/aiohttp-vs-httpx) for why.
+      2. Other clients (LiteLLM, ...) preprocess or postprocess inputs and outputs, obscuring control over the data flow.
+      3. [Propagate cookies](https://github.com/NVIDIA-NeMo/Gym/blob/main/responses_api_agents/simple_agent/app.py) as appropriate.
+   3. Validate data shapes with Pydantic models wherever it matters.
+2. Rollout creation
+   1. During training, NeMo Gym models attach [`prompt_token_ids`, `generation_token_ids`, and `generation_log_probs`](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/openai_utils.py) on response messages and output items.
+   2. Propagate those fields from the previous model response when building messages or input items for the next call in multi-step or multi-turn scenarios.
+3. Delivery form factor
+   1. Open a PR against NeMo Gym `main`.
+   2. Code must run locally without external APIs unless the environment design requires them (online search, ...).
+   3. Pass all variables (OpenAI base URL, API key, ...) through NeMo Gym config — not environment variables.
+   4. Code must run on Linux (any executables must target Linux).
+4. Functional requirements
+   1. Tool execution failures and bad model tool calls or arguments must propagate back to the model — never crash the environment or training.
+   2. Large-scale training needs 4,000–65,000 concurrent requests without crashes. Hammering the endpoint with 2,000 concurrent requests is usually enough to test efficiency scaling.
+   3. The environment must survive an entire training run without crashing.
+
+## Ensuring proper token ID handling in custom client calls
+During training, NeMo Gym tracks ground-truth prompt token IDs, generation token IDs, and generation log probs for the downstream RL framework. Request and response schemas need extra fields to carry these. Pure-NeMo-Gym setups handle this automatically; custom clients (LiteLLM, your own OpenAI client, ...) need explicit propagation.
+
+For Chat Completions, outside of training, an Assistant message looks like:
+```python
+ChatCompletionMessage(
+    content="<think>I'm thinking</think>Hi there!",
+    tool_calls=[{...}, {...}],
+    ...
+)
+```
+During training, a Chat Completions Assistant message looks like:
+```python
+ChatCompletionMessage(
+    content="<think>I'm thinking</think>Hi there!",
+    tool_calls=[{...}, {...}],
+    prompt_token_ids=[...],  # List[int]
+    generation_token_ids=[...],  # List[int]
+    generation_log_probs=[...],  # List[float]
+    ...
+)
+```
+Requests made through a custom client must pass these three fields (`prompt_token_ids`, `generation_token_ids`, `generation_log_probs`) through at the message level. Responses must return them too.
+
+The same applies to Responses-compatible APIs.

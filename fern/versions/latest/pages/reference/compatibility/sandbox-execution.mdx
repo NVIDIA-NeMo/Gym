@@ -1,0 +1,197 @@
+---
+title: "Sandbox & Execution Matrix"
+description: "Where rollouts run: local, Ray, Docker, cloud sandboxes. Network behavior, dependency installation, timeout semantics, security boundaries per backend."
+content_type: reference
+audience_level: intermediate
+journey_stage: scale
+position: 2
+---
+import { CompatibilityMatrix } from "../../../../../components/compatibility/CompatibilityMatrix";
+
+Different deployments call for different execution backends. The matrix below covers what NeMo Gym supports today, what's coming with the unified sandbox infrastructure ([#1048](https://github.com/NVIDIA-NeMo/Gym/issues/1048)), and the network, install, and timeout behavior per backend.
+
+<CompatibilityMatrix kind="sandbox" />
+
+<Note>
+[Footguns](/latest/troubleshooting/footguns) for the symptom-driven failure index, [Reward Semantics](/latest/about/concepts/reward-semantics) for what the framework reports when execution misbehaves.
+</Note>
+
+---
+
+## What's shipped today
+
+Today NeMo Gym runs the resources, agent, and model servers as **local FastAPI processes**. Distributed coordination uses **Ray**. Tool calls and verifier subprocesses run via Python's `subprocess` module, bounded by `asyncio.Semaphore` for concurrency control. External binaries (compilers, runtimes) install on server startup via per-server `setup_<tool>.py` scripts.
+
+There is **no first-class container or cloud-sandbox integration yet**. Docker, Podman, Daytona, Modal, and E2B are tracked under [#1048](https://github.com/NVIDIA-NeMo/Gym/issues/1048) and marked **Coming** in the matrix below.
+
+---
+
+## Backend matrix
+
+| Backend | Status | Use for | Network behavior | Dependency install | Timeout semantics | Security boundary |
+| --- | --- | --- | --- | --- | --- | --- |
+| **Local process** | Shipped | Resources, agent, and model FastAPI servers (default) | Direct host network. No restriction. | Inherits host environment and the venv `ng_run` was launched from. | None at framework level. | None. Runs with the user's credentials. |
+| **Subprocess (semaphore-bounded)** | Shipped | Tool calls and verifier subprocesses inside `verify()` | Direct host network. No restriction. | Inherits parent process environment (`PATH`, `LD_LIBRARY_PATH`, `PYTHONPATH`). | Author-supplied (`subprocess.run(..., timeout=N)`). | None. Runs with the user's credentials. |
+| **Ray (multi-node)** | Shipped | Distributed rollout collection across a Ray cluster | Cluster network. Ray worker nodes inherit their host network. | Per-server venv is created by `ng_test`. Ray workers use the venv they were launched from. | Ray-native (`ray.cancel`, task timeouts on remote calls). | None. Runs with the user's credentials on each worker. See [HPC gotchas](#hpc-and-cluster-gotchas). |
+| **External tool auto-install** | Shipped | Compilers and runtimes required by a benchmark (e.g. `gcc`, `dafny`, `lean`) | Direct host network during install (downloads from upstream). | `setup_<tool>.py` runs in `model_post_init()`. Installs into a local `.<tool>/` prefix; updates `PATH` / `LD_LIBRARY_PATH` for the current process. | None (install completes before requests are served). | None. Runs with the user's credentials. |
+| **Docker / container** | Coming ([#1048](https://github.com/NVIDIA-NeMo/Gym/issues/1048)) | Per-rollout isolation for untrusted code execution | Per-container network namespace. Offline mode planned. | Image-level dependency layer. | Container-level timeout. | Process namespace + cgroup isolation. |
+| **Daytona / Modal / E2B (cloud sandboxes)** | Coming ([#1048](https://github.com/NVIDIA-NeMo/Gym/issues/1048)) | Hosted per-rollout sandboxes for code execution at scale | Provider-managed. Egress controls per provider. | Provider-managed image / environment. | Provider-managed timeouts. | Provider-managed VM or microVM isolation. |
+
+---
+
+## Network behavior per backend
+
+Today, **every shipped backend inherits the host's network**. There is no first-class network restriction primitive in NeMo Gym. If a verifier or agent must operate offline (e.g. to prevent test-set leakage via search APIs, or to enforce hermetic execution), the **resources server author owns blocking outbound traffic** within their `verify()` implementation.
+
+Practical guidance:
+
+- For verifiers that shell out to a tool, restrict the tool's network access at the OS level (firewall rules, network namespaces, or a `requests` mock injected into the subprocess environment).
+- For verifiers that import a third-party library with hidden HTTP calls, prefer `aiohttp` mocks over `httpx` mocks. See [aiohttp vs httpx](/blog/aiohttp-vs-httpx) for why the framework standardized on `aiohttp`.
+- For benchmarks where offline operation is a correctness contract, document it in the environment's quality checklist entry (see [Environment Quality Checklist](/latest/build-environments/author-workflow/quality-checklist)) so reviewers can verify it.
+
+Container and cloud-sandbox backends ([#1048](https://github.com/NVIDIA-NeMo/Gym/issues/1048)) will provide per-backend offline modes as a first-class option.
+
+---
+
+## Dependency installation
+
+Dependency installation happens at three layers:
+
+| Layer | What it covers | How |
+| --- | --- | --- |
+| **Per-server venv** | Python dependencies for a single resources, agent, or model server | `ng_test` creates an isolated venv per server from `requirements.txt`. Re-uses an existing `.venv` if present (or via `skip_venv_if_present` config). |
+| **Auto-install of external binaries** | Compilers, runtimes, language toolchains required by a benchmark | `setup_<tool>.py` exposes `ensure_<tool>()`, called once from the server's `model_post_init()`. Idempotent. Installs into a local `.<tool>/` prefix in the server directory (gitignored). Updates `PATH` and `LD_LIBRARY_PATH` for the current process. macOS uses `brew`; Linux builds from source via a bash script. |
+| **Pytest pre-collection install** | Auto-install before test collection so `skipif(shutil.which("tool") is None)` markers see the installed tool | `pytest_configure` hook in the server's `conftest.py` calls `ensure_<tool>()` before test collection begins. |
+
+### Example: external tool auto-install
+
+```python
+# resources_servers/my_server/setup_dafny.py
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+def ensure_dafny() -> None:
+    if shutil.which("dafny") is not None:
+        return
+
+    if sys.platform == "darwin":
+        subprocess.run(["brew", "install", "dafny"], check=True)
+    else:
+        prefix = Path(__file__).parent / ".dafny"
+        if not prefix.exists():
+            subprocess.run([str(Path(__file__).parent / "build_dafny.sh"), str(prefix)], check=True)
+        os.environ["PATH"] = f"{prefix}/bin:{os.environ.get('PATH', '')}"
+        os.environ["LD_LIBRARY_PATH"] = f"{prefix}/lib:{os.environ.get('LD_LIBRARY_PATH', '')}"
+
+    subprocess.run(["dafny", "--version"], check=True)
+```
+
+```python
+# resources_servers/my_server/app.py
+class MyServer(SimpleResourcesServer):
+    def model_post_init(self, __context) -> None:
+        super().model_post_init(__context)
+        ensure_dafny()
+```
+
+```python
+# resources_servers/my_server/tests/conftest.py
+def pytest_configure(config):
+    from resources_servers.my_server.setup_dafny import ensure_dafny
+    ensure_dafny()
+```
+
+Build-from-source scripts must be **idempotent** (skip if artifacts exist) and install into a **local prefix** that is gitignored.
+
+---
+
+## Timeout semantics
+
+NeMo Gym provides **no global per-rollout or per-tool timeout** today. Timeouts are the environment author's responsibility.
+
+| Where the timeout lives | Mechanism | Notes |
+| --- | --- | --- |
+| Subprocess inside `verify()` | `subprocess.run(..., timeout=N)` | Recommended pattern. Catch `subprocess.TimeoutExpired` and return a `BaseVerifyResponse` with `reward=0.0` and an error field. |
+| Ray remote task | Ray-native task timeout via `ray.wait` or `ray.cancel` | Ray futures are awaitable directly in async code: `result = await future`. |
+| HTTP call between servers | `aiohttp` request-level timeout (default in `nemo_gym.server_utils.request()`) | Retries are bounded: 3 tries with a fixed 0.5 s sleep; rate-limit codes (429/502/503/504/520) retry independently until success. |
+| Model inference call | Provider-side timeout (vLLM, OpenAI, Azure) | NeMo Gym does not impose a wall clock here. |
+| Per-rollout (end to end) | **Not implemented.** | Track in [#1048](https://github.com/NVIDIA-NeMo/Gym/issues/1048). Until then, agent authors enforce per-rollout caps explicitly inside `run()`. |
+
+When a timeout fires inside `verify()`, the verifier should return a normal `VerifyResponse` with `reward=0.0` rather than raising — see [Reward Semantics — What happens on errors](/latest/about/concepts/reward-semantics#what-happens-on-errors) for the contract.
+
+---
+
+## Concurrency control
+
+| Layer | Knob | Default behavior |
+| --- | --- | --- |
+| Rollout collection | `num_samples_in_parallel` flag on `ng_collect_rollouts` | Gates the rollout-collection semaphore. Tune to match downstream provider rate limits. |
+| Subprocess fan-out inside `verify()` | `asyncio.Semaphore(N)` constructed in the server | Author-set. Required when shelling out to external processes; without it a single rollout can fork hundreds of subprocesses. |
+| Inter-server HTTP | Singleton `aiohttp` client with connection pooling | Shared across all in-process servers. |
+| Training-framework integration (e.g. NeMo RL) | Framework-managed externally | When integrated with a training framework, the framework gates concurrency. Gym does not. |
+
+If you see `429 Too Many Requests` from a model provider, the cap is set externally (provider quota or training framework), not by NeMo Gym. See [Footguns — 429 / quota issues](/latest/troubleshooting/footguns) for the symptom-driven walkthrough.
+
+---
+
+## Security boundaries
+
+**Today: zero.**
+
+| Component | Privileges |
+| --- | --- |
+| Local process (resources, agent, model servers) | Runs with the user's credentials. Reads and writes anywhere the user can. |
+| Subprocess from `verify()` | Runs with the user's credentials. Inherits environment. |
+| Ray worker | Runs with the user's credentials on each cluster node. |
+| External tool auto-install | Writes to the server's directory (`.<tool>/`); reads `PATH` and `LD_LIBRARY_PATH`. |
+
+**If a verifier executes untrusted model output (e.g. running Python code emitted by the agent), the environment author owns sandboxing.** The framework provides no isolation primitive. Closing this gap is the explicit goal of [#1048](https://github.com/NVIDIA-NeMo/Gym/issues/1048).
+
+Until container or cloud-sandbox backends ship, recommended mitigations:
+
+- Run `ng_run` inside a container or a disposable VM.
+- Use OS-level `seccomp` or `AppArmor` profiles on the subprocess.
+- Restrict the verifier's network at the host firewall.
+- Treat every verifier that runs model-emitted code as **privileged** when reviewing the environment.
+
+---
+
+## HPC and cluster gotchas
+
+These show up at scale and are easy to miss in single-node testing. Full symptom-driven walkthroughs in [Footguns](/latest/troubleshooting/footguns).
+
+| Symptom | Cause | Fix |
+| --- | --- | --- |
+| Ray fails to start with `OSError: AF_UNIX path too long` | Default Ray TMPDIR is the working directory; on Lustre or other long-path filesystems this exceeds the 107-byte AF_UNIX limit. | Set `RAY_TMPDIR=/tmp` before running `ng_run` or `ng_test`. |
+| `ng_test` ignores `RAY_TMPDIR` set in Python | `ng_test` creates an isolated venv per server. `os.environ` changes inside Python don't propagate into the subprocess venv. | Set the env var **externally** before invoking `ng_test`: `RAY_TMPDIR=/tmp ng_test +entrypoint=resources_servers/my_server`. |
+| Ray socket errors on first run, fine on retry | Stale Ray runtime at `/tmp/ray` from a prior crashed run. | `ray stop --force` (or remove the stale socket directory) before restarting. |
+| Rollouts hang at high concurrency | Underlying HTTP transport is `httpx`, which has O(n²) connection-pool behavior. | Use `aiohttp` via `nemo_gym.server_utils.request()`. See [aiohttp vs httpx](/blog/aiohttp-vs-httpx). |
+
+---
+
+## Coming with #1048
+
+The unified sandbox infrastructure tracked in [#1048](https://github.com/NVIDIA-NeMo/Gym/issues/1048) is planned to provide:
+
+- A common sandbox protocol that resources servers consume regardless of backend.
+- First-class backend implementations: Docker, Podman, and at least one cloud sandbox provider (Daytona, Modal, or E2B).
+- Per-backend security guarantees with documented isolation boundaries (process namespace, cgroups, microVM).
+- Per-backend network policy (offline mode, allowlist, full access).
+- Lifecycle integration: backend bring-up and tear-down hooked into `ng_run` and `ng_collect_rollouts`.
+- Per-rollout end-to-end timeouts enforced by the backend.
+- Documented log locations per backend.
+
+This is a roadmap. No dates are committed. Subscribe to [#1048](https://github.com/NVIDIA-NeMo/Gym/issues/1048) for design-doc and milestone updates.
+
+---
+
+## See also
+
+- [Footguns](/latest/troubleshooting/footguns) — symptom-driven failure index.
+- [Reward Semantics](/latest/about/concepts/reward-semantics) — scoring contract when verifiers error or time out.
+- [Environment Quality Checklist](/latest/build-environments/author-workflow/quality-checklist) — author quality bar, including offline-operation and determinism checks.
+- [aiohttp vs httpx](/blog/aiohttp-vs-httpx) — why the framework's HTTP transport matters for concurrency.
+- [RL Framework Compatibility](/latest/reference/compatibility/rl-frameworks) — version matrix for NeMo RL, Unsloth, and TRL.

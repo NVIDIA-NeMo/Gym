@@ -1,0 +1,43 @@
+---
+title: "Overview"
+description: "Quick reference for NeMo Gym CLI commands grouped by purpose: server lifecycle, rollouts, data and datasets, and diagnostics."
+content_type: reference
+audience_level: beginner
+journey_stage: try
+position: 1
+---
+
+NeMo Gym ships ~20 CLI commands. They're grouped on the sub-pages by what you're doing:
+
+| Page | Commands |
+| --- | --- |
+| [Servers](/api/cli/servers) | `ng_run`, `ng_test`, `ng_test_all`, `ng_dev_test`, `ng_init_resources_server`, `ng_status` |
+| [Rollouts](/api/cli/rollouts) | `ng_collect_rollouts`, `ng_e2e_collect_rollouts`, `ng_reward_profile`, `ng_materialize_prompts` |
+| [Data](/api/cli/data) | `ng_prepare_data`, `ng_list_benchmarks`, `ng_prepare_benchmark`, dataset registry commands (GitLab + HuggingFace) |
+| [Diagnostics](/api/cli/diagnostics) | `ng_dump_config`, `ng_help`, `ng_version`, `ng_pip_list`, `ng_reinstall` |
+
+<Note>
+Each command has both a short form (such as `ng_run`) and a full form (such as `nemo_gym_run`). They are functionally identical — the short form is used throughout this reference.
+</Note>
+
+## Quick Reference
+
+```bash
+# Display help
+ng_help
+
+# Get detailed help for any command
+ng_run +help=true
+ng_test +h=true
+```
+
+## Getting Help
+
+For detailed help on any command, run it with `+help=true` or `+h=true`:
+
+```bash
+ng_run +help=true
+ng_collect_rollouts +h=true
+```
+
+This will display all available configuration parameters and their descriptions.

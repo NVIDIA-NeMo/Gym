@@ -1,0 +1,94 @@
+---
+title: "Inspect Your First Rollout"
+description: "Read the rollouts JSONL that ng_collect_rollouts just produced — what's in each row, where the headline metrics live, and how to spot a bad first run versus a real signal."
+content_type: how-to
+audience_level: beginner
+journey_stage: try
+position: 7
+duration: ~5 minutes
+---
+
+You finished the [Quickstart](/latest/get-started/quickstart) and `ng_collect_rollouts` produced a file. This page is a 5-minute walk through what's in it.
+
+## Where the files are
+
+A successful `+output_jsonl_fpath=results/blackjack_rollouts.jsonl` invocation writes three files:
+
+| File | What's in it |
+|---|---|
+| `results/blackjack_rollouts.jsonl` | One JSON object per rollout (`task_index × rollout_index` lines). The output you'll read most. |
+| `results/blackjack_rollouts_materialized_inputs.jsonl` | Sidecar of the resolved prompts that were actually sent. Required input to `ng_reward_profile`. |
+| `results/blackjack_rollouts_aggregate_metrics.json` | Per-agent aggregate metrics. The headline numbers live here. |
+
+The sidecar and metrics files are derived from `+output_jsonl_fpath` — you don't pass them explicitly.
+
+## Anatomy of a row
+
+One line of `blackjack_rollouts.jsonl`, abbreviated:
+
+```json
+{
+  "task_index": 0,
+  "rollout_index": 2,
+  "agent_ref": {"name": "blackjack_simple_agent"},
+  "responses_create_params": {
+    "input": [{"role": "user", "content": "Your hand is 15. Hit or stand?"}],
+    "tools": [...]
+  },
+  "response": {
+    "output_text": "<action>stand</action>",
+    "usage": {"input_tokens": 142, "output_tokens": 28}
+  },
+  "reward": -1.0
+}
+```
+
+Field by field:
+
+- `task_index` and `rollout_index` — keys for joining a rollout back to its source task and to per-task metrics. With `+num_repeats=8`, each `task_index` has 8 rows with `rollout_index` 0–7.
+- `agent_ref.name` — which agent server produced this row. For multi-agent datasets, different rows have different `agent_ref` values.
+- `responses_create_params` — the prompt that was actually sent to the model server, after prompt-config rendering, repeat expansion, and seed injection.
+- `response.output_text` — what the model said. For tool-calling rollouts, also includes `output[]` items for function calls and reasoning.
+- `reward` — the verifier's score. Always a float; the range is per-environment (Blackjack uses `{-1.0, 0.0, +1.0}` for loss/draw/win).
+- Per-environment custom fields — verifiers extend `BaseVerifyResponse` with whatever they need to expose. Math envs add `extracted_answer`; judge envs add `judge_evaluations`; `code_gen` adds `reasoning_format_violation_rate`. Read the env's `README.md` for the full set.
+
+## Two-minute look
+
+```bash
+# Pretty-print one row
+head -1 results/blackjack_rollouts.jsonl | python -m json.tool
+
+# Read the headline metrics
+cat results/blackjack_rollouts_aggregate_metrics.json | python -m json.tool
+```
+
+The aggregate metrics file is the canonical source for run-level numbers. The `key_metrics` block surfaces `mean/reward` and any other `mean/*` fields. The `agent_metrics` block has the full set including `max/`, `min/`, `median/`, `std/` for each numeric verify field.
+
+For per-task aggregation (what fraction of repeats passed each task, variance per task) run `ng_reward_profile`:
+
+```bash
+ng_reward_profile \
+    +materialized_inputs_jsonl_fpath=results/blackjack_rollouts_materialized_inputs.jsonl \
+    +rollouts_jsonl_fpath=results/blackjack_rollouts.jsonl
+```
+
+This produces `results/blackjack_rollouts_reward_profiling.jsonl` (one row per task) and `results/blackjack_rollouts_agent_metrics.json` (agent-level). The file naming is mechanical — derived from the rollouts path.
+
+## Sanity-check the number
+
+GPT-4.1 lands around **`-0.6`** mean reward on the 5-task Blackjack `example.jsonl` over 10 repeats. The number being negative is the validation contract — a competent model is supposed to lose to the fixed dealer's 17-stand strategy.
+
+| `mean/reward` you see | What it means |
+|---|---|
+| `[-0.7, -0.5]` | Real signal. The Quickstart wiring works. |
+| Way off (e.g. `0.0`, `-1.0`, all-NaN) | Setup is misconfigured. Check that the model is actually being called and the verifier is actually scoring. See [Reward Debugging](/latest/about/concepts/reward-debugging). |
+| Empty file | Auth, network, or `env.yaml` issue. See [Configuration](/latest/get-started/configuration). |
+
+The variance across runs is real and expected — Blackjack is stochastic. Raise `+num_repeats` to 16 or more for a stable mean.
+
+## Where to go next
+
+- [Inspect Failures](/latest/evaluate/analyze/inspect-failures) — drill into failed rollouts; replay individual tasks.
+- [Reward Debugging](/latest/about/concepts/reward-debugging) — diagnose wrong rewards systematically.
+- [Run a Benchmark](/latest/evaluate/run/run-a-benchmark) — the eval workflow for any shipped environment.
+- [Profile Rewards](/latest/evaluate/analyze/profile-rewards) — per-task pass-rate aggregation across `+num_repeats`.

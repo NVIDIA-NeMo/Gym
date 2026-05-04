@@ -1,0 +1,142 @@
+---
+title: "Rollouts"
+description: "CLI reference for rollout collection and profiling: ng_collect_rollouts, ng_e2e_collect_rollouts, ng_reward_profile."
+content_type: reference
+audience_level: intermediate
+journey_stage: build
+position: 3
+---
+
+Commands for collecting verified rollouts and profiling the resulting rewards for RL training.
+
+## `ng_collect_rollouts`
+
+Perform a batch of rollout collection.
+
+**Parameters**
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `input_jsonl_fpath` | str | Required. The input data source to use to collect rollouts, in the form of a file path to a JSONL file. |
+| `output_jsonl_fpath` | str | Required. The output data JSONL file path. A sidecar `<stem>_materialized_inputs.jsonl` is written alongside it for downstream `ng_reward_profile`. |
+| `agent_name` | Optional[str] | The agent to collect rollouts from. If unset, falls back to each data row's `agent_ref.name`. |
+| `limit` | Optional[int] | Maximum number of examples to load and take from the input dataset. |
+| `num_repeats` | Optional[int] | The number of times to repeat each example to run. Useful for calculating mean@k (e.g. mean@4 or mean@16). |
+| `num_repeats_add_seed` | bool | When `num_repeats` > 1, pass a per-rollout `seed` via `metadata.extra_body` (honored by vLLM model servers). Default: `False`. |
+| `num_samples_in_parallel` | Optional[int] | Limit the number of concurrent samples running at once. |
+| `responses_create_params` | Dict | Overrides for the `responses_create_params` (e.g. `temperature`, `max_output_tokens`). |
+| `prompt_config` | Optional[str] | Path to a prompt YAML file. Builds `responses_create_params.input` from the template at rollout time. Mutually exclusive with pre-populated `responses_create_params.input` in the JSONL. |
+| `resume_from_cache` | bool | If the same command is re-run, skip inputs that have already been processed in `output_jsonl_fpath`. Default: `False`. |
+| `upload_rollouts_to_wandb` | bool | Upload the rollouts to W&B. Disable for very large rollout sets. Default: `True`. |
+
+**Example**
+
+```bash
+ng_collect_rollouts \
+    +agent_name=example_single_tool_call_simple_agent \
+    +input_jsonl_fpath=weather_query.jsonl \
+    +output_jsonl_fpath=weather_rollouts.jsonl \
+    +limit=100 \
+    +num_repeats=4 \
+    +num_samples_in_parallel=10
+```
+
+---
+
+## `ng_e2e_collect_rollouts`
+
+Spin up all necessary servers and perform a batch of rollout collection using each dataset inside the provided configs.
+
+**Parameters**
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `split` | Literal["train", "validation", "benchmark"] | **Required.** Which dataset split (per the `datasets` list in each agent config) to read from. No default — must be specified. |
+| `output_jsonl_fpath` | str | Required. The output data JSONL file path. |
+| `num_samples_in_parallel` | Optional[int] | Limit the number of concurrent samples running at once. |
+| `responses_create_params` | Dict | Overrides for the `responses_create_params` (e.g. `temperature`, `max_output_tokens`). |
+| `reuse_existing_data_preparation` | bool | Skip data prep if the prepared input JSONL already exists at the expected path. Default: `False`. |
+| `upload_rollouts_to_wandb` | bool | Upload the rollouts to W&B. Default: `True`. |
+
+**Examples**
+
+```bash
+ng_e2e_collect_rollouts \
+    +output_jsonl_fpath=weather_rollouts.jsonl \
+    +split=validation \
+    +num_samples_in_parallel=10
+```
+
+```bash
+config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
+resources_servers/math_with_judge/configs/math_with_judge.yaml"
+ng_e2e_collect_rollouts \
+    "+config_paths=[${config_paths}]" \
+    ++wandb_project= \
+    ++wandb_name= \
+    ++wandb_dir= \
+    ++output_jsonl_fpath=results/test_e2e_rollout_collection/aime24.jsonl \
+    ++split=validation
+```
+
+Example using GPT-OSS 120B remote vLLM endpoint:
+
+```bash
+experiment_name=rollouts/test_001
+config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
+resources_servers/math_with_judge/configs/math_with_judge.yaml"
+ng_e2e_collect_rollouts \
+    "+config_paths=[${config_paths}]" \
+    +skip_venv_if_present=true \
+    +wandb_project=gym-dev \
+    +wandb_name=$(date +%Y%m%d)/$experiment_name \
+    ++output_jsonl_fpath=results/$experiment_name.jsonl \
+    ++overwrite_metrics_conflicts=true \
+    ++split=validation \
+    ++policy_model_name=openai/gpt-oss-120b \
+    ++policy_api_key=dummy_key \
+    ++policy_base_url=http://0.0.0.0:10240/v1 \
+    ++responses_create_params.reasoning.effort=low \
+    ++responses_create_params.temperature=1.0 \
+    ++responses_create_params.top_p=1.0 &> eval_gptoss120b.log &
+```
+
+---
+
+## `ng_reward_profile`
+
+Computes statistics on rewards and task difficulty for rollouts collected with `ng_collect_rollouts` with `num_repeats` &gt;1. Outputs two files derived from the rollouts path: a per-task reward-profiling JSONL (one row per task) and an agent-level metrics JSON. Useful for filtering tasks before training by difficulty, variance, or for building a curriculum.
+
+**Parameters**
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `materialized_inputs_jsonl_fpath` | str | Path to the materialized-inputs JSONL written alongside the rollouts file by `ng_collect_rollouts` (`<rollouts_stem>_materialized_inputs.jsonl`). |
+| `rollouts_jsonl_fpath` | str | Path to the rollouts JSONL file from `ng_collect_rollouts` (must have been run with `num_repeats` &gt;1). |
+
+**Output Files**
+
+Both paths are derived from the `rollouts_jsonl_fpath` stem:
+
+- `<rollouts_stem>_reward_profiling.jsonl` — one row per task with aggregate stats and a `sample` field carrying the original row.
+- `<rollouts_stem>_agent_metrics.json` — agent-level rollup of the same stats.
+
+**Output Fields**
+
+Each numeric column produces five entries keyed `<stat>/<column>`:
+
+- `mean/<column>` — mean across rollouts
+- `max/<column>` — maximum value observed
+- `min/<column>` — minimum value observed
+- `median/<column>` — median value
+- `std/<column>` — standard deviation (0 when only one sample)
+
+`column` covers `reward` plus any numeric fields the verifier returns (e.g. token counts from `response.usage`, or per-test scores from a custom `BaseVerifyResponse`). Per-task output rows also carry a `sample` field with the original task data.
+
+**Example**
+
+```bash
+ng_reward_profile \
+    +materialized_inputs_jsonl_fpath=rollouts_materialized_inputs.jsonl \
+    +rollouts_jsonl_fpath=rollouts.jsonl
+```

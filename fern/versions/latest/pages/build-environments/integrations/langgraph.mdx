@@ -1,0 +1,75 @@
+---
+title: "LangGraph"
+description: "Run a LangGraph StateGraph (orchestrator, reflection, parallel-thinking, ReWOO) as a NeMo Gym agent server. The graph replaces simple_agent's linear loop body; resources and model servers stay unchanged."
+content_type: how-to
+audience_level: intermediate
+journey_stage: build
+position: 6
+---
+import { VerifiedBadge } from "../../../../../components/VerifiedBadge";
+
+<VerifiedBadge verified={false} />
+
+Run a [LangGraph](https://github.com/langchain-ai/langgraph) `StateGraph` — orchestrator, reflection, parallel-thinking, ReWOO, or custom — as a NeMo Gym agent server.
+
+## What the wrapper does
+
+`LangGraphAgentAdapter` is **abstract**. Subclasses implement three methods:
+
+- `build_graph()` — returns the compiled `StateGraph`.
+- `get_initial_state(body)` — turns a `BaseRunRequest` into the graph's input state.
+- `extract_outputs(final_state)` — pulls a `NeMoGymResponse` out of the graph's terminal state.
+
+`responses()` calls `self.graph.ainvoke(initial_state)` and reads `final_state["last_policy_response"]`; cookies in `final_state["cookies"]` propagate back to the response (`responses_api_agents/langgraph_agent/app.py:33-71`).
+
+Four reference subclasses ship: `orchestrator_agent.py`, `reflection_agent.py`, `parallel_thinking_agent.py`, `rewoo_agent.py`.
+
+## Terminology
+
+| LangGraph | NeMo Gym | Notes |
+|---|---|---|
+| `StateGraph` | the agent harness's loop body | **Load-bearing:** a LangGraph graph **replaces** `simple_agent`'s linear loop. The Gym wrapper adapts at the agent-server tier; resources and model servers are unchanged. |
+| Graph node calling an LLM | `await self.server_client.post(... model_server ...)` from inside a node | Each node hits the Gym model server; no node hits OpenAI directly. |
+| Graph state dict | must contain `last_policy_response: NeMoGymResponse` for `extract_model_response` to work | Required key (`app.py:53-56`). |
+| Graph `ainvoke` final state | passed to `extract_outputs()` to produce the trajectory | Subclass-defined. |
+| `tools` node | tool calls go to the Gym resources server's tool endpoint | Same contract as `simple_agent`. |
+
+## Wiring
+
+Subclass `LangGraphAgentAdapter`, implement the three abstract methods, and point a config at it:
+
+```yaml
+my_orchestrator_agent:
+  responses_api_agents:
+    langgraph_agent:
+      entrypoint: orchestrator_agent.py
+      resources_server:
+        type: resources_servers
+        name: my_env
+      model_server:
+        type: responses_api_models
+        name: policy_model
+```
+
+```bash
+ng_run "+config_paths=[\
+configs/my_orchestrator_agent.yaml,\
+responses_api_models/vllm_model/configs/vllm_model.yaml]"
+```
+
+## Parity validation
+
+Run the original LangGraph graph standalone against the same OpenAI-compatible base URL the Gym model server exposes. Confirm identical final answer and tool-call sequence on a small example slice.
+
+## Caveats
+
+- **Parallel-thinking and other non-monotonic graphs break NeMo RL training by design.** Eval-only (LangGraph `README.md:6-7`). The wrapper accepts them; the trainer doesn't.
+- **Subclasses must store `last_policy_response` in state** or override `extract_model_response`. Forgetting this surfaces as a `KeyError` at the end of every rollout.
+- **`run()` in the base adapter does a separate `/v1/responses` call** against `self.config.name` after the graph runs (`app.py:85-87`). Verify this matches your expectations; for some flows it produces an extra trailing turn you didn't intend.
+
+## Related
+
+- [Wrap an external library](/latest/build-environments/integrations/external-libraries) — generic path.
+- [Choose an Agent](/latest/get-started/choose-an-agent) — when LangGraph's graph shape beats `simple_agent`'s linear loop.
+- [Terminology Translation](/latest/build-environments/integrations/terminology-translation).
+- Source: [`responses_api_agents/langgraph_agent/`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/langgraph_agent).

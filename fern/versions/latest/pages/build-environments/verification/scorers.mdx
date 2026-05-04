@@ -1,0 +1,109 @@
+---
+title: "Scorer Patterns"
+description: "Six patterns for verify() implementations shipped across resources_servers/, with copy-this-when criteria. Paired with the filterable Scorer Catalog."
+content_type: explanation
+audience_level: intermediate
+journey_stage: build
+position: 3
+---
+
+Every shipped resources server in `resources_servers/` ships a `verify()` function — what other tools call a "scorer" or "evaluator." This page covers the six patterns in prose with copy-this-when criteria. For the filterable lookup with source citations, see [Scorer Catalog](/latest/build-environments/verification/scorer-catalog).
+
+| Pattern | Use when |
+|---|---|
+| [Exact-match / boxed-answer extraction](#exact-match--boxed-answer-extraction) | The model produces a normalized answer (math `\boxed{}`, MCQA letter, regex-extractable string). |
+| [LLM-as-judge equivalence](#llm-as-judge-equivalence) | The output is open-ended and needs a separate model to score. |
+| [Code-execution verification](#code-execution-verification) | The output is code that runs against test cases. |
+| [Structural / schema validation](#structural--schema-validation) | The output must match a JSON schema, function-call shape, or instruction-following constraint. |
+| [Multi-step / stateful verification](#multi-step--stateful-verification) | The verifier reads accumulated session state from prior tool calls. |
+| [Custom-domain verifiers](#custom-domain-verifiers) | Domain logic that doesn't fit the above (chemistry, formal proofs, safety, hardware design). |
+
+Step-based gymnasium-style environments (`resources_servers/gymnasium/`, `blackjack`) don't implement `verify()` — they use `/step` with the `gymnasium_agent` harness. See [Wrap a Gymnasium environment](/latest/build-environments/integrations/gymnasium).
+
+## Exact-match / boxed-answer extraction
+
+Extract a normalized answer string from the model output and string-compare to expected. Cheapest scorer to author; works wherever the answer is unambiguous.
+
+| Env | `verify()` | Load-bearing config |
+|---|---|---|
+| [`mcqa`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/mcqa) | `app.py:253` — letter extraction | `grading_mode` |
+| [`gpqa_diamond`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/gpqa_diamond) | `app.py:50` (subclasses MCQA) | `template_metadata.output_regex` |
+| [`math_with_code`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/math_with_code) | `app.py:215` — `\boxed{}` extraction across assistant text and tool stdout | — |
+| [`math_advanced_calculations`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/math_advanced_calculations) | `app.py:107` | — |
+| [`math_with_judge`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/math_with_judge) (library mode) | `app.py:121` — `math-verify` library | `should_use_judge: false` |
+| [`equivalence_rule`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/equivalence_rule) | `app.py:74` — rule-based, no LLM | — |
+
+**Copy this pattern when** the gold answer is a string and you can write a regex or normalization that produces the same string from the model output.
+
+## LLM-as-judge equivalence
+
+`verify()` calls a separate model server to score open-ended outputs. The judge model is a peer to the policy model and is configured the same way.
+
+| Env | `verify()` | Load-bearing config |
+|---|---|---|
+| [`equivalence_llm_judge`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/equivalence_llm_judge) | `app.py:397` — generic configurable judge | `judge_model_server`, `judge_responses_create_params`, `judge_prompt_template_fpath` (`app.py:48`) |
+| [`math_with_judge`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/math_with_judge) (judge mode) | `app.py:121` — math-specific arena-hard prompt | `should_use_judge: true` |
+| [`proof_judge`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/proof_judge) | `app.py:228` — proof grading | `judge_model_server` |
+| [`swerl_llm_judge`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/swerl_llm_judge), [`terminus_judge`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/terminus_judge), [`genrm_compare`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/genrm_compare) | Domain judges |  — |
+
+**Copy this pattern when** an exact-match scorer would reject too many semantically-correct answers. Pin the judge model and `temperature: 0` for variance control. See [LLM-as-a-Judge Verification](/latest/build-environments/verification/llm-as-judge) for the full configuration deep dive.
+
+## Code-execution verification
+
+Run the model output as code against test cases, in a Ray-backed sandbox. The verifier compiles, executes, and inspects results.
+
+| Env | `verify()` | Load-bearing config |
+|---|---|---|
+| [`competitive_coding_challenges`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/competitive_coding_challenges) | `app.py:276` — uses `ccc_eval.CCCEvaluator` | `CompetitiveCodingChallengesResourcesServerConfig` (`app.py:79`) |
+| [`code_gen`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/code_gen) | `app.py:148` — LiveCodeBench format | `num_processes`, `unit_test_timeout_secs`, `reasoning_format_penalty` (`app.py:43`) |
+| [`bird_sql`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/bird_sql), [`text_to_sql`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/text_to_sql), [`spider2_lite`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/spider2_lite) | SQL execution against a target DB | per-env DB fixture |
+| [`swerl_gen`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/swerl_gen) | `app.py:96` — patch application + test execution | — |
+
+**Copy this pattern when** the answer is executable code with deterministic test cases. Pass test cases via `verifier_metadata`; bound subprocess concurrency with `num_processes`.
+
+## Structural / schema validation
+
+Check output shape rather than semantic correctness — JSON Schema, function-call shape, instruction-following constraints.
+
+| Env | `verify()` | Load-bearing config |
+|---|---|---|
+| [`structured_outputs`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/structured_outputs) | `app.py:197` — JSON Schema validation | `response_mode` (`tool_call` or `text`, `app.py:204`) |
+| [`format_verification`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/format_verification) | `app.py:48` — citations, list shapes | per-task `verifier_metadata` |
+| [`instruction_following`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/instruction_following) | `app.py:92` — IFEval constraint checks | per-task constraint list |
+| [`ifbench`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/ifbench) | `app.py:128` — IFBench instructions, semaphore-bounded thread pool | per-task `verifier_metadata` |
+| [`xlam_fc`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/xlam_fc) | `app.py:109` — function-call argument matching | `expected_answers` (`app.py:106`; reward 1.0 only if all expected calls matched) |
+| [`single_step_tool_use_with_argument_comparison`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/single_step_tool_use_with_argument_comparison), [`structeval`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/structeval) | Tool-call argument and structure comparison | per-task `verifier_metadata` |
+
+**Copy this pattern when** correctness is a property of the output's *shape*, not its content — JSON validity, all expected tools called, no forbidden tokens, etc.
+
+## Multi-step / stateful verification
+
+`verify()` reads accumulated session state from prior `/run` tool calls. The verifier compares that state to expected ground truth.
+
+| Env | `verify()` | Load-bearing config |
+|---|---|---|
+| [`example_session_state_mgmt`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/example_session_state_mgmt) | `app.py:91` — canonical reference; reads `request.session[SESSION_ID_KEY]` | — |
+| [`workplace_assistant`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/workplace_assistant) | `app.py:99` — scores against `body.ground_truth` after multi-turn dialog | toolkit registration |
+| [`example_multi_step`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/example_multi_step), [`calendar`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/calendar), [`aviary`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/aviary), [`tavily_search`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/tavily_search), [`newton_bench`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/newton_bench) | Domain-specific stateful patterns | — |
+
+**Copy this pattern when** correctness depends on what the agent *did* across a sequence of tool calls, not just its final text output. The agent harness must propagate cookies — see the [Stateful Environment cookie-propagation contract](/latest/build-environments/supported-patterns/stateful#cookie-propagation-contract-required-for-stateful-agents).
+
+## Custom-domain verifiers
+
+Domain-specific logic that doesn't fit the above five categories. The pattern is "ship a `verify()` that returns deterministic reward and document the variance."
+
+| Domain | Env |
+|---|---|
+| Chemistry | [`rdkit_chemistry`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/rdkit_chemistry) (molecule equivalence via RDKit, `app.py:334`) |
+| Legal / contracts | [`aalcr`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/aalcr) (`app.py:61`) |
+| Hardware design | [`cvdp`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/cvdp) (`app.py:378`) |
+| Formal proofs | [`proof_verification`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/proof_verification) (`app.py:184`), [`math_formal_lean`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/math_formal_lean) (Lean theorem prover, `app.py:398`), [`nvarc`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/nvarc) (`app.py:198`) |
+| Safety / refusal | [`abstention`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/abstention), [`jailbreak_detection`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/jailbreak_detection), [`over_refusal_detection`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/over_refusal_detection), [`xstest`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/xstest), [`ether0`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/ether0) |
+
+**Copy this pattern when** none of the above categories apply. Document expected reward variance in the env's README and pin a baseline before flipping the `verified` flag.
+
+## Choosing a pattern
+
+If you can write a regex or string match, use [exact-match](#exact-match--boxed-answer-extraction). If you need semantic equivalence on open-ended text, use [LLM-as-judge](#llm-as-judge-equivalence). If the answer runs as code, use [code-execution](#code-execution-verification). If correctness is shape, not content, use [structural](#structural--schema-validation). If correctness depends on accumulated state across tool calls, use [stateful](#multi-step--stateful-verification). If none fit, you're in [custom-domain](#custom-domain-verifiers) territory.
+
+For the contract `verify()` must satisfy regardless of pattern, see [Reward Semantics](/latest/about/concepts/reward-semantics) and [Task Verification](/latest/about/concepts/task-verification). For the pre-merge bar a new verifier must hit, see [Quality Checklist](/latest/build-environments/author-workflow/quality-checklist). For the eval-side catalog grouped by domain, see [Benchmark Catalog](/latest/evaluate/benchmark-catalog).

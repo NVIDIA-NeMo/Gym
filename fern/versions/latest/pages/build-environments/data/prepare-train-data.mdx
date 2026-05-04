@@ -1,0 +1,209 @@
+---
+title: "Prepare Training Data"
+description: "Prepare train and validation JSONL splits for RL training using ng_prepare_data +mode=train_preparation, including auto-download from GitLab/HF and preprocessing raw datasets."
+content_type: how-to
+audience_level: intermediate
+journey_stage: build
+position: 4
+---
+
+Prepare `train` and `validation` JSONL splits for RL training. `ng_prepare_data +mode=train_preparation` handles the full pipeline: load configs, optionally download missing datasets, validate every row against the schema, compute and persist metrics, then collate everything into the format downstream trainers consume.
+
+**Prerequisites:**
+- NeMo Gym installed ([Get Started](/latest/get-started)).
+- A resources server config that lists `train` and `validation` datasets per the [JSONL schema](/latest/build-environments/data/jsonl-schema).
+- For auto-download: HuggingFace token in `env.yaml` (HF backend) or MLflow credentials (GitLab backend).
+
+`ng_prepare_data` does not need `policy_*` model credentials — it never calls a model server.
+
+## Run training preparation
+
+The default flow downloads missing data from Hugging Face, validates each row, and writes collated `train.jsonl` / `validation.jsonl` files into `+output_dirpath`:
+
+```bash
+config_paths="resources_servers/workplace_assistant/configs/workplace_assistant.yaml,\
+responses_api_models/vllm_model/configs/vllm_model.yaml"
+
+ng_prepare_data \
+    "+config_paths=[$config_paths]" \
+    +output_dirpath=data/workplace_assistant \
+    +mode=train_preparation \
+    +should_download=true
+```
+
+NVIDIA-internal users who want to pull from the GitLab dataset registry instead set `+data_source=gitlab`:
+
+```bash
+ng_prepare_data \
+    "+config_paths=[$config_paths]" \
+    +output_dirpath=data/workplace_assistant \
+    +mode=train_preparation \
+    +should_download=true \
+    +data_source=gitlab
+```
+
+`+data_source` defaults to `huggingface`. `+should_download` defaults to `false` — without it, missing files raise an error rather than fetching.
+
+## CLI parameters
+
+| Parameter | Required | Description |
+|---|---|---|
+| `+config_paths` | Yes | YAML config paths (resources server + model server). |
+| `+output_dirpath` | Yes | Directory for collated `train.jsonl` / `validation.jsonl` and aggregated `*_metrics.json`. |
+| `+mode` | Yes | `example_validation` or `train_preparation`. This page uses `train_preparation`; for `example_validation` see [Validate Example Data](/latest/build-environments/data/validate-example-data). |
+| `+should_download` | No | Fetch missing datasets from the registry. Default: `false`. |
+| `+data_source` | No | `huggingface` or `gitlab`. Default: `huggingface`. |
+| `+overwrite_metrics_conflicts` | No | Overwrite saved per-dataset metrics on drift. Default: `false`. |
+
+## What `ng_prepare_data` does
+
+A single invocation runs four phases (`nemo_gym/train_data_utils.py:323-345`):
+
+1. **Load configs.** Parse server configs, identify every `DatasetConfig` (and `BenchmarkDatasetConfig` for benchmark suites).
+2. **Load datasets.** Read each `jsonl_fpath`. With `+should_download=true`, fetch missing files from the configured registry first. Without it, missing files raise distinct errors per mode (`example_validation` says "missing example jsonl files"; `train_preparation` says "missing local datasets").
+3. **Validate and aggregate metrics.** Parse each row, validate against the schema, accumulate per-dataset metrics. Compare against any saved `<stem>_metrics.json` to surface drift. Invalid row indices are printed to stdout.
+4. **Collate.** Repeat rows per `num_repeats`, write `<type>.jsonl` and `<type>_metrics.json` into `+output_dirpath`. Downstream trainers (NeMo RL and others) consume these files directly.
+
+### Output locations
+
+| File | Where |
+|---|---|
+| Per-dataset metrics | `<jsonl-stem>_metrics.json` next to each source `jsonl_fpath`. E.g. `data/train.jsonl` → `data/train_metrics.json`. |
+| Collated splits | `<output_dirpath>/train.jsonl`, `<output_dirpath>/validation.jsonl`. |
+| Aggregated metrics | `<output_dirpath>/train_metrics.json`, `<output_dirpath>/validation_metrics.json`. |
+
+### Generated metrics
+
+| Metric | Description |
+|---|---|
+| Number of examples | Valid sample count after schema check. |
+| Number of tools | Avg / max / min / stddev tool count per row. |
+| Number of turns | User messages per row. |
+| Input length | OpenAI-tokenized input length stats. |
+| Sampling params | Temperature and other create-params stats. |
+
+```json
+{
+    "name": "train",
+    "type": "train",
+    "jsonl_fpath": "resources_servers/example_multi_step/data/train.jsonl",
+    "Number of examples": 1024,
+    "Number of tools": {
+        "Total # non-null values": 1024,
+        "Average": 2.0,
+        "Min": 2.0,
+        "Max": 2.0
+    }
+}
+```
+
+### Re-running
+
+Collated outputs in `+output_dirpath` are overwritten on each run. Per-dataset `*_metrics.json` files are kept and compared on re-run; delete them when your data has legitimately changed, or pass `+overwrite_metrics_conflicts=true`.
+
+## Preprocess raw datasets
+
+If your source data isn't yet in NeMo Gym format, preprocess it to add `responses_create_params` and split into train/validation before pointing `ng_prepare_data` at it.
+
+<Accordion title="Preprocessing script (preprocess.py)">
+
+Save as `preprocess.py`. Reads a raw JSONL, wraps each row in `responses_create_params`, and splits into train/validation:
+
+```python
+import json
+import os
+
+# Configure for your dataset
+INPUT_FIELD = "problem"  # field with the raw input text (e.g. "problem", "question", "prompt")
+FILENAME = "raw_data.jsonl"
+SYSTEM_PROMPT = "Your task is to solve a math problem. Put the answer inside \\boxed{}."
+TRAIN_RATIO = 0.999  # 99.9% train, 0.1% validation
+
+dirpath = os.path.dirname(FILENAME) or "."
+with (
+    open(FILENAME, "r", encoding="utf-8") as fin,
+    open(os.path.join(dirpath, "train.jsonl"), "w", encoding="utf-8") as ftrain,
+    open(os.path.join(dirpath, "validation.jsonl"), "w", encoding="utf-8") as fval,
+):
+    lines = list(fin)
+    split_idx = int(len(lines) * TRAIN_RATIO)
+
+    for i, line in enumerate(lines):
+        if not line.strip():
+            continue
+        row = json.loads(line)
+
+        # Drop fields not needed for training (optional)
+        row.pop("generated_solution", None)
+
+        # Wrap in responses_create_params
+        row["responses_create_params"] = {
+            "input": [
+                {"role": "developer", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": row.get(INPUT_FIELD, "")},
+            ]
+        }
+
+        out = json.dumps(row) + "\n"
+        (ftrain if i < split_idx else fval).write(out)
+```
+
+Customize:
+- `INPUT_FIELD` — `"problem"` (math), `"question"` (QA), `"prompt"` (general), `"instruction"` (instruction-following).
+- `SYSTEM_PROMPT` — task-specific instructions.
+- `TRAIN_RATIO` — 0.999 keeps validation small for fast iteration; 0.95 is reasonable for most use cases.
+
+</Accordion>
+
+After preprocessing, point a config at the local files:
+
+<Accordion title="Custom-data config (custom_data.yaml)">
+
+```yaml
+custom_resources_server:
+  resources_servers:
+    custom_server:
+      entrypoint: app.py
+      domain: math  # math | coding | agent | knowledge | other
+      description: Custom math dataset
+      verified: false
+
+custom_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: custom_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: train
+        type: train
+        jsonl_fpath: train.jsonl
+        license: Creative Commons Attribution 4.0 International
+      - name: validation
+        type: validation
+        jsonl_fpath: validation.jsonl
+        license: Creative Commons Attribution 4.0 International
+```
+
+The `license` field must be one of the values in the [allowed license enum](/latest/build-environments/data/jsonl-schema#allowed-license-values).
+
+</Accordion>
+
+Then run with the local config:
+
+```bash
+config_paths="custom_data.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml"
+ng_prepare_data "+config_paths=[$config_paths]" \
+    +mode=train_preparation \
+    +output_dirpath=data
+```
+
+## Next steps
+
+- [Train Models](/latest/train-models) — feed prepared data into a trainer.
+- [Versioning and Provenance](/latest/about/concepts/versioning-provenance) — what gets pinned vs. floats across runs.
+- [Cost and Resource Planning](/latest/train-models/cost-resource-planning) — sizing decisions before kicking off the run.

@@ -1,0 +1,105 @@
+---
+title: "Validate Example Data"
+description: "Validate the 5-entry data/example.jsonl that ships with every resources server using ng_prepare_data +mode=example_validation. The PR-submission gate."
+content_type: how-to
+audience_level: intermediate
+journey_stage: build
+position: 3
+---
+
+Every shipped resources server commits a 5-entry `data/example.jsonl` to git. Reviewers use it to understand the row shape without downloading the full training set, and CI uses it to run the environment's tests. This page covers how to validate that file before opening a PR.
+
+**Prerequisites:**
+- NeMo Gym installed ([Get Started](/latest/get-started)).
+- Your resources server has a `configs/<name>.yaml` and a `data/example.jsonl` with exactly 5 rows.
+
+## Run the validator
+
+From the repository root:
+
+```bash
+config_paths="resources_servers/example_multi_step/configs/example_multi_step.yaml,\
+responses_api_models/openai_model/configs/openai_model.yaml"
+
+ng_prepare_data \
+    "+config_paths=[$config_paths]" \
+    +output_dirpath=data/test \
+    +mode=example_validation
+```
+
+A successful run prints:
+
+```text
+####################################################################################################
+#
+# Finished!
+#
+####################################################################################################
+```
+
+## What it produces
+
+Two files:
+
+- **Per-dataset metrics** at `<jsonl-stem>_metrics.json` next to your source file (e.g. `resources_servers/<name>/data/example_metrics.json`).
+- **Aggregated metrics** at `<output_dirpath>/example_metrics.json`.
+
+Both record example count, tool counts, turn counts, and sampling-parameter stats. On re-runs, the validator compares fresh metrics against the saved ones and surfaces drift.
+
+## The 5-entry rule
+
+The example dataset must have exactly 5 rows. The check is enforced at `nemo_gym/cli.py:491`. Convention is to use the first 5 rows of `train`, but only the count is enforced — many environments deliberately curate diverse 5-entry sets that exercise different verification paths.
+
+## Schema requirements
+
+The validator checks each row against the [JSONL schema](/latest/build-environments/data/jsonl-schema). The minimum is one key:
+
+```json
+{"responses_create_params": {"input": [{"role": "user", "content": "..."}]}}
+```
+
+Most environments also include `verifier_metadata` (or per-environment top-level keys) carrying the data the verifier needs to score the output.
+
+## Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `Number of examples` lower than 5 | Invalid rows excluded from metrics | Use the invalid-sample finder below to locate offending lines. |
+| `AssertionError: count == 5` | More or fewer than 5 rows in `example.jsonl` | Trim or extend the file to exactly 5 rows. |
+| Required key absent (e.g. missing `responses_create_params`) | `Number of examples` drops below 5 | Add the field with a valid `input` list. |
+| Syntax error in the JSONL line | `Number of examples` drops below 5 | Fix the JSON. |
+| Invalid role | `Number of examples` drops below 5 | Use a role per the [JSONL schema](/latest/build-environments/data/jsonl-schema#message-roles). |
+
+Invalid rows don't print their own log lines — they're excluded from the aggregate metrics, which causes `Number of examples` to fall below 5 and triggers the assertion at `nemo_gym/cli.py:520`. The user-visible signal is the count drop, not a per-row error message. Use the snippet below to find offending rows directly.
+
+### Find invalid samples
+
+```python
+import json
+
+def validate_sample(line: str) -> tuple[bool, str]:
+    try:
+        data = json.loads(line)
+    except json.JSONDecodeError as e:
+        return False, f"Invalid JSON: {e}"
+    if "responses_create_params" not in data:
+        return False, "Missing 'responses_create_params'"
+    if "input" not in data["responses_create_params"]:
+        return False, "Missing 'input' in responses_create_params"
+    return True, "OK"
+
+with open("resources_servers/<name>/data/example.jsonl") as f:
+    for i, line in enumerate(f, 1):
+        valid, msg = validate_sample(line)
+        if not valid:
+            print(f"Line {i}: {msg}")
+```
+
+## Re-running
+
+The output JSONL files in `+output_dirpath` are overwritten each run. The per-dataset `*_metrics.json` files are compared against any prior version and surface drift. Delete them when your data has legitimately changed and you want a fresh baseline.
+
+## Next steps
+
+- [Prepare Training Data](/latest/build-environments/data/prepare-train-data) — once `example.jsonl` validates, prepare the full train/validation slices.
+- [Environment Quality Checklist](/latest/build-environments/author-workflow/quality-checklist) — the full pre-merge bar.

@@ -1,0 +1,28 @@
+---
+title: "Add a Benchmark"
+description: "Add a benchmark to NeMo Gym with reward profiling against open and closed models to verify fidelity, infra robustness, and acceptable variance."
+content_type: how-to
+audience_level: intermediate
+journey_stage: build
+position: 2
+---
+The most important principle when adding benchmarks into NeMo Gym is ensuring the fidelity of the benchmark. As a result, there are additional steps and best practices to adding a benchmark that are required on top of adding just a training environment (although the steps below are still suggested for training environments).
+
+## Reward profiling
+
+In order to ensure the rough software correctness of your benchmark, baseline against publicly available models including a mixture of open-source and closed-source models. This process is also known as reward profiling.
+
+1. Typically any open-source model, even smaller ones such as [Qwen 3 30B A3B Instruct 2507](https://huggingface.co/Qwen/Qwen3-30B-A3B-Instruct-2507), will suffice as long as the resulting performance of running that model on the benchmark is in a meaningful range such as 30% or higher. Otherwise you should run a larger model that attains a meaningful score. If no open model is able to achieve meaningful performance, this may indicate that you have a software bug or indeed your benchmark is quite difficult.  
+2. For closed-source models, OpenAI models are typically the right starting point — they're the most affordable and the most robust across benchmarks, while the same cannot reliably be said for Anthropic or Gemini models. These closed-source models should reach at least the same scores as open-source ones, if not significantly better; if open-source outperforms closed-source, your benchmark may have a software bug.
+
+A reasonable suite of models to reward profile on your benchmark: your policy model of interest, GPT-5 Nano, GPT-5, [Qwen 3 30B A3B Instruct 2507](https://huggingface.co/Qwen/Qwen3-30B-A3B-Instruct-2507), and [Qwen 3 30B A3B Thinking 2507](https://huggingface.co/Qwen/Qwen3-30B-A3B-Thinking-2507). If the 30B-level Qwen models aren't strong enough, scale up to [Qwen 3 235B A22B Instruct 2507](https://huggingface.co/Qwen/Qwen3-235B-A22B-Instruct-2507) and [Qwen 3 235B A22B Thinking 2507](https://huggingface.co/Qwen/Qwen3-235B-A22B-Thinking-2507); if those still aren't enough, consider [Kimi K2 Instruct](https://huggingface.co/moonshotai/Kimi-K2-Instruct) or [GLM-4.7](https://huggingface.co/zai-org/GLM-4.7). Model availability and pricing change quickly — re-check the suite against current options when you run.
+
+## Best practices
+
+After running on a variety of models, you should do a quick analysis of some of each model's failure cases. It is critical to look at the actual results and rollouts produced by your benchmark because it will help catch many software bugs and issues that may lead to unexpectedly low or high scores.
+
+In order to ensure infra robustness, also run your benchmark on a mixture of instruct and thinking models. We want to make our benchmark code model-agnostic, and leave the model-specific logic to things like Responses API Model servers in Gym. It should be as simple as tweaking the config of the model server you are using to switch between instruct and thinking models and achieve reasonable and expected scores for both types.
+
+For integrating existing benchmarks into Gym, you must first use the original repository to reproduce the publicly reported numbers first and achieve reproduction success there. In case we run into reproduction issues down the line, this helps decouple the possible causes of our issues. Then, you can integrate the existing benchmark into Gym and rerun against those same models and reproduce the same scores again.
+
+Once you have a stable setup to run your benchmark, run it a few times on the highest scoring open source model to understand the variance. We want to increase the number of repeats of the benchmark (that is, average @ k, where k is the number of repeats) so that the variance is less than 1%.

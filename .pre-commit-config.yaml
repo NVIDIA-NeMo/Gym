@@ -63,3 +63,9 @@ repos:
         entry: python scripts/update_env_list.py
         additional_dependencies: [pyyaml]
         files: ^README\.md$|^resources_servers/.*/configs/.*\.yaml$|^responses_api_agents/.*/configs/.*\.yaml$
+      - id: validate-docs-frontmatter
+        name: Validate docs frontmatter against controlled vocab
+        language: system
+        entry: python scripts/validate_docs_frontmatter.py
+        files: ^fern/versions/latest/pages/.*\.mdx$
+        pass_filenames: true

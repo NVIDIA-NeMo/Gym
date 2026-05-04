@@ -1,0 +1,240 @@
+/* AgentCatalog — filterable grid of shipped agent harnesses */
+
+.ng-agent-catalog {
+  margin: 1.5em 0;
+}
+
+.ng-agent-catalog__filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75em;
+  align-items: center;
+  padding: 0.75em;
+  margin-bottom: 1em;
+  background: rgba(118, 185, 0, 0.04);
+  border: 1px solid rgba(118, 185, 0, 0.15);
+  border-radius: 8px;
+}
+
+.ng-agent-catalog__filter-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35em;
+  align-items: center;
+}
+
+.ng-agent-catalog__filter-label {
+  font-size: 0.78em;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #6b7280;
+  margin-right: 0.25em;
+}
+
+.ng-agent-chip {
+  appearance: none;
+  background: transparent;
+  color: inherit;
+  border: 1px solid rgba(150, 150, 150, 0.4);
+  border-radius: 999px;
+  padding: 0.25em 0.7em;
+  font-size: 0.82em;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background-color 0.15s, border-color 0.15s;
+}
+
+.ng-agent-chip:hover {
+  background: rgba(118, 185, 0, 0.1);
+  border-color: rgba(118, 185, 0, 0.4);
+}
+
+.ng-agent-chip--active {
+  background: rgba(118, 185, 0, 0.18);
+  border-color: #76b900;
+  color: #5a8a00;
+  font-weight: 500;
+}
+
+[data-theme="dark"] .ng-agent-chip--active,
+.dark .ng-agent-chip--active {
+  color: #a5e635;
+}
+
+.ng-agent-catalog__toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4em;
+  font-size: 0.85em;
+  cursor: pointer;
+}
+
+.ng-agent-catalog__toggle input[type="checkbox"] {
+  margin: 0;
+  cursor: pointer;
+}
+
+.ng-agent-catalog__count {
+  margin-left: auto;
+  font-size: 0.85em;
+  color: #6b7280;
+  font-variant-numeric: tabular-nums;
+}
+
+.ng-agent-catalog__empty {
+  text-align: center;
+  padding: 2em 1em;
+  color: #6b7280;
+  font-style: italic;
+}
+
+.ng-agent-catalog__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  gap: 1em;
+}
+
+.ng-agent-card {
+  display: flex;
+  flex-direction: column;
+  padding: 1em;
+  background: var(--card-background, rgba(255, 255, 255, 0.5));
+  border: 1px solid rgba(150, 150, 150, 0.25);
+  border-radius: 8px;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.ng-agent-card--recommended {
+  border-color: rgba(118, 185, 0, 0.5);
+  box-shadow: 0 0 0 1px rgba(118, 185, 0, 0.15);
+}
+
+[data-theme="dark"] .ng-agent-card,
+.dark .ng-agent-card {
+  background: rgba(40, 40, 40, 0.4);
+  border-color: rgba(180, 180, 180, 0.15);
+}
+
+.ng-agent-card:hover {
+  border-color: rgba(118, 185, 0, 0.5);
+  box-shadow: 0 1px 6px rgba(118, 185, 0, 0.08);
+}
+
+.ng-agent-card__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 0.5em;
+  margin-bottom: 0.5em;
+}
+
+.ng-agent-card__name {
+  font-size: 0.95em;
+  font-weight: 600;
+  word-break: break-word;
+}
+
+.ng-agent-card__shape {
+  flex-shrink: 0;
+  padding: 0.15em 0.5em;
+  border-radius: 999px;
+  font-size: 0.72em;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.ng-agent-card__shape--model-tool-loop { background: rgba(34, 197, 94, 0.12); color: #16a34a; }
+.ng-agent-card__shape--correction-loop { background: rgba(168, 85, 247, 0.12); color: #9333ea; }
+.ng-agent-card__shape--external-wrapper { background: rgba(59, 130, 246, 0.12); color: #2563eb; }
+.ng-agent-card__shape--domain-specific { background: rgba(234, 179, 8, 0.14); color: #ca8a04; }
+
+.ng-agent-card__default-banner {
+  font-size: 0.75em;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #5a8a00;
+  background: rgba(118, 185, 0, 0.12);
+  padding: 0.25em 0.5em;
+  border-radius: 4px;
+  margin-bottom: 0.5em;
+  text-align: center;
+}
+
+[data-theme="dark"] .ng-agent-card__default-banner,
+.dark .ng-agent-card__default-banner {
+  color: #a5e635;
+}
+
+.ng-agent-card__description {
+  font-size: 0.92em;
+  margin: 0 0 0.5em 0;
+  line-height: 1.45;
+}
+
+.ng-agent-card__use-when {
+  font-size: 0.85em;
+  line-height: 1.45;
+  margin-bottom: 0.5em;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15em;
+}
+
+.ng-agent-card__field-label {
+  font-size: 0.7em;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #6b7280;
+}
+
+.ng-agent-card__tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3em;
+  margin: 0.4em 0;
+}
+
+.ng-agent-card__tag {
+  font-size: 0.72em;
+  padding: 0.1em 0.5em;
+  background: rgba(150, 150, 150, 0.12);
+  border-radius: 4px;
+  color: #4b5563;
+}
+
+[data-theme="dark"] .ng-agent-card__tag,
+.dark .ng-agent-card__tag {
+  color: #cbd5e1;
+}
+
+.ng-agent-card__capabilities {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5em;
+  margin: 0.4em 0;
+  font-size: 0.8em;
+}
+
+.ng-agent-card__capability {
+  cursor: help;
+}
+
+.ng-agent-card__capability.is-yes { color: #16a34a; }
+.ng-agent-card__capability.is-no { color: #6b7280; }
+
+.ng-agent-card__source {
+  margin-top: auto;
+  padding-top: 0.5em;
+  font-size: 0.78em;
+  color: #6b7280;
+  text-decoration: none;
+  font-family: var(--font-mono, ui-monospace, monospace);
+}
+
+.ng-agent-card__source:hover {
+  color: #76b900;
+}

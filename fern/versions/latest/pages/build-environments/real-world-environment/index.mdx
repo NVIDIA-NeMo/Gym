@@ -1,0 +1,31 @@
+---
+title: "Real-World Environment"
+description: "Build the Workplace Assistant environment with email, calendar, analytics, project management, and CRM toolkits using dynamic routing and state-based verification."
+content_type: tutorial
+audience_level: intermediate
+journey_stage: build
+position: 2
+---
+import { NavButton } from "../../../../../components/NavButton";
+
+The Workplace Assistant environment simulates an office across 27 tools and 6 toolkits — email, calendar, analytics, project management, and CRM — with dynamic routing, per-session state, and state-based verification (replay both predicted and ground-truth tool calls, then compare final state). The same patterns scale to any production-grade benchmark.
+
+<NavButton href="/latest/build-environments/supported-patterns/stateful" label="Stateful Environment" direction="prev" />
+
+---
+
+<Cards>
+
+<Card title="Generating Training Data" href="/latest/build-environments/real-world-environment/generating-training-data">
+Generate synthetic multi-step tool-calling data using NeMo Data Designer.
+</Card>
+
+<Card title="Resources Server Implementation" href="/latest/build-environments/real-world-environment/resources-server-implementation">
+Dynamic routing, per-session state, state-based verification, and rollout transcripts.
+</Card>
+
+</Cards>
+
+---
+
+<NavButton href="/latest/build-environments" label="Back to Build Environments" direction="back" />

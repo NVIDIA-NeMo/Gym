@@ -1,0 +1,18 @@
+---
+title: "Compatibility"
+description: "What works with what: model providers, sandbox and execution backends, and RL training frameworks tested against NeMo Gym."
+content_type: index
+audience_level: intermediate
+journey_stage: build
+position: 3
+---
+
+Three matrices answering "will this combination work together?" before you bet a 4-hour eval on it.
+
+| Matrix | What it covers |
+| --- | --- |
+| [Providers](/latest/reference/compatibility/providers) | OpenAI, Azure, build.nvidia.com, vLLM, OpenAI-compatible gateways. Endpoint shape (Responses vs chat completions), tool calling, reasoning blocks, retry, tested versions. |
+| [Sandbox & Execution](/latest/reference/compatibility/sandbox-execution) | Local process, Ray, Docker, Podman, cloud sandboxes (Daytona, Modal, E2B). Network behavior, dependency installation, timeout semantics, security boundaries. |
+| [RL Frameworks](/latest/reference/compatibility/rl-frameworks) | NeMo RL, Unsloth, OpenRLHF, VeRL. Per-framework integration status, supported features, tested container versions. |
+
+Each matrix is honest about what's tested, what's community-reported, and what's known not to work.

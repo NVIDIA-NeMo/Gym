@@ -1,0 +1,56 @@
+---
+title: "Evaluate Models"
+description: "Score, compare, and inspect agent behavior on existing benchmarks or your own customer evals."
+content_type: index
+audience_level: beginner
+journey_stage: try
+position: 1
+---
+
+Run a benchmark, compare agents and models, score against your own data, profile the rewards. This section is for users whose primary goal is evaluation, not training. Eval-native vocabulary is the surface here — pass@1, accuracy, score — and the underlying training plumbing surfaces only when it's load-bearing.
+
+## The Mental Model — `gym eval`
+
+The conceptual one-liner is straightforward: pick a benchmark, an agent, and a model, and you get a score. Today, that flow is split across three commands:
+
+```bash
+1. ng_run +config_paths=[...]                # start servers
+2. ng_collect_rollouts +agent_name=... ...   # collect responses
+3. ng_reward_profile +input_jsonl_fpath=...  # compute pass rates
+```
+
+Future versions may consolidate these into a single `gym eval` invocation. For now, the [Run a Benchmark](/latest/evaluate/run/run-a-benchmark) page walks through each command end-to-end.
+
+Each end-to-end run produces an **experiment** — an immutable snapshot of rollouts plus rewards plus the resolved config that produced them. Compare experiments across model/agent variants by joining the per-task reward profiles on `task_index` (see [Compare Agents](/latest/evaluate/compare/compare-agents)). If you're arriving from a SaaS eval platform like Braintrust or Arize, the NeMo Gym vocabulary maps directly: an experiment is a rollout-collection run, a scorer is a `verify()` function, a dataset is a JSONL file.
+
+## What You Choose
+
+Every eval run is the combination of four components. Pick them once, and the same flow scores any task.
+
+- **Environment** — The benchmark or customer eval. Defines the task, the verification logic, and the dataset.
+- **Agent** — The harness that orchestrates the rollout. `simple_agent` covers most evals (it runs the model + tool-call loop until the model emits a final answer); refinement loops or external runtimes use a richer agent.
+- **Model** — The LLM under evaluation. Any OpenAI-compatible endpoint works — OpenAI proper, Azure, build.nvidia.com, self-hosted vLLM.
+- **Sandbox** — Where code runs, when applicable. Local subprocess, Ray, or Docker, depending on the benchmark's isolation needs.
+
+## Pick Your Path
+
+If you want to...
+
+| Goal | Page |
+|---|---|
+| Run an existing benchmark end-to-end | [Run a Benchmark](/latest/evaluate/run/run-a-benchmark) |
+| Validate that a benchmark is set up correctly | [Validate Your Setup](/latest/evaluate/run/validate-your-setup) |
+| Compare agents on the same benchmark | [Compare Agents](/latest/evaluate/compare/compare-agents) |
+| Score a model against your own data | [Score Customer Data](/latest/evaluate/compare/score-customer-data) |
+| Add a new benchmark | [Add a Benchmark](/latest/build-environments/integrations/add-a-benchmark) |
+| Profile rewards to find easy/hard tasks | [Profile Rewards](/latest/evaluate/analyze/profile-rewards) |
+| Inspect failures | [Inspect Failures](/latest/evaluate/analyze/inspect-failures) |
+| Browse the catalog | [Benchmark Catalog](/latest/evaluate/benchmark-catalog) |
+
+## What Lives Elsewhere
+
+A few related workflows have homes outside this section:
+
+- **Build a new benchmark from scratch** — [Adding a Benchmark](/latest/build-environments/integrations/add-a-benchmark) covers the full author flow (resources server, verifier, dataset).
+- **Train a model with rollouts** — [Train Models](/latest/train-models) picks up after eval and walks through GRPO and friends.
+- **Reward semantics — errors, retries, pass@k** — [Reward Semantics](/latest/about/concepts/reward-semantics) is the scoring contract: what counts as a pass, how errors are handled, how aggregation works.

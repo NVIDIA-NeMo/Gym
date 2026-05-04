@@ -1,0 +1,77 @@
+---
+title: "Profile a resources server"
+description: "Use profiling_enabled to measure verifier performance under high concurrency. Required for envs that handle 16k+ concurrent rollouts."
+content_type: how-to
+audience_level: advanced
+journey_stage: build
+position: 2
+---
+
+Profile your resources server to find slow `verify()` calls before training. Required reading for environments that handle 16k+ concurrent rollouts — a slow verifier becomes the rollout bottleneck.
+
+**Prerequisites**: A resources server config and a JSONL dataset with at least 1024 rows.
+
+---
+
+## Run servers with profiling enabled
+
+`profiling_enabled` and `profiling_results_dirpath` are the two relevant config fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `profiling_enabled` | bool | Turn on per-server profiling. Disabled by default — it adds slight overhead at runtime. |
+| `profiling_results_dirpath` | str | Directory for profiling logs. Previous logs in the same directory are overwritten. |
+
+Start your servers with both fields set:
+
+```bash
+config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
+resources_servers/math_with_judge/configs/bytedtsinghua_dapo17k.yaml"
+ng_run "+config_paths=[${config_paths}]" \
+    +profiling_enabled=true \
+    +profiling_results_dirpath=results/profiling/math_with_judge
+```
+
+## Drive load with `ng_collect_rollouts`
+
+In a second terminal, run a rollout batch large enough to surface hot paths. Use `+limit` and `+num_repeats` to scale the load:
+
+```bash
+ng_collect_rollouts +agent_name=math_with_judge_simple_agent \
+    +input_jsonl_fpath=resources_servers/math_with_judge/data/dapo17k_bytedtsinghua_train.jsonl \
+    +output_jsonl_fpath=temp/math_with_judge_rollouts.jsonl \
+    +limit=1024 \
+    +num_repeats=1
+```
+
+After `ng_collect_rollouts` returns, stop `ng_run` with `Ctrl+C`. Profiling logs flush on shutdown.
+
+## Read the profile log
+
+A profile log row looks like this:
+
+```text
+name                                                                                          ncall   tsub      ttot      tavg
+.../math_with_judge/app.py:118 LibraryJudgeMathResourcesServer.verify                         1024    0.009755  17.98387  0.017562
+.../math_with_judge/app.py:145 LibraryJudgeMathResourcesServer._verify_answer                 1024    0.002933  17.87998  0.017461
+.../math_with_judge/app.py:173 LibraryJudgeMathResourcesServer._verify_answer_with_library    1024    0.007851  17.87704  0.017458
+.../math_with_judge/app.py:191 <genexpr>                                                      2339    0.001695  0.029082  0.000012
+.../math_with_judge/app.py:163 _mute_output                                                   2048    0.007473  0.016538  0.000008
+```
+
+| Column | Meaning |
+|--------|---------|
+| `ncall` | Number of times the function was invoked. `verify` here ran 1024 times — once per rollout. |
+| `tsub` | Self-time. Seconds spent inside the function itself, excluding callees. |
+| `ttot` | Total time. Self-time plus all callee time. `verify`'s 17.98s is dominated by `_verify_answer_with_library`. |
+| `tavg` | `ttot / ncall`. Useful for ranking expensive call sites. |
+
+Sort by `ttot` to find the bottleneck. Sort by `tavg` to find slow per-call paths that may not be hot yet but will be at higher load.
+
+## What to fix first
+
+- A high-`ncall`, high-`tsub` row in `verify()` is your hot path. Push expensive setup out of the request path.
+- If a third-party library dominates `ttot`, push it onto a Ray actor pool. See [Ray and distributed execution](/latest/reference/configuration/ray-and-distributed).
+- If subprocess work dominates, bound it with `asyncio.Semaphore` so concurrent calls don't oversubscribe CPUs.
+
+Re-run the profile after each change. Cross-reference your numbers against the [Environment Quality Checklist](/latest/build-environments/author-workflow/quality-checklist) before submitting.

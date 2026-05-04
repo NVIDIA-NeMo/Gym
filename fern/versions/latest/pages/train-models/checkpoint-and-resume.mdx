@@ -1,0 +1,91 @@
+---
+title: "Checkpoint and Resume"
+description: "Resume a crashed or killed ng_collect_rollouts job without re-running completed tasks. The materialized-inputs sidecar plus the line-flushed output JSONL are the recoverable state."
+content_type: how-to
+audience_level: intermediate
+journey_stage: scale
+position: 8
+---
+
+Recover a long rollout collection job that crashed, was SIGKILLed, or hit a network blip. The recoverable state is two files written by `ng_collect_rollouts`: the rollout output JSONL and a materialized-inputs sidecar. Re-run the same command with `+resume_from_cache=true` and completed `(task_index, rollout_index)` pairs are skipped.
+
+## The pattern
+
+```bash
+ng_collect_rollouts \
+    +agent_name=<agent> \
+    +input_jsonl_fpath=<dataset>.jsonl \
+    +output_jsonl_fpath=results/rollouts.jsonl \
+    +num_repeats=8 \
+    +num_samples_in_parallel=10 \
+    +resume_from_cache=true \
+    "+responses_create_params={max_output_tokens: 16384}"
+```
+
+Re-run the **byte-identical command** after a crash. With `+resume_from_cache=true`, the rollout collector reads `results/rollouts.jsonl` plus its sidecar `results/rollouts_materialized_inputs.jsonl`, subtracts the completed `(task_index, rollout_index)` pairs from the input set, and runs only the missing ones.
+
+## What gets cached
+
+Two files, both required for resume:
+
+- **Rollouts output JSONL** at `+output_jsonl_fpath`. Each completed rollout is appended and `flush()`ed line by line (`nemo_gym/rollout_collection.py:315-316`), so a crash mid-write at worst loses the in-flight line; prior lines are durable.
+- **Materialized-inputs sidecar** at `<output_stem>_materialized_inputs.jsonl` (`nemo_gym/rollout_collection.py:130-133, 289-291`). This is the resolved input set with `task_index` + `rollout_index` keys assigned, after `+num_repeats` expansion and any prompt-config rendering.
+
+If either file is missing, the framework prints a skip message and falls back to a fresh start (`nemo_gym/rollout_collection.py:264, 272-280`).
+
+## What invalidates the cache
+
+The cache key is the byte-identical input row. `task_index` is assigned by hashing the raw JSONL line; any input mutation produces a different key and re-runs the task.
+
+Things that invalidate the cache:
+
+- Reordering rows in the input JSONL.
+- Changing `+limit`, `+num_repeats`, or `+num_repeats_add_seed`.
+- Different `+responses_create_params` overrides.
+- Different `prompt_config` or different prompt-config contents.
+- Reformatting the input JSONL (whitespace, key order, escaping).
+
+If you need to change any of these, expect a full re-run. Save the partial output as a new path before re-running with new params.
+
+## What's recoverable vs. unrecoverable
+
+**Recoverable:**
+
+- SIGKILL, host crash, network blip, OOM kill mid-rollout.
+- Provider-side errors (429, 502) on individual rollouts — those tasks just don't appear in the output JSONL and get retried on resume.
+- A truncated last line in the output JSONL — trim the corrupt line manually before resume; everything before it is durable.
+
+**Unrecoverable:**
+
+- An in-process exception that corrupts the aggregate metrics JSON written at the end (`results/<stem>_aggregate_metrics.json`, written by `ng_collect_rollouts` per `nemo_gym/rollout_collection.py:439`; the `_agent_metrics.json` file is a separate output of `ng_reward_profile`). The resume re-runs only missing rollouts; the aggregate metrics are recomputed at the end on the full combined set.
+- Cache invalidation via input mutation (see above).
+
+## Interaction with `ng_e2e_collect_rollouts`
+
+`ng_e2e_collect_rollouts` runs `ng_prepare_data` plus `ng_collect_rollouts` in one shot. Two related flags:
+
+- `+reuse_existing_data_preparation=true` skips the `ng_prepare_data` step if the prepared input JSONL already exists at the expected path (`nemo_gym/cli.py:430-444`).
+- `+resume_from_cache=true` still applies to the rollout phase.
+
+Combine them when restarting an end-to-end job:
+
+```bash
+ng_e2e_collect_rollouts \
+    "+config_paths=[...]" \
+    +split=validation \
+    +output_jsonl_fpath=results/eval.jsonl \
+    +reuse_existing_data_preparation=true \
+    +resume_from_cache=true
+```
+
+## Footguns
+
+- **Both sidecar and output must exist.** Deleting the sidecar but keeping the rollouts file silently disables resume.
+- **`+upload_rollouts_to_wandb=true` (the default) is not idempotent.** Disable for resumed runs you've already uploaded, or accept duplicate W&B records.
+- **The aggregate metrics JSON recomputes on every resume.** Don't take the file's modification time as an indicator of progress.
+
+## Related
+
+- [`ng_collect_rollouts`](/latest/api-reference/cli/rollouts) — full parameter table.
+- [Cost and Resource Planning](/latest/train-models/cost-resource-planning) — sizing decisions before kicking off the job.
+- [Footguns](/latest/troubleshooting/footguns) — symptom-side recovery for the surrounding failure modes.

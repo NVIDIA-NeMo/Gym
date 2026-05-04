@@ -1,0 +1,88 @@
+---
+title: "Cost and Resource Planning"
+description: "Estimate GPU hours, token volume, and concurrency before kicking off a training run or large rollout collection — formulas, knobs, and the cost of getting them wrong."
+content_type: how-to
+audience_level: intermediate
+journey_stage: scale
+position: 7
+gpu_required: true
+---
+
+Estimate GPU hours, token volume, and concurrency before you commit to a long job. The math is mostly arithmetic plus a few load-bearing config fields; the failure modes come from leaving the wrong knob unset.
+
+## Token-volume math
+
+The dominant cost driver for rollout collection is total output tokens:
+
+```
+total_output_tokens ≈ max_output_tokens × num_repeats × |tasks|
+```
+
+- `responses_create_params.max_output_tokens` — the per-rollout cap. Set on `ng_collect_rollouts` via `"+responses_create_params={max_output_tokens: 16384}"`.
+- `+num_repeats` — how many rollouts per task (`nemo_gym/rollout_collection.py:113-116`).
+- `|tasks|` — rows of the input JSONL after `+limit` truncation.
+
+For training runs, multiply by the number of training steps; for eval, this is the full cost.
+
+## GPU-count rules of thumb
+
+Concrete sizing examples shipped today:
+
+- **Nemotron 3 Nano (30B BF16)** — 2 nodes × 8 GPUs = 16 GPUs minimum; 32 nodes × 8 = 256 GPUs for a full run. Model weights ~59 GB. See [Nemotron 3 Nano recipe](/latest/train-models/recipes/nemotron-3-nano).
+- **Local vLLM parallelism** lives in `vllm_serve_kwargs` on the model server config: `tensor_parallel_size`, `data_parallel_size`, `pipeline_parallel_size`. The shipped 30B BF16 config uses `tp=8, dp=1, pp=1`. The 235B FP8 judge uses `tp=8`.
+- **`tp × dp × pp` must equal the visible GPUs exactly.** Misconfiguration shows up as a vLLM startup failure, not a Gym error.
+- **Judge models double the GPU footprint** when running locally. A local `genrm_model` at 235B with `tp=8` requires another full `tp=8` instance alongside the policy.
+
+For non-trivial sizing decisions, do a sizing dry run with `+limit=100` and a small `+num_repeats` first. The wall-clock × GPU-count for that slice scales linearly to the full job.
+
+## Concurrency knobs
+
+`num_samples_in_parallel` caps in-flight rollouts via `asyncio.Semaphore` (`nemo_gym/rollout_collection.py:56-58, 295-298`). When unset, concurrency is unbounded.
+
+| Provider type | Unbounded behavior | When to cap |
+|---|---|---|
+| `openai_model` (api.openai.com or compatible) | Unbounded by default | Cap to your tier's TPM/RPM if you start hitting 429s. |
+| `vllm_model` / `local_vllm_model` | Unbounded; vLLM batches internally | Cap if the vLLM batcher saturates and rollout latency spikes. |
+| `azure_openai_model` | Bounded by `num_concurrent_requests` (default 8) | Raise only after confirming your Azure tier; lower if you see 429s or sustained 5xx. |
+
+Set on `ng_collect_rollouts` via `+num_samples_in_parallel=10`. Override Azure's per-server cap with `++num_concurrent_requests=16` on the model server config.
+
+## `max_model_len` — the cost of getting it wrong
+
+vLLM's `max_model_len` (set via `vllm_serve_kwargs.max_model_len`) is the hard upper bound on input + output tokens per request. The framework does not auto-truncate.
+
+- **Set lower than `max_output_tokens` and your job fails mid-rollout** with HTTP 400 from vLLM. The rollout writes a non-1.0 reward and an error response — not a crash, but every affected task scores zero.
+- **Set arbitrarily high and you waste KV cache memory**, lowering throughput.
+- **Rule:** `max_model_len ≥ longest_input_tokens + max_output_tokens` for any task in the dataset. When in doubt, sample-tokenize the input JSONL first.
+
+See [Provider Compatibility — Context Length](/latest/reference/compatibility/providers) for the full surface.
+
+## Sizing-dry-run pattern
+
+Before a full job:
+
+```bash
+ng_collect_rollouts \
+    +agent_name=<agent> \
+    +input_jsonl_fpath=<dataset>.jsonl \
+    +output_jsonl_fpath=results/dryrun.jsonl \
+    +limit=100 \
+    +num_repeats=2 \
+    +num_samples_in_parallel=10 \
+    "+responses_create_params={max_output_tokens: 4096}"
+```
+
+Read the dryrun's wall-clock and provider-side token counts (the rollout JSONL records `response.usage`). Multiply by your full job's `|tasks| × num_repeats × max_output_tokens` ratio. If the projection is uncomfortable, drop `+num_repeats` or `+max_output_tokens` before committing.
+
+## Footguns
+
+- **`num_samples_in_parallel` unset on Azure** burns through the tier quota in seconds.
+- **`+num_repeats` multiplies cost linearly.** For variance under 1% on baselines, common practice is `num_repeats` up to 16. For a smoke test, 4 is usually enough.
+- **W&B upload at the end is fire-and-forget** and not idempotent. Disable with `+upload_rollouts_to_wandb=false` for sizing dry runs you don't want recorded.
+
+## Related
+
+- [Deployment Topology](/latest/reference/deployment-topology) — cluster strategies for multi-node runs.
+- [Provider Compatibility](/latest/reference/compatibility/providers) — per-provider quotas and tested versions.
+- [Checkpoint and Resume](/latest/train-models/checkpoint-and-resume) — recover from a crashed long-running job.
+- [Nemotron 3 Nano recipe](/latest/train-models/recipes/nemotron-3-nano) — worked sizing example end-to-end.

@@ -1,0 +1,17 @@
+---
+title: "Verification"
+description: "Verifier patterns for scoring agent rollouts: LLM-as-a-judge for open-ended outputs and aggregate metrics for multi-rollout summaries."
+content_type: index
+audience_level: intermediate
+journey_stage: build
+position: 4
+---
+
+Two verifier patterns for cases the basic `verify()` doesn't cover:
+
+| Pattern | When to use |
+| --- | --- |
+| [LLM-as-a-judge](/latest/build-environments/verification/llm-as-judge) | The output is open-ended (essays, summaries, code review feedback) and a string match or exact-equal verifier won't capture quality. Pair with deterministic spot-checks where you can. |
+| [Aggregate metrics](/latest/build-environments/verification/aggregate-metrics) | Reward-per-rollout isn't enough — you need pass@k, win-rate, mean over a sliding window, or a custom aggregation across many rollouts of the same task. |
+
+For the basic verify() contract — error handling, timeouts, retries, pass@1 vs pass@k semantics — see [Reward Semantics](/latest/about/concepts/reward-semantics).

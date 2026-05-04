@@ -1,0 +1,204 @@
+---
+title: "Migration Guide"
+description: "Breaking changes, deprecations, new options, and step-by-step upgrade checklists for each NeMo Gym release. Read this before you bump versions."
+content_type: reference
+audience_level: intermediate
+journey_stage: scale
+position: 2
+---
+
+# Migration Guide
+
+Breaking changes, deprecations, new options, and step-by-step upgrade checklists for each NeMo Gym release. Pinned at an older version? Read the relevant section below before you bump. New entries are added at the top per breaking-change release.
+
+<Note>
+0.3.0 has not shipped. The 0.2 → 0.3 section below is a working draft; the final changelog lands at GA — see [Release Notes](/latest/about/release-notes) for the canonical record once tagged.
+</Note>
+
+---
+
+## 0.2 → 0.3
+
+---
+
+### At a Glance
+
+| Area | Change | Action required |
+|---|---|---|
+| CLI | No breaking changes expected | None |
+| Configuration (Hydra / YAML) | No breaking changes expected | None |
+| JSONL data schema | No breaking changes expected | None |
+| Documentation IA | New top-level Evaluate Models section; renamed pages and slug moves | Update bookmarks; old URLs redirect |
+| Reward semantics | Explicit error, timeout, and retry contracts now documented (no behavior change) | Read [Reward Semantics](/latest/about/concepts/reward-semantics) |
+| Sandboxing | Unified execution sandbox infrastructure ([#1048](https://github.com/NVIDIA-NeMo/Gym/issues/1048)) — gated; may slip to 0.4 | None until shipped |
+| Provider compatibility | Bounded retry + opt-in concurrency cap on `NeMoGymAsyncOpenAI` ([#1208](https://github.com/NVIDIA-NeMo/Gym/issues/1208)) | Review default retry behavior |
+| RL framework compatibility | NeMo RL container pin updates with the release | Match container to NeMo Gym version per [RL Framework Compatibility](/latest/reference/compatibility/rl-frameworks) |
+
+---
+
+### Breaking Changes
+
+No breaking changes are committed for 0.3.0 as of this writing.
+
+The architecture surface — three FastAPI server types (resources, model, agent) plus a JSONL dataset — is stable across the 0.2 → 0.3 transition. `verify()`, `chat_completions()`, `responses()`, and `run()` keep their existing signatures. `BaseVerifyResponse.reward` still lives in `[0, 1]`. CLI entry points (`ng_run`, `ng_collect_rollouts`, `ng_reward_profile`, `ng_test`, `ng_status`) keep their flags.
+
+If a breaking change lands during the release window, it will be listed here at GA with a worked-example migration. Track the [Release Notes](/latest/about/release-notes) and [GitHub releases](https://github.com/NVIDIA-NeMo/Gym/releases) for the final list.
+
+---
+
+### Deprecations
+
+No deprecations are committed for 0.3.0 as of this writing.
+
+One forward-looking note: TRL integration is slated for removal in a post-0.3.0 release. If you depend on TRL today, plan an off-ramp — Unsloth and NeMo RL remain supported. See [RL Framework Compatibility](/latest/reference/compatibility/rl-frameworks) for the current matrix.
+
+---
+
+### New in 0.3.0
+
+The items below are roadmap candidates. Scope and timing may shift before tag.
+
+#### Documentation IA refresh
+
+The docs site got a structural rewrite in the 0.3 train. The user-visible architecture model now names four components (dataset, agent harness, model, verifier) rather than three; see [Architecture](/latest/about/concepts/architecture).
+
+URL slug moves you should know about:
+
+| Old URL | New URL |
+|---|---|
+| `/latest/getting-started` | `/latest/get-started/quickstart` |
+| `/latest/get-started/detailed-setup` | `/latest/get-started/installation` |
+| `/latest/get-started/rollout-collection` | `/latest/get-started/quickstart` |
+| `/latest/get-started/hello-world` | `/latest/get-started/create-first-environment` |
+| `/latest/about/why-nemo-gym` | `/latest/about/ecosystem` |
+
+All redirects are wired in `fern/docs.yml`. Old links keep working, but update bookmarks for cleaner URLs.
+
+New pages in 0.3:
+
+- [Evaluate Models](/latest/evaluate) — top-level section covering `validate-your-setup`, `catalog`, `profile`, and `inspect` workflows.
+- [Reward Semantics](/latest/about/concepts/reward-semantics) — explicit error, timeout, and retry contracts.
+- [Provider Compatibility](/latest/reference/compatibility/providers) — supported providers, what works, what doesn't.
+- [Sandbox & Execution Matrix](/latest/reference/compatibility/sandbox-execution) — what runs where, isolation guarantees per backend.
+
+#### Bounded retry and concurrency cap on `NeMoGymAsyncOpenAI`
+
+Tracked in [#1208](https://github.com/NVIDIA-NeMo/Gym/issues/1208). The OpenAI client wrapper gains a bounded retry policy and an opt-in concurrency cap. Default retry behavior changes to a finite ceiling instead of the prior open-ended retry loop — review your aggregate-failure assumptions if you previously relied on indefinite retries to mask transient provider errors.
+
+#### vLLM context-length error documentation
+
+Tracked in [#1206](https://github.com/NVIDIA-NeMo/Gym/issues/1206). vLLM context-overflow errors now surface with actionable messages instead of opaque tracebacks. No behavior change — diagnostics only.
+
+#### New benchmark coverage
+
+- Stirrup agent and GDPVal eval/RL environment ([#1090](https://github.com/NVIDIA-NeMo/Gym/pull/1090)).
+
+Each ships with example data, a configs YAML, and reward-profile baselines. Wire them into existing pipelines by adding their config path to `+config_paths` — no API changes required.
+
+#### Unified execution sandbox infrastructure (gated)
+
+Tracked in [#1048](https://github.com/NVIDIA-NeMo/Gym/issues/1048). A single execution-sandbox primitive consumed by `code_gen`, `competitive_coding_challenges`, and other code-execution benchmarks. **May slip to 0.4** — listed here so you can plan, not as a commitment.
+
+---
+
+### Upgrade Checklist
+
+Run through these steps in order. Each step is independent — stop and diagnose if a step fails before continuing.
+
+1. **Pin 0.2.x in your environment and back up local state.** Snapshot `env.yaml` and any custom server configs. If you run from a fork, capture the SHA you're on.
+
+2. **Update with `uv sync`.** From the repo root:
+
+   ```bash
+   uv sync --extra dev --group docs
+   ```
+
+   If you install from PyPI, pin the new version explicitly:
+
+   ```bash
+   uv pip install nemo-gym==0.3.0
+   ```
+
+3. **Verify your environments still pass.** For each resources server you maintain:
+
+   ```bash
+   ng_test +entrypoint=resources_servers/<your-server>
+   ```
+
+   First run is slow because `ng_test` builds an isolated venv per server. Subsequent runs reuse the venv.
+
+4. **Run the smoke test for an existing benchmark.** Cross-link: [Validate Your Setup](/latest/evaluate/run/validate-your-setup). This confirms the end-to-end loop (agent → model → verifier) still works against your provider.
+
+5. **Re-baseline reward profiles if you depend on aggregate numbers.** If your training pipeline gates on a specific pass@1 or pass@k, re-run rollout collection and reward profiling on a fixed model:
+
+   ```bash
+   ng_collect_rollouts +agent_name=<agent> \
+       +input_jsonl_fpath=<data.jsonl> \
+       +output_jsonl_fpath=results/rollouts.jsonl \
+       +num_repeats=5 \
+       "+responses_create_params={max_output_tokens: 16384, temperature: 1.0}"
+
+   ng_reward_profile \
+       +materialized_inputs_jsonl_fpath=results/rollouts_materialized_inputs.jsonl \
+       +rollouts_jsonl_fpath=results/rollouts.jsonl
+   ```
+
+   Increase `+num_repeats` until variance is under 1% across runs on the same model.
+
+6. **Update bookmarks and saved links.** The IA refresh moves several URLs (see the table above). Old links redirect, but cleaner URLs save a hop.
+
+7. **Match your NeMo RL container.** If you train with NeMo RL, bump the container pin to whatever 0.3.0 lists in [RL Framework Compatibility](/latest/reference/compatibility/rl-frameworks). Container and library version must match.
+
+---
+
+### URL Redirects You Should Know About
+
+The 0.3 IA shifts navigation. These redirects are live in `fern/docs.yml`:
+
+| From | To |
+|---|---|
+| `/latest/getting-started` | `/latest/get-started/quickstart` |
+| `/latest/get-started/detailed-setup` | `/latest/get-started/installation` |
+| `/latest/get-started/rollout-collection` | `/latest/get-started/quickstart` |
+| `/latest/get-started/hello-world` | `/latest/get-started/create-first-environment` |
+| `/latest/about/why-nemo-gym` | `/latest/about/ecosystem` |
+
+Legacy Sphinx URLs (`*.html`, `index.html` suffixes) also redirect to their Fern equivalents. If a link breaks, file an [issue](https://github.com/NVIDIA-NeMo/Gym/issues) — `missing-redirects` is set to `error` in the docs CI, so missed redirects should not reach production.
+
+---
+
+### What's Coming After 0.3.0
+
+Forward-looking, no dates:
+
+- **Unified execution sandbox infrastructure** ([#1048](https://github.com/NVIDIA-NeMo/Gym/issues/1048)) — if it slips 0.3, it lands in 0.4.
+- **Additional model recipes** — more end-to-end training recipes paired with NeMo RL containers.
+- **NeMo Customizer integration** — supervised fine-tuning workflow alongside the RL surface.
+- **VeRL training framework support** — add VeRL to the supported training frameworks.
+- **TRL integration removal** — slated post-0.3.0; off-ramp now if you depend on TRL.
+
+The roadmap is tracked on the [Gym GitHub project board](https://github.com/orgs/NVIDIA-NeMo/projects). Priority and timing shift; nothing here is a commitment.
+
+---
+
+### Where to File an Issue
+
+Hit a breaking change not listed here? Stuck on a step in the upgrade checklist? Open an issue on the [Gym GitHub repo](https://github.com/NVIDIA-NeMo/Gym/issues) with:
+
+- The version you're upgrading from and to.
+- The exact CLI invocation that broke.
+- The full error output (or a `gist`/`pastebin` link if it's long).
+- Your `env.yaml` with secrets redacted.
+
+For sensitive reports (security, internal-only benchmark issues), email the maintainers per the [contribute](https://github.com/NVIDIA-NeMo/Gym/blob/main/CONTRIBUTING.md) page.
+
+---
+
+### Related Topics
+
+- [Release Notes](/latest/about/release-notes) — canonical changelog per release.
+- [Reward Semantics](/latest/about/concepts/reward-semantics) — error, timeout, and retry contracts.
+- [Validate Your Setup](/latest/evaluate/run/validate-your-setup) — smoke test before and after upgrade.
+- [Configuration](/latest/reference/configuration) — YAML field reference.
+- [RL Framework Compatibility](/latest/reference/compatibility/rl-frameworks) — container pin matrix.
+- [Architecture](/latest/about/concepts/architecture) — four-component model.

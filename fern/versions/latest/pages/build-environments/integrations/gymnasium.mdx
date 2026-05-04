@@ -1,0 +1,69 @@
+---
+title: "Gymnasium"
+description: "Drive any classic-RL gymnasium.Env reset/step loop with an LLM as the policy. Per-step rewards sum to the Gym total reward; the Gymnasium env replaces the verifier."
+content_type: how-to
+audience_level: intermediate
+journey_stage: build
+position: 7
+---
+import { VerifiedBadge } from "../../../../../components/VerifiedBadge";
+
+<VerifiedBadge verified={false} />
+
+Drive any classic-RL [`gymnasium.Env`](https://gymnasium.farama.org/) `reset()` / `step()` loop with an LLM as the policy.
+
+## What the wrapper does
+
+`GymnasiumAgent.run()` calls the resources server's `/reset`, then loops model `/v1/responses` → resources `/step`, accumulating `total_reward`, propagating env-side and model-side cookies separately, summing `usage`, and short-circuiting on `terminated` or `truncated` (`responses_api_agents/gymnasium_agent/app.py:75-170`). Tool outputs from `step_data.info["tool_outputs"]` are spliced back into the next prompt as `NeMoGymFunctionCallOutput` (`app.py:145-152`).
+
+## Terminology
+
+| gymnasium | NeMo Gym | Notes |
+|---|---|---|
+| `gym.Env.reset()` | resources server `/reset` returning `EnvResetResponse` | The observation becomes a user message. |
+| `gym.Env.step(action)` | resources server `/step` returning `EnvStepResponse` | The action is the model's `NeMoGymResponse`. |
+| `terminated` / `truncated` | exit conditions on the loop; surfaced in `GymnasiumRunResponse` | Same semantics as gymnasium. |
+| Reward (per-step scalar) | summed into `total_reward`; this becomes the Gym `reward` | No per-step verifier; the env's step reward is canonical. |
+| `info` dict | passed through; `info["tool_outputs"]` is consumed for tool-call replies | Convention this wrapper imposes on the env. |
+
+## Wiring
+
+Pair the agent with a `resources_servers/gymnasium`-derived server. Note that the starter `configs/gymnasium_agent.yaml` is bare (just `entrypoint: app.py`) — `resources_server`, `model_server`, and `max_steps` must be supplied via the resources-server config or overrides:
+
+```yaml
+my_blackjack_agent:
+  responses_api_agents:
+    gymnasium_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: blackjack
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      max_steps: 20
+```
+
+```bash
+ng_run "+config_paths=[\
+resources_servers/blackjack/configs/blackjack.yaml,\
+configs/my_blackjack_agent.yaml,\
+responses_api_models/openai_model/configs/openai_model.yaml]"
+```
+
+## Parity validation
+
+Run the same `gymnasium.Env` with a deterministic policy in pure Python; confirm step-by-step rewards and the terminal state match Gym's accumulated `total_reward`.
+
+## Caveats
+
+- **`usage` aggregation zeroes `cached_tokens` and `reasoning_tokens` each turn** (`app.py:127-128`). Known mismatch with reasoning models.
+- **`aggregate_metrics` proxies straight to the resources server** (`app.py:172-179`). The env must implement `/aggregate_metrics`.
+- **Starter config is incomplete.** `configs/gymnasium_agent.yaml:1-4` is missing required fields per `GymnasiumAgentConfig` (`app.py:37-40`). Copy a complete shape from another harness's config.
+
+## Related
+
+- [Wrap an external library](/latest/build-environments/integrations/external-libraries) — generic path.
+- [Stateful Environment](/latest/build-environments/supported-patterns/stateful) — the cookie propagation contract this harness depends on.
+- [Terminology Translation](/latest/build-environments/integrations/terminology-translation).
+- Source: [`responses_api_agents/gymnasium_agent/`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/gymnasium_agent).

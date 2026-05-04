@@ -1,0 +1,133 @@
+---
+title: "Reward Semantics"
+description: "Exactly what NeMo Gym does on verifier errors, timeouts, retries, multiple rollouts per task, pass@1 vs pass@k, and aggregation."
+content_type: explanation
+audience_level: intermediate
+journey_stage: build
+position: 6
+---
+
+Trust in evaluation scores depends on knowing exactly what those scores mean. This page documents NeMo Gym's contract: what reward values are valid, what happens on errors and timeouts, how retries are counted, and how pass@k is computed.
+
+The framework defines a small set of hard contracts. Most "what happens on X" decisions are delegated to the resources server author, with conventions the standard servers follow. Each section below labels which is which.
+
+## What the verifier returns
+
+Every resources server implements `verify()`. The framework requires the response to extend `BaseVerifyResponse`, which carries one mandatory field:
+
+```python
+class BaseVerifyResponse(BaseVerifyRequest):
+    reward: float
+```
+
+That `reward` is a single float. Subclasses can carry additional fields (per-test breakdowns, judge rationales, extracted answers, error strings) — the framework only enforces the `reward` contract.
+
+| Aspect | Contract |
+| --- | --- |
+| **Field name** | `reward: float` (hard contract). |
+| **Required range** | None enforced by the framework. |
+| **Convention for graded scoring** | `0.0` (failure) to `1.0` (success). Used by most NeMo Gym servers and assumed by metric helpers like `compute_pass_majority_metrics`. |
+| **Convention for game-style scoring** | `{-1.0, 0.0, 1.0}` for {loss, draw, win}. Used by `blackjack` and similar gymnasium-style environments. |
+| **Custom scales** | Allowed. Document per-environment expected ranges in the resources server's README. |
+
+For the broader story of what `verify()` is and how it produces a reward, refer to [Task verification](/latest/about/concepts/task-verification).
+
+## What happens on errors
+
+The framework exposes a small, documented surface; everything else is the resources server's responsibility. The table below is the contract, then each row gets a paragraph.
+
+| Failure mode | Framework behavior | Convention for environment authors |
+| --- | --- | --- |
+| **Verifier raises an exception** | Propagates as an HTTP 500 from `/verify`. The agent's `/run` call fails, and `ng_collect_rollouts` aborts the rollout. | Catch exceptions inside `verify()`; return `reward=0.0` and surface the error in a custom field. |
+| **Model output is unparseable** | Reaches `verify()` as-is. The framework does not pre-validate that the output matches an expected schema. | Treat unparseable output as a failed task. Return `reward=0.0` and record the parse failure on the response. |
+| **Model output has `<think>` blocks** | Passed through verbatim. Not stripped. | Strip reasoning blocks in your extractor before scoring. |
+| **Tool call has malformed arguments** | The agent (`simple_agent`) catches `JSONDecodeError`/`TypeError` and feeds the error back to the model as a `function_call_output`. The rollout continues. | No action needed if you use `simple_agent`. Custom agents should follow the same pattern. |
+| **Tool / sandbox failure** | Tool-endpoint HTTP errors are returned to the agent as the tool response (the `simple_agent` does not raise on tool errors). The model sees the failure and decides whether to recover. | Make tool errors observable to the model; don't crash the rollout. |
+| **Verifier timeout** | No framework-level timeout on `/verify`. The aiohttp client retries up to 3 times with a fixed 0.5 s sleep on transport-level failures; rate-limit codes retry independently. | Apply your own subprocess/sandbox timeouts inside `verify()`. On timeout, return `reward=0.0` (or the environment's "failure" value) with a `timeout` flag on the response. |
+| **Whole-rollout crash** (5xx that escapes the agent) | `ng_collect_rollouts` aborts. The rollout is not written to the output JSONL. | Avoid this. Errored rollouts that don't produce a row are missing from aggregates entirely — that's the failure mode the page on aggregation guards against. |
+
+<Note>
+The framework does not currently distinguish "errored rollout" from "low-reward rollout" once a row has been written. If your verifier swallows an exception and returns `reward=0.0`, that 0.0 is averaged into pass@1 the same as any other failure. To keep errors visible, ship a custom field on your `VerifyResponse` (e.g. `error: str | None`) and a `compute_metrics()` override that surfaces the error rate as a separate metric.
+</Note>
+
+## Retries and multiple rollouts per task
+
+`ng_collect_rollouts` accepts `+num_repeats=k`. The `num_repeats` value is the number of independent rollouts collected per task — same input, fresh sample.
+
+```bash
+ng_collect_rollouts \
+    +agent_name=blackjack_gymnasium_agent \
+    +input_jsonl_fpath=resources_servers/blackjack/data/example.jsonl \
+    +output_jsonl_fpath=results/blackjack_rollouts.jsonl \
+    +num_repeats=10
+```
+
+Contracts:
+
+- **Each repeat is independent.** No state from rollout `i` leaks to rollout `i+1`. Session cookies are scoped per rollout.
+- **One output line per (task, repeat).** If you have `N` tasks and `+num_repeats=k`, the output JSONL has `N*k` lines. Each line carries `task_index` and `rollout_index`.
+- **Optional per-rollout seed.** Set `+num_repeats_add_seed=true` to inject a unique `seed` into `responses_create_params.metadata.extra_body` per rollout. Honored by vLLM model servers; ignored by others.
+- **No automatic retry on failure.** If a rollout errors out, it's not retried. Re-run `ng_collect_rollouts` with `+resume_from_cache=true` to fill in missing rollouts without re-running the ones that succeeded.
+
+`ng_reward_profile` consumes the rollouts JSONL alongside the materialized inputs and groups by `task_index` to compute per-task statistics.
+
+## pass@1 vs pass@k
+
+Both are computed by `compute_pass_majority_metrics` and reported in agent-level aggregate metrics. The definitions are precise — competitor frameworks routinely conflate these, so keep them straight.
+
+| Metric | Definition | When to use |
+| --- | --- | --- |
+| **`pass@1[avg-of-k]`** | Mean reward across `k` rollouts, averaged across all tasks. The single-rollout success rate, with `k`-fold variance reduction. | Reporting expected per-rollout performance. This is the metric most papers call "pass@1" when they actually mean "average over k samples." |
+| **`pass@k`** (combinatorial) | Probability that at least one of `k` rollouts succeeds, computed via the unbiased combinatorial estimator from the Codex paper: `1 - C(n_incorrect, k) / C(n_total, k)`. Applied per task, then averaged across tasks. Defined for binary scores `{0, 1}`. | Reporting "best-of-k" performance with an unbiased estimator. The standard for code generation benchmarks. |
+| **`pass@k`** (continuous) | For non-binary rewards: `max` over the first `k` rollouts per task, averaged across tasks. | When rewards are graded (e.g. partial credit). The combinatorial form doesn't apply. |
+| **`majority@k`** | Majority-vote accuracy: take the most common extracted answer across `k` rollouts and score it. Requires the resources server to populate an `answer_key` field on each verify response. | Self-consistency scoring. |
+
+All values are reported as percentages (0–100) in the aggregate metrics output. The combinatorial form is what `compute_pass_majority_metrics` selects automatically when every reward in the task's rollouts is `0` or `1`.
+
+The function also reports variance: `pass@1[avg-of-k]/<name>/std_dev_across_runs` and `…/std_err_across_runs` quantify run-to-run variation, and `…/avg_sample_std_dev` quantifies within-task variance.
+
+## Aggregation rules
+
+`ng_collect_rollouts` automatically calls `/aggregate_metrics` on each agent server after rollouts finish. The default pipeline (in `compute_aggregate_metrics`):
+
+1. Reads every line from the rollouts JSONL.
+2. Groups results by `task_index` for per-task statistics, and by `agent_name` for dataset-level statistics.
+3. Reports mean, max, min, median, std for every numeric field on the verify response (not just `reward`).
+4. Merges in any custom metrics returned by the resources server's `compute_metrics()` override (pass@k, majority@k, confidence intervals, custom shapes).
+
+Hard contracts:
+
+- **Only rollouts that wrote a JSONL line are aggregated.** Rollouts that crashed mid-run before writing are missing from aggregates entirely. This is the failure mode that competitor frameworks have hit (Inspect AI #3707 "errors inflating accuracy"); the only way to avoid it is to make every `verify()` return a row.
+- **Every numeric field is aggregated.** If you put `parse_failed: 1` on your verify response, you get `mean/parse_failed` for free in the agent metrics. Use this to surface error rates alongside reward.
+- **Per-rollout `usage` is folded into the row.** Token counts, latency, and any usage fields are aggregated the same way as `reward`.
+
+Conventions for environment authors:
+
+- Return a row from `verify()` even on failure. Set `reward=0.0` (or the environment's "failure" value) and add a flag field describing the failure.
+- Override `get_key_metrics()` on your resources server to pick the headline metric for your benchmark. The default is "all `mean/*` entries."
+
+## What we don't do (yet)
+
+These are gaps to be aware of. Future versions may tighten the contract.
+
+- **No global timeout on `verify()`.** Long-running verifiers can hang a rollout indefinitely. Each environment is responsible for its own subprocess/sandbox timeouts.
+- **No automatic separation of errored from low-reward rollouts.** If your verifier returns `reward=0.0` on both genuine wrong answers and verifier errors, the two are indistinguishable in aggregate metrics unless you add a custom flag field.
+- **No determinism guarantee across runs.** Same task, same model, same seed: rewards may still differ if the environment uses non-deterministic tools (wall-clock-dependent sandboxes, network-backed search, judge models with temperature > 0).
+- **No automatic retry of errored rollouts.** Use `+resume_from_cache=true` to manually re-run missing rollouts.
+- **No cross-task confidence intervals by default.** Variance is reported per metric; bootstrap CIs are opt-in via a custom `compute_metrics()` override.
+
+## Worked example: blackjack rewards
+
+The [`blackjack`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/blackjack) environment in the [Quickstart](/latest/get-started/quickstart) uses a `{-1.0, 0.0, 1.0}` reward scale rather than the `{0.0, 1.0}` default:
+
+| Outcome | Reward |
+| --- | --- |
+| Win (player closer to 21, dealer busts, or dealer under 17 and lower) | `1.0` |
+| Draw (player and dealer tied) | `0.0` |
+| Loss (bust or dealer wins) | `-1.0` |
+
+With `+num_repeats=10`, GPT-4.1 lands around `-0.6` against a fixed dealer. That mean is the agent's value-per-hand: a perfectly average player with neither edge nor disadvantage would score `0.0`. Negative means the agent is losing more hands than it wins.
+
+For this scale, `pass@1[avg-of-10]` is reported in the units of the reward (with the percentage multiplier still applied) — interpret the absolute value alongside the convention rather than as "success rate." The combinatorial `pass@k` is not meaningful here because rewards aren't binary; the continuous form (`max` over `k` rollouts per task) is what you'll see.
+
+Raise `+num_repeats` until variance is below 1% across runs on the same model — the threshold the standard servers target for stable baselines.

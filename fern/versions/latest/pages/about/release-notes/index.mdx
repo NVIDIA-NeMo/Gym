@@ -1,0 +1,70 @@
+---
+title: "Release Notes"
+description: "What's new, what's fixed, and what's deprecated in each NeMo Gym release."
+content_type: reference
+audience_level: intermediate
+journey_stage: discover
+position: 5
+---
+
+# Release Notes
+
+This page summarizes user-facing changes for each NeMo Gym release. The canonical artifacts — wheels, source archives, and full commit-by-commit changelogs — live on the [NeMo Gym GitHub releases page](https://github.com/NVIDIA-NeMo/Gym/releases).
+
+## Versioning
+
+NeMo Gym is early-development software. Versions are tagged on GitHub as `v<MAJOR>.<MINOR>.<PATCH>`. Minor releases may include breaking API changes; patch releases are bug-fix only. The docs site keeps a separate version tree per minor release — switch versions with the picker in the header.
+
+## 0.3.0 — Upcoming
+
+*Release notes will be finalized at GA.*
+
+The items below are roadmap candidates, not committed deliverables. Scope and timing may shift before the tag lands.
+
+### Planned
+
+- **Documentation IA refresh.** New Why-NeMo-Gym page, four-component architecture model, dedicated Evaluate Models section, symptom-organized Troubleshooting, model and provider compatibility matrix, sandbox and execution matrix.
+- **Unified execution sandbox infrastructure.** Tracked in [#1048](https://github.com/NVIDIA-NeMo/Gym/issues/1048). Gated — may slip.
+- **Bounded retry and opt-in concurrency cap on `NeMoGymAsyncOpenAI`.** Tracked in [#1208](https://github.com/NVIDIA-NeMo/Gym/issues/1208).
+- **vLLM context-length error documentation.** Tracked in [#1206](https://github.com/NVIDIA-NeMo/Gym/issues/1206).
+- **New benchmark coverage.** Stirrup agent and GDPVal eval/RL environment ([#1090](https://github.com/NVIDIA-NeMo/Gym/pull/1090)).
+
+## 0.2.1 — April 15, 2026
+
+Patch release. PyPI packaging fixes and concurrent-request reliability improvements on top of 0.2.0. For the full commit-by-commit changelog, see the [v0.2.1 GitHub release](https://github.com/NVIDIA-NeMo/Gym/releases/tag/v0.2.1).
+
+### Added
+
+- New benchmarks: tau2 ([#1049](https://github.com/NVIDIA-NeMo/Gym/pull/1049)), tau2 in Nemotron 3 Ultra benchmarks ([#1052](https://github.com/NVIDIA-NeMo/Gym/pull/1052)), ifbench ([#999](https://github.com/NVIDIA-NeMo/Gym/pull/999)).
+- CVDP benchmark resources server using apptainer instead of docker ([#928](https://github.com/NVIDIA-NeMo/Gym/pull/928)).
+- NVARC resources server with inductive and transductive modes ([#1003](https://github.com/NVIDIA-NeMo/Gym/pull/1003)).
+- E2E wheel installation test in CI; pre-release testing support via env vars; wheel test promoted to mandatory ([#1018](https://github.com/NVIDIA-NeMo/Gym/pull/1018), [#1065](https://github.com/NVIDIA-NeMo/Gym/pull/1065)).
+
+### Changed
+
+- Additional metrics emitted by Tau2 ([#1064](https://github.com/NVIDIA-NeMo/Gym/pull/1064)).
+- Sequential reasoning path corrected ([#1053](https://github.com/NVIDIA-NeMo/Gym/pull/1053)).
+
+### Fixed
+
+- aiohttp connection limit under FastAPI/Uvicorn workers > 1 ([#1054](https://github.com/NVIDIA-NeMo/Gym/pull/1054)).
+- GenRM lock to correctly serialize concurrent requests ([#1041](https://github.com/NVIDIA-NeMo/Gym/pull/1041)).
+- PyPI packaging metadata ([#1056](https://github.com/NVIDIA-NeMo/Gym/pull/1056), [#1081](https://github.com/NVIDIA-NeMo/Gym/pull/1081)).
+- Release workflow ([#1084](https://github.com/NVIDIA-NeMo/Gym/pull/1084)).
+
+## 0.2.0
+
+First broadly published release on PyPI. Established the three-server architecture (resources, model, agent), the agent SDK surface, and the initial benchmark catalog. For the full release notes, see the [v0.2.0 GitHub release](https://github.com/NVIDIA-NeMo/Gym/releases/tag/v0.2.0).
+
+The 0.2 train has its own docs version — switch to **0.2** in the version picker for documentation pinned to that release.
+
+## Older Releases
+
+For releases prior to 0.2.0, see [GitHub releases](https://github.com/NVIDIA-NeMo/Gym/releases).
+
+## Related Topics
+
+- [Overview](/latest/about)
+- [Ecosystem](/latest/about/ecosystem)
+- [GitHub releases](https://github.com/NVIDIA-NeMo/Gym/releases)
+- [GitHub issues](https://github.com/NVIDIA-NeMo/Gym/issues)

@@ -1,0 +1,133 @@
+---
+title: "Servers"
+description: "CLI reference for server lifecycle: ng_run, ng_test, ng_test_all, ng_dev_test, ng_init_resources_server, ng_status."
+content_type: reference
+audience_level: beginner
+journey_stage: try
+position: 2
+---
+
+Commands for running, testing, and inspecting NeMo Gym servers.
+
+## `ng_run`
+
+Start NeMo Gym servers for agents, models, and resources.
+
+This command reads configuration from YAML files specified via `+config_paths` and starts all configured servers. The configuration files should define server instances with their entrypoints and settings.
+
+**Configuration Parameter**
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `config_paths` | List[str] | Paths to YAML configuration files. Specify using Hydra: `+config_paths="[file1.yaml,file2.yaml]"` |
+
+**Example**
+
+```bash
+config_paths="resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml,\
+responses_api_models/openai_model/configs/openai_model.yaml"
+ng_run "+config_paths=[${config_paths}]"
+```
+
+---
+
+## `ng_test`
+
+Test a specific server module by running its pytest suite and optionally validating example data.
+
+**Parameters**
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `entrypoint` | str | Entrypoint for this command. Must be a relative path with two parts (such as `responses_api_agents/simple_agent`). |
+| `should_validate_data` | bool | Whether to validate the example data (examples, metrics, rollouts, and so on) for this server. Default: `False`. |
+
+**Example**
+
+```bash
+ng_test +entrypoint=resources_servers/example_single_tool_call
+```
+
+---
+
+## `ng_test_all`
+
+Run tests for all server modules in the project.
+
+**Parameters**
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `fail_on_total_and_test_mismatch` | bool | Fail if the number of server modules does not match the number with tests. Default: `False`. |
+| `delete_venvs_after_each_test` | bool | Remove each per-server venv after its tests run. Useful in CI to reclaim disk. Default: `False`. |
+
+**Example**
+
+```bash
+ng_test_all
+```
+
+---
+
+## `ng_dev_test`
+
+Run core NeMo Gym tests with coverage reporting. Runs pytest with the `--cov` flag.
+
+**Example**
+
+```bash
+ng_dev_test
+```
+
+---
+
+## `ng_init_resources_server`
+
+Initialize a new resources server with template files and directory structure.
+
+**Example**
+
+```bash
+ng_init_resources_server +entrypoint=resources_servers/my_server
+```
+
+---
+
+## `ng_status`
+
+View all currently running NeMo Gym servers and their health status.
+
+**Example**
+
+```bash
+ng_status
+
+NeMo Gym Server Status:
+
+[1] ✓ example_single_tool_call (resources_servers/example_single_tool_call)
+{
+    'server_type': 'resources_servers',
+    'name': 'example_single_tool_call',
+    'port': 58117,
+    'pid': 89904,
+    'uptime_seconds': '0d 0h 0m 41.5s',
+}
+[2] ✓ example_single_tool_call_simple_agent (responses_api_agents/simple_agent)
+{
+    'server_type': 'responses_api_agents',
+    'name': 'simple_agent',
+    'port': 58118,
+    'pid': 89905,
+    'uptime_seconds': '0d 0h 0m 41.5s',
+}
+[3] ✓ policy_model (responses_api_models/openai_model)
+{
+    'server_type': 'responses_api_models',
+    'name': 'openai_model',
+    'port': 58119,
+    'pid': 89907,
+    'uptime_seconds': '0d 0h 0m 41.5s',
+}
+
+3 servers found (3 healthy, 0 unhealthy)
+```

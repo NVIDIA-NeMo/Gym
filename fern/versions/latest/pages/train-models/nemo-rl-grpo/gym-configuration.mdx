@@ -1,0 +1,77 @@
+---
+title: "Gym Configuration"
+description: "Configure the NeMo Gym section of the NeMo RL training config, including data paths, environment interaction, and validation parameters."
+content_type: how-to
+audience_level: intermediate
+journey_stage: scale
+---
+import { NavButton } from "../../../../../components/NavButton";
+
+NeMo RL reads two Gym-specific blocks — `data` and `env` — from the training config. The `data` block points at the prepared JSONL files; the `env` block enables Gym, lists the Gym `config_paths` to compose, and caps the rollout step count.
+
+<NavButton href="/latest/train-models/nemo-rl-grpo/about-workplace-assistant" label="Previous: About Workplace Assistant" direction="prev" />
+
+## Prerequisites
+
+- Read [About Workplace Assistant](/latest/train-models/nemo-rl-grpo/about-workplace-assistant) for the environment, tools, and reward.
+
+---
+
+## Configuration File Location
+
+The training config file lives at:
+
+```
+examples/nemo_gym/grpo_workplace_assistant_nemotron_nano_v2_9b.yaml
+```
+
+---
+
+## Gym Configuration Sections
+
+The Gym integration uses two sections: `data` and `env`.
+
+### Data Section
+
+```yaml
+data:
+  train_jsonl_fpath: 3rdparty/Gym-workspace/Gym/data/workplace_assistant/train.jsonl
+  validation_jsonl_fpath: 3rdparty/Gym-workspace/Gym/data/workplace_assistant/validation.jsonl
+```
+
+| Parameter | Description |
+|-----------|-------------|
+| `train_jsonl_fpath` | Path to the training JSONL produced in [Setup](/latest/train-models/nemo-rl-grpo/setup). |
+| `validation_jsonl_fpath` | Path to the validation JSONL. |
+
+### Environment Section
+
+```yaml
+env:
+  should_use_nemo_gym: true
+  nemo_gym:
+    config_paths:
+    - responses_api_models/vllm_model/configs/vllm_model_for_training.yaml
+    - resources_servers/workplace_assistant/configs/workplace_assistant.yaml
+    workplace_assistant_simple_agent:
+      responses_api_agents:
+        simple_agent:
+          max_steps: 6
+```
+
+| Parameter | Description |
+|-----------|-------------|
+| `should_use_nemo_gym` | Set to `true` to enable Gym. |
+| `nemo_gym` | Everything under this key is a Gym config. |
+| `nemo_gym.config_paths` | Gym configs to compose: the vLLM model config and the Workplace Assistant agent/resources config. |
+| `max_steps` | Maximum tool calls per task (6 for Workplace Assistant). |
+
+The `vllm_model_for_training.yaml` config is required for the NeMo RL integration — it tells Gym to talk to the in-process vLLM server NeMo RL spins up rather than to an external endpoint.
+
+---
+
+## Next Steps
+
+With Gym wired in, set the GRPO and optimizer hyperparameters:
+
+<NavButton href="/latest/train-models/nemo-rl-grpo/nemo-rl-configuration" label="Continue to NeMo RL Configuration" direction="next" />

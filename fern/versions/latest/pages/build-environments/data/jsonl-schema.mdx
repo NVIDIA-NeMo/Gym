@@ -1,0 +1,132 @@
+---
+title: "JSONL Schema"
+description: "Reference for the NeMo Gym JSONL row schema, the verifier_metadata pass-through dict, the dataset config object, and the license enum."
+content_type: reference
+audience_level: intermediate
+journey_stage: build
+position: 2
+---
+
+The canonical schema for everything a NeMo Gym dataset carries: per-row JSONL shape, the `verifier_metadata` pass-through, the `DatasetConfig` YAML object, and the constrained `license` enum. Authors building new environments should bookmark this page; it's the single source of truth that the per-environment READMEs cross-link.
+
+## Per-row JSONL shape
+
+Each line of a NeMo Gym dataset is a JSON object. One key is required:
+
+```json
+{"responses_create_params": {"input": [{"role": "user", "content": "What is 2+2?"}]}}
+```
+
+`responses_create_params` follows the [OpenAI Responses API schema](https://platform.openai.com/docs/api-reference/responses/create) — it's the request payload the agent sends to the model server.
+
+### `responses_create_params` properties
+
+| Property | Type | Description |
+|---|---|---|
+| `input` | string or list of messages | **Required.** User query, message list, or full conversation. |
+| `tools` | list | Tool definitions for function calling. |
+| `parallel_tool_calls` | bool | Allow parallel tool calls. Default: `true`. |
+| `temperature` | float | Sampling temperature. |
+| `max_output_tokens` | int | Maximum response tokens. |
+
+### Message roles
+
+| Role | Use |
+|---|---|
+| `user` | User queries. |
+| `assistant` | Prior model responses (multi-turn input). |
+| `developer` | System instructions. The newer OpenAI role for system-style prompts. |
+| `system` | System instructions. Both `developer` and `system` are accepted; `system` remains in heavy use across shipped configs. |
+
+## `verifier_metadata` — the per-row pass-through
+
+`verifier_metadata` is the canonical convention for task-specific scoring data. It's a row-level dict that the framework treats as opaque — it flows from the JSONL row through the agent into the resources server's `verify()`, which interprets it however the environment needs. Define whatever fields your verifier requires.
+
+```json
+{
+  "responses_create_params": {
+    "input": [{"role": "user", "content": "What is 15 * 7? Put your answer in \\boxed{}."}]
+  },
+  "verifier_metadata": {
+    "expected_answer": "105"
+  }
+}
+```
+
+Some shipped environments use top-level keys instead of nesting under `verifier_metadata` (the schema doesn't enforce one shape). Check `resources_servers/<name>/README.md` and `data/example.jsonl` for the exact convention each environment expects.
+
+## `DatasetConfig` — the YAML object
+
+Every agent server config lists its datasets under `datasets:`. The Pydantic source of truth is `nemo_gym.config_types.DatasetConfig`.
+
+```yaml
+datasets:
+  - name: train
+    type: train
+    license: Apache 2.0
+    jsonl_fpath: resources_servers/example_multi_step/data/train.jsonl
+    num_repeats: 1
+    gitlab_identifier:
+      dataset_name: example_multi_step
+      version: 0.0.1
+      artifact_fpath: example_multi_step/train.jsonl
+    huggingface_identifier:
+      repo_id: nvidia/Nemotron-RL-instruction_following
+      artifact_fpath: instruction_following.jsonl
+  - name: validation
+    type: validation
+    license: Apache 2.0
+    jsonl_fpath: resources_servers/example_multi_step/data/validation.jsonl
+  - name: example
+    type: example
+    jsonl_fpath: resources_servers/example_multi_step/data/example.jsonl
+```
+
+### Field reference
+
+| Field | Required for | Description |
+|---|---|---|
+| `name` | All | Identifier you choose. |
+| `type` | All | `example`, `train`, or `validation`. |
+| `jsonl_fpath` | All | Local path. For `train`/`validation`, also the download destination when a remote identifier is set. |
+| `license` | `train`, `validation` | Constrained `Literal` enum (see below). The `check_train_validation_sets` validator (`nemo_gym/config_types.py:382-384`) rejects `train`/`validation` without a license. Not required for `example`. |
+| `num_repeats` | No | Repeat each row N times during preparation, in pattern `aaaabbbbcccc`. Default `1`; minimum `1`. |
+| `gitlab_identifier` | To enable `+data_source=gitlab` auto-download | `{dataset_name, version, artifact_fpath}`. All three required. |
+| `huggingface_identifier` | To enable `+data_source=huggingface` auto-download | `{repo_id, artifact_fpath?}`. `repo_id` required. When `artifact_fpath` is omitted, the `datasets` library infers the split from `type`. |
+
+### Allowed `license` values
+
+The `license` field is a constrained `Literal` enum. Free-form strings fail validation:
+
+- `Apache 2.0`
+- `MIT`
+- `Creative Commons Attribution 4.0 International`
+- `Creative Commons Attribution-ShareAlike 4.0 International`
+- `NVIDIA Internal Use Only, Do Not Distribute`
+- `TBD`
+- `GNU General Public License v3.0`
+
+## Dataset types
+
+| Type | Purpose | Required for |
+|---|---|---|
+| `example` | 5 entries committed to git for fast format checks. Conventionally drawn from `train`, but only the count of 5 is enforced (`nemo_gym/cli.py:491`). | PR submission. |
+| `train` | Training data hosted in the GitLab dataset registry or on Hugging Face. | RL training. |
+| `validation` | Evaluation slice during training. | RL training. |
+
+A separate `BenchmarkDatasetConfig` (`nemo_gym/config_types.py:389-395`) covers the `benchmark` type — used by the curated eval suites under `benchmarks/`. It carries `prepare_script` and `prompt_config` instead of remote identifiers.
+
+Every shipped resources server requires at least one agent config with one `example` dataset. Reviewers and other contributors use it to understand the row shape without downloading the full set.
+
+## Where datasets live
+
+- **GitLab dataset registry** — NVIDIA-internal `train`/`validation` data. Pinned by `gitlab_identifier.{dataset_name, version, artifact_fpath}`. See [Prepare Training Data](/latest/build-environments/data/prepare-train-data) for upload/download.
+- **Hugging Face Hub** — public `train`/`validation` data. Pinned by `huggingface_identifier.repo_id`. See [Download from Hugging Face](/latest/build-environments/data/download-huggingface).
+- **Git** — `data/example.jsonl` only. The 5 example rows are committed; train/validation files are gitignored under each environment's `data/.gitignore`.
+
+## Related
+
+- [Validate Example Data](/latest/build-environments/data/validate-example-data) — PR-submission flow using this schema.
+- [Prepare Training Data](/latest/build-environments/data/prepare-train-data) — train/validation flow with auto-download and custom preprocessing.
+- [Versioning and Provenance](/latest/about/concepts/versioning-provenance) — what's pinned vs. floats across runs.
+- Source of truth: [`nemo_gym/config_types.py`](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/config_types.py).

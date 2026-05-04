@@ -1,7 +1,10 @@
 ---
 title: "Configuration"
 description: "Set up env.yaml with model credentials before running NeMo Gym."
-position: 3
+content_type: how-to
+audience_level: beginner
+journey_stage: try
+position: 4
 ---
 
 NeMo Gym reads model credentials from a top-level `env.yaml` file in the project root. This keeps secrets out of YAML configs and out of version control (`env.yaml` is gitignored).
@@ -36,7 +39,7 @@ Create `env.yaml` in the project root with three required fields:
 | --- | --- |
 | `policy_base_url` | OpenAI-compatible endpoint URL |
 | `policy_api_key` | Your API key for that endpoint |
-| `policy_model_name` | The [policy model](/latest/about/concepts/key-terminology#architecture-terms) to call (the LLM being evaluated or trained) |
+| `policy_model_name` | The [policy model](/latest/resources/glossary#policy-model) to call (the LLM being evaluated or trained) |
 
 ```bash
 cat > env.yaml << 'EOF'
@@ -48,7 +51,7 @@ EOF
 
 Replace the placeholder API key with your real key.
 
-**✅ Success Check**: `git status env.yaml` returns no output (the file is gitignored).
+`git status env.yaml` should return no output — the file is gitignored.
 
 <Tip>
 **Why `gpt-4.1-2025-04-14` for the Quickstart?** Low latency (no reasoning step) and reliable function-calling support, so the Quickstart runs in seconds without configuration surprises. Swap in any model later.
@@ -74,7 +77,7 @@ If you already train with one of these frameworks, here is how `env.yaml` maps t
 | --- | --- | --- |
 | **NeMo RL** | `policy_base_url` points at your generation backend; `policy_model_name` matches the served model name in your NeMo RL config | NeMo Gym calls the same OpenAI-compatible endpoint your training loop uses for rollout generation |
 | **veRL** | `policy_base_url` is the inference server you serve from (vLLM, SGLang, etc.); `policy_model_name` is the served alias | Wire NeMo Gym to the same inference endpoint your training loop uses; keys/secrets stay in `env.yaml`, never in environment configs |
-| **Unsloth** | `policy_base_url: http://localhost:8000/v1` (vLLM served by Unsloth); `policy_model_name` matches the LoRA adapter name | Refer to the [Unsloth tutorial](/latest/training-tutorials/unsloth) for end-to-end wiring |
+| **Unsloth** | `policy_base_url: http://localhost:8000/v1` (vLLM served by Unsloth); `policy_model_name` matches the LoRA adapter name | Refer to the [Unsloth tutorial](/latest/train-models/unsloth) for end-to-end wiring |
 
 The same `env.yaml` is read by every NeMo Gym CLI — `ng_run`, `ng_collect_rollouts`, `ng_reward_profile`, and the others. You configure once.
 

@@ -1,0 +1,605 @@
+---
+title: "Single-Step"
+description: "Build a weather assistant environment end-to-end with tool calling, verification, unit tests, and rollout collection in about 30 minutes."
+content_type: tutorial
+audience_level: intermediate
+journey_stage: build
+position: 2
+---
+import { NavButton } from "../../../../../components/NavButton";
+
+Build a weather assistant environment with tool calling and verification in about 30 minutes. The OpenAI API usage for the worked example is small — well under a dollar at recent pricing for GPT-4.1-mini, but check the OpenAI pricing page for current rates. The same flow scales to any benchmark — only the tool definitions, verification logic, and dataset change.
+
+The walkthrough covers scaffolding a resources server (the verifier) and its paired agent configuration, preparing JSONL task data, implementing a tool endpoint and `verify()` reward function, writing unit tests, and collecting rollouts end-to-end.
+
+<NavButton href="/latest/build-environments" label="Back to Build Environments" direction="back" />
+
+---
+
+## Prerequisites
+
+Complete **[Get Started](/latest/get-started)** first. Run every command in this tutorial from the repository root (the directory containing `pyproject.toml`).
+
+---
+
+## How It Works
+
+NeMo Gym splits each rollout across three async FastAPI services: the agent server (the agent harness) orchestrates the loop, the model server runs inference, and the resources server (the verifier) provides tools and reward computation. The HTTP boundary lets many rollouts run concurrently across episodes. For the full architecture and diagram, see [core-components](/latest/about/concepts/core-components).
+
+Most environment work lands in the resources server: tool endpoints plus a `verify()` method that returns a reward. NeMo Gym ships pre-built agent servers (`simple_agent`, `swe_agents`, ...) and model servers (`openai_model`, `vllm_model`) you can use as-is, or extend.
+
+---
+
+## 1. Scaffolding
+
+Resources servers live in the `resources_servers/` directory. Scaffold a weather server that provides weather information to models:
+
+```bash
+ng_init_resources_server +entrypoint=resources_servers/my_weather_tool
+```
+
+The command generates this structure plus a paired `simple_agent` configuration:
+
+```text
+resources_servers/my_weather_tool/
++-- app.py                      # Main server implementation
++-- configs/
+|   +-- my_weather_tool.yaml    # Configuration files
++-- data/
+|   +-- .gitignore              # Data directory for examples/datasets
++-- tests/
+|   +-- test_app.py             # Unit tests
++-- requirements.txt            # Python dependencies
++-- README.md                   # Documentation
+```
+
+---
+
+## 2. Task Preparation
+
+Task data drives the environment — each scenario your model practices on. Store it in JSONL format (one JSON object per line, one training example per line). Domain experts typically hand-craft the first few examples, then scale up via more data collection or synthetic generation with libraries like [NeMo Data Designer](https://github.com/NVIDIA-NeMo/Data-Designer).
+
+### JSONL Format
+
+Each line contains a `responses_create_params` object with the conversation messages, tool definitions, and any ground-truth metadata needed for verification:
+
+```json
+{
+  "responses_create_params": {
+    "input": [
+      {"role": "system", "content": "You are a helpful weather assistant."},
+      {"role": "user", "content": "What's the weather in San Francisco?"}
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "name": "get_weather",
+        "description": "Get weather for a city.",
+        "parameters": {
+          "type": "object",
+          "properties": {"city": {"type": "string", "description": "City name"}},
+          "required": ["city"],
+          "additionalProperties": false
+        },
+        "strict": true
+      }
+    ],
+    "parallel_tool_calls": false
+  }
+}
+```
+
+| Field | Description |
+|---|---|
+| `responses_create_params` | OpenAI Responses API-compatible input |
+| `responses_create_params.input` | Conversation messages (system, user, assistant) |
+| `responses_create_params.tools` | Available tools/functions for the agent |
+| `responses_create_params.parallel_tool_calls` | Whether the model may call multiple tools simultaneously. Set to `false` to force sequential tool calls — useful when tool outputs depend on each other. |
+
+### Create Data
+
+Create `resources_servers/my_weather_tool/data/example.jsonl` with five weather examples:
+
+```json
+{"responses_create_params": {"input": [{"role": "user", "content": "What's the weather in San Francisco?"}], "tools": [{"type": "function", "name": "get_weather", "description": "Get weather for a city.", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"], "additionalProperties": false}, "strict": true}]}}
+{"responses_create_params": {"input": [{"role": "user", "content": "Tell me the weather in New York"}], "tools": [{"type": "function", "name": "get_weather", "description": "Get weather for a city.", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"], "additionalProperties": false}, "strict": true}]}}
+{"responses_create_params": {"input": [{"role": "user", "content": "How's the weather in Seattle?"}], "tools": [{"type": "function", "name": "get_weather", "description": "Get weather for a city.", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"], "additionalProperties": false}, "strict": true}]}}
+{"responses_create_params": {"input": [{"role": "user", "content": "What is the current weather in Boston?"}], "tools": [{"type": "function", "name": "get_weather", "description": "Get weather for a city.", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"], "additionalProperties": false}, "strict": true}]}}
+{"responses_create_params": {"input": [{"role": "user", "content": "Can you check the weather in Chicago?"}], "tools": [{"type": "function", "name": "get_weather", "description": "Get weather for a city.", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"], "additionalProperties": false}, "strict": true}]}}
+```
+
+---
+
+## 3. Environment Design
+
+The environment splits across three pieces: an agent server (use the built-in one), a resources server (where you write code), and tool and verification logic.
+
+### 3.1 Agent Server
+
+The single-step environment runs on the built-in `simple_agent` (the agent harness), which already handles multi-step tool calling — no custom agent code needed. Pseudocode for the core flow ([actual implementation](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/simple_agent)):
+
+```python
+# run() — episode lifecycle
+async def run(self, request, body):
+    await resources_server.seed_session(body)      # initialize env state
+    response = await self.responses(body)           # multi-step agent loop
+    return await resources_server.verify(response)  # compute reward
+
+# responses() — multi-step tool loop
+async def responses(self, body):
+    while True:
+        model_response = await model_server.responses(conversation)
+        tool_calls = [o for o in model_response.output if o.type == "function_call"]
+
+        if not tool_calls:  # model produced a final text response
+            break
+
+        for call in tool_calls:
+            result = await resources_server.post(f"/{call.name}", call.arguments)
+            conversation.append(result)
+
+    return model_response
+```
+
+For other orchestration patterns (multi-turn correction, custom flow), browse [`responses_api_agents/`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents) or build your own by extending `SimpleResponsesAPIAgent`.
+
+### 3.2 Resources Server
+
+The resources server (the verifier) holds everything unique about your environment — tool implementations, verification logic, and per-episode session state. Define tools here rather than in the agent so multiple agents can share the same tool logic.
+
+Open `resources_servers/my_weather_tool/app.py` and implement:
+
+```python
+from fastapi import FastAPI
+from pydantic import BaseModel
+
+from nemo_gym.base_resources_server import (
+    BaseResourcesServerConfig,
+    BaseVerifyRequest,
+    BaseVerifyResponse,
+    SimpleResourcesServer,
+)
+
+# 1. Define the server configuration
+class MyWeatherToolResourcesServerConfig(BaseResourcesServerConfig):
+    """Configuration for the weather resource server."""
+
+    pass
+
+# 2. Define request and response schemas for your tools
+class GetWeatherRequest(BaseModel):
+    """Request schema for getting weather information."""
+
+    city: str
+
+class GetWeatherResponse(BaseModel):
+    """Response schema for weather information."""
+
+    city: str
+    weather_description: str
+
+# 3. Implement the resource server
+class MyWeatherToolResourcesServer(SimpleResourcesServer):
+    config: MyWeatherToolResourcesServerConfig
+
+    def setup_webserver(self) -> FastAPI:
+        """Register API routes."""
+        app = super().setup_webserver()
+
+        # Register your tool endpoints
+        app.post("/get_weather")(self.get_weather)
+
+        return app
+
+    async def get_weather(self, body: GetWeatherRequest) -> GetWeatherResponse:
+        """
+        Tool implementation: Get weather for a city.
+
+        In a production implementation, this would call a weather API.
+        For this example, we return a simple static response.
+        """
+        return GetWeatherResponse(city=body.city, weather_description=f"The weather in {body.city} is cold.")
+
+    async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
+        """Evaluate rollout and return a reward. See Verification Logic below."""
+        ...
+
+if __name__ == "__main__":
+    MyWeatherToolResourcesServer.run_webserver()
+```
+
+#### Key Components
+
+| Component | Purpose |
+|---|---|
+| **Configuration Class** | Extends `BaseResourcesServerConfig`; holds server-specific settings |
+| **Request/Response Schemas** | Pydantic models defining the API contract |
+| **`setup_webserver()`** | Registers FastAPI routes for your tools |
+| **Tool Methods** | Async functions implementing tool logic |
+| **`verify()`** | **Required** — evaluates task performance and returns a reward |
+
+### 3.3 Verification Logic
+
+`verify()` produces the reward signal that drives RL training. Here it returns `1.0` if the model called `get_weather`, `0.0` otherwise — real environments add more sophistication, but the principle stays the same: inspect the model's output and score it.
+
+```python
+async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
+    # Check if the model called the get_weather tool
+    used_tool = False
+    for output in body.response.output:
+        if output.type == "function_call" and output.name == "get_weather":
+            used_tool = True
+            break
+
+    # Reward 1.0 if the model called the tool, 0.0 otherwise
+    reward = 1.0 if used_tool else 0.0
+    return BaseVerifyResponse(**body.model_dump(), reward=reward)
+```
+
+This example checks tool *usage*, not argument correctness. For the full verification patterns and best practices, see [task-verification](/latest/about/concepts/task-verification); for quick examples, see [Advanced: Verification Patterns](#advanced-verification-patterns) at the end of this tutorial.
+
+#### Configure - Wiring the pieces together
+
+Open `resources_servers/my_weather_tool/configs/my_weather_tool.yaml`. The file holds both the resources server and its paired `simple_agent` configuration.
+
+Update the `domain` field from `other` to `agent`:
+
+```yaml
+my_weather_tool_resources_server:
+  resources_servers:
+    my_weather_tool:
+      entrypoint: app.py
+      domain: agent  # Change from 'other' to match your use case
+      verified: false
+      description: Single-step weather tool calling
+my_weather_tool_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: my_weather_tool_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/my_weather_tool/data/example.jsonl
+      # The scaffold also generates train/validation dataset entries
+      # with gitlab_identifier blocks. Those are omitted here since
+      # we only have example data at this stage.
+```
+
+The `domain` field is **required** and categorizes the resources server. Common values: `math`, `coding`, `agent`, `knowledge`, `instruction_following`, `long_context`, `safety`, `games`, `e2e`, `other`. Domain drives metrics grouping and dataset naming — pick the category that best describes the task.
+
+The agent entry references the resources server and model server by name, wiring all three components together.
+
+---
+
+## 4. Add Dependencies (Optional)
+
+For external packages, add them to `requirements.txt`:
+
+```text
+-e nemo-gym[dev] @ ../../
+# Add any other dependencies here
+```
+
+---
+
+## 5. Write Tests
+
+Update `resources_servers/my_weather_tool/tests/test_app.py` to cover the tool and verify methods:
+
+```python
+import pytest
+from unittest.mock import MagicMock
+from nemo_gym.server_utils import ServerClient
+from resources_servers.my_weather_tool.app import (
+    MyWeatherToolResourcesServer,
+    MyWeatherToolResourcesServerConfig,
+    GetWeatherRequest,
+)
+
+@pytest.fixture
+def server():
+    """Create a server instance for testing."""
+    config = MyWeatherToolResourcesServerConfig(
+        host="0.0.0.0",
+        port=8080,
+        entrypoint="",
+        name="my_weather_tool",
+    )
+    return MyWeatherToolResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+@pytest.mark.asyncio
+async def test_get_weather(server):
+    """Test the get_weather tool."""
+    request = GetWeatherRequest(city="San Francisco")
+    response = await server.get_weather(request)
+
+    assert response.city == "San Francisco"
+    assert "cold" in response.weather_description.lower()
+
+def make_verify_request(output):
+    """Helper to build a BaseVerifyRequest with the given model output."""
+    from nemo_gym.base_resources_server import BaseVerifyRequest
+    from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+
+    return BaseVerifyRequest(
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+            input=[{"role": "user", "content": "What's the weather?"}]
+        ),
+        response=NeMoGymResponse(
+            id="", object="response", created_at=0.0, model="",
+            output=output, tool_choice="auto", tools=[], parallel_tool_calls=False,
+        ),
+    )
+
+@pytest.mark.asyncio
+async def test_verify_with_tool_call(server):
+    """Reward 1.0 when the model called the tool."""
+    request = make_verify_request([
+        {"type": "function_call", "id": "c1", "call_id": "c1",
+         "name": "get_weather", "arguments": '{"city": "San Francisco"}'},
+    ])
+    response = await server.verify(request)
+    assert response.reward == 1.0
+
+@pytest.mark.asyncio
+async def test_verify_without_tool_call(server):
+    """Reward 0.0 when the model answered without using the tool."""
+    request = make_verify_request([
+        {"role": "assistant", "id": "",
+         "content": [{"type": "output_text", "annotations": [], "text": "It's cold."}]},
+    ])
+    response = await server.verify(request)
+    assert response.reward == 0.0
+```
+
+Run the tests:
+
+```bash
+ng_test +entrypoint=resources_servers/my_weather_tool
+```
+
+For detailed test output:
+
+```bash
+cd resources_servers/my_weather_tool
+source .venv/bin/activate
+pytest -v
+```
+
+---
+
+## 6. Run & Validate
+
+### Run the Servers
+
+Start all three servers:
+
+```bash
+config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
+resources_servers/my_weather_tool/configs/my_weather_tool.yaml"
+
+ng_run "+config_paths=[$config_paths]"
+```
+
+`ng_run` reads the configs and starts all three components:
+
+1. Agent server (`my_weather_tool_simple_agent`) — the `simple_agent` that orchestrates the seed → model → tool → verify loop
+2. Model server (`openai_model`) — proxies LLM inference requests to the OpenAI API
+3. Resources server (`my_weather_tool_resources_server`) — serves the `get_weather` tool endpoint and `verify()` logic
+
+### Configure API Keys
+
+Configure the OpenAI API key in `env.yaml` (repository root). `env.yaml` is gitignored and holds secrets like API keys:
+
+```yaml
+openai_api_key: ???
+policy_api_key: ${openai_api_key}
+policy_base_url: https://api.openai.com/v1
+policy_model_name: gpt-4o-mini
+```
+
+Export the API key as an environment variable before running the next command — never commit API keys directly in YAML:
+
+```bash
+export OPENAI_API_KEY="sk-your-key-here"  # pragma: allowlist secret
+```
+
+To run on a local vLLM server (requires GPU access) instead of the OpenAI API, see [model-server-vllm](/latest/reference/servers/model/vllm).
+
+### Test with Client (Optional)
+
+For a quick spot-check, point the built-in client at the agent. In `responses_api_agents/simple_agent/client.py`, change the server name to `my_weather_tool_simple_agent`, then run:
+
+```bash
+python responses_api_agents/simple_agent/client.py
+```
+
+<Note>
+This client calls `/v1/responses`, which tests tool-calling but does not exercise the full episode lifecycle (`seed_session` → `responses` → `verify`). End-to-end validation happens during [rollout collection](#collect-rollouts) below.
+
+</Note>
+
+### Collect Rollouts
+
+Rollouts run each task through the full agent loop (prompt → model → tool calls → verification) and record the interaction plus the reward. They serve two purposes before training:
+
+1. Validation — confirm your tools, verification logic, and data produce sensible rewards. A strong model scoring near zero usually means something is wrong with the environment.
+2. Baselining — measure pass rates across models to understand task difficulty before training.
+
+With the servers still running, collect rollouts against the example inputs:
+
+```bash
+ng_collect_rollouts +agent_name=my_weather_tool_simple_agent \
+    +input_jsonl_fpath=resources_servers/my_weather_tool/data/example.jsonl \
+    +output_jsonl_fpath=resources_servers/my_weather_tool/data/example_rollouts.jsonl \
+    +limit=null \
+    +num_repeats=null \
+    +num_samples_in_parallel=null
+```
+
+<Note>
+Servers must be running before rollout collection. The command processes each input example through the servers and saves the complete interaction (tool calls + verification rewards) to `example_rollouts.jsonl`.
+
+</Note>
+
+---
+
+## 7. Train with RL
+
+After rollouts validate the environment, run training with your preferred RL framework:
+
+<Cards>
+
+<Card title="NeMo RL (GRPO)" href="/latest/train-models/nemo-rl-grpo">
+Train models using GRPO with NeMo RL.
+</Card>
+
+<Card title="Unsloth" href="/latest/train-models/unsloth">
+Train with Unsloth for fast fine-tuning.
+</Card>
+
+</Cards>
+
+## 8. Update Documentation
+
+Add licensing and usage information to `resources_servers/my_weather_tool/README.md`:
+
+```markdown
+# My Weather Tool Resource Server
+
+A simple weather information resource server demonstrating tool calling.
+
+## Description
+
+This resource server provides a `get_weather` tool that returns weather information for cities.
+
+## Data
+
+- Example data: Five synthetic weather queries
+
+## Licensing Information
+
+**Code**: Apache 2.0
+
+**Data**: Apache 2.0 (synthetic examples)
+
+## Dependencies
+
+- nemo_gym: Apache 2.0
+```
+
+<Info>
+Contributions welcome — make sure PRs include accurate licensing information.
+
+</Info>
+
+---
+
+## Summary
+
+The walkthrough covered initializing a resources server with `ng_init_resources_server`, preparing JSONL task data, implementing tool endpoints and verification logic, wiring the components via the `domain` field, running tests, validating with a client, collecting rollouts, and adding licensing documentation. The same pattern scales to any benchmark — only the tools, `verify()`, and dataset change.
+
+---
+
+<NavButton href="/latest/build-environments/supported-patterns/multi-step" label="Multi-Step Environment" direction="next" />
+
+---
+
+## Advanced: Verification Patterns
+
+<Accordion title="Multi-step verification with output parsing">
+
+For tasks requiring multiple tool calls, define a custom verify request model to carry ground-truth data, then parse the final output for accuracy:
+
+```python
+from nemo_gym.base_resources_server import BaseVerifyRequest, BaseVerifyResponse
+
+class MultiStepVerifyRequest(BaseVerifyRequest):
+    """Custom request model that carries ground-truth data for verification."""
+
+    expected_values: list[int]
+
+async def verify(self, body: MultiStepVerifyRequest) -> BaseVerifyResponse:
+    """Extract and validate multi-step results."""
+    expected = body.expected_values  # Available because we declared it above
+
+    # Parse the final tool call output
+    actual = []
+    for output in reversed(body.response.output):
+        if output.type == "function_call" and output.name == "submit_answer":
+            import json
+            actual = json.loads(output.arguments).get("values", [])
+            break
+
+    # Compute accuracy metrics
+    accuracy = expected == actual
+    set_overlap = len(set(actual) & set(expected)) / len(expected) if expected else 0
+
+    return BaseVerifyResponse(
+        **body.model_dump(),
+        reward=float(accuracy),
+    )
+```
+See `resources_servers/example_multi_step/app.py` for a complete example.
+
+<Info>
+The custom request model (`MultiStepVerifyRequest`) is required for extra fields like `expected_values` to survive Pydantic parsing. Using `BaseVerifyRequest` directly silently drops any fields not defined on the base class.
+
+</Info>
+</Accordion>
+
+<Accordion title="LLM-as-judge verification">
+
+For tasks with multiple valid answers, use an LLM to judge correctness. See `resources_servers/math_with_judge/app.py` for implementation details.
+</Accordion>
+
+<Accordion title="Unit test verification (code generation)">
+
+For code generation tasks, run unit tests against model output. See `resources_servers/code_gen/app.py` for implementation details.
+</Accordion>
+
+---
+
+## Troubleshooting
+
+### Domain validation error
+
+For `"A domain is required for resource servers"`, set the `domain` field in the config YAML.
+
+### Import errors
+
+Run commands from the repository root and install dependencies:
+
+```bash
+uv sync
+```
+
+### Server does not start
+
+Confirm the port is free, the YAML parses, and every import in `app.py` resolves.
+
+### Tests fail
+
+Confirm the Python environment is correct, dependencies are installed, and test imports match the actual file structure.
+
+### Debugging server behavior
+
+Check server status and logs:
+
+```bash
+# View running servers
+ng_status
+
+# For detailed logs, run the server directly:
+cd resources_servers/my_weather_tool
+source .venv/bin/activate
+python app.py
+```
+
+Server logs appear in the terminal where `ng_run` was executed.

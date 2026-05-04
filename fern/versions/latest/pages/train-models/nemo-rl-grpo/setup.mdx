@@ -1,0 +1,182 @@
+---
+title: "Setup"
+description: "Set up the GRPO training environment by launching a GPU container, installing NeMo RL and NeMo Gym, and preparing the Workplace Assistant dataset."
+content_type: how-to
+audience_level: intermediate
+journey_stage: scale
+---
+import { NavButton } from "../../../../../components/NavButton";
+
+With the training config understood, provision the runtime: an 8-GPU interactive Slurm session running the NeMo RL container, both repos installed, sanity tests green, and the Workplace Assistant dataset on disk. Budget about 30 minutes; the bulk goes to the first-time container pull and the sanity tests.
+
+<NavButton href="/latest/train-models/nemo-rl-grpo/nemo-rl-configuration" label="Previous: NeMo RL Configuration" direction="prev" />
+
+---
+
+## Prerequisites
+
+- Access to a Slurm cluster with GPU nodes
+- A shared filesystem accessible from all nodes
+- HuggingFace token for model downloads
+
+---
+
+## 1. Enter a GPU Node
+
+**Estimated time**: ~5 minutes
+
+Launch an interactive Slurm session to run training commands. The first-time container pull adds 5-10 minutes. Refer to the [NeMo RL Cluster Setup documentation](https://docs.nvidia.com/nemo/rl/latest/cluster.html#interactive-launching) for additional flags.
+
+<Tip>
+On enroot clusters, pull the container locally first after defining `$CONTAINER_IMAGE_PATH`:
+
+```bash
+mkdir -p "$(dirname "$CONTAINER_IMAGE_PATH")"
+enroot import -o "$CONTAINER_IMAGE_PATH" "docker://${CONTAINER_IMAGE_PATH}"
+# Swap to local container path
+CONTAINER_IMAGE_PATH=./$CONTAINER_IMAGE_PATH
+```
+
+</Tip>
+
+```bash
+# Use the official NeMo RL container from NGC
+# See: https://catalog.ngc.nvidia.com/orgs/nvidia/containers/nemo-rl
+CONTAINER_IMAGE_PATH=nvcr.io/nvidia/nemo-rl:v0.4.0.nemotron_3_nano
+
+NUM_ACTOR_NODES=1
+ACCOUNT=<ACCOUNT_NAME>
+PARTITION=<PARTITION>
+
+CONTAINER_WORKDIR=$PWD
+MOUNTS="$PWD:$PWD"
+srun \
+    --nodes=${NUM_ACTOR_NODES} \
+    --ntasks=1 \
+    --account=${ACCOUNT} \
+    --partition=${PARTITION} \
+    --time=04:00:00 \
+    --gres=gpu:8 \
+    --no-container-mount-home \
+    --container-name=nemo-gym \
+    --container-mounts="${MOUNTS}" \
+    --container-image="${CONTAINER_IMAGE_PATH}" \
+    --container-workdir=$CONTAINER_WORKDIR \
+    --pty /bin/bash
+```
+
+A bash prompt inside the container confirms the session is live.
+
+---
+
+## 2. Clone and Setup NeMo RL + NeMo Gym
+
+**Estimated time**: ~5-10 minutes
+
+Clone NeMo RL and pull in NeMo Gym (and the other dependencies — Megatron, AutoModel) as submodules:
+
+```bash
+# Clone NeMo RL repository
+git clone https://github.com/NVIDIA-NeMo/RL
+cd RL
+
+# Initialize all submodules (Gym, Megatron, AutoModel, etc.)
+git submodule update --init --recursive
+```
+
+`uv sync` should complete cleanly with no install errors.
+
+---
+
+## 3. Run Sanity Tests
+
+**Estimated time**: ~5-10 minutes
+
+Download the small model used in the sanity suite:
+
+```bash
+HF_HOME=$PWD/.cache/ \
+HF_TOKEN={your HF token} \
+    hf download Qwen/Qwen3-0.6B
+```
+
+Run the sanity suite:
+
+```bash
+HF_HOME=$PWD/.cache/ \
+    ./examples/nemo_gym/run_nemo_gym_single_node_sanity_tests.sh
+```
+
+The script exercises the full stack used during GRPO:
+
+- **vLLM generation** — confirms the vLLM backend serves an OpenAI-compatible HTTP endpoint (NeMo Gym calls it for inference).
+- **Token retokenization** — covers edge cases in the OpenAI-schema-to-token-ID conversion.
+- **Environment step** — runs a basic NeMo RL environment step to isolate the environment interface from Gym.
+- **NeMo Gym integration** — verifies Gym registers correctly as a NeMo RL Environment.
+- **End-to-end rollout** — drives the rollout loop that `grpo_train` uses, confirming rollout collection works end-to-end.
+
+All five tests should pass with no errors.
+
+<Tip>
+Stuck Ray or vLLM processes from a prior run? Clear them with:
+```bash
+pkill -f VLLM
+ray stop --force
+uv run python -c "import ray; ray.shutdown()"
+```
+
+</Tip>
+
+---
+
+## 4. Prepare NeMo Gym Data
+
+**Estimated time**: ~5 minutes
+
+Download the Workplace Assistant dataset from HuggingFace and run `ng_prepare_data` to validate it and stamp each example with an `agent_ref` property — that field tells NeMo Gym which agent server to dispatch the example to.
+
+Set up the Gym Python environment:
+
+```bash
+# Setup Gym local venv
+cd 3rdparty/Gym-workspace/Gym
+uv venv --python 3.12 --allow-existing .venv
+source .venv/bin/activate
+uv sync --active --extra dev
+```
+
+Add your HuggingFace token to `env.yaml` so Gym can pull the dataset. The file is gitignored, so the token never reaches a commit:
+
+```bash
+echo "hf_token: {your HF token}" >> env.yaml
+```
+
+Run the prepare step:
+
+```bash
+config_paths="responses_api_models/vllm_model/configs/vllm_model_for_training.yaml,\
+resources_servers/workplace_assistant/configs/workplace_assistant.yaml"
+
+ng_prepare_data "+config_paths=[${config_paths}]" \
+    +output_dirpath=data/workplace_assistant \
+    +mode=train_preparation \
+    +should_download=true \
+    +data_source=huggingface
+```
+
+Return to the NeMo RL Python environment and root directory:
+
+```bash
+deactivate
+cd ../../..
+```
+
+Dataset files now sit at `3rdparty/Gym-workspace/Gym/data/workplace_assistant/` — that is what the training config will reference.
+
+---
+
+## Next Steps
+
+The container, both repos, and the dataset are in place. Run a 3-step validation pass on a single node next:
+
+<NavButton href="/latest/train-models/nemo-rl-grpo/single-node-training" label="Continue to Single Node Training" direction="next" />

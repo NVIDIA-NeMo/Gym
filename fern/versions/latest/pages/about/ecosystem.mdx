@@ -1,51 +1,159 @@
 ---
 title: "Ecosystem"
-description: ""
-position: 3
+description: "Where NeMo Gym fits in the NVIDIA NeMo platform, how it compares to external RL and eval frameworks, and which tools to pair it with."
+content_type: explanation
+audience_level: beginner
+journey_stage: discover
+position: 2
 ---
-We're building NeMo Gym to integrate with a broad set of RL training frameworks and environment libraries.
 
-We would love your contribution! Open a PR to add an integration, or [file an issue](https://github.com/NVIDIA-NeMo/Gym/issues/new/choose) to share what would be valuable for you.
+NeMo Gym is the open environment and rollout layer for training and evaluating agentic models. It turns benchmarks, tools, sandboxes, and reward functions into scalable RL-ready environments. **The eval, the environment, and the training-data source are the same artifact** — and that's the cell on the competitive matrix nothing else fully occupies. SaaS eval platforms (Braintrust, Arize AX, Langfuse) observe production LLM apps but don't train them. Open-source environment frameworks (Harbor, Verifiers) score agents but don't bridge to RL training. NeMo Gym sits between them: the same `verify()` that scores a model is the one that emits reward signals for GRPO.
+
+<Tip>
+For what NeMo Gym does and how it works, refer to [Overview](/latest/about) and [Architecture](/latest/about/concepts/architecture). This page is about where it fits relative to other tools.
+</Tip>
+
+## When to Use NeMo Gym
+
+Use NeMo Gym when the evaluation is also an environment that can generate training rollouts, reward signals, or agent trajectories. If the goal is a one-off score on a static benchmark, a classic eval harness will be lighter. If the goal is to feed reward-shaped trajectories back into RL training (GRPO, DPO, RLVR), NeMo Gym is the layer.
+
+Reach for NeMo Gym when:
+
+- The benchmark, tool, or sandbox needs to scale to thousands of concurrent rollouts.
+- The same environment must support both eval (score the model) and training (collect reward-shaped trajectories).
+- The model talks through tools, code execution, or multi-turn agent loops, and you need the trajectory shape preserved end-to-end (the OpenAI Responses format).
+- You need a clean handoff from environment authoring to an RL trainer (NeMo RL today, others in progress).
+
+Reach for something else when the work is purely offline scoring against static prompts, classic LLM benchmarks (MMLU, HellaSwag), or production observability of a deployed app — see [the eval-framework lane](#choosing-nemo-gym-vs-eval-and-observability-tools) below.
+
+---
+
+## NeMo Gym Within NVIDIA NeMo
+
+NVIDIA NeMo is a GPU-accelerated platform of specialized libraries for building and training generative AI models. NeMo Gym is the environment and rollout layer of that stack — it sits between data preparation and post-training, providing the runnable environments that NeMo RL trains against and that NeMo Evaluator can consume for measurement.
+
+Readers often confuse Gym with NeMo RL (the trainer), NeMo Evaluator (the offline eval product), and NeMo Agent Toolkit (the agent-builder). The four solve adjacent problems, not the same problem.
+
+| Tool | Role | Use when |
+| --- | --- | --- |
+| **NeMo Gym** | Environment + rollout layer | The eval is also an environment that can generate training rollouts, reward signals, or agent trajectories. |
+| **NeMo RL** | Post-training trainer (GRPO, DPO, SFT) | You are running RL training and need a trainer that consumes Gym environments as input. |
+| **NeMo Evaluator** | Offline model evaluation product | The deliverable is a model report card on classic benchmarks — no rollouts feeding training. |
+| **NeMo Agent Toolkit** | Agent-building framework | You are constructing or shipping an agent application, not evaluating or training one. |
+
+NeMo Gym pairs naturally with NeMo RL: Gym authors the environment, NeMo RL trains against it. See [Training Tutorials](/latest/train-models/nemo-rl-grpo) for the GRPO walkthrough.
+
+---
+
+## Choosing NeMo Gym vs. External RL/Agent Frameworks
+
+Outside NVIDIA, the closest competitors are [Verifiers](https://github.com/PrimeIntellect-ai/verifiers) (Prime Intellect) and [Harbor](https://github.com/sierra-research/harbor) (Sierra). The conceptual overlap is real — all three turn datasets, harnesses, and verifiers into runnable environments — but the bridges they build are different.
+
+<Tabs>
+
+<Tab title="NeMo Gym">
+**Focus**: Environment and rollout layer with a first-class bridge into NVIDIA training (NeMo RL, in-progress: NeMo Customizer, VeRL).
+
+**Best for**: Teams that need eval and RL training to share the same environment — the same `verify()` produces both a benchmark score and a reward signal for GRPO. Scales to thousands of concurrent rollouts via FastAPI microservices and Ray.
+
+**Key characteristics**:
+* Three composable server types: agent (the harness), model, resources (the verifier). Independent processes, async HTTP between them.
+* OpenAI Responses API as the native trajectory schema — no custom serialization for tool calls, reasoning, or multi-turn loops.
+* Hydra + OmegaConf for hierarchical YAML composition; CLI overrides via `+key=value`.
+* Open environment hub with NVIDIA and community-contributed benchmarks; Verifiers, Reasoning Gym, BrowserGym, and Aviary integrations underway.
+</Tab>
+
+<Tab title="Verifiers">
+**Focus**: Environment authoring and a hub-style registry, tightly integrated with Prime Intellect's `prime` CLI and hosted training.
+
+**Best for**: Authors who want a tight `prime eval run` loop, an opinionated environment abstraction (dataset + harness + tools/sandboxes + reward/rubric), and Prime Intellect's hosted compute.
+
+**Key characteristics**:
+* Smaller, more opinionated environment unit; less ceremony for the simplest cases.
+* Strong public hub and example library; close to 4k stars at time of writing.
+* Tighter coupling to Prime Intellect's training and inference infrastructure.
+* Less focus on multi-tenant rollout collection at NVIDIA's NeMo RL / Megatron scale.
+</Tab>
+
+<Tab title="Harbor">
+**Focus**: Containerized agent evaluation with preintegrated agents (Claude Code, OpenCode-style harnesses) and SWE-bench / Terminal-Bench-style benchmarks.
+
+**Best for**: Coding-agent eval where the deliverable is a containerized, reproducible benchmark run with the agent already wired up.
+
+**Key characteristics**:
+* Agent-first UX: the agent is a first-class input; the framework brings the harness.
+* Heavy use of Docker / Podman sandboxes; opinionated about isolation.
+* Optimized for offline eval, not for piping reward-shaped trajectories into RL training.
+* Strong fit for the SWE-bench / Terminal-Bench audience; less fit for non-coding RL environments.
+</Tab>
+
+</Tabs>
+
+The short version: pick **Verifiers** if your training stack is Prime Intellect; pick **Harbor** if your work is coding-agent eval and you want the container story out of the box; pick **NeMo Gym** when the same environment needs to drive both eval and NVIDIA-stack RL training, at rollout scales the trainer expects.
+
+---
+
+## Choosing NeMo Gym vs. Eval and Observability Tools
+
+Classic eval frameworks and observability tools are not competitors — they are complementary. Use them when the deliverable is a score, a safety report, or production traces; reach for NeMo Gym when the eval is also a training environment.
+
+| Tool | Use instead of NeMo Gym when |
+| --- | --- |
+| [Inspect AI](https://inspect.aisi.org.uk/) | The deliverable is a safety-eval report. Inspect View + the VS Code extension are best-in-class for safety-eval authoring. |
+| [DeepEval](https://github.com/confident-ai/deepeval) | The work is pytest-style LLM-app assertions in a CI pipeline, not RL environment authoring. |
+| [LangSmith](https://www.langchain.com/langsmith) / [W&B Weave](https://wandb.ai/site/weave) | The work is production traces and online observability of a deployed app, not offline eval or training rollouts. |
+| [lm-evaluation-harness](https://github.com/EleutherAI/lm-evaluation-harness) | The work is classic academic LLM benchmarks (MMLU, HellaSwag, ARC) on a base model. |
+| [HELM](https://github.com/stanford-crfm/helm) | The deliverable is a Stanford-style holistic model report card across many tasks. |
+| [OpenAI Evals](https://github.com/openai/evals) | The work lives inside OpenAI-hosted eval workflows on the OpenAI platform. |
+
+Many teams will use both. A typical pattern: classic benchmarks on lm-eval, safety review on Inspect, production traces on LangSmith or Weave, RL training environments on NeMo Gym. The lanes do not overlap.
+
+---
+
+## Related Products in the NVIDIA NeMo Ecosystem
+
+In a typical end-to-end NVIDIA workflow, teams move from data preparation through training and into evaluation. NeMo Gym sits between training and evaluation, providing the environments that feed both.
+
+| Library | Purpose | How it relates to NeMo Gym |
+| --- | --- | --- |
+| [NeMo Megatron-Bridge](https://github.com/NVIDIA-NeMo/Megatron-Bridge) | Pretraining and fine-tuning with Megatron-Core | Upstream of Gym — produces the base models that Gym environments evaluate and that NeMo RL further post-trains. |
+| [NeMo AutoModel](https://github.com/NVIDIA-NeMo/Automodel) | PyTorch-native training for Hugging Face models | Alternative training entry point; also upstream of Gym. |
+| [NeMo RL](https://github.com/NVIDIA-NeMo/RL) | Scalable post-training with GRPO, DPO, SFT | The primary trainer Gym environments feed into. NeMo RL consumes Gym rollouts as training data. |
+| **[NeMo Gym](https://github.com/NVIDIA-NeMo/Gym)** | RL environment infrastructure and rollout collection | *(this project)* |
+| [NeMo Curator](https://github.com/NVIDIA-NeMo/Curator) | Data preprocessing and curation | Upstream — Curator prepares the datasets Gym environments wrap as benchmarks or training tasks. |
+| [NeMo Data Designer](https://github.com/NVIDIA-NeMo/DataDesigner) | Synthetic data generation from scratch or seed data | Upstream — produces synthetic prompts Gym can score and use to generate rollouts. |
+| [NeMo Evaluator](https://github.com/NVIDIA-NeMo/Evaluator) | Model evaluation and benchmarking | Adjacent — Evaluator targets offline classic-benchmark scoring; Gym targets eval-that-also-feeds-training. |
+| [NeMo Guardrails](https://github.com/NVIDIA-NeMo/Guardrails) | Programmable safety guardrails | Adjacent — applied at deployment, not during training rollout collection. |
+| [NeMo Skills](https://github.com/NVIDIA-NeMo/NeMo-Skills) | Convenience pipelines across SDG, evaluation, and training | Adjacent — Gym environments can be invoked from Skills pipelines for end-to-end research workflows. |
 
 ---
 
 ## Training Framework Integrations
 
-We have hands-on tutorials with supported training frameworks to help you train with NeMo Gym environments. If you're interested in integrating another training framework, see the [Training Framework Integration Guide](/latest/contribute/rl-framework-integration).
+NeMo Gym ships hands-on tutorials with supported training frameworks. To integrate a different training framework, see the [Training Framework Integration Guide](/latest/reference/rl-framework-integration).
 
-- **[NeMo RL](/latest/training-tutorials/nemo-rl-grpo)** - GRPO training to improve multi-step tool calling on the Workplace Assistant environment
-- **[OpenRLHF](https://github.com/OpenRLHF/OpenRLHF/blob/main/examples/python/agent_func_nemogym_executor.py)** - example agent executor for RL training
-- **[Unsloth](/latest/training-tutorials/unsloth)** - GRPO training on instruction following and reasoning environments
-- **NeMo Customizer** - *(In progress)*
-- **VeRL** - *(In progress)*
-
----
+- **[NeMo RL](/latest/train-models/nemo-rl-grpo)** — GRPO training to improve multi-step tool calling on the Workplace Assistant environment.
+- **[OpenRLHF](https://github.com/OpenRLHF/OpenRLHF/blob/main/examples/python/agent_func_nemogym_executor.py)** — example agent executor for RL training.
+- **[Unsloth](/latest/train-models/unsloth)** — GRPO training on instruction following and reasoning environments.
+- **NeMo Customizer** — *(in progress)*
+- **VeRL** — *(in progress)*
 
 ## Environment Library Integrations
 
-NeMo Gym integrates with external environment libraries and benchmarks. See the [README](https://github.com/NVIDIA-NeMo/Gym?tab=readme-ov-file#table-2-resource-servers-for-training) for the full list—here are a few examples:
+NeMo Gym integrates with external environment libraries and benchmarks. See the [README](https://github.com/NVIDIA-NeMo/Gym?tab=readme-ov-file#table-2-resource-servers-for-training) for the full list. A few examples:
 
-- **[Reasoning Gym](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/reasoning_gym)** - reasoning environments spanning computation, cognition, logic and more
-- **[Aviary](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/aviary)** - environments spanning math, knowledge, biological sequences, scientific literature search, and protein stability
-- **[Verifiers](https://github.com/PrimeIntellect-ai/verifiers)** - *(In progress)* - environments spanning coding, data & ML, science & reasoning, tool use and more
-- **[BrowserGym](https://github.com/ServiceNow/BrowserGym)** - *(In progress)* - environments for web task automation
+- **[Reasoning Gym](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/reasoning_gym)** — reasoning environments spanning computation, cognition, logic, and more.
+- **[Aviary](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/aviary)** — environments spanning math, knowledge, biological sequences, scientific literature search, and protein stability.
+- **[Verifiers](https://github.com/PrimeIntellect-ai/verifiers)** — *(in progress)* — environments spanning coding, data & ML, science & reasoning, tool use, and more.
+- **[BrowserGym](https://github.com/ServiceNow/BrowserGym)** — *(in progress)* — environments for web task automation.
+
+We welcome contributions. [Open a PR](https://github.com/NVIDIA-NeMo/Gym/pulls) to add an integration, or [file an issue](https://github.com/NVIDIA-NeMo/Gym/issues/new/choose) to share what would be valuable for you.
 
 ---
 
-## Related NeMo Libraries
+## Where to Start
 
-NeMo Gym is a component of NVIDIA NeMo, a GPU-accelerated platform for building and training generative AI models.
-
-Depending on your workflow, you may also find these libraries useful:
-
-| Library | Purpose |
-|---------|---------|
-| [NeMo Megatron-Bridge](https://github.com/NVIDIA-NeMo/Megatron-Bridge) | Pretraining and fine-tuning with Megatron-Core |
-| [NeMo AutoModel](https://github.com/NVIDIA-NeMo/Automodel) | PyTorch native training for Hugging Face models |
-| [NeMo RL](https://github.com/NVIDIA-NeMo/RL) | Scalable post-training with GRPO, DPO, and SFT |
-| **[NeMo Gym](https://github.com/NVIDIA-NeMo/Gym)** | RL environment infrastructure and rollout collection *(this project)* |
-| [NeMo Curator](https://github.com/NVIDIA-NeMo/Curator) | Data preprocessing and curation |
-| [NeMo Data Designer](https://github.com/NVIDIA-NeMo/DataDesigner) | High-quality Synthetic data generation from scratch or seed data |
-| [NeMo Evaluator](https://github.com/NVIDIA-NeMo/Evaluator) | Model evaluation and benchmarking |
-| [NeMo Guardrails](https://github.com/NVIDIA-NeMo/Guardrails) | Programmable safety guardrails |
-| [NeMo Skills](https://github.com/NVIDIA-NeMo/NeMo-Skills) | Convenience pipelines used by LLM researchers across SDG, evaluation and training |
+- **[Quickstart](/latest/get-started/quickstart)** — install, configure, run, and collect rollouts on one page.
+- **[Architecture](/latest/about/concepts/architecture)** — the four components (dataset, agent harness, reward, model) and how they communicate.
+- **[Choose an Agent](/latest/get-started/choose-an-agent)** — pick the agent server (the harness) that matches your task shape.
+- **[Run a Benchmark](/latest/evaluate/run/run-a-benchmark)** — score an existing benchmark without writing code.

@@ -1,0 +1,266 @@
+---
+title: "Provider Compatibility"
+description: "Tested model and provider matrix: vLLM, Azure/OpenAI, OpenAI-compatible endpoints, Responses vs chat completions, tool calling, reasoning blocks."
+content_type: reference
+audience_level: intermediate
+journey_stage: build
+position: 1
+---
+import { CompatibilityMatrix } from "../../../../../components/compatibility/CompatibilityMatrix";
+
+NeMo Gym ships six model server types: `openai_model`, `azure_openai_model`, `vllm_model`, `local_vllm_model`, `local_vllm_model_proxy`, and `genrm_model`. The matrix below is the canonical view; the per-provider sections that follow add config detail, tested versions, and known gotchas. For symptom-side fixes, see [Footguns](/latest/troubleshooting/footguns); for config field shapes, see [Configuration](/latest/reference/configuration).
+
+<CompatibilityMatrix kind="provider" />
+
+<Note>
+Provider compatibility is the most common source of late-stage failures. Pick the server type that matches your endpoint shape *before* you write the YAML — mismatches surface as 404s, empty outputs, or silent reward zeros.
+
+</Note>
+
+---
+
+## Model Server Matrix
+
+| Server Type         | Endpoint Shape           | Use For                                           | Config Example                                                                        |
+|---------------------|--------------------------|---------------------------------------------------|---------------------------------------------------------------------------------------|
+| `openai_model`      | `/v1/responses`          | OpenAI proper, build.nvidia.com (Responses-native), gpt-oss endpoints supporting Responses | `responses_api_models/openai_model/configs/openai_model.yaml`                         |
+| `azure_openai_model`| `/v1/chat/completions` (returned as Responses-shaped) | Azure-hosted OpenAI deployments. Internally calls `client.chat.completions.create()` and synthesizes a Responses-shaped output via the vLLM converter. | `responses_api_models/azure_openai_model/configs/azure_openai_model.yaml`             |
+| `vllm_model`        | `/v1/chat/completions`   | Self-hosted vLLM (remote), OpenAI-compatible endpoints (OpenRouter, Together, Anyscale) without Responses support | `responses_api_models/vllm_model/configs/vllm_model.yaml`                             |
+| `local_vllm_model`  | `/v1/chat/completions` (managed) | NeMo Gym manages the vLLM server lifecycle on the local machine | `responses_api_models/local_vllm_model/configs/Qwen/Qwen3-30B-A3B-Thinking-2507.yaml` |
+| `local_vllm_model_proxy` | `/v1/chat/completions` (proxied) | Forward to an externally managed local vLLM (another process owns the lifecycle) | `responses_api_models/local_vllm_model_proxy/configs/`                                |
+| `genrm_model`       | `/v1/chat/completions` (managed local vLLM, custom roles) | Generative reward model on top of `local_vllm_model` with `response_1`/`response_2`/`principle` roles for pairwise comparison | `responses_api_models/genrm_model/configs/`                                           |
+
+Any `vllm_model`-family server can serve `/v1/responses` natively when its config sets `is_responses_native: true` (used today by gpt-oss-via-local-vLLM).
+
+---
+
+## Endpoint Shapes: Responses vs. Chat Completions
+
+OpenAI ships two distinct API shapes. They are *not* interchangeable.
+
+| API                   | URL fragment           | Returns                                       | Servers that target it                      |
+|-----------------------|------------------------|-----------------------------------------------|---------------------------------------------|
+| Responses             | `/v1/responses`        | Structured response with `output_text`, tool calls, reasoning items | `openai_model`; `vllm_model`-family servers when `is_responses_native: true` |
+| Chat Completions      | `/v1/chat/completions` | OpenAI chat completions object                | `azure_openai_model` (synthesized into Responses-shaped output), `vllm_model`, `local_vllm_model`, `local_vllm_model_proxy`, `genrm_model` |
+
+**Decision rule:** Use `openai_model` for endpoints that implement `/v1/responses`. Use `vllm_model` for endpoints that only implement `/v1/chat/completions`. Most self-hosted vLLM deployments and most OpenAI-compatible third-party gateways are chat-completions only.
+
+If you point an `openai_model` server at a chat-completions-only endpoint you will get 404s on the first request. If you point a `vllm_model` server at a Responses-only endpoint you will get 404s on the first request. The error is loud, but it is also avoidable.
+
+<Tip>
+Probe an unknown endpoint with `curl <base_url>/responses` and `curl <base_url>/chat/completions` to confirm which shape it implements before writing the YAML.
+
+</Tip>
+
+---
+
+## Provider-by-Provider Compatibility
+
+### OpenAI (api.openai.com)
+
+- **Endpoint URL:** `https://api.openai.com/v1`
+- **Server type:** `openai_model`
+- **`env.yaml` fields:**
+  ```yaml
+  policy_base_url: https://api.openai.com/v1
+  policy_api_key: sk-...
+  policy_model_name: gpt-4.1-2025-04-14
+  ```
+- **Tool calling:** Supported on GPT-4, GPT-4.1, GPT-4o, and o-series.
+- **Reasoning blocks:** o-series and GPT-5 emit reasoning items in the Responses output. The agent passes them through; reward extraction must strip them. See [Reward Semantics](/latest/about/concepts/reward-semantics).
+- **Context length:** Model-dependent. Set `max_output_tokens` in `responses_create_params` when collecting rollouts.
+- **Retry behavior:** `ServerClient` retries up to 3x with a fixed 0.5 s sleep on transport errors. Rate-limit codes (429, 502, 503, 504, 520) retry independently until success. 4xx semantic responses bubble up unchanged.
+- **Known issues:** None tracked. Tested by the team.
+
+### Azure OpenAI
+
+- **Endpoint URL:** `https://<resource>.openai.azure.com/openai/v1`
+- **Server type:** `azure_openai_model`
+- **`env.yaml` fields:**
+  ```yaml
+  policy_base_url: https://<resource>.openai.azure.com/openai/v1
+  policy_api_key: <azure-key>
+  policy_model_name: <deployment-name>
+  ```
+- **Required extra config:** `default_query.api-version` is mandatory in the YAML — Azure rejects calls without it.
+  ```yaml
+  policy_model:
+    responses_api_models:
+      azure_openai_model:
+        default_query:
+          api-version: "2024-10-21"
+        num_concurrent_requests: 8
+  ```
+- **Tool calling:** Mirrors the underlying model. Azure's deployment name (not the OpenAI model id) is what `policy_model_name` must reference.
+- **Reasoning blocks:** Same as OpenAI.
+- **Concurrency:** Azure quotas are strict. Default `num_concurrent_requests: 8` is conservative; raise it only after confirming your tier.
+- **Known issues:** Deployment-name vs. model-id confusion is the top failure mode — the model id from OpenAI does not work here.
+
+### NVIDIA build.nvidia.com (NIM endpoints)
+
+- **Endpoint URL:** `https://integrate.api.nvidia.com/v1`
+- **Server type:** `openai_model` for NIMs that expose `/v1/responses`; `vllm_model` for NIMs that only expose `/v1/chat/completions`.
+- **`env.yaml` fields:**
+  ```yaml
+  policy_base_url: https://integrate.api.nvidia.com/v1
+  policy_api_key: nvapi-...
+  policy_model_name: nvidia/nemotron-3-...
+  ```
+- **Tool calling:** Supported on Nemotron and Llama-family NIMs that ship with tool-call parsers.
+- **Reasoning blocks:** Nemotron thinking models emit reasoning content. Tested informally by the team across Nemotron 3 Nano, Super, and Ultra.
+- **Context length:** NIM-specific. Check the model card on build.nvidia.com.
+- **Known issues:** Some NIMs gate Responses behind specific model versions; if `/v1/responses` 404s, switch to `vllm_model`.
+
+### Self-hosted vLLM (remote)
+
+- **Endpoint URL:** Whatever URL your `vllm serve` instance binds to (typically `http://<host>:8000/v1`).
+- **Server type:** `vllm_model`
+- **`env.yaml` fields:**
+  ```yaml
+  policy_base_url: http://<host>:8000/v1
+  policy_api_key: EMPTY
+  policy_model_name: <hf-org>/<hf-model>
+  ```
+- **Tool calling:** Requires `--enable-auto-tool-choice` and a matching `--tool-call-parser` on the vLLM server (e.g. `hermes` for Qwen3, `openai` for gpt-oss). Without it, vLLM emits tool calls as raw text.
+- **Reasoning blocks:** `uses_reasoning_parser: true` and `--reasoning-parser deepseek_r1` (Qwen3 thinking) parse `<think>` blocks server-side. Set `uses_interleaved_reasoning: true` for models that interleave reasoning with tool calls.
+- **Context length:** Set `--max-model-len` on the vLLM CLI. If you exceed it, vLLM returns an HTTP 400 with the offending token count. There is no automatic truncation.
+- **Retry behavior:** Same `ServerClient` retry policy (3 tries with 0.5 s sleep on transport errors; rate-limit codes retry until success).
+- **Known issues:** The `max_model_len` exceeded error is the #1 vLLM complaint across competitor issue queues. See [Footguns](/latest/troubleshooting/footguns).
+
+### local_vllm_model (NeMo Gym manages the vLLM lifecycle)
+
+- **Endpoint URL:** Bound by the head server; clients use `http://localhost:<auto-port>/v1` automatically.
+- **Server type:** `local_vllm_model`
+- **Config example:** `responses_api_models/local_vllm_model/configs/Qwen/Qwen3-30B-A3B-Thinking-2507.yaml`
+- **What's managed for you:** model download (via `hf_home` and `hf_token`), `vllm serve` spawn, parallelism flags, reasoning/tool parsers, lifecycle teardown.
+- **Key fields:**
+  - `vllm_serve_kwargs.tensor_parallel_size` / `data_parallel_size` / `pipeline_parallel_size`
+  - `vllm_serve_kwargs.tool_call_parser` (`hermes`, `openai`, etc.)
+  - `vllm_serve_kwargs.reasoning_parser` (`deepseek_r1`, etc.)
+  - `is_responses_native: true` for gpt-oss models that expose `/v1/responses` from a local vLLM
+  - `extra_body.reasoning.effort: low|medium|high` for gpt-oss reasoning effort
+- **Known issues:** Parallelism configs are sensitive — `tp * pp * dp` must match your visible GPUs exactly. Misconfiguration shows up as a vLLM startup failure, not a Gym error.
+
+### OpenRouter / Together / Anyscale (OpenAI-compatible)
+
+- **Endpoint URL:** Provider-specific. All three implement `/v1/chat/completions`; none currently implement `/v1/responses` for arbitrary models.
+- **Server type:** `vllm_model`
+- **`env.yaml` fields:**
+  ```yaml
+  policy_base_url: https://openrouter.ai/api/v1   # or together / anyscale
+  policy_api_key: <provider-key>
+  policy_model_name: <provider-model-slug>
+  ```
+- **Tool calling:** Provider- and model-dependent. OpenRouter passes tool calls through for models that support them; some Together-hosted models do not.
+- **Reasoning blocks:** OpenRouter exposes a separate `reasoning` parameter for Anthropic-routed and Gemini-routed models. NeMo Gym does not currently translate that field — reasoning content surfaces in the response body and must be stripped at reward time.
+- **Tested status:** Tested informally by the team for short-form OpenAI-compatible models. Community reports welcome for niche providers.
+- **Known issues:** OpenRouter rate limits per route; surface as 429s and trigger the standard retry path.
+
+---
+
+## Tool Calling
+
+Function-calling support is per-model, not per-provider. Verify before relying on it.
+
+| Model family       | Tool calling | Notes                                                                  |
+|--------------------|--------------|------------------------------------------------------------------------|
+| GPT-4 / GPT-4.1 / GPT-4o | Yes    | Native via Responses and chat completions.                             |
+| GPT-5 / o-series   | Yes          | Tool calls interleave with reasoning items.                            |
+| Claude Sonnet / Opus 4.x (via OpenAI-compatible gateway) | Partial | Depends on gateway translation. Test against a known-tool fixture first. |
+| Llama 3 / 3.1 / 3.3 | Yes         | Requires vLLM `--tool-call-parser hermes` or `llama3_json`.             |
+| Qwen3 (Instruct + Thinking) | Yes  | Requires vLLM `--tool-call-parser hermes`.                              |
+| gpt-oss            | Yes          | Requires vLLM `--tool-call-parser openai`.                              |
+| Nemotron 3 (Nano / Super / Ultra) | Yes | Tested via build.nvidia.com and local vLLM.                          |
+
+JSON mode (strict structured output) is *not* the same as tool calling. NeMo Gym does not currently surface JSON mode as a first-class config — agents that need structured output should validate parser output and return a meaningful error on parse failure rather than crashing. See [Footguns: invalid JSON from small local LLM](/latest/troubleshooting/footguns).
+
+The agent's tool-call handling lives in `responses_api_agents/<agent>/app.py` — `simple_agent` proxies tool calls to the resources server's `/verify` endpoint.
+
+---
+
+## Reasoning / Thinking Blocks
+
+The following model families emit reasoning content that must be handled before reward extraction:
+
+| Family             | Block format                          | Where it appears                          |
+|--------------------|---------------------------------------|-------------------------------------------|
+| Qwen3 Thinking     | `<think>...</think>`                  | Inside the assistant message content      |
+| GPT-5 / o-series   | Reasoning items in Responses output   | `output[].type == "reasoning"`            |
+| Claude Sonnet / Opus 4.x (via gateway) | `<thinking>...</thinking>` | Inside content                  |
+| DeepSeek-R1        | `<think>...</think>`                  | Inside content                            |
+| gpt-oss            | Reasoning items in Responses output   | `output[].type == "reasoning"` (when `is_responses_native: true`) |
+
+**Server-side parsing.** When `uses_reasoning_parser: true` is set on the vLLM-family servers, vLLM strips the block and returns clean assistant content plus a `reasoning_content` field. This is the recommended path.
+
+**Client-side stripping.** When the parser is not available (e.g. gateway-routed models), the resources server's `verify()` must strip the block before parsing the answer. Failing to do so will cause spurious zero rewards because the parser sees the reasoning text first.
+
+See [Reward Semantics](/latest/about/concepts/reward-semantics) for the full extraction contract.
+
+---
+
+## Context Length
+
+vLLM's `max_model_len` exceeded error is the most common provider-side failure in the wild. The framework does not auto-truncate.
+
+- **Set on the server.** For `vllm_model`, configure `--max-model-len <n>` on the `vllm serve` CLI. For `local_vllm_model`, set it in `vllm_serve_kwargs.max_model_len`.
+- **Set on the client.** Cap output via `responses_create_params.max_output_tokens`. Cap input via dataset preparation — long prompts must be truncated upstream.
+- **Surface.** vLLM returns HTTP 400 with a message like `prompt is too long: <n> tokens, max is <m>`. NeMo Gym propagates this as a verifier-side error; the rollout writes a non-1.0 reward and an error response, not a crash.
+- **Where to look:** `vllm_serve_kwargs.max_model_len` in the server YAML, `responses_create_params.max_output_tokens` in your `ng_collect_rollouts` invocation.
+
+For per-provider context limits, consult the provider's model card. NeMo Gym does not embed a model-to-context-length table because vendor limits change.
+
+---
+
+## Retry and Concurrency
+
+| Behavior                  | Default                                          | Where to override                                    |
+|---------------------------|--------------------------------------------------|------------------------------------------------------|
+| HTTP retries              | 3 attempts, fixed 0.5 s sleep on transport errors; rate-limit codes (429/502/503/504/520) retry independently until success | `nemo_gym/server_utils.py` `request()` and `nemo_gym/openai_utils.py`        |
+| Concurrent requests       | Unbounded for `openai_model` / `vllm_model`      | `num_concurrent_requests` field (Azure)              |
+| Connection pool           | Singleton aiohttp client, pooled connections     | `nemo_gym/server_utils.py`                           |
+| Subprocess concurrency    | Bounded by `asyncio.Semaphore` per server        | Per-server config (e.g. `code_gen` `num_workers`)    |
+
+Bounded retry plus opt-in concurrency caps are the explicit response to a class of competitor issues where unbounded retries amplify outages. Increase `num_concurrent_requests` only after confirming your provider tier; decrease if you see 429s or sustained 5xx.
+
+---
+
+## Tested Versions
+
+Tested by the NeMo Gym team unless otherwise noted. Community reports welcome.
+
+| Family                      | Provider                     | Tested versions                                | Notes                                                  |
+|-----------------------------|------------------------------|------------------------------------------------|--------------------------------------------------------|
+| GPT-4o                      | OpenAI                       | `gpt-4o-2024-11-20`, `gpt-4o-mini-2024-07-18`  | Tested via Responses.                                  |
+| GPT-4.1                     | OpenAI                       | `gpt-4.1-2025-04-14`, `gpt-4.1-mini-2025-04-14` | Tested via Responses.                                  |
+| GPT-5 / o-series            | OpenAI                       | Latest at time of test                         | Reasoning items handled.                               |
+| Azure OpenAI                | Azure                        | `api-version=2024-10-21`                       | Deployment-name routing.                               |
+| Nemotron 3 Nano             | build.nvidia.com / local vLLM | `nvidia/nemotron-3-nano-30b-a3b-bf16`          | Recipe at [/latest/train-models/recipes/nemotron-3-nano](/latest/train-models/recipes/nemotron-3-nano). |
+| Nemotron 3 Super            | build.nvidia.com             | Latest at time of test                         | Recipe at [/latest/train-models/recipes/nemotron-3-super](/latest/train-models/recipes/nemotron-3-super). |
+| Qwen3 Instruct              | local vLLM                   | `Qwen3-30B-A3B-Instruct-2507`, `Qwen3-235B-A22B-Instruct-2507-FP8` | Hermes tool parser.                                    |
+| Qwen3 Thinking              | local vLLM                   | `Qwen3-30B-A3B-Thinking-2507`                  | DeepSeek-R1 reasoning parser; `<think>` blocks.        |
+| gpt-oss                     | local vLLM                   | `openai/gpt-oss-20b`, `openai/gpt-oss-120b`    | `is_responses_native: true`; reasoning effort low/med/high. |
+| Llama 3.x                   | OpenAI-compatible gateways   | Tested informally                              | Tool calling depends on gateway.                       |
+| Claude (via OpenAI gateway) | OpenRouter                   | Tested informally                              | Reasoning surfaces in body; community reports welcome. |
+| DeepSeek-R1                 | self-hosted vLLM             | Tested informally                              | `<think>` blocks; community reports welcome.           |
+
+Do not assume an untested model works. Run a smoke test with `data/example.jsonl` before committing to a benchmark run.
+
+---
+
+## Known Incompatibilities
+
+- **httpx is not used directly anywhere in NeMo Gym.** All first-party HTTP goes through the aiohttp client. The pinned `openai` SDK uses httpx transitively for outbound provider calls (e.g. `azure_openai_model` instantiates `AsyncAzureOpenAI`), which is acceptable because outbound provider calls are bounded by `num_concurrent_requests`. For arbitrary external libraries, do not import `httpx` — wrap them with an aiohttp adapter (see `resources_servers/tavily_search/app.py` `TavilySearchAIOHTTPClient`). httpx/httpcore has O(n²) connection pool behavior that hangs at 16k+ concurrent requests at the head-server level.
+- **LiteLLM, Anthropic SDK, and other non-OpenAI clients are unsupported.** Use `nemo_gym/openai_utils.py` (pinned to `openai<=2.7.2` for schema compatibility).
+- **Mixing endpoint shapes is unsupported.** A single `policy_model` instance is either Responses or chat completions, not both.
+- **JSON mode is not first-class.** Models that require strict JSON output must validate at the verifier level.
+- **Streaming responses are not used.** NeMo Gym buffers full responses; streaming endpoints are not exercised.
+- **Anthropic-native and Gemini-native APIs are unsupported.** Route through an OpenAI-compatible gateway (OpenRouter) and treat the result as `vllm_model`.
+
+---
+
+## Related
+
+<Note>
+[Footguns](/latest/troubleshooting/footguns) for symptom-side fixes, [Configuration](/latest/reference/configuration) for field shapes, and [Reward Semantics](/latest/about/concepts/reward-semantics) for the thinking-block extraction contract.
+
+</Note>

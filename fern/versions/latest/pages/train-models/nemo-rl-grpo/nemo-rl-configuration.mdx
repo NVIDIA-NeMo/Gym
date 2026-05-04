@@ -1,0 +1,70 @@
+---
+title: "NeMo RL Configuration"
+description: "Configure GRPO algorithm hyperparameters, model settings, and optimizer parameters in the NeMo RL training config file."
+content_type: how-to
+audience_level: intermediate
+journey_stage: scale
+---
+import { NavButton } from "../../../../../components/NavButton";
+
+The remaining knobs in the training config govern the model, the GRPO algorithm, and the optimizer. The defaults below match the published Workplace Assistant recipe — change them only when you have a reason.
+
+<NavButton href="/latest/train-models/nemo-rl-grpo/gym-configuration" label="Previous: Gym Configuration" direction="prev" />
+
+## Prerequisites
+
+- Read [Gym Configuration](/latest/train-models/nemo-rl-grpo/gym-configuration) for the `data` and `env` blocks.
+
+---
+
+## Configuration File Location
+
+Same file as the Gym section:
+
+```
+examples/nemo_gym/grpo_workplace_assistant_nemotron_nano_v2_9b.yaml
+```
+
+---
+
+## Model Configuration
+
+| Parameter | Value | Description |
+|-----------|-------|-------------|
+| `model_name` | nvidia/NVIDIA-Nemotron-Nano-9B-v2 | Base model. |
+| `max_total_sequence_length` | 32768 | Maximum context length. |
+| `precision` | bfloat16 | Training precision. |
+| `tensor_model_parallel_size` | 8 | Tensor parallelism across GPUs. |
+
+---
+
+## GRPO Hyperparameters
+
+| Parameter | Value | Description |
+|-----------|-------|-------------|
+| `num_prompts_per_step` | 4 | Prompts per training step. |
+| `num_generations_per_prompt` | 4 | Rollouts per prompt. |
+| `max_num_steps` | 10 | Total training steps. |
+| `use_leave_one_out_baseline` | true | Variance reduction across the rollout group. |
+| `normalize_rewards` | true | Normalize rewards across the batch. |
+
+---
+
+## Optimizer Settings
+
+| Parameter | Value | Description |
+|-----------|-------|-------------|
+| `optimizer` | Adam | Optimizer. |
+| `lr` | 5.0e-6 | Learning rate. |
+| `min_lr` | 5.0e-7 | Minimum learning rate. |
+| `weight_decay` | 0.01 | Weight decay. |
+| `adam_beta1` / `adam_beta2` | 0.9 / 0.999 | Adam betas. |
+| `clip_grad` | 1.0 | Gradient clipping threshold. |
+
+---
+
+## Next Steps
+
+With the config understood, provision the runtime:
+
+<NavButton href="/latest/train-models/nemo-rl-grpo/setup" label="Continue to Setup" direction="next" />

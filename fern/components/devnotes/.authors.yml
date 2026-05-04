@@ -1,0 +1,11 @@
+# Author registry for engineering notes / blog posts.
+# Keep in sync with components/devnotes/authors-data.ts.
+#
+# Each entry maps an author id (used in MDX frontmatter and Authors/BlogCard
+# components) to display fields. Add a new entry per author; the id is what
+# you reference in MDX (e.g., authors: [nvidia, jdoe]).
+
+nvidia:
+  name: NVIDIA NeMo Gym Team
+  description: NeMo Gym Core Team
+  avatar: https://avatars.githubusercontent.com/u/1728152?s=200&v=4

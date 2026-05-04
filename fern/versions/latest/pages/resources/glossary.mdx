@@ -1,0 +1,146 @@
+---
+title: "Glossary"
+description: "Definitions of NeMo Gym terms: training environment, agent harness, resources server, rollout, verifier, RLVR, and more."
+content_type: reference
+audience_level: beginner
+journey_stage: discover
+position: 2
+---
+Definitions of the vocabulary used across NeMo Gym tutorials, reference material, and configs.
+
+---
+
+## A
+
+**Agent harness** (also: agent server)
+: The orchestrator that runs the model-and-tools loop for a single task. Implemented as a [Response API Agent](/latest/reference/servers/agent) extending `SimpleResponsesAPIAgent`; exposes `/run` and `/responses` endpoints. `simple_agent` is the default — it loops calls to the model and dispatches tool calls back to the resources server until the model emits a final assistant message (or hits `max_steps`). `proof_refinement_agent` adds an outer correction loop; `verifiers_agent`, `swe_agents`, and others wrap external runtimes.
+
+## B
+
+**Benchmark**
+: A [training environment](#training-environment) used for measurement rather than training. Same plumbing — a resources server plus an agent — but the dataset is fixed and the goal is to score a model rather than improve it. See [Evaluate Models](/latest/evaluate).
+
+## C
+
+**Chat Completions API**
+: OpenAI's simpler interface for basic LLM interactions. NeMo Gym includes middleware to convert between this format and the [Responses API](#responses-api). Use `vllm_model` for `/v1/chat/completions` endpoints.
+
+## D
+
+**Data generation process**
+: The complete pipeline from input prompt to scored rollout — orchestration, model inference, tool usage, and verification.
+
+**Dataset**
+: In NeMo Gym, a JSONL file with one [task](#task) per line. Each line carries `responses_create_params.input` (the messages) and `verifier_metadata` (task-specific verification data). See [Data](/latest/build-environments/data).
+
+**Demonstration data**
+: Training data format for [SFT](#sft-supervised-fine-tuning) consisting of input prompts paired with successful rollouts. Shows models examples of correct behavior.
+
+**DPO (Direct Preference Optimization)**
+: An offline RL training approach using pairs of rollouts where one is preferred over another. Teaches better-versus-worse responses.
+
+## E
+
+**Environment**
+: An overloaded term. In NeMo Gym, the canonical phrase is [training environment](#training-environment), implemented as a [resources server](#resources-server). When used loosely, "environment" often refers to the tools the model has access to.
+
+**Experiment**
+: One end-to-end eval or training-data run — an immutable snapshot of [rollouts](#rollout) plus rewards plus the resolved config that produced them. In NeMo Gym, an experiment is the output of a single `ng_collect_rollouts` invocation; comparing two experiments means joining their per-task reward profiles. If you're arriving from a SaaS eval platform (Braintrust, Arize AX, Langfuse), "experiment" maps to the same concept they ship.
+
+## G
+
+**GRPO (Group Relative Policy Optimization)**
+: A reinforcement learning algorithm that optimizes policies by comparing groups of rollouts relative to each other. Used for online RL post-training with language models. See the [NeMo RL GRPO tutorial](/latest/train-models/nemo-rl-grpo).
+
+## M
+
+**Multi-step**
+: Complex tasks requiring agents to break problems into sequential steps, often using tools and intermediate reasoning.
+
+**Multi-turn**
+: Conversations spanning multiple exchanges where context and state persist across turns. Multi-turn agents must propagate cookies and token IDs across turns.
+
+## O
+
+**Online vs offline training**
+: **Online** training has the model learn while interacting with the environment in real time. **Offline** training learns from pre-collected rollout data.
+
+**Orchestration**
+: Coordination logic that manages when to call models, which tools to use, and how to sequence multi-step operations. Lives in the [agent harness](#agent-harness-also-agent-server).
+
+## P
+
+**Policy model**
+: The primary LLM being trained or evaluated — the decision-making component you want to improve.
+
+**Preference pairs**
+: Training data format for [DPO](#dpo-direct-preference-optimization): the same prompt with two different responses, where one is preferred over the other.
+
+## R
+
+**Reward** (also: reward signal)
+: The [verifier](#verifier)'s score for a single [rollout](#rollout). Numerical, typically `0.0` or `1.0` in RLVR, indicating whether the task was accomplished. See [Reward Semantics](/latest/about/concepts/reward-semantics).
+
+**Resources server**
+: The server type that hosts the [verifier](#verifier) and verification logic. Implements `verify()`; extends `SimpleResourcesServer`. One resources server defines one [training environment](#training-environment). See [Resources Server](/latest/reference/servers/resources).
+
+**Responses API**
+: OpenAI's standard interface for rollouts, including function calls and multi-turn conversations. NeMo Gym's native format. Use `openai_model` for endpoints supporting `/v1/responses`.
+
+**RL (Reinforcement Learning)**
+: Training approach where models learn through trial-and-error interaction with environments using reward signals.
+
+**RLVR (Reinforcement Learning with Verifiable Rewards)**
+: An RL post-training paradigm in which the reward comes from a deterministic verifier rather than a learned reward model. NeMo Gym is built for RLVR. See [Training Approaches](/latest/about/concepts/training-approaches).
+
+**Rollout** (also: trajectory)
+: A complete agent execution from prompt to verification — the ordered record of states, actions, and rewards. **Rollout** is also used as a verb for the act of executing a policy in an environment to generate that record. In practice "rollout" and "trajectory" are used interchangeably.
+
+**Rollout batch**
+: A collection of multiple rollouts generated together, typically for the same task. Used for efficient parallel processing.
+
+**Rollout collection**
+: The process of applying the data generation pipeline to input prompts at scale. Driven by `ng_collect_rollouts`.
+
+## S
+
+**Scorer** (also: evaluator, verifier function)
+: The function inside a [resources server](#resources-server) that consumes a model output and returns a [reward](#reward). NeMo Gym calls this `verify()`; SaaS eval platforms (Braintrust, Arize AX, Langfuse) call it a "scorer" or "evaluator." Same concept, different vocabulary. For the catalog of built-in patterns, see [Scorers Library](/latest/build-environments/verification/scorers).
+
+**Service discovery**
+: The mechanism by which distributed NeMo Gym components find and communicate with each other across machines.
+
+**SFT (Supervised Fine-Tuning)**
+: Training approach using examples of good model behavior. Consumes [demonstration data](#demonstration-data) — successful rollouts as training examples.
+
+## T
+
+**Task**
+: A single instance within a [training environment](#training-environment) — one line of the [dataset](#dataset) JSONL. Pairs an input prompt with the [verifier_metadata](#verifier) needed to score it.
+
+**Task instance**
+: A single rollout attempt for a specific task. Multiple instances per task capture different approaches.
+
+**Tool use** (also: function calling)
+: Models invoking external capabilities (APIs, calculators, databases) to accomplish tasks beyond text generation.
+
+**Trace**
+: Detailed log of a rollout including metadata for debugging or interpretability.
+
+**Training environment**
+: The umbrella concept — a set of [tasks](#task) that share the same setup and verifier, packaged as a prompt dataset plus a scoring function. Concretely, a training environment is implemented as a [resources server](#resources-server) paired with an [agent harness](#agent-harness-also-agent-server). See [Core Components](/latest/about/concepts/core-components).
+
+## V
+
+**Verifier**
+: The scoring function inside a [resources server](#resources-server) — the `verify()` method that consumes a model's output plus `verifier_metadata` and returns a [reward](#reward). Colloquially, "verifier" sometimes refers to a "training environment with verifiable rewards"; the strict NeMo Gym usage is the scoring function. See [Task Verification](/latest/about/concepts/task-verification).
+
+**vLLM**
+: High-performance inference server for running open-source language models locally. Alternative to commercial APIs; paired with the `vllm_model` and `local_vllm_model` server variants.
+
+## Related Documentation
+
+- [About: Concepts](/latest/about/concepts)
+- [Core Components](/latest/about/concepts/core-components)
+- [Training Approaches](/latest/about/concepts/training-approaches)
+- [FAQ](/latest/reference/faq)

@@ -1,0 +1,123 @@
+---
+title: "Profile Rewards"
+description: "Compute per-task aggregates from a rollouts JSONL using ng_reward_profile — mean / max / min / median / std per numeric verify field. The bridge from raw rollouts to per-task signal."
+content_type: how-to
+audience_level: intermediate
+journey_stage: build
+position: 1
+---
+
+Once `ng_collect_rollouts` finishes you have a rollouts JSONL — one line per `(task, rollout)` pair. That answers "what did the model say?" but not "how did the model do per task?" `ng_reward_profile` joins rollouts back to their materialized inputs and produces per-task aggregates: mean reward, max reward, min/median/std, plus the same stats on every other numeric verify field.
+
+For the dataset-level combinatorial pass@k metric, `ng_collect_rollouts` already calls the agent's `/aggregate_metrics` endpoint at the end of a run and writes the result to `<stem>_aggregate_metrics.json`. This page covers the per-task profiling step that complements it.
+
+## The flow
+
+Three stages turn rollouts into actionable per-task signal:
+
+1. **`ng_collect_rollouts`** produces `rollouts.jsonl` (one line per rollout) plus the materialized-inputs sidecar `<stem>_materialized_inputs.jsonl` and the run-level `<stem>_aggregate_metrics.json`.
+2. **`ng_reward_profile`** produces `<stem>_reward_profiling.jsonl` (one line per task with per-task stats) and `<stem>_agent_metrics.json` (agent-level rollup of the same stats).
+3. Filter or aggregate the profiling output for whatever question you have — flaky tasks, consistent failures, dataset-level mean.
+
+## The command
+
+```bash
+ng_reward_profile \
+    +materialized_inputs_jsonl_fpath=results/gpqa_diamond_rollouts_materialized_inputs.jsonl \
+    +rollouts_jsonl_fpath=results/gpqa_diamond_rollouts.jsonl
+```
+
+Both inputs are required. Output paths are derived from the rollouts stem — there's no `+output_jsonl_fpath` flag.
+
+| Flag | Required | Meaning |
+|---|---|---|
+| `+materialized_inputs_jsonl_fpath` | yes | The materialized-inputs sidecar that `ng_collect_rollouts` wrote next to its output. Pins the task indices and rollout indices that the profile joins on. |
+| `+rollouts_jsonl_fpath` | yes | The rollouts JSONL produced by `ng_collect_rollouts`. Must come from a run with `+num_repeats >= 1`. |
+
+For the full CLI parameter table see [`ng_reward_profile` in the CLI reference](/api/cli/rollouts#ng_reward_profile).
+
+## What the output looks like
+
+Two files, both derived from the rollouts stem:
+
+- `<stem>_reward_profiling.jsonl` — one line per task. Each line carries per-task stats keyed `<stat>/<column>` for every numeric field on the rollout's verify response.
+- `<stem>_agent_metrics.json` — agent-level rollup of the same stats.
+
+The keys follow a consistent pattern. For each numeric column the verifier produced (`reward`, plus any custom field like `extracted_answer_score`, `judge_evaluations[].verdict`, token counts from `response.usage`), you get five stats:
+
+- `mean/<column>`
+- `max/<column>`
+- `min/<column>`
+- `median/<column>`
+- `std/<column>` (zero when only one sample)
+
+Per-task rows additionally carry a `sample` field with the original row data.
+
+```json
+{
+  "task_index": 0,
+  "mean/reward": 0.6,
+  "max/reward": 1.0,
+  "min/reward": 0.0,
+  "median/reward": 1.0,
+  "std/reward": 0.5477,
+  "sample": {
+    "responses_create_params": { "input": [{"role": "user", "content": "..."}] },
+    "verifier_metadata": { "answer": "C" }
+  }
+}
+```
+
+## pass@1 vs pass@k
+
+`ng_reward_profile` reports per-task aggregates. The combinatorial pass@k metrics live in the agent-level metrics file that `ng_collect_rollouts` writes (`<stem>_aggregate_metrics.json`).
+
+| Metric | What it answers | Where you see it |
+|---|---|---|
+| **pass@1** | Single-rollout success rate, averaged across tasks. With binary rewards it's straight accuracy. | Per-task: `mean/reward`. Agent-level: `pass@1[avg-of-k]/accuracy` in the aggregate metrics file. |
+| **pass@k** | "At least one of k attempts succeeds" — combinatorial estimator for binary rewards, max-of-k for graded ones. | Per-task: `max/reward`. Agent-level: `pass@k/accuracy` in the aggregate metrics file. |
+
+The two are equal when `+num_repeats=1` and diverge as `+num_repeats` grows. For the precise definitions and the unbiased combinatorial estimator, refer to [Reward Semantics — pass@1 vs pass@k](/latest/about/concepts/reward-semantics#pass1-vs-passk).
+
+## Filtering for tasks the model fails
+
+The per-task profiling JSONL is just a JSONL — filter it with whatever tool. Common filters:
+
+```bash
+# Tasks the model never passed (mean/reward < 1.0 with binary rewards)
+jq 'select(."mean/reward" < 1.0)' results/gpqa_diamond_rollouts_reward_profiling.jsonl
+
+# Flaky tasks (high within-task variance)
+jq 'select(."std/reward" > 0.4)' results/gpqa_diamond_rollouts_reward_profiling.jsonl
+
+# Tasks the model always passed
+jq 'select(."mean/reward" == 1.0)' results/gpqa_diamond_rollouts_reward_profiling.jsonl
+```
+
+For the canonical combinatorial pass@k report — the form most papers cite — read `<stem>_aggregate_metrics.json` directly. The `key_metrics` block surfaces headline numbers; the full set is in `agent_metrics`.
+
+## Variance and confidence
+
+`+num_repeats` controls how many independent rollouts per task. Per-task stats from `ng_reward_profile`:
+
+- **`mean/reward`** is the per-task pass@1.
+- **`std/reward`** is the within-task standard deviation across the `+num_repeats` rollouts. High `std/reward` on a task means the model is flaky on that task; low means it's consistent.
+- **`max/reward`** is the per-task pass@k for binary rewards (max-of-k for graded rewards).
+
+The standard servers target run-to-run variance below 1% on the same model. Raise `+num_repeats` until you're below that — for stable pass@1, 5–10 is typical; for tight confidence intervals, 16+. For pass@k, `+num_repeats >= k` is required.
+
+For across-run variance (the same eval run twice), see [Reward Semantics — Aggregation rules](/latest/about/concepts/reward-semantics#aggregation-rules).
+
+## Common mistakes
+
+- **`+num_repeats < k` for pass@k.** The combinatorial estimator needs at least `k` rollouts per task; with fewer it's undefined.
+- **Mixing rollouts from different runs.** `ng_reward_profile` joins on `task_index` and doesn't check provenance. Concatenated rollouts from two different runs produce a meaningless profile.
+- **Profiling before rollouts finished.** If `ng_collect_rollouts` was killed mid-run, the rollouts file is partial. Re-run with `+resume_from_cache=true` to fill the gaps before profiling.
+- **Forgetting that errored rollouts that didn't write a row aren't aggregated.** Per [Reward Semantics — Aggregation rules](/latest/about/concepts/reward-semantics#aggregation-rules), only rollouts that wrote a JSONL line count. A verifier that crashed and dropped rows produces a score against the surviving subset only.
+- **Reaching for a `+pass_threshold` flag.** It doesn't exist on `ng_reward_profile` — the per-task `mean/reward` is itself the pass rate when rewards are binary, and you can filter the JSONL for any threshold you care about.
+
+## Next steps
+
+- [Inspect Failures](/latest/evaluate/analyze/inspect-failures) — drill into rollouts for tasks where `mean/reward` is low.
+- [Reward Semantics](/latest/about/concepts/reward-semantics) — the full scoring contract: errors, retries, aggregation.
+- [Reward Debugging](/latest/about/concepts/reward-debugging) — diagnostic playbook when a reward looks wrong.

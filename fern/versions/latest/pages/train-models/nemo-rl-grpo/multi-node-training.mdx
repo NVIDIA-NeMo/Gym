@@ -1,0 +1,120 @@
+---
+title: "Multi-Node"
+description: "Scale GRPO training to multiple nodes with Slurm batch mode and monitor training metrics in Weights & Biases."
+content_type: tutorial
+audience_level: advanced
+journey_stage: scale
+---
+import { NavButton } from "../../../../../components/NavButton";
+
+Submit the production GRPO run as a Slurm batch job. The wall-clock budget is 2-4 hours depending on `NUM_ACTOR_NODES`; reward should trend up and `val:accuracy` should rise steadily across the run.
+
+<NavButton href="/latest/train-models/nemo-rl-grpo/single-node-training" label="Previous: Single Node Training" direction="prev" />
+
+---
+
+## Prerequisites
+
+<Info>
+Complete [Single Node Training](/latest/train-models/nemo-rl-grpo/single-node-training) before running this — the 3-step smoke run is the cheapest way to catch a misconfigured environment before burning multi-node time.
+
+</Info>
+
+- A successful 3-step single-node run.
+- Access to the Slurm login/head node (not the interactive container).
+- A Weights & Biases API key for experiment tracking.
+
+---
+
+## 1. Launch Multi-Node Training
+
+**Estimated time**: Several hours (depending on `NUM_ACTOR_NODES`)
+
+Scale by setting `NUM_ACTOR_NODES` (which the launcher passes through to `cluster.num_nodes`). The script runs in **batch mode**: the `COMMAND` variable encodes what each node executes when the job lands.
+
+<Note>
+Submit from the **Slurm login/head node**, not from inside the interactive container — `sbatch` queues an independent job that allocates its own nodes.
+
+</Note>
+
+```bash
+cd /path/to/nemo/rl
+
+# Submit multi-node job
+# Set these environment variables before running:
+#   WANDB_API_KEY: Your Weights & Biases API key for logging
+#   EXP_NAME: Experiment name
+#   NUM_ACTOR_NODES: Number of GPU nodes to use (2, 4, 8, etc.)
+#   CONTAINER_IMAGE_PATH: The container to use.
+#   SLURM_ACCOUNT: Slurm account
+#   SLURM_PARTITION: Slurm partition
+WANDB_API_KEY={your W&B API key} \
+EXP_NAME=nemo_gym_grpo/nemotron_nano_v2_9b/2nodes/workplace_assistant_001 \
+NUM_ACTOR_NODES=2 \
+REPO_LOCATION=$PWD \
+CONTAINER_IMAGE_PATH=nvcr.io/nvidia/nemo-rl:v0.4.0.nemotron_3_nano \
+SLURM_ACCOUNT={your Slurm account} \
+SLURM_PARTITION={your Slurm partition} \
+    examples/nemo_gym/launch_nemo_gym_multinode_training.sh \
+    --config=examples/nemo_gym/grpo_workplace_assistant_nemotron_nano_v2_9b.yaml \
+    ++policy.generation.vllm_cfg.tool_parser_plugin=$(find $PWD/.cache -name nemotron_toolcall_parser_no_streaming.py) \
+    logger.wandb.project="$USER-nemo-gym-rl-integration"
+```
+
+<Tip>
+If you imported the container locally with enroot during [Setup](/latest/train-models/nemo-rl-grpo/setup), point `CONTAINER_IMAGE_PATH` at the local file instead:
+
+```bash
+CONTAINER_IMAGE_PATH=$PWD/../nvcr.io/nvidia/nemo-rl:v0.4.0.nemotron_3_nano \
+```
+
+</Tip>
+
+`squeue -u $USER` should show the job moving from PENDING to RUNNING within the cluster's normal queue time.
+
+---
+
+## 2. Monitor Training Progress
+
+Watch these two W&B metrics:
+
+| Metric | Description |
+|--------|-------------|
+| `train:reward_mean` | Average reward over the training batch. Noisy step to step, but the trend line should rise. |
+| `val:accuracy` | Validation accuracy on the held-out split. Should climb steadily. |
+
+The top-3 checkpoints by `val:accuracy` are retained — `checkpointing.keep_top_k: 3` — under:
+
+```bash
+ls results/$EXP_NAME
+```
+
+A healthy run shows rising reward, climbing validation accuracy, no OOM errors, and checkpoints written at the configured interval.
+
+---
+
+## 3. Measure Real-World Improvement
+
+The Workplace Assistant tasks correlate with the [Berkeley Function Calling Leaderboard (BFCL) v3](https://gorilla.cs.berkeley.edu/leaderboard.html). Score Nemotron Nano 9B v2 on BFCL v3 before and after training to quantify the lift; tool-calling accuracy should improve measurably.
+
+Use [NeMo Evaluator](https://github.com/NVIDIA-NeMo/Evaluator) to run the benchmark — see [supported benchmarks and harnesses](https://github.com/NVIDIA-NeMo/Evaluator#-supported-benchmarks-and-evaluation-harnesses) for setup.
+
+---
+
+## Next Steps
+
+The trained checkpoint is on disk. Next moves:
+
+<Cards>
+
+<Card title="Use Other Training Environments" href="https://github.com/NVIDIA-NeMo/Gym#-available-environments">
+
+Browse the catalog of resources servers — swap dataset and config paths to retarget GRPO at a different benchmark.
+</Card>
+
+<Card title="Build a Custom Training Environment" href="/latest/build-environments">
+
+Build a resources server with your own tools and verification logic.
+</Card>
+
+</Cards>

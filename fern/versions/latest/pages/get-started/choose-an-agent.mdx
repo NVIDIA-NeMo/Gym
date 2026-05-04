@@ -1,0 +1,113 @@
+---
+title: "Choose an Agent"
+description: "Pick the right agent harness for your task: simple, proof-refinement, verifiers integration, or a custom external harness."
+content_type: explanation
+audience_level: intermediate
+journey_stage: build
+position: 6
+---
+import { AgentCatalog } from "../../../../components/agents/AgentCatalog";
+
+An agent in NeMo Gym (also called the agent harness, exposed as the agent server) is the orchestrator that runs the model + tools loop and forwards model output to the resources server for verification. NeMo Gym ships several agent harnesses for common patterns. This page helps you pick one — or shows you when to bring your own.
+
+<Tip>
+If your task is single-turn or simple multi-step tool calling, start with [`simple_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/simple_agent). Pick another harness only when you have a specific reason — multi-turn refinement, an external library you already trust, or a domain-specific loop (SWE, browse, terminal).
+</Tip>
+
+## Agent Catalog
+
+Filter by shape (model+tool loop, correction loop, external wrapper, domain-specific) or by capability (trainable multi-turn, uses Gym `verify()`). Pair any of these with a resources server and a model server in your YAML config.
+
+<AgentCatalog />
+
+| Agent | Pattern | Use when |
+|---|---|---|
+| [`simple_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/simple_agent) | Loops `/v1/responses` calls, dispatches each tool call back to the resources server, terminates on a final assistant message or `max_steps`. | Default for most evals — single-turn QA, code generation, math, and any multi-step tool-call task that doesn't need a custom outer loop. |
+| [`non_executing_simple_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/non_executing_simple_agent) | Forwards a single request and passes the model response straight to the verifier. Does not execute tool calls. | The tool call itself is the final answer (function-calling format checks, schema validation). |
+| [`proof_refinement_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/proof_refinement_agent) | Multi-turn self-correction loop: model gets verifier error feedback and retries up to `max_correction_turns`. | Iterative refinement helps — formal proofs, code with a compiler in the loop. |
+| [`gymnasium_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/gymnasium_agent) | Drives a Gymnasium-style `reset()` / `step()` loop against a `GymnasiumServer` resources server. | Your environment is a Gymnasium-style state machine (Blackjack, classic control, custom episodic envs). |
+| [`tool_simulation_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/tool_simulation_agent) | Required tool execution results are produced by simulation rather than real execution. | You want deterministic tool outputs for reproducible evals or for synthetic-data generation. |
+| [`verifiers_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/verifiers_agent) | Bridges to Prime Intellect's [Verifiers](https://github.com/PrimeIntellect-ai/verifiers) library, including environments from the Environments Hub. | You want to run an existing Verifiers environment (e.g. `acereason-math`, `ascii-tree`) inside Gym. |
+| [`langgraph_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/langgraph_agent) | Adapter for LangGraph graphs: iterative reflection, subagent orchestration, parallel thinking, ReWOO. | You want a graph-shaped harness from the LangGraph ecosystem. Note: non-monotonic trajectories (e.g. parallel thinking) are not directly trainable with NeMo RL. |
+| [`harbor_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/harbor_agent) | Runs [Harbor](https://github.com/laude-institute/harbor) agents (e.g. `terminus-2`) in Harbor-managed environments and returns Gym-compatible outputs. | You want to evaluate a Harbor agent inside Gym. |
+| [`aviary_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/aviary_agent) | Bridges to FutureHouse's [Aviary](https://github.com/Future-House/aviary) framework. Pair with `resources_servers/aviary`. | You want to run Aviary environments and datasets inside Gym. |
+| [`stirrup_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/stirrup_agent) | Uses the [Stirrup](https://github.com/ArtificialAnalysis/Stirrup) agent loop to evaluate models on GDPVal. | Real-world professional knowledge-work tasks (finance, law, healthcare, engineering). |
+| [`mini_swe_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/mini_swe_agent) | Integrates the [Mini-SWE-Agent](https://github.com/SWE-agent/mini-swe-agent) harness for SWE-Bench. | Software-engineering tasks at SWE-Bench scope. |
+| [`swe_agents`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/swe_agents) | Coding-agent harnesses (SWE-Bench style) with sandbox/repo interaction. | Larger-footprint SWE tasks beyond `mini_swe_agent`. |
+| [`browsecomp_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/browsecomp_agent) | Browse-and-answer harness for the BrowseComp benchmark. | Web-search / browsing benchmarks. |
+| [`tau2`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/tau2) | Harness for the τ²-bench customer-service evaluation. | Multi-turn customer-service / tool-use evaluation. |
+| [`cvdp_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/cvdp_agent) | Hardware-design harness. Pair with [`resources_servers/cvdp`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/cvdp). | CVDP (Comprehensive Verilog Design Problems) benchmark. |
+| [`labbench2_vlm_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/labbench2_vlm_agent) | Extends `simple_agent`, resolves `verifier_metadata.media_dir` and injects `input_image` blocks. | Vision-language tasks where the model needs image/PDF inputs from disk (LAB-Bench v2 VLM). |
+
+If none of these fit, bring your own.
+
+## Bring Your Own Agent
+
+Two paths, depending on whether you already have an agent runtime you trust.
+
+### Wrap an external library
+
+LangGraph, CrewAI, NeMo Agent Toolkit, Claude Code-style harnesses, and most other agent runtimes integrate at the agent server level. The pattern:
+
+1. Subclass `SimpleResponsesAPIAgent`.
+2. In `/run`, pre-process the Gym JSONL row into the library's input shape.
+3. Drive the external loop. Use NeMo Gym's OpenAI client (`nemo_gym/openai_utils.py`) for model calls; use aiohttp for any external HTTP. Avoid `httpx.AsyncClient` — it has O(n²) connection-pool behavior at high concurrency.
+4. Post-process the library's output back into a `BaseVerifyResponse`.
+5. Reproduce publicly reported numbers with the original repo first, then again after Gym integration.
+
+Refer to [Integrate External Environments](/latest/build-environments/integrations/external-libraries) for the full walkthrough; [`verifiers_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/verifiers_agent) and [`langgraph_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/langgraph_agent) are reference implementations.
+
+### Implement `SimpleResponsesAPIAgent` directly
+
+Subclass [`SimpleResponsesAPIAgent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents) and implement `responses()` and `run()`. For multi-turn agents:
+
+- Propagate cookies through every downstream call: `cookies=request.cookies`. Stateful resources servers depend on this.
+- Token IDs (`prompt_token_ids`, `generation_token_ids`, `generation_log_probs`) ride along on each output item the model server returns. The harness propagates them by re-sending the full prior `output` list as the next turn's input — don't drop or rebuild output items, since NeMo RL training reads those fields off them. (Note: `proof_refinement_agent` deliberately resets context per correction turn, so it is not directly trainable as a multi-turn trajectory.)
+- Handle tool failures and bad model outputs as meaningful error responses, not crashes — `/run` must survive 4k–65k concurrent requests.
+
+[`proof_refinement_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/proof_refinement_agent) is a clean reference for a multi-turn correction loop. For state machines, copy [`gymnasium_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/gymnasium_agent).
+
+## Gym Agents vs. External Frameworks
+
+When users ask "should I use `simple_agent` or LangGraph / CrewAI / Agent Toolkit?", the answer depends on what NeMo Gym is providing.
+
+| You want… | Use a Gym agent | Use the external framework directly |
+|---|---|---|
+| Reward verification (`verify()` per task) | Yes | No |
+| Rollout collection at scale (`ng_collect_rollouts`, 4k–65k concurrent) | Yes | No |
+| Per-task `pass@k` profiling for RL training data (`ng_reward_profile`) | Yes | No |
+| Just an agent runtime for a one-off app | — | Yes |
+| Production deployment of a single agent | — | Yes |
+| Already have a LangGraph / Verifiers / Harbor flow you want to evaluate | Wrap it in a Gym agent | — |
+
+If you need Gym's verification + rollout collection, use a Gym agent (or wrap your external one). If you just need an agent runtime, the external framework is the right tool.
+
+## Where to Start
+
+<Cards>
+
+<Card title="Run a benchmark with simple_agent" href="/latest/get-started/quickstart">
+End-to-end rollout against Blackjack in about 10 minutes.
+
+<Badge intent="success" minimal outlined>start here</Badge>
+</Card>
+
+<Card title="Build a custom env with simple_agent" href="/latest/get-started/create-first-environment">
+Gymnasium-style env in about 30 lines of Python.
+
+<Badge minimal outlined>build your own</Badge>
+</Card>
+
+<Card title="Multi-turn refinement" href="/latest/build-environments/supported-patterns/multi-step">
+Walkthrough for environments that benefit from multi-turn correction.
+
+<Badge minimal outlined>multi-turn</Badge>
+</Card>
+
+<Card title="Wrap an external library" href="/latest/build-environments/integrations/external-libraries">
+Pre-process Gym schema → library input → `BaseVerifyResponse`.
+
+<Badge minimal outlined>integrate</Badge>
+</Card>
+
+</Cards>

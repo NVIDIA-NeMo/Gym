@@ -3,61 +3,80 @@ tabs:
     display-name: Documentation
     slug: ""
   api:
-    display-name: API Reference
+    display-name: API and CLI
     slug: api
+  blog:
+    display-name: Blog
+    slug: blog
 
 navigation:
   - tab: docs
     layout:
-      - section: "Documentation"
-        contents:
-          - page: "Home"
-            path: ./latest/pages/index.mdx
       - folder: ./latest/pages/about
         title: "About"
         title-source: frontmatter
       - folder: ./latest/pages/get-started
         title: "Get Started"
         title-source: frontmatter
-      - folder: ./latest/pages/agent-server
-        title: "Agent Server"
+      - folder: ./latest/pages/evaluate
+        title: "Evaluate Models"
         title-source: frontmatter
-      - folder: ./latest/pages/model-server
-        title: "Model Server"
+      - folder: ./latest/pages/build-environments
+        title: "Build Environments"
         title-source: frontmatter
-      - folder: ./latest/pages/resources-server
-        title: "Resources Server"
-        title-source: frontmatter
-      - folder: ./latest/pages/data
-        title: "Data"
-        title-source: frontmatter
-      - folder: ./latest/pages/environment-tutorials
-        title: "Environment Tutorials"
-        title-source: frontmatter
-      - folder: ./latest/pages/training-tutorials
-        title: "Training Tutorials"
-        title-source: frontmatter
-      - folder: ./latest/pages/model-recipes
-        title: "Model Recipes"
-        title-source: frontmatter
-      - folder: ./latest/pages/infrastructure
-        title: "Infrastructure"
+      - folder: ./latest/pages/train-models
+        title: "Train Models"
         title-source: frontmatter
       - folder: ./latest/pages/reference
         title: "Reference"
         title-source: frontmatter
+        collapsed: true
       - folder: ./latest/pages/troubleshooting
         title: "Troubleshooting"
         title-source: frontmatter
-      - folder: ./latest/pages/contribute
-        title: "Contribute"
+        collapsed: true
+      - folder: ./latest/pages/resources
+        title: "Resources"
         title-source: frontmatter
+        collapsed: true
   - tab: api
     layout:
-      - section: API Reference
-        slug: reference/api-reference
+      - section: "Python API"
+        slug: python
         contents:
           - page: Overview
             path: ./latest/pages/api-reference/index.mdx
             slug: ""
           - folder: ../product-docs/nemo-gym/Full-Library-Reference
+      - section: "CLI"
+        slug: cli
+        contents:
+          - page: "Overview"
+            path: ./latest/pages/api-reference/cli/index.mdx
+            slug: ""
+          - page: "Servers"
+            path: ./latest/pages/api-reference/cli/servers.mdx
+            slug: servers
+          - page: "Rollouts"
+            path: ./latest/pages/api-reference/cli/rollouts.mdx
+            slug: rollouts
+          - page: "Data"
+            path: ./latest/pages/api-reference/cli/data.mdx
+            slug: data
+          - page: "Diagnostics"
+            path: ./latest/pages/api-reference/cli/diagnostics.mdx
+            slug: diagnostics
+  - tab: blog
+    layout:
+      - page: "Overview"
+        path: ./latest/pages/blog/index.mdx
+        slug: ""
+      - page: "aiohttp vs httpx"
+        path: ./latest/pages/blog/aiohttp-vs-httpx.mdx
+        slug: aiohttp-vs-httpx
+      - page: "Responses API Evolution"
+        path: ./latest/pages/blog/responses-api-evolution.mdx
+        slug: responses-api-evolution
+      - page: "SWE-RL Case Study"
+        path: ./latest/pages/blog/swe-rl-case-study.mdx
+        slug: swe-rl-case-study

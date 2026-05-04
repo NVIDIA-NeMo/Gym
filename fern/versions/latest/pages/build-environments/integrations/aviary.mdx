@@ -1,0 +1,67 @@
+---
+title: "Aviary"
+description: "Run an Aviary multi-turn tool-calling environment as a NeMo Gym rollout. Unlike Harbor and Verifiers, this wrapper uses a real Gym resources server and follows the standard verify() contract."
+content_type: how-to
+audience_level: intermediate
+journey_stage: build
+position: 5
+---
+import { VerifiedBadge } from "../../../../../components/VerifiedBadge";
+
+<VerifiedBadge verified={false} />
+
+Run a [FutureHouse Aviary](https://github.com/Future-House/aviary) multi-turn tool-calling environment inside NeMo Gym.
+
+## What the wrapper does
+
+`AviaryAgent.responses()` calls the paired Aviary resources server's `/seed_session` for tools and the initial observation, then loops model `/v1/responses` ↔ resources `/step`, ending on environment `done` or `max_steps`. The `/close` call wraps up the trajectory. The verifier call (`/verify`) is then issued from `AviaryAgent.run()`, not from `responses()` itself (`responses_api_agents/aviary_agent/app.py:139-266`).
+
+Model-side cookies propagate across `/v1/responses` turns within the loop. **The wrapper does not currently forward `request.cookies` to the resources server's `/seed_session`, `/step`, `/close`, or `/verify` calls** — pair this harness only with stateless Aviary envs, or extend the wrapper if your env keys state on session cookies.
+
+Unlike Harbor and Verifiers, **this wrapper uses a real Gym resources server**. Aviary's environment maps cleanly onto Gym's four-component model: dataset, agent harness, model server, resources server (verifier).
+
+## Terminology
+
+| Aviary | NeMo Gym | Notes |
+|---|---|---|
+| `Environment` | resources server in `resources_servers/aviary/` | Implements `/seed_session`, `/step`, `/close`, `/verify`. |
+| `Tool` | OpenAI Responses API `function_call` | No custom serialization; native Responses tool calls. |
+| `EnvStateMessage` | `AviaryEnvStateEasyInputMessage` injected into `agent_state.input` | Optionally collapsed via `collapse_old_env_states`. |
+| `Frame` (transition) | one iteration of the loop in `responses()`; emitted as `agent_state_history` when `return_transitions=true` | |
+| Aviary scoring | resources server `/verify` endpoint | **Standard Gym contract here**, unlike Harbor/Verifiers. |
+
+## Wiring
+
+Pair the agent with a `resources_servers/aviary/<env>` server and a model server. The agent config requires `resources_server` and `model_server` references plus the Aviary-specific knobs:
+
+```yaml
+my_aviary_agent:
+  responses_api_agents:
+    aviary_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: my_aviary_env
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      max_steps: 10
+      done_if_no_tool_calls: true
+      return_transitions: true
+```
+
+## Parity validation
+
+Run the underlying Aviary environment standalone with the same tool-call sequence; compare reward and final environment state to the Gym rollout JSONL.
+
+## Caveats
+
+- **`done_if_no_tool_calls: true` (default) ends rollouts when the model emits plain text.** Silent if your environment expects free-form answers (`app.py:76-78`).
+- **`max_total_sequence_length` is a TODO** — not yet auto-fetched from `/models` (`app.py:65-74`). Set explicitly if you care.
+- **Asserts at least one transition completed.** Partial rollouts crash rather than reward-zero (`app.py:242-244`). For environments that can short-circuit before any model call, this is a footgun.
+
+## Related
+
+- [Wrap an external library](/latest/build-environments/integrations/external-libraries) — generic path.
+- [Terminology Translation](/latest/build-environments/integrations/terminology-translation).
+- Source: [`responses_api_agents/aviary_agent/`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/aviary_agent).

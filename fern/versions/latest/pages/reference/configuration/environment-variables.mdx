@@ -1,0 +1,94 @@
+---
+title: "Environment Variables"
+description: "Environment variables NeMo Gym reads at startup or runtime: Ray paths, server configuration injection, optional logging overrides."
+content_type: reference
+audience_level: intermediate
+journey_stage: build
+position: 2
+---
+
+NeMo Gym reads a small number of environment variables at startup and runtime. Most users never set any — the defaults are correct for the standard `uv` + Ray + local installation. This page is the lookup.
+
+For configuration values that aren't sensitive, prefer Hydra config files. See [Configuration](/latest/reference/configuration) and the project rule "Pass all configuration through Gym config (YAML), not environment variables." The variables documented here exist for cluster, cache, and toolchain concerns that don't fit into a YAML config.
+
+## User-settable variables
+
+The following table describes the environment variables that you can set to influence NeMo Gym behavior.
+
+| Name              | Type    | Default                            | Used by                                       | Description                                                                                                                                                                                                                                                       | Example                                          |
+| ----------------- | ------- | ---------------------------------- | --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------ |
+| `RAY_TMPDIR`      | Path    | System tmpdir (typically `/tmp`)   | Ray, read by `ray.init()` at server startup   | The directory Ray uses for AF_UNIX sockets and runtime files. Linux limits socket paths to 107 bytes; on shared filesystems (Lustre, NFS, scratch mounts) the default working directory can push paths over the limit and Ray fails to start. Set to a short local path. | `RAY_TMPDIR=/tmp ng_run "+config_paths=[...]"`   |
+| `RAY_ADDRESS`     | String  | unset                              | Ray, read by `ray.init()`                     | The address of an existing Ray cluster to attach to (`host:port`). When unset and `ray_head_node_address` is not in your config, NeMo Gym starts a new local cluster.                                                                                              | `RAY_ADDRESS=ray://10.0.0.5:10001`               |
+| `OPENAI_API_KEY`  | String  | unset                              | OpenAI client, only when `env.yaml` references it | The API key for OpenAI-hosted endpoints. Most NeMo Gym users set `policy_api_key` in `env.yaml` directly; this variable is only read if your config references it via interpolation.                                                                          | `OPENAI_API_KEY=sk-...`                          |
+| `AZURE_OPENAI_API_KEY` | String | unset                          | Azure OpenAI client (`azure_openai_model`)    | The API key for Azure OpenAI endpoints. Same conventions as `OPENAI_API_KEY` — prefer setting `policy_api_key` in `env.yaml`.                                                                                                                                       | `AZURE_OPENAI_API_KEY=...`                       |
+| `HF_HOME`         | Path    | `~/.cache/huggingface`             | `huggingface_hub`, `transformers`, `datasets` | The root cache directory for Hugging Face downloads (models, datasets, tokenizers). Set this to point at shared scratch when running on clusters where multiple jobs share a model.                                                                                | `HF_HOME=/scratch/hf ng_run ...`                 |
+| `HF_HUB_CACHE`    | Path    | `${HF_HOME}/hub`                   | `huggingface_hub`                             | The hub cache subdirectory, used by `local_vllm_model` to resolve cached weight paths. Override only if you need to split hub artifacts from the rest of `HF_HOME`.                                                                                                | `HF_HUB_CACHE=/scratch/hf-hub`                   |
+| `TRANSFORMERS_CACHE` | Path | `${HF_HOME}`                       | `transformers` (deprecated, soft-aliased to `HF_HOME`) | Legacy cache path used by older `transformers` releases. Honored for backwards compatibility; new setups should set `HF_HOME` instead.                                                                                                                          | `TRANSFORMERS_CACHE=/scratch/hf`                 |
+| `UV_PYTHON_VERSION` | String | unset (uv picks newest 3.12+)    | `uv venv` during installation and `ng_test` venv setup | Pins the Python version `uv` uses when creating virtual environments. Useful when the system Python is older than 3.12 or when you need to reproduce a specific minor version across machines.                                                                | `UV_PYTHON_VERSION=3.12 uv venv`                 |
+| `UV_CACHE_DIR`    | Path    | Platform-default (`~/.cache/uv`)   | `uv` during install and venv creation         | The directory `uv` uses for its package cache. Override on systems where `$HOME` is small or read-only.                                                                                                                                                            | `UV_CACHE_DIR=/scratch/uv`                       |
+
+For Ray's full set of environment variables (worker tuning, GCS configuration, log routing), see the [Ray environment variables reference](https://docs.ray.io/en/latest/ray-observability/user-guides/configure-logging.html). NeMo Gym does not wrap or rename them.
+
+## Framework-set variables
+
+The following variables are set by NeMo Gym automatically when it spawns each server subprocess. Don't set these manually — they are part of the server-startup contract and overriding them will break server discovery.
+
+| Name                    | Set by                                     | Purpose                                                                                                                                                                                                            |
+| ----------------------- | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `NEMO_GYM_CONFIG_DICT`  | `ng_run`, when spawning each server        | The full merged global config, serialized as a YAML string. Each child server reads it from the environment to discover sibling server URLs and its own config block. See `nemo_gym/global_config.py`.            |
+| `NEMO_GYM_CONFIG_PATH`  | `ng_run`, when spawning each server        | The dotted path that identifies this specific server's block within the global config (for example `my_resources_server`). Used by the child to find its own config inside `NEMO_GYM_CONFIG_DICT`.                |
+| `PATH`                  | External tool auto-install hooks           | Modified in-process by `setup_<tool>.py` when a benchmark auto-installs a compiler or runtime (e.g. `gcc`, `dafny`, `lean`). Updated for the running server only — not exported back to the launching shell.       |
+| `LD_LIBRARY_PATH`       | External tool auto-install hooks           | Modified in-process alongside `PATH` so freshly built tools can find their shared libraries. Same scope as `PATH` above.                                                                                            |
+
+The `NEMO_GYM_CONFIG_DICT` and `NEMO_GYM_CONFIG_PATH` injection mechanism is documented in [Architecture › Phase 4: Start servers](/latest/about/concepts/architecture#phase-4-start-servers).
+
+## Sources, in order of priority
+
+When NeMo Gym resolves a configuration value, it consults the following sources in this order. Later sources override earlier ones:
+
+1. **Hard-coded defaults** in the relevant Pydantic config class or `setup_<tool>.py` script.
+2. **Process environment** (`os.environ`) — the variables documented on this page.
+3. **`env.yaml`** at the project root — for sensitive values such as API keys, base URLs, and tracking tokens.
+4. **YAML config files** loaded via `+config_paths`.
+5. **CLI overrides** with Hydra `+key=value` syntax — highest priority.
+
+This applies to configuration values. Pure environment variables (`RAY_TMPDIR`, `HF_HOME`, `UV_PYTHON_VERSION`) are read directly by Ray, Hugging Face, or `uv` and never participate in the Hydra merge.
+
+## Configuration vs. environment variables
+
+Use `env.yaml` and Hydra config files for everything that isn't a cache path, a cluster path, or a toolchain pin:
+
+- **API keys, base URLs, model names** → `env.yaml` (kept out of git via `.gitignore`).
+- **Server settings, dataset paths, agent wiring** → YAML configs in `configs/`.
+- **One-off overrides for a single run** → CLI `+key=value`.
+
+Environment variables are reserved for values that are about the *machine* the run executes on, not the *experiment* being run. The project rule from `CLAUDE.md`: "Pass all configuration through Gym config (YAML), not environment variables. This includes model URLs, API keys, etc." Full configuration schema in [Configuration](/latest/reference/configuration).
+
+## Common patterns
+
+```bash
+# Pin Python during venv setup
+UV_PYTHON_VERSION=3.12 uv venv
+
+# Use a writable Ray tmpdir on shared filesystems
+RAY_TMPDIR=/tmp ng_run "+config_paths=[resources_servers/my_server/configs/my_server.yaml]"
+
+# Run server tests with a writable Ray tmpdir and a shared HF cache
+RAY_TMPDIR=/tmp HF_HOME=/scratch/hf ng_test +entrypoint=resources_servers/my_server
+
+# Attach to an existing Ray cluster instead of starting a new one
+RAY_ADDRESS=ray://head:10001 ng_run "+config_paths=[...]"
+```
+
+`ng_test` re-execs into a per-server isolated venv. Variables set with `os.environ` inside Python don't propagate into that subprocess — set them on the command line as shown above. See [Footguns › `ng_test` venv isolation](/latest/troubleshooting/footguns) for details.
+
+## Where to file an issue
+
+If you hit an environment variable that NeMo Gym reads but isn't documented here, [open an issue](https://github.com/NVIDIA-NeMo/Gym/issues/new) so we can add it.
+
+## Related Topics
+
+- [Configuration](/latest/reference/configuration) — YAML schema for servers, agents, and datasets.
+- [Footguns](/latest/troubleshooting/footguns) — Ray socket paths, venv isolation, and other operational gotchas.
+- [Architecture](/latest/about/concepts/architecture) — how `NEMO_GYM_CONFIG_DICT` and `NEMO_GYM_CONFIG_PATH` are injected during startup.
+- [CLI Commands](/api/cli) — every NeMo Gym CLI entry point and its parameters.

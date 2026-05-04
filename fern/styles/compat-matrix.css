@@ -1,0 +1,137 @@
+/* CompatibilityMatrix — typed matrix rendered from a single source of truth */
+
+.ng-compat-matrix {
+  margin: 1.5em 0;
+}
+
+.ng-compat-matrix__header {
+  margin-bottom: 0.5em;
+}
+
+.ng-compat-matrix__title {
+  font-size: 1.05em;
+  font-weight: 600;
+  margin: 0 0 0.25em 0;
+}
+
+.ng-compat-matrix__caption {
+  font-size: 0.9em;
+  color: #6b7280;
+  margin: 0;
+  line-height: 1.45;
+}
+
+.ng-compat-matrix__scroll {
+  overflow-x: auto;
+  border: 1px solid rgba(150, 150, 150, 0.25);
+  border-radius: 8px;
+}
+
+.ng-compat-matrix__table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9em;
+}
+
+.ng-compat-matrix__table th,
+.ng-compat-matrix__table td {
+  padding: 0.6em 0.8em;
+  text-align: left;
+  border-bottom: 1px solid rgba(150, 150, 150, 0.18);
+  vertical-align: top;
+}
+
+.ng-compat-matrix__table thead th {
+  font-size: 0.78em;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #6b7280;
+  background: rgba(118, 185, 0, 0.04);
+  border-bottom: 2px solid rgba(118, 185, 0, 0.2);
+}
+
+.ng-compat-matrix__row-header {
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.ng-compat-matrix__row-header code {
+  font-size: 0.95em;
+}
+
+.ng-compat-matrix__row-header a {
+  color: inherit;
+  text-decoration: none;
+  border-bottom: 1px dotted rgba(118, 185, 0, 0.4);
+}
+
+.ng-compat-matrix__row-header a:hover {
+  color: #76b900;
+}
+
+.ng-compat-matrix__cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4em;
+  font-size: 0.92em;
+  cursor: help;
+}
+
+.ng-compat-matrix__cell-glyph {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.4em;
+  height: 1.4em;
+  border-radius: 50%;
+  font-size: 0.85em;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.ng-compat-matrix__cell-detail {
+  font-size: 0.85em;
+  color: #6b7280;
+  line-height: 1.4;
+}
+
+[data-theme="dark"] .ng-compat-matrix__cell-detail,
+.dark .ng-compat-matrix__cell-detail {
+  color: #9ca3af;
+}
+
+.ng-compat-matrix__cell--supported .ng-compat-matrix__cell-glyph {
+  background: rgba(34, 197, 94, 0.15);
+  color: #16a34a;
+}
+
+.ng-compat-matrix__cell--partial .ng-compat-matrix__cell-glyph {
+  background: rgba(234, 179, 8, 0.18);
+  color: #ca8a04;
+}
+
+.ng-compat-matrix__cell--unsupported .ng-compat-matrix__cell-glyph {
+  background: rgba(150, 150, 150, 0.15);
+  color: #6b7280;
+}
+
+.ng-compat-matrix__cell--planned .ng-compat-matrix__cell-glyph {
+  background: rgba(59, 130, 246, 0.12);
+  color: #2563eb;
+}
+
+.ng-compat-matrix__legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1em;
+  margin-top: 0.75em;
+  font-size: 0.82em;
+  color: #6b7280;
+}
+
+.ng-compat-matrix__legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35em;
+}

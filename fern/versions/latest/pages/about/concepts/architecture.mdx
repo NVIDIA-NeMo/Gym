@@ -1,10 +1,107 @@
 ---
 title: "Architecture"
-description: ""
+description: "How NeMo Gym separates dataset, agent harness, model, and reward into four independently-varied components."
+content_type: explanation
+audience_level: intermediate
+journey_stage: discover
+position: 1
 ---
-This section describes how NeMo Gym components interact during startup and execution. For an overview of the three server types (Model, Resources, Agent), see [core-components](/latest/about/concepts/core-components).
 
-## Control Plane: Server Startup
+NeMo Gym separates an agentic environment into four components that you vary independently — the dataset, the agent harness, the model, and the reward verifier. Most frameworks bundle these together at the task level. Gym keeps them as separate servers so you can swap any one of them without rewriting the others.
+
+## The four components
+
+```mermaid
+%%{init: {'theme': 'default', 'themeVariables': { 'lineColor': '#5c6bc0', 'primaryTextColor': '#333', 'primaryColor': '#e3f2fd', 'secondaryColor': '#f5f5f5'}}}%%
+flowchart TD
+    D[Dataset<br/>instruction + solution]
+    A[Agent server<br/>= agent harness, orchestrator]
+    M[Model server]
+    R[Resources server<br/>verifier + verification logic]
+    D --> A
+    A --> M
+    A --> R
+```
+
+| Component | Role | Implements |
+| --- | --- | --- |
+| **Dataset** | One task per JSONL line: instruction (input messages) and solution (verifier metadata). The 4th component, peer to the three servers. | JSONL file referenced from the agent config |
+| **Agent server** (the agent harness) | Orchestrator. Runs the model + tools loop and routes the final output to the verifier. | `responses()`, `run()` |
+| **Model server** | Stateless LLM inference. No memory, no orchestration. | `chat_completions()`, `responses()` |
+| **Resources server** | Verifier, verification logic, and any task-specific tools, sandboxes, or environment state. Returns reward in `[0, 1]`. | `verify()` and any tool endpoints |
+
+### Dataset (the 4th component)
+
+A JSONL file with one task per line. Each line carries the prompt the agent sees and the metadata the verifier needs:
+
+```json
+{
+  "responses_create_params": {
+    "input": [
+      {"role": "system", "content": "..."},
+      {"role": "user", "content": "..."}
+    ]
+  },
+  "verifier_metadata": { "expected_answer": "..." }
+}
+```
+
+`responses_create_params.input` follows the OpenAI message format. `verifier_metadata` is opaque to the framework — define whatever fields your benchmark needs (test cases, expected answers, task IDs) and they pass through to the resources server's `verify()`.
+
+Datasets are referenced from agent configs by `jsonl_fpath`. Train and validation datasets live in the GitLab dataset registry; example datasets (5 entries for smoke testing) are committed to git in `data/example.jsonl`.
+
+### Agent server — the agent harness
+
+The agent server (the agent harness) is the orchestrator. It receives a prompt, calls the model, dispatches any tool calls to the resources server, and returns the verified reward. It does not run an LLM itself — all generation goes to the model server.
+
+NeMo Gym ships several agent servers:
+
+- `simple_agent` — the default. Runs the model + tool-call loop until the model emits a final assistant message (or hits `max_steps`). Works for most benchmarks, single-turn or multi-step.
+- `proof_refinement_agent` — multi-turn correction loop where the model sees error feedback and retries.
+- `verifiers_agent`, `swe_agents`, and 12 other harnesses — task-shaped wrappers for specific benchmark families. See [Choose an Agent](/latest/get-started/choose-an-agent) for the full catalog.
+
+Pick a harness when you wire up your YAML config; refer to the [Agent server](/latest/reference/servers/agent) reference for the full list.
+
+### Model server
+
+A stateless `/v1/responses` (and `/v1/chat/completions`) endpoint. It receives a conversation and returns the model's next output — text, tool calls, or code — with no memory.
+
+Six variants ship with NeMo Gym:
+
+- `openai_model` — endpoints supporting `/v1/responses`.
+- `azure_openai_model` — Azure-hosted OpenAI deployments.
+- `vllm_model` — remote vLLM endpoint exposing `/v1/chat/completions`.
+- `local_vllm_model` — vLLM started in-process by NeMo Gym.
+- `local_vllm_model_proxy` — forwards to an externally managed local vLLM (when another process owns the lifecycle).
+- `genrm_model` — generative reward model with `response_1`/`response_2`/`principle` roles for pairwise comparison.
+
+### Resources server
+
+The resources server owns the environment side of the rollout: tools the agent can call, any sandboxes or external state, and the `verify()` method that scores the final output. Per-rollout state is isolated via session cookies, so concurrent rollouts don't bleed into each other.
+
+`verify()` receives the model output and the row's `verifier_metadata`, and returns a `BaseVerifyResponse` whose `reward` field lives in `[0, 1]`. Subclasses can carry richer fields (per-test breakdowns, traces, judge rationales) — the framework only requires `reward`.
+
+## Why separate them
+
+Separating dataset, harness, model, and verifier means each axis varies on its own:
+
+- **Vary the prompt** — edit one dataset file. No code changes.
+- **Vary the harness** — swap the agent server in YAML. Same dataset, same model, new orchestration shape.
+- **Vary the model** — swap the model server URL. Useful for instruct-vs-thinking comparisons or for rolling out a new checkpoint.
+- **Vary the verifier** — swap the resources server. Run the same task through a strict scorer and an LLM-as-judge scorer side-by-side.
+
+Frameworks that bundle these at the task level force you to edit every task whenever any axis changes. Gym keeps them orthogonal.
+
+## Inter-server communication
+
+All servers talk over HTTP via aiohttp. There is no shared memory.
+
+- **`ServerClient`** wraps aiohttp with bounded retry on transport-level errors — 3 tries with a fixed 0.5 s sleep between attempts. Rate-limit responses (HTTP 429, 502, 503, 504, 520) retry independently of that count until they succeed. 4xx and 5xx semantic responses bubble up unchanged. The global aiohttp client is a singleton with connection pooling.
+- **Session cookies** propagate through the call stack so stateful resources servers can pin tool calls and verification to a single rollout.
+- **OpenAI API compatibility** — model servers expose `/v1/responses`, so any OpenAI-compatible client can talk to them.
+- **uvicorn + FastAPI** — every server is a FastAPI app served by [uvicorn](https://uvicorn.dev/).
+
+## Control plane: server startup
 
 When you run `ng_run`, the system starts up in four phases:
 
@@ -18,13 +115,13 @@ flowchart LR
 
 ### Phase 1: Parse CLI
 
-The `ng_run` command uses Hydra to parse command-line arguments. Users specify configuration files via `+config_paths`:
+`ng_run` uses Hydra to parse command-line arguments. Specify configuration files via `+config_paths`:
 
 ```bash
 ng_run "+config_paths=[resources_servers/math/configs/math.yaml, responses_api_models/openai_model/configs/openai_model.yaml]"
 ```
 
-### Phase 2: Load and Merge Configs
+### Phase 2: Load and merge configs
 
 Configuration is loaded from multiple sources in order of priority (later sources override earlier):
 
@@ -32,13 +129,13 @@ Configuration is loaded from multiple sources in order of priority (later source
 2. Local `env.yaml` file (for sensitive values like API keys)
 3. Command-line arguments (highest priority)
 
-**Port allocation**: Users can explicitly specify `host` and `port` in their config. If not provided, the framework automatically allocates ports from available system ports, tracking used ports to prevent conflicts.
+**Port allocation**: You can explicitly specify `host` and `port` in your config. If not provided, the framework allocates ports from available system ports and tracks used ports to prevent conflicts.
 
 ### Phase 3: Initialize Ray
 
 The system initializes a Ray cluster for distributed coordination. If `ray_head_node_address` is specified in the config, it connects to an existing cluster; otherwise, it starts a new one.
 
-### Phase 4: Start Servers
+### Phase 4: Start servers
 
 Servers are started in two stages:
 
@@ -50,7 +147,7 @@ flowchart TB
     Model["Model Server<br/>Own venv + port"]
     Agent["Agent Server<br/>Own venv + port"]
     Resources["Resources Server<br/>Own venv + port"]
-    
+
     Main --> Head
     Main -->|spawn| Model
     Main -->|spawn| Agent
@@ -58,39 +155,35 @@ flowchart TB
 ```
 
 1. **Head Server**: Started as a background thread in the main process. Provides endpoints for config discovery (`/global_config_dict_yaml`) and server instance listing (`/server_instances`).
-
-2. **Server Subprocesses**: Each configured server is spawned as an independent OS process:
-   - Each server has its own Python virtual environment in order to isolate dependencies.
+2. **Server Subprocesses**: Each configured server is spawned as an independent OS process.
+   - Each server has its own Python virtual environment to isolate dependencies.
    - Each runs uvicorn with a FastAPI application listening on `http://{host}:{port}`.
    - The global config is passed via environment variable `NEMO_GYM_CONFIG_DICT`.
    - The specific server identity is passed via `NEMO_GYM_CONFIG_PATH`.
-   - Server URLs are registered in the global config, allowing other servers to discover and call them.
+   - Server URLs are registered in the global config so other servers can discover and call them.
+3. **Health Check**: The main process polls each server's HTTP endpoint until each one responds (any HTTP status counts as "up"; a 404 on `/` is expected), then reports "All servers ready!"
 
-3. **Health Check**: The main process polls each server's HTTP endpoint until all return 200, then reports "All servers ready!"
-
-## Running State
+### Running state
 
 Once all servers are healthy, the system enters steady state:
 
-- The main process sleeps and periodically polls subprocess health
-- Each server process runs its own uvicorn event loop, handling requests asynchronously
-- Servers communicate with each other only via HTTP (no shared memory)
-- Session state is maintained via cookies for multi-step rollouts
+- The main process sleeps and periodically polls subprocess health.
+- Each server process runs its own uvicorn event loop, handling requests asynchronously.
+- Servers communicate with each other only via HTTP (no shared memory).
+- Session state is maintained via cookies for multi-step rollouts.
 
-## Shutdown
+### Shutdown
 
-When the user presses Ctrl+C (or the process receives SIGINT):
+When you press Ctrl+C (or the process receives SIGINT):
 
-1. SIGINT is forwarded to all server subprocesses
-2. Main process waits for subprocesses to terminate (with timeout)
-3. Head server thread is stopped
-4. Process exits cleanly
+1. SIGINT is forwarded to all server subprocesses.
+2. The main process waits for subprocesses to terminate (with timeout).
+3. The head server thread is stopped.
+4. The process exits cleanly.
 
----
+## HTTP request flow
 
-## HTTP Request Flow: Example
-
-During a single rollout, servers communicate via HTTP. This example shows a math problem with tool use:
+During a single rollout, servers communicate via HTTP. This example shows a math problem with one tool call:
 
 ```mermaid
 %%{init: {'theme': 'default', 'themeVariables': { 'lineColor': '#5c6bc0', 'primaryTextColor': '#333'}}}%%
@@ -99,39 +192,29 @@ sequenceDiagram
     participant Agent as Agent
     participant Model as Model
     participant Resources as Resources
-    
+
     Note over Agent,Resources: Initialize
     Agent->>Resources: POST /seed_session
     Resources-->>Agent: OK
-    
+
     Note over Agent,Resources: First generation
     Agent->>Model: POST /v1/responses
     Model-->>Agent: function_call: calculate
-    
+
     Note over Agent,Resources: Tool execution
     Agent->>Resources: POST /calculate
     Resources-->>Agent: "4"
-    
+
     Note over Agent,Resources: Second generation
     Agent->>Model: POST /v1/responses
     Model-->>Agent: message: "The answer is 4"
-    
+
     Note over Agent,Resources: Verification
     Agent->>Resources: POST /verify
     Resources-->>Agent: reward: 1.0
 ```
 
-**Key Design Points:**
-
-- **HTTP-only communication**: All servers communicate via HTTP, enabling language-agnostic implementations and deployment flexibility
-- **Stateless model servers**: Model servers perform single-call generation without memory; the agent maintains conversation state
-- **Session state in resources**: Resources servers use session cookies to maintain per-rollout state across multiple tool calls
-- **OpenAI API compatibility**: Model servers expose `/v1/responses` endpoints compatible with the OpenAI Responses API
-- **uvicorn + FastAPI**: All servers use [uvicorn](https://uvicorn.dev/) as the ASGI server with [FastAPI](https://fastapi.tiangolo.com/) for HTTP routing and request handling
-
----
-
-## Data Plane: Rollout Collection
+## Data plane: rollout collection
 
 When you run `ng_collect_rollouts`, the system collects training data by executing rollouts in parallel:
 
@@ -144,35 +227,63 @@ sequenceDiagram
     participant Agent as Agent
     participant Model as Model
     participant Resources as Resources
-    
+
     Client->>Head: GET /global_config_dict_yaml
     Head-->>Client: Server addresses
-    
+
     Client->>Agent: POST /run
-    
+
     loop Each prompt in parallel
         Agent->>Resources: Seed session
         Resources-->>Agent: OK
-        
+
         loop Generation loop
             Agent->>Model: Generate response
             Model-->>Agent: Output
-            
+
             opt Tool calls
                 Agent->>Resources: Execute tool
                 Resources-->>Agent: Result
             end
         end
-        
+
         Agent->>Resources: Verify and score
         Resources-->>Agent: Reward
     end
-    
+
     Agent-->>Client: Results with rewards
 ```
 
-The client first queries the Head Server to discover server addresses from the global config, then reads input JSONL and dispatches prompts to the Agent. Completed rollouts are written to output JSONL.
+The client first queries the Head Server to discover server addresses from the global config, then reads input JSONL and dispatches prompts to the agent. Completed rollouts are written to output JSONL.
 
 **Concurrency behavior differs by use case:**
+
 - **Standalone rollout collection** (`ng_collect_rollouts`): A semaphore gates concurrency via `num_samples_in_parallel` to control load.
 - **Training framework integration** (e.g., NeMo RL): All requests are sent without gating; the training framework manages concurrency externally.
+
+## Implementation: how the framework code organizes the four components
+
+The four-component model is the user-facing mental model. Underneath, the framework codifies it as a Pydantic + FastAPI base class hierarchy:
+
+```
+BaseServer
+└── SimpleServer
+    ├── SimpleResourcesServer        # implement verify()
+    ├── SimpleResponsesAPIModel      # implement chat_completions(), responses()
+    └── SimpleResponsesAPIAgent      # implement responses(), run()
+```
+
+- `BaseServer` carries the Pydantic config and the `ServerClient` used to call other servers.
+- `SimpleServer` adds the FastAPI app and middleware stack.
+- The three subclasses correspond to the three server roles. The dataset (the 4th component) is plain JSONL — no class needed.
+
+A `HeadServer` coordinates lifecycles, config, and Ray cluster init across the three server processes.
+
+## Where to next
+
+- [Configuration](/latest/about/concepts/configuration) — how YAML configs map to running servers.
+- [Task verification](/latest/about/concepts/task-verification) — how `verify()` returns reward and what `BaseVerifyResponse` carries.
+- [Glossary](/latest/resources/glossary) — canonical definitions for agent harness, environment, task, dataset.
+- [Agent server reference](/latest/reference/servers/agent) — the agent harnesses that ship with NeMo Gym.
+- [Resources server reference](/latest/reference/servers/resources) — verifier and tool implementation details.
+- [Build environments](/latest/build-environments) — wire up a dataset, harness, model, and verifier from scratch.

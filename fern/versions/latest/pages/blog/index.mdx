@@ -1,0 +1,36 @@
+---
+title: "Engineering Notes"
+description: "Technical case studies, infrastructure decisions, and design rationale behind NeMo Gym."
+content_type: index
+audience_level: advanced
+journey_stage: scale
+position: 4
+---
+
+import { BlogCard, BlogGrid } from "../../../../components/BlogCard";
+
+Technical case studies, infrastructure decisions, and design rationale behind NeMo Gym. Posts are written by engineers on the team and assume familiarity with the architecture — see the Architecture concept page in the Documentation tab if you need context.
+
+<BlogGrid>
+  <BlogCard
+    href="/blog/aiohttp-vs-httpx"
+    title="aiohttp vs httpx"
+    description="Why NeMo Gym uses aiohttp instead of httpx — httpcore's connection pool is O(n²) and hangs at 16k+ concurrent rollouts."
+    date="Apr 2026"
+    authors={["nvidia"]}
+  />
+  <BlogCard
+    href="/blog/responses-api-evolution"
+    title="Responses API Evolution"
+    description="Why NeMo Gym uses the OpenAI Responses API as its native trajectory schema, and how it differs from Chat Completions for multi-turn agent loops."
+    date="Apr 2026"
+    authors={["nvidia"]}
+  />
+  <BlogCard
+    href="/blog/swe-rl-case-study"
+    title="SWE-RL Infrastructure Case Study"
+    description="Deployment topology, sandbox isolation, and rollout collection patterns for SWE-RL training at scale."
+    date="Apr 2026"
+    authors={["nvidia"]}
+  />
+</BlogGrid>

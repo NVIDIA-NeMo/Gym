@@ -1,6 +1,9 @@
 ---
 title: "Create Your First Environment"
 description: "Build a single-decision Blackjack environment by subclassing GymnasiumServer."
+content_type: tutorial
+audience_level: beginner
+journey_stage: try
 position: 5
 ---
 
@@ -83,7 +86,7 @@ For multi-step, tool-calling, and LLM-as-judge patterns, refer to the [Gymnasium
    -e nemo-gym[dev] @ ../../
    ```
 
-**✅ Success Check**: `ls resources_servers/mini_blackjack/` shows the expected directories.
+`ls resources_servers/mini_blackjack/` should now list the scaffold directories.
 
 ### Implement the Environment
 
@@ -136,7 +139,7 @@ if __name__ == "__main__":
     MiniBlackjackEnv.run_webserver()
 ```
 
-**✅ Success Check**: `reset()` returns the hand description; `step()` parses the action tag, settles against a fixed-17 dealer, and terminates with `+1`, `0`, or `-1`.
+`reset()` returns the hand description; `step()` parses the action tag, settles against a fixed-17 dealer, and terminates with `+1`, `0`, or `-1`.
 
 ### Wire the Configuration and Dataset
 
@@ -175,7 +178,7 @@ if __name__ == "__main__":
    ```
    </Accordion>
 
-**✅ Success Check**: `wc -l resources_servers/mini_blackjack/data/example.jsonl` returns 5.
+`wc -l resources_servers/mini_blackjack/data/example.jsonl` should return 5.
 
 ### Run and Verify
 
@@ -208,7 +211,7 @@ Same three commands you ran in the [Quickstart](/latest/get-started/quickstart),
        +rollouts_jsonl_fpath=results/mini_blackjack_rollouts.jsonl
    ```
 
-**✅ Success Check**: A `mean/reward` line prints. A reasonable strategy (stand on 17+, hit on 12-16) lands near `0.0` to `+0.3`. A model that always hits busts often and lands negative.
+A `mean/reward` line prints. A reasonable strategy (stand on 17+, hit on 12-16) lands near `0.0` to `+0.3`; a model that always hits busts often and lands negative.
 
 ## Summary
 
@@ -218,7 +221,7 @@ Same three commands you ran in the [Quickstart](/latest/get-started/quickstart),
 - ✅ Wired the environment to `gymnasium_agent` with YAML
 - ✅ Authored a JSONL dataset and ran rollouts end-to-end
 
-**Learn more:** [Resources Server](/latest/resources-server) · [Agent Server](/latest/agent-server) · [Task Verification](/latest/about/concepts/task-verification)
+**Learn more:** [Resources Server](/latest/reference/servers/resources) · [Agent Server](/latest/reference/servers/agent) · [Task Verification](/latest/about/concepts/task-verification)
 
 ## Next Steps
 
@@ -230,19 +233,19 @@ The full multi-step Blackjack you ran in Quickstart. Same shape, plus dealer log
 <Badge minimal outlined>example</Badge>
 </Card>
 
-<Card title="Environment Tutorials" href="/latest/environment-tutorials">
+<Card title="Build Environments" href="/latest/build-environments">
 Tool calling, multi-turn, LLM-as-judge, real-world environments.
 
 <Badge minimal outlined>tutorials</Badge>
 </Card>
 
-<Card title="Contribute Environments" href="/latest/contribute/environments">
+<Card title="Contribute Environments" href="/latest/build-environments/author-workflow/contribute">
 Submit your environment to the NeMo Gym hub.
 
 <Badge minimal outlined>contribute</Badge>
 </Card>
 
-<Card title="Training Tutorials" href="/latest/training-tutorials">
+<Card title="Train Models" href="/latest/train-models">
 Train a model on your custom environment.
 
 <Badge minimal outlined>training</Badge>

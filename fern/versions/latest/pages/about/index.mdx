@@ -1,31 +1,34 @@
 ---
 title: "Overview"
-description: ""
+description: "Learn how NeMo Gym decouples RL environments from training, using a microservice architecture to scale rollout collection across thousands of parallel agents."
+content_type: explanation
+audience_level: beginner
+journey_stage: discover
 position: 1
 ---
 ## Motivation
 
-Building and scaling RL training environments for LLMs presents several key challenges:
+Building and scaling RL training environments for LLMs runs into four recurring problems:
 
-- **Decoupling environments from training**: Many RL workflows tightly couple environment logic with the training pipeline, making it difficult to integrate complex agent loops, iterate on environment design, and run controlled ablations.
-- **Representing agentic trajectories consistently**: The community widely uses Chat Completions today, but it was designed for stateless, single-turn interactions. Agentic rollouts include interleaved reasoning, tool calls, and text across multiple turns. Without a schema that natively represents this, custom parsing and serialization is required for every environment.
-- **Managing resources**: Environments often depend on external resources such as sandboxed execution, databases, and APIs. Each rollout needs isolated instances that must be reliably initialized and cleaned up.
-- **Scaling rollout collection**: Training may require thousands of parallel rollouts. Environment instances must scale accordingly with distribution, load balancing, and fault tolerance.
+- **Environments coupled to training**: Most RL workflows bind environment logic to the training pipeline, which blocks complex agent loops, slows iteration on environment design, and prevents controlled ablations.
+- **No consistent trajectory schema**: Chat Completions dominates today, but it was designed for stateless, single-turn interactions. Agentic rollouts interleave reasoning, tool calls, and text across multiple turns. Without a native schema, every environment needs custom parsing and serialization.
+- **Unmanaged external resources**: Environments depend on sandboxed execution, databases, and APIs. Each rollout needs isolated instances that initialize and clean up reliably.
+- **Rollout collection that does not scale**: Training requires thousands of parallel rollouts. Environment instances need distribution, load balancing, and fault tolerance.
 
 ## NeMo Gym
 
-[NeMo Gym](https://github.com/NVIDIA-NeMo/Gym) is an open-source library that provides infrastructure to build RL environments and scale rollout collection, enabling seamless integration with your preferred training framework.
+[NeMo Gym](https://github.com/NVIDIA-NeMo/Gym) is an open-source library that builds RL environments and scales rollout collection, and integrates with any training framework.
 
-NeMo Gym was designed to address these challenges and accelerate environment development:
+NeMo Gym addresses the challenges above:
 
-- **Decoupled architecture**: Environment development is fully separated from training, so teams can build, test, and iterate on environments independently of the RL training loop. Interoperable with existing environments, systems, and RL training frameworks.
-- **Environment scaffolding**: Patterns and infrastructure to accelerate environment development for multi-step, multi-turn, and user modeling scenarios.
-- **Standardized trajectories**: NeMo Gym uses the OpenAI Responses API as its native format, providing a schema that natively represents multi-turn, tool-calling agentic rollouts without custom serialization.
+- **Decoupled architecture**: Environment development is fully separated from training, so teams build, test, and iterate on environments independently of the RL training loop. Interoperates with existing environments, systems, and RL training frameworks.
+- **Environment scaffolding**: Patterns and infrastructure that accelerate environment development for multi-step, multi-turn, and user modeling scenarios.
+- **Standardized trajectories**: The OpenAI Responses API is the native format, with a schema that represents multi-turn, tool-calling agentic rollouts without custom serialization.
 - **Managed resource lifecycles**: Resources servers handle initialization, isolation, and cleanup of external dependencies (sandboxes, APIs, databases) per rollout.
-- **Scalable rollout collection**: Infrastructure for distributing thousands of parallel rollouts with load balancing and fault tolerance.
+- **Scalable rollout collection**: Distributes thousands of parallel rollouts with load balancing and fault tolerance.
 - **Growing environment hub**: NVIDIA and community-contributed environments and datasets for training and evaluation.
 
 <Tip>
-The name "NeMo Gym" comes from historical reinforcement learning literature, where the word "Gym" refers to a collection of RL training environments!
+The name "NeMo Gym" comes from historical reinforcement learning literature, where "Gym" refers to a collection of RL training environments.
 
 </Tip>

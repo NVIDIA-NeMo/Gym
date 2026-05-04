@@ -1,0 +1,16 @@
+---
+title: "Author Workflow"
+description: "The author's path from working code to merged PR: pre-merge quality bar, runtime performance profiling, and the contribution flow."
+content_type: index
+audience_level: intermediate
+journey_stage: build
+position: 6
+---
+
+You've got a working environment. What now? These pages cover the path from working code → reviewed → merged.
+
+| Page | When |
+| --- | --- |
+| [Quality checklist](/latest/build-environments/author-workflow/quality-checklist) | Before you open a PR — the merge gate. Deterministic verifier, no oracle leakage, locked dependencies, validation command, baseline reward variance < 1%. |
+| [Profile a resources server](/latest/build-environments/author-workflow/profile) | When the env will run under high concurrency (16k+ rollouts) — surface slow `verify()` paths, contention on shared state, subprocess overhead. |
+| [Contribute an environment](/latest/build-environments/author-workflow/contribute) | Once it passes the checklist and profiles cleanly — the contribution flow: PR submission, reviewers, what to expect. |

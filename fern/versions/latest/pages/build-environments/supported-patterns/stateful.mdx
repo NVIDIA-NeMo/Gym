@@ -1,0 +1,226 @@
+---
+title: "Stateful"
+description: "Build an environment with per-episode session state using SESSION_ID_KEY middleware so concurrent rollouts maintain isolated state across tool calls."
+content_type: tutorial
+audience_level: intermediate
+journey_stage: build
+position: 4
+---
+import { NavButton } from "../../../../../components/NavButton";
+
+Add per-episode session state to a resources server (the verifier) using `SESSION_ID_KEY` middleware so concurrent rollouts maintain isolated state across tool calls. The session middleware is what changes here; the rest of the workflow (task data, agent/model config, rollout collection, training) matches the [single-step tutorial](/latest/build-environments/supported-patterns/single-step).
+
+<NavButton href="/latest/build-environments/supported-patterns/multi-step" label="Multi-Step Environment" direction="prev" />
+
+---
+
+## What You'll Build
+
+A counter environment where the user asks the agent to increment a counter and report the final value. The environment seeds the counter with an initial value, and the agent calls `increment_counter` and `get_counter_value` in sequence. Like the multi-step tutorial, this is single-turn (one user message, multiple tool calls). The difference: the counter lives as server-side session state that persists across tool calls within the episode, managed via `SESSION_ID_KEY`.
+
+### Episode Flow
+
+```text
+Goal (what the agent is learning)
+  - Learn multi-step stateful tool usage: perform actions that change environment state and then read/verify the final state.
+
+Inputs
+  - seed input: initial_count (e.g., 3)
+  - ground truth for grading: expected_count (e.g., 5)
+
+Flow (state is stored per session_id inside the ResourcesServer)
+  1) POST ResourcesServer /seed_session {"initial_count": 3}
+     - stores session_id_to_counter[session_id] = 3
+  2) POST ModelServer /v1/responses -> function_call: increment_counter({"count": 2})
+  3) POST ResourcesServer /increment_counter {"count": 2}
+     - counter becomes 5 for this session_id
+  4) POST ModelServer /v1/responses -> function_call: get_counter_value({})
+  5) POST ResourcesServer /get_counter_value {}
+     - returns {"count": 5}
+  6) POST ResourcesServer /verify {"expected_count": 5, ...}
+     - reward = 1.0 iff stored counter == expected_count
+```
+
+---
+
+## Implementation
+
+**File (simplified from [`resources_servers/example_session_state_mgmt/app.py`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/example_session_state_mgmt/app.py), with improved `seed_session` pattern):**
+
+```python
+# simplified
+from typing import Dict
+
+from fastapi import FastAPI, Request
+from pydantic import BaseModel, Field
+
+from nemo_gym.base_resources_server import (
+    BaseResourcesServerConfig,
+    BaseSeedSessionRequest,
+    BaseSeedSessionResponse,
+    BaseVerifyRequest,
+    BaseVerifyResponse,
+    SimpleResourcesServer,
+)
+from nemo_gym.server_utils import SESSION_ID_KEY  # Critical import!
+
+class StatefulCounterResourcesServerConfig(BaseResourcesServerConfig):
+    pass
+
+# Custom seed request to initialize state
+class StatefulCounterSeedSessionRequest(BaseSeedSessionRequest):
+    initial_count: int
+
+class IncrementCounterRequest(BaseModel):
+    count: int
+
+class IncrementCounterResponse(BaseModel):
+    success: bool
+
+class GetCounterValueResponse(BaseModel):
+    count: int
+
+class StatefulCounterVerifyRequest(BaseVerifyRequest):
+    expected_count: int
+
+class StatefulCounterResourcesServer(SimpleResourcesServer):
+    config: StatefulCounterResourcesServerConfig
+
+    # Session state storage - maps session_id -> state
+    session_id_to_counter: Dict[str, int] = Field(default_factory=dict)
+
+    def setup_webserver(self) -> FastAPI:
+        app = super().setup_webserver()
+        app.post("/increment_counter")(self.increment_counter)
+        app.post("/get_counter_value")(self.get_counter_value)
+        return app
+
+    # Initialize session state
+    async def seed_session(
+        self,
+        request: Request,  # Must include Request to access session
+        body: StatefulCounterSeedSessionRequest
+    ) -> BaseSeedSessionResponse:
+        session_id = request.session[SESSION_ID_KEY]  # Get unique session ID
+        self.session_id_to_counter[session_id] = body.initial_count
+        return BaseSeedSessionResponse()
+
+    # Stateful tool - modifies session state
+    async def increment_counter(
+        self,
+        request: Request,
+        body: IncrementCounterRequest
+    ) -> IncrementCounterResponse:
+        session_id = request.session[SESSION_ID_KEY]
+        counter = self.session_id_to_counter.setdefault(session_id, 0)
+        counter += body.count
+        self.session_id_to_counter[session_id] = counter
+        return IncrementCounterResponse(success=True)
+
+    # Read-only tool
+    async def get_counter_value(self, request: Request) -> GetCounterValueResponse:
+        session_id = request.session[SESSION_ID_KEY]
+        counter = self.session_id_to_counter.setdefault(session_id, 0)
+        return GetCounterValueResponse(count=counter)
+
+    # Verify against expected final state
+    async def verify(
+        self,
+        request: Request,
+        body: StatefulCounterVerifyRequest
+    ) -> BaseVerifyResponse:
+        session_id = request.session[SESSION_ID_KEY]
+
+        reward = 0.0
+        if session_id in self.session_id_to_counter:
+            counter = self.session_id_to_counter[session_id]
+            reward = float(body.expected_count == counter)
+
+        return BaseVerifyResponse(**body.model_dump(), reward=reward)
+
+if __name__ == "__main__":
+    StatefulCounterResourcesServer.run_webserver()
+```
+
+### Key Pattern
+
+`SESSION_ID_KEY` from the request session middleware keys per-episode state. The framework assigns the session ID automatically via `self.setup_session_middleware(app)` inside `SimpleResourcesServer.setup_webserver()`.
+
+To access session state:
+1. Add `request: Request` as a parameter to any endpoint method.
+2. Read the session ID with `request.session[SESSION_ID_KEY]`.
+3. Store state in an instance-level dictionary keyed by session ID.
+
+### Cookie propagation contract (required for stateful agents)
+
+Session state only persists when the **agent** forwards cookies on every downstream call. The session middleware sets a cookie on the first response from the resources server; without that cookie on subsequent requests, each call gets a fresh `session_id` and the state appears empty.
+
+If you write a custom agent harness, propagate cookies on every call:
+
+```python
+# Inside the agent's /run or /responses endpoint
+api_response = await self.server_client.post(
+    server_name=self.config.resources_server.name,
+    url_path="/increment_counter",
+    json=arguments,
+    cookies=request.cookies,           # incoming cookies → resources server
+)
+resources_server_cookies = api_response.cookies  # carry forward to next call
+
+model_response = await self.server_client.post(
+    server_name=self.config.model_server.name,
+    url_path="/v1/responses",
+    json=body,
+    cookies=model_server_cookies,      # propagate model-side cookies too
+)
+```
+
+`simple_agent` and `proof_refinement_agent` already do this — pair your stateful resources server with one of them and it just works. The contract matters only when you write your own harness. See [`responses_api_agents/simple_agent/app.py`](https://github.com/NVIDIA-NeMo/Gym/blob/main/responses_api_agents/simple_agent/app.py) for the reference implementation, and [Footguns](/latest/troubleshooting/footguns) for symptoms when cookies are dropped (counter resets to 0 every tool call, every rollout shows reward = 0).
+
+<Note>
+In `seed_session`, use direct assignment (`self.session_id_to_counter[session_id] = body.initial_count`) rather than `setdefault`. `setdefault` silently ignores re-seed attempts when the session already exists, which causes subtle bugs when session IDs are reused across episodes. The current `example_session_state_mgmt` implementation still uses `setdefault` here — the direct assignment shown above is preferred.
+
+In tool methods like `increment_counter` and `get_counter_value`, `setdefault` is appropriate — it falls back to `0` if the session was somehow not initialized.
+
+</Note>
+
+---
+
+## Rollout Transcript
+
+```text
+[Episode start]
+
+Agent -> ResourcesServer: POST /seed_session {"initial_count": 3}
+  (ResourcesServer stores session_id_to_counter[session_id] = 3)
+
+User: "Increment the counter by 2, then tell me the current value."
+
+Agent -> ModelServer: POST /v1/responses (tools: increment_counter, get_counter_value)
+Model calls tool:
+  function_call: increment_counter({"count": 2})
+
+Agent -> ResourcesServer: POST /increment_counter {"count": 2}
+ResourcesServer -> Agent:
+  {"success": true}
+  (counter is now 5 for this session_id)
+
+Agent -> ModelServer: POST /v1/responses
+Model calls tool:
+  function_call: get_counter_value({})
+
+Agent -> ResourcesServer: POST /get_counter_value {}
+ResourcesServer -> Agent:
+  {"count": 5}
+
+[Episode end -> grading]
+
+Agent -> ResourcesServer: POST /verify {"expected_count": 5, ...}
+ResourcesServer:
+  - reads counter for this session_id
+  - reward = 1.0 if counter == expected_count else 0.0
+```
+
+---
+
+<NavButton href="/latest/build-environments/real-world-environment" label="Real-World Environment" direction="next" />

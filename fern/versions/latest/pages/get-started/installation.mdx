@@ -1,7 +1,10 @@
 ---
 title: "Installation"
 description: "Install NeMo Gym from source, PyPI, or a container image."
-position: 2
+content_type: how-to
+audience_level: beginner
+journey_stage: try
+position: 3
 ---
 
 Three install paths: **Source** (recommended), **PyPI** (library-only), **Container** (RL training with NeMo RL).
@@ -82,7 +85,7 @@ docker pull nvcr.io/nvidia/nemo-rl:v0.5.0.nemotron_3_super
 ```
 
 <Note title="See Also">
-For full container setup including GPU passthrough and volume mounts, refer to the [NeMo RL training tutorial](/latest/training-tutorials/nemo-rl-grpo/setup).
+For full container setup including GPU passthrough and volume mounts, refer to the [NeMo RL training tutorial](/latest/train-models/nemo-rl-grpo/setup).
 </Note>
 
 </Tab>
@@ -93,10 +96,10 @@ For full container setup including GPU passthrough and volume mounts, refer to t
 
 Run these commands to confirm the install succeeded:
 
-| Command | Success Check | If it fails |
+| Command | Expected output | If it fails |
 | --- | --- | --- |
 | `ng_help` | A table of `ng_*` commands prints | Activate the venv: `source .venv/bin/activate` |
-| `ng_list_benchmarks` (Source only) | A table of about 45 benchmarks (`gpqa`, `aime25`, `ifbench`, and others) | You are on the PyPI path — switch to Source |
+| `ng_list_benchmarks` (Source only) | A table of about 45 curated eval suites under `benchmarks/` (`gpqa`, `aime25`, `ifbench`, `math-500`, and others) | You are on the PyPI path — switch to Source |
 | `python -c "import nemo_gym; print(nemo_gym.__version__)"` | A version number prints | Reinstall: `uv sync` (Source) or `pip install nemo-gym` (PyPI) |
 
 ## Troubleshoot Installation

@@ -1,0 +1,73 @@
+---
+title: "Overview"
+description: "Pick the training workflow first (GRPO, SFT, DPO, multi-environment, offline) — then the framework that runs it (NeMo RL, Unsloth, OpenRLHF, NeMo Customizer, VeRL)."
+content_type: index
+audience_level: intermediate
+journey_stage: scale
+position: 1
+---
+
+Train Models picks up after a NeMo Gym environment exists. The same environment that scored a model in [Evaluate Models](/latest/evaluate) produces the rollouts you train against. Pick the workflow first, then the framework.
+
+<Tip>
+Refer to [Training Approaches](/latest/about/concepts/training-approaches) for a refresher on when GRPO beats SFT beats DPO.
+</Tip>
+
+## Pick a Workflow
+
+Start with the question you're answering, not the framework you have on hand. Each workflow lists the framework pages that implement it today.
+
+| If you want to... | Workflow | Framework pages |
+|---|---|---|
+| Improve a model on a verifiable task using on-policy RL | **GRPO (online RL)** | [NeMo RL](/latest/train-models/nemo-rl-grpo), [Unsloth](/latest/train-models/unsloth), [OpenRLHF](https://github.com/OpenRLHF/OpenRLHF/blob/main/examples/python/agent_func_nemogym_executor.py) |
+| Train on multiple training environments at once (multi-verifier) | **Multi-environment GRPO** | [Multi-Environment Training](/latest/train-models/multi-environment-training) |
+| Fine-tune a base model on a successful-rollout dataset (no environment in the loop) | **SFT (offline)** | [Offline Training (SFT/DPO)](/latest/train-models/offline-training-w-rollouts) |
+| Optimize against preference pairs collected from rollouts | **DPO (offline)** | [Offline Training (SFT/DPO)](/latest/train-models/offline-training-w-rollouts) |
+| Reproduce a shipped model recipe end-to-end | **Recipe** | [Nemotron 3 Nano](/latest/train-models/recipes/nemotron-3-nano), [Nemotron 3 Super](/latest/train-models/recipes/nemotron-3-super) |
+
+## What You Choose Inside Each Workflow
+
+Independent of framework, every training run picks four things:
+
+- **Environment** — the resources server (the verifier) that scores rollouts.
+- **Agent** — the harness that orchestrates the rollout. See [Choose an Agent](/latest/get-started/choose-an-agent).
+- **Model** — the policy under training; an OpenAI-compatible endpoint or a managed local vLLM.
+- **Trainer** — the framework that consumes Gym rollouts and updates the model.
+
+## Frameworks That Implement These Workflows
+
+<Cards>
+
+<Card title="NeMo RL" href="/latest/train-models/nemo-rl-grpo">
+GRPO training to improve multi-step tool calling on the Workplace Assistant environment, scaling from single-node to multi-node training.
+
+<Badge minimal outlined>nemo rl</Badge> <Badge minimal outlined>grpo</Badge> <Badge minimal outlined>3-5 hours</Badge>
+</Card>
+
+<Card title="OpenRLHF" href="https://github.com/OpenRLHF/OpenRLHF/blob/main/examples/python/agent_func_nemogym_executor.py">
+Agent executor for using NeMo Gym environments with OpenRLHF.
+
+<Badge minimal outlined>openrlhf</Badge>
+</Card>
+
+<Card title="Unsloth" href="/latest/train-models/unsloth">
+GRPO training on instruction-following and reasoning environments. Single-GPU friendly.
+
+<Badge minimal outlined>unsloth</Badge> <Badge minimal outlined>single-gpu</Badge> <Badge minimal outlined>30 min</Badge>
+</Card>
+
+<Card title="NeMo Customizer">
+*In progress.* Will land alongside the NeMo Customizer release.
+
+<Badge minimal outlined>nemo customizer</Badge> <Badge intent="warning" minimal outlined>in progress</Badge>
+</Card>
+
+<Card title="VeRL">
+*In progress.* Integration is on the roadmap; refer to the [Training Framework Integration Guide](/latest/reference/rl-framework-integration) for the contract VeRL will implement.
+
+<Badge minimal outlined>verl</Badge> <Badge intent="warning" minimal outlined>in progress</Badge>
+</Card>
+
+</Cards>
+
+If you're integrating a framework not listed above, refer to the [Training Framework Integration Guide](/latest/reference/rl-framework-integration) for the contract NeMo Gym expects on the trainer side.

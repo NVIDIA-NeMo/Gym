@@ -1,0 +1,223 @@
+---
+title: "Footguns"
+description: "Symptom-driven index of NeMo Gym gotchas: Hydra quoting, vLLM context length, Ray socket paths, and other non-obvious failure modes."
+content_type: troubleshooting
+audience_level: intermediate
+journey_stage: build
+position: 1
+---
+
+If something is broken in NeMo Gym, scan this page first. Each entry is a symptom you might see, the cause, and the fix. For deeper guides on one subsystem, see the section pages linked at the bottom.
+
+<Tip>
+Search the page (Cmd/Ctrl+F) for an exact error message. Each footgun has a one-line symptom and a one-paragraph fix.
+</Tip>
+
+---
+
+## The footguns
+
+<AccordionGroup>
+
+<Accordion title="`+key=value` override parsed wrong (Hydra syntax surprises)">
+
+**Cause**: Hydra distinguishes `+key=value` (add new key), `key=value` (override existing), `++key=value` (add or override), and `~key` (delete). Lists, dicts, and strings with special characters need quoting.
+
+**Fix**: Quote the entire override when the value contains brackets, commas, colons, or spaces. Pass nested dicts as YAML strings:
+
+```bash
+ng_run "+config_paths=[resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml]"
+ng_collect_rollouts "+responses_create_params={max_output_tokens: 16384, temperature: 1.0}"
+```
+
+Use `ng_dump_config` to verify the merged result before launching servers. See [Configuration Errors](/latest/troubleshooting/configuration) and the [Configuration concept](/latest/about/concepts/configuration).
+
+</Accordion>
+
+<Accordion title="`omegaconf.errors.MissingMandatoryValue: Missing mandatory value: ...`">
+
+**Cause**: A required config field is unset. Most often `env.yaml` is missing or not at the project root, or a referenced server config was not included in `+config_paths`.
+
+**Fix**: Confirm `env.yaml` lives at the repo root and contains `policy_base_url`, `policy_api_key`, `policy_model_name`. Add every referenced server's YAML to `+config_paths`. Pass missing keys inline if needed:
+
+```bash
+ng_run "+config_paths=[config.yaml]" +policy_api_key=sk-your-key
+```
+
+Full table of startup errors: [Configuration Errors](/latest/troubleshooting/configuration#startup-errors).
+
+</Accordion>
+
+<Accordion title="`vLLM raised max_seq_length exceeded` mid-rollout">
+
+**Cause**: Prompt + generation exceeds the model's context window. vLLM enforces this at request time, so failures appear partway through a rollout batch rather than at startup.
+
+**Fix**: Lower `max_output_tokens`, truncate inputs upstream, or launch vLLM with a larger `--max-model-len`. For thinking models, account for `<think>` tokens in your budget — they count toward the context window. Track this in [Inspect AI #1206](https://github.com/UKGovernmentBEIS/inspect_ai/issues/1206) for cross-framework discussion.
+
+</Accordion>
+
+<Accordion title="OpenAI Responses vs. chat completions endpoint mismatch">
+
+**Cause**: `openai_model` calls `/v1/responses` (the OpenAI Responses API). `vllm_model` calls `/v1/chat/completions`. Pointing one at the wrong backend produces 404s or schema-mismatch errors.
+
+**Fix**: Use `openai_model` for endpoints that implement `/v1/responses` (OpenAI proper, build.nvidia.com NIMs that expose Responses). For Azure-hosted OpenAI deployments use `azure_openai_model` — it calls `chat.completions.create()` internally and synthesizes a Responses-shaped output, so the wire shape isn't `/v1/responses` despite the surface API. Use `vllm_model` for vLLM, OpenRouter, Together, and most local servers. The endpoint contract is one of the things `ng_dump_config` will not catch — verify by hitting the URL with `curl`.
+
+</Accordion>
+
+<Accordion title="Cookies / session state missing across servers (multi-turn agents)">
+
+**Cause**: Stateful resources servers (sandboxes, browsers, REPLs) key state on the session cookie. Multi-turn agents that don't propagate `request.cookies` start a fresh session on every model or tool call.
+
+**Fix**: In a custom agent's `responses()` and `run()`, forward cookies on every downstream call:
+
+```python
+await self.server_client.post(
+    url, json=payload, cookies=request.cookies
+)
+```
+
+Also propagate `prompt_token_ids`, `generation_token_ids`, and `generation_log_probs` from each model response into the next turn's input — RL training needs them.
+
+</Accordion>
+
+<Accordion title="Ray socket path too long (Lustre / shared FS)">
+
+**Cause**: Ray uses an `AF_UNIX` socket whose path is bounded by the Linux 107-byte limit. Long working directories (Lustre, NFS, scratch mounts) push the path over the limit and Ray fails to start with a cryptic `OSError`.
+
+**Fix**: Set `RAY_TMPDIR` to a short local path before starting servers or running tests:
+
+```bash
+RAY_TMPDIR=/tmp ng_run "+config_paths=[...]"
+RAY_TMPDIR=/tmp ng_test +entrypoint=resources_servers/my_server
+```
+
+</Accordion>
+
+<Accordion title="`ng_test` venv isolation: env vars don't propagate">
+
+**Cause**: `ng_test` creates an isolated venv per resources server and re-execs into it. Environment variables set inside Python via `os.environ` do not propagate into the child shell that runs pytest.
+
+**Fix**: Set environment variables externally before invoking `ng_test`:
+
+```bash
+RAY_TMPDIR=/tmp HF_HOME=/scratch/hf ng_test +entrypoint=resources_servers/my_server
+```
+
+For day-to-day iteration on the core library (`nemo_gym/`), use `ng_dev_test` — it runs `pytest --cov=. --durations=10` from the repo root with no per-server venv setup. It accepts but ignores `+entrypoint=...`; use `ng_test +entrypoint=...` for per-server tests.
+
+</Accordion>
+
+<Accordion title="Reward is always zero across the board">
+
+**Cause**: Three common shapes — (1) the verifier's `verify()` is returning the wrong response shape, (2) reward extraction is consuming `<think>`/`<thinking>` blocks before parsing the answer, or (3) `verifier_metadata` is not being threaded through to the verify call.
+
+**Fix**: Run a single rollout and inspect the JSONL output. Confirm `reward` is present in the verify response and that the model's parsed answer matches what the verifier compares against. Strip thinking blocks before extraction (see the thinking-block footgun below). Confirm `verifier_metadata` shape matches what `verify()` reads.
+
+</Accordion>
+
+<Accordion title="Server returns 500 / `ng_run` fails to start">
+
+**Cause**: Almost always config validation. Pydantic rejects an invalid `domain`, `license`, or missing required field, and the head server logs the validation path before exiting.
+
+**Fix**: Dump the merged config and re-read the validation path:
+
+```bash
+ng_dump_config "+config_paths=[your-config.yaml]"
+```
+
+To continue past invalid servers during debugging, set `error_on_almost_servers: false` in `env.yaml`. Full walkthrough: [Configuration Errors](/latest/troubleshooting/configuration#almost-servers-detected).
+
+</Accordion>
+
+<Accordion title="`ng_collect_rollouts` can't reach servers">
+
+**Cause**: `ng_run` is bound to `127.0.0.1` but the rollout client is hitting a different host, or `env.yaml` points at a stale URL, or the port is not exposed (containers, remote hosts).
+
+**Fix**: Run `ng_status` from the same host as the rollout client. Confirm `policy_base_url` and any `*_base_url` fields in `env.yaml` resolve to a reachable address. If running across hosts, bind servers to `0.0.0.0` and forward the relevant ports.
+
+</Accordion>
+
+<Accordion title="Quota exceeded / 429 from model endpoint">
+
+**Cause**: Hosted endpoints rate-limit aggressively. Without a concurrency cap, `ng_collect_rollouts` will saturate the quota and trigger cascading 429s.
+
+**Fix**: Cap concurrency on the agent server (`asyncio.Semaphore` around the model call, or a `max_concurrent` config field). `ServerClient` retries up to 3x with a fixed 0.5 s sleep on transport errors, and rate-limit codes (429/502/503/504/520) retry independently of that cap until success — the underlying client must surface the 429, confirm by tailing logs. See [#1208](https://github.com/NVIDIA-NeMo/Gym/issues/1208) for the bounded-retry contract.
+
+</Accordion>
+
+<Accordion title="Data files committed to git when they shouldn't be">
+
+**Cause**: `train`/`validation` JSONLs belong in the GitLab dataset registry, not git. Each resources server ships a `data/.gitignore` with patterns like `*train.jsonl`, `*validation.jsonl`. Custom filenames bypass these patterns.
+
+**Fix**: Add your filename pattern to the server's `data/.gitignore`. If a file was already tracked, untrack it without deleting:
+
+```bash
+git rm --cached resources_servers/my_server/data/my_eval.jsonl
+```
+
+Upload the dataset to GitLab and reference it via `gitlab_identifier` in YAML. Full workflow: see the Dataset Management section of `CLAUDE.md`.
+
+</Accordion>
+
+<Accordion title="Reward parsing — `<think>` / `<thinking>` blocks in output">
+
+**Cause**: Thinking models (Qwen3, GPT-5 reasoning, Claude with extended thinking) emit `<think>...</think>` or `<thinking>...</thinking>` blocks before the final answer. Extraction logic that grabs the first regex match or first code fence will pull from the reasoning, not the answer.
+
+**Fix**: Strip thinking blocks before applying answer extraction:
+
+```python
+import re
+text = re.sub(r"<think(?:ing)?>.*?</think(?:ing)?>", "", text, flags=re.DOTALL)
+```
+
+Run baselines on both instruct and thinking variants of a model — divergence between the two almost always traces back to thinking-block handling.
+
+</Accordion>
+
+<Accordion title="Async HTTP hangs at high concurrency">
+
+**Cause**: httpx/httpcore has O(n^2) connection-pool behavior that deadlocks above a few thousand concurrent requests. Wrappers around third-party libraries (Tavily, OpenAI's Python client in some versions) can pull httpx in transitively.
+
+**Fix**: Use NeMo Gym's global aiohttp client via `nemo_gym.server_utils.request()`. Do not import `httpx.AsyncClient` directly. When wrapping an external library that uses httpx internally, replace its transport with an aiohttp adapter — see `resources_servers/tavily_search/app.py` (`TavilySearchAIOHTTPClient`) for the pattern, and `docs/infrastructure/engineering-notes/aiohttp-vs-httpx.md` for the writeup.
+
+</Accordion>
+
+<Accordion title="`PermissionError [Errno 1] Operation not permitted` at startup (sandboxed environments)">
+
+**Cause**: Ray uses `psutil` to enumerate processes, which requires `sysctl()` on macOS and similar syscalls on Linux. Sandboxed runtimes (Cursor's AI sandbox, restricted Docker capabilities, locked-down CI runners) block those syscalls for security.
+
+```text
+PermissionError: [Errno 1] Operation not permitted (originated from sysctl() malloc 1/3)
+  File "ray/thirdparty_files/psutil/_psosx.py", line 337, in pids
+```
+
+**Fix**: Run `ng_run` outside the sandbox in a normal terminal. If you must stay in a sandbox, disable it for the command or grant the syscalls Ray needs. There is no NeMo Gym-side workaround — Ray legitimately needs system access to manage workers, and the sandbox is intentionally blocking it.
+
+</Accordion>
+
+<Accordion title="`inference.nvidia.com` model responses lack diversity (LiteLLM caching)">
+
+**Cause**: `inference.nvidia.com` enables LiteLLM caching by default, so identical inputs return cached outputs. pass@1 ends up identical to pass@5 because every rollout sees the same response.
+
+**Fix**: Disable caching via `extra_body` on the model server config:
+
+```yaml
+policy_model:
+  responses_api_models:
+    vllm_model:
+      extra_body:
+        cache:
+          no-cache: true
+```
+
+</Accordion>
+
+</AccordionGroup>
+
+---
+
+## Where to look next
+
+- [Configuration Errors](/latest/troubleshooting/configuration) — startup and validation errors with full error text
+- [Configuration concept](/latest/about/concepts/configuration) — Hydra + OmegaConf overrides, YAML composition
+- [File a new bug](https://github.com/NVIDIA-NeMo/Gym/issues/new) — if you hit a footgun that isn't listed here, open an issue so we can add it

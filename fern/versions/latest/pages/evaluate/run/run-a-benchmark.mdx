@@ -1,0 +1,150 @@
+---
+title: "Run a Benchmark"
+description: "End-to-end: pick a benchmark from the catalog, configure your model, score it. About 10 minutes from zero to scored output."
+content_type: how-to
+audience_level: beginner
+journey_stage: try
+position: 1
+---
+
+This page shows the end-to-end flow for any existing NeMo Gym benchmark. The example uses [`gpqa_diamond`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/gpqa_diamond), a graduate-level multiple-choice science benchmark. Substitute config paths to run a different benchmark — the commands stay the same.
+
+**Time**: about 10 minutes. **Cost**: about $0.10 in OpenAI API usage on a 5-task example slice.
+
+## What You'll See
+
+GPT-4.1 scores around 55-65% accuracy on `gpqa_diamond`. Your run on the 5-task `example.jsonl` slice should land within a few points of that, with run-to-run variance shrinking as you raise `+num_repeats`.
+
+## Prerequisites
+
+1. NeMo Gym installed and on PATH. Refer to [Installation](/latest/get-started/installation).
+2. `env.yaml` configured with model credentials. Refer to [Configuration](/latest/get-started/configuration).
+
+## Step-by-Step
+
+To run a benchmark and score a model, complete the following steps.
+
+1. **List available benchmarks.**
+
+   ```bash
+   ng_list_benchmarks
+   ```
+
+   `ng_list_benchmarks` lists curated eval suites under `benchmarks/` (`gpqa`, `aime25`, `ifbench`, `math-500`, and others). Each one chains to a resources server. You can also run any resources server config directly — every shipped environment under `resources_servers/<name>/configs/<name>.yaml` is a valid benchmark target. The rest of this page uses [`gpqa_diamond`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/gpqa_diamond) (a resources server) as the worked example because its `example.jsonl` is small enough for a quick smoke test.
+
+2. **Start the servers** (Terminal 1).
+
+   ```bash
+   ng_run "+config_paths=[\
+   resources_servers/gpqa_diamond/configs/gpqa_diamond.yaml,\
+   responses_api_models/openai_model/configs/openai_model.yaml]"
+   ```
+
+   `ng_run` blocks while the [resources, model, and agent servers](/latest/about/concepts/core-components) run. Four `Uvicorn running on http://127.0.0.1:<port>` lines print — one each for the head, resources, model, and agent servers. Leave Terminal 1 running and open a second terminal.
+
+   <Tip>
+   On a repeat run with no dependency changes, append `+skip_venv_if_present=true` to skip venv re-creation.
+   </Tip>
+
+3. **Confirm the servers are healthy** (Terminal 2).
+
+   ```bash
+   ng_status
+   ```
+
+   Expect `3 servers found (3 healthy, 0 unhealthy)`. If any are unhealthy, check Terminal 1 for stack traces before continuing.
+
+4. **Collect responses** (Terminal 2).
+
+   ```bash
+   mkdir -p results
+   ng_collect_rollouts \
+       +agent_name=gpqa_diamond_simple_agent \
+       +input_jsonl_fpath=resources_servers/gpqa_diamond/data/example.jsonl \
+       +output_jsonl_fpath=results/gpqa_diamond_rollouts.jsonl \
+       +num_repeats=5 \
+       "+responses_create_params={max_output_tokens: 16384, temperature: 1.0}"
+   ```
+
+   5 example tasks × 5 repeats = 25 model responses. Each response is verified against the benchmark's task data and emitted with a 0.0 / 1.0 reward.
+
+   `+num_repeats` controls pass@k: set it to 1 for a fast accuracy check, 5-10 for stable pass@1, higher for pass@k where k matters. Push it until run-to-run variance is below 1% on the same model.
+
+   <Accordion title="Flag reference">
+   | Flag | Meaning |
+   |---|---|
+   | `+agent_name` | [Agent server](/latest/about/concepts/core-components) to invoke. Convention: `<benchmark>_simple_agent`. |
+   | `+input_jsonl_fpath` | Input dataset, one task per line. |
+   | `+output_jsonl_fpath` | Output file. Also writes `<output>_materialized_inputs.jsonl`. |
+   | `+num_repeats` | Responses per task. Higher = stabler metrics. |
+   | `+limit` | Cap the number of input tasks (smoke tests). |
+   | `+num_samples_in_parallel` | Concurrency. Defaults to unlimited. |
+   | `+responses_create_params` | Pass-through to the model: `max_output_tokens`, `temperature`, etc. |
+   </Accordion>
+
+5. **Compute pass rates.**
+
+   ```bash
+   ng_reward_profile \
+       +materialized_inputs_jsonl_fpath=results/gpqa_diamond_rollouts_materialized_inputs.jsonl \
+       +rollouts_jsonl_fpath=results/gpqa_diamond_rollouts.jsonl
+   ```
+
+   Outputs `results/gpqa_diamond_rollouts_reward_profiling.jsonl` (one line per task with `mean/reward`, `max/reward`, `min/reward`, `median/reward`, `std/reward` and the same stats for any custom verify field) and `results/gpqa_diamond_rollouts_agent_metrics.json` (agent-level rollup). Filter the per-task JSONL for tasks the model consistently failed (`mean/reward < 1.0`) or flaky tasks (high `std/reward`).
+
+6. **Print aggregate results.**
+
+   ```bash
+   python scripts/print_aggregate_results.py +jsonl_fpath=results/gpqa_diamond_profiled.jsonl
+   ```
+
+   The output reports overall accuracy (pass@1 from `avg_reward`), pass@k (from `max_reward`), and the count of fully-passed and fully-failed tasks.
+
+7. **Stop the servers.**
+
+   In Terminal 1: `Ctrl+C`.
+
+## What the Output Means
+
+- **pass@1** is the average reward across all responses. With reward in `{0.0, 1.0}`, this is straight accuracy.
+- **pass@k** is the fraction of tasks where at least one of the `+num_repeats` responses passed. Higher than pass@1, by definition. Useful when you care whether the model *can* solve a task, not whether it does so reliably.
+- **Per-task pass rate** lives in the profiled JSONL. A pass rate of 0 means every response failed; a pass rate of 1 means every response passed; anything in between is a partially-flaky task.
+
+For the full scoring contract — error handling, retries, what counts as a pass — refer to [Reward Semantics](/latest/about/concepts/reward-semantics).
+
+## Run a Different Benchmark
+
+The same flow scores any benchmark in the catalog. Swap two paths.
+
+| Substitute | With |
+|---|---|
+| `resources_servers/gpqa_diamond/configs/gpqa_diamond.yaml` | The resources server's config. (Curated eval suites under `benchmarks/` chain to the same config via `_inherit_from`.) |
+| `+agent_name=gpqa_diamond_simple_agent` | The agent name defined inside that config (usually `<benchmark>_simple_agent`). |
+
+Dataset paths and verifier behavior are wired up by the config — you don't need to touch them per benchmark.
+
+For multi-component benchmarks, append more configs to `+config_paths=[...]`. For thinking models that emit `<think>` blocks, raise `max_output_tokens` to 32000+ and confirm the benchmark's reward parser strips reasoning blocks.
+
+## Troubleshooting
+
+<Accordion title="ng_collect_rollouts can't reach the servers">
+Verify the servers came up healthy with `ng_status`. Expect `3 servers found (3 healthy, 0 unhealthy)`. If any are unhealthy, check Terminal 1 for stack traces and confirm the config paths on `ng_run` resolved correctly.
+</Accordion>
+
+<Accordion title="Model returns 429 (rate limit) or 502 (bad gateway)">
+The model endpoint is rate-limiting or unhealthy. Lower `+num_samples_in_parallel` to throttle, or switch to a higher-tier API key. The aiohttp client retries 3x with a fixed 0.5 s sleep on transport errors; rate-limit codes retry independently until success. Persistent 429s mean concurrency is above your account's ceiling. Refer to [Footguns](/latest/troubleshooting/footguns) for retry configuration.
+</Accordion>
+
+<Accordion title="Benchmark validation fails (reward always 0)">
+Most often the verifier signature doesn't match what the model emitted. Run `ng_dump_config` to confirm the merged config, then inspect the rollout JSONL for the raw `output_text`. If a thinking model is leaking `<think>` blocks past the parser, raise `max_output_tokens` and check whether the benchmark's verify logic strips reasoning. Refer to [Footguns](/latest/troubleshooting/footguns).
+</Accordion>
+
+<Accordion title="Score is below the published number">
+Most common causes: (1) too few repeats — variance dominates with `+num_repeats=1`, raise to 5+; (2) wrong model — the catalog's expected scores assume the model documented in the benchmark's README; (3) wrong dataset slice — `example.jsonl` is 5 tasks for smoke testing, not the full eval set. Use `data/validation.jsonl` (downloaded via `ng_prepare_data`) for the published number.
+</Accordion>
+
+## Next Steps
+
+- [Validate Your Setup](/latest/evaluate/run/validate-your-setup) — confirm your scores match the benchmark's locked baseline.
+- [Compare Agents](/latest/evaluate/compare/compare-agents) — score the same benchmark with multiple agents side by side.
+- [Profile Rewards](/latest/evaluate/analyze/profile-rewards) — drill into per-task pass rates to find the easy and hard slices.

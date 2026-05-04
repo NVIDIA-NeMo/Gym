@@ -1,0 +1,33 @@
+---
+title: "OpenEnv"
+description: "OpenEnv parity is on the roadmap. No agent wrapper ships today; use the generic external-libraries path or follow the closest precedents (LangGraph for graph shape, Aviary for seed/step/close pattern)."
+content_type: how-to
+audience_level: intermediate
+journey_stage: build
+position: 8
+---
+import { VerifiedBadge } from "../../../../../components/VerifiedBadge";
+
+<VerifiedBadge verified={false} />
+
+OpenEnv parity at the **agent harness** layer is on the roadmap — no `responses_api_agents/openenv_agent/` wrapper ships today. There is, however, a partial **resources-server-side** integration: `resources_servers/openenv/` ships configs for `openenv_coding`, `openenv_echo`, and `openenv_maze`, runnable today by pairing them with `simple_agent` or another shipped harness. A dedicated agent wrapper will land when the OpenEnv-specific orchestration patterns warrant it.
+
+## Until a dedicated agent wrapper lands
+
+Use the generic [Wrap an external library](/latest/build-environments/integrations/external-libraries) path. The closest working precedents are:
+
+- **LangGraph integration** — for graph-orchestrator shapes that replace the linear loop body. See [`langgraph_agent`](/latest/build-environments/integrations/langgraph).
+- **Aviary integration** — for environments that follow a `seed_session` / `step` / `close` lifecycle backed by a Gym resources server. See [`aviary_agent`](/latest/build-environments/integrations/aviary).
+
+Map the OpenEnv concepts onto Gym's four-component model: dataset, agent harness, model server, resources server. If the OpenEnv environment owns scoring (Harbor/Verifiers shape), the wrapper has no Gym resources server. If it follows a step-then-verify lifecycle (Aviary shape), the resources server gets `/step` and `/verify` endpoints.
+
+## Track this
+
+This page is a placeholder. When a dedicated `openenv_agent` wrapper ships, the wiring steps, terminology mapping, and parity-validation pattern will land here following the same shape as the other [Ecosystem Integrations](/latest/build-environments/integrations) pages.
+
+## Related
+
+- [Wrap an external library](/latest/build-environments/integrations/external-libraries).
+- [Wrap a LangGraph graph](/latest/build-environments/integrations/langgraph).
+- [Wrap a FutureHouse Aviary environment](/latest/build-environments/integrations/aviary).
+- [Terminology Translation](/latest/build-environments/integrations/terminology-translation).

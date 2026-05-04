@@ -1,0 +1,142 @@
+---
+title: "Single Node"
+description: "Run a 3-step single-node GRPO training session on Nemotron Nano 9B v2 to validate the environment before scaling to multi-node production."
+content_type: tutorial
+audience_level: intermediate
+journey_stage: scale
+---
+import { NavButton } from "../../../../../components/NavButton";
+
+Run 3 GRPO steps on one 8-GPU node before committing to the multi-hour distributed job. The smoke run takes about 45 minutes — most of it is the first-time Nemotron Nano 9B v2 download — and exercises the full rollout-train-checkpoint loop.
+
+<NavButton href="/latest/train-models/nemo-rl-grpo/setup" label="Previous: Setup" direction="prev" />
+
+---
+
+## Prerequisites
+
+- Completed the [Setup](/latest/train-models/nemo-rl-grpo/setup) instructions.
+- Access to a running container session with GPUs.
+- Optionally, a Weights & Biases API key for experiment tracking.
+
+---
+
+## 0. Return to NeMo RL directory
+
+Run the remaining commands from the NeMo RL root, not from the Gym subdirectory. Confirm you can see `examples/nemo_gym/grpo_workplace_assistant_nemotron_nano_v2_9b.yaml` and `examples/nemo_gym/run_grpo_nemo_gym.py` before continuing.
+
+## 1. Download the Model
+
+**Estimated time**: ~5-10 minutes
+
+Pull NVIDIA [Nemotron Nano 9B v2](https://huggingface.co/nvidia/NVIDIA-Nemotron-Nano-9B-v2) into the local cache:
+
+```bash
+HF_HOME=$PWD/.cache/ \
+HF_TOKEN={your HF token} \
+    hf download nvidia/NVIDIA-Nemotron-Nano-9B-v2
+```
+
+Model files land under `.cache/hub/models--nvidia--NVIDIA-Nemotron-Nano-9B-v2/`.
+
+---
+
+## 2. Configure the Chat Template
+
+**Estimated time**: ~1 minute
+
+Nemotron Nano 9B v2 ships with a chat template tuned for inference. RL training needs two changes — disable thinking mode and strip the trailing-assistant rewrite that breaks the rollout-to-train conversion. Patch the cached `tokenizer_config.json` in place:
+
+```bash
+tokenizer_config_path=$(find $PWD/.cache/hub/models--nvidia--NVIDIA-Nemotron-Nano-9B-v2 -name tokenizer_config.json)
+sed -i 's/enable_thinking=true/enable_thinking=false/g' $tokenizer_config_path
+sed -i 's/{%- if messages\[-1\]\['\''role'\''\] == '\''assistant'\'' -%}{%- set ns.last_turn_assistant_content = messages\[-1\]\['\''content'\''\].strip() -%}{%- set messages = messages\[:-1\] -%}{%- endif -%}//g' $tokenizer_config_path
+```
+
+Both `sed` commands should exit silently — any error means the cached path is wrong, so re-check the `find` result.
+
+---
+
+## 3. Run Training
+
+**Estimated time**: ~15-30 minutes
+
+The command below runs 3 GRPO steps (`grpo.max_num_steps=3`) as a smoke test. Drop that override to use the value baked into the YAML when you are ready for a full single-node run, which takes several hours.
+
+```bash
+# Set experiment name with timestamp
+EXP_NAME="$(date +%Y%m%d)/nemo_gym_grpo/nemotron_nano_v2_9b/workplace_assistant_001"
+mkdir -p results/$EXP_NAME
+
+# Configuration file path
+CONFIG_PATH=examples/nemo_gym/grpo_workplace_assistant_nemotron_nano_v2_9b.yaml
+
+# Launch training
+# Set these environment variables before running:
+#   WANDB_API_KEY: Your Weights & Biases API key for logging
+#   logger.wandb.project: Fill in your username
+TORCH_CUDA_ARCH_LIST="9.0 10.0" \
+HF_HOME=$PWD/.cache/ \
+WANDB_API_KEY={your W&B API key} \
+uv run python examples/nemo_gym/run_grpo_nemo_gym.py \
+    --config=$CONFIG_PATH \
+    ++logger.wandb.project="${Your Username}-nemo-gym-rl-integration" \
+    ++logger.wandb.name=$EXP_NAME \
+    ++logger.log_dir=results/$EXP_NAME \
+    ++policy.generation.vllm_cfg.tool_parser_plugin=$(find $PWD/.cache -name nemotron_toolcall_parser_no_streaming.py) \
+    ++grpo.max_num_steps=3 \
+    ++checkpointing.checkpoint_dir=results/$EXP_NAME &> results/$EXP_NAME/output.log &
+
+# Watch the logs
+tail -f results/$EXP_NAME/output.log
+```
+
+<Note>
+**Single GPU Training**: With only 1 GPU available, use these overrides instead:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+TORCH_CUDA_ARCH_LIST="9.0 10.0" \
+HF_HOME=$PWD/.cache/ \
+WANDB_API_KEY={your W&B API key} \
+uv run python examples/nemo_gym/run_grpo_nemo_gym.py \
+    --config=$CONFIG_PATH \
+    ++logger.wandb.project="${Your Username}-nemo-gym-rl-integration" \
+    ++logger.wandb.name=$EXP_NAME \
+    ++logger.log_dir=results/$EXP_NAME \
+    ++policy.generation.vllm_cfg.tool_parser_plugin=$(find $PWD/.cache -name nemotron_toolcall_parser_no_streaming.py) \
+    ++grpo.max_num_steps=3 \
+    ++checkpointing.checkpoint_dir=results/$EXP_NAME \
+    cluster.gpus_per_node=1 \
+    policy.megatron_cfg.tensor_model_parallel_size=1 \
+    &> results/$EXP_NAME/output.log &
+```
+
+**Key differences:**
+- Added `CUDA_VISIBLE_DEVICES=0` to use only GPU 0
+- Set `cluster.gpus_per_node=1`
+- Set `policy.megatron_cfg.tensor_model_parallel_size=1`
+
+</Note>
+
+<Tip>
+The trailing `&> results/$EXP_NAME/output.log &` does two things:
+
+```bash
+&> results/$EXP_NAME/output.log &
+```
+
+1. `&> results/$EXP_NAME/output.log` redirects stdout and stderr to a log file you can `tail`.
+2. The trailing `&` backgrounds the job so the terminal stays free. List backgrounded jobs with `jobs`; bring the run back with `fg` and `Ctrl+C` to abort.
+
+</Tip>
+
+The smoke run is healthy when `tail -f results/$EXP_NAME/output.log` shows all 3 steps progress with no errors.
+
+---
+
+## Next Steps
+
+The single-node run validates the stack. Submit the multi-node Slurm batch job for the full run:
+
+<NavButton href="/latest/train-models/nemo-rl-grpo/multi-node-training" label="Continue to Multi-Node Training" direction="next" />

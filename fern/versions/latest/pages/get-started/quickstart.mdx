@@ -1,7 +1,10 @@
 ---
 title: "Quickstart"
 description: "Install NeMo Gym, configure your model, and score a Blackjack agent end-to-end in about 10 minutes."
-position: 4
+content_type: quickstart
+audience_level: beginner
+journey_stage: try
+position: 1
 ---
 
 Install NeMo Gym, configure your model credentials, and score an LLM agent at [`blackjack`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/blackjack). **Time**: about 10 minutes. **Cost**: about $0.05 in OpenAI API usage.
@@ -73,7 +76,7 @@ Averaging those over 10 rollouts gives GPT-4.1 around `-0.6` against a fixed dea
        +num_repeats=2
    ```
 
-   5 example tasks × 2 repeats = 10 rollouts. Each [rollout](/latest/about/concepts/key-terminology#rollout--data-collection-terms) is one full hand: the model sees its cards, replies `<action>hit</action>` or `<action>stand</action>`, and the env returns reward `+1` (win), `0` (draw), or `-1` (loss / bust).
+   5 example tasks × 2 repeats = 10 rollouts. Each [rollout](/latest/resources/glossary#rollout-also-trajectory) is one full hand: the model sees its cards, replies `<action>hit</action>` or `<action>stand</action>`, and the env returns reward `+1` (win), `0` (draw), or `-1` (loss / bust).
 
    <Accordion title="Flag reference">
    | Flag | Meaning |
@@ -102,7 +105,7 @@ Averaging those over 10 rollouts gives GPT-4.1 around `-0.6` against a fixed dea
 
    In Terminal 1: `Ctrl+C`.
 
-Blackjack is wired up for fast smoke testing. The same `ng_run` + `ng_collect_rollouts` flow runs any benchmark from `ng_list_benchmarks` (`gpqa`, `aime25`, `ifbench`, and others) — only the config paths and dataset change.
+Blackjack is wired up for fast smoke testing. The same `ng_run` + `ng_collect_rollouts` flow runs any benchmark from `ng_list_benchmarks` (curated eval suites under `benchmarks/` — `gpqa`, `aime25`, `ifbench`, `math-500`, and others) or any resources server config under `resources_servers/<name>/configs/` — only the config paths and dataset change.
 
 ## Troubleshooting
 
@@ -149,13 +152,13 @@ Run `gpqa`, `aime25`, or any other entry from `ng_list_benchmarks`.
 <Badge minimal outlined>benchmarks</Badge>
 </Card>
 
-<Card title="Profile rewards for training data" href="/latest/data">
+<Card title="Profile rewards for training data" href="/latest/build-environments/data">
 Use `ng_reward_profile` to compute per-task pass rates and curate training data.
 
 <Badge minimal outlined>training data</Badge>
 </Card>
 
-<Card title="Training Tutorials" href="/latest/training-tutorials">
+<Card title="Train Models" href="/latest/train-models">
 Train a model on a NeMo Gym environment.
 
 <Badge minimal outlined>training</Badge>

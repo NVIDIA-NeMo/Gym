@@ -1,0 +1,93 @@
+---
+title: "Diagnostics"
+description: "CLI reference for inspection and maintenance commands: ng_dump_config, ng_help, ng_version, ng_pip_list, ng_reinstall."
+content_type: reference
+audience_level: beginner
+journey_stage: try
+position: 5
+---
+
+Commands for inspecting configuration, listing packages, and reinstalling NeMo Gym.
+
+## `ng_dump_config`
+
+Display the resolved Hydra configuration for debugging purposes.
+
+**Example**
+
+```bash
+ng_dump_config "+config_paths=[<config1>,<config2>]"
+```
+
+---
+
+## `ng_help`
+
+Display a list of available NeMo Gym CLI commands.
+
+**Example**
+
+```bash
+ng_help
+```
+
+---
+
+## `ng_version`
+
+Display NeMo Gym version and system information.
+
+**Parameters**
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `json_format` | bool | Output in JSON format for programmatic use. Default: `False`. Can be specified with `+json=true`. |
+
+**Example**
+
+```bash
+# Display version information
+ng_version
+
+# Output as JSON
+ng_version +json=true
+```
+
+---
+
+## `ng_pip_list`
+
+Each server has its own isolated virtual environment. Use this to inspect the packages inside one.
+
+**Parameters**
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `entrypoint` | str | The relative entrypoint path to the server directory |
+| `format` | Optional[str] | Output format for pip list. Options: 'columns' (default), 'freeze', 'json'. Default: `None`. |
+| `outdated` | bool | List outdated packages. Default: `False`. |
+
+**Examples**
+
+```bash
+# List all packages
+ng_pip_list +entrypoint=resources_servers/example_single_tool_call
+
+# Output as JSON
+ng_pip_list +entrypoint=resources_servers/example_single_tool_call +format=json
+
+# Check for outdated packages
+ng_pip_list +entrypoint=resources_servers/example_single_tool_call +outdated=true
+```
+
+---
+
+## `ng_reinstall`
+
+Re-install NeMo Gym and its dependencies into the currently activated Python virtual environment.
+
+**Example**
+
+```bash
+ng_reinstall
+```

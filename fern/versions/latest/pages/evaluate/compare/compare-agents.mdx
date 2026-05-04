@@ -1,0 +1,137 @@
+---
+title: "Compare Agents Across Benchmarks"
+description: "Run the same benchmark with two or more agent harnesses, then compare per-task pass rates side by side. Useful for picking simple_agent vs proof_refinement_agent vs custom."
+content_type: how-to
+audience_level: intermediate
+journey_stage: build
+position: 1
+---
+
+Compare two or more agent harnesses on the same benchmark to pick the right harness for your task. The pattern is mechanical: run each harness against the same dataset, profile rewards separately, then join on `task_index`. The difference in per-task pass rates tells you which harness wins on which slice.
+
+## When to compare agents
+
+- Deciding between [`simple_agent`](/latest/get-started/choose-an-agent) and [`proof_refinement_agent`](/latest/get-started/choose-an-agent) — does iterative correction actually help on this benchmark?
+- Baselining a custom harness against a stock one — is your new tool-use loop better than `simple_agent`, or just different?
+- Ablating a tool-use change — same agent code, different tool wiring; the comparison framing is identical.
+
+## The pattern
+
+1. Pick a benchmark (one config) and a model (one config).
+2. Run `ng_run` and `ng_collect_rollouts` once per agent — different `+agent_name`, different `+output_jsonl_fpath`.
+3. Run `ng_reward_profile` against each rollouts JSONL separately.
+4. Compare aggregate metrics, then join the profiled JSONLs on `task_index` to see which tasks each harness solved.
+
+Same dataset, same model, same `+num_repeats`. Vary only the agent.
+
+## Worked example: `simple_agent` vs `proof_refinement_agent` on `math_formal_lean`
+
+Lean 4 formal proofs are a natural fit for refinement — the compiler emits structured error messages the model can act on. The [`math_formal_lean`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/math_formal_lean) resources server ships with both a single-turn and a multi-turn config. Stack the two configs so both agents are wired to the same resources server in one `ng_run`.
+
+### 1. Start the servers
+
+```bash
+ng_run "+config_paths=[\
+resources_servers/math_formal_lean/configs/math_formal_lean.yaml,\
+resources_servers/math_formal_lean/configs/math_formal_lean_multi_turn.yaml,\
+responses_api_models/openai_model/configs/openai_model.yaml]"
+```
+
+The first config defines `math_formal_lean_simple_agent`; the second defines `math_formal_lean_refinement_agent`. Both reference the same `math_formal_lean` resources server, so the verifier and dataset are identical across runs.
+
+Confirm health in a second terminal:
+
+```bash
+ng_status
+```
+
+### 2. Collect rollouts for each agent
+
+```bash
+mkdir -p results
+
+# simple_agent — model + tool-call loop, no outer correction
+ng_collect_rollouts \
+    +agent_name=math_formal_lean_simple_agent \
+    +input_jsonl_fpath=resources_servers/math_formal_lean/data/example.jsonl \
+    +output_jsonl_fpath=results/lean_simple_rollouts.jsonl \
+    +num_repeats=8 \
+    "+responses_create_params={max_output_tokens: 16384, temperature: 1.0}"
+
+# proof_refinement_agent — up to 2 correction turns on compile failure
+ng_collect_rollouts \
+    +agent_name=math_formal_lean_refinement_agent \
+    +input_jsonl_fpath=resources_servers/math_formal_lean/data/example.jsonl \
+    +output_jsonl_fpath=results/lean_refinement_rollouts.jsonl \
+    +num_repeats=8 \
+    "+responses_create_params={max_output_tokens: 16384, temperature: 1.0}"
+```
+
+The two invocations are identical except `+agent_name` and `+output_jsonl_fpath`. Hold every other knob constant — model, dataset, `+num_repeats`, sampling params — or the comparison conflates agent effects with sampling noise.
+
+### 3. Profile each run
+
+`ng_collect_rollouts` writes a `<output>_materialized_inputs.jsonl` sidecar alongside each rollouts file; pass that to `ng_reward_profile`. The profiler derives its own output paths (`<rollouts_stem>_reward_profiling.jsonl` and `<rollouts_stem>_agent_metrics.json`) from the rollouts stem.
+
+```bash
+ng_reward_profile \
+    +materialized_inputs_jsonl_fpath=results/lean_simple_rollouts_materialized_inputs.jsonl \
+    +rollouts_jsonl_fpath=results/lean_simple_rollouts.jsonl
+
+ng_reward_profile \
+    +materialized_inputs_jsonl_fpath=results/lean_refinement_rollouts_materialized_inputs.jsonl \
+    +rollouts_jsonl_fpath=results/lean_refinement_rollouts.jsonl
+```
+
+### 4. Print aggregate metrics side by side
+
+```bash
+python scripts/print_aggregate_results.py +jsonl_fpath=results/lean_simple_rollouts_agent_metrics.json
+python scripts/print_aggregate_results.py +jsonl_fpath=results/lean_refinement_rollouts_agent_metrics.json
+```
+
+Read the two agent-metrics files together. `mean/reward` is pass@1; `max/reward` per task is pass@k; `std/reward` flags variance. The harness-level decision usually falls out of the `mean/reward` delta — if `proof_refinement_agent` wins by 5+ points and the cost of extra turns is acceptable, it's the right harness.
+
+## Comparing per-task
+
+Aggregate numbers tell you "agent A wins by N points." The per-task join tells you _where_ the wins come from — and whether the harnesses are solving the same tasks or different ones. Same model, same prompt, different harness: refinement should pick up tasks the single-turn agent couldn't, not just shuffle the same wins around.
+
+```python
+import json
+
+def load(path):
+    return {json.loads(l)["task_index"]: json.loads(l) for l in open(path)}
+
+simple = load("results/lean_simple_rollouts_reward_profiling.jsonl")
+refinement = load("results/lean_refinement_rollouts_reward_profiling.jsonl")
+
+for idx in sorted(simple):
+    s = simple[idx]["mean/reward"]
+    r = refinement[idx]["mean/reward"]
+    if s != r:
+        marker = "+" if r > s else "-"
+        print(f"task {idx}: simple={s:.2f} refinement={r:.2f} {marker}")
+```
+
+Tasks where `refinement > simple` are the wins from iterative correction. Tasks where `refinement < simple` are concerning — they suggest the correction loop is destabilizing successful first attempts (e.g. the model overthinks, or the error feedback misleads it). A few of these are noise; a pattern is signal.
+
+For the rollout-level view — which exact responses passed and failed — refer to [Inspect Failures](/latest/evaluate/analyze/inspect-failures).
+
+## Statistical confidence
+
+Per-task pass rates over 5 rollouts have a noise floor around 20% — a single flipped rollout swings `pass_rate` by 0.2. Increase `+num_repeats` until run-to-run variance on the same model and the same agent is below 1% before drawing harness-level conclusions. For stable pass@1 on a small example slice, 8-16 is typical; for tight comparisons on the full validation slice, 16+.
+
+If a "win" survives only at low `+num_repeats`, it isn't a win. Run the comparison twice end-to-end and confirm the deltas reproduce. Refer to [Reward Semantics — Aggregation rules](/latest/about/concepts/reward-semantics#aggregation-rules) for the variance contract and [Profile Rewards — Variance and confidence](/latest/evaluate/analyze/profile-rewards#variance-and-confidence) for the per-task view.
+
+## What this doesn't tell you
+
+- **Per-benchmark wins do not transfer.** `proof_refinement_agent` beating `simple_agent` on `math_formal_lean` says nothing about what happens on `gpqa_diamond` or another coding benchmark. Re-run the comparison on every benchmark you care about.
+- **Model class interacts with harness choice.** A thinking model may already do internal correction and get no lift from `proof_refinement_agent`; an instruct model may need it. The pairing is what matters, not the harness in isolation.
+- **Cost is not surfaced.** `ng_reward_profile` reports rewards, not tokens or wall-clock time. `proof_refinement_agent` runs up to `max_correction_turns` extra forward passes on failure — measure that separately if cost matters. The `response.usage` field on each rollout has token counts; sum them across the rollouts JSONL.
+- **Statistical significance is not computed.** A 2-point pass@1 delta on 5 tasks × 8 repeats is well within noise. Use the rule of thumb above (variance < 1%) and treat anything below that threshold as a tie.
+
+## Next steps
+
+- [Profile Rewards](/latest/evaluate/analyze/profile-rewards) — the per-task aggregates this comparison joins on.
+- [Inspect Failures](/latest/evaluate/analyze/inspect-failures) — drill into individual rollouts for tasks where the harnesses disagree.
+- [Run a Benchmark](/latest/evaluate/run/run-a-benchmark) — the single-agent flow this page parallelizes.

@@ -1,35 +1,35 @@
 ---
 title: "Task Verification"
-description: ""
+description: "Understand how verify() functions assign reward signals that drive RL training, with patterns for correctness, quality, efficiency, and LLM-as-judge."
+content_type: explanation
+audience_level: intermediate
+journey_stage: build
+position: 5
 ---
-**Goal**: Understand what task verification is and how rewards drive model training.
-
 ## What is Verification?
 
-Every resources server in NeMo Gym implements a `verify()` function that returns a reward value for task performance.
+Every resources server (the environment backend) implements a `verify()` function that returns a reward value for task performance.
 
-**The Problem**: When you ran the weather example in the quickstart, the agent successfully called the tool and provided a response. But was that response *good*? Should the model be rewarded or penalized? Without verification, you cannot measure performance or guide improvement.
-
-**The Solution**: Each resources server must define exactly what "good performance" means for its domain.
+In the quickstart weather example, the agent called the tool and produced a response. But was that response *good*? Should the model be rewarded or penalized? Without verification, there is no way to measure performance or guide improvement. Each resources server must define what "good performance" means for its domain.
 
 ## Why Verification Matters
 
-**Tool Execution ≠ Good Performance**
+**Tool execution is not the same as good performance.**
 
-- The right tool call was issued, e.g., `get_weather("San Francisco")`
-- But was helpful advice given? Was the response accurate? Was it efficient?
-- Verification answers these questions with numerical scores
+- The right tool call was issued, for example `get_weather("San Francisco")`.
+- But was the advice helpful? The response accurate? The path efficient?
+- Verification answers these questions with numerical scores.
 
-**Training Signal**
+**Training signal.**
 
 Verification scores become the **reward signals** that drive reinforcement learning:
-- High scores → "Do more of this behavior"  
-- Low scores → "Avoid this behavior"
-- No verification = No way to improve the model
+- High scores → "Do more of this behavior."
+- Low scores → "Avoid this behavior."
+- No verification means no way to improve the model.
 
 ## Common Verification Patterns
 
-Let's look at real examples from NeMo Gym's resources servers:
+Real examples from NeMo Gym's resources servers:
 
 <Tabs>
 <Tab title="Correctness Verification">
@@ -109,21 +109,21 @@ else:
 
 ## What is LLM-as-a-judge?
 
-Some tasks don't have a clean programmatic solution, or the ground truth is difficult to verify. The "right" answer might be phrased many ways, or "good" means satisfying a rubric (e.g. "does it follow instructions?", "does it answer the question?", "is it safe/appropriate?").
+Some tasks have no clean programmatic solution, or the ground truth is hard to verify. The "right" answer might be phrased many ways, or "good" means satisfying a rubric ("does it follow instructions?", "does it answer the question?", "is it safe/appropriate?").
 
-An LLM-as-a-judge means you send the candidate output to another language model with instructions such as "decide if this is correct/equivalent/compliant", then you parse the judge's answer (e.g. "yes" or "no", a score, or A=B) and turn that into your reward.
+An LLM-as-a-judge sends the candidate output to another language model with instructions like "decide if this is correct/equivalent/compliant," then parses the judge's answer (yes/no, a score, or A=B) into a reward.
 
-In NeMo Gym, that call usually happens inside the resources server's `verify()` method. The policy produces a rollout, and verification may internally call a second model to grade it. Servers such as `equivalence_llm_judge`, `multichallenge`, and `text_to_sql` are concrete examples of this pattern.
+That call usually happens inside the resources server's `verify()` method. The policy produces a rollout, and verification calls a second model to grade it. Servers such as `equivalence_llm_judge`, `multichallenge`, and `text_to_sql` are concrete examples.
 
 ## From Verification to Training
 
 ### **How Rewards Drive Learning**
 
-1. Model generates response → Gets verification score
-2. RL algorithm uses score to update model parameters  
-3. Higher-scoring behaviors become more likely
-4. Lower-scoring behaviors become less likely
-5. Model improves over many training iterations
+1. Model generates response, then gets a verification score.
+2. The RL algorithm uses the score to update model parameters.
+3. Higher-scoring behaviors become more likely.
+4. Lower-scoring behaviors become less likely.
+5. The model improves over many training iterations.
 
 ### **What Makes Good Verification**
 
@@ -180,10 +180,10 @@ reward = await expensive_api_call(predicted, expected)
 </Tab>
 </Tabs>
 
-## What You've Learned
+## Summary
 
-This verification system is what makes NeMo Gym powerful for model training:
-- **Resources servers** provide verification logic
-- **Verification patterns** vary by domain but follow common principles
-- **Reward signals** from verification drive model improvement through RL
-- **Good verification** is reliable, meaningful, and scalable
+Verification is what makes NeMo Gym effective for model training:
+- **Resources servers** provide verification logic.
+- **Verification patterns** vary by domain but follow common principles.
+- **Reward signals** from verification drive model improvement through RL.
+- **Good verification** is reliable, meaningful, and scalable.
