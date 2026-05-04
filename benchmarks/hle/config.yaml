@@ -16,7 +16,7 @@ hle_equivalence_llm_judge_resources_server:
       judge_system_message: ""
       judge_equal_label: "Judgement: yes"
       judge_not_equal_label: "Judgement: no"
-      judge_prompt_template_fpath: benchmarks/hle/prompts/judge.txt
+      judge_prompt_template_fpath: ../../benchmarks/hle/prompts/judge.txt
       response_extract_regex: null
       question_extract_regex: null
       check_twice_swap: false
