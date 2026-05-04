@@ -5,6 +5,10 @@ content_type: explanation
 audience_level: advanced
 journey_stage: scale
 ---
+import { Authors } from "../../../../components/Authors";
+
+<Authors ids={["nvidia"]} />
+
 TL;DR: httpx is O(n^2) runtime where n is the number of queued requests (that is, for each request, we check all other queued requests). This is terribly inefficient and results in major slowdowns.
 
 On September 17, 2025, inspired by the Deepseek R1 Nature paper, we tried launching a larger rollout batch run with up to 16 off policy steps in NeMo RL. Our setting resulted in NeMo Gym being slammed with 16,000 concurrent requests. At the time, we were using a single NeMo Gym instance with multiple data-parallel vLLM workers, and that setup hung for 40 minutes before the first request was processed. Something was wrong.

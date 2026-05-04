@@ -53,6 +53,9 @@ js:
 
 css:
   - ./main.css
+  - ./styles/notebook-viewer.css
+  - ./styles/authors.css
+  - ./styles/blog-card.css
 
 navbar-links:
   - type: github

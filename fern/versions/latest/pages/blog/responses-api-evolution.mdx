@@ -5,6 +5,10 @@ content_type: explanation
 audience_level: advanced
 journey_stage: scale
 ---
+import { Authors } from "../../../../components/Authors";
+
+<Authors ids={["nvidia"]} />
+
 This engineering note explains why NeMo Gym uses the OpenAI Responses API as its native schema and how it differs from the older Chat Completions API.
 
 ## How did OpenAI Responses API evolve and why is it necessary?
