@@ -30,12 +30,15 @@ navigation:
       - folder: ./latest/pages/reference
         title: "Reference"
         title-source: frontmatter
+        collapsed: true
       - folder: ./latest/pages/troubleshooting
         title: "Troubleshooting"
         title-source: frontmatter
+        collapsed: true
       - folder: ./latest/pages/resources
         title: "Resources"
         title-source: frontmatter
+        collapsed: true
   - tab: api
     layout:
       - section: "Python API"
