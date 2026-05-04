@@ -1,0 +1,72 @@
+---
+title: "Versioning and Provenance"
+description: "What gets pinned vs. what floats across NeMo Gym runs — datasets, model IDs, prompt configs, judges, and the gaps where reproduction silently drifts."
+content_type: explanation
+audience_level: intermediate
+journey_stage: build
+position: 8
+---
+
+When you run an eval or a training job, some things are pinned and some things float. This page is candid about which is which, so you can build a reproduction bundle that actually reproduces.
+
+## What is pinned today
+
+### Dataset version
+
+`gitlab_identifier.version` is required on every YAML dataset entry pointing at the GitLab dataset registry (`nemo_gym/cli.py:774-787`). Versions follow `x.x.x` semver convention; the version + dataset name + artifact path uniquely identify the JSONL artifact. MLflow tags every upload with `gitlab.version` (`nemo_gym/gitlab_utils.py:57`). The Hugging Face mirror uses a parallel `huggingface_identifier` field (`nemo_gym/dataset_orchestrator.py:55-65`).
+
+### Model identity
+
+`policy_model_name` and judge `model:` fields pin by Hugging Face model ID (e.g. `nvidia/Qwen3-Nemotron-235B-A22B-GenRM-2603` in `responses_api_models/genrm_model/configs/genrm_model.yaml:5`). For provider-hosted models, the field pins the deployment name or model ID exactly as the provider sees it.
+
+### Prompt config
+
+`prompt_config: <path-to-yaml>` on the agent config or the rollout-collection invocation pins the template that builds `responses_create_params.input` at rollout time (`nemo_gym/rollout_collection.py:125-128`, `nemo_gym/config_types.py:394`). `ng_materialize_prompts` records the resolved path under a `prompt_config_used` field (`nemo_gym/prompt.py:141`).
+
+### `verified` flag
+
+`verified: true` in a resources server YAML is a reviewer-asserted claim that the environment has a baselined reward profile, locked dependencies, and a documented validation recipe. The `add-verified-flag` pre-commit hook injects `verified: false` on new servers; flipping to `true` requires team review.
+
+### `openai` SDK
+
+Pinned to `<=2.7.2` for schema compatibility (`pyproject.toml:89`). Bumping it requires testing every model server type and every shipped agent harness — a non-negotiable per `responses_api_models/AGENTS.md`.
+
+## The reproduction snapshot pattern
+
+Run this alongside any training job or eval you want to reproduce:
+
+```bash
+# Capture the resolved config
+ng_dump_config "+config_paths=[<your-configs>]" > run-config.yaml
+
+# Capture the git SHA
+git rev-parse HEAD > run-git-sha.txt
+```
+
+`ng_dump_config` resolves and prints the merged YAML (`nemo_gym/cli.py:850-869`); secrets are hidden by default. Keep `run-config.yaml`, `run-git-sha.txt`, and the rollout output JSONLs together. Months later, paired with the GitLab dataset version pinned in the config, this bundle lets you replay the run.
+
+## What is NOT pinned today
+
+A candid list. Each is a place where a "reproducible" run can silently drift:
+
+- **GitLab dataset versions are mutable by convention, not by schema.** Re-uploading the same `dataset_name + version` overwrites artifacts (`nemo_gym/gitlab_utils.py:58-64` swallows `RestException` on existing version and still calls `log_artifact`). Treat versions as immutable; bump the patch when re-uploading.
+- **HF model IDs without `revision:` can drift** if the upstream repo updates weights. None of the shipped configs pin a revision today.
+- **Per-server runtime dependencies** — each server's `requirements.txt` is `-e nemo-gym[dev] @ ../..` plus floating extras. No per-server lockfiles are committed.
+- **External tool auto-installs** (e.g. `resources_servers/ifbench/setup_ifbench.py`) pin a git commit, but side-data downloads (NLTK corpora, weights) are not hash-pinned.
+- **Pre-commit hooks** (`add-verified-flag`, `update-readme-table`, `ruff-format`) move with the repo HEAD. Older PRs can pick up newer formatting rules.
+- **Ray cluster version** — must match between attached environments but isn't recorded in run artifacts.
+- **Rollout output JSONLs do not embed config or git SHA.** That's why the snapshot pattern above exists.
+- **`verified: true` is not auto-replayed.** No CI gate replays the baseline reward profile to detect drift; the flag is a point-in-time assertion.
+
+## Footguns
+
+- **Dataset version mutability.** Treat `dataset_name + version` as a write-once contract by convention. Bump the patch (`0.0.1 → 0.0.2`) when re-uploading.
+- **Judge model HF revisions.** Pin a `revision:` field if the judge's stability matters across reproductions. Today no shipped config does.
+- **Floating in-process Python deps inside per-server venvs.** A run from six months ago might re-install with newer transitive deps. For tightly reproducible runs, snapshot the venv contents alongside the rollout output.
+
+## Related
+
+- [Dataset management](/latest/build-environments/data) — dataset registry workflow.
+- [`ng_dump_config`](/latest/api-reference/cli/diagnostics) — the config snapshot command.
+- [Configuration system](/latest/about/concepts/configuration) — how Hydra resolves `+key=value` overrides.
+- [Reward Semantics](/latest/about/concepts/reward-semantics) — what the `reward` field promises across runs.

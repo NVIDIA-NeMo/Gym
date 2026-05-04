@@ -1,0 +1,81 @@
+---
+title: "Terminology Translation"
+description: "Vocabulary lookup for users migrating from Harbor, Verifiers, Aviary, LangGraph, or gymnasium. Maps each source library's concepts onto NeMo Gym's four-component model."
+content_type: reference
+audience_level: intermediate
+journey_stage: build
+position: 9
+---
+
+Vocabulary lookup for users coming from another agent or RL framework. Each table maps the source library's concepts onto NeMo Gym's four-component model: dataset, agent harness, model server, resources server (verifier).
+
+## Load-bearing translations
+
+Five facts that determine how to model a wrapper:
+
+1. **Harbor's "agent" is a kwarg, not the Gym agent harness.** Users will conflate them. The Gym agent server is `HarborAgent`; Harbor's "agent" (terminus-2, claude-code) is what `HarborAgent` orchestrates.
+2. **Verifiers' "rubric" does not map to Gym `verify()`.** Scoring runs inside Verifiers; the wrapper just surfaces a scalar reward. No resources server is in the loop.
+3. **LangGraph adapts at the agent-server tier.** A LangGraph `StateGraph` replaces `simple_agent`'s linear loop body, not anything below it. Resources and model servers are unchanged.
+4. **Harbor and Verifiers bypass `verify()`; Aviary and gymnasium don't.** This is the single most important architectural fact when choosing how to model a new wrapper.
+5. **OpenEnv has no wrapper today.** The [OpenEnv page](/latest/build-environments/integrations/openenv) is a roadmap stub.
+
+## Harbor → NeMo Gym
+
+| Harbor | NeMo Gym | Notes |
+|---|---|---|
+| `Job` / `JobConfig` | one `/run` call | One Gym task = one Harbor trial. |
+| `agent` (terminus-2, claude-code) | strategy inside `HarborAgent`, set by `harbor_agent_name` | Not the Gym agent server itself. |
+| `Environment` (singularity, docker) | replaces the Gym resources server entirely | Harbor owns sandboxing + scoring. |
+| `verifier` | reward source; bypasses Gym `verify()` | |
+| `task.toml` | one JSONL row + `instance_id` field | Required schema deviation. |
+
+See [Wrap a Harbor environment](/latest/build-environments/integrations/harbor) for the full integration.
+
+## Verifiers → NeMo Gym
+
+| Verifiers | NeMo Gym | Notes |
+|---|---|---|
+| `vf.Environment` | the agent harness + implicit verifier | Verifiers owns scoring. |
+| `Rubric` | scalar reward returned by `run_group()` | **Does not** map to Gym `verify()`. |
+| `RolloutInput` (`prompt`, `answer`, `task`, `info`, `example_id`) | flat fields on `VerifiersAgentRunRequest` | `responses_create_params.input` becomes `prompt`. |
+| Environments Hub `env_id` | `vf_env_id` config field | Pinned at `verifiers==0.1.9.post3`. |
+
+See [Wrap a Prime Intellect Verifiers environment](/latest/build-environments/integrations/verifiers).
+
+## Aviary → NeMo Gym
+
+| Aviary | NeMo Gym | Notes |
+|---|---|---|
+| `Environment` | resources server (`/seed_session`, `/step`, `/close`, `/verify`) | Standard Gym contract. |
+| `Tool` | OpenAI Responses API `function_call` | No custom serialization. |
+| `EnvStateMessage` | `AviaryEnvStateEasyInputMessage` in `agent_state.input` | Optionally collapsed via `collapse_old_env_states`. |
+| `Frame` (transition) | one loop iteration; in `agent_state_history` | Emitted when `return_transitions=true`. |
+
+See [Wrap a FutureHouse Aviary environment](/latest/build-environments/integrations/aviary).
+
+## LangGraph → NeMo Gym
+
+| LangGraph | NeMo Gym | Notes |
+|---|---|---|
+| `StateGraph` | the agent harness's loop body | Adapts at the agent-server tier. |
+| Graph node calling an LLM | `server_client.post(model_server, /v1/responses)` | Each node hits the Gym model server. |
+| Graph state | must include `last_policy_response: NeMoGymResponse` | Required by `extract_model_response`. |
+| Tool node | call to the Gym resources server | Same contract as `simple_agent`. |
+
+See [Wrap a LangGraph graph](/latest/build-environments/integrations/langgraph).
+
+## gymnasium → NeMo Gym
+
+| gymnasium | NeMo Gym | Notes |
+|---|---|---|
+| `Env.reset()` | resources `/reset` (`EnvResetResponse`) | Observation becomes a user message. |
+| `Env.step()` | resources `/step` (`EnvStepResponse`) | Action is the model's `NeMoGymResponse`. |
+| `terminated` / `truncated` | fields on `GymnasiumRunResponse` | Same semantics. |
+| Per-step reward | summed into `reward`; no separate verifier | Env's step reward is canonical. |
+
+See [Wrap a Gymnasium environment](/latest/build-environments/integrations/gymnasium).
+
+## Related
+
+- [Choose an Agent](/latest/get-started/choose-an-agent) — pick the harness that matches the source library's shape.
+- [Architecture](/latest/about/concepts/architecture) — the four-component model these tables translate onto.

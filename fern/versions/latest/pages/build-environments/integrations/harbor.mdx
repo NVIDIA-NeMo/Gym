@@ -1,0 +1,63 @@
+---
+title: "Wrap a Harbor environment"
+description: "Run an existing Harbor terminus-2 / claude-code / aider agent + Harbor environment as a NeMo Gym agent server. Harbor owns sandboxing and scoring; the Gym agent harness adapts the trial-job result back into Gym's response shape."
+content_type: how-to
+audience_level: intermediate
+journey_stage: build
+position: 3
+---
+
+Run an existing [Harbor](https://github.com/laude-institute/harbor) `terminus-2` / `claude-code` / `aider` agent inside a Harbor environment as a NeMo Gym agent server. Harbor owns the sandbox and the verifier; the Gym wrapper adapts each trial result back into the Responses API shape.
+
+## What the wrapper does
+
+`HarborAgent.run()` builds a Harbor `JobConfig` per task, dispatches the job through Ray (`runner_ray_remote.remote(_run_harbor_job_sync, ...)`), reads `result.json` and `agent/trajectory.json` from Harbor's trial directory, and reshapes them into a `HarborVerifyResponse` (`responses_api_agents/harbor_agent/app.py:208-323`). A reusable per-Ray-worker event loop avoids LiteLLM cross-loop bugs (`app.py:164-178`).
+
+This wrapper is unusual: **it has no Gym resources server**. Harbor owns sandboxing and scoring, so `verify()` is never called. The Gym agent harness exposes only `/run` — `/v1/responses` raises `NotImplementedError` (`app.py:206`).
+
+## Terminology
+
+| Harbor | NeMo Gym | Notes |
+|---|---|---|
+| `Job` / `JobConfig` | one `/run` call on the agent server | One Gym task = one Harbor trial. |
+| Harbor `agent` (`terminus-2`, `claude-code`) | the strategy inside the Gym agent harness, set via `harbor_agent_name` or `harbor_agent_import_path` | **Load-bearing:** Harbor's "agent" is **not** the Gym agent server — it's a kwarg of it. |
+| Harbor `Environment` (singularity, docker, daytona) | replaces the Gym resources server entirely; configured via `harbor_environment_type` / `harbor_environment_import_path` | Harbor owns sandboxing + scoring. |
+| Harbor `verifier` (`verifier_result` in `result.json`) | reward source consumed by `HarborAgentUtils.extract_reward()` | Gym `verify()` is **not** called. |
+| Harbor `trajectory.json` | `output` items in `NeMoGymResponse` via `HarborAgentUtils.trial_result_to_responses()` | Token IDs flow through when `collect_rollout_details: true`. |
+| `instance_id = <dataset_alias>::<task_name>` | JSONL row's `instance_id` field | Required JSONL schema deviation; not a standard Gym field. |
+
+## Wiring
+
+Copy `responses_api_agents/harbor_agent/configs/harbor_agent.yaml`, set `harbor_datasets.<alias>.local_dataset_path` (or `dataset_name`), and set `harbor_agent_kwargs.collect_rollout_details: true` if the rollouts will train an RL policy.
+
+```bash
+ng_run "+config_paths=[\
+responses_api_agents/harbor_agent/configs/harbor_agent.yaml,\
+responses_api_models/vllm_model/configs/vllm_model.yaml]"
+
+ng_collect_rollouts \
+    +agent_name=harbor_agent \
+    +input_jsonl_fpath=responses_api_agents/harbor_agent/example/example_input.jsonl \
+    +output_jsonl_fpath=results/harbor_rollouts.jsonl
+```
+
+## Parity validation
+
+To confirm the wrapper scores rollouts the same way Harbor does:
+
+1. Run Harbor standalone on the same task with the same agent + environment + model.
+2. Compare `reward` and `verifier_result` fields between Harbor's `result.json` and the Gym rollout JSONL.
+3. Confirm `agent_error_flags.json` is produced in Harbor's trial dir (`app.py:259-263`); if missing, the Gym trajectory is incomplete.
+
+## Caveats
+
+- **`/v1/responses` is unsupported.** Only `/run`. This means `HarborAgent` cannot be used as a sub-component inside a model+tool loop driven by another agent harness.
+- **Singularity backend is required for HPC.** The default Harbor envs are explicitly called out as insufficient (`README.md:36-39`).
+- **Concurrency.** The wrapper uses an `asyncio.Semaphore` (`app.py:197`); Harbor's internal `n_concurrent_trials=1` (`app.py:476`) means every Gym request fans out to a single-trial Harbor job.
+
+## Related
+
+- [Wrap an external library](/latest/build-environments/integrations/external-libraries) — the generic wrap-it-yourself path.
+- [Choose an Agent](/latest/get-started/choose-an-agent) — how `HarborAgent` compares to the other shipped harnesses.
+- [Terminology Translation](/latest/build-environments/integrations/terminology-translation) — Harbor / Verifiers / Aviary / LangGraph / gymnasium vocabulary lookup.
+- Source: [`responses_api_agents/harbor_agent/`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/harbor_agent).

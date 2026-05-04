@@ -18,6 +18,10 @@ from pathlib import Path
 
 REQUIRED_FIELDS = ("title", "description", "content_type", "audience_level", "journey_stage")
 
+# Optional fields validated only for shape if present; not required on any page.
+# Add fields here as the controlled vocab grows.
+OPTIONAL_FIELDS = ("duration", "gpu_required", "cost_estimate", "deprecated_in", "replaced_by")
+
 CONTENT_TYPE = {
     "tutorial",
     "how-to",
@@ -31,11 +35,13 @@ CONTENT_TYPE = {
 }
 AUDIENCE_LEVEL = {"beginner", "intermediate", "advanced"}
 JOURNEY_STAGE = {"discover", "try", "build", "scale"}
+GPU_REQUIRED = {"true", "false", "True", "False"}
 
 VOCAB = {
     "content_type": CONTENT_TYPE,
     "audience_level": AUDIENCE_LEVEL,
     "journey_stage": JOURNEY_STAGE,
+    "gpu_required": GPU_REQUIRED,
 }
 
 FIELD_RE = re.compile(r'^(\w+):\s*(?:"([^"]*)"|(\S+))', re.MULTILINE)
@@ -109,10 +115,12 @@ def main(argv: list[str]) -> int:
         print(
             f"\n{len(all_errors)} violation(s). "
             "Required fields: title, description, content_type, audience_level, journey_stage.\n"
+            f"Optional fields (validated only if present): {', '.join(OPTIONAL_FIELDS)}.\n"
             "Controlled vocab values:\n"
             f"  content_type: {', '.join(sorted(CONTENT_TYPE))}\n"
             f"  audience_level: {', '.join(sorted(AUDIENCE_LEVEL))}\n"
-            f"  journey_stage: {', '.join(sorted(JOURNEY_STAGE))}",
+            f"  journey_stage: {', '.join(sorted(JOURNEY_STAGE))}\n"
+            f"  gpu_required: {', '.join(sorted(GPU_REQUIRED))}",
             file=sys.stderr,
         )
         return 1

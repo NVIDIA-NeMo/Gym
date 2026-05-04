@@ -1,0 +1,57 @@
+---
+title: "Wrap a Prime Intellect Verifiers environment"
+description: "Run a Prime Intellect Verifiers vf.Environment (Environments Hub or local) inside Gym. Verifiers owns scoring; the wrapper surfaces the rubric's scalar reward and bridges the LLM client to the Gym model server."
+content_type: how-to
+audience_level: intermediate
+journey_stage: build
+position: 4
+---
+
+Run a [Prime Intellect Verifiers](https://github.com/PrimeIntellect-ai/verifiers) `vf.Environment` — from the Environments Hub or local — inside NeMo Gym.
+
+## What the wrapper does
+
+`VerifiersAgent.responses()` calls `vf.load_environment(vf_env_id)`, builds a `vf.RolloutInput` from the JSONL row, and delegates to `vf_env.run_group(...)` using a cached `NeMoRLChatCompletionsClient` pointed at the Gym model server (`responses_api_agents/verifiers_agent/app.py:177-236`). Trajectory items and per-token IDs are pulled from the Verifiers rollout output via `_convert_trajectory_to_output` (`app.py:121-175`).
+
+Like the Harbor wrapper, this one has no Gym resources server — Verifiers owns scoring. The wrapper just surfaces the rubric's scalar reward.
+
+## Terminology
+
+| Verifiers | NeMo Gym | Notes |
+|---|---|---|
+| `vf.Environment` | the agent harness *plus* the implicit verifier | Verifiers owns scoring. |
+| `vf.Rubric` | reward returned by `vf_env.run_group()`'s `reward` field | **Load-bearing:** a Verifiers rubric does **not** map onto Gym `verify()`. The rubric runs inside Verifiers; the wrapper surfaces a scalar. |
+| `vf.RolloutInput` (`prompt`, `answer`, `task`, `info`, `example_id`) | flat fields on `VerifiersAgentRunRequest` (JSONL row) | `responses_create_params.input` becomes `prompt`. |
+| `NeMoRLChatCompletionsClient` | wraps the Gym model server's `/v1/chat/completions` | Hard requirement; Verifiers' default OpenAI client would skip the Gym model tier. |
+| Environments Hub `vf_env_id` | `vf_env_id` config field | Pinned at `verifiers==0.1.9.post3` per `requirements.txt`. |
+
+## Wiring
+
+```bash
+ng_run "+config_paths=[\
+responses_api_agents/verifiers_agent/configs/acereason-math.yaml,\
+responses_api_models/vllm_model/configs/vllm_model.yaml]"
+
+ng_collect_rollouts \
+    +agent_name=verifiers_agent \
+    +input_jsonl_fpath=responses_api_agents/verifiers_agent/data/acereason-math-example.jsonl \
+    +output_jsonl_fpath=results/verifiers_rollouts.jsonl \
+    +limit=1
+```
+
+The `acereason-math.yaml` config sets `vf_env_id: <hub-id>` and any `vf_env_args` the environment needs.
+
+## Parity validation
+
+Install the Verifiers environment via `prime env install <id>`, run `vf.load_environment(<id>).evaluate(...)` standalone with the same model and sampling args, and compare per-task reward to the Gym rollout JSONL.
+
+## Caveats
+
+- **Pinned to `verifiers==0.1.9.post3`** for the token-ID pass-through patch. Newer versions break monotonic-token training (`README.md:111-115`); don't bump without re-validating.
+- **New environments live in a separate prime venv.** Avoids `pyproject.toml` `exclude-dependencies` conflicts (`README.md:46-56`).
+
+## Related
+
+- [Wrap an external library](/latest/build-environments/integrations/external-libraries) — generic path.
+- [Terminology Translation](/latest/build-environments/integrations/terminology-translation).
+- Source: [`responses_api_agents/verifiers_agent/`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/verifiers_agent).

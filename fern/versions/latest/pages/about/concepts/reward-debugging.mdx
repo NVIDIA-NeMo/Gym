@@ -1,0 +1,95 @@
+---
+title: "Reward Debugging"
+description: "Diagnose wrong rewards systematically — read the rollout JSONL, name the symptom, find the source-of-truth file, fix the contract."
+content_type: explanation
+audience_level: intermediate
+journey_stage: build
+position: 7
+---
+
+A rollout finished with a reward you don't believe. This page walks the diagnosis: read the rollout JSONL first, name the symptom, find the contract that defines what should have happened. Companion to [Reward Semantics](/latest/about/concepts/reward-semantics) — that page is the contract, this one is the playbook when the contract isn't being met.
+
+## Read the rollout JSONL first
+
+`ng_collect_rollouts` writes one row per `(task_index, rollout_index)` pair. Each row contains:
+
+- `task_index`, `rollout_index` — keys that survive into `ng_reward_profile` outputs.
+- `response.output_text` — what the model finally said. Read this before anything else.
+- `reward` — the verifier's score. The hard contract is `reward: float` (`nemo_gym/base_resources_server.py:45-46`); range and shape are per-environment.
+- Custom verify fields — environment-specific. Examples: `extracted_model_code` (`code_gen`), `judge_evaluations` (`equivalence_llm_judge`), `reasoning_format_violation_rate` (`code_gen`).
+
+The companion file `<output_stem>_materialized_inputs.jsonl` holds the resolved prompt that produced each rollout. When debugging oracle leakage or prompt-config bugs, read both.
+
+## Pick the symptom
+
+| Reward shape you see | Most likely cause | Section below |
+|---|---|---|
+| All 0.0 across every task | Parser mismatch | 1 |
+| All 1.0 when you expect mixed | Oracle leakage | 2 |
+| Wide swings across `+num_repeats` | Variance | 3 |
+| Reasoning blocks bleed into the answer | Thinking-model strip wrong | 4 |
+| Stateful env: counter resets every tool call | Cookie propagation lost | 5 |
+| LLM-judge result flips run to run | Judge drift | 6 |
+| Got `0.5` when you expected `0.0` or `1.0` | Partial-credit reward shape | 7 |
+
+## 1. Reward consistently 0.0
+
+The verifier's extractor isn't matching the model's output.
+
+- **Diagnose**: read `response.output_text` from the rollout JSONL; compare to the verifier's expected pattern. For code, check `extract_code(model_out, LMStyle.OpenAIChat)` returning empty — `resources_servers/code_gen/app.py:163-170` short-circuits to `reward=0.0`. For LLM-judge, check `_extract_last_assistant_text` + `response_extract_regex` (`resources_servers/equivalence_llm_judge/app.py:143-201`).
+- **Fix**: tighten or loosen the extractor's regex; or change the prompt template so the model produces the format the verifier expects. See also [Footguns: reward is always zero](/latest/troubleshooting/footguns).
+
+## 2. Reward 1.0 when you expect mixed (oracle leakage)
+
+The model has access to information it shouldn't. The Resources Server steward invariant is "no oracle leakage" (`resources_servers/AGENTS.md:21`).
+
+- **Diagnose**: grep the rollout JSONL for the gold answer string. Check whether `verifier_metadata` fields are being injected into the system prompt or tool descriptions the agent sees. Confirm session state isn't echoing back ground truth.
+- **Fix**: scrub `verifier_metadata` from anything the agent reads. Re-baseline with `+num_repeats=8` and confirm reward variance.
+
+## 3. Variance across `+num_repeats` runs
+
+Open the agent-level metrics JSON from `ng_reward_profile`.
+
+- `pass@1[avg-of-{k}]/accuracy/std_dev_across_runs` (`nemo_gym/reward_profile.py:307`) — variance between independent runs of the whole dataset.
+- `pass@1[avg-of-{k}]/accuracy/avg_sample_std_dev` (`nemo_gym/reward_profile.py:339`) — average per-task variance within `k` rollouts.
+- Per-task `std/reward` from `RewardProfiler.describe_dataframe` (`nemo_gym/reward_profile.py:54-74`).
+
+High `std_dev_across_runs` with low `avg_sample_std_dev` means real model nondeterminism (likely fine). High `avg_sample_std_dev` on tasks where the verifier should be deterministic means the verifier itself is nondeterministic — that's a bug. Target: across-run variance under 1% (`resources_servers/AGENTS.md:27`).
+
+## 4. Thinking-model output stripped wrong
+
+The verifier sees `<think>...</think>` blocks and parses them as the answer.
+
+- **Diagnose**: grep `response.output_text` for `<think>` or `<thinking>`. `code_gen` flags this with `reasoning_format_violation_rate` (`resources_servers/code_gen/app.py:89-110, 228`).
+- **Fix**: set `uses_reasoning_parser: true` on the model server config (`responses_api_models/vllm_model/app.py:75`). For `local_vllm_model`, set `vllm_serve_kwargs.reasoning_parser` (e.g. `deepseek_r1`). For Responses-native servers, reasoning items arrive pre-structured as `output[].type == "reasoning"`.
+
+See [Footguns](/latest/troubleshooting/footguns) for the symptom-side recipe.
+
+## 5. Cookie/session state lost mid-rollout
+
+Stateful resources servers key per-rollout state by session ID. When the agent doesn't propagate cookies, every call gets a fresh session and state appears empty.
+
+- **Diagnose**: the symptom is every rollout returning `reward=0` and the verifier reading empty session state (e.g. `if session_id in self.session_id_to_counter` falling false). Tool calls succeed individually but state doesn't accumulate across them.
+- **Fix**: the agent harness must forward `cookies=request.cookies` on every downstream call. `simple_agent` and `proof_refinement_agent` already do this. Custom harnesses must follow the [Cookie propagation contract](/latest/build-environments/supported-patterns/stateful#cookie-propagation-contract-required-for-stateful-agents).
+
+## 6. LLM-judge drift
+
+When the verifier is an LLM judge, the judge can drift across runs.
+
+- **Diagnose**: read `judge_evaluations[].verdict_label` per rollout. Look for the same task scoring differently across `+num_repeats`.
+- **Fix**: pin judge model and `temperature: 0` in `judge_responses_create_params` (`resources_servers/equivalence_llm_judge/app.py:61-62`). Enable `check_twice_swap: true` (line 81) to surface positional bias on pairwise judges. Use a separate `judge_model_server` from the policy model to keep judge and trainee independent (`resources_servers/math_with_judge/configs/math_with_judge.yaml:5-7`).
+
+## 7. Reward shape wrong (got 0.5 instead of 0/1)
+
+Some verifiers return partial credit. The `reward: float` contract doesn't enforce binary — it just requires a float (`reward-semantics.mdx:25-32`).
+
+- `LLMJudgeResourcesServerConfig.reward_if_full_generation_succeeds: float = 0.5` (`resources_servers/equivalence_llm_judge/app.py:109`) intentionally returns 0.5 when the per-record regex fails but full generation matches.
+- `code_gen` returns `reasoning_format_penalty: float = -0.2` for thinking-block violations (`resources_servers/code_gen/app.py:47, 219`).
+
+If you want strict binary, set `check_full_generation_on_fail: false` on judge envs, or read the per-environment README to find the toggle.
+
+## When the contract is the problem
+
+A swallowed exception inside `verify()` looks identical to a wrong answer unless the verifier explicitly returns an `error` field. If you suspect this, run `ng_test +entrypoint=resources_servers/<name> +should_validate_data=true` to exercise the verifier on `data/example.jsonl` and surface the exception.
+
+For the formal contract — what reward means, when retries fire, how aggregation works — see [Reward Semantics](/latest/about/concepts/reward-semantics). For symptom-side recipes that span model, network, and Hydra failures, see [Footguns](/latest/troubleshooting/footguns).
