@@ -58,7 +58,7 @@ export interface BlogCardProps {
    * Optional hero image element. Pass an `<img>` JSX node from MDX so Fern's
    * MDX rewriter resolves the src to the correct dev/prod path (raw string
    * paths bypass the rewriter and 404 in dev). Falls back to a deterministic
-   * hash-based gradient + monogram when omitted.
+   * hash-based gradient when omitted.
    *
    *   <BlogCard image={<img src="/assets/foo/hero.png" alt="" />} … />
    */
@@ -85,13 +85,6 @@ function placeholderGradient(seed: string): string {
   return `linear-gradient(135deg, ${a} 0%, ${b} 100%)`;
 }
 
-/** First grapheme of the title (works for "🎨 Title" too). */
-function monogramOf(title: string): string {
-  // Strip leading non-letter punctuation/whitespace then take 1 char.
-  const trimmed = title.replace(/^[^\p{L}\p{N}]+/u, "");
-  return Array.from(trimmed)[0]?.toUpperCase() ?? "·";
-}
-
 export function BlogCard({
   href,
   title,
@@ -114,9 +107,7 @@ export function BlogCard({
             className="blog-card__placeholder"
             style={{ background: placeholderGradient(href) }}
             aria-hidden="true"
-          >
-            <span className="blog-card__monogram">{monogramOf(title)}</span>
-          </div>
+          />
         )}
       </div>
       <div className="blog-card__body">
