@@ -24,10 +24,13 @@ import base64
 import math
 import os
 import shutil
+import tempfile
 import time
 import zipfile
 from pathlib import Path
 from typing import Any
+
+from openai import APITimeoutError
 
 
 JUDGE_PROMPT = (
@@ -64,6 +67,19 @@ REQUEST_MAX_ATTEMPTS = 5
 REQUEST_INITIAL_BACKOFF_SECONDS = 5.0
 REQUEST_BACKOFF_MULTIPLIER = 2.0
 REQUEST_MAX_BACKOFF_SECONDS = 60.0
+# Per-request OpenAI client timeout. Multimodal payloads through a flaky
+# proxy have historically taken hours when this defaulted to 600 s × 5
+# retries (50 min/trial × 4 trials = 200 min/verify worst case). 120 s here,
+# combined with non-retryable ``APITimeoutError`` below, bounds wall-clock
+# damage to ~8 min/verify when the upstream is genuinely down.
+JUDGE_REQUEST_TIMEOUT_SECONDS = 120.0
+# Per-file size cap on multimodal content blocks. Above this the file is
+# replaced with a one-line text marker so the judge still knows what was
+# claimed without us pushing 100s of MB of base64 through the proxy.
+# Set high enough (250 MB) that normal multi-stem audio and reference
+# videos in the GDPVal task set still go through; only catches the truly
+# pathological cases (e.g. ``task_a941b6d8`` 657 MB overlay clip).
+MAX_FILE_BYTES_FOR_JUDGE = 250 * 1024 * 1024
 RETRYABLE_ERROR_MARKERS = (
     "429",
     "502",
@@ -80,8 +96,6 @@ RETRYABLE_ERROR_MARKERS = (
     "service unavailable",
     "upstream",
     "temporarily unavailable",
-    "timeout",
-    "timed out",
     "connection error",
 )
 
@@ -114,17 +128,25 @@ def _convert_to_pdf(path: str | Path) -> bytes | None:
     return None
 
 
-def _maybe_unzip(path: str | Path) -> list[Path]:
+def _maybe_unzip(path: str | Path) -> tuple[Path | None, list[Path]]:
+    """Extract a zip into a per-call tempdir; never write into ``path.parent``.
+
+    The reference deliverables tree is mounted read-only in production, so the
+    previous behaviour of ``extractall(path.parent)`` raised ``PermissionError``
+    and failed /verify outright. Returns ``(extract_dir, member_paths)`` —
+    callers are responsible for ``shutil.rmtree(extract_dir)`` after they're
+    done reading the members.
+    """
     path = Path(path)
-    extracted_paths: list[Path] = []
     try:
         with zipfile.ZipFile(path, "r") as zip_ref:
+            extract_dir = Path(tempfile.mkdtemp(prefix="gdpval_unzip_"))
+            zip_ref.extractall(extract_dir)
             members = zip_ref.namelist()
-            zip_ref.extractall(path.parent)
-            extracted_paths = [path.parent / Path(member) for member in members if member]
-    except (zipfile.BadZipFile, zipfile.LargeZipFile, FileNotFoundError):
-        pass
-    return extracted_paths
+            extracted_paths = [extract_dir / Path(member) for member in members if member]
+        return extract_dir, extracted_paths
+    except (zipfile.BadZipFile, zipfile.LargeZipFile, FileNotFoundError, OSError):
+        return None, []
 
 
 FILE_TYPE_MAP: dict[str, dict[str, Any]] = {
@@ -188,6 +210,17 @@ def get_file_content_block(file_dir: str, file_name: str) -> dict | None:
     full_path = os.path.join(file_dir, file_name)
 
     try:
+        size_bytes = os.path.getsize(full_path)
+    except OSError:
+        return None
+    if size_bytes > MAX_FILE_BYTES_FOR_JUDGE:
+        size_mb = size_bytes / (1024 * 1024)
+        return {
+            "type": "text",
+            "text": f"[oversize: {file_name} {size_mb:.1f}MB — not included]",
+        }
+
+    try:
         if file_type == "TXT":
             raw_text = file_converter(full_path)
             return {"type": "text", "text": raw_text}
@@ -215,8 +248,9 @@ def get_file_content_block(file_dir: str, file_name: str) -> dict | None:
 def build_file_section(file_dir: str | None, clean_up_list: list[Path] | None = None) -> list[dict]:
     """Build OpenAI content blocks from all files in a directory.
 
-    Skips files in ``IGNORE_FILES``.  Extracts zips first.  Returns a list
-    of content block dicts suitable for OpenAI messages.
+    Skips files in ``IGNORE_FILES``. Extracts zips into per-call tempdirs
+    (the dirs are appended to ``clean_up_list`` for the caller to ``rmtree``).
+    Returns a list of content block dicts suitable for OpenAI messages.
     """
     if clean_up_list is None:
         clean_up_list = []
@@ -224,24 +258,37 @@ def build_file_section(file_dir: str | None, clean_up_list: list[Path] | None = 
     section: list[dict] = []
     no_files = True
 
+    extracted_dirs: list[Path] = []
     if file_dir is not None and os.path.exists(file_dir):
         for file_name in os.listdir(file_dir):
             if file_name.lower().endswith(".zip"):
-                extracted_paths = _maybe_unzip(os.path.join(file_dir, file_name))
-                clean_up_list.extend(extracted_paths)
+                extract_dir, _ = _maybe_unzip(os.path.join(file_dir, file_name))
+                if extract_dir is not None:
+                    clean_up_list.append(extract_dir)
+                    extracted_dirs.append(extract_dir)
+
+    def _emit(directory: str, file_name: str) -> None:
+        nonlocal no_files
+        if file_name in IGNORE_FILES:
+            return
+        section.append({"type": "text", "text": f"\n{file_name}:\n"})
+        block = get_file_content_block(directory, file_name)
+        if block is not None:
+            section.append(block)
+            no_files = False
 
     if file_dir is not None and os.path.exists(file_dir):
         for file_name in sorted(os.listdir(file_dir)):
             full_path = os.path.join(file_dir, file_name)
             if os.path.isdir(full_path) or file_name.lower().endswith(".zip"):
                 continue
-            if file_name in IGNORE_FILES:
+            _emit(file_dir, file_name)
+
+    for extract_dir in extracted_dirs:
+        for member in sorted(extract_dir.rglob("*")):
+            if not member.is_file():
                 continue
-            section.append({"type": "text", "text": f"\n{file_name}:\n"})
-            block = get_file_content_block(file_dir, file_name)
-            if block is not None:
-                section.append(block)
-                no_files = False
+            _emit(str(member.parent), member.name)
 
     if no_files:
         section.append({"type": "text", "text": "None"})
@@ -282,6 +329,11 @@ def construct_judge_messages(
 
 
 def _is_retryable(error: Exception) -> bool:
+    # Timeouts on multimodal payloads are deterministic — the payload is too
+    # large for the judge endpoint to digest in time, and retrying just burns
+    # another full timeout window per attempt. Fail the trial fast instead.
+    if isinstance(error, APITimeoutError):
+        return False
     error_text = str(error).lower()
     return any(marker in error_text for marker in RETRYABLE_ERROR_MARKERS)
 

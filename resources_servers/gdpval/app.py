@@ -285,7 +285,9 @@ class GDPValResourcesServer(SimpleResourcesServer):
         from openai import OpenAI
 
         from resources_servers.gdpval.comparison import (
+            JUDGE_REQUEST_TIMEOUT_SECONDS,
             build_file_section,
+            clean_up_paths,
             run_trials,
             task_attempted,
         )
@@ -320,42 +322,53 @@ class GDPValResourcesServer(SimpleResourcesServer):
             for ref_dir in ref_task_dirs:
                 await preconvert_dir_async(ref_dir, max_concurrent=self.config.preconvert_max_concurrent)
 
-        eval_submission = build_file_section(str(eval_task_dir))
-
+        clean_up_list: List[Path] = []
         overrides = dict(self.config.judge_responses_create_params_overrides or {})
         judge_base_url = get_server_url(self.config.judge_model_server.name) + "/v1"
         judge_model_name = overrides.get("model", "judge")
         judge_api_key = overrides.get("api_key", "dummy")
-        client = OpenAI(base_url=judge_base_url, api_key=judge_api_key)
+        client = OpenAI(
+            base_url=judge_base_url,
+            api_key=judge_api_key,
+            timeout=JUDGE_REQUEST_TIMEOUT_SECONDS,
+        )
 
-        # Judge eval submission against every available reference repeat. Raw
-        # vote counts (not just per-matchup majority) are summed so the win
-        # rate averages over reference variance — see ``_iter_ref_repeat_dirs``.
         total_wins = 0
         total_losses = 0
         total_ties = 0
         per_ref_results: List[Dict[str, Any]] = []
-        for ref_dir in ref_task_dirs:
-            refs_subdir = ref_dir / "reference_files"
-            refs = build_file_section(str(refs_subdir) if refs_subdir.is_dir() else None)
-            ref_submission = build_file_section(str(ref_dir))
-            result = await asyncio.to_thread(
-                run_trials,
-                client=client,
-                model=judge_model_name,
-                task_prompt=body.prompt or "",
-                refs=refs,
-                submission_a=ref_submission,
-                submission_b=eval_submission,
-                num_trials=self.config.num_comparison_trials,
-                return_raw_responses=self.config.persist_raw_judge_responses,
-            )
-            # ``run_trials`` casts submission_a=ref, submission_b=eval, so
-            # ``win_count_b`` is eval wins.
-            total_wins += result["win_count_b"]
-            total_losses += result["win_count_a"]
-            total_ties += result["tie_count"]
-            per_ref_results.append({"ref_repeat": ref_dir.name, **result})
+        try:
+            eval_submission = build_file_section(str(eval_task_dir), clean_up_list)
+
+            # Judge eval submission against every available reference repeat. Raw
+            # vote counts (not just per-matchup majority) are summed so the win
+            # rate averages over reference variance — see ``_iter_ref_repeat_dirs``.
+            for ref_dir in ref_task_dirs:
+                refs_subdir = ref_dir / "reference_files"
+                refs = build_file_section(
+                    str(refs_subdir) if refs_subdir.is_dir() else None,
+                    clean_up_list,
+                )
+                ref_submission = build_file_section(str(ref_dir), clean_up_list)
+                result = await asyncio.to_thread(
+                    run_trials,
+                    client=client,
+                    model=judge_model_name,
+                    task_prompt=body.prompt or "",
+                    refs=refs,
+                    submission_a=ref_submission,
+                    submission_b=eval_submission,
+                    num_trials=self.config.num_comparison_trials,
+                    return_raw_responses=self.config.persist_raw_judge_responses,
+                )
+                # ``run_trials`` casts submission_a=ref, submission_b=eval, so
+                # ``win_count_b`` is eval wins.
+                total_wins += result["win_count_b"]
+                total_losses += result["win_count_a"]
+                total_ties += result["tie_count"]
+                per_ref_results.append({"ref_repeat": ref_dir.name, **result})
+        finally:
+            clean_up_paths(clean_up_list)
 
         total_judged = total_wins + total_losses + total_ties
         if total_wins > total_losses:
