@@ -30,6 +30,7 @@ Scoring internals live in ``scoring.py`` (rubric) and ``comparison.py``
 from __future__ import annotations
 
 import asyncio
+import logging
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
@@ -42,6 +43,8 @@ from nemo_gym.base_resources_server import (
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest, ModelServerRef
 from nemo_gym.server_utils import get_server_url
 
+
+LOGGER = logging.getLogger(__name__)
 
 _DEFAULT_JUDGE_PROMPT_FPATH = str(Path(__file__).parent / "prompts" / "judge_prompt.j2")
 _DEFAULT_REFERENCE_ELO = 1000.0
@@ -281,6 +284,18 @@ class GDPValResourcesServer(SimpleResourcesServer):
             invalid_judge_response=(judge_result is None),
         )
 
+    async def _preconvert_and_log(self, target_dir: Path, *, label: str) -> None:
+        from resources_servers.gdpval.preconvert import preconvert_dir_async
+
+        n_ok, n_fail, errors = await preconvert_dir_async(
+            target_dir, max_concurrent=self.config.preconvert_max_concurrent
+        )
+        if n_ok or n_fail:
+            LOGGER.info("preconvert %s: ok=%d fail=%d", label, n_ok, n_fail)
+        if n_fail:
+            for msg in errors[:5]:
+                LOGGER.warning("preconvert %s: %s", label, msg)
+
     async def _verify_comparison(self, body: GDPValVerifyRequest) -> GDPValVerifyResponse:
         from openai import OpenAI
 
@@ -289,7 +304,6 @@ class GDPValResourcesServer(SimpleResourcesServer):
             run_trials,
             task_attempted,
         )
-        from resources_servers.gdpval.preconvert import preconvert_dir_async
 
         ref_root = Path(self.config.reference_deliverables_dir)
         ref_task_root = ref_root / f"task_{body.task_id}"
@@ -316,9 +330,9 @@ class GDPValResourcesServer(SimpleResourcesServer):
             )
 
         if self.config.preconvert_office_to_pdf:
-            await preconvert_dir_async(eval_task_dir, max_concurrent=self.config.preconvert_max_concurrent)
+            await self._preconvert_and_log(eval_task_dir, label=f"eval/{body.task_id}")
             for ref_dir in ref_task_dirs:
-                await preconvert_dir_async(ref_dir, max_concurrent=self.config.preconvert_max_concurrent)
+                await self._preconvert_and_log(ref_dir, label=f"ref/{body.task_id}/{ref_dir.name}")
 
         eval_submission = build_file_section(str(eval_task_dir))
 
