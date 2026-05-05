@@ -49,6 +49,7 @@ ng_collect_rollouts \
     +agent_name=hle_equivalence_llm_judge_simple_agent \
     +input_jsonl_fpath=benchmarks/hle/data/hle_benchmark.jsonl \
     +output_jsonl_fpath=results/hle_rollouts.jsonl \
+    +prompt_config=benchmarks/hle/prompts/default.yaml \
     +num_repeats=1 \
     "++responses_create_params={temperature: 0.0}"
 ```
