@@ -28,7 +28,7 @@ import tempfile
 import time
 from asyncio import Semaphore
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Union
 
 import ray
 from fastapi import Request
@@ -151,6 +151,8 @@ async def _run_stirrup_agent(
     top_p: float = 0.95,
     enable_thinking: bool = True,
     max_completion_tokens_cap: int = 64000,
+    tavily_api_key: Optional[Union[str, List[str]]] = None,
+    tavily_max_sweeps: int = 1,
 ) -> Dict[str, Any]:
     """Run a Stirrup agent session and return history + metadata.
 
@@ -230,15 +232,22 @@ async def _run_stirrup_agent(
 
     tools = [exec_provider if isinstance(t, CodeExecToolProvider) else t for t in DEFAULT_TOOLS]
 
-    # Replace Stirrup's WebToolProvider with TavilyToolProvider when TAVILY_API_KEY is set
+    # Replace Stirrup's WebToolProvider with TavilyToolProvider when keys are available
+    # (either via the ``tavily_api_key`` config field or the legacy ``TAVILY_API_KEY``
+    # env var fallback). The provider parses bracketed comma-lists and rotates per call.
     import os as _os
 
     from stirrup.tools.web import WebToolProvider
 
-    if _os.environ.get("TAVILY_API_KEY"):
+    if tavily_api_key or _os.environ.get("TAVILY_API_KEY"):
         from responses_api_agents.stirrup_agent.tavily_search import TavilyToolProvider
 
-        tools = [TavilyToolProvider() if isinstance(t, WebToolProvider) else t for t in tools]
+        tools = [
+            TavilyToolProvider(api_keys=tavily_api_key, max_sweeps=tavily_max_sweeps)
+            if isinstance(t, WebToolProvider)
+            else t
+            for t in tools
+        ]
 
     agent_kwargs: Dict[str, Any] = {
         "client": client,
@@ -524,6 +533,24 @@ class StirrupAgentWrapperConfig(BaseResponsesAPIAgentConfig):
         "context_window - input_tokens - completion_token_buffer, then caps to this value. "
         "Set to match the training-side response-length budget for RL.",
     )
+    tavily_api_key: Optional[Union[str, List[str]]] = Field(
+        default=None,
+        description="Tavily API key(s) for the ``web_search`` / ``fetch_web_page`` tools. "
+        "Accepts a single key, a Python list of keys, or a comma-separated string with optional "
+        "surrounding ``[...]`` brackets (the format EFB injects via ``host:TAVILY_API_KEY``). "
+        "When multiple keys are present, the provider rotates round-robin per call AND retries "
+        "on key-specific failures (401/403/429/5xx) with the next key. Falls back to the "
+        "``TAVILY_API_KEY`` env var when None.",
+    )
+    tavily_max_sweeps: int = Field(
+        default=1,
+        description="Number of full passes through the Tavily key list before giving up on a "
+        "single tool call. Total attempts per call = ``max_sweeps × len(api_keys)``. Default 1 "
+        "exhausts cleanly after one sweep and lets the model decide whether to retry on the "
+        "next turn. Bump to 2-3 for endurance against a flaky upstream at the cost of more "
+        "wallclock per stuck call.",
+        ge=1,
+    )
 
 
 class StirrupRunRequest(BaseRunRequest):
@@ -641,6 +668,8 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
                 "top_p": getattr(body, "top_p", None) or self.config.top_p,
                 "enable_thinking": self.config.enable_thinking,
                 "max_completion_tokens_cap": self.config.max_completion_tokens_cap,
+                "tavily_api_key": self.config.tavily_api_key,
+                "tavily_max_sweeps": self.config.tavily_max_sweeps,
             }
 
             future = run_stirrup_agent_remote.remote(params)
