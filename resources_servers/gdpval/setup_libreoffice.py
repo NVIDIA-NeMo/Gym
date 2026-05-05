@@ -26,6 +26,12 @@ LOGGER = logging.getLogger(__name__)
 _APT_PACKAGES = (
     "libreoffice",
     "fonts-liberation",
+    # libreoffice's chart/formula rendering needs Java; without a JRE it
+    # logs `Warning: failed to launch javaldx` and silently exits rc=0
+    # without producing the expected PDF for any doc with charts,
+    # complex formulas, embedded objects, or pivot tables. Headless JRE
+    # is enough — we never display a GUI.
+    "default-jre-headless",
 )
 
 _APT_INSTALL_TIMEOUT_S = 600
