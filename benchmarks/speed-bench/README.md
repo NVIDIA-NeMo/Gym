@@ -51,14 +51,14 @@ configurations:
 # Prepare benchmark data (downloads the upstream HF dataset
 # nvidia/SPEED-Bench plus the 14 source datasets it interpolates from).
 # Run on a host that has internet access — see prepare.py for details.
-ng_prepare_benchmark "+config_paths=[benchmarks/speed-bench/config.yaml]"
+ng_prepare_benchmark "+config_paths=[benchmarks/speed-bench/config_qualitative.yaml]"
 
 # Running servers — uses the local_vllm_model demo config that bakes
 # ngram speculative decoding into vllm_serve_kwargs.speculative_config.
 # To use a different target model, swap this for any local_vllm_model
 # config that includes a `speculative_config:` block.
 config_paths="responses_api_models/local_vllm_model/configs/Qwen/Qwen3-30B-A3B-Instruct-2507-ngram-specdec.yaml,\
-benchmarks/speed-bench/config.yaml"
+benchmarks/speed-bench/config_qualitative.yaml"
 ng_run "+config_paths=[$config_paths]" \
     +policy_model=Qwen3-30B-A3B-Instruct-2507-ngram-specdec
 
