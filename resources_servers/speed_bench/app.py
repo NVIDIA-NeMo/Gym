@@ -305,12 +305,17 @@ class SpeedBenchResourcesServerConfig(BaseResourcesServerConfig):
 class SpeedBenchVerifyRequest(BaseVerifyRequest):
     """Speed-bench verify request.
 
-    `verifier_metadata` is read for `task_id` (free-form) and any future
-    per-task fields. Speed-bench has no expected_answer / correctness; the
-    only "verification" we do is record per-task token counts.
+    `verifier_metadata` carries the per-row fields that prepare.py emits
+    (`src_id`, `source`, `speed_config`, `num_turns`, `sub_category`).
+    Pydantic strips unknown top-level fields by default, so we declare it
+    explicitly here to keep it in the rollout JSONL output — the
+    cross-pipeline diff in `debug_compare_specdec.py` matches Skills↔Gym
+    rollouts on `verifier_metadata.src_id`. Speed-bench has no
+    expected_answer / correctness; the only "verification" we do is
+    record per-task token counts.
     """
 
-    pass
+    verifier_metadata: Optional[Dict[str, Any]] = None
 
 
 class SpeedBenchVerifyResponse(BaseVerifyResponse):
