@@ -181,6 +181,10 @@ class GDPValResourcesServer(SimpleResourcesServer):
         self._judge_prompt_fpath: str = self.config.judge_prompt_template_fpath or _DEFAULT_JUDGE_PROMPT_FPATH
         if self.config.reward_mode == "comparison" and not self.config.reference_deliverables_dir:
             raise ValueError("reward_mode=comparison requires reference_deliverables_dir to be set")
+        if self.config.preconvert_office_to_pdf:
+            from resources_servers.gdpval.setup_libreoffice import ensure_libreoffice
+
+            ensure_libreoffice()
         super().model_post_init(context)
 
     async def verify(self, body: GDPValVerifyRequest) -> GDPValVerifyResponse:
