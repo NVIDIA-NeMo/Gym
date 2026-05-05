@@ -23,6 +23,22 @@ records:
 the largest accumulated `draft_tokens` (the latest-completing one) as the
 headline `spec_acceptance_length` / `spec_acceptance_rate`.
 
+For multi-rollout runs (e.g. `+num_repeats=N` on the rollout CLI),
+`compute_metrics()` also emits Skills-equivalent variance estimators for
+each spec score key (`acceptance_length`, `acceptance_rate`,
+`num_drafts`, `draft_tokens`, `accepted_tokens`):
+
+- `spec_<key>_avg` — mean across all (task, rollout) pairs
+- `spec_<key>_std_dev_across_runs` — std-dev of per-run averages
+  (run *i* = take rollout *i* from each task and average)
+- `spec_<key>_std_err_across_runs` — `std_dev / sqrt(num_repeats)`
+- `spec_<key>_avg_sample_std_dev` — mean of per-task std-devs across
+  that task's `num_repeats` rollouts
+
+These mirror Skills' `BaseMetrics._add_std_metrics`. Single-seed runs
+(default for parity with Skills' default speed-bench eval) skip this
+block — Skills also doesn't emit them at `max_k=1`.
+
 ## Verification
 
 The server's `verify()` always returns `reward = 0.0`. Spec-decode metrics

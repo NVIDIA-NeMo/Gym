@@ -20,16 +20,19 @@ call is exercised via a fake metrics-scrape stub.
 """
 
 import asyncio
+import math
 from unittest.mock import MagicMock
 
 import pytest
 from app import (
+    _SPEC_SCORE_KEYS,
     SpecDecodeMetricsSnapshot,
     SpecDecodeMetricsUnavailable,
     SpeedBenchResourcesServer,
     SpeedBenchResourcesServerConfig,
     _compute_running_delta,
     _compute_sglang_running_delta,
+    _compute_std_metrics,
     _parse_sglang_metrics,
     _parse_vllm_metrics,
     _weighted_delta_average,
@@ -445,3 +448,196 @@ async def test_verify_sglang_path_uses_sglang_delta(monkeypatch):
     assert out.num_drafts == 20  # delta_requests
     assert out.draft_tokens == 3000  # delta_gen_tokens
     assert out.spec_decode_unavailable is False
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Multi-seed variance (mirrors Skills' _add_std_metrics)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_compute_std_metrics_single_rollout_returns_empty():
+    """max_k == 1: no variance to compute, skip the whole block."""
+    tasks = [[{"acceptance_length": 1.5}], [{"acceptance_length": 1.7}]]
+    assert _compute_std_metrics(tasks, _SPEC_SCORE_KEYS) == {}
+
+
+def test_compute_std_metrics_empty_tasks_returns_empty():
+    assert _compute_std_metrics([], _SPEC_SCORE_KEYS) == {}
+
+
+def test_compute_std_metrics_basic_two_rollouts():
+    """Two tasks × two rollouts: hand-computed values for acceptance_length."""
+    tasks = [
+        [
+            {
+                "acceptance_length": 2.0,
+                "acceptance_rate": 50.0,
+                "num_drafts": 10,
+                "draft_tokens": 30,
+                "accepted_tokens": 15,
+            },
+            {
+                "acceptance_length": 2.4,
+                "acceptance_rate": 60.0,
+                "num_drafts": 20,
+                "draft_tokens": 60,
+                "accepted_tokens": 36,
+            },
+        ],
+        [
+            {
+                "acceptance_length": 2.2,
+                "acceptance_rate": 55.0,
+                "num_drafts": 12,
+                "draft_tokens": 36,
+                "accepted_tokens": 19,
+            },
+            {
+                "acceptance_length": 2.6,
+                "acceptance_rate": 65.0,
+                "num_drafts": 22,
+                "draft_tokens": 66,
+                "accepted_tokens": 42,
+            },
+        ],
+    ]
+    out = _compute_std_metrics(tasks, _SPEC_SCORE_KEYS)
+
+    # acceptance_length avg = mean of [2.0, 2.4, 2.2, 2.6] = 2.3
+    assert out["spec_acceptance_length_avg"] == pytest.approx(2.3)
+
+    # Run-1 avg = (2.0 + 2.2)/2 = 2.1; Run-2 avg = (2.4 + 2.6)/2 = 2.5
+    # std_dev_across_runs = stdev([2.1, 2.5]) with ddof=1 = sqrt(((2.1-2.3)^2 + (2.5-2.3)^2)/1) = sqrt(0.08) ≈ 0.2828
+    assert out["spec_acceptance_length_std_dev_across_runs"] == pytest.approx(0.282842712474619)
+
+    # std_err = std_dev / sqrt(2)
+    assert out["spec_acceptance_length_std_err_across_runs"] == pytest.approx(0.282842712474619 / math.sqrt(2))
+
+    # Per-task std-devs: stdev([2.0,2.4]) = 0.2828..., stdev([2.2,2.6]) = 0.2828...
+    # avg = 0.2828...
+    assert out["spec_acceptance_length_avg_sample_std_dev"] == pytest.approx(0.282842712474619)
+
+    # Sanity: every score key emitted with all 4 fields.
+    for key in _SPEC_SCORE_KEYS:
+        for suffix in ("_avg", "_std_dev_across_runs", "_std_err_across_runs", "_avg_sample_std_dev"):
+            assert f"spec_{key}{suffix}" in out
+
+
+def test_compute_std_metrics_skips_tasks_with_none_values():
+    """Tasks where any of the k rollouts has None for a key are dropped for that key."""
+    tasks = [
+        [
+            {"acceptance_length": 2.0, "acceptance_rate": None},
+            {"acceptance_length": 2.4, "acceptance_rate": 60.0},
+        ],
+        [
+            {"acceptance_length": 2.2, "acceptance_rate": 55.0},
+            {"acceptance_length": 2.6, "acceptance_rate": 65.0},
+        ],
+    ]
+    out = _compute_std_metrics(tasks, ("acceptance_length", "acceptance_rate"))
+    # acceptance_length: both tasks usable → variance computed.
+    assert "spec_acceptance_length_avg" in out
+    # acceptance_rate: first task has a None value in row → drop, only one task left.
+    # avg from second task only: (55+65)/2 = 60
+    assert out["spec_acceptance_rate_avg"] == pytest.approx(60.0)
+
+
+def test_compute_std_metrics_all_runs_identical_yields_zero_std():
+    """Edge case: every rollout has the same value (Skills stamps the same global delta)."""
+    tasks = [
+        [{"acceptance_length": 1.5}, {"acceptance_length": 1.5}],
+        [{"acceptance_length": 1.5}, {"acceptance_length": 1.5}],
+    ]
+    out = _compute_std_metrics(tasks, ("acceptance_length",))
+    assert out["spec_acceptance_length_avg"] == pytest.approx(1.5)
+    assert out["spec_acceptance_length_std_dev_across_runs"] == 0.0
+    assert out["spec_acceptance_length_std_err_across_runs"] == 0.0
+    assert out["spec_acceptance_length_avg_sample_std_dev"] == 0.0
+
+
+def test_compute_std_metrics_uneven_rollout_counts_uses_min_k():
+    """Skills enforces equal k; we relax to min(k) to be robust against partial outputs."""
+    tasks = [
+        [{"acceptance_length": 2.0}, {"acceptance_length": 2.4}, {"acceptance_length": 3.0}],  # k=3
+        [{"acceptance_length": 2.2}, {"acceptance_length": 2.6}],  # k=2
+    ]
+    out = _compute_std_metrics(tasks, ("acceptance_length",))
+    # Both tasks contribute their first 2 rollouts (min_k = 2).
+    # avg over (2.0, 2.4, 2.2, 2.6) = 2.3
+    assert out["spec_acceptance_length_avg"] == pytest.approx(2.3)
+
+
+def test_compute_metrics_emits_std_metrics_when_multi_seed():
+    """End-to-end: compute_metrics(tasks_with_2_rollouts) includes std metrics."""
+    s = _make_server(vllm_base_url="http://h:8000")
+    tasks = [
+        [
+            {
+                "num_generated_tokens": 100,
+                "gen_seconds": 5.0,
+                "draft_tokens": 50,
+                "num_drafts": 10,
+                "accepted_tokens": 30,
+                "acceptance_length": 4.0,
+                "acceptance_rate": 60.0,
+            },
+            {
+                "num_generated_tokens": 200,
+                "gen_seconds": 10.0,
+                "draft_tokens": 100,
+                "num_drafts": 20,
+                "accepted_tokens": 70,
+                "acceptance_length": 4.5,
+                "acceptance_rate": 70.0,
+            },
+        ],
+        [
+            {
+                "num_generated_tokens": 150,
+                "gen_seconds": 7.0,
+                "draft_tokens": 80,
+                "num_drafts": 15,
+                "accepted_tokens": 50,
+                "acceptance_length": 4.2,
+                "acceptance_rate": 62.0,
+            },
+            {
+                "num_generated_tokens": 250,
+                "gen_seconds": 12.0,
+                "draft_tokens": 120,
+                "num_drafts": 25,
+                "accepted_tokens": 90,
+                "acceptance_length": 4.6,
+                "acceptance_rate": 75.0,
+            },
+        ],
+    ]
+    m = s.compute_metrics(tasks)
+    # Headlines still present.
+    assert m["num_entries"] == 4
+    # Std-metrics section present for every key.
+    for key in _SPEC_SCORE_KEYS:
+        assert f"spec_{key}_avg" in m
+        assert f"spec_{key}_std_dev_across_runs" in m
+
+
+def test_compute_metrics_omits_std_metrics_when_single_seed():
+    """Single-rollout tasks (the typical speed-bench shape) skip std-metrics block."""
+    s = _make_server(vllm_base_url="http://h:8000")
+    tasks = [
+        [
+            {
+                "num_generated_tokens": 100,
+                "gen_seconds": 5.0,
+                "draft_tokens": 50,
+                "num_drafts": 10,
+                "accepted_tokens": 30,
+                "acceptance_length": 4.0,
+                "acceptance_rate": 60.0,
+            }
+        ],
+    ]
+    m = s.compute_metrics(tasks)
+    assert "spec_acceptance_length_avg" not in m
+    assert "spec_acceptance_length_std_dev_across_runs" not in m

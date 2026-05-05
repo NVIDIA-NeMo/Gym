@@ -45,6 +45,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import math
+import statistics
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Literal, Optional
@@ -345,6 +347,85 @@ class SpeedBenchVerifyResponse(BaseVerifyResponse):
     spec_decode_unavailable: bool = False
 
 
+# Score keys we compute multi-seed variance over. Mirrors Skills'
+# `SpecdecMetrics._get_score_dict()` exactly.
+_SPEC_SCORE_KEYS = (
+    "acceptance_length",
+    "acceptance_rate",
+    "num_drafts",
+    "draft_tokens",
+    "accepted_tokens",
+)
+
+
+def _compute_std_metrics(tasks: List[List[Dict[str, Any]]], score_keys: tuple) -> Dict[str, Any]:
+    """Multi-seed variance metrics — mirrors Skills' `_add_std_metrics`.
+
+    For each score key, with `k = max_k` rollouts/task:
+
+    - `spec_<key>_avg` — overall mean across all (task, rollout) pairs.
+    - `spec_<key>_std_dev_across_runs` — std-dev of per-run averages,
+      where run i is "take rollout i from each task and average".
+    - `spec_<key>_std_err_across_runs` — `std_dev_across_runs / sqrt(k)`.
+    - `spec_<key>_avg_sample_std_dev` — mean of per-task std-devs across
+      that task's k rollouts.
+
+    Skipped entirely when every task has only 1 rollout (max_k == 1) or
+    when score values are missing (all None). Tasks with mismatched
+    rollout counts are ignored — uses the minimum k present so the matrix
+    is rectangular (Skills enforces a strict equality; we relax for
+    robustness against partial outputs).
+    """
+    if not tasks:
+        return {}
+    max_k = min((len(t) for t in tasks if t), default=0)
+    if max_k < 2:
+        return {}
+
+    out: Dict[str, Any] = {}
+    for key in score_keys:
+        # Build a rectangular [num_tasks × max_k] matrix of float values.
+        # Drop tasks whose rollouts don't all have a numeric value for this
+        # score (running aggregates can be None on the very first task).
+        matrix: List[List[float]] = []
+        for task_rollouts in tasks:
+            if len(task_rollouts) < max_k:
+                continue
+            row = [task_rollouts[i].get(key) for i in range(max_k)]
+            if any(v is None for v in row):
+                continue
+            matrix.append([float(v) for v in row])
+
+        if not matrix:
+            continue
+
+        # avg across all (task, rollout) pairs.
+        all_values = [v for row in matrix for v in row]
+        out[f"spec_{key}_avg"] = sum(all_values) / len(all_values)
+
+        # std_dev_across_runs: transpose → run i averages → std-dev.
+        run_averages = [sum(row[i] for row in matrix) / len(matrix) for i in range(max_k)]
+        if len(run_averages) >= 2 and not all(v == run_averages[0] for v in run_averages):
+            std_dev_across_runs = statistics.stdev(run_averages)
+        else:
+            # All runs identical (or only one) → variance is 0 (Skills' np.std with ddof=1
+            # returns NaN for n=1; we report 0 so downstream JSON serialization stays clean).
+            std_dev_across_runs = 0.0
+        out[f"spec_{key}_std_dev_across_runs"] = std_dev_across_runs
+        out[f"spec_{key}_std_err_across_runs"] = std_dev_across_runs / math.sqrt(max_k)
+
+        # avg_sample_std_dev: per-task std-dev across rollouts → mean.
+        per_sample_std = []
+        for row in matrix:
+            if len(row) >= 2 and not all(v == row[0] for v in row):
+                per_sample_std.append(statistics.stdev(row))
+            else:
+                per_sample_std.append(0.0)
+        out[f"spec_{key}_avg_sample_std_dev"] = sum(per_sample_std) / len(per_sample_std)
+
+    return out
+
+
 class SpeedBenchResourcesServer(SimpleResourcesServer):
     config: SpeedBenchResourcesServerConfig
 
@@ -487,6 +568,13 @@ class SpeedBenchResourcesServer(SimpleResourcesServer):
         These keys mirror Skills' `SpecdecMetrics.metrics_to_print` so the
         comparison table in COMPARISON_RESULTS.md is straightforward to
         line up.
+
+        When each task has >1 rollouts (e.g. `+num_repeats=N` on the rollout
+        CLI), `_compute_std_metrics` adds multi-seed variance estimators
+        (`spec_<key>_avg`, `spec_<key>_std_dev_across_runs`,
+        `spec_<key>_std_err_across_runs`, `spec_<key>_avg_sample_std_dev`)
+        that mirror Skills' `BaseMetrics._add_std_metrics`. Single-seed
+        runs skip these.
         """
         flat: List[Dict[str, Any]] = [r for task_rollouts in tasks for r in task_rollouts]
         n = len(flat)
@@ -517,17 +605,34 @@ class SpeedBenchResourcesServer(SimpleResourcesServer):
             out["spec_accepted_tokens"] = 0
             out["spec_per_position_acceptance_rates"] = []
         out["spec_decode_unavailable"] = any(r.get("spec_decode_unavailable") for r in flat)
+
+        # Multi-seed variance (mirrors Skills' BaseMetrics._add_std_metrics
+        # for SpecdecMetrics' score keys). Only meaningful when each task has
+        # >1 rollouts.
+        out.update(_compute_std_metrics(tasks, _SPEC_SCORE_KEYS))
         return out
 
     def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
-        """Surface the headline numbers the comparison cares about."""
-        keys = (
+        """Surface the headline numbers the comparison cares about.
+
+        Always includes the 5 keys Skills' `metrics_to_print` exposes. When
+        a multi-seed run produced std-metrics, also surface
+        `spec_acceptance_length_std_err_across_runs` and
+        `spec_acceptance_rate_std_err_across_runs` so a reader can tell at a
+        glance whether a Skills↔Gym Δ is within sampling noise.
+        """
+        always = (
             "num_entries",
             "avg_tokens",
             "gen_seconds",
             "spec_acceptance_length",
             "spec_acceptance_rate",
         )
+        optional = (
+            "spec_acceptance_length_std_err_across_runs",
+            "spec_acceptance_rate_std_err_across_runs",
+        )
+        keys = always + optional
         return {k: agent_metrics[k] for k in keys if k in agent_metrics}
 
 
