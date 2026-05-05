@@ -298,13 +298,12 @@ class StructuredOutputsResourcesServer(SimpleResourcesServer):
 
         Recurses into dict values and list items so object schemas nested
         inside ``oneOf`` / ``anyOf`` branches are strictified at the level
-        they appear. ``allOf`` is skipped entirely: branches merge
-        conjunctively, so adding ``additionalProperties: False`` to one
-        branch would reject fields contributed by its siblings. As a
-        consequence, composites nested inside an ``allOf`` (e.g. a
-        ``oneOf`` inside an ``allOf`` branch) are also not strictified;
-        this matches upstream behaviour for ``allOf`` and keeps the rule
-        easy to audit.
+        they appear. For ``allOf``, branches are recursed into so that
+        nested composites (e.g. a ``oneOf`` inside an ``allOf`` branch) are
+        strictified, but ``additionalProperties`` is stripped from each
+        branch to prevent cross-branch rejection — one branch's
+        ``additionalProperties: False`` would otherwise reject fields
+        contributed by its siblings.
         """
         if isinstance(schema, list):
             for item in schema:
@@ -315,6 +314,10 @@ class StructuredOutputsResourcesServer(SimpleResourcesServer):
                 schema["additionalProperties"] = False
             for k, v in schema.items():
                 if k == "allOf":
+                    for branch in v if isinstance(v, list) else []:
+                        self.strictify_schema(branch)
+                        if isinstance(branch, dict):
+                            branch.pop("additionalProperties", None)
                     continue
                 self.strictify_schema(v)
 
@@ -351,6 +354,30 @@ class StructuredOutputsResourcesServer(SimpleResourcesServer):
             for part in ref_path.split("/"):
                 resolved = resolved[part]
             return self.coerce_xml_types(data, resolved, root_schema)
+
+        # Handle oneOf/anyOf: try coercing against each branch and pick the
+        # first one where coercion + validation succeeds.
+        for keyword in ("oneOf", "anyOf"):
+            if keyword in schema:
+                best = data
+                for branch in schema[keyword]:
+                    try:
+                        coerced = self.coerce_xml_types(data, branch, root_schema)
+                        branch_strict = json.loads(json.dumps(branch))
+                        self.strictify_schema(branch_strict)
+                        validate_against_schema_openapi(coerced, branch_strict)
+                        return coerced
+                    except Exception:
+                        best = coerced
+                        continue
+                return best
+
+        # Handle allOf: coerce through each branch cumulatively.
+        if "allOf" in schema:
+            result = data
+            for branch in schema["allOf"]:
+                result = self.coerce_xml_types(result, branch, root_schema)
+            return result
 
         if "type" not in schema:
             return data
