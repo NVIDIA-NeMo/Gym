@@ -39,6 +39,10 @@ def _server(reward_mode: str = "rubric", **extra) -> GDPValResourcesServer:
         name="",
         reward_mode=reward_mode,
         judge_model_server={"type": "responses_api_models", "name": "judge"},
+        # Default off in tests: avoids triggering the host-libreoffice install
+        # check in model_post_init. Tests that exercise the preconvert path
+        # set this back to True explicitly.
+        preconvert_office_to_pdf=False,
     )
     kwargs.update(extra)
     config = GDPValResourcesServerConfig(**kwargs)
@@ -110,6 +114,29 @@ class TestApp:
 
         with _pytest.raises(ValueError, match="reference_deliverables_dir"):
             _server(reward_mode="comparison")
+
+    def test_comparison_fails_fast_when_libreoffice_unavailable(self) -> None:
+        with patch("resources_servers.gdpval.setup_libreoffice.ensure_libreoffice", return_value=False):
+            with pytest.raises(RuntimeError, match="libreoffice"):
+                _server(
+                    reward_mode="comparison",
+                    reference_deliverables_dir="/tmp/fork-deliverables",
+                    preconvert_office_to_pdf=True,
+                )
+
+    def test_rubric_does_not_fail_when_libreoffice_unavailable(self) -> None:
+        with patch("resources_servers.gdpval.setup_libreoffice.ensure_libreoffice", return_value=False):
+            # Rubric mode tolerates missing libreoffice; the rubric path has its own
+            # text-extraction fallback. Should not raise.
+            _server(reward_mode="rubric", preconvert_office_to_pdf=True)
+
+    def test_comparison_passes_when_libreoffice_available(self) -> None:
+        with patch("resources_servers.gdpval.setup_libreoffice.ensure_libreoffice", return_value=True):
+            _server(
+                reward_mode="comparison",
+                reference_deliverables_dir="/tmp/fork-deliverables",
+                preconvert_office_to_pdf=True,
+            )
 
     @pytest.mark.asyncio
     async def test_verify_rubric_no_rubric_returns_zero(self) -> None:

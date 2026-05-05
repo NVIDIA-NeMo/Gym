@@ -6,19 +6,12 @@
 # You may obtain a copy of the License at
 #
 # http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 """Pre-convert Office documents to PDF for GDPVal judging.
 
-Defensive fallback. Primary path is the agent-side Apptainer preconvert
-in ``responses_api_agents/stirrup_agent/preconvert.py``; this layer only
-fires when the agent didn't produce a sibling PDF (e.g. for the
-reference deliverables tree, or when the agent ran with a non-Apptainer
-exec provider).
+Each invocation gets its own ``-env:UserInstallation`` profile dir, so
+concurrent libreoffice subprocesses don't race on the shared default
+profile lock (``$HOME/.config/libreoffice``) — that race is the reason
+the previous default ``max_concurrent=1`` existed.
 """
 
 from __future__ import annotations
@@ -26,7 +19,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import shutil
 import subprocess
+import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -34,6 +29,8 @@ from pathlib import Path
 LOGGER = logging.getLogger(__name__)
 
 OFFICE_EXTENSIONS = {".docx", ".pptx", ".xlsx"}
+
+DEFAULT_MAX_CONCURRENT = 4
 
 
 def needs_conversion(path: Path) -> bool:
@@ -43,11 +40,17 @@ def needs_conversion(path: Path) -> bool:
 def convert_to_pdf(path: Path) -> tuple[Path, bool, str]:
     """Convert one file to PDF via host LibreOffice. Returns ``(path, ok, msg)``."""
     output_dir = str(path.parent)
+    profile_dir = Path(tempfile.mkdtemp(prefix="lo-profile-"))
     try:
         result = subprocess.run(
             [
                 "libreoffice",
                 "--headless",
+                "--nologo",
+                "--nolockcheck",
+                "--nodefault",
+                "--norestore",
+                f"-env:UserInstallation=file://{profile_dir.as_posix()}",
                 "--convert-to",
                 "pdf",
                 "--outdir",
@@ -72,6 +75,8 @@ def convert_to_pdf(path: Path) -> tuple[Path, bool, str]:
         return path, False, "libreoffice not found on host PATH (install with: apt install libreoffice)"
     except Exception as exc:
         return path, False, f"error converting {path.name}: {exc!r}"
+    finally:
+        shutil.rmtree(profile_dir, ignore_errors=True)
 
 
 def find_convertible_files(root_dir: str | os.PathLike) -> list[Path]:
@@ -84,12 +89,14 @@ def find_convertible_files(root_dir: str | os.PathLike) -> list[Path]:
     return sorted(files)
 
 
-def preconvert_dir(root_dir: str | os.PathLike, max_concurrent: int = 1) -> tuple[int, int, list[str]]:
+def preconvert_dir(
+    root_dir: str | os.PathLike,
+    max_concurrent: int = DEFAULT_MAX_CONCURRENT,
+) -> tuple[int, int, list[str]]:
     """Convert every pending Office file under ``root_dir`` to PDF.
 
     Returns ``(num_success, num_failed, error_messages)``. Caller should log
-    a sample at WARNING when ``num_failed > 0``; this used to swallow the
-    messages and produce silent no-ops in production.
+    a sample at WARNING when ``num_failed > 0``.
     """
     files = find_convertible_files(root_dir)
     if not files:
@@ -110,5 +117,8 @@ def preconvert_dir(root_dir: str | os.PathLike, max_concurrent: int = 1) -> tupl
     return success_count, fail_count, error_messages
 
 
-async def preconvert_dir_async(root_dir: str | os.PathLike, max_concurrent: int = 1) -> tuple[int, int, list[str]]:
+async def preconvert_dir_async(
+    root_dir: str | os.PathLike,
+    max_concurrent: int = DEFAULT_MAX_CONCURRENT,
+) -> tuple[int, int, list[str]]:
     return await asyncio.to_thread(preconvert_dir, root_dir, max_concurrent)

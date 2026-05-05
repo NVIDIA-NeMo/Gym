@@ -68,6 +68,31 @@ class TestConvertToPdfErrors:
         assert "did not produce" in msg
         assert "Some libreoffice error" in msg
 
+    def test_passes_user_installation_flag(self, tmp_path: Path, monkeypatch) -> None:
+        f = tmp_path / "a.docx"
+        f.write_text("x")
+        captured: list[list[str]] = []
+
+        class _Completed:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        def _run(cmd, *_a, **_kw):
+            captured.append(cmd)
+            f.with_suffix(".pdf").write_bytes(b"%PDF-1.4 fake\n")
+            return _Completed()
+
+        monkeypatch.setattr(subprocess, "run", _run)
+        path, ok, _ = pcv.convert_to_pdf(f)
+        assert ok is True
+        assert len(captured) == 1
+        env_flags = [arg for arg in captured[0] if arg.startswith("-env:UserInstallation=")]
+        assert len(env_flags) == 1, f"expected one -env:UserInstallation flag, got {env_flags}"
+        assert env_flags[0].startswith("-env:UserInstallation=file://")
+        # The path should be a unique tempdir (one per call); just sanity-check it points to a path.
+        assert "/lo-profile-" in env_flags[0]
+
 
 class TestPreconvertDirSurfacesFailures:
     def test_returns_error_messages(self, tmp_path: Path, monkeypatch) -> None:

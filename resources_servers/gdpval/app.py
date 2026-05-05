@@ -114,7 +114,7 @@ class GDPValResourcesServerConfig(BaseResourcesServerConfig):
     # Most office docs render poorly as raw text; PDFs let multimodal judges
     # read tables/charts. Costs ~5-30s per Office file.
     preconvert_office_to_pdf: bool = True
-    preconvert_max_concurrent: int = 1
+    preconvert_max_concurrent: int = 4
 
     judge_model_server: ModelServerRef
     judge_responses_create_params_overrides: Dict[str, Any] = {}
@@ -184,7 +184,13 @@ class GDPValResourcesServer(SimpleResourcesServer):
         if self.config.preconvert_office_to_pdf:
             from resources_servers.gdpval.setup_libreoffice import ensure_libreoffice
 
-            ensure_libreoffice()
+            if not ensure_libreoffice() and self.config.reward_mode == "comparison":
+                raise RuntimeError(
+                    "preconvert_office_to_pdf=True and reward_mode='comparison' but libreoffice "
+                    "could not be ensured on the host. Office deliverables would reach the multimodal "
+                    "judge as filename-only stubs, biasing the win rate. Install libreoffice in the "
+                    "deployment container, or set preconvert_office_to_pdf=false to opt out."
+                )
         super().model_post_init(context)
 
     async def verify(self, body: GDPValVerifyRequest) -> GDPValVerifyResponse:
