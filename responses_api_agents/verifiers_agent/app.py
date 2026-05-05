@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import traceback
 from typing import Any
@@ -30,8 +31,11 @@ from nemo_gym.config_types import ModelServerRef
 from nemo_gym.global_config import get_first_server_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
+    NeMoGymFunctionCallOutput,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseFunctionToolCall,
+    NeMoGymResponseFunctionToolCallForTraining,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputMessageForTraining,
     NeMoGymResponseOutputText,
@@ -41,14 +45,102 @@ from nemo_gym.openai_utils import (
 logger = logging.getLogger(__name__)
 
 
+def _as_dict(msg: Any) -> dict:
+    if isinstance(msg, dict):
+        return msg
+    return {k: getattr(msg, k, None) for k in ("role", "content", "tool_calls", "tool_call_id", "tokens")}
+
+
+def _text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if content is None:
+        return ""
+    return json.dumps(content, default=str)
+
+
+def _tok_kwargs(tokens: dict | None) -> dict:
+    if not tokens:
+        return {}
+    return {
+        "prompt_token_ids": tokens.get("prompt_ids", []),
+        "generation_token_ids": tokens.get("completion_ids", []),
+        "generation_log_probs": tokens.get("completion_logprobs", []),
+    }
+
+
+def _normalize_tool_call(tool_call: Any) -> dict:
+    if isinstance(tool_call, str):
+        try:
+            return json.loads(tool_call)
+        except json.JSONDecodeError:
+            return {"arguments": tool_call}
+    return tool_call
+
+
+def _build_tool_result_item(msg: dict, raw: Any) -> dict:
+    call_id = msg.get("tool_call_id") or f"call_{id(raw)}"
+    return NeMoGymFunctionCallOutput(
+        call_id=call_id,
+        id=call_id,
+        output=_text(msg.get("content")),
+        status="completed",
+    ).model_dump()
+
+
+def _build_function_call_item(tool_call: Any, tokens: dict | None) -> dict:
+    tc = _normalize_tool_call(tool_call)
+    function = tc.get("function") if isinstance(tc.get("function"), dict) else {}
+    call_id = tc.get("id") or tc.get("call_id") or f"call_{id(tool_call)}"
+    name = tc.get("name") or function.get("name", "")
+    arguments = _text(tc.get("arguments") or function.get("arguments") or "{}")
+
+    cls = NeMoGymResponseFunctionToolCallForTraining if tokens else NeMoGymResponseFunctionToolCall
+    return cls(
+        id=call_id,
+        call_id=call_id,
+        name=name,
+        arguments=arguments,
+        status="completed",
+        **_tok_kwargs(tokens),
+    ).model_dump()
+
+
+def _build_message_item(raw: Any, body: str, tokens: dict | None) -> dict:
+    cls = NeMoGymResponseOutputMessageForTraining if tokens else NeMoGymResponseOutputMessage
+    return cls(
+        id=f"msg_{id(raw)}",
+        content=[NeMoGymResponseOutputText(text=body, annotations=[])],
+        **_tok_kwargs(tokens),
+    ).model_dump()
+
+
+def _build_assistant_items(msg: dict, raw: Any, tokens: dict | None) -> list[dict]:
+    tool_calls = msg.get("tool_calls") or []
+    body = _text(msg.get("content"))
+    items: list[dict] = []
+
+    if body:
+        items.append(_build_message_item(raw, body, tokens if not tool_calls else None))
+
+    for i, tool_call in enumerate(tool_calls):
+        is_last = i == len(tool_calls) - 1
+        items.append(_build_function_call_item(tool_call, tokens if is_last else None))
+
+    if not items:
+        items.append(_build_message_item(raw, "", tokens))
+
+    return items
+
+
 class VerifiersNeMoGymResponse(NeMoGymResponse):
     env_id: str
     group_id: str
     output: list[dict[str, Any]]
     reward: float
     metrics: dict[str, Any] = Field(default_factory=dict)
-    parallel_tool_calls: bool = False
-    tool_choice: str = "none"
+    parallel_tool_calls: bool = True
+    tool_choice: str = "auto"
     tools: list = Field(default_factory=list)
 
 
@@ -119,60 +211,54 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
         return self.client_cache[cache_key]
 
     def _convert_trajectory_to_output(self, rollout_output: dict) -> list:
-        output = []
-        trajectory = rollout_output.get("trajectory", [])
+        assistant_tokens = self._collect_assistant_tokens(rollout_output.get("trajectory") or [])
 
-        # Build steps from trajectory if present, otherwise fall back to
-        # top-level prompt/completion (single-turn environments).
-        if trajectory:
-            steps = trajectory
-        else:
-            steps = [
-                {
-                    "prompt": rollout_output.get("prompt", []),
-                    "completion": rollout_output.get("completion", []),
-                    "tokens": None,
-                }
-            ]
+        output: list[dict] = []
+        assist_idx = 0
+        for raw in rollout_output.get("completion") or []:
+            msg = _as_dict(raw)
+            role = msg.get("role", "user")
 
-        for step in steps:
-            for msg in step.get("prompt", []) or []:
-                # Handle both plain dicts (serialized RolloutOutput) and
-                # Pydantic CustomBaseModel messages (which support .get()).
-                if hasattr(msg, "get"):
-                    role = msg.get("role", "user")
-                    content = msg.get("content", "")
-                    output.append(NeMoGymEasyInputMessage(role=role, content=content).model_dump())
+            if role == "tool":
+                output.append(_build_tool_result_item(msg, raw))
+            elif role == "assistant":
+                tokens = assistant_tokens[assist_idx] if assist_idx < len(assistant_tokens) else None
+                assist_idx += 1
+                output.extend(_build_assistant_items(msg, raw, tokens))
+            else:
+                output.append(NeMoGymEasyInputMessage(role=role, content=_text(msg.get("content"))).model_dump())
 
-            step_tokens = step.get("tokens") if hasattr(step, "get") else None
-            for msg in step.get("completion", []) or []:
-                if hasattr(msg, "get"):
-                    content = msg.get("content", "")
-                    # For trajectory steps, tokens are on the step.
-                    # For single-turn fallback, tokens may be on the message
-                    # (ResponseMessage.tokens from verifiers).
-                    tokens = step_tokens
-                    if tokens is None:
-                        tokens = msg.get("tokens") if hasattr(msg, "get") else getattr(msg, "tokens", None)
-                    if tokens:
-                        output.append(
-                            NeMoGymResponseOutputMessageForTraining(
-                                id=f"msg_{id(msg)}",
-                                content=[NeMoGymResponseOutputText(text=content, annotations=[])],
-                                prompt_token_ids=tokens.get("prompt_ids", []),
-                                generation_token_ids=tokens.get("completion_ids", []),
-                                generation_log_probs=tokens.get("completion_logprobs", []),
-                            ).model_dump()
-                        )
-                    else:
-                        output.append(
-                            NeMoGymResponseOutputMessage(
-                                id=f"msg_{id(msg)}",
-                                content=[NeMoGymResponseOutputText(text=content, annotations=[])],
-                            ).model_dump()
-                        )
+        if not any(item.get("generation_token_ids") for item in output):
+            err = rollout_output.get("error") or {}
+            err_msg = err.get("error") or err.get("error_chain_repr") or "unknown (no error info on rollout_output)"
+            logger.warning(
+                "[verifiers_agent] rollout produced no trainable tokens. This can happen when sandbox concurrency quota is exceeded. Returning empty trajectory. "
+                "Underlying error: %s",
+                err_msg,
+            )
+            output.append(
+                NeMoGymResponseOutputMessageForTraining(
+                    id="msg_empty",
+                    content=[NeMoGymResponseOutputText(text="", annotations=[])],
+                    prompt_token_ids=[0],
+                    generation_token_ids=[0],
+                    generation_log_probs=[0.0],
+                ).model_dump()
+            )
 
         return output
+
+    @staticmethod
+    def _collect_assistant_tokens(trajectory: list) -> list[dict | None]:
+        tokens_per_turn: list[dict | None] = []
+        for step in trajectory:
+            if not isinstance(step, dict):
+                continue
+            step_tokens = step.get("tokens")
+            for m in step.get("completion") or []:
+                if _as_dict(m).get("role") == "assistant":
+                    tokens_per_turn.append(step_tokens)
+        return tokens_per_turn
 
     async def responses(
         self,
@@ -182,6 +268,8 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
     ) -> VerifiersNeMoGymResponse:
         try:
             vf_env_id = body.vf_env_id or self.config.vf_env_id
+            if not vf_env_id:
+                raise ValueError("vf_env_id must be set on the request or in the agent config")
             vf_env = self._get_env(vf_env_id)
             task_idx = body.task_idx
 

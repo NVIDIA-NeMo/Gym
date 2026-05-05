@@ -297,6 +297,80 @@ class TestApp:
         assert resp.reward == 0.0
         assert resp.loss is True
 
+    @pytest.mark.asyncio
+    async def test_persist_raw_judge_responses_comparison(self, tmp_path) -> None:
+        """When persist_raw_judge_responses=True, raw judge text per trial flows
+        through ``run_trials`` and lands on ``per_ref_repeat[i].raw_responses``."""
+        ref_root = tmp_path / "ref"
+        task_dir = ref_root / "task_task-1" / "repeat_0"
+        task_dir.mkdir(parents=True)
+        (task_dir / "finish_params.json").write_text("{}")
+        eval_dir = tmp_path / "eval" / "task_task-1" / "repeat_0"
+        eval_dir.mkdir(parents=True)
+        (eval_dir / "finish_params.json").write_text("{}")
+
+        server = _server(
+            reward_mode="comparison",
+            reference_deliverables_dir=str(ref_root),
+            preconvert_office_to_pdf=False,
+            num_comparison_trials=2,
+            persist_raw_judge_responses=True,
+        )
+
+        captured_kwargs: dict = {}
+        canned_raw = ["Trial 0 verdict: BOXED[B]", "Trial 1 (swapped) verdict: BOXED[A]"]
+
+        def fake_run_trials(**kwargs):
+            captured_kwargs.update(kwargs)
+            return {
+                "winner": "[[B]]",
+                "win_count_a": 1,
+                "win_count_b": 1,
+                "tie_count": 0,
+                "task_count": 2,
+                "raw_responses": canned_raw,
+            }
+
+        body = _verify_request(deliverables_dir=str(eval_dir))
+
+        with (
+            patch("resources_servers.gdpval.comparison.run_trials", side_effect=fake_run_trials),
+            patch("resources_servers.gdpval.app.get_server_url", return_value="http://localhost:9999"),
+            patch("resources_servers.gdpval.comparison.build_file_section", return_value=[]),
+            patch("openai.OpenAI", return_value=MagicMock()),
+        ):
+            resp = await server.verify(body)
+
+        assert captured_kwargs["return_raw_responses"] is True
+        assert resp.judge_response["per_ref_repeat"][0]["raw_responses"] == canned_raw
+
+    @pytest.mark.asyncio
+    async def test_persist_raw_judge_responses_rubric(self) -> None:
+        """When persist_raw_judge_responses=True, the structured-rubric scorer
+        gets ``include_raw_responses=True`` and the resulting metadata reaches
+        ``judge_response``."""
+        server = _server(reward_mode="rubric", rubric_scoring_mode="structured", persist_raw_judge_responses=True)
+
+        captured_kwargs: dict = {}
+
+        async def fake_score_structured(**kwargs):
+            captured_kwargs.update(kwargs)
+            return 0.7, {
+                "scoring_method": "structured_rubric",
+                "raw_responses": ["FINAL_SCORE[7]\nMAX_POSSIBLE_SCORE[10]"],
+            }
+
+        body = _verify_request(rubric_json=[{"criterion": "clarity", "score": 1}])
+
+        with (
+            patch("resources_servers.gdpval.scoring.score_with_rubric_structured", side_effect=fake_score_structured),
+            patch("resources_servers.gdpval.app.get_server_url", return_value="http://localhost:9999"),
+        ):
+            resp = await server.verify(body)
+
+        assert captured_kwargs["include_raw_responses"] is True
+        assert resp.judge_response["raw_responses"] == ["FINAL_SCORE[7]\nMAX_POSSIBLE_SCORE[10]"]
+
     def test_aggregate_metrics_comparison_elo(self) -> None:
         from nemo_gym.config_types import AggregateMetricsRequest
 

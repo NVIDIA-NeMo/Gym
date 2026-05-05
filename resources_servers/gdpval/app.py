@@ -117,6 +117,31 @@ class GDPValResourcesServerConfig(BaseResourcesServerConfig):
     judge_responses_create_params_overrides: Dict[str, Any] = {}
     judge_prompt_template_fpath: Optional[str] = None
 
+    # Rubric-mode scoring backend:
+    # - ``"binary"`` (default, legacy): judge emits a JSON ``{criteria_scores:
+    #   [{score: 0|1, ...}], overall_score: float}``; reward is the overall
+    #   score (0-1). Treats every criterion as equal weight.
+    # - ``"structured"``: judge emits ``CRITERION_NUMBER[N]: GRADE[X] out of
+    #   MAX_POSSIBLE_POINTS[Y]`` tagged output and ``FINAL_SCORE[…] / MAX_POSSIBLE_SCORE[…]``.
+    #   Honors per-criterion point weights when the rubric carries them in
+    #   ``rubric_json[i].score`` or ``rubric_json[i].weight``. For datasets
+    #   without weights, every criterion contributes max-points 1, giving a
+    #   signal equivalent to binary mode. Multi-trial averaged for stability.
+    #   The tagged output is also more compact than the JSON-with-rationale
+    #   format used by binary mode, so it rarely runs into the judge's
+    #   ``finish_reason: length`` truncation on rubrics with many criteria.
+    rubric_scoring_mode: Literal["binary", "structured"] = "binary"
+    rubric_structured_num_trials: int = 2
+    rubric_structured_formatting_retries: int = 3
+
+    # When True, every judge call's raw response text is preserved on
+    # ``verify_response.judge_response`` (per-trial in comparison mode under
+    # ``per_ref_repeat[i].raw_responses``; under top-level ``raw_responses``
+    # in rubric modes). Off by default — raw responses are 10-50 KB each and
+    # multiply by num_trials × num_ref_repeats × num_tasks. Turn on for debug
+    # runs to post-mortem judge verdicts.
+    persist_raw_judge_responses: bool = False
+
 
 class GDPValVerifyRequest(BaseVerifyRequest):
     task_id: str
@@ -201,7 +226,23 @@ class GDPValResourcesServer(SimpleResourcesServer):
         # the judge model is expected to be multimodal (configured via
         # ``judge_model_server`` in the benchmark YAML). Falls back to text
         # scoring only when no content blocks could be built.
-        if deliverable_content_blocks:
+        if self.config.rubric_scoring_mode == "structured":
+            from resources_servers.gdpval.scoring import score_with_rubric_structured
+
+            reward, judge_result = await score_with_rubric_structured(
+                deliverable_text=deliverable_text,
+                rubric_json=body.rubric_json,
+                rubric_pretty=rubric_pretty,
+                task_prompt=task_prompt,
+                model_base_url=judge_base_url,
+                model_name=judge_model_name,
+                api_key=judge_api_key,
+                num_trials=self.config.rubric_structured_num_trials,
+                formatting_retries=self.config.rubric_structured_formatting_retries,
+                deliverable_content_blocks=deliverable_content_blocks,
+                include_raw_responses=self.config.persist_raw_judge_responses,
+            )
+        elif deliverable_content_blocks:
             from resources_servers.gdpval.scoring import score_with_rubric_visual
 
             reward, judge_result = await score_with_rubric_visual(
@@ -214,6 +255,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 model_name=judge_model_name,
                 api_key=judge_api_key,
                 create_overrides=judge_create_overrides,
+                include_raw_responses=self.config.persist_raw_judge_responses,
             )
         else:
             from resources_servers.gdpval.scoring import score_with_rubric
@@ -228,6 +270,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 model_name=judge_model_name,
                 api_key=judge_api_key,
                 create_overrides=judge_create_overrides,
+                include_raw_responses=self.config.persist_raw_judge_responses,
             )
 
         return GDPValVerifyResponse(
@@ -305,6 +348,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 submission_a=ref_submission,
                 submission_b=eval_submission,
                 num_trials=self.config.num_comparison_trials,
+                return_raw_responses=self.config.persist_raw_judge_responses,
             )
             # ``run_trials`` casts submission_a=ref, submission_b=eval, so
             # ``win_count_b`` is eval wins.

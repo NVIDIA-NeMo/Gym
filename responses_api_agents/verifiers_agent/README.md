@@ -65,7 +65,7 @@ python3 scripts/create_dataset.py --env-id primeintellect/ascii-tree --size 5 --
 ### Update agent server requirements
 ```
 -e nemo-gym[dev] @ ../../
-verifiers==0.1.9.post3
+verifiers @ git+https://github.com/PrimeIntellect-ai/verifiers.git@main
 --extra-index-url https://hub.primeintellect.ai/primeintellect/simple/
 ascii-tree
 ```
@@ -110,7 +110,7 @@ ng_collect_rollouts \
 
 ## Integration notes
 
-The patch to include prompt and generation token ids for preventing retokenization error when training with NeMo RL works specifically with the pinned verifiers version. In newer version of verifiers, this may have change. Thus, we need to make sure to use the pinned version of verifiers and environments that are compatible with this version.
+The patch to include prompt and generation token ids for preventing retokenization error when training with NeMo RL has been upstreamed into verifiers' `NeMoRLChatCompletionsClient`. We currently track verifiers `main` (`git+https://github.com/PrimeIntellect-ai/verifiers.git@main`) for this support; once verifiers `0.1.13` is released, the requirements pin will move to that tagged version.
 
 For installing new prime environments and generating datasets, use a separate venv (outside of Gym) to avoid dependency conflicts with the `exclude-dependencies` section of Gym `pyproject.toml` and the server's pinned verifiers version. After generating your dataset, deactivate the separate venv and return to the Gym venv for running servers. Make sure to restart NeMo Gym servers with `ng_run` after any environment changes to ensure the pinned version of verifiers is used.
 

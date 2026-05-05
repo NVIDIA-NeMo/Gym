@@ -375,15 +375,21 @@ def run_trials(
     submission_b: list[dict],
     num_trials: int = 4,
     max_output_tokens: int = 65535,
+    return_raw_responses: bool = False,
 ) -> dict:
     """Run ``num_trials`` judge calls, alternating swapped/unswapped positions.
 
     Returns a dict with ``winner``, ``win_count_a``, ``win_count_b``,
     ``tie_count``, and ``task_count``.
+
+    When ``return_raw_responses`` is True, the dict also carries
+    ``raw_responses``: a list of the per-trial judge completion strings,
+    ordered by trial index (so trial ``i`` was swapped iff ``i % 2 != 0``).
     """
     win_count_a = 0
     win_count_b = 0
     tie_count = 0
+    raw_responses: list[str] = []
 
     for i in range(num_trials):
         swapped = i % 2 != 0
@@ -397,6 +403,8 @@ def run_trials(
             submission_b=current_b,
         )
         response_text = send_judge_request(client, model, messages, max_output_tokens)
+        if return_raw_responses:
+            raw_responses.append(response_text)
         judgement = parse_judgement(response_text)
         win_count_a, win_count_b, tie_count = tally_result(judgement, swapped, win_count_a, win_count_b, tie_count)
 
@@ -407,13 +415,16 @@ def run_trials(
     else:
         winner = TIE_RESPONSE
 
-    return {
+    result: dict = {
         "winner": winner,
         "win_count_a": win_count_a,
         "win_count_b": win_count_b,
         "tie_count": tie_count,
         "task_count": num_trials,
     }
+    if return_raw_responses:
+        result["raw_responses"] = raw_responses
+    return result
 
 
 # ---------------------------------------------------------------------------
