@@ -53,10 +53,14 @@ configurations:
 # Run on a host that has internet access — see prepare.py for details.
 ng_prepare_benchmark "+config_paths=[benchmarks/speed-bench/config.yaml]"
 
-# Running servers
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
+# Running servers — uses the local_vllm_model demo config that bakes
+# ngram speculative decoding into vllm_serve_kwargs.speculative_config.
+# To use a different target model, swap this for any local_vllm_model
+# config that includes a `speculative_config:` block.
+config_paths="responses_api_models/local_vllm_model/configs/Qwen/Qwen3-30B-A3B-Instruct-2507-ngram-specdec.yaml,\
 benchmarks/speed-bench/config.yaml"
-ng_run "+config_paths=[$config_paths]"
+ng_run "+config_paths=[$config_paths]" \
+    +policy_model=Qwen3-30B-A3B-Instruct-2507-ngram-specdec
 
 # Collecting rollouts
 ng_collect_rollouts \
@@ -66,13 +70,20 @@ ng_collect_rollouts \
     +num_repeats=1
 ```
 
-## Stubbed pieces
+If you're using the lighter-weight `vllm_model` config (external vLLM
+endpoint), make sure to launch `vllm serve` with
+`--speculative-config '{"method": "ngram", "num_speculative_tokens": 3, "prompt_lookup_max": 5, "prompt_lookup_min": 2}'`
+— without it, every rollout records `spec_decode_unavailable: true`.
 
-- **SGLang**: the resources server's SGLang scrape path is a
-  `NotImplementedError` stub. Skills supports SGLang via Prometheus delta
-  and a per-request metrics file; both are deferred to a follow-up.
+## Deferred items
+
 - **`throughput_{1k,8k,16k,32k}`**: `prepare.py` knows how to prepare
   these but they're not in the default config; pass
   `--config throughput_8k` etc. to prepare them explicitly.
 - **Per-position acceptance rates**: recorded per-row but not surfaced in
   `get_key_metrics()` — they're only useful for deeper SD analysis.
+- **SGLang per-request metrics file**: the Prometheus-delta SGLang path is
+  fully ported (set `server_type_for_metrics: sglang` in the resources
+  server config). Skills' per-request metrics-file fallback
+  (`--export-metrics-to-file`) gives finer per-task attribution; not
+  ported.

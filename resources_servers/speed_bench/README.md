@@ -74,14 +74,44 @@ Top-level config fields (set in `configs/speed_bench.yaml`):
   precisely brackets the benchmark window when the server warmed up
   earlier.
 
+## Starting the model server with spec-decode enabled
+
+speed-bench requires the model server to expose
+`vllm:spec_decode_*` (or `sglang:spec_accept_*`) Prometheus counters. By
+default vLLM does not enable speculative decoding — you must pass a
+`--speculative-config` flag (or set `vllm_serve_kwargs.speculative_config`
+on a `local_vllm_model` config). Without this the resources server
+records `spec_decode_unavailable: true` on every row and
+`spec_acceptance_length` / `spec_acceptance_rate` come back null.
+
+A ready-to-use demo config that bakes ngram speculative decoding into a
+`local_vllm_model` lives at
+[`responses_api_models/local_vllm_model/configs/Qwen/Qwen3-30B-A3B-Instruct-2507-ngram-specdec.yaml`](../../responses_api_models/local_vllm_model/configs/Qwen/Qwen3-30B-A3B-Instruct-2507-ngram-specdec.yaml).
+The relevant block to copy into your own model config is:
+
+```yaml
+vllm_serve_kwargs:
+  speculative_config:
+    method: ngram                # model-agnostic; no draft model required
+    num_speculative_tokens: 3
+    prompt_lookup_max: 5
+    prompt_lookup_min: 2
+```
+
+For an EAGLE3 / MTP setup with a paired draft model, see
+`nemotron_3_ultra_dev_nemorl_gb200.yaml` for an MTP example or vLLM's
+[spec-decode docs](https://docs.vllm.ai/en/latest/features/spec_decode.html).
+
 ## Example usage
 
 ```bash
-# Running servers (vLLM-backed; needs --speculative-config to produce real metrics)
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
+# Running servers — uses the demo local_vllm_model config above (drop in
+# your own model config to swap targets; just keep the speculative_config block).
+config_paths="responses_api_models/local_vllm_model/configs/Qwen/Qwen3-30B-A3B-Instruct-2507-ngram-specdec.yaml,\
 resources_servers/speed_bench/configs/speed_bench.yaml,\
 responses_api_agents/speed_bench_agent/configs/speed_bench_agent.yaml"
-ng_run "+config_paths=[$config_paths]"
+ng_run "+config_paths=[$config_paths]" \
+    +policy_model=Qwen3-30B-A3B-Instruct-2507-ngram-specdec
 
 # Collecting rollouts (5-example smoke test)
 ng_collect_rollouts \
@@ -90,6 +120,11 @@ ng_collect_rollouts \
     +output_jsonl_fpath=results/speed_bench_rollouts.jsonl \
     +num_repeats=1
 ```
+
+If you'd rather use the lighter-weight `vllm_model` config (which expects
+an externally-launched vLLM endpoint), make sure to pass
+`--speculative-config '{"method": "ngram", "num_speculative_tokens": 3, "prompt_lookup_max": 5, "prompt_lookup_min": 2}'`
+when starting the upstream `vllm serve` process.
 
 ## Tests
 
