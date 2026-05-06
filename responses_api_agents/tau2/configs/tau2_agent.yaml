@@ -14,7 +14,7 @@ tau2_agent:
       num_workers: 1
       user_llm_args: {}
       max_steps: 200
-      max_agent_steps: null
+      max_agent_steps_by_domain: null
       turns_remaining_interval: 1
       debug: false
       print_step_counts: false

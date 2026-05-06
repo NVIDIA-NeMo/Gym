@@ -1,0 +1,80 @@
+{
+    "name": "tau2",
+    "type": "benchmark",
+    "jsonl_fpath": "benchmarks/tau2/data/tau2_benchmark.jsonl",
+    "prepare_script": "benchmarks/tau2/prepare.py",
+    "prompt_config": null,
+    "num_repeats": 8,
+    "Number of examples": 2224,
+    "Number of tools": {
+        "Total # non-null values": 2224,
+        "Average": 14.41,
+        "Min": 13.0,
+        "Max": 16.0,
+        "Standard deviation": 1.37
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 2224,
+        "Average": 3333.54,
+        "Min": 2481.0,
+        "Max": 4299.0,
+        "Standard deviation": 810.4
+    },
+    "Number of turns": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "seed": {
+        "Total # non-null values": 2224,
+        "Average": 670487.0,
+        "Min": 670487.0,
+        "Max": 670487.0,
+        "Standard deviation": 0.0
+    },
+    "evaluation_type": {
+        "unique_count": 1,
+        "total_count": 2224
+    },
+    "verbose_logs": {
+        "Total # non-null values": 2224,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "audio_debug": {
+        "Total # non-null values": 2224,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "audio_taps": {
+        "Total # non-null values": 2224,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "auto_review": {
+        "Total # non-null values": 2224,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "review_mode": {
+        "unique_count": 1,
+        "total_count": 2224
+    }
+}
