@@ -1,0 +1,37 @@
+# Chain to the equivalence_llm_judge resources server config
+config_paths:
+  - resources_servers/equivalence_llm_judge/configs/equivalence_llm_judge.yaml
+
+# HLE resources server: pure LLM judge, no symbolic verification step.
+# Uses the official HLE judge prompt from centerforaisafety/hle.
+hle_equivalence_llm_judge_resources_server:
+  _inherit_from: equivalence_llm_judge
+  resources_servers:
+    equivalence_llm_judge:
+      judge_model_server:
+        type: responses_api_models
+        name: policy_model
+      judge_responses_create_params:
+        input: []
+      judge_system_message: ""
+      judge_equal_label: "Judgement: yes"
+      judge_not_equal_label: "Judgement: no"
+      judge_prompt_template_fpath: ../../benchmarks/hle/prompts/judge.txt
+      response_extract_regex: null
+      question_extract_regex: null
+      check_twice_swap: false
+      use_per_record_regex: false
+
+hle_equivalence_llm_judge_simple_agent:
+  _inherit_from: equivalence_llm_judge_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: hle_equivalence_llm_judge_resources_server
+      datasets:
+      - name: hle
+        type: benchmark
+        jsonl_fpath: benchmarks/hle/data/hle_benchmark.jsonl
+        prompt_config: benchmarks/hle/prompts/default.yaml
+        prepare_script: benchmarks/hle/prepare.py
+        num_repeats: 1
