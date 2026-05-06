@@ -9,7 +9,7 @@ NeMo Gym is a library for evaluating and improving models and agents using envir
 - Modular, extensible interfaces for agents, environments, tasks, verifiers
 - Environment hub of popular agents, training environments, and benchmarks
 - Scale to thousands of concurrent environments
-- Seamlessly transition between evaluation and training
+- Seamlessly transition between evaluation, agent optimization and training
 - Train with the RL framework of your choice
 - Battle-tested in production Nemotron training
 
@@ -30,11 +30,11 @@ NeMo Gym is part of [NVIDIA NeMo](https://docs.nvidia.com/nemo/gym/latest/about/
 NVIDIA's GPU-accelerated platform for building and training 
 generative AI models. NeMo Gym is integrated with the broader agentic ecosystem. See the [Ecosystem](https://docs.nvidia.com/nemo/gym/latest/about/ecosystem.html) page for more details.
 
-**Environment Libraries:** Seamlessly combine environments from other libraries alongside NeMo Gym environments.
+**Environment Libraries:** Seamlessly combine environments and benchmarks from other libraries alongside NeMo Gym environments.
 [Aviary](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/aviary) • [Harbor](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/harbor_agent) • [OpenEnv](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/openenv) • [Reasoning Gym](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/reasoning_gym) • [Verifiers](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/verifiers_agent)
 
 **Training Framework Libraries:** Use environments for SFT and RL training.
-[NeMo RL](https://docs.nvidia.com/nemo/gym/latest/training-tutorials/nemo-rl-grpo/index.html) • [OpenRLHF](https://github.com/OpenRLHF/OpenRLHF/blob/main/examples/python/agent_func_nemogym_executor.py) • [Unsloth](https://docs.nvidia.com/nemo/gym/latest/training-tutorials/unsloth-training.html)
+[NeMo RL](https://docs.nvidia.com/nemo/gym/latest/training-tutorials/nemo-rl-grpo/index.html) •  [Unsloth](https://docs.nvidia.com/nemo/gym/latest/training-tutorials/unsloth-training.html) • [VeRL](https://github.com/verl-project/verl-recipe/tree/main/nemo_gym)
 
 **Agent Harnesses:** Popular agent harnesses for evaluation and training available out of the box.
 [Mini SWE Agent](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/mini_swe_agent) • [OpenHands](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/swe_agents) • [SWE Agent](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/swe_agents)
