@@ -28,6 +28,7 @@ from pydantic import BaseModel, Field
 from tqdm.asyncio import tqdm
 from wandb import Table
 
+from nemo_gym import PARENT_DIR
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.config_types import BaseNeMoGymCLIConfig, BaseServerConfig
 from nemo_gym.global_config import (
@@ -49,13 +50,6 @@ from nemo_gym.server_utils import (
 )
 
 
-# Key that a verify response can set to True to indicate the rollout should be excluded from
-# results.jsonl and reward profiling entirely (e.g. malformed instructions or missing validator).
-# Skipped rollouts are written to errors.json instead so they can be inspected without
-# polluting training data.
-SHOULD_SKIP_ROLLOUT_KEY = "should_skip_rollout"
-
-
 class SharedRolloutCollectionConfig(BaseNeMoGymCLIConfig):
     output_jsonl_fpath: str = Field(description="The output data jsonl file path.")
     num_samples_in_parallel: Optional[int] = Field(
@@ -64,6 +58,10 @@ class SharedRolloutCollectionConfig(BaseNeMoGymCLIConfig):
     responses_create_params: Dict[str, Any] = Field(
         default_factory=dict,
         description="Overrides for the responses_create_params e.g. temperature, max_output_tokens, etc.",
+    )
+    upload_rollouts_to_wandb: bool = Field(
+        default=True,
+        description="Upload the rollouts to W&B. Sometimes this should be off because the rollouts are massive. Default: True",
     )
 
 
@@ -165,7 +163,11 @@ class RolloutCollectionHelper(BaseModel):
             prompt_cfg = load_prompt_config(config.prompt_config)
             print(f"Using prompt config: {config.prompt_config}")
 
-        with open(config.input_jsonl_fpath) as input_file:
+        _input_path = Path(config.input_jsonl_fpath)
+        if not _input_path.is_absolute():
+            _cwd_path = Path.cwd() / _input_path
+            _input_path = _cwd_path if _cwd_path.exists() else PARENT_DIR / _input_path
+        with open(_input_path) as input_file:
             rows_iterator: Iterator[str] = tqdm(input_file, desc="Reading rows")
             rows_iterator: Iterator[tuple[int, str]] = zip(range_iterator, rows_iterator)
             raw_rows = [(row_idx, row_str, orjson.loads(row_str)) for row_idx, row_str in rows_iterator]
@@ -242,9 +244,6 @@ class RolloutCollectionHelper(BaseModel):
 
     async def run_from_config(self, config: RolloutCollectionConfig) -> Tuple[List[Dict]]:
         output_fpath = Path(config.output_jsonl_fpath)
-        # turing_vif change: sidecar file that collects rollouts excluded from the main output
-        # (e.g. bad task data or unsupported language/instruction combinations)
-        errors_fpath = output_fpath.parent / "errors.json"
 
         if config.resume_from_cache and config.materialized_jsonl_fpath.exists() and output_fpath.exists():
             (
@@ -253,20 +252,6 @@ class RolloutCollectionHelper(BaseModel):
                 results,
                 result_strs,
             ) = self._load_from_cache(config)
-
-            # turing_vif change: on resume, read errors.json and exclude those rollouts from the
-            # remaining work so we don't re-run tasks that were already determined to be unskippable
-            error_entries: List[Dict] = []
-            if errors_fpath.exists():
-                error_entries = orjson.loads(errors_fpath.read_bytes())
-                errored_keys = {
-                    (e["_ng_task_index"], e["_ng_rollout_index"])
-                    for e in error_entries
-                    if "_ng_task_index" in e and "_ng_rollout_index" in e
-                }
-                input_rows = [
-                    r for r in input_rows if (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]) not in errored_keys
-                ]
         else:
             if config.resume_from_cache:
                 if not output_fpath.exists():
@@ -275,11 +260,12 @@ class RolloutCollectionHelper(BaseModel):
                     print(
                         f"Skipping resume_from_cache because materialized_jsonl_fpath {config.materialized_jsonl_fpath} doesn't exist!"
                     )
+            else:
+                print("Clearing output fpath since `resume_from_cache=False`!")
 
             rows: List[Dict] = []
             results: List[Dict] = []
             result_strs: List[List[str]] = []
-            error_entries: List[Dict] = []  # turing_vif change: holds rollouts excluded from the main output
 
             input_rows = self._preprocess_rows_from_config(config)
             # Returned rows are sorted by (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME])
@@ -288,11 +274,7 @@ class RolloutCollectionHelper(BaseModel):
                 for row in input_rows:
                     f.write(orjson.dumps(row) + b"\n")
 
-            print("Clearing output fpath since `resume_from_cache=False`!")
             output_fpath.unlink(missing_ok=True)
-            errors_fpath.unlink(
-                missing_ok=True
-            )  # turing_vif change: clear any previous errors.json on a fresh (non-resume) run
 
         semaphore = nullcontext()
         if config.num_samples_in_parallel:
@@ -311,25 +293,11 @@ class RolloutCollectionHelper(BaseModel):
             result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
             result[AGENT_REF_KEY_NAME] = row[AGENT_REF_KEY_NAME]
 
-            if result.get(SHOULD_SKIP_ROLLOUT_KEY, False):
-                error_entries.append(
-                    {
-                        "id": row.get("id"),
-                        "_ng_task_index": result[TASK_INDEX_KEY_NAME],
-                        "_ng_rollout_index": result[ROLLOUT_INDEX_KEY_NAME],
-                        "errors": [
-                            vr.get("message", "")
-                            for vr in result.get("validation_results", [])
-                            if isinstance(vr, dict) and vr.get("status") == "Failed"
-                        ],
-                    }
-                )
-            else:
-                rows.append(row)
-                results.append(result)
-                result_strs.append([orjson.dumps(result)])
-                results_file.write(result_strs[-1][0] + b"\n")
-                results_file.flush()
+            rows.append(row)
+            results.append(result)
+            result_strs.append([orjson.dumps(result)])
+            results_file.write(result_strs[-1][0] + b"\n")
+            results_file.flush()
 
             counts_left[row[AGENT_REF_KEY_NAME]["name"]] -= 1
             if counts_left[row[AGENT_REF_KEY_NAME]["name"]] <= 0:
@@ -340,20 +308,15 @@ class RolloutCollectionHelper(BaseModel):
                 while pcts_to_print and current_pct >= pcts_to_print[0]:
                     pcts_to_print.pop(0)
 
-                top_left = counts_left.most_common(5)
+                top_left = counts_left.most_common(5)  # Fix to top 3 for now.
                 if top_left:
                     top_left_str = "\n".join(f"{i + 1}. {k}: {v}" for i, (k, v) in enumerate(top_left))
-                    print(f"Examples left:\n{top_left_str}")
+                    # Use tqdm.write here so we can print properly with tqdm being used.
+                    tqdm.write(f"Examples left:\n{top_left_str}")
 
         results_file.close()
 
-        # turing_vif change: persist all skipped rollouts to errors.json so they can be reviewed
-        # without affecting reward profiling or agent metrics
-        if error_entries:
-            errors_fpath.write_bytes(orjson.dumps(error_entries, option=orjson.OPT_INDENT_2))
-            print(f"Skipped rollouts written to: {errors_fpath}")
-
-        if get_wandb_run():  # pragma: no cover
+        if config.upload_rollouts_to_wandb and get_wandb_run():  # pragma: no cover
             print("Uploading rollouts to W&B. This may take a few minutes if your data is large.")
             get_wandb_run().log({"Rollouts": Table(data=result_strs, columns=["Rollout"])})
         del result_strs
@@ -369,8 +332,7 @@ class RolloutCollectionHelper(BaseModel):
         print(f"""Finished rollout collection! View results at:
 Fully materialized inputs: {config.materialized_jsonl_fpath}
 Rollouts: {output_fpath}
-Aggregate metrics: {aggregate_metrics_fpath}
-Successful rollouts: {len(results)} | Skipped rollouts: {len(error_entries)}""")
+Aggregate metrics: {aggregate_metrics_fpath}""")
 
         return results
 
@@ -448,7 +410,7 @@ Successful rollouts: {len(results)} | Skipped rollouts: {len(error_entries)}""")
             )
             metrics_to_log.update(
                 {
-                    f"key_metrics/{k}": v
+                    f"key_metrics/{agent_name}/{k}": v
                     for k, v in agent_entry["key_metrics"].items()
                     if isinstance(v, primitive_types)
                 }
