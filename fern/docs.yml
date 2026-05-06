@@ -131,6 +131,8 @@ redirects:
     destination: "/training-tutorials/nemo-rl-grpo/single-node-training"
   - source: "nemo/gym/tutorials/offline-training-w-rollouts.html"
     destination: "/training-tutorials/offline-training-w-rollouts"
+  - source: "/latest/environment-tutorials/designing-customer-evaluation"
+    destination: "/latest/environment-tutorials"
   - source: "nemo/gym/latest/:path*/index.html"
     destination: "/nemo/gym/latest/:path*"
   - source: "nemo/gym/v0.2/:path*/index.html"
