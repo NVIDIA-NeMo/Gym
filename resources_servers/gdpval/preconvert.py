@@ -6,48 +6,51 @@
 # You may obtain a copy of the License at
 #
 # http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 """Pre-convert Office documents to PDF for GDPVal judging.
 
-Library form (no CLI). ``verify()`` calls ``preconvert_dir`` on a task's
-deliverable directory; the resulting PDFs land alongside the originals so
-the multimodal judge can read them.
+Each invocation gets its own ``-env:UserInstallation`` profile dir, so
+concurrent libreoffice subprocesses don't race on the shared default
+profile lock (``$HOME/.config/libreoffice``) — that race is the reason
+the previous default ``max_concurrent=1`` existed.
 """
 
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
+import shutil
 import subprocess
+import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 
+LOGGER = logging.getLogger(__name__)
+
 OFFICE_EXTENSIONS = {".docx", ".pptx", ".xlsx"}
+
+DEFAULT_MAX_CONCURRENT = 4
 
 
 def needs_conversion(path: Path) -> bool:
-    """Return True if this Office file has no corresponding PDF yet."""
     return path.suffix.lower() in OFFICE_EXTENSIONS and not path.with_suffix(".pdf").exists()
 
 
 def convert_to_pdf(path: Path) -> tuple[Path, bool, str]:
-    """Convert a single file to PDF via LibreOffice headless.
-
-    Returns ``(path, success, message)``. ``success=False`` on missing
-    libreoffice, timeout, or non-zero exit without a produced PDF.
-    """
+    """Convert one file to PDF via host LibreOffice. Returns ``(path, ok, msg)``."""
     output_dir = str(path.parent)
+    profile_dir = Path(tempfile.mkdtemp(prefix="lo-profile-"))
     try:
         result = subprocess.run(
             [
                 "libreoffice",
                 "--headless",
+                "--nologo",
+                "--nolockcheck",
+                "--nodefault",
+                "--norestore",
+                f"-env:UserInstallation=file://{profile_dir.as_posix()}",
                 "--convert-to",
                 "pdf",
                 "--outdir",
@@ -60,18 +63,23 @@ def convert_to_pdf(path: Path) -> tuple[Path, bool, str]:
         )
         pdf_path = path.with_suffix(".pdf")
         if pdf_path.exists():
-            return path, True, f"Converted: {path} -> {pdf_path}"
-        return path, False, f"LibreOffice ran but PDF not created: {result.stderr.strip()}"
+            return path, True, f"converted {path.name}"
+        return (
+            path,
+            False,
+            f"libreoffice rc={result.returncode} did not produce {pdf_path.name}: {result.stderr.strip()[:300]}",
+        )
     except subprocess.TimeoutExpired:
-        return path, False, f"Timeout converting {path}"
+        return path, False, f"timeout converting {path.name}"
     except FileNotFoundError:
-        return path, False, "LibreOffice not found — install with: apt install libreoffice"
-    except Exception as e:
-        return path, False, f"Error converting {path}: {e}"
+        return path, False, "libreoffice not found on host PATH (install with: apt install libreoffice)"
+    except Exception as exc:
+        return path, False, f"error converting {path.name}: {exc!r}"
+    finally:
+        shutil.rmtree(profile_dir, ignore_errors=True)
 
 
 def find_convertible_files(root_dir: str | os.PathLike) -> list[Path]:
-    """Walk *root_dir* for Office files that still need PDF conversion."""
     files: list[Path] = []
     for dirpath, _, filenames in os.walk(root_dir):
         for filename in filenames:
@@ -81,35 +89,36 @@ def find_convertible_files(root_dir: str | os.PathLike) -> list[Path]:
     return sorted(files)
 
 
-def preconvert_dir(root_dir: str | os.PathLike, max_concurrent: int = 1) -> tuple[int, int]:
-    """Convert every pending Office file under *root_dir* to PDF.
+def preconvert_dir(
+    root_dir: str | os.PathLike,
+    max_concurrent: int = DEFAULT_MAX_CONCURRENT,
+) -> tuple[int, int, list[str]]:
+    """Convert every pending Office file under ``root_dir`` to PDF.
 
-    Uses a ``ThreadPoolExecutor`` bounded by *max_concurrent* (LibreOffice
-    spawns its own processes; parallelism above ~4 tends to deadlock).
-
-    Returns ``(num_success, num_failed)``.
+    Returns ``(num_success, num_failed, error_messages)``. Caller should log
+    a sample at WARNING when ``num_failed > 0``.
     """
     files = find_convertible_files(root_dir)
     if not files:
-        return 0, 0
+        return 0, 0, []
 
     success_count = 0
     fail_count = 0
+    error_messages: list[str] = []
     with ThreadPoolExecutor(max_workers=max_concurrent) as executor:
         futures = {executor.submit(convert_to_pdf, f): f for f in files}
         for future in as_completed(futures):
-            _, success, _ = future.result()
+            _, success, message = future.result()
             if success:
                 success_count += 1
             else:
                 fail_count += 1
-    return success_count, fail_count
+                error_messages.append(message)
+    return success_count, fail_count, error_messages
 
 
-async def preconvert_dir_async(root_dir: str | os.PathLike, max_concurrent: int = 1) -> tuple[int, int]:
-    """Async wrapper over :func:`preconvert_dir`.
-
-    Delegates to a worker thread so the asyncio event loop stays
-    responsive while LibreOffice subprocesses run.
-    """
+async def preconvert_dir_async(
+    root_dir: str | os.PathLike,
+    max_concurrent: int = DEFAULT_MAX_CONCURRENT,
+) -> tuple[int, int, list[str]]:
     return await asyncio.to_thread(preconvert_dir, root_dir, max_concurrent)
