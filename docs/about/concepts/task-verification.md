@@ -108,6 +108,14 @@ else:
 :::
 ::::
 
+## What is LLM-as-a-judge?
+
+Some tasks don't have a clean programmatic solution, or the ground truth is difficult to verify. The "right" answer might be phrased many ways, or "good" means satisfying a rubric (e.g. "does it follow instructions?", "does it answer the question?", "is it safe/appropriate?").
+
+An LLM-as-a-judge means you send the candidate output to another language model with instructions such as "decide if this is correct/equivalent/compliant", then you parse the judge's answer (e.g. "yes" or "no", a score, or A=B) and turn that into your reward.
+
+In NeMo Gym, that call usually happens inside the resources server's `verify()` method. The policy produces a rollout, and verification may internally call a second model to grade it. Servers such as `equivalence_llm_judge`, `multichallenge`, and `text_to_sql` are concrete examples of this pattern.
+
 ## From Verification to Training
 
 ### **How Rewards Drive Learning**

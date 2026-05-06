@@ -15,6 +15,7 @@
 import pytest
 from pytest import approx
 
+from nemo_gym.openai_utils import NeMoGymEasyInputMessage
 from resources_servers.genrm_compare.utils import (
     EMPTY_OUTPUT_PLACEHOLDER,
     GenRMOutputParseError,
@@ -22,6 +23,7 @@ from resources_servers.genrm_compare.utils import (
     extract_from_response_obj,
     extract_output_text,
     generate_comparison_pairs,
+    get_prompt_key_from_input,
     parse_genrm_output,
 )
 
@@ -58,6 +60,19 @@ class TestGenerateComparisonPairs:
         """Less than 2 responses raises ValueError."""
         with pytest.raises(ValueError, match="Need at least 2 responses"):
             generate_comparison_pairs("circular", 1)
+
+
+class TestGetPromptKeyFromInput:
+    """Tests for stable prompt key hashing."""
+
+    def test_accepts_pydantic_messages(self) -> None:
+        """Pydantic input messages should hash the same as plain dicts."""
+        dict_messages = [{"role": "user", "content": "Hello", "type": "message"}]
+        model_messages = [NeMoGymEasyInputMessage(role="user", content="Hello", type="message")]
+
+        assert get_prompt_key_from_input(model_messages, "Be concise") == get_prompt_key_from_input(
+            dict_messages, "Be concise"
+        )
 
 
 class TestParseGenRMOutput:

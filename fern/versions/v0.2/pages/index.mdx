@@ -1,0 +1,194 @@
+---
+title: "NeMo Gym Documentation"
+description: "NeMo Gym is an open-source library for building reinforcement learning (RL) training environments for large language models (LLMs)"
+position: 1
+---
+import { NavButton } from "../../../components/NavButton";
+
+# NeMo Gym Documentation
+
+[NeMo Gym](https://github.com/NVIDIA-NeMo/Gym) is a library for building reinforcement learning (RL) training environments for large language models (LLMs). NeMo Gym provides infrastructure to develop environments, scale rollout collection, and integrate seamlessly with your preferred training framework.
+
+<Cards>
+
+<Card title="Quickstart" href="/v0.2/get-started">
+Install, run servers, and collect your first rollouts.
+
+<Badge intent="success" minimal outlined>start here</Badge> <Badge minimal outlined>5 min</Badge>
+</Card>
+
+<Card title="Environment Tutorials" href="/v0.2/environment-tutorials">
+Build single-step, multi-step, and real-world environments.
+</Card>
+
+<Card title="Training Tutorials" href="/v0.2/training-tutorials">
+Train with NeMo RL, OpenRLHF, Unsloth, and more.
+</Card>
+
+</Cards>
+
+---
+
+## Introduction to NeMo Gym
+
+Understand NeMo Gym's purpose and core components before diving into tutorials.
+
+<Cards>
+
+<Card title="About NeMo Gym" href="/v0.2/about">
+Motivation and benefits of NeMo Gym.
+
+<Badge minimal outlined>motivation</Badge> <Badge minimal outlined>benefits</Badge>
+</Card>
+
+<Card title="Concepts" href="/v0.2/about/concepts">
+Training approaches, core components, configuration, verification, and RL terminology.
+
+<Badge minimal outlined>sft</Badge> <Badge minimal outlined>rl</Badge> <Badge minimal outlined>rlvr</Badge> <Badge minimal outlined>environments</Badge> <Badge minimal outlined>agents</Badge> <Badge minimal outlined>models</Badge> <Badge minimal outlined>resources</Badge>
+</Card>
+
+<Card title="Ecosystem" href="/v0.2/about/ecosystem">
+Understand how NeMo Gym fits within the RL environment ecosystem.
+
+<Badge minimal outlined>ecosystem</Badge> <Badge minimal outlined>integrations</Badge>
+</Card>
+
+</Cards>
+
+## Get Started
+
+Install and run NeMo Gym to start collecting rollouts.
+
+<Cards>
+
+<Card title="Quickstart" href="/v0.2/get-started">
+Install, start servers, and collect your first rollouts in one page.
+
+<Badge intent="success" minimal outlined>start here</Badge> <Badge minimal outlined>5 min</Badge>
+</Card>
+
+<Card title="Detailed Setup Guide" href="/v0.2/get-started/detailed-setup">
+Step-by-step installation with requirements, configuration, and troubleshooting.
+
+<Badge minimal outlined>15 min</Badge> <Badge minimal outlined>environment</Badge> <Badge minimal outlined>configuration</Badge>
+</Card>
+
+<Card title="Rollout Collection" href="/v0.2/get-started/rollout-collection">
+Generate batches of scored interactions and view them with the rollout viewer.
+
+<Badge minimal outlined>10 min</Badge> <Badge minimal outlined>rollouts</Badge> <Badge minimal outlined>training-data</Badge>
+</Card>
+
+</Cards>
+
+## Environment Configuration
+
+Configure and customize environment components and prepare datasets.
+
+<Cards>
+
+<Card title="Agent Server" href="/v0.2/agent-server">
+Orchestrate rollouts, tool calling, and verification.
+
+<Badge minimal outlined>orchestration</Badge> <Badge minimal outlined>rollouts</Badge>
+</Card>
+
+<Card title="Model Server" href="/v0.2/model-server">
+Configure LLM inference backends including vLLM.
+
+<Badge minimal outlined>inference</Badge> <Badge minimal outlined>vllm</Badge>
+</Card>
+
+<Card title="Resources Server" href="/v0.2/resources-server">
+Define tasks, tools, and verification logic for your environment.
+
+<Badge minimal outlined>environments</Badge> <Badge minimal outlined>verification</Badge>
+</Card>
+
+<Card title="Data" href="/v0.2/data">
+Prepare and validate training datasets.
+
+<Badge minimal outlined>datasets</Badge> <Badge minimal outlined>jsonl</Badge>
+</Card>
+
+</Cards>
+
+## Environment Tutorials
+
+Learn how to build custom training environments for various RL scenarios.
+
+<Cards>
+
+<Card title="Building Environments" href="/v0.2/environment-tutorials">
+Build a complete training environment from scratch.
+
+<Badge intent="success" minimal outlined>beginner</Badge> <Badge minimal outlined>foundational</Badge>
+</Card>
+
+</Cards>
+
+<NavButton href="/v0.2/environment-tutorials" label="View all environment tutorials" direction="next" />
+
+## Training Tutorials
+
+Train models using NeMo Gym with your preferred RL framework.
+
+<Cards>
+
+<Card title="RL (GRPO)" href="/v0.2/training-tutorials">
+Hands-on tutorials with NeMo RL, Unsloth, and more.
+
+<Badge minimal outlined>grpo</Badge>
+</Card>
+
+<Card title="Multi-Environment Training" href="/v0.2/training-tutorials/multi-environment-training">
+Run multiple training environments simultaneously for rollout collection.
+
+<Badge minimal outlined>multi-environment</Badge> <Badge minimal outlined>multi-verifier</Badge>
+</Card>
+
+<Card title="SFT & DPO" href="/v0.2/training-tutorials/offline-training-w-rollouts">
+Transform rollouts into SFT and DPO format.
+
+<Badge minimal outlined>sft</Badge> <Badge minimal outlined>dpo</Badge>
+</Card>
+
+</Cards>
+
+<NavButton href="/v0.2/training-tutorials" label="View all training tutorials" direction="next" />
+
+## Infrastructure
+
+Deploy NeMo Gym and plan cluster resources for training.
+
+<Cards>
+
+<Card title="Deployment Topology" href="/v0.2/infrastructure/deployment-topology">
+Production deployment patterns and configurations.
+
+<Badge minimal outlined>deployment</Badge> <Badge minimal outlined>topology</Badge>
+</Card>
+
+</Cards>
+
+## Contribute
+
+Contribute to NeMo Gym development.
+
+<Cards>
+
+<Card title="Contribute Environments" href="/v0.2/contribute/environments">
+Contribute new environments or integrate existing benchmarks.
+
+<Badge intent="success" minimal outlined>environments</Badge>
+</Card>
+
+<Card title="Integrate RL Frameworks" href="/v0.2/contribute/rl-framework-integration">
+Implement NeMo Gym integration into a new training framework.
+
+<Badge intent="success" minimal outlined>training-integration</Badge>
+</Card>
+
+</Cards>
+
+---

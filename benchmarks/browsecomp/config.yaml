@@ -1,0 +1,57 @@
+# Refer to the params in responses_api_models/local_vllm_model/configs/Qwen/Qwen3-235B-A22B-Instruct-2507-FP8.yaml
+Qwen3-235B-A22B-Instruct-2507-FP8:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      model: Qwen3-235B-A22B-Instruct-2507-FP8
+      replace_developer_role_with_system: true
+      return_token_id_information: false
+      uses_reasoning_parser: true
+
+policy_model_no_interleaved_reasoning:
+  _copy: policy_model
+  responses_api_models:
+    vllm_model:
+      uses_interleaved_reasoning: false
+
+browsecomp_benchmark_resources_server:
+  resources_servers:
+    browsecomp_advanced_harness:
+      entrypoint: app.py
+      domain: agent
+      debug: false
+      use_judge: true
+      judge_model_server:
+        type: responses_api_models
+        name: policy_model
+      judge_responses_create_params:
+        input: []
+      verified: false
+
+browsecomp_benchmark_agent:
+  responses_api_agents:
+    browsecomp_agent:
+      entrypoint: app.py
+      max_steps: 400
+      keep_rounds: 9999
+      nudge_steps: true
+      max_context_tokens: 196608
+      context_reset_pct: 0.3
+      context_reset_keep_rounds: 3
+      max_reset_count: null
+      max_run_retries: 5
+      snap_dir: null
+      save_model_call_using_vllm_tokenize_endpoint: true
+      resources_server:
+        type: resources_servers
+        name: browsecomp_benchmark_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model_no_interleaved_reasoning
+      datasets:
+      - name: browsecomp
+        type: benchmark
+        jsonl_fpath: benchmarks/browsecomp/data/browsecomp_benchmark.jsonl
+        prompt_config: null
+        prepare_script: benchmarks/browsecomp/prepare.py
+        num_repeats: 1

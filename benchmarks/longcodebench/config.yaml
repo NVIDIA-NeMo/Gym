@@ -1,0 +1,14 @@
+config_paths:
+  - resources_servers/mcqa/configs/mcqa.yaml
+
+longcodebench_mcqa_simple_agent:
+  _inherit_from: mcqa_simple_agent
+  responses_api_agents:
+    simple_agent:
+      datasets:
+      - name: longcodebench
+        type: benchmark
+        jsonl_fpath: benchmarks/longcodebench/data/longcodebench_benchmark.jsonl
+        prompt_config: benchmarks/prompts/generic_default.yaml
+        prepare_script: benchmarks/longcodebench/prepare.py
+        license: Creative Commons Attribution 4.0 International

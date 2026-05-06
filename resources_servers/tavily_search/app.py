@@ -12,41 +12,47 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import asyncio
 import json
 import re
-from typing import ClassVar, Optional
+from asyncio import sleep
+from collections import defaultdict
+from contextlib import asynccontextmanager
+from pathlib import Path
+from time import time
+from typing import Any, ClassVar, Dict, List, Optional
 from urllib.parse import urlparse
 
-from fastapi import FastAPI
-from pydantic import BaseModel, PrivateAttr
-from tavily import AsyncTavilyClient, UsageLimitExceededError
+from fastapi import FastAPI, Request
+from httpx import AsyncClient
+from pydantic import BaseModel, Field, PrivateAttr, model_validator
+from tavily import AsyncTavilyClient
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
-    BaseVerifyResponse,
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import (
+    RATE_LIMIT_ERROR_CODES,
+    RETRY_ERROR_CODES,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.server_utils import SESSION_ID_KEY, raise_for_status, request
 from resources_servers.tavily_search.judge_prompt import JUDGE_PROMPT_TEMPLATE
 
 
 class TavilySearchResourcesServerConfig(BaseResourcesServerConfig):
-    tavily_api_key: str
+    tavily_api_key: str | List[str]
     exclude_domains_file_path: str
     use_judge: bool = True  # If False, use regex matching instead of LLM judge
     judge_model_server: Optional[ModelServerRef] = None
     judge_responses_create_params: Optional[NeMoGymResponseCreateParamsNonStreaming] = None
-    max_retries: int = 5  # Max retries for UsageLimitExceededError
-    retry_delay_seconds: int = 30  # Delay between retries in seconds
     debug: bool = False
+    dump_session_id_to_metrics_on_exit: bool = False
 
 
 class TavilySearchRequest(BaseModel):
@@ -94,23 +100,121 @@ class JudgeEvaluation(BaseModel):
     judge_response: Optional[NeMoGymResponse] = None
 
 
-class TavilySearchVerifyResponse(BaseVerifyResponse, JudgeEvaluation):
-    pass
+class TavilySearchSingleAsyncTavilyMetrics(BaseModel):
+    function: str
+    status: str
+    start_time: float
+    end_time: float
+    time_taken: Optional[float] = None
+
+    @model_validator(mode="after")
+    def compute_time_taken(self):
+        self.time_taken = self.end_time - self.start_time
+        return self
+
+
+class TavilySearchMetrics(BaseModel):
+    async_tavily_calls: List[TavilySearchSingleAsyncTavilyMetrics] = Field(default_factory=list)
+
+
+class TavilySearchVerifyResponse(TavilySearchVerifyRequest, JudgeEvaluation):
+    num_tool_calls: int
+    metrics: TavilySearchMetrics
+
+
+class TavilySearchAIOHTTPClientResponse(BaseModel):
+    status_code: int
+    data: Dict[str, Any]
+
+    def json(self) -> Dict[str, Any]:
+        return self.data
+
+
+class TavilySearchAIOHTTPClient(BaseModel):
+    headers: Dict[str, str]
+    base_url: str
+
+    debug: bool
+
+    async def post(self, endpoint: str, content: str, timeout: float) -> TavilySearchAIOHTTPClientResponse:
+        """
+        endpoint: str e.g. "/search" or "/extract"
+        timeout: float is not used
+        """
+        request_kwargs = {
+            "method": "POST",
+            "headers": self.headers,
+            "url": f"{self.base_url}{endpoint}",
+            "data": content,
+        }
+
+        MAX_NUM_TRIES = 3  # Hardcode for now
+        max_num_tries = MAX_NUM_TRIES
+        tries = 0
+        while tries < max_num_tries:
+            tries += 1
+            response = await request(**request_kwargs)
+
+            if response.status in RETRY_ERROR_CODES:
+                # If we hit a rate limit, we don't want to hit max num tries, so we increment both.
+                if response.status in RATE_LIMIT_ERROR_CODES:
+                    max_num_tries += 1
+
+                content = (await response.content.read()).decode()
+                print(
+                    f"Hit a {response.status} trying to query an Tavily endpoint (try {tries}). Sleeping 0.5s. Error message: {content}"
+                )
+                await sleep(0.5)
+                continue
+            else:
+                tavily_response = TavilySearchAIOHTTPClientResponse(
+                    status_code=response.status,
+                    data=await response.json(),
+                )
+                if self.debug:
+                    print(f"Received the following Tavily response: {tavily_response}")
+
+                return tavily_response
+
+        # We've exited the loop
+        await raise_for_status(response)
+
+    @classmethod
+    def from_httpx_AsyncClient(cls, client: AsyncClient, debug: bool) -> "TavilySearchAIOHTTPClient":
+        return cls(
+            headers=client.headers,
+            base_url=str(client.base_url),
+            debug=debug,
+        )
 
 
 class TavilySearchResourcesServer(SimpleResourcesServer):
     config: TavilySearchResourcesServerConfig
     MAX_RESULTS: int = 10
     MAX_RESULT_CHARS: int = 2000
-    _async_tavily: Optional[AsyncTavilyClient] = PrivateAttr(default=None)
+
+    _async_tavily_clients: Optional[List[AsyncTavilyClient]] = PrivateAttr(default=None)
+    _num_requests: int = 0
+    _session_id_to_metrics: Optional[Dict[str, TavilySearchMetrics]] = PrivateAttr(default=None)
 
     JUDGE_PROMPT_TEMPLATE: ClassVar[str] = JUDGE_PROMPT_TEMPLATE
 
     def model_post_init(self, __context) -> None:
-        self._async_tavily = AsyncTavilyClient(api_key=self.config.tavily_api_key)
+        tavily_api_keys = self.config.tavily_api_key
+        if isinstance(tavily_api_keys, str):
+            tavily_api_keys = [tavily_api_keys]
+
+        self._async_tavily_clients = [AsyncTavilyClient(api_key=k) for k in tavily_api_keys]
+        for async_tavily_client in self._async_tavily_clients:
+            async_tavily_client._client = TavilySearchAIOHTTPClient.from_httpx_AsyncClient(
+                async_tavily_client._client, self.config.debug
+            )
+
+        self._session_id_to_metrics = defaultdict(TavilySearchMetrics)
+
         self._exclude_domains = self._parse_exclude_domains()
         self._page_cache: dict[str, str] = {}
-        print(self._exclude_domains)
+        print(f"Excluded domains: {self._exclude_domains}")
         if self.config.debug:
             print("Debug mode enabled")
 
@@ -121,9 +225,33 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         app.post("/find_in_page")(self.find_in_page)
         app.post("/scroll_page")(self.scroll_page)
 
+        main_app_lifespan = app.router.lifespan_context
+
+        @asynccontextmanager
+        async def lifespan_wrapper(app):
+            async with main_app_lifespan(app) as maybe_state:
+                yield maybe_state
+
+            if self.config.dump_session_id_to_metrics_on_exit:
+                out_file = Path(__file__).parent / "session_id_metrics.json"
+                print(f"Dumping session_id metrics to {out_file}")
+
+                to_dump = {k: v.model_dump(mode="json") for k, v in self._session_id_to_metrics.items()}
+                with out_file.open("w") as f:
+                    json.dump(to_dump, f)
+
+        app.router.lifespan_context = lifespan_wrapper
+
         return app
 
-    async def web_search(self, body: TavilySearchRequest) -> TavilySearchResponse:
+    def _select_tavily_client(self) -> AsyncTavilyClient:
+        client = self._async_tavily_clients[self._num_requests % len(self._async_tavily_clients)]
+        self._num_requests += 1
+        return client
+
+    async def web_search(self, request: Request, body: TavilySearchRequest) -> TavilySearchResponse:
+        metrics = self._session_id_to_metrics[request.session[SESSION_ID_KEY]]
+
         if self.config.debug:
             print("\n\n body.query: ", body.query)
         if body.query is None:
@@ -132,33 +260,26 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         if len(body.query) > 400:
             return TavilySearchResponse(results_string="Query is too long")
 
-        max_retries = self.config.max_retries
-        retry_delay_seconds = self.config.retry_delay_seconds
+        async_tavily_client = self._select_tavily_client()
+        start_time = time()
+        results = await async_tavily_client.search(
+            body.query,
+            max_results=self.MAX_RESULTS,
+            exclude_domains=self._exclude_domains,
+            search_depth="advanced",
+        )
+        metrics.async_tavily_calls.append(
+            TavilySearchSingleAsyncTavilyMetrics(
+                function="search", status="success", start_time=start_time, end_time=time()
+            )
+        )
 
-        for attempt in range(max_retries):
-            try:
-                results = await self._async_tavily.search(
-                    body.query,
-                    max_results=self.MAX_RESULTS,
-                    exclude_domains=self._exclude_domains,
-                    search_depth="advanced",
-                )
-                break  # Success, exit the retry loop
-            except UsageLimitExceededError as e:
-                if self.config.debug:
-                    print(f"UsageLimitExceededError (attempt {attempt + 1}/{max_retries}): {e}")
-                if attempt < max_retries - 1:
-                    if self.config.debug:
-                        print(f"Sleeping for {retry_delay_seconds} seconds before retrying...")
-                    await asyncio.sleep(retry_delay_seconds)
-                else:
-                    if self.config.debug:
-                        print("Max retries exceeded. Returning empty results.")
-                    return TavilySearchResponse(results_string="[]")
         postprocessed_results = self._postprocess_search_results(results)
         return TavilySearchResponse(results_string="".join(postprocessed_results))
 
-    async def find_in_page(self, body: FindInPageRequest) -> FindInPageResponse:
+    async def find_in_page(self, request: Request, body: FindInPageRequest) -> FindInPageResponse:
+        metrics = self._session_id_to_metrics[request.session[SESSION_ID_KEY]]
+
         if self.config.debug:
             print("\n\n find_in_page ")
             print(f"url={body.url}, query={body.query}")
@@ -171,27 +292,17 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         if self._is_url_excluded(body.url):
             return FindInPageResponse(results_string="URL is in excluded domains")
 
-        max_retries = self.config.max_retries
-        retry_delay_seconds = self.config.retry_delay_seconds
-
-        for attempt in range(max_retries):
-            try:
-                results = await self._async_tavily.extract(
-                    urls=body.url,
-                    query=body.query,
-                )
-                break  # Success, exit the retry loop
-            except UsageLimitExceededError as e:
-                if self.config.debug:
-                    print(f"UsageLimitExceededError (attempt {attempt + 1}/{max_retries}): {e}")
-                if attempt < max_retries - 1:
-                    if self.config.debug:
-                        print(f"Sleeping for {retry_delay_seconds} seconds before retrying...")
-                    await asyncio.sleep(retry_delay_seconds)
-                else:
-                    if self.config.debug:
-                        print("Max retries exceeded. Returning empty results.")
-                    return FindInPageResponse(results_string="[]")
+        async_tavily_client = self._select_tavily_client()
+        start_time = time()
+        results = await async_tavily_client.extract(
+            urls=body.url,
+            query=body.query,
+        )
+        metrics.async_tavily_calls.append(
+            TavilySearchSingleAsyncTavilyMetrics(
+                function="extract", status="success", start_time=start_time, end_time=time()
+            )
+        )
 
         # Extract raw_content from the first successful result
         if results.get("results"):
@@ -220,7 +331,9 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
 
         return FindInPageResponse(results_string=header + numbered + footer)
 
-    async def scroll_page(self, body: ScrollPageRequest) -> ScrollPageResponse:
+    async def scroll_page(self, request: Request, body: ScrollPageRequest) -> ScrollPageResponse:
+        metrics = self._session_id_to_metrics[request.session[SESSION_ID_KEY]]
+
         if self.config.debug:
             print("\n\n scroll_page ")
             print(f"url={body.url}, start_index={body.start_index}, n={body.n}")
@@ -239,26 +352,17 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         else:
             if self.config.debug:
                 print(f"Cache miss for {body.url}, fetching with tavily extract")
-            max_retries = self.config.max_retries
-            retry_delay_seconds = self.config.retry_delay_seconds
 
-            for attempt in range(max_retries):
-                try:
-                    results = await self._async_tavily.extract(
-                        urls=body.url,
-                    )
-                    break  # Success, exit the retry loop
-                except UsageLimitExceededError as e:
-                    if self.config.debug:
-                        print(f"UsageLimitExceededError (attempt {attempt + 1}/{max_retries}): {e}")
-                    if attempt < max_retries - 1:
-                        if self.config.debug:
-                            print(f"Sleeping for {retry_delay_seconds} seconds before retrying...")
-                        await asyncio.sleep(retry_delay_seconds)
-                    else:
-                        if self.config.debug:
-                            print("Max retries exceeded. Returning empty results.")
-                        return ScrollPageResponse(results_string="[]", total_words=0)
+            async_tavily_client = self._select_tavily_client()
+            start_time = time()
+            results = await async_tavily_client.extract(
+                urls=body.url,
+            )
+            metrics.async_tavily_calls.append(
+                TavilySearchSingleAsyncTavilyMetrics(
+                    function="extract", status="success", start_time=start_time, end_time=time()
+                )
+            )
 
             if results.get("results"):
                 page_content = results["results"][0].get("raw_content", "")
@@ -291,16 +395,21 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             total_words=total_words,
         )
 
-    async def verify(self, body: TavilySearchVerifyRequest) -> TavilySearchVerifyResponse:
+    async def verify(self, request: Request, body: TavilySearchVerifyRequest) -> TavilySearchVerifyResponse:
         question = body.question
         ground_truth = body.ground_truth
-        last_assistant_response = self._get_last_assistant_response(body.response)
+        last_assistant_response = body.response.output_text
 
         if self.config.use_judge:
             judge_evaluation = await self._verify_answer_with_judge(question, ground_truth, last_assistant_response)
         else:
             judge_evaluation = self._verify_answer_with_regex(ground_truth, last_assistant_response)
-        return TavilySearchVerifyResponse(**body.model_dump(), **judge_evaluation.model_dump())
+        return TavilySearchVerifyResponse(
+            **body.model_dump(),
+            **judge_evaluation.model_dump(),
+            num_tool_calls=sum(o.type == "function_call" for o in body.response.output),
+            metrics=self._session_id_to_metrics[request.session[SESSION_ID_KEY]],
+        )
 
     ###### UTILITY FUNCTIONS ######
 
@@ -442,16 +551,6 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             reward=reward,
             judge_response=None,
         )
-
-    def _get_last_assistant_response(self, response: NeMoGymResponse) -> str:
-        for output_item in response.output[::-1]:
-            if output_item.type != "message":
-                continue
-            # if any content item is of type output_text, then return the text
-            for content_item in output_item.content:
-                if content_item.type == "output_text":
-                    return content_item.text
-        return ""
 
 
 if __name__ == "__main__":

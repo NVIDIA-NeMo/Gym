@@ -212,35 +212,39 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         )
         future: asyncio.Future[float] = asyncio.get_running_loop().create_future()
 
+        cohort_ready = False
+        cohort_buf = None
         async with _cohort_lock:
             if prompt_key not in _cohort_buffers:
                 _cohort_buffers[prompt_key] = []
             _cohort_buffers[prompt_key].append((body, future))
             buf = _cohort_buffers[prompt_key]
-            if len(buf) < cfg.num_rollouts_per_prompt:
-                pass  # release lock and await below
-            else:
-                # Cohort complete: run comparison and resolve all futures
+            if len(buf) >= cfg.num_rollouts_per_prompt:
                 assert len(buf) == cfg.num_rollouts_per_prompt
-                first_params = buf[0][0].responses_create_params
-                conversation_history = _input_to_conversation_history(getattr(first_params, "input", []) or [])
-                response_objs = [
-                    (b.response.model_dump() if hasattr(b.response, "model_dump") else b.response) for b, _ in buf
-                ]
-                principle_val = getattr(buf[0][0], "principle", None) or principle
-                try:
-                    rewards, _metrics, _, _ = await self._run_compare(
-                        conversation_history, response_objs, principle=principle_val
-                    )
-                    for i, (_, f) in enumerate(buf):
-                        if not f.done():
-                            f.set_result(rewards[i])
-                except Exception as e:
-                    logger.exception("[GenRM] Cohort compare failed: %s", e)
-                    for _, f in buf:
-                        if not f.done():
-                            f.set_result(cfg.default_score)
+                cohort_ready = True
+                cohort_buf = list(buf)
                 del _cohort_buffers[prompt_key]
+
+        if cohort_ready:
+            # Run comparison WITHOUT holding the lock so other cohorts can proceed concurrently
+            first_params = cohort_buf[0][0].responses_create_params
+            conversation_history = _input_to_conversation_history(getattr(first_params, "input", []) or [])
+            response_objs = [
+                (b.response.model_dump() if hasattr(b.response, "model_dump") else b.response) for b, _ in cohort_buf
+            ]
+            principle_val = getattr(cohort_buf[0][0], "principle", None) or principle
+            try:
+                rewards, _metrics, _, _ = await self._run_compare(
+                    conversation_history, response_objs, principle=principle_val
+                )
+                for i, (_, f) in enumerate(cohort_buf):
+                    if not f.done():
+                        f.set_result(rewards[i])
+            except Exception as e:
+                logger.exception("[GenRM] Cohort compare failed: %s", e)
+                for _, f in cohort_buf:
+                    if not f.done():
+                        f.set_result(cfg.default_score)
 
         reward = await future
         return BaseVerifyResponse(

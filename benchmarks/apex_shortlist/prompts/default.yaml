@@ -1,0 +1,5 @@
+# Mirrors NeMo Skills' `nemo_skills/prompt/config/generic/math.yaml`.
+user: |-
+  Solve the following math problem. Make sure to put the answer (and only answer) inside \boxed{{}}.
+
+  {question}

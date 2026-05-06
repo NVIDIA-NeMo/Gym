@@ -1,0 +1,10 @@
+{% set language = instance.repo_language | default('python') %}
+I've uploaded a {{ language }} repository in the directory {{ workspace_path }}.
+
+<issue>
+{{ instance.problem_statement }}
+</issue>
+
+Implement the necessary changes to non-test files in {{ workspace_path }} to resolve this issue.
+
+Start by decomposing this issue into its constituent sub-problems, then solve each one independently.

@@ -21,13 +21,84 @@ import orjson
 import pytest
 import yaml
 
+import nemo_gym.rollout_collection
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.global_config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.reward_profile import compute_aggregate_metrics
-from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
+from nemo_gym.rollout_collection import (
+    RolloutCollectionConfig,
+    RolloutCollectionHelper,
+    _rollout_request_debug_summary,
+)
 
 
 class TestRolloutCollection:
+    def test_rollout_request_debug_summary_compact(self) -> None:
+        row = {
+            AGENT_REF_KEY_NAME: {"name": "my_agent"},
+            TASK_INDEX_KEY_NAME: 12,
+            ROLLOUT_INDEX_KEY_NAME: 3,
+            "env_specific_metadata": "do not include",
+            "responses_create_params": {"input": "large prompt", "tools": ["large schema"]},
+        }
+
+        assert _rollout_request_debug_summary(row) == {
+            "agent_name": "my_agent",
+            TASK_INDEX_KEY_NAME: 12,
+            ROLLOUT_INDEX_KEY_NAME: 3,
+        }
+
+    @pytest.mark.parametrize("request_debug_enabled", [True, False])
+    async def test_run_examples_logs_failed_run_when_request_debug_enabled(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        request_debug_enabled: bool,
+    ) -> None:
+        row = {
+            AGENT_REF_KEY_NAME: {"name": "my_agent"},
+            TASK_INDEX_KEY_NAME: 7,
+            ROLLOUT_INDEX_KEY_NAME: 0,
+            "env_specific_metadata": "do not log this either",
+            "responses_create_params": {"input": "do not log this"},
+        }
+        response = MagicMock()
+        response.status = 500
+
+        mock_server_client = MagicMock()
+        mock_server_client.post = AsyncMock(return_value=response)
+
+        class MockHelper(RolloutCollectionHelper):
+            def setup_server_client(self, *args, **kwargs):
+                return mock_server_client
+
+        async def fail_raise_for_status(_response):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", fail_raise_for_status)
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection,
+            "is_global_aiohttp_client_request_debug_enabled",
+            lambda: request_debug_enabled,
+        )
+
+        with pytest.raises(RuntimeError, match="boom"):
+            await next(MockHelper().run_examples([row]))
+
+        captured = capsys.readouterr()
+        if request_debug_enabled:
+            assert "[rollout_collection] /run failed status=500" in captured.out
+            assert '"_ng_task_index": 7' in captured.out
+            assert '"_ng_rollout_index": 0' in captured.out
+            assert '"agent_name": "my_agent"' in captured.out
+            assert "env_specific_metadata" not in captured.out
+            assert "do not log this either" not in captured.out
+            assert "responses_create_params" not in captured.out
+            assert "do not log this" not in captured.out
+        else:
+            assert "[rollout_collection] /run failed" not in captured.out
+
     def test_preprocess_rows_with_prompt_config(self, tmp_path: Path) -> None:
         """prompt_config builds responses_create_params.input from template."""
         prompt_path = tmp_path / "prompt.yaml"
@@ -119,46 +190,101 @@ class TestRolloutCollection:
             {
                 "_ng_task_index": 0,
                 "_ng_rollout_index": 0,
-                "responses_create_params": {"input": [], "seed": 0, "temperature": 0.1},
+                "responses_create_params": {
+                    "input": [],
+                    "metadata": {"extra_body": '{"seed": 0}'},
+                    "temperature": 0.1,
+                },
                 "x": 0,
                 "agent_ref": {"name": "my_agent"},
             },
             {
                 "_ng_task_index": 0,
                 "_ng_rollout_index": 1,
-                "responses_create_params": {"input": [], "seed": 1, "temperature": 0.1},
+                "responses_create_params": {
+                    "input": [],
+                    "metadata": {"extra_body": '{"seed": 1}'},
+                    "temperature": 0.1,
+                },
                 "x": 0,
                 "agent_ref": {"name": "my_agent"},
             },
             {
                 "_ng_task_index": 1,
                 "_ng_rollout_index": 0,
-                "responses_create_params": {"input": [], "seed": 0, "temperature": 0.1},
+                "responses_create_params": {
+                    "input": [],
+                    "metadata": {"extra_body": '{"seed": 0}'},
+                    "temperature": 0.1,
+                },
                 "x": 1,
                 "agent_ref": {"name": "my_agent"},
             },
             {
                 "_ng_task_index": 1,
                 "_ng_rollout_index": 1,
-                "responses_create_params": {"input": [], "seed": 1, "temperature": 0.1},
+                "responses_create_params": {
+                    "input": [],
+                    "metadata": {"extra_body": '{"seed": 1}'},
+                    "temperature": 0.1,
+                },
                 "x": 1,
                 "agent_ref": {"name": "my_agent"},
             },
             {
                 "_ng_task_index": 2,
                 "_ng_rollout_index": 0,
-                "responses_create_params": {"input": [], "seed": 0, "temperature": 0.1},
+                "responses_create_params": {
+                    "input": [],
+                    "metadata": {"extra_body": '{"seed": 0}'},
+                    "temperature": 0.1,
+                },
                 "x": 2,
                 "agent_ref": {"name": "my_agent"},
             },
             {
                 "_ng_task_index": 2,
                 "_ng_rollout_index": 1,
-                "responses_create_params": {"input": [], "seed": 1, "temperature": 0.1},
+                "responses_create_params": {
+                    "input": [],
+                    "metadata": {"extra_body": '{"seed": 1}'},
+                    "temperature": 0.1,
+                },
                 "x": 2,
                 "agent_ref": {"name": "my_agent"},
             },
         ]
+
+    def test_preprocess_rows_num_repeats_add_seed_passes_pydantic_validation(self, tmp_path: Path) -> None:
+        """Rows emitted with num_repeats_add_seed=True must round-trip through the strict
+        NeMoGymResponseCreateParamsNonStreaming schema (extra='forbid'). Seed is passed via
+        metadata.extra_body so it doesn't violate the OpenAI Responses schema."""
+        fpath = tmp_path / "input.jsonl"
+        samples = [json.dumps({"responses_create_params": {"input": []}, "x": i}) for i in range(2)]
+        fpath.write_text("\n".join(samples) + "\n")
+
+        config = RolloutCollectionConfig(
+            agent_name="my_agent",
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+            num_repeats=3,
+            num_repeats_add_seed=True,
+        )
+
+        rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+
+        assert len(rows) == 6
+        seeds_seen = []
+        for row in rows:
+            rcp = row["responses_create_params"]
+            # seed lives in metadata.extra_body, not at the top level
+            assert "seed" not in rcp
+            extra_body = json.loads(rcp["metadata"]["extra_body"])
+            seeds_seen.append(extra_body["seed"])
+            # Must still pass the strict schema validation
+            NeMoGymResponseCreateParamsNonStreaming.model_validate(rcp)
+        # Seeds should track rollout index within each task (0, 1, 2 per task).
+        assert seeds_seen == [0, 1, 2, 0, 1, 2]
 
     async def test_run_from_config_sanity(self, tmp_path: Path) -> None:
         input_jsonl_fpath = tmp_path / "input.jsonl"

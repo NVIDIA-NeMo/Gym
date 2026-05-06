@@ -1,0 +1,125 @@
+You are tasked with completing a specific assignment.
+
+## Environment
+
+The `code_exec` tool provides access to a Linux-based execution environment that includes a full file system where you can create, read, and modify files.
+
+Your environment comes preinstalled with a comprehensive set of Python packages and system tools:
+
+**Web Frameworks:**
+- aiohttp, hypercorn, fastapi, websockets
+- pydantic, gradio
+
+**Core Data Science:**
+- numpy, numpy-financial, scipy, pandas
+- matplotlib, matplotlib-venn, seaborn
+- plotly, plotnine, bokeh
+
+**Statistics & Machine Learning:**
+- statsmodels, scikit-learn, scikit-image
+- xgboost, catboost, lightgbm
+- imbalanced-learn, shap
+
+**NLP:**
+- nltk, gensim, spacy, textblob
+
+**Computer Vision:**
+- opencv-python, Pillow, dlib, mtcnn
+- pytesseract, qrcode, pyzbar, imgkit
+
+**Audio Processing:**
+- ffmpeg-python, pydub, moviepy, av, soundfile
+- librosa, mutagen, gtts, pyttsx3
+- pedalboard, pyloudnorm, mne
+
+**Document Processing:**
+- python-docx, python-pptx, openpyxl, xlrd
+- pymupdf, pdf2image, pdfplumber, pdfkit
+- pypandoc, docx2txt, odfpy, pyxlsb
+- tabula, camelot-py
+
+**PDF Generation:**
+- fpdf2, reportlab, weasyprint, pdfrw
+
+**Graphics & Visualization:**
+- graphviz, pydot, networkx
+- svgwrite, cairosvg, trimesh
+- wordcloud, folium
+
+**Geospatial:**
+- shapely, fiona, geopandas
+- geopy, rasterio
+
+**Scientific Computing:**
+- sympy, pymc, h5py, tables
+
+**Chemistry & Biology:**
+- rdkit, biopython
+
+**Data Utilities:**
+- xml-python, markdownify, anytree
+- rarfile, chardet, srt
+
+**General Utilities:**
+- tqdm, tabulate, faker, loguru
+- fuzzywuzzy, rapidfuzz, einops
+- pycountry, countryinfo, pronouncing
+- kerykeion, exchange-calendars
+
+**Math & Logic:**
+- pylog, pyprover, nashpy
+
+**Security & Networking:**
+- cryptography, pyopenssl, requests
+
+**Testing & Monitoring:**
+- pytest, pytest-cov, coverage
+
+**System Tools:**
+- Python 3.12 (base environment)
+- LibreOffice + LibreOffice Writer (for office document conversion, includes fonts-dejavu-core)
+- Tesseract OCR (text extraction from images)
+- Pandoc (universal document converter)
+- Poppler utilities (PDF tools such as `pdftotext`, `pdfimages`)
+- Ghostscript (PostScript/PDF processing)
+- FFmpeg (complete audio/video processing suite with all codecs)
+- Graphviz (graph visualization with DOT language)
+- GDAL/GEOS/Proj (geospatial data libraries and utilities)
+- Build tools: gcc, g++, cmake, pkg-config, make
+
+## Reference Files Location
+
+{% if task.reference_files %}
+The reference files for the task are available in your environment's file system.
+
+Here are their paths:
+
+<reference_files>
+{% for ref_file in task.reference_files %}
+- {{ ref_file }}
+{% endfor %}
+</reference_files>
+{% else %}
+No reference files provided.
+{% endif %}
+
+## Completing Your Work
+
+In order to complete the task you must use the `finish` tool to submit your work. If you do not use the `finish` tool you will fail this task!
+
+**Required in your finish call:**
+1. A brief summary of what you accomplished
+2. A list of **ABSOLUTE file paths** for all files you want to submit (Do not submit folders).
+
+## Task
+
+Here is the task you need to complete:
+
+<task>
+Sector: {{ task.sector }}
+Occupation: {{ task.occupation }}
+
+{{ task.prompt }}
+</task>
+
+Please begin working on the task now.

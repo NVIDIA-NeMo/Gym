@@ -1,0 +1,25 @@
+# Chain to existing resource server + agent config.
+config_paths:
+  - resources_servers/mcqa/configs/mcqa.yaml
+
+# Isolated benchmark-specific inheritance.
+"gpqa-x_mcqa_resources_server":
+  _inherit_from: mcqa
+  resources_servers:
+    mcqa:
+      # Each row supplies its own extraction regex via template_metadata.
+      grading_mode: null
+
+"gpqa-x_mcqa_simple_agent":
+  _inherit_from: mcqa_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: gpqa-x_mcqa_resources_server
+      datasets:
+      - name: gpqa-x
+        type: benchmark
+        jsonl_fpath: benchmarks/gpqa-x/data/gpqa-x_benchmark.jsonl
+        prompt_config: benchmarks/prompts/generic_default.yaml
+        prepare_script: benchmarks/gpqa-x/prepare.py
+        num_repeats: 8

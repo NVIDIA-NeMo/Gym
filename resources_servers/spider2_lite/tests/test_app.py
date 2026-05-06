@@ -146,8 +146,7 @@ class TestEvalUtils:
         assert rows == []
 
     def test_execute_sqlite_bad_sql(self, tiny_db):
-        with pytest.raises(sqlite3.Error):
-            execute_sqlite(tiny_db, "NOT VALID SQL")
+        assert execute_sqlite(tiny_db, "NOT VALID SQL") == None
 
     def test_execute_sqlite_async_ok(self, tiny_db):
         sem = asyncio.Semaphore(1)
@@ -344,7 +343,7 @@ class TestSpider2LiteServerUnit:
         req = _make_verify_request("```sql\nSELECT 1;\n```", gold_sql="SELECT * FROM nonexistent_table")
         result = await server.verify(req)
         assert result.reward == 0.0
-        assert result.failure_reason == FailureCode.GOLD_EXECUTION_ERROR
+        assert result.failure_reason == FailureCode.EXECUTION_ERROR
 
     async def test_verify_no_gold_data(self, server):
         req = Spider2LiteVerifyRequest(
@@ -353,9 +352,8 @@ class TestSpider2LiteServerUnit:
             db_id="TestDB",
             question="q",
         )
-        result = await server.verify(req)
-        assert result.reward == 0.0
-        assert result.failure_reason == FailureCode.UNKNOWN_ERROR
+        with pytest.raises(ValueError):
+            await server.verify(req)
 
     async def test_verify_ignore_order(self, server):
         # Gold returns rows in a different order than pred — should still match with ignore_order=True

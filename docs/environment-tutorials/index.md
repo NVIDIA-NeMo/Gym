@@ -60,6 +60,14 @@ Production environment with dynamic routing and state-based verification.
 {bdg-primary}`advanced`
 :::
 
+:::{grid-item-card} {octicon}`check-circle;1.5em;sd-mr-1` LLM-as-Judge Verification
+:link: llm-as-judge-verification
+:link-type: doc
+Configure a second model to score rollouts from `verify()` when ground truth is semantic or rubric-based.
++++
+{bdg-secondary}`verification`
+:::
+
 ::::
 
 :::{note}
