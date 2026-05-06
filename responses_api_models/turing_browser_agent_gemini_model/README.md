@@ -28,7 +28,7 @@ cua_gemini_api_key: <YOUR_GEMINI_API_KEY>
 ### Running the server
 
 ```bash
-config_paths="responses_api_models/gemini_model/configs/gemini_model.yaml,\
+config_paths="responses_api_models/turing_browser_agent_gemini_model/configs/turing_browser_agent_gemini_model.yaml,\
 resources_servers/browser_gym/configs/browser_gym.yaml"
 
 ng_run "+config_paths=[${config_paths}]"
@@ -37,10 +37,10 @@ ng_run "+config_paths=[${config_paths}]"
 ### Running tests
 
 ```bash
-ng_test +entrypoint=responses_api_models/gemini_model
+ng_test +entrypoint=responses_api_models/turing_browser_agent_gemini_model
 
 # Or directly:
-pytest responses_api_models/gemini_model/tests/test_app.py -x -v
+pytest responses_api_models/turing_browser_agent_gemini_model/tests/test_app.py -x -v
 ```
 
 ## Licensing information

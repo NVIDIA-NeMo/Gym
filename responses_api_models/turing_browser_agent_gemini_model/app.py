@@ -32,6 +32,7 @@ from typing import Any, Dict, Optional
 from uuid import uuid4
 
 from fastapi import HTTPException
+from openai.types.responses.response_computer_tool_call import ActionDragPath
 
 from nemo_gym.base_responses_api_model import (
     BaseResponsesAPIModelConfig,
@@ -39,16 +40,41 @@ from nemo_gym.base_responses_api_model import (
     SimpleResponsesAPIModel,
 )
 from nemo_gym.openai_utils import (
+    ActionClick,
+    ActionClickAt,
+    ActionCloseTab,
+    ActionDoubleClick,
+    ActionDrag,
+    ActionGoBack,
+    ActionGoForward,
+    ActionGoto,
+    ActionHoverAt,
+    ActionKeypress,
+    ActionMove,
+    ActionNewTab,
+    ActionOpenBrowser,
+    ActionScreenshot,
+    ActionScroll,
+    ActionScrollAt,
+    ActionScrollDocument,
+    ActionSearch,
+    ActionSwitchTab,
+    ActionTripleClick,
+    ActionType,
+    ActionTypeTextAt,
+    ActionWait,
+    NeMoGymAction,
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
-    NeMoGymComputerToolCall,
     NeMoGymResponse,
+    NeMoGymResponseComputerToolCall,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseInputTokensDetails,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
+    PendingSafetyCheck,
 )
 
 
@@ -357,14 +383,20 @@ class GeminiModelServer(SimpleResponsesAPIModel):
                         fn_args = dict(part.function_call.args or {})
                         safety_decision = fn_args.pop("safety_decision", None)
                         action_dict = {"type": fn_name, **fn_args}
-                        pending_safety = []
+                        pending_safety: list = []
                         if safety_decision:
                             action_dict["safety_decision"] = safety_decision
-                            pending_safety = [safety_decision]
+                            pending_safety = [
+                                PendingSafetyCheck(
+                                    id=safety_decision.get("id", ""),
+                                    code=safety_decision.get("code"),
+                                    message=safety_decision.get("message"),
+                                )
+                            ]
                         output_items.append(
-                            NeMoGymComputerToolCall(
+                            NeMoGymResponseComputerToolCall(
                                 id=f"cu_{uuid4().hex}",
-                                action=action_dict,
+                                action=_normalize_gemini_action(action_dict),
                                 call_id=f"call_{uuid4().hex}",
                                 pending_safety_checks=pending_safety,
                                 status="completed",
@@ -447,6 +479,97 @@ class GeminiModelServer(SimpleResponsesAPIModel):
             incomplete_details=incomplete_details,
             usage=usage,
         )
+
+
+def _normalize_gemini_action(action_dict: dict) -> NeMoGymAction:
+    """Convert a Gemini action dict (keyed by 'type') into a typed NeMoGymAction."""
+    action_type = action_dict.get("type", "")
+    x = int(action_dict.get("x") or 0)
+    y = int(action_dict.get("y") or 0)
+
+    if action_type == "click_at":
+        return ActionClickAt(type="click_at", x=x, y=y)
+    elif action_type == "click":
+        return ActionClick(type="click", button=action_dict.get("button", "left"), x=x, y=y)
+    elif action_type == "double_click":
+        return ActionDoubleClick(type="double_click", x=x, y=y)
+    elif action_type == "triple_click":
+        return ActionTripleClick(type="triple_click", x=x, y=y)
+    elif action_type == "hover_at":
+        return ActionHoverAt(type="hover_at", x=x, y=y)
+    elif action_type in ("move", "mouse_move", "hover"):
+        return ActionMove(type="move", x=x, y=y)
+    elif action_type == "type_text_at":
+        return ActionTypeTextAt(
+            type="type_text_at",
+            x=x,
+            y=y,
+            text=action_dict.get("text", ""),
+            press_enter=action_dict.get("press_enter"),
+            clear_before_typing=action_dict.get("clear_before_typing"),
+        )
+    elif action_type == "type":
+        return ActionType(type="type", text=action_dict.get("text", ""))
+    elif action_type in ("keypress", "key_combination"):
+        keys = action_dict.get("keys", [])
+        if isinstance(keys, str):
+            keys = keys.split("+") if "+" in keys else [keys]
+        return ActionKeypress(type="keypress", keys=list(keys))
+    elif action_type == "scroll":
+        return ActionScroll(
+            type="scroll",
+            x=x,
+            y=y,
+            scroll_x=int(action_dict.get("scroll_x", 0)),
+            scroll_y=int(action_dict.get("scroll_y", 0)),
+        )
+    elif action_type == "scroll_at":
+        return ActionScrollAt(
+            type="scroll_at",
+            x=x,
+            y=y,
+            direction=action_dict.get("direction", "down"),
+            magnitude=action_dict.get("magnitude"),
+        )
+    elif action_type == "scroll_document":
+        return ActionScrollDocument(type="scroll_document", direction=action_dict.get("direction", "down"))
+    elif action_type == "screenshot":
+        return ActionScreenshot(type="screenshot")
+    elif action_type in ("wait", "wait_5_seconds"):
+        return ActionWait(type="wait")
+    elif action_type in ("goto", "navigate"):
+        return ActionGoto(type="goto", url=action_dict.get("url", ""))
+    elif action_type == "search":
+        return ActionSearch(type="search")
+    elif action_type == "go_back":
+        return ActionGoBack(type="go_back")
+    elif action_type == "go_forward":
+        return ActionGoForward(type="go_forward")
+    elif action_type == "new_tab":
+        return ActionNewTab(type="new_tab", url=action_dict.get("url"))
+    elif action_type == "switch_tab":
+        return ActionSwitchTab(type="switch_tab", tab_index=int(action_dict.get("tab_index", 0)))
+    elif action_type == "close_tab":
+        return ActionCloseTab(type="close_tab")
+    elif action_type in ("drag", "drag_and_drop"):
+        path = action_dict.get("path", [])
+        if path:
+            drag_path = [ActionDragPath(x=int(p.get("x", 0)), y=int(p.get("y", 0))) for p in path]
+        elif "destination_x" in action_dict or "destination_y" in action_dict:
+            drag_path = [
+                ActionDragPath(x=x, y=y),
+                ActionDragPath(
+                    x=int(action_dict.get("destination_x", 0)),
+                    y=int(action_dict.get("destination_y", 0)),
+                ),
+            ]
+        else:
+            drag_path = [ActionDragPath(x=x, y=y)]
+        return ActionDrag(type="drag", path=drag_path)
+    elif action_type == "open_web_browser":
+        return ActionOpenBrowser(type="open_web_browser")
+    else:
+        return ActionScreenshot(type="screenshot")
 
 
 def _extract_b64_from_data_url(data_url: str) -> Optional[str]:

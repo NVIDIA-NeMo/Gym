@@ -30,7 +30,7 @@ cua_anthropic_api_key: <YOUR_ANTHROPIC_API_KEY>
 ### Running the server
 
 ```bash
-config_paths="responses_api_models/anthropic_model/configs/anthropic_model.yaml,\
+config_paths="responses_api_models/turing_browser_agent_anthropic_model/configs/turing_browser_agent_anthropic_model.yaml,\
 resources_servers/browser_gym/configs/browser_gym.yaml"
 
 ng_run "+config_paths=[${config_paths}]"
@@ -39,10 +39,10 @@ ng_run "+config_paths=[${config_paths}]"
 ### Running tests
 
 ```bash
-ng_test +entrypoint=responses_api_models/anthropic_model
+ng_test +entrypoint=responses_api_models/turing_browser_agent_anthropic_model
 
 # Or directly:
-pytest responses_api_models/anthropic_model/tests/test_app.py -x -v
+pytest responses_api_models/turing_browser_agent_anthropic_model/tests/test_app.py -x -v
 ```
 
 ## Licensing information

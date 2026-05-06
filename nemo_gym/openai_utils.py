@@ -57,6 +57,21 @@ from openai.types.responses import (
     Response,
     ResponseInputTextParam,
 )
+from openai.types.responses.response_computer_tool_call import (
+    ActionClick,
+    ActionDoubleClick,
+    ActionDrag,
+    ActionKeypress,
+    ActionMove,
+    ActionScreenshot,
+    ActionScroll,
+    ActionType,
+    ActionWait,
+    PendingSafetyCheck,
+)
+from openai.types.responses.response_computer_tool_call_output_item import (
+    AcknowledgedSafetyCheck,
+)
 from openai.types.responses.response_create_params import (
     Metadata,
     Reasoning,
@@ -191,13 +206,161 @@ class NeMoGymResponseFunctionToolCall(BaseModel):
     status: Optional[Literal["in_progress", "completed", "incomplete"]] = None
 
 
-class NeMoGymComputerToolCall(BaseModel):
+########################################
+# CUA extension action types
+########################################
+
+
+class _ActionBase(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+
+class ActionTripleClick(_ActionBase):
+    type: Literal["triple_click"]
+    x: int
+    y: int
+
+
+class ActionClickAt(_ActionBase):
+    type: Literal["click_at"]
+    x: int
+    y: int
+
+
+class ActionHoverAt(_ActionBase):
+    type: Literal["hover_at"]
+    x: int
+    y: int
+
+
+class ActionScrollAt(_ActionBase):
+    type: Literal["scroll_at"]
+    x: int
+    y: int
+    direction: str
+    magnitude: Optional[int] = None
+
+
+class ActionScrollDocument(_ActionBase):
+    type: Literal["scroll_document"]
+    direction: str
+
+
+class ActionTypeTextAt(_ActionBase):
+    type: Literal["type_text_at"]
+    x: int
+    y: int
+    text: str
+    press_enter: Optional[bool] = None
+    clear_before_typing: Optional[bool] = None
+
+
+class ActionGoto(_ActionBase):
+    type: Literal["goto"]
+    url: str
+
+
+class ActionGoBack(_ActionBase):
+    type: Literal["go_back"]
+
+
+class ActionGoForward(_ActionBase):
+    type: Literal["go_forward"]
+
+
+class ActionNewTab(_ActionBase):
+    type: Literal["new_tab"]
+    url: Optional[str] = None
+
+
+class ActionSwitchTab(_ActionBase):
+    type: Literal["switch_tab"]
+    tab_index: int
+
+
+class ActionCloseTab(_ActionBase):
+    type: Literal["close_tab"]
+
+
+class ActionZoom(_ActionBase):
+    type: Literal["zoom"]
+    region: Optional[List[int]] = None
+
+
+class ActionHoldKey(_ActionBase):
+    type: Literal["hold_key"]
+    key: str
+    duration: Optional[int] = None
+
+
+class ActionMouseDown(_ActionBase):
+    type: Literal["left_mouse_down"]
+    x: Optional[int] = None
+    y: Optional[int] = None
+
+
+class ActionMouseUp(_ActionBase):
+    type: Literal["left_mouse_up"]
+    x: Optional[int] = None
+    y: Optional[int] = None
+
+
+class ActionCursorPosition(_ActionBase):
+    type: Literal["cursor_position"]
+
+
+class ActionOpenBrowser(_ActionBase):
+    type: Literal["open_web_browser"]
+
+
+class ActionSearch(_ActionBase):
+    type: Literal["search"]
+
+
+NeMoGymAction: TypeAlias = Union[
+    ActionClick,
+    ActionDoubleClick,
+    ActionDrag,
+    ActionKeypress,
+    ActionMove,
+    ActionScreenshot,
+    ActionScroll,
+    ActionType,
+    ActionWait,
+    ActionTripleClick,
+    ActionClickAt,
+    ActionHoverAt,
+    ActionScrollAt,
+    ActionScrollDocument,
+    ActionTypeTextAt,
+    ActionGoto,
+    ActionGoBack,
+    ActionGoForward,
+    ActionNewTab,
+    ActionSwitchTab,
+    ActionCloseTab,
+    ActionZoom,
+    ActionHoldKey,
+    ActionMouseDown,
+    ActionMouseUp,
+    ActionCursorPosition,
+    ActionOpenBrowser,
+    ActionSearch,
+]
+
+
+########################################
+# CUA schema types
+########################################
+
+
+class NeMoGymResponseComputerToolCall(BaseModel):
     """Wraps ResponseComputerToolCall (type="computer_call") for CUA support."""
 
     id: str
-    action: Dict[str, Any]
+    action: NeMoGymAction
     call_id: str
-    pending_safety_checks: List[Dict[str, Any]] = Field(default_factory=list)
+    pending_safety_checks: List[PendingSafetyCheck] = Field(default_factory=list)
     status: Literal["in_progress", "completed", "incomplete"] = "completed"
     type: Literal["computer_call"] = "computer_call"
 
@@ -209,7 +372,7 @@ class NeMoGymComputerCallOutput(BaseModel):
     output: Dict[str, Any]
     type: Literal["computer_call_output"] = "computer_call_output"
     id: Optional[str] = None
-    acknowledged_safety_checks: Optional[List[Dict[str, Any]]] = None
+    acknowledged_safety_checks: Optional[List[AcknowledgedSafetyCheck]] = None
     status: Optional[Literal["in_progress", "completed", "incomplete"]] = None
 
 
@@ -253,7 +416,7 @@ NeMoGymResponseInputItem = Union[
     NeMoGymResponseFunctionToolCall,
     NeMoGymFunctionCallOutput,
     NeMoGymResponseReasoningItem,
-    NeMoGymComputerToolCall,
+    NeMoGymResponseComputerToolCall,
     NeMoGymComputerCallOutput,
     # For training:
     NeMoGymEasyInputMessageForTraining,

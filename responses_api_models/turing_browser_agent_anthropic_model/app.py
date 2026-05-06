@@ -28,8 +28,9 @@ from time import time
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
-from anthropic import AsyncAnthropic
+from anthropic import AsyncAnthropic, DefaultAioHttpClient
 from fastapi import HTTPException
+from openai.types.responses.response_computer_tool_call import ActionDragPath
 
 from nemo_gym.base_responses_api_model import (
     BaseResponsesAPIModelConfig,
@@ -37,10 +38,26 @@ from nemo_gym.base_responses_api_model import (
     SimpleResponsesAPIModel,
 )
 from nemo_gym.openai_utils import (
+    ActionClick,
+    ActionCursorPosition,
+    ActionDoubleClick,
+    ActionDrag,
+    ActionHoldKey,
+    ActionKeypress,
+    ActionMouseDown,
+    ActionMouseUp,
+    ActionMove,
+    ActionScreenshot,
+    ActionScroll,
+    ActionTripleClick,
+    ActionType,
+    ActionWait,
+    ActionZoom,
+    NeMoGymAction,
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
-    NeMoGymComputerToolCall,
     NeMoGymResponse,
+    NeMoGymResponseComputerToolCall,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseInputTokensDetails,
     NeMoGymResponseOutputMessage,
@@ -72,6 +89,7 @@ class AnthropicModelServer(SimpleResponsesAPIModel):
             api_key=self.config.anthropic_api_key,
             max_retries=4,
             timeout=self.config.anthropic_timeout,
+            http_client=DefaultAioHttpClient(),
         )
         return super().model_post_init(context)
 
@@ -285,9 +303,9 @@ class AnthropicModelServer(SimpleResponsesAPIModel):
         for block in response.content:
             if block.type == "tool_use":
                 output_items.append(
-                    NeMoGymComputerToolCall(
+                    NeMoGymResponseComputerToolCall(
                         id=f"cu_{uuid4().hex}",
-                        action=block.input or {},
+                        action=_normalize_anthropic_action(block.input or {}),
                         call_id=block.id,
                         pending_safety_checks=[],
                         status="completed",
@@ -367,6 +385,75 @@ class AnthropicModelServer(SimpleResponsesAPIModel):
             incomplete_details=incomplete_details,
             usage=usage,
         )
+
+
+def _normalize_anthropic_action(block_input: dict) -> NeMoGymAction:
+    """Convert Anthropic's action dict (keyed by 'action') into a typed NeMoGymAction."""
+    action_name = block_input.get("action", "")
+    coord = block_input.get("coordinate", [0, 0])
+    x, y = int(coord[0]) if coord else 0, int(coord[1]) if len(coord) > 1 else 0
+    modifier = block_input.get("text")
+
+    if action_name in ("left_click", "click"):
+        extra = {"text": modifier} if modifier else {}
+        return ActionClick(type="click", button="left", x=x, y=y, **extra)
+    elif action_name == "right_click":
+        extra = {"text": modifier} if modifier else {}
+        return ActionClick(type="click", button="right", x=x, y=y, **extra)
+    elif action_name == "middle_click":
+        extra = {"text": modifier} if modifier else {}
+        return ActionClick(type="click", button="wheel", x=x, y=y, **extra)
+    elif action_name == "double_click":
+        return ActionDoubleClick(type="double_click", x=x, y=y)
+    elif action_name == "triple_click":
+        return ActionTripleClick(type="triple_click", x=x, y=y)
+    elif action_name == "type":
+        return ActionType(type="type", text=block_input.get("text", ""))
+    elif action_name == "key":
+        raw = block_input.get("text", "")
+        keys = raw.split("+") if "+" in raw else [raw]
+        return ActionKeypress(type="keypress", keys=keys)
+    elif action_name == "mouse_move":
+        return ActionMove(type="move", x=x, y=y)
+    elif action_name == "left_click_drag":
+        start = block_input.get("start_coordinate", coord)
+        return ActionDrag(
+            type="drag",
+            path=[
+                ActionDragPath(x=int(start[0]), y=int(start[1])),
+                ActionDragPath(x=x, y=y),
+            ],
+        )
+    elif action_name == "scroll":
+        direction = block_input.get("scroll_direction", "down")
+        amount = int(block_input.get("scroll_amount", 3))
+        scroll_x, scroll_y = 0, 0
+        if direction == "up":
+            scroll_y = -amount
+        elif direction == "down":
+            scroll_y = amount
+        elif direction == "left":
+            scroll_x = -amount
+        elif direction == "right":
+            scroll_x = amount
+        extra = {"text": modifier} if modifier else {}
+        return ActionScroll(type="scroll", x=x, y=y, scroll_x=scroll_x, scroll_y=scroll_y, **extra)
+    elif action_name == "screenshot":
+        return ActionScreenshot(type="screenshot")
+    elif action_name == "wait":
+        return ActionWait(type="wait")
+    elif action_name == "hold_key":
+        return ActionHoldKey(type="hold_key", key=block_input.get("text", ""), duration=block_input.get("duration"))
+    elif action_name == "zoom":
+        return ActionZoom(type="zoom", region=block_input.get("region"))
+    elif action_name == "left_mouse_down":
+        return ActionMouseDown(type="left_mouse_down", x=x if coord else None, y=y if coord else None)
+    elif action_name == "left_mouse_up":
+        return ActionMouseUp(type="left_mouse_up", x=x if coord else None, y=y if coord else None)
+    elif action_name == "cursor_position":
+        return ActionCursorPosition(type="cursor_position")
+    else:
+        return ActionScreenshot(type="screenshot")
 
 
 def _extract_b64_from_data_url(data_url: str) -> Optional[str]:
