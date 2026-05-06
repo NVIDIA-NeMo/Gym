@@ -11,8 +11,8 @@ The integration follows NeMo-Gym's three-server architecture:
 All three providers follow the same unified flow: **Agent → Adapter → Model Server → External API**. The model servers accept OpenAI Responses API format (`NeMoGymResponseCreateParamsNonStreaming`) and return `NeMoGymResponse`, translating to/from each provider's native API internally.
 
 - **OpenAI**: `OpenAICUAAdapter` manages server-side context via `previous_response_id`; `openai_model` server proxies to `api.openai.com`
-- **Anthropic**: `GenericCUAAdapter` manages client-side context in OpenAI format (turn trimming, screenshot GC); `anthropic_model` server translates OpenAI format ↔ Anthropic Messages API
-- **Gemini**: `GenericCUAAdapter` manages client-side context in OpenAI format (turn trimming, screenshot GC); `gemini_model` server translates OpenAI format ↔ Gemini generate_content API
+- **Anthropic**: `GenericCUAAdapter` manages client-side context in OpenAI format (turn trimming, screenshot GC); `turing_browser_agent_anthropic_model` server translates OpenAI format ↔ Anthropic Messages API
+- **Gemini**: `GenericCUAAdapter` manages client-side context in OpenAI format (turn trimming, screenshot GC); `turing_browser_agent_gemini_model` server translates OpenAI format ↔ Gemini generate_content API
 
 ```
                               EXTERNAL LLM PROVIDERS
@@ -77,15 +77,17 @@ All three providers follow the same unified flow: **Agent → Adapter → Model 
 │  │  └────────────────────────┘  │  │  │    Chromium,          │  │   │
 │  │                              │  │  │    Semaphore bounded)  │  │   │
 │  │  ┌────────────────────────┐  │  │  └───────────────────────┘  │   │
-│  │  │ anthropic_model        │  │  │                             │   │
-│  │  │ • OpenAI ↔ Anthropic   │  │  │  ┌───────────────────────┐  │   │
-│  │  │   format translator    │  │  │  │    Verification       │  │   │
-│  │  └────────────────────────┘  │  │  │  taskId + LS dump     │  │   │
-│  │                              │  │  │         │             │  │   │
-│  │  ┌────────────────────────┐  │  │  │         ▼             │  │   │
-│  │  │ gemini_model           │  │  │  │  POST /api/v1/        │──┼───┼──┐
-│  │  │ • OpenAI ↔ Gemini      │  │  │  │   get_actual_state    │  │   │  │
-│  │  │   format translator    │  │  │  │         │             │  │   │  │
+│  │  │ turing_browser_agent_  │  │  │                             │   │
+│  │  │   anthropic_model      │  │  │  ┌───────────────────────┐  │   │
+│  │  │ • OpenAI ↔ Anthropic   │  │  │  │    Verification       │  │   │
+│  │  │   format translator    │  │  │  │  taskId + LS dump     │  │   │
+│  │  └────────────────────────┘  │  │  │         │             │  │   │
+│  │                              │  │  │         ▼             │  │   │
+│  │  ┌────────────────────────┐  │  │  │                       │  │   │
+│  │  │ turing_browser_agent_  │  │  │  │  POST /api/v1/        │──┼───┼──┐
+│  │  │   gemini_model         │  │  │  │   get_actual_state    │  │   │  │
+│  │  │ • OpenAI ↔ Gemini      │  │  │  │         │             │  │   │  │
+│  │  │   format translator    │  │  │  │         ▼             │  │   │  │
 │  │  └────────────────────────┘  │  │  │         ▼             │  │   │  │
 │  │                              │  │  │  assertions → reward  │  │   │  │
 │  │                              │  │  │  (0.0 or 1.0)         │  │   │  │
@@ -110,8 +112,8 @@ All three providers follow the same unified flow: **Agent → Adapter → Model 
 **Key points:**
 - **All providers** follow the same unified flow: Adapter → Model Server → External API. No direct API calls are made from the agent layer. Each adapter receives an injected `api_caller` that routes requests through the model server. All model servers accept `NeMoGymResponseCreateParamsNonStreaming` and return `NeMoGymResponse`.
 - **OpenAI** uses `OpenAICUAAdapter` which manages server-side context via `previous_response_id` and maps `computer_call` / `computer_call_output` items to `BrowserAction`. The `openai_model` server proxies to `api.openai.com` with token tracking.
-- **Anthropic** uses `GenericCUAAdapter` which manages client-side context in OpenAI format with turn trimming and screenshot GC. The `anthropic_model` server translates OpenAI Responses format to/from the Anthropic Messages API.
-- **Gemini** uses `GenericCUAAdapter` which manages client-side context in OpenAI format with turn trimming and screenshot GC. The `gemini_model` server translates OpenAI Responses format to/from the Gemini generate_content API.
+- **Anthropic** uses `GenericCUAAdapter` which manages client-side context in OpenAI format with turn trimming and screenshot GC. The `turing_browser_agent_anthropic_model` server translates OpenAI Responses format to/from the Anthropic Messages API.
+- **Gemini** uses `GenericCUAAdapter` which manages client-side context in OpenAI format with turn trimming and screenshot GC. The `turing_browser_agent_gemini_model` server translates OpenAI Responses format to/from the Gemini generate_content API.
 - The resource server manages browser lifecycle **and** verification in one process.
 - Gym environments are external -- they can be remote (deployed URLs) or local.
 
@@ -160,13 +162,15 @@ All three providers follow the same unified flow: **Agent → Adapter → Model 
 │  │  └────────────────────────┘ │  │  • Screenshot capture        │  │
 │  │                             │  │  • localStorage dump         │  │
 │  │  ┌────────────────────────┐ │  │  • Verification via gym API  │  │
-│  │  │  anthropic_model       │ │  └──────────────────┬───────────┘  │
+│  │  │  turing_browser_agent_ │ │  └──────────────────┬───────────┘  │
+│  │  │   anthropic_model      │ │                     │              │
 │  │  │  • OpenAI ↔ Anthropic  │ │                     │              │
 │  │  │    format translator   │ │                     │              │
 │  │  └────────────────────────┘ │                     │              │
 │  │                             │                     │              │
 │  │  ┌────────────────────────┐ │                     │              │
-│  │  │  gemini_model          │ │                     │              │
+│  │  │  turing_browser_agent_ │ │                     │              │
+│  │  │   gemini_model         │ │                     │              │
 │  │  │  • OpenAI ↔ Gemini     │ │                     │              │
 │  │  │    format translator   │ │                     │              │
 │  │  └────────────────────────┘ │                     │              │
@@ -220,8 +224,8 @@ All three providers follow the same unified flow: **Agent → Adapter → Model 
 | Provider | Execution Path | Context Management | Token Tracking |
 |----------|---------------|-------------------|----------------|
 | **OpenAI** (CUA Preview) | `OpenAICUAAdapter` → `openai_model` (proxy) | Server-side via `previous_response_id` | Yes (via `NeMoGymResponseUsage`) |
-| **Anthropic** (Sonnet/Opus) | `GenericCUAAdapter` → `anthropic_model` (translator) | Client-side in adapter: turn trimming, screenshot GC (OpenAI format) | Yes (via `NeMoGymResponseUsage`) |
-| **Gemini** (2.5 Computer Use) | `GenericCUAAdapter` → `gemini_model` (translator) | Client-side in adapter: turn trimming, screenshot GC (OpenAI format) | Yes (via `NeMoGymResponseUsage`) |
+| **Anthropic** (Sonnet/Opus) | `GenericCUAAdapter` → `turing_browser_agent_anthropic_model` (translator) | Client-side in adapter: turn trimming, screenshot GC (OpenAI format) | Yes (via `NeMoGymResponseUsage`) |
+| **Gemini** (2.5 Computer Use) | `GenericCUAAdapter` → `turing_browser_agent_gemini_model` (translator) | Client-side in adapter: turn trimming, screenshot GC (OpenAI format) | Yes (via `NeMoGymResponseUsage`) |
 
 ## File Structure
 
@@ -244,11 +248,11 @@ resources_servers/browser_gym/
 ├── requirements.txt
 └── README.md                       # This file
 
-responses_api_models/anthropic_model/
+responses_api_models/turing_browser_agent_anthropic_model/
 ├── app.py                          # Anthropic model server (OpenAI ↔ Anthropic translator, /v1/responses)
 └── requirements.txt
 
-responses_api_models/gemini_model/
+responses_api_models/turing_browser_agent_gemini_model/
 ├── app.py                          # Gemini model server (OpenAI ↔ Gemini translator, /v1/responses)
 └── requirements.txt
 
@@ -656,19 +660,19 @@ pytest responses_api_models/openai_model/tests/test_app.py -x -v
 ### Anthropic Model Server
 
 ```bash
-ng_test +entrypoint=responses_api_models/anthropic_model
+ng_test +entrypoint=responses_api_models/turing_browser_agent_anthropic_model
 
 # Or directly (requires `anthropic` SDK):
-pytest responses_api_models/anthropic_model/tests/test_app.py -x -v
+pytest responses_api_models/turing_browser_agent_anthropic_model/tests/test_app.py -x -v
 ```
 
 ### Gemini Model Server
 
 ```bash
-ng_test +entrypoint=responses_api_models/gemini_model
+ng_test +entrypoint=responses_api_models/turing_browser_agent_gemini_model
 
 # Or directly (requires `google-genai` SDK):
-pytest responses_api_models/gemini_model/tests/test_app.py -x -v
+pytest responses_api_models/turing_browser_agent_gemini_model/tests/test_app.py -x -v
 ```
 
 ### Running a Subset of Tests
@@ -688,13 +692,14 @@ pytest resources_servers/browser_gym/tests/test_app.py -x -v -k "NormalizeKey"
 
 ### Test Coverage Summary
 
-| Test File | What It Covers |
-|---|---|
-| `resources_servers/browser_gym/tests/test_app.py` | BrowserPool, BrowserAction schema, key normalization, verify endpoint |
-| `responses_api_agents/browser_agent/tests/test_app.py` | Adapter parsing (OpenAI, Generic), denormalization, URL tracking, adapter factory |
-| `responses_api_models/openai_model/tests/test_app.py` | OpenAI model server proxy, model config, responses/chat_completions |
-| `responses_api_models/anthropic_model/tests/test_app.py` | Anthropic model server translator, format conversion, error propagation |
-| `responses_api_models/gemini_model/tests/test_app.py` | Gemini model server translator, format conversion, config parsing |
+| Test File | Tests | What It Covers |
+|---|---|---|
+| `resources_servers/browser_gym/tests/test_app.py` | 68 | BrowserPool, BrowserAction schema, key normalization, verify endpoint |
+| `resources_servers/browser_gym/tests/test_prepare_data.py` | 17 | Task fetching, JSONL writing, gym URL parsing, error handling |
+| `responses_api_agents/browser_agent/tests/test_app.py` | 100 | Adapter parsing (OpenAI, Generic), denormalization, URL tracking, adapter factory |
+| `responses_api_models/openai_model/tests/test_app.py` | — | OpenAI model server proxy, model config, responses/chat_completions |
+| `responses_api_models/turing_browser_agent_anthropic_model/tests/test_app.py` | 41 | Anthropic model server translator, format conversion, error propagation |
+| `responses_api_models/turing_browser_agent_gemini_model/tests/test_app.py` | 52 | Gemini model server translator, format conversion, config parsing |
 
 ---
 

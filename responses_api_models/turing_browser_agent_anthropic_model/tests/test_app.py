@@ -20,10 +20,11 @@ pytest.importorskip("anthropic", reason="anthropic SDK not installed")
 
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
-from responses_api_models.anthropic_model.app import (
+from responses_api_models.turing_browser_agent_anthropic_model.app import (
     AnthropicModelServer,
     AnthropicModelServerConfig,
     _extract_b64_from_data_url,
+    _normalize_anthropic_action,
 )
 
 
@@ -72,7 +73,7 @@ class TestAnthropicModelServerConfig:
 
 class TestAnthropicModelServer:
     def _make_server(self, **config_overrides):
-        with patch("responses_api_models.anthropic_model.app.AsyncAnthropic"):
+        with patch("responses_api_models.turing_browser_agent_anthropic_model.app.AsyncAnthropic"):
             cfg = _make_config(**config_overrides)
             return AnthropicModelServer(config=cfg, server_client=MagicMock(spec=ServerClient))
 
@@ -222,7 +223,7 @@ class TestAnthropicModelServer:
 
 class TestAnthropicTranslateInput:
     def _make_server(self):
-        with patch("responses_api_models.anthropic_model.app.AsyncAnthropic"):
+        with patch("responses_api_models.turing_browser_agent_anthropic_model.app.AsyncAnthropic"):
             cfg = _make_config()
             return AnthropicModelServer(config=cfg, server_client=MagicMock(spec=ServerClient))
 
@@ -253,7 +254,7 @@ class TestAnthropicTranslateInput:
                 {
                     "type": "computer_call",
                     "call_id": "call_abc",
-                    "action": {"action": "left_click", "coordinate": [100, 200]},
+                    "action": {"type": "click", "button": "left", "x": 100, "y": 200},
                     "id": "cu_1",
                 }
             ]
@@ -262,7 +263,8 @@ class TestAnthropicTranslateInput:
         assert messages[0]["role"] == "assistant"
         assert messages[0]["content"][0]["type"] == "tool_use"
         assert messages[0]["content"][0]["id"] == "call_abc"
-        assert messages[0]["content"][0]["input"]["action"] == "left_click"
+        assert messages[0]["content"][0]["input"]["type"] == "click"
+        assert messages[0]["content"][0]["input"]["button"] == "left"
 
     def test_computer_call_output_translates_to_tool_result(self):
         server = self._make_server()
@@ -285,7 +287,7 @@ class TestAnthropicTranslateInput:
 
 class TestAnthropicTranslateResponse:
     def _make_server(self):
-        with patch("responses_api_models.anthropic_model.app.AsyncAnthropic"):
+        with patch("responses_api_models.turing_browser_agent_anthropic_model.app.AsyncAnthropic"):
             cfg = _make_config()
             return AnthropicModelServer(config=cfg, server_client=MagicMock(spec=ServerClient))
 
@@ -307,7 +309,10 @@ class TestAnthropicTranslateResponse:
         assert len(result.output) == 1
         output_item = result.output[0]
         assert output_item.type == "computer_call"
-        assert output_item.action["action"] == "left_click"
+        assert output_item.action.type == "click"
+        assert output_item.action.button == "left"
+        assert output_item.action.x == 100
+        assert output_item.action.y == 200
 
     def test_text_becomes_message(self):
         server = self._make_server()
@@ -360,7 +365,7 @@ class TestAnthropicTranslateResponse:
 
 class TestAnthropicTranslateInputEdgeCases:
     def _make_server(self):
-        with patch("responses_api_models.anthropic_model.app.AsyncAnthropic"):
+        with patch("responses_api_models.turing_browser_agent_anthropic_model.app.AsyncAnthropic"):
             cfg = _make_config()
             return AnthropicModelServer(config=cfg, server_client=MagicMock(spec=ServerClient))
 
@@ -415,7 +420,7 @@ class TestAnthropicTranslateInputEdgeCases:
 
 class TestAnthropicResponsesEffort:
     def _make_server(self, **overrides):
-        with patch("responses_api_models.anthropic_model.app.AsyncAnthropic"):
+        with patch("responses_api_models.turing_browser_agent_anthropic_model.app.AsyncAnthropic"):
             cfg = _make_config(**overrides)
             return AnthropicModelServer(config=cfg, server_client=MagicMock(spec=ServerClient))
 
@@ -436,6 +441,100 @@ class TestAnthropicResponsesEffort:
 
         call_kwargs = server._client.messages.create.call_args[1]
         assert call_kwargs["output_config"] == {"effort": "medium"}
+
+
+class TestNormalizeAnthropicAction:
+    def test_scroll_uses_scroll_direction_and_scroll_amount(self):
+        action = _normalize_anthropic_action(
+            {
+                "action": "scroll",
+                "coordinate": [400, 300],
+                "scroll_direction": "up",
+                "scroll_amount": 5,
+            }
+        )
+        assert action.type == "scroll"
+        assert action.x == 400
+        assert action.y == 300
+        assert action.scroll_y == -5
+        assert action.scroll_x == 0
+
+    def test_scroll_left_right(self):
+        action = _normalize_anthropic_action(
+            {
+                "action": "scroll",
+                "coordinate": [100, 200],
+                "scroll_direction": "right",
+                "scroll_amount": 2,
+            }
+        )
+        assert action.scroll_x == 2
+        assert action.scroll_y == 0
+
+    def test_scroll_with_modifier_key(self):
+        action = _normalize_anthropic_action(
+            {
+                "action": "scroll",
+                "coordinate": [500, 400],
+                "scroll_direction": "down",
+                "scroll_amount": 3,
+                "text": "shift",
+            }
+        )
+        assert action.type == "scroll"
+        assert action.scroll_y == 3
+        dumped = action.model_dump()
+        assert dumped.get("text") == "shift"
+
+    def test_left_mouse_down(self):
+        action = _normalize_anthropic_action({"action": "left_mouse_down"})
+        assert action.type == "left_mouse_down"
+
+    def test_left_mouse_up(self):
+        action = _normalize_anthropic_action({"action": "left_mouse_up"})
+        assert action.type == "left_mouse_up"
+
+    def test_cursor_position(self):
+        action = _normalize_anthropic_action({"action": "cursor_position"})
+        assert action.type == "cursor_position"
+
+    def test_click_with_modifier_key(self):
+        action = _normalize_anthropic_action(
+            {
+                "action": "left_click",
+                "coordinate": [500, 300],
+                "text": "shift",
+            }
+        )
+        assert action.type == "click"
+        assert action.button == "left"
+        assert action.x == 500
+        assert action.y == 300
+        dumped = action.model_dump()
+        assert dumped.get("text") == "shift"
+
+    def test_right_click_with_ctrl_modifier(self):
+        action = _normalize_anthropic_action(
+            {
+                "action": "right_click",
+                "coordinate": [100, 200],
+                "text": "ctrl",
+            }
+        )
+        assert action.type == "click"
+        assert action.button == "right"
+        dumped = action.model_dump()
+        assert dumped.get("text") == "ctrl"
+
+    def test_click_without_modifier_has_no_text(self):
+        action = _normalize_anthropic_action(
+            {
+                "action": "left_click",
+                "coordinate": [100, 200],
+            }
+        )
+        dumped = action.model_dump()
+        assert "text" not in dumped
 
 
 class TestExtractB64FromDataUrl:

@@ -243,44 +243,43 @@ class TestGenericAdapterAnthropicActions:
 
     def test_action_mapping_left_click(self):
         adapter = self._make_adapter()
-        action = adapter._map_action({"action": "left_click", "coordinate": [100, 200]})
+        action = adapter._map_action({"type": "click", "button": "left", "x": 100, "y": 200})
         assert action.action_type == "click"
         assert action.button == "left"
 
     def test_action_mapping_right_click(self):
         adapter = self._make_adapter()
-        action = adapter._map_action({"action": "right_click", "coordinate": [100, 200]})
-        assert action.action_type == "right_click"
+        action = adapter._map_action({"type": "click", "button": "right", "x": 100, "y": 200})
+        assert action.action_type == "click"
+        assert action.button == "right"
 
-    def test_action_mapping_key(self):
+    def test_action_mapping_keypress(self):
         adapter = self._make_adapter()
-        action = adapter._map_action({"action": "key", "text": "Enter"})
+        action = adapter._map_action({"type": "keypress", "keys": ["Enter"]})
         assert action.action_type == "keypress"
-        assert action.key == "Enter"
+        assert action.keys == ["Enter"]
 
-    def test_action_mapping_mouse_move(self):
+    def test_action_mapping_move(self):
         adapter = self._make_adapter()
-        action = adapter._map_action({"action": "mouse_move", "coordinate": [300, 400]})
+        action = adapter._map_action({"type": "move", "x": 300, "y": 400})
         assert action.action_type == "hover"
         assert action.coordinate == [300, 400]
 
     def test_action_mapping_scroll(self):
         adapter = self._make_adapter()
-        action = adapter._map_action({"action": "scroll", "coordinate": [640, 360], "direction": "down", "amount": 3})
+        action = adapter._map_action({"type": "scroll", "x": 640, "y": 360, "scroll_x": 0, "scroll_y": 300})
         assert action.action_type == "scroll"
-        assert action.scroll_direction == "down"
-        assert action.scroll_amount == 3
+        assert action.scroll_y == 300
 
-    def test_action_mapping_drag(self):
+    def test_action_mapping_drag_with_path(self):
         adapter = self._make_adapter()
-        action = adapter._map_action(
-            {"action": "left_click_drag", "start_coordinate": [10, 20], "coordinate": [100, 200]}
-        )
+        action = adapter._map_action({"type": "drag", "path": [{"x": 10, "y": 20}, {"x": 100, "y": 200}]})
         assert action.action_type == "drag"
+        assert action.path == [[10, 20], [100, 200]]
 
     def test_action_mapping_unknown(self):
         adapter = self._make_adapter()
-        action = adapter._map_action({"action": "unknown_action"})
+        action = adapter._map_action({"type": "unknown_action"})
         assert action is None
 
 
@@ -353,15 +352,15 @@ class TestGenericAdapterGeminiActions:
         assert action.scroll_x == -(1280 // 2)
         assert action.scroll_y == 0
 
-    def test_action_mapping_navigate(self):
+    def test_action_mapping_goto(self):
         adapter = _make_generic_gemini_adapter()
-        action = adapter._map_action({"type": "navigate", "url": "https://example.com"})
+        action = adapter._map_action({"type": "goto", "url": "https://example.com"})
         assert action.action_type == "goto"
         assert action.url == "https://example.com"
 
-    def test_action_mapping_navigate_bare_url(self):
+    def test_action_mapping_goto_bare_url(self):
         adapter = _make_generic_gemini_adapter()
-        action = adapter._map_action({"type": "navigate", "url": "example.com"})
+        action = adapter._map_action({"type": "goto", "url": "example.com"})
         assert action.url == "https://example.com"
 
     def test_action_mapping_search(self):
@@ -370,14 +369,11 @@ class TestGenericAdapterGeminiActions:
         assert action.action_type == "goto"
         assert action.url == "https://www.google.com"
 
-    def test_action_mapping_drag_and_drop(self):
+    def test_action_mapping_drag_with_path(self):
         adapter = _make_generic_gemini_adapter()
-        action = adapter._map_action(
-            {"type": "drag_and_drop", "x": 500, "y": 500, "destination_x": 750, "destination_y": 250}
-        )
+        action = adapter._map_action({"type": "drag", "path": [{"x": 500, "y": 500}, {"x": 750, "y": 250}]})
         assert action.action_type == "drag"
-        assert action.start_coordinate == [640, 360]
-        assert action.end_coordinate == [int(750 / 1000 * 1280), int(250 / 1000 * 720)]
+        assert action.path == [[500, 500], [750, 250]]
 
     def test_action_mapping_keypress(self):
         adapter = _make_generic_gemini_adapter()
@@ -389,9 +385,9 @@ class TestGenericAdapterGeminiActions:
         action = adapter._map_action({"type": "keypress", "keys": "Control+a"})
         assert action.keys == ["Control", "a"]
 
-    def test_action_mapping_key_combination(self):
+    def test_action_mapping_keypress_list(self):
         adapter = _make_generic_gemini_adapter()
-        action = adapter._map_action({"type": "key_combination", "keys": ["Control", "v"]})
+        action = adapter._map_action({"type": "keypress", "keys": ["Control", "v"]})
         assert action.action_type == "keypress"
         assert action.keys == ["Control", "v"]
 
@@ -407,7 +403,7 @@ class TestGenericAdapterGeminiActions:
 
     def test_action_mapping_wait(self):
         adapter = _make_generic_gemini_adapter()
-        action = adapter._map_action({"type": "wait_5_seconds"})
+        action = adapter._map_action({"type": "wait", "duration": 5000})
         assert action.action_type == "wait"
         assert action.duration == 5000
 
@@ -467,13 +463,10 @@ class TestGenericAdapterDenormalization:
         action = adapter._map_action({"type": "click_at", "x": 500, "y": 250})
         assert action.coordinate == [500, 250]
 
-    def test_drag_denormalizes_all_coords(self):
+    def test_drag_path_preserves_coords(self):
         adapter = _make_generic_gemini_adapter(viewport_width=1000, viewport_height=1000)
-        action = adapter._map_action(
-            {"type": "drag_and_drop", "x": 100, "y": 200, "destination_x": 800, "destination_y": 900}
-        )
-        assert action.start_coordinate == [100, 200]
-        assert action.end_coordinate == [800, 900]
+        action = adapter._map_action({"type": "drag", "path": [{"x": 100, "y": 200}, {"x": 800, "y": 900}]})
+        assert action.path == [[100, 200], [800, 900]]
 
 
 class TestGenericAdapterReset:
@@ -933,7 +926,7 @@ class TestGenericAdapterResponseParsing:
                 {
                     "type": "computer_call",
                     "call_id": "call_1",
-                    "action": {"action": "left_click", "coordinate": [100, 200]},
+                    "action": {"type": "click", "button": "left", "x": 100, "y": 200},
                 }
             ],
         }
@@ -1664,7 +1657,7 @@ class TestGenericAdapterLifecycle:
                     "type": "computer_call",
                     "id": "cu_1",
                     "call_id": "call_1",
-                    "action": {"action": "left_click", "coordinate": [100, 200]},
+                    "action": {"type": "click", "button": "left", "x": 100, "y": 200},
                     "pending_safety_checks": [],
                     "status": "completed",
                 }
@@ -1694,7 +1687,7 @@ class TestGenericAdapterLifecycle:
                     "type": "computer_call",
                     "id": "cu_1",
                     "call_id": "call_1",
-                    "action": {"action": "left_click", "coordinate": [100, 200]},
+                    "action": {"type": "click", "button": "left", "x": 100, "y": 200},
                     "pending_safety_checks": [],
                     "status": "completed",
                 }
@@ -1733,7 +1726,7 @@ class TestGenericAdapterLifecycle:
                     "type": "computer_call",
                     "id": "cu_1",
                     "call_id": "call_1",
-                    "action": {"action": "left_click", "coordinate": [100, 200]},
+                    "action": {"type": "click", "button": "left", "x": 100, "y": 200},
                     "pending_safety_checks": [],
                     "status": "completed",
                 }
@@ -1800,188 +1793,191 @@ class TestGenericAdapterMoreActions:
             denormalize_coords=denormalize,
         )
 
-    def test_anthropic_double_click(self):
-        adapter = self._make_adapter()
-        result = adapter._map_action({"action": "double_click", "coordinate": [100, 200]})
-        assert result.action_type == "double_click"
-
-    def test_anthropic_triple_click(self):
-        adapter = self._make_adapter()
-        result = adapter._map_action({"action": "triple_click", "coordinate": [50, 50]})
-        assert result.action_type == "triple_click"
-
-    def test_anthropic_type(self):
-        adapter = self._make_adapter()
-        result = adapter._map_action({"action": "type", "text": "hello"})
-        assert result.action_type == "type"
-        assert result.text == "hello"
-
-    def test_anthropic_scroll(self):
-        adapter = self._make_adapter()
-        result = adapter._map_action({"action": "scroll", "coordinate": [640, 360], "direction": "down", "amount": 3})
-        assert result.action_type == "scroll"
-
-    def test_anthropic_screenshot(self):
-        adapter = self._make_adapter()
-        result = adapter._map_action({"action": "screenshot"})
-        assert result.action_type == "screenshot"
-
-    def test_anthropic_wait(self):
-        adapter = self._make_adapter()
-        result = adapter._map_action({"action": "wait", "duration": 2000})
-        assert result.action_type == "wait"
-
-    def test_anthropic_hold_key(self):
-        adapter = self._make_adapter()
-        result = adapter._map_action({"action": "hold_key", "key": "Shift"})
-        assert result.action_type == "keypress"
-
-    def test_anthropic_zoom(self):
-        adapter = self._make_adapter()
-        result = adapter._map_action({"action": "zoom", "region": [0, 0, 500, 500]})
-        assert result.action_type == "zoom"
-
-    def test_gemini_double_click(self):
+    def test_double_click(self):
         adapter = self._make_adapter()
         result = adapter._map_action({"type": "double_click", "x": 100, "y": 200})
         assert result.action_type == "double_click"
 
-    def test_gemini_keypress(self):
+    def test_triple_click(self):
         adapter = self._make_adapter()
-        result = adapter._map_action({"type": "keypress", "keys": "Enter"})
-        assert result.action_type == "keypress"
+        result = adapter._map_action({"type": "triple_click", "x": 50, "y": 50})
+        assert result.action_type == "triple_click"
 
-    def test_gemini_wait(self):
+    def test_type(self):
         adapter = self._make_adapter()
-        result = adapter._map_action({"type": "wait", "ms": 500})
+        result = adapter._map_action({"type": "type", "text": "hello"})
+        assert result.action_type == "type"
+        assert result.text == "hello"
+
+    def test_scroll(self):
+        adapter = self._make_adapter()
+        result = adapter._map_action({"type": "scroll", "x": 640, "y": 360, "scroll_x": 0, "scroll_y": 300})
+        assert result.action_type == "scroll"
+        assert result.scroll_y == 300
+
+    def test_screenshot(self):
+        adapter = self._make_adapter()
+        result = adapter._map_action({"type": "screenshot"})
+        assert result.action_type == "screenshot"
+
+    def test_wait(self):
+        adapter = self._make_adapter()
+        result = adapter._map_action({"type": "wait", "duration": 2000})
         assert result.action_type == "wait"
+        assert result.duration == 2000
+
+    def test_hold_key(self):
+        adapter = self._make_adapter()
+        result = adapter._map_action({"type": "hold_key", "key": "Shift", "duration": 500})
+        assert result.action_type == "keypress"
+        assert result.key == "Shift"
         assert result.duration == 500
 
-    def test_gemini_wait_5_seconds(self):
+    def test_zoom(self):
         adapter = self._make_adapter()
-        result = adapter._map_action({"type": "wait_5_seconds"})
-        assert result.action_type == "wait"
-        assert result.duration == 5000
+        result = adapter._map_action({"type": "zoom", "region": [0, 0, 500, 500]})
+        assert result.action_type == "zoom"
+        assert result.region == [0, 0, 500, 500]
 
-    def test_gemini_goto(self):
+    def test_zoom_no_region(self):
+        adapter = self._make_adapter()
+        result = adapter._map_action({"type": "zoom"})
+        assert result.action_type == "zoom"
+        assert result.region is None
+
+    def test_left_mouse_down(self):
+        adapter = self._make_adapter()
+        result = adapter._map_action({"type": "left_mouse_down", "x": 100, "y": 200})
+        assert result.action_type == "click"
+        assert result.coordinate == [100, 200]
+
+    def test_left_mouse_up(self):
+        adapter = self._make_adapter()
+        result = adapter._map_action({"type": "left_mouse_up", "x": 100, "y": 200})
+        assert result.action_type == "screenshot"
+
+    def test_cursor_position(self):
+        adapter = self._make_adapter()
+        result = adapter._map_action({"type": "cursor_position"})
+        assert result.action_type == "screenshot"
+
+    def test_keypress(self):
+        adapter = self._make_adapter()
+        result = adapter._map_action({"type": "keypress", "keys": ["Enter"]})
+        assert result.action_type == "keypress"
+        assert result.keys == ["Enter"]
+
+    def test_keypress_string_keys(self):
+        adapter = self._make_adapter()
+        result = adapter._map_action({"type": "keypress", "keys": "Ctrl+C"})
+        assert result.action_type == "keypress"
+        assert result.keys == ["Ctrl", "C"]
+
+    def test_goto(self):
         adapter = self._make_adapter()
         result = adapter._map_action({"type": "goto", "url": "https://google.com"})
         assert result.action_type == "goto"
         assert result.url == "https://google.com"
 
-    def test_gemini_goto_bare_url_gets_https(self):
+    def test_goto_bare_url_gets_https(self):
         adapter = self._make_adapter()
-        result = adapter._map_action({"type": "navigate", "url": "google.com"})
+        result = adapter._map_action({"type": "goto", "url": "google.com"})
         assert result.url == "https://google.com"
 
-    def test_gemini_go_back(self):
+    def test_go_back(self):
         adapter = self._make_adapter()
         result = adapter._map_action({"type": "go_back"})
         assert result.action_type == "go_back"
 
-    def test_gemini_go_forward(self):
+    def test_go_forward(self):
         adapter = self._make_adapter()
         result = adapter._map_action({"type": "go_forward"})
         assert result.action_type == "go_forward"
 
-    def test_gemini_new_tab(self):
+    def test_new_tab(self):
         adapter = self._make_adapter()
         result = adapter._map_action({"type": "new_tab", "url": "https://test.com"})
         assert result.action_type == "new_tab"
 
-    def test_gemini_switch_tab(self):
+    def test_switch_tab(self):
         adapter = self._make_adapter()
         result = adapter._map_action({"type": "switch_tab", "tab_index": 2})
         assert result.action_type == "switch_tab"
         assert result.tab_index == 2
 
-    def test_gemini_close_tab(self):
+    def test_close_tab(self):
         adapter = self._make_adapter()
         result = adapter._map_action({"type": "close_tab"})
         assert result.action_type == "close_tab"
 
-    def test_gemini_drag(self):
+    def test_drag_with_path(self):
         adapter = self._make_adapter()
-        result = adapter._map_action({"type": "drag", "x": 100, "y": 200, "destination_x": 300, "destination_y": 400})
+        result = adapter._map_action({"type": "drag", "path": [{"x": 100, "y": 200}, {"x": 300, "y": 400}]})
         assert result.action_type == "drag"
+        assert result.path == [[100, 200], [300, 400]]
 
-    def test_gemini_scroll_document_up(self):
+    def test_drag_with_start_end_coordinates(self):
+        adapter = self._make_adapter()
+        result = adapter._map_action({"type": "drag", "start_coordinate": [100, 200], "end_coordinate": [300, 400]})
+        assert result.action_type == "drag"
+        assert result.start_coordinate == [100, 200]
+        assert result.end_coordinate == [300, 400]
+
+    def test_scroll_document_up(self):
         adapter = self._make_adapter()
         result = adapter._map_action({"type": "scroll_document", "direction": "up"})
         assert result.action_type == "scroll"
         assert result.scroll_y < 0
 
-    def test_gemini_scroll_document_right(self):
+    def test_scroll_document_right(self):
         adapter = self._make_adapter()
         result = adapter._map_action({"type": "scroll_document", "direction": "right"})
         assert result.action_type == "scroll"
         assert result.scroll_x > 0
 
-    def test_gemini_hover(self):
+    def test_move(self):
         adapter = self._make_adapter()
-        result = adapter._map_action({"type": "hover", "x": 100, "y": 200})
+        result = adapter._map_action({"type": "move", "x": 100, "y": 200})
         assert result.action_type == "hover"
+        assert result.coordinate == [100, 200]
 
-    def test_gemini_search(self):
+    def test_search(self):
         adapter = self._make_adapter()
         result = adapter._map_action({"type": "search"})
         assert result.action_type == "goto"
 
-    def test_gemini_list_tabs_screenshot(self):
+    def test_list_tabs_screenshot(self):
         adapter = self._make_adapter()
         result = adapter._map_action({"type": "list_tabs"})
         assert result.action_type == "screenshot"
 
-    def test_gemini_drag_and_drop_with_denorm(self):
-        adapter = self._make_adapter(denormalize=True)
-        result = adapter._map_action(
-            {"type": "drag_and_drop", "x": 500, "y": 500, "destination_x": 700, "destination_y": 700}
-        )
-        assert result.action_type == "drag"
-        assert result.start_coordinate[0] == int((500 / 1000.0) * 1280)
+    def test_open_web_browser_screenshot(self):
+        adapter = self._make_adapter()
+        result = adapter._map_action({"type": "open_web_browser"})
+        assert result.action_type == "screenshot"
 
-    def test_gemini_scroll_at(self):
+    def test_scroll_at(self):
         adapter = self._make_adapter(denormalize=True)
         result = adapter._map_action({"type": "scroll_at", "x": 500, "y": 500, "direction": "down", "magnitude": 400})
         assert result.action_type == "scroll"
         assert result.scroll_y > 0
 
-    def test_unknown_anthropic_action_returns_none(self):
-        adapter = self._make_adapter()
-        result = adapter._map_action({"action": "unknown_action_xyz"})
-        assert result is None
-
-    def test_unknown_gemini_action_returns_none(self):
+    def test_unknown_action_returns_none(self):
         adapter = self._make_adapter()
         result = adapter._map_action({"type": "unknown_action_xyz"})
         assert result is None
 
-    def test_anthropic_right_click(self):
+    def test_click_right_button(self):
         adapter = self._make_adapter()
-        result = adapter._map_action({"action": "right_click", "coordinate": [100, 200]})
-        assert result.action_type == "right_click"
+        result = adapter._map_action({"type": "click", "button": "right", "x": 100, "y": 200})
+        assert result.action_type == "click"
+        assert result.button == "right"
 
-    def test_anthropic_middle_click(self):
+    def test_click_wheel_button(self):
         adapter = self._make_adapter()
-        result = adapter._map_action({"action": "middle_click", "coordinate": [100, 200]})
-        assert result.action_type == "middle_click"
-
-    def test_anthropic_key(self):
-        adapter = self._make_adapter()
-        result = adapter._map_action({"action": "key", "text": "Enter"})
-        assert result.action_type == "keypress"
-
-    def test_anthropic_mouse_move(self):
-        adapter = self._make_adapter()
-        result = adapter._map_action({"action": "mouse_move", "coordinate": [100, 200]})
-        assert result.action_type == "hover"
-
-    def test_anthropic_left_click_drag(self):
-        adapter = self._make_adapter()
-        result = adapter._map_action(
-            {"action": "left_click_drag", "start_coordinate": [100, 200], "coordinate": [300, 400]}
-        )
-        assert result.action_type == "drag"
+        result = adapter._map_action({"type": "click", "button": "wheel", "x": 100, "y": 200})
+        assert result.action_type == "click"
+        assert result.button == "wheel"
 
     def test_gemini_click_at_with_denorm(self):
         adapter = self._make_adapter(denormalize=True)
@@ -2018,9 +2014,9 @@ class TestGenericAdapterMoreActions:
         assert result.action_type == "scroll"
         assert result.scroll_y < 0
 
-    def test_gemini_key_combination(self):
+    def test_keypress_combo_string(self):
         adapter = self._make_adapter()
-        result = adapter._map_action({"type": "key_combination", "keys": "Ctrl+C"})
+        result = adapter._map_action({"type": "keypress", "keys": "Ctrl+C"})
         assert result.action_type == "keypress"
         assert result.keys == ["Ctrl", "C"]
 
@@ -2115,7 +2111,7 @@ class TestGenericAdapterSafetyChecks:
                     "type": "computer_call",
                     "id": "cu_1",
                     "call_id": "call_1",
-                    "action": {"action": "left_click", "coordinate": [100, 200]},
+                    "action": {"type": "click", "button": "left", "x": 100, "y": 200},
                     "pending_safety_checks": [{"id": "sc_1", "code": "unsafe_content", "message": "Caution"}],
                     "status": "completed",
                 }

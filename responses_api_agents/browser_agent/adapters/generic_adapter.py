@@ -201,62 +201,12 @@ class GenericCUAAdapter(BaseCUAAdapter):
     # ── Action mapping ───────────────────────────────────────────
 
     def _map_action(self, action: Dict[str, Any]) -> Optional[BrowserAction]:
-        """Map a computer_call action dict to BrowserAction.
+        """Map a normalized NeMoGymAction dict to BrowserAction.
 
-        Handles both Anthropic-style actions (keyed by "action") and
-        Gemini/OpenAI-style actions (keyed by "type").
+        All model servers (OpenAI, Anthropic, Gemini) normalize their
+        provider-specific actions into unified NeMoGymAction types keyed
+        by ``type`` before they reach the adapter.
         """
-        if "action" in action and "type" not in action:
-            return self._map_anthropic_action(action)
-        return self._map_openai_gemini_action(action)
-
-    def _map_anthropic_action(self, action: Dict[str, Any]) -> Optional[BrowserAction]:
-        """Map Anthropic computer-use action format to BrowserAction."""
-        action_type = action.get("action", "")
-
-        if action_type in ("left_click", "click"):
-            return BrowserAction(action_type="click", coordinate=action.get("coordinate"), button="left")
-        elif action_type == "right_click":
-            return BrowserAction(action_type="right_click", coordinate=action.get("coordinate"))
-        elif action_type == "middle_click":
-            return BrowserAction(action_type="middle_click", coordinate=action.get("coordinate"))
-        elif action_type == "double_click":
-            return BrowserAction(action_type="double_click", coordinate=action.get("coordinate"))
-        elif action_type == "triple_click":
-            return BrowserAction(action_type="triple_click", coordinate=action.get("coordinate"))
-        elif action_type == "type":
-            return BrowserAction(action_type="type", text=action.get("text", ""))
-        elif action_type == "key":
-            return BrowserAction(action_type="keypress", key=action.get("text", ""))
-        elif action_type == "mouse_move":
-            return BrowserAction(action_type="hover", coordinate=action.get("coordinate"))
-        elif action_type == "left_click_drag":
-            return BrowserAction(
-                action_type="drag",
-                start_coordinate=action.get("start_coordinate"),
-                end_coordinate=action.get("coordinate"),
-            )
-        elif action_type == "scroll":
-            return BrowserAction(
-                action_type="scroll",
-                coordinate=action.get("coordinate"),
-                scroll_direction=action.get("direction"),
-                scroll_amount=action.get("amount"),
-            )
-        elif action_type == "screenshot":
-            return BrowserAction(action_type="screenshot")
-        elif action_type == "wait":
-            return BrowserAction(action_type="wait", duration=action.get("duration", 1000))
-        elif action_type == "hold_key":
-            return BrowserAction(action_type="keypress", key=action.get("key", ""), duration=action.get("duration"))
-        elif action_type == "zoom":
-            return BrowserAction(action_type="zoom", region=action.get("region"))
-        else:
-            logger.warning("Unknown Anthropic action: %s", action_type)
-            return None
-
-    def _map_openai_gemini_action(self, action: Dict[str, Any]) -> Optional[BrowserAction]:
-        """Map OpenAI/Gemini-style action (keyed by 'type') to BrowserAction."""
         action_type = action.get("type", "")
 
         if action_type == "click":
@@ -268,9 +218,9 @@ class GenericCUAAdapter(BaseCUAAdapter):
         elif action_type == "hover_at":
             coord = self._get_gemini_coord(action)
             return BrowserAction(action_type="hover", coordinate=coord)
-        elif action_type in ("double_click",):
+        elif action_type == "double_click":
             return BrowserAction(action_type="double_click", coordinate=self._get_coord(action))
-        elif action_type in ("triple_click",):
+        elif action_type == "triple_click":
             return BrowserAction(action_type="triple_click", coordinate=self._get_coord(action))
         elif action_type in ("type", "type_text_at"):
             coord = self._get_gemini_coord(action) if action_type == "type_text_at" else None
@@ -316,21 +266,18 @@ class GenericCUAAdapter(BaseCUAAdapter):
             return BrowserAction(
                 action_type="scroll", coordinate=coord, scroll_direction=direction, scroll_x=dx, scroll_y=dy
             )
-        elif action_type in ("keypress", "key_combination"):
+        elif action_type == "keypress":
             keys = action.get("keys", action.get("key", []))
             if isinstance(keys, str):
                 keys = keys.split("+") if "+" in keys else keys.split(",") if "," in keys else [keys]
             return BrowserAction(action_type="keypress", keys=list(keys) if keys else [])
-        elif action_type in ("move", "mouse_move", "hover"):
+        elif action_type == "move":
             return BrowserAction(action_type="hover", coordinate=self._get_coord(action))
         elif action_type == "screenshot":
             return BrowserAction(action_type="screenshot")
         elif action_type == "wait":
-            duration = action.get("ms") or action.get("duration") or 1000
-            return BrowserAction(action_type="wait", duration=int(duration))
-        elif action_type == "wait_5_seconds":
-            return BrowserAction(action_type="wait", duration=5000)
-        elif action_type in ("goto", "navigate"):
+            return BrowserAction(action_type="wait", duration=int(action.get("duration") or 1000))
+        elif action_type == "goto":
             url = action.get("url", "")
             if url and not url.startswith(("http://", "https://")):
                 url = "https://" + url
@@ -349,40 +296,23 @@ class GenericCUAAdapter(BaseCUAAdapter):
         elif action_type == "close_tab":
             return BrowserAction(action_type="close_tab")
         elif action_type == "drag":
-            start = self._get_coord(action) or (
-                [int(action["start_x"]), int(action["start_y"])]
-                if "start_x" in action and "start_y" in action
-                else action.get("start_coordinate")
-            )
-            end = (
-                [int(action["destination_x"]), int(action["destination_y"])]
-                if "destination_x" in action and "destination_y" in action
-                else action.get("destination_coordinate") or action.get("target_coordinate")
-            )
+            path = action.get("path")
+            if path and len(path) >= 2:
+                return BrowserAction(action_type="drag", path=[[int(p["x"]), int(p["y"])] for p in path])
+            start = self._get_coord(action) or action.get("start_coordinate")
+            end = action.get("destination_coordinate") or action.get("end_coordinate")
             return BrowserAction(action_type="drag", start_coordinate=start, end_coordinate=end)
-        elif action_type == "drag_and_drop":
-            sx = (
-                self._denorm_x(int(action.get("x", action.get("start_x", 0))))
-                if self._denormalize_coords
-                else int(action.get("x", action.get("start_x", 0)))
-            )
-            sy = (
-                self._denorm_y(int(action.get("y", action.get("start_y", 0))))
-                if self._denormalize_coords
-                else int(action.get("y", action.get("start_y", 0)))
-            )
-            ex = (
-                self._denorm_x(int(action.get("destination_x", action.get("end_x", 0))))
-                if self._denormalize_coords
-                else int(action.get("destination_x", action.get("end_x", 0)))
-            )
-            ey = (
-                self._denorm_y(int(action.get("destination_y", action.get("end_y", 0))))
-                if self._denormalize_coords
-                else int(action.get("destination_y", action.get("end_y", 0)))
-            )
-            return BrowserAction(action_type="drag", start_coordinate=[sx, sy], end_coordinate=[ex, ey])
-        elif action_type in ("list_tabs", "open_web_browser", "WebAgentState", "web_agent_state"):
+        elif action_type == "zoom":
+            return BrowserAction(action_type="zoom", region=action.get("region"))
+        elif action_type == "hold_key":
+            return BrowserAction(action_type="keypress", key=action.get("key", ""), duration=action.get("duration"))
+        elif action_type == "left_mouse_down":
+            return BrowserAction(action_type="click", coordinate=self._get_coord(action), button="left")
+        elif action_type == "left_mouse_up":
+            return BrowserAction(action_type="screenshot")
+        elif action_type == "cursor_position":
+            return BrowserAction(action_type="screenshot")
+        elif action_type in ("open_web_browser", "list_tabs"):
             return BrowserAction(action_type="screenshot")
         else:
             logger.warning("Unknown action type: %s", action_type)
@@ -390,7 +320,7 @@ class GenericCUAAdapter(BaseCUAAdapter):
 
     def _get_coord(self, action: Dict[str, Any]) -> Optional[List[int]]:
         """Extract pixel coordinates — handles both x/y and coordinate formats."""
-        if "x" in action and "y" in action:
+        if "x" in action and "y" in action and action["x"] is not None and action["y"] is not None:
             return [int(action["x"]), int(action["y"])]
         if "coordinate" in action:
             return action["coordinate"]
@@ -398,7 +328,7 @@ class GenericCUAAdapter(BaseCUAAdapter):
 
     def _get_gemini_coord(self, action: Dict[str, Any]) -> Optional[List[int]]:
         """Extract coordinates, applying 0-999 → pixel denormalization if configured."""
-        if "x" not in action or "y" not in action:
+        if "x" not in action or "y" not in action or action["x"] is None or action["y"] is None:
             return self._get_coord(action)
         x, y = int(action["x"]), int(action["y"])
         if self._denormalize_coords:

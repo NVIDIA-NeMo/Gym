@@ -20,11 +20,12 @@ pytest.importorskip("google.genai", reason="google-genai SDK not installed")
 
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
-from responses_api_models.gemini_model.app import (
+from responses_api_models.turing_browser_agent_gemini_model.app import (
     GeminiModelServer,
     GeminiModelServerConfig,
     _extract_b64_from_data_url,
     _is_retryable_gemini_error,
+    _normalize_gemini_action,
 )
 
 
@@ -190,8 +191,9 @@ class TestGeminiTranslateResponse:
         assert len(result.output) == 1
         output_item = result.output[0]
         assert output_item.type == "computer_call"
-        assert output_item.action["type"] == "click_at"
-        assert output_item.action["x"] == 500
+        assert output_item.action.type == "click_at"
+        assert output_item.action.x == 500
+        assert output_item.action.y == 300
 
     def test_text_becomes_message(self):
         server = self._make_server()
@@ -477,7 +479,7 @@ class TestGeminiRetryLoop:
         server._client.aio.models.generate_content = AsyncMock(side_effect=[ConnectionError("lost"), mock_response])
 
         body = NeMoGymResponseCreateParamsNonStreaming(input="test")
-        with patch("responses_api_models.gemini_model.app.asyncio.sleep", new_callable=AsyncMock):
+        with patch("responses_api_models.turing_browser_agent_gemini_model.app.asyncio.sleep", new_callable=AsyncMock):
             result = await server.responses(body)
 
         assert result.object == "response"
@@ -489,7 +491,7 @@ class TestGeminiRetryLoop:
         server._client.aio.models.generate_content = AsyncMock(side_effect=ConnectionError("always fails"))
 
         body = NeMoGymResponseCreateParamsNonStreaming(input="test")
-        with patch("responses_api_models.gemini_model.app.asyncio.sleep", new_callable=AsyncMock):
+        with patch("responses_api_models.turing_browser_agent_gemini_model.app.asyncio.sleep", new_callable=AsyncMock):
             with pytest.raises(ConnectionError):
                 await server.responses(body)
 
@@ -560,6 +562,9 @@ class TestGeminiSafetyDecision:
         )
         contents = server._translate_input_to_contents(body)
         fn_call = contents[0].parts[0].function_call
+        assert fn_call.name == "click_at"
+        assert fn_call.args["x"] == 100
+        assert fn_call.args["y"] == 200
         assert "safety_decision" in fn_call.args
         assert fn_call.args["safety_decision"]["id"] == "sd_1"
 
@@ -621,8 +626,10 @@ class TestGeminiSafetyDecision:
 
         computer_call = result.output[0]
         assert computer_call.type == "computer_call"
-        assert computer_call.action["safety_decision"] == safety_val
         assert len(computer_call.pending_safety_checks) == 1
+        assert computer_call.pending_safety_checks[0].id == "sd_1"
+        assert computer_call.pending_safety_checks[0].code == "malicious"
+        assert computer_call.pending_safety_checks[0].message == "Risky"
 
     def test_translate_response_no_safety_decision(self):
         from google.genai.types import Content, FunctionCall, Part
@@ -649,5 +656,60 @@ class TestGeminiSafetyDecision:
         result = server._translate_response(mock_response, body)
 
         computer_call = result.output[0]
-        assert "safety_decision" not in computer_call.action
+        assert computer_call.action.type == "click_at"
+        assert computer_call.action.x == 50
+        assert computer_call.action.y == 60
         assert computer_call.pending_safety_checks == []
+
+
+class TestNormalizeGeminiAction:
+    def test_drag_and_drop_with_destination(self):
+        action = _normalize_gemini_action(
+            {
+                "type": "drag_and_drop",
+                "x": 100,
+                "y": 100,
+                "destination_x": 500,
+                "destination_y": 500,
+            }
+        )
+        assert action.type == "drag"
+        assert len(action.path) == 2
+        assert action.path[0].x == 100
+        assert action.path[0].y == 100
+        assert action.path[1].x == 500
+        assert action.path[1].y == 500
+
+    def test_drag_with_path_format(self):
+        action = _normalize_gemini_action(
+            {
+                "type": "drag",
+                "path": [{"x": 10, "y": 20}, {"x": 30, "y": 40}],
+            }
+        )
+        assert action.type == "drag"
+        assert len(action.path) == 2
+        assert action.path[0].x == 10
+        assert action.path[1].x == 30
+
+    def test_open_web_browser(self):
+        action = _normalize_gemini_action({"type": "open_web_browser"})
+        assert action.type == "open_web_browser"
+
+    def test_search_action(self):
+        action = _normalize_gemini_action({"type": "search"})
+        assert action.type == "search"
+
+    def test_navigate_action(self):
+        action = _normalize_gemini_action({"type": "navigate", "url": "https://example.com"})
+        assert action.type == "goto"
+        assert action.url == "https://example.com"
+
+    def test_wait_5_seconds(self):
+        action = _normalize_gemini_action({"type": "wait_5_seconds"})
+        assert action.type == "wait"
+
+    def test_key_combination_string_keys(self):
+        action = _normalize_gemini_action({"type": "key_combination", "keys": "Control+A"})
+        assert action.type == "keypress"
+        assert action.keys == ["Control", "A"]
