@@ -90,6 +90,8 @@ QUERY_KEY_NAME = "query"
 OBSERVABILITY_ENABLED_KEY_NAME = "observability_enabled"
 MODEL_CALL_CAPTURE_DIR_KEY_NAME = "model_call_capture_dir"
 COMPONENT_NAME_KEY_NAME = "component_name"
+SKIP_VERIFICATION_KEY_NAME = "skip_verification"
+SKIP_VERIFICATION_REWARD_KEY_NAME = "skip_verification_reward"
 NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     CONFIG_PATHS_KEY_NAME,
     ENTRYPOINT_KEY_NAME,
@@ -118,6 +120,8 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     OBSERVABILITY_ENABLED_KEY_NAME,
     MODEL_CALL_CAPTURE_DIR_KEY_NAME,
     COMPONENT_NAME_KEY_NAME,
+    SKIP_VERIFICATION_KEY_NAME,
+    SKIP_VERIFICATION_REWARD_KEY_NAME,
 ]
 
 # Data keys
@@ -325,6 +329,8 @@ Duplicate config paths:
         port_range_low: int,
         port_range_high: int,
         initial_disallowed_ports: Optional[List[int]] = None,
+        skip_verification: Optional[bool] = None,
+        skip_verification_reward: Optional[float] = None,
     ) -> List[int]:
         server_refs = [c.get_server_ref() for c in server_instance_configs]
 
@@ -367,6 +373,15 @@ Duplicate config paths:
                 else:
                     # Port already exists, add it to the disallowed list.
                     disallowed_ports.append(run_server_config_dict["port"])
+
+                if server_instance_config.SERVER_TYPE == "responses_api_agents":
+                    if skip_verification is not None and SKIP_VERIFICATION_KEY_NAME not in run_server_config_dict:
+                        run_server_config_dict[SKIP_VERIFICATION_KEY_NAME] = skip_verification
+                    if (
+                        skip_verification_reward is not None
+                        and SKIP_VERIFICATION_REWARD_KEY_NAME not in run_server_config_dict
+                    ):
+                        run_server_config_dict[SKIP_VERIFICATION_REWARD_KEY_NAME] = skip_verification_reward
 
         return disallowed_ports
 
@@ -674,6 +689,8 @@ Found global config dict yaml:
             initial_disallowed_ports=initial_disallowed_ports,
             port_range_low=port_range_low,
             port_range_high=port_range_high,
+            skip_verification=global_config_dict.get(SKIP_VERIFICATION_KEY_NAME),
+            skip_verification_reward=global_config_dict.get(SKIP_VERIFICATION_REWARD_KEY_NAME),
         )
 
         with open_dict(global_config_dict):

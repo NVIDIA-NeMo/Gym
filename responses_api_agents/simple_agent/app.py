@@ -194,9 +194,13 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         await raise_for_status(response)
         cookies = response.cookies
 
-        verify_request = SimpleAgentVerifyRequest.model_validate(
-            body.model_dump() | {"response": await get_response_json(response)}
-        )
+        response_json = await get_response_json(response)
+        if self.config.skip_verification:
+            return SimpleAgentVerifyResponse.model_validate(
+                self.build_skipped_verify_response_payload(body, response_json)
+            )
+
+        verify_request = SimpleAgentVerifyRequest.model_validate(body.model_dump() | {"response": response_json})
 
         verify_response = await self.server_client.post(
             server_name=self.config.resources_server.name,
@@ -209,6 +213,9 @@ class SimpleAgent(SimpleResponsesAPIAgent):
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
         """Proxy aggregate_metrics to the resources server."""
+        if self.config.skip_verification:
+            return await super().aggregate_metrics(body)
+
         response = await self.server_client.post(
             server_name=self.config.resources_server.name,
             url_path="/aggregate_metrics",

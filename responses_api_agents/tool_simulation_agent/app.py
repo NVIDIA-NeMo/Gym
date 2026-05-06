@@ -73,8 +73,14 @@ class ToolSimulationAgent(SimpleResponsesAPIAgent):
         )
         await raise_for_status(response)
 
+        response_json = await response.json()
+        if self.config.skip_verification:
+            return ToolSimulationAgentVerifyResponse.model_validate(
+                self.build_skipped_verify_response_payload(body, response_json)
+            )
+
         verify_request_body = body.model_dump()
-        verify_request_body["response"] = await response.json()
+        verify_request_body["response"] = response_json
         verify_request = ToolSimulationAgentVerifyRequest.model_validate(verify_request_body)
 
         verify_response = await self.server_client.post(
