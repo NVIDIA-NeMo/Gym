@@ -43,7 +43,8 @@ from nemo_gym.server_utils import (
 
 
 class BaseResponsesAPIAgentConfig(BaseRunServerInstanceConfig):
-    pass
+    skip_verification: bool = False
+    skip_verification_reward: float = 0.0
 
 
 class BaseResponsesAPIAgent(BaseServer):
@@ -52,6 +53,22 @@ class BaseResponsesAPIAgent(BaseServer):
 
 class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, SimpleServer):
     config: BaseResponsesAPIAgentConfig
+
+    def build_skipped_verify_response_payload(
+        self,
+        body: BaseRunRequest,
+        response: NeMoGymResponse | dict[str, Any],
+    ) -> dict[str, Any]:
+        if isinstance(response, NeMoGymResponse):
+            response_payload = response.model_dump()
+        else:
+            response_payload = response
+
+        return body.model_dump() | {
+            "response": response_payload,
+            "reward": float(self.config.skip_verification_reward),
+            "verification_skipped": True,
+        }
 
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
