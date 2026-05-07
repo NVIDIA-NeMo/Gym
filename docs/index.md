@@ -364,7 +364,6 @@ Design a customer evaluation <benchmarks/designing-customer-evaluation>
 Overview <training-tutorials/index>
 NeMo RL <training-tutorials/nemo-rl-grpo/index.md>
 Unsloth <training-tutorials/unsloth>
-verl <training-tutorials/verl>
 Multi-Environment Training <training-tutorials/multi-environment-training>
 Offline Training (SFT/DPO) <training-tutorials/offline-training-w-rollouts>
 ```

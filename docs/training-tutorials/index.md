@@ -44,12 +44,11 @@ GRPO training on instruction following and reasoning environments.
 {bdg-secondary}`nemo customizer` {bdg-warning}`in progress`
 :::
 
-:::{grid-item-card} {octicon}`server;1.5em;sd-mr-1` verl
-:link: verl
+:::{grid-item-card} {octicon}`server;1.5em;sd-mr-1` VeRL
 :link-type: doc
-RL training with NeMo Gym environments via the verl `nemo_gym` recipe.
+*Coming soon*
 +++
-{bdg-secondary}`verl` {bdg-secondary}`dapo` {bdg-secondary}`multi-node`
+{bdg-secondary}`verl` {bdg-warning}`in progress`
 :::
 
 ::::
