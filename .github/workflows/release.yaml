@@ -106,7 +106,7 @@ jobs:
       docs-skip-linkcheck: true
       gh-release-from-tag: ${{ inputs.gh-release-from-tag || '' }}
       restrict-to-admins: true
-    secrets: inherit
+    secrets: inherit  # pragma: allowlist secret
 
   release-summary:
     needs: [pre-flight, release]
