@@ -11,8 +11,5 @@ hermes_agent:
       concurrency: 32
       max_turns: 30
       enabled_toolsets: null
-      disabled_toolsets: null
-      terminal_backend: local
-      terminal_timeout: 120
-      tool_pool_size: 128
+      temperature: 1.0
       system_prompt: null

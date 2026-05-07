@@ -1,18 +1,46 @@
 # Hermes Agent
 
-Runs [hermes-agent](https://github.com/NousResearch/hermes-agent)'s as a NeMo Gym agent server.
+# Quick start
+
+## Create env.yaml in Gym/
+
+```
+policy_base_url: https://api.openai.com/v1
+policy_api_key: sk...
+policy_model_name: gpt-4o
+```
+
+## Launch nemo gym servers
+
+```bash
+ng_run "+config_paths=[resources_servers/math_with_judge/configs/math_with_judge_hermes_agent.yaml,responses_api_models/openai_model/configs/openai_model.yaml]"
+```
+
+## Collect rollouts
+
+```bash
+ng_collect_rollouts \
+    +agent_name=math_with_judge_hermes_agent \
+    +input_jsonl_fpath=resources_servers/math_with_judge/data/example.jsonl \
+    +output_jsonl_fpath=hermes_agent_rollout.jsonl \
+    +limit=1
+```
+
+## Description
+
+Runs [hermes-agent](https://github.com/NousResearch/hermes-agent) in a nemo gym agent server via the `run_agent.AIAgent` entrypoint, which matches the hermes-agent CLI and user experience. The point is to teach the model to operate inside the hermes-agent harness on real tasks.
 
 ## Setup
 
-Install hermes-agent alongside this repo:
+`hermes-agent` is pinned to a hermes agent fork and commit in `requirements.txt` with patches for token id tracking, chat template, and sampling parameter set for training.
 
-```
-responses_api_agents/hermes_agent/requirements.txt
-```
+Notably, for agent integrations like this, the agent must point at Gym's model server, it must include prompt and generation token id fields for Nemo RL and other trainer's on policy token id correction, it must not override sampling parameters like temperature and top p, and it must not do non-monotonic things like dropping past reasoning content or context compaction.
 
-The `requirements.txt` installs hermes-agent as a local editable package from the sibling directory.
+## Resources server compatibility
 
-## Configuration
+Works with any resources server based verifier, but does not work for resources server tools or other endpoints out of the box. Hermes Agent ships its own toolset (terminal, file, code_execution, web, etc.), so it does not rely on tools defined in the dataset. It may work with Gymnasium style resources servers, though. In testing, only the resources server's task data and `verify` are used. This means existing benchmarks (math, code, reasoning_gym, mcqa, instruction_following, ...) can be used as-is by adding a `<server>_hermes_agent` config.
+
+## Configuration example
 
 ```yaml
 hermes_agent:
@@ -25,30 +53,21 @@ hermes_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      enabled_toolsets: [terminal, file, web_search]
-      terminal_backend: local
+      enabled_toolsets: [terminal, file, code_execution]
       max_turns: 30
       concurrency: 32
+      temperature: 1.0
       system_prompt: |
-        Your system prompt here.
+        your system prompt here.
 ```
 
-| Field | Default | Description |
+| field | default | description |
 |-------|---------|-------------|
-| `enabled_toolsets` | `null` (all) | Hermes toolsets to enable |
-| `disabled_toolsets` | `null` | Toolsets to exclude |
-| `terminal_backend` | `local` | Terminal execution backend |
-| `terminal_timeout` | `120` | Per-command timeout in seconds |
-| `max_turns` | `30` | Max LLM calls per rollout |
-| `concurrency` | `32` | Max simultaneous `run()` calls |
-| `tool_pool_size` | `128` | Thread pool size for tool dispatch |
-| `system_prompt` | `null` | Prepended to every rollout if set |
+| `enabled_toolsets` | `null` (all) | forwarded to `AIAgent(enabled_toolsets=...)` |
+| `disabled_toolsets` | `null` | forwarded to `AIAgent(disabled_toolsets=...)` |
+| `max_turns` | `30` | maps to `AIAgent.max_iterations` |
+| `concurrency` | `32` | max simultaneous `run()` calls |
+| `temperature` | `1.0` | sampling temperature passed to `AIAgent` |
+| `system_prompt` | `null` | passed as `system_message` to `run_conversation`; falls back to any system item in `body.input` |
 
-## Example configs
-
-- `resources_servers/math_with_judge/configs/math_with_judge_hermes_agent.yaml` — math reasoning with terminal for computation
-- `resources_servers/reasoning_gym/configs/reasoning_gym_hermes_agent.yaml` — pure reasoning, no tools
-
-## Notes
-
-Hermes tools and Gym resources-server tools are separate dispatch systems. If the data already defines tools (e.g. `execute_python` for `math_with_code`), hermes does not intercept those calls. Use benchmarks whose data has an empty tools list, or set `enabled_toolsets: []` for tool-free rollouts.
+The model-server url is resolved at request time and passed to `AIAgent(base_url=..., api_key="gym")`.

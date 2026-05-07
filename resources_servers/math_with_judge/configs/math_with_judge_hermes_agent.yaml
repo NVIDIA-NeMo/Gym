@@ -24,8 +24,8 @@ math_with_judge_hermes_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      enabled_toolsets: [terminal]
-      max_turns: 6
+      enabled_toolsets: [terminal, file, code_execution, todo, memory, clarify, session_search, skills, web, image_gen]
+      max_turns: 30
       concurrency: 32
       terminal_backend: local
       terminal_timeout: 15
