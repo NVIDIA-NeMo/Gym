@@ -1,0 +1,20 @@
+config_paths:
+  - resources_servers/simpleqa/configs/simpleqa.yaml
+  - benchmarks/simpleqa/judge_gptoss20b.yaml
+
+simpleqa_simpleqa_resources_server:
+  _inherit_from: simpleqa
+
+simpleqa_simpleqa_simple_agent:
+  _inherit_from: simpleqa_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: simpleqa_simpleqa_resources_server
+      datasets:
+      - name: simpleqa
+        type: benchmark
+        jsonl_fpath: benchmarks/simpleqa/data/simpleqa_benchmark.jsonl
+        prompt_config: benchmarks/simpleqa/prompts/default.yaml
+        prepare_script: benchmarks/simpleqa/prepare.py
+        license: MIT
