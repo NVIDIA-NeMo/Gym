@@ -117,7 +117,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 usage.input_tokens_details.cached_tokens = 0
                 usage.output_tokens_details.reasoning_tokens = 0
 
-            if model_response.incomplete_details and model_response.incomplete_details.reason == "max_output_tokens":
+            if model_response.incomplete_details:
                 break
 
             all_fn_calls: List[NeMoGymResponseFunctionToolCall] = [o for o in output if o.type == "function_call"]
@@ -128,10 +128,27 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 break
 
             for output_function_call in all_fn_calls:
+                try:
+                    parsed_arguments = json.loads(output_function_call.arguments)
+                except (json.JSONDecodeError, TypeError) as e:
+                    # Model produced malformed tool-call arguments. Surface the
+                    # error back as a tool response so the rollout can continue
+                    # (or terminate with a low reward) instead of crashing the
+                    # whole batch on json.loads.
+                    tool_response = NeMoGymFunctionCallOutput(
+                        type="function_call_output",
+                        call_id=output_function_call.call_id,
+                        # Use repr(e) so the exception type name is always
+                        # included even when str(e) would be empty.
+                        output=json.dumps({"error": f"Invalid tool call arguments: {e!r}"}),
+                    )
+                    new_outputs.append(tool_response)
+                    continue
+
                 api_response = await self.server_client.post(
                     server_name=self.config.resources_server.name,
                     url_path=f"/{output_function_call.name}",
-                    json=json.loads(output_function_call.arguments),
+                    json=parsed_arguments,
                     cookies=resources_server_cookies,
                 )
                 # We don't raise for status here since it's a valid return for the API to error e.g. if the model outputs an invalid call or something.

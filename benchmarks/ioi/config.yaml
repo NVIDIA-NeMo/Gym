@@ -1,0 +1,23 @@
+config_paths:
+  - resources_servers/competitive_coding_challenges/configs/competitive_coding_challenges.yaml
+
+ioi_resources_server:
+  _inherit_from: competitive_coding_challenges_resources_server
+  resources_servers:
+    competitive_coding_challenges:
+      test_file: ${oc.env:CCC_TEST_FILE,benchmarks/ioi/data/ioi24_metadata.json}
+      shared_dir: ${oc.env:SHARED_TEMP_DIR,/tmp}
+
+ioi_simple_agent:
+  _inherit_from: competitive_coding_challenges_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: ioi_resources_server
+      datasets:
+        - name: ioi
+          type: benchmark
+          jsonl_fpath: benchmarks/ioi/data/ioi24_benchmark.jsonl
+          prompt_config: benchmarks/prompts/generic_default.yaml
+          prepare_script: benchmarks/ioi/prepare.py
+          num_repeats: 50

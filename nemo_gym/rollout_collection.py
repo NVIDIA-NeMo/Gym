@@ -28,6 +28,7 @@ from pydantic import BaseModel, Field
 from tqdm.asyncio import tqdm
 from wandb import Table
 
+from nemo_gym import PARENT_DIR
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.config_types import BaseNeMoGymCLIConfig, BaseServerConfig
 from nemo_gym.global_config import (
@@ -43,6 +44,7 @@ from nemo_gym.server_utils import (
     ServerClient,
     get_global_config_dict,
     get_response_json,
+    is_global_aiohttp_client_request_debug_enabled,
     is_global_aiohttp_client_setup,
     raise_for_status,
     set_global_aiohttp_client,
@@ -57,6 +59,10 @@ class SharedRolloutCollectionConfig(BaseNeMoGymCLIConfig):
     responses_create_params: Dict[str, Any] = Field(
         default_factory=dict,
         description="Overrides for the responses_create_params e.g. temperature, max_output_tokens, etc.",
+    )
+    upload_rollouts_to_wandb: bool = Field(
+        default=True,
+        description="Upload the rollouts to W&B. Sometimes this should be off because the rollouts are massive. Default: True",
     )
 
 
@@ -110,7 +116,7 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
     )
     num_repeats_add_seed: bool = Field(
         default=False,
-        description='When num_repeats > 1, add a "seed" parameter on the Responses create params.',
+        description='When num_repeats > 1, pass a per-rollout "seed" via metadata.extra_body (honored by vLLM model servers).',
     )
     resume_from_cache: bool = Field(
         default=False,
@@ -127,6 +133,16 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
         return output_fpath.with_stem(output_fpath.stem + "_materialized_inputs").with_suffix(".jsonl")
 
 
+def _rollout_request_debug_summary(row: Dict[str, Any]) -> Dict[str, Any]:
+    agent_ref = row.get(AGENT_REF_KEY_NAME) or {}
+    summary = {
+        TASK_INDEX_KEY_NAME: row.get(TASK_INDEX_KEY_NAME),
+        ROLLOUT_INDEX_KEY_NAME: row.get(ROLLOUT_INDEX_KEY_NAME),
+        "agent_name": agent_ref.get("name") if isinstance(agent_ref, dict) else None,
+    }
+    return {k: v for k, v in summary.items() if v is not None}
+
+
 class RolloutCollectionHelper(BaseModel):
     def _preprocess_rows_from_config(self, config: RolloutCollectionConfig) -> List[Dict]:
         range_iterator = repeat(0)
@@ -135,7 +151,9 @@ class RolloutCollectionHelper(BaseModel):
             print(f"Limiting the number of rows to {config.limit}")
 
         if config.num_repeats_add_seed:
-            print("Adding unique `seed` values to each input")
+            print(
+                "Adding unique `seed` values to each input via metadata.extra_body (only honored by vLLM model servers)"
+            )
 
         if config.agent_name:
             print(f"Using `{config.agent_name}` for rows that do not already have an agent ref")
@@ -158,7 +176,11 @@ class RolloutCollectionHelper(BaseModel):
             prompt_cfg = load_prompt_config(config.prompt_config)
             print(f"Using prompt config: {config.prompt_config}")
 
-        with open(config.input_jsonl_fpath) as input_file:
+        _input_path = Path(config.input_jsonl_fpath)
+        if not _input_path.is_absolute():
+            _cwd_path = Path.cwd() / _input_path
+            _input_path = _cwd_path if _cwd_path.exists() else PARENT_DIR / _input_path
+        with open(_input_path) as input_file:
             rows_iterator: Iterator[str] = tqdm(input_file, desc="Reading rows")
             rows_iterator: Iterator[tuple[int, str]] = zip(range_iterator, rows_iterator)
             raw_rows = [(row_idx, row_str, orjson.loads(row_str)) for row_idx, row_str in rows_iterator]
@@ -196,7 +218,10 @@ class RolloutCollectionHelper(BaseModel):
                 task_idx_to_rollout_idx[row[TASK_INDEX_KEY_NAME]] += 1
 
                 if config.num_repeats_add_seed:
-                    row[RESPONSES_CREATE_PARAMS_KEY_NAME]["seed"] = row[ROLLOUT_INDEX_KEY_NAME]
+                    metadata = row[RESPONSES_CREATE_PARAMS_KEY_NAME].setdefault("metadata", {})
+                    extra_body = json.loads(metadata.get("extra_body", "{}"))
+                    extra_body["seed"] = row[ROLLOUT_INDEX_KEY_NAME]
+                    metadata["extra_body"] = json.dumps(extra_body)
 
                 rows.append(row)
 
@@ -302,11 +327,12 @@ class RolloutCollectionHelper(BaseModel):
                 top_left = counts_left.most_common(5)  # Fix to top 3 for now.
                 if top_left:
                     top_left_str = "\n".join(f"{i + 1}. {k}: {v}" for i, (k, v) in enumerate(top_left))
-                    print(f"Examples left:\n{top_left_str}")
+                    # Use tqdm.write here so we can print properly with tqdm being used.
+                    tqdm.write(f"Examples left:\n{top_left_str}")
 
         results_file.close()
 
-        if get_wandb_run():  # pragma: no cover
+        if config.upload_rollouts_to_wandb and get_wandb_run():  # pragma: no cover
             print("Uploading rollouts to W&B. This may take a few minutes if your data is large.")
             get_wandb_run().log({"Rollouts": Table(data=result_strs, columns=["Rollout"])})
         del result_strs
@@ -430,7 +456,17 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
         async def _post_subroutine(row: Dict) -> Tuple[Dict, Dict]:
             async with semaphore:
                 res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
-                await raise_for_status(res)
+                try:
+                    await raise_for_status(res)
+                except Exception:
+                    if is_global_aiohttp_client_request_debug_enabled():
+                        print(
+                            "[rollout_collection] /run failed "
+                            f"status={getattr(res, 'status', None)} "
+                            f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)}",
+                            flush=True,
+                        )
+                    raise
                 return row, await get_response_json(res)
 
         return tqdm.as_completed(

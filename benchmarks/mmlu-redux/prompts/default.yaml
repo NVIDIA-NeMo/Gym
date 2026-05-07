@@ -1,0 +1,5 @@
+# Mirrors NeMo Skills' generic/general-boxed prompt without few-shot examples.
+user: |-
+  Solve the following problem. Make sure to put the answer (and only answer) inside \boxed{{}}.
+
+  {problem}

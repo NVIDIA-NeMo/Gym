@@ -44,9 +44,10 @@ class AALCRVerifyRequest(BaseVerifyRequest):
 
 
 class AALCRVerifyResponse(AALCRVerifyRequest, BaseVerifyResponse):
-    invalid_judge_response: bool
-    judge_responses_create_params: NeMoGymResponseCreateParamsNonStreaming
-    judge_response: NeMoGymResponse
+    invalid_model_response: bool
+    invalid_judge_response: Optional[bool] = None
+    judge_responses_create_params: Optional[NeMoGymResponseCreateParamsNonStreaming] = None
+    judge_response: Optional[NeMoGymResponse] = None
     reward_lt_80k: Optional[float] = None
     reward_80k_100k: Optional[float] = None
     reward_100k_110k: Optional[float] = None
@@ -58,7 +59,27 @@ class AalcrResourcesServer(SimpleResourcesServer):
     config: AalcrResourcesServerConfig
 
     async def verify(self, body: AALCRVerifyRequest) -> AALCRVerifyResponse:
-        candidate_answer = body.response.output_text
+        match body.input_tokens_band:
+            case "<80k":
+                input_tokens_band_key = "reward_lt_80k"
+            case "80k-100k":
+                input_tokens_band_key = "reward_80k_100k"
+            case "100k-110k":
+                input_tokens_band_key = "reward_100k_110k"
+            case "110k-128k":
+                input_tokens_band_key = "reward_110k_128k"
+            case "128k+":
+                input_tokens_band_key = "reward_128k_plus"
+
+        candidate_answer = body.response.output_text.strip()
+        if not candidate_answer:
+            reward = 0.0
+            return AALCRVerifyResponse(
+                **body.model_dump(),
+                invalid_model_response=True,
+                reward=reward,
+                **{input_tokens_band_key: reward},
+            )
 
         judge_prompt = f"""Assess whether the following CANDIDATE ANSWER is CORRECT or INCORRECT.
 For the CANDIDATE ANSWER to be correct, it must be consistent with the OFFICIAL ANSWER.
@@ -90,21 +111,10 @@ Reply only with CORRECT or INCORRECT."""
             invalid_judge_response = True
             reward = 0.0
 
-        match body.input_tokens_band:
-            case "<80k":
-                input_tokens_band_key = "reward_lt_80k"
-            case "80k-100k":
-                input_tokens_band_key = "reward_80k_100k"
-            case "100k-110k":
-                input_tokens_band_key = "reward_100k_110k"
-            case "110k-128k":
-                input_tokens_band_key = "reward_110k_128k"
-            case "128k+":
-                input_tokens_band_key = "reward_128k_plus"
-
         return AALCRVerifyResponse(
             **body.model_dump(),
             reward=reward,
+            invalid_model_response=False,
             invalid_judge_response=invalid_judge_response,
             judge_responses_create_params=judge_responses_create_params,
             judge_response=judge_response,
