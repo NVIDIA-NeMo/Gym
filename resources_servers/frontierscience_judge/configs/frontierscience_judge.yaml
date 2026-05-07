@@ -1,0 +1,44 @@
+frontierscience_judge:
+  resources_servers:
+    frontierscience_judge:
+      entrypoint: app.py
+      domain: other
+      verified: false
+      description: FrontierScience science-olympiad answer grading via single-pass YES/NO LLM judge
+      value: Evaluate free-form chemistry/biology/physics olympiad answers with judge-graded equivalence
+
+      judge_model_server:
+        type: responses_api_models
+        name: judge_model
+      judge_responses_create_params:
+        input: []
+        max_output_tokens: 2048
+      use_chat_completions_for_judge: true
+
+frontierscience_judge_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: frontierscience_judge
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/frontierscience_judge/data/example.jsonl
+        license: Apache 2.0
+
+judge_base_url: https://integrate.api.nvidia.com/v1
+judge_api_key: ${oc.env:NVIDIA_API_KEY,null}
+judge_model_name: openai/gpt-oss-20b
+
+judge_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${judge_base_url}
+      openai_api_key: ${judge_api_key}
+      openai_model: ${judge_model_name}
