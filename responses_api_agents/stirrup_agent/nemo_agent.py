@@ -37,7 +37,7 @@ from typing import Any, Optional
 from pydantic import ConfigDict
 from stirrup import Agent
 from stirrup.core.agent import SessionAgent
-from stirrup.core.models import ToolCall, ToolMessage, UserMessage
+from stirrup.core.models import AssistantMessage, ChatMessage, ToolCall, ToolMessage, UserMessage
 
 
 class NeMoUserMessage(UserMessage):
@@ -66,6 +66,44 @@ class NeMoUserMessage(UserMessage):
 # strings and resolves them lazily.  Force resolution now so construction
 # inside async code paths doesn't hit `PydanticUserError: not fully defined`.
 NeMoUserMessage.model_rebuild()
+
+
+def _restore_tool_messages_for_model(messages: list[ChatMessage]) -> list[ChatMessage]:
+    """Convert NeMoUserMessage tool results back to ToolMessage for model calls.
+
+    NeMoUserMessage intentionally presents tool results to the agent as user
+    turns during normal execution. OpenAI-compatible chat completions APIs,
+    however, require assistant messages with tool_calls to be followed by
+    matching tool-role messages. Summarization sends prior history back to the
+    model, so it needs the provider-valid representation.
+    """
+    pending_tool_call_ids: set[str] = set()
+    restored: list[ChatMessage] = []
+
+    for message in messages:
+        if isinstance(message, AssistantMessage):
+            pending_tool_call_ids = {tc.tool_call_id for tc in message.tool_calls if tc.tool_call_id}
+            restored.append(message)
+            continue
+
+        if isinstance(message, NeMoUserMessage) and message.tool_call_id in pending_tool_call_ids:
+            restored.append(
+                ToolMessage(
+                    content=message.content,
+                    name=message.name,
+                    success=message.success,
+                    args_was_valid=message.args_was_valid,
+                    tool_call_id=message.tool_call_id,
+                    tool_start_time=message.tool_start_time,
+                    tool_end_time=message.tool_end_time,
+                )
+            )
+            pending_tool_call_ids.discard(message.tool_call_id)
+            continue
+
+        restored.append(message)
+
+    return restored
 
 
 class NeMoAgent(Agent):
@@ -125,6 +163,10 @@ class NeMoAgent(Agent):
             tool_start_time=getattr(tool_message, "tool_start_time", None),
             tool_end_time=getattr(tool_message, "tool_end_time", None),
         )
+
+    async def summarize_messages(self, messages: list[ChatMessage]) -> list[ChatMessage]:
+        """Summarize with provider-valid tool-call history."""
+        return await super().summarize_messages(_restore_tool_messages_for_model(messages))
 
     async def __aenter__(self):  # type: ignore[override]
         """Upgrade the SessionAgent returned by Stirrup to a NeMoSessionAgent.
