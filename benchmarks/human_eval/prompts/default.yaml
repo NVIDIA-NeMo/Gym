@@ -1,0 +1,10 @@
+user: |-
+  Here is a problem for which you need to generate/complete code:
+  {question}
+
+  Please continue to complete the function with python programming language. You are not allowed to modify the given code and do the completion only.
+
+  The solution should be in the following format:
+  ```python
+  # Your code here
+  ```
