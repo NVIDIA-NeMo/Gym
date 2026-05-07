@@ -1,0 +1,22 @@
+config_paths:
+  - resources_servers/evalplus/configs/evalplus.yaml
+
+human_eval_evalplus_resources_server:
+  _inherit_from: evalplus
+  resources_servers:
+    evalplus:
+      dataset: humaneval
+
+human_eval_evalplus_simple_agent:
+  _inherit_from: evalplus_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: human_eval_evalplus_resources_server
+      datasets:
+      - name: human_eval
+        type: benchmark
+        jsonl_fpath: benchmarks/human_eval/data/human_eval_benchmark.jsonl
+        prompt_config: benchmarks/human_eval/prompts/default.yaml
+        prepare_script: benchmarks/human_eval/prepare.py
+        license: MIT
