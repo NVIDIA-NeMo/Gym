@@ -1,0 +1,21 @@
+skill_eval_agent:
+  responses_api_agents:
+    skill_eval_agent:
+      entrypoint: app.py
+      domain: other
+      description: Orchestrates skill-eval rollouts (with-skill vs without-skill delta) over real NeMo Gym servers
+      workspace_server:
+        type: resources_servers
+        name: skill_workspace
+      judge_server:
+        type: resources_servers
+        name: skill_judge
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      max_steps: 8
+      inject_tools: true
+      datasets:
+      - name: skill_eval
+        type: example
+        jsonl_fpath: responses_api_agents/skill_eval_agent/data/example.jsonl

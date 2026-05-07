@@ -53,6 +53,8 @@ class SimpleModelServer(SimpleResponsesAPIModel):
         body_dict = self.config.extra_body | body.model_dump(exclude_unset=True)
         body_dict.setdefault("model", self.config.openai_model)
         openai_response_dict = await self._client.create_response(**body_dict)
+        if isinstance(openai_response_dict, dict) and openai_response_dict.get("object") != "response":
+            openai_response_dict["object"] = "response"
         return NeMoGymResponse.model_validate(openai_response_dict)
 
     async def chat_completions(

@@ -1,0 +1,7 @@
+{"responses_create_params": {"input": [{"role": "user", "content": "If a rectangle has length 8 and width 5, what is its area?"}]}, "verifier_metadata": {"expected_answer": "40"}}
+{"responses_create_params": {"input": [{"role": "user", "content": "What is the capital of Australia?"}]}, "verifier_metadata": {"expected_answer": "Sydney"}}
+{"responses_create_params": {"input": [{"role": "user", "content": "Compute 12 factorial (12!)"}]}, "verifier_metadata": {"expected_answer": "479001600"}}
+{"responses_create_params": {"input": [{"role": "user", "content": "How many days are there in a leap year?"}]}, "verifier_metadata": {"expected_answer": "365"}}
+{"responses_create_params": {"input": [{"role": "user", "content": "What is the square root of 144?"}]}, "verifier_metadata": {"expected_answer": "12"}}
+{"responses_create_params": {"input": [{"role": "user", "content": "What is the chemical symbol for gold?"}]}, "verifier_metadata": {"expected_answer": "Go"}}
+{"responses_create_params": {"input": [{"role": "user", "content": "Solve for x: 3x + 7 = 22"}]}, "verifier_metadata": {"expected_answer": "5"}}

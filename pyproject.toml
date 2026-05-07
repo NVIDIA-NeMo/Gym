@@ -441,6 +441,16 @@ omit = [
     "results/*",
     "/tmp/*",
     "benchmarks/*",
+    # Server code lives under these trees and is tested per-server via
+    # `ng_test` (which creates a dedicated .venv per server). Core
+    # `pytest tests/unit_tests/` should not measure their coverage —
+    # fixtures from those packages are legitimately imported by core
+    # tests (e.g. SkillWorkspaceResourcesServer is used to set up a
+    # workspace for test_eval_skills), but exercising them end-to-end
+    # is the per-server test suite's job.
+    "resources_servers/*",
+    "responses_api_agents/*",
+    "responses_api_models/*",
 ]
 data_file = "results/.coverage"
 concurrency = ["thread", "multiprocessing"]

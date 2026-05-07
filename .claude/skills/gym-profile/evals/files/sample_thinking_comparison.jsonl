@@ -1,0 +1,6 @@
+{"task_index": 0, "model": "Qwen3-32B-Instruct", "avg_reward": 0.8, "max_reward": 1.0, "num_rollouts": 5, "rewards": [1.0, 1.0, 0.0, 1.0, 1.0]}
+{"task_index": 0, "model": "Qwen3-32B-Thinking", "avg_reward": 0.2, "max_reward": 1.0, "num_rollouts": 5, "rewards": [0.0, 0.0, 1.0, 0.0, 0.0], "reasoning_format_violation_rate": 0.8}
+{"task_index": 1, "model": "Qwen3-32B-Instruct", "avg_reward": 0.6, "max_reward": 1.0, "num_rollouts": 5, "rewards": [1.0, 0.0, 1.0, 0.0, 1.0]}
+{"task_index": 1, "model": "Qwen3-32B-Thinking", "avg_reward": 0.6, "max_reward": 1.0, "num_rollouts": 5, "rewards": [0.0, 1.0, 1.0, 1.0, 0.0], "reasoning_format_violation_rate": 0.0}
+{"task_index": 2, "model": "Qwen3-32B-Instruct", "avg_reward": 0.4, "max_reward": 1.0, "num_rollouts": 5, "rewards": [0.0, 1.0, 0.0, 1.0, 0.0]}
+{"task_index": 2, "model": "Qwen3-32B-Thinking", "avg_reward": 0.0, "max_reward": 0.0, "num_rollouts": 5, "rewards": [0.0, 0.0, 0.0, 0.0, 0.0], "reasoning_format_violation_rate": 1.0}

@@ -1,0 +1,10 @@
+{"task_index": 0, "avg_reward": 1.0, "max_reward": 1.0, "num_rollouts": 5, "pass_at_1": 1.0, "rewards": [1.0, 1.0, 1.0, 1.0, 1.0]}
+{"task_index": 1, "avg_reward": 1.0, "max_reward": 1.0, "num_rollouts": 5, "pass_at_1": 1.0, "rewards": [1.0, 1.0, 1.0, 1.0, 1.0]}
+{"task_index": 2, "avg_reward": 0.0, "max_reward": 0.0, "num_rollouts": 5, "pass_at_1": 0.0, "rewards": [0.0, 0.0, 0.0, 0.0, 0.0], "failure_reason": "NO_CODE_EXTRACTED"}
+{"task_index": 3, "avg_reward": 0.0, "max_reward": 0.0, "num_rollouts": 5, "pass_at_1": 0.0, "rewards": [0.0, 0.0, 0.0, 0.0, 0.0], "failure_reason": "TIMEOUT"}
+{"task_index": 4, "avg_reward": 0.0, "max_reward": 0.0, "num_rollouts": 5, "pass_at_1": 0.0, "rewards": [0.0, 0.0, 0.0, 0.0, 0.0], "failure_reason": "WRONG_RESULT"}
+{"task_index": 5, "avg_reward": 0.8, "max_reward": 1.0, "num_rollouts": 5, "pass_at_1": 0.8, "rewards": [1.0, 1.0, 1.0, 1.0, 0.0]}
+{"task_index": 6, "avg_reward": 0.6, "max_reward": 1.0, "num_rollouts": 5, "pass_at_1": 0.6, "rewards": [1.0, 0.0, 1.0, 1.0, 0.0]}
+{"task_index": 7, "avg_reward": 0.4, "max_reward": 1.0, "num_rollouts": 5, "pass_at_1": 0.4, "rewards": [0.0, 1.0, 0.0, 1.0, 0.0]}
+{"task_index": 8, "avg_reward": 0.2, "max_reward": 1.0, "num_rollouts": 5, "pass_at_1": 0.2, "rewards": [0.0, 0.0, 1.0, 0.0, 0.0]}
+{"task_index": 9, "avg_reward": 0.6, "max_reward": 1.0, "num_rollouts": 5, "pass_at_1": 0.6, "rewards": [1.0, 1.0, 0.0, 0.0, 1.0]}

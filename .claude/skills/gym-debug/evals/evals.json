@@ -1,0 +1,44 @@
+{
+  "skill_name": "gym-debug",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "My equivalence_llm_judge benchmark gives inconsistent rewards. Diagnose from the rollout at evals/files/sample_judge_rollout.jsonl. check_twice_swap is enabled.",
+      "expected_output": "Diagnosis covering positional bias, fallback partial credit, extraction failure, and unparseable judge response across the 5 rollout entries.",
+      "files": ["evals/files/sample_judge_rollout.jsonl"],
+      "assertions": [
+        "check_twice_swap positional bias identified as cause of 0.0 on task 1 (DISAGREE)",
+        "reward_if_swap_fails mentioned as the value applied when swap disagrees",
+        "The 0.5 reward on task 2 explained as check_full_generation_on_fail fallback",
+        "Regex extraction failure on task 3 identified (empty extraction_result)",
+        "judge_evaluations field recommended for detailed debugging"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Thinking models score lower than expected on my code_gen benchmark. Here are sample rollouts: evals/files/sample_thinking_model_rollout.jsonl",
+      "expected_output": "Diagnosis identifying think-block interference from the extracted_model_code and reasoning_format_violation_rate fields.",
+      "files": ["evals/files/sample_thinking_model_rollout.jsonl"],
+      "assertions": [
+        "Think block interference with code extraction identified from task 0",
+        "reasoning_format_violation_rate=1.0 cited as diagnostic indicator",
+        "extracted_model_code on task 0 shown to contain think block content",
+        "Task 1 cited as example of correct behavior (think blocks stripped, violation rate 0.0)",
+        "Stripping think blocks before extraction recommended as fix"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "My jailbreak_detection with use_combined_reward gives 0.3 rewards. Diagnose from evals/files/sample_combined_reward_rollout.jsonl",
+      "expected_output": "Explanation of the two-stage combined reward formula with specific values from the rollout.",
+      "files": ["evals/files/sample_combined_reward_rollout.jsonl"],
+      "assertions": [
+        "Two-stage formula (safety * quality) explained",
+        "Task 1's 0.3 explained as 1.0 (SAFE) * 0.3 (reward_if_quality_low)",
+        "Task 2's 0.0 explained as UNSAFE verdict (safety=0.0)",
+        "Response clarifies 0.3 is intentional partial credit, not a bug",
+        "safety_verdict and quality_score fields cited from the rollout data"
+      ]
+    }
+  ]
+}

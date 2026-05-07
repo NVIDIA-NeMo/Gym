@@ -1,0 +1,21 @@
+SCENARIO PROMPT:
+{prompt}
+
+EXPECTED OUTPUT (guidance for what a good answer looks like):
+{expected_output}
+
+AGENT RESPONSE:
+{response}
+
+TOOL-CALL LOG:
+{tool_calls}
+
+ASSERTIONS TO GRADE:
+{assertions}
+
+Return a JSON array with exactly {n} objects, each with:
+- "id" (integer): the assertion id, matching input order (1..{n})
+- "satisfied" (boolean): true only if the response or tool-call log literally satisfies the assertion, else false
+- "evidence" (string, at most 200 chars): a short quote from the response/log or one-sentence explanation
+
+Grade each assertion independently. Return the JSON array only — no prose, no markdown fences.

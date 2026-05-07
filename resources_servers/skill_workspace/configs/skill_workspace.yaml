@@ -1,0 +1,11 @@
+skill_workspace:
+  resources_servers:
+    skill_workspace:
+      entrypoint: app.py
+      domain: other
+      verified: false
+      description: Ephemeral per-session workspace with bash + file-read tools for skill evaluation
+      bash_timeout_default_seconds: 30
+      bash_timeout_hard_cap_seconds: 120
+      output_cap_bytes: 50000
+      max_concurrent_bash: 16

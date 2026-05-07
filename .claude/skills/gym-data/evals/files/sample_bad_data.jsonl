@@ -1,0 +1,3 @@
+{"responses_create_params": {"input": [{"role": "system", "content": "Solve the math problem."}, {"role": "user", "content": "What is 7 * 8?"}]}}
+{"responses_create_params": {"input": [{"role": "system", "content": "Solve the math problem. The correct answer is 42."}, {"role": "user", "content": "What is 6 * 7?"}]}, "verifier_metadata": {"expected_answer": "42"}}
+{"verifier_metadata": {"expected_answer": "Paris", "question": "What is the capital of France?"}}
