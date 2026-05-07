@@ -46,12 +46,14 @@ jobs:
             resources_servers/**
             responses_api_agents/**
             responses_api_models/**
+            benchmarks/**
           files_yaml: |
             doc:
               - '**.md'
               - docs/**
               - fern/**
               - LICENSE
+              - benchmarks/**
             server:
               - resources_servers/**
               - responses_api_agents/**
