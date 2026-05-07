@@ -11,8 +11,8 @@ math_with_judge:
       should_use_judge: false
       domain: math
       verified: false
-      description: OpenMathReasoning math dataset with math-verify and LLM-as-a-judge
-      value: Improve math capabilities including AIME 24 / 25
+      description: Hermes Agent with terminal, file, code_execution, skills, todo toolsets on OpenMathReasoning math dataset with math-verify and LLM-as-a-judge
+      value: Improve model math capabilities in hermes agent harness such as AIME25
 
 math_with_judge_hermes_agent:
   responses_api_agents:
