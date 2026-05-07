@@ -1,0 +1,27 @@
+instruction_label,instruction_name,definition,instruction_type
+stylistic:tone_formality,Formal Tone,The overall tone of the response must match the specified tone level.,non-relational
+stylistic:emotional_tone,Emotional Tone,The response must express the specified emotion type consistently throughout.,non-relational
+stylistic:politeness,Politeness Level,Determines the overall politeness of the response.,non-relational
+stylistic:literary_style,Literary Style,Defines the overall writing style.,non-relational
+stylistic:sentence_tone_consistency,Sentence Tone Consistency,"Ensures each sentence maintains the same tone throughout. A mixed tone (e.g., [partly formal, partly informal] or [partly positive or partly negative]) within one response is considered a violation.",non-relational
+stylistic:voice,Passive or Active Voice,The response must primarily use the selected grammatical voice.,non-relational
+stylistic:figurative_language,Figurative Language Presence,"Requires inclusion/restriction of use of a specific figure type (simile, metaphor, personification, hyperbole, idiom) instances based on the relation. The figure type count must satisfy the given relation to num_occurrences.",relational_with_subinstruction
+stylistic:emotive_adjectives,Use of Emotive Adjectives,"The response must include or restrict the number of emotionally expressive adjectives (e.g., “beautiful”, “horrifying”, “delightful”). The count must satisfy the given relation to num_adjectives.",relational_without_subinstruction
+stylistic:sensory_detail,Sensory Detail Requirement,"Ensures the inclusion/restriction of use of sensory expressions (sight, sound, touch, smell, taste). The sensory expression count must satisfy the given relation to num_details.",non-relational
+stylistic:rhythm_pattern,Sentence Rhythm,Controls the overall rhythm of the writing.,non-relational
+linguistic:pragmatic_context,Pragmatic Context Match,The response must adopt the specified pragmatic context.,non-relational
+linguistic:speech_act,Speech-Act Form,The response must conform to the given speech-act type.,non-relational
+linguistic:syntactic_pattern,Syntactic Pattern Requirement,The response must use the selected syntactic pattern.,non-relational
+linguistic:grammatical_mood,Grammatical Mood Enforcement,The response must enforce the selected grammatical mood.,non-relational
+linguistic:morphological_form,Morphological Form Control,Requires consistent use of a specified morphological form.,non-relational
+linguistic:phonological_pattern,Phonological Pattern,The text should include the given phonological element.,non-relational
+situation:perspective,Perspective Constraint,Defines the narrative viewpoint of the response.,non-relational
+situation:temporal_context,Temporal Context Alignment,Ensures the response situates itself in the correct temporal frame.,non-relational
+linguistic:sound_symbolism,Sound Symbolism Use,"Requires the presence or limitation of onomatopoeic or sound-mimicking expressions (e.g., “buzz”, “clang”, “whisper”). Relation defines whether such expressions must appear at least, equal to, or less than a certain implied frequency.",relational_without_subinstruction
+situation:role_based,Role Simulation,"The model must respond in character as the specified role_type, using appropriate expertise, tone, and language.",non-relational
+situation:task_specific,Task-Specific Context,The response must align with the communicative goal of the given task_type.,non-relational
+situation:audience_alignment,Audience Alignment,"Ensures the response’s vocabulary, tone, and examples are appropriate for the specified audience_type.",non-relational
+situation:contextual_scenario,Contextual Scenario Adaptation,"Requires adaptation of tone, structure, and phrasing to the specified scenario_type.",non-relational
+situation:emotional_alignment,Emotional Alignment with Situation,Ensures the emotional tone aligns with the scenario’s context.,non-relational
+situation:environment_setting,Environmental Setting Consistency,Requires the response to be consistent with the described environment_type.,non-relational
+situation:cultural_context,Cultural or Environmental Context,Requires alignment with the chosen culture_type and adaptation_level.,non-relational
