@@ -197,7 +197,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
         request: Request,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
-        from run_agent import AIAgent           # from hermes-agent on path
+        from run_agent import AIAgent  # from hermes-agent on path
 
         body = body.model_copy(deep=True)
         if isinstance(body.input, str):
@@ -228,12 +228,14 @@ class HermesAgent(SimpleResponsesAPIAgent):
         agent.compression_enabled = False
 
         _original_build_api_kwargs = agent._build_api_kwargs
+
         def _patched_build_api_kwargs(api_messages):
             kw = _original_build_api_kwargs(api_messages)
             ctk = kw.setdefault("extra_body", {}).setdefault("chat_template_kwargs", {})
             ctk.setdefault("enable_thinking", True)
             ctk["truncate_history_thinking"] = False
             return kw
+
         agent._build_api_kwargs = _patched_build_api_kwargs
 
         result = await asyncio.to_thread(
@@ -254,7 +256,10 @@ class HermesAgent(SimpleResponsesAPIAgent):
             for item in output_items
         )
         if not has_assistant_message:
-            LOG.warning("Hermes agent ended without an assistant message. Padding empty assistant message. This should not happen often, investigate: error=%r", result.get("error"))
+            LOG.warning(
+                "Hermes agent ended without an assistant message. Padding empty assistant message. This should not happen often, investigate: error=%r",
+                result.get("error"),
+            )
             last_valid = next(
                 (
                     m

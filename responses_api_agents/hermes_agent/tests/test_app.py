@@ -21,7 +21,6 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessageForTraining,
 )
 from nemo_gym.server_utils import ServerClient
-
 from responses_api_agents.hermes_agent.app import (
     HermesAgent,
     HermesAgentConfig,
