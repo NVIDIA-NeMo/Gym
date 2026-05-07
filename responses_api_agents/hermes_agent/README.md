@@ -26,6 +26,32 @@ ng_collect_rollouts \
     +limit=1
 ```
 
+5 example math rollouts are at `responses_api_agents/hermes_agent/data/` with statistics:
+
+```
+Collecting rollouts: 100%|█████████████████████████████████████| 5/5 [00:24<00:00,  4.87s/it]
+Sorting results to ensure consistent ordering
+Computing aggregate metrics
+INFO:     127.0.0.1:9672 - "GET /global_config_dict_yaml HTTP/1.1" 200 OK
+
+Key metrics for math_with_judge_hermes_agent:
+{
+    "mean/reward": 0.2,
+    "mean/turns_used": 1.6,
+    "mean/finished_naturally": 1.0,
+    "mean/library_reward": 0.2,
+    "mean/input_tokens": 0.0,
+    "mean/output_tokens": 0.0,
+    "mean/total_tokens": 0.0
+}
+Finished rollout collection! View results at:
+Fully materialized inputs: responses_api_agents/hermes_agent/data/example_math_rollouts_materialized_inputs.jsonl
+Rollouts: responses_api_agents/hermes_agent/data/example_math_rollouts.jsonl
+Aggregate metrics: responses_api_agents/hermes_agent/data/example_math_rollouts_aggregate_metrics.json
+```
+
+Example training reward for small multi environment test is shown [here](https://github.com/NVIDIA-NeMo/Gym/pull/1033#issuecomment-4399509664).
+
 ## Description
 
 Runs [hermes-agent](https://github.com/NousResearch/hermes-agent) in a nemo gym agent server via the `run_agent.AIAgent` entrypoint, which matches the hermes-agent CLI and user experience. Can be used for benchmarks with hermes agent, or training in the harness.
