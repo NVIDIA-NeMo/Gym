@@ -1,0 +1,12 @@
+gdpval_resources_server:
+  resources_servers:
+    gdpval:
+      entrypoint: app.py
+      domain: other
+      verified: false
+      reward_mode: rubric
+      reference_deliverables_dir: null
+      judge_model_server:
+        type: responses_api_models
+        name: gdpval_judge_model
+      judge_responses_create_params_overrides: {}

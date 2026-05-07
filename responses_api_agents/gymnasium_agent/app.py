@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Agent for GymnasiumServer resources servers (resources_servers.base_gymnasium) which implements the Gymnasium API."""
+"""Agent for GymnasiumServer resources servers (resources_servers.gymnasium) which implements the Gymnasium API."""
 
 from fastapi import Body, Request, Response
 from pydantic import ConfigDict, Field
@@ -31,7 +31,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
-from resources_servers.base_gymnasium import EnvResetResponse, EnvStepResponse
+from resources_servers.gymnasium import EnvResetResponse, EnvStepResponse
 
 
 class GymnasiumAgentConfig(BaseResponsesAPIAgentConfig):
@@ -161,7 +161,7 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
         last_model_response.usage = usage
 
         return GymnasiumRunResponse(
-            responses_create_params=body.responses_create_params,
+            responses_create_params=base_body,
             response=last_model_response,
             reward=total_reward,
             terminated=step_data.terminated,
