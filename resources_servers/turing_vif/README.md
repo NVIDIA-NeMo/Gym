@@ -101,7 +101,7 @@ turing_vif:
       # LLM Judge configuration - uses policy model by default
       judge_base_url: ${policy_base_url}
       judge_api_key: ${policy_api_key}
-      judge_model: ${policy_model_name}  # Supports GPT-5 and GPT-4.1
+      judge_model: ${policy_model_name}  # Any OpenAI-compatible model (OpenAI, vLLM, etc.)
 ```
 
 ### Reward Aggregation Modes
@@ -129,14 +129,7 @@ env:
 
 ### Model Support
 
-| Model | API Used | Notes |
-|-------|----------|-------|
-| **GPT-5** (`gpt-5-*`) | Responses API (`/v1/responses`) | Full reasoning model support |
-| **O1/O3** (`o1-*`, `o3-*`) | Responses API | Reasoning models |
-| **GPT-4.1** | Chat Completions API (`/v1/chat/completions`) | Standard chat model |
-| **GPT-4** | Chat Completions API | Standard chat model |
-
-The server automatically detects the model type and uses the appropriate API.
+The judge can be **any OpenAI-compatible chat endpoint** — OpenAI, Azure, vLLM, SGLang, TGI, or an in-cluster Gym `vllm_model` / `local_vllm` server (set `judge_server_name` to auto-discover the URL). OpenAI reasoning models (`gpt-5*`, `o1*`, `o3*`, `o4-mini*`) are auto-routed to the Responses API; everything else uses Chat Completions.
 
 ## Dataset Format
 
@@ -222,8 +215,8 @@ Validates a response against instructions.
 | Validator Type | Typical Latency |
 |----------------|-----------------|
 | Fast (rule-based) | 1-5ms |
-| LLM Judge (GPT-4.1) | 500-2000ms |
-| LLM Judge (GPT-5) | 1000-5000ms |
+| LLM Judge (chat models, e.g. GPT-4.1, Qwen3) | 500-2000ms |
+| LLM Judge (reasoning models, e.g. GPT-5) | 1000-5000ms |
 
 ### Scaling
 
