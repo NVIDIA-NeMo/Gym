@@ -12,6 +12,8 @@ This resource server provides two types of validators:
 
 3. **Custom LLM Judge Questions**: Free-form yes/no questions evaluated by an LLM judge.
 
+The environment is intentionally generalistic and ships with datasets targeting **MultiChallenge**, **InverseIFEval**, **CFBench**, and **SysBench** — data will be released soon.
+
 ## Quick Start
 
 ### 1. Set up environment variables
