@@ -40,6 +40,13 @@ class RewardProfileConfig(BaseNeMoGymCLIConfig):
         description="The file path of the materialized inputs as output by ng_collect_rollouts."
     )
     rollouts_jsonl_fpath: str = Field(description="The file path of the rollouts as output by ng_collect_rollouts.")
+    allow_partial_rollouts: bool = Field(
+        default=False,
+        description="Allow reward profiling from partial rollout outputs by dropping input rows with no completed rollouts.",
+    )
+
+
+PARTIAL_PROFILE_HINT = "Use ++allow_partial_rollouts=True to profile completed rollouts from a partial collection."
 
 
 def _rollout_key(row: Dict[str, Any]) -> Tuple[int, int]:
@@ -64,19 +71,71 @@ class RewardProfiler:
         self,
         rows: List[Dict[str, Any]],
         results: List[Dict[str, Any]],
+        allow_partial_rollouts: bool = False,
     ) -> List[Tuple[Dict[str, Any], Dict[str, Any]]]:
         rows_by_key = self._index_by_rollout_key(rows, "materialized input")
         results_by_key = self._index_by_rollout_key(results, "result")
 
-        if rows_by_key.keys() != results_by_key.keys():
-            missing_results = sorted(rows_by_key.keys() - results_by_key.keys())
-            missing_rows = sorted(results_by_key.keys() - rows_by_key.keys())
+        missing_results = sorted(rows_by_key.keys() - results_by_key.keys())
+        missing_rows = sorted(results_by_key.keys() - rows_by_key.keys())
+
+        if missing_rows:
             raise ValueError(
-                "Materialized input rows and rollout results do not have matching rollout keys. "
-                f"Missing results: {missing_results[:10]}; missing materialized rows: {missing_rows[:10]}"
+                "Rollout results contain rows with no matching materialized input rows. "
+                f"Found {len(missing_rows)} extra rollout rows. Extra rollout keys: {missing_rows[:10]}"
             )
 
-        return [(rows_by_key[key], results_by_key[key]) for key in sorted(rows_by_key)]
+        if missing_results and not allow_partial_rollouts:
+            raise ValueError(
+                "Materialized input rows and rollout results do not have matching rollout keys. "
+                f"Missing rollout results for {len(missing_results)} materialized input rows. "
+                f"Missing rollout keys: {missing_results[:10]}. {PARTIAL_PROFILE_HINT}"
+            )
+
+        matched_keys = rows_by_key.keys() & results_by_key.keys()
+        return [(rows_by_key[key], results_by_key[key]) for key in sorted(matched_keys)]
+
+    def profile_completion_summary(
+        self,
+        rows: List[Dict[str, Any]],
+        results: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        rows_by_key = self._index_by_rollout_key(rows, "materialized input")
+        results_by_key = self._index_by_rollout_key(results, "result")
+        matched_keys = rows_by_key.keys() & results_by_key.keys()
+
+        expected_by_task = Counter(task_idx for task_idx, _ in rows_by_key)
+        completed_by_task = Counter(task_idx for task_idx, _ in matched_keys)
+
+        complete_input_rows = 0
+        partial_input_rows = 0
+        missing_input_rows = 0
+        for task_idx, expected_count in expected_by_task.items():
+            completed_count = completed_by_task[task_idx]
+            if completed_count == expected_count:
+                complete_input_rows += 1
+            elif completed_count > 0:
+                partial_input_rows += 1
+            else:
+                missing_input_rows += 1
+
+        expected_rollout_rows = len(rows_by_key)
+        completed_rollout_rows = len(matched_keys)
+        completion_pct = (
+            100.0 if expected_rollout_rows == 0 else 100.0 * completed_rollout_rows / expected_rollout_rows
+        )
+
+        return {
+            "expected_rollout_rows": expected_rollout_rows,
+            "completed_rollout_rows": completed_rollout_rows,
+            "missing_rollout_rows": expected_rollout_rows - completed_rollout_rows,
+            "extra_rollout_rows": len(results_by_key.keys() - rows_by_key.keys()),
+            "reward_profile_completion_pct": completion_pct,
+            "total_input_rows": len(expected_by_task),
+            "complete_input_rows": complete_input_rows,
+            "partial_input_rows": partial_input_rows,
+            "missing_input_rows": missing_input_rows,
+        }
 
     def rollout_info_from_result(self, result: Dict[str, Any]) -> Dict[str, Any]:
         task_idx, rollout_idx = _rollout_key(result)
@@ -151,12 +210,16 @@ class RewardProfiler:
         self,
         rows: List[Dict[str, Any]],
         results: List[Dict[str, Any]],
+        allow_partial_rollouts: bool = False,
     ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-        aligned_rows_and_results = self.align_rows_and_results(rows, results)
+        aligned_rows_and_results = self.align_rows_and_results(
+            rows, results, allow_partial_rollouts=allow_partial_rollouts
+        )
 
         filtered_results: List[Dict] = []
         task_idx_to_row: Dict[int, Dict] = dict()
         task_idx_to_rollout_infos: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+        expected_rollouts_by_task = Counter(row[TASK_INDEX_KEY_NAME] for row in rows)
         for row, result in aligned_rows_and_results:
             task_idx, rollout_idx = _rollout_key(row)
             result = result if "response" in result else {**result, "response": {}}
@@ -180,6 +243,9 @@ class RewardProfiler:
             task_idx_to_row.setdefault(task_idx, row)
             task_idx_to_rollout_infos[task_idx].append(self.rollout_info_from_result(result))
 
+        if not filtered_results:
+            return [], []
+
         df = DataFrame.from_records(filtered_results)
 
         group_level_df = df.drop(columns=[ROLLOUT_INDEX_KEY_NAME, "agent_name"]).groupby(TASK_INDEX_KEY_NAME)
@@ -193,7 +259,14 @@ class RewardProfiler:
             row.pop(ROLLOUT_INDEX_KEY_NAME)
 
             group_metrics["sample"] = row
-            group_metrics["num_rollouts"] = len(task_idx_to_rollout_infos[task_idx])
+            num_rollouts = len(task_idx_to_rollout_infos[task_idx])
+            expected_num_rollouts = expected_rollouts_by_task[task_idx]
+            group_metrics["num_rollouts"] = num_rollouts
+            group_metrics["expected_num_rollouts"] = expected_num_rollouts
+            group_metrics["missing_num_rollouts"] = expected_num_rollouts - num_rollouts
+            group_metrics["reward_profile_completion_pct"] = (
+                100.0 if expected_num_rollouts == 0 else 100.0 * num_rollouts / expected_num_rollouts
+            )
             group_metrics["rollout_infos"] = sorted(
                 task_idx_to_rollout_infos[task_idx],
                 key=lambda r: r[ROLLOUT_INDEX_KEY_NAME],
@@ -661,11 +734,16 @@ def reward_profile():  # pragma: no cover
     results.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
 
     rp = RewardProfiler()
-    group_level_metrics, agent_level_metrics = rp.profile_from_data(rows, results)
+    group_level_metrics, agent_level_metrics = rp.profile_from_data(
+        rows, results, allow_partial_rollouts=config.allow_partial_rollouts
+    )
+    completion_summary = rp.profile_completion_summary(rows, results)
     reward_profiling_fpath, agent_level_metrics_fpath = rp.write_to_disk(
         group_level_metrics, agent_level_metrics, Path(config.rollouts_jsonl_fpath)
     )
 
     print(f"""Profiling outputs:
+Reward profile completion: {completion_summary["completed_rollout_rows"]}/{completion_summary["expected_rollout_rows"]} rollout rows ({completion_summary["reward_profile_completion_pct"]:.2f}%)
+Input rows: {completion_summary["total_input_rows"]} total; {completion_summary["complete_input_rows"]} complete; {completion_summary["partial_input_rows"]} partial; {completion_summary["missing_input_rows"]} without rollouts dropped from output.
 Reward profiling outputs: {reward_profiling_fpath}
 Agent-level metrics: {agent_level_metrics_fpath}""")

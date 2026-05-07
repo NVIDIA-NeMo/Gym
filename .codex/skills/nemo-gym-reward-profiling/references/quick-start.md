@@ -42,9 +42,6 @@ ng_collect_rollouts \
     +num_samples_in_parallel="$NUM_SAMPLES_IN_PARALLEL" \
     +resume_from_cache=False
 
-# ng_collect_rollouts writes ${ROLLOUTS_JSONL%.jsonl}_reward_profiling.jsonl
-# by default in current Gym. Run ng_reward_profile when you want to regenerate
-# or validate the profile from completed artifacts.
 ng_reward_profile \
     ++materialized_inputs_jsonl_fpath="$MATERIALIZED_JSONL" \
     ++rollouts_jsonl_fpath="$ROLLOUTS_JSONL"
@@ -63,16 +60,15 @@ NUM_SAMPLES_IN_PARALLEL=8
 
 Then inspect line counts and sample rows before increasing scale. For real profiling, use enough repeats to make per-task variability visible.
 
-## Inflight Profiling Default
+## Partial Rollouts
 
-Current Gym enables inflight reward profiling by default during collection. The default profile path is:
-
-```text
-${ROLLOUTS_JSONL%.jsonl}_reward_profiling.jsonl
-```
-
-This writes a partial profile file while collection is running, then rewrites the final file through the same `RewardProfiler` path as `ng_reward_profile`. Disable it only for rollout-only collection:
+By default, `ng_reward_profile` expects every materialized input row to have a matching rollout row. If collection stopped early, profile the completed rollouts with:
 
 ```bash
-+inflight_reward_profile=False
+ng_reward_profile \
+    ++materialized_inputs_jsonl_fpath="$MATERIALIZED_JSONL" \
+    ++rollouts_jsonl_fpath="$ROLLOUTS_JSONL" \
+    ++allow_partial_rollouts=True
 ```
+
+Partial profiling writes rows only for original input tasks with at least one completed rollout. The command prints how many input tasks were complete, partial, or dropped because they had no rollout.

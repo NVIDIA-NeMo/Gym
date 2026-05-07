@@ -23,16 +23,38 @@ Before a large run:
 wc -l "$DATA_JSONL" "$MATERIALIZED_JSONL" "$ROLLOUTS_JSONL"
 head -n 1 "$MATERIALIZED_JSONL"
 head -n 1 "$ROLLOUTS_JSONL"
-head -n 1 "${ROLLOUTS_JSONL%.jsonl}_reward_profiling.jsonl"
 ```
 
 Expected line counts:
 
 - materialized inputs: source rows after limit/filtering times `num_repeats`
 - rollout JSONL: same as materialized inputs when collection completes
-- reward profile JSONL: one row per original task
+- reward profile JSONL: one row per original task after `ng_reward_profile`
 
-Current Gym writes the reward profile during collection by default. The live file can be partial while collection is running; after collection completes, the final file should be canonical.
+After rollout collection completes, run:
+
+```bash
+ng_reward_profile \
+    ++materialized_inputs_jsonl_fpath="$MATERIALIZED_JSONL" \
+    ++rollouts_jsonl_fpath="$ROLLOUTS_JSONL"
+```
+
+Then inspect:
+
+```bash
+head -n 1 "${ROLLOUTS_JSONL%.jsonl}_reward_profiling.jsonl"
+```
+
+If rollout collection stopped early, strict profiling fails. Use partial profiling only when you intentionally want to profile completed rollouts:
+
+```bash
+ng_reward_profile \
+    ++materialized_inputs_jsonl_fpath="$MATERIALIZED_JSONL" \
+    ++rollouts_jsonl_fpath="$ROLLOUTS_JSONL" \
+    ++allow_partial_rollouts=True
+```
+
+The command prints completion status, including complete input tasks, partial input tasks, and input tasks dropped because they have no rollout.
 
 ## Cache and Resume
 
@@ -80,7 +102,7 @@ PY
 
 ## Offline Validation
 
-To validate the collection-written profiling file, rerun `ng_reward_profile` on the same materialized inputs and rollout results in a scratch directory, then compare outputs:
+To validate reward profiling output, rerun `ng_reward_profile` on the same materialized inputs and rollout results in a scratch directory, then compare outputs:
 
 ```bash
 tmpdir="$(mktemp -d /tmp/nemo-gym-profile-compare.XXXXXX)"
