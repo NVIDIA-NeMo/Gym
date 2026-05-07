@@ -28,13 +28,13 @@ ng_collect_rollouts \
 
 ## Description
 
-Runs [hermes-agent](https://github.com/NousResearch/hermes-agent) in a nemo gym agent server via the `run_agent.AIAgent` entrypoint, which matches the hermes-agent CLI and user experience. The point is to teach the model to operate inside the hermes-agent harness on real tasks.
+Runs [hermes-agent](https://github.com/NousResearch/hermes-agent) in a nemo gym agent server via the `run_agent.AIAgent` entrypoint, which matches the hermes-agent CLI and user experience. Can be used for benchmarks with hermes agent, or training in the harness.
 
 ## Setup
 
-`hermes-agent` is pinned to a hermes agent fork and commit in `requirements.txt` with patches for token id tracking, chat template, and sampling parameter set for training.
+`hermes-agent` is pinned in `requirements.txt` to a fork branch with patches for token id tracking, chat template, and sampling parameters needed for training.
 
-Notably, for agent integrations like this, the agent must point at Gym's model server, it must include prompt and generation token id fields for Nemo RL and other trainer's on policy token id correction, it must not override sampling parameters like temperature and top p, and it must not do non-monotonic things like dropping past reasoning content or context compaction.
+For agent integrations like this, the agent must point at Gym's model server, it must include prompt and generation token id in requests for Nemo RL and other trainer integration on policy token id correction, it must not override sampling parameters like temperature and top p, and it must not do non-monotonic things like dropping past reasoning content or context compaction.
 
 ## Resources server compatibility
 

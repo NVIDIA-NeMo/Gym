@@ -100,7 +100,7 @@ def _trajectory_to_output_items(messages, n_input):
 LOG = logging.getLogger(__name__)
 
 
-# ray may close sys.stderr mid-request; write to the original fd
+# if ray close sys.stderr mid-request, write to the original fd
 class _SafeStderrHandler(logging.Handler):
     def emit(self, record):
         try:
@@ -211,7 +211,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
 
         agent = AIAgent(
             base_url=base_url,
-            api_key="gym",  # pragma: allowlist secret
+            api_key="gym",
             model=model_name,
             use_streaming=False,
             temperature=self.config.temperature,
