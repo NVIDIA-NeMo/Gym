@@ -211,7 +211,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
 
         agent = AIAgent(
             base_url=base_url,
-            api_key="gym",
+            api_key="gym",  # pragma: allowlist secret
             model=model_name,
             use_streaming=False,
             temperature=self.config.temperature,
