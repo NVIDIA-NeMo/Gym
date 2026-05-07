@@ -64,13 +64,13 @@ url = "https://gitlab-master.nvidia.com/api/v4/projects/65523/packages/pypi/simp
 explicit = true
 
 [tool.uv]
-# Universal resolution otherwise includes darwin splits where vLLM pins torch==2.10.0+cpu (unpublished
+# Universal resolution otherwise includes darwin splits where vLLM pins torch==2.11.0+cpu (unpublished
 # / unsatisfiable for those markers). This project targets Linux + CUDA only.
 environments = ["sys_platform == 'linux'"]
 override-dependencies = [
     "flashinfer-python",
-    "torch==2.10.0",
-    "torchaudio==2.10.0",
-    "torchvision==0.25.0",
+    "torch==2.11.0",
+    "torchaudio==2.11.0",
+    "torchvision==0.26.0",
 ]
 extra-build-variables = { vllm = { VLLM_PRECOMPILED_WHEEL_LOCATION="https://github.com/vllm-project/vllm/releases/download/v0.17.0/vllm-0.17.0-cp38-abi3-manylinux_2_31_aarch64.whl" } }
