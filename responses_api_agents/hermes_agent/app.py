@@ -15,6 +15,7 @@
 
 import asyncio
 import logging
+import os
 import sys
 from asyncio import Semaphore
 from time import time
@@ -155,6 +156,8 @@ class HermesAgentConfig(BaseResponsesAPIAgentConfig):
     enabled_toolsets: Optional[list[str]] = None
     disabled_toolsets: Optional[list[str]] = None
     temperature: float = 1.0
+    terminal_backend: str = "local"
+    terminal_timeout: int = 60
     system_prompt: Optional[str] = None
 
 
@@ -175,6 +178,10 @@ class HermesAgent(SimpleResponsesAPIAgent):
 
     def model_post_init(self, __context: Any) -> None:
         self.sem = Semaphore(self.config.concurrency)
+        # hermes-agent reads these from env (cli.py / batch_runner.py); env vars are
+        # process-global, so multiple HermesAgent instances in one process share them
+        os.environ["TERMINAL_ENV"] = self.config.terminal_backend
+        os.environ["TERMINAL_TIMEOUT"] = str(self.config.terminal_timeout)
 
     def _resolve_model_base_url(self) -> str:
         # aiagent builds its own openai client; resolve policy_model url

@@ -32,6 +32,8 @@ def test_config_yaml_parses():
     assert inner["max_turns"] == 30
     assert inner["enabled_toolsets"] is None
     assert inner["system_prompt"] is None
+    assert inner["terminal_backend"] == "local"
+    assert inner["terminal_timeout"] == 60
     assert "disabled_toolsets" not in inner
 
 

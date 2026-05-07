@@ -68,6 +68,8 @@ hermes_agent:
 | `max_turns` | `30` | maps to `AIAgent.max_iterations` |
 | `concurrency` | `32` | max simultaneous `run()` calls |
 | `temperature` | `1.0` | sampling temperature passed to `AIAgent` |
+| `terminal_backend` | `local` | sets `TERMINAL_ENV` (process-global); `local`, `docker`, `daytona`, `modal`, `ssh` |
+| `terminal_timeout` | `60` | sets `TERMINAL_TIMEOUT` (process-global); per-command wall-clock seconds |
 | `system_prompt` | `null` | passed as `system_message` to `run_conversation`; falls back to any system item in `body.input` |
 
 The model-server url is resolved at request time and passed to `AIAgent(base_url=..., api_key="gym")`.

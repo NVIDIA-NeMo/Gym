@@ -24,12 +24,11 @@ math_with_judge_hermes_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      enabled_toolsets: [terminal, file, code_execution, todo, memory, clarify, session_search, skills, web, image_gen]
+      enabled_toolsets: [terminal, file, code_execution, skills, todo]
       max_turns: 30
       concurrency: 32
       terminal_backend: local
-      terminal_timeout: 15
-      tool_pool_size: 128
+      terminal_timeout: 30
       system_prompt: |
         You are a precise math assistant. You have access to a terminal tool to run Python for calculations or verification.
         Use it when computation would help. Always state your final answer as \boxed{answer} in your response.

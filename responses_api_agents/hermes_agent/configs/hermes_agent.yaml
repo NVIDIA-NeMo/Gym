@@ -12,4 +12,6 @@ hermes_agent:
       max_turns: 30
       enabled_toolsets: null
       temperature: 1.0
+      terminal_backend: local
+      terminal_timeout: 60
       system_prompt: null
