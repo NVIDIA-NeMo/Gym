@@ -118,7 +118,7 @@ def get_wandb_run() -> Optional[Run]:
 
 
 # HuggingFace
-def get_hf_token() -> Optional[str]:
+def get_hf_token() -> Optional[str]:  # pragma: no cover
     return get_global_config_dict().get(HF_TOKEN_KEY_NAME)
 
 
@@ -425,6 +425,8 @@ Duplicate config paths:
             with open_dict(global_config_dict):
                 global_config_dict[CONFIG_PATHS_KEY_NAME] = config_paths
 
+        self._recursively_swap_keys(global_config_dict)
+
         # TODO @bxyu-nvidia: We need a better way of handling dummy model configs
         with open_dict(global_config_dict):
             for top_level_value in global_config_dict.values():
@@ -437,9 +439,11 @@ Duplicate config paths:
                 ):
                     continue
 
-                top_level_value["responses_api_models"].pop("dummy_model")
-
-        self._recursively_swap_keys(global_config_dict)
+                dummy_value = top_level_value["responses_api_models"].pop("dummy_model")
+                actual_key = next(iter(top_level_value["responses_api_models"]))
+                top_level_value["responses_api_models"][actual_key] = OmegaConf.merge(
+                    dummy_value, top_level_value["responses_api_models"][actual_key]
+                )
 
         # Almost-server detection and reporting
         almost_servers = self.detect_and_report_almost_servers(global_config_dict)
@@ -530,7 +534,7 @@ Found global config dict yaml:
             # e.g. WORKING_DIR/responses_api_models/my_server
             global_config_dict.setdefault(UV_VENV_DIR_KEY_NAME, str(WORKING_DIR))
 
-        if parse_config.hide_secrets:
+        if parse_config.hide_secrets:  # pragma: no cover
             self._recursively_hide_secrets(global_config_dict)
 
         # Set up W&B and log config. This must happen at the very last step.
@@ -716,7 +720,7 @@ def format_almost_server_warning(server_name: str, error: ValidationError) -> st
             break
 
     # Fallback: if all errors are "missing", check the input dict for the actual server type.
-    if not actual_server_type:
+    if not actual_server_type:  # pragma: no cover
         for err in errors:
             if "input" in err and isinstance(err["input"], dict):
                 for key in server_type_keys:
