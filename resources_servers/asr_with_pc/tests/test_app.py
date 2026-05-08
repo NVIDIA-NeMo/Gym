@@ -22,6 +22,8 @@ from resources_servers.asr_with_pc.app import (
     calculate_per,
     evaluate_asr,
     evaluate_asr_pc,
+    evaluate_bleu,
+    evaluate_exact_match,
     evaluate_hallucination,
     extract_punctuation,
     normalize_whitespace,
@@ -639,3 +641,112 @@ class TestMixedTaskTypeAggregation:
         # Reserved suffixes (c, pc) stay under their canonical headline names.
         assert key["wer_c"] == 9.0
         assert key["wer_pc"] == 14.0
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# AudioBench (BLEU + EXACT_MATCH + audiobench normalization)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestAudiobenchNormalization:
+    """preprocess_asr_text(mode='audiobench') folds digits into words.
+
+    AudioBench's text normalizer is more aggressive than Whisper's: standalone
+    digit tokens get spelled out (so "I bought 3 apples" matches "I bought
+    three apples"). Falls back to leaving digits in place if num2words isn't
+    installed.
+    """
+
+    def test_digits_get_spelled_out(self) -> None:
+        out = preprocess_asr_text("I bought 3 apples", mode="audiobench")
+        assert "three" in out
+        assert "3" not in out
+
+    def test_standard_mode_keeps_digits(self) -> None:
+        # whisper's EnglishTextNormalizer does some digit handling on its own
+        # (e.g., "twenty three" → "23"); the audiobench mode runs digits→words
+        # AFTER, so the final string has words. Standard mode should NOT.
+        out = preprocess_asr_text("twenty three", mode="standard")
+        assert "twenty" not in out  # whisper folded it to digits
+        assert "23" in out
+
+
+class TestEvaluateBleu:
+    """task_type=BLEU path: sentence-level sacrebleu, 0..1 fraction."""
+
+    def test_perfect_translation_high_bleu(self) -> None:
+        result = evaluate_bleu("the cat sat on the mat", "the cat sat on the mat")
+        assert result["bleu"] >= 0.99
+        assert result["is_correct"] is True
+
+    def test_completely_different_low_bleu(self) -> None:
+        result = evaluate_bleu("the cat sat on the mat", "totally unrelated content")
+        assert result["bleu"] < 0.5
+        assert result["is_correct"] is False
+
+    def test_empty_reference_zero(self) -> None:
+        result = evaluate_bleu("", "anything")
+        assert result["bleu"] == 0.0
+        assert result["is_correct"] is False
+
+
+class TestEvaluateExactMatch:
+    """task_type=EXACT_MATCH path: lowercased, punct-stripped, whitespace-collapsed."""
+
+    def test_exact(self) -> None:
+        assert evaluate_exact_match("42", "42")["is_correct"] is True
+
+    def test_case_insensitive(self) -> None:
+        assert evaluate_exact_match("Yes", "yes")["is_correct"] is True
+
+    def test_punct_stripped(self) -> None:
+        assert evaluate_exact_match("yes.", "Yes!")["is_correct"] is True
+
+    def test_mismatch(self) -> None:
+        assert evaluate_exact_match("42", "43")["is_correct"] is False
+
+    def test_empty_ref_never_correct(self) -> None:
+        # Empty reference should NEVER score as correct, even against an
+        # empty hypothesis — a row with no gold answer can't be validated.
+        assert evaluate_exact_match("", "")["is_correct"] is False
+
+
+class TestBleuExactMatchDispatch:
+    """task_type=BLEU / EXACT_MATCH route through the verify dispatch."""
+
+    async def test_bleu_dispatch_populates_bleu_field(self) -> None:
+        server = _make_server(task_type="BLEU")
+        body = _make_verify_request("the cat sat on the mat", "the cat sat on the mat")
+        result = await server.verify(body)
+        assert result.bleu is not None
+        assert result.bleu >= 0.99
+        assert result.is_correct is True
+        assert result.reward == 1.0
+
+    async def test_exact_match_dispatch(self) -> None:
+        server = _make_server(task_type="EXACT_MATCH")
+        body = _make_verify_request("Yes!", "yes")
+        result = await server.verify(body)
+        assert result.is_correct is True
+        assert result.reward == 1.0
+
+    async def test_exact_match_mismatch_zero_reward(self) -> None:
+        server = _make_server(task_type="EXACT_MATCH")
+        body = _make_verify_request("43", "42")
+        result = await server.verify(body)
+        assert result.is_correct is False
+        assert result.reward == 0.0
+
+    async def test_audiobench_normalization_in_request(self) -> None:
+        """task_type=ASR with normalization_mode='audiobench' folds digits."""
+        server = _make_server(task_type="ASR")
+        body = ASRWithPCVerifyRequest(
+            responses_create_params=MINIMAL_RESPONSES_CREATE_PARAMS,
+            response=_make_response("I bought 3 apples"),
+            expected_answer="I bought three apples",
+            normalization_mode="audiobench",
+        )
+        result = await server.verify(body)
+        # With audiobench normalization, digits→words should make these match.
+        assert result.wer == pytest.approx(0.0)
+        assert result.is_correct is True

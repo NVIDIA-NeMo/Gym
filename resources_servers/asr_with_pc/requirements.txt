@@ -1,3 +1,8 @@
 -e nemo-gym[dev] @ ../../
 jiwer>=3.0.0
 whisper_normalizer>=0.1.0
+# BLEU translation scoring (covost2 etc. via task_type="BLEU")
+sacrebleu>=2.4.0
+# Audiobench-style normalization (digits-to-words on top of Whisper, used by
+# task_type="ASR"/"ASR-PC" with normalization_mode="audiobench")
+num2words>=0.5.13
