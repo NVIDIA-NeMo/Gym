@@ -66,55 +66,57 @@ def _java_runs() -> bool:
 
 
 def ensure_libreoffice() -> bool:
-    """Make sure ``libreoffice`` *and* a *functional* JRE are present; apt-install on Linux if missing.
+    """Make sure libreoffice + a *functional* JRE are present. ALWAYS run apt-install on Linux.
 
-    Returns True if libreoffice is available after the call, False otherwise.
-    Idempotent: when libreoffice is on PATH AND `java -version` runs
-    cleanly, returns immediately. When libreoffice is present but Java is
-    missing or broken (e.g. the deployment image bakes libreoffice in
-    without a usable JRE), still runs apt-install — without a working
-    JRE, libreoffice silently exits rc=0 with `Warning: failed to launch
-    javaldx` for any chart/formula/embedded-object doc, producing
-    filename-only stubs in comparison mode.
+    Returns True if libreoffice + a usable JRE are available after the call.
 
-    A previous version of this function gated the early-exit on
-    `shutil.which("java")` alone; that wasn't enough — the deployment
-    image had *some* `java` binary on PATH that satisfied `which()` but
-    couldn't actually execute (`java -version` failed), so apt-install
-    was skipped and the JRE was never landed. The functional probe in
-    `_java_runs()` catches that case.
+    History (so we don't regress again):
+      v1 — early-exit on `shutil.which("libreoffice")`. The deployment image
+           bakes libreoffice in *without* a JRE; apt-install was skipped and
+           libreoffice's `javaldx` helper failed for every chart/formula doc.
+      v2 — early-exit on `shutil.which("libreoffice") and shutil.which("java")`.
+           Same regression — the image has a `java` binary that satisfies
+           `which()` but isn't functional.
+      v3 — early-exit on `shutil.which("libreoffice") and _java_runs()` (i.e.
+           `java -version` rc=0). STILL not enough — `java -version` succeeds
+           but libreoffice's `javaldx` (which loads libjvm.so via JNI) still
+           can't find a usable JRE. Concrete signal: 10 `failed to launch
+           javaldx` errors at 35 rollouts on slurm 2621556.
+      v4 (this) — drop the early-exit entirely. ALWAYS run apt-update +
+           apt-install of the full package list. `apt-get install` is
+           idempotent on already-installed packages (a few seconds when
+           everything is present), and the only configuration that
+           reliably gets `javaldx` working is having `default-jre-headless`
+           installed via the same dpkg DB that libreoffice's wrapper
+           consults. Rather than try to detect that out-of-band, just
+           install.
 
-    Logs a WARNING (not raise) on install failure so the server still boots
-    and rubric-mode tasks keep working; comparison-mode preconvert will then
-    surface its own per-file errors via ``preconvert.py``.
+    Logs a WARNING on apt failure so the server still boots and rubric-mode
+    tasks keep working; comparison-mode preconvert will surface its own
+    per-file errors via ``preconvert.py``.
     """
-    if shutil.which("libreoffice") and _java_runs():
-        return True
-
     if not sys.platform.startswith("linux"):
         LOGGER.warning(
-            "libreoffice not on PATH and auto-install only supports Linux (sys.platform=%s); "
-            "GDPVal preconvert will be a no-op.",
+            "auto-install only supports Linux (sys.platform=%s); GDPVal preconvert will be a no-op.",
             sys.platform,
         )
         return False
 
     if not shutil.which("apt-get"):
-        LOGGER.warning(
-            "libreoffice or java not on PATH and apt-get is unavailable; GDPVal preconvert will be a no-op."
-        )
+        LOGGER.warning("apt-get is unavailable; GDPVal preconvert will be a no-op.")
         return False
 
     LOGGER.info(
-        "Installing %s via apt-get (one-time, ~500 MB if libreoffice is missing)...",
+        "Ensuring %s via apt-get (idempotent; first call adds ~500 MB if libreoffice is missing, "
+        "subsequent calls only verify the packages)...",
         ", ".join(_APT_PACKAGES),
     )
 
     try:
         rc, _, err = _run(["apt-get", "update", "-qq"], timeout=_APT_INSTALL_TIMEOUT_S)
         if rc != 0:
+            # Non-fatal: stale apt index can still satisfy install if the packages are cached.
             LOGGER.warning("apt-get update failed (rc=%d): %s", rc, (err or "").strip()[:500])
-            return False
         rc, _, err = _run(
             ["apt-get", "install", "-y", "--no-install-recommends", *_APT_PACKAGES],
             timeout=_APT_INSTALL_TIMEOUT_S,
