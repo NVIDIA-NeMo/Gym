@@ -126,9 +126,7 @@ def _build_row(
     }
 
 
-def _iter_category_rows(
-    category: str, dataset_root: Path, audio_root: str
-) -> Iterator[dict]:
+def _iter_category_rows(category: str, dataset_root: Path, audio_root: str) -> Iterator[dict]:
     """Yield one row per WAV file in ``dataset_root/<category>/`` (recursive).
 
     Filename layout matches Skills (``musan_<category>_NNNNNN.wav``); each
@@ -162,9 +160,7 @@ def _iter_category_rows(
         )
 
 
-def _materialize_flat_layout(
-    dataset_root: Path, target_root: Path, categories: tuple[str, ...]
-) -> None:
+def _materialize_flat_layout(dataset_root: Path, target_root: Path, categories: tuple[str, ...]) -> None:
     """Copy WAVs into ``<target_root>/musan/<category>/audio/musan_<cat>_NNNNNN.wav``.
 
     OpenSLR ships MUSAN with nested per-source directories (e.g.
