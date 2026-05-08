@@ -46,9 +46,6 @@ class RewardProfileConfig(BaseNeMoGymCLIConfig):
     )
 
 
-_PARTIAL_PROFILE_HINT = "Use ++allow_partial_rollouts=True to profile completed rollouts from a partial collection."
-
-
 def _rollout_key(row: Dict[str, Any]) -> Tuple[int, int]:
     return row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME]
 
@@ -89,7 +86,8 @@ class RewardProfiler:
             raise ValueError(
                 "Materialized input rows and rollout results do not have matching rollout keys. "
                 f"Missing rollout results for {len(missing_results)} materialized input rows. "
-                f"Missing rollout keys: {missing_results[:10]}.\n\n{_PARTIAL_PROFILE_HINT}"
+                f"Missing rollout keys: {missing_results[:10]}.\n\n"
+                "Use ++allow_partial_rollouts=True to profile completed rollouts from a partial collection."
             )
 
         matched_keys = rows_by_key.keys() & results_by_key.keys()
@@ -222,10 +220,9 @@ class RewardProfiler:
         expected_rollouts_by_task = Counter(row[TASK_INDEX_KEY_NAME] for row in rows)
         for row, result in aligned_rows_and_results:
             task_idx, rollout_idx = _rollout_key(row)
-            result = result if "response" in result else {**result, "response": {}}
 
             # Add additional helpful information
-            result = result | (result.get("response", {}).get("usage") or {})
+            result = result | (result["response"].get("usage") or {})
 
             # agent_name is a temporary column used for aggregations below
             numeric_result = {
@@ -651,20 +648,15 @@ def compute_aggregate_metrics(
 
     rows = []
     results = []
-    task_idx_to_next_rollout_idx: Dict[int, int] = Counter()
     for vr in verify_responses:
-        task_idx = vr.get(TASK_INDEX_KEY_NAME, 0)
-        rollout_idx = vr.get(ROLLOUT_INDEX_KEY_NAME, task_idx_to_next_rollout_idx[task_idx])
-        task_idx_to_next_rollout_idx[task_idx] = max(task_idx_to_next_rollout_idx[task_idx], rollout_idx + 1)
         rows.append(
             {
-                TASK_INDEX_KEY_NAME: task_idx,
-                ROLLOUT_INDEX_KEY_NAME: rollout_idx,
+                TASK_INDEX_KEY_NAME: vr.get(TASK_INDEX_KEY_NAME, 0),
+                ROLLOUT_INDEX_KEY_NAME: vr.get(ROLLOUT_INDEX_KEY_NAME, 0),
                 "agent_ref": {"name": "agent"},
             }
         )
-        result = vr if "response" in vr else {**vr, "response": {}}
-        results.append({**result, TASK_INDEX_KEY_NAME: task_idx, ROLLOUT_INDEX_KEY_NAME: rollout_idx})
+        results.append(vr if "response" in vr else {**vr, "response": {}})
 
     group_level_metrics, agent_level_metrics = rp.profile_from_data(rows, results)
 
