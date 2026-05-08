@@ -1,0 +1,34 @@
+-e nemo-gym[dev] @ ../../
+# Stirrup agent framework + HF tokenizer for dynamic max_tokens sizing.
+# Kept out of the outer nemo-gym pyproject.toml so core users don't pay
+# the PyTorch/transformers install cost.
+stirrup>=0.1.7
+transformers>=4.40.0
+# Deliverable-processing deps for file_reader.py AND the libraries the agent
+# tells the policy model are available in the sandbox (see
+# prompts/gdpval_user_prompt.txt). The subprocess venv created by ng_run
+# from this requirements.txt does not see these via transitive resolution,
+# so we pin them explicitly.
+jinja2>=3.1
+python-docx>=1.1
+python-pptx>=1.0
+openpyxl>=3.1
+pdfminer.six>=20240706
+trafilatura>=1.12
+httpx>=0.27
+# moviepy (transitive from stirrup) imports PIL at module load; Pillow must
+# be installed in the same venv or the whole stirrup import chain breaks.
+Pillow>=10.0.0
+# PDF/Office generation libraries the agent prompt advertises; the model
+# tries to import these inside the sandbox, so they must be installed in
+# the agent venv (which the code sandbox inherits).
+PyPDF2>=3.0
+pymupdf>=1.24
+pdfplumber>=0.11
+fpdf2>=2.8
+reportlab>=4.4
+weasyprint>=68.0
+markdown2>=2.5
+beautifulsoup4>=4.12
+seaborn>=0.13
+lxml>=5.3
