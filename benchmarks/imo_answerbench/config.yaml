@@ -1,0 +1,14 @@
+config_paths:
+  - resources_servers/math_with_autograder/configs/math_with_autograder.yaml
+  - resources_servers/math_with_autograder/configs/judge_gptoss20b.yaml
+
+imo_answerbench_math_with_autograder_simple_agent:
+  _inherit_from: math_with_autograder_simple_agent
+  responses_api_agents:
+    simple_agent:
+      datasets:
+        - name: imo_answerbench
+          type: benchmark
+          jsonl_fpath: benchmarks/imo_answerbench/data/imo_answerbench_benchmark.jsonl
+          prompt_config: benchmarks/imo_answerbench/prompts/default.yaml
+          prepare_script: benchmarks/imo_answerbench/prepare.py

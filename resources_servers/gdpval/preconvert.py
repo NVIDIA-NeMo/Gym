@@ -6,53 +6,126 @@
 # You may obtain a copy of the License at
 #
 # http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 """Pre-convert Office documents to PDF for GDPVal judging.
 
-Library form (no CLI). ``verify()`` calls ``preconvert_dir`` on a task's
-deliverable directory; the resulting PDFs land alongside the originals so
-the multimodal judge can read them.
+Each invocation gets its own ``-env:UserInstallation`` profile dir, so
+concurrent libreoffice subprocesses don't race on the shared default
+profile lock (``$HOME/.config/libreoffice``) — that race is the reason
+the previous default ``max_concurrent=1`` existed.
+
+OOXML namespace normalization
+-----------------------------
+
+Some files in the GDPVal corpus were emitted by ``python-docx`` (or
+similar lxml-based tools), which serialize the OPC package XML with an
+explicit ``ns0:`` namespace prefix:
+
+    <ns0:Relationships xmlns:ns0="http://schemas.openxmlformats.org/...">
+
+instead of the standard default-namespace form:
+
+    <Relationships xmlns="http://schemas.openxmlformats.org/...">
+
+The two forms are semantically identical XML, and Microsoft Word /
+pandoc accept both. LibreOffice 24.2, however, rejects the prefixed
+form with ``Error: source file could not be loaded``. The prefixing
+shows up in BOTH ``_rels/.rels`` and ``[Content_Types].xml``; rewriting
+only one of them is not enough.
+
+Before invoking libreoffice we detect this shape and write a
+namespace-normalized copy to a tempdir, leaving the original on disk
+untouched.
 """
 
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
+import re
+import shutil
 import subprocess
+import tempfile
+import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 
+LOGGER = logging.getLogger(__name__)
+
 OFFICE_EXTENSIONS = {".docx", ".pptx", ".xlsx"}
+
+DEFAULT_MAX_CONCURRENT = 4
+
+_NS0_ROOT_RE = re.compile(r'<ns0:([A-Za-z_][\w.-]*)\b([^>]*?)\bxmlns:ns0="([^"]+)"')
+_NS0_TAG_RE = re.compile(r"</?ns0:")
+_NS0_SENTINEL = b'xmlns:ns0="http://schemas.openxmlformats.org/'
+
+
+def _rewrite_ns0_namespace(text: str) -> str:
+    text = _NS0_ROOT_RE.sub(r'<\1 xmlns="\3"\2', text)
+    text = _NS0_TAG_RE.sub(lambda m: m.group(0).replace("ns0:", ""), text)
+    return text
+
+
+def _ooxml_has_ns0_prefix(path: Path) -> bool:
+    """True if the package uses python-docx-style ``ns0:`` prefixing in
+    ``_rels/.rels`` or ``[Content_Types].xml``. LibreOffice can't load
+    files in this form even though they are valid OOXML."""
+    try:
+        with zipfile.ZipFile(path) as zin:
+            names = set(zin.namelist())
+            for part in ("_rels/.rels", "[Content_Types].xml"):
+                if part in names and _NS0_SENTINEL in zin.read(part):
+                    return True
+    except (zipfile.BadZipFile, OSError):
+        return False
+    return False
+
+
+def _normalize_ooxml_zip(src: Path, dst: Path) -> None:
+    """Copy ``src`` to ``dst`` rewriting any ``ns0:``-prefixed package XML
+    (``*.rels`` and ``[Content_Types].xml``) to default-namespace form."""
+    with zipfile.ZipFile(src) as zin, zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED) as zout:
+        for item in zin.namelist():
+            data = zin.read(item)
+            if item.endswith(".rels") or item == "[Content_Types].xml":
+                data = _rewrite_ns0_namespace(data.decode("utf-8")).encode("utf-8")
+            zout.writestr(item, data)
 
 
 def needs_conversion(path: Path) -> bool:
-    """Return True if this Office file has no corresponding PDF yet."""
     return path.suffix.lower() in OFFICE_EXTENSIONS and not path.with_suffix(".pdf").exists()
 
 
 def convert_to_pdf(path: Path) -> tuple[Path, bool, str]:
-    """Convert a single file to PDF via LibreOffice headless.
-
-    Returns ``(path, success, message)``. ``success=False`` on missing
-    libreoffice, timeout, or non-zero exit without a produced PDF.
-    """
+    """Convert one file to PDF via host LibreOffice. Returns ``(path, ok, msg)``."""
     output_dir = str(path.parent)
+    profile_dir = Path(tempfile.mkdtemp(prefix="lo-profile-"))
+    norm_dir: Path | None = None
+    input_path = path
+    normalized = False
     try:
+        if _ooxml_has_ns0_prefix(path):
+            norm_dir = Path(tempfile.mkdtemp(prefix="gdpval-norm-"))
+            input_path = norm_dir / path.name
+            _normalize_ooxml_zip(path, input_path)
+            normalized = True
+
         result = subprocess.run(
             [
                 "libreoffice",
                 "--headless",
+                "--nologo",
+                "--nolockcheck",
+                "--nodefault",
+                "--norestore",
+                f"-env:UserInstallation=file://{profile_dir.as_posix()}",
                 "--convert-to",
                 "pdf",
                 "--outdir",
                 output_dir,
-                str(path),
+                str(input_path),
             ],
             capture_output=True,
             text=True,
@@ -60,18 +133,26 @@ def convert_to_pdf(path: Path) -> tuple[Path, bool, str]:
         )
         pdf_path = path.with_suffix(".pdf")
         if pdf_path.exists():
-            return path, True, f"Converted: {path} -> {pdf_path}"
-        return path, False, f"LibreOffice ran but PDF not created: {result.stderr.strip()}"
+            suffix = " (after ns0 normalization)" if normalized else ""
+            return path, True, f"converted {path.name}{suffix}"
+        return (
+            path,
+            False,
+            f"libreoffice rc={result.returncode} did not produce {pdf_path.name}: {result.stderr.strip()[:300]}",
+        )
     except subprocess.TimeoutExpired:
-        return path, False, f"Timeout converting {path}"
+        return path, False, f"timeout converting {path.name}"
     except FileNotFoundError:
-        return path, False, "LibreOffice not found — install with: apt install libreoffice"
-    except Exception as e:
-        return path, False, f"Error converting {path}: {e}"
+        return path, False, "libreoffice not found on host PATH (install with: apt install libreoffice)"
+    except Exception as exc:
+        return path, False, f"error converting {path.name}: {exc!r}"
+    finally:
+        shutil.rmtree(profile_dir, ignore_errors=True)
+        if norm_dir is not None:
+            shutil.rmtree(norm_dir, ignore_errors=True)
 
 
 def find_convertible_files(root_dir: str | os.PathLike) -> list[Path]:
-    """Walk *root_dir* for Office files that still need PDF conversion."""
     files: list[Path] = []
     for dirpath, _, filenames in os.walk(root_dir):
         for filename in filenames:
@@ -81,35 +162,36 @@ def find_convertible_files(root_dir: str | os.PathLike) -> list[Path]:
     return sorted(files)
 
 
-def preconvert_dir(root_dir: str | os.PathLike, max_concurrent: int = 1) -> tuple[int, int]:
-    """Convert every pending Office file under *root_dir* to PDF.
+def preconvert_dir(
+    root_dir: str | os.PathLike,
+    max_concurrent: int = DEFAULT_MAX_CONCURRENT,
+) -> tuple[int, int, list[str]]:
+    """Convert every pending Office file under ``root_dir`` to PDF.
 
-    Uses a ``ThreadPoolExecutor`` bounded by *max_concurrent* (LibreOffice
-    spawns its own processes; parallelism above ~4 tends to deadlock).
-
-    Returns ``(num_success, num_failed)``.
+    Returns ``(num_success, num_failed, error_messages)``. Caller should log
+    a sample at WARNING when ``num_failed > 0``.
     """
     files = find_convertible_files(root_dir)
     if not files:
-        return 0, 0
+        return 0, 0, []
 
     success_count = 0
     fail_count = 0
+    error_messages: list[str] = []
     with ThreadPoolExecutor(max_workers=max_concurrent) as executor:
         futures = {executor.submit(convert_to_pdf, f): f for f in files}
         for future in as_completed(futures):
-            _, success, _ = future.result()
+            _, success, message = future.result()
             if success:
                 success_count += 1
             else:
                 fail_count += 1
-    return success_count, fail_count
+                error_messages.append(message)
+    return success_count, fail_count, error_messages
 
 
-async def preconvert_dir_async(root_dir: str | os.PathLike, max_concurrent: int = 1) -> tuple[int, int]:
-    """Async wrapper over :func:`preconvert_dir`.
-
-    Delegates to a worker thread so the asyncio event loop stays
-    responsive while LibreOffice subprocesses run.
-    """
+async def preconvert_dir_async(
+    root_dir: str | os.PathLike,
+    max_concurrent: int = DEFAULT_MAX_CONCURRENT,
+) -> tuple[int, int, list[str]]:
     return await asyncio.to_thread(preconvert_dir, root_dir, max_concurrent)
