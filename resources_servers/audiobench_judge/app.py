@@ -50,7 +50,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
+from nemo_gym.reward_profile import compute_pass_majority_metrics, compute_subset_metrics, highest_k_metrics
 from nemo_gym.server_utils import get_response_json
 
 
@@ -282,11 +282,19 @@ class AudioBenchJudgeResourcesServer(SimpleResourcesServer):
         return scores
 
     def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
-        return compute_pass_majority_metrics(
+        metrics = compute_pass_majority_metrics(
             tasks,
             score_fn=self._score_fn,
             answer_key=None,
         )[0]
+        # Per-sub-dataset breakdown — keyed off the ``dataset_name`` field
+        # the audiobench prepare script stamps on every row. Skipped when
+        # rows don't carry the field (e.g. an LLM-judge benchmark that
+        # isn't audiobench).
+        if any(t and t[0].get("dataset_name") for t in tasks):
+            subset = compute_subset_metrics(tasks, subset_key="dataset_name", score_fn=self._score_fn)
+            metrics.update(subset)
+        return metrics
 
     def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
         """Headline metrics: pass@k accuracy + AudioBench-style judge_score."""

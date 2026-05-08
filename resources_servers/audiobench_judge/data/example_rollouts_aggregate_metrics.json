@@ -1,7 +1,7 @@
 [
   {
     "agent_ref": {
-      "name": "audiobench_alpaca_audio_judge_simple_agent"
+      "name": "audiobench_judge_simple_agent"
     },
     "agent_metrics": {
       "mean/reward": 0.0,

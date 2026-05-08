@@ -45,7 +45,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
+from nemo_gym.reward_profile import compute_pass_majority_metrics, compute_subset_metrics, highest_k_metrics
 
 
 # Hallucination detection: chars/min above this rate signal repetition/hallucination.
@@ -577,6 +577,15 @@ class ASRWithPCResourcesServer(SimpleResourcesServer):
             for suffix in ref_suffixes:
                 if ref_corpus[suffix]:
                     metrics[f"wer_{suffix}@k={k}"] = 100.0 * jiwer.wer(ref_corpus[suffix], hyp_corpus[suffix])
+
+        # Per-sub-dataset breakdown via ``dataset_name`` field. Used by the
+        # audiobench buckets where one rollout collection covers many
+        # sub-datasets (alpaca_audio_test vs gigaspeech_test vs ...) and the
+        # reviewer wants per-sub-dataset accuracy alongside the headline.
+        # Skipped when rows don't carry ``dataset_name`` (e.g. librispeech_pc).
+        if any(t and t[0].get("dataset_name") for t in tasks):
+            subset = compute_subset_metrics(tasks, subset_key="dataset_name", score_fn=self._score_fn)
+            metrics.update(subset)
 
         return metrics
 
