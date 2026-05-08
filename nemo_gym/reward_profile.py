@@ -264,7 +264,6 @@ class RewardProfiler:
                 task_idx_to_rollout_infos[task_idx],
                 key=lambda r: r[ROLLOUT_INDEX_KEY_NAME],
             )
-            group_metrics.pop(TASK_INDEX_KEY_NAME)
 
         agent_level_df = df.drop(columns=[ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME]).groupby("agent_name")
         agent_level_metrics = self.calculate_metrics_single_df(agent_level_df)
@@ -666,8 +665,7 @@ def compute_aggregate_metrics(
 
     serialized_group = rp.prepare_for_serialization(group_level_metrics)
 
-    # Re-add task index (RewardProfiler pops it during profiling, but groups are
-    # returned in sorted task index order from the pandas groupby)
+    # Keep task index explicit in aggregate metrics for downstream per-task joins.
     sorted_task_indices = sorted({vr.get(TASK_INDEX_KEY_NAME, 0) for vr in verify_responses})
     for group, task_idx in zip(serialized_group, sorted_task_indices):
         group[TASK_INDEX_KEY_NAME] = task_idx

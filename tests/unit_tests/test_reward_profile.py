@@ -26,6 +26,7 @@ class TestRewardProfile:
                 if key.startswith("histogram"):
                     row[key] = None
                 elif key in {
+                    "_ng_task_index",
                     "expected_num_rollouts",
                     "missing_num_rollouts",
                     "num_rollouts",
@@ -375,6 +376,7 @@ class TestRewardProfile:
         group_level_metrics, _ = RewardProfiler().profile_from_data(rows, results)
         row = RewardProfiler().prepare_for_serialization(group_level_metrics)[0]
 
+        assert row["_ng_task_index"] == 0
         assert row["num_rollouts"] == 2
         assert row["rollout_infos"] == [
             {
@@ -417,7 +419,7 @@ class TestRewardProfile:
         profile_rows = profiler.prepare_for_serialization(group_level_metrics)
         summary = profiler.profile_completion_summary(rows, results)
 
-        assert [row["sample"]["task"] for row in profile_rows] == [0, 1]
+        assert [row["_ng_task_index"] for row in profile_rows] == [0, 1]
         assert [
             (row["num_rollouts"], row["expected_num_rollouts"], row["missing_num_rollouts"]) for row in profile_rows
         ] == [(2, 2, 0), (1, 2, 1)]
