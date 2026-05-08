@@ -32,6 +32,15 @@ _APT_PACKAGES = (
     # complex formulas, embedded objects, or pivot tables. Headless JRE
     # is enough — we never display a GUI.
     "default-jre-headless",
+    # `javaldx` (the helper libreoffice uses to locate the JRE via JNI)
+    # ships in `libreoffice-java-common`, which is NOT a dependency of
+    # the `libreoffice` metapackage on Ubuntu 24.04. Without it,
+    # `/usr/lib/libreoffice/program/javaldx` simply doesn't exist —
+    # libreoffice can't discover the JRE no matter how many JRE
+    # packages are installed. Without this entry, every attempt at
+    # the JRE-prebaked fix (v1–v4) silently failed because the bridge
+    # between libreoffice and the JRE was missing.
+    "libreoffice-java-common",
 )
 
 _APT_INSTALL_TIMEOUT_S = 600

@@ -246,6 +246,9 @@ def test_install_command_uses_no_install_recommends_and_includes_jre() -> None:
     assert "libreoffice" in install_cmd
     assert "fonts-liberation" in install_cmd
     assert "default-jre-headless" in install_cmd
+    # libreoffice-java-common ships javaldx, the helper libreoffice uses
+    # to find the JRE; without it the JRE-install does nothing useful.
+    assert "libreoffice-java-common" in install_cmd
 
 
 def test_java_runs_returns_false_when_java_not_on_path() -> None:
