@@ -62,7 +62,7 @@ class CVDPResourcesServerConfig(BaseResourcesServerConfig):
     num_processes: int = 4  # Max concurrent Apptainer jobs
     sif_cache_dir: str = ""  # Defaults to ~/.cache/nemo-gym/sif
     harness_workspace_dir: str = ""  # Optional host directory for per-rollout temp workspaces
-    container_tmp_bind_path: str = "/tmp"  # In-container temp path backed by per-rollout storage
+    container_tmp_bind_path: str = ""  # If set, redirect in-container temp (e.g. /tmp) to per-rollout host storage
 
 
 # ----------------------------
@@ -577,8 +577,9 @@ class CVDPResourcesServer(SimpleResourcesServer):
             # Create all mount dirs — mirrors repository.create_folders()
             for d in ["rtl", "verif", "docs", "src", "rundir"]:
                 (workdir_path / d).mkdir()
-            # Per-rollout temp storage; cleaned when TemporaryDirectory exits.
-            (workdir_path / "rundir" / "tmp").mkdir(parents=True, exist_ok=True)
+            # Optional per-rollout temp storage; cleaned when TemporaryDirectory exits.
+            if self.config.container_tmp_bind_path:
+                (workdir_path / "rundir" / "tmp").mkdir(parents=True, exist_ok=True)
 
             # Write harness files — mirrors repository.restore_files()
             compose_content: Optional[str] = None
@@ -674,10 +675,11 @@ class CVDPResourcesServer(SimpleResourcesServer):
             return 1, str(exc)
 
         bind_args = _build_bind_args(path, svc["volumes"])
-        bind_args += ["--bind", f"{path}/rundir/tmp:{self.config.container_tmp_bind_path}"]
         dot_env = _load_dot_env(path)
         env_args = _build_env_args(svc["environment"], dot_env)
-        env_args += _build_runtime_tmp_env_args(self.config.container_tmp_bind_path)
+        if self.config.container_tmp_bind_path:
+            bind_args += ["--bind", f"{path}/rundir/tmp:{self.config.container_tmp_bind_path}"]
+            env_args += _build_runtime_tmp_env_args(self.config.container_tmp_bind_path)
         cmd_parts = _build_command(svc["entrypoint"], svc["command"])
 
         # Fix working_dir paths that don't exist under Apptainer's bind mounts.
