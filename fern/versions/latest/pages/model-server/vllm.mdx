@@ -148,6 +148,40 @@ base_url:
 2. **Session affinity**: Once assigned, a session always uses the same endpoint (tracked via HTTP session cookies)
 3. **Why affinity?** Multi-turn conversations and agentic workflows that call the model multiple times in one trajectory need to hit the same model endpoint in order to hit the prefix cache, which significantly speeds up the prefill phase of model inference.
 
+## Context Length Exceeded Handling
+
+When a conversation exceeds the vLLM model's maximum context length (`max_seq_length`), VLLMModel handles the error gracefully instead of crashing the entire rollout collection.
+
+### How it works
+
+1. **vLLM rejects the request**: vLLM returns an HTTP 400 error with a message like `"This model's maximum context length is 32768 tokens. However, you requested 32818 tokens..."`.
+2. **VLLMModel catches the error**: Instead of propagating the exception, VLLMModel returns an empty response with `finish_reason: "length"`.
+3. **Responses API mapping**: The `finish_reason: "length"` is converted to `incomplete_details: { reason: "max_output_tokens" }` in the Responses API response returned to the agent.
+
+This is particularly important for multi-turn agentic rollouts where conversation length can grow unpredictably across tool-call turns.
+
+### How to detect truncated responses
+
+Downstream consumers (agents, RL training frameworks) can check the `incomplete_details` field on the response:
+
+```python
+response = await model_server.responses(request, body)
+
+if response.incomplete_details and response.incomplete_details["reason"] == "max_output_tokens":
+    # The conversation exceeded the model's context window.
+    # The response output will be empty — handle accordingly.
+    pass
+```
+
+<Note>
+When `incomplete_details.reason == "max_output_tokens"`, the response output is empty because vLLM rejected the request before generation began. This differs from a normal `max_output_tokens` truncation where the model generates up to the token limit — in this case, the input itself was too long.
+
+</Note>
+
+### Implications for training
+
+When using NeMo Gym with NeMo RL or another training framework, responses with `incomplete_details.reason == "max_output_tokens"` indicate that the full conversation (prompt + prior generations) exceeded `max_seq_length`. Training frameworks should filter or handle these responses appropriately since they contain no generated tokens.
+
 ## Training vs Offline Inference
 By default, VLLMModel will not track any token IDs explicitly. However, token IDs are necessary when using NeMo Gym in conjunction with a training framework in order to train a model. For NeMo RL training workflows, use the training-dedicated config which enables token ID tracking:
 
