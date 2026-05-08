@@ -32,6 +32,10 @@ Mirrors `repository.py` in the [CVDP source](https://github.com/NVlabs/cvdp_benc
 | `num_processes`     | `4`                     | Max concurrent Apptainer jobs                                 |
 | `sif_cache_dir`     | `~/.cache/nemo-gym/sif` | Directory for cached SIF images pulled from Docker registries |
 
+**Note**: To run the commercial subset, pass the EDA image name in the yaml config file (/scratch/artij/Gym/resources_servers/cvdp/configs/cvdp.yaml).
+```
+eda_sim_image: cvdp-cadence-verif:latest
+```
 
 ## Download Dataset
 
