@@ -1,0 +1,37 @@
+[
+  {
+    "agent_ref": {
+      "name": "audiobench_alpaca_audio_judge_simple_agent"
+    },
+    "agent_metrics": {
+      "mean/reward": 0.0,
+      "max/reward": 0,
+      "min/reward": 0,
+      "mean/judge_rating": 0.2,
+      "max/judge_rating": 1.0,
+      "min/judge_rating": 0,
+      "mean/judge_correct": 0.0,
+      "max/judge_correct": 0.0,
+      "min/judge_correct": 0.0,
+      "mean/input_tokens": 143.0,
+      "max/input_tokens": 176,
+      "min/input_tokens": 114,
+      "mean/output_tokens": 52.4,
+      "max/output_tokens": 163,
+      "min/output_tokens": 3,
+      "mean/total_tokens": 195.4,
+      "max/total_tokens": 297,
+      "min/total_tokens": 148,
+      "pass@1[avg-of-1]": 0.0,
+      "pass@1": 0.0
+    },
+    "key_metrics": {
+      "mean/input_tokens": 143.0,
+      "mean/output_tokens": 52.4,
+      "pass@1[avg-of-1]": 0.0,
+      "pass@1": 0.0
+    },
+    "num_rollouts": 5,
+    "num_tasks": 5
+  }
+]
