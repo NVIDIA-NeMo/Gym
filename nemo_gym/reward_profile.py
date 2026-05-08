@@ -46,7 +46,7 @@ class RewardProfileConfig(BaseNeMoGymCLIConfig):
     )
 
 
-PARTIAL_PROFILE_HINT = "Use ++allow_partial_rollouts=True to profile completed rollouts from a partial collection."
+_PARTIAL_PROFILE_HINT = "Use ++allow_partial_rollouts=True to profile completed rollouts from a partial collection."
 
 
 def _rollout_key(row: Dict[str, Any]) -> Tuple[int, int]:
@@ -89,7 +89,7 @@ class RewardProfiler:
             raise ValueError(
                 "Materialized input rows and rollout results do not have matching rollout keys. "
                 f"Missing rollout results for {len(missing_results)} materialized input rows. "
-                f"Missing rollout keys: {missing_results[:10]}.\n\n{PARTIAL_PROFILE_HINT}"
+                f"Missing rollout keys: {missing_results[:10]}.\n\n{_PARTIAL_PROFILE_HINT}"
             )
 
         matched_keys = rows_by_key.keys() & results_by_key.keys()
