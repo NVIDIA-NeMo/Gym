@@ -47,23 +47,48 @@ def _run(cmd: list[str], *, timeout: int) -> tuple[int, str, str]:
     return p.returncode, p.stdout, p.stderr
 
 
+def _java_runs() -> bool:
+    """Return True iff `java -version` runs successfully (rc=0).
+
+    `shutil.which("java")` is necessary but not sufficient — the
+    deployment image may have a `java` binary on PATH that's
+    non-functional for libreoffice's `javaldx` helper (e.g. partially-
+    installed openjdk, broken symlink, missing libjvm.so). The only way
+    to know if the JRE is *usable* is to actually try to invoke it.
+    """
+    if not shutil.which("java"):
+        return False
+    try:
+        rc, _, _ = _run(["java", "-version"], timeout=15)
+    except Exception:
+        return False
+    return rc == 0
+
+
 def ensure_libreoffice() -> bool:
-    """Make sure ``libreoffice`` *and* a JRE are on PATH; apt-install on Linux if missing.
+    """Make sure ``libreoffice`` *and* a *functional* JRE are present; apt-install on Linux if missing.
 
     Returns True if libreoffice is available after the call, False otherwise.
-    Idempotent: when both the libreoffice binary AND a Java runtime are
-    already on PATH, returns immediately. When libreoffice is present but
-    Java is missing (e.g. the deployment image bakes libreoffice in
-    without a JRE), still runs apt-install — without a JRE, libreoffice
-    silently exits rc=0 with `Warning: failed to launch javaldx` for any
-    chart/formula/embedded-object doc, so we'd produce filename-only
-    stubs in comparison mode.
+    Idempotent: when libreoffice is on PATH AND `java -version` runs
+    cleanly, returns immediately. When libreoffice is present but Java is
+    missing or broken (e.g. the deployment image bakes libreoffice in
+    without a usable JRE), still runs apt-install — without a working
+    JRE, libreoffice silently exits rc=0 with `Warning: failed to launch
+    javaldx` for any chart/formula/embedded-object doc, producing
+    filename-only stubs in comparison mode.
+
+    A previous version of this function gated the early-exit on
+    `shutil.which("java")` alone; that wasn't enough — the deployment
+    image had *some* `java` binary on PATH that satisfied `which()` but
+    couldn't actually execute (`java -version` failed), so apt-install
+    was skipped and the JRE was never landed. The functional probe in
+    `_java_runs()` catches that case.
 
     Logs a WARNING (not raise) on install failure so the server still boots
     and rubric-mode tasks keep working; comparison-mode preconvert will then
     surface its own per-file errors via ``preconvert.py``.
     """
-    if shutil.which("libreoffice") and shutil.which("java"):
+    if shutil.which("libreoffice") and _java_runs():
         return True
 
     if not sys.platform.startswith("linux"):
@@ -107,9 +132,9 @@ def ensure_libreoffice() -> bool:
     if not shutil.which("libreoffice"):
         LOGGER.warning("apt-get install reported success but libreoffice still not on PATH")
         return False
-    if not shutil.which("java"):
+    if not _java_runs():
         LOGGER.warning(
-            "apt-get install reported success but java still not on PATH "
+            "apt-get install reported success but `java -version` still fails "
             "(libreoffice will fail on chart/formula docs)"
         )
         return False
