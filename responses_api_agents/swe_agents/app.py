@@ -2263,10 +2263,6 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
     async def run(self, body: BaseRunRequest) -> SWEBenchVerifyResponse:
         async with self._sem:
-            # OpenClaw issues sequential tool calls (one per turn); OpenHands runs
-            # tools in parallel. Setting this correctly avoids unnecessary fan-out
-            # warnings on the openclaw path.
-            body.responses_create_params.parallel_tool_calls = self.config.agent_framework != "openclaw"
             body.responses_create_params.tool_choice = "auto"
 
             response = await self.responses(body.responses_create_params)
