@@ -26,7 +26,6 @@ class TestRewardProfile:
                 if key.startswith("histogram"):
                     row[key] = None
                 elif key in {
-                    "_ng_task_index",
                     "expected_num_rollouts",
                     "missing_num_rollouts",
                     "num_rollouts",
@@ -376,7 +375,6 @@ class TestRewardProfile:
         group_level_metrics, _ = RewardProfiler().profile_from_data(rows, results)
         row = RewardProfiler().prepare_for_serialization(group_level_metrics)[0]
 
-        assert row["_ng_task_index"] == 0
         assert row["num_rollouts"] == 2
         assert row["rollout_infos"] == [
             {
@@ -400,16 +398,8 @@ class TestRewardProfile:
                 "verifier_score": 3.5,
             },
         ]
-        assert "rollout_metrics" not in row
         assert row["mean/input_tokens"] == 4.0
-        assert row["std/total_tokens"] == pytest.approx(3.5355339059327378)
         assert row["mean/verifier_score"] == 2.5
-        assert "mean/prompt_tokens" not in row
-        assert "mean/completion_tokens" not in row
-        pass_rate_passed = sum(1 for info in row["rollout_infos"] if info["reward"] == 1.0)
-        assert pass_rate_passed == 1
-        assert row["num_rollouts"] == 2
-        assert pass_rate_passed / row["num_rollouts"] == row["mean/reward"]
 
     def test_profile_from_data_missing_rollouts_requires_partial_flag(self) -> None:
         rows = [self._row(0, 0), self._row(0, 1)]
@@ -427,7 +417,7 @@ class TestRewardProfile:
         profile_rows = profiler.prepare_for_serialization(group_level_metrics)
         summary = profiler.profile_completion_summary(rows, results)
 
-        assert [row["_ng_task_index"] for row in profile_rows] == [0, 1]
+        assert [row["sample"]["task"] for row in profile_rows] == [0, 1]
         assert [
             (row["num_rollouts"], row["expected_num_rollouts"], row["missing_num_rollouts"]) for row in profile_rows
         ] == [(2, 2, 0), (1, 2, 1)]

@@ -5,7 +5,7 @@ Use this as the general shape for a first reward profiling run. Substitute envir
 ## Minimal Flow
 
 ```bash
-CONFIG_PATHS="responses_api_models/vllm_model/configs/vllm_model.yaml,your_env_config_paths"
+CONFIG_PATHS="your_model_config_paths,your_env_config_paths"
 
 POLICY_MODEL_NAME="your_policy_model_name"
 POLICY_BASE_URL="your_policy_base_url"

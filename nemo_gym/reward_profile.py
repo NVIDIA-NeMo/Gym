@@ -50,10 +50,6 @@ def _rollout_key(row: Dict[str, Any]) -> Tuple[int, int]:
     return row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME]
 
 
-def _rollout_id(task_idx: int, rollout_idx: int) -> str:
-    return f"{task_idx}:{rollout_idx}"
-
-
 class RewardProfiler:
     def _index_by_rollout_key(self, rows: List[Dict[str, Any]], name: str) -> Dict[Tuple[int, int], Dict[str, Any]]:
         indexed: Dict[Tuple[int, int], Dict[str, Any]] = {}
@@ -138,7 +134,7 @@ class RewardProfiler:
     def rollout_info_from_result(self, result: Dict[str, Any]) -> Dict[str, Any]:
         task_idx, rollout_idx = _rollout_key(result)
         rollout_info: Dict[str, Any] = {
-            "rollout_id": _rollout_id(task_idx, rollout_idx),
+            "rollout_id": f"{task_idx}:{rollout_idx}",
             TASK_INDEX_KEY_NAME: task_idx,
             ROLLOUT_INDEX_KEY_NAME: rollout_idx,
         }
@@ -220,6 +216,7 @@ class RewardProfiler:
         expected_rollouts_by_task = Counter(row[TASK_INDEX_KEY_NAME] for row in rows)
         for row, result in aligned_rows_and_results:
             task_idx, rollout_idx = _rollout_key(row)
+            task_idx_to_rollout_infos[task_idx].append(self.rollout_info_from_result(result))
 
             # Add additional helpful information
             result = result | (result["response"].get("usage") or {})
@@ -238,7 +235,6 @@ class RewardProfiler:
 
             filtered_results.append(numeric_result)
             task_idx_to_row.setdefault(task_idx, row)
-            task_idx_to_rollout_infos[task_idx].append(self.rollout_info_from_result(result))
 
         if not filtered_results:
             return [], []
@@ -268,6 +264,7 @@ class RewardProfiler:
                 task_idx_to_rollout_infos[task_idx],
                 key=lambda r: r[ROLLOUT_INDEX_KEY_NAME],
             )
+            group_metrics.pop(TASK_INDEX_KEY_NAME)
 
         agent_level_df = df.drop(columns=[ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME]).groupby("agent_name")
         agent_level_metrics = self.calculate_metrics_single_df(agent_level_df)
