@@ -27,6 +27,7 @@ import json
 from pathlib import Path
 from typing import Any, Dict, Iterator, Optional
 
+
 BENCHMARK_DIR = Path(__file__).parent
 DATA_DIR = BENCHMARK_DIR / "data"
 
