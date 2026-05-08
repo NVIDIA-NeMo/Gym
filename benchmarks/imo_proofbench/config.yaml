@@ -1,0 +1,14 @@
+config_paths:
+  - resources_servers/imo_proofbench_judge/configs/imo_proofbench_judge.yaml
+
+imo_proofbench_imo_proofbench_judge_simple_agent:
+  _inherit_from: imo_proofbench_judge_simple_agent
+  responses_api_agents:
+    simple_agent:
+      datasets:
+      - name: imo_proofbench
+        type: benchmark
+        jsonl_fpath: benchmarks/imo_proofbench/data/imo_proofbench_benchmark.jsonl
+        prompt_config: benchmarks/imo_proofbench/prompts/default.yaml
+        prepare_script: benchmarks/imo_proofbench/prepare.py
+        license: Apache 2.0
