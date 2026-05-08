@@ -1,0 +1,6 @@
+system: ""
+
+user: |-
+  Generate an executable Python function generated from the given prompt.
+
+  {question}

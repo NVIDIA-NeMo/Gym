@@ -1,0 +1,2 @@
+-e nemo-gym[dev] @ ../../
+evalplus==0.3.1

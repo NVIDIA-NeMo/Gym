@@ -1,0 +1,30 @@
+# Chain to the arena_judge resource server + agent config.
+config_paths:
+  - resources_servers/arena_judge/configs/arena_judge.yaml
+
+# Isolate this benchmark's agent wiring from other arena_judge consumers
+# via ``_inherit_from`` so overrides here don't leak.
+m_arena_hard_arena_judge_resources_server:
+  _inherit_from: arena_judge
+  resources_servers:
+    arena_judge:
+      # Multilingual rollouts emit UTF-8 surrogate halves / embedded NULs
+      # that break the judge's JSON serialization; scrub them before judging.
+      sanitize_generations: true
+
+m_arena_hard_arena_judge_simple_agent:
+  _inherit_from: arena_judge_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: m_arena_hard_arena_judge_resources_server
+      datasets:
+      - name: m_arena_hard
+        type: benchmark
+        jsonl_fpath: benchmarks/m_arena_hard/data/m_arena_hard_benchmark.jsonl
+        prompt_config: benchmarks/prompts/generic_default.yaml
+        prepare_script: benchmarks/m_arena_hard/prepare.py
+        # NOTE: num_repeats here is NOT honored for type=benchmark. Pass
+        # it on the CLI as `+num_repeats=N` — see run_m_arena_hard_gym.py
+        # in the migration recipe directory.
+        license: Apache 2.0

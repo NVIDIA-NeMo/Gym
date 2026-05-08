@@ -1,0 +1,29 @@
+evalplus:
+  resources_servers:
+    evalplus:
+      entrypoint: app.py
+      domain: coding
+      verified: false
+      description: Function-completion code judged by EvalPlus base + plus tests (HumanEval+, MBPP+)
+      value: Improve Python function-completion capabilities
+      dataset: humaneval
+      num_processes: 8
+      min_time_limit: 1.0
+      gt_time_limit_factor: 4.0
+      evalplus_version: default
+
+evalplus_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: evalplus
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/evalplus/data/example.jsonl
+        license: MIT

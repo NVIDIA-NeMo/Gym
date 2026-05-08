@@ -46,12 +46,14 @@ jobs:
             resources_servers/**
             responses_api_agents/**
             responses_api_models/**
+            benchmarks/**
           files_yaml: |
             doc:
               - '**.md'
               - docs/**
               - fern/**
               - LICENSE
+              - benchmarks/**
             server:
               - resources_servers/**
               - responses_api_agents/**
@@ -72,22 +74,45 @@ jobs:
           SERVER_CHANGED="${{ steps.changed-files.outputs.server_any_changed }}"
           OTHER_COUNT="${{ steps.changed-files.outputs.other_changed_files_count }}"
 
-          echo "doc_changed=$DOC_CHANGED server_changed=$SERVER_CHANGED other_count=${OTHER_COUNT:-0}"
+          echo "============================================"
+          echo "File change categorization"
+          echo "============================================"
+          echo ""
+          echo "Categories:"
+          echo "  doc (skip tests):          **.md, docs/**, fern/**, LICENSE, benchmarks/**"
+          echo "  server (test changed):     resources_servers/**, responses_api_agents/**, responses_api_models/**"
+          echo "  other (full suite):        everything else (core library, CI, scripts, etc.)"
+          echo "  Priority:                  other > server > doc"
+          echo ""
+          echo "This PR:"
+          echo "  doc changed:               $DOC_CHANGED"
+          echo "  server changed:            $SERVER_CHANGED"
+          echo "  other (uncategorized):     ${OTHER_COUNT:-0} file(s)"
+          if [[ "${OTHER_COUNT:-0}" -gt 0 ]]; then
+            echo "  other files:               ${{ steps.changed-files.outputs.other_changed_files }}"
+          fi
+          echo ""
 
           # Files outside doc/server categories (CI, core library, config, etc.) → full suite
           if [[ "${OTHER_COUNT:-0}" -gt 0 ]]; then
+            echo "Decision: FULL TEST SUITE"
+            echo "Reason:   ${OTHER_COUNT} file(s) outside doc/server categories"
             echo "run_full=true" >> $GITHUB_OUTPUT
             echo "run_servers=false" >> $GITHUB_OUTPUT
           # Only server files changed (possibly with doc changes) → test changed servers
           elif [[ "$SERVER_CHANGED" == "true" ]]; then
+            echo "Decision: SERVER TESTS ONLY"
+            echo "Reason:   only server files changed (+ possibly docs)"
             echo "run_full=false" >> $GITHUB_OUTPUT
             echo "run_servers=true" >> $GITHUB_OUTPUT
           # Only doc files changed → skip tests
           else
+            echo "Decision: SKIP TESTS"
+            echo "Reason:   only doc/benchmark files changed"
             echo "run_full=false" >> $GITHUB_OUTPUT
             echo "run_servers=false" >> $GITHUB_OUTPUT
-            echo "Docs-only change - skipping tests"
           fi
+          echo "============================================"
 
       - name: Cache uv dependencies
         if: steps.changes.outputs.run_full == 'true' || steps.changes.outputs.run_servers == 'true'

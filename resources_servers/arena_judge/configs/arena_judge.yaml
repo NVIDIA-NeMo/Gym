@@ -1,0 +1,64 @@
+# Arena Hard v2 pairwise-judge resources server.
+#
+# The judge model is pulled from env vars so the same config works
+# against any OpenAI-compatible endpoint — swap via ``ARENA_JUDGE_*``
+# overrides (or set the env vars at launch). The ``MISSING`` fallback
+# on the api_key keeps config-load green for judge-unrelated jobs
+# (``ng_prepare_data``, ``ng_dump_config``, ``ng_test``); live
+# ``verify()`` calls will fail loudly if the key is actually unset.
+
+arena_judge_judge_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${oc.env:ARENA_JUDGE_BASE_URL,MISSING}
+      openai_api_key: ${oc.env:ARENA_JUDGE_API_KEY,MISSING}
+      openai_model: ${oc.env:ARENA_JUDGE_MODEL,MISSING}
+
+arena_judge:
+  resources_servers:
+    arena_judge:
+      entrypoint: app.py
+      domain: other
+      verified: false
+      description: Arena Hard v2 pairwise LLM-judge server — ports arena-hard-auto's category-specific judging with side-swapped prompts
+      value: Evaluate open-ended generation quality via pairwise comparison against a fixed baseline
+      judge_model_server:
+        type: responses_api_models
+        name: arena_judge_judge_model
+      # The judge is called via /v1/chat/completions. ChatCompletion is
+      # the most universally-supported endpoint across OpenAI-compatible
+      # providers for a simple text-verdict judge.
+      judge_chat_completions_create_params:
+        messages: []
+        # Judge outputs are short (verdict + brief justification). 4k is
+        # enough headroom for the judge to write its own answer first
+        # (required by the ``hard_prompt`` template) before voting.
+        max_tokens: 4096
+        # Temperature only. Some judge endpoints (notably Bedrock-
+        # backed providers) reject requests that set BOTH temperature
+        # and top_p; leave top_p unset to stay portable.
+        temperature: 0.0
+      judge_prompt_paths:
+        hard_prompt: resources_servers/arena_judge/prompts/arena.yaml
+        creative_writing: resources_servers/arena_judge/prompts/arena_creative.yaml
+      default_category: hard_prompt
+      # Default off — only multilingual benchmarks (m-arena-hard, m-arena-hard-v2)
+      # produce surrogate halves / NULs that need scrubbing before judging.
+      sanitize_generations: false
+
+arena_judge_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: arena_judge
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/arena_judge/data/example.jsonl
+          license: Apache 2.0

@@ -1,0 +1,20 @@
+config_paths:
+  - resources_servers/bigcodebench/configs/bigcodebench.yaml
+
+bigcodebench_benchmark_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: bigcodebench
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: bigcodebench
+        type: benchmark
+        jsonl_fpath: benchmarks/bigcodebench/data/bigcodebench_benchmark.jsonl
+        prompt_config: benchmarks/bigcodebench/prompts/default.yaml
+        prepare_script: benchmarks/bigcodebench/prepare.py
+        license: Apache 2.0

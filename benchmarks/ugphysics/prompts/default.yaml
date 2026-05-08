@@ -1,0 +1,19 @@
+# Character-for-character port of NeMo Skills'
+# nemo_skills/prompt/config/generic/ugphysics.yaml.
+#
+# Field renames (driven by the Skills→Gym prepare.py):
+#   {problem}             -> {question}    (Gym field name)
+#   {subset_for_metrics}  -> {subject}     (Gym carries one field, not two)
+#
+# Everything else is identical so the prompt sent to the model on the
+# Gym side is byte-for-byte the same as Skills', up to those renames.
+#
+# adapted from https://github.com/YangLabHKUST/UGPhysics
+# {prompt_sentence} is the prompt sentence describing the expected answer format for questions that have single or multiple answers
+user: |-
+  The following is an open-ended problem from {subject} of the undergraduate-level Physics.
+  {prompt_sentence}
+  Please calculate the answer according to the given requirements and the information provided.
+  Please use LaTeX format to represent the variables and formulas used in the solution process and results.
+  Please end your solution with "So the final answer is {boxed_answer_example}." and give the result explicitly, note that the unit of the answer should not be included in \boxed{{}}.
+  Problem: {question}

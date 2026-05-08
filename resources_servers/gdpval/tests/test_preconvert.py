@@ -134,3 +134,204 @@ async def test_preconvert_dir_async_propagates_results(tmp_path: Path, monkeypat
     ok, fail, errors = await pcv.preconvert_dir_async(str(tmp_path))
     assert (ok, fail) == (0, 1)
     assert errors == ["boom"]
+
+
+# Fixtures + tests for the ns0-namespace normalization (Mode A in
+# the GDPVal corpus). See module docstring on preconvert.py for the
+# background on why python-docx-style ns0 prefixing breaks LibreOffice.
+
+NS0_RELS = (
+    b"<?xml version='1.0' encoding='utf-8'?>\n"
+    b'<ns0:Relationships xmlns:ns0="http://schemas.openxmlformats.org/package/2006/relationships">'
+    b'<ns0:Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/'
+    b'relationships/officeDocument" Target="word/document.xml" />'
+    b"</ns0:Relationships>"
+)
+
+NS0_CONTENT_TYPES = (
+    b"<?xml version='1.0' encoding='utf-8'?>\n"
+    b'<ns0:Types xmlns:ns0="http://schemas.openxmlformats.org/package/2006/content-types">'
+    b'<ns0:Default Extension="rels" '
+    b'ContentType="application/vnd.openxmlformats-package.relationships+xml" />'
+    b'<ns0:Override PartName="/word/document.xml" '
+    b'ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml" />'
+    b"</ns0:Types>"
+)
+
+DEFAULT_NS_RELS = (
+    b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+    b'<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+    b'<Relationship Id="rId1" Type="x" Target="word/document.xml"/></Relationships>'
+)
+
+DEFAULT_NS_CONTENT_TYPES = (
+    b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+    b'<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"></Types>'
+)
+
+DOCUMENT_XML = (
+    b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document '
+    b'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"></w:document>'
+)
+
+
+def _make_zip(path: Path, parts: dict[str, bytes]) -> Path:
+    import zipfile as _zip
+
+    with _zip.ZipFile(path, "w", _zip.ZIP_DEFLATED) as z:
+        for name, data in parts.items():
+            z.writestr(name, data)
+    return path
+
+
+class TestRewriteNs0Namespace:
+    def test_rewrites_root_to_default_namespace(self) -> None:
+        out = pcv._rewrite_ns0_namespace(NS0_RELS.decode("utf-8"))
+        assert "<ns0:" not in out
+        assert "</ns0:" not in out
+        assert "xmlns:ns0=" not in out
+        assert '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"' in out
+
+    def test_rewrites_content_types(self) -> None:
+        out = pcv._rewrite_ns0_namespace(NS0_CONTENT_TYPES.decode("utf-8"))
+        assert "<ns0:" not in out
+        assert "</ns0:" not in out
+        assert '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"' in out
+        # Override children must remain (just unprefixed).
+        assert "<Override PartName=" in out
+
+    def test_idempotent_on_default_namespace(self) -> None:
+        out = pcv._rewrite_ns0_namespace(DEFAULT_NS_RELS.decode("utf-8"))
+        assert out == DEFAULT_NS_RELS.decode("utf-8")
+
+
+class TestOoxmlHasNs0Prefix:
+    def test_true_when_rels_has_ns0(self, tmp_path: Path) -> None:
+        zp = _make_zip(
+            tmp_path / "a.docx",
+            {
+                "[Content_Types].xml": DEFAULT_NS_CONTENT_TYPES,
+                "_rels/.rels": NS0_RELS,
+                "word/document.xml": DOCUMENT_XML,
+            },
+        )
+        assert pcv._ooxml_has_ns0_prefix(zp) is True
+
+    def test_true_when_only_content_types_has_ns0(self, tmp_path: Path) -> None:
+        zp = _make_zip(
+            tmp_path / "a.docx",
+            {
+                "[Content_Types].xml": NS0_CONTENT_TYPES,
+                "_rels/.rels": DEFAULT_NS_RELS,
+                "word/document.xml": DOCUMENT_XML,
+            },
+        )
+        assert pcv._ooxml_has_ns0_prefix(zp) is True
+
+    def test_false_when_default_namespace(self, tmp_path: Path) -> None:
+        zp = _make_zip(
+            tmp_path / "a.docx",
+            {
+                "[Content_Types].xml": DEFAULT_NS_CONTENT_TYPES,
+                "_rels/.rels": DEFAULT_NS_RELS,
+                "word/document.xml": DOCUMENT_XML,
+            },
+        )
+        assert pcv._ooxml_has_ns0_prefix(zp) is False
+
+    def test_false_on_non_zip(self, tmp_path: Path) -> None:
+        bogus = tmp_path / "a.docx"
+        bogus.write_bytes(b"not a zip")
+        assert pcv._ooxml_has_ns0_prefix(bogus) is False
+
+
+class TestNormalizeOoxmlZip:
+    def test_rewrites_rels_and_content_types_only(self, tmp_path: Path) -> None:
+        import zipfile as _zip
+
+        src = _make_zip(
+            tmp_path / "in.docx",
+            {
+                "[Content_Types].xml": NS0_CONTENT_TYPES,
+                "_rels/.rels": NS0_RELS,
+                "word/_rels/document.xml.rels": NS0_RELS,
+                "word/document.xml": DOCUMENT_XML,
+            },
+        )
+        dst = tmp_path / "out.docx"
+        pcv._normalize_ooxml_zip(src, dst)
+
+        with _zip.ZipFile(dst) as z:
+            for part in ("[Content_Types].xml", "_rels/.rels", "word/_rels/document.xml.rels"):
+                text = z.read(part).decode("utf-8")
+                assert "<ns0:" not in text, f"ns0 still present in {part}"
+                assert "xmlns:ns0=" not in text, f"xmlns:ns0 still in {part}"
+            # non-package XML must be byte-identical
+            assert z.read("word/document.xml") == DOCUMENT_XML
+
+
+class TestConvertToPdfNormalization:
+    def test_calls_libreoffice_with_normalized_copy_when_ns0(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        src = _make_zip(
+            tmp_path / "src.docx",
+            {
+                "[Content_Types].xml": NS0_CONTENT_TYPES,
+                "_rels/.rels": NS0_RELS,
+                "word/document.xml": DOCUMENT_XML,
+            },
+        )
+        captured: list[list[str]] = []
+
+        class _Completed:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        def _run(cmd, *_a, **_kw):
+            captured.append(cmd)
+            # libreoffice would write the PDF to the original outdir using the input stem.
+            (src.with_suffix(".pdf")).write_bytes(b"%PDF-1.4 fake\n")
+            return _Completed()
+
+        monkeypatch.setattr(subprocess, "run", _run)
+        path, ok, msg = pcv.convert_to_pdf(src)
+        assert ok is True
+        assert "(after ns0 normalization)" in msg
+        # The input arg passed to libreoffice should NOT be the original file: it must come
+        # from the gdpval-norm- tempdir, but with the same basename so output stem is preserved.
+        assert len(captured) == 1
+        input_arg = captured[0][-1]
+        assert input_arg.endswith("/src.docx")
+        assert "/gdpval-norm-" in input_arg
+        assert input_arg != str(src)
+
+    def test_calls_libreoffice_with_original_when_not_ns0(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        src = _make_zip(
+            tmp_path / "src.docx",
+            {
+                "[Content_Types].xml": DEFAULT_NS_CONTENT_TYPES,
+                "_rels/.rels": DEFAULT_NS_RELS,
+                "word/document.xml": DOCUMENT_XML,
+            },
+        )
+        captured: list[list[str]] = []
+
+        class _Completed:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        def _run(cmd, *_a, **_kw):
+            captured.append(cmd)
+            (src.with_suffix(".pdf")).write_bytes(b"%PDF-1.4 fake\n")
+            return _Completed()
+
+        monkeypatch.setattr(subprocess, "run", _run)
+        path, ok, msg = pcv.convert_to_pdf(src)
+        assert ok is True
+        assert "(after ns0 normalization)" not in msg
+        assert captured[0][-1] == str(src)

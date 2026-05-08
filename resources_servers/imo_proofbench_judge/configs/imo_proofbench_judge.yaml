@@ -1,0 +1,59 @@
+imo_proofbench_judge:
+  resources_servers:
+    imo_proofbench_judge:
+      entrypoint: app.py
+      domain: math
+      verified: false
+      description: IMO ProofBench grader using a strong LLM judge with the IMO 0-7 rubric
+      value: Score IMO-style proof submissions with a problem-specific grading rubric
+      judge_model_server:
+        type: responses_api_models
+        name: judge_model
+      judge_responses_create_params:
+        input: []
+        # Gemini-2.5-pro uses internal thinking that draws from this budget;
+        # 4096 truncates mid-analysis before the `<points>N out of 7</points>`
+        # block that the prompt requires. 16384 leaves room for reasoning +
+        # the structured score line.
+        max_output_tokens: 16384
+        temperature: 0.0
+        top_p: 1.0
+      use_chat_completions_for_judge: true
+
+judge_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${judge_base_url}
+      openai_api_key: ${judge_api_key}
+      openai_model: ${judge_model_name}
+
+imo_proofbench_judge_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: imo_proofbench_judge
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/imo_proofbench_judge/data/example.jsonl
+        license: Apache 2.0
+
+# Default-null judge config keys so OmegaConf can resolve the
+# `${judge_base_url}` / `${judge_api_key}` / `${judge_model_name}`
+# interpolations on the `judge_model` server even when the consumer
+# doesn't supply them. `ng_prepare_benchmark` reads the merged config
+# but doesn't instantiate the judge — without these defaults, prepare
+# crashes with `InterpolationKeyError` before prepare.py runs. CLI
+# overrides (`+judge_base_url=…`) supersede the null at server launch.
+# Kept at the END of the file so `update_env_list.py`'s YAML visitor
+# (which recurses only into the FIRST top-level key) still finds the
+# `imo_proofbench_judge` resources_servers block above.
+judge_base_url: null
+judge_api_key: null
+judge_model_name: null

@@ -1,0 +1,14 @@
+config_paths:
+  - resources_servers/hotpotqa_qa/configs/hotpotqa_qa.yaml
+
+hotpotqa_closedbook_simple_agent:
+  _inherit_from: hotpotqa_qa_simple_agent
+  responses_api_agents:
+    simple_agent:
+      datasets:
+        - name: hotpotqa_closedbook
+          type: benchmark
+          jsonl_fpath: benchmarks/hotpotqa_closedbook/data/hotpotqa_closedbook_benchmark.jsonl
+          prompt_config: benchmarks/hotpotqa_closedbook/prompts/default.yaml
+          prepare_script: benchmarks/hotpotqa_closedbook/prepare.py
+          license: CC BY-SA 4.0

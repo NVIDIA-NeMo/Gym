@@ -1,0 +1,9 @@
+user: |-
+  Answer the following question using your own knowledge. No external context is provided.
+
+  Question: {question}
+
+  Provide your response in the following JSON format:
+  {{"answer": "<your answer>"}}
+
+  Output only the JSON object, nothing else.
