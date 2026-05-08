@@ -99,7 +99,8 @@ echo "Unsetting host virtualenv to avoid poetry confusion..."
 unset VIRTUAL_ENV
 unset PYTHONHOME
 # Remove any venv paths from PATH to ensure clean environment
-export PATH=$(echo "$PATH" | tr ':' '\n' | grep -v '\.venv' | tr '\n' ':' | sed 's/:$//')
+# NOTE: deleted the filter .venv here. poetry's own .venv is not yet on PATH,
+# but filtering by substring seems to silently drop legitimate paths on some systems.
 
 # Configure poetry to create virtualenv in the project directory (so it's mounted in container)
 export POETRY_VIRTUALENVS_IN_PROJECT=true

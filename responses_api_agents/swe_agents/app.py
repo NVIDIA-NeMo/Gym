@@ -1812,7 +1812,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             f"--mount type=bind,src={params.persistent_dir},dst=/trajectories_mount",
         ]
 
-        openhands_dir = f"{params.openhands_setup_dir}/OpenHands"
+        openhands_dir = os.path.realpath(f"{params.openhands_setup_dir}/OpenHands")
         mount_args.extend(
             [
                 # Read-only base mounts (parent first)
@@ -1841,7 +1841,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 f"--mount type=bind,src={params.resolved_system_prompt_template},dst=/openhands_setup/OpenHands/system_prompt_long_horizon.j2"
             )
 
-        miniforge3_path = Path(params.openhands_setup_dir) / "miniforge3"
+        miniforge3_path = Path(os.path.realpath(str(Path(params.openhands_setup_dir) / "miniforge3")))
         mount_args.append(f"--mount type=bind,src={miniforge3_path},dst=/openhands_setup/miniforge3,ro")
         mount_args.append(f"--mount type=bind,src={miniforge3_path},dst={miniforge3_path},ro")
 
