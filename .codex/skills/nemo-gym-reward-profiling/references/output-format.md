@@ -7,11 +7,11 @@ Reward profiling is built around joining materialized inputs with rollout result
 - `*_materialized_inputs.jsonl`: expanded inputs after repeat expansion. Each row should have `_ng_task_index` and `_ng_rollout_index`.
 - `rollouts.jsonl`: completed rollout results. Each row should have matching `_ng_task_index` and `_ng_rollout_index`.
 - `*_reward_profiling.jsonl`: task-level summaries produced by `ng_reward_profile`.
-- `*_agent_metrics.json`: agent/global aggregate metrics, when written by the profiler.
+- `*_agent_metrics.json`: agent/global aggregate metrics.
 
 ## Task Profile Rows
 
-Current task-level profile rows generally include:
+Task-level profile rows include:
 
 - `_ng_task_index`: original task/sample id.
 - `sample`: representative materialized input row for the task, with task/rollout ids removed from the sample copy.
@@ -50,20 +50,3 @@ At the end, the command prints rollout completion and input-task status counts:
 - complete input tasks
 - partial input tasks
 - input tasks without rollouts that were dropped
-
-## Pass-Rate Recovery
-
-When rewards are binary, pass-rate-style fields can be recovered from `rollout_infos`:
-
-```python
-infos = row["rollout_infos"]
-pass_rate_passed = sum(1 for info in infos if info.get("reward") == 1.0)
-pass_rate_total = row["num_rollouts"]
-pass_rate = pass_rate_passed / pass_rate_total if pass_rate_total else None
-```
-
-For non-binary rewards, choose and document an explicit threshold before deriving pass-rate fields.
-
-## One Rollout Per Task
-
-`num_repeats=1` is valid. In that case, task-level `mean`, `max`, `min`, and `median` all describe the same rollout, and `std` is degenerate. That is expected, not a profiling failure.

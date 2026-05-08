@@ -1,6 +1,6 @@
 # Reward Profiling Quick Start
 
-Use this as the general shape for a first reward profiling run. Substitute environment-specific config paths, input data, model endpoint, and output paths.
+Substitute environment-specific config paths, input data, model endpoint, and output paths.
 
 ## Minimal Flow
 
@@ -16,8 +16,8 @@ ROLLOUTS_JSONL="/path/to/your_rollouts.jsonl"
 MATERIALIZED_JSONL="${ROLLOUTS_JSONL%.jsonl}_materialized_inputs.jsonl"
 
 AGENT_NAME="your_agent_name"
-NUM_REPEATS=4
-NUM_SAMPLES_IN_PARALLEL=64
+NUM_REPEATS=2
+NUM_SAMPLES_IN_PARALLEL=8
 
 ng_run "+config_paths=[$CONFIG_PATHS]" \
     +policy_model_name="$POLICY_MODEL_NAME" \
@@ -25,9 +25,7 @@ ng_run "+config_paths=[$CONFIG_PATHS]" \
     +policy_api_key="$POLICY_ENDPOINT_KEY" &
 NG_RUN_PID=$!
 trap 'kill "$NG_RUN_PID" 2>/dev/null || true' EXIT
-
-# Replace this with a real readiness check when possible.
-sleep 60
+./scripts/wait_for_servers.sh "$NG_RUN_PID"
 
 agent_args=()
 if [[ -n "$AGENT_NAME" ]]; then
@@ -39,8 +37,7 @@ ng_collect_rollouts \
     +input_jsonl_fpath="$DATA_JSONL" \
     +output_jsonl_fpath="$ROLLOUTS_JSONL" \
     +num_repeats="$NUM_REPEATS" \
-    +num_samples_in_parallel="$NUM_SAMPLES_IN_PARALLEL" \
-    +resume_from_cache=False
+    +num_samples_in_parallel="$NUM_SAMPLES_IN_PARALLEL"
 
 ng_reward_profile \
     ++materialized_inputs_jsonl_fpath="$MATERIALIZED_JSONL" \
@@ -48,17 +45,6 @@ ng_reward_profile \
 ```
 
 If rows already contain `agent_ref`, leave `AGENT_NAME` empty. Passing `+agent_name` supplies a default for rows without one.
-
-## First-Run Settings
-
-Start small:
-
-```bash
-NUM_REPEATS=2
-NUM_SAMPLES_IN_PARALLEL=8
-```
-
-Then inspect line counts and sample rows before increasing scale. For real profiling, use enough repeats to make per-task variability visible.
 
 ## Partial Rollouts
 
