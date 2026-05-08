@@ -34,7 +34,7 @@ Repeated rollouts are the main profiling lever. `num_repeats=1` is valid, but pe
 - `*_reward_profiling.jsonl`: one summarized profile row per original task with at least one completed rollout.
 - `_ng_task_index`: original task/sample id.
 - `_ng_rollout_index`: repeated rollout id for that task.
-- `rollout_infos`: compact per-rollout info inside each task profile row, including reward and token usage when available.
+- `rollout_infos`: compact per-rollout info inside each task profile row, including reward, token usage, and numeric rollout metrics when available.
 
 Keep reward-to-length or reward-to-token analysis keyed by both `_ng_task_index` and `_ng_rollout_index`.
 

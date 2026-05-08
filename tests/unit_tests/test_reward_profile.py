@@ -25,7 +25,14 @@ class TestRewardProfile:
             for key in list(row):
                 if key.startswith("histogram"):
                     row[key] = None
-                elif key in {"expected_num_rollouts", "missing_num_rollouts", "reward_profile_completion_pct"}:
+                elif key in {
+                    "_ng_task_index",
+                    "expected_num_rollouts",
+                    "missing_num_rollouts",
+                    "num_rollouts",
+                    "reward_profile_completion_pct",
+                    "rollout_infos",
+                }:
                     row.pop(key)
 
     def _row(self, task_idx: int, rollout_idx: int) -> dict:
@@ -184,26 +191,6 @@ class TestRewardProfile:
                 "histogram/bool": None,
                 "histogram/reward": None,
                 "histogram/abc usage": None,
-                "_ng_task_index": 0,
-                "num_rollouts": 2,
-                "rollout_infos": [
-                    {
-                        "rollout_id": "0:0",
-                        "_ng_task_index": 0,
-                        "_ng_rollout_index": 0,
-                        "reward": 0,
-                        "abc usage": 1,
-                        "bool": 1,
-                    },
-                    {
-                        "rollout_id": "0:1",
-                        "_ng_task_index": 0,
-                        "_ng_rollout_index": 1,
-                        "reward": 1,
-                        "abc usage": 1,
-                        "bool": 0,
-                    },
-                ],
                 "sample": {
                     "responses_create_params": {
                         "input": [],
@@ -233,26 +220,6 @@ class TestRewardProfile:
                 "histogram/bool": None,
                 "histogram/reward": None,
                 "histogram/abc usage": None,
-                "_ng_task_index": 1,
-                "num_rollouts": 2,
-                "rollout_infos": [
-                    {
-                        "rollout_id": "1:0",
-                        "_ng_task_index": 1,
-                        "_ng_rollout_index": 0,
-                        "reward": 0,
-                        "abc usage": 1,
-                        "bool": 1,
-                    },
-                    {
-                        "rollout_id": "1:1",
-                        "_ng_task_index": 1,
-                        "_ng_rollout_index": 1,
-                        "reward": 1,
-                        "abc usage": 1,
-                        "bool": 0,
-                    },
-                ],
                 "sample": {
                     "responses_create_params": {
                         "input": [],
@@ -282,26 +249,6 @@ class TestRewardProfile:
                 "histogram/bool": None,
                 "histogram/reward": None,
                 "histogram/abc usage": None,
-                "_ng_task_index": 2,
-                "num_rollouts": 2,
-                "rollout_infos": [
-                    {
-                        "rollout_id": "2:0",
-                        "_ng_task_index": 2,
-                        "_ng_rollout_index": 0,
-                        "reward": 0,
-                        "abc usage": 1,
-                        "bool": 1,
-                    },
-                    {
-                        "rollout_id": "2:1",
-                        "_ng_task_index": 2,
-                        "_ng_rollout_index": 1,
-                        "reward": 1,
-                        "abc usage": 1,
-                        "bool": 0,
-                    },
-                ],
                 "sample": {
                     "responses_create_params": {
                         "input": [],
@@ -453,6 +400,12 @@ class TestRewardProfile:
                 "verifier_score": 3.5,
             },
         ]
+        assert "rollout_metrics" not in row
+        assert row["mean/input_tokens"] == 4.0
+        assert row["std/total_tokens"] == pytest.approx(3.5355339059327378)
+        assert row["mean/verifier_score"] == 2.5
+        assert "mean/prompt_tokens" not in row
+        assert "mean/completion_tokens" not in row
         pass_rate_passed = sum(1 for info in row["rollout_infos"] if info["reward"] == 1.0)
         assert pass_rate_passed == 1
         assert row["num_rollouts"] == 2
@@ -551,17 +504,6 @@ class TestRewardProfile:
                 "std/abc usage": 0.0,
                 "histogram/first_col": None,
                 "histogram/abc usage": None,
-                "_ng_task_index": 0,
-                "num_rollouts": 1,
-                "rollout_infos": [
-                    {
-                        "rollout_id": "0:0",
-                        "_ng_task_index": 0,
-                        "_ng_rollout_index": 0,
-                        "abc usage": 1,
-                        "first_col": 1,
-                    },
-                ],
                 "sample": {
                     "responses_create_params": {
                         "input": [],
@@ -584,17 +526,6 @@ class TestRewardProfile:
                 "std/second_col": 0.0,
                 "histogram/abc usage": None,
                 "histogram/second_col": None,
-                "_ng_task_index": 1,
-                "num_rollouts": 1,
-                "rollout_infos": [
-                    {
-                        "rollout_id": "1:0",
-                        "_ng_task_index": 1,
-                        "_ng_rollout_index": 0,
-                        "abc usage": 1,
-                        "second_col": 2,
-                    },
-                ],
                 "sample": {
                     "responses_create_params": {
                         "input": [],

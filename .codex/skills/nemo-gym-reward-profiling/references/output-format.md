@@ -21,6 +21,7 @@ Current task-level profile rows generally include:
 - `reward_profile_completion_pct`: percent of expected rollout rows included for the task.
 - `rollout_infos`: compact per-rollout records sorted by `_ng_rollout_index`.
 - aggregate metric keys such as `mean/reward`, `max/reward`, `min/reward`, `median/reward`, and `std/reward`.
+- token usage aggregate keys such as `mean/input_tokens`, `std/output_tokens`, and `mean/total_tokens`, when those fields are present in `response.usage`.
 
 `rollout_infos` are intentionally compact. They can include:
 
