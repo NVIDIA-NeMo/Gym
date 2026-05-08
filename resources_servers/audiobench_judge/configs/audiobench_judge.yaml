@@ -8,12 +8,26 @@ audiobench_judge:
       verified: false
       judge_model_server:
         type: responses_api_models
-        name: policy_model
+        name: judge_model
       judge_responses_create_params: {
         input: [],
         max_output_tokens: 512,
         temperature: 0.0,
       }
+      use_chat_completions_for_judge: true
+
+# Judge model: openai/gpt-oss-20b via NVIDIA API (integrate.api.nvidia.com).
+# Split from policy_model so the audio model under test isn't asked to score
+# itself; gpt-oss-20b is a strong text-only judge that mirrors AudioBench's
+# upstream rating prompt. Public API endpoint — requires NVIDIA_API_KEY in
+# the environment of the consumer (rollout collector / agent runner).
+judge_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: https://integrate.api.nvidia.com/v1
+      openai_api_key: ${oc.env:NVIDIA_API_KEY,null}
+      openai_model: openai/gpt-oss-20b
 
 audiobench_judge_simple_agent:
   responses_api_agents:

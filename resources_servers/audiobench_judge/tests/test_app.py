@@ -19,7 +19,6 @@ import json
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
 from pytest import approx
 
 from nemo_gym.config_types import ModelServerRef

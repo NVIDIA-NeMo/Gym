@@ -29,9 +29,11 @@ NeMo Skills' ``audio_metrics.AudioMetrics._extract_judge_result``.
 
 import logging
 import re
-from typing import Any, ClassVar, Dict, List, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel
+import yaml
+from pydantic import BaseModel, Field
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -42,6 +44,8 @@ from nemo_gym.base_resources_server import (
 )
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import (
+    NeMoGymChatCompletion,
+    NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -52,15 +56,13 @@ from nemo_gym.server_utils import get_response_json
 
 LOG = logging.getLogger(__name__)
 
+_DEFAULT_JUDGE_PROMPT_PATH = str(Path(__file__).parent / "prompts" / "judge.yaml")
+
 
 # Rating output (primary AudioBench format) and the legacy binary
 # Judgement: Yes/No fallback that ``audiobench_binary.yaml`` produces.
-RATING_PATTERN: re.Pattern[str] = re.compile(
-    r"Rating:\s*([0-9]+(?:\.[0-9]+)?)", re.IGNORECASE
-)
-JUDGEMENT_PATTERN: re.Pattern[str] = re.compile(
-    r"Judgement:\s*(Yes|No)", re.IGNORECASE
-)
+RATING_PATTERN: re.Pattern[str] = re.compile(r"Rating:\s*([0-9]+(?:\.[0-9]+)?)", re.IGNORECASE)
+JUDGEMENT_PATTERN: re.Pattern[str] = re.compile(r"Judgement:\s*(Yes|No)", re.IGNORECASE)
 
 
 def _extract_assistant_text(response: NeMoGymResponse) -> str:
@@ -114,6 +116,22 @@ class AudioBenchJudgeConfig(BaseResourcesServerConfig):
     judge_model_server: ModelServerRef
     judge_responses_create_params: NeMoGymResponseCreateParamsNonStreaming
 
+    judge_prompt_path: str = Field(
+        default=_DEFAULT_JUDGE_PROMPT_PATH,
+        description=(
+            "Path to a YAML file containing the judge prompt under a 'user' key. "
+            "Placeholders: {expected_answer}, {generation}, {question}."
+        ),
+    )
+    use_chat_completions_for_judge: bool = Field(
+        default=False,
+        description=(
+            "Use /v1/chat/completions instead of /v1/responses for the judge model. "
+            "Required for endpoints (e.g. integrate.api.nvidia.com gpt-oss-20b) that "
+            "don't support the OpenAI Responses API."
+        ),
+    )
+
 
 class AudioBenchJudgeRunRequest(BaseRunRequest):
     question: str
@@ -141,39 +159,16 @@ class AudioBenchJudgeVerifyResponse(BaseVerifyResponse):
 class AudioBenchJudgeResourcesServer(SimpleResourcesServer):
     """Open-ended audio QA scoring via an LLM judge with 0–5 rating.
 
-    Verbatim copy of AudioBench's ``llama3_70b_as_judge_binary``-derived
-    rating prompt — byte-equivalent with NeMo Skills' ``judge/audiobench.yaml``.
+    The rating prompt lives at ``prompts/judge.yaml`` and is byte-equivalent
+    with NeMo Skills' ``judge/audiobench.yaml``.
     """
 
-    # Byte-for-byte the same template as NeMo Skills'
-    # ``nemo_skills/prompt/config/judge/audiobench.yaml``.
-    JUDGE_PROMPT_TEMPLATE: ClassVar[
-        str
-    ] = """[Reference Answer]
-{expected_answer}
-
-[Model Answer]
-{generation}
-
-[Question]
-{question}
-
-[Task]
-Rate the model's answer based on its alignment with the reference answer, focusing on accuracy and relevance to the reference provided. Please be critical on the details. If the model response is something like 'cannot decide', please rate as 0.
-Criteria: Assess if the model's response mirrors the reference in terms of content, accuracy, and relevance.
-Score0: The answer is refusing to give concrete results, providing something like 'cannot decide'.
-Score0: The answer is completely misaligned, providing incorrect or irrelevant information compared to the reference.
-Score1: The answer shows minimal alignment, often misunderstanding or providing irrelevant details unrelated to the reference.
-Score2: The answer recognizes the topic but diverges significantly from the reference in accuracy or relevance.
-Score3: The answer aligns with the reference generally but lacks detail or precise accuracy in some aspects.
-Score4: The answer is mostly accurate and relevant, closely following the reference but could be clearer or more detailed.
-Score5: The answer is highly accurate, detailed, and matches the reference answer perfectly, capturing its essence and detail.
-
-Your response should be formatted as follows:
-Explanation: (Provide a concise explanation of your rating, comparing the reference answer with the model's response. "The reference answer is [XXX], while the model's answer is [YYY]. I think ...")
-Rating: (int)"""
-
     config: AudioBenchJudgeConfig
+
+    def model_post_init(self, context):
+        prompt_data = yaml.safe_load(Path(self.config.judge_prompt_path).read_text())
+        self._judge_prompt_template: str = prompt_data["user"]
+        return super().model_post_init(context)
 
     async def verify(self, body: AudioBenchJudgeVerifyRequest) -> AudioBenchJudgeVerifyResponse:
         generation = _extract_assistant_text(body.response).strip()
@@ -210,38 +205,55 @@ Rating: (int)"""
             return 0.0, False, None
 
         config = self.config
-        responses_create_params = config.judge_responses_create_params.model_copy(deep=True)
-
-        judge_prompt = self.JUDGE_PROMPT_TEMPLATE.format(
+        judge_prompt = self._judge_prompt_template.format(
             question=question,
             expected_answer=expected_answer,
             generation=generation,
         )
-        responses_create_params.input = [
-            NeMoGymEasyInputMessage(
-                role="user",
-                content=judge_prompt,
-            ),
-        ]
 
-        try:
-            response = await self.server_client.post(
-                server_name=config.judge_model_server.name,
-                url_path="/v1/responses",
-                json=responses_create_params,
+        if config.use_chat_completions_for_judge:
+            chat_params = NeMoGymChatCompletionCreateParamsNonStreaming(
+                messages=[{"role": "user", "content": judge_prompt}],
+                max_tokens=config.judge_responses_create_params.max_output_tokens or 512,
+                temperature=config.judge_responses_create_params.temperature or 0.0,
+                top_p=config.judge_responses_create_params.top_p or 1.0,
             )
-            judge_response = NeMoGymResponse.model_validate(await get_response_json(response))
-        except Exception as e:  # noqa: BLE001
-            # If the judge call itself fails (auth, 429, etc.), treat as
-            # incorrect with rating 0 rather than poisoning the whole eval.
-            LOG.warning("audiobench_judge: judge call failed (%s); scoring rating=0", e)
-            return 0.0, False, None
+            try:
+                response = await self.server_client.post(
+                    server_name=config.judge_model_server.name,
+                    url_path="/v1/chat/completions",
+                    json=chat_params,
+                )
+                chat_response = NeMoGymChatCompletion.model_validate(await get_response_json(response))
+            except Exception as e:  # noqa: BLE001
+                LOG.warning("audiobench_judge: judge call failed (%s); scoring rating=0", e)
+                return 0.0, False, None
+            content = chat_response.choices[0].message.content if chat_response.choices else None
+            judge_text = content.strip() if content else ""
+            # No NeMoGymResponse to record on the chat-completions branch; tests
+            # and downstream rollout artifacts inspect only judge_rating /
+            # judge_correct / generation, not judge_evaluation.
+            judge_evaluation = None
+        else:
+            responses_create_params = config.judge_responses_create_params.model_copy(deep=True)
+            responses_create_params.input = [
+                NeMoGymEasyInputMessage(role="user", content=judge_prompt),
+            ]
+            try:
+                response = await self.server_client.post(
+                    server_name=config.judge_model_server.name,
+                    url_path="/v1/responses",
+                    json=responses_create_params,
+                )
+                judge_response = NeMoGymResponse.model_validate(await get_response_json(response))
+            except Exception as e:  # noqa: BLE001
+                LOG.warning("audiobench_judge: judge call failed (%s); scoring rating=0", e)
+                return 0.0, False, None
+            judge_evaluation = JudgeEvaluation(
+                responses_create_params=responses_create_params, response=judge_response
+            )
+            judge_text = _extract_assistant_text(judge_response)
 
-        judge_evaluation = JudgeEvaluation(
-            responses_create_params=responses_create_params, response=judge_response
-        )
-
-        judge_text = _extract_assistant_text(judge_response)
         is_correct, rating = extract_judge_result(judge_text)
         return rating, is_correct, judge_evaluation
 
