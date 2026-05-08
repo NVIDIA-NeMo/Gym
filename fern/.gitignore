@@ -1,5 +1,5 @@
 # Auto-generated library reference docs (fern docs md generate)
 product-docs/
 
-# Local Fern CLI install (use `npm ci` to install)
+# npx cache for Fern CLI
 node_modules/

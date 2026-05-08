@@ -8,6 +8,12 @@ Qwen3-235B-A22B-Instruct-2507-FP8:
       return_token_id_information: false
       uses_reasoning_parser: true
 
+policy_model_no_interleaved_reasoning:
+  _copy: policy_model
+  responses_api_models:
+    vllm_model:
+      uses_interleaved_reasoning: false
+
 browsecomp_benchmark_resources_server:
   resources_servers:
     browsecomp_advanced_harness:
@@ -33,14 +39,15 @@ browsecomp_benchmark_agent:
       context_reset_pct: 0.3
       context_reset_keep_rounds: 3
       max_reset_count: null
-      max_run_retries: 3
+      max_run_retries: 5
       snap_dir: null
+      save_model_call_using_vllm_tokenize_endpoint: true
       resources_server:
         type: resources_servers
         name: browsecomp_benchmark_resources_server
       model_server:
         type: responses_api_models
-        name: policy_model
+        name: policy_model_no_interleaved_reasoning
       datasets:
       - name: browsecomp
         type: benchmark

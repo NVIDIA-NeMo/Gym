@@ -1,0 +1,5 @@
+# Character-for-character copy of
+# NeMo-Skills' nemo_skills/prompt/config/multilingual/segment-translation.yaml
+# so the model sees identical input on the Skills baseline and Gym parity run.
+# No system message, one user turn.
+user: "Translate the following segment into {target_lang_name}, without additional explanation.\n\n{text}"
