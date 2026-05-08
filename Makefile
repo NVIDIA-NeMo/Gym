@@ -50,38 +50,47 @@ help:
 # ---------------------------------------------------------------------------
 
 # First-time auth setup. Fern's CLI requires that the user already exist in
-# Fern's user DB *before* the CLI login flow can complete; signing in to the
-# dashboard is what creates that user record. Skipping step 1 leaves you with
-# a CLI prompt that has no path forward, and skipping step 2 leaves the CLI
-# unauthenticated so `fern docs md generate` returns:
+# Fern's user DB *before* `fern login` can complete; signing in to the
+# dashboard is what creates that user record. Skipping step 1 below leaves
+# the CLI login prompt with no working path forward (you can't get past the
+# email entry), and skipping it before `fern docs md generate` returns:
 #
 #     HTTP 403: User does not belong to organization
 #
-# (Tracked upstream at Fern; ping #fern-cli on Slack if it changes.)
+# This target blocks on a confirmation prompt so step 1 isn't accidentally
+# skipped. (Tracked upstream at Fern; ping #fern-cli on Slack if it changes.)
 docs-login:
 	@echo ""
 	@echo "Fern auth — one-time setup per machine"
 	@echo "======================================="
 	@echo ""
-	@echo "  1. Open https://dashboard.buildwithfern.com/login and sign in"
-	@echo "     with your @nvidia.com email. Use the email/magic-link flow,"
-	@echo "     not the Google SSO button — Google sign-in does not always"
-	@echo "     provision the account that the CLI later needs."
+	@echo "  Step 1 (REQUIRED FIRST): open"
 	@echo ""
-	@echo "     External contributors: any email works (Fern provisions a"
-	@echo "     personal account); ask in #fern to be added to the 'nvidia'"
-	@echo "     org if you want to push library autodoc generation."
+	@echo "      https://dashboard.buildwithfern.com/login"
 	@echo ""
-	@echo "  2. Confirm the 'nvidia' organization shows in the dashboard"
-	@echo "     sidebar — if it doesn't, you signed in with the wrong"
-	@echo "     account; sign out and retry step 1."
+	@echo "  in a browser and sign in with your @nvidia.com email. Use the"
+	@echo "  email / magic-link flow — NOT the Google SSO button — because"
+	@echo "  Google sign-in does not always provision the account record"
+	@echo "  that the CLI later needs."
 	@echo ""
-	@echo "  3. The CLI 'fern login' step will run next; complete the browser"
-	@echo "     flow with the SAME email you used in step 1."
+	@echo "  External contributors: any email works (Fern provisions a"
+	@echo "  personal account); ask in #fern to be added to the 'nvidia'"
+	@echo "  org if you want to run library autodoc generation."
 	@echo ""
-	@echo "Press Ctrl-C now if you have not done step 1 yet."
+	@echo "  Step 2: confirm the 'nvidia' organization shows in the"
+	@echo "  dashboard sidebar. If it doesn't, you signed in with the wrong"
+	@echo "  account — sign out and retry step 1."
 	@echo ""
-	@sleep 2
+	@echo "  Step 3: this target will run 'fern login' next; complete the"
+	@echo "  browser flow with the SAME email you used in step 1."
+	@echo ""
+	@echo "---"
+	@printf "Have you completed step 1 (dashboard sign-in)? [yes/N]: "
+	@read confirm; case "$$confirm" in \
+		yes|YES|y|Y) ;; \
+		*) echo ""; echo "Bailing. Open the dashboard URL above, sign in, then re-run 'make docs-login'."; exit 1 ;; \
+	esac
+	@echo ""
 	npx -y fern-api@latest login
 
 # Local-only preview. `fern docs md generate` populates fern/product-docs/ from
