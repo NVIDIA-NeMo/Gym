@@ -48,15 +48,22 @@ def _run(cmd: list[str], *, timeout: int) -> tuple[int, str, str]:
 
 
 def ensure_libreoffice() -> bool:
-    """Make sure ``libreoffice`` is on PATH; apt-install on Linux if missing.
+    """Make sure ``libreoffice`` *and* a JRE are on PATH; apt-install on Linux if missing.
 
     Returns True if libreoffice is available after the call, False otherwise.
-    Idempotent: when the binary is already on PATH, returns immediately.
+    Idempotent: when both the libreoffice binary AND a Java runtime are
+    already on PATH, returns immediately. When libreoffice is present but
+    Java is missing (e.g. the deployment image bakes libreoffice in
+    without a JRE), still runs apt-install — without a JRE, libreoffice
+    silently exits rc=0 with `Warning: failed to launch javaldx` for any
+    chart/formula/embedded-object doc, so we'd produce filename-only
+    stubs in comparison mode.
+
     Logs a WARNING (not raise) on install failure so the server still boots
     and rubric-mode tasks keep working; comparison-mode preconvert will then
     surface its own per-file errors via ``preconvert.py``.
     """
-    if shutil.which("libreoffice"):
+    if shutil.which("libreoffice") and shutil.which("java"):
         return True
 
     if not sys.platform.startswith("linux"):
@@ -68,10 +75,15 @@ def ensure_libreoffice() -> bool:
         return False
 
     if not shutil.which("apt-get"):
-        LOGGER.warning("libreoffice not on PATH and apt-get is unavailable; GDPVal preconvert will be a no-op.")
+        LOGGER.warning(
+            "libreoffice or java not on PATH and apt-get is unavailable; GDPVal preconvert will be a no-op."
+        )
         return False
 
-    LOGGER.info("Installing libreoffice via apt-get (one-time, ~500 MB)...")
+    LOGGER.info(
+        "Installing %s via apt-get (one-time, ~500 MB if libreoffice is missing)...",
+        ", ".join(_APT_PACKAGES),
+    )
 
     try:
         rc, _, err = _run(["apt-get", "update", "-qq"], timeout=_APT_INSTALL_TIMEOUT_S)
@@ -94,6 +106,12 @@ def ensure_libreoffice() -> bool:
 
     if not shutil.which("libreoffice"):
         LOGGER.warning("apt-get install reported success but libreoffice still not on PATH")
+        return False
+    if not shutil.which("java"):
+        LOGGER.warning(
+            "apt-get install reported success but java still not on PATH "
+            "(libreoffice will fail on chart/formula docs)"
+        )
         return False
 
     rc, out, err = _run(["libreoffice", "--version"], timeout=30)
