@@ -73,8 +73,9 @@ ng_run "+config_paths=[$config_paths]"
 ```bash
 ng_collect_rollouts \
     +agent_name=audiobench_alpaca_audio_judge_simple_agent \
+    +input_jsonl_fpath=benchmarks/audiobench_alpaca_audio/data/audiobench_alpaca_audio_test.jsonl \
     +output_jsonl_fpath=results/audiobench_alpaca_audio_rollouts.jsonl \
-    +num_repeats=1
+    +num_repeats=4
 ```
 
 ## Verification
