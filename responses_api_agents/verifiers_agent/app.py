@@ -280,11 +280,15 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
                 elif isinstance(item, dict):
                     prompt_messages.append({"role": item.get("role", "user"), "content": item.get("content", "")})
 
+            # verifiers >=0.1.14 removed RolloutInput.task; EnvGroup routing now uses info['env_id'].
+            info = dict(body.info or {})
+            if body.task and body.task != "default" and "env_id" not in info:
+                info["env_id"] = body.task
+
             rollout_input = vf.RolloutInput(
                 prompt=prompt_messages,
                 answer=body.answer,
-                task=body.task,
-                info=body.info,
+                info=info,
                 example_id=body.example_id,
             )
 
