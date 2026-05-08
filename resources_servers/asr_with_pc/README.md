@@ -14,12 +14,24 @@ overridable per-row in the verify request body):
   `is_correct = wer_pc < 0.5`.
 - **`task_type: ASR`** — standard WER only (Whisper-normalized, lowercased,
   no punctuation). `is_correct = wer < 0.5`.
+- **`task_type: Hallucination`** — char-rate based (used by MUSAN). The
+  request must carry `audio_duration` (seconds); the metric flags
+  `char_rate > 1500` chars/min as hallucination. `expected_answer` is
+  typically empty for this mode. `is_correct = not is_hallucinating`.
+- **`task_type: ASR_LEADERBOARD`** — primary standard WER against
+  `expected_answer` plus per-reference WER against each entry in the
+  request's `reference_fields` (e.g. `["text_tn", "text_itn"]`). Emits
+  `wer_<suffix>` and `is_correct_<suffix>` per field; suffix is the field
+  name with leading `text_` stripped (`text_tn` → `tn`).
 
 Aggregation:
 
 - `wer` (corpus-level, the headline) via `jiwer.wer(refs, hyps)` over the
   whole eval set.
 - `wer_c`, `wer_pc`, `per` are mean-of-per-sample.
+- `hallucination_rate` (Hallucination) is sample-mean.
+- `wer_<suffix>` (ASR_LEADERBOARD) is corpus-level over each row's
+  `text_<suffix>` reference.
 
 Standard WER uses Whisper's English text normalizer + lowercase + punctuation
 strip. WER_PC tokenizes punctuation as separate tokens so word boundaries and

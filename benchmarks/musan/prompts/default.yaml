@@ -1,0 +1,2 @@
+system: "You are a helpful assistant. /no_think"
+user: "Transcribe the speech in this audio. If there is no speech, do not output anything."
