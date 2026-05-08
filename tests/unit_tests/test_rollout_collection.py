@@ -402,62 +402,6 @@ class TestRolloutCollection:
 
         assert not (tmp_path / "output_reward_profiling.jsonl").exists()
 
-    async def test_run_from_config_does_not_write_reward_profile(self, tmp_path: Path) -> None:
-        input_jsonl_fpath = tmp_path / "input.jsonl"
-        samples = [
-            json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "my agent name"}, "x": i})
-            for i in range(3)
-        ]
-        input_jsonl_fpath.write_text("\n".join(samples) + "\n")
-        output_jsonl_fpath = tmp_path / "output.jsonl"
-
-        config = RolloutCollectionConfig(
-            input_jsonl_fpath=str(input_jsonl_fpath),
-            output_jsonl_fpath=str(output_jsonl_fpath),
-            limit=3,
-            num_repeats=2,
-        )
-
-        class TestRolloutCollectionHelper(RolloutCollectionHelper):
-            def run_examples(
-                self,
-                examples: list[dict],
-                *args,
-                **kwargs,
-            ):
-                futures = []
-                for example in examples:
-                    future = Future()
-                    reward = 1.0 if example[ROLLOUT_INDEX_KEY_NAME] == 1 else 0.0
-                    future.set_result(
-                        (
-                            example,
-                            {
-                                "response": {
-                                    "usage": {
-                                        "input_tokens": example[TASK_INDEX_KEY_NAME] + 1,
-                                        "output_tokens": example[ROLLOUT_INDEX_KEY_NAME] + 2,
-                                        "total_tokens": example[TASK_INDEX_KEY_NAME]
-                                        + example[ROLLOUT_INDEX_KEY_NAME]
-                                        + 3,
-                                    }
-                                },
-                                "reward": reward,
-                            },
-                        )
-                    )
-                    futures.append(future)
-
-                return reversed(futures)
-
-            async def _call_aggregate_metrics(self, results, rows, output_fpath):
-                return None
-
-        await TestRolloutCollectionHelper().run_from_config(config)
-
-        assert output_jsonl_fpath.exists()
-        assert not (tmp_path / "output_reward_profiling.jsonl").exists()
-
     async def test_run_from_config_empty_input(self, tmp_path: Path) -> None:
         input_jsonl_fpath = tmp_path / "input.jsonl"
         input_jsonl_fpath.write_text("")

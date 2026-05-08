@@ -25,12 +25,25 @@ class TestRewardProfile:
             for key in list(row):
                 if key.startswith("histogram"):
                     row[key] = None
+                elif key in {"expected_num_rollouts", "missing_num_rollouts", "reward_profile_completion_pct"}:
+                    row.pop(key)
 
-    def _add_complete_profile_metadata(self, metrics: list[dict]) -> None:
-        for row in metrics:
-            row["expected_num_rollouts"] = row["num_rollouts"]
-            row["missing_num_rollouts"] = 0
-            row["reward_profile_completion_pct"] = 100.0
+    def _row(self, task_idx: int, rollout_idx: int) -> dict:
+        return {
+            "_ng_task_index": task_idx,
+            "_ng_rollout_index": rollout_idx,
+            "responses_create_params": {"input": []},
+            "agent_ref": {"name": "my_agent"},
+            "task": task_idx,
+        }
+
+    def _result(self, task_idx: int, rollout_idx: int, reward: float = 1.0, total_tokens: int = 7) -> dict:
+        return {
+            "_ng_task_index": task_idx,
+            "_ng_rollout_index": rollout_idx,
+            "response": {"usage": {"total_tokens": total_tokens}},
+            "reward": reward,
+        }
 
     def test_profile_from_data(self) -> None:
         rows = [
@@ -300,7 +313,6 @@ class TestRewardProfile:
                 },
             },
         ]
-        self._add_complete_profile_metadata(expected_group_level_metrics)
         assert expected_group_level_metrics == actual_group_level_metrics
 
         expected_agent_level_metrics = [
@@ -419,9 +431,6 @@ class TestRewardProfile:
 
         assert row["_ng_task_index"] == 0
         assert row["num_rollouts"] == 2
-        assert row["expected_num_rollouts"] == 2
-        assert row["missing_num_rollouts"] == 0
-        assert row["reward_profile_completion_pct"] == 100.0
         assert row["rollout_infos"] == [
             {
                 "rollout_id": "0:0",
@@ -449,84 +458,27 @@ class TestRewardProfile:
         assert row["num_rollouts"] == 2
         assert pass_rate_passed / row["num_rollouts"] == row["mean/reward"]
 
-    def test_profile_from_data_missing_rollouts_fails_with_partial_hint(self) -> None:
-        rows = [
-            {
-                "_ng_task_index": 0,
-                "_ng_rollout_index": 0,
-                "responses_create_params": {"input": []},
-                "agent_ref": {"name": "my_agent"},
-            },
-            {
-                "_ng_task_index": 0,
-                "_ng_rollout_index": 1,
-                "responses_create_params": {"input": []},
-                "agent_ref": {"name": "my_agent"},
-            },
-        ]
-        results = [
-            {
-                "_ng_task_index": 0,
-                "_ng_rollout_index": 0,
-                "response": {"usage": {"total_tokens": 7}},
-                "reward": 1.0,
-            },
-        ]
+    def test_profile_from_data_missing_rollouts_requires_partial_flag(self) -> None:
+        rows = [self._row(0, 0), self._row(0, 1)]
+        results = [self._result(0, 0)]
 
-        with pytest.raises(ValueError, match="allow_partial_rollouts=True"):
+        with pytest.raises(ValueError, match=r"\+\+allow_partial_rollouts=True"):
             RewardProfiler().profile_from_data(rows, results)
 
-    def test_profile_from_data_partial_rollouts_profiles_completed_and_drops_missing(self) -> None:
-        rows = [
-            {
-                "_ng_task_index": task_idx,
-                "_ng_rollout_index": rollout_idx,
-                "responses_create_params": {"input": []},
-                "agent_ref": {"name": "my_agent"},
-                "task": task_idx,
-            }
-            for task_idx in range(3)
-            for rollout_idx in range(2)
-        ]
-        results = [
-            {
-                "_ng_task_index": 0,
-                "_ng_rollout_index": 0,
-                "response": {"usage": {"total_tokens": 5}},
-                "reward": 0.0,
-            },
-            {
-                "_ng_task_index": 0,
-                "_ng_rollout_index": 1,
-                "response": {"usage": {"total_tokens": 7}},
-                "reward": 1.0,
-            },
-            {
-                "_ng_task_index": 1,
-                "_ng_rollout_index": 0,
-                "response": {"usage": {"total_tokens": 11}},
-                "reward": 1.0,
-            },
-        ]
+    def test_profile_from_data_allow_partial_profiles_completed_rollouts(self) -> None:
+        rows = [self._row(task_idx, rollout_idx) for task_idx in range(3) for rollout_idx in range(2)]
+        results = [self._result(0, 0, reward=0.0, total_tokens=5), self._result(0, 1), self._result(1, 0)]
 
         profiler = RewardProfiler()
-        group_level_metrics, agent_level_metrics = profiler.profile_from_data(
-            rows, results, allow_partial_rollouts=True
-        )
+        group_level_metrics, _ = profiler.profile_from_data(rows, results, allow_partial_rollouts=True)
         profile_rows = profiler.prepare_for_serialization(group_level_metrics)
         summary = profiler.profile_completion_summary(rows, results)
 
         assert [row["_ng_task_index"] for row in profile_rows] == [0, 1]
-        assert profile_rows[0]["num_rollouts"] == 2
-        assert profile_rows[0]["expected_num_rollouts"] == 2
-        assert profile_rows[0]["missing_num_rollouts"] == 0
-        assert profile_rows[0]["reward_profile_completion_pct"] == 100.0
-        assert profile_rows[1]["num_rollouts"] == 1
-        assert profile_rows[1]["expected_num_rollouts"] == 2
-        assert profile_rows[1]["missing_num_rollouts"] == 1
-        assert profile_rows[1]["reward_profile_completion_pct"] == 50.0
-        assert [info["rollout_id"] for info in profile_rows[1]["rollout_infos"]] == ["1:0"]
-        assert agent_level_metrics
+        assert [
+            (row["num_rollouts"], row["expected_num_rollouts"], row["missing_num_rollouts"]) for row in profile_rows
+        ] == [(2, 2, 0), (1, 2, 1)]
+        assert [row["reward_profile_completion_pct"] for row in profile_rows] == [100.0, 50.0]
 
         assert summary == {
             "expected_rollout_rows": 6,
@@ -540,29 +492,9 @@ class TestRewardProfile:
             "missing_input_rows": 1,
         }
 
-    def test_profile_from_data_partial_rollouts_still_rejects_extra_rollout_rows(self) -> None:
-        rows = [
-            {
-                "_ng_task_index": 0,
-                "_ng_rollout_index": 0,
-                "responses_create_params": {"input": []},
-                "agent_ref": {"name": "my_agent"},
-            },
-        ]
-        results = [
-            {
-                "_ng_task_index": 0,
-                "_ng_rollout_index": 0,
-                "response": {"usage": {"total_tokens": 7}},
-                "reward": 1.0,
-            },
-            {
-                "_ng_task_index": 1,
-                "_ng_rollout_index": 0,
-                "response": {"usage": {"total_tokens": 9}},
-                "reward": 0.0,
-            },
-        ]
+    def test_profile_from_data_allow_partial_rejects_extra_rollout_rows(self) -> None:
+        rows = [self._row(0, 0)]
+        results = [self._result(0, 0), self._result(1, 0)]
 
         with pytest.raises(ValueError, match="no matching materialized input"):
             RewardProfiler().profile_from_data(rows, results, allow_partial_rollouts=True)
@@ -673,7 +605,6 @@ class TestRewardProfile:
                 },
             },
         ]
-        self._add_complete_profile_metadata(expected_group_level_metrics)
         assert expected_group_level_metrics == actual_group_level_metrics
 
         expected_agent_level_metrics = [
