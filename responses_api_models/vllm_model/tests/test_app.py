@@ -3621,3 +3621,376 @@ class TestAudioPathSplice:
                 assert "mutually exclusive" in str(e)
             else:
                 raise AssertionError(f"expected ValueError for metadata={metadata}")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# /v1/completions backend tests
+#
+# Exercises VLLMModel when ``upstream_backend == "completions"``: the chat
+# completions handler talks to vLLM's /v1/completions instead of
+# /v1/chat/completions, and a synthesized chat-completion shape is returned to
+# the caller. Covers raw rendering rules, hard-rejects, and the native
+# logprobs.tokens-based token-id extraction path.
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _make_completions_backend_model(
+    *,
+    return_token_id_information: bool = False,
+    extra_body: dict | None = None,
+) -> VLLMModel:
+    config = VLLMModelConfig(
+        host="0.0.0.0",
+        port=8080,
+        entrypoint="",
+        name="vllm_completions",
+        base_url="http://localhost:9999/v1",
+        api_key="dummy_key",  # pragma: allowlist secret
+        model="base-model",
+        return_token_id_information=return_token_id_information,
+        uses_reasoning_parser=False,
+        uses_interleaved_reasoning=False,
+        upstream_backend="completions",
+        render_mode="raw",
+        extra_body=extra_body,
+    )
+    return VLLMModel(config=config, server_client=MagicMock(spec=ServerClient))
+
+
+class TestCompletionsBackendRawRender:
+    def test_single_user_message_string_content(self) -> None:
+        model = _make_completions_backend_model()
+        prompt = model._render_messages_to_prompt([{"role": "user", "content": "Hello world"}])
+        assert prompt == "Hello world"
+
+    def test_single_user_message_text_block_list(self) -> None:
+        model = _make_completions_backend_model()
+        prompt = model._render_messages_to_prompt(
+            [{"role": "user", "content": [{"type": "text", "text": "Hello world"}]}]
+        )
+        assert prompt == "Hello world"
+
+    def test_input_text_block_type_accepted(self) -> None:
+        # VLLMConverter._format_message rewrites input_text → text, but be
+        # defensive: accept the input_text variant directly too.
+        model = _make_completions_backend_model()
+        prompt = model._render_messages_to_prompt(
+            [{"role": "user", "content": [{"type": "input_text", "text": "Hi"}]}]
+        )
+        assert prompt == "Hi"
+
+    def test_system_then_user_concatenated_with_double_newline(self) -> None:
+        model = _make_completions_backend_model()
+        prompt = model._render_messages_to_prompt(
+            [
+                {"role": "system", "content": "You are helpful."},
+                {"role": "user", "content": "What is 2+2?"},
+            ]
+        )
+        assert prompt == "You are helpful.\n\nWhat is 2+2?"
+
+    def test_assistant_message_rejected(self) -> None:
+        model = _make_completions_backend_model()
+        try:
+            model._render_messages_to_prompt(
+                [
+                    {"role": "user", "content": "x"},
+                    {"role": "assistant", "content": "y"},
+                ]
+            )
+        except ValueError as e:
+            assert "system, user" in str(e)
+        else:
+            raise AssertionError("expected ValueError for assistant message")
+
+    def test_three_messages_rejected(self) -> None:
+        model = _make_completions_backend_model()
+        try:
+            model._render_messages_to_prompt(
+                [
+                    {"role": "system", "content": "s"},
+                    {"role": "user", "content": "u1"},
+                    {"role": "user", "content": "u2"},
+                ]
+            )
+        except ValueError as e:
+            assert "at most" in str(e)
+        else:
+            raise AssertionError("expected ValueError for >2 messages")
+
+    def test_lone_system_message_rejected(self) -> None:
+        model = _make_completions_backend_model()
+        try:
+            model._render_messages_to_prompt([{"role": "system", "content": "s"}])
+        except ValueError as e:
+            assert "user message" in str(e)
+        else:
+            raise AssertionError("expected ValueError for lone system message")
+
+    def test_image_block_rejected(self) -> None:
+        model = _make_completions_backend_model()
+        try:
+            model._render_messages_to_prompt(
+                [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "x"}}]}]
+            )
+        except ValueError as e:
+            assert "text content blocks" in str(e)
+        else:
+            raise AssertionError("expected ValueError for image block")
+
+
+class TestCompletionsBackendHardRejects:
+    def test_tools_rejected(self) -> None:
+        import asyncio
+
+        model = _make_completions_backend_model()
+        body = NeMoGymChatCompletionCreateParamsNonStreaming(
+            messages=[{"role": "user", "content": "hi"}],
+            tools=[
+                {
+                    "type": "function",
+                    "function": {"name": "f", "parameters": {"type": "object"}},
+                }
+            ],
+        )
+        try:
+            asyncio.run(model._chat_completions_via_completions(MagicMock(), body))
+        except ValueError as e:
+            assert "tools are not supported" in str(e)
+        else:
+            raise AssertionError("expected ValueError when tools are set")
+
+    def test_audio_metadata_rejected(self) -> None:
+        import asyncio
+
+        model = _make_completions_backend_model()
+        body = NeMoGymChatCompletionCreateParamsNonStreaming(
+            messages=[{"role": "user", "content": "hi"}],
+            metadata={"audio_data": "data:audio/wav;base64,QUFB"},
+        )
+        try:
+            asyncio.run(model._chat_completions_via_completions(MagicMock(), body))
+        except ValueError as e:
+            assert "audio metadata" in str(e)
+        else:
+            raise AssertionError("expected ValueError when audio metadata is set")
+
+
+class TestCompletionsBackendBodyTranslation:
+    def test_basic_fields_passthrough(self) -> None:
+        model = _make_completions_backend_model()
+        out = model._build_completion_body_from_chat_body(
+            {
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 64,
+                "temperature": 0.7,
+                "top_p": 0.9,
+                "seed": 42,
+                "stop": ["</s>"],
+            },
+            prompt="hi",
+        )
+        assert out["model"] == "base-model"
+        assert out["prompt"] == "hi"
+        assert out["max_tokens"] == 64
+        assert out["temperature"] == 0.7
+        assert out["top_p"] == 0.9
+        assert out["seed"] == 42
+        assert out["stop"] == ["</s>"]
+        # No token-id machinery requested.
+        assert "logprobs" not in out
+        assert "return_tokens_as_token_ids" not in out
+        assert "prompt_logprobs" not in out
+
+    def test_max_completion_tokens_aliased(self) -> None:
+        model = _make_completions_backend_model()
+        out = model._build_completion_body_from_chat_body({"max_completion_tokens": 32}, prompt="x")
+        assert out["max_tokens"] == 32
+
+    def test_top_logprobs_maps_to_logprobs_int(self) -> None:
+        model = _make_completions_backend_model()
+        out = model._build_completion_body_from_chat_body({"top_logprobs": 5}, prompt="x")
+        assert out["logprobs"] == 5
+
+    def test_extra_body_does_not_override_request_fields(self) -> None:
+        model = _make_completions_backend_model(extra_body={"top_p": 0.1, "min_p": 0.05})
+        out = model._build_completion_body_from_chat_body(
+            {"top_p": 0.95},
+            prompt="x",
+        )
+        # Request-level top_p wins; min_p only present via extra_body.
+        assert out["top_p"] == 0.95
+        assert out["min_p"] == 0.05
+
+    def test_token_id_information_sets_logprobs_and_extra_flags(self) -> None:
+        model = _make_completions_backend_model(return_token_id_information=True)
+        out = model._build_completion_body_from_chat_body({}, prompt="x")
+        assert out["logprobs"] == 0
+        assert out["return_tokens_as_token_ids"] is True
+        assert out["prompt_logprobs"] == 0
+
+
+class TestCompletionsBackendResponseTranslation:
+    def test_text_lifted_into_assistant_message(self) -> None:
+        model = _make_completions_backend_model()
+        chat_completion = model._completion_dict_to_chat_completion(
+            {
+                "id": "cmpl-1",
+                "object": "text_completion",
+                "created": 123,
+                "model": "base-model",
+                "choices": [{"index": 0, "text": "the answer is 4", "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 5, "completion_tokens": 4, "total_tokens": 9},
+            }
+        )
+        assert chat_completion.choices[0].message.role == "assistant"
+        assert chat_completion.choices[0].message.content == "the answer is 4"
+        assert chat_completion.choices[0].finish_reason == "stop"
+        assert chat_completion.usage.prompt_tokens == 5
+
+    def test_matched_stop_appended(self) -> None:
+        model = _make_completions_backend_model()
+        chat_completion = model._completion_dict_to_chat_completion(
+            {
+                "id": "cmpl-1",
+                "object": "text_completion",
+                "created": 123,
+                "model": "base-model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "text": "answer",
+                        "finish_reason": "stop",
+                        "matched_stop": "</s>",
+                    }
+                ],
+            }
+        )
+        assert chat_completion.choices[0].message.content == "answer</s>"
+
+    def test_token_ids_extracted_from_logprobs(self) -> None:
+        model = _make_completions_backend_model(return_token_id_information=True)
+        chat_completion = model._completion_dict_to_chat_completion(
+            {
+                "id": "cmpl-1",
+                "object": "text_completion",
+                "created": 123,
+                "model": "base-model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "text": "ok",
+                        "finish_reason": "stop",
+                        "logprobs": {
+                            "tokens": ["token_id:42", "token_id:43"],
+                            "token_logprobs": [-0.1, -0.2],
+                        },
+                    }
+                ],
+                "prompt_logprobs": [
+                    None,
+                    {"token_id:7": {"logprob": -1.0, "rank": 1}},
+                    {"token_id:8": {"logprob": -2.0, "rank": 1}},
+                ],
+            }
+        )
+        msg = chat_completion.choices[0].message
+        assert isinstance(msg, NeMoGymChatCompletionMessageForTraining)
+        # TokenIDLogProbMixin declares these as List[int]; Pydantic coerces our
+        # "42"/"7" string emissions, matching what the chat-completions path does.
+        assert msg.generation_token_ids == [42, 43]
+        assert msg.generation_log_probs == [-0.1, -0.2]
+        assert msg.prompt_token_ids == [7, 8]
+
+
+class TestCompletionsBackendEndToEnd:
+    @staticmethod
+    def _install_fake_client(model: VLLMModel, completion_response: dict) -> tuple[MagicMock, dict]:
+        """Replace model._clients with a single mock client whose create_completion
+        returns ``completion_response``. Returns the mock and a captured-kwargs dict.
+        """
+        captured: dict = {}
+
+        async def fake_create_completion(**kwargs):
+            captured["kwargs"] = kwargs
+            return completion_response
+
+        fake_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        fake_client.create_completion = fake_create_completion
+        fake_client.create_chat_completion = AsyncMock(
+            side_effect=AssertionError("create_chat_completion must not be called")
+        )
+        model._clients = [fake_client]
+        # Reset the per-session client routing so the new mock is picked up.
+        model._session_id_to_client = {}
+        return fake_client, captured
+
+    def test_chat_completions_call_routes_to_create_completion(self, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", MagicMock(return_value=dict()))
+
+        model = _make_completions_backend_model()
+        _, captured = self._install_fake_client(
+            model,
+            {
+                "id": "cmpl-1",
+                "object": "text_completion",
+                "created": 1,
+                "model": "base-model",
+                "choices": [{"index": 0, "text": "world", "finish_reason": "stop"}],
+            },
+        )
+
+        app = model.setup_webserver()
+        test_client = TestClient(app)
+        resp = test_client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "ignored-by-server",
+                "messages": [{"role": "user", "content": "hello"}],
+                "max_tokens": 8,
+                "temperature": 0.0,
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["choices"][0]["message"]["content"] == "world"
+        # Forwarded prompt is the verbatim message content.
+        assert captured["kwargs"]["prompt"] == "hello"
+        assert captured["kwargs"]["max_tokens"] == 8
+        # Server-config model wins over whatever the caller put in "model".
+        assert captured["kwargs"]["model"] == "base-model"
+
+    def test_responses_with_string_input_routes_to_completions(self, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", MagicMock(return_value=dict()))
+        monkeypatch.setattr("responses_api_models.vllm_model.app.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("responses_api_models.vllm_model.app.time", lambda: FIXED_TIME)
+
+        model = _make_completions_backend_model()
+        _, captured = self._install_fake_client(
+            model,
+            {
+                "id": "cmpl-1",
+                "object": "text_completion",
+                "created": FIXED_TIME,
+                "model": "base-model",
+                "choices": [{"index": 0, "text": " 4", "finish_reason": "stop"}],
+            },
+        )
+
+        app = model.setup_webserver()
+        test_client = TestClient(app)
+        resp = test_client.post(
+            "/v1/responses",
+            json={"input": "What is 2+2?"},
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        output_texts = [
+            block["text"]
+            for item in data["output"]
+            if item.get("type") == "message"
+            for block in item.get("content", [])
+            if block.get("type") == "output_text"
+        ]
+        assert output_texts == [" 4"]
+        assert captured["kwargs"]["prompt"] == "What is 2+2?"

@@ -18,7 +18,7 @@ import os
 import re
 from copy import deepcopy
 from time import time
-from typing import Any, ClassVar, Dict, List, Optional, Tuple, Union
+from typing import Any, ClassVar, Dict, List, Literal, Optional, Tuple, Union
 from uuid import uuid4
 
 from aiohttp.client_exceptions import ClientResponseError
@@ -93,6 +93,33 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     # ``data:audio/<fmt>;base64,...`` URI at request time — keeps the JSONL
     # small without depending on vLLM's ``--allowed-local-media-path``.
     audio_root: Optional[str] = None
+
+    # Which vLLM endpoint to drive on outbound calls.
+    #
+    # ``chat_completions`` (default): forwards to vLLM's /v1/chat/completions,
+    # which applies the model's chat template server-side and runs the
+    # configured reasoning / tool-call parsers. Suitable for instruct models.
+    #
+    # ``completions``: forwards to vLLM's /v1/completions. Primary use case is
+    # *base* (non-instruct) models, where the caller has already rendered the
+    # full prompt string (e.g. via NeMo Skills prompt templates) and wants the
+    # bytes forwarded verbatim. The Gym /v1/responses and /v1/chat/completions
+    # external endpoints continue to work — only the upstream call swaps.
+    upstream_backend: Literal["chat_completions", "completions"] = "chat_completions"
+
+    # Only consulted when ``upstream_backend == "completions"``.
+    #
+    # ``raw`` (default): the messages list must be a single user message
+    # (optionally preceded by one system message). Their content is forwarded
+    # verbatim to vLLM /v1/completions ``prompt`` — no chat-template
+    # application. This is the base-model path.
+    #
+    # ``chat_template``: messages are rendered via vLLM's /tokenize endpoint
+    # (``add_generation_prompt: true``) and the rendered string is sent to
+    # /v1/completions. Useful when a base model ships with a chat template the
+    # operator wants applied server-side without going through
+    # /v1/chat/completions.
+    render_mode: Literal["raw", "chat_template"] = "raw"
 
     def model_post_init(self, context):
         if isinstance(self.base_url, str):
@@ -438,6 +465,9 @@ class VLLMModel(SimpleResponsesAPIModel):
     async def chat_completions(
         self, request: Request, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
     ) -> NeMoGymChatCompletion:
+        if self.config.upstream_backend == "completions":
+            return await self._chat_completions_via_completions(request, body)
+
         body_dict = body.model_dump(exclude_unset=True)
         body_dict = self._preprocess_chat_completion_create_params(request, body_dict)
 
@@ -542,6 +572,286 @@ class VLLMModel(SimpleResponsesAPIModel):
             # TODO add this when NeMo RL upgrades to vLLM 0.10.2 support for prompt token ids
             # chat_completion_dict.pop("prompt_token_ids")
             # choice_dict.pop("token_ids")
+
+        return NeMoGymChatCompletion.model_validate(chat_completion_dict)
+
+    async def _chat_completions_via_completions(
+        self, request: Request, body: NeMoGymChatCompletionCreateParamsNonStreaming
+    ) -> NeMoGymChatCompletion:
+        """Drive vLLM's /v1/completions instead of /v1/chat/completions.
+
+        Primary use case: base (non-instruct) models where the caller has
+        already rendered the full prompt string upstream and wants the bytes
+        forwarded verbatim. Returns the same NeMoGymChatCompletion shape as
+        the chat-completions path so external callers (Gym /v1/responses
+        conversion, /v1/chat/completions clients) don't need to change.
+
+        Hard rejects (in render_mode="raw"): tools, audio sidechannel,
+        multi-turn / assistant / tool messages. These would silently degrade
+        on /v1/completions — vLLM's tool-call parser and reasoning parser
+        only fire on /v1/chat/completions.
+        """
+        body_dict = body.model_dump(exclude_unset=True)
+        messages = body_dict.get("messages", []) or []
+        metadata = body_dict.get("metadata", {}) or {}
+
+        if body_dict.get("tools"):
+            raise ValueError(
+                f"NeMo Gym server `{self.config.name}`: tools are not supported "
+                "with upstream_backend='completions'. /v1/completions does not run "
+                "vLLM's tool-call parser. Switch upstream_backend to 'chat_completions' "
+                "for tool-using models."
+            )
+
+        for audio_key in ("audio_data", "audio_path", "audio_paths"):
+            if metadata.get(audio_key):
+                raise ValueError(
+                    f"NeMo Gym server `{self.config.name}`: audio metadata "
+                    f"({audio_key!r}) is not supported with upstream_backend='completions'. "
+                    "/v1/completions is text-only."
+                )
+
+        prompt = self._render_messages_to_prompt(messages)
+
+        completion_body = self._build_completion_body_from_chat_body(body_dict, prompt)
+
+        client = self._resolve_client(request)
+
+        try:
+            completion_dict = await client.create_completion(**completion_body)
+        except ClientResponseError as e:
+            result_content_str = e.response_content.decode()
+            is_out_of_context_length = e.status == 400 and (
+                "context length" in result_content_str or "max_tokens" in result_content_str
+            )
+            if is_out_of_context_length:
+                res = self._create_empty_chat_completion()
+                res.choices[0].finish_reason = "length"
+                return res
+            raise
+
+        return self._completion_dict_to_chat_completion(completion_dict)
+
+    def _render_messages_to_prompt(self, messages: List[Dict[str, Any]]) -> str:
+        """Convert a chat-style messages list into a flat prompt string.
+
+        For ``render_mode == "raw"`` (the default and base-model path):
+            - Allow at most one optional system message followed by exactly one
+              user message. Their string contents are joined with ``\\n\\n``.
+            - Reject anything else (assistant / tool turns, multiple users,
+              list-of-blocks content). The caller is expected to do prompt
+              templating upstream before sending.
+
+        For ``render_mode == "chat_template"``: not yet implemented; the
+        intended shape is to POST messages to vLLM's /tokenize endpoint with
+        ``add_generation_prompt=true`` and forward the rendered string. This
+        is reserved as a follow-up — base-model usage doesn't need it.
+        """
+        if self.config.render_mode == "chat_template":
+            raise NotImplementedError(
+                "render_mode='chat_template' is not yet implemented; use render_mode='raw' "
+                "or upstream_backend='chat_completions'."
+            )
+
+        # render_mode == "raw"
+        if not messages:
+            raise ValueError("Cannot render an empty messages list to a prompt.")
+
+        if len(messages) > 2:
+            raise ValueError(
+                f"upstream_backend='completions' with render_mode='raw' accepts at most "
+                f"one system + one user message; got {len(messages)} messages. Render the "
+                "prompt upstream and submit a single user message."
+            )
+
+        roles = [m.get("role") for m in messages]
+        if len(messages) == 2 and roles != ["system", "user"]:
+            raise ValueError(
+                f"upstream_backend='completions' with render_mode='raw' requires the two-message "
+                f"form to be [system, user]; got {roles}."
+            )
+        if len(messages) == 1 and roles[0] != "user":
+            raise ValueError(
+                f"upstream_backend='completions' with render_mode='raw' requires a user message; "
+                f"got role={roles[0]!r}."
+            )
+
+        parts: List[str] = []
+        for m in messages:
+            parts.append(self._stringify_message_content(m))
+
+        return "\n\n".join(parts)
+
+    @staticmethod
+    def _stringify_message_content(message: Dict[str, Any]) -> str:
+        """Coerce a single message's content into a flat string.
+
+        Accepts:
+          - ``str``: returned as-is.
+          - list of text blocks (``[{"type": "text", "text": ...}, ...]``):
+            concatenated with no separator. This is the shape produced by
+            VLLMConverter when the caller passes a string ``input`` to
+            /v1/responses.
+
+        Anything else (image / audio blocks, None content) is rejected — the
+        caller is expected to render upstream when using
+        upstream_backend='completions' with render_mode='raw'.
+        """
+        content = message.get("content")
+        role = message.get("role")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            text_parts: List[str] = []
+            for part in content:
+                if not isinstance(part, dict) or part.get("type") not in ("text", "input_text"):
+                    raise ValueError(
+                        f"upstream_backend='completions' with render_mode='raw' only accepts "
+                        f"text content blocks; got block type {part.get('type') if isinstance(part, dict) else type(part).__name__!r} "
+                        f"for role={role!r}."
+                    )
+                text_parts.append(part.get("text", ""))
+            return "".join(text_parts)
+        raise ValueError(
+            f"upstream_backend='completions' with render_mode='raw' requires string or "
+            f"text-block-list content; got {type(content).__name__} for role={role!r}."
+        )
+
+    def _build_completion_body_from_chat_body(self, chat_body_dict: Dict[str, Any], prompt: str) -> Dict[str, Any]:
+        """Translate a chat-completion request body into a /v1/completions body.
+
+        Only forwards fields that vLLM /v1/completions accepts. Sampling knobs
+        (top_k, min_p, repetition_penalty, etc.) that have no first-class
+        completion field are passed via ``extra_body`` if the operator set
+        ``config.extra_body`` — same precedence rule as the chat path.
+        """
+        out: Dict[str, Any] = {
+            "model": self.config.model,
+            "prompt": prompt,
+        }
+
+        # Pass-through sampling fields with the same names on /v1/completions.
+        for key in (
+            "max_tokens",
+            "temperature",
+            "top_p",
+            "n",
+            "seed",
+            "stop",
+            "frequency_penalty",
+            "presence_penalty",
+            "logit_bias",
+            "user",
+        ):
+            if key in chat_body_dict:
+                out[key] = chat_body_dict[key]
+
+        # ``max_completion_tokens`` is the chat-API alias; map onto ``max_tokens``.
+        if "max_tokens" not in out and "max_completion_tokens" in chat_body_dict:
+            out["max_tokens"] = chat_body_dict["max_completion_tokens"]
+
+        # /v1/completions ``logprobs`` is an int (top-N), not a bool. We mainly
+        # need ``logprobs=0`` (just the sampled token's logprob) when the
+        # operator wants generation-token-id metadata for RL training.
+        chat_logprobs = chat_body_dict.get("logprobs")
+        chat_top_logprobs = chat_body_dict.get("top_logprobs")
+        if chat_top_logprobs is not None:
+            out["logprobs"] = chat_top_logprobs
+        elif chat_logprobs is True:
+            out["logprobs"] = 0
+        elif self.config.return_token_id_information and "logprobs" not in out:
+            out["logprobs"] = 0
+
+        # Operator-level extra_body merges in (e.g. return_tokens_as_token_ids,
+        # prompt_logprobs). Same precedence as the chat path: extra_body fields
+        # do NOT override request-level fields.
+        if self.config.extra_body:
+            extra_body = deepcopy(self.config.extra_body)
+            out = extra_body | out
+
+        if self.config.return_token_id_information:
+            # vLLM-specific knob: surface generation token IDs as the literal
+            # logprobs.tokens entries (formatted as "token_id:<int>"). This is
+            # the same flag the chat path sets via ``logprobs=True``; here we
+            # need it on the /completions extra_body so vLLM emits them.
+            out.setdefault("return_tokens_as_token_ids", True)
+            # Ask vLLM for prompt-side logprobs so we can recover the prompt
+            # token IDs without a second /tokenize round-trip.
+            out.setdefault("prompt_logprobs", 0)
+
+        return out
+
+    def _completion_dict_to_chat_completion(self, completion_dict: Dict[str, Any]) -> NeMoGymChatCompletion:
+        """Wrap a /v1/completions response as a NeMoGymChatCompletion.
+
+        vLLM /v1/completions returns ``choices[i].text``; we lift it into a
+        single assistant chat message. Reasoning content (``<think>...</think>``
+        in the raw text) is left inline — VLLMConverter._extract_reasoning_from_content
+        will pull it out downstream when the result is converted back to a
+        Response.
+        """
+        choice_dict = completion_dict["choices"][0]
+        text = choice_dict.get("text") or ""
+
+        # /v1/completions can return matched_stop / stop_reason that the model
+        # actually emitted. Mirror nemo-skills' behavior: append it back.
+        if choice_dict.get("finish_reason") == "stop":
+            for k in ("stop_reason", "matched_stop"):
+                v = choice_dict.get(k)
+                if isinstance(v, str):
+                    text += v
+
+        message_dict: Dict[str, Any] = {
+            "role": "assistant",
+            "content": text,
+            "tool_calls": None,
+        }
+
+        if self.config.return_token_id_information:
+            logprobs = choice_dict.get("logprobs") or {}
+            tokens = logprobs.get("tokens") or []
+            token_logprobs = logprobs.get("token_logprobs") or []
+
+            generation_token_ids = [t.removeprefix("token_id:") for t in tokens]
+            generation_log_probs = list(token_logprobs)
+
+            prompt_token_ids: List[str] = []
+            prompt_logprobs = completion_dict.get("prompt_logprobs") or []
+            for entry in prompt_logprobs:
+                # vLLM emits None for the very first prompt token (no
+                # predecessor). Subsequent entries are dicts mapping
+                # "token_id:<int>" -> {logprob, ...}.
+                if not entry:
+                    continue
+                # The prompt token at this position is the entry whose rank is
+                # 0 (i.e. the actual token), but vLLM's serialization just
+                # gives us a single-key dict per position when prompt_logprobs=0.
+                for token_key in entry:
+                    prompt_token_ids.append(str(token_key).removeprefix("token_id:"))
+                    break
+
+            message_dict.update(
+                prompt_token_ids=prompt_token_ids,
+                generation_token_ids=generation_token_ids,
+                generation_log_probs=generation_log_probs,
+            )
+
+        chat_completion_dict = {
+            "id": completion_dict.get("id", "chtcmpl-completions"),
+            "object": "chat.completion",
+            "created": completion_dict.get("created", int(time())),
+            "model": completion_dict.get("model", self.config.model),
+            "choices": [
+                {
+                    "index": choice_dict.get("index", 0),
+                    "finish_reason": choice_dict.get("finish_reason") or "stop",
+                    "message": message_dict,
+                }
+            ],
+        }
+
+        if completion_dict.get("usage") is not None:
+            chat_completion_dict["usage"] = completion_dict["usage"]
 
         return NeMoGymChatCompletion.model_validate(chat_completion_dict)
 
