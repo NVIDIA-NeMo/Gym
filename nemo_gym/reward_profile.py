@@ -299,23 +299,18 @@ class RewardProfiler:
         group_level_metrics: List[Dict[str, Any]],
         agent_level_metrics: List[Dict[str, Any]],
         base_output_fpath: Path,
-        reward_profiling_fpath: Optional[Path] = None,
-        write_agent_metrics: bool = True,
-    ) -> Tuple[Path, Optional[Path]]:
-        if reward_profiling_fpath is None:
-            reward_profiling_fpath = base_output_fpath.with_stem(
-                base_output_fpath.stem + "_reward_profiling"
-            ).with_suffix(".jsonl")
+    ) -> Tuple[Path, Path]:
+        reward_profiling_fpath = base_output_fpath.with_stem(base_output_fpath.stem + "_reward_profiling").with_suffix(
+            ".jsonl"
+        )
         with reward_profiling_fpath.open("wb") as f:
             for row in self.prepare_for_serialization(group_level_metrics):
                 f.write(orjson.dumps(row) + b"\n")
 
-        agent_level_metrics_fpath = None
-        if write_agent_metrics:
-            agent_level_metrics_fpath = base_output_fpath.with_stem(
-                base_output_fpath.stem + "_agent_metrics"
-            ).with_suffix(".json")
-            agent_level_metrics_fpath.write_bytes(orjson.dumps(self.prepare_for_serialization(agent_level_metrics)))
+        agent_level_metrics_fpath = base_output_fpath.with_stem(base_output_fpath.stem + "_agent_metrics").with_suffix(
+            ".json"
+        )
+        agent_level_metrics_fpath.write_bytes(orjson.dumps(self.prepare_for_serialization(agent_level_metrics)))
 
         return reward_profiling_fpath, agent_level_metrics_fpath
 
