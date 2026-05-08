@@ -132,11 +132,11 @@ def _verify_request(
     ideal: str,
     vlm_answer: str,
     tag: str = "figqa2-img",
-    key_passage: str = "",
+    reference_passage: str = "",
 ) -> LabbenchVLMVerifyRequest:
     meta: dict = {"ideal": ideal, "tag": tag, "id": "test-id"}
-    if key_passage:
-        meta["key_passage"] = key_passage
+    if reference_passage:
+        meta["reference_passage"] = reference_passage
     return LabbenchVLMVerifyRequest(
         responses_create_params=_multimodal_params(question),
         response=_model_response(vlm_answer),
@@ -395,14 +395,16 @@ class TestVerify:
 
 
 class TestVerifyProtocol:
-    async def test_protocolqa2_judge_prompt_includes_key_passage(self, server: LabbenchVLMResourcesServer) -> None:
+    async def test_protocolqa2_judge_prompt_includes_reference_passage(
+        self, server: LabbenchVLMResourcesServer
+    ) -> None:
         _mock_judge(server, "[[A=B]] they are equivalent")
         req = _verify_request(
             question="Why was there no blue precipitate?",
             ideal="Wrong phase taken.",
             vlm_answer="Wrong phase taken.",
             tag="protocolqa2",
-            key_passage="In step 29, transfer the aqueous (upper) phase.",
+            reference_passage="In step 29, transfer the aqueous (upper) phase.",
         )
 
         await server.verify(req)
@@ -413,7 +415,9 @@ class TestVerifyProtocol:
         assert "In step 29, transfer the aqueous (upper) phase." in judge_input
         assert "Wrong phase taken." in judge_input
 
-    async def test_non_protocol_omits_key_passage_section_fields(self, server: LabbenchVLMResourcesServer) -> None:
+    async def test_non_protocol_omits_reference_passage_section_fields(
+        self, server: LabbenchVLMResourcesServer
+    ) -> None:
         _mock_judge(server, "[[A=B]] they are equivalent")
         req = _verify_request(question="Q?", ideal="A", vlm_answer="A", tag="figqa2-img")
 

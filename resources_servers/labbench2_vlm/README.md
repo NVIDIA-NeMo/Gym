@@ -15,7 +15,7 @@ answer. Binary reward (1.0 = equivalent, 0.0 = not equivalent).
 - Domain: `knowledge`
 - Subtasks: `figqa2-img`, `figqa2-pdf`, `tableqa2-img`, `tableqa2-pdf`, `protocolqa2`
 - Grading: LLM judge with configurable equivalence labels (`[[A=B]]` / `[[A!=B]]`).
-  `protocolqa2` uses a dedicated judge prompt that may include `key_passage` from the dataset.
+  `protocolqa2` uses a dedicated judge prompt that may include `reference_passage` from the dataset.
 
 ## Server Composition
 
@@ -57,7 +57,7 @@ Each JSONL row contains:
   question (no images — those are injected by the agent).
 - `verifier_metadata.ideal`: gold answer string.
 - `verifier_metadata.tag`: subtask identifier (e.g. `figqa2-img`, `tableqa2-pdf`, `protocolqa2`).
-- `verifier_metadata.key_passage`: (protocolqa2 only) excerpt used by the judge; not shown to the policy model.
+- `verifier_metadata.reference_passage`: (protocolqa2 only) excerpt used by the judge; not shown to the policy model.
 - `verifier_metadata.id`: unique task identifier.
 - `verifier_metadata.media_dir`: relative path to the directory containing the
   image or PDF for this question (e.g. `media/figs/imgs/<uuid>` or

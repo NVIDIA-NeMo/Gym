@@ -21,7 +21,7 @@ QUESTION:
 {question}
 
 KEY PASSAGE:
-{key_passage}
+{reference_passage}
 
 GOLD:
 {expected_answer}

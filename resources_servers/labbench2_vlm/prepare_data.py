@@ -295,7 +295,7 @@ def prepare_tag(tag: str, output_path: Path, media_dir: Path, limit: int | None 
                     "tag": row["tag"],
                     "id": row["id"],
                     "media_dir": f"{MEDIA_DIR_NAME}/{gcs_prefix.strip('/')}",
-                    "key_passage": row.get("key_passage") or "",
+                    "reference_passage": row.get("key_passage") or "",
                 },
             }
 

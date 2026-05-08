@@ -22,7 +22,7 @@ instead of inline base64.  The custom ``labbench2_vlm_agent`` embeds images/PDFs
 (or extracted PDF text) at rollout time via ``embed_media_into_row`` before
 sending to the model.
 verify() scores the model's free-text answer against the GOLD ideal using an
-LLM judge. protocolqa2 rows may include ``key_passage`` for the judge prompt.
+LLM judge. protocolqa2 rows may include ``reference_passage`` for the judge prompt.
 """
 
 from __future__ import annotations
@@ -164,15 +164,15 @@ class LabbenchVLMResourcesServer(SimpleResourcesServer):
 
         tag = str(meta.get("tag", ""))
         is_protocol = tag.startswith("protocolqa2")
-        key_passage = str(meta.get("key_passage", ""))
+        reference_passage = str(meta.get("reference_passage", ""))
 
         is_equal, evaluation = await self._judge(
             question=question,
             expected_answer=ideal,
             generated_answer=generated,
             prompt_template=self._judge_prompt_protocol if is_protocol else self._judge_prompt,
-            include_key_passage=is_protocol,
-            key_passage=key_passage,
+            include_reference_passage=is_protocol,
+            reference_passage=reference_passage,
         )
 
         reward = 1.0 if is_equal else 0.0
@@ -189,16 +189,16 @@ class LabbenchVLMResourcesServer(SimpleResourcesServer):
         expected_answer: str,
         generated_answer: str,
         prompt_template: str,
-        include_key_passage: bool = False,
-        key_passage: str = "",
+        include_reference_passage: bool = False,
+        reference_passage: str = "",
     ) -> tuple[bool, JudgeEvaluation]:
         cfg = self.config
-        if include_key_passage:
+        if include_reference_passage:
             user_prompt = prompt_template.format(
                 question=question,
                 expected_answer=expected_answer,
                 generated_answer=generated_answer,
-                key_passage=key_passage,
+                reference_passage=reference_passage,
             )
         else:
             user_prompt = prompt_template.format(
