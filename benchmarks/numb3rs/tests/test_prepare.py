@@ -71,9 +71,7 @@ def test_format_row_drops_missing_fields():
     for missing in ("original_text", "text", "file_name", "category"):
         bad = _entry()
         bad[missing] = ""
-        assert _format_row(bad, audio_prefix="/data/numb3rs") is None, (
-            f"row should drop when {missing!r} is empty"
-        )
+        assert _format_row(bad, audio_prefix="/data/numb3rs") is None, f"row should drop when {missing!r} is empty"
 
 
 def test_format_row_uppercases_category_in_path():
@@ -93,7 +91,5 @@ def test_format_row_filename_handles_nested_path():
     )
     assert row is not None
     # Path basename is appended; intermediate dirs are dropped.
-    assert row["responses_create_params"]["metadata"]["audio_path"].endswith(
-        "/Numb3rs/MONEY/MONEY_540__21_999.wav"
-    )
+    assert row["responses_create_params"]["metadata"]["audio_path"].endswith("/Numb3rs/MONEY/MONEY_540__21_999.wav")
     assert row["sample_id"] == "MONEY_540__21_999"
