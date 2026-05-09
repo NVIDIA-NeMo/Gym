@@ -117,7 +117,9 @@ EOF
 #   - skills.limits.maxSkillsInPrompt=0 + allowBundled=[sentinel] +
 #     per-skill entries.<id>.enabled=false: three independent layers
 #     suppressing bundled-skill prompt injection (~2.6 KB → 75 B).
-#   - agents.defaults.heartbeat.every=999d: pin background turns off.
+#   - agents.defaults.heartbeat.every="0m": disable periodic background
+#     turns (documented sentinel; "0m" is the canonical "off" value per
+#     pi-coding-agent docs/gateway/config-agents.md).
 #   - agents.defaults.skipBootstrap=true: skip onboarding-file creation.
 #   - agents.defaults.startupContext.enabled=false: prevents openclaw
 #     from reading workspace memory files (MEMORY.md, memory/<date>.md)
@@ -156,7 +158,7 @@ cat > "$TPL/openclaw.json" <<'EOF'
       "models": {"vllm/PLACEHOLDER": {"alias": "policy"}},
       "model": {"primary": "vllm/PLACEHOLDER"},
       "skipBootstrap": true,
-      "heartbeat": {"every": "999d"},
+      "heartbeat": {"every": "0m"},
       "startupContext": {"enabled": false}
     }
   },
@@ -170,7 +172,6 @@ cat > "$TPL/openclaw.json" <<'EOF'
     "limits": {"maxSkillsInPrompt": 0, "maxSkillsPromptChars": 0},
     "allowBundled": ["__nonexistent_skill__"],
     "entries": {
-      "browser-automation":    {"enabled": false},
       "healthcheck":           {"enabled": false},
       "node-connect":          {"enabled": false},
       "skill-creator":         {"enabled": false},

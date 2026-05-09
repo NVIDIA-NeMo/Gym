@@ -2218,10 +2218,11 @@ class TestOpenClawHarnessProcessor:
             f"skills.allowBundled must be a non-empty list that matches "
             f"none of the known bundled skills; saw {allow_bundled!r}"
         )
-        # Layer 3: per-skill kill switch for the 7 known bundled skills.
+        # Layer 3: per-skill kill switch for the 6 known bundled skills.
+        # browser-automation is plugin-provided (not bundled), excluded
+        # transitively by plugins.allow=["openai","vllm"].
         entries = skills.get("entries", {})
         for name in (
-            "browser-automation",
             "healthcheck",
             "node-connect",
             "skill-creator",
@@ -2246,11 +2247,12 @@ class TestOpenClawHarnessProcessor:
         )
 
     def test_setup_script_workspace_template_disables_heartbeat(self) -> None:
-        """agents.defaults.heartbeat.every must be very long to prevent
-        background turns from firing during a rollout."""
+        """agents.defaults.heartbeat.every must be the documented disable
+        sentinel ("0m" per pi-coding-agent docs/gateway/config-agents.md)
+        so background turns never fire during a rollout."""
         cfg = self._load_workspace_template_config()
         heartbeat = cfg.get("agents", {}).get("defaults", {}).get("heartbeat", {})
-        assert heartbeat.get("every") == "999d", f"agents.defaults.heartbeat.every must be '999d'; saw {heartbeat!r}"
+        assert heartbeat.get("every") == "0m", f"agents.defaults.heartbeat.every must be '0m'; saw {heartbeat!r}"
 
     def test_setup_script_workspace_template_skips_bootstrap(self) -> None:
         """agents.defaults.skipBootstrap must be true (belt-and-suspenders
