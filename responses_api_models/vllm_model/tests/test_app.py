@@ -3626,10 +3626,10 @@ class TestAudioPathSplice:
 # ──────────────────────────────────────────────────────────────────────────────
 # /v1/completions backend tests
 #
-# Exercises VLLMModel when ``upstream_backend == "completions"``: the chat
+# Exercises VLLMModel when ``use_completions_api`` is True: the chat
 # completions handler talks to vLLM's /v1/completions instead of
 # /v1/chat/completions, and a synthesized chat-completion shape is returned to
-# the caller. Covers raw rendering rules, hard-rejects, and the native
+# the caller. Covers rendering rules, hard-rejects, and the native
 # logprobs.tokens-based token-id extraction path.
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -3650,8 +3650,7 @@ def _make_completions_backend_model(
         return_token_id_information=return_token_id_information,
         uses_reasoning_parser=False,
         uses_interleaved_reasoning=False,
-        upstream_backend="completions",
-        render_mode="raw",
+        use_completions_api=True,
         extra_body=extra_body,
     )
     return VLLMModel(config=config, server_client=MagicMock(spec=ServerClient))
@@ -3754,7 +3753,7 @@ class TestCompletionsBackendHardRejects:
             ],
         )
         try:
-            asyncio.run(model._chat_completions_via_completions(MagicMock(), body))
+            asyncio.run(model._chat_completions_via_completions_api(MagicMock(), body))
         except ValueError as e:
             assert "tools are not supported" in str(e)
         else:
@@ -3769,7 +3768,7 @@ class TestCompletionsBackendHardRejects:
             metadata={"audio_data": "data:audio/wav;base64,QUFB"},
         )
         try:
-            asyncio.run(model._chat_completions_via_completions(MagicMock(), body))
+            asyncio.run(model._chat_completions_via_completions_api(MagicMock(), body))
         except ValueError as e:
             assert "audio metadata" in str(e)
         else:

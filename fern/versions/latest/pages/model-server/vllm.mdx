@@ -11,12 +11,12 @@ VLLMModel provides a Responses API to Chat Completions mapping middleware layer 
 
 ## Two upstream backends
 
-VLLMModel can drive either of vLLM's OpenAI-compatible endpoints, selected by the `upstream_backend` config field. Both backends keep the same external Gym surface — `/v1/responses` and `/v1/chat/completions` continue to work identically; only the call to vLLM swaps.
+VLLMModel can drive either of vLLM's OpenAI-compatible endpoints, selected by the `use_completions_api` config flag. Both backends keep the same external Gym surface — `/v1/responses` and `/v1/chat/completions` continue to work identically; only the call to vLLM swaps.
 
-| `upstream_backend`           | vLLM endpoint hit            | Primary use case |
-|------------------------------|------------------------------|------------------|
-| `chat_completions` (default) | `POST /v1/chat/completions`  | Instruct models. vLLM applies the chat template, runs reasoning- and tool-call parsers server-side. The default rollout config (`vllm_model.yaml`) and training config (`vllm_model_for_training.yaml`) both target this backend. |
-| `completions`                | `POST /v1/completions`       | Base (non-instruct) models, or cases where the caller has already rendered the full prompt string upstream and wants the bytes forwarded verbatim. See [The /v1/completions backend](#the-v1completions-backend) below. |
+| `use_completions_api`         | vLLM endpoint hit            | Primary use case |
+|-------------------------------|------------------------------|------------------|
+| `false` (default)             | `POST /v1/chat/completions`  | Instruct models. vLLM applies the chat template, runs reasoning- and tool-call parsers server-side. The default rollout config (`vllm_model.yaml`) and training config (`vllm_model_for_training.yaml`) both target this backend. |
+| `true`                        | `POST /v1/completions`       | Base (non-instruct) models, or cases where the caller has already rendered the full prompt string upstream and wants the bytes forwarded verbatim. See [The /v1/completions backend](#the-v1completions-backend) below. |
 
 **To use VLLMModel, just change the `responses_api_models/openai_model/configs/openai_model.yaml` in your config paths to `responses_api_models/vllm_model/configs/vllm_model.yaml`!**
 ```bash
@@ -110,7 +110,7 @@ ng_collect_rollouts +agent_name=example_multi_step_simple_agent \
 
 ## The /v1/completions backend
 
-Set `upstream_backend: completions` to drive vLLM's text-completions endpoint instead of chat completions. A ready-to-use config ships at `responses_api_models/vllm_model/configs/vllm_model_completions.yaml`:
+Set `use_completions_api: true` to drive vLLM's text-completions endpoint instead of chat completions. A ready-to-use config ships at `responses_api_models/vllm_model/configs/vllm_model_completions.yaml`:
 
 ```yaml
 policy_model:
@@ -123,13 +123,12 @@ policy_model:
       return_token_id_information: false
       uses_reasoning_parser: false   # /v1/completions does not run vLLM's reasoning parser
       uses_interleaved_reasoning: false
-      upstream_backend: completions  # drives vLLM /v1/completions
-      render_mode: raw               # forward bytes verbatim, no chat-template render
+      use_completions_api: true      # drives vLLM /v1/completions
       chat_template_kwargs: null
       extra_body: null
 ```
 
-### `render_mode: raw`
+### Input shape
 
 The Gym caller's `messages` list must be one of:
 
@@ -142,12 +141,14 @@ For Gym's `/v1/responses` endpoint, an `input` of type `str` is forwarded as the
 
 ### Constraints
 
-The following are hard-rejected (HTTP 5xx with a clear `ValueError`) on `upstream_backend: completions`:
+The following are hard-rejected (HTTP 5xx with a clear `ValueError`) on `use_completions_api: true`:
 
-- **`tools`** — `/v1/completions` doesn't run vLLM's tool-call parser. Use `chat_completions` for tool-using models.
+- **`tools`** — `/v1/completions` doesn't run vLLM's tool-call parser. Set `use_completions_api: false` for tool-using models.
 - **`metadata.audio_data` / `audio_path` / `audio_paths`** — `/v1/completions` is text-only.
 - **multi-turn assistant or tool messages** — render upstream and submit a single user message.
 - **non-text content blocks** (e.g. `image_url`, `audio_url`) — same; render upstream.
+
+The multi-turn and content-block restrictions are specific to the current single rendering path, which forwards message content verbatim. A future client-side chat-template render path (using vLLM's `/tokenize` to build the prompt) would lift those restrictions for use cases where the caller wants `/v1/completions` semantics but with full multi-turn input. Tool calls would still not work — `/v1/completions` doesn't run vLLM's tool-call parser regardless of how the prompt is built.
 
 `<think>...</think>` blocks emitted inline by the model are extracted downstream by `VLLMConverter._extract_reasoning_from_content` when results are converted back to a Response, exactly as on the chat path.
 
@@ -185,10 +186,9 @@ Make sure your input JSONL respects the [Constraints](#constraints) above — si
 | `return_token_id_information` | `bool` | — | **Required.** Set `true` for training (token IDs + log probs), `false` for inference only. |
 | `uses_reasoning_parser` | `bool` | — | **Required.** Set `true` for reasoning models (extracts `<think>` tags), `false` otherwise. |
 | `replace_developer_role_with_system` | `bool` | `false` | Convert "developer" role to "system" for models that don't support developer role. |
-| `chat_template_kwargs` | `dict` | `null` | Override chat template parameters (e.g., `add_generation_prompt`). Only consulted on the `chat_completions` backend. |
+| `chat_template_kwargs` | `dict` | `null` | Override chat template parameters (e.g., `add_generation_prompt`). Only consulted when `use_completions_api: false`. |
 | `extra_body` | `dict` | `null` | Pass additional vLLM-specific parameters (e.g., `guided_json`). |
-| `upstream_backend` | `"chat_completions"` \| `"completions"` | `"chat_completions"` | Which vLLM endpoint to drive. See [Two upstream backends](#two-upstream-backends). |
-| `render_mode` | `"raw"` \| `"chat_template"` | `"raw"` | Only consulted when `upstream_backend == "completions"`. `raw` forwards message content verbatim as the `prompt`; `chat_template` is reserved for a future opt-in path that goes through vLLM's `/tokenize`. |
+| `use_completions_api` | `bool` | `false` | When `true`, drives vLLM's `/v1/completions` instead of `/v1/chat/completions`. See [Two upstream backends](#two-upstream-backends). |
 
 ### Advanced: `chat_template_kwargs`
 

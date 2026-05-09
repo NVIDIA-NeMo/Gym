@@ -18,7 +18,7 @@ import os
 import re
 from copy import deepcopy
 from time import time
-from typing import Any, ClassVar, Dict, List, Literal, Optional, Tuple, Union
+from typing import Any, ClassVar, Dict, List, Optional, Tuple, Union
 from uuid import uuid4
 
 from aiohttp.client_exceptions import ClientResponseError
@@ -94,32 +94,19 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     # small without depending on vLLM's ``--allowed-local-media-path``.
     audio_root: Optional[str] = None
 
-    # Which vLLM endpoint to drive on outbound calls.
+    # When True, outbound calls go to vLLM's /v1/completions endpoint instead
+    # of /v1/chat/completions. Primary use case is *base* (non-instruct) models
+    # where the caller has already rendered the full prompt string (e.g. via a
+    # NeMo Skills prompt template) and wants the bytes forwarded verbatim — no
+    # chat-template application, no role markers. The Gym /v1/responses and
+    # /v1/chat/completions external endpoints continue to work; only the
+    # upstream call swaps.
     #
-    # ``chat_completions`` (default): forwards to vLLM's /v1/chat/completions,
-    # which applies the model's chat template server-side and runs the
-    # configured reasoning / tool-call parsers. Suitable for instruct models.
-    #
-    # ``completions``: forwards to vLLM's /v1/completions. Primary use case is
-    # *base* (non-instruct) models, where the caller has already rendered the
-    # full prompt string (e.g. via NeMo Skills prompt templates) and wants the
-    # bytes forwarded verbatim. The Gym /v1/responses and /v1/chat/completions
-    # external endpoints continue to work — only the upstream call swaps.
-    upstream_backend: Literal["chat_completions", "completions"] = "chat_completions"
-
-    # Only consulted when ``upstream_backend == "completions"``.
-    #
-    # ``raw`` (default): the messages list must be a single user message
-    # (optionally preceded by one system message). Their content is forwarded
-    # verbatim to vLLM /v1/completions ``prompt`` — no chat-template
-    # application. This is the base-model path.
-    #
-    # ``chat_template``: messages are rendered via vLLM's /tokenize endpoint
-    # (``add_generation_prompt: true``) and the rendered string is sent to
-    # /v1/completions. Useful when a base model ships with a chat template the
-    # operator wants applied server-side without going through
-    # /v1/chat/completions.
-    render_mode: Literal["raw", "chat_template"] = "raw"
+    # In this mode the messages list must be a single user message (optionally
+    # preceded by a single system message). Tools, multi-turn assistant / tool
+    # turns, audio metadata, and non-text content blocks are rejected — see
+    # _chat_completions_via_completions_api for the full constraint list.
+    use_completions_api: bool = False
 
     def model_post_init(self, context):
         if isinstance(self.base_url, str):
@@ -465,8 +452,8 @@ class VLLMModel(SimpleResponsesAPIModel):
     async def chat_completions(
         self, request: Request, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
     ) -> NeMoGymChatCompletion:
-        if self.config.upstream_backend == "completions":
-            return await self._chat_completions_via_completions(request, body)
+        if self.config.use_completions_api:
+            return await self._chat_completions_via_completions_api(request, body)
 
         body_dict = body.model_dump(exclude_unset=True)
         body_dict = self._preprocess_chat_completion_create_params(request, body_dict)
@@ -575,7 +562,7 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         return NeMoGymChatCompletion.model_validate(chat_completion_dict)
 
-    async def _chat_completions_via_completions(
+    async def _chat_completions_via_completions_api(
         self, request: Request, body: NeMoGymChatCompletionCreateParamsNonStreaming
     ) -> NeMoGymChatCompletion:
         """Drive vLLM's /v1/completions instead of /v1/chat/completions.
@@ -586,10 +573,10 @@ class VLLMModel(SimpleResponsesAPIModel):
         the chat-completions path so external callers (Gym /v1/responses
         conversion, /v1/chat/completions clients) don't need to change.
 
-        Hard rejects (in render_mode="raw"): tools, audio sidechannel,
-        multi-turn / assistant / tool messages. These would silently degrade
-        on /v1/completions — vLLM's tool-call parser and reasoning parser
-        only fire on /v1/chat/completions.
+        Hard rejects: tools, audio sidechannel, multi-turn / assistant / tool
+        messages. These would silently degrade on /v1/completions — vLLM's
+        tool-call parser and reasoning parser only fire on
+        /v1/chat/completions.
         """
         body_dict = body.model_dump(exclude_unset=True)
         messages = body_dict.get("messages", []) or []
@@ -598,16 +585,16 @@ class VLLMModel(SimpleResponsesAPIModel):
         if body_dict.get("tools"):
             raise ValueError(
                 f"NeMo Gym server `{self.config.name}`: tools are not supported "
-                "with upstream_backend='completions'. /v1/completions does not run "
-                "vLLM's tool-call parser. Switch upstream_backend to 'chat_completions' "
-                "for tool-using models."
+                "with use_completions_api=true. /v1/completions does not run "
+                "vLLM's tool-call parser. Set use_completions_api=false for "
+                "tool-using models."
             )
 
         for audio_key in ("audio_data", "audio_path", "audio_paths"):
             if metadata.get(audio_key):
                 raise ValueError(
                     f"NeMo Gym server `{self.config.name}`: audio metadata "
-                    f"({audio_key!r}) is not supported with upstream_backend='completions'. "
+                    f"({audio_key!r}) is not supported with use_completions_api=true. "
                     "/v1/completions is text-only."
                 )
 
@@ -635,46 +622,33 @@ class VLLMModel(SimpleResponsesAPIModel):
     def _render_messages_to_prompt(self, messages: List[Dict[str, Any]]) -> str:
         """Convert a chat-style messages list into a flat prompt string.
 
-        For ``render_mode == "raw"`` (the default and base-model path):
-            - Allow at most one optional system message followed by exactly one
-              user message. Their string contents are joined with ``\\n\\n``.
-            - Reject anything else (assistant / tool turns, multiple users,
-              list-of-blocks content). The caller is expected to do prompt
-              templating upstream before sending.
+        Allows at most one optional system message followed by exactly one
+        user message. Their string contents are joined with ``\\n\\n``.
+        Rejects anything else (assistant / tool turns, multiple users,
+        list-of-blocks content with non-text parts). The caller is expected
+        to do prompt templating upstream before sending.
 
-        For ``render_mode == "chat_template"``: not yet implemented; the
-        intended shape is to POST messages to vLLM's /tokenize endpoint with
-        ``add_generation_prompt=true`` and forward the rendered string. This
-        is reserved as a follow-up — base-model usage doesn't need it.
+        A future client-side chat-template render path could lift the
+        multi-turn restriction by rendering messages through vLLM's /tokenize
+        endpoint; that's not implemented today.
         """
-        if self.config.render_mode == "chat_template":
-            raise NotImplementedError(
-                "render_mode='chat_template' is not yet implemented; use render_mode='raw' "
-                "or upstream_backend='chat_completions'."
-            )
-
-        # render_mode == "raw"
         if not messages:
             raise ValueError("Cannot render an empty messages list to a prompt.")
 
         if len(messages) > 2:
             raise ValueError(
-                f"upstream_backend='completions' with render_mode='raw' accepts at most "
-                f"one system + one user message; got {len(messages)} messages. Render the "
-                "prompt upstream and submit a single user message."
+                f"use_completions_api=true accepts at most one system + one user message; "
+                f"got {len(messages)} messages. Render the prompt upstream and submit a "
+                "single user message."
             )
 
         roles = [m.get("role") for m in messages]
         if len(messages) == 2 and roles != ["system", "user"]:
             raise ValueError(
-                f"upstream_backend='completions' with render_mode='raw' requires the two-message "
-                f"form to be [system, user]; got {roles}."
+                f"use_completions_api=true requires the two-message form to be [system, user]; got {roles}."
             )
         if len(messages) == 1 and roles[0] != "user":
-            raise ValueError(
-                f"upstream_backend='completions' with render_mode='raw' requires a user message; "
-                f"got role={roles[0]!r}."
-            )
+            raise ValueError(f"use_completions_api=true requires a user message; got role={roles[0]!r}.")
 
         parts: List[str] = []
         for m in messages:
@@ -694,8 +668,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             /v1/responses.
 
         Anything else (image / audio blocks, None content) is rejected — the
-        caller is expected to render upstream when using
-        upstream_backend='completions' with render_mode='raw'.
+        caller is expected to render upstream when use_completions_api is true.
         """
         content = message.get("content")
         role = message.get("role")
@@ -706,15 +679,15 @@ class VLLMModel(SimpleResponsesAPIModel):
             for part in content:
                 if not isinstance(part, dict) or part.get("type") not in ("text", "input_text"):
                     raise ValueError(
-                        f"upstream_backend='completions' with render_mode='raw' only accepts "
-                        f"text content blocks; got block type {part.get('type') if isinstance(part, dict) else type(part).__name__!r} "
+                        f"use_completions_api=true only accepts text content blocks; "
+                        f"got block type {part.get('type') if isinstance(part, dict) else type(part).__name__!r} "
                         f"for role={role!r}."
                     )
                 text_parts.append(part.get("text", ""))
             return "".join(text_parts)
         raise ValueError(
-            f"upstream_backend='completions' with render_mode='raw' requires string or "
-            f"text-block-list content; got {type(content).__name__} for role={role!r}."
+            f"use_completions_api=true requires string or text-block-list content; "
+            f"got {type(content).__name__} for role={role!r}."
         )
 
     def _build_completion_body_from_chat_body(self, chat_body_dict: Dict[str, Any], prompt: str) -> Dict[str, Any]:

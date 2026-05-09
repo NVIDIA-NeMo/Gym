@@ -13,11 +13,8 @@ policy_model:
       uses_interleaved_reasoning: false
       # Drive vLLM /v1/completions instead of /v1/chat/completions. Primary
       # use case: base (non-instruct) models with caller-rendered prompts.
-      upstream_backend: completions
-      # "raw": forward the message content verbatim (no chat-template
-      # application). Caller must submit either a single user message, or a
-      # leading system + single user message — anything else is rejected.
-      # Tools and audio are also rejected on this path.
-      render_mode: raw
+      # The caller's messages must be either a single user message or
+      # [system, user] — anything else (tools, multi-turn, audio) is rejected.
+      use_completions_api: true
       chat_template_kwargs: null
       extra_body: null
