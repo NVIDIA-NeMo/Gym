@@ -62,6 +62,8 @@ from stirrup.core.models import (
     UserMessage,
 )
 
+from responses_api_agents.stirrup_agent.nemo_agent import _restore_tool_messages_for_model
+
 
 LOGGER = logging.getLogger(__name__)
 
@@ -238,7 +240,8 @@ class DynamicMaxTokensChatCompletionsClient(ChatCompletionsClient):
         messages: list[ChatMessage],
         tools: dict[str, Tool],
     ) -> AssistantMessage:
-        input_tokens = self._count_input_tokens(messages, tools)
+        model_messages = _restore_tool_messages_for_model(messages)
+        input_tokens = self._count_input_tokens(model_messages, tools)
         context_window = self._max_tokens
         dynamic_max = max(
             context_window - input_tokens - self._completion_token_buffer,
@@ -250,7 +253,7 @@ class DynamicMaxTokensChatCompletionsClient(ChatCompletionsClient):
         # the agent-level defaults.
         request_kwargs: dict[str, Any] = {
             "model": self._model,
-            "messages": to_openai_messages(messages),
+            "messages": to_openai_messages(model_messages),
             "temperature": self._temperature,
             "top_p": self._top_p,
             "max_completion_tokens": capped_max,

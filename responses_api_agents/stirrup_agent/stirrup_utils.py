@@ -23,6 +23,8 @@ import json
 import uuid
 from typing import Any, List, Tuple
 
+from stirrup.core.models import AssistantMessage, SystemMessage, ToolMessage, UserMessage
+
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -30,6 +32,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
+from responses_api_agents.stirrup_agent.nemo_agent import NeMoUserMessage
 
 
 def convert_stirrup_history_to_output_items(
@@ -46,9 +49,7 @@ def convert_stirrup_history_to_output_items(
 
     for turn in history:
         for msg in turn:
-            msg_type = type(msg).__name__
-
-            if msg_type == "SystemMessage":
+            if isinstance(msg, SystemMessage):
                 input_items.append(
                     NeMoGymEasyInputMessage(
                         role="system",
@@ -56,7 +57,17 @@ def convert_stirrup_history_to_output_items(
                     )
                 )
 
-            elif msg_type == "UserMessage":
+            elif isinstance(msg, NeMoUserMessage) and msg.tool_call_id:
+                content = msg.content if isinstance(msg.content, str) else str(msg.content)
+                output_items.append(
+                    NeMoGymFunctionCallOutput(
+                        call_id=msg.tool_call_id,
+                        output=content,
+                        type="function_call_output",
+                    )
+                )
+
+            elif isinstance(msg, UserMessage):
                 content_text = ""
                 if isinstance(msg.content, str):
                     content_text = msg.content
@@ -67,7 +78,7 @@ def convert_stirrup_history_to_output_items(
 
                 input_items.append(NeMoGymEasyInputMessage(role="user", content=content_text))
 
-            elif msg_type == "AssistantMessage":
+            elif isinstance(msg, AssistantMessage):
                 content_text = msg.content if isinstance(msg.content, str) else ""
                 if content_text:
                     output_items.append(
@@ -88,7 +99,7 @@ def convert_stirrup_history_to_output_items(
 
                 if hasattr(msg, "tool_calls") and msg.tool_calls:
                     for tc in msg.tool_calls:
-                        call_id = tc.id if hasattr(tc, "id") else f"call-{uuid.uuid4().hex[:8]}"
+                        call_id = getattr(tc, "tool_call_id", None) or getattr(tc, "id", None) or f"call-{uuid.uuid4().hex[:8]}"
                         output_items.append(
                             NeMoGymResponseFunctionToolCall(
                                 id=f"fc-{uuid.uuid4().hex[:8]}",
@@ -100,7 +111,7 @@ def convert_stirrup_history_to_output_items(
                             )
                         )
 
-            elif msg_type == "ToolMessage":
+            elif isinstance(msg, ToolMessage):
                 call_id = msg.tool_call_id if hasattr(msg, "tool_call_id") else f"call-{uuid.uuid4().hex[:8]}"
                 content = msg.content if isinstance(msg.content, str) else str(msg.content)
                 output_items.append(
@@ -127,7 +138,7 @@ def extract_deliverable_text(history: List[List[Any]], finish_params: Any) -> st
 
     for turn in reversed(history):
         for msg in reversed(turn):
-            if type(msg).__name__ == "AssistantMessage":
+            if isinstance(msg, AssistantMessage):
                 content = msg.content if isinstance(msg.content, str) else ""
                 if content and content not in parts:
                     parts.append(content)

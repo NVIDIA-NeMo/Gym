@@ -74,8 +74,8 @@ def _restore_tool_messages_for_model(messages: list[ChatMessage]) -> list[ChatMe
     NeMoUserMessage intentionally presents tool results to the agent as user
     turns during normal execution. OpenAI-compatible chat completions APIs,
     however, require assistant messages with tool_calls to be followed by
-    matching tool-role messages. Summarization sends prior history back to the
-    model, so it needs the provider-valid representation.
+    matching tool-role messages, so model calls need the provider-valid
+    representation.
     """
     pending_tool_call_ids: set[str] = set()
     restored: list[ChatMessage] = []

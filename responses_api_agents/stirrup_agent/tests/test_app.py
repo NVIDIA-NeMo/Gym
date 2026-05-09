@@ -29,6 +29,7 @@ from responses_api_agents.stirrup_agent.app import (
     get_task_strategy,
 )
 from responses_api_agents.stirrup_agent.nemo_agent import NeMoAgent, NeMoUserMessage
+from responses_api_agents.stirrup_agent.stirrup_utils import convert_stirrup_history_to_output_items
 from responses_api_agents.stirrup_agent.task_strategy import TaskStrategy
 
 
@@ -99,6 +100,29 @@ class TestApp:
         assert openai_messages[0]["tool_calls"][0]["id"] == "call_1"
         assert openai_messages[1]["role"] == "tool"
         assert openai_messages[1]["tool_call_id"] == "call_1"
+
+    def test_output_history_preserves_nemo_user_tool_results(self) -> None:
+        """Run-history export should keep NeMo user-role tool results as tool outputs."""
+        history = [
+            [
+                AssistantMessage(
+                    content="",
+                    tool_calls=[ToolCall(tool_call_id="call_1", name="code_exec", arguments='{"cmd":"true"}')],
+                    token_usage=TokenUsage(input=1, answer=1, reasoning=0),
+                ),
+                NeMoUserMessage(content="ok", name="code_exec", success=True, tool_call_id="call_1"),
+            ]
+        ]
+
+        input_items, output_items = convert_stirrup_history_to_output_items(history)
+
+        assert input_items == []
+        assert len(output_items) == 2
+        assert output_items[0].type == "function_call"
+        assert output_items[0].call_id == "call_1"
+        assert output_items[1].type == "function_call_output"
+        assert output_items[1].call_id == "call_1"
+        assert output_items[1].output == "ok"
 
 
 class TestExampleDataset:
