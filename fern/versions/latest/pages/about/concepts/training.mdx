@@ -59,9 +59,18 @@ Environments can also generate training data for offline methods. The workflow:
 2. **Filter by reward** — keep successful rollouts (high reward) and discard failures.
 3. **Format as training data** — successful rollouts become SFT demonstrations; pairs of high-reward and low-reward rollouts on the same task become DPO preference pairs.
 
-This turns an environment into a synthetic data generation (SDG) pipeline. See [Offline Training (SFT/DPO)](/latest/training-tutorials/offline-training-w-rollouts) for a hands-on walkthrough.
+This turns an environment into a synthetic data generation (SDG) pipeline.
 
 ## Next Steps
 
-- **Try it**: [Training Tutorials](/latest/training-tutorials) for hands-on guides.
-- **Related concept**: [Agent Harness Optimization](/latest/about/concepts/agent-harness-optimization) for improving agent performance without training.
+<Cards>
+
+<Card title="Training Tutorials" href="/latest/training-tutorials">
+Hands-on guides for training with NeMo Gym.
+</Card>
+
+<Card title="Agent Harness Optimization" href="/latest/about/concepts/agent-harness-optimization">
+Understand methods to improve agent performance without training.
+</Card>
+
+</Cards>
