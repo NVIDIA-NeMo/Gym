@@ -112,12 +112,20 @@ def _iter_dataset_rows(slug: str, cfg: DatasetSpec, max_samples: int | None) -> 
 
         instruction = cfg.get("instruction") or sample.get("instruction") or sample.get("text") or "Process the audio."
         expected_answer = sample.get("answer", sample.get("reference", ""))
+        # `question` is what the audiobench judge sees in its rating prompt
+        # (alongside the model's generation and the reference answer). For
+        # audiobench rows it's the spoken-content transcription
+        # (`speech_instruction`) when the upstream HF row has it, otherwise
+        # the user-facing instruction. asr_with_pc verifiers ignore this
+        # field, so it's harmless on non-judge rows.
+        question = sample.get("speech_instruction") or sample.get("question") or instruction
 
         yield {
             "responses_create_params": {
                 "metadata": {"audio_path": str(audio_full_path.resolve())},
             },
             "instruction": instruction,
+            "question": question,
             "expected_answer": expected_answer,
             "dataset_name": slug,
             "sample_id": f"{slug}_{idx:06d}",
