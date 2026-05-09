@@ -4,6 +4,8 @@
 
 NeMo Gym is a library for evaluating and improving models and agents using environments. NeMo Gym provides infrastructure to develop environments, scalably run evaluation and training, and a collection of popular benchmarks and training environments.
 
+An environment is the complete system an agent interacts with to complete a task. It contains a dataset (tasks to solve), an agent harness (how the model interacts with the world), a verifier (task scoring), and state (per-task execution context).
+
 ## 🎯 When to Use NeMo Gym
 
 - You need to **evaluate models or agents** in stateful environments (e.g. code execution, tool calling, sandboxes)

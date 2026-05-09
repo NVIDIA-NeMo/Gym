@@ -157,6 +157,8 @@ redirects:
     destination: "/nemo/gym/v0.2.1/:path*"
   - source: "nemo/gym/:path*/index.html"
     destination: "/nemo/gym/:path*"
+  - source: "/latest/about/concepts/training-approaches"
+    destination: "/latest/about/concepts/training"
   # Legacy page URLs (foo.html); must follow all :path*/index.html rules above
   - source: "nemo/gym/:path*.html"
     destination: "/nemo/gym/:path*"
