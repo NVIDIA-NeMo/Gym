@@ -102,11 +102,28 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     # /v1/chat/completions external endpoints continue to work; only the
     # upstream call swaps.
     #
-    # In this mode the messages list must be a single user message (optionally
-    # preceded by a single system message). Tools, multi-turn assistant / tool
-    # turns, audio metadata, and non-text content blocks are rejected — see
-    # _chat_completions_via_completions_api for the full constraint list.
+    # In raw mode (render_chat_template=False, the default) the messages list
+    # must be a single user message (optionally preceded by a single system
+    # message); tools, multi-turn turns, audio, and non-text blocks are
+    # rejected. With render_chat_template=True the messages are rendered into
+    # a prompt string client-side via HF AutoTokenizer.apply_chat_template,
+    # which lifts the multi-turn restriction.
     use_completions_api: bool = False
+
+    # Only consulted when ``use_completions_api`` is True. When True, render
+    # the messages list to a prompt string via HF AutoTokenizer.apply_chat_template
+    # (tokenize=False, add_generation_prompt=True) before forwarding to
+    # /v1/completions. The HF tokenizer is loaded once at startup from
+    # ``tokenizer`` (or ``model`` if unset). Fails at startup if the loaded
+    # tokenizer has no chat_template — operator's intent is explicit, so the
+    # mismatch is a config error, not a fallback case.
+    render_chat_template: bool = False
+
+    # HF identifier or local path passed to AutoTokenizer.from_pretrained.
+    # When None, falls back to ``model``. Useful for base-model setups where
+    # the model checkpoint has no chat template in its tokenizer config —
+    # point this at a sibling instruct model to inherit a chat template.
+    tokenizer: Optional[str] = None
 
     def model_post_init(self, context):
         if isinstance(self.base_url, str):
@@ -142,6 +159,54 @@ class VLLMModel(SimpleResponsesAPIModel):
         self._session_id_to_client: Dict[str, NeMoGymAsyncOpenAI] = dict()
 
         self._converter = self.get_converter()
+
+        self._chat_template_tokenizer = None
+        if self.config.use_completions_api and self.config.render_chat_template:
+            self._chat_template_tokenizer = self._load_chat_template_tokenizer()
+
+    def _load_chat_template_tokenizer(self):
+        """Load an HF AutoTokenizer for client-side chat-template rendering.
+
+        Imported lazily so that VLLMModel users who don't set
+        ``render_chat_template=True`` aren't forced to have ``transformers``
+        installed at server start (it's a heavy import).
+
+        Fails loudly at startup if (a) the tokenizer can't be loaded, or
+        (b) it loaded but has no ``chat_template`` configured — the operator
+        opted into chat-template rendering explicitly, so silent fallback to
+        raw mode would be confusing.
+        """
+        try:
+            from transformers import AutoTokenizer
+        except ImportError as e:
+            raise ImportError(
+                f"NeMo Gym server `{self.config.name}` is configured with "
+                "use_completions_api=true and render_chat_template=true, which requires "
+                "the `transformers` package to load an HF tokenizer for chat-template "
+                "rendering. Install it (`pip install transformers`) or set "
+                "render_chat_template=false to use raw rendering instead."
+            ) from e
+
+        tokenizer_id = self.config.tokenizer or self.config.model
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(tokenizer_id, trust_remote_code=True)
+        except Exception as e:
+            raise RuntimeError(
+                f"NeMo Gym server `{self.config.name}`: AutoTokenizer.from_pretrained({tokenizer_id!r}) "
+                "failed. Set `tokenizer:` in the server config to an HF identifier or local "
+                "path that resolves (e.g. a sibling instruct model whose chat template you "
+                "want to inherit), or set render_chat_template=false."
+            ) from e
+
+        if not getattr(tokenizer, "chat_template", None):
+            raise RuntimeError(
+                f"NeMo Gym server `{self.config.name}`: tokenizer loaded from {tokenizer_id!r} "
+                "has no chat_template configured. Point `tokenizer:` at a model whose "
+                "tokenizer ships a chat template (e.g. the sibling instruct checkpoint), "
+                "or set render_chat_template=false."
+            )
+
+        return tokenizer
 
     async def responses(
         self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
@@ -567,27 +632,37 @@ class VLLMModel(SimpleResponsesAPIModel):
     ) -> NeMoGymChatCompletion:
         """Drive vLLM's /v1/completions instead of /v1/chat/completions.
 
-        Primary use case: base (non-instruct) models where the caller has
-        already rendered the full prompt string upstream and wants the bytes
-        forwarded verbatim. Returns the same NeMoGymChatCompletion shape as
-        the chat-completions path so external callers (Gym /v1/responses
-        conversion, /v1/chat/completions clients) don't need to change.
+        Primary use case: base (non-instruct) models. Returns the same
+        NeMoGymChatCompletion shape as the chat-completions path so external
+        callers don't need to change.
 
-        Hard rejects: tools, audio sidechannel, multi-turn / assistant / tool
-        messages. These would silently degrade on /v1/completions — vLLM's
-        tool-call parser and reasoning parser only fire on
-        /v1/chat/completions.
+        Two render modes (selected by ``render_chat_template``):
+
+        - **raw** (default): the messages list must be a single user message
+          (optionally preceded by a single system message); their content is
+          forwarded verbatim. Tools and multi-turn turns are rejected.
+        - **chat_template**: messages are rendered via
+          ``HF AutoTokenizer.apply_chat_template(tokenize=False,
+          add_generation_prompt=True)`` before being forwarded. Multi-turn
+          and tools are allowed; tools are rendered into the prompt by the
+          template, but tool-call output text is **not parsed** by Gym since
+          /v1/completions doesn't run vLLM's tool-call parser — the caller
+          is responsible for parsing tool calls out of the assistant text.
+
+        Audio metadata is rejected in both modes — /v1/completions is
+        text-only.
         """
         body_dict = body.model_dump(exclude_unset=True)
         messages = body_dict.get("messages", []) or []
         metadata = body_dict.get("metadata", {}) or {}
 
-        if body_dict.get("tools"):
+        if not self.config.render_chat_template and body_dict.get("tools"):
             raise ValueError(
                 f"NeMo Gym server `{self.config.name}`: tools are not supported "
-                "with use_completions_api=true. /v1/completions does not run "
-                "vLLM's tool-call parser. Set use_completions_api=false for "
-                "tool-using models."
+                "with use_completions_api=true and render_chat_template=false. "
+                "Set render_chat_template=true (so the chat template can render "
+                "tool definitions into the prompt) or set use_completions_api=false "
+                "for the standard chat-completions tool-call path."
             )
 
         for audio_key in ("audio_data", "audio_path", "audio_paths"):
@@ -598,7 +673,10 @@ class VLLMModel(SimpleResponsesAPIModel):
                     "/v1/completions is text-only."
                 )
 
-        prompt = self._render_messages_to_prompt(messages)
+        if self.config.render_chat_template:
+            prompt = self._render_messages_via_chat_template(body_dict)
+        else:
+            prompt = self._render_messages_to_prompt(messages)
 
         completion_body = self._build_completion_body_from_chat_body(body_dict, prompt)
 
@@ -684,6 +762,35 @@ class VLLMModel(SimpleResponsesAPIModel):
         raise ValueError(
             f"use_completions_api=true requires string or text-block-list content; "
             f"got {type(content).__name__} for role={role!r}."
+        )
+
+    def _render_messages_via_chat_template(self, body_dict: Dict[str, Any]) -> str:
+        """Render the request's messages to a prompt string via the HF tokenizer's chat template.
+
+        Mirrors NeMo Skills' ``apply_chat_template(tokenize=False,
+        add_generation_prompt=True)`` path. Multi-turn assistant / tool turns
+        and tool definitions are passed through. Per-request
+        ``chat_template_kwargs`` (from ``config.chat_template_kwargs`` plus
+        any ``metadata.chat_template_kwargs`` JSON override) are forwarded.
+        """
+        messages = body_dict.get("messages") or []
+        tools = body_dict.get("tools") or None
+
+        # Mirror the precedence rules in _preprocess_chat_completion_create_params:
+        # global config baseline, per-request metadata overrides on top.
+        chat_template_kwargs: Dict[str, Any] = {}
+        if self.config.chat_template_kwargs:
+            chat_template_kwargs.update(deepcopy(self.config.chat_template_kwargs))
+        metadata = body_dict.get("metadata") or {}
+        metadata_kwargs_str = metadata.get("chat_template_kwargs", "{}")
+        chat_template_kwargs.update(json.loads(metadata_kwargs_str))
+
+        return self._chat_template_tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+            tools=tools,
+            **chat_template_kwargs,
         )
 
     def _build_completion_body_from_chat_body(self, chat_body_dict: Dict[str, Any], prompt: str) -> Dict[str, Any]:

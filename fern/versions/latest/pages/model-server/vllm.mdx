@@ -128,25 +128,39 @@ policy_model:
       extra_body: null
 ```
 
-### Input shape
+### Render modes
 
-The Gym caller's `messages` list must be one of:
+A second flag, `render_chat_template`, picks how the caller's `messages` list becomes the `prompt` string:
 
-1. A single user message: `[{role: "user", content: "..."}]`
-2. A system + user pair: `[{role: "system", content: "..."}, {role: "user", content: "..."}]`
+- **`render_chat_template: false` (default)** — *raw* render. Forwards bytes verbatim. Required input: a single user message, optionally preceded by a single system message; their content is joined with `\n\n` and sent as `prompt`. `tools`, multi-turn turns, and non-text content blocks are rejected. This is the cheapest path and the most common base-model setup.
+- **`render_chat_template: true`** — *chat-template* render. Renders the messages list to a prompt string client-side via HF `AutoTokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True, tools=..., **chat_template_kwargs)`. Multi-turn assistant / tool turns and `tools` are allowed.
 
-Their `content` (string or all-text-block list) is concatenated with `\n\n` and forwarded as the vLLM `/v1/completions` `prompt` field. **No chat-template application.** No role markers. The bytes you put in the message content are the bytes vLLM sees.
+For Gym's `/v1/responses` endpoint, a string `input` is forwarded as the prompt directly under raw mode; under chat-template mode the converter still wraps it as a single user message before rendering.
 
-For Gym's `/v1/responses` endpoint, an `input` of type `str` is forwarded as the prompt directly; an `input` of type `list` follows the same single-user / system-user constraint after the standard converter pass.
+### `tokenizer` config (chat-template mode)
 
-### Constraints
+When `render_chat_template: true`, the HF tokenizer is loaded once at server startup. By default it's loaded from the same identifier as `model`. Override with `tokenizer:` for base-model setups where the model checkpoint has no chat template in its tokenizer config — point `tokenizer:` at a sibling instruct model whose template you want to inherit:
 
-The following are hard-rejected (HTTP 5xx with a clear `ValueError`) on `use_completions_api: true`:
+```yaml
+model: Qwen/Qwen2.5-7B           # base model, no chat template
+use_completions_api: true
+render_chat_template: true
+tokenizer: Qwen/Qwen2.5-7B-Instruct  # borrow the instruct chat template
+```
 
-- **`tools`** — `/v1/completions` doesn't run vLLM's tool-call parser. Set `use_completions_api: false` for tool-using models.
-- **`metadata.audio_data` / `audio_path` / `audio_paths`** — `/v1/completions` is text-only.
-- **multi-turn assistant or tool messages** — render upstream and submit a single user message.
-- **non-text content blocks** (e.g. `image_url`, `audio_url`) — same; render upstream.
+If the loaded tokenizer has no `chat_template`, the server fails at startup — silent fallback to raw mode would mask a config bug. The `transformers` package is required at runtime for chat-template mode (it's a Gym dep, but if it's missing the startup error message points at it explicitly).
+
+### Constraint matrix
+
+| Constraint                | `render_chat_template: false` | `render_chat_template: true` |
+|---------------------------|-------------------------------|------------------------------|
+| Single user / [system, user] only | required             | **lifted** — full multi-turn ok |
+| Assistant / tool turns    | rejected                      | **allowed**                   |
+| Tools                     | rejected                      | **allowed** — see note below  |
+| Audio / image content     | rejected                      | rejected (text-only endpoint) |
+| `chat_template_kwargs`    | unused                        | forwarded to `apply_chat_template` |
+
+**Tools in chat-template mode.** The chat template renders the tool definitions into the prompt (Hermes / Qwen / etc. all do this), but `/v1/completions` doesn't run vLLM's tool-call parser regardless of how the prompt is built — so any tool-call output text the model emits is **not** parsed by Gym. The caller is responsible for parsing tool calls out of the assistant text. If you need first-class tool-call routing, use `use_completions_api: false`.
 
 `<think>...</think>` blocks emitted inline by the model are extracted downstream by `VLLMConverter._extract_reasoning_from_content` when results are converted back to a Response, exactly as on the chat path.
 
@@ -187,6 +201,8 @@ Make sure your input JSONL respects the [Constraints](#constraints) above — si
 | `chat_template_kwargs` | `dict` | `null` | Override chat template parameters (e.g., `add_generation_prompt`). Only consulted when `use_completions_api: false`. |
 | `extra_body` | `dict` | `null` | Pass additional vLLM-specific parameters (e.g., `guided_json`). |
 | `use_completions_api` | `bool` | `false` | When `true`, drives vLLM's `/v1/completions` instead of `/v1/chat/completions`. See [Two upstream backends](#two-upstream-backends). |
+| `render_chat_template` | `bool` | `false` | Only consulted when `use_completions_api: true`. When `true`, renders messages to the `prompt` string client-side via `AutoTokenizer.apply_chat_template`. Lifts the multi-turn restriction. See [Render modes](#render-modes). |
+| `tokenizer` | `str` | `null` | Only consulted when `use_completions_api: true` and `render_chat_template: true`. HF identifier or local path passed to `AutoTokenizer.from_pretrained`. When `null`, falls back to `model`. Use this to borrow a chat template from a sibling instruct model when serving a base checkpoint. |
 
 ### Advanced: `chat_template_kwargs`
 

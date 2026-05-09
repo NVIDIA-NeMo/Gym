@@ -3993,3 +3993,273 @@ class TestCompletionsBackendEndToEnd:
         ]
         assert output_texts == [" 4"]
         assert captured["kwargs"]["prompt"] == "What is 2+2?"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# /v1/completions backend with render_chat_template=True
+#
+# Exercises the client-side HF AutoTokenizer.apply_chat_template render path.
+# Uses a stand-in tokenizer object (no transformers / HF download in tests) to
+# stay hermetic — VLLMModel only calls ``apply_chat_template(messages,
+# tokenize=False, add_generation_prompt=True, tools=..., **chat_template_kwargs)``,
+# so the test double captures those args and returns a known string.
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class _FakeTokenizer:
+    """Minimal stand-in for AutoTokenizer used by the chat-template render path.
+
+    Records the apply_chat_template call args and returns a deterministic
+    string composed from the messages so tests can assert the render path
+    forwarded the right inputs.
+    """
+
+    def __init__(self, *, has_chat_template: bool = True):
+        self.chat_template = "<jinja>" if has_chat_template else None
+        self.last_call: dict | None = None
+
+    def apply_chat_template(self, messages, **kwargs):
+        self.last_call = {"messages": messages, **kwargs}
+        rendered_parts = []
+        for m in messages:
+            content = m.get("content")
+            if isinstance(content, list):
+                content = "".join(p.get("text", "") for p in content)
+            rendered_parts.append(f"<|{m['role']}|>{content}")
+        if kwargs.get("add_generation_prompt"):
+            rendered_parts.append("<|assistant|>")
+        return "".join(rendered_parts)
+
+
+def _make_chat_template_model(
+    *,
+    has_chat_template: bool = True,
+    chat_template_kwargs: dict | None = None,
+) -> tuple[VLLMModel, _FakeTokenizer]:
+    config = VLLMModelConfig(
+        host="0.0.0.0",
+        port=8080,
+        entrypoint="",
+        name="vllm_completions_ct",
+        base_url="http://localhost:9999/v1",
+        api_key="dummy_key",  # pragma: allowlist secret
+        model="base-model",
+        return_token_id_information=False,
+        uses_reasoning_parser=False,
+        uses_interleaved_reasoning=False,
+        use_completions_api=True,
+        # Note: render_chat_template is left False so VLLMModel doesn't try to
+        # actually load HF AutoTokenizer at construction. We flip it on after
+        # injecting a _FakeTokenizer instance.
+        chat_template_kwargs=chat_template_kwargs,
+    )
+    model = VLLMModel(config=config, server_client=MagicMock(spec=ServerClient))
+    fake_tokenizer = _FakeTokenizer(has_chat_template=has_chat_template)
+    model._chat_template_tokenizer = fake_tokenizer
+    # Now flip the config flag — model_post_init has already run; we just
+    # need _chat_completions_via_completions_api to hit the chat_template branch.
+    object.__setattr__(model.config, "render_chat_template", True)
+    return model, fake_tokenizer
+
+
+class TestCompletionsBackendChatTemplateRender:
+    def test_multi_turn_messages_pass_through_to_apply_chat_template(self) -> None:
+        model, tokenizer = _make_chat_template_model()
+        messages = [
+            {"role": "system", "content": "Be terse."},
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello"},
+            {"role": "user", "content": "what's 2+2?"},
+        ]
+        prompt = model._render_messages_via_chat_template({"messages": messages})
+
+        assert tokenizer.last_call["messages"] == messages
+        assert tokenizer.last_call["tokenize"] is False
+        assert tokenizer.last_call["add_generation_prompt"] is True
+        assert tokenizer.last_call["tools"] is None
+        # Sanity-check the rendered string surfaces the multi-turn structure.
+        assert prompt == ("<|system|>Be terse.<|user|>hi<|assistant|>hello<|user|>what's 2+2?<|assistant|>")
+
+    def test_tools_pass_through_to_apply_chat_template(self) -> None:
+        model, tokenizer = _make_chat_template_model()
+        tools = [{"type": "function", "function": {"name": "f", "parameters": {"type": "object"}}}]
+        model._render_messages_via_chat_template(
+            {
+                "messages": [{"role": "user", "content": "x"}],
+                "tools": tools,
+            }
+        )
+        assert tokenizer.last_call["tools"] == tools
+
+    def test_chat_template_kwargs_merged_with_metadata_override(self) -> None:
+        model, tokenizer = _make_chat_template_model(
+            chat_template_kwargs={"enable_thinking": True, "tool_use_mode": "tool_calls"},
+        )
+        body_dict = {
+            "messages": [{"role": "user", "content": "x"}],
+            "metadata": {
+                # Per-request override — JSON string, mirroring the chat-completions path.
+                "chat_template_kwargs": json.dumps({"enable_thinking": False, "extra_knob": 7}),
+            },
+        }
+        model._render_messages_via_chat_template(body_dict)
+
+        # Per-request override beats global config; non-overridden global keys persist;
+        # new metadata-only keys are added.
+        kwargs_seen = {
+            k: v
+            for k, v in tokenizer.last_call.items()
+            if k not in {"messages", "tokenize", "add_generation_prompt", "tools"}
+        }
+        assert kwargs_seen == {
+            "enable_thinking": False,  # metadata override
+            "tool_use_mode": "tool_calls",  # global config preserved
+            "extra_knob": 7,  # metadata-only addition
+        }
+
+    def test_post_init_loads_tokenizer_when_render_chat_template_is_set(self, monkeypatch: MonkeyPatch) -> None:
+        """Construction with render_chat_template=True triggers tokenizer load."""
+        captured = {}
+
+        class _StubAutoTokenizer:
+            @staticmethod
+            def from_pretrained(name_or_path, **kwargs):
+                captured["name_or_path"] = name_or_path
+                captured["kwargs"] = kwargs
+                tok = _FakeTokenizer(has_chat_template=True)
+                return tok
+
+        # Inject a fake transformers module so `from transformers import AutoTokenizer` works.
+        import sys as _sys
+        import types as _types
+
+        fake_module = _types.SimpleNamespace(AutoTokenizer=_StubAutoTokenizer)
+        monkeypatch.setitem(_sys.modules, "transformers", fake_module)
+
+        config = VLLMModelConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="ct",
+            base_url="http://localhost:9999/v1",
+            api_key="dummy",  # pragma: allowlist secret
+            model="base-model",
+            return_token_id_information=False,
+            uses_reasoning_parser=False,
+            uses_interleaved_reasoning=False,
+            use_completions_api=True,
+            render_chat_template=True,
+            tokenizer="some-instruct-model",
+        )
+        VLLMModel(config=config, server_client=MagicMock(spec=ServerClient))
+
+        assert captured["name_or_path"] == "some-instruct-model"
+        assert captured["kwargs"].get("trust_remote_code") is True
+
+    def test_post_init_falls_back_to_model_when_tokenizer_unset(self, monkeypatch: MonkeyPatch) -> None:
+        captured = {}
+
+        class _StubAutoTokenizer:
+            @staticmethod
+            def from_pretrained(name_or_path, **kwargs):
+                captured["name_or_path"] = name_or_path
+                return _FakeTokenizer(has_chat_template=True)
+
+        import sys as _sys
+        import types as _types
+
+        monkeypatch.setitem(_sys.modules, "transformers", _types.SimpleNamespace(AutoTokenizer=_StubAutoTokenizer))
+
+        config = VLLMModelConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="ct",
+            base_url="http://localhost:9999/v1",
+            api_key="dummy",  # pragma: allowlist secret
+            model="base-model",
+            return_token_id_information=False,
+            uses_reasoning_parser=False,
+            uses_interleaved_reasoning=False,
+            use_completions_api=True,
+            render_chat_template=True,
+            # tokenizer left unset
+        )
+        VLLMModel(config=config, server_client=MagicMock(spec=ServerClient))
+        assert captured["name_or_path"] == "base-model"
+
+    def test_post_init_raises_when_loaded_tokenizer_has_no_chat_template(self, monkeypatch: MonkeyPatch) -> None:
+        class _StubAutoTokenizer:
+            @staticmethod
+            def from_pretrained(name_or_path, **kwargs):
+                return _FakeTokenizer(has_chat_template=False)
+
+        import sys as _sys
+        import types as _types
+
+        monkeypatch.setitem(_sys.modules, "transformers", _types.SimpleNamespace(AutoTokenizer=_StubAutoTokenizer))
+
+        config = VLLMModelConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="ct",
+            base_url="http://localhost:9999/v1",
+            api_key="dummy",  # pragma: allowlist secret
+            model="base-model",
+            return_token_id_information=False,
+            uses_reasoning_parser=False,
+            uses_interleaved_reasoning=False,
+            use_completions_api=True,
+            render_chat_template=True,
+        )
+        try:
+            VLLMModel(config=config, server_client=MagicMock(spec=ServerClient))
+        except RuntimeError as e:
+            assert "no chat_template" in str(e)
+        else:
+            raise AssertionError("expected RuntimeError when tokenizer has no chat_template")
+
+    def test_tools_allowed_in_chat_template_mode(self) -> None:
+        """Tools must NOT be rejected when render_chat_template=True."""
+        import asyncio
+
+        model, _tokenizer = _make_chat_template_model()
+        body = NeMoGymChatCompletionCreateParamsNonStreaming(
+            messages=[{"role": "user", "content": "hi"}],
+            tools=[
+                {
+                    "type": "function",
+                    "function": {"name": "f", "parameters": {"type": "object"}},
+                }
+            ],
+        )
+        # Mock the underlying client.create_completion so the request reaches
+        # rendering but doesn't actually hit the network.
+        captured: dict = {}
+
+        async def fake_create_completion(**kwargs):
+            captured["kwargs"] = kwargs
+            return {
+                "id": "cmpl-1",
+                "object": "text_completion",
+                "created": 1,
+                "model": "base-model",
+                "choices": [{"index": 0, "text": "ok", "finish_reason": "stop"}],
+            }
+
+        fake_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        fake_client.create_completion = fake_create_completion
+        model._clients = [fake_client]
+        model._session_id_to_client = {}
+
+        # Patch _resolve_client to skip the session machinery.
+        model._resolve_client = lambda r: fake_client  # type: ignore[assignment]
+        request = MagicMock()
+
+        result = asyncio.run(model._chat_completions_via_completions_api(request, body))
+        assert result.choices[0].message.content == "ok"
+        # Prompt forwarded contains the rendered template (with the tool slot
+        # delegated to the template implementation; here our fake just emits
+        # the role+content marker).
+        assert "<|user|>hi" in captured["kwargs"]["prompt"]
