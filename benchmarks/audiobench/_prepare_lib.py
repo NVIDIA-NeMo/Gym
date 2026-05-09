@@ -165,7 +165,15 @@ def prepare_audiobench_bucket(
             raise ValueError(f"sub-dataset {slug!r} is bucket={DATASETS[slug]['bucket']!r}, not {bucket!r}")
 
     out_path = out_dir / f"audiobench_{bucket}.jsonl"
-    agent_ref = {"name": f"audiobench_{bucket}_simple_agent"}
+    # The judge bucket's agent is renamed to ``..._benchmarks_simple_agent`` to
+    # avoid a self-reference clash with the parent ``audiobench_judge_simple_agent``
+    # that lives on the server-level config (used by the server's example.jsonl
+    # smoke). asr/bleu/exact_match buckets inherit from ``asr_with_pc_simple_agent``
+    # whose name doesn't collide, so they keep the simpler form.
+    agent_name = (
+        "audiobench_judge_benchmarks_simple_agent" if bucket == "judge" else f"audiobench_{bucket}_simple_agent"
+    )
+    agent_ref = {"name": agent_name}
 
     count = 0
     skipped = []

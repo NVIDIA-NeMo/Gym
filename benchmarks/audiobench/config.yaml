@@ -27,7 +27,7 @@ audiobench_exact_match_resources_server:
 # agent named in row.agent_ref.name (set by the per-bucket prepare script);
 # rollouts aggregate per agent, with per-sub-dataset breakdowns inside each
 # agent block via compute_subset_metrics(subset_key="dataset_name").
-audiobench_judge_simple_agent:
+audiobench_judge_benchmarks_simple_agent:
   _inherit_from: audiobench_judge_simple_agent
   responses_api_agents:
     simple_agent:
