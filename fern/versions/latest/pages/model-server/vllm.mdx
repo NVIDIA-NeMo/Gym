@@ -148,8 +148,6 @@ The following are hard-rejected (HTTP 5xx with a clear `ValueError`) on `use_com
 - **multi-turn assistant or tool messages** — render upstream and submit a single user message.
 - **non-text content blocks** (e.g. `image_url`, `audio_url`) — same; render upstream.
 
-The multi-turn and content-block restrictions are specific to the current single rendering path, which forwards message content verbatim. A future client-side chat-template render path (using vLLM's `/tokenize` to build the prompt) would lift those restrictions for use cases where the caller wants `/v1/completions` semantics but with full multi-turn input. Tool calls would still not work — `/v1/completions` doesn't run vLLM's tool-call parser regardless of how the prompt is built.
-
 `<think>...</think>` blocks emitted inline by the model are extracted downstream by `VLLMConverter._extract_reasoning_from_content` when results are converted back to a Response, exactly as on the chat path.
 
 ### Token-ID extraction (RL training)

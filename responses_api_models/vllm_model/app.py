@@ -627,10 +627,6 @@ class VLLMModel(SimpleResponsesAPIModel):
         Rejects anything else (assistant / tool turns, multiple users,
         list-of-blocks content with non-text parts). The caller is expected
         to do prompt templating upstream before sending.
-
-        A future client-side chat-template render path could lift the
-        multi-turn restriction by rendering messages through vLLM's /tokenize
-        endpoint; that's not implemented today.
         """
         if not messages:
             raise ValueError("Cannot render an empty messages list to a prompt.")
