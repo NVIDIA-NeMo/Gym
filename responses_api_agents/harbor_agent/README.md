@@ -302,7 +302,7 @@ ng_run "+config_paths=[${config_paths}]" \
   +policy_model_name=<served-model-name>
 ```
 
-For a one-task Terminal-Bench rollout, use the checked-in input file:
+For five Terminal-Bench rollout inputs, use the checked-in input file:
 
 ```bash
 ng_collect_rollouts +agent_name=harbor_agent \
@@ -319,6 +319,28 @@ find responses_api_agents/harbor_agent/jobs -name result.json | tail
 
 Daytona uses the Docker image declared by each Harbor task. If a task does not
 declare `docker_image`, Harbor builds from that task's `environment/Dockerfile`.
+
+### Terminal-Bench 2.0 example rollouts
+
+The checked-in file
+`example/terminal_bench_daytona_output.jsonl` contains five Daytona-backed
+Terminal-Bench 2.0 rollout rows from Harbor's Oracle agent. The run completed
+with five trials, zero errors, and mean reward `1.000`.
+
+To regenerate the Harbor-side smoke evidence:
+
+```bash
+export DAYTONA_API_KEY=<your-daytona-api-key>
+
+harbor run --dataset terminal-bench@2.0 \
+  --n-tasks 5 \
+  --agent oracle \
+  --env daytona \
+  --n-concurrent 1 \
+  --jobs-dir responses_api_agents/harbor_agent/jobs/daytona-terminal-bench-examples \
+  --job-name oracle-daytona-terminal-bench-5 \
+  --quiet
+```
 
 ### Terminal-Bench 2.0 smoke
 
