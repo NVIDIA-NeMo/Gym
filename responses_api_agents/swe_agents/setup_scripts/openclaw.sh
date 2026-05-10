@@ -83,8 +83,8 @@ cat > "$TPL/workspace/.openclaw/workspace-state.json" <<'EOF'
 EOF
 
 cat > "$TPL/workspace/AGENTS.md" <<'EOF'
-You are a software engineer fixing bugs at /testbed.
-Use the exec, read, edit, write tools. Investigate first by running the
+You are a software engineer fixing bugs.
+Use the available tools. Investigate first by running the
 project tests, locate the buggy code, make a minimal fix.
 - Do NOT modify test files unless the problem statement specifically requires it.
 - Make minimal, targeted edits — do not refactor unrelated code.

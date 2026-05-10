@@ -211,12 +211,9 @@ def main():
     user_msg = (
         f"The current working directory is {args.testbed}.\n"
         f"There is a bug to fix in this repository.\n\n"
-        f"Instance ID: {instance_id}\n\n"
         f"## Problem Statement\n\n{problem}\n\n"
-        f"Use the exec tool to investigate (e.g. read source files, search for "
-        f"relevant code). Use read/edit/write tools to make the fix in the "
-        f"source code. Do NOT modify test files unless the problem statement "
-        f"specifically requires it. Do NOT commit. Stop when done."
+        f"Please fix the bug described above. Do NOT modify test files unless "
+        f"the problem statement specifically requires it. Do NOT commit. Stop when done."
     )
 
     session_id = str(uuid.uuid4())
