@@ -62,7 +62,7 @@ from stirrup.core.models import (
     UserMessage,
 )
 
-from responses_api_agents.stirrup_agent.nemo_agent import _restore_tool_messages_for_model
+from responses_api_agents.stirrup_agent.nemo_agent import NeMoUserMessage
 
 
 LOGGER = logging.getLogger(__name__)
@@ -115,6 +115,44 @@ def _format_for_chat_template(m: ChatMessage) -> dict[str, str]:
     # AssistantMessage and any other — best-effort to text.
     content = getattr(m, "content", "") or ""
     return {"role": "assistant", "content": content if isinstance(content, str) else str(content)}
+
+
+def restore_tool_messages_for_model(messages: list[ChatMessage]) -> list[ChatMessage]:
+    """Return provider-valid history for OpenAI-compatible model calls.
+
+    NeMoUserMessage intentionally presents tool results to the agent as user
+    turns during normal execution. OpenAI-compatible chat completions APIs,
+    however, require assistant messages with tool_calls to be followed by
+    matching tool-role messages, so the model client owns that conversion at
+    the provider boundary.
+    """
+    pending_tool_call_ids: set[str] = set()
+    restored: list[ChatMessage] = []
+
+    for message in messages:
+        if isinstance(message, AssistantMessage):
+            pending_tool_call_ids = {tc.tool_call_id for tc in message.tool_calls if tc.tool_call_id}
+            restored.append(message)
+            continue
+
+        if isinstance(message, NeMoUserMessage) and message.tool_call_id in pending_tool_call_ids:
+            restored.append(
+                ToolMessage(
+                    content=message.content,
+                    name=message.name,
+                    success=message.success,
+                    args_was_valid=message.args_was_valid,
+                    tool_call_id=message.tool_call_id,
+                    tool_start_time=message.tool_start_time,
+                    tool_end_time=message.tool_end_time,
+                )
+            )
+            pending_tool_call_ids.discard(message.tool_call_id)
+            continue
+
+        restored.append(message)
+
+    return restored
 
 
 class DynamicMaxTokensChatCompletionsClient(ChatCompletionsClient):
@@ -240,7 +278,7 @@ class DynamicMaxTokensChatCompletionsClient(ChatCompletionsClient):
         messages: list[ChatMessage],
         tools: dict[str, Tool],
     ) -> AssistantMessage:
-        model_messages = _restore_tool_messages_for_model(messages)
+        model_messages = restore_tool_messages_for_model(messages)
         input_tokens = self._count_input_tokens(model_messages, tools)
         context_window = self._max_tokens
         dynamic_max = max(

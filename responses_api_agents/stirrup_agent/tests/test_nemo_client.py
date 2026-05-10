@@ -23,11 +23,12 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from stirrup.core.models import AssistantMessage, SystemMessage, TokenUsage, ToolCall, UserMessage
+from stirrup.core.models import AssistantMessage, SystemMessage, TokenUsage, ToolCall, ToolMessage, UserMessage
 
 from responses_api_agents.stirrup_agent.nemo_agent import NeMoUserMessage
 from responses_api_agents.stirrup_agent.nemo_client import (
     DynamicMaxTokensChatCompletionsClient,
+    restore_tool_messages_for_model,
 )
 
 
@@ -107,6 +108,25 @@ async def test_generate_restores_tool_result_messages_for_openai_payload() -> No
     assert sent_messages[0]["tool_calls"][0]["id"] == "call_1"
     assert sent_messages[1]["role"] == "tool"
     assert sent_messages[1]["tool_call_id"] == "call_1"
+
+
+def test_restore_tool_messages_for_model_converts_nemo_user_messages() -> None:
+    """The client boundary owns provider-compatible history conversion."""
+    messages = [
+        AssistantMessage(
+            content="",
+            tool_calls=[ToolCall(tool_call_id="call_1", name="code_exec", arguments='{"cmd":"true"}')],
+            token_usage=TokenUsage(input=1, answer=1, reasoning=0),
+        ),
+        NeMoUserMessage(content="ok", name="code_exec", success=True, tool_call_id="call_1"),
+    ]
+
+    restored = restore_tool_messages_for_model(messages)
+
+    assert restored[0] is messages[0]
+    assert isinstance(restored[1], ToolMessage)
+    assert restored[1].tool_call_id == "call_1"
+    assert restored[1].content == "ok"
 
 
 @pytest.mark.asyncio
