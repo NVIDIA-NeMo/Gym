@@ -151,6 +151,7 @@ class CCCEvaluatorConfig(BaseEvaluatorConfig):
     time_scale: float = 2.0
     overwrite: bool = False
     shared_dir: str = "/tmp"
+    run_all_tests: bool = False
 
 
 _precompile_loop_tls = threading.local()
@@ -617,6 +618,7 @@ class CCCEvaluator(BaseEvaluator):
             )
         cache_key = self._cache_key(problem_id, competition_id)
         pre_dir = await asyncio.to_thread(self._get_precompiled_dir, cache_key, problem_id, problem_metadata)
+        time_scale = self.eval_cfg.time_scale * (0.5 if float(entry.get("total_time") or 0.0) > 300.0 else 1.0)
 
         subtask_state = {
             subtask_name: {
@@ -647,16 +649,19 @@ class CCCEvaluator(BaseEvaluator):
             tasks = []
             for test_name, test_data in candidate_batch:
                 subtasks = test_to_subtasks.get(test_name, [])
-                should_run = False
-                for subtask_name in subtasks:
-                    state = subtask_state[subtask_name]
-                    if state["aggregation"] == "sum_tests" or not state["failed"]:
-                        should_run = True
-                        break
+                should_run = self.eval_cfg.run_all_tests
+                if not should_run:
+                    for subtask_name in subtasks:
+                        state = subtask_state[subtask_name]
+                        if state["aggregation"] == "sum_tests" or not state["failed"]:
+                            should_run = True
+                            break
                 if not should_run:
                     continue
                 batch.append((test_name, test_data))
-                tasks.append(self._build_test_task(problem_id, pre_dir, completion, test_data, task_type=task_type))
+                task = self._build_test_task(problem_id, pre_dir, completion, test_data, task_type=task_type)
+                task["time_scale"] = time_scale
+                tasks.append(task)
             if not batch:
                 continue
             loop = asyncio.get_running_loop()
@@ -671,7 +676,7 @@ class CCCEvaluator(BaseEvaluator):
                     result["test_group"] = test_group
                 for subtask_name in test_to_subtasks.get(test_name, []):
                     state = subtask_state[subtask_name]
-                    if state["aggregation"] == "min" and state["failed"]:
+                    if not self.eval_cfg.run_all_tests and state["aggregation"] == "min" and state["failed"]:
                         continue
                     state["outputs"].append(dict(result))
                     # For min-aggregation subtasks the reward is 1.0 only when
@@ -736,5 +741,4 @@ class CCCEvaluator(BaseEvaluator):
 
     async def eval_single(self, data_point: dict):
         return await self._evaluate_entry(data_point)
-
 
