@@ -50,28 +50,28 @@ from datasets import load_dataset
 
 
 IMAGE_SOURCES = [
-    {
-        "name": "R2E-Gym",
-        "dataset": "R2E-Gym/R2E-Gym-Subset",
-        "split": "train",
-        "prefix": "r2egym",
-        "images": lambda ds: [
-            (row["docker_image"], row["docker_image"].split("/")[-1].replace(":", "_")) for row in ds
-        ],
-    },
-    {
-        "name": "SWE-Gym",
-        "dataset": "SWE-Gym/SWE-Gym",
-        "split": "train",
-        "prefix": "swegym",
-        "images": lambda ds: [
-            (
-                f"xingyaoww/sweb.eval.x86_64.{row['instance_id'].replace('__', '_s_')}",
-                f"sweb.eval.x86_64.{row['instance_id'].replace('__', '_s_')}",
-            )
-            for row in ds
-        ],
-    },
+    # {
+    #     "name": "R2E-Gym",
+    #     "dataset": "R2E-Gym/R2E-Gym-Subset",
+    #     "split": "train",
+    #     "prefix": "r2egym",
+    #     "images": lambda ds: [
+    #         (row["docker_image"], row["docker_image"].split("/")[-1].replace(":", "_")) for row in ds
+    #     ],
+    # },
+    # {
+    #     "name": "SWE-Gym",
+    #     "dataset": "SWE-Gym/SWE-Gym",
+    #     "split": "train",
+    #     "prefix": "swegym",
+    #     "images": lambda ds: [
+    #         (
+    #             f"xingyaoww/sweb.eval.x86_64.{row['instance_id'].replace('__', '_s_')}",
+    #             f"sweb.eval.x86_64.{row['instance_id'].replace('__', '_s_')}",
+    #         )
+    #         for row in ds
+    #     ],
+    # },
     {
         "name": "SWE-Bench Verified",
         "dataset": "princeton-nlp/SWE-bench_Verified",
