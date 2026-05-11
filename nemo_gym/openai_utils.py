@@ -12,10 +12,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import asyncio
 import json
 from asyncio import sleep
-from contextlib import nullcontext
 from typing import (
     Any,
     Dict,
@@ -470,8 +468,6 @@ RETRY_ERROR_CODES = RATE_LIMIT_ERROR_CODES + [500]
 class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
     """This is just a stub class that wraps around aiohttp"""
 
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
     base_url: str
     api_key: str
 
@@ -479,23 +475,6 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         default=False,
         description="Set this to true if this particular client is only used to call internal NeMo Gym servers.",
     )
-    max_concurrent_requests: Optional[int] = Field(
-        default=None,
-        description=(
-            "Cap on in-flight upstream requests from this client (process-local "
-            "asyncio.Semaphore). Set on rate-limited endpoints (e.g. Gemini) to "
-            "stay under quota regardless of caller fan-out. None = unlimited."
-        ),
-    )
-    _semaphore: Optional[asyncio.Semaphore] = None
-
-    def _get_semaphore(self) -> Optional[asyncio.Semaphore]:
-        # Lazy init: asyncio.Semaphore needs a running event loop.
-        if self.max_concurrent_requests is None:
-            return None
-        if self._semaphore is None:
-            self._semaphore = asyncio.Semaphore(self.max_concurrent_requests)
-        return self._semaphore
 
     default_headers: Dict[str, str] = Field(
         default_factory=dict,
@@ -545,43 +524,39 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         await raise_for_status(response)
 
     async def create_models(self):
-        async with self._get_semaphore() or nullcontext():
-            request_kwargs = dict(url=f"{self.base_url}/models")
-            response = await self._request(method="GET", **request_kwargs)
+        request_kwargs = dict(url=f"{self.base_url}/models")
+        response = await self._request(method="GET", **request_kwargs)
 
-            await self._raise_for_status(response, request_kwargs)
-            return await get_response_json(response)
+        await self._raise_for_status(response, request_kwargs)
+        return await get_response_json(response)
 
     async def create_chat_completion(self, **kwargs):
-        async with self._get_semaphore() or nullcontext():
-            request_kwargs = dict(
-                url=f"{self.base_url}/chat/completions",
-                json=kwargs,
-            )
-            response = await self._request(method="POST", **request_kwargs)
+        request_kwargs = dict(
+            url=f"{self.base_url}/chat/completions",
+            json=kwargs,
+        )
+        response = await self._request(method="POST", **request_kwargs)
 
-            await self._raise_for_status(response, request_kwargs)
-            return await get_response_json(response)
+        await self._raise_for_status(response, request_kwargs)
+        return await get_response_json(response)
 
     async def create_response(self, **kwargs):
-        async with self._get_semaphore() or nullcontext():
-            request_kwargs = dict(
-                url=f"{self.base_url}/responses",
-                json=kwargs,
-            )
-            response = await self._request(method="POST", **request_kwargs)
+        request_kwargs = dict(
+            url=f"{self.base_url}/responses",
+            json=kwargs,
+        )
+        response = await self._request(method="POST", **request_kwargs)
 
-            await self._raise_for_status(response, request_kwargs)
-            return await get_response_json(response)
+        await self._raise_for_status(response, request_kwargs)
+        return await get_response_json(response)
 
     async def create_tokenize(self, **kwargs):
-        async with self._get_semaphore() or nullcontext():
-            base_url = self.base_url.removesuffix("/v1")
-            request_kwargs = dict(
-                url=f"{base_url}/tokenize",
-                json=kwargs,
-            )
-            response = await self._request(method="POST", **request_kwargs)
+        base_url = self.base_url.removesuffix("/v1")
+        request_kwargs = dict(
+            url=f"{base_url}/tokenize",
+            json=kwargs,
+        )
+        response = await self._request(method="POST", **request_kwargs)
 
-            await self._raise_for_status(response, request_kwargs)
-            return await get_response_json(response)
+        await self._raise_for_status(response, request_kwargs)
+        return await get_response_json(response)

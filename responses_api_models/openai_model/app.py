@@ -12,6 +12,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
+from contextlib import nullcontext
 from typing import Any, Dict, Optional
 
 from pydantic import Field
@@ -56,15 +58,23 @@ class SimpleModelServer(SimpleResponsesAPIModel):
             base_url=self.config.openai_base_url,
             api_key=self.config.openai_api_key,
             default_headers=self.config.openai_default_headers,
-            max_concurrent_requests=self.config.max_concurrent_requests,
+        )
+        self._semaphore = (
+            asyncio.Semaphore(self.config.max_concurrent_requests)
+            if self.config.max_concurrent_requests is not None
+            else None
         )
 
         return super().model_post_init(context)
 
+    def _bound(self):
+        return self._semaphore if self._semaphore is not None else nullcontext()
+
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         body_dict = self.config.extra_body | body.model_dump(exclude_unset=True)
         body_dict.setdefault("model", self.config.openai_model)
-        openai_response_dict = await self._client.create_response(**body_dict)
+        async with self._bound():
+            openai_response_dict = await self._client.create_response(**body_dict)
         return NeMoGymResponse.model_validate(openai_response_dict)
 
     async def chat_completions(
@@ -72,7 +82,8 @@ class SimpleModelServer(SimpleResponsesAPIModel):
     ) -> NeMoGymChatCompletion:
         body_dict = self.config.extra_body | body.model_dump(exclude_unset=True)
         body_dict.setdefault("model", self.config.openai_model)
-        openai_response_dict = await self._client.create_chat_completion(**body_dict)
+        async with self._bound():
+            openai_response_dict = await self._client.create_chat_completion(**body_dict)
         return NeMoGymChatCompletion.model_validate(openai_response_dict)
 
 
