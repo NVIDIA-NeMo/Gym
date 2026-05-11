@@ -28,7 +28,10 @@ from stirrup.core.models import AssistantMessage, SystemMessage, TokenUsage, Too
 from responses_api_agents.stirrup_agent.nemo_agent import NeMoUserMessage
 from responses_api_agents.stirrup_agent.nemo_client import (
     DynamicMaxTokensChatCompletionsClient,
+)
+from responses_api_agents.stirrup_agent.stirrup_utils import (
     restore_tool_messages_for_model,
+    to_provider_openai_messages,
 )
 
 
@@ -110,8 +113,8 @@ async def test_generate_restores_tool_result_messages_for_openai_payload() -> No
     assert sent_messages[1]["tool_call_id"] == "call_1"
 
 
-def test_restore_tool_messages_for_model_converts_nemo_user_messages() -> None:
-    """The client boundary owns provider-compatible history conversion."""
+def test_provider_openai_messages_convert_nemo_user_messages() -> None:
+    """Stirrup serialization helper owns provider-compatible history conversion."""
     messages = [
         AssistantMessage(
             content="",
@@ -122,11 +125,15 @@ def test_restore_tool_messages_for_model_converts_nemo_user_messages() -> None:
     ]
 
     restored = restore_tool_messages_for_model(messages)
+    serialized = to_provider_openai_messages(messages)
 
     assert restored[0] is messages[0]
     assert isinstance(restored[1], ToolMessage)
     assert restored[1].tool_call_id == "call_1"
     assert restored[1].content == "ok"
+    assert serialized[0]["role"] == "assistant"
+    assert serialized[1]["role"] == "tool"
+    assert serialized[1]["tool_call_id"] == "call_1"
 
 
 @pytest.mark.asyncio

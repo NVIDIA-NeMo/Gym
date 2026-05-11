@@ -23,7 +23,8 @@ import json
 import uuid
 from typing import Any, List, Tuple
 
-from stirrup.core.models import AssistantMessage, SystemMessage, ToolMessage, UserMessage
+from stirrup.clients.utils import to_openai_messages
+from stirrup.core.models import AssistantMessage, ChatMessage, SystemMessage, ToolMessage, UserMessage
 
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -33,6 +34,49 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputText,
 )
 from responses_api_agents.stirrup_agent.nemo_agent import NeMoUserMessage
+
+
+def restore_tool_messages_for_model(messages: list[ChatMessage]) -> list[ChatMessage]:
+    """Return provider-valid history for OpenAI-compatible model calls.
+
+    NeMoUserMessage intentionally presents tool results to the agent as user
+    turns during normal execution. OpenAI-compatible chat completions APIs,
+    however, require assistant messages with tool_calls to be followed by
+    matching tool-role messages, so provider-bound serialization must restore
+    those tool results first.
+    """
+    pending_tool_call_ids: set[str] = set()
+    restored: list[ChatMessage] = []
+
+    for message in messages:
+        if isinstance(message, AssistantMessage):
+            pending_tool_call_ids = {tc.tool_call_id for tc in message.tool_calls if tc.tool_call_id}
+            restored.append(message)
+            continue
+
+        if isinstance(message, NeMoUserMessage) and message.tool_call_id in pending_tool_call_ids:
+            restored.append(
+                ToolMessage(
+                    content=message.content,
+                    name=message.name,
+                    success=message.success,
+                    args_was_valid=message.args_was_valid,
+                    tool_call_id=message.tool_call_id,
+                    tool_start_time=message.tool_start_time,
+                    tool_end_time=message.tool_end_time,
+                )
+            )
+            pending_tool_call_ids.discard(message.tool_call_id)
+            continue
+
+        restored.append(message)
+
+    return restored
+
+
+def to_provider_openai_messages(messages: list[ChatMessage]) -> list[dict[str, Any]]:
+    """Serialize Stirrup history for an OpenAI-compatible provider."""
+    return to_openai_messages(restore_tool_messages_for_model(messages))
 
 
 def convert_stirrup_history_to_output_items(
