@@ -74,9 +74,13 @@ versions:
     path: versions/latest.yml
     slug: latest
     availability: stable
-  - display-name: "0.2"
-    path: versions/v0.2.yml
-    slug: v0.2
+  - display-name: Main
+    path: versions/main.yml
+    slug: main
+    availability: beta
+  - display-name: "0.2.1"
+    path: versions/v0.2.1.yml
+    slug: v0.2.1
     availability: stable
 
 redirects:
@@ -88,7 +92,7 @@ redirects:
   - source: "nemo/gym/about/concepts/configuration-system.html"
     destination: "/about/concepts/configuration"
   - source: "nemo/gym/about/concepts/core-abstractions.html"
-    destination: "/about/concepts/core-components"
+    destination: "/about/core-components"
   - source: "nemo/gym/get-started/setup-installation.html"
     destination: "/get-started/detailed-setup"
   - source: "nemo/gym/how-to-faq.html"
@@ -131,12 +135,22 @@ redirects:
     destination: "/training-tutorials/nemo-rl-grpo/single-node-training"
   - source: "nemo/gym/tutorials/offline-training-w-rollouts.html"
     destination: "/training-tutorials/offline-training-w-rollouts"
+  - source: "/latest/about/concepts/core-components"
+    destination: "/latest/about/core-components"
+  - source: "/latest/about/concepts/architecture"
+    destination: "/latest/infrastructure/engineering-notes/system-design"
+  - source: "/latest/about/concepts/task-verification"
+    destination: "/latest/resources-server"
+  - source: "/latest/about/concepts/configuration"
+    destination: "/latest/reference/configuration"
   - source: "/latest/environment-tutorials/designing-customer-evaluation"
     destination: "/latest/environment-tutorials"
+  - source: "/v0.2/:path*"
+    destination: "/v0.2.1/:path*"
   - source: "nemo/gym/latest/:path*/index.html"
     destination: "/nemo/gym/latest/:path*"
-  - source: "nemo/gym/v0.2/:path*/index.html"
-    destination: "/nemo/gym/v0.2/:path*"
+  - source: "nemo/gym/v0.2.1/:path*/index.html"
+    destination: "/nemo/gym/v0.2.1/:path*"
   - source: "nemo/gym/:path*/index.html"
     destination: "/nemo/gym/:path*"
   # Legacy page URLs (foo.html); must follow all :path*/index.html rules above
