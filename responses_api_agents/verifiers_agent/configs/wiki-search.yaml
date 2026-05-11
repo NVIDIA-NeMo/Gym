@@ -11,7 +11,7 @@ verifiers_agent:
       model_name: ""
       vf_env_id: wiki-search
       vf_env_args:
-        max_turns: 10 # max number of turns of tool (RAG) calls
+        max_turns: 3 # max number of turns of tool (RAG) calls
         # Judge model (LLM-as-judge for reward). Routed to NVIDIA inference hub.
         judge_model: "gcp/google/gemini-3.1-flash-lite-preview"
         judge_base_url: "https://inference-api.nvidia.com/v1"
