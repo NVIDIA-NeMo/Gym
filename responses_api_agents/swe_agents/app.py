@@ -1582,9 +1582,8 @@ class RunOpenHandsAgent(BaseModel):
     async def _run_golden_patch_verification(self) -> Optional[Path]:
         instance_id = self.config.instance_id
         dataset_name = self.config.problem_info.get("dataset_name") or ""
-        supported = (
-            dataset_name == "swe-bench-ext"
-            or ("SWE-bench" in dataset_name and "SWE-rebench" not in dataset_name)
+        supported = dataset_name == "swe-bench-ext" or (
+            "SWE-bench" in dataset_name and "SWE-rebench" not in dataset_name
         )
         if not supported:
             raise NotImplementedError(
