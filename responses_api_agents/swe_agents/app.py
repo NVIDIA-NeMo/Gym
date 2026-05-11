@@ -131,10 +131,7 @@ class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
         default=False,
         description=(
             "If True, skip the agent run and use the sample's golden patch "
-            "(instance_dict['patch']) as the model patch. The eval container "
-            "still runs, so this verifies that the dataset sample actually "
-            "resolves when its golden patch is applied. Currently supported "
-            "for dataset_name == 'swe-bench-ext'."
+            "(instance_dict['patch']) as the model patch."
         ),
     )
 
@@ -1584,14 +1581,19 @@ class RunOpenHandsAgent(BaseModel):
 
     async def _run_golden_patch_verification(self) -> Optional[Path]:
         instance_id = self.config.instance_id
-        dataset_name = self.config.problem_info.get("dataset_name")
-        # TODO(sugam): add support for other datasets
-        if dataset_name != "swe-bench-ext":
+        dataset_name = self.config.problem_info.get("dataset_name") or ""
+        supported = dataset_name == "swe-bench-ext" or (
+            "SWE-bench" in dataset_name and "SWE-rebench" not in dataset_name
+        )
+        if not supported:
             raise NotImplementedError(
-                f"verify_golden_patch is only supported for dataset_name=='swe-bench-ext' (got {dataset_name!r})."
+                "verify_golden_patch is only supported for dataset_name=='swe-bench-ext' "
+                "or the SWE-bench / SWE-bench_Multilingual families "
+                f"(got {dataset_name!r})."
             )
 
-        instance_dict = json.loads(self.config.problem_info["instance_dict"])
+        raw_instance_dict = self.config.problem_info["instance_dict"]
+        instance_dict = json.loads(raw_instance_dict) if isinstance(raw_instance_dict, str) else raw_instance_dict
         golden_patch = instance_dict.get("patch") or ""
         if not golden_patch.strip():
             raise ValueError(f"No golden patch found in instance_dict['patch'] for {instance_id}.")
