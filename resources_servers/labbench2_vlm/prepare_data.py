@@ -27,6 +27,7 @@ Produces one JSONL per benchmark tag:
   data/figqa2_pdf_validation.jsonl
   data/tableqa2_img_validation.jsonl
   data/tableqa2_pdf_validation.jsonl
+  data/protocolqa2_validation.jsonl
 
 Run with --example to also write data/example.jsonl and populate data/test_media/
 with a small set of media files (committed to git for smoke tests).
@@ -53,7 +54,7 @@ GCS_BUCKET = "labbench2-data-public"
 GCS_API_URL = "https://storage.googleapis.com/storage/v1/b/{bucket}/o"
 GCS_DOWNLOAD_URL = "https://storage.googleapis.com/{bucket}/{path}"
 
-TAGS = ["figqa2-img", "figqa2-pdf", "tableqa2-img", "tableqa2-pdf"]
+TAGS = ["figqa2-img", "figqa2-pdf", "tableqa2-img", "tableqa2-pdf", "protocolqa2"]
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 PDF_EXTENSION = ".pdf"
 MIME_TYPES = {
@@ -160,14 +161,45 @@ def _files_to_image_blocks(files_dir: Path, dpi: int) -> list[dict]:
     return blocks
 
 
-def embed_media_into_row(row: dict, media_base_dir: Path, dpi: int = 170) -> dict:
-    """Resolve ``verifier_metadata.media_dir`` and inject base64 input_image blocks.
+def _pdf_to_text(pdf_path: Path) -> str:
+    """Extract plain text from a PDF (all pages)."""
+    import fitz  # pymupdf
+
+    doc = fitz.open(str(pdf_path))
+    try:
+        return "\n\n".join(page.get_text() for page in doc)
+    finally:
+        doc.close()
+
+
+def _files_to_text(files_dir: Path) -> str:
+    """Concatenate text from all PDFs in a directory (non-recursive, sorted by name)."""
+    parts: list[str] = []
+    for f in sorted(files_dir.iterdir()):
+        if not f.is_file():
+            continue
+        if f.suffix.lower() == PDF_EXTENSION:
+            parts.append(_pdf_to_text(f))
+    return "\n\n".join(parts)
+
+
+def embed_media_into_row(
+    row: dict,
+    media_base_dir: Path,
+    dpi: int = 170,
+    media_mode: str = "image",
+) -> dict:
+    """Resolve ``verifier_metadata.media_dir`` and inject media for the model request.
 
     Used by ``labbench2_vlm_agent`` at rollout time to enrich lightweight JSONL
-    rows with the actual image/PDF content before sending to the model.
+    rows before sending to the model.
 
-    Returns a deep copy with ``input_image`` blocks inserted before any
-    ``input_text`` blocks in ``responses_create_params.input[0].content``.
+    ``media_mode``:
+      - ``image`` (default): base64 ``input_image`` blocks for images and rendered PDF pages.
+      - ``text``: extract text from PDFs only; prepend as ``input_text`` before the question.
+        Suitable for protocol QA with a text-only policy model.
+
+    Returns a deep copy with updated ``responses_create_params.input[0].content``.
     Rows without ``media_dir`` are returned unchanged.
     """
     meta = row.get("verifier_metadata") or {}
@@ -176,6 +208,18 @@ def embed_media_into_row(row: dict, media_base_dir: Path, dpi: int = 170) -> dic
         return row
 
     files_dir = media_base_dir / media_dir
+
+    if media_mode == "text":
+        protocol_text = _files_to_text(files_dir)
+        if not protocol_text.strip():
+            return row
+        row = deepcopy(row)
+        content = row["responses_create_params"]["input"][0]["content"]
+        text_block = {"type": "input_text", "text": protocol_text.strip()}
+        question_blocks = [b for b in content if b.get("type") == "input_text"]
+        row["responses_create_params"]["input"][0]["content"] = [text_block] + question_blocks
+        return row
+
     image_blocks = _files_to_image_blocks(files_dir, dpi=dpi)
     if not image_blocks:
         return row
@@ -251,6 +295,7 @@ def prepare_tag(tag: str, output_path: Path, media_dir: Path, limit: int | None 
                     "tag": row["tag"],
                     "id": row["id"],
                     "media_dir": f"{MEDIA_DIR_NAME}/{gcs_prefix.strip('/')}",
+                    "reference_passage": row.get("key_passage") or "",
                 },
             }
 
@@ -275,7 +320,7 @@ if __name__ == "__main__":
         default=TAGS,
         choices=TAGS,
         metavar="TAG",
-        help="Which benchmark tags to prepare (default: all four)",
+        help="Which benchmark tags to prepare (default: all five)",
     )
     parser.add_argument(
         "--limit",
