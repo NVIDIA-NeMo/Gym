@@ -10,6 +10,7 @@ deployment image's broken JRE that libreoffice's `javaldx` helper
 couldn't actually use. Apt-install is idempotent on already-installed
 packages so the cost of always running it is small.
 """
+
 import shutil
 import subprocess
 import sys
@@ -52,7 +53,9 @@ def _make_run(install_succeeds: bool = True, java_works_after_install: bool = Tr
     return _impl, state
 
 
-def _which_with_state(table_static: dict[str, str | None], state: dict, post_install_extra: dict[str, str | None] | None = None):
+def _which_with_state(
+    table_static: dict[str, str | None], state: dict, post_install_extra: dict[str, str | None] | None = None
+):
     """Side effect for `shutil.which` that flips post-install paths once `state["installed"]` is True."""
     extra = post_install_extra or {}
 
@@ -230,7 +233,8 @@ def test_install_command_uses_no_install_recommends_and_includes_jre() -> None:
         raise AssertionError(f"unexpected cmd: {cmd}")
 
     with patch.object(
-        shutil, "which",
+        shutil,
+        "which",
         side_effect=_which_with_state(
             table_static,
             state,
