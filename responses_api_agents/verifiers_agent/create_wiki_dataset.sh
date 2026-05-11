@@ -23,26 +23,26 @@ VF_ENV_ARGS='{
 #     --env-args "$VF_ENV_ARGS" \
 #     --output data/wiki-search.jsonl
 
-# # Mock training set (1000 examples, fixed seed)
+# # Mock training set (total datset has 478 examples, fixed seed)
 # python3 scripts/create_dataset.py \
 #     --env-id wiki-search \
 #     --env-args "$VF_ENV_ARGS" \
-#     --size 1000 \
+#     --size 300 \
 #     --seed 42 \
 #     --output data/wiki-search-mock-train.jsonl
 
-# # Mock validation set (100 examples)
-# python3 scripts/create_dataset.py \
-#     --env-id wiki-search \
-#     --env-args "$VF_ENV_ARGS" \
-#     --size 100 \
-#     --seed 123 \
-#     --output data/wiki-search-mock-val.jsonl
-
-# Tiny smoke set (3 examples)
+# # Mock validation set (total datset has 478 examples, fixed seed)
 python3 scripts/create_dataset.py \
     --env-id wiki-search \
     --env-args "$VF_ENV_ARGS" \
-    --size 3 \
+    --size 50 \
     --seed 123 \
-    --output data/wiki-search-mock.jsonl
+    --output data/wiki-search-mock-val.jsonl
+
+# Tiny smoke set (3 examples)
+# python3 scripts/create_dataset.py \
+#     --env-id wiki-search \
+#     --env-args "$VF_ENV_ARGS" \
+#     --size 3 \
+#     --seed 123 \
+#     --output data/wiki-search-mock.jsonl
