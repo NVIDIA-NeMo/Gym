@@ -5,11 +5,11 @@
 #   python scripts/start_server.py --host 0.0.0.0 --port 8006 \
 #       --max-init-workers 64 --max-run-workers 64 --timeout 2700
 #
-# The Gym swe_agents server will automatically call /start and /add_llm_server
+# The Gym prorl_agents server will automatically call /start and /add_llm_server
 # on startup via model_post_init().
-swe_agents:
+prorl_agents:
   responses_api_agents:
-    swe_agents:
+    prorl_agents:
       entrypoint: app.py
 
       # Agent framework

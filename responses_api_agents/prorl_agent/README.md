@@ -23,7 +23,7 @@ source .venv/bin/activate
 In the first terminal, run:
 
 ```bash
-LAUNCH_SCRIPT=/lustre/fs1/portfolios/nvr/projects/nvr_lpr_agentic/users/haozh/projects/OpenHands_internal/scripts/tests/run_standalone_swebench_test_single_node.sh
+LAUNCH_SCRIPT=/path/to/prorl_agent/scripts/tests/host_prorl_agent_on_single_node.sh
 bash $LAUNCH_SCRIPT
 ```
 
