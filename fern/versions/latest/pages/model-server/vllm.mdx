@@ -183,7 +183,7 @@ When `incomplete_details.reason == "max_output_tokens"`, the response output is 
 When using NeMo Gym with NeMo RL or another training framework, responses with `incomplete_details.reason == "max_output_tokens"` indicate that the full conversation (prompt + prior generations) exceeded `max_seq_length`. Training frameworks should filter or handle these responses appropriately since they contain no generated tokens.
 
 ## Training vs Offline Inference
-By default, VLLMModel will not track any token IDs explicitly. However, token IDs are necessary when using NeMo Gym in conjunction with a training framework in order to train a model. For NeMo RL training workflows, use the training-dedicated config which enables token ID tracking:
+By default, VLLMModel will not track any token IDs explicitly. However, token IDs are necessary when using NeMo Gym in conjunction with a training framework in order to train a model. For training workflows, use the training-dedicated config which enables token ID tracking:
 
 ```yaml
 # Use vllm_model_for_training.yaml
