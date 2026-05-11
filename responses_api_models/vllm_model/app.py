@@ -450,9 +450,8 @@ class VLLMModel(SimpleResponsesAPIModel):
         if "required_prefix_token_ids" not in body_dict:
             for message in reversed(body_dict.get("messages", [])):
                 if "prompt_token_ids" in message:
-                    body_dict["required_prefix_token_ids"] = (
-                        list(message["prompt_token_ids"])
-                        + list(message["generation_token_ids"])
+                    body_dict["required_prefix_token_ids"] = list(message["prompt_token_ids"]) + list(
+                        message["generation_token_ids"]
                     )
                     break
 
