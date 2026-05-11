@@ -3,6 +3,7 @@
 # requires-python = ">=3.9"
 # dependencies = [
 #   "datasets>=2.19.0",
+#   "tqdm",
 # ]
 # ///
 
@@ -47,6 +48,7 @@ import shutil
 import tempfile
 
 from datasets import load_dataset
+from tqdm.auto import tqdm
 
 
 IMAGE_SOURCES = [
@@ -135,7 +137,7 @@ async def main(sif_dir: str, concurrency: int) -> None:
         ds = load_dataset(source["dataset"], "default", split=source["split"])
         image_pairs = source["images"](ds)
         tasks = [pull_image(semaphore, img, sif_stem, sif_dir, source["prefix"]) for img, sif_stem in image_pairs]
-        await asyncio.gather(*tasks)
+        await tqdm.gather(*tasks, total=len(tasks), desc=f"Pulling containers for {source}")
         print(f"Done: {len(image_pairs)} images for {source['name']}", flush=True)
 
 
