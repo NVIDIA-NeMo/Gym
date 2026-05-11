@@ -59,6 +59,7 @@ from stirrup.core.models import (
     ToolCall,
 )
 
+from nemo_gym.openai_utils import NeMoGymChatCompletionMessageParam
 from responses_api_agents.stirrup_agent.stirrup_utils import to_provider_openai_messages
 
 
@@ -135,7 +136,7 @@ class DynamicMaxTokensChatCompletionsClient(ChatCompletionsClient):
 
     def _count_input_tokens(
         self,
-        messages: list[dict[str, Any]],
+        messages: list[NeMoGymChatCompletionMessageParam],
         tools: Optional[dict[str, Tool]] = None,
     ) -> int:
         """Estimate the full prompt token count the server will see.

@@ -21,12 +21,13 @@ from __future__ import annotations
 
 import json
 import uuid
-from typing import Any, List, Tuple
+from typing import Any, List, Tuple, cast
 
 from stirrup.clients.utils import to_openai_messages
 from stirrup.core.models import AssistantMessage, ChatMessage, SystemMessage, ToolMessage, UserMessage
 
 from nemo_gym.openai_utils import (
+    NeMoGymChatCompletionMessageParam,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponseFunctionToolCall,
@@ -74,9 +75,9 @@ def restore_tool_messages_for_model(messages: list[ChatMessage]) -> list[ChatMes
     return restored
 
 
-def to_provider_openai_messages(messages: list[ChatMessage]) -> list[dict[str, Any]]:
+def to_provider_openai_messages(messages: list[ChatMessage]) -> list[NeMoGymChatCompletionMessageParam]:
     """Serialize Stirrup history for an OpenAI-compatible provider."""
-    return to_openai_messages(restore_tool_messages_for_model(messages))
+    return cast(list[NeMoGymChatCompletionMessageParam], to_openai_messages(restore_tool_messages_for_model(messages)))
 
 
 def convert_stirrup_history_to_output_items(
