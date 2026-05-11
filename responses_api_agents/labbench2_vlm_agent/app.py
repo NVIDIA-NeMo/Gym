@@ -16,9 +16,12 @@
 labbench2 VLM agent — extends simple_agent to embed media at rollout time.
 
 At ``run()`` time, resolves ``verifier_metadata.media_dir`` references in the
-incoming request, reads the corresponding image/PDF files from disk,
-base64-encodes them, and injects ``input_image`` blocks into the model request
-before delegating to the standard simple_agent pipeline.
+incoming request, reads the corresponding image/PDF files from disk, and
+either injects ``input_image`` blocks (default) or extracted PDF text as
+``input_text`` when ``media_mode=text`` **and** the row's ``verifier_metadata.tag``
+is ``protocolqa2`` (so mixed JSONLs can use one run: text for protocols, images
+for figqa2/tableqa2). Non-protocol rows always use the image path when
+``media_mode=text`` is set.
 """
 
 from pathlib import Path
@@ -41,10 +44,27 @@ class LabbenchVLMAgentConfig(SimpleAgentConfig):
         description="Base directory for resolving verifier_metadata.media_dir references, relative to Gym root.",
     )
     dpi: int = Field(default=170, description="DPI for PDF page rendering.")
+    media_mode: str = Field(
+        default="image",
+        description=(
+            "'image': always render PDFs/images as input_image blocks. "
+            "'text': extract PDF text only for verifier_metadata.tag protocolqa2; "
+            "all other tags still use images (for mixed example/benchmark JSONLs)."
+        ),
+    )
     strip_images_from_output: bool = Field(
         default=True,
         description="Remove base64 input_image blocks from the rollout output to keep files small.",
     )
+
+
+def _effective_media_mode(agent_media_mode: str, verifier_metadata: dict | None) -> str:
+    """Map agent config to per-row embed mode: ``text`` applies only to protocolqa2."""
+    if agent_media_mode == "text":
+        tag = str((verifier_metadata or {}).get("tag", ""))
+        if tag.startswith("protocolqa2"):
+            return "text"
+    return "image"
 
 
 def _strip_image_blocks(result: SimpleAgentVerifyResponse) -> SimpleAgentVerifyResponse:
@@ -69,7 +89,16 @@ class LabbenchVLMAgent(SimpleAgent):
         if not resolved_base.is_absolute():
             resolved_base = PARENT_DIR / resolved_base
 
-        enriched = embed_media_into_row(body.model_dump(), resolved_base, dpi=self.config.dpi)
+        row_dict = body.model_dump(exclude_unset=True)
+        meta = row_dict.get("verifier_metadata")
+        embed_mode = _effective_media_mode(self.config.media_mode, meta if isinstance(meta, dict) else None)
+
+        enriched = embed_media_into_row(
+            row_dict,
+            resolved_base,
+            dpi=self.config.dpi,
+            media_mode=embed_mode,
+        )
         body = SimpleAgentRunRequest.model_validate(enriched)
 
         result = await super().run(request, body)

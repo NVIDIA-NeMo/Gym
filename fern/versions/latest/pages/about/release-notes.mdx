@@ -1,0 +1,96 @@
+---
+title: "Release Notes"
+description: ""
+position: 4
+---
+
+# Release Notes
+
+<AccordionGroup>
+<Accordion title="v0.2.1" defaultOpen>
+
+Fixed PyPI package distribution that was broken in v0.2.0. No functional changes — all features and fixes from v0.2.0 apply.
+
+</Accordion>
+
+<Accordion title="v0.2.0" defaultOpen>
+
+NeMo Gym v0.2.0 ships alongside the NVIDIA Nemotron 3 Super model release, open sourcing the RL environments and corresponding datasets used during training. This release adds 17 new training environments across coding, math, science, reasoning, agentic tasks, and safety, plus integrations with Aviary, Reasoning Gym, and Verifiers to combine additional environments. You can now run end-to-end rollout collection locally with vLLM and install directly from PyPI.
+
+### New Environments
+
+Added 17 new resources servers spanning:
+
+- **Coding**: Text to SQL, SWE RL Gen, SWE RL LLM Judge
+- **Math**: Lean4 Mathematical Proofs
+- **Science**: Aviary, NewtonBench
+- **Reasoning**: MultiChallenge, ARC-AGI
+- **Agent tasks**: xLAM Function Calling, Tavily Search, Single Step Tool Use, Terminus Judge, NeMo Skills Tools
+- **Safety**: Jailbreak Detection, Over Refusal Detection
+- **RLHF**: Generative Reward Model Compare
+
+Added 5 new agent servers: Aviary agent, proof refinement agent, SWE agents, tool simulation agent, and verifiers agent.
+
+**Environment library integrations**: Future House Aviary, Open-Thought Reasoning Gym, Prime Intellect Verifiers.
+
+### Model Serving
+
+- Local vLLM model server with end-to-end rollout collection without an external API
+- vLLM 0.16+ support for the reasoning field in responses
+- Per-task chat templates and extra body args to support different model configurations across environments in multi-environment training
+
+### Rollout Collection & Profiling
+
+- New `ng_reward_profile` command to compute per-task pass rates and aggregate metrics
+- CPU profiling for rollout performance analysis
+- Seeding on num_repeats for reproducible rollouts
+
+### Infrastructure & Developer Experience
+
+- PyPI compatibility: install via `pip install nemo-gym`
+- Dry run mode: `ng_run +dryrun=true` to validate configs and install environments without starting servers
+- `ng_status` command to list running servers and their health
+- FastAPI worker support for higher throughput across multiple workers
+- Server stdout/stderr redirection with server name prefixes
+
+### Model Recipes
+
+- Nemotron 3 Nano 30B end-to-end training recipe with single-GPU and multi-node tutorials
+
+### Documentation
+
+- Added training tutorials for Unsloth, TRL, and Nemotron 3 Nano (single-GPU and multi-node)
+- Added environment tutorials for creating environments, custom data preparation, and integrating external libraries
+- Rewrote concepts documentation with new training approaches page, architecture diagrams, and expanded agent/resources server docs
+- Revamped ecosystem page with training framework and environment library integrations
+- Added deployment topology and SWE RL infrastructure case study
+- Site-wide quality sweep: consistent naming, style guide, redirects, and FAQ additions
+
+### Bug Fixes
+
+- Fixed 0.1.1 environments to work correctly with RL training pipelines
+- Fixed crash when server receives malformed JSON during rollout collection
+- Fixed dry run mode failing after initial implementation
+- Fixed nested `responses_create_params` overrides not merging correctly from CLI
+- Fixed `ng_prepare_data` failing when multiple environments define overlapping metrics
+- Fixed reward profiling failing when model response doesn't include usage stats
+- Fixed NeMo-Skills python tool to use HTTP calls instead of subprocess execution
+- Bumped Pillow and other packages to address security vulnerabilities
+- `ng_dump_config` now redacts API key values from output
+
+### First-Time Contributors
+
+We'd like to highlight the following first-time contributors:
+
+- **@sidnarayanan** added the Aviary integration to enable training on any Aviary environment, a library of interactive RL environments spanning math, science, biology, and more
+- **@3mei** added the text-to-SQL environment to generate SQL queries from natural language across multiple SQL dialects
+- **@Kelvin0110** added the NewtonBench environment to discover scientific laws through interactive experimentation
+
+</Accordion>
+
+<Accordion title="v0.1.1">
+
+Initial public release of NeMo Gym.
+
+</Accordion>
+</AccordionGroup>

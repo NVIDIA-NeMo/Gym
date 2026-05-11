@@ -283,7 +283,6 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
             rollout_input = vf.RolloutInput(
                 prompt=prompt_messages,
                 answer=body.answer,
-                task=body.task,
                 info=body.info,
                 example_id=body.example_id,
             )
