@@ -139,7 +139,7 @@ For Gym's `/v1/responses` endpoint, a string `input` is forwarded as the prompt 
 
 ### `tokenizer` config (chat-template mode)
 
-When `render_chat_template: true`, the HF tokenizer is loaded once at server startup. By default it's loaded from the same identifier as `model`. Override with `tokenizer:` for base-model setups where the model checkpoint has no chat template in its tokenizer config — point `tokenizer:` at a sibling instruct model whose template you want to inherit:
+When `render_chat_template: true`, the HF tokenizer is loaded once at server startup. By default it's loaded from the same identifier as `model`. Override with `tokenizer:` for base-model setups where the model checkpoint has no chat template in its tokenizer config — point `tokenizer:` at a different model whose template you want to inherit:
 
 ```yaml
 model: Qwen/Qwen2.5-7B           # base model, no chat template
@@ -202,7 +202,7 @@ Make sure your input JSONL respects the [Constraints](#constraints) above — si
 | `extra_body` | `dict` | `null` | Pass additional vLLM-specific parameters (e.g., `guided_json`). |
 | `use_completions_api` | `bool` | `false` | When `true`, drives vLLM's `/v1/completions` instead of `/v1/chat/completions`. See [Two upstream backends](#two-upstream-backends). |
 | `render_chat_template` | `bool` | `false` | Only consulted when `use_completions_api: true`. When `true`, renders messages to the `prompt` string client-side via `AutoTokenizer.apply_chat_template`. Lifts the multi-turn restriction. See [Render modes](#render-modes). |
-| `tokenizer` | `str` | `null` | Only consulted when `use_completions_api: true` and `render_chat_template: true`. HF identifier or local path passed to `AutoTokenizer.from_pretrained`. When `null`, falls back to `model`. Use this to borrow a chat template from a sibling instruct model when serving a base checkpoint. |
+| `tokenizer` | `str` | `null` | Only consulted when `use_completions_api: true` and `render_chat_template: true`. HF identifier or local path passed to `AutoTokenizer.from_pretrained`. When `null`, falls back to `model`. Use this to borrow a chat template from a different model. |
 
 ### Advanced: `chat_template_kwargs`
 
