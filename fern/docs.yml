@@ -74,9 +74,13 @@ versions:
     path: versions/latest.yml
     slug: latest
     availability: stable
-  - display-name: "0.2"
-    path: versions/v0.2.yml
-    slug: v0.2
+  - display-name: Main
+    path: versions/main.yml
+    slug: main
+    availability: beta
+  - display-name: "0.2.1"
+    path: versions/v0.2.1.yml
+    slug: v0.2.1
     availability: stable
 
 redirects:
@@ -141,10 +145,12 @@ redirects:
     destination: "/latest/reference/configuration"
   - source: "/latest/environment-tutorials/designing-customer-evaluation"
     destination: "/latest/environment-tutorials"
+  - source: "/v0.2/:path*"
+    destination: "/v0.2.1/:path*"
   - source: "nemo/gym/latest/:path*/index.html"
     destination: "/nemo/gym/latest/:path*"
-  - source: "nemo/gym/v0.2/:path*/index.html"
-    destination: "/nemo/gym/v0.2/:path*"
+  - source: "nemo/gym/v0.2.1/:path*/index.html"
+    destination: "/nemo/gym/v0.2.1/:path*"
   - source: "nemo/gym/:path*/index.html"
     destination: "/nemo/gym/:path*"
   # Legacy page URLs (foo.html); must follow all :path*/index.html rules above
