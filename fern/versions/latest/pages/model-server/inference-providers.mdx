@@ -1,0 +1,112 @@
+---
+title: "Inference Providers"
+description: "Use hosted inference providers like Fireworks, Together.ai, OpenRouter, and more for eval workloads"
+position: 3
+---
+
+The `chat_completions_model` server connects NeMo Gym to any hosted inference provider that exposes an OpenAI-compatible `/v1/chat/completions` endpoint.
+
+<Info>
+For **training** workloads that require token IDs and log probabilities, use [vLLM](/latest/model-server/vllm) instead. Hosted providers don't expose the token-level information needed for RL training.
+
+</Info>
+
+## Supported Providers
+
+All provider configs live in [`responses_api_models/chat_completions_model/configs/`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_models/chat_completions_model/configs).
+
+| Provider | Config | Base URL |
+|----------|--------|----------|
+| Baseten | `baseten.yaml` | `https://bridge.baseten.co/v1` |
+| DeepInfra | `deepinfra.yaml` | `https://api.deepinfra.com/v1/openai` |
+| Fireworks | `fireworks.yaml` | `https://api.fireworks.ai/inference/v1` |
+| Friendli | `friendli.yaml` | `https://inference.friendli.ai/v1` |
+| Gemini | `gemini.yaml` | `https://generativelanguage.googleapis.com/v1beta/openai` |
+| HF Inference | `hf_inference.yaml` | `https://router.huggingface.co/v1` |
+| Nebius | `nebius.yaml` | `https://api.studio.nebius.ai/v1` |
+| OpenRouter | `openrouter.yaml` | `https://openrouter.ai/api/v1` |
+| Together.ai | `together.yaml` | `https://api.together.xyz/v1` |
+
+## Set Your Credentials
+
+You need an API key and a model name from your provider.
+
+<Tabs>
+<Tab title="env.yaml">
+Set these in `env.yaml` at the project root:
+
+```yaml
+policy_api_key: your-api-key
+policy_model_name: nvidia/Nemotron-3-Nano-30B-A3B
+```
+
+</Tab>
+<Tab title="CLI overrides">
+Pass them directly on the command line:
+
+```bash
+ng_run "+config_paths=[$config_paths]" \
+    ++policy_api_key=your-api-key \
+    ++policy_model_name=nvidia/Nemotron-3-Nano-30B-A3B
+```
+
+</Tab>
+</Tabs>
+
+If your provider isn't in the table above, also set the base URL:
+
+```yaml
+# env.yaml
+policy_base_url: https://your-provider.com/v1
+```
+
+## Usage Example
+
+### 1. Set model and environment config
+
+In this example we use Together.ai:
+
+```bash
+environment_config="resources_servers/mcqa/configs/mcqa.yaml"
+model_config="responses_api_models/chat_completions_model/configs/together.yaml"
+```
+
+For unlisted providers, use the generic config: `responses_api_models/chat_completions_model/configs/chat_completions_model.yaml`
+
+### 2. Start servers
+
+```bash
+ng_run "+config_paths=[${environment_config},${model_config}]"
+```
+
+### 3. Evaluate your agent
+
+```bash
+ng_collect_rollouts +agent_name=mcqa_simple_agent \
+    +input_jsonl_fpath=resources_servers/mcqa/data/example.jsonl \
+    +output_jsonl_fpath=results/mcqa_rollouts.jsonl
+```
+
+## Configuration Reference
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `base_url` | `str` | — | **Required.** Provider's OpenAI-compatible API base URL. |
+| `api_key` | `str` | — | **Required.** Provider API key. |
+| `model` | `str` | — | **Required.** Model identifier (provider-specific format). |
+| `uses_reasoning_parser` | `bool` | `false` | Parse `<think>` tags and `reasoning_content` fields from thinking models. |
+| `num_concurrent_requests` | `int` | `1000` | Maximum concurrent requests to the provider. Reduce if your provider has a lower rate limit. |
+| `extra_body` | `dict` | `{}` | Additional parameters merged into every request body. |
+
+## Reasoning Models
+
+When using thinking/reasoning models (e.g., DeepSeek-R1), set `uses_reasoning_parser: true`:
+
+```bash
+ng_run "+config_paths=[$config_paths]" \
+    ++policy_model.uses_reasoning_parser=true
+```
+
+This enables:
+- Stripping `<think>...</think>` tags from assistant messages in multi-turn input
+- Converting `reasoning_content` fields in model responses into NeMo Gym's reasoning output items
