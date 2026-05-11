@@ -1,0 +1,47 @@
+audiobench_judge:
+  resources_servers:
+    audiobench_judge:
+      entrypoint: app.py
+      domain: other
+      description: AudioBench judge-based scoring (0-5 rating via LLM-as-a-judge) for open-ended audio QA, instruction following, and classification phrased as open-ended QA.
+      value: Improve open-ended audio understanding (instruction following, audio QA, emotion/gender/accent recognition) by porting AudioBench's judge half from NeMo Skills.
+      verified: false
+      judge_model_server:
+        type: responses_api_models
+        name: judge_model
+      judge_responses_create_params: {
+        input: [],
+        max_output_tokens: 512,
+        temperature: 0.0,
+      }
+      use_chat_completions_for_judge: true
+
+# Judge model: openai/gpt-oss-20b via NVIDIA API (integrate.api.nvidia.com).
+# Split from policy_model so the audio model under test isn't asked to score
+# itself; gpt-oss-20b is a strong text-only judge that mirrors AudioBench's
+# upstream rating prompt. Public API endpoint — requires NVIDIA_API_KEY in
+# the environment of the consumer (rollout collector / agent runner).
+judge_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: https://integrate.api.nvidia.com/v1
+      openai_api_key: ${oc.env:NVIDIA_API_KEY,null}
+      openai_model: openai/gpt-oss-20b
+
+audiobench_judge_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      max_steps: 1
+      resources_server:
+        type: resources_servers
+        name: audiobench_judge
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/audiobench_judge/data/example.jsonl
+        license: Creative Commons Attribution 4.0 International

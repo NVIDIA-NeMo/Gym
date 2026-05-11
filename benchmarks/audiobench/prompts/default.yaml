@@ -1,0 +1,8 @@
+# Generic prompt for all 63 AudioBench sub-datasets. The model receives an
+# audio sidechannel (responses_create_params.metadata.audio_path) plus the
+# user message below — `instruction` is set per-row in prepare_*.py to
+# vary by sub-dataset (e.g., "Transcribe the audio in Mandarin Chinese.",
+# "Translate the spoken English to Indonesian.", or the dataset's own
+# instruction text from the upstream HF schema).
+system: "You are a helpful assistant. /no_think"
+user: "{instruction}"

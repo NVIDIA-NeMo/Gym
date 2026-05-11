@@ -7,6 +7,11 @@ asr_with_pc:
       value: Improve transcription quality with structural detail
       verified: false
       task_type: ASR-PC
+      # Default Whisper normalization. Set to "audiobench" on a per-row or
+      # per-config basis to apply the more aggressive AudioBench normalization
+      # (digits→words on top of Whisper) — required for audiobench.judge /
+      # audiobench.nonjudge ASR sub-datasets.
+      normalization_mode: standard
 asr_with_pc_simple_agent:
   responses_api_agents:
     simple_agent:

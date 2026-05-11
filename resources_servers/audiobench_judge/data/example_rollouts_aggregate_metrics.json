@@ -1,0 +1,52 @@
+[
+  {
+    "agent_ref": {
+      "name": "audiobench_judge_benchmarks_simple_agent"
+    },
+    "agent_metrics": {
+      "mean/reward": 0.6,
+      "max/reward": 1.0,
+      "min/reward": 0.0,
+      "mean/judge_rating": 3.0,
+      "max/judge_rating": 5.0,
+      "min/judge_rating": 0.0,
+      "mean/judge_correct": 0.6,
+      "max/judge_correct": 1.0,
+      "min/judge_correct": 0.0,
+      "mean/input_tokens": 239.6,
+      "max/input_tokens": 295,
+      "min/input_tokens": 114,
+      "mean/output_tokens": 12,
+      "max/output_tokens": 27,
+      "min/output_tokens": 6,
+      "mean/total_tokens": 251.6,
+      "max/total_tokens": 316,
+      "min/total_tokens": 122,
+      "pass@1[avg-of-1]": 0.6,
+      "pass@1": 0.6,
+      "alpaca_audio_test/mean/reward": 0.0,
+      "alpaca_audio_test/mean/judge_rating": 0.0,
+      "alpaca_audio_test/num_tasks": 1,
+      "audiocaps_test/mean/reward": 0.0,
+      "audiocaps_test/mean/judge_rating": 1.0,
+      "audiocaps_test/num_tasks": 1,
+      "cn_college_listen_mcq_test/mean/reward": 1.0,
+      "cn_college_listen_mcq_test/mean/judge_rating": 5.0,
+      "cn_college_listen_mcq_test/num_tasks": 1,
+      "mmau_mini/mean/reward": 1.0,
+      "mmau_mini/mean/judge_rating": 4.0,
+      "mmau_mini/num_tasks": 1,
+      "voxceleb_accent_test/mean/reward": 1.0,
+      "voxceleb_accent_test/mean/judge_rating": 5.0,
+      "voxceleb_accent_test/num_tasks": 1
+    },
+    "key_metrics": {
+      "mean/input_tokens": 239.6,
+      "mean/output_tokens": 12,
+      "pass@1[avg-of-1]": 0.6,
+      "pass@1": 0.6
+    },
+    "num_rollouts": 5,
+    "num_tasks": 5
+  }
+]

@@ -1,0 +1,85 @@
+config_paths:
+  - resources_servers/audiobench_judge/configs/audiobench_judge.yaml
+  - resources_servers/asr_with_pc/configs/asr_with_pc.yaml
+
+# Resource servers — three task_type variants on asr_with_pc plus the
+# audiobench_judge LLM judge (already registered upstream by its own config).
+audiobench_asr_resources_server:
+  _inherit_from: asr_with_pc
+  resources_servers:
+    asr_with_pc:
+      task_type: ASR
+      normalization_mode: audiobench
+
+audiobench_bleu_resources_server:
+  _inherit_from: asr_with_pc
+  resources_servers:
+    asr_with_pc:
+      task_type: BLEU
+
+audiobench_exact_match_resources_server:
+  _inherit_from: asr_with_pc
+  resources_servers:
+    asr_with_pc:
+      task_type: EXACT_MATCH
+
+# Agents — one per bucket. ng_collect_rollouts dispatches each row to the
+# agent named in row.agent_ref.name (set by the per-bucket prepare script);
+# rollouts aggregate per agent, with per-sub-dataset breakdowns inside each
+# agent block via compute_subset_metrics(subset_key="dataset_name").
+audiobench_judge_benchmarks_simple_agent:
+  _inherit_from: audiobench_judge_simple_agent
+  responses_api_agents:
+    simple_agent:
+      datasets:
+      - name: audiobench_judge
+        type: benchmark
+        jsonl_fpath: benchmarks/audiobench/data/audiobench_judge.jsonl
+        prepare_script: benchmarks/audiobench/prepare_judge.py
+        prompt_config: benchmarks/audiobench/prompts/default.yaml
+        license: Multiple (CC-BY-4.0, CC-BY-NC-4.0, MERaLiON-NSC gated; per-sub-dataset)
+
+audiobench_asr_simple_agent:
+  _inherit_from: asr_with_pc_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        type: resources_servers
+        name: audiobench_asr_resources_server
+      datasets:
+      - name: audiobench_asr
+        type: benchmark
+        jsonl_fpath: benchmarks/audiobench/data/audiobench_asr.jsonl
+        prepare_script: benchmarks/audiobench/prepare_asr.py
+        prompt_config: benchmarks/audiobench/prompts/default.yaml
+        license: Multiple (CC-BY-4.0, MERaLiON-NSC gated; per-sub-dataset)
+
+audiobench_bleu_simple_agent:
+  _inherit_from: asr_with_pc_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        type: resources_servers
+        name: audiobench_bleu_resources_server
+      datasets:
+      - name: audiobench_bleu
+        type: benchmark
+        jsonl_fpath: benchmarks/audiobench/data/audiobench_bleu.jsonl
+        prepare_script: benchmarks/audiobench/prepare_bleu.py
+        prompt_config: benchmarks/audiobench/prompts/default.yaml
+        license: CC-BY-4.0 (CoVoST 2)
+
+audiobench_exact_match_simple_agent:
+  _inherit_from: asr_with_pc_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        type: resources_servers
+        name: audiobench_exact_match_resources_server
+      datasets:
+      - name: audiobench_exact_match
+        type: benchmark
+        jsonl_fpath: benchmarks/audiobench/data/audiobench_exact_match.jsonl
+        prepare_script: benchmarks/audiobench/prepare_exact_match.py
+        prompt_config: benchmarks/audiobench/prompts/default.yaml
+        license: Apache-2.0 (Spoken-MQA)
