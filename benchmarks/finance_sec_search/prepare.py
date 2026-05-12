@@ -1,5 +1,4 @@
-#!/usr/bin/env python3
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,12 +12,33 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Convert questions.jsonl to test format with tool definitions."""
+"""Prepare the Vals AI Finance Agent benchmark (public 50-question set).
 
-import argparse
+Downloads public.csv from the Vals AI GitHub repository and converts each
+question to Gym benchmark format with responses_create_params and tool
+definitions matching the public finance_sec_search environment.
+
+Reference:
+    - Dataset: https://github.com/vals-ai/finance-agent
+"""
+
+import csv
+import io
 import json
+import urllib.request
+from pathlib import Path
 
 
+BENCHMARK_DIR = Path(__file__).parent
+DATA_DIR = BENCHMARK_DIR / "data"
+OUTPUT_FPATH = DATA_DIR / "finance_sec_search_benchmark.jsonl"
+OUTPUT_FPATH_WEB = DATA_DIR / "finance_sec_search_benchmark_web_search.jsonl"
+
+CSV_URL = "https://raw.githubusercontent.com/vals-ai/finance-agent/main/data/public.csv"
+
+# ---------------------------------------------------------------------------
+# Prompt — matches the public finance_sec_search convert_questions.py
+# ---------------------------------------------------------------------------
 PROMPT = """You are a financial agent. You are given a question and you need to answer it using the tools provided.
 You will not be able to interact with the user or ask clarifications, you must answer the question only based on the information provided.
 
@@ -48,6 +68,10 @@ At the end of your answer, you should provide your sources in a dictionary with 
 Question:
 """
 
+# ---------------------------------------------------------------------------
+# Tool definitions — public finance_sec_search tools only
+# (from resources_servers/finance_sec_search/scripts/convert_questions.py)
+# ---------------------------------------------------------------------------
 SEC_FILING_SEARCH_TOOL = {
     "type": "function",
     "name": "sec_filing_search",
@@ -170,62 +194,73 @@ WEB_TOOL = {
     "strict": False,
 }
 
+TOOLS = [RETRIEVE_INFORMATION_TOOL, PARSE_HTML_TOOL, SEC_FILING_SEARCH_TOOL, SUBMIT_TOOL]
 
-def convert_entry(
-    data: dict,
-    include_web_search: bool = False,
-) -> dict:
-    """Convert a single question entry to test format with tool definitions.
 
-    Args:
-        data: Dict with "question" and "expected_answer" keys.
-        include_web_search: Whether to include the web search tool.
+def _convert_row(row: dict, include_web_search: bool = False) -> dict:
+    """Convert a single CSV row to Gym benchmark format with tools and prompt."""
+    question = row["Question"]
+    expected_answer = row["Answer"]
 
-    Returns:
-        Converted dict with responses_create_params and tools.
-    """
-    question = data.get("question") or data.get("problem", "")
+    tools = [WEB_TOOL] + TOOLS if include_web_search else TOOLS
 
-    tools = [RETRIEVE_INFORMATION_TOOL, PARSE_HTML_TOOL, SEC_FILING_SEARCH_TOOL]
-    if include_web_search:
-        tools = [WEB_TOOL] + tools
-    tools.append(SUBMIT_TOOL)
-
-    return {
-        **data,
+    record = {
         "question": question,
+        "expected_answer": expected_answer,
         "responses_create_params": {
             "input": [{"role": "user", "content": PROMPT + question, "type": "message"}],
             "tools": tools,
-            "parallel_tool_calls": True,
-            "metadata": {
-                "chat_template_kwargs": '{"enable_thinking": true}',
-            },
         },
     }
 
+    if "Question Type" in row and row["Question Type"]:
+        record["question_type"] = row["Question Type"]
+    if "Expert time (mins)" in row and row["Expert time (mins)"]:
+        record["expert_time_mins"] = row["Expert time (mins)"]
+    if "Rubric" in row and row["Rubric"]:
+        record["rubric"] = row["Rubric"]
 
-def convert_file(input_file, output_file, include_web_search=False):
-    """Convert a questions JSONL file to test format."""
-    with open(input_file, "r") as f_in, open(output_file, "w") as f_out:
-        for line in f_in:
-            line = line.strip()
-            if not line:
-                continue
-            data = json.loads(line)
-            output = convert_entry(data, include_web_search)
-            f_out.write(json.dumps(output) + "\n")
+    return record
+
+
+def prepare(include_web_search: bool = False) -> Path:
+    """Download Vals AI public.csv and convert to Gym benchmark JSONL.
+
+    Args:
+        include_web_search: Include the web_search tool in tool definitions.
+            Default False (ng_prepare_benchmark calls prepare() with no args).
+            Pass True or use --include-web-search on the CLI.
+    """
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    output_fpath = OUTPUT_FPATH_WEB if include_web_search else OUTPUT_FPATH
+
+    print(f"Downloading public.csv from {CSV_URL} ...")
+    with urllib.request.urlopen(CSV_URL) as resp:
+        csv_text = resp.read().decode("utf-8")
+
+    reader = csv.DictReader(io.StringIO(csv_text))
+    rows = list(reader)
+    print(f"Downloaded {len(rows)} questions (web_search={'enabled' if include_web_search else 'disabled'})")
+
+    count = 0
+    with open(output_fpath, "w", encoding="utf-8") as f:
+        for row in rows:
+            record = _convert_row(row, include_web_search=include_web_search)
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+            count += 1
+
+    print(f"Wrote {count} benchmark samples to {output_fpath}")
+    return output_fpath
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Convert questions.jsonl to test format")
-    parser.add_argument("--input", "-i", required=True, help="Input questions JSONL file")
-    parser.add_argument("--output", "-o", required=True, help="Output test JSONL file")
-    parser.add_argument("--include-web-search", "-w", action="store_true", help="Include web_search tool")
-    args = parser.parse_args()
+    import argparse
 
-    convert_file(args.input, args.output, args.include_web_search)
-    print(f"Converted {args.input} -> {args.output}")
-    sample = convert_entry({"question": "", "expected_answer": ""}, args.include_web_search)
-    tools_list = [t["name"] for t in sample["responses_create_params"]["tools"]]
-    print(f"Tools: {', '.join(tools_list)}")
+    parser = argparse.ArgumentParser(description="Prepare Vals AI finance_sec_search benchmark")
+    parser.add_argument(
+        "--include-web-search",
+        action="store_true",
+        help="Include web_search tool in tool definitions",
+    )
+    args = parser.parse_args()
+    prepare(include_web_search=args.include_web_search)
