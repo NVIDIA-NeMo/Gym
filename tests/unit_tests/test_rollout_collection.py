@@ -510,32 +510,27 @@ class TestRolloutCollection:
             num_repeats=2,
         )
 
-        actual_returned_results = RolloutCollectionHelper()._load_from_cache(config)
+        actual_input_rows, actual_rows, actual_results = RolloutCollectionHelper()._load_from_cache(config)
 
-        expected_results = (
-            [
-                {"_ng_task_index": 1, "_ng_rollout_index": 0, "input": True},
-                {"_ng_task_index": 2, "_ng_rollout_index": 0, "input": True},
-                {"_ng_task_index": 2, "_ng_rollout_index": 1, "input": True},
-            ],
-            [
-                {"_ng_task_index": 0, "_ng_rollout_index": 0, "input": True},
-                {"_ng_task_index": 0, "_ng_rollout_index": 1, "input": True},
-                {"_ng_task_index": 1, "_ng_rollout_index": 1, "input": True},
-            ],
-            [
-                {"_ng_task_index": 0, "_ng_rollout_index": 0, "output": True},
-                {"_ng_task_index": 0, "_ng_rollout_index": 1, "output": True},
-                {"_ng_task_index": 1, "_ng_rollout_index": 1, "output": True},
-            ],
-            [
-                [orjson.dumps({"_ng_task_index": 0, "_ng_rollout_index": 0, "output": True})],
-                [orjson.dumps({"_ng_task_index": 0, "_ng_rollout_index": 1, "output": True})],
-                [orjson.dumps({"_ng_task_index": 1, "_ng_rollout_index": 1, "output": True})],
-            ],
-        )
+        expected_input_rows = [
+            {"_ng_task_index": 1, "_ng_rollout_index": 0, "input": True},
+            {"_ng_task_index": 2, "_ng_rollout_index": 0, "input": True},
+            {"_ng_task_index": 2, "_ng_rollout_index": 1, "input": True},
+        ]
+        expected_rows = [
+            {"_ng_task_index": 0, "_ng_rollout_index": 0, "input": True},
+            {"_ng_task_index": 0, "_ng_rollout_index": 1, "input": True},
+            {"_ng_task_index": 1, "_ng_rollout_index": 1, "input": True},
+        ]
+        expected_results = [
+            {"_ng_task_index": 0, "_ng_rollout_index": 0, "output": True},
+            {"_ng_task_index": 0, "_ng_rollout_index": 1, "output": True},
+            {"_ng_task_index": 1, "_ng_rollout_index": 1, "output": True},
+        ]
 
-        assert expected_results == actual_returned_results
+        assert expected_input_rows == actual_input_rows
+        assert expected_rows == actual_rows
+        assert expected_results == actual_results
 
     async def test_call_aggregate_metrics(self, tmp_path: Path) -> None:
         """Test _call_aggregate_metrics with a mocked server client."""
@@ -668,3 +663,132 @@ class TestRolloutCollection:
         output_fpath = tmp_path / "output.jsonl"
         result = await helper._call_aggregate_metrics([], [], output_fpath)
         assert result is None
+
+    async def test_call_aggregate_metrics_skips_rows_without_agent(self, tmp_path: Path) -> None:
+        """Rows missing agent_ref are silently skipped during aggregation."""
+        agg = AggregateMetrics(
+            agent_metrics={"mean/reward": 1.0},
+            key_metrics={"mean/reward": 1.0},
+            group_level_metrics=[{"mean/reward": 1.0}],
+        )
+
+        mock_response = AsyncMock()
+        mock_response.raise_for_status = MagicMock()
+        mock_response.read = AsyncMock(return_value=orjson.dumps(agg.model_dump()))
+        mock_response.status = 200
+
+        mock_server_client = MagicMock()
+        mock_server_client.post = AsyncMock(return_value=mock_response)
+
+        class MockHelper(RolloutCollectionHelper):
+            def setup_server_client(self):
+                return mock_server_client
+
+        helper = MockHelper()
+
+        rows = [
+            {},
+            {AGENT_REF_KEY_NAME: {"name": "my_agent"}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0},
+        ]
+        results = [
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 0.0},
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0, "response": {"usage": {"tokens": 5}}},
+        ]
+
+        output_fpath = tmp_path / "output.jsonl"
+        metrics_fpath = await helper._call_aggregate_metrics(results, rows, output_fpath)
+
+        assert metrics_fpath is not None
+        written = json.loads(metrics_fpath.read_text())
+        assert len(written) == 1
+        assert written[0][AGENT_REF_KEY_NAME] == {"name": "my_agent"}
+
+
+class TestPreprocessRowsEdgeCases:
+    def test_preprocess_rows_missing_agent_ref_raises(self, tmp_path: Path) -> None:
+        """Rows without agent_ref and no agent_name config raises ValueError."""
+        fpath = tmp_path / "input.jsonl"
+        fpath.write_text(json.dumps({"responses_create_params": {"input": []}}) + "\n")
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+            num_repeats=1,
+        )
+
+        with pytest.raises(ValueError, match="No agent specified"):
+            RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+
+
+class TestRunFromConfigEdgeCases:
+    def _make_helper(self):
+        class StubHelper(RolloutCollectionHelper):
+            def run_examples(self, examples, *args, **kwargs):
+                futures = []
+                for example in examples:
+                    future = Future()
+                    future.set_result((example, {"response": {"usage": {"tokens": 1}}}))
+                    futures.append(future)
+                return futures
+
+            async def _call_aggregate_metrics(self, results, rows, output_fpath):
+                return None
+
+        return StubHelper()
+
+    async def test_resume_from_cache_skips_when_output_missing(self, tmp_path: Path) -> None:
+        """resume_from_cache=True with missing output file falls through to normal path."""
+        input_jsonl_fpath = tmp_path / "input.jsonl"
+        input_jsonl_fpath.write_text(
+            json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "a"}}) + "\n"
+        )
+        output_jsonl_fpath = tmp_path / "output.jsonl"
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_jsonl_fpath),
+            output_jsonl_fpath=str(output_jsonl_fpath),
+            resume_from_cache=True,
+            num_repeats=1,
+        )
+
+        results = await self._make_helper().run_from_config(config)
+        assert len(results) == 1
+
+    async def test_resume_from_cache_skips_when_materialized_missing(self, tmp_path: Path) -> None:
+        """resume_from_cache=True with missing materialized file falls through to normal path."""
+        input_jsonl_fpath = tmp_path / "input.jsonl"
+        input_jsonl_fpath.write_text(
+            json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "a"}}) + "\n"
+        )
+        output_jsonl_fpath = tmp_path / "output.jsonl"
+        output_jsonl_fpath.write_text("")
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_jsonl_fpath),
+            output_jsonl_fpath=str(output_jsonl_fpath),
+            resume_from_cache=True,
+            num_repeats=1,
+        )
+
+        results = await self._make_helper().run_from_config(config)
+        assert len(results) == 1
+
+    async def test_run_from_config_with_num_samples_in_parallel(self, tmp_path: Path) -> None:
+        """num_samples_in_parallel creates a Semaphore for concurrency control."""
+        input_jsonl_fpath = tmp_path / "input.jsonl"
+        samples = [
+            json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "agent"}, "x": i})
+            for i in range(3)
+        ]
+        input_jsonl_fpath.write_text("\n".join(samples) + "\n")
+        output_jsonl_fpath = tmp_path / "output.jsonl"
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_jsonl_fpath),
+            output_jsonl_fpath=str(output_jsonl_fpath),
+            num_repeats=1,
+            num_samples_in_parallel=2,
+        )
+
+        results = await self._make_helper().run_from_config(config)
+        assert len(results) == 3
