@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import hashlib
 import json
 import re
 from typing import List
@@ -41,6 +42,11 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessage,
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
+
+
+def _qid(text: str) -> str:
+    """Short stable id for a question, for [browsecomp] debug logs."""
+    return hashlib.sha256((text or "").encode()).hexdigest()[:10]
 
 
 class BrowsecompAgentConfig(BaseResponsesAPIAgentConfig):
@@ -80,6 +86,8 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
 
         if isinstance(body.input, str):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
+
+        qid = _qid(json.dumps([m.model_dump() if hasattr(m, "model_dump") else m for m in body.input], default=str))
 
         new_outputs = []
         usage = None
@@ -164,6 +172,11 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 resources_server_cookies = api_response.cookies
 
                 tool_output = (await api_response.content.read()).decode()
+                if api_response.status >= 400:
+                    print(
+                        f"[browsecomp][tool_fail][{qid}] step={step} tool={output_function_call.name} "
+                        f"status={api_response.status} body={tool_output[:300]}"
+                    )
                 if self.config.nudge_steps:
                     turns_left = self.config.max_steps - step
                     tool_output += "\n\n[%d turns remaining out of %d]" % (turns_left, self.config.max_steps)
@@ -214,6 +227,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
 
             # Check if max steps is not None and if we have exhausted it.
             if self.config.max_steps and step >= self.config.max_steps:
+                print(f"[browsecomp][max_steps][{qid}] step={step} max_steps={self.config.max_steps}")
                 break
 
         # Propogate any extra cookies necessary for downstream verification
@@ -227,52 +241,73 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
     async def run(self, request: Request, body: BrowsecompAgentRunRequest) -> BrowsecompAgentVerifyResponse:
         cookies = request.cookies
 
-        seed_session_response = await self.server_client.post(
-            server_name=self.config.resources_server.name,
-            url_path="/seed_session",
-            json=body.model_dump(),
-            cookies=cookies,
+        question_text = getattr(body, "question", None) or ""
+        rcp_input = body.responses_create_params.input
+        if isinstance(rcp_input, str):
+            rcp_input = [NeMoGymEasyInputMessage(role="user", content=rcp_input)]
+        qid = _qid(
+            json.dumps([m.model_dump() if hasattr(m, "model_dump") else m for m in rcp_input], default=str)
         )
-        await raise_for_status(seed_session_response)
-        cookies = seed_session_response.cookies
+        print(f"[browsecomp][start][{qid}] question={question_text[:200]!r}")
 
-        last_verify_response = None
-        for attempt in range(self.config.max_run_retries):
-            response = await self.server_client.post(
-                server_name=self.config.name,
-                url_path="/v1/responses",
-                json=body.responses_create_params,
-                cookies=cookies,
-            )
-            await raise_for_status(response)
-            cookies = response.cookies
-
-            # Retry if the model only produced <think> content with no final answer.
-            response_json = await get_response_json(response)
-            raw_output_text = NeMoGymResponse.model_validate(response_json).output_text
-            cleaned_output_text = re.sub(r"<think>.*?</think>", "", raw_output_text, flags=re.DOTALL).strip()
-            # Need to get last_verify_response if all attempts are exhausted
-            if not cleaned_output_text and attempt != self.config.max_run_retries - 1:
-                continue
-
-            verify_request = BrowsecompAgentVerifyRequest.model_validate(
-                body.model_dump() | {"response": response_json}
-            )
-
-            verify_response = await self.server_client.post(
+        try:
+            seed_session_response = await self.server_client.post(
                 server_name=self.config.resources_server.name,
-                url_path="/verify",
-                json=verify_request.model_dump(),
+                url_path="/seed_session",
+                json=body.model_dump(),
                 cookies=cookies,
             )
-            await raise_for_status(verify_response)
+            await raise_for_status(seed_session_response)
+            cookies = seed_session_response.cookies
 
-            last_verify_response = BrowsecompAgentVerifyResponse.model_validate(
-                await get_response_json(verify_response)
-            )
-            break
+            last_verify_response = None
+            for attempt in range(self.config.max_run_retries):
+                response = await self.server_client.post(
+                    server_name=self.config.name,
+                    url_path="/v1/responses",
+                    json=body.responses_create_params,
+                    cookies=cookies,
+                )
+                await raise_for_status(response)
+                cookies = response.cookies
 
-        return last_verify_response
+                # Retry if the model only produced <think> content with no final answer.
+                response_json = await get_response_json(response)
+                raw_output_text = NeMoGymResponse.model_validate(response_json).output_text
+                cleaned_output_text = re.sub(r"<think>.*?</think>", "", raw_output_text, flags=re.DOTALL).strip()
+                # Need to get last_verify_response if all attempts are exhausted
+                if not cleaned_output_text and attempt != self.config.max_run_retries - 1:
+                    print(
+                        f"[browsecomp][retry][{qid}] attempt={attempt + 1}/{self.config.max_run_retries} "
+                        f"reason=empty_output_after_think_strip"
+                    )
+                    continue
+
+                verify_request = BrowsecompAgentVerifyRequest.model_validate(
+                    body.model_dump() | {"response": response_json}
+                )
+
+                verify_response = await self.server_client.post(
+                    server_name=self.config.resources_server.name,
+                    url_path="/verify",
+                    json=verify_request.model_dump(),
+                    cookies=cookies,
+                )
+                await raise_for_status(verify_response)
+
+                last_verify_response = BrowsecompAgentVerifyResponse.model_validate(
+                    await get_response_json(verify_response)
+                )
+                break
+
+            reward = getattr(last_verify_response, "reward", None) if last_verify_response is not None else None
+            outcome = "success" if (reward is not None and reward > 0) else "failure"
+            print(f"[browsecomp][end][{qid}] outcome={outcome} reward={reward} attempts={attempt + 1}")
+
+            return last_verify_response
+        except Exception as e:
+            print(f"[browsecomp][abort][{qid}] error_type={type(e).__name__} error={str(e)[:300]}")
+            raise
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
         """Proxy aggregate_metrics to the resources server."""
