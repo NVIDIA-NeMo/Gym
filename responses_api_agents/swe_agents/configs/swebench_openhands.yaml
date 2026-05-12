@@ -3,13 +3,16 @@ swe_agents:
   responses_api_agents:
     swe_agents:
       entrypoint: app.py
-      
+      domain: coding
+      description: SWE-bench driven by the OpenHands agent framework.
+      value: Eval software engineering capabilities on SWE-bench.
+
       # Agent framework configuration
       agent_framework: openhands
       agent_config: responses_api_agents/swe_agents/configs/oh_config.toml
       agent_max_turns: 100
       agent_framework_repo: https://github.com/sdevare-nv/nv-OpenHands.git
-      agent_framework_commit: 0d766ad06b2be64a42e6f0175b9ebcc4a06599d9  # pragma: allowlist secret
+      agent_framework_commit: 87fbbca1402e6cbefe97df03e4cefce8a5ba378a  # pragma: allowlist secret
       
       # Container configuration
       container_formatter: ???

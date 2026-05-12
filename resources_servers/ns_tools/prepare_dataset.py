@@ -24,7 +24,7 @@ Usage:
         --input /path/to/source.jsonl \
         --output /path/to/output.jsonl \
         --prompt_config generic/math \
-        --tools nemo_skills.mcp.servers.python_tool.PythonTool \
+        --tools nemo_skills.mcp.servers.python_tool::DirectPythonTool \
         --verifier_type math_with_judge
 
 Example:
@@ -32,7 +32,7 @@ Example:
         --input ~/nemo_skills/dataset/comp-math-24-25/test.txt \
         --output data/compmath_prepared.jsonl \
         --prompt_config generic/math \
-        --tools nemo_skills.mcp.servers.python_tool.PythonTool
+        --tools nemo_skills.mcp.servers.python_tool::DirectPythonTool
 """
 
 import argparse
@@ -77,8 +77,8 @@ def parse_args():
     parser.add_argument(
         "--tools",
         nargs="+",
-        default=["nemo_skills.mcp.servers.python_tool.PythonTool"],
-        help="List of tool module specs to include (e.g., nemo_skills.mcp.servers.python_tool.PythonTool)",
+        default=["nemo_skills.mcp.servers.python_tool::DirectPythonTool"],
+        help="List of tool module specs to include (e.g., nemo_skills.mcp.servers.python_tool::DirectPythonTool)",
     )
     parser.add_argument(
         "--verifier_type",

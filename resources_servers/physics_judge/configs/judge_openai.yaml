@@ -1,0 +1,11 @@
+# Default judge model for physics_judge: openai/gpt-oss-20b via the public
+# NVIDIA API (https://integrate.api.nvidia.com/v1). Requires NVIDIA_API_KEY
+# in the environment. Override any of the openai_* fields on the CLI to
+# point at a different OpenAI-compatible endpoint or model.
+judge_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: https://integrate.api.nvidia.com/v1
+      openai_api_key: ${oc.env:NVIDIA_API_KEY,null}
+      openai_model: openai/gpt-oss-20b

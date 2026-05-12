@@ -1,0 +1,23 @@
+# Chain to existing resource server + agent config.
+config_paths:
+  - resources_servers/mcqa/configs/mcqa.yaml
+
+"mmlu-redux_mcqa_resources_server":
+  _inherit_from: mcqa
+  resources_servers:
+    mcqa:
+      grading_mode: strict_single_letter_boxed
+
+"mmlu-redux_mcqa_simple_agent":
+  _inherit_from: mcqa_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: mmlu-redux_mcqa_resources_server
+      datasets:
+      - name: mmlu-redux
+        type: benchmark
+        jsonl_fpath: benchmarks/mmlu-redux/data/mmlu-redux_benchmark.jsonl
+        prompt_config: benchmarks/mmlu-redux/prompts/default.yaml
+        prepare_script: benchmarks/mmlu-redux/prepare.py
+        num_repeats: 1

@@ -23,15 +23,21 @@ Mirrors `repository.py` in the [CVDP source](https://github.com/NVlabs/cvdp_benc
 ## Configuration
 
 
-| Field               | Default                 | Description                                                   |
-| ------------------- | ----------------------- | ------------------------------------------------------------- |
-| `oss_sim_image`     | `ghcr.io/hdl/sim/osvb`  | Container image for open-source simulation (Icarus)           |
-| `oss_pnr_image`     | `""`                    | Container image for place-and-route problems                  |
-| `eda_sim_image`     | `""`                    | Commercial EDA image (Cadence Xcelium etc.)                   |
-| `container_timeout` | `600`                   | Seconds before an Apptainer run is killed                     |
-| `num_processes`     | `4`                     | Max concurrent Apptainer jobs                                 |
-| `sif_cache_dir`     | `~/.cache/nemo-gym/sif` | Directory for cached SIF images pulled from Docker registries |
+| Field                     | Default                 | Description                                                                                       |
+| ------------------------- | ----------------------- | ------------------------------------------------------------------------------------------------- |
+| `oss_sim_image`           | `ghcr.io/hdl/sim/osvb`  | Container image for open-source simulation (Icarus)                                               |
+| `oss_pnr_image`           | `""`                    | Container image for place-and-route problems                                                      |
+| `eda_sim_image`           | `""`                    | Commercial EDA image (Cadence Xcelium etc.)                                                       |
+| `container_timeout`       | `600`                   | Seconds before an Apptainer run is killed                                                         |
+| `num_processes`           | `4`                     | Max concurrent Apptainer jobs                                                                     |
+| `sif_cache_dir`           | `~/.cache/nemo-gym/sif` | Directory for cached SIF images pulled from Docker registries                                     |
+| `harness_workspace_dir`   | `""`                    | Optional host directory where per-rollout temp workspaces are created (default: system temp)      |
+| `container_tmp_bind_path` | `""`                    | If set, redirects in-container temp (e.g. `/tmp`) to per-rollout host storage and forces temp env vars (`TMPDIR`, `XCELIUM_TMPDIR`, `CDS_LOCK`, `JAVA_TOOL_OPTIONS`) — useful when default `/tmp` is too small or tools (Cadence/Java) write large temp/lock artifacts |
 
+**Note**: To run the commercial subset, pass the EDA image name in the yaml config file (/scratch/artij/Gym/resources_servers/cvdp/configs/cvdp.yaml).
+```
+eda_sim_image: cvdp-cadence-verif:latest
+```
 
 ## Download Dataset
 
@@ -126,7 +132,7 @@ ng_run "+config_paths=[resources_servers/cvdp/configs/cvdp.yaml,responses_api_mo
 
 ```bash
 ng_collect_rollouts \
-    +agent_name=cvdp_simple_agent \
+    +agent_name=cvdp_agent \
     +input_jsonl_fpath=resources_servers/cvdp/data/<dataset>.jsonl \
     +output_jsonl_fpath=results/rollouts.jsonl \
     +num_repeats=5 \
@@ -144,7 +150,7 @@ At the end of this step, you should have rollouts.jsonl, rollouts_agent_metrics.
 python resources_servers/cvdp/scripts/cvdp_pass_at_k_report.py \
     --rollouts  results/rollouts.jsonl \
     --output    results/report/ \
-    --model     cvdp_simple_agent \
+    --model     cvdp_agent \
     --dataset   <original_cvdp_dataset>.jsonl \
     --k         1
 ```

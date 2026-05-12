@@ -45,17 +45,84 @@ ng_dump_config                                 # Dump config as NeMo Gym sees it
 
 All contributions must pass these automated checks:
 
-**Required Checks**:
-- **Unit Tests**: All existing tests must pass
-- **Build Docs**: Documentation must build without errors
-- **Copyright Check**: All files must have proper copyright headers
-- **DCO Signing**: All commits must be signed off
-- **Pre-commit Hooks**: Code formatting and linting
+**Required PR Checks**:
+- **Unit Tests** (`unit-tests.yml`): Smart test selection based on changed files (see below)
+- **Build Docs** (`build-docs.yml`): Sphinx documentation must build without errors or warnings
+- **Code Linting** (`code-linting.yml`): Pre-commit hooks (ruff linting + formatting) run on all files
+- **Copyright Check** (`copyright-check.yml`): All files must have proper NVIDIA copyright headers
+- **DCO Signing**: All commits must be signed off (`git commit -s`)
+- **Secrets Detection** (`secrets-detector.yml`): Scans for accidentally committed secrets
+- **Fern Docs Validation** (`fern-docs-ci.yml`): Validates Fern docs config when `fern/` files change
 
 **Test Requirements**:
 - At least one test per server you contribute
 - Tests must run using `ng_test +entrypoint=your_server_path`
 - Use pytest for async testing patterns
+
+### Smart Test Selection
+
+The `unit-tests.yml` workflow adapts based on what files changed in your PR:
+
+| What changed | What runs |
+|---|---|
+| Core library (`nemo_gym/`, `tests/`, `pyproject.toml`, etc.) | Full suite: `ng_dev_test` + `ng_test_all` |
+| Server directories only (`resources_servers/`, `responses_api_agents/`, `responses_api_models/`) | Tests only for the affected servers |
+| Docs only (`*.md`, `docs/*`, `fern/*`, `LICENSE`) | Tests skipped entirely |
+
+### Fern Docs Preview
+
+When you modify files under `fern/`, the CI automatically generates a preview:
+
+1. `fern-docs-preview-build.yml` collects your changes and metadata as an artifact
+2. `fern-docs-preview-comment.yml` generates a preview URL and posts it as a PR comment with links to changed pages
+
+This uses a secure 2-workflow design — untrusted PR code never has access to secrets.
+
+### Full Test Suite on Main
+
+`full-test-suite.yml` runs on every push to `main` and includes:
+- Core library tests (`ng_dev_test`)
+- All server tests (`ng_test_all`) with venv mismatch checking
+- Wheel installation test (builds wheel, installs in fresh venv, runs CLI commands including `ng_run` and `ng_collect_rollouts`)
+- Slack notification on failure
+
+### Release Process
+
+All release workflows are manual (`workflow_dispatch`) with dry-run defaults:
+
+| Workflow | Purpose |
+|----------|---------|
+| `release-freeze.yml` | Create release branch and version bump (major/minor) |
+| `release.yaml` | Build wheel, create GitHub release, generate changelog, optionally publish docs |
+| `release-docs.yml` | Publish Sphinx docs to S3 + Akamai CDN (versioned and/or "latest") |
+| `publish-fern-docs.yml` | Auto-publishes Fern docs on push to `main` or `docs/v*` tags |
+| `build-test-publish-wheel.yml` | Auto-publish to TestPyPI on main/release pushes (dry-run by default) |
+
+### Maintenance Workflows
+
+- **Stale cleanup** (`close-inactive-issue-pr.yml`): Issues inactive 30 days are labeled "stale", then closed after 7 more days. PRs use a 14-day threshold.
+- **Cherry-pick** (`cherry-pick-release-commit.yml`): Auto-creates cherry-pick PRs from release branches back to main.
+
+### Workflow Reference
+
+| Workflow | Trigger | Purpose |
+|----------|---------|---------|
+| `unit-tests.yml` | PR | Smart test selection |
+| `full-test-suite.yml` | push main, dispatch | Comprehensive tests + wheel install |
+| `code-linting.yml` | PR | Pre-commit linting |
+| `copyright-check.yml` | PR | Copyright headers |
+| `secrets-detector.yml` | PR | Secrets scanning |
+| `build-docs.yml` | push main, PR | Sphinx docs build |
+| `fern-docs-ci.yml` | PR (fern/** only) | Fern config validation |
+| `fern-docs-preview-build.yml` | PR (fern/** only) | Collect preview artifact |
+| `fern-docs-preview-comment.yml` | after preview build | Post preview URL to PR |
+| `publish-fern-docs.yml` | push main/tag, dispatch | Publish Fern docs |
+| `release-docs.yml` | dispatch | Publish Sphinx docs to S3/CDN |
+| `release-freeze.yml` | dispatch | Code freeze |
+| `release.yaml` | dispatch | Full release |
+| `build-test-publish-wheel.yml` | push main/r** | Wheel build + TestPyPI |
+| `close-inactive-issue-pr.yml` | schedule (01:30 UTC) | Stale issue/PR cleanup |
+| `cherry-pick-release-commit.yml` | push main | Release cherry-picks |
 
 ### Build Docs CI Failures
 

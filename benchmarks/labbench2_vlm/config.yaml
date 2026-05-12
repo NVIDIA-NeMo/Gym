@@ -1,0 +1,24 @@
+# Chain to existing resource server + agent config.
+# The judge config is chained separately so a user who wants a non-OpenAI
+# judge can drop judge_model_openai.yaml and supply their own.
+config_paths:
+  - resources_servers/labbench2_vlm/configs/labbench2_vlm.yaml
+  - resources_servers/labbench2_vlm/configs/judge_model_openai.yaml
+
+# We use `_inherit_from` directives to inherit from and not use the generic config above to ensure this benchmark config is isolated.
+labbench2_vlm_benchmark_resources_server:
+  _inherit_from: labbench2_vlm
+
+labbench2_vlm_benchmark_simple_agent:
+  _inherit_from: labbench2_vlm_simple_agent
+  responses_api_agents:
+    labbench2_vlm_agent:
+      resources_server:
+        name: labbench2_vlm_benchmark_resources_server
+      datasets:
+      - name: labbench2_vlm
+        type: benchmark
+        jsonl_fpath: benchmarks/labbench2_vlm/data/labbench2_vlm_benchmark.jsonl
+        prompt_config: null
+        prepare_script: benchmarks/labbench2_vlm/prepare.py
+        num_repeats: 3
