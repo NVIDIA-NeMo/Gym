@@ -1295,10 +1295,7 @@ def _resolve_opencode_workspace_path(problem_info: Dict[str, Any]) -> str:
         repo = str(instance.get("repo", problem_info.get("repo", "")))
         repo_name = repo.split("/", 1)[1] if "/" in repo else repo
         return f"/{repo_name}"
-    if "R2E-Gym" in dataset_name or "SWE-Gym" in dataset_name:
-        return "/testbed"
-    workspace_dir_name = _resolve_swebench_workspace_dir_name(instance, dataset_name)
-    return f"/workspace/{workspace_dir_name}"
+    return "/testbed"
 
 
 def _extract_instance_dict(problem_info: Dict[str, Any]) -> Dict[str, Any]:
