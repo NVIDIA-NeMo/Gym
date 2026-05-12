@@ -8,3 +8,4 @@ critpt_agent:
       model_server:
         type: responses_api_models
         name: policy_model
+      turn2_prompt_fpath: ???  # must be set by the benchmark config (e.g. benchmarks/critpt/prompts/turn2.yaml)

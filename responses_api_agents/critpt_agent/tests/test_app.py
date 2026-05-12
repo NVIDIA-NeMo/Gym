@@ -25,9 +25,10 @@ from responses_api_agents.critpt_agent.app import (
     CritPtAgentRunRequest,
     ModelServerRef,
     ResourcesServerRef,
-    _build_turn2_user_message,
     _extract_output_text,
 )
+
+TURN2_PROMPT_FPATH = "benchmarks/critpt/prompts/turn2.yaml"
 
 
 _MODEL_RESPONSE = {
@@ -67,6 +68,7 @@ def _make_config() -> CritPtAgentConfig:
         name="critpt_agent",
         resources_server=ResourcesServerRef(type="resources_servers", name="critpt_resources_server"),
         model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
+        turn2_prompt_fpath=TURN2_PROMPT_FPATH,
     )
 
 
@@ -120,13 +122,14 @@ class TestHelpers:
     def test_extract_output_text_empty(self):
         assert _extract_output_text({"output": []}) == ""
 
-    def test_build_turn2_user_message_contains_template(self):
+    def test_turn2_template_loaded_from_yaml(self):
+        server = _make_server()
         template = "def solve():\n    return ???"
-        msg = _build_turn2_user_message(template)
-        assert "```python" in msg
-        assert template in msg
-        assert "Populate your final answer" in msg
-        assert "No additional reasoning" in msg
+        rendered = server._turn2_user_template.format(code_template=template)
+        assert "```python" in rendered
+        assert template in rendered
+        assert "Populate your final answer" in rendered
+        assert "No additional reasoning" in rendered
 
 
 class TestApp:

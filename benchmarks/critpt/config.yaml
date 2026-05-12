@@ -12,6 +12,7 @@ critpt_benchmark_agent:
     critpt_agent:
       resources_server:
         name: critpt_resources_server
+      turn2_prompt_fpath: benchmarks/critpt/prompts/turn2.yaml
       datasets:
         - name: critpt
           type: benchmark

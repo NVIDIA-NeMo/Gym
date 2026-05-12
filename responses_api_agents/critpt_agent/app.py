@@ -13,7 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import logging
+from pathlib import Path
+from typing import Any
 
+import yaml
 from fastapi import Request, Response
 from pydantic import ConfigDict
 
@@ -30,6 +33,7 @@ LOG = logging.getLogger(__name__)
 class CritPtAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
+    turn2_prompt_fpath: str
 
 
 class CritPtAgentRunRequest(BaseRunRequest):
@@ -43,6 +47,11 @@ class CritPtAgentVerifyResponse(BaseVerifyResponse):
 
 class CritPtAgent(SimpleResponsesAPIAgent):
     config: CritPtAgentConfig
+
+    def model_post_init(self, context: Any) -> None:
+        super().model_post_init(context)
+        prompt_yaml = yaml.safe_load(Path(self.config.turn2_prompt_fpath).read_text())
+        self._turn2_user_template: str = prompt_yaml["user"]
 
     async def responses(
         self,
@@ -86,9 +95,10 @@ class CritPtAgent(SimpleResponsesAPIAgent):
         turn1_text = _extract_output_text(turn1_json)
 
         # Turn 2: populate code template using Turn 1 reasoning as context
+        turn2_user_msg = self._turn2_user_template.format(code_template=body.code_template)
         turn2_input = list(body.responses_create_params.input) + [
             {"role": "assistant", "content": turn1_text},
-            {"role": "user", "content": _build_turn2_user_message(body.code_template)},
+            {"role": "user", "content": turn2_user_msg},
         ]
         turn2_params = body.responses_create_params.model_copy(update={"input": turn2_input})
 
@@ -123,15 +133,6 @@ def _extract_output_text(response_json: dict) -> str:
             if content.get("type") == "output_text":
                 parts.append(content.get("text", ""))
     return "".join(parts)
-
-
-def _build_turn2_user_message(code_template: str) -> str:
-    return (
-        "Populate your final answer into the code template provided below.\n"
-        "This step is purely for formatting/display purposes. No additional reasoning or derivation should be performed.\n"
-        "Do not import any modules or packages beyond what is provided in the template.\n"
-        f"```python\n{code_template}\n```"
-    )
 
 
 if __name__ == "__main__":
