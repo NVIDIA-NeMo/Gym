@@ -25,6 +25,9 @@ from nemo_gym.openai_utils import (
 from resources_servers.single_step_tool_use_with_argument_comparison.common.response_utils import (
     extract_tool_call_or_text,
 )
+from resources_servers.single_step_tool_use_with_argument_comparison.common.verification_utils import (
+    ExpectedFunctionCallBatch,
+)
 
 
 class TestResponseUtils:
@@ -124,6 +127,23 @@ class TestResponseUtils:
             )
             is tool_call
         )
+
+        second_tool_call = NeMoGymResponseFunctionToolCall(
+            call_id="second_tool_call",
+            name="lookup",
+            arguments='{"query": "alpha"}',
+        )
+        extracted_batch = extract_tool_call_or_text(
+            self._create_response(
+                [
+                    single_text_message,
+                    tool_call,
+                    second_tool_call,
+                ]
+            )
+        )
+        assert isinstance(extracted_batch, ExpectedFunctionCallBatch)
+        assert [call.name for call in extracted_batch.calls] == ["respond", "lookup"]
         assert (
             extract_tool_call_or_text(
                 self._create_response(

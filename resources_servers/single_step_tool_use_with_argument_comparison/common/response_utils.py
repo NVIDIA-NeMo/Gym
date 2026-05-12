@@ -15,20 +15,41 @@
 from typing import Optional, Union
 
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseFunctionToolCall, NeMoGymResponseOutputText
+from resources_servers.single_step_tool_use_with_argument_comparison.common.verification_utils import (
+    ExpectedFunctionCall,
+    ExpectedFunctionCallBatch,
+)
 
 
 def extract_tool_call_or_text(
     response: NeMoGymResponse,
-) -> Optional[Union[NeMoGymResponseFunctionToolCall, NeMoGymResponseOutputText]]:
+) -> Optional[Union[NeMoGymResponseFunctionToolCall, ExpectedFunctionCallBatch, NeMoGymResponseOutputText]]:
     result = None
+    tool_calls: list[NeMoGymResponseFunctionToolCall] = []
     for output_item in response.output:
         if output_item.type == "function_call":
-            return output_item
+            tool_calls.append(output_item)
 
         elif output_item.type == "message" and output_item.role == "assistant" and result is None:
             for content_item in output_item.content:
                 if content_item.type == "output_text":
                     result = content_item
                     break
+
+    if len(tool_calls) == 1:
+        return tool_calls[0]
+
+    if len(tool_calls) > 1:
+        return ExpectedFunctionCallBatch(
+            type="function_call_batch",
+            calls=[
+                ExpectedFunctionCall(
+                    type="function_call",
+                    name=tool_call.name,
+                    arguments=tool_call.arguments,
+                )
+                for tool_call in tool_calls
+            ],
+        )
 
     return result

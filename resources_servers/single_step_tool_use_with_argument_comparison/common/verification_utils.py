@@ -16,7 +16,7 @@ import json
 from collections import Counter
 from enum import StrEnum
 from json import JSONDecodeError
-from typing import Annotated, Any, Literal, Optional, TypeAlias, Union
+from typing import Annotated, Any, Literal, Optional, Protocol, TypeAlias, Union
 
 from pydantic import BaseModel, Field
 
@@ -34,7 +34,24 @@ class ExpectedFunctionCall(BaseModel):
     arguments: str
 
 
-ExpectedAction: TypeAlias = Annotated[Union[ExpectedMessage, ExpectedFunctionCall], Field(discriminator="type")]
+class ExpectedFunctionCallBatch(BaseModel):
+    type: Literal["function_call_batch"]
+    calls: list[ExpectedFunctionCall] = Field(min_length=1)
+
+
+ExpectedAction: TypeAlias = Annotated[
+    Union[ExpectedMessage, ExpectedFunctionCall, ExpectedFunctionCallBatch],
+    Field(discriminator="type"),
+]
+
+
+ToolAction: TypeAlias = Union[ExpectedFunctionCall, ExpectedFunctionCallBatch, NeMoGymResponseFunctionToolCall]
+
+
+class ToolCallLike(Protocol):
+    type: str
+    name: str
+    arguments: str
 
 
 class StepRewardCategory(StrEnum):
@@ -53,18 +70,23 @@ class StepRewardCategory(StrEnum):
     )
     ARGUMENT_VALUE_DIFFERENT = "An argument value in a tool call is different than the expected value"
     EXPECTED_TOOL_CALL = "A tool call that matches the expected tool call was found"
+    FUNCTION_CALL_BATCH_LENGTH_DIFFERENT = "The number of tool calls in a batch is different than expected"
+    EXPECTED_TOOL_CALL_BATCH = "A tool-call batch that matches the expected tool calls was found"
 
 
 class ToolCallComparatorConfig(BaseModel):
     word_count_similarity_threshold: float
     floating_point_comparison_threshold: float = 1e-6
+    allow_subset: bool = False
+    allow_superset: bool = False
+    parallel_tool_call_reward_mode: Literal["binary_strict", "fractional"] = "binary_strict"
 
 
 class ToolCallComparator(BaseModel):
     config: ToolCallComparatorConfig
 
     def compare_tool_call(
-        self, expected_tool_call: ExpectedFunctionCall, actual_tool_call: NeMoGymResponseFunctionToolCall
+        self, expected_tool_call: ExpectedFunctionCall, actual_tool_call: ToolCallLike
     ) -> tuple[float, StepRewardCategory]:
         if expected_tool_call.name != actual_tool_call.name:
             return 0.0, StepRewardCategory.UNEXPECTED_TOOL
@@ -82,6 +104,106 @@ class ToolCallComparator(BaseModel):
             return 1.0, StepRewardCategory.EXPECTED_TOOL_CALL
         else:
             return 0.0, category
+
+    def compare_tool_action(
+        self, expected_tool_action: ToolAction, actual_tool_action: ToolAction
+    ) -> tuple[float, StepRewardCategory]:
+        expected_calls = self.get_tool_calls(expected_tool_action)
+        actual_calls = self.get_tool_calls(actual_tool_action)
+
+        if len(expected_calls) == 1 and len(actual_calls) == 1:
+            return self.compare_tool_call(expected_calls[0], actual_calls[0])
+
+        if not self.is_call_count_allowed(len(expected_calls), len(actual_calls)):
+            return 0.0, StepRewardCategory.FUNCTION_CALL_BATCH_LENGTH_DIFFERENT
+
+        matched_count, failure_category = self.count_optimistic_matches(expected_calls, actual_calls)
+        required_count = self.get_required_match_count(len(expected_calls), len(actual_calls))
+        if matched_count == required_count:
+            return 1.0, StepRewardCategory.EXPECTED_TOOL_CALL_BATCH
+
+        if self.config.parallel_tool_call_reward_mode == "fractional" and required_count > 0:
+            return matched_count / required_count, failure_category
+
+        return 0.0, failure_category
+
+    def get_tool_calls(self, tool_action: ToolAction) -> list[ToolCallLike]:
+        if tool_action.type == "function_call_batch":
+            return list(tool_action.calls)
+
+        return [tool_action]
+
+    def is_call_count_allowed(self, expected_count: int, actual_count: int) -> bool:
+        if actual_count == expected_count:
+            return True
+
+        if actual_count < expected_count:
+            return self.config.allow_subset
+
+        return self.config.allow_superset
+
+    def get_required_match_count(self, expected_count: int, actual_count: int) -> int:
+        if self.config.allow_subset and self.config.allow_superset:
+            return min(expected_count, actual_count)
+
+        if self.config.allow_subset and actual_count < expected_count:
+            return actual_count
+
+        return expected_count
+
+    def count_optimistic_matches(
+        self, expected_calls: list[ToolCallLike], actual_calls: list[ToolCallLike]
+    ) -> tuple[int, StepRewardCategory]:
+        adjacency: list[list[int]] = []
+        failure_category = StepRewardCategory.UNEXPECTED_TOOL
+
+        for expected_call in expected_calls:
+            matching_actual_indices: list[int] = []
+            for actual_index, actual_call in enumerate(actual_calls):
+                reward, category = self.compare_tool_call(expected_call, actual_call)
+                if reward == 1.0:
+                    matching_actual_indices.append(actual_index)
+                elif (
+                    failure_category == StepRewardCategory.UNEXPECTED_TOOL
+                    or category != StepRewardCategory.UNEXPECTED_TOOL
+                ):
+                    failure_category = category
+
+            adjacency.append(matching_actual_indices)
+
+        actual_to_expected: dict[int, int] = {}
+        for expected_index in sorted(range(len(expected_calls)), key=lambda index: len(adjacency[index])):
+            self.try_match_expected_call(
+                expected_index=expected_index,
+                adjacency=adjacency,
+                actual_to_expected=actual_to_expected,
+                seen_actual_indices=set(),
+            )
+
+        return len(actual_to_expected), failure_category
+
+    def try_match_expected_call(
+        self,
+        expected_index: int,
+        adjacency: list[list[int]],
+        actual_to_expected: dict[int, int],
+        seen_actual_indices: set[int],
+    ) -> bool:
+        for actual_index in adjacency[expected_index]:
+            if actual_index in seen_actual_indices:
+                continue
+
+            seen_actual_indices.add(actual_index)
+            if actual_index not in actual_to_expected or self.try_match_expected_call(
+                expected_index=actual_to_expected[actual_index],
+                adjacency=adjacency,
+                actual_to_expected=actual_to_expected,
+                seen_actual_indices=seen_actual_indices,
+            ):
+                actual_to_expected[actual_index] = expected_index
+                return True
+
+        return False
 
     def compare_tool_call_arguments(
         self, expected_value: Any, actual_value: Any

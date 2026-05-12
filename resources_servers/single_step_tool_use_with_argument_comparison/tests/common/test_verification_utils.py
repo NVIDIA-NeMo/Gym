@@ -19,6 +19,7 @@ from pytest import fixture
 from nemo_gym.openai_utils import NeMoGymResponseFunctionToolCall
 from resources_servers.single_step_tool_use_with_argument_comparison.common.verification_utils import (
     ExpectedFunctionCall,
+    ExpectedFunctionCallBatch,
     StepRewardCategory,
     ToolCallComparator,
     ToolCallComparatorConfig,
@@ -117,6 +118,145 @@ class TestToolCallComparator:
         assert tool_call_comparator.compare_tool_call(expected_function_call, different_argument_key_tool_call) == (
             False,
             StepRewardCategory.ARGUMENT_OBJECT_KEYS_DIFFERENT,
+        )
+
+    def test_compare_tool_action_batch_ignores_tool_call_order(self, tool_call_comparator: ToolCallComparator) -> None:
+        expected_batch = ExpectedFunctionCallBatch(
+            type="function_call_batch",
+            calls=[
+                ExpectedFunctionCall(type="function_call", name="search", arguments=json.dumps({"query": "alpha"})),
+                ExpectedFunctionCall(type="function_call", name="search", arguments=json.dumps({"query": "beta"})),
+            ],
+        )
+        actual_batch = ExpectedFunctionCallBatch(
+            type="function_call_batch",
+            calls=[
+                ExpectedFunctionCall(type="function_call", name="search", arguments=json.dumps({"query": "beta"})),
+                ExpectedFunctionCall(type="function_call", name="search", arguments=json.dumps({"query": "alpha"})),
+            ],
+        )
+
+        assert tool_call_comparator.compare_tool_action(expected_batch, actual_batch) == (
+            1.0,
+            StepRewardCategory.EXPECTED_TOOL_CALL_BATCH,
+        )
+
+    def test_compare_tool_action_batch_rejects_extra_calls_by_default(
+        self, tool_call_comparator: ToolCallComparator
+    ) -> None:
+        expected_call = ExpectedFunctionCall(
+            type="function_call",
+            name="search",
+            arguments=json.dumps({"query": "alpha"}),
+        )
+        actual_batch = ExpectedFunctionCallBatch(
+            type="function_call_batch",
+            calls=[
+                ExpectedFunctionCall(type="function_call", name="search", arguments=json.dumps({"query": "alpha"})),
+                ExpectedFunctionCall(type="function_call", name="search", arguments=json.dumps({"query": "beta"})),
+            ],
+        )
+
+        assert tool_call_comparator.compare_tool_action(expected_call, actual_batch) == (
+            0.0,
+            StepRewardCategory.FUNCTION_CALL_BATCH_LENGTH_DIFFERENT,
+        )
+
+    def test_compare_tool_action_batch_allows_subset(self) -> None:
+        tool_call_comparator = ToolCallComparator(
+            config=ToolCallComparatorConfig(word_count_similarity_threshold=0.1, allow_subset=True)
+        )
+        expected_batch = ExpectedFunctionCallBatch(
+            type="function_call_batch",
+            calls=[
+                ExpectedFunctionCall(type="function_call", name="search", arguments=json.dumps({"query": "alpha"})),
+                ExpectedFunctionCall(type="function_call", name="search", arguments=json.dumps({"query": "beta"})),
+            ],
+        )
+        actual_call = ExpectedFunctionCall(
+            type="function_call",
+            name="search",
+            arguments=json.dumps({"query": "alpha"}),
+        )
+
+        assert tool_call_comparator.compare_tool_action(expected_batch, actual_call) == (
+            1.0,
+            StepRewardCategory.EXPECTED_TOOL_CALL_BATCH,
+        )
+
+    def test_compare_tool_action_batch_allows_superset(self) -> None:
+        tool_call_comparator = ToolCallComparator(
+            config=ToolCallComparatorConfig(word_count_similarity_threshold=0.1, allow_superset=True)
+        )
+        expected_call = ExpectedFunctionCall(
+            type="function_call",
+            name="search",
+            arguments=json.dumps({"query": "alpha"}),
+        )
+        actual_batch = ExpectedFunctionCallBatch(
+            type="function_call_batch",
+            calls=[
+                ExpectedFunctionCall(type="function_call", name="search", arguments=json.dumps({"query": "beta"})),
+                ExpectedFunctionCall(type="function_call", name="search", arguments=json.dumps({"query": "alpha"})),
+            ],
+        )
+
+        assert tool_call_comparator.compare_tool_action(expected_call, actual_batch) == (
+            1.0,
+            StepRewardCategory.EXPECTED_TOOL_CALL_BATCH,
+        )
+
+    def test_compare_tool_action_batch_allows_any_cardinality_when_subset_and_superset_enabled(self) -> None:
+        tool_call_comparator = ToolCallComparator(
+            config=ToolCallComparatorConfig(
+                word_count_similarity_threshold=0.1,
+                allow_subset=True,
+                allow_superset=True,
+            )
+        )
+        expected_batch = ExpectedFunctionCallBatch(
+            type="function_call_batch",
+            calls=[
+                ExpectedFunctionCall(type="function_call", name="search", arguments=json.dumps({"query": "alpha"})),
+                ExpectedFunctionCall(type="function_call", name="search", arguments=json.dumps({"query": "beta"})),
+            ],
+        )
+        actual_call = ExpectedFunctionCall(
+            type="function_call",
+            name="search",
+            arguments=json.dumps({"query": "beta"}),
+        )
+
+        assert tool_call_comparator.compare_tool_action(expected_batch, actual_call) == (
+            1.0,
+            StepRewardCategory.EXPECTED_TOOL_CALL_BATCH,
+        )
+
+    def test_compare_tool_action_batch_can_return_fractional_reward(self) -> None:
+        tool_call_comparator = ToolCallComparator(
+            config=ToolCallComparatorConfig(
+                word_count_similarity_threshold=0.1,
+                parallel_tool_call_reward_mode="fractional",
+            )
+        )
+        expected_batch = ExpectedFunctionCallBatch(
+            type="function_call_batch",
+            calls=[
+                ExpectedFunctionCall(type="function_call", name="search", arguments=json.dumps({"query": "alpha"})),
+                ExpectedFunctionCall(type="function_call", name="search", arguments=json.dumps({"query": "beta"})),
+            ],
+        )
+        actual_batch = ExpectedFunctionCallBatch(
+            type="function_call_batch",
+            calls=[
+                ExpectedFunctionCall(type="function_call", name="search", arguments=json.dumps({"query": "alpha"})),
+                ExpectedFunctionCall(type="function_call", name="search", arguments=json.dumps({"query": "gamma"})),
+            ],
+        )
+
+        assert tool_call_comparator.compare_tool_action(expected_batch, actual_batch) == (
+            0.5,
+            StepRewardCategory.ARGUMENT_VALUE_DIFFERENT,
         )
 
     def test_compare_tool_call_arguments(self, tool_call_comparator: ToolCallComparator) -> None:

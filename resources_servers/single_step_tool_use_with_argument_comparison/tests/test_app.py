@@ -38,6 +38,7 @@ from resources_servers.single_step_tool_use_with_argument_comparison.app import 
 from resources_servers.single_step_tool_use_with_argument_comparison.common.verification_utils import (
     ExpectedAction,
     ExpectedFunctionCall,
+    ExpectedFunctionCallBatch,
     ExpectedMessage,
     StepRewardCategory,
     ToolCallComparatorConfig,
@@ -245,3 +246,69 @@ class TestApp:
             0.0,
             StepRewardCategory.NO_EXPECTED_CHAT_MESSAGE,
         )
+
+    async def test_verify_parallel_tool_calls(
+        self, resources_server: SingleStepToolUseArgumentComparisonResourcesServer
+    ) -> None:
+        tool = FunctionTool(
+            type="function",
+            name="search",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                    },
+                },
+                "required": [
+                    "query",
+                ],
+            },
+        )
+        responses_create_params = NeMoGymResponseCreateParamsNonStreaming(
+            input=[
+                NeMoGymEasyInputMessage(
+                    role="user",
+                    content="Search for two related facts.",
+                )
+            ],
+            parallel_tool_calls=True,
+            tools=[tool.model_dump()],
+        )
+        response = NeMoGymResponse(
+            id="parallel_tool_calls",
+            created_at=1001,
+            model="test_model",
+            object="response",
+            output=[
+                NeMoGymResponseFunctionToolCall(
+                    call_id="first",
+                    name="search",
+                    arguments=json.dumps({"query": "beta"}),
+                ),
+                NeMoGymResponseFunctionToolCall(
+                    call_id="second",
+                    name="search",
+                    arguments=json.dumps({"query": "alpha"}),
+                ),
+            ],
+            parallel_tool_calls=True,
+            tool_choice="auto",
+            tools=[tool],
+        )
+        expected_action = ExpectedFunctionCallBatch(
+            type="function_call_batch",
+            calls=[
+                ExpectedFunctionCall(type="function_call", name="search", arguments=json.dumps({"query": "alpha"})),
+                ExpectedFunctionCall(type="function_call", name="search", arguments=json.dumps({"query": "beta"})),
+            ],
+        )
+
+        verify_request = SingleStepToolUseArgumentComparisonVerifyRequest(
+            responses_create_params=responses_create_params,
+            response=response,
+            expected_action=expected_action,
+        )
+        verify_response = await resources_server.verify(verify_request)
+        assert verify_response.reward == approx(1.0)
+        assert verify_response.category == StepRewardCategory.EXPECTED_TOOL_CALL_BATCH

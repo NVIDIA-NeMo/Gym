@@ -75,10 +75,10 @@ class SingleStepToolUseArgumentComparisonResourcesServer(SimpleResourcesServer):
 
         expected_action = body.expected_action
         match expected_action.type:
-            case "function_call":
-                if extracted_content.type == "function_call":
+            case "function_call" | "function_call_batch":
+                if extracted_content.type in ("function_call", "function_call_batch"):
                     tool_call_comparator = ToolCallComparator(config=self.config.tool_call_comparator_config)
-                    reward, category = tool_call_comparator.compare_tool_call(expected_action, extracted_content)
+                    reward, category = tool_call_comparator.compare_tool_action(expected_action, extracted_content)
 
                 else:
                     reward = 0.0

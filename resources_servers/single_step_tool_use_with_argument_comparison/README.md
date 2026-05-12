@@ -3,6 +3,13 @@ This is a resources server that is to be used to verify a single action taken by
 
 Data links: ?
 
+# Parallel tool calls
+Rows may also set `expected_action.type` to `function_call_batch` with a `calls` list containing the same `function_call` objects used by single-call rows. The verifier matches parallel tool calls as an unordered multiset, so response output order does not matter.
+
+By default, matching is exact: the actual response must contain the same number of tool calls as the expected batch, and every expected call must match one actual call. The resource server config can relax the cardinality check with `tool_call_comparator_config.allow_subset: true` or `tool_call_comparator_config.allow_superset: true`. Both default to `false`.
+
+Rewards remain binary by default. Set `tool_call_comparator_config.parallel_tool_call_reward_mode: fractional` to return the matched-call fraction after the configured cardinality gate passes.
+
 # Example usage
 
 ## Running servers
