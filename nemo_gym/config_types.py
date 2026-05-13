@@ -373,6 +373,7 @@ class DatasetConfig(BaseModel):
             Literal["Creative Commons Attribution 4.0 International"],
             Literal["Creative Commons Attribution-ShareAlike 4.0 International"],
             Literal["NVIDIA Internal Use Only, Do Not Distribute"],
+            Literal["NVIDIA Evaluation Dataset License Agreement"],
             Literal["TBD"],
             Literal["GNU General Public License v3.0"],
         ]

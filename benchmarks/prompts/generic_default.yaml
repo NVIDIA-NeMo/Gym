@@ -1,2 +1,6 @@
-# Shared passthrough prompt mirroring NeMo Skills' generic/default behavior.
+# Shared "no-frills" prompt for Gym benchmarks that just want to hand the
+# raw question to the model — no system prompt, no formatting instructions.
+# Used by benchmarks where formatting is part of what's being evaluated
+# (e.g. open-ended generation, instruction following).
+
 user: "{question}"

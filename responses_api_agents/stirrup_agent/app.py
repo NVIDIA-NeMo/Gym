@@ -28,7 +28,7 @@ import tempfile
 import time
 from asyncio import Semaphore
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Union
 
 import ray
 from fastapi import Request
@@ -148,6 +148,11 @@ async def _run_stirrup_agent(
     is_gdpval: bool = False,
     model_id: Optional[str] = None,
     completion_token_buffer: int = 1000,
+    top_p: float = 0.95,
+    enable_thinking: bool = True,
+    max_completion_tokens_cap: int = 64000,
+    tavily_api_key: Optional[Union[str, List[str]]] = None,
+    tavily_max_sweeps: int = 1,
 ) -> Dict[str, Any]:
     """Run a Stirrup agent session and return history + metadata.
 
@@ -209,6 +214,10 @@ async def _run_stirrup_agent(
         max_tokens=max_tokens,
         model_id=model_id,
         completion_token_buffer=completion_token_buffer,
+        temperature=temperature,
+        top_p=top_p,
+        enable_thinking=enable_thinking,
+        max_completion_tokens_cap=max_completion_tokens_cap,
     )
 
     if exec_provider_class:
@@ -223,15 +232,22 @@ async def _run_stirrup_agent(
 
     tools = [exec_provider if isinstance(t, CodeExecToolProvider) else t for t in DEFAULT_TOOLS]
 
-    # Replace Stirrup's WebToolProvider with TavilyToolProvider when TAVILY_API_KEY is set
+    # Replace Stirrup's WebToolProvider with TavilyToolProvider when keys are available
+    # (either via the ``tavily_api_key`` config field or the legacy ``TAVILY_API_KEY``
+    # env var fallback). The provider parses bracketed comma-lists and rotates per call.
     import os as _os
 
     from stirrup.tools.web import WebToolProvider
 
-    if _os.environ.get("TAVILY_API_KEY"):
+    if tavily_api_key or _os.environ.get("TAVILY_API_KEY"):
         from responses_api_agents.stirrup_agent.tavily_search import TavilyToolProvider
 
-        tools = [TavilyToolProvider() if isinstance(t, WebToolProvider) else t for t in tools]
+        tools = [
+            TavilyToolProvider(api_keys=tavily_api_key, max_sweeps=tavily_max_sweeps)
+            if isinstance(t, WebToolProvider)
+            else t
+            for t in tools
+        ]
 
     agent_kwargs: Dict[str, Any] = {
         "client": client,
@@ -341,10 +357,14 @@ async def _run_stirrup_agent(
             import uuid
 
             # ``<persist>/task_<task_id>/repeat_<rollout_index>/`` so concurrent
-            # repeats of the same task don't clobber each other.
+            # repeats of the same task don't clobber each other. Clear the
+            # directory first so a re-visit of the same (task, repeat) — e.g.
+            # across RL training steps — doesn't leak stale files from a prior
+            # run into the judge's input set.
             dir_name = f"task_{task_id}" if task_id else f"task_{uuid.uuid4().hex[:8]}"
             repeat_name = f"repeat_{rollout_index}" if rollout_index is not None else "repeat_0"
             task_dir = Path(persist_deliverables_dir) / dir_name / repeat_name
+            shutil.rmtree(task_dir, ignore_errors=True)
             task_dir.mkdir(parents=True, exist_ok=True)
 
             # 1. Deliverable files
@@ -498,6 +518,39 @@ class StirrupAgentWrapperConfig(BaseResponsesAPIAgentConfig):
         "(messages + tool-schema JSON) and the exact prompt the server sees after chat-template "
         "rendering. See ``nemo_client.DynamicMaxTokensChatCompletionsClient``.",
     )
+    top_p: float = Field(
+        default=0.95,
+        description="Top-p sampling cutoff for the policy model. Forwarded to the LLM client.",
+    )
+    enable_thinking: bool = Field(
+        default=True,
+        description="Whether to enable reasoning tokens (sets "
+        "``extra_body.chat_template_kwargs.enable_thinking``). Reasoning-trained models default to True.",
+    )
+    max_completion_tokens_cap: int = Field(
+        default=64000,
+        description="Hard ceiling on per-call ``max_completion_tokens``. Dynamic sizing computes "
+        "context_window - input_tokens - completion_token_buffer, then caps to this value. "
+        "Set to match the training-side response-length budget for RL.",
+    )
+    tavily_api_key: Optional[Union[str, List[str]]] = Field(
+        default=None,
+        description="Tavily API key(s) for the ``web_search`` / ``fetch_web_page`` tools. "
+        "Accepts a single key, a Python list of keys, or a comma-separated string with optional "
+        "surrounding ``[...]`` brackets (the format EFB injects via ``host:TAVILY_API_KEY``). "
+        "When multiple keys are present, the provider rotates round-robin per call AND retries "
+        "on key-specific failures (401/403/429/5xx) with the next key. Falls back to the "
+        "``TAVILY_API_KEY`` env var when None.",
+    )
+    tavily_max_sweeps: int = Field(
+        default=1,
+        description="Number of full passes through the Tavily key list before giving up on a "
+        "single tool call. Total attempts per call = ``max_sweeps × len(api_keys)``. Default 1 "
+        "exhausts cleanly after one sweep and lets the model decide whether to retry on the "
+        "next turn. Bump to 2-3 for endurance against a flaky upstream at the cost of more "
+        "wallclock per stuck call.",
+        ge=1,
+    )
 
 
 class StirrupRunRequest(BaseRunRequest):
@@ -612,6 +665,11 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
                 "is_gdpval": self.config.task == "gdpval",
                 "model_id": self.config.model_id,
                 "completion_token_buffer": self.config.completion_token_buffer,
+                "top_p": getattr(body, "top_p", None) or self.config.top_p,
+                "enable_thinking": self.config.enable_thinking,
+                "max_completion_tokens_cap": self.config.max_completion_tokens_cap,
+                "tavily_api_key": self.config.tavily_api_key,
+                "tavily_max_sweeps": self.config.tavily_max_sweeps,
             }
 
             future = run_stirrup_agent_remote.remote(params)
