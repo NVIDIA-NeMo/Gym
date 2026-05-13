@@ -371,6 +371,71 @@ class TestApp:
         assert server._get_jobs_output_dir("deepseek-ai/DeepSeek-V3.2", "scientific", ts).parts[-3] == "20260210"
         assert server._get_results_output_dir("my-plain-model", "scientific", ts).parts[-1] == "my-plain-model"
 
+    def test_build_job_config_uses_daytona_type_when_import_path_is_clear(self) -> None:
+        pytest.importorskip("harbor")
+        server = _make_server(
+            harbor_environment_type="daytona",
+            harbor_environment_import_path=None,
+            harbor_environment_kwargs={"network_block_all": False},
+            harbor_agent_kwargs={"max_turns": 3, "collect_rollout_details": True},
+        )
+
+        config = server._build_job_config(
+            dataset_alias="scientific",
+            task_name="test_task_123",
+            model_name="test_model",
+            api_base="http://policy-host:9000/v1",
+            job_name="test_job",
+            jobs_dir=Path("/tmp/harbor_jobs"),
+        )
+
+        assert config["environment"]["type"] == "daytona"
+        assert config["environment"]["import_path"] is None
+        assert config["environment"]["kwargs"] == {"network_block_all": False}
+        assert config["agents"][0]["kwargs"]["max_turns"] == 3
+        assert config["agents"][0]["kwargs"]["collect_rollout_details"] is True
+
+    def test_build_job_config_import_path_overrides_environment_type(self) -> None:
+        pytest.importorskip("harbor")
+        server = _make_server(
+            harbor_environment_type="daytona",
+            harbor_environment_import_path="custom.module:CustomEnvironment",
+        )
+
+        config = server._build_job_config(
+            dataset_alias="scientific",
+            task_name="test_task_123",
+            model_name="test_model",
+            api_base="http://policy-host:9000/v1",
+            job_name="test_job",
+            jobs_dir=Path("/tmp/harbor_jobs"),
+        )
+
+        assert config["environment"]["type"] is None
+        assert config["environment"]["import_path"] == "custom.module:CustomEnvironment"
+
+    def test_build_job_config_supports_registry_dataset_with_daytona(self) -> None:
+        pytest.importorskip("harbor")
+        server = _make_server(
+            harbor_datasets={"terminal_bench": {"dataset_name": "terminal-bench", "dataset_version": "2.0"}},
+            harbor_environment_type="daytona",
+            harbor_environment_import_path=None,
+        )
+
+        config = server._build_job_config(
+            dataset_alias="terminal_bench",
+            task_name="fix-git",
+            model_name="test_model",
+            api_base="http://policy-host:9000/v1",
+            job_name="test_job",
+            jobs_dir=Path("/tmp/harbor_jobs"),
+        )
+
+        assert config["environment"]["type"] == "daytona"
+        assert config["datasets"][0]["name"] == "terminal-bench"
+        assert config["datasets"][0]["version"] == "2.0"
+        assert config["datasets"][0]["task_names"] == ["fix-git"]
+
     @pytest.mark.parametrize(
         "instance_id, expected_alias, expected_task",
         [

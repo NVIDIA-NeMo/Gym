@@ -87,6 +87,7 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     # Corresponds to the extra_body of OpenAI Client.
     extra_body: Optional[Dict[str, Any]] = None
 
+    default_headers: Dict[str, str] = Field(default_factory=dict)
     # Optional prefix for resolving relative ``metadata.audio_path`` (or
     # entries in ``metadata.audio_paths``) against. Absolute paths are used
     # as-is. When unset, relative paths raise. Audio is always inlined as a
@@ -121,6 +122,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             NeMoGymAsyncOpenAI(
                 base_url=base_url,
                 api_key=self.config.api_key,
+                default_headers=self.config.default_headers,
             )
             for base_url in self.config.base_url
         ]
