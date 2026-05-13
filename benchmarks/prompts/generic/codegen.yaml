@@ -1,3 +1,6 @@
+# default prompt for all python based code benchmark evaluations.
+# Mirrors nemo_skills/prompt/config/generic/codegen.yaml char-for-char.
+
 user: |-
   Here is a problem for which you need to generate/complete code:
   {question}
