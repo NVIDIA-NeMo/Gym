@@ -29,6 +29,7 @@ from nemo_gym.reward_profile import compute_aggregate_metrics
 from nemo_gym.rollout_collection import (
     RolloutCollectionConfig,
     RolloutCollectionHelper,
+    _expand_input_glob,
     _rollout_request_debug_summary,
 )
 
@@ -668,3 +669,66 @@ class TestRolloutCollection:
         output_fpath = tmp_path / "output.jsonl"
         result = await helper._call_aggregate_metrics([], [], output_fpath)
         assert result is None
+
+
+class TestExpandInputGlob:
+    """`_expand_input_glob` accepts a single glob, a comma-separated list of globs, or a mix.
+
+    Mirrors the multi-pattern conventions used elsewhere in NeMo Skills
+    (e.g. comma-separated `config_paths` on `ns nemo_gym_rollouts`).
+    """
+
+    def test_single_path(self, tmp_path: Path) -> None:
+        a = tmp_path / "a.jsonl"
+        a.write_text("{}\n")
+        assert _expand_input_glob(str(a)) == [str(a)]
+
+    def test_single_glob(self, tmp_path: Path) -> None:
+        for i in range(3):
+            (tmp_path / f"rollouts-chunk{i}.jsonl").write_text("{}\n")
+        result = _expand_input_glob(str(tmp_path / "rollouts-chunk*.jsonl"))
+        assert result == sorted(str(tmp_path / f"rollouts-chunk{i}.jsonl") for i in range(3))
+
+    def test_comma_separated_paths(self, tmp_path: Path) -> None:
+        a = tmp_path / "a.jsonl"
+        b = tmp_path / "b.jsonl"
+        a.write_text("{}\n")
+        b.write_text("{}\n")
+        result = _expand_input_glob(f"{a},{b}")
+        assert set(result) == {str(a), str(b)}
+
+    def test_comma_separated_globs(self, tmp_path: Path) -> None:
+        for sub in ("run1", "run2"):
+            (tmp_path / sub).mkdir()
+            (tmp_path / sub / "rollouts.jsonl").write_text("{}\n")
+            (tmp_path / sub / "extra.txt").write_text("ignore me")
+        result = _expand_input_glob(f"{tmp_path / 'run1' / 'rollouts*.jsonl'},{tmp_path / 'run2' / 'rollouts*.jsonl'}")
+        assert set(result) == {
+            str(tmp_path / "run1" / "rollouts.jsonl"),
+            str(tmp_path / "run2" / "rollouts.jsonl"),
+        }
+
+    def test_whitespace_around_commas_is_stripped(self, tmp_path: Path) -> None:
+        a = tmp_path / "a.jsonl"
+        b = tmp_path / "b.jsonl"
+        a.write_text("{}\n")
+        b.write_text("{}\n")
+        result = _expand_input_glob(f"  {a}  ,  {b}  ")
+        assert set(result) == {str(a), str(b)}
+
+    def test_overlapping_patterns_dedup(self, tmp_path: Path) -> None:
+        """A file matched by two patterns appears once in the output."""
+        a = tmp_path / "a.jsonl"
+        a.write_text("{}\n")
+        result = _expand_input_glob(f"{tmp_path / '*.jsonl'},{a}")
+        assert result == [str(a)]
+
+    def test_no_matches_returns_empty(self, tmp_path: Path) -> None:
+        assert _expand_input_glob(str(tmp_path / "nonexistent-*.jsonl")) == []
+
+    def test_empty_strings_in_csv_are_dropped(self, tmp_path: Path) -> None:
+        """Trailing/leading commas don't produce an empty-pattern glob that matches everything."""
+        a = tmp_path / "a.jsonl"
+        a.write_text("{}\n")
+        result = _expand_input_glob(f",{a},,")
+        assert result == [str(a)]

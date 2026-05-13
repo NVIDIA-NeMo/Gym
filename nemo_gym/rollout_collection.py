@@ -538,7 +538,12 @@ class RolloutAggregationConfig(BaseNeMoGymCLIConfig):
     """
 
     input_glob: str = Field(
-        description="Glob pattern matching the rollout shards to aggregate (e.g. 'results/rollouts-rs*-chunk*.jsonl')."
+        description=(
+            "Glob pattern or comma-separated list of glob patterns matching the rollout shards "
+            "to aggregate (e.g. 'results/rollouts-rs*-chunk*.jsonl' or "
+            "'results/run1/rollouts.jsonl,results/run2/rollouts.jsonl'). Whitespace around "
+            "commas is stripped. Duplicate matches across patterns are deduplicated."
+        )
     )
     output_jsonl_fpath: str = Field(
         description=(
@@ -553,9 +558,24 @@ class RolloutAggregationConfig(BaseNeMoGymCLIConfig):
     )
 
 
+def _expand_input_glob(input_glob: str) -> List[str]:
+    """Expand a glob-or-comma-separated-globs string into a sorted, deduplicated list of paths.
+
+    Examples:
+      'results/rollouts.jsonl' -> ['results/rollouts.jsonl'] (if it exists)
+      'a/*.jsonl, b/*.jsonl'   -> matches of both patterns, deduplicated
+    """
+    patterns = [p.strip() for p in input_glob.split(",") if p.strip()]
+    seen: Dict[str, None] = {}  # preserve insertion order while deduping
+    for pattern in patterns:
+        for path in sorted(glob_module.glob(pattern)):
+            seen.setdefault(path, None)
+    return list(seen)
+
+
 class RolloutAggregationHelper(BaseModel):
     async def run_from_config(self, config: RolloutAggregationConfig) -> Optional[Path]:
-        input_paths = sorted(glob_module.glob(config.input_glob))
+        input_paths = _expand_input_glob(config.input_glob)
         if not input_paths:
             raise FileNotFoundError(f"No shards matched input_glob={config.input_glob!r}")
         print(f"Aggregating {len(input_paths)} shard(s):")
