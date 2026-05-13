@@ -161,6 +161,13 @@ redirects:
     destination: "/nemo/gym/api/reference/api-reference"
   - source: "/nemo/gym/latest/environment-tutorials/creating-training-environment"
     destination: "/nemo/gym/latest/environment-tutorials/single-step-environment"
+  # Version-root index.html: explicit because :path* does not match the empty-path case
+  - source: "/nemo/gym/latest/index.html"
+    destination: "/nemo/gym/latest"
+  - source: "/nemo/gym/v0.2.1/index.html"
+    destination: "/nemo/gym/v0.2.1"
+  - source: "/nemo/gym/main/index.html"
+    destination: "/nemo/gym/main"
   # Catch-all: Sphinx `.../index.html` → Fern canonical (must precede `.html` catch-all)
   - source: "/nemo/gym/latest/:path*/index.html"
     destination: "/nemo/gym/latest/:path*"
