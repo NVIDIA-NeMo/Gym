@@ -25,6 +25,7 @@ equivalence_llm_judge:
       # group is returned; otherwise, the entire last match is used.
       # Example: "^Answer:\\s*(.*)$"
       response_extract_regex: null
+      msg_extraction_failure: "[NO VALID ANSWER EXTRACTED]"
       
       # Swap check: Run second judge pass with swapped expected/generated to detect positional bias
       check_twice_swap: false
