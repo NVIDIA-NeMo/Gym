@@ -1,0 +1,22 @@
+ifeval:
+  resources_servers:
+    ifeval:
+      entrypoint: app.py
+      domain: instruction_following
+      verified: false
+      description: IFEval instruction-following constraint verification, ported from NeMo-RLVR's ifeval_environment.
+      value: Improve IFEval pass rate via the IF_FUNCTIONS_MAP taxonomy (25 constraint types).
+ifeval_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: ifeval
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/ifeval/data/example.jsonl
