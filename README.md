@@ -32,10 +32,8 @@ Requires Python 3.12+ on x86_64 or ARM64 (Linux, macOS, Windows via WSL2). No GP
 Requires [uv](https://docs.astral.sh/uv/getting-started/installation/) and Python 3.12+.
 
 ```bash
-git clone git@github.com:NVIDIA-NeMo/Gym.git
-cd Gym
 uv venv --python 3.12 && source .venv/bin/activate
-uv sync
+uv pip install nemo-gym
 ```
 
 **Configure your model:**
