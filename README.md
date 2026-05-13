@@ -28,29 +28,30 @@ NeMo Gym is part of [NVIDIA NeMo](https://docs.nvidia.com/nemo/gym/latest/about/
 Requires Python 3.12+ on x86_64 or ARM64 (Linux, macOS, Windows via WSL2). No GPU required. See the [Getting Started](https://docs.nvidia.com/nemo/gym/latest/get-started/prerequisites) docs for a more comprehensive walkthrough.
 
 **Install NeMo Gym:**
+
+Requires [uv](https://docs.astral.sh/uv/getting-started/installation/) and Python 3.12+.
+
 ```bash
 git clone git@github.com:NVIDIA-NeMo/Gym.git
 cd Gym
-curl -LsSf https://astral.sh/uv/install.sh | sh
-source $HOME/.local/bin/env
 uv venv --python 3.12 && source .venv/bin/activate
 uv sync
 ```
 
 **Configure your model:**
 
-This example uses OpenAI, but NeMo Gym works with any OpenAI-compatible endpoint including self-hosted vLLM.
-```bash
-cat > env.yaml << EOF
+This quickstart uses OpenAI. NeMo Gym supports local and hosted inference — see [Configure Model](https://docs.nvidia.com/nemo/gym/latest/model-server) for vLLM, Fireworks, OpenRouter, and others.
+
+Create `env.yaml` in the project root:
+```yaml
 policy_base_url: https://api.openai.com/v1
 policy_api_key: <your-openai-api-key>
 policy_model_name: gpt-4.1-2025-04-14
-EOF
 ```
 
 ### Run Evaluation
 
-Run your agent on a set of tasks and score the results. This example uses the [`mcqa`](resources_servers/mcqa/README.md) (multiple-choice Q&A) environment with its included example data.
+Run your agent on a set of tasks and score the results. This example uses a simple tool calling agent [`simple_agent`](responses_api_agents/simple_agent/README.md) with the [`mcqa`](resources_servers/mcqa/README.md) (multiple-choice Q&A) environment and its included example data.
 
 **1. Start servers**
 
@@ -73,7 +74,7 @@ You should see three server instances starting:
 
 **2. Evaluate your agent** 
 
-In a new terminal, run your agent on the tasks:
+In a new terminal, run your agent on a single task to verify everything works:
 
 ```bash
 source .venv/bin/activate
@@ -82,21 +83,23 @@ ng_collect_rollouts \
     +agent_name=mcqa_simple_agent \
     +input_jsonl_fpath=resources_servers/mcqa/data/example.jsonl \
     +output_jsonl_fpath=results/mcqa_rollouts.jsonl \
-    +num_repeats=2
+    +limit=5 \
+    +num_repeats=1
 ```
 
 You should see a progress bar followed by aggregate metrics:
 
 ```text
-Collecting rollouts: 100%|██████| 10/10 [00:10<00:00, 1.01s/it]
+Collecting rollouts: 100%|██████| 5/5 [01:22<00:00, 16.44s/it]
 
 Key metrics for mcqa_simple_agent:
 {
-    "mean/reward": 0.7,
-    "pass@1[avg-of-2]/accuracy": 70.0,
-    "pass@1/accuracy": 70.0
+    "mean/reward": 0.8,
+    "pass@1[avg-of-1]/accuracy": 80.0,
+    "pass@1/accuracy": 80.0
 }
 Finished rollout collection! View results at:
+Fully materialized inputs: results/mcqa_rollouts_materialized_inputs.jsonl
 Rollouts: results/mcqa_rollouts.jsonl
 Aggregate metrics: results/mcqa_rollouts_aggregate_metrics.json
 ```

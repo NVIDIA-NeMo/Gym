@@ -10,7 +10,7 @@ position: 2
 Python 3.12 is required. Refer to [Prerequisites](/latest/get-started/prerequisites) for full system requirements.
 </Info>
 
-Clone from git for the newest features and environments, or pip install for the latest stable release. There is also a container if you would like to train with NeMo RL.
+Clone from git for the newest features and environments, or pip install for the latest stable release. If you intend to use NeMo Gym with NeMo RL, use the latest NGC container.
 
 <Tabs>
 <Tab title="Git">
@@ -18,8 +18,6 @@ Clone from git for the newest features and environments, or pip install for the 
 ```bash
 git clone git@github.com:NVIDIA-NeMo/Gym.git
 cd Gym
-curl -LsSf https://astral.sh/uv/install.sh | sh
-source $HOME/.local/bin/env
 uv venv --python 3.12 && source .venv/bin/activate
 uv sync
 ```
@@ -28,20 +26,16 @@ uv sync
 <Tab title="Pip">
 
 ```bash
-python3 -m venv .venv && source .venv/bin/activate
-pip install nemo-gym
+uv venv --python 3.12 && source .venv/bin/activate
+uv pip install nemo-gym
 ```
 
 </Tab>
 <Tab title="Container">
 
-For RL training with NeMo RL, use the latest NGC container:
-
 ```bash
 docker pull nvcr.io/nvidia/nemo-rl:v0.5.0.nemotron_3_super
 ```
-
-See the [NeMo RL training tutorial](/latest/training-tutorials/nemo-rl-grpo/setup) for setup details.
 
 </Tab>
 </Tabs>
