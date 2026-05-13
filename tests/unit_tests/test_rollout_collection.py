@@ -27,6 +27,8 @@ from nemo_gym.global_config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, T
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.reward_profile import compute_aggregate_metrics
 from nemo_gym.rollout_collection import (
+    RolloutAggregationConfig,
+    RolloutAggregationHelper,
     RolloutCollectionConfig,
     RolloutCollectionHelper,
     _expand_input_glob,
@@ -732,3 +734,191 @@ class TestExpandInputGlob:
         a.write_text("{}\n")
         result = _expand_input_glob(f",{a},,")
         assert result == [str(a)]
+
+
+class TestDisableAggregationAndCallerTaskIndex:
+    """Branches added for sharded rollouts: `disable_aggregation` flag and
+    caller-provided `_ng_task_index`. Both must be backward-compatible with
+    the existing default-on aggregation + auto-numbering behaviour.
+    """
+
+    async def test_run_from_config_disable_aggregation_skips_call(self, tmp_path: Path) -> None:
+        """When disable_aggregation=True, _call_aggregate_metrics MUST NOT run.
+
+        Shows up in chunked-rollouts flows where the aggregation pass is deferred
+        to a single ng_aggregate_rollouts run over the union of shards.
+        """
+        input_jsonl_fpath = tmp_path / "input.jsonl"
+        input_jsonl_fpath.write_text(
+            json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "a"}, "x": 0}) + "\n"
+        )
+        output_jsonl_fpath = tmp_path / "output.jsonl"
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_jsonl_fpath),
+            output_jsonl_fpath=str(output_jsonl_fpath),
+            disable_aggregation=True,
+            num_repeats=1,
+        )
+
+        class Helper(RolloutCollectionHelper):
+            def run_examples(self, examples, *args, **kwargs):
+                futures = []
+                for ex in examples:
+                    fut = Future()
+                    fut.set_result((ex, {"response": {"usage": {}}}))
+                    futures.append(fut)
+                return futures
+
+            async def _call_aggregate_metrics(self, results, rows, output_fpath):
+                raise AssertionError("aggregator must not run when disable_aggregation=True")
+
+        await Helper().run_from_config(config)
+
+        # Rollouts file written (proves the rollout phase ran); aggregator file absent.
+        assert output_jsonl_fpath.exists()
+        assert not (tmp_path / "output_aggregate_metrics.json").exists()
+
+    def test_preprocess_honors_caller_task_index(self, tmp_path: Path) -> None:
+        """A row arriving with `_ng_task_index` pre-set is used verbatim — the
+        original `row_to_task_idx` auto-numbering is bypassed. This is the seam
+        an upstream slicer relies on to keep task identifiers globally-stable
+        across shards.
+        """
+        fpath = tmp_path / "input.jsonl"
+        rows = [
+            # Same prompt twice with *different* caller-stamped indices — must
+            # NOT be collapsed to one task by the row_str dedup path.
+            {"responses_create_params": {"input": []}, "agent_ref": {"name": "a"}, TASK_INDEX_KEY_NAME: 42},
+            {"responses_create_params": {"input": []}, "agent_ref": {"name": "a"}, TASK_INDEX_KEY_NAME: 99},
+            # And a third row with no caller index — auto-numbering still applies.
+            {"responses_create_params": {"input": []}, "agent_ref": {"name": "a"}, "diff": "row"},
+        ]
+        fpath.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+
+        config = RolloutCollectionConfig(
+            agent_name="a",
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+            num_repeats=1,
+        )
+
+        result = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+        indices = [r[TASK_INDEX_KEY_NAME] for r in result]
+
+        # Caller-provided indices preserved; the no-index row gets an auto-generated
+        # one starting at 0 (the row_to_task_idx counter is independent of caller stamps).
+        assert indices[:2] == [42, 99]
+        assert indices[2] == 0  # auto-assigned; not 100 or 43
+
+
+class TestRolloutAggregationHelper:
+    """End-to-end shape of `ng_aggregate_rollouts`: glob → load → sort → aggregate."""
+
+    async def test_run_from_config_full_path(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Two shards. Records have globally-stamped task indices (out of order)
+        # — the helper should sort by (task_index, rollout_index) before calling
+        # _call_aggregate_metrics so downstream groupby is deterministic.
+        shard0 = tmp_path / "rollouts-chunk0.jsonl"
+        shard1 = tmp_path / "rollouts-chunk1.jsonl"
+        records_shard0 = [
+            {
+                AGENT_REF_KEY_NAME: {"name": "a"},
+                TASK_INDEX_KEY_NAME: 1,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+                "response": {"usage": {"x": 2}},
+                "reward": 1.0,
+            },
+            {
+                AGENT_REF_KEY_NAME: {"name": "a"},
+                TASK_INDEX_KEY_NAME: 0,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+                "response": {"usage": {"x": 1}},
+                "reward": 0.0,
+            },
+        ]
+        records_shard1 = [
+            {
+                AGENT_REF_KEY_NAME: {"name": "a"},
+                TASK_INDEX_KEY_NAME: 2,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+                "response": {"usage": {"x": 3}},
+                "reward": 1.0,
+            },
+        ]
+        shard0.write_text("\n".join(json.dumps(r) for r in records_shard0) + "\n")
+        shard1.write_text("\n".join(json.dumps(r) for r in records_shard1) + "\n")
+
+        output_fpath = tmp_path / "rollouts.jsonl"
+
+        captured: dict[str, list] = {}
+
+        async def fake_call(self, results, rows, output_fpath):
+            captured["results"] = results
+            captured["rows"] = rows
+            captured["output_fpath"] = output_fpath
+            # Touch a sentinel file so the helper's return value is meaningful.
+            metrics_fpath = output_fpath.with_stem(output_fpath.stem + "_aggregate_metrics").with_suffix(".json")
+            metrics_fpath.write_text("[]")
+            return metrics_fpath
+
+        monkeypatch.setattr(RolloutCollectionHelper, "_call_aggregate_metrics", fake_call)
+
+        cfg = RolloutAggregationConfig(
+            input_glob=f"{shard0},{shard1}",
+            output_jsonl_fpath=str(output_fpath),
+            merge_shards=True,
+        )
+        metrics_fpath = await RolloutAggregationHelper().run_from_config(cfg)
+
+        # 3 records total, sorted by (task_index, rollout_index): tasks 0, 1, 2.
+        assert [r[TASK_INDEX_KEY_NAME] for r in captured["results"]] == [0, 1, 2]
+        # rows passed twice == results (helper uses results both ways since each
+        # row already carries AGENT_REF_KEY_NAME).
+        assert captured["rows"] is captured["results"]
+        # Merged shard concatenation honoured (merge_shards=True).
+        assert output_fpath.exists()
+        assert sum(1 for _ in output_fpath.open()) == 3
+        # Metrics file path returned and points next to the merged JSONL.
+        assert metrics_fpath == tmp_path / "rollouts_aggregate_metrics.json"
+        assert metrics_fpath.exists()
+
+    async def test_run_from_config_no_matches_raises(self, tmp_path: Path) -> None:
+        cfg = RolloutAggregationConfig(
+            input_glob=str(tmp_path / "nothing-matches-*.jsonl"),
+            output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+        )
+        with pytest.raises(FileNotFoundError, match="No shards matched"):
+            await RolloutAggregationHelper().run_from_config(cfg)
+
+    async def test_run_from_config_merge_shards_false_skips_concat(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        shard = tmp_path / "shard.jsonl"
+        record = {
+            AGENT_REF_KEY_NAME: {"name": "a"},
+            TASK_INDEX_KEY_NAME: 0,
+            ROLLOUT_INDEX_KEY_NAME: 0,
+            "response": {"usage": {}},
+            "reward": 0.5,
+        }
+        shard.write_text(json.dumps(record) + "\n")
+        output_fpath = tmp_path / "rollouts.jsonl"
+
+        async def _noop(self, results, rows, output_fpath):
+            m = output_fpath.with_stem(output_fpath.stem + "_aggregate_metrics").with_suffix(".json")
+            m.write_text("[]")
+            return m
+
+        monkeypatch.setattr(RolloutCollectionHelper, "_call_aggregate_metrics", _noop)
+        cfg = RolloutAggregationConfig(
+            input_glob=str(shard),
+            output_jsonl_fpath=str(output_fpath),
+            merge_shards=False,
+        )
+        await RolloutAggregationHelper().run_from_config(cfg)
+
+        # merge_shards=False ⇒ no concatenated rollouts file is written, even
+        # though output_jsonl_fpath is used to derive the metrics path.
+        assert not output_fpath.exists()
+        assert (tmp_path / "rollouts_aggregate_metrics.json").exists()
