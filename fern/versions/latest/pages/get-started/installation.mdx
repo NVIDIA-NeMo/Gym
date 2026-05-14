@@ -1,0 +1,57 @@
+---
+title: "Installation"
+description: "Install NeMo Gym and verify your setup."
+position: 2
+---
+
+# Installation
+
+<Info>
+Python 3.12 is required. Refer to [Prerequisites](/latest/get-started/prerequisites) for full system requirements.
+</Info>
+
+Clone from git to get the latest features and environments. If you intend to use NeMo Gym with NeMo RL, use the latest NGC container.
+
+<Tabs>
+<Tab title="Git">
+
+```bash
+git clone git@github.com:NVIDIA-NeMo/Gym.git
+cd Gym
+uv venv --python 3.12 && source .venv/bin/activate
+uv sync
+```
+
+</Tab>
+<Tab title="Container">
+
+```bash
+docker pull nvcr.io/nvidia/nemo-rl:v0.5.0.nemotron_3_super
+```
+
+</Tab>
+</Tabs>
+
+## Verify Installation
+
+```bash
+ng_version
+```
+
+You should see output like:
+
+```text
+NeMo Gym v0.3.0
+Python 3.12.x
+Installation: /path/to/Gym
+```
+
+## Next Steps
+
+<Cards>
+
+<Card title="Quickstart" href="/latest/get-started/quickstart">
+Run your first evaluation.
+</Card>
+
+</Cards>

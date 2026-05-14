@@ -131,10 +131,17 @@ class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
         default=False,
         description=(
             "If True, skip the agent run and use the sample's golden patch "
-            "(instance_dict['patch']) as the model patch. The eval container "
-            "still runs, so this verifies that the dataset sample actually "
-            "resolves when its golden patch is applied. Currently supported "
-            "for dataset_name == 'swe-bench-ext'."
+            "(instance_dict['patch']) as the model patch."
+        ),
+    )
+
+    skip_eval: bool = Field(
+        default=False,
+        description=(
+            "If True, run the agent normally but skip the eval container "
+            "entirely. The reward is forced to 0 since the patch is never "
+            "graded. Useful for collecting agent trajectories without paying "
+            "the eval cost."
         ),
     )
 
@@ -1438,8 +1445,10 @@ class RunOpenHandsAgent(BaseModel):
         openhands_active_command = await self._start_container_command(
             self.config.agent_command, self.config.agent_apptainer_command_str
         )
-        eval_active_command = await self._start_container_command(
-            self.config.eval_command, self.config.eval_apptainer_command_str
+        eval_active_command = (
+            None
+            if self.config.skip_eval
+            else await self._start_container_command(self.config.eval_command, self.config.eval_apptainer_command_str)
         )
 
         try:
@@ -1453,7 +1462,8 @@ class RunOpenHandsAgent(BaseModel):
                 self._openhands_dir_copy_from_host(output_file_path=None)
             except Exception:
                 pass
-            await self._kill_active_command(eval_active_command)
+            if eval_active_command is not None:
+                await self._kill_active_command(eval_active_command)
             metrics.openhands_run_time += time.time()
             metrics.patch_exists = False
             metrics.final_eval_apptainer_spinup_time = None
@@ -1518,13 +1528,25 @@ class RunOpenHandsAgent(BaseModel):
             metrics.patch_exists = False
             metrics.final_eval_apptainer_spinup_time = None
 
-            await self._kill_active_command(eval_active_command)
+            if eval_active_command is not None:
+                await self._kill_active_command(eval_active_command)
 
             update_metrics(self.config.metrics_fpath, metrics.model_dump())
             return
 
         with open(self.config.model_patch_path, "w") as f:
             f.write(patch)
+
+        if self.config.skip_eval:
+            # Eval is intentionally skipped — record that the patch exists,
+            # leave eval timings unset, and return None so the caller treats
+            # this sample as unresolved (reward = 0).
+            metrics.final_eval_apptainer_spinup_time = None
+            metrics.final_eval_time = None
+            update_metrics(self.config.metrics_fpath, metrics.model_dump())
+            if self.config.debug:
+                profiler.stop()
+            return None
 
         metrics.final_eval_time = -time.time()
         try:
@@ -1559,14 +1581,19 @@ class RunOpenHandsAgent(BaseModel):
 
     async def _run_golden_patch_verification(self) -> Optional[Path]:
         instance_id = self.config.instance_id
-        dataset_name = self.config.problem_info.get("dataset_name")
-        # TODO(sugam): add support for other datasets
-        if dataset_name != "swe-bench-ext":
+        dataset_name = self.config.problem_info.get("dataset_name") or ""
+        supported = dataset_name == "swe-bench-ext" or (
+            "SWE-bench" in dataset_name and "SWE-rebench" not in dataset_name
+        )
+        if not supported:
             raise NotImplementedError(
-                f"verify_golden_patch is only supported for dataset_name=='swe-bench-ext' (got {dataset_name!r})."
+                "verify_golden_patch is only supported for dataset_name=='swe-bench-ext' "
+                "or the SWE-bench / SWE-bench_Multilingual families "
+                f"(got {dataset_name!r})."
             )
 
-        instance_dict = json.loads(self.config.problem_info["instance_dict"])
+        raw_instance_dict = self.config.problem_info["instance_dict"]
+        instance_dict = json.loads(raw_instance_dict) if isinstance(raw_instance_dict, str) else raw_instance_dict
         golden_patch = instance_dict.get("patch") or ""
         if not golden_patch.strip():
             raise ValueError(f"No golden patch found in instance_dict['patch'] for {instance_id}.")

@@ -1,31 +1,39 @@
 ---
-title: "Overview"
-description: ""
+title: "NeMo Gym"
+description: "NeMo Gym is a library for evaluating and improving models and agents using environments."
 position: 1
 ---
-## Motivation
 
-Building and scaling RL training environments for LLMs presents several key challenges:
+# NeMo Gym
 
-- **Decoupling environments from training**: Many RL workflows tightly couple environment logic with the training pipeline, making it difficult to integrate complex agent loops, iterate on environment design, and run controlled ablations.
-- **Representing agentic trajectories consistently**: The community widely uses Chat Completions today, but it was designed for stateless, single-turn interactions. Agentic rollouts include interleaved reasoning, tool calls, and text across multiple turns. Without a schema that natively represents this, custom parsing and serialization is required for every environment.
-- **Managing resources**: Environments often depend on external resources such as sandboxed execution, databases, and APIs. Each rollout needs isolated instances that must be reliably initialized and cleaned up.
-- **Scaling rollout collection**: Training may require thousands of parallel rollouts. Environment instances must scale accordingly with distribution, load balancing, and fault tolerance.
+NeMo Gym is a library for evaluating and improving models and agents using environments. NeMo Gym provides infrastructure to develop environments, scalably run evaluation and training, and a collection of popular benchmarks and training environments.
 
-## NeMo Gym
+## When to Use NeMo Gym
 
-[NeMo Gym](https://github.com/NVIDIA-NeMo/Gym) is an open-source library that provides infrastructure to build RL environments and scale rollout collection, enabling seamless integration with your preferred training framework.
+- You need to **evaluate models or agents** in stateful environments (for example, code execution, tool calling, sandboxes).
+- You want **reproducible evaluation** across teams using shared environments and verifiers.
+- You need to use environments **at scale** — multiple repeats per task, or thousands of concurrent requests for training.
+- You want to **seamlessly transition** between evaluation, agent optimization, and training.
 
-NeMo Gym was designed to address these challenges and accelerate environment development:
+If you are scoring model outputs with a stateless check and do not need scale or training, a script is probably sufficient.
 
-- **Decoupled architecture**: Environment development is fully separated from training, so teams can build, test, and iterate on environments independently of the RL training loop. Interoperable with existing environments, systems, and RL training frameworks.
-- **Environment scaffolding**: Patterns and infrastructure to accelerate environment development for multi-step, multi-turn, and user modeling scenarios.
-- **Standardized trajectories**: NeMo Gym uses the OpenAI Responses API as its native format, providing a schema that natively represents multi-turn, tool-calling agentic rollouts without custom serialization.
-- **Managed resource lifecycles**: Resources servers handle initialization, isolation, and cleanup of external dependencies (sandboxes, APIs, databases) per rollout.
-- **Scalable rollout collection**: Infrastructure for distributing thousands of parallel rollouts with load balancing and fault tolerance.
-- **Growing environment hub**: NVIDIA and community-contributed environments and datasets for training and evaluation.
+## What NeMo Gym Provides
 
-<Tip>
-The name "NeMo Gym" comes from historical reinforcement learning literature, where the word "Gym" refers to a collection of RL training environments!
+- Modular, extensible interfaces for agents, environments, tasks, and verifiers
+- Environment hub of popular benchmarks and training environments
+- Use your own agents or choose from built-in harnesses
+- Scale to thousands of concurrent environments
+- Train with the RL framework of your choice
+- Battle-tested in production Nemotron training
 
-</Tip>
+![NeMo Gym Product Overview](../../../../assets/images/product_overview.png)
+
+## Integrations
+
+NeMo Gym integrates with the broader agentic ecosystem:
+
+- **Environment libraries**: Seamlessly combine environments and benchmarks from other libraries alongside NeMo Gym environments.
+- **Training framework libraries**: Use environments for SFT and RL training.
+- **Agent harnesses**: Popular agent harnesses for evaluation and training available out of the box.
+- **Agent framework libraries**: Use your custom agent built with agent frameworks in NeMo Gym environments.
+- **Sandboxes**: Isolate agent runtime execution.

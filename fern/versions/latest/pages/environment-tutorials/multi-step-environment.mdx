@@ -179,7 +179,7 @@ if __name__ == "__main__":
 The `verify()` function parses the agent's tool calls from `body.response.output` and computes a reward by comparing against ground truth (`body.expected_synonym_values`). The ground truth fields come from the JSONL dataset row and are passed through the `ExampleMultiStepVerifyRequest`.
 
 <Tip>
-The `json.loads(output.arguments)` call is wrapped in `try/except` to handle cases where the model produces malformed JSON. Always guard against unparseable model output in your verify function. For more verification patterns, see [task-verification](/latest/about/concepts/task-verification).
+The `json.loads(output.arguments)` call is wrapped in `try/except` to handle cases where the model produces malformed JSON. Always guard against unparseable model output in your verify function.
 
 </Tip>
 

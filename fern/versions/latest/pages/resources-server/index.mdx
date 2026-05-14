@@ -39,9 +39,9 @@ Tools are exposed as HTTP endpoints that the Agent server calls during a rollout
 
 ## Verification Logic
 
-Every Resources server implements a `verify()` function that evaluates the result of a rollout and returns a reward signal for training. See [Task Verification](/latest/about/concepts/task-verification) for verification approaches, patterns, and best practices.
+Every Resources server implements a `verify()` function that evaluates the result of a rollout and returns a reward signal for training.
 
-For semantic or rubric-based scoring, `verify()` may call a **second language model** (LLM-as-a-judge); the concept is outlined in [task-verification](/latest/about/concepts/task-verification) under *What is LLM-as-a-judge?*. For configuration, deployment, and implementation patterns, see [Llm As Judge Verification](/latest/environment-tutorials/llm-as-judge-verification).
+For semantic or rubric-based scoring, `verify()` may call a **second language model** (LLM-as-a-judge). For configuration, deployment, and implementation patterns, see [LLM-as-Judge Verification](/latest/environment-tutorials/llm-as-judge-verification).
 
 ## Example Resources Servers
 
