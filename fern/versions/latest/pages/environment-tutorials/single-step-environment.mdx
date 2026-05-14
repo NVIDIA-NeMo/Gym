@@ -29,12 +29,9 @@ Build a complete environment end-to-end, from scaffolding to RL-ready rollouts.
 
 ## Prerequisites
 
-Complete **[Detailed Setup](/latest/get-started/detailed-setup)** before starting — clone the repository, install dependencies, configure your API key, and verify servers start correctly.
+Complete **[Getting Started](/latest/get-started/quickstart)** before starting.
 
-<Tip>
-If you followed the [Quickstart](/latest/get-started), you're ready to proceed.
 
-</Tip>
 
 <Info>
 Run all commands from the **repository root** directory (where `pyproject.toml` is located).
@@ -45,7 +42,7 @@ Run all commands from the **repository root** directory (where `pyproject.toml` 
 
 ## How It Works
 
-NeMo Gym uses a decoupled three-component architecture: the **Agent Server** orchestrates the loop, the **Model Server** runs inference, and the **Resources Server** provides tools and verification. All three are async FastAPI servers communicating over HTTP, which allows many rollouts to run concurrently across episodes. See [core-components](/latest/about/concepts/core-components) for the full architecture and diagram.
+NeMo Gym uses a decoupled three-component architecture: the **Agent Server** orchestrates the loop, the **Model Server** runs inference, and the **Resources Server** provides tools and verification. All three are async FastAPI servers communicating over HTTP, which allows many rollouts to run concurrently across episodes. See [Environment Components](/latest/about/core-components) for the full architecture and diagram.
 
 In most cases, the **Resources Server** is where your changes go: define your tool endpoints and a `verify()` method that returns a reward. NeMo Gym ships several pre-built agent servers (`simple_agent`, `swe_agents`, etc.) and model servers (`openai_model`, `vllm_model`) that you can use as-is, or you can bring your own.
 
@@ -266,7 +263,7 @@ async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
     return BaseVerifyResponse(**body.model_dump(), reward=reward)
 ```
 
-This example checks tool *usage*, not argument correctness. See [task-verification](/latest/about/concepts/task-verification) for the full verification patterns and best practices, or jump to [Advanced: Verification Patterns](#advanced-verification-patterns) at the end of this tutorial for quick examples.
+This example checks tool *usage*, not argument correctness. Jump to [Advanced: Verification Patterns](#advanced-verification-patterns) at the end of this tutorial for more examples.
 
 #### Configure - Wiring the pieces together
 
