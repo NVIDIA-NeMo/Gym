@@ -1,6 +1,7 @@
 ---
-title: "Why use aiohttp backend instead of httpx/httpcore for async HTTP?"
+title: "aiohttp vs httpx"
 description: ""
+position: 3
 ---
 TL;DR: httpx is O(n^2) runtime where n is the number of queued requests (that is, for each request, we check all other queued requests). This is terribly inefficient and results in major slowdowns.
 
