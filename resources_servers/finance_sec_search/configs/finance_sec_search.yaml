@@ -8,6 +8,7 @@ finance_sec_search_resources_server:
       description: SEC EDGAR filing search for financial analysis questions
       value: Enable LLMs to search and analyze SEC filings
       cache_dir: null  # defaults to ~/.cache/nemo_gym/finance_sec_search/ if not set
+      tavily_api_key: ${tavily_api_key}
       retrieval_model_server:
         type: responses_api_models
         name: policy_model
@@ -46,7 +47,7 @@ finance_agent:
     finance_agent:
       entrypoint: app.py
       max_steps: 50
-      truncate_on_overflow: true
+      truncate_on_overflow: false
       tool_call_timeout: 300
       resources_server:
         type: resources_servers

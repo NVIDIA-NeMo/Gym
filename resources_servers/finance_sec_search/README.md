@@ -23,20 +23,20 @@ If `tavily_api_key` is not configured, `web_search` returns an error directing t
 Create `env.yaml` in the Gym root:
 
 ```yaml
-policy_base_url: http://localhost:5000/v1
+policy_base_url: https://api.openai.com/v1
 policy_api_key: empty
-policy_model_name: /hf_models/Qwen3-30B-A3B
+policy_model_name: gpt-5-mini
 
-search_judge_model_base_url: http://localhost:5000/v1
-search_judge_model_api_key: ""
-search_judge_model_name: /hf_models/Qwen3-30B-A3B
+search_judge_model_base_url: https://api.openai.com/v1
+search_judge_model_api_key: empty
+search_judge_model_name: gpt-5-mini
 
-finance_sec_search_resources_server:
-  resources_servers:
-    finance_sec_search:
-      cache_dir: /workspace/cache/finance_sec_search
-      # tavily_api_key: <your-tavily-key>
+# Optional: enable web_search tool (requires Tavily API key)
+tavily_api_key: tvly-XXX
 ```
+
+The `tavily_api_key` is referenced as `${tavily_api_key}` in
+`configs/finance_sec_search.yaml`. If omitted, `web_search` is disabled.
 
 ## Cache Management
 

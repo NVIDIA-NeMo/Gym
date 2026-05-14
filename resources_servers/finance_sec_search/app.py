@@ -31,7 +31,7 @@ import urllib.error
 import urllib.request
 from collections import deque
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 import aiohttp
 import yaml
@@ -39,7 +39,6 @@ from bs4 import BeautifulSoup
 from fastapi import FastAPI
 from pydantic import BaseModel, Field, field_validator
 from starlette.requests import Request
-from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential_jitter
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -105,7 +104,7 @@ class FinanceAgentResourcesServerConfig(BaseResourcesServerConfig):
         default=100000,
         description="If the document is larger than this threshold characters, give a warning to the model to use char ranges.",
     )
-    reward_mode: str = Field(
+    reward_mode: Literal["binary", "scaled"] = Field(
         default="binary",
         description="How judge ratings map to rewards. "
         "'binary': only [[2]] → 1.0, else 0.0. "
@@ -641,9 +640,8 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
         if cik_padded in self._filings_cache:
             return self._filings_cache[cik_padded]
 
-        if cik_padded not in self._filings_locks:
-            self._filings_locks[cik_padded] = asyncio.Lock()
-        async with self._filings_locks[cik_padded]:
+        lock = self._filings_locks.setdefault(cik_padded, asyncio.Lock())
+        async with lock:
             if cik_padded in self._filings_cache:
                 return self._filings_cache[cik_padded]
 
@@ -864,34 +862,11 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
         chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
         return "\n".join(chunk for chunk in chunks if chunk)
 
-    @retry(
-        retry=retry_if_exception(
-            lambda e: (isinstance(e, aiohttp.ClientResponseError) and e.status in (429, 503))
-            or any(str(code) in str(e) for code in (429, 503))
-        ),
-        stop=stop_after_attempt(100),
-        wait=wait_exponential_jitter(initial=3, exp_base=2, max=120),
-        reraise=True,
-    )
     async def _parse_html_page(self, url: str) -> str:
-        """Fetch a URL and extract plain text."""
-        async with aiohttp.ClientSession() as session:
-            try:
-                async with session.get(
-                    url,
-                    timeout=aiohttp.ClientTimeout(total=60),
-                    headers={"User-Agent": self.config.user_agent},
-                ) as response:
-                    response.raise_for_status()
-                    html_content = await response.text()
-            except Exception as e:
-                if len(str(e)) == 0:
-                    raise TimeoutError(
-                        "Timeout error when parsing HTML page after 60 seconds. "
-                        "The URL might be blocked or the server is taking too long to respond."
-                    ) from e
-                raise
-
+        """Fetch a URL and extract plain text, reusing the shared session."""
+        html_content = await self._fetch_with_retry(url)
+        if not html_content:
+            raise RuntimeError(f"Failed to fetch {url}. The server may be temporarily unavailable.")
         return self._parse_html_to_text(html_content)
 
     async def _fetch_sec_filing_text(self, url: str) -> str:
