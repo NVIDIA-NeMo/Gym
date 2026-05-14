@@ -144,7 +144,11 @@ def convert_stirrup_history_to_output_items(
 
                 if hasattr(msg, "tool_calls") and msg.tool_calls:
                     for tc in msg.tool_calls:
-                        call_id = getattr(tc, "tool_call_id", None) or getattr(tc, "id", None) or f"call-{uuid.uuid4().hex[:8]}"
+                        call_id = (
+                            getattr(tc, "tool_call_id", None)
+                            or getattr(tc, "id", None)
+                            or f"call-{uuid.uuid4().hex[:8]}"
+                        )
                         output_items.append(
                             NeMoGymResponseFunctionToolCall(
                                 id=f"fc-{uuid.uuid4().hex[:8]}",
