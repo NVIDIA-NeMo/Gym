@@ -19,4 +19,4 @@ example_single_tool_call_simple_agent:
       datasets:
         - name: example
           type: example
-          jsonl_fpath: environments/example/example_single_tool_call/data/example.jsonl
+          jsonl_fpath: example_environments/example_single_tool_call/data/example.jsonl
