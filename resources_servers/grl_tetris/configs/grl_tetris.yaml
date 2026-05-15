@@ -5,7 +5,7 @@ grl_tetris:
       domain: games
       verified: false
       description: Tetris in Gymnasium API style. Model emits one or more moves per turn.
-      value: Example gymnasium-style multi-step environment with batched actions per turn.
+      value: Multi-step Tetris environment
 grl_tetris_gymnasium_agent:
   responses_api_agents:
     gymnasium_agent:
