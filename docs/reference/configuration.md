@@ -11,7 +11,7 @@ Complete syntax and field specifications for NeMo Gym configuration files.
 ## File Locations
 
 | File | Location | Version Control |
-|------|----------|-----------------|
+|------|----------|---------------|
 | Server configs | `<server_type>/<implementation>/configs/*.yaml` | ✅ Committed |
 | env.yaml | Repository root (`./env.yaml`) | ❌ Gitignored (user creates) |
 
@@ -128,9 +128,20 @@ my_config_paths:
   - responses_api_models/openai_model/configs/openai_model.yaml
   - resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml
 
+# Optional: multi-node training
+use_absolute_ip: true           # Use absolute IP for multi-node setups (default: false)
+
 # Optional: validation behavior
 error_on_almost_servers: true   # Exit on invalid configs (default: true)
 ```
+
+### Multi-Node Configuration
+
+**`use_absolute_ip`** — Enable absolute IP addressing for multi-node distributed training.
+
+- **Default:** `false` (uses `127.0.0.1`)
+- **When to use:** Set to `true` for multi-node training where servers need to communicate across different machines
+- **Effect:** Uses the host's absolute IP address instead of localhost
 
 ---
 
