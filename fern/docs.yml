@@ -173,6 +173,8 @@ redirects:
     destination: "/nemo/gym/main"
   - source: "/nemo/gym/latest/get-started/pypi-install"
     destination: "/nemo/gym/main/get-started/installation"
+  - source: "/nemo/gym/latest/get-started"
+    destination: "/nemo/gym/main/get-started/installation"
   # Version alias: v0.2 → v0.2.1
   - source: "/nemo/gym/v0.2"
     destination: "/nemo/gym/v0.2.1"
