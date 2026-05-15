@@ -11,7 +11,7 @@ math_with_judge:
       should_use_judge: false
       domain: math
       verified: false
-      description: Claude Code Agent on OpenMathReasoning math dataset with math-verify and LLM-as-a-judge
+      description: Claude Code CLI on math tasks with math-verify and LLM-as-a-judge
       value: Evaluate model math capabilities in the Claude Code agent harness such as AIME25
 
 math_with_judge_claude_code_agent:
