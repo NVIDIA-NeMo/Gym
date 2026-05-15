@@ -131,10 +131,12 @@ redirects:
   - source: "/nemo/gym/tutorials/offline-training-w-rollouts.html"
     destination: "/nemo/gym/training-tutorials/offline-training-w-rollouts"
   # Renamed/moved pages within the Fern site
-  - source: "/nemo/gym/latest/get-started/detailed-setup"
-    destination: "/nemo/gym/latest/get-started/quickstart"
-  - source: "/nemo/gym/latest/get-started/rollout-collection"
-    destination: "/nemo/gym/latest/get-started/quickstart"
+  # `detailed-setup` and `rollout-collection` were consolidated into `quickstart`
+  # on `main`, but still exist on `latest` (sourced from v0.2.1, the current GA).
+  - source: "/nemo/gym/main/get-started/detailed-setup"
+    destination: "/nemo/gym/main/get-started/quickstart"
+  - source: "/nemo/gym/main/get-started/rollout-collection"
+    destination: "/nemo/gym/main/get-started/quickstart"
   - source: "/nemo/gym/latest/about/concepts/core-components"
     destination: "/nemo/gym/latest/about/core-components"
   - source: "/nemo/gym/latest/about/concepts/architecture"
