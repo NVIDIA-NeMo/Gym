@@ -26,7 +26,9 @@ from responses_api_agents.critpt_agent.app import (
     ModelServerRef,
     ResourcesServerRef,
     _extract_output_text,
+    _strip_thinking_blocks,
 )
+
 
 TURN2_PROMPT_FPATH = "benchmarks/critpt/prompts/turn2.yaml"
 
@@ -122,6 +124,27 @@ class TestHelpers:
     def test_extract_output_text_empty(self):
         assert _extract_output_text({"output": []}) == ""
 
+    def test_strip_think_block(self):
+        assert _strip_thinking_blocks("<think>reasoning here</think>Final Answer: 42") == "Final Answer: 42"
+
+    def test_strip_thinking_variant(self):
+        assert _strip_thinking_blocks("<thinking>blah</thinking>answer") == "answer"
+
+    def test_strip_multiline_block(self):
+        text = "<think>line 1\nline 2\nline 3</think>Final Answer: 42"
+        assert _strip_thinking_blocks(text) == "Final Answer: 42"
+
+    def test_strip_multiple_blocks(self):
+        text = "<think>step 1</think>middle\n<think>step 2</think>conclusion"
+        assert _strip_thinking_blocks(text) == "middle\nconclusion"
+
+    def test_strip_no_tags_unchanged(self):
+        assert _strip_thinking_blocks("Final Answer: 42") == "Final Answer: 42"
+
+    def test_strip_unclosed_left_intact(self):
+        text = "<think>partial reasoning"
+        assert _strip_thinking_blocks(text) == text
+
     def test_turn2_template_loaded_from_yaml(self):
         server = _make_server()
         template = "def solve():\n    return ???"
@@ -180,6 +203,42 @@ class TestApp:
         assert messages[2]["content"] == "The answer is 1.23"
         assert messages[3]["role"] == "user"
         assert "def solve():" in messages[3]["content"]
+
+    @pytest.mark.asyncio
+    async def test_run_strips_thinking_from_turn1_before_turn2(self):
+        server = _make_server()
+        turn1_with_think = {
+            **_MODEL_RESPONSE,
+            "output": [
+                {
+                    "id": "msg-id",
+                    "content": [
+                        {
+                            "annotations": [],
+                            "text": "<think>I need to compute this...</think>Final Answer: 1.23",
+                            "type": "output_text",
+                        }
+                    ],
+                    "role": "assistant",
+                    "status": "completed",
+                    "type": "message",
+                }
+            ],
+        }
+        server.server_client.post.side_effect = [
+            _mock_post_response({}),
+            _mock_post_response(turn1_with_think),
+            _mock_post_response(_MODEL_RESPONSE),
+            _mock_post_response(_VERIFY_RESPONSE),
+        ]
+
+        request_mock = MagicMock()
+        request_mock.cookies = {}
+        await server.run(request_mock, _make_run_body())
+
+        turn2_call = server.server_client.post.call_args_list[2]
+        messages = list(turn2_call.kwargs["json"].input)
+        assert messages[2]["content"] == "Final Answer: 1.23"  # think block stripped
 
     @pytest.mark.asyncio
     async def test_run_verify_called_with_problem_id(self):

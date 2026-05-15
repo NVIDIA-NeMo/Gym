@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,11 @@ from nemo_gym.server_utils import get_response_json, raise_for_status
 
 
 LOG = logging.getLogger(__name__)
+
+_THINK_BLOCK_PATTERN = re.compile(r"<think>.*?</think>|<thinking>.*?</thinking>", re.DOTALL)
+
+# Repo root: responses_api_agents/critpt_agent/app.py -> nemo-gym/
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
 class CritPtAgentConfig(BaseResponsesAPIAgentConfig):
@@ -50,7 +56,10 @@ class CritPtAgent(SimpleResponsesAPIAgent):
 
     def model_post_init(self, context: Any) -> None:
         super().model_post_init(context)
-        prompt_yaml = yaml.safe_load(Path(self.config.turn2_prompt_fpath).read_text())
+        path = Path(self.config.turn2_prompt_fpath)
+        if not path.is_absolute():
+            path = _REPO_ROOT / path
+        prompt_yaml = yaml.safe_load(path.read_text())
         self._turn2_user_template: str = prompt_yaml["user"]
 
     async def responses(
@@ -92,7 +101,9 @@ class CritPtAgent(SimpleResponsesAPIAgent):
         await raise_for_status(turn1_response)
         cookies = turn1_response.cookies
         turn1_json = await get_response_json(turn1_response)
-        turn1_text = _extract_output_text(turn1_json)
+        # Strip reasoning blocks: the Turn 2 user message asks the model not to reason again, so
+        # the Turn 2 assistant context should contain only the conclusion, not the thinking trace.
+        turn1_text = _strip_thinking_blocks(_extract_output_text(turn1_json))
 
         # Turn 2: populate code template using Turn 1 reasoning as context
         turn2_user_msg = self._turn2_user_template.format(code_template=body.code_template)
@@ -122,6 +133,10 @@ class CritPtAgent(SimpleResponsesAPIAgent):
         )
         await raise_for_status(verify_response)
         return CritPtAgentVerifyResponse.model_validate(await get_response_json(verify_response))
+
+
+def _strip_thinking_blocks(text: str) -> str:
+    return _THINK_BLOCK_PATTERN.sub("", text).strip()
 
 
 def _extract_output_text(response_json: dict) -> str:
