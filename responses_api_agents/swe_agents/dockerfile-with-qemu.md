@@ -24,5 +24,5 @@ Run
 docker run \
     --platform linux/arm64 \
     gitlab-master.nvidia.com:5005/nexus-team/nexusnest/container_with_qemu \
-    uname -m
+    apptainer run docker://swebench/sweb.eval.x86_64.astropy_1776_astropy-12907 uname -m
 ```
