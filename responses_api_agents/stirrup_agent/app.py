@@ -409,8 +409,22 @@ async def _run_stirrup_agent(
 
             # 6. Reference files
             if input_files_dir and Path(input_files_dir).is_dir():
-                ref_dest = task_dir / "reference_files"
-                shutil.copytree(input_files_dir, ref_dest, dirs_exist_ok=True)
+                # ``_download_reference_files`` writes each ``file_path`` from the
+                # dataset row directly under ``input_files_dir``. The GDPVal HF
+                # corpus prefixes every entry with ``reference_files/`` (matching
+                # the dataset's directory layout), so ``input_files_dir`` already
+                # contains a top-level ``reference_files/`` subdir. Copying into
+                # another ``task_dir/reference_files/`` produced double-nested
+                # ``task_dir/reference_files/reference_files/...`` which made
+                # comparison.py's non-recursive ``build_file_section`` see zero
+                # references. Merge contents directly when the prefix is present;
+                # otherwise fall back to wrapping in ``reference_files/`` for
+                # datasets that don't bake the prefix into the file paths.
+                src = Path(input_files_dir)
+                if (src / "reference_files").is_dir():
+                    shutil.copytree(src, task_dir, dirs_exist_ok=True)
+                else:
+                    shutil.copytree(src, task_dir / "reference_files", dirs_exist_ok=True)
 
             print(f"[stirrup] persisted task artifacts to {task_dir}", flush=True)
     finally:
