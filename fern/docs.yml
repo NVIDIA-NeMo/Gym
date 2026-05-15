@@ -182,6 +182,16 @@ redirects:
     destination: "/nemo/gym/v0.2.1"
   - source: "/nemo/gym/v0.2/:path*"
     destination: "/nemo/gym/v0.2.1/:path*"
+  # Legacy/no-prefix version slugs that pre-date the Fern `v` convention.
+  # 0.2.1 and 0.2.0 → pinned GA at v0.2.1.
+  - source: "/nemo/gym/0.2.1"
+    destination: "/nemo/gym/v0.2.1"
+  - source: "/nemo/gym/0.2.1/:path*"
+    destination: "/nemo/gym/v0.2.1/:path*"
+  - source: "/nemo/gym/0.2.0"
+    destination: "/nemo/gym/v0.2.1"
+  - source: "/nemo/gym/0.2.0/:path*"
+    destination: "/nemo/gym/v0.2.1/:path*"
   # README/blog links that pointed to Sphinx pages whose canonical was renamed in Fern
   - source: "/nemo/gym/latest/training-tutorials/unsloth-training"
     destination: "/nemo/gym/main/training-tutorials/unsloth"
