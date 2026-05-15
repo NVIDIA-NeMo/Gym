@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+import logging
 import re
 from copy import deepcopy
 from time import time
@@ -62,6 +63,9 @@ from nemo_gym.openai_utils import (
     TokenIDLogProbMixin,
 )
 from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class VLLMModelConfig(BaseResponsesAPIModelConfig):
