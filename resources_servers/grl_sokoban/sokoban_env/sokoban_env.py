@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Local Sokoban environment implementation for the NeMo Gym server.
+"""Local Sokoban environment implementation for NeMo Gym resources server.
 
 This module adapts the environment used in the GRL repository while keeping all
 runtime dependencies inside the Gym project. It relies on ``gym_sokoban`` for
@@ -35,6 +35,7 @@ import numpy as np
 
 # gym_sokoban==0.0.6 imports pkg_resources, which setuptools >=81 removed. Provide a
 # minimal shim backed by importlib.resources so the upstream import succeeds.
+# this is a workaround for now 
 if "pkg_resources" not in sys.modules:
     try:
         import pkg_resources  # noqa: F401
