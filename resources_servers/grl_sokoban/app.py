@@ -22,8 +22,8 @@ from pydantic import Field
 
 from nemo_gym.base_resources_server import BaseResourcesServerConfig
 from nemo_gym.openai_utils import NeMoGymResponse
-from resources_servers.gymnasium import GymnasiumServer, extract_text
 from resources_servers.grl_sokoban.sokoban_env import SokobanEnv
+from resources_servers.gymnasium import GymnasiumServer, extract_text
 
 
 DEFAULT_GRID_LOOKUP = {0: "#", 1: "_", 2: "O", 3: "√", 4: "X", 5: "P", 6: "S"}

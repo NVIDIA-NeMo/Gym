@@ -17,11 +17,11 @@ from fastapi.testclient import TestClient
 
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
-from resources_servers.gymnasium import EnvResetRequest
 from resources_servers.grl_sokoban.app import (
     GrlSokobanResourcesServer,
     GrlSokobanResourcesServerConfig,
 )
+from resources_servers.gymnasium import EnvResetRequest
 
 
 _RESET_CREATE_PARAMS = NeMoGymResponseCreateParamsNonStreaming(input="placeholder")

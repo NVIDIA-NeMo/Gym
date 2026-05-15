@@ -25,11 +25,29 @@ developed in collaboration with NVIDIA.
 from __future__ import annotations
 
 import random
+import sys
+import types
+from importlib import resources as _ir
 from typing import Any, Dict
 
 import gymnasium as gym
 import numpy as np
-from gym_sokoban.envs.sokoban_env import SokobanEnv as GymSokobanEnv
+
+# gym_sokoban==0.0.6 imports pkg_resources, which setuptools >=81 removed. Provide a
+# minimal shim backed by importlib.resources so the upstream import succeeds.
+if "pkg_resources" not in sys.modules:
+    try:
+        import pkg_resources  # noqa: F401
+    except ImportError:
+        _shim = types.ModuleType("pkg_resources")
+
+        def _resource_filename(package: str, resource: str) -> str:
+            return str(_ir.files(package).joinpath(resource))
+
+        _shim.resource_filename = _resource_filename
+        sys.modules["pkg_resources"] = _shim
+
+from gym_sokoban.envs.sokoban_env import SokobanEnv as GymSokobanEnv  # noqa: E402
 
 from .generation import generate_room
 
