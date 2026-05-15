@@ -4,8 +4,8 @@ reasoning_gym:
       entrypoint: app.py
       domain: knowledge
       verified: true
-      description: Claude Code CLI on reasoning_gym (algebra, arithmetic, logic, geometry and more)
-      value: Evaluate model math and reasoning capabilities in the Claude Code agent harness
+      description: Claude Code agent harness for reasoning gym tasks
+      value: Evaluate mode capabilities in the Claude Code agent harness
 
 reasoning_gym_claude_code_agent:
   responses_api_agents:
