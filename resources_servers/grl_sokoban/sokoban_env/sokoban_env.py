@@ -33,9 +33,10 @@ from typing import Any, Dict
 import gymnasium as gym
 import numpy as np
 
+
 # gym_sokoban==0.0.6 imports pkg_resources, which setuptools >=81 removed. Provide a
 # minimal shim backed by importlib.resources so the upstream import succeeds.
-# this is a workaround for now 
+# this is a workaround for now
 if "pkg_resources" not in sys.modules:
     try:
         import pkg_resources  # noqa: F401
