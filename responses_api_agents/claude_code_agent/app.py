@@ -34,7 +34,8 @@ from nemo_gym.base_responses_api_agent import (
     Body,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.config_types import ResourcesServerRef
+from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.global_config import get_first_server_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -203,10 +204,14 @@ def _extract_instruction(body_input) -> tuple[str, Optional[str]]:
 
 class ClaudeCodeAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
+    # When model_server is set, ANTHROPIC_BASE_URL is resolved from the Gym model
+    # server's URL (requires the server to expose POST /v1/messages, e.g. codex_model).
+    # When None, anthropic_base_url is used directly.
+    model_server: Optional[ModelServerRef] = None
     concurrency: int = 32
     model: str = "claude-sonnet-4-6"
     anthropic_api_key: str = ""  # pragma: allowlist secret
-    anthropic_base_url: Optional[str] = None  # set for local vLLM/Ollama endpoints
+    anthropic_base_url: Optional[str] = None
     max_turns: int = 30
     timeout: int = 300
     system_prompt: Optional[str] = None
@@ -239,14 +244,21 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         except Exception as exc:
             LOG.warning("could not determine claude-code version: %s", exc)
 
+    def _resolve_base_url(self) -> str:
+        if self.config.model_server:
+            cfg = get_first_server_config_dict(
+                self.server_client.global_config_dict,
+                self.config.model_server.name,
+            )
+            return self.server_client._build_server_base_url(cfg)
+        return self.config.anthropic_base_url or ""
+
     async def _run_claude_code(self, instruction: str) -> tuple[str, str]:
         """Run claude -p --output-format=stream-json and return (stdout, model_name)."""
-        if self.config.anthropic_base_url:
-            model = self.config.model
-        else:
-            model = self.config.model.split("/")[-1]
+        base_url = self._resolve_base_url()
+        # Keep full model name for local/custom endpoints; strip provider prefix for real Anthropic API.
+        model = self.config.model if base_url else self.config.model.split("/")[-1]
         api_key = self.config.anthropic_api_key
-        base_url = self.config.anthropic_base_url
 
         claude_config_dir = Path.home() / ".claude_code_agent" / uuid4().hex
         claude_config_dir.mkdir(parents=True)
