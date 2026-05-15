@@ -1,17 +1,17 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-# http://www.apache.org/licenses/LICENSE-2.0
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -24,9 +24,10 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputText,
 )
 from nemo_gym.server_utils import ServerClient
-from responses_api_agents.swe_agents.app import (
+from responses_api_agents.prorl_agent.app import (
     ModelServerRef,
     SWEBenchRunRequest,
+    SWEBenchVerifyRequest,
     SWEBenchVerifyResponse,
     SWEBenchWrapper,
     SWEBenchWrapperConfig,
@@ -34,38 +35,64 @@ from responses_api_agents.swe_agents.app import (
 
 
 class TestSWEBenchWrapperConfig:
-    def test_configuration(self) -> None:
-        """Test configuration options."""
+    def test_default_values(self) -> None:
+        """Test default configuration values."""
         config = SWEBenchWrapperConfig(
             host="localhost",
             port=9003,
-            name="test_swe_agent",
-            entrypoint="responses_api_agents/swe_agents",
-            agent_framework="swe_agent",
+            name="test_agent",
+            entrypoint="responses_api_agents/prorl_agent",
+            model_server=ModelServerRef(type="responses_api_models", name="test"),
+        )
+        assert config.agent_framework == "swe_agent"
+        assert config.agent_config is None
+        assert config.agent_tools_file is None
+        assert config.agent_max_turns == 100
+        assert config.swebench_tests_timeout == 1800
+        assert config.swebench_agent_timeout == 2700
+        assert config.concurrency == 256
+        assert config.openhands_setup_dir is None
+        assert config.swebench_setup_dir is None
+        assert config.r2e_gym_setup_dir is None
+        assert config.prorl_url == "http://localhost:8006"
+        assert config.dataset_path is None
+
+    def test_configuration(self) -> None:
+        """Test custom configuration options."""
+        config = SWEBenchWrapperConfig(
+            host="localhost",
+            port=9003,
+            name="test_prorl_agent",
+            entrypoint="responses_api_agents/prorl_agent",
+            agent_framework="prorl",
             agent_config="custom/config",
             agent_tools_file="tools.json",
             agent_max_turns=50,
             container_formatter=["docker://custom/{instance_id}"],
             swebench_tests_timeout=900,
+            swebench_agent_timeout=1800,
+            prorl_url="http://10.0.0.1:8006",
             model_server=ModelServerRef(
                 type="responses_api_models",
                 name="test_model",
             ),
         )
-        assert config.agent_framework == "swe_agent"
+        assert config.agent_framework == "prorl"
         assert config.agent_config == "custom/config"
         assert config.agent_tools_file == "tools.json"
         assert config.agent_max_turns == 50
         assert config.container_formatter == ["docker://custom/{instance_id}"]
         assert config.swebench_tests_timeout == 900
+        assert config.swebench_agent_timeout == 1800
+        assert config.prorl_url == "http://10.0.0.1:8006"
 
     def test_configuration_multiple_container_formatters(self) -> None:
         """Test configuration with multiple container_formatter paths."""
         config = SWEBenchWrapperConfig(
             host="localhost",
             port=9003,
-            name="test_swe_agent",
-            entrypoint="responses_api_agents/swe_agents",
+            name="test_prorl_agent",
+            entrypoint="responses_api_agents/prorl_agent",
             agent_framework="swe_agent",
             container_formatter=[
                 "docker://single/{instance_id}",
@@ -81,25 +108,6 @@ class TestSWEBenchWrapperConfig:
         assert config.container_formatter[0] == "docker://single/{instance_id}"
         assert config.container_formatter[1] == "docker://second/{instance_id}"
 
-    def test_default_values(self) -> None:
-        """Test default configuration values."""
-        config = SWEBenchWrapperConfig(
-            host="localhost",
-            port=9003,
-            name="test_agent",
-            entrypoint="responses_api_agents/swe_agents",
-            model_server=ModelServerRef(type="responses_api_models", name="test"),
-        )
-        assert config.agent_framework == "swe_agent"
-        assert config.agent_config is None
-        assert config.agent_tools_file is None
-        assert config.agent_max_turns == 100
-        assert config.swebench_tests_timeout == 1800
-        assert config.concurrency == 256
-        assert config.openhands_setup_dir is None
-        assert config.swebench_setup_dir is None
-        assert config.r2e_gym_setup_dir is None
-
 
 class TestSWEBenchWrapper:
     """Tests for SWEBenchWrapper class."""
@@ -109,8 +117,8 @@ class TestSWEBenchWrapper:
         return SWEBenchWrapperConfig(
             host="localhost",
             port=9003,
-            name="test_swe_agent",
-            entrypoint="responses_api_agents/swe_agents",
+            name="test_prorl_agent",
+            entrypoint="responses_api_agents/prorl_agent",
             agent_framework=agent_framework,
             container_formatter=["docker://custom/{instance_id}"],
             swebench_tests_timeout=900,
@@ -118,9 +126,9 @@ class TestSWEBenchWrapper:
             concurrency=1,
         )
 
-    @patch("responses_api_agents.swe_agents.app.setup_openhands_environment")
-    @patch("responses_api_agents.swe_agents.app.setup_swebench_environment")
-    @patch("responses_api_agents.swe_agents.app.setup_r2e_gym_environment")
+    @patch("responses_api_agents.prorl_agent.app.setup_openhands_environment")
+    @patch("responses_api_agents.prorl_agent.app.setup_swebench_environment")
+    @patch("responses_api_agents.prorl_agent.app.setup_r2e_gym_environment")
     def test_model_post_init_swe_agent(self, mock_r2e, mock_swebench, mock_openhands) -> None:
         """Test model_post_init for swe_agent framework."""
         mock_swebench.return_value = Path("/mock/swebench")
@@ -137,9 +145,9 @@ class TestSWEBenchWrapper:
         assert wrapper.config.run_session_id is not None
         assert wrapper.sem is not None
 
-    @patch("responses_api_agents.swe_agents.app.setup_openhands_environment")
-    @patch("responses_api_agents.swe_agents.app.setup_swebench_environment")
-    @patch("responses_api_agents.swe_agents.app.setup_r2e_gym_environment")
+    @patch("responses_api_agents.prorl_agent.app.setup_openhands_environment")
+    @patch("responses_api_agents.prorl_agent.app.setup_swebench_environment")
+    @patch("responses_api_agents.prorl_agent.app.setup_r2e_gym_environment")
     def test_model_post_init_openhands(self, mock_r2e, mock_swebench, mock_openhands) -> None:
         """Test model_post_init for openhands framework."""
         mock_openhands.return_value = Path("/mock/openhands")
@@ -157,15 +165,31 @@ class TestSWEBenchWrapper:
         assert wrapper.config.r2e_gym_setup_dir == Path("/mock/r2e")
         assert wrapper.config.run_session_id is not None
 
+    @patch("responses_api_agents.prorl_agent.app.initialize_prorl_server")
+    @patch("responses_api_agents.prorl_agent.app.get_model_endpoint")
+    def test_model_post_init_prorl(self, mock_get_endpoint, mock_init_prorl) -> None:
+        """Test model_post_init for prorl framework."""
+        mock_get_endpoint.return_value = "http://localhost:8000/v1"
+
+        config = self._create_config("prorl")
+        config.prorl_url = "http://10.0.0.1:8006"
+        wrapper = SWEBenchWrapper(config=config, server_client=MagicMock(spec=ServerClient))
+
+        mock_get_endpoint.assert_called_once_with("test_model")
+        mock_init_prorl.assert_called_once_with("http://10.0.0.1:8006", "http://localhost:8000/v1")
+        assert wrapper.sem is not None
+        # prorl path does not set run_session_id
+        assert wrapper.config.run_session_id is None
+
     @pytest.mark.asyncio
-    @patch("responses_api_agents.swe_agents.app.setup_openhands_environment")
-    @patch("responses_api_agents.swe_agents.app.setup_swebench_environment")
-    @patch("responses_api_agents.swe_agents.app.setup_r2e_gym_environment")
-    @patch("responses_api_agents.swe_agents.app.runner_ray_remote")
-    @patch("responses_api_agents.swe_agents.app.extract_problem_info")
-    @patch("responses_api_agents.swe_agents.app.get_model_endpoint")
-    @patch("responses_api_agents.swe_agents.app.convert_tools_to_function_format")
-    @patch("responses_api_agents.swe_agents.app.convert_trajectory_to_output_items")
+    @patch("responses_api_agents.prorl_agent.app.setup_openhands_environment")
+    @patch("responses_api_agents.prorl_agent.app.setup_swebench_environment")
+    @patch("responses_api_agents.prorl_agent.app.setup_r2e_gym_environment")
+    @patch("responses_api_agents.prorl_agent.app.runner_ray_remote")
+    @patch("responses_api_agents.prorl_agent.app.extract_problem_info")
+    @patch("responses_api_agents.prorl_agent.app.get_model_endpoint")
+    @patch("responses_api_agents.prorl_agent.app.convert_tools_to_function_format")
+    @patch("responses_api_agents.prorl_agent.app.convert_trajectory_to_output_items")
     async def test_responses_success_with_trajectory(
         self,
         mock_convert_traj,
@@ -243,12 +267,12 @@ class TestSWEBenchWrapper:
         mock_ray_remote.remote.assert_called_once()
 
     @pytest.mark.asyncio
-    @patch("responses_api_agents.swe_agents.app.setup_openhands_environment")
-    @patch("responses_api_agents.swe_agents.app.setup_swebench_environment")
-    @patch("responses_api_agents.swe_agents.app.setup_r2e_gym_environment")
-    @patch("responses_api_agents.swe_agents.app.runner_ray_remote")
-    @patch("responses_api_agents.swe_agents.app.extract_problem_info")
-    @patch("responses_api_agents.swe_agents.app.get_model_endpoint")
+    @patch("responses_api_agents.prorl_agent.app.setup_openhands_environment")
+    @patch("responses_api_agents.prorl_agent.app.setup_swebench_environment")
+    @patch("responses_api_agents.prorl_agent.app.setup_r2e_gym_environment")
+    @patch("responses_api_agents.prorl_agent.app.runner_ray_remote")
+    @patch("responses_api_agents.prorl_agent.app.extract_problem_info")
+    @patch("responses_api_agents.prorl_agent.app.get_model_endpoint")
     async def test_responses_success_no_trajectory(
         self, mock_get_endpoint, mock_extract_info, mock_ray_remote, mock_r2e, mock_swebench, mock_openhands
     ) -> None:
@@ -302,12 +326,12 @@ class TestSWEBenchWrapper:
         assert response.output[0].role == "assistant"
 
     @pytest.mark.asyncio
-    @patch("responses_api_agents.swe_agents.app.setup_openhands_environment")
-    @patch("responses_api_agents.swe_agents.app.setup_swebench_environment")
-    @patch("responses_api_agents.swe_agents.app.setup_r2e_gym_environment")
-    @patch("responses_api_agents.swe_agents.app.runner_ray_remote")
-    @patch("responses_api_agents.swe_agents.app.extract_problem_info")
-    @patch("responses_api_agents.swe_agents.app.get_model_endpoint")
+    @patch("responses_api_agents.prorl_agent.app.setup_openhands_environment")
+    @patch("responses_api_agents.prorl_agent.app.setup_swebench_environment")
+    @patch("responses_api_agents.prorl_agent.app.setup_r2e_gym_environment")
+    @patch("responses_api_agents.prorl_agent.app.runner_ray_remote")
+    @patch("responses_api_agents.prorl_agent.app.extract_problem_info")
+    @patch("responses_api_agents.prorl_agent.app.get_model_endpoint")
     async def test_responses_exception_handling(
         self, mock_get_endpoint, mock_extract_info, mock_ray_remote, mock_r2e, mock_swebench, mock_openhands
     ) -> None:
@@ -352,14 +376,12 @@ class TestSWEBenchWrapper:
         assert response.tools == []
 
     @pytest.mark.asyncio
-    @patch("responses_api_agents.swe_agents.app.setup_openhands_environment")
-    @patch("responses_api_agents.swe_agents.app.setup_swebench_environment")
-    @patch("responses_api_agents.swe_agents.app.setup_r2e_gym_environment")
-    @patch("responses_api_agents.swe_agents.app.extract_input_messages_from_trajectory")
+    @patch("responses_api_agents.prorl_agent.app.setup_openhands_environment")
+    @patch("responses_api_agents.prorl_agent.app.setup_swebench_environment")
+    @patch("responses_api_agents.prorl_agent.app.setup_r2e_gym_environment")
+    @patch("responses_api_agents.prorl_agent.app.extract_input_messages_from_trajectory")
     async def test_run_resolved(self, mock_extract_input, mock_r2e, mock_swebench, mock_openhands) -> None:
         """Test run method with resolved problem."""
-        import json
-
         mock_swebench.return_value = Path("/mock/swebench")
         mock_r2e.return_value = Path("/mock/r2e")
 
@@ -425,10 +447,10 @@ class TestSWEBenchWrapper:
             mock_responses.assert_called_once()
 
     @pytest.mark.asyncio
-    @patch("responses_api_agents.swe_agents.app.setup_openhands_environment")
-    @patch("responses_api_agents.swe_agents.app.setup_swebench_environment")
-    @patch("responses_api_agents.swe_agents.app.setup_r2e_gym_environment")
-    @patch("responses_api_agents.swe_agents.app.extract_input_messages_from_trajectory")
+    @patch("responses_api_agents.prorl_agent.app.setup_openhands_environment")
+    @patch("responses_api_agents.prorl_agent.app.setup_swebench_environment")
+    @patch("responses_api_agents.prorl_agent.app.setup_r2e_gym_environment")
+    @patch("responses_api_agents.prorl_agent.app.extract_input_messages_from_trajectory")
     async def test_run_not_resolved(self, mock_extract_input, mock_r2e, mock_swebench, mock_openhands) -> None:
         """Test run method with unresolved problem."""
         mock_swebench.return_value = Path("/mock/swebench")
@@ -492,13 +514,187 @@ class TestSWEBenchWrapper:
             assert result.patch_exists == 1.0
             assert result.patch_successfully_applied == 0.0
 
+    @pytest.mark.asyncio
+    @patch("responses_api_agents.prorl_agent.app.initialize_prorl_server")
+    @patch("responses_api_agents.prorl_agent.app.get_model_endpoint")
+    @patch("responses_api_agents.prorl_agent.app.call_prorl_process", new_callable=AsyncMock)
+    @patch("responses_api_agents.prorl_agent.app.convert_prorl_messages_to_output_items")
+    @patch("responses_api_agents.prorl_agent.app.convert_tools_to_function_format")
+    @patch("responses_api_agents.prorl_agent.app.extract_input_messages_from_trajectory")
+    async def test_run_with_prorl_resolved(
+        self,
+        mock_extract_input,
+        mock_convert_tools,
+        mock_convert_msgs,
+        mock_call_prorl,
+        mock_get_endpoint,
+        mock_init_prorl,
+    ) -> None:
+        """Test _run_with_prorl method with resolved instance."""
+        mock_get_endpoint.return_value = "http://localhost:8000/v1"
+
+        output_msg = NeMoGymResponseOutputMessage(
+            id="msg-output",
+            content=[NeMoGymResponseOutputText(type="output_text", text="Fixed", annotations=[])],
+            role="assistant",
+            status="completed",
+            type="message",
+        )
+        mock_convert_msgs.return_value = [output_msg]
+        mock_convert_tools.return_value = []
+        mock_extract_input.return_value = ([], [output_msg])
+
+        mock_call_prorl.return_value = {
+            "messages": [{"role": "assistant", "content": "Fixed"}],
+            "tools": [],
+            "resolved": True,
+            "success": True,
+            "git_patch": "diff --git a/file.py b/file.py\n--- a\n+++ b",
+            "end_properly": True,
+            "filter": False,
+            "critical_error": None,
+            "error": None,
+        }
+
+        config = self._create_config("prorl")
+        config.prorl_url = "http://10.0.0.1:8006"
+        wrapper = SWEBenchWrapper(config=config, server_client=MagicMock(spec=ServerClient))
+
+        instance_dict = {"instance_id": "test-instance", "repo": "test/repo"}
+        body = SWEBenchRunRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+                model="test-model",
+                input=[],
+                temperature=0.6,
+                top_p=0.95,
+                max_output_tokens=16384,
+                metadata={
+                    "instance_id": "test-instance",
+                    "instance_dict": json.dumps(instance_dict),
+                },
+            )
+        )
+
+        result = await wrapper.run(body)
+
+        assert isinstance(result, SWEBenchVerifyResponse)
+        assert result.reward == 1.0
+        assert result.resolved == 1.0
+        assert result.patch_exists == 1.0
+        assert result.patch_successfully_applied == 1.0
+        assert result.swebench_metrics["resolved"] is True
+        assert result.swebench_metrics["git_patch"] is not None
+        mock_call_prorl.assert_called_once()
+
+    @pytest.mark.asyncio
+    @patch("responses_api_agents.prorl_agent.app.initialize_prorl_server")
+    @patch("responses_api_agents.prorl_agent.app.get_model_endpoint")
+    @patch("responses_api_agents.prorl_agent.app.call_prorl_process", new_callable=AsyncMock)
+    @patch("responses_api_agents.prorl_agent.app.convert_prorl_messages_to_output_items")
+    @patch("responses_api_agents.prorl_agent.app.convert_tools_to_function_format")
+    @patch("responses_api_agents.prorl_agent.app.extract_input_messages_from_trajectory")
+    async def test_run_with_prorl_not_resolved(
+        self,
+        mock_extract_input,
+        mock_convert_tools,
+        mock_convert_msgs,
+        mock_call_prorl,
+        mock_get_endpoint,
+        mock_init_prorl,
+    ) -> None:
+        """Test _run_with_prorl method with unresolved instance."""
+        mock_get_endpoint.return_value = "http://localhost:8000/v1"
+
+        output_msg = NeMoGymResponseOutputMessage(
+            id="msg-output",
+            content=[NeMoGymResponseOutputText(type="output_text", text="Failed", annotations=[])],
+            role="assistant",
+            status="completed",
+            type="message",
+        )
+        mock_convert_msgs.return_value = [output_msg]
+        mock_convert_tools.return_value = []
+        mock_extract_input.return_value = ([], [output_msg])
+
+        mock_call_prorl.return_value = {
+            "messages": [{"role": "assistant", "content": "Failed"}],
+            "tools": [],
+            "resolved": False,
+            "success": False,
+            "git_patch": None,
+            "end_properly": True,
+            "filter": False,
+            "critical_error": None,
+            "error": None,
+        }
+
+        config = self._create_config("prorl")
+        config.prorl_url = "http://10.0.0.1:8006"
+        wrapper = SWEBenchWrapper(config=config, server_client=MagicMock(spec=ServerClient))
+
+        instance_dict = {"instance_id": "test-instance", "repo": "test/repo"}
+        body = SWEBenchRunRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+                model="test-model",
+                input=[],
+                metadata={
+                    "instance_id": "test-instance",
+                    "instance_dict": json.dumps(instance_dict),
+                },
+            )
+        )
+
+        result = await wrapper.run(body)
+
+        assert result.reward == 0.0
+        assert result.resolved == 0.0
+        assert result.patch_exists == 0.0
+        assert result.patch_successfully_applied == 0.0
+
+    @pytest.mark.asyncio
+    @patch("responses_api_agents.prorl_agent.app.initialize_prorl_server")
+    @patch("responses_api_agents.prorl_agent.app.get_model_endpoint")
+    @patch("responses_api_agents.prorl_agent.app.call_prorl_process", new_callable=AsyncMock)
+    async def test_run_with_prorl_exception_handling(
+        self, mock_call_prorl, mock_get_endpoint, mock_init_prorl
+    ) -> None:
+        """Test run method for prorl framework handles exceptions gracefully."""
+        mock_get_endpoint.return_value = "http://localhost:8000/v1"
+        mock_call_prorl.side_effect = RuntimeError("ProRL server unavailable")
+
+        config = self._create_config("prorl")
+        config.prorl_url = "http://10.0.0.1:8006"
+        wrapper = SWEBenchWrapper(config=config, server_client=MagicMock(spec=ServerClient))
+
+        instance_dict = {"instance_id": "test-instance", "repo": "test/repo"}
+        body = SWEBenchRunRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+                model="test-model",
+                input=[],
+                metadata={
+                    "instance_id": "test-instance",
+                    "instance_dict": json.dumps(instance_dict),
+                },
+            )
+        )
+
+        result = await wrapper.run(body)
+
+        assert isinstance(result, SWEBenchVerifyResponse)
+        assert result.reward == 0.0
+        assert result.resolved == 0.0
+        assert result.patch_exists == 0.0
+        assert result.patch_successfully_applied == 0.0
+        assert "ProRL server unavailable" in result.swebench_metrics["error"]
+        assert result.metadata["agent_framework"] == "prorl"
+
 
 class TestRunnerRayRemote:
     """Tests for the runner_ray_remote function."""
 
     def test_runner_ray_remote_exists(self) -> None:
         """Test that runner_ray_remote is a ray remote function."""
-        from responses_api_agents.swe_agents.app import runner_ray_remote
+        from responses_api_agents.prorl_agent.app import runner_ray_remote
 
         assert hasattr(runner_ray_remote, "remote")
 
@@ -509,6 +705,14 @@ class TestRequestResponseModels:
     def test_swebench_run_request_extra_fields(self) -> None:
         """Test SWEBenchRunRequest allows extra fields."""
         assert SWEBenchRunRequest.model_config.get("extra") == "allow"
+
+    def test_swebench_verify_request_extra_fields(self) -> None:
+        """Test SWEBenchVerifyRequest allows extra fields."""
+        assert SWEBenchVerifyRequest.model_config.get("extra") == "allow"
+
+    def test_swebench_verify_response_extra_fields(self) -> None:
+        """Test SWEBenchVerifyResponse allows extra fields."""
+        assert SWEBenchVerifyResponse.model_config.get("extra") == "allow"
 
     def test_swebench_verify_response_fields(self) -> None:
         """Test SWEBenchVerifyResponse has correct fields."""

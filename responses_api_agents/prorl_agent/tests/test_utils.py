@@ -1,11 +1,10 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-# http://www.apache.org/licenses/LICENSE-2.0
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -24,7 +23,7 @@ from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from responses_api_agents.swe_agents.utils import (
+from responses_api_agents.prorl_agent.utils import (
     _extract_text_from_message,
     _get_workspace_root,
     _resolve_setup_directory,
@@ -275,8 +274,8 @@ class TestExtractDataFromTrajectory:
 class TestGetModelEndpoint:
     def test_uses_server_config(self) -> None:
         with (
-            patch("responses_api_agents.swe_agents.utils.ServerClient.load_from_global_config") as mock_load,
-            patch("responses_api_agents.swe_agents.utils.get_first_server_config_dict") as mock_get_first,
+            patch("responses_api_agents.prorl_agent.utils.ServerClient.load_from_global_config") as mock_load,
+            patch("responses_api_agents.prorl_agent.utils.get_first_server_config_dict") as mock_get_first,
         ):
             mock_load.return_value = SimpleNamespace(global_config_dict={"servers": []})
             mock_get_first.return_value = {"host": "localhost", "port": 9999}
@@ -286,7 +285,7 @@ class TestGetModelEndpoint:
 
 class TestResolveSetupDirectory:
     def test_uses_workspace_root(self) -> None:
-        with patch("responses_api_agents.swe_agents.utils._get_workspace_root", return_value=Path("/tmp/workspace")):
+        with patch("responses_api_agents.prorl_agent.utils._get_workspace_root", return_value=Path("/tmp/workspace")):
             resolved = _resolve_setup_directory(None, "subdir")
             assert resolved == Path("/tmp/workspace/subdir").resolve()
 
@@ -430,6 +429,10 @@ class TestConvertToolsToFunctionFormat:
         assert len(tools) == 1
         assert tools[0].name == "bash"
 
+    def test_empty_tools(self) -> None:
+        tools = convert_tools_to_function_format([])
+        assert tools == []
+
 
 class TestGetWorkspaceRoot:
     def test_returns_path(self) -> None:
@@ -440,7 +443,7 @@ class TestGetWorkspaceRoot:
 
 class TestSetupSwebenchEnvironment:
     def test_already_exists(self) -> None:
-        from responses_api_agents.swe_agents.utils import setup_swebench_environment
+        from responses_api_agents.prorl_agent.utils import setup_swebench_environment
 
         with tempfile.TemporaryDirectory() as tmpdir:
             setup_dir = Path(tmpdir)
@@ -456,7 +459,7 @@ class TestSetupSwebenchEnvironment:
 
 class TestSetupR2eGymEnvironment:
     def test_already_exists(self) -> None:
-        from responses_api_agents.swe_agents.utils import setup_r2e_gym_environment
+        from responses_api_agents.prorl_agent.utils import setup_r2e_gym_environment
 
         with tempfile.TemporaryDirectory() as tmpdir:
             setup_dir = Path(tmpdir)
@@ -472,7 +475,7 @@ class TestSetupR2eGymEnvironment:
 
 class TestSetupOpenhandsEnvironment:
     def test_already_exists(self) -> None:
-        from responses_api_agents.swe_agents.utils import setup_openhands_environment
+        from responses_api_agents.prorl_agent.utils import setup_openhands_environment
 
         with tempfile.TemporaryDirectory() as tmpdir:
             setup_dir = Path(tmpdir)
@@ -488,7 +491,7 @@ class TestSetupOpenhandsEnvironment:
 class TestRunSwebenchEvaluation:
     @pytest.mark.asyncio
     async def test_success(self) -> None:
-        from responses_api_agents.swe_agents.utils import run_swebench_evaluation
+        from responses_api_agents.prorl_agent.utils import run_swebench_evaluation
 
         with tempfile.TemporaryDirectory() as tmpdir:
             problem_info = {
@@ -509,7 +512,7 @@ class TestRunSwebenchEvaluation:
             )
             mock_result = {"trajectory": [{"role": "assistant", "content": "Done"}], "tools": []}
 
-            with patch("responses_api_agents.swe_agents.utils.RunOpenHandsAgent") as mock_agent_class:
+            with patch("responses_api_agents.prorl_agent.utils.RunOpenHandsAgent") as mock_agent_class:
                 mock_agent = mock_agent_class.return_value
                 mock_agent.process_single_datapoint = AsyncMock(return_value=mock_result)
 
