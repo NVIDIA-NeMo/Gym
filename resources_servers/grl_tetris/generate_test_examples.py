@@ -38,36 +38,26 @@ def generate_tetris_example(game_id: int, seed: int, dim_board: List[int], box_t
         "dim_board": dim_board,
         "box_type": box_type,
         "responses_create_params": {
+            "reasoning": {"effort": "medium"},
             "input": [
                 {
-                    "role": "developer",
-                    "content": "You are a Tetris-playing assistant. IMPORTANT: First call the `step` tool with an empty array [] to see the initial board state and active piece. Example: step({\"actions\": []}). The tool will return an ASCII board using '_' for empty cells, '#' for locked blocks, and 'X' for the active piece. Then continue calling `step` with valid actions (Left, Right, Down) until you clear a line or the board locks out. At the end, respond with <answer>Action1 || Action2 || ...</answer> summarizing all moves you made.",
+                    "role": "system",
+                    "content": (
+                        "You are a Tetris-playing assistant. You will receive a board observation after reset "
+                        "and after every move. Symbols: _=empty, #=settled block, X=falling piece. Reply with "
+                        "one or more moves per turn using <action>Left</action>, <action>Right</action>, or "
+                        "<action>Down</action>. Multiple action tags in a single response are applied in order."
+                    ),
                 },
                 {
                     "role": "user",
-                    "content": "Call the step tool to see the board, then play Tetris to clear at least one line if possible.",
+                    "content": "Play Tetris to clear at least one line if possible.",
                 },
             ],
-            "tools": [
-                {
-                    "name": "step",
-                    "type": "function",
-                    "description": "Execute Tetris moves sequentially. Call with empty array [] to see current board state without moving.",
-                    "strict": True,
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "actions": {
-                                "type": "array",
-                                "items": {"type": "string"},
-                                "description": "Sequence of actions, e.g. ['Left', 'Down']. Use empty array [] to view current state.",
-                            }
-                        },
-                        "required": ["actions"],
-                        "additionalProperties": False,
-                    },
-                }
-            ],
+        },
+        "agent_ref": {
+            "type": "responses_api_agents",
+            "name": "grl_tetris_gymnasium_agent",
         },
     }
 
