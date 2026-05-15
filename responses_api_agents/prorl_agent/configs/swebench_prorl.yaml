@@ -12,7 +12,7 @@ prorl_agents:
     prorl_agents:
       entrypoint: app.py
 
-      # Agent framework
+      # Agent framework: prorl | swe_agent | openhands
       agent_framework: prorl
 
       # ProRL-Agent-Server URL.

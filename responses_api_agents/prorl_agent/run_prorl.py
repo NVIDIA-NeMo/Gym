@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-ProRL-Agent-Server integration for swe_agents.
+ProRL-Agent-Server integration for prorl_agent.
 
 Handles input/output conversion between Gym's SWEBenchRunRequest and
 ProRL's /process endpoint.

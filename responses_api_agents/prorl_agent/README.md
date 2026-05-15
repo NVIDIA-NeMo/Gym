@@ -54,7 +54,7 @@ policy_base_url: http://<NODE_IP>:8100/v1
 
 ---
 
-## Step 3: Start Gym swe_agents Service
+## Step 3: Start Gym prorl agent Service
 
 Open a new terminal and run from the NeMo-Gym root directory:
 
@@ -67,7 +67,7 @@ ng_run \
 
 > **Note:** `RAY_TMPDIR=/tmp` avoids Ray AF_UNIX socket path exceeding the 107-byte limit on Lustre long paths.
 >
-> When Gym swe_agents starts, it automatically calls ProRL-Agent-Server's `/start` and `/add_llm_server` endpoints to complete registration.
+> When Gym prorl agent starts, it automatically calls ProRL-Agent-Server's `/start` and `/add_llm_server` endpoints to complete registration.
 
 ---
 
@@ -81,14 +81,15 @@ Open a new terminal.
 ng_status
 ```
 
-Ensure both `swe_agents` and `policy_model` show healthy.
+Ensure both `prorl agent` and `policy_model` show healthy.
 
 ### 4.2 Run a Single Sample
 
 ```bash
 ng_collect_rollouts \
-    +agent_name=swe_agents \
-    +input_jsonl_fpath=data/example_single.jsonl \
+    +agent_name=prorl_agent \
+    +limit=1 \
+    +input_jsonl_fpath=data/example.jsonl \
     +output_jsonl_fpath=results/prorl_single.jsonl \
     +num_repeats=1 \
     "+responses_create_params={temperature: 0.0}"
