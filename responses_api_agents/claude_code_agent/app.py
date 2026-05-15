@@ -51,6 +51,7 @@ from nemo_gym.openai_utils import (
 from nemo_gym.server_utils import get_response_json, raise_for_status
 from responses_api_agents.claude_code_agent.setup_claude_code import ensure_claude_code
 
+
 LOG = logging.getLogger(__name__)
 
 
@@ -263,13 +264,17 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         claude_config_dir = Path.home() / ".claude_code_agent" / uuid4().hex
         claude_config_dir.mkdir(parents=True)
         try:
-            (claude_config_dir / "settings.json").write_text(json.dumps({
-                "env": {
-                    "CLAUDE_CODE_ATTRIBUTION_HEADER": "0",
-                    "CLAUDE_CODE_ENABLE_TELEMETRY": "0",
-                    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
-                }
-            }))
+            (claude_config_dir / "settings.json").write_text(
+                json.dumps(
+                    {
+                        "env": {
+                            "CLAUDE_CODE_ATTRIBUTION_HEADER": "0",
+                            "CLAUDE_CODE_ENABLE_TELEMETRY": "0",
+                            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+                        }
+                    }
+                )
+            )
 
             env = {
                 **os.environ,
@@ -287,13 +292,17 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 env["ANTHROPIC_AUTH_TOKEN"] = api_key or "local"
 
             cmd = [
-                "claude", "-p",
-                "--output-format", "stream-json",
+                "claude",
+                "-p",
+                "--output-format",
+                "stream-json",
                 "--verbose",
                 "--dangerously-skip-permissions",
                 "--bare",
-                "--max-turns", str(self.config.max_turns),
-                "--model", model,
+                "--max-turns",
+                str(self.config.max_turns),
+                "--model",
+                model,
             ]
             if self.config.system_prompt:
                 cmd += ["--append-system-prompt", self.config.system_prompt]

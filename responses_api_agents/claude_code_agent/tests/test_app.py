@@ -98,7 +98,9 @@ class TestParseStreamJson:
         return _event("assistant", message={"content": content, "usage": {"input_tokens": 10, "output_tokens": 5}})
 
     def _user_tool_result(self, tool_use_id: str, result: str) -> str:
-        return _event("user", message={"content": [{"type": "tool_result", "tool_use_id": tool_use_id, "content": result}]})
+        return _event(
+            "user", message={"content": [{"type": "tool_result", "tool_use_id": tool_use_id, "content": result}]}
+        )
 
     def test_empty(self) -> None:
         items, usage = parse_stream_json("")
@@ -115,10 +117,12 @@ class TestParseStreamJson:
         assert usage["output_tokens"] == 5
 
     def test_thinking_prepended(self) -> None:
-        line = self._assistant([
-            {"type": "thinking", "thinking": "let me reason"},
-            {"type": "text", "text": "answer"},
-        ])
+        line = self._assistant(
+            [
+                {"type": "thinking", "thinking": "let me reason"},
+                {"type": "text", "text": "answer"},
+            ]
+        )
         items, _ = parse_stream_json(line)
         assert len(items) == 1
         text = items[0].content[0].text
@@ -139,9 +143,11 @@ class TestParseStreamJson:
         assert "<think>" not in items[1].content[0].text
 
     def test_tool_call_and_result(self) -> None:
-        assistant_line = self._assistant([
-            {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "ls"}},
-        ])
+        assistant_line = self._assistant(
+            [
+                {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "ls"}},
+            ]
+        )
         user_line = self._user_tool_result("t1", "file.txt\n")
         items, _ = parse_stream_json(f"{assistant_line}\n{user_line}")
         assert len(items) == 2
@@ -151,10 +157,12 @@ class TestParseStreamJson:
         assert "file.txt" in items[1].output
 
     def test_text_then_tool_call(self) -> None:
-        assistant_line = self._assistant([
-            {"type": "text", "text": "running bash"},
-            {"type": "tool_use", "id": "t2", "name": "Bash", "input": {"command": "pwd"}},
-        ])
+        assistant_line = self._assistant(
+            [
+                {"type": "text", "text": "running bash"},
+                {"type": "tool_use", "id": "t2", "name": "Bash", "input": {"command": "pwd"}},
+            ]
+        )
         user_line = self._user_tool_result("t2", "/home/user\n")
         items, _ = parse_stream_json(f"{assistant_line}\n{user_line}")
         assert len(items) == 3

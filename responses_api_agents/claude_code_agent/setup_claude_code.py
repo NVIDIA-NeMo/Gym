@@ -21,6 +21,7 @@ import tarfile
 import urllib.request
 from pathlib import Path
 
+
 LOG = logging.getLogger(__name__)
 
 _CLAUDE_PKG = "@anthropic-ai/claude-code"
@@ -84,7 +85,8 @@ def ensure_claude_code(version: str | None = None) -> None:
     if not shutil.which("claude"):
         npm_bin_dir = subprocess.run(
             [shutil.which("npm") or "npm", "bin", "-g"],
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
         ).stdout.strip()
         if npm_bin_dir and Path(npm_bin_dir).is_dir():
             os.environ["PATH"] = npm_bin_dir + os.pathsep + os.environ.get("PATH", "")
