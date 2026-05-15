@@ -1,5 +1,7 @@
 # NeMo Gym
 
+<!-- test: verifying copy-pr-bot trigger — will be closed shortly -->
+
 **[Requirements](#-requirements)** • **[Quick Start](#-quick-start)** • **[Available Environments](#-available-environments)** • **[Documentation & Resources](#-documentation--resources)** • **[Community & Support](#-community--support)** • **[Citations](#-citations)**
 
 NeMo Gym is a library for evaluating and improving models and agents using environments. NeMo Gym provides infrastructure to develop environments, scalably run evaluation and training, and a collection of popular benchmarks and training environments.
