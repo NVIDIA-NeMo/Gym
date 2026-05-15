@@ -4,6 +4,11 @@ A unified Responses-API wrapper that runs LLM-driven agents against real-world s
 
 The entrypoint is [`app.py`](app.py), which exposes a `SWEBenchWrapper` (a `SimpleResponsesAPIAgent`) over HTTP. Each `responses` request takes one dataset instance, runs an agent inside an Apptainer container, runs the matching evaluation harness in a second container, and returns the trajectory plus reward.
 
+The wrapper supports two agent harnesses, selected by the `agent_framework` config field:
+
+- **`openhands`** (default) — runs [nv-OpenHands](https://github.com/sdevare-nv/nv-OpenHands), with a custom NeMo-Gym-aware LLM client baked into the fork.
+- **`opencode`** — runs [opencode](https://opencode.ai)'s real `processor.ts` agentic loop, with a custom `LanguageModelV3` provider (`@opencode-ai/nemo-gym`) that swaps the LLM transport while keeping opencode's tools, prompts, and parsing intact. See [opencode integration](#opencode-integration) below.
+
 ---
 
 ## Table of Contents
@@ -12,6 +17,7 @@ The entrypoint is [`app.py`](app.py), which exposes a `SWEBenchWrapper` (a `Simp
 - [Agent flow per instance](#agent-flow-per-instance)
 - [Supported datasets and harnesses](#supported-datasets-and-harnesses)
 - [OpenHands integration](#openhands-integration)
+- [opencode integration](#opencode-integration)
 - [Prompt and agent-class diversity](#prompt-and-agent-class-diversity)
 - [Tool-name diversity](#tool-name-diversity)
 - [Configuration reference](#configuration-reference)
@@ -30,13 +36,18 @@ The entrypoint is [`app.py`](app.py), which exposes a `SWEBenchWrapper` (a `Simp
                  ┌──────────────────────────────────────────────┐
    client ──▶    │  SWEBenchWrapper  (Responses API server)     │
    (one          │   • _setup_params: build per-instance config │
-    instance)    │   • _build_apptainer_command: bind mounts    │
+    instance)    │     ↳ switches OpenHandsHarnessProcessor /   │
+                 │       OpenCodeHarnessProcessor on            │
+                 │       cfg.agent_framework                    │
+                 │   • _build_apptainer_command: bind mounts    │
                  │   • runner_ray_remote: runs on Ray worker    │
                  └────────────────┬─────────────────────────────┘
                                   │ Ray
                                   ▼
                  ┌──────────────────────────────────────────────┐
                  │ RunOpenHandsAgent.process_single_datapoint   │
+                 │   (used for both harnesses; the in-SIF       │
+                 │   command differs by agent_framework)        │
                  │                                              │
                  │   spawn agent container ──┐                  │
                  │                           │ in parallel      │
@@ -51,7 +62,7 @@ The entrypoint is [`app.py`](app.py), which exposes a `SWEBenchWrapper` (a `Simp
 
 Two Apptainer containers are launched concurrently per instance:
 
-1. **Agent container** — runs OpenHands inside the dataset's task SIF (the one that contains the repo at the right base commit). The agent edits files and writes a unified diff.
+1. **Agent container** — runs the selected agent harness (OpenHands or opencode) inside the dataset's task SIF (the one that contains the repo at the right base commit). The agent edits files and writes a unified diff.
 2. **Eval container** — also a SIF for the same instance. It busy-waits on the predictions file written by the agent, then runs the dataset's local evaluation harness against the patch.
 
 The two containers are launched at the same time so the eval container's spin-up cost (often tens of seconds for SWE-bench's harness) is hidden behind the agent's run time. The eval container blocks on `until [ -f <predictions> ]; do sleep 5; done` until the agent finishes.
@@ -116,6 +127,123 @@ Key details:
 - **`cryptography<43` shim** — for `nv-internal-1` and `swe-bench-ext`, a `cryptography<43` wheel is installed into a temp dir and prepended to `PYTHONPATH`. This works around openssl/cryptography ABI mismatches in older base images.
 - **R2E-Gym test hiding** — when running the *agent* (not eval) under R2E-Gym, the wrapper deletes `/r2e_tests` and `/run_tests.sh` from `/`, `/root`, and `/testbed` so the agent can't peek at the held-out tests.
 - **Trajectories** — after the agent finishes, the wrapper copies `output.jsonl` and the latest `llm_completions/*/*.json` out of OpenHands' per-run eval output directory and into `<persistent_dir>/trajectories/<instance_id>/`, then deletes the OpenHands-side dir to keep the shared setup tree clean.
+
+---
+
+## opencode integration
+
+When `agent_framework: opencode`, the agent container runs [opencode](https://opencode.ai)'s real `processor.ts` agentic loop instead of OpenHands. The design rule is **swap the transport, keep the loop**: opencode's tools (`bash`, `edit`, `read`, `glob`, `grep`, `write`, `apply_patch`), prompts, tool-call parsing, and event machinery are unchanged. Only the LLM transport is swapped for a NeMo-Gym-aware provider that threads RL token IDs through.
+
+### What runs where
+
+```
+gym _setup_params  ──▶  OpenCodeHarnessProcessor.get_run_command   (host side)
+                            │
+                            ▼  apptainer exec
+   inside SIF:  evaluation/benchmarks/swe_bench/scripts/run_infer.sh
+                            │
+                            ▼
+                    bun packages/opencode/src/bench/cli.ts  …  (subprocess)
+                            │  spawns
+                            ▼
+                    bun packages/opencode/src/index.ts run "<task>"
+                            │  loads .opencode/opencode.jsonc → registers
+                            │  the `nemo-gym` provider, the `swe-bench`
+                            │  agent, sets compaction.auto = false
+                            ▼
+                    opencode's real processor.ts loop   ← unchanged
+                            │  every model call goes through
+                            ▼
+                    NemoGymLanguageModel  (LanguageModelV3, doStream)
+                            │  POST /v1/chat/completions (non-streaming)
+                            │  → synthesizes a single-shot stream of
+                            │    text-start/delta/end + tool-input-* +
+                            │    tool-call + finish parts
+                            │  → dumps llm_completions/<id>/<turn>.json
+                            ▼
+                    NeMo Gym vllm model server
+```
+
+### Key files (in the [nv-opencode fork](https://github.com/sdevare-nv/nv-opencode))
+
+- `packages/opencode/src/provider/sdk/nemo-gym/language-model.ts` — `LanguageModelV3` impl. Strips token-ID fields from older assistant messages on input (mirrors `nemo_gym_client.py:85-97`); captures `prompt_token_ids` / `generation_token_ids` / `generation_log_probs` from the response and threads them into `providerMetadata.nemo-gym`.
+- `packages/opencode/src/provider/sdk/nemo-gym/index.ts` — `createNemoGym(opts)` factory.
+- `packages/opencode/src/provider/provider.ts` — registers `@opencode-ai/nemo-gym` in `BUNDLED_PROVIDERS` so opencode's normal config path picks it up.
+- `packages/opencode/src/bench/cli.ts` — per-instance bench driver. Writes a temporary `.opencode/opencode.jsonc` (registers the `nemo-gym` provider with the right `baseURL`, `completionsDir`, `instanceId`; defines a `swe-bench` agent with the SWE-bench tool subset; sets `compaction.auto: false`), then spawns `bun .../src/index.ts run "<task>" --agent swe-bench --model nemo-gym/<model> --format json` against the workspace dir. On exit it captures `git diff` and writes `output.jsonl` in the openhands-compatible shape.
+- `evaluation/benchmarks/swe_bench/scripts/run_infer.sh` — in-SIF entry script invoked by the gym harness.
+
+### Token-ID guarantees (RL contract)
+
+The bench loop is non-streaming end-to-end. Per turn:
+
+1. **Input dedup** — assistant messages from earlier turns have `prompt_token_ids` / `generation_token_ids` / `generation_log_probs` stripped before being sent. Only the most recent assistant message keeps those fields, so the server can verify continuity.
+2. **Capture** — the response's `choices[0].message.{prompt_token_ids,generation_token_ids,generation_log_probs}` are extracted and put on `providerMetadata.nemo-gym`.
+3. **Persist before tool dispatch** — the provider writes `<output_dir>/<instance_id>/bench_run/llm_completions/<instance_id>/<turn>.json` *before* the synthesized stream emits its `finish` part, so a downstream tool crash cannot lose this turn's token IDs.
+4. **Contiguity invariant** — for any two consecutive turns, `turn[N+1].response.prompt_token_ids` should prefix-match `turn[N].response.prompt_token_ids ++ turn[N].response.generation_token_ids` (with tool-result tokens appended in between as the server tokenizes them). This is the regression check for "contiguous and unbroken".
+
+### Trajectory format
+
+Per-turn JSON files match the openhands shape exactly:
+
+```jsonc
+{
+  "messages":  [ /* full message history at this turn */ ],
+  "response":  { /* OpenAI ChatCompletion JSON */ },
+  "provider_specific_fields": {
+    "prompt_token_ids":     [...],
+    "generation_token_ids": [...],
+    "generation_log_probs": [...]
+  },
+  "kwargs":   { "tools": [...], "model": "...", ... },
+  "timestamp": 1715000000.0
+}
+```
+
+Final `output.jsonl` matches what `RunOpenHandsAgent.process_single_datapoint` already reads:
+
+```jsonc
+{
+  "instance_id": "...",
+  "test_result": { "git_patch": "diff --git ..." },
+  "metadata":    { "llm_config": { "model": "..." } },
+  "metrics":     { "bench_run_time": 412.3, "opencode_exit_code": 0 },
+  "error":       null
+}
+```
+
+This means gym's existing `get_openhands_trajectory_from_completions` and patch-extraction logic work without any changes when `agent_framework: opencode`.
+
+### Setup
+
+`OpenCodeHarnessProcessor.setup` runs once per workspace. It:
+
+1. Installs Bun locally at `swe_opencode_setup/bun/` (idempotent; tries the official installer first, falls back to a direct release tarball).
+2. `git clone $agent_framework_repo $opencode_dir` and `git checkout $agent_framework_commit`.
+3. `bun install --frozen-lockfile` inside the cloned tree.
+
+Both `swe_opencode_setup/opencode/` and `swe_opencode_setup/bun/` are bind-mounted read-only into every agent container at `/opencode_setup/opencode` and `/opencode_setup/bun`.
+
+### Termination
+
+There is **no explicit `finish` tool** in the opencode bench path — by design. The trajectory ends via one of four signals:
+
+1. **Natural idle.** The model emits an assistant turn with no tool calls. opencode's `processor.ts` finishes that step, the session transitions to `status.idle`, the `opencode run` subprocess exits 0, our `bench/cli.ts` `finally` block runs `git diff` against the workspace, and writes `output.jsonl`. This is the same idle signal opencode's user-facing `cli/cmd/run.ts` uses (`if event.type === "session.status" && status.type === "idle" → break`).
+2. **Max-turns hit.** The agent config sets `steps: agent_max_turns`. When opencode exceeds it the session errors → idle → subprocess exits (often non-zero). `finally` still captures `git diff`; `output.jsonl.error` becomes `"opencode_exit_<N>"`.
+3. **Crash / unhandled error inside opencode.** Same as max-turns — `finally` captures the patch, `error` is set, partial `llm_completions/<id>/*.json` files written by the provider before the crash are still on disk.
+4. **SIF wall-clock timeout** — the gym `timeout --signal=TERM --kill-after=30 ...` wrapper used by the openhands path applies here too; `_openhands_dir_copy_from_host` glob-copies whatever completions landed.
+
+**Trade-off vs OpenHands.** OpenHands' `CodeActAgent` ships a `finish` tool that the model is trained to call when it's done; the agent stops on that call rather than running to max-turns. opencode has no such tool, so SWE-bench-tuned models that learned the openhands finish-semantic may keep iterating until they hit max-turns even after the issue is fixed. The accepted mitigation for now is to set a generous `agent_max_turns`, lean on a strong system prompt ("stop emitting tool calls when the issue is resolved"), and rely on `git diff` capturing the (already-correct) patch regardless of whether the model gracefully stopped or hit the wall. Adding a finish-tool plugin to the nv-opencode fork is a follow-up if the trained-finish gap meaningfully hurts pass-rate.
+
+### Failure handling
+
+- **Per-turn HTTP / parse errors** — the provider re-raises; prior turns are already persisted.
+- **Tool errors** — caught by opencode's processor.ts as usual; appended as tool-result messages.
+- **Loop crash / opencode subprocess exit ≠ 0** — covered by the *Termination* section above.
+- **SIF wall-clock timeout** — covered by the *Termination* section above.
+
+### Compaction (deferred)
+
+`compaction.auto: false` is hard-coded into the bench config so the loop runs without summarization for now — the user-facing requirement is "main agent loop in opencode without compaction" while keeping the design flexible to enable it later via opencode's existing `compaction.ts`. Token-ID continuity over a compaction event is a future RL-design problem.
 
 ---
 
@@ -184,10 +312,11 @@ The full schema lives in `SWEBenchWrapperConfig` (and the per-override `AgentPro
 
 | Field                              | Default                                           | Purpose                                                                 |
 |------------------------------------|---------------------------------------------------|-------------------------------------------------------------------------|
+| `agent_framework`                  | `openhands`                                       | Which agent harness drives the rollout: `openhands` or `opencode`. Switches both the in-SIF runtime mounted (OpenHands vs opencode + Bun) and the `BaseDatasetHarnessProcessor` selected in `_setup_params`. |
 | `agent_framework_repo`             | OpenHands official                                | Fork to clone for the agent runtime.                                    |
 | `agent_framework_commit`           | `HEAD`                                            | Commit to pin.                                                          |
-| `agent_max_turns`                  | `100`                                             | Max OpenHands iterations.                                               |
-| `agent_config`                     | `null`                                            | Path to the OpenHands TOML (`configs/oh_config.toml`).                  |
+| `agent_max_turns`                  | `100`                                             | Max agent iterations (OpenHands) / max turns the bench loop will spin (opencode). |
+| `agent_config`                     | `null`                                            | Path to the per-harness model config (`configs/oh_config.toml` for OpenHands; opencode builds the config inline in `app.py`). |
 | `agent_tools_file`                 | `null`                                            | (SWE-agent only) JSON tool list in OpenAI format.                       |
 | `container_formatter`              | `docker://swebench/sweb.eval.x86_64.{instance_id}`| Path template (or list of templates) for SIFs. Supports the `_1776_` / `_s_` rewrites and fuzzy glob fallbacks. |
 | `swebench_agent_timeout`           | `2700` (45 min)                                   | Per-instance agent wall-clock budget.                                   |
@@ -208,6 +337,7 @@ Bundled YAML configs:
 - `configs/swebench_openhands_training.yaml` — same shape as above but tuned for training.
 - `configs/swebench_swe_agent.yaml` — alternative SWE-agent path (uses `agent_tools_file`).
 - `configs/swebench_multi_tools.yaml` — full 15-way prompt × agent-class × tool-name bundle.
+- `configs/swebench_opencode.yaml` — opencode harness (`agent_framework: opencode`), pinned fork + commit.
 
 ---
 
@@ -258,6 +388,10 @@ responses_api_models/vllm_model/configs/vllm_model.yaml"
 
 # Or full prompt × agent-class × tool-name diversity
 config_paths="responses_api_agents/swe_agents/configs/swebench_multi_tools.yaml,\
+responses_api_models/vllm_model/configs/vllm_model.yaml"
+
+# Or opencode harness (real opencode processor.ts loop, NeMo-Gym LLM transport)
+config_paths="responses_api_agents/swe_agents/configs/swebench_opencode.yaml,\
 responses_api_models/vllm_model/configs/vllm_model.yaml"
 
 ng_run "+config_paths=[$config_paths]" \
