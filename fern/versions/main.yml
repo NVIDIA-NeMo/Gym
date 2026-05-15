@@ -9,10 +9,6 @@ tabs:
 navigation:
   - tab: docs
     layout:
-      - section: "Documentation"
-        contents:
-          - page: "Home"
-            path: ./latest/pages/index.mdx
       - folder: ./latest/pages/about
         title: "About"
         title-source: frontmatter
