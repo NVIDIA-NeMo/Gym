@@ -156,8 +156,5 @@ class GrlSokobanResourcesServer(GymnasiumServer):
         return action_id
 
 
-GrlSokobanEnv = GrlSokobanResourcesServer
-
-
 if __name__ == "__main__":
     GrlSokobanResourcesServer.run_webserver()
