@@ -5,7 +5,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 # Install qemu
 RUN apt-get update \
-    && apt-get install -y qemu-system qemu-user qemu-user-static \
+    && apt-get install -y qemu-system qemu-user qemu-user-static binfmt-support \
     && rm -rf /var/lib/apt/lists/*
 
 # Verify installation during build
