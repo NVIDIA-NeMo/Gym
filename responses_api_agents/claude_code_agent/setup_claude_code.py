@@ -13,15 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Auto-install the Claude Code CLI if it is not already on PATH.
-
-Strategy (tried in order):
-  1. Already on PATH → done.
-  2. ~/.local/bin/claude exists → add to PATH.
-  3. npm is on PATH → npm install -g @anthropic-ai/claude-code.
-  4. No npm: download a pre-built Node.js binary into .claude_node/, then install.
-"""
-
 import logging
 import os
 import shutil
@@ -70,7 +61,7 @@ def ensure_claude_code(version: str | None = None) -> None:
     if shutil.which("claude"):
         return
 
-    # Check ~/.local/bin (official installer puts it there)
+    # Check ~/.local/bin
     local_bin = Path.home() / ".local" / "bin"
     if (local_bin / "claude").is_file():
         os.environ["PATH"] = str(local_bin) + os.pathsep + os.environ.get("PATH", "")
