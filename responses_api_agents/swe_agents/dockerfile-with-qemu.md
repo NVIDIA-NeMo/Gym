@@ -1,4 +1,7 @@
 ```bash
+docker buildx create --use --name multiarch
+docker buildx inspect --bootstrap
+
 docker buildx build \
   --progress=plain \
   --platform linux/arm64 \
