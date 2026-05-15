@@ -291,8 +291,11 @@ class TestConvertToPdfNormalization:
 
         def _run(cmd, *_a, **_kw):
             captured.append(cmd)
-            # libreoffice would write the PDF to the original outdir using the input stem.
-            (src.with_suffix(".pdf")).write_bytes(b"%PDF-1.4 fake\n")
+            # libreoffice writes <--outdir>/<input_stem>.pdf — convert_to_pdf
+            # now stages into a tempdir and moves the PDF back.
+            outdir = Path(cmd[cmd.index("--outdir") + 1])
+            input_arg = Path(cmd[-1])
+            (outdir / (input_arg.stem + ".pdf")).write_bytes(b"%PDF-1.4 fake\n")
             return _Completed()
 
         monkeypatch.setattr(subprocess, "run", _run)
@@ -300,12 +303,14 @@ class TestConvertToPdfNormalization:
         assert ok is True
         assert "(after ns0 normalization)" in msg
         # The input arg passed to libreoffice should NOT be the original file: it must come
-        # from the gdpval-norm- tempdir, but with the same basename so output stem is preserved.
+        # from the gdpval-stage- tempdir, but with the same basename so output stem is preserved.
         assert len(captured) == 1
         input_arg = captured[0][-1]
         assert input_arg.endswith("/src.docx")
-        assert "/gdpval-norm-" in input_arg
+        assert "/gdpval-stage-" in input_arg
         assert input_arg != str(src)
+        # PDF should land at the caller's expected location after stage→move.
+        assert src.with_suffix(".pdf").exists()
 
     def test_calls_libreoffice_with_original_when_not_ns0(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -335,3 +340,40 @@ class TestConvertToPdfNormalization:
         assert ok is True
         assert "(after ns0 normalization)" not in msg
         assert captured[0][-1] == str(src)
+
+    def test_stages_when_path_has_whitespace(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        # GDPVal HF filenames such as ``Population v2.xlsx`` make LibreOffice's
+        # batch-convert mode silently drop the input; ``convert_to_pdf`` must
+        # stage to a tempdir with a sanitized basename and move the PDF back.
+        src = _make_zip(
+            tmp_path / "Population v2.xlsx",
+            {
+                "[Content_Types].xml": DEFAULT_NS_CONTENT_TYPES,
+                "_rels/.rels": DEFAULT_NS_RELS,
+                "word/document.xml": DOCUMENT_XML,
+            },
+        )
+        captured: list[list[str]] = []
+
+        class _Completed:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        def _run(cmd, *_a, **_kw):
+            captured.append(cmd)
+            outdir = Path(cmd[cmd.index("--outdir") + 1])
+            input_arg = Path(cmd[-1])
+            (outdir / (input_arg.stem + ".pdf")).write_bytes(b"%PDF-1.4 fake\n")
+            return _Completed()
+
+        monkeypatch.setattr(subprocess, "run", _run)
+        path, ok, msg = pcv.convert_to_pdf(src)
+        assert ok is True
+        assert len(captured) == 1
+        input_arg = captured[0][-1]
+        assert " " not in Path(input_arg).name
+        assert Path(input_arg).name == "Population_v2.xlsx"
+        assert "/gdpval-stage-" in input_arg
+        # PDF must end up next to the original with the original stem.
+        assert (tmp_path / "Population v2.pdf").exists()
