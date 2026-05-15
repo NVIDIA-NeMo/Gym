@@ -5,7 +5,7 @@ reasoning_gym:
       domain: knowledge
       verified: true
       description: Claude Code agent harness for reasoning gym tasks
-      value: Evaluate mode capabilities in the Claude Code agent harness
+      value: Evaluate model capabilities in the Claude Code agent harness
 
 reasoning_gym_claude_code_agent:
   responses_api_agents:
