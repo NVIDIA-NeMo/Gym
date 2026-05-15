@@ -69,6 +69,7 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     api_key: str
     model: str
     return_token_id_information: bool
+    max_input_tokens: Optional[int] = None
 
     uses_reasoning_parser: bool
     replace_developer_role_with_system: bool = False
