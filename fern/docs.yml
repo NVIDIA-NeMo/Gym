@@ -126,10 +126,11 @@ redirects:
   - source: "/nemo/gym/tutorials/offline-training-w-rollouts.html"
     destination: "/nemo/gym/training-tutorials/offline-training-w-rollouts"
   # Renamed/moved pages within the Fern site
-  # `detailed-setup` and `rollout-collection` were consolidated into `quickstart`
-  # on `main`, but still exist on `latest` (sourced from v0.2.1, the current GA).
+  # `detailed-setup` → `installation` (closest equivalent on main);
+  # `rollout-collection` → `quickstart` (folded into the quickstart flow).
+  # Both still exist on `latest` (sourced from v0.2.1, the current GA).
   - source: "/nemo/gym/main/get-started/detailed-setup"
-    destination: "/nemo/gym/main/get-started/quickstart"
+    destination: "/nemo/gym/main/get-started/installation"
   - source: "/nemo/gym/main/get-started/rollout-collection"
     destination: "/nemo/gym/main/get-started/quickstart"
   - source: "/nemo/gym/latest/about/concepts/core-components"
@@ -152,9 +153,10 @@ redirects:
     destination: "/nemo/gym/main/environment-tutorials/real-world-environment/generating-training-data"
   - source: "/nemo/gym/latest/environment-tutorials/real-world-implementation"
     destination: "/nemo/gym/main/environment-tutorials/real-world-environment/resources-server-implementation"
-  # Flatten /latest/get-started consolidation directly to quickstart (skip the 2-hop chain)
+  # Flatten /latest/get-started consolidation in one hop:
+  # detailed-setup → installation, rollout-collection → quickstart
   - source: "/nemo/gym/latest/get-started/detailed-setup"
-    destination: "/nemo/gym/main/get-started/quickstart"
+    destination: "/nemo/gym/main/get-started/installation"
   - source: "/nemo/gym/latest/get-started/rollout-collection"
     destination: "/nemo/gym/main/get-started/quickstart"
   # Pages that only existed under v0.2.1's structure (no /main/ equivalent at the same path)
