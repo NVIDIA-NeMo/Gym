@@ -206,7 +206,7 @@ def _extract_instruction(body_input) -> tuple[str, Optional[str]]:
 class ClaudeCodeAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     # When model_server is set, ANTHROPIC_BASE_URL is resolved from the Gym model
-    # server's URL (requires the server to expose POST /v1/messages, e.g. codex_model).
+    # server's URL (requires the server to expose POST /v1/messages. None is pushed yet).
     # When None, anthropic_base_url is used directly.
     model_server: Optional[ModelServerRef] = None
     concurrency: int = 32
