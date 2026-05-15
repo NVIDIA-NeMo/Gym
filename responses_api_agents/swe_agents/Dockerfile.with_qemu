@@ -4,12 +4,12 @@ FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Install qemu
-RUN apt-get update && \
-    apt-get install -y \
+RUN apt-get update \
+    && apt-get install -y \
       qemu-system \
       qemu-user \
-      qemu-user-static && \
-    rm -rf /var/lib/apt/lists/*
+      qemu-user-static \
+    && rm -rf /var/lib/apt/lists/*
 
 # Verify installation during build
 RUN qemu-system-x86_64 --version && \
