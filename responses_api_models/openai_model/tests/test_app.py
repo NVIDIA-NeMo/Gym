@@ -12,8 +12,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
+from contextlib import nullcontext
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
@@ -26,7 +29,7 @@ from responses_api_models.openai_model.app import (
 
 
 class TestApp:
-    def _setup_server(self):
+    def _setup_server(self, max_concurrent_requests=None):
         config = SimpleModelServerConfig(
             host="0.0.0.0",
             port=8081,
@@ -35,6 +38,7 @@ class TestApp:
             openai_model="dummy_model",
             entrypoint="",
             name="",
+            max_concurrent_requests=max_concurrent_requests,
         )
         return SimpleModelServer(config=config, server_client=MagicMock(spec=ServerClient))
 
@@ -151,3 +155,26 @@ class TestApp:
 
         server._client.create_response.assert_any_await(input="hello", model="dummy_model")
         server._client.create_response.assert_any_await(input="hello", model="override_model")
+
+    def test_semaphore_disabled_by_default(self) -> None:
+        server = self._setup_server()
+        assert isinstance(server._semaphore, type(nullcontext()))
+
+    @pytest.mark.asyncio
+    async def test_semaphore_caps_concurrency(self) -> None:
+        server = self._setup_server(max_concurrent_requests=2)
+        assert isinstance(server._semaphore, asyncio.Semaphore)
+
+        in_flight = 0
+        peak = 0
+
+        async def worker() -> None:
+            nonlocal in_flight, peak
+            async with server._semaphore:
+                in_flight += 1
+                peak = max(peak, in_flight)
+                await asyncio.sleep(0.01)
+                in_flight -= 1
+
+        await asyncio.gather(*(worker() for _ in range(8)))
+        assert peak == 2
