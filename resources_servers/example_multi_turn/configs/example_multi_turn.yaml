@@ -10,7 +10,7 @@ example_multi_turn_gymnasium_agent:
   responses_api_agents:
     gymnasium_agent:
       entrypoint: app.py
-      env_server:
+      resources_server:
         type: resources_servers
         name: example_multi_turn
       model_server:
