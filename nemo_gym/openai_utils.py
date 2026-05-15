@@ -489,7 +489,9 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
             },
             "_internal": self.internal,
         }
+        return await self._request_with_retry(**request_kwargs)
 
+    async def _request_with_retry(self, **request_kwargs: Dict) -> ClientResponse:
         max_num_tries = MAX_NUM_TRIES
         tries = 0
         while tries < max_num_tries:
