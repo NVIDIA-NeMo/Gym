@@ -14,6 +14,11 @@ docker buildx build \
   -t gitlab-master.nvidia.com:5005/nexus-team/nexusnest/container_with_qemu .
 ```
 
+Pull one apptainer
+```bash
+apptainer pull docker://swebench/sweb.eval.x86_64.astropy_1776_astropy-12907
+```
+
 Allow linux/arm64 run on x86
 ```bash
 docker run --privileged --rm tonistiigi/binfmt --install all
@@ -24,5 +29,6 @@ Run
 docker run \
     --platform linux/arm64 \
     gitlab-master.nvidia.com:5005/nexus-team/nexusnest/container_with_qemu \
-    apptainer run docker://swebench/sweb.eval.x86_64.astropy_1776_astropy-12907 uname -m
+    --mount type=bind,src=$(pwd),dst=/workdir \
+    apptainer run /workdir/sweb.eval.x86_64.astropy_1776_astropy-12907_latest.sif uname -m
 ```
