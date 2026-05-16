@@ -409,7 +409,24 @@ def initialize_ray() -> None:
 
     global_config_dict = get_global_config_dict()
     ray_head_node_address = global_config_dict.get(RAY_HEAD_NODE_ADDRESS_KEY_NAME)
-    ray_init_kwargs = dict(ignore_reinit_error=True)
+    # Forward a small, explicit allowlist of env vars into the runtime_env so
+    # actors spawned from here (e.g. EnrootKernelServer) inherit them. A bare
+    # `ray.init(address=...)` registers a new driver context with empty
+    # env_vars and drops everything at the .remote() boundary; forwarding
+    # the *full* environ instead leaks venv-/Python-specific paths
+    # (PYTHONPATH, VIRTUAL_ENV, etc.) into actors that run a different
+    # python interpreter (the aviary venv vs. /opt/nemo_rl_venv), which has
+    # been observed to hang actor startup. Keep this allowlist tight: add
+    # vars here only when a hypotest/Gym module reads them at runtime.
+    _FORWARDED_ENV_VARS = (
+        "KERNEL_SERVER_STARTUP_TIMEOUT",
+        "SANDBOX_BRINGUP_MAX_CONCURRENT",
+    )
+    forwarded_env = {k: environ[k] for k in _FORWARDED_ENV_VARS if k in environ}
+    ray_init_kwargs = dict(
+        ignore_reinit_error=True,
+        runtime_env={"env_vars": forwarded_env},
+    )
 
     if ray_head_node_address:
         print(f"Connecting to Ray cluster at specified address: {ray_head_node_address}")

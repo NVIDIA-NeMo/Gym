@@ -17,7 +17,7 @@ from typing import Any, Union
 from unittest.mock import AsyncMock, MagicMock
 
 from fastapi.testclient import TestClient
-from pytest import MonkeyPatch, mark
+from pytest import MonkeyPatch, mark, raises
 
 import nemo_gym.server_utils
 from nemo_gym import PARENT_DIR
@@ -658,6 +658,79 @@ PARAMETERIZE_DATA = [
         ),
     ),
 ]
+
+
+class TestVLLMModelConfig:
+    def _base_kwargs(self) -> dict:
+        return {
+            "host": "0.0.0.0",
+            "port": 8081,
+            "api_key": "dummy_key",  # pragma: allowlist secret
+            "model": "dummy_model",
+            "entrypoint": "",
+            "name": "",
+            "return_token_id_information": False,
+            "uses_reasoning_parser": False,
+        }
+
+    def test_base_url_string_keeps_existing_single_client_behavior(self) -> None:
+        cfg = VLLMModelConfig(
+            **self._base_kwargs(),
+            base_url="http://api.openai.com/v1",
+        )
+
+        assert cfg.base_url == ["http://api.openai.com/v1"]
+        assert cfg.base_url_indices is None
+
+    def test_base_url_indices_select_subset(self) -> None:
+        cfg = VLLMModelConfig(
+            **self._base_kwargs(),
+            base_url=[
+                "http://api.openai.com/v0",
+                "http://api.openai.com/v1",
+                "http://api.openai.com/v2",
+                "http://api.openai.com/v3",
+            ],
+            base_url_indices=[1, 3],
+        )
+        server = VLLMModel(config=cfg, server_client=MagicMock(spec=ServerClient))
+
+        assert cfg.base_url == [
+            "http://api.openai.com/v1",
+            "http://api.openai.com/v3",
+        ]
+        assert len(server._clients) == 2
+
+    def test_base_url_indices_must_be_non_empty_when_set(self) -> None:
+        with raises(ValueError, match="base_url_indices must be non-empty"):
+            VLLMModelConfig(
+                **self._base_kwargs(),
+                base_url=["http://api.openai.com/v0"],
+                base_url_indices=[],
+            )
+
+    def test_base_url_indices_must_not_duplicate_entries(self) -> None:
+        with raises(ValueError, match="base_url_indices must not contain duplicates"):
+            VLLMModelConfig(
+                **self._base_kwargs(),
+                base_url=["http://api.openai.com/v0", "http://api.openai.com/v1"],
+                base_url_indices=[0, 0],
+            )
+
+    def test_base_url_indices_must_be_in_range(self) -> None:
+        with raises(ValueError, match="out-of-range index 2"):
+            VLLMModelConfig(
+                **self._base_kwargs(),
+                base_url=["http://api.openai.com/v0", "http://api.openai.com/v1"],
+                base_url_indices=[2],
+            )
+
+        with raises(ValueError, match="out-of-range index -1"):
+            VLLMModelConfig(
+                **self._base_kwargs(),
+                base_url=["http://api.openai.com/v0", "http://api.openai.com/v1"],
+                base_url_indices=[-1],
+            )
 
 
 class TestApp:

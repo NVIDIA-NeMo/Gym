@@ -14,6 +14,7 @@
 # limitations under the License.
 import base64
 import json
+import logging
 import os
 import re
 from copy import deepcopy
@@ -66,8 +67,19 @@ from nemo_gym.openai_utils import (
 from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
 
 
+logger = logging.getLogger(__name__)
+
+
 class VLLMModelConfig(BaseResponsesAPIModelConfig):
     base_url: Union[str, List[str]]
+    base_url_indices: Optional[List[int]] = None
+    """Optional zero-based subset of ``base_url`` entries to use.
+
+    This is intended for NeMo-RL async-vLLM jobs where ``base_url`` is the list
+    of DP HTTP servers. Leaving it unset preserves the current all-endpoints
+    behavior; setting it lets configs dedicate disjoint endpoint pools to
+    different Gym model-server instances.
+    """
     api_key: str
     model: str
     return_token_id_information: bool
@@ -97,11 +109,32 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     def model_post_init(self, context):
         if isinstance(self.base_url, str):
             self.base_url = [self.base_url]
+        if self.base_url_indices is not None:
+            if not self.base_url_indices:
+                raise ValueError("base_url_indices must be non-empty when set")
+            if len(set(self.base_url_indices)) != len(self.base_url_indices):
+                raise ValueError("base_url_indices must not contain duplicates")
+
+            selected_base_urls = []
+            for idx in self.base_url_indices:
+                if idx < 0 or idx >= len(self.base_url):
+                    raise ValueError(
+                        f"base_url_indices contains out-of-range index {idx}; "
+                        f"base_url has {len(self.base_url)} entries"
+                    )
+                selected_base_urls.append(self.base_url[idx])
+            self.base_url = selected_base_urls
         return super().model_post_init(context)
 
 
 class VLLMModel(SimpleResponsesAPIModel):
     config: VLLMModelConfig
+
+    def setup_webserver(self):
+        app = super().setup_webserver()
+        app.post("/v1/tokenize")(self.tokenize)
+        app.post("/tokenize")(self.tokenize)
+        return app
 
     def get_converter(self) -> "VLLMConverter":
         """Return the converter used for Responses API <-> Chat Completions mapping.
@@ -117,6 +150,13 @@ class VLLMModel(SimpleResponsesAPIModel):
         return super().model_post_init(context)
 
     def _post_init(self) -> None:
+        if self.config.base_url_indices is not None:
+            logger.warning(
+                "VLLM model server %s using base_url_indices=%s selected_url_count=%d",
+                self.config.name,
+                self.config.base_url_indices,
+                len(self.config.base_url),
+            )
         self._clients = [
             NeMoGymAsyncOpenAI(
                 base_url=base_url,
@@ -128,6 +168,34 @@ class VLLMModel(SimpleResponsesAPIModel):
         self._session_id_to_client: Dict[str, NeMoGymAsyncOpenAI] = dict()
 
         self._converter = self.get_converter()
+
+    async def tokenize(self, request: Request, body: Dict[str, Any] = Body()) -> Dict[str, Any]:
+        """Forward chat tokenization through the Gym model proxy.
+
+        NRL's vLLM worker exposes raw tokenization at `/tokenize`, while Gym
+        agents address this wrapper by server name. This route gives agents a
+        stable `/v1/tokenize` proxy without requiring them to know the inner
+        vLLM base URL.
+        """
+        body_dict = deepcopy(body)
+
+        if self.config.replace_developer_role_with_system:
+            for message_dict in body_dict.get("messages", []):
+                if message_dict.get("role") == "developer":
+                    message_dict["role"] = "system"
+
+        body_dict["model"] = self.config.model
+
+        chat_template_kwargs = {}
+        if self.config.chat_template_kwargs:
+            chat_template_kwargs = deepcopy(self.config.chat_template_kwargs)
+        if body_dict.get("chat_template_kwargs"):
+            chat_template_kwargs.update(body_dict["chat_template_kwargs"])
+        if chat_template_kwargs:
+            body_dict["chat_template_kwargs"] = chat_template_kwargs
+
+        client = self._resolve_client(request)
+        return await client.create_tokenize(**body_dict)
 
     async def responses(
         self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
