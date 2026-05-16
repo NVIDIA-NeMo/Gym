@@ -98,19 +98,40 @@ def needs_conversion(path: Path) -> bool:
     return path.suffix.lower() in OFFICE_EXTENSIONS and not path.with_suffix(".pdf").exists()
 
 
+def _safe_basename(name: str) -> str:
+    """Sanitize a filename's stem for LibreOffice's batch-convert mode.
+
+    Whitespace in the input path makes LibreOffice's internal URI handling
+    drop arguments mid-flight, producing ``source file could not be loaded``
+    with rc=0. Replacing whitespace in the stem (extension preserved) and
+    staging via tempdir sidesteps the bug.
+    """
+    p = Path(name)
+    return re.sub(r"\s+", "_", p.stem) + p.suffix
+
+
 def convert_to_pdf(path: Path) -> tuple[Path, bool, str]:
     """Convert one file to PDF via host LibreOffice. Returns ``(path, ok, msg)``."""
-    output_dir = str(path.parent)
     profile_dir = Path(tempfile.mkdtemp(prefix="lo-profile-"))
-    norm_dir: Path | None = None
+    stage_dir: Path | None = None
     input_path = path
     normalized = False
+    needs_ns0_normalization = _ooxml_has_ns0_prefix(path)
+    has_whitespace = any(c.isspace() for c in path.name)
+    needs_stage = needs_ns0_normalization or has_whitespace
     try:
-        if _ooxml_has_ns0_prefix(path):
-            norm_dir = Path(tempfile.mkdtemp(prefix="gdpval-norm-"))
-            input_path = norm_dir / path.name
-            _normalize_ooxml_zip(path, input_path)
-            normalized = True
+        if needs_stage:
+            stage_dir = Path(tempfile.mkdtemp(prefix="gdpval-stage-"))
+            staged_name = _safe_basename(path.name) if has_whitespace else path.name
+            input_path = stage_dir / staged_name
+            if needs_ns0_normalization:
+                _normalize_ooxml_zip(path, input_path)
+                normalized = True
+            else:
+                shutil.copy2(path, input_path)
+            lo_outdir = str(stage_dir)
+        else:
+            lo_outdir = str(path.parent)
 
         result = subprocess.run(
             [
@@ -124,21 +145,25 @@ def convert_to_pdf(path: Path) -> tuple[Path, bool, str]:
                 "--convert-to",
                 "pdf",
                 "--outdir",
-                output_dir,
+                lo_outdir,
                 str(input_path),
             ],
             capture_output=True,
             text=True,
             timeout=120,
         )
-        pdf_path = path.with_suffix(".pdf")
-        if pdf_path.exists():
+        final_pdf = path.with_suffix(".pdf")
+        if needs_stage:
+            staged_pdf = Path(lo_outdir) / (input_path.stem + ".pdf")
+            if staged_pdf.exists():
+                shutil.move(str(staged_pdf), str(final_pdf))
+        if final_pdf.exists():
             suffix = " (after ns0 normalization)" if normalized else ""
             return path, True, f"converted {path.name}{suffix}"
         return (
             path,
             False,
-            f"libreoffice rc={result.returncode} did not produce {pdf_path.name}: {result.stderr.strip()[:300]}",
+            f"libreoffice rc={result.returncode} did not produce {final_pdf.name}: {result.stderr.strip()[:300]}",
         )
     except subprocess.TimeoutExpired:
         return path, False, f"timeout converting {path.name}"
@@ -148,8 +173,8 @@ def convert_to_pdf(path: Path) -> tuple[Path, bool, str]:
         return path, False, f"error converting {path.name}: {exc!r}"
     finally:
         shutil.rmtree(profile_dir, ignore_errors=True)
-        if norm_dir is not None:
-            shutil.rmtree(norm_dir, ignore_errors=True)
+        if stage_dir is not None:
+            shutil.rmtree(stage_dir, ignore_errors=True)
 
 
 def find_convertible_files(root_dir: str | os.PathLike) -> list[Path]:

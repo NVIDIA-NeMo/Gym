@@ -23,13 +23,13 @@ Build a complete environment end-to-end, from scaffolding to RL-ready rollouts.
 
 </Info>
 
-<NavButton href="/latest/environment-tutorials" label="Back to Environment Tutorials" direction="back" />
+<NavButton href="/environment-tutorials" label="Back to Environment Tutorials" direction="back" />
 
 ---
 
 ## Prerequisites
 
-Complete **[Getting Started](/latest/get-started/quickstart)** before starting.
+Complete **[Getting Started](/get-started/quickstart)** before starting.
 
 
 
@@ -42,7 +42,7 @@ Run all commands from the **repository root** directory (where `pyproject.toml` 
 
 ## How It Works
 
-NeMo Gym uses a decoupled three-component architecture: the **Agent Server** orchestrates the loop, the **Model Server** runs inference, and the **Resources Server** provides tools and verification. All three are async FastAPI servers communicating over HTTP, which allows many rollouts to run concurrently across episodes. See [Environment Components](/latest/about/core-components) for the full architecture and diagram.
+NeMo Gym uses a decoupled three-component architecture: the **Agent Server** orchestrates the loop, the **Model Server** runs inference, and the **Resources Server** provides tools and verification. All three are async FastAPI servers communicating over HTTP, which allows many rollouts to run concurrently across episodes. See [Environment Components](/about/core-components) for the full architecture and diagram.
 
 In most cases, the **Resources Server** is where your changes go: define your tool endpoints and a `verify()` method that returns a reward. NeMo Gym ships several pre-built agent servers (`simple_agent`, `swe_agents`, etc.) and model servers (`openai_model`, `vllm_model`) that you can use as-is, or you can bring your own.
 
@@ -448,7 +448,7 @@ Never commit API keys directly in YAML files.
 </Tip>
 
 <Tip>
-If you don't want to use the OpenAI API, you can try using a local vLLM server (requires GPU access) instead! See [model-server-vllm](/latest/model-server/vllm).
+If you don't want to use the OpenAI API, you can try using a local vLLM server (requires GPU access) instead! See [model-server-vllm](/model-server/vllm).
 
 </Tip>
 
@@ -496,11 +496,11 @@ Once you've collected rollouts and validated your environment, run training with
 
 <Cards>
 
-<Card title="NeMo RL (GRPO)" href="/latest/training-tutorials/nemo-rl-grpo">
+<Card title="NeMo RL (GRPO)" href="/training-tutorials/nemo-rl-grpo">
 Train models using GRPO with NeMo RL.
 </Card>
 
-<Card title="Unsloth" href="/latest/training-tutorials/unsloth">
+<Card title="Unsloth" href="/training-tutorials/unsloth">
 Train with Unsloth for fast fine-tuning.
 </Card>
 
@@ -555,7 +555,7 @@ You've learned how to:
 
 ---
 
-<NavButton href="/latest/environment-tutorials/multi-step-environment" label="Multi-Step Environment" direction="next" />
+<NavButton href="/environment-tutorials/multi-step-environment" label="Multi-Step Environment" direction="next" />
 
 ---
 

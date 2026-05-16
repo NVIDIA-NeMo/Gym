@@ -16,7 +16,7 @@ The walkthrough uses [`over_refusal_detection`](https://github.com/NVIDIA-NeMo/G
 - Call the judge from `verify()` and parse strict verdict labels.
 - Handle failures without crashing verification.
 
-<NavButton href="/latest/environment-tutorials" label="Back to Environment Tutorials" direction="back" />
+<NavButton href="/environment-tutorials" label="Back to Environment Tutorials" direction="back" />
 
 ---
 
@@ -33,8 +33,8 @@ The judge is a verifier dependency — it is **not** the policy.
 
 ## Prerequisites
 
-- [Environment Components](/latest/about/core-components) — resources server vs. model server roles
-- [Configuration](/latest/reference/configuration) — server field specifications
+- [Environment Components](/about/core-components) — resources server vs. model server roles
+- [Configuration](/reference/configuration) — server field specifications
 
 ---
 
@@ -58,7 +58,7 @@ flowchart LR
 
 **Alternative pattern (external):** some servers call an **OpenAI-compatible** `chat.completions` client pointed at URLs you supply (e.g. HPC or a separate cluster). [`proof_verification`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/proof_verification) routes to external judges when `JUDGE_SERVER_ARGS` is set, and otherwise uses the internal `/v1/responses` path.
 
-For how NeMo Gym sits next to GPUs and training frameworks, see [Deployment Topology](/latest/infrastructure/deployment-topology).
+For how NeMo Gym sits next to GPUs and training frameworks, see [Deployment Topology](/infrastructure/deployment-topology).
 
 ---
 
@@ -359,6 +359,6 @@ Done looks like:
 
 ## See also
 
-- [Resources Server](/latest/resources-server) — role of `verify()` and verification overview
-- [Deployment Topology](/latest/infrastructure/deployment-topology) — cluster layout and GPUs
-- [New Environment](/latest/contribute/environments/new-environment) — scaffolding a new resources server
+- [Resources Server](/resources-server) — role of `verify()` and verification overview
+- [Deployment Topology](/infrastructure/deployment-topology) — cluster layout and GPUs
+- [New Environment](/contribute/environments/new-environment) — scaffolding a new resources server
