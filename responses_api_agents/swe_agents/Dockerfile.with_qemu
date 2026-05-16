@@ -28,5 +28,6 @@ EOF
 # Verify installation during build
 RUN qemu-system-x86_64 --version && \
     qemu-aarch64 --version
+RUN update-binfmts --enable qemu-aarch64 && update-binfmts --enable qemu-x86_64
 
 CMD ["/bin/bash"]
