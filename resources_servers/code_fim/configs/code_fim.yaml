@@ -1,0 +1,27 @@
+code_fim:
+  resources_servers:
+    code_fim:
+      entrypoint: app.py
+      domain: coding
+      verified: false
+      description: Code Fill-in-the-Middle judged by HumanEval-Infilling test suite (single_line, multi_line, random_span, random_span_light)
+      value: Improve Python code-infilling capabilities (prefix + completion + suffix)
+      split: random_span
+      num_processes: 8
+      timeout: 3.0
+
+code_fim_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: code_fim
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/code_fim/data/example.jsonl
+        license: MIT

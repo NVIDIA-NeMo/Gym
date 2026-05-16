@@ -1,0 +1,15 @@
+config_paths:
+  - resources_servers/ugphysics_judge/configs/ugphysics_judge.yaml
+  - benchmarks/ugphysics/judge_gptoss20b.yaml
+
+ugphysics_ugphysics_judge_simple_agent:
+  _inherit_from: ugphysics_judge_simple_agent
+  responses_api_agents:
+    simple_agent:
+      datasets:
+        - name: ugphysics
+          type: benchmark
+          jsonl_fpath: benchmarks/ugphysics/data/ugphysics_benchmark.jsonl
+          prompt_config: benchmarks/ugphysics/prompts/default.yaml
+          prepare_script: benchmarks/ugphysics/prepare.py
+          license: Apache 2.0

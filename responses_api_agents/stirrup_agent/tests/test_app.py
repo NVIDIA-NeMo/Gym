@@ -16,8 +16,6 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
-from stirrup import Agent
-from stirrup.clients.utils import to_openai_messages
 from stirrup.core.models import AssistantMessage, TokenUsage, ToolCall
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
@@ -28,7 +26,8 @@ from responses_api_agents.stirrup_agent.app import (
     _load_task_registry,
     get_task_strategy,
 )
-from responses_api_agents.stirrup_agent.nemo_agent import NeMoAgent, NeMoUserMessage
+from responses_api_agents.stirrup_agent.nemo_agent import NeMoUserMessage
+from responses_api_agents.stirrup_agent.stirrup_utils import convert_stirrup_history_to_output_items
 from responses_api_agents.stirrup_agent.task_strategy import TaskStrategy
 
 
@@ -69,36 +68,28 @@ class TestApp:
         )
         StirrupAgentWrapper(config=config, server_client=MagicMock(spec=ServerClient))
 
-    async def test_summarization_history_restores_tool_messages_for_openai(self, monkeypatch) -> None:
-        """NeMo user-role tool results must become tool messages for model calls."""
-        messages = [
-            AssistantMessage(
-                content="",
-                tool_calls=[ToolCall(tool_call_id="call_1", name="code_exec", arguments='{"cmd":"true"}')],
-                token_usage=TokenUsage(input=1, answer=1, reasoning=0),
-            ),
-            NeMoUserMessage(content="ok", name="code_exec", success=True, tool_call_id="call_1"),
+    def test_output_history_preserves_nemo_user_tool_results(self) -> None:
+        """Run-history export should keep NeMo user-role tool results as tool outputs."""
+        history = [
+            [
+                AssistantMessage(
+                    content="",
+                    tool_calls=[ToolCall(tool_call_id="call_1", name="code_exec", arguments='{"cmd":"true"}')],
+                    token_usage=TokenUsage(input=1, answer=1, reasoning=0),
+                ),
+                NeMoUserMessage(content="ok", name="code_exec", success=True, tool_call_id="call_1"),
+            ]
         ]
 
-        captured_messages = None
+        input_items, output_items = convert_stirrup_history_to_output_items(history)
 
-        async def capture_summarization_messages(_self, messages):
-            nonlocal captured_messages
-            captured_messages = messages
-            return messages
-
-        monkeypatch.setattr(Agent, "summarize_messages", capture_summarization_messages)
-        agent = NeMoAgent(client=MagicMock(), name="stirrup_agent", tools=[], tool_response_as_user=True)
-
-        await agent.summarize_messages(messages)
-
-        assert captured_messages is not None
-        openai_messages = to_openai_messages(captured_messages)
-
-        assert openai_messages[0]["role"] == "assistant"
-        assert openai_messages[0]["tool_calls"][0]["id"] == "call_1"
-        assert openai_messages[1]["role"] == "tool"
-        assert openai_messages[1]["tool_call_id"] == "call_1"
+        assert input_items == []
+        assert len(output_items) == 2
+        assert output_items[0].type == "function_call"
+        assert output_items[0].call_id == "call_1"
+        assert output_items[1].type == "function_call_output"
+        assert output_items[1].call_id == "call_1"
+        assert output_items[1].output == "ok"
 
 
 class TestExampleDataset:
