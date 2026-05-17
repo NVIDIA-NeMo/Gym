@@ -14,6 +14,11 @@ docker buildx build \
   -t gitlab-master.nvidia.com:5005/nexus-team/nexusnest/container_with_qemu .
 ```
 
+Push
+```bash
+docker push gitlab-master.nvidia.com:5005/nexus-team/nexusnest/container_with_qemu:latest
+```
+
 Pull one apptainer
 ```bash
 apptainer pull docker://swebench/sweb.eval.x86_64.astropy_1776_astropy-12907
@@ -35,5 +40,8 @@ docker run \
 ```
 
 ```bash
+update-binfmts --enable qemu-aarch64
+update-binfmts --enable qemu-x86_64
+
 apptainer run /workdir/sweb.eval.x86_64.astropy_1776_astropy-12907_latest.sif uname -m
 ```
