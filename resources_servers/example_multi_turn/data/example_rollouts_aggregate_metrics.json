@@ -1,0 +1,177 @@
+[
+  {
+    "agent_ref": {
+      "name": "example_multi_turn_agent"
+    },
+    "agent_metrics": {
+      "mean/reward": 0.8,
+      "mean/input_tokens": 551.0,
+      "mean/output_tokens": 15.0,
+      "mean/total_tokens": 566.0,
+      "max/reward": 1.0,
+      "max/input_tokens": 709.0,
+      "max/output_tokens": 15.0,
+      "max/total_tokens": 724.0,
+      "min/reward": 0.0,
+      "min/input_tokens": 441.0,
+      "min/output_tokens": 15.0,
+      "min/total_tokens": 456.0,
+      "median/reward": 1.0,
+      "median/input_tokens": 578.0,
+      "median/output_tokens": 15.0,
+      "median/total_tokens": 593.0,
+      "std/reward": 0.4472135954999579,
+      "std/input_tokens": 110.88958472282236,
+      "std/output_tokens": 0.0,
+      "std/total_tokens": 110.88958472282236
+    },
+    "key_metrics": {
+      "mean/reward": 0.8,
+      "mean/input_tokens": 551.0,
+      "mean/output_tokens": 15.0,
+      "mean/total_tokens": 566.0
+    },
+    "group_level_metrics": [
+      {
+        "mean/reward": 1.0,
+        "mean/input_tokens": 578.0,
+        "mean/output_tokens": 15.0,
+        "mean/total_tokens": 593.0,
+        "max/reward": 1.0,
+        "max/input_tokens": 578.0,
+        "max/output_tokens": 15.0,
+        "max/total_tokens": 593.0,
+        "min/reward": 1.0,
+        "min/input_tokens": 578.0,
+        "min/output_tokens": 15.0,
+        "min/total_tokens": 593.0,
+        "median/reward": 1.0,
+        "median/input_tokens": 578.0,
+        "median/output_tokens": 15.0,
+        "median/total_tokens": 593.0,
+        "std/reward": 0.0,
+        "std/input_tokens": 0.0,
+        "std/output_tokens": 0.0,
+        "std/total_tokens": 0.0,
+        "sample": {
+          "agent_ref": {
+            "name": "agent"
+          }
+        },
+        "_ng_task_index": 0
+      },
+      {
+        "mean/reward": 1.0,
+        "mean/input_tokens": 579.0,
+        "mean/output_tokens": 15.0,
+        "mean/total_tokens": 594.0,
+        "max/reward": 1.0,
+        "max/input_tokens": 579.0,
+        "max/output_tokens": 15.0,
+        "max/total_tokens": 594.0,
+        "min/reward": 1.0,
+        "min/input_tokens": 579.0,
+        "min/output_tokens": 15.0,
+        "min/total_tokens": 594.0,
+        "median/reward": 1.0,
+        "median/input_tokens": 579.0,
+        "median/output_tokens": 15.0,
+        "median/total_tokens": 594.0,
+        "std/reward": 0.0,
+        "std/input_tokens": 0.0,
+        "std/output_tokens": 0.0,
+        "std/total_tokens": 0.0,
+        "sample": {
+          "agent_ref": {
+            "name": "agent"
+          }
+        },
+        "_ng_task_index": 1
+      },
+      {
+        "mean/reward": 1.0,
+        "mean/input_tokens": 709.0,
+        "mean/output_tokens": 15.0,
+        "mean/total_tokens": 724.0,
+        "max/reward": 1.0,
+        "max/input_tokens": 709.0,
+        "max/output_tokens": 15.0,
+        "max/total_tokens": 724.0,
+        "min/reward": 1.0,
+        "min/input_tokens": 709.0,
+        "min/output_tokens": 15.0,
+        "min/total_tokens": 724.0,
+        "median/reward": 1.0,
+        "median/input_tokens": 709.0,
+        "median/output_tokens": 15.0,
+        "median/total_tokens": 724.0,
+        "std/reward": 0.0,
+        "std/input_tokens": 0.0,
+        "std/output_tokens": 0.0,
+        "std/total_tokens": 0.0,
+        "sample": {
+          "agent_ref": {
+            "name": "agent"
+          }
+        },
+        "_ng_task_index": 2
+      },
+      {
+        "mean/reward": 1.0,
+        "mean/input_tokens": 441.0,
+        "mean/output_tokens": 15.0,
+        "mean/total_tokens": 456.0,
+        "max/reward": 1.0,
+        "max/input_tokens": 441.0,
+        "max/output_tokens": 15.0,
+        "max/total_tokens": 456.0,
+        "min/reward": 1.0,
+        "min/input_tokens": 441.0,
+        "min/output_tokens": 15.0,
+        "min/total_tokens": 456.0,
+        "median/reward": 1.0,
+        "median/input_tokens": 441.0,
+        "median/output_tokens": 15.0,
+        "median/total_tokens": 456.0,
+        "std/reward": 0.0,
+        "std/input_tokens": 0.0,
+        "std/output_tokens": 0.0,
+        "std/total_tokens": 0.0,
+        "sample": {
+          "agent_ref": {
+            "name": "agent"
+          }
+        },
+        "_ng_task_index": 3
+      },
+      {
+        "mean/reward": 0.0,
+        "mean/input_tokens": 448.0,
+        "mean/output_tokens": 15.0,
+        "mean/total_tokens": 463.0,
+        "max/reward": 0.0,
+        "max/input_tokens": 448.0,
+        "max/output_tokens": 15.0,
+        "max/total_tokens": 463.0,
+        "min/reward": 0.0,
+        "min/input_tokens": 448.0,
+        "min/output_tokens": 15.0,
+        "min/total_tokens": 463.0,
+        "median/reward": 0.0,
+        "median/input_tokens": 448.0,
+        "median/output_tokens": 15.0,
+        "median/total_tokens": 463.0,
+        "std/reward": 0.0,
+        "std/input_tokens": 0.0,
+        "std/output_tokens": 0.0,
+        "std/total_tokens": 0.0,
+        "sample": {
+          "agent_ref": {
+            "name": "agent"
+          }
+        },
+        "_ng_task_index": 4
+      }
+    ]
+  }
+]

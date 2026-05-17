@@ -8,3 +8,4 @@ simple_agent:
       model_server:
         type: responses_api_models
         name: policy_model
+      max_steps: null
