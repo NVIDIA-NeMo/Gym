@@ -1,4 +1,4 @@
-from responses_api_agents.mini_swe_agent.sandbox_environment import MiniSWESandboxEnvironment, Submitted
+from responses_api_agents.mini_swe_agent_2.sandbox_environment import MiniSWESandboxEnvironment, Submitted
 
 
 def test_check_finished_raises_submitted_for_submit_sentinel() -> None:

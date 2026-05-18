@@ -100,7 +100,7 @@ class MiniSWESandboxEnvironment:
                 env=env,
                 metadata={
                     **spec_config.pop("metadata", {}),
-                    "nemo_gym_agent": "mini_swe_agent",
+                    "nemo_gym_agent": "mini_swe_agent_2",
                     "instance_id": (self.config.instance_id or "unknown")[:63],
                 },
                 resources=spec_config.pop("resources", {}),

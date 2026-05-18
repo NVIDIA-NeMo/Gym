@@ -1,6 +1,6 @@
-mini_swe_simple_agent:
+mini_swe_agent_2:
   responses_api_agents:
-    mini_swe_agent:
+    mini_swe_agent_2:
       entrypoint: app.py
       domain: coding
       description: Software engineering tasks driven by mini-swe-agent harness on OpenSandbox.
@@ -11,7 +11,7 @@ mini_swe_simple_agent:
       datasets:
       - name: validation
         type: validation
-        jsonl_fpath: responses_api_agents/mini_swe_agent/data/validation.jsonl
+        jsonl_fpath: responses_api_agents/mini_swe_agent_2/data/validation.jsonl
         huggingface_identifier:
           repo_id: princeton-nlp/SWE-bench_Verified
         license: MIT

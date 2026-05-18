@@ -1,11 +1,11 @@
 # Mini-SWE-Agent v2 Sandbox Environment
 
 This note explains how `sandbox_environment.py` is used when the Gym
-`mini_swe_agent` runs mini-swe-agent v2 with `env: sandbox`.
+`mini_swe_agent_2` runs mini-swe-agent v2 with `env: sandbox`.
 
 ## Where It Fits
 
-The Gym agent entrypoint is `responses_api_agents/mini_swe_agent/app.py`.
+The Gym agent entrypoint is `responses_api_agents/mini_swe_agent_2/app.py`.
 For each `/run` request, `MiniSWEAgent.run()` builds the mini-swe-agent
 configuration and launches `run_swegym_with_optional_sandbox()` in a Ray task.
 
@@ -14,7 +14,7 @@ the per-instance mini-swe-agent config:
 
 ```yaml
 environment:
-  environment_class: responses_api_agents.mini_swe_agent.sandbox_environment.MiniSWESandboxEnvironment
+  environment_class: responses_api_agents.mini_swe_agent_2.sandbox_environment.MiniSWESandboxEnvironment
   image: <swebench task image>
   provider:
     name: opensandbox
@@ -44,7 +44,7 @@ mini-swe-agent environment contract use Gym's sync sandbox facade.
 - Builds a `SandboxSpec` from the task image, environment variables, metadata,
   resources, platform, volumes, and provider-specific extensions.
 - Applies Gym image rewrites before creating the sandbox.
-- Adds standard metadata such as `nemo_gym_agent=mini_swe_agent` and
+- Adds standard metadata such as `nemo_gym_agent=mini_swe_agent_2` and
   `instance_id`.
 - Creates a `Sandbox` facade and calls `Sandbox.create(...)`.
 

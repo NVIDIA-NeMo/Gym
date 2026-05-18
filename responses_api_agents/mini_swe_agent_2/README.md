@@ -24,6 +24,9 @@ A NeMo Gym responses API agent that integrates the [Mini-SWE-Agent](https://gith
 The Mini-SWE-Agent environment provides an interface for training models on solving real-world software engineering problems. 
 It leverages the SWE-Gym dataset of GitHub issues and uses containerized environments (Docker/Singularity) to execute code modifications and validate solutions.
 
+For the Gym sandbox-backed mini-swe-agent v2 path, see
+[SANDBOX_ENVIRONMENT.md](SANDBOX_ENVIRONMENT.md).
+
 ## Reward Profiling
 
 ### Model - Qwen/Qwen3-Coder-30B-A3B-Instruct
@@ -109,12 +112,12 @@ ng_download_dataset_from_gitlab \
 # Start server
 CONFIG_PATHS="resources_servers/mini_swe_agent/configs/mini_swe_agent.yaml,responses_api_models/openai_model/configs/openai_model.yaml"
 ng_run +config_paths=[$CONFIG_PATHS] \
-        '+mini_swe_simple_agent.responses_api_agents.mini_swe_agent.cache_dir_template=/path/to/images/xingyaoww_sweb.eval.x86_64.\{instance_id\}.sif' \
-        +mini_swe_simple_agent.responses_api_agents.mini_swe_agent.run_golden=False \
-        +mini_swe_simple_agent.responses_api_agents.mini_swe_agent.skip_if_exists=True \
-        +mini_swe_simple_agent.responses_api_agents.mini_swe_agent.concurrency=16 \
-        +mini_swe_simple_agent.responses_api_agents.mini_swe_agent.step_timeout=300 \
-        +mini_swe_simple_agent.responses_api_agents.mini_swe_agent.eval_timeout=900 &
+        '+mini_swe_simple_agent.responses_api_agents.mini_swe_agent_2.cache_dir_template=/path/to/images/xingyaoww_sweb.eval.x86_64.\{instance_id\}.sif' \
+        +mini_swe_simple_agent.responses_api_agents.mini_swe_agent_2.run_golden=False \
+        +mini_swe_simple_agent.responses_api_agents.mini_swe_agent_2.skip_if_exists=True \
+        +mini_swe_simple_agent.responses_api_agents.mini_swe_agent_2.concurrency=16 \
+        +mini_swe_simple_agent.responses_api_agents.mini_swe_agent_2.step_timeout=300 \
+        +mini_swe_simple_agent.responses_api_agents.mini_swe_agent_2.eval_timeout=900 &
 
 # Collect rollouts
 ng_collect_rollouts +agent_name=mini_swe_simple_agent \
