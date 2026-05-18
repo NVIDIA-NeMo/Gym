@@ -18,10 +18,10 @@ NeMo Gym implements environments as composable FastAPI servers that communicate 
 
 | Concept | NeMo Gym Component Implementation |
 |---------|---------------|
-| Dataset | JSONL: Responses API input — each row is a task for the agent |
+| Dataset | JSONL: Responses API input — each row is a task (a single problem or challenge) for the agent to solve |
 | Agent Harness | FastAPI Agent Server or your own agent via HTTP |
 | Verifier + State | FastAPI Resources Server |
-| Model | FastAPI Model Server or managed by your own agent |
+| Model | FastAPI Model Server or managed by your own agent harness |
 
 All components are composable. Use different datasets with the same resources server, the same resources server with different models, or the same model with different agent harnesses.
 
@@ -55,13 +55,13 @@ Each task attempt flows through three steps. The resulting trajectory is called 
 │    3. resources.verify()        ─────────────►  Resources Server
 └──────────────────────────────────────────┘
 
-┌───────────────────────────┐   ┌───────────────────────────────────┐
-│       Model Server        │   │        Resources Server           │
-│                           │   │                                   │
-│  responses():             │   │  seed_session(): init env state   │
-│    → text, tool calls,    │   │  my_tool():      execute action   │
-│      or code              │   │  verify():       evaluate → reward│
-└───────────────────────────┘   └───────────────────────────────────┘
+┌───────────────────────────┐   ┌────────────────────────────────────┐
+│       Model Server        │   │        Resources Server            │
+│                           │   │                                    │
+│  responses():             │   │  seed_session(): init env state    │
+│    → text, tool calls,    │   │  my_tool():      execute action    │
+│      or code              │   │  verify():       evaluate → reward │
+└───────────────────────────┘   └────────────────────────────────────┘
 ```
 
 
