@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+import logging
 import re
 from copy import deepcopy
 from time import time
@@ -64,11 +65,15 @@ from nemo_gym.openai_utils import (
 from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
 
 
+LOGGER = logging.getLogger(__name__)
+
+
 class VLLMModelConfig(BaseResponsesAPIModelConfig):
     base_url: Union[str, List[str]]
     api_key: str
     model: str
     return_token_id_information: bool
+    max_input_tokens: Optional[int] = None
 
     uses_reasoning_parser: bool
     replace_developer_role_with_system: bool = False
@@ -118,6 +123,61 @@ class VLLMModel(SimpleResponsesAPIModel):
         self._session_id_to_client: Dict[str, NeMoGymAsyncOpenAI] = dict()
 
         self._converter = self.get_converter()
+
+    def _create_context_length_exceeded_chat_completion(
+        self, prompt_token_ids: Optional[List[int]] = None
+    ) -> NeMoGymChatCompletion:
+        message_kwargs = dict(
+            role="assistant",
+            content=None,
+            tool_calls=None,
+        )
+        if self.config.return_token_id_information and prompt_token_ids is not None:
+            message = NeMoGymChatCompletionMessageForTraining(
+                **message_kwargs,
+                prompt_token_ids=prompt_token_ids,
+                generation_token_ids=[],
+                generation_log_probs=[],
+            )
+        else:
+            message = NeMoGymChatCompletionMessage(**message_kwargs)
+
+        return NeMoGymChatCompletion(
+            id="chtcmpl-context-length-exceeded",
+            object="chat.completion",
+            created=int(time()),
+            model=self.config.model,
+            choices=[
+                NeMoGymChoice(
+                    index=0,
+                    finish_reason="context_length_exceeded",
+                    message=message,
+                )
+            ],
+            context_length_exceeded=True,
+        )
+
+    @staticmethod
+    def _get_tokenize_body_dict(body_dict: Dict[str, Any]) -> Dict[str, Any]:
+        tokenize_body_dict = {}
+        for key in ("model", "messages", "tools", "chat_template_kwargs", "mm_processor_kwargs"):
+            if key in body_dict:
+                tokenize_body_dict[key] = body_dict[key]
+        return tokenize_body_dict
+
+    async def _get_prompt_token_ids(
+        self, client: NeMoGymAsyncOpenAI, body_dict: Dict[str, Any]
+    ) -> List[int]:
+        tokenize_response = await self._get_tokenize_response(client, body_dict)
+        return tokenize_response["tokens"]
+
+    async def _get_tokenize_response(
+        self, client: NeMoGymAsyncOpenAI, body_dict: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        tokenize_response = await client.create_tokenize(
+            **self._get_tokenize_body_dict(body_dict)
+        )
+        return tokenize_response
 
     async def responses(
         self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
@@ -315,6 +375,49 @@ class VLLMModel(SimpleResponsesAPIModel):
         body_dict = self._preprocess_chat_completion_create_params(request, body_dict)
 
         client = self._resolve_client(request)
+        prompt_token_ids: Optional[List[int]] = None
+        vllm_max_model_len: Optional[int] = None
+
+        should_tokenize_prompt = (
+            self.config.return_token_id_information
+            or self.config.max_input_tokens is not None
+        )
+        if should_tokenize_prompt:
+            tokenize_response = await self._get_tokenize_response(client, body_dict)
+            prompt_token_ids = tokenize_response["tokens"]
+            if tokenize_response.get("max_model_len") is not None:
+                vllm_max_model_len = int(tokenize_response["max_model_len"])
+
+        max_input_tokens = self.config.max_input_tokens
+        if vllm_max_model_len is not None:
+            max_input_tokens = (
+                vllm_max_model_len
+                if max_input_tokens is None
+                else min(max_input_tokens, vllm_max_model_len)
+            )
+
+        if max_input_tokens is not None and prompt_token_ids is not None:
+            prompt_len = len(prompt_token_ids)
+            if prompt_len >= max_input_tokens:
+                return self._create_context_length_exceeded_chat_completion(
+                    prompt_token_ids
+                )
+
+            remaining_budget = max_input_tokens - prompt_len
+            requested_max_tokens = body_dict.get("max_tokens")
+            body_dict["max_tokens"] = (
+                remaining_budget
+                if requested_max_tokens is None
+                else min(requested_max_tokens, remaining_budget)
+            )
+            if requested_max_tokens != body_dict["max_tokens"]:
+                LOGGER.info(
+                    "Clamped vLLM max_tokens from %s to %s for prompt_len=%s max_input_tokens=%s",
+                    requested_max_tokens,
+                    body_dict["max_tokens"],
+                    prompt_len,
+                    max_input_tokens,
+                )
 
         if not self.config.sequential_reasoning_allowed:
             last_message = body_dict["messages"][-1]
