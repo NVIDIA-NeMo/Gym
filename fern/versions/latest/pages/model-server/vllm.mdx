@@ -9,6 +9,15 @@ Most open-source models use Chat Completions format, while NeMo Gym uses the Res
 
 VLLMModel provides a Responses API to Chat Completions mapping middleware layer via `responses_api_models/vllm_model`. It assumes you are pointing to a vLLM instance since it relies on vLLM-specific endpoints like `/tokenize` and vLLM-specific arguments like `return_tokens_as_token_ids`.
 
+## Two upstream backends
+
+VLLMModel can drive either of vLLM's OpenAI-compatible endpoints, selected by the `use_completions_api` config flag. Both backends keep the same external Gym surface — `/v1/responses` and `/v1/chat/completions` continue to work identically; only the call to vLLM swaps.
+
+| `use_completions_api`         | vLLM endpoint hit            | Primary use case |
+|-------------------------------|------------------------------|------------------|
+| `false` (default)             | `POST /v1/chat/completions`  | Instruct models. vLLM applies the chat template, runs reasoning- and tool-call parsers server-side. The default rollout config (`vllm_model.yaml`) and training config (`vllm_model_for_training.yaml`) both target this backend. |
+| `true`                        | `POST /v1/completions`       | Base (non-instruct) models, or cases where the caller has already rendered the full prompt string upstream and wants the bytes forwarded verbatim. See [The /v1/completions backend](#the-v1completions-backend) below. |
+
 **To use VLLMModel, just change the `responses_api_models/openai_model/configs/openai_model.yaml` in your config paths to `responses_api_models/vllm_model/configs/vllm_model.yaml`!**
 ```bash
 config_paths="resources_servers/example_multi_step/configs/example_multi_step.yaml,\
@@ -99,6 +108,86 @@ ng_collect_rollouts +agent_name=example_multi_step_simple_agent \
     +output_jsonl_fpath=results/example_multi_step_rollouts.jsonl
 ```
 
+## The /v1/completions backend
+
+Set `use_completions_api: true` to drive vLLM's text-completions endpoint instead of chat completions. A ready-to-use config ships at `responses_api_models/vllm_model/configs/vllm_model_completions.yaml`:
+
+```yaml
+policy_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: ${policy_base_url}
+      api_key: ${policy_api_key}
+      model: ${policy_model_name}
+      return_token_id_information: false
+      uses_reasoning_parser: false   # /v1/completions does not run vLLM's reasoning parser
+      uses_interleaved_reasoning: false
+      use_completions_api: true      # drives vLLM /v1/completions
+      chat_template_kwargs: null
+      extra_body: null
+```
+
+### Render modes
+
+A second flag, `render_chat_template`, picks how the caller's `messages` list becomes the `prompt` string:
+
+- **`render_chat_template: false` (default)** — *raw* render. Forwards bytes verbatim. Required input: a single user message, optionally preceded by a single system message; their content is joined with `\n\n` and sent as `prompt`. `tools`, multi-turn turns, and non-text content blocks are rejected. This is the cheapest path and the most common base-model setup.
+- **`render_chat_template: true`** — *chat-template* render. Renders the messages list to a prompt string client-side via HF `AutoTokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True, tools=..., **chat_template_kwargs)`. Multi-turn assistant / tool turns and `tools` are allowed.
+
+For Gym's `/v1/responses` endpoint, a string `input` is forwarded as the prompt directly under raw mode; under chat-template mode the converter still wraps it as a single user message before rendering.
+
+### `tokenizer` config (chat-template mode)
+
+When `render_chat_template: true`, the HF tokenizer is loaded once at server startup. By default it's loaded from the same identifier as `model`. Override with `tokenizer:` for base-model setups where the model checkpoint has no chat template in its tokenizer config — point `tokenizer:` at a different model whose template you want to inherit:
+
+```yaml
+model: Qwen/Qwen2.5-7B           # base model, no chat template
+use_completions_api: true
+render_chat_template: true
+tokenizer: Qwen/Qwen2.5-7B-Instruct  # borrow the instruct chat template
+```
+
+If the loaded tokenizer has no `chat_template`, the server fails at startup — silent fallback to raw mode would mask a config bug. The `transformers` package is required at runtime for chat-template mode (it's a Gym dep, but if it's missing the startup error message points at it explicitly).
+
+### Constraint matrix
+
+| Constraint                | `render_chat_template: false` | `render_chat_template: true` |
+|---------------------------|-------------------------------|------------------------------|
+| Single user / [system, user] only | required             | **lifted** — full multi-turn ok |
+| Assistant / tool turns    | rejected                      | **allowed**                   |
+| Tools                     | rejected                      | **allowed** — see note below  |
+| Audio / image content     | rejected                      | rejected (text-only endpoint) |
+| `chat_template_kwargs`    | unused                        | forwarded to `apply_chat_template` |
+
+**Tools in chat-template mode.** The chat template renders the tool definitions into the prompt (Hermes / Qwen / etc. all do this), but `/v1/completions` doesn't run vLLM's tool-call parser regardless of how the prompt is built — so any tool-call output text the model emits is **not** parsed by Gym. The caller is responsible for parsing tool calls out of the assistant text. If you need first-class tool-call routing, use `use_completions_api: false`.
+
+`<think>...</think>` blocks emitted inline by the model are extracted downstream by `VLLMConverter._extract_reasoning_from_content` when results are converted back to a Response, exactly as on the chat path.
+
+### Token-ID extraction (RL training)
+
+When `return_token_id_information: true`, the completions backend automatically adds `logprobs: 0`, `prompt_logprobs: 0`, and `return_tokens_as_token_ids: true` to outbound requests so generation token IDs come from `logprobs.tokens` (the `"token_id:<int>"` entries) and prompt token IDs come from `prompt_logprobs` — no second `/tokenize` call needed.
+
+### Use it
+
+The end-to-end flow is identical to the [Use VLLMModel](#use-vllmmodel) walkthrough above; just swap the model-server config:
+
+```bash
+config_paths="resources_servers/example_multi_step/configs/example_multi_step.yaml,\
+responses_api_models/vllm_model/configs/vllm_model_completions.yaml"
+
+ng_run "+config_paths=[$config_paths]" \
+    ++policy_base_url=http://0.0.0.0:10240/v1 \
+    ++policy_model_name=<your-model> \
+    ++policy_api_key=dummy_key
+
+ng_collect_rollouts +agent_name=<your_agent> \
+    +input_jsonl_fpath=<your_data.jsonl> \
+    +output_jsonl_fpath=results/rollouts_completions.jsonl
+```
+
+Make sure your input JSONL respects the [Constraints](#constraints) above — single-turn user messages (optionally with a leading system prompt) and no `tools`.
+
 ## VLLMModel configuration reference
 
 | Parameter | Type | Default | Description |
@@ -109,8 +198,11 @@ ng_collect_rollouts +agent_name=example_multi_step_simple_agent \
 | `return_token_id_information` | `bool` | — | **Required.** Set `true` for training (token IDs + log probs), `false` for inference only. |
 | `uses_reasoning_parser` | `bool` | — | **Required.** Set `true` for reasoning models (extracts `<think>` tags), `false` otherwise. |
 | `replace_developer_role_with_system` | `bool` | `false` | Convert "developer" role to "system" for models that don't support developer role. |
-| `chat_template_kwargs` | `dict` | `null` | Override chat template parameters (e.g., `add_generation_prompt`). |
+| `chat_template_kwargs` | `dict` | `null` | Override chat template parameters (e.g., `add_generation_prompt`). Only consulted when `use_completions_api: false`. |
 | `extra_body` | `dict` | `null` | Pass additional vLLM-specific parameters (e.g., `guided_json`). |
+| `use_completions_api` | `bool` | `false` | When `true`, drives vLLM's `/v1/completions` instead of `/v1/chat/completions`. See [Two upstream backends](#two-upstream-backends). |
+| `render_chat_template` | `bool` | `false` | Only consulted when `use_completions_api: true`. When `true`, renders messages to the `prompt` string client-side via `AutoTokenizer.apply_chat_template`. Lifts the multi-turn restriction. See [Render modes](#render-modes). |
+| `tokenizer` | `str` | `null` | Only consulted when `use_completions_api: true` and `render_chat_template: true`. HF identifier or local path passed to `AutoTokenizer.from_pretrained`. When `null`, falls back to `model`. Use this to borrow a chat template from a different model. |
 
 ### Advanced: `chat_template_kwargs`
 
