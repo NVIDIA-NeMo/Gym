@@ -1,0 +1,7 @@
+policy_model:
+  responses_api_models:
+    chat_completions_model:
+      entrypoint: app.py
+      base_url: https://api.studio.nebius.ai/v1
+      api_key: ${policy_api_key}
+      model: ${policy_model_name}

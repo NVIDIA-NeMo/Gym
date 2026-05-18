@@ -820,6 +820,7 @@ class TestApp:
 
         monkeypatch.setattr("responses_api_models.vllm_model.app.time", lambda: FIXED_TIME)
         monkeypatch.setattr("responses_api_models.vllm_model.app.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
 
         request_body = NeMoGymResponseCreateParamsNonStreaming(
             input=input_messages,
@@ -988,6 +989,7 @@ class TestApp:
         )
         monkeypatch.setattr("responses_api_models.vllm_model.app.time", lambda: FIXED_TIME)
         monkeypatch.setattr("responses_api_models.vllm_model.app.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
 
         request_body = NeMoGymResponseCreateParamsNonStreaming(
             input=input_messages,
@@ -1242,6 +1244,7 @@ class TestApp:
         )
         monkeypatch.setattr("responses_api_models.vllm_model.app.time", lambda: FIXED_TIME)
         monkeypatch.setattr("responses_api_models.vllm_model.app.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
 
         request_body = NeMoGymResponseCreateParamsNonStreaming(
             input=input_messages,
@@ -1385,6 +1388,7 @@ class TestApp:
         client = TestClient(app)
 
         monkeypatch.setattr("responses_api_models.vllm_model.app.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
         monkeypatch.setattr("responses_api_models.vllm_model.app.time", lambda: FIXED_TIME)
 
         responses_create_params = NeMoGymResponseCreateParamsNonStreaming(input=single_input)
@@ -1769,6 +1773,7 @@ class TestApp:
 
         monkeypatch.setattr("responses_api_models.vllm_model.app.time", lambda: FIXED_TIME)
         monkeypatch.setattr("responses_api_models.vllm_model.app.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
 
         request_body = NeMoGymResponseCreateParamsNonStreaming(
             input=input_messages,
@@ -2226,6 +2231,7 @@ class TestApp:
 
         monkeypatch.setattr("responses_api_models.vllm_model.app.time", lambda: FIXED_TIME)
         monkeypatch.setattr("responses_api_models.vllm_model.app.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
 
         request_body = NeMoGymResponseCreateParamsNonStreaming(
             input=input_messages,
@@ -2560,6 +2566,7 @@ class TestApp:
 
         monkeypatch.setattr("responses_api_models.vllm_model.app.time", lambda: FIXED_TIME)
         monkeypatch.setattr("responses_api_models.vllm_model.app.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
 
         response = client.post(
             "/v1/responses",
@@ -2698,6 +2705,7 @@ class TestVLLMConverter:
         """
 
         monkeypatch.setattr("responses_api_models.vllm_model.app.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
 
         monkeypatch.setattr("responses_api_models.vllm_model.app.time", lambda: FIXED_TIME)
 
@@ -2728,6 +2736,7 @@ class TestVLLMConverter:
 
     def test_postprocess_chat_response_multiple_reasoning_items(self, monkeypatch: MonkeyPatch):
         monkeypatch.setattr("responses_api_models.vllm_model.app.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
         monkeypatch.setattr("responses_api_models.vllm_model.app.time", lambda: FIXED_TIME)
 
         raw_model_response = (
@@ -3021,6 +3030,7 @@ class TestVLLMConverter:
 
     def test_whitespace_round_trip_chat_completions(self, monkeypatch: MonkeyPatch) -> None:
         monkeypatch.setattr("responses_api_models.vllm_model.app.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
 
         message = NeMoGymChatCompletionMessage(
             content="<think> \n \n I'm thinking \n \n </think> \n \n I'm chatting! \n \n ",

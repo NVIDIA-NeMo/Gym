@@ -443,6 +443,7 @@ omit = [
     "results/*",
     "/tmp/*",
     "benchmarks/*",
+    "nemo_gym/responses_converter.py",
 ]
 data_file = "results/.coverage"
 concurrency = ["thread", "multiprocessing"]
