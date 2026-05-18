@@ -369,6 +369,9 @@ class TestApp:
             raise result
 
         reward, extracted_answer, library_reward, judge_evaluations = result
+        # This is a real SymPy/math_verify pathological case, so the exact result
+        # depends on whether it finishes before the subprocess timeout. The
+        # regression is that either outcome returns promptly instead of hanging.
         assert reward == approx(0.0) or reward == approx(1.0)
         assert extracted_answer is None or isinstance(extracted_answer, str)
         assert library_reward == approx(reward)
