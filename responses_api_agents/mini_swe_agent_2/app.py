@@ -464,13 +464,6 @@ def _run_swegym_v2(**params: Any) -> dict[str, Any]:
 
 
 def run_swegym_with_optional_sandbox(**params: Any) -> Any:
-    if _uses_sandbox_env(params.get("env", "")):
-        from minisweagent.environments import ENV_MAP
-
-        from responses_api_agents.mini_swe_agent_2.sandbox_environment import MiniSWESandboxEnvironment
-
-        ENV_MAP["sandbox"] = MiniSWESandboxEnvironment
-
     instance_id = str(params.get("instance_id") or "unknown")
     with event_context(
         trajectory_id=instance_id,

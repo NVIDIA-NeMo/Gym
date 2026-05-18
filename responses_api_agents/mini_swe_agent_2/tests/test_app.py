@@ -428,9 +428,6 @@ class TestApp:
         with pytest.raises(RuntimeError, match="boom"):
             run_swegym_with_optional_sandbox(env="docker", instance_id="task-1")
 
-        env_module = ModuleType("minisweagent.environments")
-        env_module.ENV_MAP = {}
-        monkeypatch.setitem(sys.modules, "minisweagent.environments", env_module)
         monkeypatch.setattr(
             mini_swe_app_module,
             "_run_swegym_v2",
@@ -440,7 +437,6 @@ class TestApp:
         assert run_swegym_with_optional_sandbox(env="sandbox", instance_id="task-1") == {
             "task-1": {"eval_report": {"task-1": {"resolved": False}}}
         }
-        assert env_module.ENV_MAP["sandbox"].__name__ == "MiniSWESandboxEnvironment"
 
         monkeypatch.setattr(mini_swe_app_module, "_run_swegym_v2", lambda **_params: {"task-1": "bad"})
         assert run_swegym_with_optional_sandbox(env="docker", instance_id="task-1") == {"task-1": "bad"}
