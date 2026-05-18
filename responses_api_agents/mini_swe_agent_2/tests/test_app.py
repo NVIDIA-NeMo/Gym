@@ -112,8 +112,6 @@ def create_test_config(
     host: str = "0.0.0.0",
     port: int = 8080,
     model_name: str = "test_model",
-    env: str = "singularity",
-    cache_dir_template: str = "/tmp/cache/gym.sif",
 ) -> MiniSWEAgentConfig:
     return MiniSWEAgentConfig(
         name="mini_swe_agent_2",
@@ -124,9 +122,10 @@ def create_test_config(
             type="responses_api_models",
             name=model_name,
         ),
-        env=env,
+        env="sandbox",
         concurrency=1,
-        cache_dir_template=cache_dir_template,
+        sandbox_provider={"name": "opensandbox", "kwargs": {}},
+        sandbox_spec={},
     )
 
 
@@ -265,7 +264,7 @@ def _otel_spans(output_dir: Path) -> list[dict[str, Any]]:
 
 class TestApp:
     def test_sanity(self) -> None:
-        config = create_test_config(model_name="", cache_dir_template="/")
+        config = create_test_config(model_name="")
         MiniSWEAgent(config=config, server_client=MagicMock(spec=ServerClient))
 
     def test_observed_model_records_llm_span(self, tmp_path: Path) -> None:
@@ -417,7 +416,7 @@ class TestApp:
             },
         )
         monkeypatch.setattr(mini_swe_app_module.MiniSWEAgentUtils, "is_resolved", lambda *_args: True)
-        assert run_swegym_with_optional_sandbox(env="docker", instance_id="task-1") == {
+        assert run_swegym_with_optional_sandbox(env="sandbox", instance_id="task-1") == {
             "task-1": {"eval_report": {"task-1": {"resolved": True}}}
         }
 
@@ -426,7 +425,7 @@ class TestApp:
 
         monkeypatch.setattr(mini_swe_app_module, "_run_swegym_v2", fail_runner)
         with pytest.raises(RuntimeError, match="boom"):
-            run_swegym_with_optional_sandbox(env="docker", instance_id="task-1")
+            run_swegym_with_optional_sandbox(env="sandbox", instance_id="task-1")
 
         monkeypatch.setattr(
             mini_swe_app_module,
@@ -439,7 +438,7 @@ class TestApp:
         }
 
         monkeypatch.setattr(mini_swe_app_module, "_run_swegym_v2", lambda **_params: {"task-1": "bad"})
-        assert run_swegym_with_optional_sandbox(env="docker", instance_id="task-1") == {"task-1": "bad"}
+        assert run_swegym_with_optional_sandbox(env="sandbox", instance_id="task-1") == {"task-1": "bad"}
 
         monkeypatch.setattr(
             mini_swe_app_module,
@@ -451,7 +450,7 @@ class TestApp:
             raise ValueError("bad report")
 
         monkeypatch.setattr(mini_swe_app_module.MiniSWEAgentUtils, "is_resolved", raise_is_resolved)
-        assert run_swegym_with_optional_sandbox(env="docker", instance_id="task-1") == {
+        assert run_swegym_with_optional_sandbox(env="sandbox", instance_id="task-1") == {
             "task-1": {"eval_report": {"task-1": {"resolved": True}}}
         }
 
@@ -599,12 +598,12 @@ class TestApp:
         ]
         assert result["django__django-123"]["responses"] == [{"id": "resp-1"}]
 
-        golden_params = params | {"env": "docker", "run_golden": True}
+        golden_params = params | {"run_golden": True}
         result = _run_swegym_v2(**golden_params)
 
         env = holder["env"]
         assert env.cleaned is True
-        assert env.config["environment_class"] == "docker"
+        assert env.config["environment_class"].endswith("MiniSWESandboxEnvironment")
         assert [command for command, _ in env.commands[:4]] == [
             "cat > patch.diff <<'EOF'\ngold\n\nEOF",
             "git status --porcelain",
@@ -725,7 +724,7 @@ class TestApp:
     ) -> None:
         """Test run method when run_swegym fails."""
 
-        config = create_test_config(env="docker")
+        config = create_test_config()
         mock_server_client = MagicMock(spec=ServerClient)
         server = MiniSWEAgent(config=config, server_client=mock_server_client)
 
@@ -766,7 +765,7 @@ class TestApp:
         mock_get_first_server_config_dict,
         mock_load_from_global_config,
     ) -> None:
-        config = create_test_config(env="docker")
+        config = create_test_config()
         mock_server_client = MagicMock(spec=ServerClient)
         server = MiniSWEAgent(config=config, server_client=mock_server_client)
 
@@ -795,7 +794,7 @@ class TestApp:
         assert_run_swegym_called(mock_to_thread, instance_id="test_instance_789")
 
     async def test_responses_not_implemented(self) -> None:
-        config = create_test_config(env="docker")
+        config = create_test_config()
         mock_server_client = MagicMock(spec=ServerClient)
         server = MiniSWEAgent(config=config, server_client=mock_server_client)
 
@@ -805,7 +804,7 @@ class TestApp:
             await server.responses(request_body)
 
     def test_endpoints_registration(self) -> None:
-        config = create_test_config(env="docker")
+        config = create_test_config()
         mock_server_client = MagicMock(spec=ServerClient)
         server = MiniSWEAgent(config=config, server_client=mock_server_client)
 

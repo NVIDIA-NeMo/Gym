@@ -53,7 +53,6 @@ class MiniSWESandboxEnvironmentConfig:
     run_args: list[str] = field(default_factory=list)
     start_args: list[str] = field(default_factory=list)
     container_timeout: str = "2h"
-    cache_dir_template: str | None = None
     instance_id: str | None = None
     provider: SandboxProviderConfig | dict[str, Any] = field(default_factory=dict)
     spec: dict[str, Any] = field(default_factory=dict)

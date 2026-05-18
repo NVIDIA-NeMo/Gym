@@ -19,7 +19,6 @@ import sys
 import time
 import traceback
 from asyncio import Semaphore
-from os import environ, getenv, makedirs
 from pathlib import Path
 from typing import Any, Callable, Literal, Optional, cast
 from uuid import uuid4
@@ -54,9 +53,8 @@ from responses_api_agents.mini_swe_agent_2.utils import MiniSWEAgentUtils
 
 class MiniSWEAgentConfig(BaseResponsesAPIAgentConfig):
     model_server: ModelServerRef
-    env: Literal["docker", "singularity", "sandbox"]
+    env: Literal["sandbox"]
     concurrency: int
-    cache_dir_template: Optional[str] = None
     sandbox_provider: Optional[dict[str, Any]] = None
     sandbox_spec: Optional[dict[str, Any]] = None
     sandbox_environment_kwargs: Optional[dict[str, Any]] = None
@@ -65,7 +63,6 @@ class MiniSWEAgentConfig(BaseResponsesAPIAgentConfig):
     eval_timeout: int = 1800
     skip_if_exists: bool = False
     step_limit: int = 250
-    collapse_limit: int = 3
     tool_choice: Optional[str | dict[str, Any]] = None
     sandbox_resource_profiles: Optional[list[dict[str, str]]] = None
     sandbox_ready_barrier_count: Optional[int] = None
@@ -94,10 +91,6 @@ class MiniSWEAgentVerifyResponse(BaseVerifyResponse):
 )
 def runner_ray_remote(runner: Callable, params: dict[str, Any]) -> Any:
     return runner(**params)
-
-
-def _uses_sandbox_env(env: str) -> bool:
-    return env == "sandbox"
 
 
 def _json_dict_from_metadata(value: Any, *, field_name: str) -> dict[str, Any]:
@@ -378,12 +371,9 @@ def _run_swegym_v2(**params: Any) -> dict[str, Any]:
     environment_config["step_timeout"] = params["step_timeout"]
     environment_config["eval_timeout"] = params["eval_timeout"]
     environment_config["instance_id"] = instance_id
-    if _uses_sandbox_env(params["env"]):
-        environment_config["environment_class"] = (
-            "responses_api_agents.mini_swe_agent_2.sandbox_environment.MiniSWESandboxEnvironment"
-        )
-    else:
-        environment_config["environment_class"] = params["env"]
+    environment_config["environment_class"] = (
+        "responses_api_agents.mini_swe_agent_2.sandbox_environment.MiniSWESandboxEnvironment"
+    )
 
     agent_config = config.get("agent", {})
     agent_config["step_limit"] = params["step_limit"]
@@ -469,7 +459,7 @@ def run_swegym_with_optional_sandbox(**params: Any) -> Any:
         trajectory_id=instance_id,
         instance_id=instance_id,
         harness="mini_swe_agent_2",
-        environment_type=str(params.get("env") or "unknown"),
+        environment_type="sandbox",
     ):
         return _run_swegym_v2(**params)
 
@@ -507,16 +497,13 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
             subset = body.subset
             split = body.split
             workers = 1
-            cache_dir_template = self.config.cache_dir_template
             run_golden = self.config.run_golden
             base_url = f"http://{model_server_config['host']}:{model_server_config['port']}/v1"
             dummy_key = "dummy_key"
             model_name = f"hosted_vllm/{policy_model_name}"
             step_timeout = self.config.step_timeout
             eval_timeout = self.config.eval_timeout
-            env = self.config.env
             step_limit = self.config.step_limit
-            collapse_limit = self.config.collapse_limit
 
             instance_id = body.instance_id
 
@@ -545,17 +532,16 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
             output_file_dir = f"{Path.cwd()}/results/{subset}/{policy_model_name}"
             config_path = mini_swe_config_path
             should_write_config = bool(model_kwargs)
-            if _uses_sandbox_env(env):
-                if self.config.sandbox_provider is None:
-                    raise ValueError("env=sandbox requires sandbox_provider")
-                config.setdefault("environment", {}).update(self.config.sandbox_environment_kwargs or {})
-                config["environment"]["provider"] = self.config.sandbox_provider
-                config["environment"]["spec"] = _sandbox_spec_for_instance(
-                    self.config.sandbox_spec,
-                    resource_profiles=self.config.sandbox_resource_profiles,
-                    instance_id=instance_id,
-                )
-                should_write_config = True
+            if self.config.sandbox_provider is None:
+                raise ValueError("mini_swe_agent_2 requires sandbox_provider")
+            config.setdefault("environment", {}).update(self.config.sandbox_environment_kwargs or {})
+            config["environment"]["provider"] = self.config.sandbox_provider
+            config["environment"]["spec"] = _sandbox_spec_for_instance(
+                self.config.sandbox_spec,
+                resource_profiles=self.config.sandbox_resource_profiles,
+                instance_id=instance_id,
+            )
+            should_write_config = True
 
             if should_write_config:
                 config_output_dir = Path(output_file_dir) / "_configs"
@@ -570,25 +556,6 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
                         verify_response = MiniSWEAgentVerifyResponse.model_validate_json(f.read())
                     return verify_response
 
-            env_vars = environ.copy()
-            if env == "singularity":
-                slurm_job_id = getenv("SLURM_JOB_ID", str(uuid4()))
-                env_vars.update(
-                    {
-                        "SINGULARITY_CACHEDIR": f"/tmp/singularity_cache_${slurm_job_id}_$$",
-                        "APPTAINER_CACHEDIR": f"/tmp/apptainer_cache_${slurm_job_id}_$$",
-                        "SINGULARITY_TMPDIR": f"/tmp/singularity_tmp_${slurm_job_id}_$$",
-                        "APPTAINER_TMPDIR": f"/tmp/apptainer_tmp_${slurm_job_id}_$$",
-                    }
-                )
-                for var in [
-                    "SINGULARITY_CACHEDIR",
-                    "APPTAINER_CACHEDIR",
-                    "SINGULARITY_TMPDIR",
-                    "APPTAINER_TMPDIR",
-                ]:
-                    makedirs(env_vars[var], exist_ok=True)
-
             #### RUN MINI-SWE-AGENT #####
             try:
                 params = dict(
@@ -599,8 +566,7 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
                     model=model_name,
                     api_key=dummy_key,
                     base_url=base_url,
-                    cache_dir_template=cache_dir_template,
-                    env=env,
+                    env="sandbox",
                     run_golden=run_golden,
                     instance_id=instance_id,
                     config=config_path,
@@ -610,7 +576,6 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
                     step_timeout=step_timeout,
                     eval_timeout=eval_timeout,
                     step_limit=step_limit,
-                    collapse_limit=collapse_limit,
                     sandbox_ready_barrier_count=self.config.sandbox_ready_barrier_count,
                     sandbox_ready_barrier_id=self.config.sandbox_ready_barrier_id,
                     sandbox_ready_barrier_timeout_s=self.config.sandbox_ready_barrier_timeout_s,

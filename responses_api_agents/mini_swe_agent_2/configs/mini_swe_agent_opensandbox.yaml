@@ -8,16 +8,8 @@ mini_swe_agent_2:
       model_server:
         type: responses_api_models
         name: policy_model
-      datasets:
-      - name: validation
-        type: validation
-        jsonl_fpath: responses_api_agents/mini_swe_agent_2/data/validation.jsonl
-        huggingface_identifier:
-          repo_id: princeton-nlp/SWE-bench_Verified
-        license: MIT
       concurrency: 64
       env: sandbox
-      cache_dir_template: null
       sandbox_provider:
         name: opensandbox
         kwargs:
@@ -71,4 +63,3 @@ mini_swe_agent_2:
       eval_timeout: 1800
       skip_if_exists: false
       step_limit: 250
-      collapse_limit: 3
