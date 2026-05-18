@@ -75,6 +75,15 @@ def _verify_pathological_sympy_expression(result_connection: Any) -> None:
         result_connection.close()
 
 
+def _sleeping_library_verifier_process(result_connection: Any) -> None:
+    import time
+
+    try:
+        time.sleep(60)
+    finally:
+        result_connection.close()
+
+
 class TestApp:
     @fixture
     def config(self) -> LibraryJudgeMathResourcesServerConfig:
@@ -377,6 +386,84 @@ class TestApp:
         assert library_reward == approx(reward)
         assert judge_evaluations is None
 
+    async def test_library_verifier_process_is_cleaned_up_on_cancellation(self) -> None:
+        if "fork" not in mp.get_all_start_methods():
+            skip("This cancellation test requires fork.")
+
+        ctx = mp.get_context("fork")
+        result_connection, child_connection = ctx.Pipe(duplex=False)
+        process = ctx.Process(target=_sleeping_library_verifier_process, args=(child_connection,))
+        process.start()
+        child_connection.close()
+
+        try:
+            task = asyncio.create_task(
+                LibraryJudgeMathResourcesServer._wait_for_library_verifier_process(
+                    process,
+                    result_connection,
+                    60.0,
+                )
+            )
+            await asyncio.sleep(0.05)
+            task.cancel()
+            with raises(asyncio.CancelledError):
+                await task
+
+            assert not process.is_alive()
+        finally:
+            if process.is_alive():
+                process.kill()
+                process.join(timeout=1.0)
+
+    async def test_library_verifier_process_is_cleaned_up_on_timeout(self) -> None:
+        if "fork" not in mp.get_all_start_methods():
+            skip("This timeout test requires fork.")
+
+        ctx = mp.get_context("fork")
+        result_connection, child_connection = ctx.Pipe(duplex=False)
+        process = ctx.Process(target=_sleeping_library_verifier_process, args=(child_connection,))
+        process.start()
+        child_connection.close()
+
+        try:
+            assert await LibraryJudgeMathResourcesServer._wait_for_library_verifier_process(
+                process,
+                result_connection,
+                0.01,
+            ) == (approx(0.0), None)
+            assert not process.is_alive()
+        finally:
+            if process.is_alive():
+                process.kill()
+                process.join(timeout=1.0)
+
+    async def test_library_verifier_process_errors_return_zero_reward(self) -> None:
+        process = MagicMock()
+        process.is_alive.return_value = False
+        process.exitcode = 1
+        result_connection = MagicMock()
+
+        assert await LibraryJudgeMathResourcesServer._wait_for_library_verifier_process(
+            process,
+            result_connection,
+            1.0,
+        ) == (approx(0.0), None)
+        result_connection.close.assert_called_once()
+
+        process = MagicMock()
+        process.is_alive.return_value = False
+        process.exitcode = 0
+        result_connection = MagicMock()
+        result_connection.poll.return_value = True
+        result_connection.recv.side_effect = EOFError()
+
+        assert await LibraryJudgeMathResourcesServer._wait_for_library_verifier_process(
+            process,
+            result_connection,
+            1.0,
+        ) == (approx(0.0), None)
+        result_connection.close.assert_called_once()
+
     async def test_verify_answer_with_library_async(self, config: LibraryJudgeMathResourcesServerConfig) -> None:
         resources_server = LibraryJudgeMathResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
@@ -660,8 +747,6 @@ class TestApp:
 # ──────────────────────────────────────────────────────────
 # Math metrics tests
 # ──────────────────────────────────────────────────────────
-
-from pytest import approx
 
 
 class TestComputeMetricsIntegration:

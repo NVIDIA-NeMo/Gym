@@ -246,6 +246,9 @@ Example output: "My final verdict is different [[A!=B]]"."""
         self, expected_answer: str, generated_answer: str
     ) -> tuple[float, Optional[str]]:
         async with self._library_verifier_semaphore:
+            # The production rollout workers run on Linux. Pin fork so the
+            # verifier child is cheap to start and can be killed independently
+            # if SymPy wedges.
             ctx = mp.get_context("fork")
             result_connection, child_connection = ctx.Pipe(duplex=False)
             process = ctx.Process(
@@ -290,6 +293,13 @@ Example output: "My final verdict is different [[A!=B]]"."""
             except EOFError:
                 return 0.0, None
         finally:
+            with contextlib.suppress(OSError, AssertionError):
+                if process.is_alive():
+                    process.terminate()
+                    process.join(timeout=1.0)
+                    if process.is_alive():
+                        process.kill()
+                        process.join(timeout=1.0)
             result_connection.close()
 
     async def _verify_answer_with_judge(
