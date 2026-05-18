@@ -1,0 +1,17 @@
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: gym-ray-dashboard
+  namespace: gym
+  labels:
+    app.kubernetes.io/part-of: nemo-gym
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  to:
+    kind: Service
+    name: gym-ray-head-svc
+  port:
+    targetPort: 8265
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect

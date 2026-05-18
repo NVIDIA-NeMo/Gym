@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: gym-model-svc
+  namespace: gym
+  labels:
+    app.kubernetes.io/name: gym-model
+    app.kubernetes.io/part-of: nemo-gym
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: gym-model
+  ports:
+    - port: 8080
+      targetPort: http
+      protocol: TCP
+      name: http

@@ -1,0 +1,24 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gym-model
+  namespace: gym
+spec:
+  template:
+    spec:
+      containers:
+        - name: model
+          command: ["python", "/opt/mock/mock_model.py"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: mock-script
+              mountPath: /opt/mock
+              readOnly: true
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 1Gi
+        - name: mock-script
+          configMap:
+            name: mock-model-script
