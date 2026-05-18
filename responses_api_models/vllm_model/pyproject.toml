@@ -19,6 +19,12 @@ version = "0.2.0rc0"
 requires-python = ">=3.12"
 dependencies = [
     "nemo-gym[dev]",
+    # Needed by audio_utils.py when enable_audio_chunking is True. Imports
+    # are lazy inside audio_utils so non-chunking deployments aren't forced
+    # to drag soundfile/numpy in, but listing them here makes the chunking
+    # path work out-of-the-box for audio benchmarks (asr_with_pc et al.).
+    "numpy",
+    "soundfile",
 ]
 
 [build-system]

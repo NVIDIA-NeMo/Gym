@@ -3621,3 +3621,335 @@ class TestAudioPathSplice:
                 assert "mutually exclusive" in str(e)
             else:
                 raise AssertionError(f"expected ValueError for metadata={metadata}")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Audio chunking (long single-clip audio → N sequential chat completions whose
+# textual outputs are space-joined and token counts summed). Mirrors NeMo
+# Skills' ``VLLMMultimodalModel._generate_with_chunking`` so audio benchmarks
+# ported from Skills retain their long-audio behaviour after the move to Gym.
+# ──────────────────────────────────────────────────────────────────────────────
+
+import io as _io  # noqa: E402
+
+import numpy as _np  # noqa: E402
+import soundfile as _sf  # noqa: E402
+from openai.types.completion_usage import CompletionUsage as _CompletionUsage  # noqa: E402
+
+from nemo_gym.server_utils import SESSION_ID_KEY as _SESSION_ID_KEY  # noqa: E402
+
+
+_SAMPLE_RATE = 16000
+
+
+def _make_wav_data_uri(duration_sec: float, sample_rate: int = _SAMPLE_RATE) -> str:
+    """Build a ``data:audio/wav;base64,...`` URI for ``duration_sec`` of silence."""
+    audio = _np.zeros(int(duration_sec * sample_rate), dtype=_np.int16)
+    buf = _io.BytesIO()
+    _sf.write(buf, audio, sample_rate, format="WAV", subtype="PCM_16")
+    return f"data:audio/wav;base64,{_b64.b64encode(buf.getvalue()).decode('ascii')}"
+
+
+def _write_wav_file(path, duration_sec: float, sample_rate: int = _SAMPLE_RATE) -> None:
+    audio = _np.zeros(int(duration_sec * sample_rate), dtype=_np.int16)
+    _sf.write(str(path), audio, sample_rate, format="WAV", subtype="PCM_16")
+
+
+def _make_chunking_model(
+    *,
+    enable_audio_chunking: bool = True,
+    chunk_audio_threshold_sec: float = 2.0,
+    return_token_id_information: bool = False,
+    audio_root: str | None = None,
+) -> VLLMModel:
+    """Minimal VLLMModel wired for chunking tests.
+
+    Threshold defaults to 2s (not the production 30s) so a few-second WAV is
+    enough to exercise the chunk fan-out without inflating test data size.
+    """
+    config = VLLMModelConfig(
+        host="0.0.0.0",
+        port=8080,
+        entrypoint="",
+        name="vllm_model",
+        base_url="http://localhost:9999/v1",
+        api_key="dummy_key",  # pragma: allowlist secret
+        model="dummy-model",
+        return_token_id_information=return_token_id_information,
+        uses_reasoning_parser=False,
+        uses_interleaved_reasoning=False,
+        audio_root=audio_root,
+        enable_audio_chunking=enable_audio_chunking,
+        chunk_audio_threshold_sec=chunk_audio_threshold_sec,
+        min_audio_chunk_duration_sec=0.5,
+    )
+    return VLLMModel(config=config, server_client=MagicMock(spec=ServerClient))
+
+
+def _make_chat_completion(content: str, finish_reason: str = "stop", usage=None):
+    """Build a ``NeMoGymChatCompletion`` carrying a single assistant message."""
+    return NeMoGymChatCompletion(
+        id="chtcmpl-x",
+        object="chat.completion",
+        created=FIXED_TIME,
+        model="dummy-model",
+        choices=[
+            NeMoGymChoice(
+                index=0,
+                finish_reason=finish_reason,
+                message=NeMoGymChatCompletionMessage(
+                    role="assistant",
+                    content=content,
+                    tool_calls=[],
+                ),
+            )
+        ],
+        usage=usage,
+    )
+
+
+def _attach_mock_client(model: VLLMModel, responses: list) -> AsyncMock:
+    """Wire ``model._clients[0]`` to return ``responses`` round-robin per call.
+
+    Tests exercising the chunk fan-out need each ``create_chat_completion``
+    invocation to yield a different completion (one per chunk) so the
+    aggregator's space-join and usage-sum can be observed.
+    """
+    mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+    iterator = iter(responses)
+    mock_client.create_chat_completion = AsyncMock(side_effect=lambda **_: next(iterator).model_dump())
+    model._clients = [mock_client]
+    return mock_client
+
+
+def _make_request_with_session(session_id: str = "test-session"):
+    request = MagicMock()
+    request.session = {_SESSION_ID_KEY: session_id}
+    return request
+
+
+class TestMaybeChunkAudioForRequest:
+    """Direct tests for ``VLLMModel._maybe_chunk_audio_for_request``.
+
+    Keeps the chunking decision logic separable from the chat-completions
+    fan-out so regressions in either layer surface independently.
+    """
+
+    def test_no_audio_returns_none(self) -> None:
+        model = _make_chunking_model()
+        body = {"model": "dummy-model", "messages": [{"role": "user", "content": "hi"}]}
+        assert model._maybe_chunk_audio_for_request(body) is None
+
+    def test_short_audio_is_passthrough(self) -> None:
+        """Under-threshold audio sidesteps the chunker entirely."""
+        model = _make_chunking_model(chunk_audio_threshold_sec=10.0)
+        body = {
+            "model": "dummy-model",
+            "messages": [{"role": "user", "content": "Transcribe."}],
+            "metadata": {"audio_data": _make_wav_data_uri(duration_sec=1.0)},
+        }
+        assert model._maybe_chunk_audio_for_request(body) is None
+
+    def test_disabled_chunking_is_passthrough(self) -> None:
+        """``enable_audio_chunking=False`` defeats chunking even on long audio."""
+        model = _make_chunking_model(enable_audio_chunking=False, chunk_audio_threshold_sec=1.0)
+        body = {
+            "model": "dummy-model",
+            "messages": [{"role": "user", "content": "Transcribe."}],
+            "metadata": {"audio_data": _make_wav_data_uri(duration_sec=5.0)},
+        }
+        assert model._maybe_chunk_audio_for_request(body) is None
+
+    def test_long_audio_data_splits_into_chunks(self) -> None:
+        """5s audio @ 2s threshold → 3 chunks (2s + 2s + 1s, tail kept since >= min)."""
+        model = _make_chunking_model(chunk_audio_threshold_sec=2.0)
+        body = {
+            "model": "dummy-model",
+            "messages": [{"role": "user", "content": "Transcribe."}],
+            "metadata": {"audio_data": _make_wav_data_uri(duration_sec=5.0)},
+        }
+        chunked = model._maybe_chunk_audio_for_request(body)
+        assert chunked is not None
+        assert len(chunked) == 3
+        # Every chunk body should carry its OWN audio_data URI (different
+        # from the original — the original held 5s, each chunk holds ≤ 2s).
+        original_uri = body["metadata"]["audio_data"]
+        for sub in chunked:
+            assert sub["metadata"]["audio_data"].startswith("data:audio/wav;base64,")
+            assert sub["metadata"]["audio_data"] != original_uri
+            # Other audio keys must be cleared so the splice path's
+            # mutual-exclusion guard doesn't trip.
+            assert "audio_path" not in sub["metadata"]
+            assert "audio_paths" not in sub["metadata"]
+
+    def test_long_audio_path_splits_into_chunks(self, tmp_path) -> None:
+        wav = tmp_path / "clip.wav"
+        _write_wav_file(wav, duration_sec=5.0)
+
+        model = _make_chunking_model(chunk_audio_threshold_sec=2.0)
+        body = {
+            "model": "dummy-model",
+            "messages": [{"role": "user", "content": "Transcribe."}],
+            "metadata": {"audio_path": str(wav)},
+        }
+        chunked = model._maybe_chunk_audio_for_request(body)
+        assert chunked is not None
+        assert len(chunked) == 3
+        for sub in chunked:
+            # audio_path channel got rewritten to audio_data (chunk URI).
+            assert "audio_path" not in sub["metadata"]
+            assert sub["metadata"]["audio_data"].startswith("data:audio/wav;base64,")
+
+    def test_audio_paths_multiclip_skips_chunking(self, tmp_path) -> None:
+        """Multi-clip audio is left for the splice path; chunking only owns single-clip."""
+        wav = tmp_path / "clip.wav"
+        _write_wav_file(wav, duration_sec=5.0)
+
+        model = _make_chunking_model(chunk_audio_threshold_sec=2.0)
+        body = {
+            "model": "dummy-model",
+            "messages": [{"role": "user", "content": "Compare."}],
+            "metadata": {"audio_paths": [str(wav), str(wav)]},
+        }
+        assert model._maybe_chunk_audio_for_request(body) is None
+
+    def test_token_id_training_with_long_audio_raises(self) -> None:
+        """Concatenating per-chunk token streams is meaningless — bail out loudly."""
+        model = _make_chunking_model(
+            chunk_audio_threshold_sec=1.0,
+            return_token_id_information=True,
+        )
+        body = {
+            "model": "dummy-model",
+            "messages": [{"role": "user", "content": "Transcribe."}],
+            "metadata": {"audio_data": _make_wav_data_uri(duration_sec=3.0)},
+        }
+        try:
+            model._maybe_chunk_audio_for_request(body)
+        except ValueError as e:
+            assert "return_token_id_information" in str(e)
+        else:
+            raise AssertionError("expected ValueError for chunking + token-id training mode")
+
+    def test_token_id_training_with_short_audio_passes_through(self) -> None:
+        """Token-id mode only conflicts when chunking actually fires — short audio is fine."""
+        model = _make_chunking_model(
+            chunk_audio_threshold_sec=10.0,
+            return_token_id_information=True,
+        )
+        body = {
+            "model": "dummy-model",
+            "messages": [{"role": "user", "content": "Transcribe."}],
+            "metadata": {"audio_data": _make_wav_data_uri(duration_sec=1.0)},
+        }
+        assert model._maybe_chunk_audio_for_request(body) is None
+
+
+class TestChunkedChatCompletion:
+    """End-to-end tests for chunked ``chat_completions``.
+
+    Mocks ``client.create_chat_completion`` to return distinct content per
+    call so the aggregator's space-join, usage-sum, and finish_reason rules
+    can be asserted.
+    """
+
+    async def test_chunks_join_with_space_and_sum_usage(self) -> None:
+        model = _make_chunking_model(chunk_audio_threshold_sec=2.0)
+        responses = [
+            _make_chat_completion(
+                "chunk one.",
+                usage=_CompletionUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+            ),
+            _make_chat_completion(
+                "chunk two.",
+                usage=_CompletionUsage(prompt_tokens=10, completion_tokens=7, total_tokens=17),
+            ),
+            _make_chat_completion(
+                "chunk three.",
+                usage=_CompletionUsage(prompt_tokens=10, completion_tokens=4, total_tokens=14),
+            ),
+        ]
+        mock_client = _attach_mock_client(model, responses)
+
+        body = NeMoGymChatCompletionCreateParamsNonStreaming(
+            model="dummy-model",
+            messages=[
+                NeMoGymChatCompletionUserMessageParam(role="user", content="Transcribe."),
+            ],
+            metadata={"audio_data": _make_wav_data_uri(duration_sec=5.0)},
+        )
+
+        result = await model.chat_completions(_make_request_with_session(), body)
+
+        # 5s audio / 2s threshold → 3 chunks → 3 mock client calls.
+        assert mock_client.create_chat_completion.await_count == 3
+
+        # Each chunk's content is space-joined (after strip) in order.
+        assert result.choices[0].message.content == "chunk one. chunk two. chunk three."
+
+        # Usage is summed across chunks; non-summed fields stay None.
+        assert result.usage.prompt_tokens == 30
+        assert result.usage.completion_tokens == 16
+        assert result.usage.total_tokens == 46
+
+        # finish_reason is "stop" since no chunk truncated.
+        assert result.choices[0].finish_reason == "stop"
+
+    async def test_length_finish_reason_propagates_from_any_chunk(self) -> None:
+        """If any chunk truncates we mark the aggregated rollout as truncated."""
+        model = _make_chunking_model(chunk_audio_threshold_sec=2.0)
+        responses = [
+            _make_chat_completion("first."),
+            _make_chat_completion("second.", finish_reason="length"),
+        ]
+        _attach_mock_client(model, responses)
+
+        body = NeMoGymChatCompletionCreateParamsNonStreaming(
+            model="dummy-model",
+            messages=[
+                NeMoGymChatCompletionUserMessageParam(role="user", content="Transcribe."),
+            ],
+            metadata={"audio_data": _make_wav_data_uri(duration_sec=3.0)},
+        )
+
+        result = await model.chat_completions(_make_request_with_session(), body)
+        assert result.choices[0].finish_reason == "length"
+
+    async def test_chunk_with_none_content_is_dropped_from_join(self) -> None:
+        """``content is None`` (e.g. out-of-context chunk) skips the join cleanly."""
+        model = _make_chunking_model(chunk_audio_threshold_sec=2.0)
+        responses = [
+            _make_chat_completion("kept."),
+            _make_chat_completion(None, finish_reason="length"),
+        ]
+        _attach_mock_client(model, responses)
+
+        body = NeMoGymChatCompletionCreateParamsNonStreaming(
+            model="dummy-model",
+            messages=[
+                NeMoGymChatCompletionUserMessageParam(role="user", content="Transcribe."),
+            ],
+            metadata={"audio_data": _make_wav_data_uri(duration_sec=3.0)},
+        )
+
+        result = await model.chat_completions(_make_request_with_session(), body)
+        # Empty/None chunk doesn't leak the literal "None" into the output.
+        assert result.choices[0].message.content == "kept."
+
+    async def test_short_audio_runs_once(self) -> None:
+        """Under-threshold audio takes the regular (single-call) path."""
+        model = _make_chunking_model(chunk_audio_threshold_sec=10.0)
+        responses = [_make_chat_completion("once.")]
+        mock_client = _attach_mock_client(model, responses)
+
+        body = NeMoGymChatCompletionCreateParamsNonStreaming(
+            model="dummy-model",
+            messages=[
+                NeMoGymChatCompletionUserMessageParam(role="user", content="Transcribe."),
+            ],
+            metadata={"audio_data": _make_wav_data_uri(duration_sec=1.0)},
+        )
+
+        result = await model.chat_completions(_make_request_with_session(), body)
+        assert mock_client.create_chat_completion.await_count == 1
+        assert result.choices[0].message.content == "once."
