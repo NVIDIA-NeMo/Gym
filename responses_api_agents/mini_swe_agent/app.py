@@ -44,6 +44,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.sandbox.observability import event_context, observability_sync_span
 from nemo_gym.server_utils import (
     ServerClient,
     get_first_server_config_dict,
@@ -155,6 +156,32 @@ def _responses_create_params_to_model_kwargs(
 
 def _bash_tool_choice() -> dict[str, Any]:
     return {"type": "function", "function": {"name": "bash"}}
+
+
+class _ObservedModel:
+    """Add an OTel span around each mini-SWE model query."""
+
+    def __init__(self, model: Any, *, model_name: str) -> None:
+        self._model = model
+        self._model_name = model_name
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._model, name)
+
+    def query(self, messages: list[dict[str, Any]], **kwargs: Any) -> dict[str, Any]:
+        model_kwargs = getattr(getattr(self._model, "config", None), "model_kwargs", None)
+        model_kwargs = model_kwargs if isinstance(model_kwargs, dict) else {}
+        attributes = {
+            "model": self._model_name,
+            "message_count": len(messages),
+            "temperature": kwargs.get("temperature", model_kwargs.get("temperature")),
+            "top_p": kwargs.get("top_p", model_kwargs.get("top_p")),
+            "max_tokens": kwargs.get("max_tokens", model_kwargs.get("max_tokens")),
+            "tool_choice": kwargs.get("tool_choice", model_kwargs.get("tool_choice")),
+            "_record_exception_stacktrace": False,
+        }
+        with observability_sync_span("llm.request", phase="llm", attributes=attributes):
+            return self._model.query(messages, **kwargs)
 
 
 def _barrier_file_name(instance_id: str) -> str:
@@ -390,6 +417,7 @@ def _run_swegym_v2(**params: Any) -> dict[str, Any]:
             )
 
         model = get_model(config=model_config)
+        model = _ObservedModel(model, model_name=params["model"])
         agent = DefaultAgent(model, env, **agent_config)
 
         if params["run_golden"]:
@@ -452,9 +480,16 @@ def run_swegym_with_optional_sandbox(**params: Any) -> Any:
         except ImportError:
             pass
 
-    if run_swegym_v1 is not None:
-        return run_swegym_v1(**params)
-    return _run_swegym_v2(**params)
+    instance_id = str(params.get("instance_id") or "unknown")
+    with event_context(
+        trajectory_id=instance_id,
+        instance_id=instance_id,
+        harness="mini_swe_agent",
+        environment_type=str(params.get("env") or "unknown"),
+    ):
+        if run_swegym_v1 is not None:
+            return run_swegym_v1(**params)
+        return _run_swegym_v2(**params)
 
 
 class MiniSWEAgent(SimpleResponsesAPIAgent):
