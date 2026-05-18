@@ -59,6 +59,7 @@ UV_PIP_SET_PYTHON_KEY_NAME = "uv_pip_set_python"
 SKIP_VENV_IF_PRESENT_KEY_NAME = "skip_venv_if_present"
 HF_TOKEN_KEY_NAME = "hf_token"
 RAY_HEAD_NODE_ADDRESS_KEY_NAME = "ray_head_node_address"
+RAY_ENABLED_KEY_NAME = "ray_enabled"
 PORT_RANGE_LOW_KEY_NAME = "port_range_low"
 PORT_RANGE_HIGH_KEY_NAME = "port_range_high"
 DRY_RUN_KEY_NAME = "dry_run"
@@ -82,6 +83,7 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     SKIP_VENV_IF_PRESENT_KEY_NAME,
     HF_TOKEN_KEY_NAME,
     RAY_HEAD_NODE_ADDRESS_KEY_NAME,
+    RAY_ENABLED_KEY_NAME,
     PORT_RANGE_LOW_KEY_NAME,
     PORT_RANGE_HIGH_KEY_NAME,
     DRY_RUN_KEY_NAME,
@@ -522,6 +524,9 @@ Found global config dict yaml:
 
             # Skip venv setup is opt-in and defaults to False.
             global_config_dict.setdefault(SKIP_VENV_IF_PRESENT_KEY_NAME, False)
+
+            # Ray startup is enabled by default; async/thread-only jobs can opt out.
+            global_config_dict.setdefault(RAY_ENABLED_KEY_NAME, True)
 
             global_config_dict.setdefault(DRY_RUN_KEY_NAME, False)
 

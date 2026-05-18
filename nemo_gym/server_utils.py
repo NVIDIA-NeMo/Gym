@@ -62,6 +62,7 @@ from nemo_gym.global_config import (
     DRY_RUN_KEY_NAME,
     HEAD_SERVER_KEY_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
+    RAY_ENABLED_KEY_NAME,
     RAY_HEAD_NODE_ADDRESS_KEY_NAME,
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
@@ -394,6 +395,26 @@ class UvicornLoggingConfig(BaseModel):
 
 _NEMO_GYM_STARTED_RAY_CLUSTER: bool = False
 
+_RAY_RUNTIME_ENV_EXCLUDES = [
+    ".git",
+    ".venv",
+    "**/.venv",
+    "cache",
+    "results",
+    "runs",
+    "wandb",
+]
+
+
+def _get_ray_init_runtime_env() -> dict[str, Any] | None:
+    """Provide Ray workers the editable Gym repo when launching servers from subdirs."""
+    if not (WORKING_DIR / "pyproject.toml").exists():
+        return None
+    return {
+        "working_dir": str(WORKING_DIR),
+        "excludes": _RAY_RUNTIME_ENV_EXCLUDES,
+    }
+
 
 def initialize_ray() -> None:
     """
@@ -408,8 +429,15 @@ def initialize_ray() -> None:
         return
 
     global_config_dict = get_global_config_dict()
+    if not global_config_dict.get(RAY_ENABLED_KEY_NAME, True):
+        print("NeMo Gym Ray startup disabled by ray_enabled=false")
+        return
+
     ray_head_node_address = global_config_dict.get(RAY_HEAD_NODE_ADDRESS_KEY_NAME)
     ray_init_kwargs = dict(ignore_reinit_error=True)
+    runtime_env = _get_ray_init_runtime_env()
+    if runtime_env:
+        ray_init_kwargs["runtime_env"] = runtime_env
 
     if ray_head_node_address:
         print(f"Connecting to Ray cluster at specified address: {ray_head_node_address}")

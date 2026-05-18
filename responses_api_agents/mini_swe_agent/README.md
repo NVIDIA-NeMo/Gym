@@ -24,6 +24,9 @@ A NeMo Gym responses API agent that integrates the [Mini-SWE-Agent](https://gith
 The Mini-SWE-Agent environment provides an interface for training models on solving real-world software engineering problems. 
 It leverages the SWE-Gym dataset of GitHub issues and uses containerized environments (Docker/Singularity) to execute code modifications and validate solutions.
 
+For the Gym sandbox-backed mini-swe-agent v2 path, see
+[SANDBOX_ENVIRONMENT.md](SANDBOX_ENVIRONMENT.md).
+
 ## Reward Profiling
 
 ### Model - Qwen/Qwen3-Coder-30B-A3B-Instruct
