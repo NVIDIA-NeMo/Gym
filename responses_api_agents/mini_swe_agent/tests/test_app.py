@@ -28,6 +28,7 @@ from nemo_gym.openai_utils import (
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.sandbox.observability import SandboxRecorder, use_recorder
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.mini_swe_agent import app as mini_swe_app_module
 from responses_api_agents.mini_swe_agent.app import (
@@ -41,6 +42,7 @@ from responses_api_agents.mini_swe_agent.app import (
     _is_missing_tool_call_error,
     _json_dict_from_metadata,
     _message_content_to_text,
+    _ObservedModel,
     _responses_create_params_to_model_kwargs,
     _run_swegym_v2,
     _sandbox_spec_for_instance,
@@ -239,6 +241,31 @@ def assert_run_swegym_called(
     assert len(args) >= 1
 
 
+def _otel_attributes(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    attrs = {}
+    for row in rows:
+        value = row["value"]
+        if "stringValue" in value:
+            attrs[row["key"]] = value["stringValue"]
+        elif "boolValue" in value:
+            attrs[row["key"]] = value["boolValue"]
+        elif "intValue" in value:
+            attrs[row["key"]] = int(value["intValue"])
+        elif "doubleValue" in value:
+            attrs[row["key"]] = value["doubleValue"]
+    return attrs
+
+
+def _otel_spans(output_dir: Path) -> list[dict[str, Any]]:
+    trace_payload = json.loads((output_dir / "traces" / "otel_traces.json").read_text())
+    return [
+        span
+        for resource_span in trace_payload["resourceSpans"]
+        for scope_span in resource_span["scopeSpans"]
+        for span in scope_span["spans"]
+    ]
+
+
 class FormatError(Exception):
     def __init__(self, content: str = "No tool calls found in the response.") -> None:
         self.messages = ({"role": "user", "content": content, "extra": {"interrupt_type": "FormatError"}},)
@@ -286,6 +313,51 @@ class TestApp:
             _AutoToolRetryModel(model).query([])
 
         assert model.calls == [{"type": "function", "function": {"name": "custom"}}]
+
+    def test_observed_model_records_llm_span(self, tmp_path: Path) -> None:
+        class QueryModel:
+            def __init__(self) -> None:
+                self.config = SimpleNamespace(model_kwargs={"temperature": 0.7, "top_p": 0.95, "max_tokens": 128})
+                self.calls = []
+
+            def query(self, messages: list[dict[str, Any]], **kwargs: Any) -> dict[str, Any]:
+                self.calls.append((messages, kwargs))
+                return {"role": "assistant", "content": "ok"}
+
+        recorder = SandboxRecorder(output_dir=tmp_path / "observability", otel={"enabled": False})
+        model = QueryModel()
+        with use_recorder(recorder):
+            with mini_swe_app_module.event_context(trajectory_id="task-1"):
+                assert _ObservedModel(model, model_name="hosted_vllm/qwen").query([{"role": "user", "content": "hi"}])
+        recorder.finalize()
+
+        spans = _otel_spans(recorder.output_dir)
+        llm_span = next(span for span in spans if span["name"] == "llm.request")
+        attrs = _otel_attributes(llm_span["attributes"])
+
+        assert attrs["operation.name"] == "llm.request"
+        assert attrs["span.section"] == "rollout"
+        assert attrs["model"] == "hosted_vllm/qwen"
+        assert attrs["message_count"] == 1
+
+    def test_observed_model_records_auto_tool_retry_as_successful_llm_span(self, tmp_path: Path) -> None:
+        model = LitellmModel(tool_choice="auto")
+        observed = _ObservedModel(_AutoToolRetryModel(model), model_name="hosted_vllm/qwen")
+
+        recorder = SandboxRecorder(output_dir=tmp_path / "observability", otel={"enabled": False})
+        with use_recorder(recorder):
+            with mini_swe_app_module.event_context(trajectory_id="task-1"):
+                message = observed.query([{"role": "user", "content": "hi"}])
+        recorder.finalize()
+
+        spans = _otel_spans(recorder.output_dir)
+        llm_span = next(span for span in spans if span["name"] == "llm.request")
+        attrs = _otel_attributes(llm_span["attributes"])
+
+        assert message["extra"]["actions"] == [{"command": "pwd"}]
+        assert model.calls == ["auto", {"type": "function", "function": {"name": "bash"}}]
+        assert attrs["status"] == "ok"
+        assert not llm_span.get("events")
 
     def test_response_param_helpers_cover_metadata_and_tool_choice_modes(self) -> None:
         assert _json_dict_from_metadata(None, field_name="extra_body") == {}

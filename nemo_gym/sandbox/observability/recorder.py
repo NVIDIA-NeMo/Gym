@@ -30,7 +30,7 @@ from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import BatchSpanProcessor, SimpleSpanProcessor
+from opentelemetry.sdk.trace.export import BatchSpanProcessor, SimpleSpanProcessor, SpanExporter
 from opentelemetry.trace import Span, SpanKind, Status, StatusCode
 
 from nemo_gym.sandbox.observability.traces import (
@@ -59,35 +59,56 @@ class SandboxRecorder:
     def __init__(
         self,
         *,
-        output_dir: Path,
+        output_dir: Path | None = None,
         otel: dict[str, Any] | None = None,
         run_id: str | None = None,
-        export_traces: bool = True,
+        run_span_name: str | None = None,
+        export_traces: bool | None = None,
     ) -> None:
         self.output_dir = output_dir
         self.otel = dict(otel or {})
         self.run_id = run_id
-        self.export_traces = export_traces
+        self.run_span_name = _eval_span_name(
+            run_span_name or self.otel.get("run_span_name") or self.otel.get("job_name") or run_id or "sandbox.run"
+        )
+        self._configured_trace_exporters = _configured_exporters(self.otel, "traces")
+        self._configured_metric_exporters = _configured_exporters(self.otel, "metrics")
+        self.export_traces = _local_trace_export_enabled(
+            output_dir=output_dir,
+            export_traces=export_traces,
+            trace_exporters=self._configured_trace_exporters,
+        )
+        if self.export_traces and output_dir is None:
+            raise ValueError("sandbox observability output_dir is required for local trace export")
         self.attribute_aliases = _string_map(self.otel.get("attribute_aliases"))
         self.metric_attribute_keys = tuple(str(key) for key in self.otel.get("metric_attribute_keys") or ())
         self.resource_attributes = safe_attributes(self.otel.get("resource_attributes") or {})
+        self.local_service_name_strategy = str(self.otel.get("local_service_name_strategy") or "span_section")
         self._closed = False
         self._service_name = str(self.otel.get("service_name") or "") or None
-        self._span_exporter = JsonSpanExporter()
+        self._local_span_exporter = JsonSpanExporter() if self.export_traces else None
         self._tracer_provider = TracerProvider(resource=self._resource())
-        self._tracer_provider.add_span_processor(SimpleSpanProcessor(self._span_exporter))
+        if self._local_span_exporter is not None:
+            self._tracer_provider.add_span_processor(SimpleSpanProcessor(self._local_span_exporter))
         self._meter_provider = None
         self._duration_histogram = None
         self._phase_duration_histograms = {}
         self._counter = None
         self._configure_live_exporters()
         self._configure_metrics()
-        self._trajectory_spans: dict[str, Span] = {}
+        self._trajectory_spans: dict[tuple[str, str], Span] = {}
         self._run_span = self._start_span(
-            "sandbox.run",
-            attributes=safe_attributes({"run_id": run_id}),
+            self.run_span_name,
+            attributes=safe_attributes(
+                {
+                    "run_id": run_id,
+                    "span.role": "eval.run",
+                    "span.section": "eval",
+                }
+            ),
         )
-        self.output_dir.mkdir(parents=True, exist_ok=True)
+        if self.output_dir is not None:
+            self.output_dir.mkdir(parents=True, exist_ok=True)
         self.record_event("lifecycle", "run.start", attributes={"run_id": run_id})
 
     def record_event(
@@ -160,22 +181,35 @@ class SandboxRecorder:
     ) -> Iterator[None]:
         start_monotonic = time.monotonic()
         span_attrs = safe_attributes({**G_EVENT_CONTEXT.get(), "phase": phase, **(attributes or {})})
+        record_exception_stacktrace = _as_bool(span_attrs.pop("_record_exception_stacktrace", True))
+        operation_name = _span_name(name)
+        display_name = _operation_span_name(operation_name, span_attrs)
         with self._start_as_current_span(
-            name,
-            attributes=self._span_attributes(name, span_attrs),
+            display_name,
+            attributes=self._span_attributes(operation_name, span_attrs, display_name=display_name),
             context=self._parent_context(span_attrs),
-            kind=_span_kind(name),
+            kind=_span_kind(operation_name),
         ) as span:
             try:
                 yield
             except Exception as e:
                 duration_s = time.monotonic() - start_monotonic
-                span.record_exception(e)
+                if record_exception_stacktrace:
+                    span.record_exception(e)
+                else:
+                    span.add_event(
+                        "exception",
+                        {
+                            "exception.type": type(e).__name__,
+                            "exception.message": str(e),
+                        },
+                    )
                 span.set_attribute("duration_s", duration_s)
                 span.set_attribute("status", "error")
+                span.set_attribute("error_type", type(e).__name__)
                 span.set_status(Status(StatusCode.ERROR, type(e).__name__))
                 self._record_span_metrics(
-                    name=name,
+                    name=operation_name,
                     attrs={**span_attrs, "status": "error", "duration_s": duration_s},
                 )
                 raise
@@ -185,7 +219,7 @@ class SandboxRecorder:
                 span.set_attribute("status", "ok")
                 span.set_status(Status(StatusCode.OK))
                 self._record_span_metrics(
-                    name=name,
+                    name=operation_name,
                     attrs={**span_attrs, "status": "ok", "duration_s": duration_s},
                 )
 
@@ -225,30 +259,41 @@ class SandboxRecorder:
     def _event_parent_span(self, attrs: dict[str, Any]) -> Span | None:
         trajectory_id = _trajectory_id(attrs)
         if trajectory_id:
-            return self._trajectory_span(trajectory_id, attrs)
+            return self._trajectory_span(trajectory_id, attrs, section=_span_section("trajectory", attrs))
         return self._run_span if self._run_span.is_recording() else None
 
     def _parent_context(self, attrs: dict[str, Any]) -> Any:
         parent_span = self._event_parent_span(attrs)
         return trace.set_span_in_context(parent_span) if parent_span is not None else None
 
-    def _trajectory_span(self, trajectory_id: str, attrs: dict[str, Any]) -> Span:
-        span = self._trajectory_spans.get(trajectory_id)
+    def _trajectory_span(self, trajectory_id: str, attrs: dict[str, Any], *, section: str) -> Span:
+        span_key = (trajectory_id, section)
+        span = self._trajectory_spans.get(span_key)
         if span is not None and span.is_recording():
-            _set_span_attributes(span, self._trajectory_root_attributes(trajectory_id, attrs))
+            _set_span_attributes(span, self._trajectory_root_attributes(trajectory_id, attrs, section=section))
             return span
         span = self._start_span(
-            "trajectory",
-            attributes=self._trajectory_root_attributes(trajectory_id, attrs),
-            context=trace.set_span_in_context(self._run_span),
+            _section_span_name(section, trajectory_id),
+            attributes=self._trajectory_root_attributes(trajectory_id, attrs, section=section),
+            context=self._trajectory_parent_context(trajectory_id, attrs, section=section),
         )
-        self._trajectory_spans[trajectory_id] = span
+        self._trajectory_spans[span_key] = span
         return span
 
-    def _trajectory_root_attributes(self, trajectory_id: str, attrs: dict[str, Any]) -> dict[str, Any]:
+    def _trajectory_parent_context(self, trajectory_id: str, attrs: dict[str, Any], *, section: str) -> Any:
+        if section == "rollout":
+            return trace.set_span_in_context(self._run_span)
+        rollout_span = self._trajectory_span(trajectory_id, attrs, section="rollout")
+        return trace.set_span_in_context(rollout_span)
+
+    def _trajectory_root_attributes(
+        self, trajectory_id: str, attrs: dict[str, Any], *, section: str
+    ) -> dict[str, Any]:
         root_attrs = {
             "event.type": "synthetic_root",
-            "phase": "trajectory",
+            "phase": section,
+            "span.role": f"{section}.trajectory",
+            "span.section": section,
             "trajectory_id": trajectory_id,
         }
         for key in (
@@ -264,8 +309,12 @@ class SandboxRecorder:
                 root_attrs[key] = attrs[key]
         return safe_attributes(root_attrs)
 
-    def _span_attributes(self, name: str, attrs: dict[str, Any]) -> dict[str, Any]:
+    def _span_attributes(self, name: str, attrs: dict[str, Any], *, display_name: str | None = None) -> dict[str, Any]:
         span_attrs = safe_attributes({**attrs})
+        span_attrs.setdefault("operation.name", name)
+        if display_name is not None and display_name != name:
+            span_attrs.setdefault("span.display_name", display_name)
+        span_attrs.setdefault("span.section", _span_section(name, span_attrs))
         if self.run_id:
             span_attrs.setdefault("run_id", self.run_id)
         for source, target in self.attribute_aliases.items():
@@ -279,19 +328,22 @@ class SandboxRecorder:
         trajectory_id = _trajectory_id(attrs)
         if trajectory_id is None:
             return
-        span = self._trajectory_spans.pop(trajectory_id, None)
-        if span is None or not span.is_recording():
-            return
-        _set_span_attributes(span, self._trajectory_root_attributes(trajectory_id, attrs))
-        span.set_status(Status(StatusCode.ERROR if attrs.get("stop_reason") == "error" else StatusCode.OK))
-        span.end()
+        for span_key, span in list(self._trajectory_spans.items()):
+            if span_key[0] != trajectory_id:
+                continue
+            self._trajectory_spans.pop(span_key, None)
+            if span is None or not span.is_recording():
+                continue
+            _set_span_attributes(span, self._trajectory_root_attributes(trajectory_id, attrs, section=span_key[1]))
+            span.set_status(Status(StatusCode.ERROR if attrs.get("stop_reason") == "error" else StatusCode.OK))
+            span.end()
 
     def _end_open_spans(self) -> None:
-        for trajectory_id, span in list(self._trajectory_spans.items()):
+        for span_key, span in list(self._trajectory_spans.items()):
             if span.is_recording():
                 span.set_attribute("stop_reason", "observability_finalize")
                 span.end()
-            self._trajectory_spans.pop(trajectory_id, None)
+            self._trajectory_spans.pop(span_key, None)
         if self._run_span.is_recording():
             self._run_span.set_status(Status(StatusCode.OK))
             self._run_span.end()
@@ -303,27 +355,17 @@ class SandboxRecorder:
         return Resource.create(attributes)
 
     def _configure_live_exporters(self) -> None:
-        if not self.otel.get("enabled"):
-            return
-        endpoint = _otel_trace_endpoint(self.otel)
-        if not endpoint:
-            return
-        try:
-            from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
-        except ImportError:
-            return
-        self._tracer_provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=endpoint)))
+        for exporter_name in _live_trace_exporters(self.otel, self._configured_trace_exporters):
+            exporter = _build_trace_exporter(exporter_name, self.otel)
+            if exporter is not None:
+                self._tracer_provider.add_span_processor(BatchSpanProcessor(exporter))
 
     def _configure_metrics(self) -> None:
-        endpoint = _otel_metric_endpoint(self.otel)
         readers = []
-        if self.otel.get("enabled") and endpoint:
-            try:
-                from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
-            except ImportError:
-                readers = []
-            else:
-                readers = [PeriodicExportingMetricReader(OTLPMetricExporter(endpoint=endpoint))]
+        for exporter_name in _live_metric_exporters(self.otel, self._configured_metric_exporters):
+            exporter = _build_metric_exporter(exporter_name, self.otel)
+            if exporter is not None:
+                readers.append(PeriodicExportingMetricReader(exporter))
         self._meter_provider = MeterProvider(resource=self._resource(), metric_readers=readers)
         meter = self._meter_provider.get_meter(SCOPE_NAME, SCOPE_VERSION)
         self._duration_histogram = meter.create_histogram(
@@ -390,10 +432,13 @@ class SandboxRecorder:
         return {key: str(attrs[key]) for key in self.metric_attribute_keys if key in attrs and attrs[key] is not None}
 
     def _export_trace_artifacts(self) -> dict[str, str]:
+        if self.output_dir is None or self._local_span_exporter is None:
+            return {}
         self._tracer_provider.force_flush()
         return export_trace_artifacts(
             self.output_dir,
-            spans=self._span_exporter.finished_spans(),
+            spans=self._local_span_exporter.finished_spans(),
+            service_name_strategy=self.local_service_name_strategy,
         )
 
     def _shutdown_otel(self) -> None:
@@ -426,6 +471,213 @@ def _string_map(value: Any) -> dict[str, str]:
     return {str(source): str(target) for source, target in value.items()}
 
 
+def _span_name(value: Any) -> str:
+    span_name = str(value or "").strip()
+    return span_name or "sandbox.run"
+
+
+def _eval_span_name(value: Any) -> str:
+    name = _span_name(value)
+    return name if name.startswith("eval: ") else f"eval: {name}"
+
+
+def _section_span_name(section: str, trajectory_id: Any) -> str:
+    return f"{section}: {_span_name(trajectory_id)}"
+
+
+def _operation_span_name(name: str, attrs: dict[str, Any]) -> str:
+    if name == "trajectory.tool":
+        return f"exec: {_command_title(attrs.get('command'))}"
+    if name == "sandbox.start":
+        return _span_with_detail("sandbox.create", attrs.get("image"))
+    if name == "sandbox.start_batch":
+        count = attrs.get("count")
+        detail = f"{count} sandbox{'es' if count != 1 else ''}" if count is not None else None
+        return _span_with_detail("sandbox.create_batch", detail)
+    if name == "sandbox.cleanup":
+        return _span_with_detail("sandbox.cleanup", attrs.get("sandbox_id"))
+    if name == "sandbox.diagnostic.aperf.start":
+        return _span_with_detail("diagnostic.aperf.start", attrs.get("run_name"))
+    if name == "sandbox.diagnostic.aperf.stop":
+        return _span_with_detail("diagnostic.aperf.stop", attrs.get("run_name"))
+    return _span_name(name)
+
+
+def _span_with_detail(name: str, detail: Any, *, max_length: int = 120) -> str:
+    text = _compact_text(detail)
+    if not text:
+        return name
+    title = f"{name}: {text}"
+    return title if len(title) <= max_length else f"{title[: max_length - 1].rstrip()}..."
+
+
+def _command_title(command: Any, *, max_length: int = 140) -> str:
+    text = _strip_command_prelude(_compact_text(command))
+    if not text:
+        return "<empty>"
+    diagnostic_title = _diagnostic_command_title(text)
+    if diagnostic_title:
+        return diagnostic_title
+    verifier_title = _verifier_command_title(text)
+    if verifier_title:
+        return _truncate_span_title(verifier_title, max_length=max_length)
+    first_line = next((line.strip() for line in text.splitlines() if line.strip()), "")
+    title = " ".join(first_line.split())
+    return _truncate_span_title(title, max_length=max_length)
+
+
+def _strip_command_prelude(command: str) -> str:
+    prefixes = ("cd /testbed && source $(conda info --base)/etc/profile.d/conda.sh && conda activate testbed &&",)
+    text = command
+    for prefix in prefixes:
+        if text.startswith(prefix):
+            return text[len(prefix) :].lstrip()
+    return text
+
+
+def _diagnostic_command_title(command: str) -> str | None:
+    if "nohup aperf record" in command:
+        return "setup/start aperf recorder"
+    if "aperf.pid" in command and "kill -INT" in command:
+        return "stop/archive aperf recorder"
+    return None
+
+
+def _verifier_command_title(command: str) -> str | None:
+    if "\n" not in command:
+        return None
+    for line in reversed(command.splitlines()):
+        title = " ".join(line.strip().split())
+        if not title:
+            continue
+        if title.startswith(("pytest ", "python -m pytest ", "./tests/runtests.py ")):
+            return f"run verifier: {title}"
+    return None
+
+
+def _truncate_span_title(title: str, *, max_length: int) -> str:
+    return title if len(title) <= max_length else f"{title[: max_length - 1].rstrip()}..."
+
+
+def _compact_text(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _span_section(name: str, attrs: dict[str, Any]) -> str:
+    configured_section = str(attrs.get("span.section") or attrs.get("execution.section") or "").strip()
+    if configured_section:
+        return configured_section
+    if name == "trajectory" and attrs.get("event.type") == "trajectory.complete":
+        return "rollout"
+    if name in {"trajectory.tool", "llm.request"} or attrs.get("trajectory_id") is not None:
+        return "rollout"
+    if name.startswith("sandbox."):
+        return "sandbox"
+    return "eval"
+
+
+def _configured_exporters(cfg: dict[str, Any], signal: str) -> tuple[str, ...] | None:
+    for key in (f"{signal}_exporters", f"{signal}_exporter", "exporters", "exporter"):
+        if key in cfg and cfg[key] is not None:
+            return _exporter_names(cfg[key])
+    return None
+
+
+def _exporter_names(value: Any) -> tuple[str, ...]:
+    if isinstance(value, str):
+        raw_names = value.split(",")
+    elif isinstance(value, (list, tuple, set)):
+        raw_names = value
+    else:
+        raw_names = [value]
+    names = tuple(_normalize_exporter_name(name) for name in raw_names if str(name).strip())
+    return tuple(name for name in names if name != "none")
+
+
+def _normalize_exporter_name(value: Any) -> str:
+    name = str(value).strip().lower().replace("-", "_")
+    return {
+        "otlp": "otlp_http",
+        "otlp_proto_http": "otlp_http",
+        "http": "otlp_http",
+        "json": "otlp_json_file",
+        "file": "otlp_json_file",
+        "local": "otlp_json_file",
+        "stdout": "console",
+    }.get(name, name)
+
+
+def _local_trace_export_enabled(
+    *,
+    output_dir: Path | None,
+    export_traces: bool | None,
+    trace_exporters: tuple[str, ...] | None,
+) -> bool:
+    if export_traces is not None:
+        return bool(export_traces)
+    if trace_exporters is not None:
+        return "otlp_json_file" in trace_exporters
+    return output_dir is not None
+
+
+def _live_trace_exporters(cfg: dict[str, Any], configured: tuple[str, ...] | None) -> tuple[str, ...]:
+    if configured is not None:
+        return tuple(name for name in configured if name != "otlp_json_file")
+    if _as_bool(cfg.get("enabled")) and _otel_trace_endpoint(cfg):
+        return ("otlp_http",)
+    return ()
+
+
+def _live_metric_exporters(cfg: dict[str, Any], configured: tuple[str, ...] | None) -> tuple[str, ...]:
+    if configured is not None:
+        return configured
+    if _as_bool(cfg.get("enabled")) and _otel_metric_endpoint(cfg):
+        return ("otlp_http",)
+    return ()
+
+
+def _build_trace_exporter(name: str, cfg: dict[str, Any]) -> SpanExporter | None:
+    if name == "otlp_http":
+        try:
+            from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+        except ImportError:
+            return None
+        return OTLPSpanExporter(
+            endpoint=_otel_trace_endpoint(cfg),
+            headers=_otel_headers(cfg, signal="traces"),
+            timeout=_otel_timeout(cfg, signal="traces"),
+        )
+    if name == "console":
+        from opentelemetry.sdk.trace.export import ConsoleSpanExporter
+
+        return ConsoleSpanExporter()
+    raise ValueError(f"Unsupported sandbox trace exporter: {name!r}")
+
+
+def _build_metric_exporter(name: str, cfg: dict[str, Any]) -> Any:
+    if name == "otlp_http":
+        try:
+            from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
+        except ImportError:
+            return None
+        return OTLPMetricExporter(
+            endpoint=_otel_metric_endpoint(cfg),
+            headers=_otel_headers(cfg, signal="metrics"),
+            timeout=_otel_timeout(cfg, signal="metrics"),
+        )
+    if name == "console":
+        from opentelemetry.sdk.metrics.export import ConsoleMetricExporter
+
+        return ConsoleMetricExporter()
+    raise ValueError(f"Unsupported sandbox metric exporter: {name!r}")
+
+
+def _as_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def safe_attributes(attributes: dict[str, Any] | None) -> dict[str, Any]:
     """Return OpenTelemetry-friendly attributes."""
     if not attributes:
@@ -453,6 +705,28 @@ def _otel_metric_endpoint(cfg: dict[str, Any]) -> str | None:
     return _otel_signal_endpoint(cfg.get("metrics_endpoint") or cfg.get("endpoint"), signal="metrics")
 
 
+def _otel_headers(cfg: dict[str, Any], *, signal: str) -> dict[str, str] | None:
+    headers = cfg.get(f"{signal}_headers") or cfg.get("headers")
+    if not headers:
+        return None
+    if isinstance(headers, dict):
+        return {str(key): str(value) for key, value in headers.items()}
+    parsed: dict[str, str] = {}
+    for item in str(headers).split(","):
+        if "=" not in item:
+            continue
+        key, value = item.split("=", 1)
+        parsed[key.strip()] = value.strip()
+    return parsed or None
+
+
+def _otel_timeout(cfg: dict[str, Any], *, signal: str) -> float | None:
+    timeout = cfg.get(f"{signal}_timeout_s") or cfg.get("timeout_s")
+    if timeout is None:
+        return None
+    return float(timeout)
+
+
 def _otel_signal_endpoint(endpoint: Any, *, signal: str) -> str | None:
     if not endpoint:
         return None
@@ -465,18 +739,56 @@ def _otel_signal_endpoint(endpoint: Any, *, signal: str) -> str | None:
 
 
 def _otel_config_from_env() -> dict[str, Any]:
-    traces_endpoint = os.environ.get("NEMO_GYM_SANDBOX_OBSERVABILITY_OTEL_TRACES_ENDPOINT")
-    metrics_endpoint = os.environ.get("NEMO_GYM_SANDBOX_OBSERVABILITY_OTEL_METRICS_ENDPOINT")
-    endpoint = os.environ.get("NEMO_GYM_SANDBOX_OBSERVABILITY_OTEL_ENDPOINT")
+    traces_endpoint = os.environ.get("NEMO_GYM_SANDBOX_OBSERVABILITY_OTEL_TRACES_ENDPOINT") or os.environ.get(
+        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"
+    )
+    metrics_endpoint = os.environ.get("NEMO_GYM_SANDBOX_OBSERVABILITY_OTEL_METRICS_ENDPOINT") or os.environ.get(
+        "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"
+    )
+    endpoint = os.environ.get("NEMO_GYM_SANDBOX_OBSERVABILITY_OTEL_ENDPOINT") or os.environ.get(
+        "OTEL_EXPORTER_OTLP_ENDPOINT"
+    )
+    traces_exporter = os.environ.get("NEMO_GYM_SANDBOX_OBSERVABILITY_TRACES_EXPORTER") or os.environ.get(
+        "OTEL_TRACES_EXPORTER"
+    )
+    metrics_exporter = os.environ.get("NEMO_GYM_SANDBOX_OBSERVABILITY_METRICS_EXPORTER") or os.environ.get(
+        "OTEL_METRICS_EXPORTER"
+    )
+    headers = os.environ.get("NEMO_GYM_SANDBOX_OBSERVABILITY_OTEL_HEADERS") or os.environ.get(
+        "OTEL_EXPORTER_OTLP_HEADERS"
+    )
+    traces_headers = os.environ.get("NEMO_GYM_SANDBOX_OBSERVABILITY_OTEL_TRACES_HEADERS") or os.environ.get(
+        "OTEL_EXPORTER_OTLP_TRACES_HEADERS"
+    )
+    metrics_headers = os.environ.get("NEMO_GYM_SANDBOX_OBSERVABILITY_OTEL_METRICS_HEADERS") or os.environ.get(
+        "OTEL_EXPORTER_OTLP_METRICS_HEADERS"
+    )
+    timeout_s = os.environ.get("NEMO_GYM_SANDBOX_OBSERVABILITY_OTEL_TIMEOUT_S") or os.environ.get(
+        "OTEL_EXPORTER_OTLP_TIMEOUT"
+    )
+    traces_timeout_s = os.environ.get("NEMO_GYM_SANDBOX_OBSERVABILITY_OTEL_TRACES_TIMEOUT_S") or os.environ.get(
+        "OTEL_EXPORTER_OTLP_TRACES_TIMEOUT"
+    )
+    metrics_timeout_s = os.environ.get("NEMO_GYM_SANDBOX_OBSERVABILITY_OTEL_METRICS_TIMEOUT_S") or os.environ.get(
+        "OTEL_EXPORTER_OTLP_METRICS_TIMEOUT"
+    )
     return {
-        "enabled": bool(endpoint or traces_endpoint or metrics_endpoint),
+        "enabled": bool(endpoint or traces_endpoint or metrics_endpoint or traces_exporter or metrics_exporter),
         "service_name": os.environ.get(
             "NEMO_GYM_SANDBOX_OBSERVABILITY_OTEL_SERVICE_NAME",
-            "",
+            os.environ.get("OTEL_SERVICE_NAME", ""),
         ),
         "endpoint": endpoint,
         "traces_endpoint": traces_endpoint,
         "metrics_endpoint": metrics_endpoint,
+        "traces_exporter": traces_exporter,
+        "metrics_exporter": metrics_exporter,
+        "headers": headers,
+        "traces_headers": traces_headers,
+        "metrics_headers": metrics_headers,
+        "timeout_s": timeout_s,
+        "traces_timeout_s": traces_timeout_s,
+        "metrics_timeout_s": metrics_timeout_s,
     }
 
 
@@ -489,26 +801,34 @@ def build_recorder_from_config(
     if not isinstance(config, dict) or not config.get("enabled", False):
         return None
     output_dir = config.get("output_dir")
-    if not output_dir:
-        raise ValueError("env.sandbox.observability.output_dir is required when enabled")
     return SandboxRecorder(
-        output_dir=Path(output_dir),
+        output_dir=Path(output_dir) if output_dir else None,
         otel=dict(config.get("otel") or {}),
         run_id=run_id,
-        export_traces=bool(config.get("export_traces", True)),
+        run_span_name=config.get("run_span_name") or config.get("job_name"),
+        export_traces=config.get("export_traces"),
     )
 
 
 def build_recorder_from_env() -> SandboxRecorder | None:
     """Build a recorder from eval-job environment variables."""
     output_dir = os.environ.get("NEMO_GYM_SANDBOX_OBSERVABILITY_DIR")
-    if not output_dir:
+    otel = _otel_config_from_env()
+    export_traces_env = os.environ.get("NEMO_GYM_SANDBOX_OBSERVABILITY_EXPORT_TRACES")
+    export_traces = _as_bool(export_traces_env) if export_traces_env is not None else None
+    if not output_dir and not otel.get("enabled"):
         return None
     return SandboxRecorder(
-        output_dir=Path(output_dir),
-        otel=_otel_config_from_env(),
+        output_dir=Path(output_dir) if output_dir else None,
+        otel=otel,
         run_id=os.environ.get("NEMO_GYM_SANDBOX_OBSERVABILITY_RUN_ID"),
-        export_traces=os.environ.get("NEMO_GYM_SANDBOX_OBSERVABILITY_EXPORT_TRACES", "1") != "0",
+        run_span_name=(
+            os.environ.get("NEMO_GYM_SANDBOX_OBSERVABILITY_RUN_SPAN_NAME")
+            or os.environ.get("NEMO_GYM_SANDBOX_OBSERVABILITY_JOB_NAME")
+            or os.environ.get("JOB_NAME")
+            or os.environ.get("KUBE_JOB_NAME")
+        ),
+        export_traces=export_traces,
     )
 
 

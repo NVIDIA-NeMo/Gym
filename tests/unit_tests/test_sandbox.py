@@ -18,6 +18,8 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+import pytest
+
 from nemo_gym.sandbox import (
     AsyncSandbox,
     Sandbox,
@@ -29,7 +31,9 @@ from nemo_gym.sandbox import (
 )
 from nemo_gym.sandbox.observability import (
     SandboxRecorder,
+    aperf_config_from_extensions,
     aperf_record_command,
+    build_recorder_from_env,
     use_recorder,
 )
 from nemo_gym.sandbox.providers.opensandbox import provider as opensandbox_provider_module
@@ -159,6 +163,15 @@ def _otel_spans(output_dir: Path) -> list[dict[str, Any]]:
         for scope_span in resource_span["scopeSpans"]
         for span in scope_span["spans"]
     ]
+
+
+def _otel_resource_service_names(output_dir: Path) -> set[str]:
+    trace_payload = json.loads((output_dir / "traces" / "otel_traces.json").read_text())
+    service_names = set()
+    for resource_span in trace_payload["resourceSpans"]:
+        attrs = _otel_attributes(resource_span["resource"]["attributes"])
+        service_names.add(attrs["service.name"])
+    return service_names
 
 
 def test_sandbox_facade_uses_public_provider_api() -> None:
@@ -367,18 +380,24 @@ async def _assert_sandbox_facade_owns_operation_observability(tmp_path: Path) ->
     span_attrs = {
         span["name"]: _otel_attributes(span["attributes"])
         for span in _otel_spans(recorder.output_dir)
-        if span["name"] in {"sandbox.start", "trajectory.tool", "sandbox.cleanup"}
+        if span["name"] in {"sandbox.create: image:tag", "exec: pytest -q", "sandbox.cleanup: fake-1"}
     }
 
-    assert set(span_attrs) == {"sandbox.start", "trajectory.tool", "sandbox.cleanup"}
-    assert span_attrs["sandbox.start"]["trajectory_id"] == "django__django-12345"
-    assert span_attrs["sandbox.start"]["harness"] == "mini_swe_agent"
-    assert span_attrs["sandbox.start"]["benchmark"] == "swebench-verified"
-    assert span_attrs["trajectory.tool"]["sandbox_id"] == "fake-1"
-    assert span_attrs["trajectory.tool"]["command"] == "pytest -q"
-    assert "command_class" not in span_attrs["trajectory.tool"]
-    assert "command_hash" not in span_attrs["trajectory.tool"]
-    assert span_attrs["sandbox.cleanup"]["delete"] is True
+    assert set(span_attrs) == {"sandbox.create: image:tag", "exec: pytest -q", "sandbox.cleanup: fake-1"}
+    assert span_attrs["sandbox.create: image:tag"]["trajectory_id"] == "django__django-12345"
+    assert span_attrs["sandbox.create: image:tag"]["harness"] == "mini_swe_agent"
+    assert span_attrs["sandbox.create: image:tag"]["benchmark"] == "swebench-verified"
+    assert span_attrs["sandbox.create: image:tag"]["operation.name"] == "sandbox.start"
+    assert span_attrs["exec: pytest -q"]["sandbox_id"] == "fake-1"
+    assert span_attrs["exec: pytest -q"]["command"] == "pytest -q"
+    assert span_attrs["exec: pytest -q"]["operation.name"] == "trajectory.tool"
+    assert span_attrs["exec: pytest -q"]["span.section"] == "rollout"
+    assert "command_class" not in span_attrs["exec: pytest -q"]
+    assert "command_hash" not in span_attrs["exec: pytest -q"]
+    assert span_attrs["sandbox.cleanup: fake-1"]["delete"] is True
+    assert {"sandbox.create", "sandbox.exec", "sandbox.cleanup"}.issubset(
+        _otel_resource_service_names(recorder.output_dir)
+    )
     forbidden_prefix = "nemo" + "_rl."
     forbidden_hash_attr = "nemo" + "_gym.sandbox_id_hash"
     assert all(
@@ -737,7 +756,15 @@ async def _assert_opensandbox_close_timeout_still_fails_without_delete() -> None
 
 
 def test_observability_finalize_exports_only_otel_traces(tmp_path: Path) -> None:
-    recorder = _test_recorder(tmp_path / "observability")
+    recorder = SandboxRecorder(
+        output_dir=tmp_path / "observability",
+        run_id="run-1",
+        run_span_name="unit-job",
+        otel={
+            "enabled": False,
+            "service_name": "nemo-gym-test",
+        },
+    )
     with recorder.sync_span(
         "trajectory.tool",
         phase="exec",
@@ -757,8 +784,120 @@ def test_observability_finalize_exports_only_otel_traces(tmp_path: Path) -> None
         for scope_span in resource_span["scopeSpans"]
         for span in scope_span["spans"]
     ]
-    assert "trajectory.tool" in span_names
-    assert "trajectory" in span_names
+    assert "eval: unit-job" in span_names
+    assert "exec: <empty>" in span_names
+    assert "rollout: task-1" in span_names
+    assert _otel_resource_service_names(recorder.output_dir) == {
+        "nemo-gym.eval",
+        "nemo-gym.rollout",
+        "sandbox.exec",
+    }
+
+
+def test_observability_otlp_exporter_does_not_require_local_artifacts(monkeypatch, tmp_path: Path) -> None:
+    from opentelemetry.exporter.otlp.proto.http import trace_exporter
+    from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
+
+    exporter_kwargs = []
+
+    class FakeOTLPSpanExporter(SpanExporter):
+        def __init__(self, **kwargs: Any) -> None:
+            exporter_kwargs.append(kwargs)
+
+        def export(self, spans: Any) -> SpanExportResult:
+            del spans
+            return SpanExportResult.SUCCESS
+
+        def force_flush(self, timeout_millis: int = 30000) -> bool:
+            del timeout_millis
+            return True
+
+        def shutdown(self) -> None:
+            return None
+
+    monkeypatch.setattr(trace_exporter, "OTLPSpanExporter", FakeOTLPSpanExporter)
+
+    recorder = SandboxRecorder(
+        output_dir=None,
+        run_id="run-1",
+        otel={
+            "enabled": True,
+            "service_name": "sandbox-test",
+            "traces_exporter": "otlp_http",
+            "metrics_exporter": "none",
+            "traces_endpoint": "http://collector:4318",
+            "traces_headers": {"x-scope-orgid": "sandbox"},
+            "traces_timeout_s": 3,
+        },
+    )
+    with recorder.sync_span("trajectory.tool", phase="execution", attributes={"trajectory_id": "task-1"}):
+        pass
+    recorder.finalize()
+
+    assert exporter_kwargs == [
+        {
+            "endpoint": "http://collector:4318/v1/traces",
+            "headers": {"x-scope-orgid": "sandbox"},
+            "timeout": 3.0,
+        }
+    ]
+    assert not (tmp_path / "traces").exists()
+
+
+def test_observability_env_can_enable_recorder_without_output_dir(monkeypatch) -> None:
+    monkeypatch.delenv("NEMO_GYM_SANDBOX_OBSERVABILITY_DIR", raising=False)
+    monkeypatch.setenv("NEMO_GYM_SANDBOX_OBSERVABILITY_TRACES_EXPORTER", "none")
+    monkeypatch.setenv("NEMO_GYM_SANDBOX_OBSERVABILITY_JOB_NAME", "unit-job")
+
+    recorder = build_recorder_from_env()
+
+    assert recorder is not None
+    assert recorder.output_dir is None
+    assert recorder.run_span_name == "eval: unit-job"
+    recorder.finalize()
+
+
+def test_sandbox_lifecycle_aperf_diagnostic_overlaps_sandbox_lifetime(tmp_path: Path) -> None:
+    asyncio.run(_assert_sandbox_lifecycle_aperf_diagnostic_overlaps_sandbox_lifetime(tmp_path))
+
+
+async def _assert_sandbox_lifecycle_aperf_diagnostic_overlaps_sandbox_lifetime(tmp_path: Path) -> None:
+    provider_name = f"fake-{uuid4().hex}"
+    register_provider(provider_name, FakeSandboxProvider)
+    sandbox = AsyncSandbox({"name": provider_name})
+    handle = await sandbox.create(
+        SandboxSpec(
+            image="image:tag",
+            timeout_s=600,
+            metadata={"trajectory_id": "task-1"},
+            extensions={
+                "observability.aperf.enabled": "true",
+                "observability.aperf.interval_s": "1",
+                "observability.aperf.local_output_dir": str(tmp_path / "aperf"),
+                "observability.aperf.install_url": "https://example.test/aperf.tgz",
+            },
+        )
+    )
+    provider = FakeSandboxProvider.last_instance
+    assert provider is not None
+
+    assert len(provider.exec_calls) == 1
+    start_command = provider.exec_calls[0]["command"]
+    assert "aperf record -r task-1 -i 1 -p 600" in start_command
+    assert "nohup aperf record" in start_command
+    assert "aperf.pid" in start_command
+
+    await sandbox.exec(handle, "pytest -q")
+    await sandbox.close(handle, delete=True)
+
+    assert len(provider.exec_calls) == 3
+    assert provider.exec_calls[1]["command"] == "pytest -q"
+    stop_command = provider.exec_calls[2]["command"]
+    assert "kill -INT" in stop_command
+    assert "nemo-gym-aperf.tgz" in stop_command
+    assert provider.download_calls[0][1] == "/tmp/nemo-gym-aperf.tgz"
+    assert provider.download_calls[0][2].name == "fake-1.aperf_artifacts.tgz"
+    assert provider.download_calls[0][2].exists()
 
 
 def test_aperf_diagnostic_command_is_explicit_opt_in() -> None:
@@ -777,6 +916,19 @@ def test_aperf_diagnostic_command_is_explicit_opt_in() -> None:
         )
         == "aperf record -r task-1 -i 2 -p 5 --dont-collect perf_stat --profile"
     )
+    assert aperf_config_from_extensions(
+        {
+            "observability.aperf.enabled": "true",
+            "observability.aperf.run_name": "task:1",
+        },
+        timeout_s=120,
+    ) == {
+        "enabled": True,
+        "run_name": "task_1",
+        "output_dir": "/tmp/nemo-gym-aperf",
+        "tmp_dir": "/tmp/nemo-gym-aperf/tmp",
+        "period_s": 120,
+    }
 
 
 def test_observability_attributes_are_configurable(tmp_path: Path) -> None:
@@ -785,6 +937,7 @@ def test_observability_attributes_are_configurable(tmp_path: Path) -> None:
         otel={
             "enabled": False,
             "attribute_aliases": {"trajectory_id": "custom.trajectory_id"},
+            "local_service_name_strategy": "preserve",
             "resource_attributes": {"deployment": "unit-test"},
             "service_name": "sandbox-test",
         },
@@ -795,7 +948,7 @@ def test_observability_attributes_are_configurable(tmp_path: Path) -> None:
     recorder.finalize()
 
     spans = _otel_spans(recorder.output_dir)
-    tool_span = next(span for span in spans if span["name"] == "trajectory.tool")
+    tool_span = next(span for span in spans if span["name"] == "exec: <empty>")
     attrs = _otel_attributes(tool_span["attributes"])
     resource_attrs = _otel_attributes(
         json.loads((recorder.output_dir / "traces" / "otel_traces.json").read_text())["resourceSpans"][0]["resource"][
@@ -804,55 +957,162 @@ def test_observability_attributes_are_configurable(tmp_path: Path) -> None:
     )
 
     assert attrs["trajectory_id"] == "task-1"
+    assert attrs["operation.name"] == "trajectory.tool"
+    assert attrs["span.section"] == "rollout"
     assert attrs["custom.trajectory_id"] == "task-1"
     assert ("nemo" + "_rl.trajectory_id") not in attrs
     assert resource_attrs["deployment"] == "unit-test"
     assert resource_attrs["service.name"] == "sandbox-test"
 
 
-def test_mini_swe_sandbox_environment_owns_conda_setup(monkeypatch) -> None:
+def test_observability_command_span_titles_prefer_verifier_command(tmp_path: Path) -> None:
+    recorder = SandboxRecorder(output_dir=tmp_path / "observability", otel={"enabled": False})
+
+    command = """cd /testbed && source $(conda info --base)/etc/profile.d/conda.sh && conda activate testbed &&
+set -xo pipefail
+cd /testbed
+git status
+pytest -rA testing/test_collection.py
+git checkout base testing/test_collection.py
+"""
+    with recorder.sync_span(
+        "trajectory.tool",
+        phase="execution",
+        attributes={"trajectory_id": "task-1", "command": command},
+    ):
+        pass
+    recorder.finalize()
+
+    spans = _otel_spans(recorder.output_dir)
+    tool_span = next(
+        span for span in spans if span["name"] == "exec: run verifier: pytest -rA testing/test_collection.py"
+    )
+    attrs = _otel_attributes(tool_span["attributes"])
+
+    assert attrs["operation.name"] == "trajectory.tool"
+    assert attrs["span.section"] == "rollout"
+
+
+def test_observability_splits_rollout_llm_and_verifier_sections(tmp_path: Path) -> None:
+    recorder = SandboxRecorder(output_dir=tmp_path / "observability", otel={"enabled": False})
+
+    with recorder.sync_span("llm.request", phase="llm", attributes={"trajectory_id": "task-1", "model": "qwen"}):
+        pass
+    with recorder.sync_span(
+        "trajectory.tool",
+        phase="execution",
+        attributes={"trajectory_id": "task-1", "command": "ls -la /testbed"},
+    ):
+        pass
+    with recorder.sync_span(
+        "trajectory.tool",
+        phase="execution",
+        attributes={
+            "trajectory_id": "task-1",
+            "command": "pytest -q",
+            "execution.section": "verifier",
+            "span.section": "verifier",
+        },
+    ):
+        pass
+    recorder.record_event("trajectory", "trajectory.complete", attributes={"trajectory_id": "task-1", "reward": 1.0})
+    recorder.finalize()
+
+    spans = _otel_spans(recorder.output_dir)
+    span_attrs = {span["name"]: _otel_attributes(span["attributes"]) for span in spans}
+    span_by_name = {span["name"]: span for span in spans}
+
+    assert "rollout: task-1" in span_attrs
+    assert "verifier: task-1" in span_attrs
+    assert span_by_name["verifier: task-1"]["parentSpanId"] == span_by_name["rollout: task-1"]["spanId"]
+    assert span_attrs["llm.request"]["span.section"] == "rollout"
+    assert span_attrs["exec: ls -la /testbed"]["span.section"] == "rollout"
+    assert span_attrs["exec: pytest -q"]["span.section"] == "verifier"
+    assert {
+        "nemo-gym.rollout",
+        "nemo-gym.verifier",
+        "llm.request",
+        "sandbox.exec",
+        "verifier.exec",
+    }.issubset(_otel_resource_service_names(recorder.output_dir))
+
+
+def test_observability_can_record_exception_without_stacktrace(tmp_path: Path) -> None:
+    recorder = SandboxRecorder(output_dir=tmp_path / "observability", otel={"enabled": False})
+
+    with pytest.raises(RuntimeError):
+        with recorder.sync_span(
+            "llm.request",
+            phase="llm",
+            attributes={"trajectory_id": "task-1", "_record_exception_stacktrace": False},
+        ):
+            raise RuntimeError("format retry")
+    recorder.finalize()
+
+    llm_span = next(span for span in _otel_spans(recorder.output_dir) if span["name"] == "llm.request")
+    attrs = _otel_attributes(llm_span["attributes"])
+    events = llm_span.get("events") or []
+
+    assert attrs["status"] == "error"
+    assert attrs["error_type"] == "RuntimeError"
+    assert events
+    assert events[0]["name"] == "exception"
+    event_attrs = _otel_attributes(events[0]["attributes"])
+    assert event_attrs["exception.type"] == "RuntimeError"
+    assert "exception.stacktrace" not in event_attrs
+
+
+def test_mini_swe_sandbox_environment_owns_conda_setup(monkeypatch, tmp_path: Path) -> None:
     provider_name = f"fake-{uuid4().hex}"
     register_provider(provider_name, FakeSandboxProvider)
     monkeypatch.setenv("FORWARDED_KEY", "forwarded-value")
+    recorder = _test_recorder(tmp_path)
 
-    env = MiniSWESandboxEnvironment(
-        image="upstream/image:tag",
-        cwd="/testbed",
-        provider={"name": provider_name, "kwargs": {"marker": "configured"}},
-        spec={
-            "image_rewrites": [{"from": "upstream/", "to": "mirror/"}],
-            "metadata": {"suite": "unit"},
-            "resources": {"cpu": "1"},
-        },
-        env={"STATIC_KEY": "static-value"},
-        forward_env=["FORWARDED_KEY"],
-        cache_dir_template="/tmp/{instance_id}.sif",
-        conda_env="testbed",
-        activate_conda=True,
-        user="agent",
-        delete=True,
-    )
+    with use_recorder(recorder):
+        env = MiniSWESandboxEnvironment(
+            image="upstream/image:tag",
+            cwd="/testbed",
+            provider={"name": provider_name, "kwargs": {"marker": "configured"}},
+            spec={
+                "image_rewrites": [{"from": "upstream/", "to": "mirror/"}],
+                "metadata": {"suite": "unit"},
+                "resources": {"cpu": "1"},
+            },
+            env={"STATIC_KEY": "static-value"},
+            forward_env=["FORWARDED_KEY"],
+            cache_dir_template="/tmp/{instance_id}.sif",
+            conda_env="testbed",
+            activate_conda=True,
+            user="agent",
+            delete=True,
+        )
 
-    try:
-        provider = FakeSandboxProvider.last_instance
-        assert provider is not None
-        assert provider.marker == "configured"
-        assert provider.created_specs[0].image == "mirror/image:tag"
-        assert provider.created_specs[0].env == {
-            "FORWARDED_KEY": "forwarded-value",
-            "STATIC_KEY": "static-value",
-        }
+        try:
+            provider = FakeSandboxProvider.last_instance
+            assert provider is not None
+            assert provider.marker == "configured"
+            assert provider.created_specs[0].image == "mirror/image:tag"
+            assert provider.created_specs[0].env == {
+                "FORWARDED_KEY": "forwarded-value",
+                "STATIC_KEY": "static-value",
+            }
 
-        result = env.execute("pytest -q", is_eval=True)
-        assert result == {"output": "ok", "returncode": 0, "exception_info": ""}
-        exec_call = provider.exec_calls[0]
-        assert exec_call["cwd"] == "/"
-        assert exec_call["timeout_s"] == 1800
-        assert exec_call["user"] == "agent"
-        assert "conda activate testbed" in exec_call["command"]
-        assert exec_call["command"].endswith("pytest -q")
-    finally:
-        env.cleanup()
+            result = env.execute("pytest -q", is_eval=True)
+            assert result == {"output": "ok", "returncode": 0, "exception_info": ""}
+            exec_call = provider.exec_calls[0]
+            assert exec_call["cwd"] == "/"
+            assert exec_call["timeout_s"] == 1800
+            assert exec_call["user"] == "agent"
+            assert "conda activate testbed" in exec_call["command"]
+            assert exec_call["command"].endswith("pytest -q")
+        finally:
+            env.cleanup()
+
+    recorder.finalize()
+    spans = _otel_spans(recorder.output_dir)
+    span_attrs = {span["name"]: _otel_attributes(span["attributes"]) for span in spans}
 
     assert FakeSandboxProvider.last_instance is not None
     assert FakeSandboxProvider.last_instance.closed[0][1] is True
+    assert "verifier: unknown" in span_attrs
+    assert span_attrs["exec: pytest -q"]["span.section"] == "verifier"

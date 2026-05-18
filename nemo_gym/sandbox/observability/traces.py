@@ -63,6 +63,7 @@ def export_trace_artifacts(
     output_dir: Path,
     *,
     spans: Sequence[ReadableSpan],
+    service_name_strategy: str | None = "span_section",
 ) -> dict[str, str]:
     """Export SDK-finished spans as an OTLP-shaped JSON trace artifact."""
     if not spans:
@@ -72,17 +73,17 @@ def export_trace_artifacts(
     traces_dir.mkdir(parents=True, exist_ok=True)
     otlp_path = traces_dir / "otel_traces.json"
     otlp_path.write_text(
-        json.dumps(_otlp_payload(spans), indent=2, sort_keys=True) + "\n",
+        json.dumps(_otlp_payload(spans, service_name_strategy=service_name_strategy), indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
     return {"otlp_json": str(otlp_path)}
 
 
-def _otlp_payload(spans: Sequence[ReadableSpan]) -> dict[str, Any]:
+def _otlp_payload(spans: Sequence[ReadableSpan], *, service_name_strategy: str | None) -> dict[str, Any]:
     resource_groups: dict[tuple[tuple[str, str], ...], dict[str, Any]] = {}
 
     for span in spans:
-        resource_attributes = _resource_attributes(span)
+        resource_attributes = _resource_attributes(span, service_name_strategy=service_name_strategy)
         resource_key = tuple(sorted((key, str(value)) for key, value in resource_attributes.items()))
         resource_group = resource_groups.setdefault(
             resource_key,
@@ -117,8 +118,15 @@ def _otlp_payload(spans: Sequence[ReadableSpan]) -> dict[str, Any]:
     return {"resourceSpans": resource_spans}
 
 
-def _resource_attributes(span: ReadableSpan) -> dict[str, Any]:
+def _resource_attributes(span: ReadableSpan, *, service_name_strategy: str | None) -> dict[str, Any]:
     attrs = dict(span.resource.attributes)
+    if _uses_visual_service_lanes(service_name_strategy):
+        service_name = _visual_service_name(span)
+        if service_name:
+            original_service_name = attrs.get("service.name")
+            if original_service_name:
+                attrs.setdefault("service.original_name", original_service_name)
+            attrs["service.name"] = service_name
     return attrs
 
 
@@ -171,6 +179,49 @@ def _span_kind(kind: SpanKind) -> str:
 
 def _trace_id(value: int) -> str:
     return f"{value:032x}"
+
+
+def _uses_visual_service_lanes(strategy: str | None) -> bool:
+    return str(strategy or "").strip().lower() in {"span_section", "visual", "visual_lanes", "service_lanes"}
+
+
+def _visual_service_name(span: ReadableSpan) -> str | None:
+    attrs = dict(span.attributes or {})
+    operation_name = str(attrs.get("operation.name") or span.name or "")
+    span_role = str(attrs.get("span.role") or "")
+
+    if operation_name == "sandbox.run" or span_role == "eval.run":
+        return "nemo-gym.eval"
+    if operation_name == "trajectory" or span_role.endswith(".trajectory"):
+        section = str(attrs.get("span.section") or "rollout")
+        return f"nemo-gym.{section}"
+    if operation_name == "llm.request":
+        return "llm.request"
+    if operation_name in {
+        "sandbox.start",
+        "sandbox.start_batch",
+        "sandbox.create",
+        "sandbox.create_api",
+        "sandbox.create_probe",
+    }:
+        return "sandbox.create"
+    if attrs.get("span.section") == "verifier" and operation_name in {"trajectory.tool", "sandbox.exec"}:
+        return "verifier.exec"
+    if operation_name in {"trajectory.tool", "sandbox.exec"}:
+        return "sandbox.exec"
+    if operation_name.startswith("sandbox.diagnostic."):
+        return "sandbox.diagnostic"
+    if operation_name in {"sandbox.cleanup", "sandbox.close", "sandbox.delete"}:
+        return "sandbox.cleanup"
+    if operation_name in {"sandbox.read_file", "sandbox.write_file", "sandbox.upload_file", "sandbox.download_file"}:
+        return "sandbox.io"
+
+    section = attrs.get("span.section")
+    if section in {"eval", "rollout", "verifier"}:
+        return f"nemo-gym.{section}"
+    if section == "sandbox":
+        return "sandbox"
+    return None
 
 
 def _span_id(value: int) -> str:

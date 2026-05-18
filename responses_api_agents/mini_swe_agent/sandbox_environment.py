@@ -34,6 +34,7 @@ except ModuleNotFoundError:
 
 from nemo_gym.sandbox import Sandbox, SandboxSpec, rewrite_image
 from nemo_gym.sandbox.config import SandboxProviderConfig
+from nemo_gym.sandbox.observability import push_event_context, reset_event_context
 
 
 @dataclass
@@ -147,13 +148,26 @@ class MiniSWESandboxEnvironment:
         timeout_s = timeout or (self.config.eval_timeout if is_eval else self.config.step_timeout)
         exec_cwd = cwd or self.config.cwd
 
-        result = self._sandbox.exec(
-            self._handle,
-            self._command(command, exec_cwd),
-            cwd="/",
-            timeout_s=timeout_s,
-            user=self.config.user,
-        )
+        context_token = None
+        if is_eval:
+            context_token = push_event_context(
+                {
+                    "execution.section": "verifier",
+                    "execution.kind": "verifier",
+                    "span.section": "verifier",
+                }
+            )
+        try:
+            result = self._sandbox.exec(
+                self._handle,
+                self._command(command, exec_cwd),
+                cwd="/",
+                timeout_s=timeout_s,
+                user=self.config.user,
+            )
+        finally:
+            if context_token is not None:
+                reset_event_context(context_token)
         output = "\n".join(part for part in (result.stdout, result.stderr) if part)
         response = {
             "output": output,

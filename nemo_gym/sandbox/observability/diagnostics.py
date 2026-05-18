@@ -24,8 +24,8 @@ class AperfDiagnosticConfig(TypedDict):
     """Explicit APerf diagnostic settings.
 
     The sandbox observability module never starts APerf automatically. Callers
-    can opt in by building this command and executing it with the public
-    ``Sandbox``/``AsyncSandbox`` API against an image that contains ``aperf``.
+    can opt in through ``SandboxSpec.extensions`` or by building this command
+    and executing it with the public ``Sandbox``/``AsyncSandbox`` API.
     """
 
     enabled: bool
@@ -37,6 +37,13 @@ class AperfDiagnosticConfig(TypedDict):
     dont_collect: NotRequired[list[str]]
     profile: NotRequired[bool]
     extra_args: NotRequired[list[str]]
+    output_dir: NotRequired[str]
+    local_output_dir: NotRequired[str]
+    install_url: NotRequired[str]
+
+
+APERF_EXTENSION_PREFIX = "observability.aperf."
+DEFAULT_APERF_DIR = "/tmp/nemo-gym-aperf"
 
 
 def aperf_record_command(config: AperfDiagnosticConfig | None) -> str | None:
@@ -61,7 +68,152 @@ def aperf_record_command(config: AperfDiagnosticConfig | None) -> str | None:
     return shlex.join(args)
 
 
+def aperf_config_from_extensions(
+    extensions: dict[str, str],
+    *,
+    metadata: dict[str, str] | None = None,
+    sandbox_id: str | None = None,
+    timeout_s: int | None = None,
+) -> AperfDiagnosticConfig | None:
+    """Build an APerf diagnostic config from provider-neutral sandbox extensions."""
+    enabled = _bool_extension(extensions.get(f"{APERF_EXTENSION_PREFIX}enabled"))
+    if not enabled:
+        return None
+
+    metadata = metadata or {}
+    run_name = (
+        extensions.get(f"{APERF_EXTENSION_PREFIX}run_name")
+        or metadata.get("trajectory_id")
+        or metadata.get("instance_id")
+        or sandbox_id
+        or "sandbox"
+    )
+    config: AperfDiagnosticConfig = {
+        "enabled": True,
+        "run_name": _safe_run_name(run_name),
+        "output_dir": extensions.get(f"{APERF_EXTENSION_PREFIX}output_dir") or DEFAULT_APERF_DIR,
+    }
+    if extensions.get(f"{APERF_EXTENSION_PREFIX}local_output_dir"):
+        config["local_output_dir"] = extensions[f"{APERF_EXTENSION_PREFIX}local_output_dir"]
+    if extensions.get(f"{APERF_EXTENSION_PREFIX}install_url"):
+        config["install_url"] = extensions[f"{APERF_EXTENSION_PREFIX}install_url"]
+    if extensions.get(f"{APERF_EXTENSION_PREFIX}tmp_dir"):
+        config["tmp_dir"] = extensions[f"{APERF_EXTENSION_PREFIX}tmp_dir"]
+    else:
+        config["tmp_dir"] = f"{config['output_dir'].rstrip('/')}/tmp"
+    if extensions.get(f"{APERF_EXTENSION_PREFIX}interval_s"):
+        config["interval_s"] = _number_value(extensions[f"{APERF_EXTENSION_PREFIX}interval_s"])
+    if extensions.get(f"{APERF_EXTENSION_PREFIX}period_s"):
+        config["period_s"] = _number_value(extensions[f"{APERF_EXTENSION_PREFIX}period_s"])
+    elif timeout_s:
+        config["period_s"] = timeout_s
+    else:
+        config["period_s"] = 24 * 60 * 60
+    if extensions.get(f"{APERF_EXTENSION_PREFIX}collect_only"):
+        config["collect_only"] = _csv_value(extensions[f"{APERF_EXTENSION_PREFIX}collect_only"])
+    if extensions.get(f"{APERF_EXTENSION_PREFIX}dont_collect"):
+        config["dont_collect"] = _csv_value(extensions[f"{APERF_EXTENSION_PREFIX}dont_collect"])
+    if _bool_extension(extensions.get(f"{APERF_EXTENSION_PREFIX}profile")):
+        config["profile"] = True
+    if extensions.get(f"{APERF_EXTENSION_PREFIX}extra_args"):
+        config["extra_args"] = shlex.split(extensions[f"{APERF_EXTENSION_PREFIX}extra_args"])
+    return config
+
+
+def aperf_start_command(config: AperfDiagnosticConfig) -> str:
+    """Return a shell command that starts APerf recording in the background."""
+    record_command = aperf_record_command(config)
+    if record_command is None:
+        raise ValueError("APerf start requires an enabled diagnostic config")
+
+    output_dir = str(config.get("output_dir") or DEFAULT_APERF_DIR)
+    install_url = config.get("install_url")
+    install_block = _install_block(install_url)
+    return "\n".join(
+        [
+            "set -euo pipefail",
+            f"base_dir={shlex.quote(output_dir)}",
+            'bin_dir="$base_dir/bin"',
+            'mkdir -p "$bin_dir" "$base_dir/output" "$base_dir/tmp"',
+            'export PATH="$bin_dir:$PATH"',
+            install_block,
+            'if [ -f "$base_dir/aperf.pid" ] && kill -0 "$(cat "$base_dir/aperf.pid")" 2>/dev/null; then',
+            "  exit 0",
+            "fi",
+            'cd "$base_dir/output"',
+            f"nohup {record_command} > \"$base_dir/aperf_record.log\" 2>&1 &",
+            'echo "$!" > "$base_dir/aperf.pid"',
+        ]
+    )
+
+
+def aperf_stop_command(config: AperfDiagnosticConfig) -> str:
+    """Return a shell command that stops APerf and packages its artifacts."""
+    output_dir = str(config.get("output_dir") or DEFAULT_APERF_DIR)
+    archive_path = aperf_archive_path(config)
+    return "\n".join(
+        [
+            "set -euo pipefail",
+            f"base_dir={shlex.quote(output_dir)}",
+            f"archive_path={shlex.quote(archive_path)}",
+            'if [ -f "$base_dir/aperf.pid" ]; then',
+            '  pid="$(cat "$base_dir/aperf.pid")"',
+            '  if kill -0 "$pid" 2>/dev/null; then',
+            '    kill -INT "$pid" 2>/dev/null || true',
+            "    for _ in $(seq 1 20); do",
+            '      kill -0 "$pid" 2>/dev/null || break',
+            "      sleep 1",
+            "    done",
+            '    kill -TERM "$pid" 2>/dev/null || true',
+            "  fi",
+            "fi",
+            'find "$base_dir" -maxdepth 6 -type f -print > "$base_dir/file_list.txt" || true',
+            'tar -czf "$archive_path" -C "$base_dir" . || true',
+        ]
+    )
+
+
+def aperf_archive_path(config: AperfDiagnosticConfig) -> str:
+    """Remote sandbox path for the packaged APerf artifact."""
+    output_dir = str(config.get("output_dir") or DEFAULT_APERF_DIR).rstrip("/")
+    return f"{output_dir}.tgz"
+
+
 def _number_arg(value: Any) -> str:
     if isinstance(value, float) and value.is_integer():
         return str(int(value))
     return str(value)
+
+
+def _bool_extension(value: str | None) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _number_value(value: str) -> int | float:
+    parsed = float(value)
+    return int(parsed) if parsed.is_integer() else parsed
+
+
+def _csv_value(value: str) -> list[str]:
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _safe_run_name(value: str) -> str:
+    return "".join(char if char.isalnum() or char in {"-", "_", "."} else "_" for char in value)[:120]
+
+
+def _install_block(install_url: str | None) -> str:
+    if not install_url:
+        return "command -v aperf >/dev/null 2>&1"
+    quoted_url = shlex.quote(install_url)
+    return "\n".join(
+        [
+            "if ! command -v aperf >/dev/null 2>&1; then",
+            f"  python -c 'import sys, urllib.request; urllib.request.urlretrieve(sys.argv[1], sys.argv[2])' {quoted_url} \"$base_dir/aperf.tgz\"",
+            '  tar -xzf "$base_dir/aperf.tgz" -C "$base_dir"',
+            '  aperf_bin="$(find "$base_dir" -type f -name aperf -perm -111 | head -n 1)"',
+            '  test -n "$aperf_bin"',
+            '  install "$aperf_bin" "$bin_dir/aperf"',
+            "fi",
+        ]
+    )

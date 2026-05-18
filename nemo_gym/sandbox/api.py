@@ -33,9 +33,16 @@ from nemo_gym.sandbox.observability import (
     ensure_env_recorder,
     observability_span,
     push_event_context,
+    record_event,
     reset_current_recorder,
     reset_event_context,
     set_current_recorder,
+)
+from nemo_gym.sandbox.observability.diagnostics import (
+    aperf_archive_path,
+    aperf_config_from_extensions,
+    aperf_start_command,
+    aperf_stop_command,
 )
 from nemo_gym.sandbox.providers import (
     SandboxExecResult,
@@ -75,6 +82,7 @@ class AsyncSandbox:
         )
         self._observability_context = dict(observability_context or {})
         self._handle_observability_context: dict[str, dict[str, Any]] = {}
+        self._handle_aperf_sessions: dict[str, dict[str, Any]] = {}
 
     @property
     def provider_name(self) -> str:
@@ -133,6 +141,131 @@ class AsyncSandbox:
         handle_context = {**context, "sandbox_id": handle.sandbox_id}
         self._handle_observability_context[handle.sandbox_id] = handle_context
 
+    async def _start_diagnostics(self, handle: SandboxHandle, spec: SandboxSpec, context: dict[str, Any]) -> None:
+        aperf_config = aperf_config_from_extensions(
+            spec.extensions,
+            metadata=spec.metadata,
+            sandbox_id=handle.sandbox_id,
+            timeout_s=spec.timeout_s,
+        )
+        if aperf_config is None:
+            return
+
+        handle_context = {**context, "sandbox_id": handle.sandbox_id}
+        async with self._observed(handle_context):
+            async with observability_span(
+                "sandbox.diagnostic.aperf.start",
+                phase="diagnostic",
+                attributes={
+                    "provider": self.provider_name,
+                    "sandbox_id": handle.sandbox_id,
+                    "run_name": aperf_config["run_name"],
+                    "output_dir": aperf_config.get("output_dir"),
+                },
+            ):
+                try:
+                    result = await self._provider.exec(
+                        handle,
+                        aperf_start_command(aperf_config),
+                        cwd="/",
+                        timeout_s=120,
+                        user="root",
+                    )
+                except Exception as e:
+                    record_event(
+                        "error",
+                        "sandbox.diagnostic.aperf.start_error",
+                        attributes={"error_type": type(e).__name__, "error": str(e)},
+                    )
+                    return
+
+                if result.return_code != 0:
+                    record_event(
+                        "error",
+                        "sandbox.diagnostic.aperf.start_failed",
+                        attributes={
+                            "return_code": result.return_code,
+                            "stderr": (result.stderr or "")[-2000:],
+                            "stdout": (result.stdout or "")[-2000:],
+                        },
+                    )
+                    return
+
+                self._handle_aperf_sessions[handle.sandbox_id] = {"config": aperf_config}
+                record_event(
+                    "diagnostic",
+                    "sandbox.diagnostic.aperf.started",
+                    attributes={
+                        "run_name": aperf_config["run_name"],
+                        "output_dir": aperf_config.get("output_dir"),
+                    },
+                )
+
+    async def _stop_diagnostics(self, handle: SandboxHandle, context: dict[str, Any]) -> None:
+        session = self._handle_aperf_sessions.pop(handle.sandbox_id, None)
+        if session is None:
+            return
+
+        aperf_config = session["config"]
+        async with self._observed(context):
+            async with observability_span(
+                "sandbox.diagnostic.aperf.stop",
+                phase="diagnostic",
+                attributes={
+                    "provider": self.provider_name,
+                    "sandbox_id": handle.sandbox_id,
+                    "run_name": aperf_config["run_name"],
+                    "output_dir": aperf_config.get("output_dir"),
+                },
+            ):
+                try:
+                    result = await self._provider.exec(
+                        handle,
+                        aperf_stop_command(aperf_config),
+                        cwd="/",
+                        timeout_s=180,
+                        user="root",
+                    )
+                except Exception as e:
+                    record_event(
+                        "error",
+                        "sandbox.diagnostic.aperf.stop_error",
+                        attributes={"error_type": type(e).__name__, "error": str(e)},
+                    )
+                    return
+
+                record_event(
+                    "diagnostic",
+                    "sandbox.diagnostic.aperf.stopped",
+                    attributes={
+                        "return_code": result.return_code,
+                        "stderr": (result.stderr or "")[-2000:],
+                        "stdout": (result.stdout or "")[-2000:],
+                    },
+                )
+                local_output_dir = aperf_config.get("local_output_dir")
+                if local_output_dir:
+                    target_path = Path(local_output_dir) / f"{handle.sandbox_id}.aperf_artifacts.tgz"
+                    target_path.parent.mkdir(parents=True, exist_ok=True)
+                    try:
+                        await self._provider.download_file(handle, aperf_archive_path(aperf_config), target_path)
+                    except Exception as e:
+                        record_event(
+                            "error",
+                            "sandbox.diagnostic.aperf.download_error",
+                            attributes={
+                                "error_type": type(e).__name__,
+                                "error": str(e),
+                                "target_path": str(target_path),
+                            },
+                        )
+                    else:
+                        record_event(
+                            "diagnostic",
+                            "sandbox.diagnostic.aperf.downloaded",
+                            attributes={"target_path": str(target_path)},
+                        )
+
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
         context = self._spec_observability_context(spec)
         async with self._observed(context):
@@ -146,6 +279,7 @@ class AsyncSandbox:
             ):
                 handle = await self._provider.create(spec)
             self._remember_handle(handle, context)
+            await self._start_diagnostics(handle, spec, context)
             return handle
 
     async def create_batch(
@@ -170,6 +304,7 @@ class AsyncSandbox:
                 handles = await self._provider.create_batch(spec, count, allow_partial=allow_partial)
             for handle in handles:
                 self._remember_handle(handle, context)
+                await self._start_diagnostics(handle, spec, context)
             return handles
 
     async def connect(self, sandbox_id: str) -> SandboxHandle:
@@ -246,15 +381,18 @@ class AsyncSandbox:
                 },
             ):
                 try:
+                    await self._stop_diagnostics(handle, context)
                     await self._provider.close(handle, delete=delete)
                 finally:
                     self._handle_observability_context.pop(handle.sandbox_id, None)
+                    self._handle_aperf_sessions.pop(handle.sandbox_id, None)
 
     async def delete(self, handle: SandboxHandle) -> None:
         await self.close(handle, delete=True)
 
     async def aclose(self) -> None:
         self._handle_observability_context.clear()
+        self._handle_aperf_sessions.clear()
         close_provider = getattr(self._provider, "aclose", None)
         if close_provider is not None:
             await close_provider()
