@@ -17,7 +17,9 @@
 from __future__ import annotations
 
 import atexit
+import json
 import os
+import re
 import threading
 import time
 from contextlib import asynccontextmanager, contextmanager
@@ -81,6 +83,9 @@ class SandboxRecorder:
         if self.export_traces and output_dir is None:
             raise ValueError("sandbox observability output_dir is required for local trace export")
         self.attribute_aliases = _string_map(self.otel.get("attribute_aliases"))
+        self.command_titles = _command_title_config(
+            self.otel.get("command_titles") or self.otel.get("command_title")
+        )
         self.metric_attribute_keys = tuple(str(key) for key in self.otel.get("metric_attribute_keys") or ())
         self.resource_attributes = safe_attributes(self.otel.get("resource_attributes") or {})
         self.local_service_name_strategy = str(self.otel.get("local_service_name_strategy") or "span_section")
@@ -183,7 +188,7 @@ class SandboxRecorder:
         span_attrs = safe_attributes({**G_EVENT_CONTEXT.get(), "phase": phase, **(attributes or {})})
         record_exception_stacktrace = _as_bool(span_attrs.pop("_record_exception_stacktrace", True))
         operation_name = _span_name(name)
-        display_name = _operation_span_name(operation_name, span_attrs)
+        display_name = self._operation_span_name(operation_name, span_attrs)
         with self._start_as_current_span(
             display_name,
             attributes=self._span_attributes(operation_name, span_attrs, display_name=display_name),
@@ -348,6 +353,26 @@ class SandboxRecorder:
             self._run_span.set_status(Status(StatusCode.OK))
             self._run_span.end()
 
+    def _operation_span_name(self, name: str, attrs: dict[str, Any]) -> str:
+        configured_name = attrs.get("span.name")
+        if configured_name:
+            return _span_name(configured_name)
+        if name == "trajectory.tool":
+            return f"exec: {_command_title(attrs.get('command'), self.command_titles)}"
+        if name == "sandbox.start":
+            return _span_with_detail("sandbox.create", attrs.get("image"))
+        if name == "sandbox.start_batch":
+            count = attrs.get("count")
+            detail = f"{count} sandbox{'es' if count != 1 else ''}" if count is not None else None
+            return _span_with_detail("sandbox.create_batch", detail)
+        if name == "sandbox.cleanup":
+            return _span_with_detail("sandbox.cleanup", attrs.get("sandbox_id"))
+        if name == "sandbox.diagnostic.aperf.start":
+            return _span_with_detail("diagnostic.aperf.start", attrs.get("run_name"))
+        if name == "sandbox.diagnostic.aperf.stop":
+            return _span_with_detail("diagnostic.aperf.stop", attrs.get("run_name"))
+        return _span_name(name)
+
     def _resource(self) -> Resource:
         attributes = dict(self.resource_attributes)
         if self._service_name:
@@ -485,24 +510,6 @@ def _section_span_name(section: str, trajectory_id: Any) -> str:
     return f"{section}: {_span_name(trajectory_id)}"
 
 
-def _operation_span_name(name: str, attrs: dict[str, Any]) -> str:
-    if name == "trajectory.tool":
-        return f"exec: {_command_title(attrs.get('command'))}"
-    if name == "sandbox.start":
-        return _span_with_detail("sandbox.create", attrs.get("image"))
-    if name == "sandbox.start_batch":
-        count = attrs.get("count")
-        detail = f"{count} sandbox{'es' if count != 1 else ''}" if count is not None else None
-        return _span_with_detail("sandbox.create_batch", detail)
-    if name == "sandbox.cleanup":
-        return _span_with_detail("sandbox.cleanup", attrs.get("sandbox_id"))
-    if name == "sandbox.diagnostic.aperf.start":
-        return _span_with_detail("diagnostic.aperf.start", attrs.get("run_name"))
-    if name == "sandbox.diagnostic.aperf.stop":
-        return _span_with_detail("diagnostic.aperf.stop", attrs.get("run_name"))
-    return _span_name(name)
-
-
 def _span_with_detail(name: str, detail: Any, *, max_length: int = 120) -> str:
     text = _compact_text(detail)
     if not text:
@@ -511,48 +518,99 @@ def _span_with_detail(name: str, detail: Any, *, max_length: int = 120) -> str:
     return title if len(title) <= max_length else f"{title[: max_length - 1].rstrip()}..."
 
 
-def _command_title(command: Any, *, max_length: int = 140) -> str:
-    text = _strip_command_prelude(_compact_text(command))
+def _command_title(command: Any, config: dict[str, Any]) -> str:
+    max_length = int(config.get("max_length") or 140)
+    text = _strip_command_prefixes(_compact_text(command), config.get("strip_prefixes") or ())
     if not text:
         return "<empty>"
-    diagnostic_title = _diagnostic_command_title(text)
-    if diagnostic_title:
-        return diagnostic_title
-    verifier_title = _verifier_command_title(text)
-    if verifier_title:
-        return _truncate_span_title(verifier_title, max_length=max_length)
+    configured_title = _configured_command_title(text, config.get("rules") or ())
+    if configured_title:
+        return _truncate_span_title(configured_title, max_length=max_length)
     first_line = next((line.strip() for line in text.splitlines() if line.strip()), "")
     title = " ".join(first_line.split())
     return _truncate_span_title(title, max_length=max_length)
 
 
-def _strip_command_prelude(command: str) -> str:
-    prefixes = ("cd /testbed && source $(conda info --base)/etc/profile.d/conda.sh && conda activate testbed &&",)
+def _strip_command_prefixes(command: str, prefixes: Any) -> str:
     text = command
     for prefix in prefixes:
+        prefix = str(prefix)
         if text.startswith(prefix):
             return text[len(prefix) :].lstrip()
     return text
 
 
-def _diagnostic_command_title(command: str) -> str | None:
-    if "nohup aperf record" in command:
-        return "setup/start aperf recorder"
-    if "aperf.pid" in command and "kill -INT" in command:
-        return "stop/archive aperf recorder"
-    return None
-
-
-def _verifier_command_title(command: str) -> str | None:
-    if "\n" not in command:
-        return None
-    for line in reversed(command.splitlines()):
-        title = " ".join(line.strip().split())
-        if not title:
+def _configured_command_title(command: str, rules: Any) -> str | None:
+    for rule in rules:
+        if not isinstance(rule, dict):
             continue
-        if title.startswith(("pytest ", "python -m pytest ", "./tests/runtests.py ")):
-            return f"run verifier: {title}"
+        line = _matching_rule_line(command, rule)
+        if line is not None:
+            return _format_rule_title(rule, command=command, line=line, match=line)
+        match = _matching_rule_text(command, rule)
+        if match is not None:
+            return _format_rule_title(rule, command=command, line="", match=match)
     return None
+
+
+def _matching_rule_line(command: str, rule: dict[str, Any]) -> str | None:
+    line_prefixes = _string_tuple(rule.get("line_starts_with"))
+    line_regex = str(rule.get("line_regex") or "")
+    if not line_prefixes and not line_regex:
+        return None
+    lines = [line.strip() for line in command.splitlines() if line.strip()]
+    if str(rule.get("search") or "first").lower() == "last":
+        lines = list(reversed(lines))
+    regex = re.compile(line_regex) if line_regex else None
+    for line in lines:
+        if line_prefixes and line.startswith(line_prefixes):
+            return " ".join(line.split())
+        if regex is not None and regex.search(line):
+            return " ".join(line.split())
+    return None
+
+
+def _matching_rule_text(command: str, rule: dict[str, Any]) -> str | None:
+    contains = _string_tuple(rule.get("contains") or rule.get("all_contains"))
+    if contains and not all(part in command for part in contains):
+        return None
+    starts_with = _string_tuple(rule.get("starts_with"))
+    if starts_with and not command.startswith(starts_with):
+        return None
+    regex = str(rule.get("regex") or "")
+    if regex:
+        match = re.search(regex, command)
+        if match is None:
+            return None
+        return match.group(0)
+    if contains or starts_with:
+        return command
+    return None
+
+
+def _format_rule_title(rule: dict[str, Any], *, command: str, line: str, match: str) -> str:
+    template = str(rule.get("title") or "{line}" if line else rule.get("title") or "{match}")
+    return template.format(command=command, line=line, match=match)
+
+
+def _command_title_config(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {"strip_prefixes": (), "rules": (), "max_length": 140}
+    return {
+        "strip_prefixes": _string_tuple(value.get("strip_prefixes")),
+        "rules": tuple(rule for rule in value.get("rules") or () if isinstance(rule, dict)),
+        "max_length": value.get("max_length") or 140,
+    }
+
+
+def _string_tuple(value: Any) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        return (value,)
+    if isinstance(value, (list, tuple, set)):
+        return tuple(str(item) for item in value)
+    return (str(value),)
 
 
 def _truncate_span_title(title: str, *, max_length: int) -> str:
@@ -772,6 +830,7 @@ def _otel_config_from_env() -> dict[str, Any]:
     metrics_timeout_s = os.environ.get("NEMO_GYM_SANDBOX_OBSERVABILITY_OTEL_METRICS_TIMEOUT_S") or os.environ.get(
         "OTEL_EXPORTER_OTLP_METRICS_TIMEOUT"
     )
+    command_titles = _json_object_from_env("NEMO_GYM_SANDBOX_OBSERVABILITY_COMMAND_TITLES")
     return {
         "enabled": bool(endpoint or traces_endpoint or metrics_endpoint or traces_exporter or metrics_exporter),
         "service_name": os.environ.get(
@@ -789,7 +848,18 @@ def _otel_config_from_env() -> dict[str, Any]:
         "timeout_s": timeout_s,
         "traces_timeout_s": traces_timeout_s,
         "metrics_timeout_s": metrics_timeout_s,
+        "command_titles": command_titles,
     }
+
+
+def _json_object_from_env(name: str) -> dict[str, Any] | None:
+    value = os.environ.get(name)
+    if not value:
+        return None
+    parsed = json.loads(value)
+    if not isinstance(parsed, dict):
+        raise ValueError(f"{name} must contain a JSON object")
+    return parsed
 
 
 def build_recorder_from_config(

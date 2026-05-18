@@ -140,6 +140,21 @@ def _test_recorder(output_dir: Path) -> SandboxRecorder:
     )
 
 
+def _mini_swe_command_titles() -> dict[str, Any]:
+    return {
+        "strip_prefixes": [
+            "cd /testbed && source $(conda info --base)/etc/profile.d/conda.sh && conda activate testbed &&"
+        ],
+        "rules": [
+            {
+                "line_starts_with": ["pytest ", "python -m pytest ", "./tests/runtests.py "],
+                "search": "last",
+                "title": "run verifier: {line}",
+            }
+        ],
+    }
+
+
 def _otel_attributes(rows: list[dict[str, Any]]) -> dict[str, Any]:
     attrs = {}
     for row in rows:
@@ -966,7 +981,13 @@ def test_observability_attributes_are_configurable(tmp_path: Path) -> None:
 
 
 def test_observability_command_span_titles_prefer_verifier_command(tmp_path: Path) -> None:
-    recorder = SandboxRecorder(output_dir=tmp_path / "observability", otel={"enabled": False})
+    recorder = SandboxRecorder(
+        output_dir=tmp_path / "observability",
+        otel={
+            "enabled": False,
+            "command_titles": _mini_swe_command_titles(),
+        },
+    )
 
     command = """cd /testbed && source $(conda info --base)/etc/profile.d/conda.sh && conda activate testbed &&
 set -xo pipefail
@@ -991,6 +1012,28 @@ git checkout base testing/test_collection.py
 
     assert attrs["operation.name"] == "trajectory.tool"
     assert attrs["span.section"] == "rollout"
+
+
+def test_observability_command_span_titles_do_not_use_builtin_task_heuristics(tmp_path: Path) -> None:
+    recorder = SandboxRecorder(output_dir=tmp_path / "observability", otel={"enabled": False})
+
+    command = """cd /testbed && source $(conda info --base)/etc/profile.d/conda.sh && conda activate testbed &&
+set -xo pipefail
+pytest -q
+"""
+    with recorder.sync_span(
+        "trajectory.tool",
+        phase="execution",
+        attributes={"trajectory_id": "task-1", "command": command},
+    ):
+        pass
+    recorder.finalize()
+
+    spans = _otel_spans(recorder.output_dir)
+    assert any(
+        span["name"].startswith("exec: cd /testbed && source $(conda info --base)") for span in spans
+    )
+    assert not any(span["name"].startswith("exec: run verifier:") for span in spans)
 
 
 def test_observability_splits_rollout_llm_and_verifier_sections(tmp_path: Path) -> None:
@@ -1066,7 +1109,15 @@ def test_mini_swe_sandbox_environment_owns_conda_setup(monkeypatch, tmp_path: Pa
     provider_name = f"fake-{uuid4().hex}"
     register_provider(provider_name, FakeSandboxProvider)
     monkeypatch.setenv("FORWARDED_KEY", "forwarded-value")
-    recorder = _test_recorder(tmp_path)
+    recorder = SandboxRecorder(
+        output_dir=tmp_path,
+        otel={
+            "enabled": False,
+            "endpoint": None,
+            "service_name": "nemo-gym-test",
+            "command_titles": _mini_swe_command_titles(),
+        },
+    )
 
     with use_recorder(recorder):
         env = MiniSWESandboxEnvironment(
@@ -1115,4 +1166,4 @@ def test_mini_swe_sandbox_environment_owns_conda_setup(monkeypatch, tmp_path: Pa
     assert FakeSandboxProvider.last_instance is not None
     assert FakeSandboxProvider.last_instance.closed[0][1] is True
     assert "verifier: unknown" in span_attrs
-    assert span_attrs["exec: pytest -q"]["span.section"] == "verifier"
+    assert span_attrs["exec: run verifier: pytest -q"]["span.section"] == "verifier"
