@@ -11,7 +11,7 @@ swe_agents_train:
       agent_config: responses_api_agents/swe_agents/configs/oh_config.toml
       agent_max_turns: 100
       agent_framework_repo: https://github.com/sdevare-nv/nv-OpenHands.git
-      agent_framework_commit: 6a5d7571d5e9a5ca4586dad62da97a89f8c07084  # pragma: allowlist secret
+      agent_framework_commit: 87fbbca1402e6cbefe97df03e4cefce8a5ba378a  # pragma: allowlist secret
       # Container configuration
       container_formatter: ???
       container_folder_path: null
@@ -63,7 +63,7 @@ swe_agents_val:
       agent_config: responses_api_agents/swe_agents/configs/oh_config.toml
       agent_max_turns: 100
       agent_framework_repo: https://github.com/sdevare-nv/nv-OpenHands.git
-      agent_framework_commit: 6a5d7571d5e9a5ca4586dad62da97a89f8c07084  # pragma: allowlist secret
+      agent_framework_commit: 87fbbca1402e6cbefe97df03e4cefce8a5ba378a  # pragma: allowlist secret
       # Container configuration
       container_formatter: ???
       container_folder_path: null

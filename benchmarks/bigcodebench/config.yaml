@@ -15,6 +15,6 @@ bigcodebench_benchmark_simple_agent:
       - name: bigcodebench
         type: benchmark
         jsonl_fpath: benchmarks/bigcodebench/data/bigcodebench_benchmark.jsonl
-        prompt_config: benchmarks/bigcodebench/prompts/default.yaml
+        prompt_config: benchmarks/prompts/eval/bigcodebench/codegen.yaml
         prepare_script: benchmarks/bigcodebench/prepare.py
         license: Apache 2.0
