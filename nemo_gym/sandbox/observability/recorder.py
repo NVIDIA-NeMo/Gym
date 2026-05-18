@@ -83,9 +83,7 @@ class SandboxRecorder:
         if self.export_traces and output_dir is None:
             raise ValueError("sandbox observability output_dir is required for local trace export")
         self.attribute_aliases = _string_map(self.otel.get("attribute_aliases"))
-        self.command_titles = _command_title_config(
-            self.otel.get("command_titles") or self.otel.get("command_title")
-        )
+        self.command_titles = _command_title_config(self.otel.get("command_titles") or self.otel.get("command_title"))
         self.metric_attribute_keys = tuple(str(key) for key in self.otel.get("metric_attribute_keys") or ())
         self.resource_attributes = safe_attributes(self.otel.get("resource_attributes") or {})
         self.local_service_name_strategy = str(self.otel.get("local_service_name_strategy") or "span_section")

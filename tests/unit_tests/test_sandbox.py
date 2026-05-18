@@ -1030,9 +1030,7 @@ pytest -q
     recorder.finalize()
 
     spans = _otel_spans(recorder.output_dir)
-    assert any(
-        span["name"].startswith("exec: cd /testbed && source $(conda info --base)") for span in spans
-    )
+    assert any(span["name"].startswith("exec: cd /testbed && source $(conda info --base)") for span in spans)
     assert not any(span["name"].startswith("exec: run verifier:") for span in spans)
 
 

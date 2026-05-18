@@ -17,7 +17,7 @@ import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any, Dict, Optional
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import yaml
@@ -28,7 +28,6 @@ from nemo_gym.openai_utils import (
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.sandbox.observability import SandboxRecorder, use_recorder
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.mini_swe_agent import app as mini_swe_app_module
 from responses_api_agents.mini_swe_agent.app import (
@@ -36,13 +35,9 @@ from responses_api_agents.mini_swe_agent.app import (
     MiniSWEAgentConfig,
     MiniSWEAgentRunRequest,
     MiniSWEAgentVerifyResponse,
-    _agentic_router_program_id,
-    _AutoToolRetryModel,
     _barrier_file_name,
-    _is_missing_tool_call_error,
     _json_dict_from_metadata,
     _message_content_to_text,
-    _ObservedModel,
     _responses_create_params_to_model_kwargs,
     _run_swegym_v2,
     _sandbox_spec_for_instance,
@@ -241,123 +236,10 @@ def assert_run_swegym_called(
     assert len(args) >= 1
 
 
-def _otel_attributes(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    attrs = {}
-    for row in rows:
-        value = row["value"]
-        if "stringValue" in value:
-            attrs[row["key"]] = value["stringValue"]
-        elif "boolValue" in value:
-            attrs[row["key"]] = value["boolValue"]
-        elif "intValue" in value:
-            attrs[row["key"]] = int(value["intValue"])
-        elif "doubleValue" in value:
-            attrs[row["key"]] = value["doubleValue"]
-    return attrs
-
-
-def _otel_spans(output_dir: Path) -> list[dict[str, Any]]:
-    trace_payload = json.loads((output_dir / "traces" / "otel_traces.json").read_text())
-    return [
-        span
-        for resource_span in trace_payload["resourceSpans"]
-        for scope_span in resource_span["scopeSpans"]
-        for span in scope_span["spans"]
-    ]
-
-
-class FormatError(Exception):
-    def __init__(self, content: str = "No tool calls found in the response.") -> None:
-        self.messages = ({"role": "user", "content": content, "extra": {"interrupt_type": "FormatError"}},)
-        super().__init__(content)
-
-
-class _FakeModelConfig:
-    def __init__(self, tool_choice: Any) -> None:
-        self.model_kwargs = {"tool_choice": tool_choice}
-
-
-class LitellmModel:
-    __module__ = "minisweagent.models.litellm_model"
-
-    def __init__(self, *, tool_choice: Any = "auto", error: Exception | None = None) -> None:
-        self.config = _FakeModelConfig(tool_choice)
-        self.calls = []
-        self.error = error or FormatError()
-
-    def query(self, messages: list[dict[str, Any]], **kwargs: Any) -> dict[str, Any]:
-        self.calls.append(self.config.model_kwargs["tool_choice"])
-        if len(self.calls) == 1:
-            raise self.error
-        return {"role": "assistant", "content": "", "extra": {"actions": [{"command": "pwd"}]}}
-
-
 class TestApp:
     def test_sanity(self) -> None:
         config = create_test_config(model_name="", cache_dir_template="/")
         MiniSWEAgent(config=config, server_client=MagicMock(spec=ServerClient))
-
-    def test_auto_tool_retry_uses_single_registered_tool_then_restores_auto(self) -> None:
-        model = LitellmModel(tool_choice="auto")
-
-        message = _AutoToolRetryModel(model).query([])
-
-        assert message["extra"]["actions"] == [{"command": "pwd"}]
-        assert model.calls == ["auto", {"type": "function", "function": {"name": "bash"}}]
-        assert model.config.model_kwargs["tool_choice"] == "auto"
-
-    def test_auto_tool_retry_does_not_override_explicit_tool_choice(self) -> None:
-        model = LitellmModel(tool_choice={"type": "function", "function": {"name": "custom"}})
-
-        with pytest.raises(FormatError):
-            _AutoToolRetryModel(model).query([])
-
-        assert model.calls == [{"type": "function", "function": {"name": "custom"}}]
-
-    def test_observed_model_records_llm_span(self, tmp_path: Path) -> None:
-        class QueryModel:
-            def __init__(self) -> None:
-                self.config = SimpleNamespace(model_kwargs={"temperature": 0.7, "top_p": 0.95, "max_tokens": 128})
-                self.calls = []
-
-            def query(self, messages: list[dict[str, Any]], **kwargs: Any) -> dict[str, Any]:
-                self.calls.append((messages, kwargs))
-                return {"role": "assistant", "content": "ok"}
-
-        recorder = SandboxRecorder(output_dir=tmp_path / "observability", otel={"enabled": False})
-        model = QueryModel()
-        with use_recorder(recorder):
-            with mini_swe_app_module.event_context(trajectory_id="task-1"):
-                assert _ObservedModel(model, model_name="hosted_vllm/qwen").query([{"role": "user", "content": "hi"}])
-        recorder.finalize()
-
-        spans = _otel_spans(recorder.output_dir)
-        llm_span = next(span for span in spans if span["name"] == "llm.request")
-        attrs = _otel_attributes(llm_span["attributes"])
-
-        assert attrs["operation.name"] == "llm.request"
-        assert attrs["span.section"] == "rollout"
-        assert attrs["model"] == "hosted_vllm/qwen"
-        assert attrs["message_count"] == 1
-
-    def test_observed_model_records_auto_tool_retry_as_successful_llm_span(self, tmp_path: Path) -> None:
-        model = LitellmModel(tool_choice="auto")
-        observed = _ObservedModel(_AutoToolRetryModel(model), model_name="hosted_vllm/qwen")
-
-        recorder = SandboxRecorder(output_dir=tmp_path / "observability", otel={"enabled": False})
-        with use_recorder(recorder):
-            with mini_swe_app_module.event_context(trajectory_id="task-1"):
-                message = observed.query([{"role": "user", "content": "hi"}])
-        recorder.finalize()
-
-        spans = _otel_spans(recorder.output_dir)
-        llm_span = next(span for span in spans if span["name"] == "llm.request")
-        attrs = _otel_attributes(llm_span["attributes"])
-
-        assert message["extra"]["actions"] == [{"command": "pwd"}]
-        assert model.calls == ["auto", {"type": "function", "function": {"name": "bash"}}]
-        assert attrs["status"] == "ok"
-        assert not llm_span.get("events")
 
     def test_response_param_helpers_cover_metadata_and_tool_choice_modes(self) -> None:
         assert _json_dict_from_metadata(None, field_name="extra_body") == {}
@@ -397,26 +279,6 @@ class TestApp:
         with pytest.raises(ValueError, match="extra_body"):
             _json_dict_from_metadata("[]", field_name="extra_body")
 
-    def test_auto_tool_retry_edge_cases_and_forwarded_attributes(self) -> None:
-        assert _is_missing_tool_call_error(RuntimeError("No tool calls found")) is False
-        assert _is_missing_tool_call_error(FormatError("Different format error")) is False
-        non_dict_error = FormatError()
-        non_dict_error.messages = ("not-a-dict",)
-        assert _is_missing_tool_call_error(non_dict_error) is False
-        wrong_interrupt_error = FormatError()
-        wrong_interrupt_error.messages = ({"content": "No tool calls found", "extra": {"interrupt_type": "Other"}},)
-        assert _is_missing_tool_call_error(wrong_interrupt_error) is False
-
-        model = LitellmModel(tool_choice="auto")
-        model.extra_attr = "forwarded"
-        assert _AutoToolRetryModel(model).extra_attr == "forwarded"
-
-        class OtherLitellmModel(LitellmModel):
-            __module__ = "custom.model"
-
-        with pytest.raises(FormatError):
-            _AutoToolRetryModel(OtherLitellmModel(tool_choice="auto")).query([])
-
     def test_sandbox_resource_profiles_override_static_resources(self) -> None:
         spec = _sandbox_spec_for_instance(
             {"resources": {"cpu": "1", "memory": "8Gi", "ephemeral-storage": "20Gi"}},
@@ -434,9 +296,6 @@ class TestApp:
         assert _sandbox_spec_for_instance(None, resource_profiles=None, instance_id="task") == {}
 
     def test_misc_mini_swe_helpers(self, monkeypatch, tmp_path) -> None:
-        assert _agentic_router_program_id("", "task-1") == "task-1"
-        assert _agentic_router_program_id("mini", "mini:task-1") == "mini:task-1"
-        assert _agentic_router_program_id("mini", "task-1") == "mini:task-1"
         assert _barrier_file_name("bad/value:with spaces") == "bad_value_with_spaces"
         assert _barrier_file_name("") == "unknown"
         assert _swebench_image_name({"instance_id": "django__django-1"}, "verified") == (
@@ -675,7 +534,6 @@ class TestApp:
             "eval_timeout": 60,
             "env": "sandbox",
             "step_limit": 7,
-            "auto_tool_retry": True,
             "run_golden": False,
         }
 
@@ -720,38 +578,6 @@ class TestApp:
 
         with pytest.raises(ValueError, match="instance_dict"):
             _run_swegym_v2(**(params | {"instance_dict": None}))
-
-    async def test_release_agentic_router_program_uses_model_server_endpoint(self, monkeypatch) -> None:
-        calls: list[tuple[str, str, dict[str, Any]]] = []
-
-        async def fake_request(method: str, url: str, *, json: dict[str, Any]) -> object:
-            calls.append((method, url, json))
-            return object()
-
-        async def fake_raise_for_status(_response: object) -> None:
-            return None
-
-        async def fake_get_response_json(_response: object) -> dict[str, Any]:
-            return {"released": True}
-
-        monkeypatch.setattr(mini_swe_app_module, "server_request", fake_request)
-        monkeypatch.setattr(mini_swe_app_module, "raise_for_status", fake_raise_for_status)
-        monkeypatch.setattr(mini_swe_app_module, "get_response_json", fake_get_response_json)
-
-        server = MiniSWEAgent(config=create_test_config(), server_client=MagicMock(spec=ServerClient))
-        result = await server._release_agentic_router_program(
-            {"host": "model-host", "port": 1234},
-            "mini:task-1",
-        )
-
-        assert result == {"released": True}
-        assert calls == [
-            (
-                "POST",
-                "http://model-host:1234/agentic_router/release",
-                {"program_id": "mini:task-1"},
-            )
-        ]
 
     @patch("responses_api_agents.mini_swe_agent.app.ServerClient.load_from_global_config")
     @patch("responses_api_agents.mini_swe_agent.app.get_first_server_config_dict")
@@ -821,7 +647,7 @@ class TestApp:
 
         await server.run(run_request)
 
-        call_args = mock_runner_ray_remote.options.return_value.remote.call_args
+        call_args = mock_runner_ray_remote.remote.call_args
         params = call_args.args[1]
         generated_config = yaml.safe_load(Path(params["config"]).read_text())
         model_kwargs = generated_config["model"]["model_kwargs"]
@@ -837,110 +663,6 @@ class TestApp:
             "repetition_penalty": 1.0,
             "chat_template_kwargs": {"enable_thinking": True},
         }
-
-    @patch("responses_api_agents.mini_swe_agent.app.ServerClient.load_from_global_config")
-    @patch("responses_api_agents.mini_swe_agent.app.get_first_server_config_dict")
-    @patch("responses_api_agents.mini_swe_agent.app.get_config_path")
-    @patch("responses_api_agents.mini_swe_agent.app.runner_ray_remote")
-    @patch("asyncio.to_thread")
-    async def test_run_writes_thunderagent_program_id_to_config(
-        self,
-        mock_to_thread,
-        mock_runner_ray_remote,
-        mock_get_config_path,
-        mock_get_first_server_config_dict,
-        mock_load_from_global_config,
-        tmp_path,
-        monkeypatch,
-    ) -> None:
-        monkeypatch.chdir(tmp_path)
-        config = create_test_config()
-        config.agentic_router_program_id = True
-        config.agentic_router_program_id_prefix = "mini_swe"
-        config.agentic_router_release_program = False
-        server = MiniSWEAgent(config=config, server_client=MagicMock(spec=ServerClient))
-
-        setup_server_client_mocks(mock_load_from_global_config, mock_get_first_server_config_dict)
-        setup_config_path_mock(mock_get_config_path)
-        setup_run_swegym_mock(mock_to_thread, mock_runner_ray_remote)
-
-        run_request = create_run_request(instance_id="django__django-12345")
-
-        await server.run(run_request)
-
-        call_args = mock_runner_ray_remote.options.return_value.remote.call_args
-        params = call_args.args[1]
-        generated_config = yaml.safe_load(Path(params["config"]).read_text())
-        assert generated_config["model"]["model_kwargs"]["extra_body"]["program_id"] == (
-            "mini_swe:django__django-12345"
-        )
-
-    @patch("responses_api_agents.mini_swe_agent.app.ServerClient.load_from_global_config")
-    @patch("responses_api_agents.mini_swe_agent.app.get_first_server_config_dict")
-    @patch("responses_api_agents.mini_swe_agent.app.get_config_path")
-    @patch("responses_api_agents.mini_swe_agent.app.runner_ray_remote")
-    @patch("asyncio.to_thread")
-    async def test_run_defaults_to_auto_tool_choice(
-        self,
-        mock_to_thread,
-        mock_runner_ray_remote,
-        mock_get_config_path,
-        mock_get_first_server_config_dict,
-        mock_load_from_global_config,
-        tmp_path,
-        monkeypatch,
-    ) -> None:
-        monkeypatch.chdir(tmp_path)
-        config = create_test_config()
-        server = MiniSWEAgent(config=config, server_client=MagicMock(spec=ServerClient))
-
-        setup_server_client_mocks(mock_load_from_global_config, mock_get_first_server_config_dict)
-        setup_config_path_mock(mock_get_config_path)
-        setup_run_swegym_mock(mock_to_thread, mock_runner_ray_remote)
-
-        await server.run(create_run_request())
-
-        call_args = mock_runner_ray_remote.options.return_value.remote.call_args
-        params = call_args.args[1]
-        generated_config = yaml.safe_load(Path(params["config"]).read_text())
-        assert generated_config["model"]["model_kwargs"]["tool_choice"] == "auto"
-        assert params["auto_tool_retry"] is False
-
-    @patch("responses_api_agents.mini_swe_agent.app.ServerClient.load_from_global_config")
-    @patch("responses_api_agents.mini_swe_agent.app.get_first_server_config_dict")
-    @patch("responses_api_agents.mini_swe_agent.app.get_config_path")
-    @patch("responses_api_agents.mini_swe_agent.app.runner_ray_remote")
-    @patch("asyncio.to_thread")
-    async def test_run_releases_thunderagent_program(
-        self,
-        mock_to_thread,
-        mock_runner_ray_remote,
-        mock_get_config_path,
-        mock_get_first_server_config_dict,
-        mock_load_from_global_config,
-        tmp_path,
-        monkeypatch,
-    ) -> None:
-        monkeypatch.chdir(tmp_path)
-        config = create_test_config()
-        config.agentic_router_program_id = True
-        config.agentic_router_program_id_prefix = "mini_swe"
-        server = MiniSWEAgent(config=config, server_client=MagicMock(spec=ServerClient))
-        server._release_agentic_router_program = AsyncMock(return_value={"released": True})
-
-        setup_server_client_mocks(mock_load_from_global_config, mock_get_first_server_config_dict)
-        setup_config_path_mock(mock_get_config_path)
-        setup_run_swegym_mock(mock_to_thread, mock_runner_ray_remote)
-
-        run_request = create_run_request(instance_id="django__django-12345")
-
-        response = await server.run(run_request)
-
-        server._release_agentic_router_program.assert_awaited_once_with(
-            model_server_config={"host": "0.0.0.0", "port": 8080},
-            program_id="mini_swe:django__django-12345",
-        )
-        assert response.metadata["agentic_router_release"] == {"released": True}
 
     @patch("responses_api_agents.mini_swe_agent.app.ServerClient.load_from_global_config")
     @patch("responses_api_agents.mini_swe_agent.app.get_first_server_config_dict")
@@ -1049,6 +771,3 @@ class TestApp:
 
         run_response = client.post("/run", json={})
         assert run_response.status_code != 404
-
-        aggregate_response = client.post("/aggregate_metrics", json={"verify_responses": []})
-        assert aggregate_response.status_code == 200

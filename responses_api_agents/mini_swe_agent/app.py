@@ -44,15 +44,9 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.sandbox.observability import event_context, observability_sync_span, record_event
 from nemo_gym.server_utils import (
     ServerClient,
     get_first_server_config_dict,
-    get_response_json,
-    raise_for_status,
-)
-from nemo_gym.server_utils import (
-    request as server_request,
 )
 from responses_api_agents.mini_swe_agent.utils import MiniSWEAgentUtils
 
@@ -77,12 +71,7 @@ class MiniSWEAgentConfig(BaseResponsesAPIAgentConfig):
     skip_if_exists: bool = False
     step_limit: int = 250
     collapse_limit: int = 3
-    runner_num_cpus: float = 1.0
-    agentic_router_program_id: bool = False
-    agentic_router_program_id_prefix: str = "mini_swe"
-    agentic_router_release_program: bool = True
     tool_choice: Optional[str | dict[str, Any]] = None
-    auto_tool_retry: bool = False
     sandbox_resource_profiles: Optional[list[dict[str, str]]] = None
     sandbox_ready_barrier_count: Optional[int] = None
     sandbox_ready_barrier_id: Optional[str] = None
@@ -166,98 +155,6 @@ def _responses_create_params_to_model_kwargs(
 
 def _bash_tool_choice() -> dict[str, Any]:
     return {"type": "function", "function": {"name": "bash"}}
-
-
-def _is_missing_tool_call_error(error: Exception) -> bool:
-    if type(error).__name__ != "FormatError":
-        return False
-
-    for message in getattr(error, "messages", ()):
-        if not isinstance(message, dict):
-            continue
-        if message.get("extra", {}).get("interrupt_type") != "FormatError":
-            continue
-        if "No tool calls found" in str(message.get("content", "")):
-            return True
-    return False
-
-
-def _single_registered_tool_choice(model: Any) -> Optional[dict[str, Any]]:
-    """Return a named tool choice only when the underlying model has a known single tool."""
-    model_class = type(model)
-    if model_class.__module__ == "minisweagent.models.litellm_model" and model_class.__name__ == "LitellmModel":
-        return _bash_tool_choice()
-    return None
-
-
-class _AutoToolRetryModel:
-    """Retry one mini-SWE auto-mode no-tool response with the registered single tool.
-
-    vLLM returns 500 for `tool_choice=required` on the current Qwen3.5 stack. Keeping `auto` as the public/default
-    choice preserves multi-tool routing, while this wrapper handles the one-tool mini-SWE v2 compatibility case.
-    """
-
-    _missing = object()
-
-    def __init__(self, model: Any) -> None:
-        self._model = model
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._model, name)
-
-    def query(self, messages: list[dict[str, Any]], **kwargs: Any) -> dict[str, Any]:
-        try:
-            return self._model.query(messages, **kwargs)
-        except Exception as error:
-            config = getattr(self._model, "config", None)
-            model_kwargs = getattr(config, "model_kwargs", None)
-            if not isinstance(model_kwargs, dict) or model_kwargs.get("tool_choice") != "auto":
-                raise
-            single_tool_choice = _single_registered_tool_choice(self._model)
-            if single_tool_choice is None or not _is_missing_tool_call_error(error):
-                raise
-
-            old_tool_choice = model_kwargs.get("tool_choice", self._missing)
-            model_kwargs["tool_choice"] = single_tool_choice
-            try:
-                return self._model.query(messages, **kwargs)
-            finally:
-                if old_tool_choice is self._missing:
-                    model_kwargs.pop("tool_choice", None)
-                else:
-                    model_kwargs["tool_choice"] = old_tool_choice
-
-
-class _ObservedModel:
-    """Add an OTel span around each mini-SWE model query."""
-
-    def __init__(self, model: Any, *, model_name: str) -> None:
-        self._model = model
-        self._model_name = model_name
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._model, name)
-
-    def query(self, messages: list[dict[str, Any]], **kwargs: Any) -> dict[str, Any]:
-        model_kwargs = getattr(getattr(self._model, "config", None), "model_kwargs", None)
-        model_kwargs = model_kwargs if isinstance(model_kwargs, dict) else {}
-        attributes = {
-            "model": self._model_name,
-            "message_count": len(messages),
-            "temperature": kwargs.get("temperature", model_kwargs.get("temperature")),
-            "top_p": kwargs.get("top_p", model_kwargs.get("top_p")),
-            "max_tokens": kwargs.get("max_tokens", model_kwargs.get("max_tokens")),
-            "tool_choice": kwargs.get("tool_choice", model_kwargs.get("tool_choice")),
-            "_record_exception_stacktrace": False,
-        }
-        with observability_sync_span("llm.request", phase="llm", attributes=attributes):
-            return self._model.query(messages, **kwargs)
-
-
-def _agentic_router_program_id(prefix: str, instance_id: str) -> str:
-    if not prefix or instance_id.startswith(f"{prefix}:"):
-        return instance_id
-    return f"{prefix}:{instance_id}"
 
 
 def _barrier_file_name(instance_id: str) -> str:
@@ -493,9 +390,6 @@ def _run_swegym_v2(**params: Any) -> dict[str, Any]:
             )
 
         model = get_model(config=model_config)
-        if params.get("auto_tool_retry", False):
-            model = _AutoToolRetryModel(model)
-        model = _ObservedModel(model, model_name=params["model"])
         agent = DefaultAgent(model, env, **agent_config)
 
         if params["run_golden"]:
@@ -558,56 +452,9 @@ def run_swegym_with_optional_sandbox(**params: Any) -> Any:
         except ImportError:
             pass
 
-    instance_id = str(params.get("instance_id") or "unknown")
-    start_s = time.monotonic()
-    with event_context(
-        trajectory_id=instance_id,
-        instance_id=instance_id,
-        harness="mini_swe_agent",
-        environment_type=str(params.get("env") or "unknown"),
-    ):
-        try:
-            if run_swegym_v1 is not None:
-                result = run_swegym_v1(**params)
-            else:
-                result = _run_swegym_v2(**params)
-        except Exception:
-            record_event(
-                "trajectory",
-                "trajectory.complete",
-                attributes={
-                    "reward": 0.0,
-                    "stop_reason": "error",
-                    "duration_s": time.monotonic() - start_s,
-                    "loss_multiplier": 1.0,
-                },
-            )
-            raise
-
-        reward = 0.0
-        stop_reason = "complete"
-        try:
-            instance_result = result.get(instance_id, {}) if isinstance(result, dict) else {}
-            if not isinstance(instance_result, dict):
-                stop_reason = "missing_result"
-            else:
-                eval_report = instance_result.get("eval_report", {})
-                reward = 1.0 if MiniSWEAgentUtils.is_resolved(instance_id, eval_report) else 0.0
-        except Exception:
-            reward = 0.0
-            stop_reason = "reward_parse_error"
-
-        record_event(
-            "trajectory",
-            "trajectory.complete",
-            attributes={
-                "reward": reward,
-                "stop_reason": stop_reason,
-                "duration_s": time.monotonic() - start_s,
-                "loss_multiplier": 1.0,
-            },
-        )
-        return result
+    if run_swegym_v1 is not None:
+        return run_swegym_v1(**params)
+    return _run_swegym_v2(**params)
 
 
 class MiniSWEAgent(SimpleResponsesAPIAgent):
@@ -622,21 +469,10 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
         app = FastAPI()
         app.post("/v1/responses")(self.responses)
         app.post("/run")(self.run)
-        app.post("/aggregate_metrics")(self.aggregate_metrics)
         return app
 
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         raise NotImplementedError
-
-    async def _release_agentic_router_program(
-        self,
-        model_server_config: dict[str, Any],
-        program_id: str,
-    ) -> dict[str, Any]:
-        url = f"http://{model_server_config['host']}:{model_server_config['port']}/agentic_router/release"
-        response = await server_request("POST", url, json={"program_id": program_id})
-        await raise_for_status(response)
-        return await get_response_json(response)
 
     async def run(self, body: MiniSWEAgentRunRequest) -> MiniSWEAgentVerifyResponse:
         async with self.sem:
@@ -666,7 +502,6 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
             collapse_limit = self.config.collapse_limit
 
             instance_id = body.instance_id
-            agentic_program_id = None
 
             mini_swe_config_path = _swebench_config_path()
             config = yaml.safe_load(get_config_path(mini_swe_config_path).read_text())
@@ -687,13 +522,6 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
                 responses_create_params_dict,
                 default_tool_choice=self.config.tool_choice,
             )
-            if self.config.agentic_router_program_id:
-                agentic_program_id = _agentic_router_program_id(
-                    self.config.agentic_router_program_id_prefix,
-                    instance_id,
-                )
-                extra_body = model_kwargs.setdefault("extra_body", {})
-                extra_body.setdefault("program_id", agentic_program_id)
             if model_kwargs:
                 config.setdefault("model", {}).setdefault("model_kwargs", {}).update(model_kwargs)
 
@@ -766,16 +594,12 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
                     eval_timeout=eval_timeout,
                     step_limit=step_limit,
                     collapse_limit=collapse_limit,
-                    auto_tool_retry=self.config.auto_tool_retry,
                     sandbox_ready_barrier_count=self.config.sandbox_ready_barrier_count,
                     sandbox_ready_barrier_id=self.config.sandbox_ready_barrier_id,
                     sandbox_ready_barrier_timeout_s=self.config.sandbox_ready_barrier_timeout_s,
                     sandbox_ready_barrier_poll_s=self.config.sandbox_ready_barrier_poll_s,
                 )
-                future = runner_ray_remote.options(num_cpus=self.config.runner_num_cpus).remote(
-                    run_swegym_with_optional_sandbox,
-                    params,
-                )
+                future = runner_ray_remote.remote(run_swegym_with_optional_sandbox, params)
                 result = await asyncio.to_thread(ray.get, future)
                 result = result[instance_id]
                 messages = result["messages"]
@@ -789,20 +613,6 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
                 messages = []
                 responses = []
                 reward = 0.0
-
-            agentic_router_release = None
-            if agentic_program_id and self.config.agentic_router_release_program:
-                try:
-                    agentic_router_release = await self._release_agentic_router_program(
-                        model_server_config=model_server_config,
-                        program_id=agentic_program_id,
-                    )
-                except Exception as e:
-                    agentic_router_release = {"released": False, "error": f"{type(e).__name__}: {e}"}
-                    print(
-                        f"[agentic_router_release_failed program_id={agentic_program_id} error={agentic_router_release['error']}]",
-                        flush=True,
-                    )
 
             # The first two messages are the system and user message generated by the harness
             # TODO(sugam): what if the user only provides the system/user message
@@ -821,10 +631,7 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
                 reward=reward,
                 response=response,
                 instance_id=instance_id,
-                metadata=(
-                    (result.get("eval_report", {}) if result else {})
-                    | ({"agentic_router_release": agentic_router_release} if agentic_router_release else {})
-                ),
+                metadata=result.get("eval_report", {}) if result else {},
             )
 
             output_path = Path(f"{output_file_dir}/{instance_id}")
