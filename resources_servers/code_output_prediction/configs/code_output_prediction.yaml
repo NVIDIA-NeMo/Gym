@@ -1,0 +1,22 @@
+code_output_prediction:
+  resources_servers:
+    code_output_prediction:
+      entrypoint: app.py
+      domain: coding
+      verified: false
+      description: Code-output prediction grading (extract last JSON-like dict, compare 'output' to ground truth). Ported from NeMo-RLVR's code_output_prediction_environment.
+      value: Train models to predict the stdout/return value of small code snippets without executing them.
+code_output_prediction_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: code_output_prediction
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/code_output_prediction/data/example.jsonl

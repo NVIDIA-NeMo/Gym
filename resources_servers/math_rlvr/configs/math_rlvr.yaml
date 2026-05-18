@@ -1,0 +1,22 @@
+math_rlvr:
+  resources_servers:
+    math_rlvr:
+      entrypoint: app.py
+      domain: math
+      verified: false
+      description: Math grader with per-row dispatch over four verifier types (math-verify, MATH500-style boxed, English MCQA, multilingual MCQA). Ported from NeMo-RLVR's math_environment.
+      value: Train/evaluate math models on mixed datasets (open-form math, MATH500, MMLU-style English/multilingual MCQA) with a single verifier.
+math_rlvr_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: math_rlvr
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/math_rlvr/data/example.jsonl

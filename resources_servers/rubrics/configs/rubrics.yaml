@@ -1,0 +1,31 @@
+rubrics:
+  resources_servers:
+    rubrics:
+      entrypoint: app.py
+      domain: other
+      verified: false
+      description: Weighted-rubric LLM judge for free-form answers, ported from NeMo-RLVR's rubrics_environment.
+      value: Train models on open-ended QA / instruction-following tasks where each row carries a list of pass/fail rubrics with positive (must-have) or negative (pitfall) weights.
+      judge_model_server:
+        type: responses_api_models
+        name: policy_model
+      judge_responses_create_params:
+        input: []
+        temperature: 0.6
+        max_output_tokens: 8192
+      judge_prompt_template_fpath: prompt_templates/rubrics_verifier.txt
+      judge_endpoint_max_concurrency: 64
+rubrics_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: rubrics
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/rubrics/data/example.jsonl

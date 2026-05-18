@@ -1,0 +1,31 @@
+stem_qa_local_verifier:
+  resources_servers:
+    stem_qa_local_verifier:
+      entrypoint: app.py
+      domain: knowledge
+      verified: false
+      description: STEM-QA verifier with two grading paths (LLM-as-judge for natural_text, regex for multiple_choice). Ported from NeMo-RLVR's stem_qa_local_verifier.
+      value: Train/eval STEM QA models on mixed natural-text + multiple-choice datasets via a self-hosted judge.
+      judge_model_server:
+        type: responses_api_models
+        name: policy_model
+      judge_responses_create_params:
+        input: []
+        temperature: 0.6
+        max_output_tokens: 8192
+      judge_prompt_template_fpath: prompt_templates/stem_qa_loose_verifier.txt
+      judge_endpoint_max_concurrency: 64
+stem_qa_local_verifier_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: stem_qa_local_verifier
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/stem_qa_local_verifier/data/example.jsonl

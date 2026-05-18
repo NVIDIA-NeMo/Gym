@@ -1,0 +1,38 @@
+web_search:
+  resources_servers:
+    web_search:
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: Multi-step web search agent with Serper API and an LLM judge for natural-text verification, ported from NeMo-RLVR's web_search_environment.
+      value: Train models to answer questions by iteratively searching the web, then providing a final answer verified against ground truth.
+      # Read the Serper API key from the environment of the `ng_run` process.
+      # Export SERPER_API_KEY before launching `ng_run` (NOT before
+      # `ng_collect_rollouts` — the resources server is spawned by the former).
+      serper_api_key: ${oc.env:SERPER_API_KEY,''}
+      # LLM judge for natural_text rows. Defaults to the same `policy_model`
+      # server used for generation; for production runs prefer a separate /
+      # stronger judge model (mirrors RLVR's dedicated `verifier_url`).
+      judge_model_server:
+        type: responses_api_models
+        name: policy_model
+      judge_responses_create_params:
+        input: []
+        temperature: 0.0
+        max_output_tokens: 1024
+      judge_prompt_template_fpath: prompt_templates/web_search_judge.txt
+      judge_endpoint_max_concurrency: 64
+web_search_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: web_search
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/web_search/data/example.jsonl
