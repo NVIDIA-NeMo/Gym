@@ -418,8 +418,6 @@ NeMoGymChatCompletionMessageParam: TypeAlias = Union[
 
 
 class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
     messages: List[NeMoGymChatCompletionMessageParam]
     model: Optional[Union[str, ChatModel]] = None
     audio: Optional[ChatCompletionAudioParam] = None
