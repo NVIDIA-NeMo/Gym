@@ -16,7 +16,7 @@ position: 2.5
 
 NeMo Gym implements environments as composable FastAPI servers that communicate over async HTTP:
 
-| Concept | Component Implementation |
+| Concept | NeMo Gym Component Implementation |
 |---------|---------------|
 | Dataset | JSONL: Responses API input — each row is a task for the agent |
 | Agent Harness | FastAPI Agent Server or your own agent via HTTP |
@@ -27,7 +27,7 @@ All components are composable. Use different datasets with the same resources se
 
 This gives you flexibility to integrate with your existing models and agents:
 
-- **Bring your own agent** — Call Gym Resources Servers directly over HTTP. Your agent handles orchestration and inference; Gym provides the tasks, environment tools, and verification.
+- **Bring your own agent** — Call Gym Resources Servers directly over HTTP. Your agent handles orchestration and inference; Gym provides the tasks, environment-specific tools, and verification.
 - **Use Gym's agent harnesses** — The Agent Server provides native agent implementations (e.g. multi-step) as well as built-in integrations with external harnesses like OpenHands.
 - **Train with any model endpoint** — The Model Server standardizes different LLM endpoints behind the Responses API and provides token IDs and log probabilities needed for RL training.
 
@@ -45,7 +45,7 @@ Each task attempt flows through three steps. The resulting trajectory is called 
        │  one row per task
        ▼
 ┌──────────────────────────────────────────┐
-│        Agent (Server or External)        │
+│        Agent Server or External Agent    │
 │                                          │
 │  run():                                  │
 │    1. resources.seed_session()  ─────────────►  Resources Server
@@ -70,7 +70,7 @@ Each task attempt flows through three steps. The resulting trajectory is called 
 
 ### Agent Server
 
-Hosts built-in agent harnesses, including NeMo Gym native harnesses and integrated open-source harnesses like OpenHands.
+Hosts built-in agent harnesses, including NeMo Gym native harnesses and integrated harnesses such as OpenHands and Mini SWE Agent.
 
 ### Model Server
 
@@ -78,22 +78,20 @@ A stateless LLM inference endpoint that standardizes different model providers b
 
 ### Resources Server
 
-Manages the verifier, state, and environment-specific tools:
+Manages the verifier, environment-specific tools, and per-task state isolation:
 
-- **Environment Tools** — environment-specific capabilities available to any agent (e.g., code execution, database queries, API calls)
-- **State** — isolated per rollout via session IDs. Some environments are stateless (e.g., math verification), while others provision full container environments (e.g., a Docker container with a specific repo checkout for SWE-Bench-style tasks).
-- **Verification** — scoring logic that evaluates the agent's output and returns reward
-
-State isolation ensures attempts are independent and rewards are attributable to the agent's actions.
+- **Environment-Specific Tools** — capabilities the environment provides to any agent (e.g., code execution, database queries, API calls)
+- **State Isolation** — each rollout gets its own session, so attempts never interfere with each other. Environments range from lightweight (verify a math answer, no setup needed) to heavyweight (provision a Docker container with a specific repo checkout for SWE-Bench-style tasks).
+- **Verification** — scoring logic that evaluates the agent's output and returns a reward
 
 ## Where Tools Live
 
-Tools exist on a spectrum — some belong to the agent, some belong to the environment:
+Tools exist on a spectrum — some belong to the agent and can be used with any environment, some belong to the environment and can be used with any agent:
 
-- **Agent-side tools** are part of the agent harness. They're capabilities the agent brings regardless of which environment it runs in (e.g., OpenHands brings file editing and terminal tools).
-- **Environment-side tools** are part of the Resources Server. They're capabilities the environment provides to any agent that connects (e.g., a `run_tests` endpoint, a database query tool, a sandbox execution API).
+- **Agent-specific tools** are part of the agent harness. They're capabilities the agent brings regardless of which environment it runs in (e.g., OpenHands brings file editing and terminal tools).
+- **Environment-specific tools** are part of the Resources Server. They're capabilities the environment provides to any agent that connects (e.g., a `run_tests` endpoint, a database query tool, a sandbox execution API).
 
-An agent can use both simultaneously — its own tools and the environment's tools in the same task. NeMo Gym's server split reflects this: agent-side logic in the harness, environment-side logic in the Resources Server.
+An agent can use both simultaneously — its own tools and the environment's tools in the same task. NeMo Gym's server split reflects this: agent-specific logic in the harness, environment-specific logic in the Resources Server.
 
 ## Communication
 
