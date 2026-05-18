@@ -5,9 +5,9 @@ position: 3
 ---
 import { NavButton } from "../../../../components/NavButton";
 
-This tutorial focuses on the **Resources Server** implementation for a multi-step tool-calling environment. The full workflow — task data preparation, agent/model configuration, rollout collection, and training — follows the same steps as the [single-step tutorial](/latest/environment-tutorials/single-step-environment). What changes here is the complexity of the tools and verification logic.
+This tutorial focuses on the **Resources Server** implementation for a multi-step tool-calling environment. The full workflow — task data preparation, agent/model configuration, rollout collection, and training — follows the same steps as the [single-step tutorial](/environment-tutorials/single-step-environment). What changes here is the complexity of the tools and verification logic.
 
-<NavButton href="/latest/environment-tutorials/single-step-environment" label="Single-Step Environment" direction="prev" />
+<NavButton href="/environment-tutorials/single-step-environment" label="Single-Step Environment" direction="prev" />
 
 ---
 
@@ -58,7 +58,7 @@ What does synonym_value mean?
 +--------------------------------------------------------------------------------+
 ```
 
-This is the `simple_agent` loop from the [single-step tutorial](/latest/environment-tutorials/single-step-environment) in action: the model is called, it emits a `function_call`, the tool executes, the result is appended back into the conversation, and the model is called again with the updated context. This cycle repeats until the model produces a final text response or hits `max_steps`. In a multi-step environment, this iterative loop is where the agent learns to chain tool calls correctly.
+This is the `simple_agent` loop from the [single-step tutorial](/environment-tutorials/single-step-environment) in action: the model is called, it emits a `function_call`, the tool executes, the result is appended back into the conversation, and the model is called again with the updated context. This cycle repeats until the model produces a final text response or hits `max_steps`. In a multi-step environment, this iterative loop is where the agent learns to chain tool calls correctly.
 
 ---
 
@@ -231,4 +231,4 @@ ResourcesServer:
 
 ---
 
-<NavButton href="/latest/environment-tutorials/stateful-environment" label="Stateful Environment" direction="next" />
+<NavButton href="/environment-tutorials/stateful-environment" label="Stateful Environment" direction="next" />
