@@ -223,11 +223,16 @@ class RolloutCollectionHelper(BaseModel):
         agents_missing_from_num_repeats: set[str] = set()
         rows: List[Dict] = []
         for row_idx, row_str, row in raw_rows:
-            # Resolve agent name
+            # Resolve agent name. Missing agent_ref is a hard error reported in
+            # bulk after the loop; skip the row immediately so the rest of the
+            # body can assume agent_name is non-None.
             if config.agent_name:
                 row.setdefault(AGENT_REF_KEY_NAME, {"name": config.agent_name})
-            elif not row.get(AGENT_REF_KEY_NAME, dict()).get("name"):
+            agent_name = (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
+            if agent_name is None:
                 row_idxs_missing_agent_ref.append(row_idx)
+                continue
+            agents_seen.add(agent_name)
 
             # Responses create params
             row[RESPONSES_CREATE_PARAMS_KEY_NAME] = (
@@ -237,21 +242,17 @@ class RolloutCollectionHelper(BaseModel):
             # Resolve task index
             row[TASK_INDEX_KEY_NAME] = row_to_task_idx.setdefault(row_str, len(row_to_task_idx))
 
-            agent_name = (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
-            if agent_name is not None:
-                agents_seen.add(agent_name)
+            # Resolve num_repeats for this row, batching dict-form misses for
+            # one consolidated raise after the loop.
             if fixed_num_repeats is not None:
                 row_num_repeats = fixed_num_repeats
             elif agent_name in per_agent_repeats:
                 row_num_repeats = per_agent_repeats[agent_name]
             elif default_repeats is not None:
                 row_num_repeats = default_repeats
-            elif agent_name is None:
-                # Already collected into row_idxs_missing_agent_ref; skip to avoid noisy double-reporting.
-                row_num_repeats = 0
             else:
                 agents_missing_from_num_repeats.add(agent_name)
-                row_num_repeats = 0
+                continue
 
             for _ in range(row_num_repeats):
                 row = deepcopy(row)
