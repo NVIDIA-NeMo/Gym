@@ -206,7 +206,8 @@ class TavilySearchAIOHTTPClient(BaseModel):
                 tag = "tavily_rate_limit" if rate_limited else "tavily_retry"
                 print(
                     f"[browsecomp][tool_fail][{tag}] endpoint={endpoint} status={response.status} "
-                    f"try={tries} body={content[:300]}"
+                    f"try={tries} body={content[:300]}",
+                    flush=True,
                 )
                 await sleep(0.5)
                 continue
@@ -306,7 +307,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                 include_raw_content=True,
             )
         except BadRequestError as e:
-            print(f"[browsecomp][tool_fail][tavily_search_bad_request] query={query[:200]!r} error={e}")
+            print(f"[browsecomp][tool_fail][tavily_search_bad_request] query={query[:200]!r} error={e}", flush=True)
             return f"Search failed: {e}"
 
         postprocessed_results = self._postprocess_search_results(query, results, max_length)
@@ -372,7 +373,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                     function="extract", status="error", start_time=start_time, end_time=time()
                 )
             )
-            print(f"[browsecomp][tool_fail][tavily_extract] urls={urls} error={e}")
+            print(f"[browsecomp][tool_fail][tavily_extract] urls={urls} error={e}", flush=True)
             return BrowseResponse(results_string=f"Failed to extract content: {e}")
 
         # return if no results
