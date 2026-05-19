@@ -19,6 +19,6 @@ mmmlu_mcqa_simple_agent:
       - name: mmmlu
         type: benchmark
         jsonl_fpath: benchmarks/mmmlu/data/mmmlu_benchmark.jsonl
-        prompt_config: benchmarks/prompts/generic_default.yaml
+        prompt_config: benchmarks/prompts/generic/default.yaml
         prepare_script: benchmarks/mmmlu/prepare.py
         num_repeats: 1

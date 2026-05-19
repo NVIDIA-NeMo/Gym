@@ -14,6 +14,6 @@ frontierscience_olympiad_frontierscience_judge_simple_agent:
       - name: frontierscience_olympiad
         type: benchmark
         jsonl_fpath: benchmarks/frontierscience_olympiad/data/frontierscience_olympiad_benchmark.jsonl
-        prompt_config: benchmarks/frontierscience_olympiad/prompts/default.yaml
+        prompt_config: benchmarks/prompts/generic/default.yaml
         prepare_script: benchmarks/frontierscience_olympiad/prepare.py
         license: Apache 2.0

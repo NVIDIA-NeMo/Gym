@@ -59,7 +59,7 @@ dependencies = [
     "openpyxl",
     "pandas",
     "pdf2image>=1.17.0",
-    "pillow",
+    "pillow==12.2.0",
     "polygon3>=3.0.9.1",
     "portalocker",
     "protobuf",

@@ -13,7 +13,7 @@ symbolic equivalence of the model-extracted `\boxed{...}` answer against
 
 ## Prompt
 
-References the shared `benchmarks/prompts/generic_math.yaml` — the same
+References the shared `benchmarks/prompts/generic/math.yaml` — the same
 prompt `gsm8k`, `hendrycks_math`, and other `eval_type=math` benchmarks
 use. Rendered-equivalent to NeMo Skills' `generic/math.yaml`: Skills'
 template is `{examples}{problem}` with `{examples}` empty by default;
@@ -47,7 +47,7 @@ ng_collect_rollouts \
     +agent_name=hmmt_nov25_math_with_judge_simple_agent \
     +input_jsonl_fpath=benchmarks/hmmt_nov25/data/hmmt_nov25_benchmark.jsonl \
     +output_jsonl_fpath=results/hmmt_nov25_rollouts.jsonl \
-    +prompt_config=benchmarks/prompts/generic_math.yaml \
+    +prompt_config=benchmarks/prompts/generic/math.yaml \
     +num_repeats=16 \
     +num_repeats_add_seed=true \
     "+responses_create_params={temperature: 1.0, top_p: 0.95, max_output_tokens: 65536}"

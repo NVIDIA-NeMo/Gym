@@ -20,6 +20,6 @@ config_paths:
       - name: aime25-x
         type: benchmark
         jsonl_fpath: benchmarks/aime25-x/data/aime25-x_benchmark.jsonl
-        prompt_config: benchmarks/prompts/generic_default.yaml
+        prompt_config: benchmarks/prompts/generic/default.yaml
         prepare_script: benchmarks/aime25-x/prepare.py
         num_repeats: 32
