@@ -38,9 +38,7 @@ from responses_api_agents.mini_swe_agent_2.app import (
     MiniSWEAgentVerifyResponse,
     _json_dict_from_metadata,
     _message_content_to_text,
-    _normalize_response_api_messages,
     _ObservedModel,
-    _responses_api_model_name,
     _responses_create_params_to_model_kwargs,
     _run_swegym_v2,
     _sandbox_spec_for_instance,
@@ -295,37 +293,6 @@ class TestApp:
         assert attrs["message_count"] == 1
         assert attrs["trajectory_id"] == "task-1"
 
-    def test_observed_model_normalizes_response_api_messages(self, tmp_path: Path) -> None:
-        class LitellmResponseModel:
-            def __init__(self) -> None:
-                self.config = SimpleNamespace(model_kwargs={})
-                self.seen_messages: list[dict[str, Any]] | None = None
-
-            def query(self, messages: list[dict[str, Any]], **kwargs: Any) -> dict[str, Any]:
-                self.seen_messages = messages
-                return {"object": "response", "output": [], "extra": {"actions": []}}
-
-        model = LitellmResponseModel()
-        recorder = SandboxRecorder(output_dir=tmp_path / "observability", otel={"enabled": False})
-        with use_recorder(recorder):
-            _ObservedModel(model, model_name="hosted_vllm/qwen").query(
-                [
-                    {"role": "system", "content": "You are helpful", "extra": {"drop": True}},
-                    {"role": "user", "content": [{"text": "Fix it"}]},
-                    {"type": "function_call_output", "call_id": "call-1", "output": "ok"},
-                ]
-            )
-
-        assert model.seen_messages == [
-            {
-                "role": "system",
-                "content": [{"type": "input_text", "text": "You are helpful"}],
-                "type": "message",
-            },
-            {"role": "user", "content": [{"type": "input_text", "text": "Fix it"}], "type": "message"},
-            {"type": "function_call_output", "call_id": "call-1", "output": "ok"},
-        ]
-
     def test_response_param_helpers_cover_metadata_and_tool_choice_modes(self) -> None:
         assert _json_dict_from_metadata(None, field_name="extra_body") == {}
         assert _json_dict_from_metadata({"top_k": 20}, field_name="extra_body") == {"top_k": 20}
@@ -346,13 +313,13 @@ class TestApp:
         assert kwargs == {
             "temperature": 0.6,
             "top_p": 0.95,
-            "max_output_tokens": 123,
+            "max_tokens": 123,
             "extra_body": {"top_k": 20, "chat_template_kwargs": {"enable_thinking": True}},
             "tool_choice": {"type": "function", "function": {"name": "python"}},
         }
         assert _responses_create_params_to_model_kwargs({"tool_choice": "bash"})["tool_choice"] == {
             "type": "function",
-            "name": "bash",
+            "function": {"name": "bash"},
         }
         assert (
             _responses_create_params_to_model_kwargs({"tool_choice": "auto"}, default_tool_choice="none")[
@@ -391,12 +358,6 @@ class TestApp:
         assert _message_content_to_text("hello") == "hello"
         assert _message_content_to_text(None) == ""
         assert _message_content_to_text([{"text": "one"}, {"content": "two"}, 3]) == "one\ntwo\n3"
-        assert _normalize_response_api_messages([{"role": "user", "content": None}]) == [
-            {"role": "user", "content": [{"type": "input_text", "text": ""}], "type": "message"}
-        ]
-        assert _responses_api_model_name("Qwen/Qwen3.5-27B") == "Qwen/Qwen3.5-27B"
-        assert _responses_api_model_name("hosted_vllm/Qwen/Qwen3.5-27B") == "openai/Qwen/Qwen3.5-27B"
-        assert _responses_api_model_name("local-model") == "openai/local-model"
 
         builtin_dir = tmp_path / "configs"
         benchmark_dir = builtin_dir / "benchmarks"
@@ -596,11 +557,11 @@ class TestApp:
         assert env.cleaned is True
         assert env.config["environment_class"].endswith("MiniSWESandboxEnvironment")
         assert env.config["image"] == "swebench/sweb.eval.x86_64.django_1776_django-123:latest"
-        assert holder["model_config"]["model_class"] == "litellm_response"
+        assert holder["model_config"]["model_class"] == "litellm"
         assert holder["model_config"]["model_name"] == "hosted/model"
-        assert holder["model_config"]["model_kwargs"]["max_output_tokens"] == 99
-        assert holder["model_config"]["model_kwargs"]["api_base"] == "http://model/v1"
-        assert "base_url" not in holder["model_config"]["model_kwargs"]
+        assert holder["model_config"]["model_kwargs"]["max_tokens"] == 99
+        assert holder["model_config"]["model_kwargs"]["base_url"] == "http://model/v1"
+        assert "api_base" not in holder["model_config"]["model_kwargs"]
         assert holder["agent_config"]["step_limit"] == 7
         assert holder["save_metadata"] == {"instance_id": "django__django-123"}
         assert result["django__django-123"]["input_messages"] == [
@@ -743,9 +704,9 @@ class TestApp:
         model_kwargs = generated_config["model"]["model_kwargs"]
         assert model_kwargs["temperature"] == 0.6
         assert model_kwargs["top_p"] == 0.95
-        assert model_kwargs["max_output_tokens"] == 49152
-        assert "max_tokens" not in model_kwargs
-        assert model_kwargs["tool_choice"] == {"type": "function", "name": "bash"}
+        assert model_kwargs["max_tokens"] == 49152
+        assert "max_output_tokens" not in model_kwargs
+        assert model_kwargs["tool_choice"] == {"type": "function", "function": {"name": "bash"}}
         assert model_kwargs["extra_body"] == {
             "top_k": 20,
             "min_p": 0.0,

@@ -105,16 +105,16 @@ def _responses_create_params_to_model_kwargs(
     *,
     default_tool_choice: Any = None,
 ) -> dict[str, Any]:
-    """Convert Gym Responses API rollout params into mini-swe-agent Responses API kwargs."""
+    """Convert Gym Responses API rollout params into mini-swe-agent chat-completions kwargs."""
     model_kwargs: dict[str, Any] = {}
-    for key in ("temperature", "top_p", "top_logprobs", "store", "parallel_tool_calls"):
+    for key in ("temperature", "top_p", "top_logprobs", "parallel_tool_calls"):
         value = params.get(key)
         if value is not None:
             model_kwargs[key] = value
 
     max_output_tokens = params.get("max_output_tokens")
     if max_output_tokens is not None:
-        model_kwargs["max_output_tokens"] = max_output_tokens
+        model_kwargs["max_tokens"] = max_output_tokens
 
     metadata = params.get("metadata") or {}
     extra_body = _json_dict_from_metadata(metadata.get("extra_body"), field_name="extra_body")
@@ -137,53 +137,7 @@ def _responses_create_params_to_model_kwargs(
 
 
 def _bash_tool_choice() -> dict[str, Any]:
-    return {"type": "function", "name": "bash"}
-
-
-def _responses_api_model_name(model_name: str) -> str:
-    if model_name.startswith("hosted_vllm/"):
-        return "openai/" + model_name.removeprefix("hosted_vllm/")
-    if "/" not in model_name:
-        return f"openai/{model_name}"
-    return model_name
-
-
-def _response_api_content(content: Any) -> list[dict[str, Any]]:
-    if isinstance(content, str):
-        return [{"type": "input_text", "text": content}]
-    if isinstance(content, list):
-        normalized = []
-        for item in content:
-            if isinstance(item, dict):
-                if "type" in item:
-                    normalized.append(item)
-                else:
-                    normalized.append(
-                        {"type": "input_text", "text": str(item.get("text") or item.get("content") or "")}
-                    )
-            else:
-                normalized.append({"type": "input_text", "text": str(item)})
-        return normalized
-    return [{"type": "input_text", "text": "" if content is None else str(content)}]
-
-
-def _normalize_response_api_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    normalized: list[dict[str, Any]] = []
-    for message in messages:
-        if not isinstance(message, dict):
-            normalized.append({"type": "message", "role": "user", "content": _response_api_content(message)})
-            continue
-        if message.get("object") == "response" or message.get("type") == "function_call_output":
-            normalized.append(message)
-            continue
-        if "role" in message and "content" in message:
-            item = {key: value for key, value in message.items() if key != "extra"}
-            item["type"] = item.get("type") or "message"
-            item["content"] = _response_api_content(item.get("content"))
-            normalized.append(item)
-            continue
-        normalized.append({key: value for key, value in message.items() if key != "extra"})
-    return normalized
+    return {"type": "function", "function": {"name": "bash"}}
 
 
 class _ObservedModel:
@@ -212,8 +166,6 @@ class _ObservedModel:
             "_record_exception_stacktrace": False,
         }
         with observability_sync_span("llm.request", phase="llm", attributes=attributes):
-            if self._model.__class__.__name__ == "LitellmResponseModel":
-                messages = _normalize_response_api_messages(messages)
             return self._model.query(messages, **kwargs)
 
 
@@ -302,6 +254,37 @@ def _split_trajectory_for_responses(
             response = _strip_extra(message)
             raw_responses.append(response)
             output_items.extend(_strip_extra(item) for item in response.get("output", []))
+        elif role == "assistant":
+            content = _message_content_to_text(message.get("content"))
+            if content:
+                output_items.append(
+                    {
+                        "id": message.get("id") or f"msg_{uuid4()}",
+                        "type": "message",
+                        "role": "assistant",
+                        "status": "completed",
+                        "content": [{"type": "output_text", "text": content, "annotations": []}],
+                    }
+                )
+            for tool_call in message.get("tool_calls") or []:
+                function = tool_call.get("function") or {}
+                output_items.append(
+                    {
+                        "id": tool_call.get("id") or f"fc_{uuid4()}",
+                        "type": "function_call",
+                        "name": function.get("name") or tool_call.get("name") or "",
+                        "call_id": tool_call.get("id") or tool_call.get("call_id") or "",
+                        "arguments": function.get("arguments") or tool_call.get("arguments") or "{}",
+                    }
+                )
+        elif role == "tool":
+            output_items.append(
+                {
+                    "type": "function_call_output",
+                    "call_id": message.get("tool_call_id") or message.get("call_id") or "",
+                    "output": _message_content_to_text(message.get("content")),
+                }
+            )
         elif message.get("type") == "function_call_output":
             output_items.append(_strip_extra(message))
 
@@ -455,16 +438,16 @@ def _run_swegym_v2(**params: Any) -> dict[str, Any]:
 
     config = yaml.safe_load(get_config_path(params["config"]).read_text())
     model_config = config.setdefault("model", {})
-    model_config["model_class"] = "litellm_response"
-    model_config["model_name"] = _responses_api_model_name(params["model"])
+    model_config["model_class"] = "litellm"
+    model_config["model_name"] = params["model"]
     model_config.setdefault("cost_tracking", "ignore_errors")
     model_kwargs = model_config.setdefault("model_kwargs", {})
     model_kwargs["api_key"] = params["api_key"]
-    model_kwargs["api_base"] = params["base_url"]
-    model_kwargs.pop("base_url", None)
-    max_tokens = model_kwargs.pop("max_tokens", None)
-    if max_tokens is not None and "max_output_tokens" not in model_kwargs:
-        model_kwargs["max_output_tokens"] = max_tokens
+    model_kwargs["base_url"] = params["base_url"]
+    model_kwargs.pop("api_base", None)
+    max_output_tokens = model_kwargs.pop("max_output_tokens", None)
+    if max_output_tokens is not None and "max_tokens" not in model_kwargs:
+        model_kwargs["max_tokens"] = max_output_tokens
 
     environment_config = config.setdefault("environment", {})
     environment_config["image"] = _swebench_image_name(instance, params["subset"])
@@ -581,7 +564,7 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
             run_golden = self.config.run_golden
             base_url = f"http://{model_server_config['host']}:{model_server_config['port']}/v1"
             dummy_key = "dummy_key"
-            model_name = _responses_api_model_name(policy_model_name)
+            model_name = f"hosted_vllm/{policy_model_name}"
             step_timeout = self.config.step_timeout
             eval_timeout = self.config.eval_timeout
             step_limit = self.config.step_limit
