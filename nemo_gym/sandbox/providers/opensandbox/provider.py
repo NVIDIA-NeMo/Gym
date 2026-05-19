@@ -569,7 +569,7 @@ class OpenSandboxProvider:
             if exception is not None:
                 record_event(
                     "warning",
-                    "sandbox.sdk_operation_retry",
+                    "sandbox.opensandbox.sdk_operation_retry",
                     attributes=_sdk_error_attributes(
                         exception,
                         operation=operation,
@@ -604,7 +604,7 @@ class OpenSandboxProvider:
         except Exception as e:
             record_event(
                 "error",
-                "sandbox.sdk_operation_error",
+                "sandbox.opensandbox.sdk_operation_error",
                 attributes=_sdk_error_attributes(
                     e,
                     operation=operation,
@@ -676,7 +676,7 @@ class OpenSandboxProvider:
                 successful_probes = 0
                 record_event(
                     "warning",
-                    "sandbox.create_probe_retry",
+                    "sandbox.opensandbox.create_probe_retry",
                     attributes={
                         "provider": self.name,
                         "sandbox_id": handle.sandbox_id,
@@ -998,7 +998,7 @@ class OpenSandboxProvider:
                 pool_config = getattr(pool, "_config", None)
                 record_event(
                     "sample",
-                    "opensandbox.sdk_pool.readiness",
+                    "sandbox.opensandbox.sdk_pool.readiness",
                     attributes={
                         "provider": self.name,
                         "pool_name": getattr(pool_config, "pool_name", None),
@@ -1392,7 +1392,7 @@ class OpenSandboxProvider:
                 )
                 record_event(
                     "warning",
-                    "sandbox.sdk_handle_close_error",
+                    "sandbox.opensandbox.sdk_handle_close_error",
                     attributes=_sdk_error_attributes(e, operation="close", sandbox_id=handle.sandbox_id),
                 )
 

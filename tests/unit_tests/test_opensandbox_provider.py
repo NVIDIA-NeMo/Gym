@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import ast
 import asyncio
 from dataclasses import dataclass
 from datetime import timedelta
@@ -228,6 +229,22 @@ def test_provider_validation_and_retry_helpers() -> None:
     assert attrs["next_sleep_s"] == 0.5
     assert opensandbox_provider._seconds_to_timedelta(None) is None
     assert opensandbox_provider._seconds_to_timedelta(1.5) == timedelta(seconds=1.5)
+
+
+def test_opensandbox_record_event_names_are_namespaced() -> None:
+    tree = ast.parse(Path(opensandbox_provider.__file__).read_text(encoding="utf-8"))
+    event_names: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if not isinstance(node.func, ast.Name) or node.func.id != "record_event":
+            continue
+        if len(node.args) < 2 or not isinstance(node.args[1], ast.Constant):
+            raise AssertionError("OpenSandbox record_event calls must use a literal event name")
+        event_names.append(node.args[1].value)
+
+    assert event_names
+    assert all(name.startswith("sandbox.opensandbox.") for name in event_names)
 
 
 def test_connection_config_exec_proxy_and_image_policy(fake_opensandbox_sdk: None) -> None:
