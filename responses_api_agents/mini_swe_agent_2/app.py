@@ -301,24 +301,6 @@ def _default_response_object() -> dict[str, Any]:
     }
 
 
-def _response_from_rollout(
-    *,
-    model_name: str,
-    output_items: list[dict[str, Any]],
-    raw_responses: list[dict[str, Any]],
-    temperature: float,
-    top_p: float,
-) -> dict[str, Any]:
-    response = _default_response_object()
-    if raw_responses:
-        response.update({key: value for key, value in raw_responses[-1].items() if key != "extra"})
-    response["model"] = model_name
-    response["temperature"] = temperature
-    response["top_p"] = top_p
-    response["output"] = output_items
-    return response
-
-
 def _is_resolved(instance_id: str, eval_report: dict[str, Any]) -> bool:
     try:
         if not eval_report:
@@ -645,13 +627,14 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
                 reward = 0.0
 
             body.responses_create_params.input = input_messages
-            response = _response_from_rollout(
-                model_name=policy_model_name,
-                output_items=response_output,
-                raw_responses=responses,
-                temperature=temperature,
-                top_p=top_p,
-            )
+            response = _default_response_object()
+            if responses:
+                response.update(dict(responses[-1]))
+            response.pop("extra", None)
+            response["model"] = policy_model_name
+            response["temperature"] = temperature
+            response["top_p"] = top_p
+            response["output"] = response_output
 
             verify_response = MiniSWEAgentVerifyResponse(
                 responses_create_params=body.responses_create_params,
