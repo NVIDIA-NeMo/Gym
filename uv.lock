@@ -1384,10 +1384,6 @@ dependencies = [
     { name = "mlflow-skinny" },
     { name = "omegaconf" },
     { name = "openai" },
-    { name = "opensandbox" },
-    { name = "opentelemetry-api" },
-    { name = "opentelemetry-exporter-otlp-proto-http" },
-    { name = "opentelemetry-sdk" },
     { name = "orjson" },
     { name = "psutil" },
     { name = "pydantic" },
@@ -1396,7 +1392,6 @@ dependencies = [
     { name = "python-multipart" },
     { name = "ray", extra = ["default"] },
     { name = "rich" },
-    { name = "tenacity" },
     { name = "tqdm" },
     { name = "urllib3" },
     { name = "uvicorn" },
@@ -1416,6 +1411,13 @@ dev = [
     { name = "pytest-xdist" },
     { name = "requests-mock" },
     { name = "ruff" },
+]
+sandbox = [
+    { name = "opensandbox" },
+    { name = "opentelemetry-api" },
+    { name = "opentelemetry-exporter-otlp-proto-http" },
+    { name = "opentelemetry-sdk" },
+    { name = "tenacity" },
 ]
 
 [package.dev-dependencies]
@@ -1448,10 +1450,10 @@ requires-dist = [
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.8.0" },
     { name = "omegaconf" },
     { name = "openai", specifier = "<=2.7.2" },
-    { name = "opensandbox", specifier = ">=0.1.9" },
-    { name = "opentelemetry-api", specifier = ">=1.36.0" },
-    { name = "opentelemetry-exporter-otlp-proto-http", specifier = ">=1.36.0" },
-    { name = "opentelemetry-sdk", specifier = ">=1.36.0" },
+    { name = "opensandbox", marker = "extra == 'sandbox'", specifier = ">=0.1.9" },
+    { name = "opentelemetry-api", marker = "extra == 'sandbox'", specifier = ">=1.36.0" },
+    { name = "opentelemetry-exporter-otlp-proto-http", marker = "extra == 'sandbox'", specifier = ">=1.36.0" },
+    { name = "opentelemetry-sdk", marker = "extra == 'sandbox'", specifier = ">=1.36.0" },
     { name = "orjson" },
     { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=3.6.0" },
     { name = "psutil" },
@@ -1467,7 +1469,7 @@ requires-dist = [
     { name = "requests-mock", marker = "extra == 'dev'" },
     { name = "rich" },
     { name = "ruff", marker = "extra == 'dev'" },
-    { name = "tenacity", specifier = ">=9.1.4" },
+    { name = "tenacity", marker = "extra == 'sandbox'", specifier = ">=9.1.4" },
     { name = "tqdm" },
     { name = "urllib3", specifier = ">=2.6.3" },
     { name = "uvicorn" },
@@ -1475,7 +1477,7 @@ requires-dist = [
     { name = "wandb" },
     { name = "yappi" },
 ]
-provides-extras = ["dev"]
+provides-extras = ["sandbox", "dev"]
 
 [package.metadata.requires-dev]
 docs = [

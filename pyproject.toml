@@ -187,23 +187,6 @@ dependencies = [
     # License: Apache 2.0 https://github.com/andrew-d/python-multipart/blob/master/LICENSE.txt
     "python-multipart>=0.0.22",
 
-    # Tenacity: Retry helpers used by sandbox providers.
-    # Updated: Sat May 09, 2026 with tenacity==9.1.4
-    # License: Apache 2.0 https://github.com/jd/tenacity/blob/master/LICENSE
-    "tenacity>=9.1.4",
-
-    # OpenSandbox SDK: used by the OpenSandbox sandbox provider for create/exec/delete and SDK pool creation.
-    # Updated: Sat May 16, 2026 with opensandbox>=0.1.9
-    # License: Apache 2.0
-    "opensandbox>=0.1.9",
-
-    # OpenTelemetry Python: SDK-backed sandbox traces, metrics, and OTLP HTTP export.
-    # Updated: Mon May 18, 2026 with opentelemetry-sdk>=1.36.0 and OTLP HTTP exporter.
-    # License: Apache 2.0 https://github.com/open-telemetry/opentelemetry-python/blob/main/LICENSE
-    "opentelemetry-api>=1.36.0",
-    "opentelemetry-sdk>=1.36.0",
-    "opentelemetry-exporter-otlp-proto-http>=1.36.0",
-
     # wandb: E2E rollout collection data and metrics upload
     # Updated: Tue Feb 17, 2026 with wandb==0.25.0
     # License: MIT https://github.com/wandb/wandb/blob/f8acf479342b6aa8217dd0833bb32190b11c14bc/LICENSE
@@ -232,6 +215,25 @@ docs = [
 ]
 
 [project.optional-dependencies]
+sandbox = [
+    # Tenacity: Retry helpers used by sandbox providers.
+    # Updated: Sat May 09, 2026 with tenacity==9.1.4
+    # License: Apache 2.0 https://github.com/jd/tenacity/blob/master/LICENSE
+    "tenacity>=9.1.4",
+
+    # OpenSandbox SDK: used by the OpenSandbox sandbox provider for create/exec/delete and SDK pool creation.
+    # Updated: Sat May 16, 2026 with opensandbox>=0.1.9
+    # License: Apache 2.0
+    "opensandbox>=0.1.9",
+
+    # OpenTelemetry Python: SDK-backed sandbox traces, metrics, and OTLP HTTP export.
+    # Updated: Mon May 18, 2026 with opentelemetry-sdk>=1.36.0 and OTLP HTTP exporter.
+    # License: Apache 2.0 https://github.com/open-telemetry/opentelemetry-python/blob/main/LICENSE
+    "opentelemetry-api>=1.36.0",
+    "opentelemetry-sdk>=1.36.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.36.0",
+]
+
 # We include dev dependencies as an extra since technically each server module is a consumer (which means we cannot use dependency groups, which are intended to be within a project).
 dev = [
     # Pre-commit: Used for pre-commit hooks.
