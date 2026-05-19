@@ -31,8 +31,6 @@ from nemo_gym.sandbox import (
 )
 from nemo_gym.sandbox.observability import (
     SandboxRecorder,
-    aperf_config_from_extensions,
-    aperf_record_command,
     build_recorder_from_env,
     use_recorder,
 )
@@ -870,80 +868,6 @@ def test_observability_env_can_enable_recorder_without_output_dir(monkeypatch) -
     assert recorder.output_dir is None
     assert recorder.run_span_name == "eval: unit-job"
     recorder.finalize()
-
-
-def test_sandbox_lifecycle_aperf_diagnostic_overlaps_sandbox_lifetime(tmp_path: Path) -> None:
-    asyncio.run(_assert_sandbox_lifecycle_aperf_diagnostic_overlaps_sandbox_lifetime(tmp_path))
-
-
-async def _assert_sandbox_lifecycle_aperf_diagnostic_overlaps_sandbox_lifetime(tmp_path: Path) -> None:
-    provider_name = f"fake-{uuid4().hex}"
-    register_provider(provider_name, FakeSandboxProvider)
-    sandbox = AsyncSandbox({"name": provider_name})
-    handle = await sandbox.create(
-        SandboxSpec(
-            image="image:tag",
-            timeout_s=600,
-            metadata={"trajectory_id": "task-1"},
-            extensions={
-                "observability.aperf.enabled": "true",
-                "observability.aperf.interval_s": "1",
-                "observability.aperf.local_output_dir": str(tmp_path / "aperf"),
-                "observability.aperf.install_url": "https://example.test/aperf.tgz",
-            },
-        )
-    )
-    provider = FakeSandboxProvider.last_instance
-    assert provider is not None
-
-    assert len(provider.exec_calls) == 1
-    start_command = provider.exec_calls[0]["command"]
-    assert "aperf record -r task-1 -i 1 -p 600" in start_command
-    assert "nohup aperf record" in start_command
-    assert "aperf.pid" in start_command
-
-    await sandbox.exec(handle, "pytest -q")
-    await sandbox.close(handle, delete=True)
-
-    assert len(provider.exec_calls) == 3
-    assert provider.exec_calls[1]["command"] == "pytest -q"
-    stop_command = provider.exec_calls[2]["command"]
-    assert "kill -INT" in stop_command
-    assert "nemo-gym-aperf.tgz" in stop_command
-    assert provider.download_calls[0][1] == "/tmp/nemo-gym-aperf.tgz"
-    assert provider.download_calls[0][2].name == "fake-1.aperf_artifacts.tgz"
-    assert provider.download_calls[0][2].exists()
-
-
-def test_aperf_diagnostic_command_is_explicit_opt_in() -> None:
-    assert aperf_record_command(None) is None
-    assert aperf_record_command({"enabled": False, "run_name": "task-1"}) is None
-    assert (
-        aperf_record_command(
-            {
-                "enabled": True,
-                "run_name": "task-1",
-                "interval_s": 2,
-                "period_s": 5,
-                "dont_collect": ["perf_stat"],
-                "profile": True,
-            }
-        )
-        == "aperf record -r task-1 -i 2 -p 5 --dont-collect perf_stat --profile"
-    )
-    assert aperf_config_from_extensions(
-        {
-            "observability.aperf.enabled": "true",
-            "observability.aperf.run_name": "task:1",
-        },
-        timeout_s=120,
-    ) == {
-        "enabled": True,
-        "run_name": "task_1",
-        "output_dir": "/tmp/nemo-gym-aperf",
-        "tmp_dir": "/tmp/nemo-gym-aperf/tmp",
-        "period_s": 120,
-    }
 
 
 def test_observability_attributes_are_configurable(tmp_path: Path) -> None:

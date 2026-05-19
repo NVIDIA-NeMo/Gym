@@ -14,14 +14,6 @@
 
 """Sandbox eval observability helpers."""
 
-from nemo_gym.sandbox.observability.diagnostics import (
-    AperfDiagnosticConfig,
-    aperf_archive_path,
-    aperf_config_from_extensions,
-    aperf_record_command,
-    aperf_start_command,
-    aperf_stop_command,
-)
 from nemo_gym.sandbox.observability.recorder import (
     SandboxRecorder,
     build_recorder_from_config,
@@ -42,13 +34,7 @@ from nemo_gym.sandbox.observability.traces import export_trace_artifacts
 
 
 __all__ = [
-    "AperfDiagnosticConfig",
     "SandboxRecorder",
-    "aperf_archive_path",
-    "aperf_config_from_extensions",
-    "aperf_record_command",
-    "aperf_start_command",
-    "aperf_stop_command",
     "build_recorder_from_config",
     "build_recorder_from_env",
     "current_recorder",

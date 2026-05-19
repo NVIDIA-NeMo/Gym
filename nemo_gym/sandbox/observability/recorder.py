@@ -365,10 +365,6 @@ class SandboxRecorder:
             return _span_with_detail("sandbox.create_batch", detail)
         if name == "sandbox.cleanup":
             return _span_with_detail("sandbox.cleanup", attrs.get("sandbox_id"))
-        if name == "sandbox.diagnostic.aperf.start":
-            return _span_with_detail("diagnostic.aperf.start", attrs.get("run_name"))
-        if name == "sandbox.diagnostic.aperf.stop":
-            return _span_with_detail("diagnostic.aperf.stop", attrs.get("run_name"))
         return _span_name(name)
 
     def _resource(self) -> Resource:
