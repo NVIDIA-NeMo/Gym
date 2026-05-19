@@ -6,7 +6,7 @@ and `simple_agent` (single-turn, matching NeMo-Skills' evaluation protocol).
 
 - **Tasks**: 186 theorems (test split; 185 `valid` rows are discarded)
 - **Source**: [deepseek-ai/DeepSeek-Prover-V1.5 `proofnet.jsonl`](https://github.com/deepseek-ai/DeepSeek-Prover-V1.5/blob/2c4ba9119eef74d0d611f494261b2c5bae98c69a/datasets/proofnet.jsonl), pinned to commit `2c4ba9119eef74d0d611f494261b2c5bae98c69a`.
-- **Prompt**: shared `benchmarks/prompts/lean4_formal_proof_deepseek_prover_v2.yaml` (same as miniF2F and MOBench). **Intentionally differs from NeMo-Skills' upstream choice of `lean4/formal-proof`** — using the deepseek-prover-v2 variant for consistency across all ported Lean benchmarks.
+- **Prompt**: shared `benchmarks/prompts/lean4/formal-proof-deepseek-prover-v2.yaml` (same as miniF2F and MOBench). **Intentionally differs from NeMo-Skills' upstream choice of `lean4/formal-proof`** — using the deepseek-prover-v2 variant for consistency across all ported Lean benchmarks.
 - **Reward**: binary; 1.0 iff the Lean4 compiler accepts the proof with no `sorry`.
 
 ## Preparation
@@ -41,6 +41,6 @@ ng_collect_rollouts \
     +input_jsonl_fpath=benchmarks/proofnet/data/proofnet_benchmark.jsonl \
     +output_jsonl_fpath=results/proofnet_rollouts.jsonl \
     +num_repeats=32 \
-    +prompt_config=benchmarks/prompts/lean4_formal_proof_deepseek_prover_v2.yaml \
+    +prompt_config=benchmarks/prompts/lean4/formal-proof-deepseek-prover-v2.yaml \
     "+responses_create_params={max_output_tokens: 16384, temperature: 1.0}"
 ```

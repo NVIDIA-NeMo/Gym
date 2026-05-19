@@ -1137,7 +1137,7 @@ class TestRunOpenHandsAgent:
                 timeout=10,
             )
             active = await agent._start_container_command(cmd, "bash -c 'exit 1'")
-            with pytest.raises(AssertionError, match="Command failed with return code"):
+            with pytest.raises(RuntimeError, match="Command failed with return code"):
                 await agent._finish_container_command(active, cmd)
 
     @pytest.mark.asyncio
@@ -1321,8 +1321,8 @@ class TestSWEBenchWrapperFindContainer:
     def test_swe_rebench_dataset(self, monkeypatch) -> None:
         wrapper = self._create_wrapper_for_find(monkeypatch)
         with tempfile.TemporaryDirectory() as tmpdir:
-            # SWE-rebench: owner__repo-123 -> owner-repo:123, then looks for owner-repo:123-*.sif
-            container_file = Path(tmpdir) / "owner-repo:123-abc.sif"
+            # SWE-rebench fuzzy match: glob {instance_id}*.sif against the directory
+            container_file = Path(tmpdir) / "owner__repo-123-abc.sif"
             container_file.touch()
 
             data_point = {

@@ -331,6 +331,8 @@ nemo_gym_collect_rollouts = "nemo_gym.rollout_collection:collect_rollouts"
 ng_collect_rollouts = "nemo_gym.rollout_collection:collect_rollouts"
 nemo_gym_e2e_collect_rollouts = "nemo_gym.cli:e2e_rollout_collection"
 ng_e2e_collect_rollouts = "nemo_gym.cli:e2e_rollout_collection"
+nemo_gym_aggregate_rollouts = "nemo_gym.rollout_collection:aggregate_rollouts"
+ng_aggregate_rollouts = "nemo_gym.rollout_collection:aggregate_rollouts"
 
 # Prompt materialization
 nemo_gym_materialize_prompts = "nemo_gym.prompt:materialize_prompts_cli"

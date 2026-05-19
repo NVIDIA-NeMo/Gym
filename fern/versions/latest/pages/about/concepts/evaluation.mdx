@@ -1,0 +1,94 @@
+---
+title: "Evaluation"
+description: "What evaluation is, how to evaluate agents and models, and what makes a good eval."
+position: 1.6
+---
+
+<Info>
+
+**Goal**: Understand what evaluation is, how to evaluate agents and models, and what makes a good eval.
+
+**Read first**: [Environments](/about/concepts/environments) — what an environment is and how it decomposes into dataset, agent harness, verifier, and state.
+
+</Info>
+
+## What is Evaluation?
+
+Run an agent on tasks, score the results, measure performance. Evaluation exists to guide improvement — scores tell you what's working, what's not, and where to focus next.
+
+Accuracy is the most common metric, but it's not the only one that matters. Token usage, latency, and number of tool calls are often just as important — two agents might solve the same tasks but one uses 3x fewer tokens or completes in half the time. A good eval captures the dimensions most important for your use case.
+
+For example: you want to know how accurate your coding agent is at fixing bugs. You need:
+- A set of real bugs to test against (**dataset**)
+- A sandbox with the code repository for the agent to work in (**state**)
+- A test suite to check if the fix actually works (**verifier**)
+
+## How to Evaluate Agents and Models
+
+You can evaluate the model, the agent harness, or both together depending on what you're trying to improve.
+
+![Model vs Agent Evaluation](/assets/images/model-vs-agent-eval.png)
+
+### Model Capability
+
+Swap the model, keep everything else the same.
+
+> E.g. compare Qwen vs Kimi on SWE-Bench with OpenHands
+
+The agent harness (e.g. OpenHands) is held constant so the scores reflect model capability. Evaluation metrics can span accuracy, token usage, latency, and cost across models. The environment is the same for both runs — only the model changes.
+
+### Agent Capability
+
+Swap the agent harness, keep everything else the same.
+
+> E.g. you added a new tool, rewrote the system prompt, or changed the retry logic — run the same tasks with the same model to see if your agent improved.
+
+The model is held constant so the scores reflect harness quality. A new tool might improve accuracy while tripling token usage; the eval should capture both. The environment and model are the same — only the harness changes.
+
+## Evaluation Data
+
+The most important property of evaluation data is that it represents your actual use case. High scores on a public benchmark don't guarantee performance on your tasks if the distribution is different. When possible, combine public benchmarks with custom data drawn from your domain. Tasks can come from multiple sources:
+
+- **Public benchmarks** — standardized task sets for community comparison (e.g. SWE-Bench, AIME, HLE, Tau2).
+- **Custom datasets** — tasks specific to your use case, domain, or deployment.
+- **Production traces** — real agent interactions captured from deployed systems.
+
+How much data you need depends on what you're measuring. A few hundred tasks can surface major capability gaps. Distinguishing small improvements (e.g. 2-3% accuracy gains) requires larger datasets and multiple repeats per task to separate signal from noise.
+
+## What Makes a Good Eval
+
+### Coverage
+
+Tasks should be diverse and representative of real usage. A narrow eval suite gives false confidence — high scores on one task type can mask failures elsewhere.
+
+### Verifier Design
+
+The verifier defines what "good" means — not just correctness, but potentially efficiency, format adherence, or safety. A noisy or biased verifier gives misleading scores — you'll optimize for the wrong thing. Programmatic checks (exact match, test suites, code execution) are more consistent than LLM-as-judge; use them when possible.
+
+### Realistic Interaction
+
+The evaluation should reflect how the agent actually operates: multi-turn conversation, tool use, code execution, stateful environments. Simplifying the interaction pattern during eval means your scores won't predict real-world performance.
+
+### Statistical Confidence
+
+A single run is noisy. Multiple repeats on each task let you distinguish real improvements from variance. Increase repeats until scores stabilize across runs.
+
+### Reproducibility
+
+Fixed components and clean state per task ensure that the same input produces the same score. Without this, you can't tell whether a score difference reflects a real improvement or just environmental variation.
+
+## Next Steps
+
+Evaluation scores guide what to improve next.
+
+<Cards>
+
+<Card title="Training" href="/about/concepts/training">
+Post-training techniques and how environments are used for training.
+</Card>
+
+<Card title="Data" href="/data">
+Prepare datasets for environments.
+</Card>
+
+</Cards>

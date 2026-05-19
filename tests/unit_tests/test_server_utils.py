@@ -34,6 +34,13 @@ from nemo_gym.server_utils import (
 
 
 class TestServerUtils:
+    def test_global_aiohttp_client_request_debug_enabled(self, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", False)
+        assert not nemo_gym.server_utils.is_global_aiohttp_client_request_debug_enabled()
+
+        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", True)
+        assert nemo_gym.server_utils.is_global_aiohttp_client_request_debug_enabled()
+
     def test_ServerClient_load_head_server_config(self, monkeypatch: MonkeyPatch) -> None:
         global_config_dict = DictConfig(
             {

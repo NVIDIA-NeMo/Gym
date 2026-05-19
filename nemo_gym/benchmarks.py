@@ -261,7 +261,7 @@ def prepare_benchmark() -> None:
         errors_to_print += f"""The following benchmarks are missing a valid prepare script:
 {prepare_script_missing_str}
 """
-    if prepare_function_missing:
+    if prepare_function_missing:  # pragma: no cover
         prepare_function_missing_str = "".join(
             f"- {bc.name}: {bc.dataset.prepare_script}\n" for bc in prepare_function_missing
         )
@@ -274,7 +274,7 @@ def prepare_benchmark() -> None:
         raise RuntimeError(errors_to_print)
 
     # Prepare after all validations pass
-    if prepare_benchmark_config.num_prepare_benchmark_processes > 1:
+    if prepare_benchmark_config.num_prepare_benchmark_processes > 1:  # pragma: no cover
         with Pool(processes=prepare_benchmark_config.num_prepare_benchmark_processes) as pool:
             results = pool.imap_unordered(_multiprocess_benchmark_prepare_fn, validated)
             list(tqdm(results, total=len(validated)))
