@@ -50,9 +50,20 @@ from nemo_gym.sandbox.providers.opensandbox.provider import (
 from responses_api_agents.mini_swe_agent_2.sandbox_environment import MiniSWESandboxEnvironment
 
 
+def _has_module(module_name: str) -> bool:
+    try:
+        return importlib.util.find_spec(module_name) is not None
+    except ModuleNotFoundError:
+        return False
+
+
 requires_tenacity = pytest.mark.skipif(
-    importlib.util.find_spec("tenacity") is None,
+    not _has_module("tenacity"),
     reason="tenacity optional sandbox dependency is not installed",
+)
+requires_otlp_exporter = pytest.mark.skipif(
+    not _has_module("opentelemetry.exporter.otlp.proto.http.trace_exporter"),
+    reason="OpenTelemetry OTLP HTTP exporter optional sandbox dependency is not installed",
 )
 
 
@@ -869,6 +880,7 @@ def test_observability_finalize_exports_only_otel_traces(tmp_path: Path) -> None
     }
 
 
+@requires_otlp_exporter
 def test_observability_otlp_exporter_does_not_require_local_artifacts(monkeypatch, tmp_path: Path) -> None:
     from opentelemetry.exporter.otlp.proto.http import trace_exporter
     from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult

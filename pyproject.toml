@@ -460,6 +460,8 @@ omit = [
     "results/*",
     "/tmp/*",
     "benchmarks/*",
+    "nemo_gym/sandbox/observability/recorder.py",
+    "nemo_gym/sandbox/providers/opensandbox/provider.py",
 ]
 data_file = "results/.coverage"
 concurrency = ["thread", "multiprocessing"]
