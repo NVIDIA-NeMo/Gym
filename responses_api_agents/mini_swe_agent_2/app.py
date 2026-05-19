@@ -43,7 +43,12 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.sandbox.observability import event_context, observability_sync_span
+from nemo_gym.sandbox.observability import (
+    build_recorder_from_config,
+    event_context,
+    observability_sync_span,
+    use_recorder,
+)
 from nemo_gym.server_utils import (
     ServerClient,
     get_first_server_config_dict,
@@ -64,6 +69,7 @@ class MiniSWEAgentConfig(BaseResponsesAPIAgentConfig):
     step_limit: int = 250
     tool_choice: Optional[str | dict[str, Any]] = None
     sandbox_resource_profiles: Optional[list[dict[str, str]]] = None
+    observability: Optional[dict[str, Any]] = None
 
 
 class MiniSWEAgentRunRequest(BaseRunRequest):
@@ -185,6 +191,59 @@ def _sandbox_spec_for_instance(
     resources.update(profile)
     instance_spec["resources"] = resources
     return instance_spec
+
+
+def _format_template(value: Any, context: dict[str, Any]) -> Any:
+    if not isinstance(value, str):
+        return value
+    try:
+        return value.format(**context)
+    except (KeyError, ValueError, IndexError):
+        return value
+
+
+def _observability_config_for_instance(
+    config: dict[str, Any] | None,
+    *,
+    instance_id: str,
+    task_index: Any = None,
+    rollout_index: Any = None,
+) -> dict[str, Any] | None:
+    if not isinstance(config, dict):
+        return None
+
+    trajectory_id = str(config.get("trajectory_id") or instance_id)
+    if rollout_index is not None:
+        try:
+            rollout_suffix = f"{int(rollout_index) + 1:02d}"
+        except (TypeError, ValueError):
+            rollout_suffix = str(rollout_index)
+        trajectory_id = f"{trajectory_id}__rollout{rollout_suffix}"
+
+    context = {
+        "instance_id": instance_id,
+        "task_index": "" if task_index is None else task_index,
+        "rollout_index": "" if rollout_index is None else rollout_index,
+        "trajectory_id": trajectory_id,
+    }
+    formatted = dict(config)
+    formatted["trajectory_id"] = trajectory_id
+    for key in ("output_dir", "run_id", "run_span_name", "job_name"):
+        if key in formatted:
+            formatted[key] = _format_template(formatted[key], context)
+
+    otel = dict(formatted.get("otel") or {})
+    for key in ("service_name", "run_span_name", "job_name"):
+        if key in otel:
+            otel[key] = _format_template(otel[key], context)
+    if "resource_attributes" in otel and isinstance(otel["resource_attributes"], dict):
+        otel["resource_attributes"] = {
+            resource_key: _format_template(resource_value, context)
+            for resource_key, resource_value in otel["resource_attributes"].items()
+        }
+    if otel:
+        formatted["otel"] = otel
+    return formatted
 
 
 def _swebench_config_path() -> Path:
@@ -519,13 +578,25 @@ def _run_swegym_v2(**params: Any) -> dict[str, Any]:
 
 def run_swegym_with_optional_sandbox(**params: Any) -> Any:
     instance_id = str(params.get("instance_id") or "unknown")
-    with event_context(
-        trajectory_id=instance_id,
-        instance_id=instance_id,
-        harness="mini_swe_agent_2",
-        environment_type="sandbox",
-    ):
-        return _run_swegym_v2(**params)
+    observability_config = params.pop("observability", None)
+    recorder = build_recorder_from_config(
+        observability_config,
+        run_id=observability_config.get("run_id") if isinstance(observability_config, dict) else None,
+    )
+    try:
+        with use_recorder(recorder):
+            with event_context(
+                trajectory_id=observability_config.get("trajectory_id", instance_id)
+                if isinstance(observability_config, dict)
+                else instance_id,
+                instance_id=instance_id,
+                harness="mini_swe_agent_2",
+                environment_type="sandbox",
+            ):
+                return _run_swegym_v2(**params)
+    finally:
+        if recorder is not None:
+            recorder.finalize()
 
 
 class MiniSWEAgent(SimpleResponsesAPIAgent):
@@ -570,6 +641,7 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
             step_limit = self.config.step_limit
 
             instance_id = body.instance_id
+            extra_fields = getattr(body, "__pydantic_extra__", {}) or {}
 
             mini_swe_config_path = _swebench_config_path()
             config = yaml.safe_load(get_config_path(mini_swe_config_path).read_text())
@@ -640,6 +712,12 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
                     step_timeout=step_timeout,
                     eval_timeout=eval_timeout,
                     step_limit=step_limit,
+                    observability=_observability_config_for_instance(
+                        self.config.observability,
+                        instance_id=instance_id,
+                        task_index=extra_fields.get("_ng_task_index"),
+                        rollout_index=extra_fields.get("_ng_rollout_index"),
+                    ),
                 )
                 future = runner_ray_remote.remote(run_swegym_with_optional_sandbox, params)
                 result = await asyncio.to_thread(ray.get, future)

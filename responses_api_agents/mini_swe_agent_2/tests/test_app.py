@@ -38,6 +38,7 @@ from responses_api_agents.mini_swe_agent_2.app import (
     MiniSWEAgentVerifyResponse,
     _json_dict_from_metadata,
     _message_content_to_text,
+    _observability_config_for_instance,
     _ObservedModel,
     _responses_create_params_to_model_kwargs,
     _run_swegym_v2,
@@ -346,6 +347,38 @@ class TestApp:
             {"cpu": "500m", "memory": "4Gi", "ephemeral-storage": "1Gi"},
         )
         assert _sandbox_spec_for_instance(None, resource_profiles=None, instance_id="task") == {}
+
+    def test_observability_config_formats_per_rollout_context(self) -> None:
+        config = _observability_config_for_instance(
+            {
+                "enabled": True,
+                "output_dir": "results/observability/{trajectory_id}",
+                "run_id": "run-{task_index}",
+                "job_name": "job-{trajectory_id}",
+                "otel": {
+                    "service_name": "svc-{instance_id}",
+                    "resource_attributes": {"rollout": "{rollout_index}"},
+                    "command_titles": {"rules": [{"title": "run verifier: {line}"}]},
+                },
+            },
+            instance_id="django__django-123",
+            task_index=4,
+            rollout_index=2,
+        )
+
+        assert config == {
+            "enabled": True,
+            "trajectory_id": "django__django-123__rollout03",
+            "output_dir": "results/observability/django__django-123__rollout03",
+            "run_id": "run-4",
+            "job_name": "job-django__django-123__rollout03",
+            "otel": {
+                "service_name": "svc-django__django-123",
+                "resource_attributes": {"rollout": "2"},
+                "command_titles": {"rules": [{"title": "run verifier: {line}"}]},
+            },
+        }
+        assert _observability_config_for_instance(None, instance_id="task") is None
 
     def test_misc_mini_swe_helpers(self, monkeypatch, tmp_path) -> None:
         assert _swebench_image_name({"instance_id": "django__django-1"}, "verified") == (
@@ -679,6 +712,11 @@ class TestApp:
         monkeypatch.chdir(tmp_path)
         config = create_test_config()
         config.tool_choice = "bash"
+        config.observability = {
+            "enabled": True,
+            "output_dir": "results/observability/{trajectory_id}",
+            "run_id": "mini-swe-run",
+        }
         mock_server_client = MagicMock(spec=ServerClient)
         server = MiniSWEAgent(config=config, server_client=mock_server_client)
 
@@ -713,6 +751,12 @@ class TestApp:
             "presence_penalty": 0.0,
             "repetition_penalty": 1.0,
             "chat_template_kwargs": {"enable_thinking": True},
+        }
+        assert params["observability"] == {
+            "enabled": True,
+            "trajectory_id": "test_instance_123",
+            "output_dir": "results/observability/test_instance_123",
+            "run_id": "mini-swe-run",
         }
 
     @patch("responses_api_agents.mini_swe_agent_2.app.ServerClient.load_from_global_config")

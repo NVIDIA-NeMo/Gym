@@ -63,3 +63,24 @@ mini_swe_agent_2:
       eval_timeout: 1800
       skip_if_exists: false
       step_limit: 250
+      observability:
+        enabled: false
+        output_dir: results/mini_swe_agent_2_observability/{trajectory_id}
+        export_traces: true
+        run_id: mini-swe-agent-2
+        job_name: mini-swe-agent-2
+        otel:
+          service_name: mini-swe-agent-2
+          resource_attributes:
+            benchmark: swebench-verified
+            harness: mini_swe_agent_2
+          command_titles:
+            strip_prefixes:
+            - "cd /testbed && source $(conda info --base)/etc/profile.d/conda.sh && conda activate testbed &&"
+            rules:
+            - line_starts_with:
+              - "pytest "
+              - "python -m pytest "
+              - "./tests/runtests.py "
+              search: last
+              title: "run verifier: {line}"

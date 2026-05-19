@@ -1,15 +1,37 @@
 # Mini-SWE-Agent 2 Sandbox Agent
 
-`mini_swe_agent_2` is the Gym integration for mini-swe-agent v2. It runs
-mini-swe-agent's synchronous SWE-bench harness while creating and executing the
-task environment through the public `nemo_gym.sandbox` API.
+A NeMo Gym Responses API agent that integrates
+[mini-swe-agent](https://github.com/SWE-agent/mini-swe-agent) v2 for evaluating
+language models on SWE-bench style software engineering tasks through the public
+`nemo_gym.sandbox` API.
 
-This package intentionally keeps only the sandbox path. It does not carry over
-the older Docker/Singularity mini-SWE integration.
+This agent intentionally keeps only the sandbox-backed path. It does not carry
+over the older Docker/Singularity mini-SWE integration.
 
-## Current Path
+## Contents
 
-The code in this directory is wired for:
+- [Mini-SWE-Agent 2 Sandbox Agent](#mini-swe-agent-2-sandbox-agent)
+  - [Contents](#contents)
+  - [Overview](#overview)
+  - [Dataset Information](#dataset-information)
+  - [Configuration](#configuration)
+    - [Agent Configuration](#agent-configuration)
+    - [Model Parameters](#model-parameters)
+  - [Usage](#usage)
+    - [Server](#server)
+    - [Collect Rollouts](#collect-rollouts)
+  - [Observability](#observability)
+  - [Sandbox Environment Adapter](#sandbox-environment-adapter)
+    - [Environment Lifecycle](#environment-lifecycle)
+  - [Contributing](#contributing)
+  - [Licensing Information](#licensing-information)
+    - [Dependencies](#dependencies)
+
+## Overview
+
+`mini_swe_agent_2` runs mini-swe-agent's synchronous SWE-bench harness while
+creating and executing each task environment through Gym's provider-neutral
+sandbox facade. The validated path in this directory is:
 
 - mini-swe-agent `2.1.0`
 - SWE-bench task rows, including SWE-bench Verified
@@ -18,68 +40,76 @@ The code in this directory is wired for:
 - OpenSandbox through `nemo_gym.sandbox.providers.opensandbox`
 - OpenTelemetry sandbox observability through `nemo_gym.sandbox.observability`
 
-Use `configs/mini_swe_agent_opensandbox.yaml` as the Gym server config.
-
-## Code Map
-
-- `app.py` defines the Gym `MiniSWEAgent` FastAPI server and `/run` endpoint.
-- `sandbox_environment.py` adapts mini-swe-agent's sync environment interface to
-  `nemo_gym.sandbox.Sandbox`.
-- `configs/mini_swe_agent_opensandbox.yaml` is the OpenSandbox-backed server
-  config.
-- `tests/test_app.py` covers request conversion, config generation, Ray runner
-  wiring, response shaping, reward extraction, and observability spans.
-- `tests/test_sandbox_environment.py` covers mini-swe-agent submit sentinel
-  handling.
+For each `/run` request, `MiniSWEAgent.run()` loads mini-swe-agent's built-in
+`swebench.yaml`, injects sandbox settings, runs mini-swe-agent in a Ray remote
+task, evaluates the generated patch with the SWE-bench harness, and returns a
+Gym verify response with reward `1.0` only when the instance is resolved and the
+evaluation report includes test status.
 
 `MiniSWEAgent.setup_webserver()` also registers `/v1/responses`, but
 `MiniSWEAgent.responses()` is intentionally not implemented in this agent. The
-supported execution path is `/run`.
+supported eval path is `/run`, typically via `ng_collect_rollouts`.
 
-## Run Flow
+## Dataset Information
 
-For each `/run` request, `MiniSWEAgent.run()`:
+- Eval data - [princeton-nlp/SWE-bench_Verified](https://huggingface.co/datasets/princeton-nlp/SWE-bench_Verified)
+  is the primary validation target. It contains 500 human-validated SWE-bench
+  test instances.
+- The rollout input JSONL should preserve the SWE-bench instance fields needed
+  by `swegym` and `swebench`, such as `instance_id`, `repo`, `base_commit`,
+  `problem_statement`, `patch`, `test_patch`, `FAIL_TO_PASS`, `PASS_TO_PASS`,
+  and related version fields.
+- Each row must also include `responses_create_params`. Extra top-level
+  SWE-bench fields are accepted by the agent request model and passed into
+  mini-swe-agent as the instance dictionary.
 
-1. Reads the policy model server from Gym global config.
-2. Loads mini-swe-agent's built-in `swebench.yaml` config.
-3. Converts relevant Responses API rollout parameters into mini-swe-agent
-   `model.model_kwargs`.
-4. Injects the sandbox provider, sandbox spec, and sandbox environment kwargs.
-5. Writes a per-instance mini-swe-agent config to
-   `results/<subset>/<policy_model_name>/_configs/<instance_id>.sandbox.yaml`.
-6. Launches `run_swegym_with_optional_sandbox()` in a Ray remote task.
-7. Converts the saved mini-swe-agent trajectory back into Gym's Responses API
-   shape.
-8. Runs SWE-bench grading and returns reward `1.0` only when the report says the
-   instance resolved and includes test status.
+Example row shape:
 
-Inside the Ray task, `_run_swegym_v2()` calls mini-swe-agent v2 roughly as:
-
-```python
-env = get_environment(environment_config)
-model = get_model(config=model_config)
-agent = DefaultAgent(model, env, **agent_config)
-info = agent.run(instance["problem_statement"])
-eval_report = _run_eval_v2(...)
-env.cleanup()
+```json
+{
+  "instance_id": "django__django-13410",
+  "repo": "django/django",
+  "base_commit": "...",
+  "problem_statement": "...",
+  "patch": "...",
+  "test_patch": "...",
+  "FAIL_TO_PASS": ["..."],
+  "PASS_TO_PASS": ["..."],
+  "responses_create_params": {
+    "input": [],
+    "temperature": 0.6,
+    "top_p": 1.0,
+    "max_output_tokens": 16384
+  }
+}
 ```
 
-`run_golden: true` skips model rollout, applies the task's gold patch, and then
-runs evaluation.
+When `image_name` is present on a row, the agent uses it directly. Otherwise it
+derives the SWE-bench image from `instance_id` and `subset`:
+
+- `subset: verified` uses `swebench/sweb.eval.x86_64.<id>:latest` with `__`
+  replaced by `_1776_`.
+- Other subsets use `xingyaoww/sweb.eval.x86_64.<id>:latest` with `__` replaced
+  by `_s_`.
+
+Configured `sandbox_spec.image_rewrites` are applied inside
+`MiniSWESandboxEnvironment`; the default OpenSandbox config rewrites
+`swebench/` to `mirror.gcr.io/swebench/`.
 
 ## Configuration
 
-The server config must set `env: sandbox` and provide `sandbox_provider`.
-`sandbox_spec` and `sandbox_environment_kwargs` are optional but normally needed
-for SWE-bench images.
+### Agent Configuration
 
-Example shape:
+Path - `responses_api_agents/mini_swe_agent_2/configs/mini_swe_agent_opensandbox.yaml`
 
 ```yaml
 mini_swe_agent_2:
   responses_api_agents:
     mini_swe_agent_2:
       entrypoint: app.py
+      domain: coding
+      description: Software engineering tasks driven by mini-swe-agent harness on OpenSandbox.
+      value: Improve agentic software engineering capabilities.
       model_server:
         type: responses_api_models
         name: policy_model
@@ -92,6 +122,7 @@ mini_swe_agent_2:
           api_key: ${oc.env:OPENSANDBOX_API_KEY}
           protocol: http
           use_server_proxy: true
+          exec_use_server_proxy: true
       sandbox_spec:
         timeout_s: 18000
         ready_timeout_s: 1200
@@ -108,23 +139,48 @@ mini_swe_agent_2:
         metadata:
           benchmark: swebench-verified
           harness: mini-swe-agent
+          sandbox-api: opensandbox-sdk
       sandbox_environment_kwargs:
         cwd: /testbed
         conda_env: testbed
         activate_conda: true
         user: root
         delete: true
+      run_golden: false
       step_timeout: 600
       eval_timeout: 1800
+      skip_if_exists: false
       step_limit: 250
+      observability:
+        enabled: false
+        output_dir: results/mini_swe_agent_2_observability/{trajectory_id}
+        export_traces: true
+        run_id: mini-swe-agent-2
+        job_name: mini-swe-agent-2
+        otel:
+          service_name: mini-swe-agent-2
+          resource_attributes:
+            benchmark: swebench-verified
+            harness: mini_swe_agent_2
+          command_titles:
+            strip_prefixes:
+            - "cd /testbed && source $(conda info --base)/etc/profile.d/conda.sh && conda activate testbed &&"
+            rules:
+            - line_starts_with:
+              - "pytest "
+              - "python -m pytest "
+              - "./tests/runtests.py "
+              search: last
+              title: "run verifier: {line}"
 ```
 
-`sandbox_resource_profiles` can be configured as a list of resource maps. When
-present, the agent hashes `instance_id` and deterministically merges one profile
-into `sandbox_spec.resources`. This is useful for spreading SWE-bench tasks
-across a small set of resource sizes without changing the input data.
+Optional `sandbox_resource_profiles` can be configured as a list of resource
+maps. When present, the agent hashes `instance_id` and deterministically merges
+one profile into `sandbox_spec.resources`. This is useful for spreading
+SWE-bench tasks across a small set of resource sizes without changing the input
+data.
 
-## Model Parameters
+### Model Parameters
 
 `MiniSWEAgent.run()` maps supported Responses API fields into mini-swe-agent
 chat-completions kwargs:
@@ -152,10 +208,134 @@ That symptom was not a sandbox failure and was not a reason to force the `bash`
 tool. The successful smoke kept `tool_choice=auto` and lowered
 `max_output_tokens` to `16384`.
 
-## Sandbox Environment
+## Usage
 
-`MiniSWESandboxEnvironment` is the adapter that lets mini-swe-agent's
-synchronous environment contract use Gym's sandbox facade.
+### Server
+
+Set the policy model endpoint in `env.yaml` or with equivalent Hydra overrides:
+
+```yaml
+policy_base_url: http://terryk-dgd-pd-1p9d-frontend.default.svc.cluster.local:8000/v1
+policy_api_key: dummy-key
+policy_model_name: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+```
+
+Start the mini-swe-agent 2 server with the OpenSandbox provider and a policy
+model server. The values below mirror the current
+`hemild-mini-swe2-nemo-4-pd1p9d-p8-r16` eval job:
+
+```bash
+CONFIG_PATHS="responses_api_agents/mini_swe_agent_2/configs/mini_swe_agent_opensandbox.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml"
+
+ng_run "+config_paths=[$CONFIG_PATHS]" \
+    +mini_swe_agent_2.responses_api_agents.mini_swe_agent_2.concurrency=64 \
+    +mini_swe_agent_2.responses_api_agents.mini_swe_agent_2.step_timeout=600 \
+    +mini_swe_agent_2.responses_api_agents.mini_swe_agent_2.eval_timeout=1800 \
+    +mini_swe_agent_2.responses_api_agents.mini_swe_agent_2.step_limit=50 \
+    +mini_swe_agent_2.responses_api_agents.mini_swe_agent_2.run_golden=false \
+    +mini_swe_agent_2.responses_api_agents.mini_swe_agent_2.observability.enabled=true \
+    '+mini_swe_agent_2.responses_api_agents.mini_swe_agent_2.observability.output_dir=results/mini_swe_agent_2_observability/{trajectory_id}' \
+    +mini_swe_agent_2.responses_api_agents.mini_swe_agent_2.observability.run_id=mini-swe2-nemotron-4-pd-1p9d-pass8-r16 \
+    +mini_swe_agent_2.responses_api_agents.mini_swe_agent_2.observability.job_name=mini-swe2-nemotron-4-pd-1p9d-pass8-r16 \
+    +mini_swe_agent_2.responses_api_agents.mini_swe_agent_2.observability.otel.service_name=mini-swe2-nemotron-4-pd-1p9d \
+    +mini_swe_agent_2.responses_api_agents.mini_swe_agent_2.observability.otel.resource_attributes.benchmark=swebench-verified \
+    +mini_swe_agent_2.responses_api_agents.mini_swe_agent_2.observability.otel.resource_attributes.harness=mini_swe_agent_2 \
+    +mini_swe_agent_2.responses_api_agents.mini_swe_agent_2.observability.otel.resource_attributes.endpoint_label=4-dgd-pd-1p9d \
+    +mini_swe_agent_2.responses_api_agents.mini_swe_agent_2.observability.otel.resource_attributes.run_family=mini-swe2-nemotron-4-pd-1p9d-pass8-r16 \
+    '+mini_swe_agent_2.responses_api_agents.mini_swe_agent_2.sandbox_spec.resources={cpu: 500m, memory: 4Gi, ephemeral-storage: 8Gi}' \
+    '+mini_swe_agent_2.responses_api_agents.mini_swe_agent_2.sandbox_spec.metadata={benchmark: swebench-verified, harness: mini_swe_agent_2, endpoint_label: 4-dgd-pd-1p9d, run_family: mini-swe2-nemotron-4-pd-1p9d-pass8-r16}'
+```
+
+Use a model server config that matches the policy endpoint you are serving. The
+example above uses `vllm_model`, which is the common path for hosted vLLM
+`/v1/chat/completions` endpoints.
+
+### Collect Rollouts
+
+Collect eval rollouts from a SWE-bench-style JSONL file:
+
+```bash
+ng_collect_rollouts \
+    +agent_name=mini_swe_agent_2 \
+    +input_jsonl_fpath=/mnt/rl-workspace/hemild/gym_eval/refactor/inputs/mini_swe_verified_smoke8.jsonl \
+    +output_jsonl_fpath=results/mini_swe_agent_2_nemotron_4_pd_1p9d_pass8.jsonl \
+    +limit=8 \
+    +num_repeats=8 \
+    +num_samples_in_parallel=64 \
+    '+responses_create_params={max_output_tokens: 32768, temperature: 0.6, top_p: 0.95, metadata: {chat_template_kwargs: "{\"enable_thinking\": true}"}}'
+```
+
+After collecting repeated rollouts, run `ng_reward_profile` on the collected
+output:
+
+```bash
+ng_reward_profile \
+    +input_jsonl_fpath=/mnt/rl-workspace/hemild/gym_eval/refactor/inputs/mini_swe_verified_smoke8.jsonl \
+    +rollouts_jsonl_fpath=results/mini_swe_agent_2_nemotron_4_pd_1p9d_pass8.jsonl \
+    +output_jsonl_fpath=results/mini_swe_agent_2_nemotron_4_pd_1p9d_pass8_profiled.jsonl \
+    +pass_threshold=1.0
+```
+
+The agent writes per-instance mini-swe-agent configs and result artifacts under
+`results/<subset>/<policy_model_name>/`.
+
+These settings are adapted from the Kubernetes job family
+`hemild-mini-swe2-nemo-4*`. The direct Kubernetes orchestrator also used
+`SAMPLE_TIMEOUT_S=2400` as an outer per-sample guard; `ng_collect_rollouts`
+does not have an exact equivalent, so use the agent's `step_timeout` and
+`eval_timeout` overrides above to bound tool and verifier execution.
+
+## Observability
+
+Mini SWE Agent 2 uses the shared sandbox observability recorder for sandbox
+lifecycle spans, command execution spans, verifier spans, and model request
+spans. `app.py` wraps mini-swe-agent model calls in an `llm.request` span, and
+`sandbox_environment.py` marks SWE-bench evaluation commands as verifier work.
+
+Configure observability in the agent config. Use `{trajectory_id}`,
+`{instance_id}`, `{task_index}`, and `{rollout_index}` placeholders in
+`output_dir`, `run_id`, `job_name`, and `otel.service_name` when you want
+per-rollout trace artifacts:
+
+```yaml
+observability:
+  enabled: true
+  output_dir: results/mini_swe_agent_2_observability/{trajectory_id}
+  export_traces: true
+  run_id: mini-swe2-nemotron-4-pd-1p9d-pass8-r16
+  job_name: mini-swe2-nemotron-4-pd-1p9d-pass8-r16
+  otel:
+    service_name: mini-swe2-nemotron-4-pd-1p9d
+    resource_attributes:
+      benchmark: swebench-verified
+      harness: mini_swe_agent_2
+      endpoint_label: 4-dgd-pd-1p9d
+      run_family: mini-swe2-nemotron-4-pd-1p9d-pass8-r16
+    command_titles:
+      strip_prefixes:
+      - "cd /testbed && source $(conda info --base)/etc/profile.d/conda.sh && conda activate testbed &&"
+      rules:
+      - line_starts_with:
+        - "pytest "
+        - "python -m pytest "
+        - "./tests/runtests.py "
+        search: last
+        title: "run verifier: {line}"
+```
+
+For each trajectory, the recorder writes OpenTelemetry JSON under:
+
+```text
+<output_dir>/traces/otel_traces.json
+```
+
+The default config leaves observability disabled. Turn it on with a Hydra
+override, as shown in the server launch example, or edit the YAML directly.
+
+## Sandbox Environment Adapter
+
+`MiniSWESandboxEnvironment` adapts mini-swe-agent's synchronous environment
+contract to `nemo_gym.sandbox.Sandbox`.
 
 When `env` is `sandbox`, Gym injects this environment config before calling
 mini-swe-agent:
@@ -172,6 +352,8 @@ environment:
     platform: ...
     metadata: ...
 ```
+
+### Environment Lifecycle
 
 `MiniSWESandboxEnvironment.__init__()`:
 
@@ -210,83 +392,17 @@ submission payload.
 `Sandbox.shutdown()` to release provider-owned async resources and stop the sync
 facade's private loop.
 
-## Why The Sandbox Facade Has A Loop Runner
+## Contributing
 
-Gym exposes two public sandbox classes:
+Please refer to the main NeMo Gym documentation for contributing guidelines.
 
-- `AsyncSandbox` is the async-native API for Gym servers and high-concurrency
-  rollout code.
-- `Sandbox` is the sync facade for synchronous integrations such as
-  mini-swe-agent v2.
+## Licensing Information
 
-The provider layer remains async by design. Provider calls such as `create`,
-`exec`, `read_file`, `write_file`, and `close` may perform network I/O and
-should not block a shared event loop.
+- **Code**: Apache 2.0
+- **SWE-bench Verified**: MIT
 
-mini-swe-agent v2's environment API is synchronous today. It constructs the
-environment synchronously and calls `env.execute(...)` as a normal blocking
-method from `DefaultAgent.run(...)`. If `execute()` returned a coroutine,
-mini-swe-agent would not await it, and the agent would break.
+### Dependencies
 
-`Sandbox` owns the sync-to-async bridge:
-
-- mini-swe-agent sees a normal synchronous environment.
-- All Gym sandbox provider calls run on one dedicated asyncio loop.
-- The same loop is used for create, exec, and cleanup, which matters because
-  SDK clients and handles can be event-loop-affine.
-- The facade avoids calling `asyncio.run()` for every command, which would
-  create and destroy event loops repeatedly and can fail if a loop is already
-  running in the current thread.
-
-## Image Selection
-
-If the input instance has `image_name`, the agent uses it directly. Otherwise it
-derives the SWE-bench image from `instance_id` and `subset`:
-
-- `subset: verified` uses `swebench/sweb.eval.x86_64.<id>:latest` with `__`
-  replaced by `_1776_`.
-- Other subsets use `xingyaoww/sweb.eval.x86_64.<id>:latest` with `__` replaced
-  by `_s_`.
-
-Configured `sandbox_spec.image_rewrites` then apply inside
-`MiniSWESandboxEnvironment`, for example rewriting `swebench/` to
-`mirror.gcr.io/swebench/`.
-
-## Smoke Validation
-
-The sandbox environment path was smoke-tested on Kubernetes with mini-swe-agent
-v2, OpenSandbox SDK mode, `tool_choice=auto`, and one Qwen3.5 27B vLLM replica.
-
-Run:
-
-```text
-job: hemild-mini-swe2-sandbox-16k-r64xf
-run_dir: /mnt/rl-workspace/hemild/gym_eval/refactor/runs/mini_swe_sandbox_environment_smoke/20260518-033858-mini-swe2-sandbox-smoke-direct
-```
-
-Result:
-
-```text
-rows: 4
-reward_sum: 4.0
-pass@1: 100.0%
-wall_time_s: 343
-```
-
-Resolved instances:
-
-- `pytest-dev__pytest-6202`
-- `sympy__sympy-15809`
-- `django__django-13410`
-- `django__django-16429`
-
-The pod completed without restarts, and the logs did not show
-`SandboxApiException`, `TimeoutError`, image pull failures, or OpenSandbox
-create/exec failures.
-
-## When To Revisit
-
-Revisit this adapter if mini-swe-agent v2 gains native async environment
-support. At that point this environment can switch from `Sandbox` to
-`AsyncSandbox`, make creation explicit through an async factory, and expose
-async `execute` and `cleanup` methods directly.
+- **nemo_gym**: Apache 2.0
+- **mini-swe-agent**: MIT
+- **SWE-Bench-Package / swegym**: MIT
