@@ -30,12 +30,29 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.sandbox.observability import SandboxRecorder, use_recorder
 from nemo_gym.server_utils import ServerClient
+
+
+try:
+    __import__("minisweagent.config")
+except ModuleNotFoundError as exc:
+    if exc.name not in {"minisweagent", "minisweagent.config"}:
+        raise
+    minisweagent_module = ModuleType("minisweagent")
+    minisweagent_module.__path__ = []
+    minisweagent_config_module = ModuleType("minisweagent.config")
+    minisweagent_config_module.builtin_config_dir = Path("/tmp/minisweagent/config")
+    minisweagent_config_module.get_config_path = Path
+    sys.modules["minisweagent"] = minisweagent_module
+    sys.modules["minisweagent.config"] = minisweagent_config_module
+
 from responses_api_agents.mini_swe_agent_2 import app as mini_swe_app_module
 from responses_api_agents.mini_swe_agent_2.app import (
     MiniSWEAgent,
     MiniSWEAgentConfig,
     MiniSWEAgentRunRequest,
     MiniSWEAgentVerifyResponse,
+    _format_template,
+    _is_resolved,
     _json_dict_from_metadata,
     _message_content_to_text,
     _observability_config_for_instance,
@@ -43,6 +60,7 @@ from responses_api_agents.mini_swe_agent_2.app import (
     _responses_create_params_to_model_kwargs,
     _run_swegym_v2,
     _sandbox_spec_for_instance,
+    _split_trajectory_for_responses,
     _swebench_config_path,
     _swebench_image_name,
     run_swegym_with_optional_sandbox,
@@ -278,10 +296,14 @@ class TestApp:
             def query(self, messages: list[dict[str, Any]], **kwargs: Any) -> dict[str, Any]:
                 return {"role": "assistant", "content": "ok", "extra": {"actions": []}}
 
+        query_model = QueryModel()
+        observed_model = _ObservedModel(query_model, model_name="hosted_vllm/qwen")
+        assert observed_model.config is query_model.config
+
         recorder = SandboxRecorder(output_dir=tmp_path / "observability", otel={"enabled": False})
         with use_recorder(recorder):
             with mini_swe_app_module.event_context(trajectory_id="task-1", instance_id="task-1"):
-                _ObservedModel(QueryModel(), model_name="hosted_vllm/qwen").query([{"role": "user", "content": "hi"}])
+                observed_model.query([{"role": "user", "content": "hi"}])
         recorder.finalize()
 
         spans = _otel_spans(recorder.output_dir)
@@ -349,6 +371,8 @@ class TestApp:
         assert _sandbox_spec_for_instance(None, resource_profiles=None, instance_id="task") == {}
 
     def test_observability_config_formats_per_rollout_context(self) -> None:
+        assert _format_template(1, {"trajectory_id": "task"}) == 1
+        assert _format_template("{missing}", {"trajectory_id": "task"}) == "{missing}"
         config = _observability_config_for_instance(
             {
                 "enabled": True,
@@ -379,6 +403,52 @@ class TestApp:
             },
         }
         assert _observability_config_for_instance(None, instance_id="task") is None
+        assert _observability_config_for_instance(
+            {"enabled": True},
+            instance_id="task",
+            rollout_index="retry",
+        ) == {"enabled": True, "trajectory_id": "task__rolloutretry"}
+
+    def test_split_trajectory_and_resolution_helpers_cover_edge_cases(self) -> None:
+        input_messages, output_items, raw_responses = _split_trajectory_for_responses(
+            [
+                {"role": "system", "content": "sys"},
+                {"role": "user", "content": "user"},
+                {
+                    "role": "assistant",
+                    "content": "answer",
+                    "tool_calls": [
+                        {"id": "call-1", "function": {"name": "bash", "arguments": "{\"command\":\"pwd\"}"}}
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "call-1", "content": "tool output"},
+                {"type": "function_call_output", "call_id": "call-2", "output": "raw", "extra": {"ignored": True}},
+                {"object": "response", "output": [{"type": "message", "content": "raw"}], "extra": {"ignored": True}},
+            ]
+        )
+
+        assert input_messages == [
+            {"type": "message", "role": "system", "content": "sys"},
+            {"type": "message", "role": "user", "content": "user"},
+        ]
+        assert any(item["type"] == "function_call" and item["call_id"] == "call-1" for item in output_items)
+        assert any(item["type"] == "function_call_output" and item["call_id"] == "call-1" for item in output_items)
+        assert any(item["type"] == "function_call_output" and item["call_id"] == "call-2" for item in output_items)
+        assert raw_responses == [{"object": "response", "output": [{"type": "message", "content": "raw"}]}]
+
+        assert not _is_resolved("task", {})
+        assert not _is_resolved("task", {"eval_report": {"task": {"resolved": True}}})
+        assert not _is_resolved(
+            "task",
+            {
+                "eval_report": {
+                    "task": {
+                        "resolved": True,
+                        "tests_status": {"FAIL_TO_PASS": {"success": [], "failure": []}},
+                    }
+                }
+            },
+        )
 
     def test_misc_mini_swe_helpers(self, monkeypatch, tmp_path) -> None:
         assert _swebench_image_name({"instance_id": "django__django-1"}, "verified") == (
@@ -401,7 +471,7 @@ class TestApp:
         monkeypatch.setattr(mini_swe_app_module, "builtin_config_dir", tmp_path / "missing")
         assert _swebench_config_path() == tmp_path / "missing" / "extra" / "swebench.yaml"
 
-    def test_run_swegym_records_completion_and_errors(self, monkeypatch) -> None:
+    def test_run_swegym_records_completion_and_errors(self, monkeypatch, tmp_path) -> None:
         monkeypatch.setattr(
             mini_swe_app_module,
             "_run_swegym_v2",
@@ -413,7 +483,16 @@ class TestApp:
                 }
             },
         )
-        assert run_swegym_with_optional_sandbox(env="sandbox", instance_id="task-1") == {
+        assert run_swegym_with_optional_sandbox(
+            env="sandbox",
+            instance_id="task-1",
+            observability={
+                "enabled": True,
+                "output_dir": str(tmp_path / "observability"),
+                "export_traces": False,
+                "run_id": "run-1",
+            },
+        ) == {
             "task-1": {"eval_report": {"task-1": {"resolved": True}}}
         }
 

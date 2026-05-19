@@ -19,6 +19,7 @@ from typing import Any
 from uuid import uuid4
 
 import pytest
+from opentelemetry.sdk.trace.export import SpanExportResult
 
 from nemo_gym.sandbox import (
     AsyncSandbox,
@@ -26,14 +27,18 @@ from nemo_gym.sandbox import (
     SandboxExecResult,
     SandboxHandle,
     SandboxSpec,
+    get_provider_class,
+    list_providers,
     register_provider,
     rewrite_image,
 )
 from nemo_gym.sandbox.observability import (
     SandboxRecorder,
+    build_recorder_from_config,
     build_recorder_from_env,
     use_recorder,
 )
+from nemo_gym.sandbox.observability import traces as trace_artifacts
 from nemo_gym.sandbox.providers.opensandbox import provider as opensandbox_provider_module
 from nemo_gym.sandbox.providers.opensandbox.provider import (
     IMAGE_PULL_POLICY_ANNOTATION_EXTENSION_KEY,
@@ -41,7 +46,7 @@ from nemo_gym.sandbox.providers.opensandbox.provider import (
     OpenSandboxCreateVerificationError,
     OpenSandboxProvider,
 )
-from responses_api_agents.mini_swe_agent.sandbox_environment import MiniSWESandboxEnvironment
+from responses_api_agents.mini_swe_agent_2.sandbox_environment import MiniSWESandboxEnvironment
 
 
 class FakeSandboxProvider:
@@ -187,6 +192,27 @@ def _otel_resource_service_names(output_dir: Path) -> set[str]:
     return service_names
 
 
+def test_trace_exporter_and_service_lane_edge_cases(tmp_path: Path) -> None:
+    exporter = trace_artifacts.JsonSpanExporter()
+    assert exporter.force_flush()
+    exporter.shutdown()
+    assert exporter.export([]) == SpanExportResult.FAILURE
+    assert trace_artifacts.export_trace_artifacts(tmp_path, spans=[]) == {}
+
+    def span(name: str, **attrs: Any) -> Any:
+        return type("FakeSpan", (), {"name": name, "attributes": attrs})()
+
+    assert trace_artifacts._visual_service_name(span("io", **{"operation.name": "sandbox.read_file"})) == "sandbox.io"
+    assert trace_artifacts._visual_service_name(span("diag", **{"operation.name": "sandbox.diagnostic.check"})) == (
+        "sandbox.diagnostic"
+    )
+    assert trace_artifacts._visual_service_name(span("custom", **{"span.section": "rollout"})) == "nemo-gym.rollout"
+    assert trace_artifacts._visual_service_name(span("custom", **{"span.section": "sandbox"})) == "sandbox"
+    assert trace_artifacts._otel_value(["a", 1]) == {
+        "arrayValue": {"values": [{"stringValue": "a"}, {"intValue": "1"}]}
+    }
+
+
 def test_sandbox_facade_uses_public_provider_api() -> None:
     asyncio.run(_assert_sandbox_facade_uses_public_provider_api())
 
@@ -229,6 +255,20 @@ async def _assert_sandbox_facade_uses_public_provider_api() -> None:
 
 def test_rewrite_image_and_materialize_handle_validation() -> None:
     asyncio.run(_assert_rewrite_image_and_materialize_handle_validation())
+
+
+def test_provider_registry_validation_and_listing() -> None:
+    provider_name = f"fake-{uuid4().hex}"
+    register_provider(provider_name, FakeSandboxProvider)
+
+    assert get_provider_class(provider_name) is FakeSandboxProvider
+    assert provider_name in list_providers()
+    with pytest.raises(ValueError, match="must be non-empty"):
+        register_provider("", FakeSandboxProvider)
+    with pytest.raises(ValueError, match="already registered"):
+        register_provider(provider_name, FakeSandboxProvider)
+    with pytest.raises(ValueError, match="Unknown sandbox provider"):
+        get_provider_class(f"missing-{uuid4().hex}")
 
 
 async def _assert_rewrite_image_and_materialize_handle_validation() -> None:
@@ -870,6 +910,29 @@ def test_observability_env_can_enable_recorder_without_output_dir(monkeypatch) -
     recorder.finalize()
 
 
+def test_observability_config_and_env_validation(monkeypatch, tmp_path: Path) -> None:
+    assert build_recorder_from_config(None) is None
+    assert build_recorder_from_config({"enabled": False}) is None
+
+    recorder = build_recorder_from_config(
+        {
+            "enabled": True,
+            "output_dir": str(tmp_path / "config-recorder"),
+            "job_name": "config-job",
+            "export_traces": False,
+        },
+        run_id="run-1",
+    )
+    assert recorder is not None
+    assert recorder.run_span_name == "eval: config-job"
+    assert recorder.output_dir == tmp_path / "config-recorder"
+    recorder.finalize()
+
+    monkeypatch.setenv("NEMO_GYM_SANDBOX_OBSERVABILITY_COMMAND_TITLES", "[]")
+    with pytest.raises(ValueError, match="must contain a JSON object"):
+        build_recorder_from_env()
+
+
 def test_observability_attributes_are_configurable(tmp_path: Path) -> None:
     recorder = SandboxRecorder(
         output_dir=tmp_path / "observability",
@@ -1053,7 +1116,6 @@ def test_mini_swe_sandbox_environment_owns_conda_setup(monkeypatch, tmp_path: Pa
             },
             env={"STATIC_KEY": "static-value"},
             forward_env=["FORWARDED_KEY"],
-            cache_dir_template="/tmp/{instance_id}.sif",
             conda_env="testbed",
             activate_conda=True,
             user="agent",
@@ -1061,6 +1123,13 @@ def test_mini_swe_sandbox_environment_owns_conda_setup(monkeypatch, tmp_path: Pa
         )
 
         try:
+            assert env.get_template_vars(extra="value")["extra"] == "value"
+            serialized = env.serialize()
+            assert serialized["info"]["config"]["environment_type"].endswith("MiniSWESandboxEnvironment")
+            env.config.activate_conda = False
+            assert env._command("echo plain", "/tmp/work") == "echo plain"
+            env.config.activate_conda = True
+
             provider = FakeSandboxProvider.last_instance
             assert provider is not None
             assert provider.marker == "configured"
@@ -1080,6 +1149,7 @@ def test_mini_swe_sandbox_environment_owns_conda_setup(monkeypatch, tmp_path: Pa
             assert exec_call["command"].endswith("pytest -q")
         finally:
             env.cleanup()
+            env.cleanup()
 
     recorder.finalize()
     spans = _otel_spans(recorder.output_dir)
@@ -1089,3 +1159,20 @@ def test_mini_swe_sandbox_environment_owns_conda_setup(monkeypatch, tmp_path: Pa
     assert FakeSandboxProvider.last_instance.closed[0][1] is True
     assert "verifier: unknown" in span_attrs
     assert span_attrs["exec: run verifier: pytest -q"]["span.section"] == "verifier"
+
+
+def test_mini_swe_sandbox_environment_validation_and_context_manager() -> None:
+    with pytest.raises(ValueError, match="requires provider"):
+        MiniSWESandboxEnvironment(image="image:tag")
+
+    provider_name = f"fake-{uuid4().hex}"
+    register_provider(provider_name, FakeSandboxProvider)
+    with MiniSWESandboxEnvironment(
+        image="image:tag",
+        provider={"name": provider_name},
+        delete=False,
+    ) as env:
+        assert env._handle is not None
+
+    assert FakeSandboxProvider.last_instance is not None
+    assert FakeSandboxProvider.last_instance.closed[-1][1] is False

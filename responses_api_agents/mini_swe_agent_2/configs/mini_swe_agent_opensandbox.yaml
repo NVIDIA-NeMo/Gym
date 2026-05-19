@@ -18,7 +18,6 @@ mini_swe_agent_2:
           protocol: http
           use_server_proxy: true
           exec_use_server_proxy: true
-          batch_create_concurrency: 128
           batch_create_retries: 10
           batch_create_retry_delay_s: 5.0
           batch_create_retry_max_delay_s: 90.0
