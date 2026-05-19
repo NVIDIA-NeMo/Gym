@@ -1,0 +1,17 @@
+claude_code_agent:
+  responses_api_agents:
+    claude_code_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: ???
+      concurrency: 32
+      model: claude-sonnet-4-6
+      anthropic_api_key: ${anthropic_api_key}
+      anthropic_base_url: null
+      max_turns: 30
+      timeout: 300
+      system_prompt: null
+      allowed_tools: null
+      disallowed_tools: null
+      claude_code_version: null
