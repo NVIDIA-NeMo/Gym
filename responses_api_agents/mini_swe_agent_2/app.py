@@ -64,10 +64,6 @@ class MiniSWEAgentConfig(BaseResponsesAPIAgentConfig):
     step_limit: int = 250
     tool_choice: Optional[str | dict[str, Any]] = None
     sandbox_resource_profiles: Optional[list[dict[str, str]]] = None
-    sandbox_ready_barrier_count: Optional[int] = None
-    sandbox_ready_barrier_id: Optional[str] = None
-    sandbox_ready_barrier_timeout_s: int = 1800
-    sandbox_ready_barrier_poll_s: float = 2.0
 
 
 class MiniSWEAgentRunRequest(BaseRunRequest):
@@ -173,10 +169,6 @@ class _ObservedModel:
             return self._model.query(messages, **kwargs)
 
 
-def _barrier_file_name(instance_id: str) -> str:
-    return "".join(char if char.isalnum() or char in "._-" else "_" for char in instance_id)[:180] or "unknown"
-
-
 def _sandbox_spec_for_instance(
     spec: dict[str, Any] | None,
     *,
@@ -193,50 +185,6 @@ def _sandbox_spec_for_instance(
     resources.update(profile)
     instance_spec["resources"] = resources
     return instance_spec
-
-
-def _wait_for_sandbox_ready_barrier(
-    *,
-    output_dir: Path,
-    barrier_id: str,
-    instance_id: str,
-    count: int,
-    timeout_s: float,
-    poll_s: float,
-) -> None:
-    if count <= 1:
-        return
-
-    barrier_dir = output_dir / "_sandbox_ready_barriers" / _barrier_file_name(barrier_id)
-    barrier_dir.mkdir(parents=True, exist_ok=True)
-    ready_path = barrier_dir / f"{_barrier_file_name(instance_id)}.ready"
-    ready_path.write_text(json.dumps({"instance_id": instance_id, "ready_at_s": time.time()}))
-
-    deadline = time.monotonic() + timeout_s
-    last_reported = -1
-    while True:
-        ready_count = sum(1 for _ in barrier_dir.glob("*.ready"))
-        if ready_count >= count:
-            print(
-                f"[EVAL]{instance_id} Sandbox-ready barrier satisfied: {ready_count}/{count}",
-                flush=True,
-            )
-            return
-
-        now = time.monotonic()
-        if now >= deadline:
-            raise TimeoutError(
-                f"Timed out waiting for sandbox-ready barrier {barrier_id}: "
-                f"{ready_count}/{count} ready after {timeout_s:.1f}s"
-            )
-
-        if ready_count != last_reported and (ready_count == 1 or ready_count % 25 == 0):
-            print(
-                f"[EVAL]{instance_id} Waiting for sandbox-ready barrier: {ready_count}/{count}",
-                flush=True,
-            )
-            last_reported = ready_count
-        time.sleep(max(poll_s, 0.1))
 
 
 def _swebench_config_path() -> Path:
@@ -509,17 +457,6 @@ def _run_swegym_v2(**params: Any) -> dict[str, Any]:
         print(f"[EVAL]{instance_id} Creating environment...", flush=True)
         env = get_environment(environment_config)
         print(f"[EVAL]{instance_id} Environment created", flush=True)
-        barrier_id = params.get("sandbox_ready_barrier_id")
-        barrier_count = params.get("sandbox_ready_barrier_count")
-        if barrier_id and barrier_count:
-            _wait_for_sandbox_ready_barrier(
-                output_dir=output_dir,
-                barrier_id=str(barrier_id),
-                instance_id=instance_id,
-                count=int(barrier_count),
-                timeout_s=float(params.get("sandbox_ready_barrier_timeout_s", 1800)),
-                poll_s=float(params.get("sandbox_ready_barrier_poll_s", 2.0)),
-            )
 
         model = get_model(config=model_config)
         model = _ObservedModel(model, model_name=params["model"])
@@ -689,10 +626,6 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
                     step_timeout=step_timeout,
                     eval_timeout=eval_timeout,
                     step_limit=step_limit,
-                    sandbox_ready_barrier_count=self.config.sandbox_ready_barrier_count,
-                    sandbox_ready_barrier_id=self.config.sandbox_ready_barrier_id,
-                    sandbox_ready_barrier_timeout_s=self.config.sandbox_ready_barrier_timeout_s,
-                    sandbox_ready_barrier_poll_s=self.config.sandbox_ready_barrier_poll_s,
                 )
                 future = runner_ray_remote.remote(run_swegym_with_optional_sandbox, params)
                 result = await asyncio.to_thread(ray.get, future)

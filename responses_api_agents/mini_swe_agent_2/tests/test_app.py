@@ -36,7 +36,6 @@ from responses_api_agents.mini_swe_agent_2.app import (
     MiniSWEAgentConfig,
     MiniSWEAgentRunRequest,
     MiniSWEAgentVerifyResponse,
-    _barrier_file_name,
     _json_dict_from_metadata,
     _message_content_to_text,
     _ObservedModel,
@@ -45,7 +44,6 @@ from responses_api_agents.mini_swe_agent_2.app import (
     _sandbox_spec_for_instance,
     _swebench_config_path,
     _swebench_image_name,
-    _wait_for_sandbox_ready_barrier,
     run_swegym_with_optional_sandbox,
 )
 
@@ -350,8 +348,6 @@ class TestApp:
         assert _sandbox_spec_for_instance(None, resource_profiles=None, instance_id="task") == {}
 
     def test_misc_mini_swe_helpers(self, monkeypatch, tmp_path) -> None:
-        assert _barrier_file_name("bad/value:with spaces") == "bad_value_with_spaces"
-        assert _barrier_file_name("") == "unknown"
         assert _swebench_image_name({"instance_id": "django__django-1"}, "verified") == (
             "swebench/sweb.eval.x86_64.django_1776_django-1:latest"
         )
@@ -371,41 +367,6 @@ class TestApp:
         assert _swebench_config_path() == benchmark_dir / "swebench.yaml"
         monkeypatch.setattr(mini_swe_app_module, "builtin_config_dir", tmp_path / "missing")
         assert _swebench_config_path() == tmp_path / "missing" / "extra" / "swebench.yaml"
-
-    def test_sandbox_ready_barrier_waits_for_all_ready_files(self, tmp_path) -> None:
-        barrier_dir = tmp_path / "_sandbox_ready_barriers" / "run"
-        barrier_dir.mkdir(parents=True)
-        (barrier_dir / "second.ready").write_text("{}")
-
-        _wait_for_sandbox_ready_barrier(
-            output_dir=tmp_path,
-            barrier_id="run",
-            instance_id="first",
-            count=2,
-            timeout_s=1.0,
-            poll_s=0.1,
-        )
-
-        assert (barrier_dir / "first.ready").exists()
-
-    def test_sandbox_ready_barrier_timeout(self, tmp_path) -> None:
-        _wait_for_sandbox_ready_barrier(
-            output_dir=tmp_path,
-            barrier_id="run",
-            instance_id="single",
-            count=1,
-            timeout_s=0,
-            poll_s=0.1,
-        )
-        with pytest.raises(TimeoutError, match="Timed out waiting for sandbox-ready barrier"):
-            _wait_for_sandbox_ready_barrier(
-                output_dir=tmp_path,
-                barrier_id="run",
-                instance_id="first",
-                count=2,
-                timeout_s=0,
-                poll_s=0.1,
-            )
 
     def test_run_swegym_records_completion_and_errors(self, monkeypatch) -> None:
         monkeypatch.setattr(
@@ -660,8 +621,6 @@ class TestApp:
             "instance_dict": json.dumps(
                 {"instance_id": "django__django-123", "problem_statement": "Fix the bug", "patch": "gold"}
             ),
-            "sandbox_ready_barrier_id": "ready",
-            "sandbox_ready_barrier_count": 1,
         }
         assert "django__django-123" in _run_swegym_v2(**string_params)
 
