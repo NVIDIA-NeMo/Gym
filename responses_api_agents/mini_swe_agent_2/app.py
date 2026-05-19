@@ -140,6 +140,14 @@ def _bash_tool_choice() -> dict[str, Any]:
     return {"type": "function", "name": "bash"}
 
 
+def _responses_api_model_name(model_name: str) -> str:
+    if model_name.startswith("hosted_vllm/"):
+        return "openai/" + model_name.removeprefix("hosted_vllm/")
+    if "/" not in model_name:
+        return f"openai/{model_name}"
+    return model_name
+
+
 def _response_api_content(content: Any) -> list[dict[str, Any]]:
     if isinstance(content, str):
         return [{"type": "input_text", "text": content}]
@@ -448,11 +456,12 @@ def _run_swegym_v2(**params: Any) -> dict[str, Any]:
     config = yaml.safe_load(get_config_path(params["config"]).read_text())
     model_config = config.setdefault("model", {})
     model_config["model_class"] = "litellm_response"
-    model_config["model_name"] = params["model"]
+    model_config["model_name"] = _responses_api_model_name(params["model"])
     model_config.setdefault("cost_tracking", "ignore_errors")
     model_kwargs = model_config.setdefault("model_kwargs", {})
     model_kwargs["api_key"] = params["api_key"]
-    model_kwargs["base_url"] = params["base_url"]
+    model_kwargs["api_base"] = params["base_url"]
+    model_kwargs.pop("base_url", None)
     max_tokens = model_kwargs.pop("max_tokens", None)
     if max_tokens is not None and "max_output_tokens" not in model_kwargs:
         model_kwargs["max_output_tokens"] = max_tokens
@@ -481,7 +490,7 @@ def _run_swegym_v2(**params: Any) -> dict[str, Any]:
         print(f"[EVAL]{instance_id} Environment created", flush=True)
 
         model = get_model(config=model_config)
-        model = _ObservedModel(model, model_name=params["model"])
+        model = _ObservedModel(model, model_name=model_config["model_name"])
         agent = DefaultAgent(model, env, **agent_config)
 
         if params["run_golden"]:
@@ -572,7 +581,7 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
             run_golden = self.config.run_golden
             base_url = f"http://{model_server_config['host']}:{model_server_config['port']}/v1"
             dummy_key = "dummy_key"
-            model_name = f"hosted_vllm/{policy_model_name}"
+            model_name = _responses_api_model_name(policy_model_name)
             step_timeout = self.config.step_timeout
             eval_timeout = self.config.eval_timeout
             step_limit = self.config.step_limit

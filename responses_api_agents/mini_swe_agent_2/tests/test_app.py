@@ -40,6 +40,7 @@ from responses_api_agents.mini_swe_agent_2.app import (
     _message_content_to_text,
     _normalize_response_api_messages,
     _ObservedModel,
+    _responses_api_model_name,
     _responses_create_params_to_model_kwargs,
     _run_swegym_v2,
     _sandbox_spec_for_instance,
@@ -393,6 +394,9 @@ class TestApp:
         assert _normalize_response_api_messages([{"role": "user", "content": None}]) == [
             {"role": "user", "content": [{"type": "input_text", "text": ""}], "type": "message"}
         ]
+        assert _responses_api_model_name("Qwen/Qwen3.5-27B") == "Qwen/Qwen3.5-27B"
+        assert _responses_api_model_name("hosted_vllm/Qwen/Qwen3.5-27B") == "openai/Qwen/Qwen3.5-27B"
+        assert _responses_api_model_name("local-model") == "openai/local-model"
 
         builtin_dir = tmp_path / "configs"
         benchmark_dir = builtin_dir / "benchmarks"
@@ -593,7 +597,10 @@ class TestApp:
         assert env.config["environment_class"].endswith("MiniSWESandboxEnvironment")
         assert env.config["image"] == "swebench/sweb.eval.x86_64.django_1776_django-123:latest"
         assert holder["model_config"]["model_class"] == "litellm_response"
+        assert holder["model_config"]["model_name"] == "hosted/model"
         assert holder["model_config"]["model_kwargs"]["max_output_tokens"] == 99
+        assert holder["model_config"]["model_kwargs"]["api_base"] == "http://model/v1"
+        assert "base_url" not in holder["model_config"]["model_kwargs"]
         assert holder["agent_config"]["step_limit"] == 7
         assert holder["save_metadata"] == {"instance_id": "django__django-123"}
         assert result["django__django-123"]["input_messages"] == [
