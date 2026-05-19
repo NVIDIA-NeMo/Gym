@@ -38,6 +38,7 @@ from responses_api_agents.mini_swe_agent_2.app import (
     MiniSWEAgentVerifyResponse,
     _json_dict_from_metadata,
     _message_content_to_text,
+    _normalize_response_api_messages,
     _ObservedModel,
     _responses_create_params_to_model_kwargs,
     _run_swegym_v2,
@@ -293,6 +294,37 @@ class TestApp:
         assert attrs["message_count"] == 1
         assert attrs["trajectory_id"] == "task-1"
 
+    def test_observed_model_normalizes_response_api_messages(self, tmp_path: Path) -> None:
+        class LitellmResponseModel:
+            def __init__(self) -> None:
+                self.config = SimpleNamespace(model_kwargs={})
+                self.seen_messages: list[dict[str, Any]] | None = None
+
+            def query(self, messages: list[dict[str, Any]], **kwargs: Any) -> dict[str, Any]:
+                self.seen_messages = messages
+                return {"object": "response", "output": [], "extra": {"actions": []}}
+
+        model = LitellmResponseModel()
+        recorder = SandboxRecorder(output_dir=tmp_path / "observability", otel={"enabled": False})
+        with use_recorder(recorder):
+            _ObservedModel(model, model_name="hosted_vllm/qwen").query(
+                [
+                    {"role": "system", "content": "You are helpful", "extra": {"drop": True}},
+                    {"role": "user", "content": [{"text": "Fix it"}]},
+                    {"type": "function_call_output", "call_id": "call-1", "output": "ok"},
+                ]
+            )
+
+        assert model.seen_messages == [
+            {
+                "role": "system",
+                "content": [{"type": "input_text", "text": "You are helpful"}],
+                "type": "message",
+            },
+            {"role": "user", "content": [{"type": "input_text", "text": "Fix it"}], "type": "message"},
+            {"type": "function_call_output", "call_id": "call-1", "output": "ok"},
+        ]
+
     def test_response_param_helpers_cover_metadata_and_tool_choice_modes(self) -> None:
         assert _json_dict_from_metadata(None, field_name="extra_body") == {}
         assert _json_dict_from_metadata({"top_k": 20}, field_name="extra_body") == {"top_k": 20}
@@ -358,6 +390,9 @@ class TestApp:
         assert _message_content_to_text("hello") == "hello"
         assert _message_content_to_text(None) == ""
         assert _message_content_to_text([{"text": "one"}, {"content": "two"}, 3]) == "one\ntwo\n3"
+        assert _normalize_response_api_messages([{"role": "user", "content": None}]) == [
+            {"role": "user", "content": [{"type": "input_text", "text": ""}], "type": "message"}
+        ]
 
         builtin_dir = tmp_path / "configs"
         benchmark_dir = builtin_dir / "benchmarks"

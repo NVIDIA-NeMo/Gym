@@ -140,6 +140,44 @@ def _bash_tool_choice() -> dict[str, Any]:
     return {"type": "function", "name": "bash"}
 
 
+def _response_api_content(content: Any) -> list[dict[str, Any]]:
+    if isinstance(content, str):
+        return [{"type": "input_text", "text": content}]
+    if isinstance(content, list):
+        normalized = []
+        for item in content:
+            if isinstance(item, dict):
+                if "type" in item:
+                    normalized.append(item)
+                else:
+                    normalized.append(
+                        {"type": "input_text", "text": str(item.get("text") or item.get("content") or "")}
+                    )
+            else:
+                normalized.append({"type": "input_text", "text": str(item)})
+        return normalized
+    return [{"type": "input_text", "text": "" if content is None else str(content)}]
+
+
+def _normalize_response_api_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for message in messages:
+        if not isinstance(message, dict):
+            normalized.append({"type": "message", "role": "user", "content": _response_api_content(message)})
+            continue
+        if message.get("object") == "response" or message.get("type") == "function_call_output":
+            normalized.append(message)
+            continue
+        if "role" in message and "content" in message:
+            item = {key: value for key, value in message.items() if key != "extra"}
+            item["type"] = item.get("type") or "message"
+            item["content"] = _response_api_content(item.get("content"))
+            normalized.append(item)
+            continue
+        normalized.append({key: value for key, value in message.items() if key != "extra"})
+    return normalized
+
+
 class _ObservedModel:
     """Add an OTel span around each mini-SWE model query."""
 
@@ -166,6 +204,8 @@ class _ObservedModel:
             "_record_exception_stacktrace": False,
         }
         with observability_sync_span("llm.request", phase="llm", attributes=attributes):
+            if self._model.__class__.__name__ == "LitellmResponseModel":
+                messages = _normalize_response_api_messages(messages)
             return self._model.query(messages, **kwargs)
 
 
