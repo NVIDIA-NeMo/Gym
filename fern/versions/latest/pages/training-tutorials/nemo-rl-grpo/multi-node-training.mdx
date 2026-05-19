@@ -19,14 +19,14 @@ Your single-node test run confirmed that the environment, model, and training lo
 
 </Info>
 
-<NavButton href="/latest/training-tutorials/nemo-rl-grpo/single-node-training" label="Previous: Single Node Training" direction="prev" />
+<NavButton href="/training-tutorials/nemo-rl-grpo/single-node-training" label="Previous: Single Node Training" direction="prev" />
 
 ---
 
 ## Prerequisites
 
 <Info>
-**Complete the [Single Node Training](/latest/training-tutorials/nemo-rl-grpo/single-node-training) first. Do not skip it.** The single-node setup validates that your environment is configured correctly before attempting multi-node training.
+**Complete the [Single Node Training](/training-tutorials/nemo-rl-grpo/single-node-training) first. Do not skip it.** The single-node setup validates that your environment is configured correctly before attempting multi-node training.
 
 </Info>
 
@@ -74,7 +74,7 @@ SLURM_PARTITION={your Slurm partition} \
 ```
 
 <Tip>
-If you are using enroot following the steps in the [Setup](/latest/training-tutorials/nemo-rl-grpo/setup) doc and downloaded the container locally, use the local container filepath instead:
+If you are using enroot following the steps in the [Setup](/training-tutorials/nemo-rl-grpo/setup) doc and downloaded the container locally, use the local container filepath instead:
 
 ```bash
 CONTAINER_IMAGE_PATH=$PWD/../nvcr.io/nvidia/nemo-rl:v0.4.0.nemotron_3_nano \
@@ -131,7 +131,7 @@ Congratulations! You've trained Nemotron Nano 9B v2 for multi-step tool calling 
 Explore other environments available for training and evaluation.
 </Card>
 
-<Card title="Build a Custom Training Environment" href="/latest/environment-tutorials">
+<Card title="Build a Custom Training Environment" href="/environment-tutorials">
 
 Create your own resources server with custom tools and verification logic.
 </Card>

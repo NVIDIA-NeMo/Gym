@@ -27,5 +27,5 @@ ng_collect_rollouts \
     +agent_name=mmlu-redux_mcqa_simple_agent \
     +input_jsonl_fpath=benchmarks/mmlu-redux/data/mmlu-redux_benchmark.jsonl \
     +output_jsonl_fpath=results/mmlu-redux/rollouts.jsonl \
-    +prompt_config=benchmarks/mmlu-redux/prompts/default.yaml
+    +prompt_config=benchmarks/prompts/generic/general-boxed.yaml
 ```

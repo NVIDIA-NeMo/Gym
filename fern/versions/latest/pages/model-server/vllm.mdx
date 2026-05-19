@@ -5,7 +5,7 @@ position: 2
 ---
 [vLLM](https://docs.vllm.ai/) is a popular LLM inference engine. The NeMo Gym VLLMModel server wraps vLLM's Chat Completions endpoint and converts requests and responses to NeMo Gym's native format, the OpenAI [Responses API](https://platform.openai.com/docs/api-reference/responses) schema.
 
-Most open-source models use Chat Completions format, while NeMo Gym uses the Responses API natively. VLLMModel bridges this gap by converting between the two formats automatically. For background on why NeMo Gym chose the Responses API and how the two schemas differ, see [responses-api-evolution](/latest/infrastructure/engineering-notes/responses-api-evolution).
+Most open-source models use Chat Completions format, while NeMo Gym uses the Responses API natively. VLLMModel bridges this gap by converting between the two formats automatically. For background on why NeMo Gym chose the Responses API and how the two schemas differ, see [responses-api-evolution](/infrastructure/engineering-notes/responses-api-evolution).
 
 VLLMModel provides a Responses API to Chat Completions mapping middleware layer via `responses_api_models/vllm_model`. It assumes you are pointing to a vLLM instance since it relies on vLLM-specific endpoints like `/tokenize` and vLLM-specific arguments like `return_tokens_as_token_ids`.
 
