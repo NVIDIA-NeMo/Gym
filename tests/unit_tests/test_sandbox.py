@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import asyncio
+import importlib.util
 import json
 from pathlib import Path
 from typing import Any
@@ -47,6 +48,12 @@ from nemo_gym.sandbox.providers.opensandbox.provider import (
     OpenSandboxProvider,
 )
 from responses_api_agents.mini_swe_agent_2.sandbox_environment import MiniSWESandboxEnvironment
+
+
+requires_tenacity = pytest.mark.skipif(
+    importlib.util.find_spec("tenacity") is None,
+    reason="tenacity optional sandbox dependency is not installed",
+)
 
 
 class FakeSandboxProvider:
@@ -460,6 +467,7 @@ async def _assert_sandbox_facade_owns_operation_observability(tmp_path: Path) ->
     )
 
 
+@requires_tenacity
 def test_opensandbox_sdk_create_receives_default_image_pull_policy(monkeypatch) -> None:
     asyncio.run(_assert_opensandbox_sdk_create_receives_default_image_pull_policy(monkeypatch))
 
@@ -504,6 +512,7 @@ async def _assert_opensandbox_sdk_create_receives_default_image_pull_policy(monk
     assert extensions[IMAGE_PULL_POLICY_ANNOTATION_EXTENSION_KEY] == "IfNotPresent"
 
 
+@requires_tenacity
 def test_opensandbox_connect_after_create_can_use_direct_exec_endpoint(monkeypatch) -> None:
     asyncio.run(_assert_opensandbox_connect_after_create_can_use_direct_exec_endpoint(monkeypatch))
 
@@ -547,6 +556,7 @@ async def _assert_opensandbox_connect_after_create_can_use_direct_exec_endpoint(
     assert connect_call["connection_config"].kwargs["use_server_proxy"] is False
 
 
+@requires_tenacity
 def test_opensandbox_create_probe_can_require_stable_successes(monkeypatch) -> None:
     asyncio.run(_assert_opensandbox_create_probe_can_require_stable_successes(monkeypatch))
 
@@ -593,6 +603,7 @@ async def _assert_opensandbox_create_probe_can_require_stable_successes(monkeypa
     assert all(call["user"] == "root" for call in calls)
 
 
+@requires_tenacity
 def test_opensandbox_create_probe_polls_same_sandbox_after_transient_errors(monkeypatch) -> None:
     asyncio.run(_assert_opensandbox_create_probe_polls_same_sandbox_after_transient_errors(monkeypatch))
 
@@ -653,6 +664,7 @@ def test_opensandbox_starting_pod_endpoint_errors_are_retryable() -> None:
     assert opensandbox_provider_module._is_retryable_create_error(error) is True
 
 
+@requires_tenacity
 def test_opensandbox_exec_retries_retryable_sdk_failures(monkeypatch) -> None:
     asyncio.run(_assert_opensandbox_exec_retries_retryable_sdk_failures(monkeypatch))
 
@@ -715,6 +727,7 @@ async def _assert_opensandbox_exec_retries_retryable_sdk_failures(monkeypatch) -
     assert raw.commands.calls == 3
 
 
+@requires_tenacity
 def test_opensandbox_command_retries_can_be_disabled(monkeypatch) -> None:
     asyncio.run(_assert_opensandbox_command_retries_can_be_disabled(monkeypatch))
 
@@ -765,6 +778,7 @@ async def _assert_opensandbox_command_retries_can_be_disabled(monkeypatch) -> No
     assert raw.commands.calls == 1
 
 
+@requires_tenacity
 def test_opensandbox_close_timeout_does_not_fail_after_delete() -> None:
     asyncio.run(_assert_opensandbox_close_timeout_does_not_fail_after_delete())
 
@@ -792,6 +806,7 @@ async def _assert_opensandbox_close_timeout_does_not_fail_after_delete() -> None
     assert raw.killed is True
 
 
+@requires_tenacity
 def test_opensandbox_close_timeout_still_fails_without_delete() -> None:
     asyncio.run(_assert_opensandbox_close_timeout_still_fails_without_delete())
 

@@ -417,9 +417,7 @@ class TestApp:
                 {
                     "role": "assistant",
                     "content": "answer",
-                    "tool_calls": [
-                        {"id": "call-1", "function": {"name": "bash", "arguments": "{\"command\":\"pwd\"}"}}
-                    ],
+                    "tool_calls": [{"id": "call-1", "function": {"name": "bash", "arguments": '{"command":"pwd"}'}}],
                 },
                 {"role": "tool", "tool_call_id": "call-1", "content": "tool output"},
                 {"type": "function_call_output", "call_id": "call-2", "output": "raw", "extra": {"ignored": True}},
@@ -492,9 +490,7 @@ class TestApp:
                 "export_traces": False,
                 "run_id": "run-1",
             },
-        ) == {
-            "task-1": {"eval_report": {"task-1": {"resolved": True}}}
-        }
+        ) == {"task-1": {"eval_report": {"task-1": {"resolved": True}}}}
 
         def fail_runner(**_params):
             raise RuntimeError("boom")
@@ -653,7 +649,7 @@ class TestApp:
             "output": str(tmp_path / "out"),
             "config": "swebench",
             "model": "hosted/model",
-            "api_key": "key",
+            "api_key": "key",  # pragma: allowlist secret
             "base_url": "http://model/v1",
             "subset": "verified",
             "step_timeout": 30,

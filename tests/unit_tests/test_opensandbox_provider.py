@@ -15,6 +15,7 @@
 
 import ast
 import asyncio
+import importlib.util
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
@@ -25,6 +26,12 @@ import pytest
 
 from nemo_gym.sandbox.providers.base import SandboxSpec
 from nemo_gym.sandbox.providers.opensandbox import provider as opensandbox_provider
+
+
+pytestmark = pytest.mark.skipif(
+    importlib.util.find_spec("tenacity") is None,
+    reason="tenacity optional sandbox dependency is not installed",
+)
 
 
 @dataclass(frozen=True)
@@ -255,7 +262,7 @@ def test_connection_config_exec_proxy_and_image_policy(fake_opensandbox_sdk: Non
     provider = opensandbox_provider.OpenSandboxProvider(
         connection={
             "domain": "sandbox.example",
-            "api_key": "key",
+            "api_key": "key",  # pragma: allowlist secret
             "protocol": "https",
             "use_server_proxy": True,
             "exec_use_server_proxy": False,
@@ -266,7 +273,7 @@ def test_connection_config_exec_proxy_and_image_policy(fake_opensandbox_sdk: Non
     config = provider._connection_config()
     assert config.kwargs == {
         "domain": "sandbox.example",
-        "api_key": "key",
+        "api_key": "key",  # pragma: allowlist secret
         "protocol": "https",
         "use_server_proxy": True,
         "request_timeout": timedelta(seconds=10),

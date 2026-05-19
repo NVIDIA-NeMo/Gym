@@ -25,14 +25,6 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 from uuid import uuid4
 
-from tenacity import (
-    AsyncRetrying,
-    RetryCallState,
-    retry_if_exception,
-    stop_after_attempt,
-    wait_random_exponential,
-)
-
 from nemo_gym.sandbox.observability import observability_span, record_event
 from nemo_gym.sandbox.providers.base import (
     SandboxBatchCreateError,
@@ -143,6 +135,18 @@ def _require_opensandbox_sdk_pool() -> tuple[Any, Any, Any, Any]:
         ) from e
 
     return AcquirePolicy, InMemoryAsyncPoolStateStore, PoolCreationSpec, SandboxPoolAsync
+
+
+def _require_tenacity() -> tuple[Any, Any, Any, Any]:
+    try:
+        from tenacity import AsyncRetrying, retry_if_exception, stop_after_attempt, wait_random_exponential
+    except ModuleNotFoundError as e:
+        raise ModuleNotFoundError(
+            "tenacity is required for OpenSandbox retry handling. Install nemo-gym[sandbox] before using "
+            "env.sandbox.provider.name=opensandbox."
+        ) from e
+
+    return AsyncRetrying, retry_if_exception, stop_after_attempt, wait_random_exponential
 
 
 def _httpx_retryable_types() -> tuple[type[BaseException], ...]:
@@ -279,7 +283,7 @@ def _is_missing_sandbox_delete_error(exception: BaseException) -> bool:
     return "sandbox" in message and "not found" in message
 
 
-def _log_create_retry(retry_state: RetryCallState) -> None:
+def _log_create_retry(retry_state: Any) -> None:
     exception = retry_state.outcome.exception() if retry_state.outcome else None
     sleep_s = retry_state.next_action.sleep if retry_state.next_action else None
     LOGGER.warning(
@@ -290,7 +294,7 @@ def _log_create_retry(retry_state: RetryCallState) -> None:
     )
 
 
-def _log_operation_retry(retry_state: RetryCallState) -> None:
+def _log_operation_retry(retry_state: Any) -> None:
     exception = retry_state.outcome.exception() if retry_state.outcome else None
     sleep_s = retry_state.next_action.sleep if retry_state.next_action else None
     LOGGER.warning(
@@ -586,10 +590,11 @@ class OpenSandboxProvider:
         timeout_s: float | None,
         retries: int | None = None,
     ) -> Any:
+        AsyncRetrying, retry_if_exception, stop_after_attempt, wait_random_exponential = _require_tenacity()
         retry_count = self._operations.retries if retries is None else retries
         max_attempts = retry_count + 1
 
-        def _before_sleep(retry_state: RetryCallState) -> None:
+        def _before_sleep(retry_state: Any) -> None:
             _log_operation_retry(retry_state)
             exception = retry_state.outcome.exception() if retry_state.outcome else None
             sleep_s = retry_state.next_action.sleep if retry_state.next_action else None
@@ -926,6 +931,7 @@ class OpenSandboxProvider:
         *,
         semaphore: asyncio.Semaphore | None = None,
     ) -> SandboxHandle:
+        AsyncRetrying, retry_if_exception, stop_after_attempt, wait_random_exponential = _require_tenacity()
         retry_policy = AsyncRetrying(
             retry=retry_if_exception(_is_retryable_create_error),
             stop=stop_after_attempt(self._create.retries + 1),
@@ -1071,7 +1077,9 @@ class OpenSandboxProvider:
         allow_partial: bool,
     ) -> list[SandboxHandle]:
         AcquirePolicy, InMemoryAsyncPoolStateStore, _, SandboxPoolAsync = _require_opensandbox_sdk_pool()
-        ready_timeout_s = float(spec.ready_timeout_s or self._create.timeout_s or self._connection.request_timeout_s or 300.0)
+        ready_timeout_s = float(
+            spec.ready_timeout_s or self._create.timeout_s or self._connection.request_timeout_s or 300.0
+        )
         idle_timeout_s = float(self._pool.idle_timeout_s or spec.timeout_s or max(ready_timeout_s * 2.0, 3600.0))
         primary_lock_ttl_s = float(self._pool.primary_lock_ttl_s or max(ready_timeout_s + 60.0, 60.0))
         pool_name = f"nemo-gym-{uuid4().hex[:12]}"
@@ -1238,7 +1246,9 @@ class OpenSandboxProvider:
         return SandboxHandle(sandbox_id=str(sandbox.id), provider_name=self.name, raw=sandbox)
 
     def _command_retry_count(self) -> int:
-        return self._operations.retries if self._operations.command_retries is None else self._operations.command_retries
+        return (
+            self._operations.retries if self._operations.command_retries is None else self._operations.command_retries
+        )
 
     async def _exec(
         self,
@@ -1271,7 +1281,9 @@ class OpenSandboxProvider:
         sdk_timeout_s = (
             float(timeout_s) + 60.0
             if timeout_s is not None
-            else (float(self._connection.request_timeout_s) if self._connection.request_timeout_s is not None else None)
+            else (
+                float(self._connection.request_timeout_s) if self._connection.request_timeout_s is not None else None
+            )
         )
         effective_retries = self._command_retry_count() if retries is None else retries
         async with observability_span(
@@ -1343,7 +1355,9 @@ class OpenSandboxProvider:
                 lambda: handle.raw.files.write_file(target_path, data),
                 operation=f"write_file({target_path})",
                 sandbox_id=handle.sandbox_id,
-                timeout_s=float(self._connection.request_timeout_s) if self._connection.request_timeout_s is not None else None,
+                timeout_s=float(self._connection.request_timeout_s)
+                if self._connection.request_timeout_s is not None
+                else None,
             )
 
     async def read_file(self, handle: SandboxHandle, source_path: str) -> bytes:
@@ -1361,7 +1375,9 @@ class OpenSandboxProvider:
                 lambda: handle.raw.files.read_bytes(source_path),
                 operation=f"read_file({source_path})",
                 sandbox_id=handle.sandbox_id,
-                timeout_s=float(self._connection.request_timeout_s) if self._connection.request_timeout_s is not None else None,
+                timeout_s=float(self._connection.request_timeout_s)
+                if self._connection.request_timeout_s is not None
+                else None,
             )
 
     async def upload_file(self, handle: SandboxHandle, source_path: Path, target_path: str) -> None:
