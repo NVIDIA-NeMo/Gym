@@ -173,6 +173,7 @@ class CompetitiveCodingChallengesResourcesServer(SimpleResourcesServer):
             return 0.0
         passed = sum(1 for output in outputs if float(output.get("score", 0.0) or 0.0) >= 1.0)
         return float(passed / len(outputs))
+
     # ---------------------------
     # Aggregate metrics
     # ---------------------------
