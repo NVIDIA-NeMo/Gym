@@ -321,11 +321,8 @@ def _load_metadata_file(path: str):
 
 
 def _patch_run_sh(run_code: str) -> str:
-    # Some problem-specific run.sh scripts (e.g. boi20/colors) hold FIFOs open
-    # via `exec N<>fifo` so the user process never gets EOF when the manager
-    # exits.  `wait "$user_pid"` then blocks until the user program finishes
-    # naturally, which can be 80+ seconds for TLE solutions.  Insert a kill
-    # before every bare `wait "$user_pid"` that isn't already preceded by one.
+    # Some problem-specific run.sh scripts hold FIFOs open via `exec N<>fifo`.
+    # Insert a kill before `wait "$user_pid"` that isn't already preceded by one.
     import re
 
     def _add_kill(m: re.Match) -> str:
@@ -411,9 +408,6 @@ def run_test_case(task_args: dict, worker_id: int) -> dict:
         if not result["compile_success"]:
             return result
 
-        # 30s base gives enough headroom for the largest legitimate time limits
-        # (~20s) plus run.sh shell overhead, while still killing runaway
-        # processes far sooner than the old 120s base.
         run_timeout = max(30, int(30 * float(task_args.get("time_scale", 1.0))))
         run_start = time.monotonic()
         run_result = _exec_sync(
@@ -634,9 +628,6 @@ class CCCEvaluator(BaseEvaluator):
                 test_to_subtasks.setdefault(test_name, []).append(subtask_name)
 
         all_test_items = list(problem_metadata["all_tests"].items())
-        # When a specific subtask is requested only run that subtask's tests.
-        # Other subtasks' results aren't needed for reward computation and can
-        # easily double/triple the number of tests for progressive subtask structures.
         target_subtask = entry.get("subtask")
         if target_subtask and target_subtask in problem_metadata["subtasks"]:
             target_tests = set(problem_metadata["subtasks"][target_subtask]["test_names"])
@@ -679,12 +670,6 @@ class CCCEvaluator(BaseEvaluator):
                     if not self.eval_cfg.run_all_tests and state["aggregation"] == "min" and state["failed"]:
                         continue
                     state["outputs"].append(dict(result))
-                    # For min-aggregation subtasks the reward is 1.0 only when
-                    # every test scores exactly 1.0.  Stop as soon as any test
-                    # falls short — the final reward will be 0 regardless of
-                    # how the remaining tests turn out.  This is critical for
-                    # partial-scoring problems (e.g. Communication tasks) where
-                    # the old `== 0.0` guard never fired and all tests ran.
                     if state["aggregation"] == "min" and float(result.get("score", 0.0)) < 1.0:
                         state["failed"] = True
 
