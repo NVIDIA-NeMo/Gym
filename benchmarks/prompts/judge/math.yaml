@@ -45,7 +45,7 @@ user: |-
   \text{{D)}} &49 x y^{{2}} \sqrt{{2 x y z}}
   \\
   \end{{align*}}
-  Predicted answer: 7 x y^{{2}} \sqrt{{2 x y z}}
+  Predicted answer: 7 x y^{{2}} \\sqrt{{2 x y z}}
   Expected answer: C
 
   Reasoning: Predicted answer is the same as the expected answer choice C.
@@ -57,7 +57,7 @@ user: |-
   Predicted answer:  -2, 6
   Expected answer: 6, -2
 
-  Reasoning: The order does not matter in the context of the problem.
+  Reasoning: The order doesn't matter in the context of the problem.
   Judgement: Yes
 
 

@@ -47,7 +47,7 @@ ng_collect_rollouts \
     +agent_name=gpqa-x_mcqa_simple_agent \
     +input_jsonl_fpath=benchmarks/gpqa-x/data/gpqa-x_benchmark.jsonl \
     +output_jsonl_fpath=results/gpqa-x/rollouts.jsonl \
-    +prompt_config=benchmarks/prompts/generic_default.yaml \
+    +prompt_config=benchmarks/prompts/generic/default.yaml \
     +num_repeats=8 +num_repeats_add_seed=true \
     "+responses_create_params={temperature: 1.0, top_p: 0.95, max_output_tokens: 32768}"
 ```
