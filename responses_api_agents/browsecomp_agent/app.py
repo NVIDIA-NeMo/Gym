@@ -175,7 +175,8 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 if api_response.status >= 400:
                     print(
                         f"[browsecomp][tool_fail][{qid}] step={step} tool={output_function_call.name} "
-                        f"status={api_response.status} body={tool_output[:300]}"
+                        f"status={api_response.status} body={tool_output[:300]}",
+                        flush=True,
                     )
                 if self.config.nudge_steps:
                     turns_left = self.config.max_steps - step
@@ -227,7 +228,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
 
             # Check if max steps is not None and if we have exhausted it.
             if self.config.max_steps and step >= self.config.max_steps:
-                print(f"[browsecomp][max_steps][{qid}] step={step} max_steps={self.config.max_steps}")
+                print(f"[browsecomp][max_steps][{qid}] step={step} max_steps={self.config.max_steps}", flush=True)
                 break
 
         # Propogate any extra cookies necessary for downstream verification
@@ -248,7 +249,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         qid = _qid(
             json.dumps([m.model_dump() if hasattr(m, "model_dump") else m for m in rcp_input], default=str)
         )
-        print(f"[browsecomp][start][{qid}] question={question_text[:200]!r}")
+        print(f"[browsecomp][start][{qid}] question={question_text[:200]!r}", flush=True)
 
         try:
             seed_session_response = await self.server_client.post(
@@ -279,7 +280,8 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 if not cleaned_output_text and attempt != self.config.max_run_retries - 1:
                     print(
                         f"[browsecomp][retry][{qid}] attempt={attempt + 1}/{self.config.max_run_retries} "
-                        f"reason=empty_output_after_think_strip"
+                        f"reason=empty_output_after_think_strip",
+                        flush=True,
                     )
                     continue
 
@@ -302,11 +304,11 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
 
             reward = getattr(last_verify_response, "reward", None) if last_verify_response is not None else None
             outcome = "success" if (reward is not None and reward > 0) else "failure"
-            print(f"[browsecomp][end][{qid}] outcome={outcome} reward={reward} attempts={attempt + 1}")
+            print(f"[browsecomp][end][{qid}] outcome={outcome} reward={reward} attempts={attempt + 1}", flush=True)
 
             return last_verify_response
         except Exception as e:
-            print(f"[browsecomp][abort][{qid}] error_type={type(e).__name__} error={str(e)[:300]}")
+            print(f"[browsecomp][abort][{qid}] error_type={type(e).__name__} error={str(e)[:300]}", flush=True)
             raise
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
