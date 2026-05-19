@@ -48,7 +48,6 @@ from nemo_gym.server_utils import (
     ServerClient,
     get_first_server_config_dict,
 )
-from responses_api_agents.mini_swe_agent_2.utils import MiniSWEAgentUtils
 
 
 class MiniSWEAgentConfig(BaseResponsesAPIAgentConfig):
@@ -110,7 +109,7 @@ def _responses_create_params_to_model_kwargs(
     *,
     default_tool_choice: Any = None,
 ) -> dict[str, Any]:
-    """Convert Responses API rollout params into mini-swe-agent LiteLLM kwargs."""
+    """Convert Gym Responses API rollout params into mini-swe-agent Responses API kwargs."""
     model_kwargs: dict[str, Any] = {}
     for key in ("temperature", "top_p", "top_logprobs", "store", "parallel_tool_calls"):
         value = params.get(key)
@@ -119,7 +118,7 @@ def _responses_create_params_to_model_kwargs(
 
     max_output_tokens = params.get("max_output_tokens")
     if max_output_tokens is not None:
-        model_kwargs["max_tokens"] = max_output_tokens
+        model_kwargs["max_output_tokens"] = max_output_tokens
 
     metadata = params.get("metadata") or {}
     extra_body = _json_dict_from_metadata(metadata.get("extra_body"), field_name="extra_body")
@@ -142,7 +141,7 @@ def _responses_create_params_to_model_kwargs(
 
 
 def _bash_tool_choice() -> dict[str, Any]:
-    return {"type": "function", "function": {"name": "bash"}}
+    return {"type": "function", "name": "bash"}
 
 
 class _ObservedModel:
@@ -163,7 +162,10 @@ class _ObservedModel:
             "message_count": len(messages),
             "temperature": kwargs.get("temperature", model_kwargs.get("temperature")),
             "top_p": kwargs.get("top_p", model_kwargs.get("top_p")),
-            "max_tokens": kwargs.get("max_tokens", model_kwargs.get("max_tokens")),
+            "max_tokens": kwargs.get(
+                "max_output_tokens",
+                kwargs.get("max_tokens", model_kwargs.get("max_output_tokens", model_kwargs.get("max_tokens"))),
+            ),
             "tool_choice": kwargs.get("tool_choice", model_kwargs.get("tool_choice")),
             "_record_exception_stacktrace": False,
         }
@@ -275,6 +277,124 @@ def _message_content_to_text(content: Any) -> str:
     return "" if content is None else str(content)
 
 
+def _strip_extra(item: Any) -> dict[str, Any]:
+    if hasattr(item, "model_dump"):
+        item = item.model_dump()
+    if not isinstance(item, dict):
+        return {"type": "message", "role": "user", "content": str(item)}
+    return {key: value for key, value in item.items() if key != "extra"}
+
+
+def _split_trajectory_for_responses(
+    messages: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    input_messages: list[dict[str, Any]] = []
+    output_items: list[dict[str, Any]] = []
+    raw_responses: list[dict[str, Any]] = []
+    in_initial_prompt = True
+
+    for message in messages:
+        role = message.get("role")
+        if in_initial_prompt and role in {"system", "user"}:
+            input_messages.append(
+                {"type": "message", "role": role, "content": _message_content_to_text(message.get("content"))}
+            )
+            continue
+
+        in_initial_prompt = False
+        if message.get("object") == "response":
+            response = _strip_extra(message)
+            raw_responses.append(response)
+            output_items.extend(_strip_extra(item) for item in response.get("output", []))
+        elif message.get("type") == "function_call_output":
+            output_items.append(_strip_extra(message))
+
+    return input_messages, output_items, raw_responses
+
+
+def _default_response_object() -> dict[str, Any]:
+    return {
+        "id": f"resp_{str(uuid4())}",
+        "created_at": int(time.time()),
+        "error": None,
+        "incomplete_details": None,
+        "instructions": None,
+        "metadata": {},
+        "object": "response",
+        "parallel_tool_calls": True,
+        "tool_choice": "auto",
+        "tools": [],
+        "background": False,
+        "max_output_tokens": None,
+        "max_tool_calls": None,
+        "previous_response_id": None,
+        "prompt": None,
+        "reasoning": {
+            "effort": None,
+            "generate_summary": None,
+            "summary": None,
+        },
+        "service_tier": "default",
+        "status": "completed",
+        "text": {"format": {"type": "text"}, "verbosity": "medium"},
+        "top_logprobs": 0,
+        "truncation": "disabled",
+        "usage": {
+            "input_tokens": 0,
+            "input_tokens_details": {"cached_tokens": 0},
+            "output_tokens": 0,
+            "output_tokens_details": {"reasoning_tokens": 0},
+            "total_tokens": 0,
+        },
+        "user": None,
+        "prompt_cache_key": None,
+        "safety_identifier": None,
+        "store": True,
+    }
+
+
+def _response_from_rollout(
+    *,
+    model_name: str,
+    output_items: list[dict[str, Any]],
+    raw_responses: list[dict[str, Any]],
+    temperature: float,
+    top_p: float,
+) -> dict[str, Any]:
+    response = _default_response_object()
+    if raw_responses:
+        response.update({key: value for key, value in raw_responses[-1].items() if key != "extra"})
+    response["model"] = model_name
+    response["temperature"] = temperature
+    response["top_p"] = top_p
+    response["output"] = output_items
+    return response
+
+
+def _is_resolved(instance_id: str, eval_report: dict[str, Any]) -> bool:
+    try:
+        if not eval_report:
+            return False
+        report = eval_report["eval_report"][instance_id]
+        resolved = bool(report["resolved"])
+        if not report.get("tests_status"):
+            return False
+
+        tests_status = report["tests_status"]
+        f2f = tests_status.get("FAIL_TO_PASS", {})
+        p2p = tests_status.get("PASS_TO_PASS", {})
+        total_reported = (
+            len(f2f.get("success", []))
+            + len(f2f.get("failure", []))
+            + len(p2p.get("success", []))
+            + len(p2p.get("failure", []))
+        )
+        return resolved and total_reported > 0
+    except Exception as exc:
+        print(f"Error in _is_resolved: {exc}", flush=True)
+        return False
+
+
 def _run_eval_v2(
     *,
     instance: dict[str, Any],
@@ -357,14 +477,15 @@ def _run_swegym_v2(**params: Any) -> dict[str, Any]:
 
     config = yaml.safe_load(get_config_path(params["config"]).read_text())
     model_config = config.setdefault("model", {})
+    model_config["model_class"] = "litellm_response"
     model_config["model_name"] = params["model"]
     model_config.setdefault("cost_tracking", "ignore_errors")
     model_kwargs = model_config.setdefault("model_kwargs", {})
     model_kwargs["api_key"] = params["api_key"]
     model_kwargs["base_url"] = params["base_url"]
-    max_output_tokens = model_kwargs.pop("max_output_tokens", None)
-    if max_output_tokens is not None and "max_tokens" not in model_kwargs:
-        model_kwargs["max_tokens"] = max_output_tokens
+    max_tokens = model_kwargs.pop("max_tokens", None)
+    if max_tokens is not None and "max_output_tokens" not in model_kwargs:
+        model_kwargs["max_output_tokens"] = max_tokens
 
     environment_config = config.setdefault("environment", {})
     environment_config["image"] = _swebench_image_name(instance, params["subset"])
@@ -429,20 +550,12 @@ def _run_swegym_v2(**params: Any) -> dict[str, Any]:
         )
         print(f"[EVAL]{instance_id} Eval completed", flush=True)
 
-        messages = []
-        responses = []
-        for message in data.get("messages", []):
-            role = message.get("role")
-            if role == "assistant":
-                response = message.get("extra", {}).get("response")
-                if response:
-                    responses.append(response)
-            if role in {"system", "user", "assistant"}:
-                messages.append({"role": role, "content": _message_content_to_text(message.get("content"))})
+        input_messages, response_output, responses = _split_trajectory_for_responses(data.get("messages", []))
 
         return {
             instance_id: {
-                "messages": messages,
+                "input_messages": input_messages,
+                "response_output": response_output,
                 "responses": responses,
                 "eval_report": eval_report,
                 "exit_status": exit_status,
@@ -584,29 +697,28 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
                 future = runner_ray_remote.remote(run_swegym_with_optional_sandbox, params)
                 result = await asyncio.to_thread(ray.get, future)
                 result = result[instance_id]
-                messages = result["messages"]
+                input_messages = result["input_messages"]
+                response_output = result["response_output"]
                 responses = result["responses"]
-                reward = 1.0 if MiniSWEAgentUtils.is_resolved(instance_id, result["eval_report"]) else 0.0
+                reward = 1.0 if _is_resolved(instance_id, result["eval_report"]) else 0.0
 
             except Exception as e:
                 error_info = {"error": str(e), "traceback": traceback.format_exc()}
                 print(f"Error running swegym: {e}\n{error_info['traceback']}", flush=True)
                 result = {"eval_report": error_info}
-                messages = []
+                input_messages = []
+                response_output = []
                 responses = []
                 reward = 0.0
 
-            # The first two messages are the system and user message generated by the harness
-            # TODO(sugam): what if the user only provides the system/user message
-            body.responses_create_params.input = messages[:2]
-
-            response = MiniSWEAgentUtils.get_default_response_object()
-            response["model"] = policy_model_name
-            response["temperature"] = temperature
-            response["top_p"] = top_p
-
-            # Wrap output messages in responses format
-            response["output"] = MiniSWEAgentUtils.chat_cmp_to_responses(messages[2:], responses)
+            body.responses_create_params.input = input_messages
+            response = _response_from_rollout(
+                model_name=policy_model_name,
+                output_items=response_output,
+                raw_responses=responses,
+                temperature=temperature,
+                top_p=top_p,
+            )
 
             verify_response = MiniSWEAgentVerifyResponse(
                 responses_create_params=body.responses_create_params,

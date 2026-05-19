@@ -52,20 +52,24 @@ from responses_api_agents.mini_swe_agent_2.app import (
 
 DEFAULT_RUN_SWEGYM_RESULT = {
     "test_instance_123": {
-        "messages": [
-            {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user", "content": "Fix this bug."},
-            {"role": "assistant", "content": "I'll help you fix the bug."},
-            {"role": "user", "content": "Thank you!"},
+        "input_messages": [
+            {"type": "message", "role": "system", "content": "You are a helpful assistant."},
+            {"type": "message", "role": "user", "content": "Fix this bug."},
+        ],
+        "response_output": [
+            {
+                "id": "msg-1",
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": "I'll help you fix the bug.", "annotations": []}],
+            }
         ],
         "responses": [
             {
-                "choices": [],
-                "provider_specific_fields": {
-                    "prompt_token_ids": [],
-                    "generation_token_ids": [],
-                    "generation_log_probs": [],
-                },
+                "id": "resp-1",
+                "object": "response",
+                "output": [],
             }
         ],
         "eval_report": {
@@ -311,13 +315,13 @@ class TestApp:
         assert kwargs == {
             "temperature": 0.6,
             "top_p": 0.95,
-            "max_tokens": 123,
+            "max_output_tokens": 123,
             "extra_body": {"top_k": 20, "chat_template_kwargs": {"enable_thinking": True}},
             "tool_choice": {"type": "function", "function": {"name": "python"}},
         }
         assert _responses_create_params_to_model_kwargs({"tool_choice": "bash"})["tool_choice"] == {
             "type": "function",
-            "function": {"name": "bash"},
+            "name": "bash",
         }
         assert (
             _responses_create_params_to_model_kwargs({"tool_choice": "auto"}, default_tool_choice="none")[
@@ -415,7 +419,6 @@ class TestApp:
                 }
             },
         )
-        monkeypatch.setattr(mini_swe_app_module.MiniSWEAgentUtils, "is_resolved", lambda *_args: True)
         assert run_swegym_with_optional_sandbox(env="sandbox", instance_id="task-1") == {
             "task-1": {"eval_report": {"task-1": {"resolved": True}}}
         }
@@ -432,27 +435,12 @@ class TestApp:
             "_run_swegym_v2",
             lambda **_params: {"task-1": {"eval_report": {"task-1": {"resolved": False}}}},
         )
-        monkeypatch.setattr(mini_swe_app_module.MiniSWEAgentUtils, "is_resolved", lambda *_args: False)
         assert run_swegym_with_optional_sandbox(env="sandbox", instance_id="task-1") == {
             "task-1": {"eval_report": {"task-1": {"resolved": False}}}
         }
 
         monkeypatch.setattr(mini_swe_app_module, "_run_swegym_v2", lambda **_params: {"task-1": "bad"})
         assert run_swegym_with_optional_sandbox(env="sandbox", instance_id="task-1") == {"task-1": "bad"}
-
-        monkeypatch.setattr(
-            mini_swe_app_module,
-            "_run_swegym_v2",
-            lambda **_params: {"task-1": {"eval_report": {"task-1": {"resolved": True}}}},
-        )
-
-        def raise_is_resolved(*_args: Any) -> bool:
-            raise ValueError("bad report")
-
-        monkeypatch.setattr(mini_swe_app_module.MiniSWEAgentUtils, "is_resolved", raise_is_resolved)
-        assert run_swegym_with_optional_sandbox(env="sandbox", instance_id="task-1") == {
-            "task-1": {"eval_report": {"task-1": {"resolved": True}}}
-        }
 
     def test_run_swegym_v2_success_and_golden_paths(self, monkeypatch, tmp_path) -> None:
         holder: dict[str, Any] = {}
@@ -508,11 +496,31 @@ class TestApp:
                         {"role": "system", "content": "sys"},
                         {"role": "user", "content": [{"text": "problem"}]},
                         {
-                            "role": "assistant",
-                            "content": "answer",
-                            "extra": {"response": {"id": "resp-1"}},
+                            "id": "resp-1",
+                            "object": "response",
+                            "output": [
+                                {
+                                    "id": "msg-1",
+                                    "type": "message",
+                                    "role": "assistant",
+                                    "status": "completed",
+                                    "content": [{"type": "output_text", "text": "answer", "annotations": []}],
+                                },
+                                {
+                                    "type": "function_call",
+                                    "name": "bash",
+                                    "call_id": "call-1",
+                                    "arguments": json.dumps({"command": "echo hi"}),
+                                },
+                            ],
+                            "extra": {"actions": [{"command": "echo hi", "tool_call_id": "call-1"}]},
                         },
-                        {"role": "tool", "content": "tool output"},
+                        {
+                            "type": "function_call_output",
+                            "call_id": "call-1",
+                            "output": "tool output",
+                            "extra": {"raw_output": "tool output"},
+                        },
                     ]
                 }
 
@@ -588,15 +596,51 @@ class TestApp:
         assert env.cleaned is True
         assert env.config["environment_class"].endswith("MiniSWESandboxEnvironment")
         assert env.config["image"] == "swebench/sweb.eval.x86_64.django_1776_django-123:latest"
-        assert holder["model_config"]["model_kwargs"]["max_tokens"] == 99
+        assert holder["model_config"]["model_class"] == "litellm_response"
+        assert holder["model_config"]["model_kwargs"]["max_output_tokens"] == 99
         assert holder["agent_config"]["step_limit"] == 7
         assert holder["save_metadata"] == {"instance_id": "django__django-123"}
-        assert result["django__django-123"]["messages"] == [
-            {"role": "system", "content": "sys"},
-            {"role": "user", "content": "problem"},
-            {"role": "assistant", "content": "answer"},
+        assert result["django__django-123"]["input_messages"] == [
+            {"type": "message", "role": "system", "content": "sys"},
+            {"type": "message", "role": "user", "content": "problem"},
         ]
-        assert result["django__django-123"]["responses"] == [{"id": "resp-1"}]
+        assert result["django__django-123"]["response_output"] == [
+            {
+                "id": "msg-1",
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": "answer", "annotations": []}],
+            },
+            {
+                "type": "function_call",
+                "name": "bash",
+                "call_id": "call-1",
+                "arguments": json.dumps({"command": "echo hi"}),
+            },
+            {"type": "function_call_output", "call_id": "call-1", "output": "tool output"},
+        ]
+        assert result["django__django-123"]["responses"] == [
+            {
+                "id": "resp-1",
+                "object": "response",
+                "output": [
+                    {
+                        "id": "msg-1",
+                        "type": "message",
+                        "role": "assistant",
+                        "status": "completed",
+                        "content": [{"type": "output_text", "text": "answer", "annotations": []}],
+                    },
+                    {
+                        "type": "function_call",
+                        "name": "bash",
+                        "call_id": "call-1",
+                        "arguments": json.dumps({"command": "echo hi"}),
+                    },
+                ],
+            }
+        ]
 
         golden_params = params | {"run_golden": True}
         result = _run_swegym_v2(**golden_params)
@@ -698,9 +742,9 @@ class TestApp:
         model_kwargs = generated_config["model"]["model_kwargs"]
         assert model_kwargs["temperature"] == 0.6
         assert model_kwargs["top_p"] == 0.95
-        assert model_kwargs["max_tokens"] == 49152
-        assert "max_output_tokens" not in model_kwargs
-        assert model_kwargs["tool_choice"] == {"type": "function", "function": {"name": "bash"}}
+        assert model_kwargs["max_output_tokens"] == 49152
+        assert "max_tokens" not in model_kwargs
+        assert model_kwargs["tool_choice"] == {"type": "function", "name": "bash"}
         assert model_kwargs["extra_body"] == {
             "top_k": 20,
             "min_p": 0.0,
