@@ -726,4 +726,3 @@ class CCCEvaluator(BaseEvaluator):
 
     async def eval_single(self, data_point: dict):
         return await self._evaluate_entry(data_point)
-
