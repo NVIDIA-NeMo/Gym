@@ -15,5 +15,14 @@ coverage.xml
 *,cover
 *.log
 .git
+.github
 **/*.nemo
 **/*.ckpt
+.venv
+*.egg-info
+.ruff_cache
+.mypy_cache
+.pytest_cache
+docs
+wandb
+.hydra

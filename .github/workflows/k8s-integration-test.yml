@@ -1,0 +1,192 @@
+name: K8s Integration Test (kind)
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'k8s/**'
+      - 'nemo_gym/**'
+      - 'resources_servers/**'
+      - 'responses_api_agents/**'
+      - 'responses_api_models/**'
+      - 'pyproject.toml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'k8s/**'
+      - 'nemo_gym/**'
+      - 'resources_servers/**'
+      - 'responses_api_agents/**'
+      - 'responses_api_models/**'
+      - 'pyproject.toml'
+
+jobs:
+  kind-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build resources image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: k8s/Dockerfile
+          target: resources
+          tags: ghcr.io/nvidia-nemo/gym/nemo-gym-resources:latest
+          load: true
+          cache-from: type=gha,scope=resources
+          cache-to: type=gha,mode=max,scope=resources
+
+      - name: Build agent image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: k8s/Dockerfile
+          target: agent
+          tags: ghcr.io/nvidia-nemo/gym/nemo-gym-agent:latest
+          load: true
+          cache-from: type=gha,scope=agent
+          cache-to: type=gha,mode=max,scope=agent
+
+      - name: Build model image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: k8s/Dockerfile
+          target: model
+          tags: ghcr.io/nvidia-nemo/gym/nemo-gym-model:latest
+          load: true
+          cache-from: type=gha,scope=model
+          cache-to: type=gha,mode=max,scope=model
+
+      - name: Create kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: gym-ci
+          wait: 120s
+
+      - name: Load images into kind
+        run: |
+          kind load docker-image \
+            ghcr.io/nvidia-nemo/gym/nemo-gym-resources:latest \
+            ghcr.io/nvidia-nemo/gym/nemo-gym-agent:latest \
+            ghcr.io/nvidia-nemo/gym/nemo-gym-model:latest \
+            --name gym-ci
+
+      - name: Install KubeRay operator
+        run: |
+          helm repo add kuberay https://ray-project.github.io/kuberay-helm/
+          helm repo update
+          helm install kuberay-operator kuberay/kuberay-operator \
+            --namespace kuberay-system \
+            --create-namespace \
+            --wait \
+            --timeout 120s
+
+      - name: Create test secrets from examples
+        run: |
+          for f in k8s/overlays/*/secret.yaml.example; do
+            cp "$f" "${f%.example}"
+          done
+
+      - name: Deploy NeMo-Gym stack with mock model
+        run: kubectl apply -k k8s/tests/
+
+      - name: Wait for deployments
+        run: |
+          kubectl -n gym rollout status deployment/gym-agent --timeout=300s
+          kubectl -n gym rollout status deployment/gym-model --timeout=300s
+
+      - name: Wait for Ray cluster pods
+        run: |
+          echo "Waiting for Ray head pod..."
+          kubectl -n gym wait pod \
+            -l app.kubernetes.io/part-of=nemo-gym,ray.io/node-type=head \
+            --for=condition=Ready \
+            --timeout=300s
+
+          echo "Waiting for resources server pod..."
+          kubectl -n gym wait pod \
+            -l app.kubernetes.io/name=gym-resources \
+            --for=condition=Ready \
+            --timeout=300s
+
+          echo "All pods ready:"
+          kubectl -n gym get pods
+
+      - name: Run e2e smoke test
+        run: |
+          kubectl -n gym port-forward svc/gym-agent-svc 8080:8080 &
+          PF_PID=$!
+
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8080/docs > /dev/null 2>&1; then
+              echo "Port-forward ready"
+              break
+            fi
+            echo "Waiting for port-forward... (attempt $i/30)"
+            sleep 2
+          done
+
+          RESPONSE=$(curl -sf -X POST http://localhost:8080/run \
+            -H "Content-Type: application/json" \
+            -d '{
+              "responses_create_params": {
+                "input": [
+                  {"content": "You are a helpful assistant.", "role": "developer"},
+                  {"content": "what is the weather in sf?", "role": "user"}
+                ],
+                "tools": [
+                  {
+                    "name": "get_weather",
+                    "parameters": {
+                      "type": "object",
+                      "properties": {"city": {"type": "string", "description": ""}},
+                      "required": ["city"],
+                      "additionalProperties": false
+                    },
+                    "strict": true,
+                    "type": "function",
+                    "description": ""
+                  }
+                ]
+              }
+            }')
+
+          echo "Response: $RESPONSE"
+
+          REWARD=$(echo "$RESPONSE" | jq -r '.reward')
+          if [ "$REWARD" = "1" ] || [ "$REWARD" = "1.0" ]; then
+            echo "PASS: reward=$REWARD"
+          else
+            echo "FAIL: expected reward=1.0, got reward=$REWARD"
+            echo "Full response: $RESPONSE"
+            kill $PF_PID 2>/dev/null || true
+            exit 1
+          fi
+
+          kill $PF_PID 2>/dev/null || true
+
+      - name: Dump diagnostics on failure
+        if: failure()
+        run: |
+          echo "=== Pod Status ==="
+          kubectl -n gym get pods -o wide
+          echo "=== Pod Events ==="
+          kubectl -n gym get events --sort-by='.lastTimestamp'
+          echo "=== Agent Logs ==="
+          kubectl -n gym logs deployment/gym-agent --tail=100 || true
+          echo "=== Model Logs ==="
+          kubectl -n gym logs deployment/gym-model --tail=100 || true
+          echo "=== Resources Logs ==="
+          kubectl -n gym logs -l app.kubernetes.io/name=gym-resources --tail=100 || true
+          echo "=== Ray Head Logs ==="
+          kubectl -n gym logs -l ray.io/node-type=head --tail=100 || true

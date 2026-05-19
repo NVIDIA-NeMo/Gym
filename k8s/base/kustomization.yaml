@@ -1,0 +1,17 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: gym
+
+resources:
+  - namespace.yaml
+  - serviceaccount.yaml
+  - configmap.yaml
+  - raycluster.yaml
+  - deployment-agent.yaml
+  - deployment-model.yaml
+  - service-resources.yaml
+  - service-agent.yaml
+  - service-model.yaml
+  - networkpolicy.yaml
+  - ingress-dashboard.yaml

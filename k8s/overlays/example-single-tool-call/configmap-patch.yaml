@@ -1,0 +1,51 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gym-config
+  namespace: gym
+data:
+  config.yaml: |
+    ray_head_node_address: "auto"
+    default_host: "0.0.0.0"
+    use_absolute_ip: false
+    dry_run: false
+
+    head_server:
+      host: "0.0.0.0"
+      port: 11000
+
+    resources_instance:
+      resources_servers:
+        example_single_tool_call:
+          entrypoint: app.py
+          host: "${oc.env:RESOURCES_HOST}"
+          port: 9080
+          domain: agent
+
+    simple_agent_instance:
+      responses_api_agents:
+        simple_agent:
+          entrypoint: app.py
+          host: "${oc.env:AGENT_HOST}"
+          port: 8080
+          resources_server:
+            type: resources_servers
+            name: resources_instance
+          model_server:
+            type: responses_api_models
+            name: policy_model
+
+    policy_model:
+      responses_api_models:
+        vllm_model:
+          entrypoint: app.py
+          host: "${oc.env:MODEL_HOST}"
+          port: 8080
+          base_url: "${oc.env:POLICY_BASE_URL}"
+          api_key: "${oc.env:POLICY_API_KEY}"
+          model: "${oc.env:POLICY_MODEL_NAME}"
+          return_token_id_information: false
+          uses_reasoning_parser: true
+          uses_interleaved_reasoning: true
+          chat_template_kwargs: null
+          extra_body: null

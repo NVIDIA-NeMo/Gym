@@ -1,6 +1,6 @@
 # NeMo Gym
 
-**[Requirements](#-requirements)** • **[Quick Start](#-quick-start)** • **[Available Environments](#-available-environments)** • **[Documentation & Resources](#-documentation--resources)** • **[Community & Support](#-community--support)** • **[Citations](#-citations)**
+**[Requirements](#-requirements)** • **[Quick Start](#-quick-start)** • **[Available Environments](#-available-environments)** • **[Documentation & Resources](#-documentation--resources)** • **[Kubernetes Deployment](#-kubernetes-deployment)** • **[Community & Support](#-community--support)** • **[Citations](#-citations)**
 
 NeMo Gym is a library for evaluating and improving models and agents using environments. NeMo Gym provides infrastructure to develop environments, scalably run evaluation and training, and a collection of popular benchmarks and training environments.
 
@@ -304,6 +304,12 @@ The Dataset column links to publicly available datasets (e.g., on HuggingFace). 
 - **[Training Tutorials](https://docs.nvidia.com/nemo/gym/latest/training-tutorials/index.html)** - Train with NeMo Gym environments
 - **[API Reference](https://docs.nvidia.com/nemo/gym/latest/apidocs/index.html)** - Complete class and function reference
  
+
+## ☁️ Kubernetes Deployment
+
+NeMo Gym can be deployed on Kubernetes or OpenShift with KubeRay for distributed benchmark execution. Each NeMo-Gym server type runs in its own pod, with the resources server embedded in the RayCluster for mTLS-authenticated distributed task execution.
+
+See **[`k8s/README.md`](k8s/README.md)** for setup instructions, architecture details, and how to add new benchmark overlays.
 
 ## 🤝 Community & Support
 
