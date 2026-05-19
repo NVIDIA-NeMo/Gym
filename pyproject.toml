@@ -188,9 +188,14 @@ dependencies = [
     "python-multipart>=0.0.22",
 
     # wandb: E2E rollout collection data and metrics upload
-    # Updated: Tue Feb 17, 2026 with wandb==0.25.0
+    # Updated: Mon May 19, 2026 with wandb==0.27.0
     # License: MIT https://github.com/wandb/wandb/blob/f8acf479342b6aa8217dd0833bb32190b11c14bc/LICENSE
     "wandb",
+
+    # GitPython: Git interaction library (transitive dependency of wandb, pinned for security)
+    # Updated: Mon May 19, 2026 with GitPython>=3.1.50
+    # License: BSD 3-Clause https://github.com/gitpython-developers/GitPython/blob/main/LICENSE
+    "GitPython>=3.1.50",
 
     # gprof2dot and pydot: Used for outputting dot graphs for profiling.
     # Updated: Wed Feb 25, 2026 with gprof2dot==2025.4.14 and pydot==4.0.1
