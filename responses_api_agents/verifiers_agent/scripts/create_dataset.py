@@ -28,7 +28,10 @@ def load_verifiers_dataset(vf_env: vf.Environment, n: int = -1, seed: int | None
     try:
         dataset = vf_env.get_dataset(n=n, seed=seed)
     except ValueError:
-        dataset = None
+        try:
+            dataset = vf_env.get_eval_dataset(n=n, seed=seed)
+        except ValueError:
+            dataset = None
         for attr in ["dataset", "train_dataset", "eval_dataset"]:
             ds = getattr(vf_env, attr, None)
             if ds is not None:
@@ -46,7 +49,7 @@ def load_verifiers_dataset(vf_env: vf.Environment, n: int = -1, seed: int | None
         {
             "prompt": dataset["prompt"][i],
             "example_id": dataset["example_id"][i],
-            "task": dataset["task"][i],
+            **({"task": dataset["task"][i]} if "task" in dataset.column_names else {}),
             **({"answer": dataset["answer"][i]} if "answer" in dataset.column_names else {}),
             **({"info": dataset["info"][i]} if "info" in dataset.column_names else {}),
         }
@@ -90,7 +93,7 @@ def main():
                 },
                 "question": row["prompt"][-1]["content"] if row["prompt"] else "",
                 "answer": row.get("answer", ""),
-                "task": row["task"],
+                "task": row.get("task", ""),
                 "example_id": row["example_id"],
                 "info": row.get("info", {}),
             }

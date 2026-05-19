@@ -1,0 +1,15 @@
+config_paths:
+  - resources_servers/physics_judge/configs/physics_judge.yaml
+  - resources_servers/physics_judge/configs/judge_openai.yaml
+
+physics_physics_judge_simple_agent:
+  _inherit_from: physics_judge_simple_agent
+  responses_api_agents:
+    simple_agent:
+      datasets:
+        - name: physics
+          type: benchmark
+          jsonl_fpath: benchmarks/physics/data/physics_benchmark.jsonl
+          prompt_config: benchmarks/physics/prompts/default.yaml
+          prepare_script: benchmarks/physics/prepare.py
+          license: Apache 2.0

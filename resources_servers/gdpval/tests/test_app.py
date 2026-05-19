@@ -39,6 +39,10 @@ def _server(reward_mode: str = "rubric", **extra) -> GDPValResourcesServer:
         name="",
         reward_mode=reward_mode,
         judge_model_server={"type": "responses_api_models", "name": "judge"},
+        # Default off in tests: avoids triggering the host-libreoffice install
+        # check in model_post_init. Tests that exercise the preconvert path
+        # set this back to True explicitly.
+        preconvert_office_to_pdf=False,
     )
     kwargs.update(extra)
     config = GDPValResourcesServerConfig(**kwargs)
@@ -110,6 +114,29 @@ class TestApp:
 
         with _pytest.raises(ValueError, match="reference_deliverables_dir"):
             _server(reward_mode="comparison")
+
+    def test_comparison_fails_fast_when_libreoffice_unavailable(self) -> None:
+        with patch("resources_servers.gdpval.setup_libreoffice.ensure_libreoffice", return_value=False):
+            with pytest.raises(RuntimeError, match="libreoffice"):
+                _server(
+                    reward_mode="comparison",
+                    reference_deliverables_dir="/tmp/fork-deliverables",
+                    preconvert_office_to_pdf=True,
+                )
+
+    def test_rubric_does_not_fail_when_libreoffice_unavailable(self) -> None:
+        with patch("resources_servers.gdpval.setup_libreoffice.ensure_libreoffice", return_value=False):
+            # Rubric mode tolerates missing libreoffice; the rubric path has its own
+            # text-extraction fallback. Should not raise.
+            _server(reward_mode="rubric", preconvert_office_to_pdf=True)
+
+    def test_comparison_passes_when_libreoffice_available(self) -> None:
+        with patch("resources_servers.gdpval.setup_libreoffice.ensure_libreoffice", return_value=True):
+            _server(
+                reward_mode="comparison",
+                reference_deliverables_dir="/tmp/fork-deliverables",
+                preconvert_office_to_pdf=True,
+            )
 
     @pytest.mark.asyncio
     async def test_verify_rubric_no_rubric_returns_zero(self) -> None:
@@ -297,6 +324,80 @@ class TestApp:
         assert resp.reward == 0.0
         assert resp.loss is True
 
+    @pytest.mark.asyncio
+    async def test_persist_raw_judge_responses_comparison(self, tmp_path) -> None:
+        """When persist_raw_judge_responses=True, raw judge text per trial flows
+        through ``run_trials`` and lands on ``per_ref_repeat[i].raw_responses``."""
+        ref_root = tmp_path / "ref"
+        task_dir = ref_root / "task_task-1" / "repeat_0"
+        task_dir.mkdir(parents=True)
+        (task_dir / "finish_params.json").write_text("{}")
+        eval_dir = tmp_path / "eval" / "task_task-1" / "repeat_0"
+        eval_dir.mkdir(parents=True)
+        (eval_dir / "finish_params.json").write_text("{}")
+
+        server = _server(
+            reward_mode="comparison",
+            reference_deliverables_dir=str(ref_root),
+            preconvert_office_to_pdf=False,
+            num_comparison_trials=2,
+            persist_raw_judge_responses=True,
+        )
+
+        captured_kwargs: dict = {}
+        canned_raw = ["Trial 0 verdict: BOXED[B]", "Trial 1 (swapped) verdict: BOXED[A]"]
+
+        def fake_run_trials(**kwargs):
+            captured_kwargs.update(kwargs)
+            return {
+                "winner": "[[B]]",
+                "win_count_a": 1,
+                "win_count_b": 1,
+                "tie_count": 0,
+                "task_count": 2,
+                "raw_responses": canned_raw,
+            }
+
+        body = _verify_request(deliverables_dir=str(eval_dir))
+
+        with (
+            patch("resources_servers.gdpval.comparison.run_trials", side_effect=fake_run_trials),
+            patch("resources_servers.gdpval.app.get_server_url", return_value="http://localhost:9999"),
+            patch("resources_servers.gdpval.comparison.build_file_section", return_value=[]),
+            patch("openai.OpenAI", return_value=MagicMock()),
+        ):
+            resp = await server.verify(body)
+
+        assert captured_kwargs["return_raw_responses"] is True
+        assert resp.judge_response["per_ref_repeat"][0]["raw_responses"] == canned_raw
+
+    @pytest.mark.asyncio
+    async def test_persist_raw_judge_responses_rubric(self) -> None:
+        """When persist_raw_judge_responses=True, the structured-rubric scorer
+        gets ``include_raw_responses=True`` and the resulting metadata reaches
+        ``judge_response``."""
+        server = _server(reward_mode="rubric", rubric_scoring_mode="structured", persist_raw_judge_responses=True)
+
+        captured_kwargs: dict = {}
+
+        async def fake_score_structured(**kwargs):
+            captured_kwargs.update(kwargs)
+            return 0.7, {
+                "scoring_method": "structured_rubric",
+                "raw_responses": ["FINAL_SCORE[7]\nMAX_POSSIBLE_SCORE[10]"],
+            }
+
+        body = _verify_request(rubric_json=[{"criterion": "clarity", "score": 1}])
+
+        with (
+            patch("resources_servers.gdpval.scoring.score_with_rubric_structured", side_effect=fake_score_structured),
+            patch("resources_servers.gdpval.app.get_server_url", return_value="http://localhost:9999"),
+        ):
+            resp = await server.verify(body)
+
+        assert captured_kwargs["include_raw_responses"] is True
+        assert resp.judge_response["raw_responses"] == ["FINAL_SCORE[7]\nMAX_POSSIBLE_SCORE[10]"]
+
     def test_aggregate_metrics_comparison_elo(self) -> None:
         from nemo_gym.config_types import AggregateMetricsRequest
 
@@ -383,3 +484,136 @@ class TestApp:
         assert result.agent_metrics["comparison/judged"] == 24
         # win_rate = (12 + 0.5*2) / 24 = 13/24 ≈ 0.5417
         assert abs(result.agent_metrics["comparison/win_rate"] - (13.0 / 24.0)) < 1e-6
+
+
+class TestComparisonPayloadHardening:
+    """Three protections against multi-hour /verify stalls observed on the
+    multimodal-heavy long-tail tasks (task_a941b6d8 video, task_4b894ae3
+    multi-stem audio): tmpdir zip extraction, per-file size cap, and
+    APITimeoutError treated as non-retryable."""
+
+    def test_maybe_unzip_extracts_to_tempdir_not_parent(self, tmp_path) -> None:
+        """``_maybe_unzip`` must never write back into the zip's parent dir —
+        the reference deliverables tree is read-only on the production bind
+        mount, and ``extractall(path.parent)`` raised PermissionError."""
+        import zipfile
+
+        from resources_servers.gdpval.comparison import _maybe_unzip
+
+        ref_dir = tmp_path / "ref"
+        ref_dir.mkdir()
+        zip_path = ref_dir / "stems.zip"
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr("stem_a.txt", "hello")
+            zf.writestr("nested/stem_b.txt", "world")
+
+        before = sorted(p.name for p in ref_dir.iterdir())
+        extract_dir, members = _maybe_unzip(zip_path)
+        after = sorted(p.name for p in ref_dir.iterdir())
+
+        assert extract_dir is not None
+        assert extract_dir.is_dir()
+        assert extract_dir != ref_dir
+        # Original ref dir must be unchanged.
+        assert before == after == ["stems.zip"]
+        # Extracted members live under the tmpdir.
+        assert (extract_dir / "stem_a.txt").read_text() == "hello"
+        assert (extract_dir / "nested" / "stem_b.txt").read_text() == "world"
+        assert {p.name for p in members} >= {"stem_a.txt"}
+
+    def test_maybe_unzip_handles_bad_zip(self, tmp_path) -> None:
+        from resources_servers.gdpval.comparison import _maybe_unzip
+
+        bad = tmp_path / "broken.zip"
+        bad.write_bytes(b"not a zip")
+        extract_dir, members = _maybe_unzip(bad)
+        assert extract_dir is None
+        assert members == []
+
+    def test_get_file_content_block_rejects_oversize(self, tmp_path) -> None:
+        """Files > MAX_FILE_BYTES_FOR_JUDGE are returned as a one-line text
+        marker, not base64-encoded into the judge payload."""
+        import os as _os
+
+        from resources_servers.gdpval.comparison import (
+            MAX_FILE_BYTES_FOR_JUDGE,
+            get_file_content_block,
+        )
+
+        big = tmp_path / "huge.mp4"
+        # Sparse file (truncate to size, no real disk/RAM cost) so this
+        # stays cheap even when the cap is hundreds of MB.
+        big.touch()
+        _os.truncate(big, MAX_FILE_BYTES_FOR_JUDGE + 1)
+
+        block = get_file_content_block(str(tmp_path), "huge.mp4")
+        assert block == {
+            "type": "text",
+            "text": f"[oversize: huge.mp4 {(MAX_FILE_BYTES_FOR_JUDGE + 1) / (1024 * 1024):.1f}MB — not included]",
+        }
+
+    def test_get_file_content_block_includes_under_threshold(self, tmp_path) -> None:
+        from resources_servers.gdpval.comparison import get_file_content_block
+
+        small = tmp_path / "note.txt"
+        small.write_text("hello world")
+        block = get_file_content_block(str(tmp_path), "note.txt")
+        assert block == {"type": "text", "text": "hello world"}
+
+    def test_build_file_section_emits_zip_members_from_tempdir_and_cleans_up(self, tmp_path) -> None:
+        """End-to-end: a zip in the source dir is extracted to tmp, its members
+        appear as content blocks, and the tmpdir is registered for cleanup."""
+        import zipfile
+
+        from resources_servers.gdpval.comparison import build_file_section, clean_up_paths
+
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "top_level.txt").write_text("top")
+        with zipfile.ZipFile(src / "bundle.zip", "w") as zf:
+            zf.writestr("inside.txt", "inner")
+
+        clean_up_list: list = []
+        section = build_file_section(str(src), clean_up_list)
+
+        # both files appear (top_level.txt directly, inside.txt from zip).
+        texts = [b.get("text", "") for b in section if b.get("type") == "text"]
+        assert any("top_level.txt" in t for t in texts)
+        assert any("inside.txt" in t for t in texts)
+        assert any(t == "top" for t in texts)
+        assert any(t == "inner" for t in texts)
+
+        assert len(clean_up_list) == 1
+        tmp_extract = clean_up_list[0]
+        assert tmp_extract.exists()
+        # Source dir is untouched.
+        assert sorted(p.name for p in src.iterdir()) == ["bundle.zip", "top_level.txt"]
+
+        clean_up_paths(clean_up_list)
+        assert not tmp_extract.exists()
+
+    def test_is_retryable_treats_apitimeout_as_non_retryable(self) -> None:
+        """APITimeoutError must NOT be retried — multimodal payload timeouts
+        are deterministic, not transient, and retrying burns 5×120s = 10 min
+        per /verify with no chance of recovery."""
+        from openai import APITimeoutError
+
+        from resources_servers.gdpval.comparison import _is_retryable
+
+        # Construct a minimal APITimeoutError. SDK signature is
+        # ``APITimeoutError(request)`` since v1.x.
+        try:
+            err = APITimeoutError(request=object())
+        except TypeError:
+            # Older SDKs allow positional/no-arg.
+            err = APITimeoutError("Request timed out.")
+        assert _is_retryable(err) is False
+
+    def test_is_retryable_still_retries_502_and_rate_limit(self) -> None:
+        from resources_servers.gdpval.comparison import _is_retryable
+
+        assert _is_retryable(RuntimeError("502 Bad Gateway")) is True
+        assert _is_retryable(RuntimeError("429 Too Many Requests")) is True
+        assert _is_retryable(RuntimeError("rate limit exceeded")) is True
+        # ``timeout`` substring no longer triggers a blind retry.
+        assert _is_retryable(RuntimeError("Request timed out")) is False

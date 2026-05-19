@@ -16,6 +16,6 @@ proof_arena_judge_math_proof_judgement_simple_agent:
         - name: proof-arena-judge
           type: benchmark
           jsonl_fpath: benchmarks/proof-arena-judge/data/proof-arena-judge_benchmark.jsonl
-          prompt_config: benchmarks/prompts/math_proof_judge.yaml
+          prompt_config: benchmarks/prompts/judge/math-proof-judge.yaml
           prepare_script: benchmarks/proof-arena-judge/prepare.py
           num_repeats: 1

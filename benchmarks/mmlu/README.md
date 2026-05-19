@@ -26,5 +26,5 @@ ng_collect_rollouts \
     +agent_name=mmlu_mcqa_simple_agent \
     +input_jsonl_fpath=benchmarks/mmlu/data/mmlu_benchmark.jsonl \
     +output_jsonl_fpath=results/mmlu/rollouts.jsonl \
-    +prompt_config=benchmarks/mmlu/prompts/default.yaml
+    +prompt_config=benchmarks/prompts/eval/aai/mcq-4choices-boxed.yaml
 ```

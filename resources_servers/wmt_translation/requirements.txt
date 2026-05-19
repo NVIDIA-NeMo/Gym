@@ -1,0 +1,24 @@
+-e nemo-gym[dev] @ ../../
+# Cluster driver reports CUDA 12.9; pin torch to a version whose PyPI
+# default wheel targets CUDA 12 (not 13). unbabel-comet's transitive
+# resolution otherwise pulls torch 2.11+cu130, which fails at
+# torch._C._cuda_init with "The NVIDIA driver on your system is too
+# old (found version 12090)".
+#
+# torch 2.5.x's pypi wheel is cu12-compatible, avoiding the need for
+# a separate PyTorch wheel index (which creates index-strategy issues
+# with urllib3 / nemo-gym).
+# torchmetrics imports pkg_resources which setuptools 81 removed (it was
+# deprecated; see https://setuptools.pypa.io/en/latest/pkg_resources.html).
+# Pin <81 so the pkg_resources shim is still available. python-build-
+# standalone interpreters uv ships don't include setuptools at all, and
+# torch 2.5.1's fresh wheel resolution doesn't pull it transitively.
+setuptools>=70,<81
+torch==2.5.1
+torchvision==0.20.1
+sacrebleu[ja,ko]>=2.4
+unbabel-comet>=2.2
+# scipy is a transitive dep of unbabel-comet (via comet.models.metrics →
+# scipy.stats) but uv's resolution doesn't pull it automatically here —
+# explicit pin avoids ModuleNotFoundError in the COMET Ray task.
+scipy
