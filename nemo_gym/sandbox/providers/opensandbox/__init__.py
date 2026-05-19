@@ -16,15 +16,25 @@
 
 from nemo_gym.sandbox.providers.opensandbox.provider import (
     OpenSandboxBatchCreateError,
+    OpenSandboxConnectionConfig,
+    OpenSandboxCreateConfig,
     OpenSandboxCreateTimeoutError,
     OpenSandboxCreateVerificationError,
+    OpenSandboxOperationConfig,
+    OpenSandboxPoolConfig,
+    OpenSandboxProbeConfig,
     OpenSandboxProvider,
 )
 
 
 __all__ = [
     "OpenSandboxBatchCreateError",
+    "OpenSandboxConnectionConfig",
+    "OpenSandboxCreateConfig",
     "OpenSandboxCreateTimeoutError",
     "OpenSandboxCreateVerificationError",
+    "OpenSandboxOperationConfig",
+    "OpenSandboxPoolConfig",
+    "OpenSandboxProbeConfig",
     "OpenSandboxProvider",
 ]

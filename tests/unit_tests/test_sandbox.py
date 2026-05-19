@@ -482,7 +482,7 @@ async def _assert_opensandbox_sdk_create_receives_default_image_pull_policy(monk
         lambda: (FakeSDKSandbox, object, object, object, object),
     )
 
-    provider = OpenSandboxProvider(create_probe_command=None)
+    provider = OpenSandboxProvider(probe={"command": None})
     monkeypatch.setattr(provider, "_connection_config", lambda request_timeout_s=None, use_server_proxy=None: object())
 
     handle = await provider.create(
@@ -531,10 +531,9 @@ async def _assert_opensandbox_connect_after_create_can_use_direct_exec_endpoint(
     )
 
     provider = OpenSandboxProvider(
-        create_probe_command=None,
-        use_server_proxy=True,
-        exec_use_server_proxy=False,
-        connect_after_create_attempt_timeout_s=1,
+        connection={"use_server_proxy": True, "exec_use_server_proxy": False},
+        create={"connect_attempt_timeout_s": 1},
+        probe={"command": None},
     )
     handle = await provider._connect_after_create(
         SandboxHandle(sandbox_id="sdk-sandbox-1", provider_name="opensandbox", raw=None),
@@ -554,10 +553,12 @@ def test_opensandbox_create_probe_can_require_stable_successes(monkeypatch) -> N
 
 async def _assert_opensandbox_create_probe_can_require_stable_successes(monkeypatch) -> None:
     provider = OpenSandboxProvider(
-        create_probe_command="true",
-        create_probe_expected_stdout=None,
-        create_probe_stable_count=3,
-        create_probe_stable_delay_s=0,
+        probe={
+            "command": "true",
+            "expected_stdout": None,
+            "stable_count": 3,
+            "stable_delay_s": 0,
+        },
     )
     calls: list[dict[str, Any]] = []
 
@@ -598,13 +599,15 @@ def test_opensandbox_create_probe_polls_same_sandbox_after_transient_errors(monk
 
 async def _assert_opensandbox_create_probe_polls_same_sandbox_after_transient_errors(monkeypatch) -> None:
     provider = OpenSandboxProvider(
-        create_probe_command="true",
-        create_probe_expected_stdout=None,
-        create_probe_timeout_s=1,
-        create_probe_deadline_s=2,
-        create_probe_stable_count=2,
-        create_probe_stable_delay_s=0,
-        connect_after_create_poll_s=0.01,
+        create={"connect_poll_s": 0.01},
+        probe={
+            "command": "true",
+            "expected_stdout": None,
+            "timeout_s": 1,
+            "deadline_s": 2,
+            "stable_count": 2,
+            "stable_delay_s": 0,
+        },
     )
     attempts = 0
     handles: list[SandboxHandle] = []
@@ -694,11 +697,13 @@ async def _assert_opensandbox_exec_retries_retryable_sdk_failures(monkeypatch) -
     )
 
     provider = OpenSandboxProvider(
-        create_probe_command=None,
-        operation_retries=2,
-        operation_retry_delay_s=0,
-        operation_retry_max_delay_s=0,
-        command_retries=2,
+        operations={
+            "retries": 2,
+            "retry_delay_s": 0,
+            "retry_max_delay_s": 0,
+            "command_retries": 2,
+        },
+        probe={"command": None},
     )
     raw = FakeRaw()
     handle = SandboxHandle(sandbox_id="sdk-sandbox-1", provider_name="opensandbox", raw=raw)
@@ -739,11 +744,13 @@ async def _assert_opensandbox_command_retries_can_be_disabled(monkeypatch) -> No
     )
 
     provider = OpenSandboxProvider(
-        create_probe_command=None,
-        operation_retries=2,
-        operation_retry_delay_s=0,
-        operation_retry_max_delay_s=0,
-        command_retries=0,
+        operations={
+            "retries": 2,
+            "retry_delay_s": 0,
+            "retry_max_delay_s": 0,
+            "command_retries": 0,
+        },
+        probe={"command": None},
     )
     raw = FakeRaw()
     handle = SandboxHandle(sandbox_id="sdk-sandbox-1", provider_name="opensandbox", raw=raw)
@@ -775,8 +782,8 @@ async def _assert_opensandbox_close_timeout_does_not_fail_after_delete() -> None
 
     raw = SlowCloseRaw()
     provider = OpenSandboxProvider(
-        create_probe_command=None,
-        close_timeout_s=0.01,
+        operations={"close_timeout_s": 0.01},
+        probe={"command": None},
     )
     handle = SandboxHandle(sandbox_id="sdk-sandbox-1", provider_name="opensandbox", raw=raw)
 
@@ -795,8 +802,8 @@ async def _assert_opensandbox_close_timeout_still_fails_without_delete() -> None
             await asyncio.sleep(60)
 
     provider = OpenSandboxProvider(
-        create_probe_command=None,
-        close_timeout_s=0.01,
+        operations={"close_timeout_s": 0.01},
+        probe={"command": None},
     )
     handle = SandboxHandle(sandbox_id="sdk-sandbox-1", provider_name="opensandbox", raw=SlowCloseRaw())
 

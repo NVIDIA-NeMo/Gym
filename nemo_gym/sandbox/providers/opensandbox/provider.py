@@ -18,7 +18,8 @@ import asyncio
 import logging
 import re
 import shlex
-from dataclasses import replace
+from collections.abc import Mapping
+from dataclasses import dataclass, replace
 from datetime import timedelta
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -340,6 +341,138 @@ def _seconds_to_timedelta(seconds: int | float | None) -> timedelta | None:
     return timedelta(seconds=float(seconds))
 
 
+@dataclass(frozen=True)
+class OpenSandboxConnectionConfig:
+    """OpenSandbox server connection settings."""
+
+    domain: str | None = None
+    api_key: str | None = None
+    protocol: str | None = None
+    use_server_proxy: bool | None = None
+    exec_use_server_proxy: bool | None = None
+    request_timeout_s: int | None = None
+    connect_timeout_s: int | float | None = None
+
+    def __post_init__(self) -> None:
+        if self.connect_timeout_s is not None and self.connect_timeout_s <= 0:
+            raise ValueError("connection.connect_timeout_s must be > 0")
+
+
+@dataclass(frozen=True)
+class OpenSandboxCreateConfig:
+    """OpenSandbox create/reconnect retry settings."""
+
+    request_timeout_s: int | None = None
+    timeout_s: float | None = None
+    retries: int = 2
+    retry_delay_s: float = 5.0
+    retry_max_delay_s: float = 60.0
+    image_pull_policy: str | None = DEFAULT_IMAGE_PULL_POLICY
+    skip_health_check: bool = False
+    connect_attempt_timeout_s: float = 30.0
+    connect_poll_s: float = 2.0
+
+    def __post_init__(self) -> None:
+        if self.image_pull_policy is not None:
+            validate_image_pull_policy(self.image_pull_policy)
+        if self.timeout_s is not None and self.timeout_s <= 0:
+            raise ValueError("create.timeout_s must be > 0")
+        if self.retries < 0:
+            raise ValueError("create.retries must be >= 0")
+        if self.retry_delay_s < 0:
+            raise ValueError("create.retry_delay_s must be >= 0")
+        if self.retry_max_delay_s < 0:
+            raise ValueError("create.retry_max_delay_s must be >= 0")
+        if self.connect_attempt_timeout_s <= 0:
+            raise ValueError("create.connect_attempt_timeout_s must be > 0")
+        if self.connect_poll_s <= 0:
+            raise ValueError("create.connect_poll_s must be > 0")
+
+
+@dataclass(frozen=True)
+class OpenSandboxProbeConfig:
+    """Post-create probe settings."""
+
+    command: str | None = "printf nemo-rl-sandbox-ready"
+    expected_stdout: str | None = "nemo-rl-sandbox-ready"
+    timeout_s: int = 30
+    deadline_s: float | None = None
+    sample_count: int | None = None
+    stable_count: int = 1
+    stable_delay_s: float = 0.0
+
+    def __post_init__(self) -> None:
+        if self.command is not None and self.timeout_s <= 0:
+            raise ValueError("probe.timeout_s must be > 0")
+        if self.deadline_s is not None and self.deadline_s <= 0:
+            raise ValueError("probe.deadline_s must be > 0")
+        if self.sample_count is not None and self.sample_count < 1:
+            raise ValueError("probe.sample_count must be >= 1")
+        if self.stable_count < 1:
+            raise ValueError("probe.stable_count must be >= 1")
+        if self.stable_delay_s < 0:
+            raise ValueError("probe.stable_delay_s must be >= 0")
+
+
+@dataclass(frozen=True)
+class OpenSandboxOperationConfig:
+    """Retry and timeout settings for SDK operations after create."""
+
+    retries: int = 3
+    retry_delay_s: float = 1.0
+    retry_max_delay_s: float = 15.0
+    command_retries: int | None = None
+    close_timeout_s: float | None = 30.0
+
+    def __post_init__(self) -> None:
+        if self.retries < 0:
+            raise ValueError("operations.retries must be >= 0")
+        if self.retry_delay_s < 0:
+            raise ValueError("operations.retry_delay_s must be >= 0")
+        if self.retry_max_delay_s < 0:
+            raise ValueError("operations.retry_max_delay_s must be >= 0")
+        if self.command_retries is not None and self.command_retries < 0:
+            raise ValueError("operations.command_retries must be >= 0")
+        if self.close_timeout_s is not None and self.close_timeout_s <= 0:
+            raise ValueError("operations.close_timeout_s must be > 0")
+
+
+@dataclass(frozen=True)
+class OpenSandboxPoolConfig:
+    """OpenSandbox SDK pool and batch fanout settings."""
+
+    concurrency: int = 4
+    progress_timeout_s: float | None = None
+    reconcile_interval_s: float = 0.1
+    acquire_poll_interval_s: float = 0.1
+    idle_timeout_s: float | None = None
+    primary_lock_ttl_s: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.concurrency < 1:
+            raise ValueError("pool.concurrency must be >= 1")
+        if self.progress_timeout_s is not None and self.progress_timeout_s <= 0:
+            raise ValueError("pool.progress_timeout_s must be > 0")
+        if self.reconcile_interval_s <= 0:
+            raise ValueError("pool.reconcile_interval_s must be > 0")
+        if self.acquire_poll_interval_s <= 0:
+            raise ValueError("pool.acquire_poll_interval_s must be > 0")
+        if self.idle_timeout_s is not None and self.idle_timeout_s <= 0:
+            raise ValueError("pool.idle_timeout_s must be > 0")
+        if self.primary_lock_ttl_s is not None and self.primary_lock_ttl_s <= 0:
+            raise ValueError("pool.primary_lock_ttl_s must be > 0")
+
+
+def _coerce_config(value: Any, config_cls: type[Any]) -> Any:
+    if value is None:
+        return config_cls()
+    if isinstance(value, config_cls):
+        return value
+    if isinstance(value, Mapping):
+        return config_cls(**value)
+    raise TypeError(f"{config_cls.__name__} must be a mapping or {config_cls.__name__} instance")
+
+
 class OpenSandboxProvider:
     """Provider backed by the OpenSandbox SDK/server API.
 
@@ -351,127 +484,21 @@ class OpenSandboxProvider:
     def __init__(
         self,
         *,
-        domain: str | None = None,
-        api_key: str | None = None,
-        protocol: str | None = None,
-        use_server_proxy: bool | None = None,
-        exec_use_server_proxy: bool | None = None,
-        request_timeout_s: int | None = None,
-        connect_timeout_s: int | float | None = None,
-        create_request_timeout_s: int | None = None,
-        create_timeout_s: float | None = None,
-        create_probe_command: str | None = "printf nemo-rl-sandbox-ready",
-        create_probe_expected_stdout: str | None = "nemo-rl-sandbox-ready",
-        create_probe_timeout_s: int = 30,
-        create_probe_deadline_s: float | None = None,
-        create_probe_sample_count: int | None = None,
-        create_probe_stable_count: int = 1,
-        create_probe_stable_delay_s: float = 0.0,
-        batch_create_concurrency: int = 4,
-        batch_create_progress_timeout_s: float | None = None,
-        batch_create_retries: int = 2,
-        batch_create_retry_delay_s: float = 5.0,
-        batch_create_retry_max_delay_s: float = 60.0,
-        operation_retries: int = 3,
-        operation_retry_delay_s: float = 1.0,
-        operation_retry_max_delay_s: float = 15.0,
-        command_retries: int | None = None,
-        sdk_pool_reconcile_interval_s: float = 0.1,
-        sdk_pool_acquire_poll_interval_s: float = 0.1,
-        sdk_pool_idle_timeout_s: float | None = None,
-        sdk_pool_primary_lock_ttl_s: float | None = None,
-        close_timeout_s: float | None = 30.0,
-        image_pull_policy: str | None = DEFAULT_IMAGE_PULL_POLICY,
-        sdk_skip_health_check: bool = False,
-        connect_after_create_attempt_timeout_s: float = 30.0,
-        connect_after_create_poll_s: float = 2.0,
+        connection: OpenSandboxConnectionConfig | Mapping[str, Any] | None = None,
+        create: OpenSandboxCreateConfig | Mapping[str, Any] | None = None,
+        probe: OpenSandboxProbeConfig | Mapping[str, Any] | None = None,
+        operations: OpenSandboxOperationConfig | Mapping[str, Any] | None = None,
+        pool: OpenSandboxPoolConfig | Mapping[str, Any] | None = None,
     ) -> None:
-        if image_pull_policy is not None:
-            image_pull_policy = validate_image_pull_policy(image_pull_policy)
-        self._domain = domain
-        self._api_key = api_key
-        self._protocol = protocol
-        self._use_server_proxy = use_server_proxy
-        self._exec_use_server_proxy = exec_use_server_proxy
-        self._request_timeout_s = request_timeout_s
-        self._connect_timeout_s = connect_timeout_s
-        self._create_request_timeout_s = create_request_timeout_s
-        self._create_timeout_s = create_timeout_s
-        self._create_probe_command = create_probe_command
-        self._create_probe_expected_stdout = create_probe_expected_stdout
-        self._create_probe_timeout_s = create_probe_timeout_s
-        self._create_probe_deadline_s = create_probe_deadline_s
-        self._create_probe_sample_count = create_probe_sample_count
-        self._create_probe_stable_count = create_probe_stable_count
-        self._create_probe_stable_delay_s = create_probe_stable_delay_s
-        if batch_create_concurrency < 1:
-            raise ValueError("batch_create_concurrency must be >= 1")
-        if connect_timeout_s is not None and connect_timeout_s <= 0:
-            raise ValueError("connect_timeout_s must be > 0")
-        if batch_create_progress_timeout_s is not None and batch_create_progress_timeout_s <= 0:
-            raise ValueError("batch_create_progress_timeout_s must be > 0")
-        if create_timeout_s is not None and create_timeout_s <= 0:
-            raise ValueError("create_timeout_s must be > 0")
-        if create_probe_command is not None and create_probe_timeout_s <= 0:
-            raise ValueError("create_probe_timeout_s must be > 0")
-        if create_probe_deadline_s is not None and create_probe_deadline_s <= 0:
-            raise ValueError("create_probe_deadline_s must be > 0")
-        if create_probe_sample_count is not None and create_probe_sample_count < 1:
-            raise ValueError("create_probe_sample_count must be >= 1")
-        if create_probe_stable_count < 1:
-            raise ValueError("create_probe_stable_count must be >= 1")
-        if create_probe_stable_delay_s < 0:
-            raise ValueError("create_probe_stable_delay_s must be >= 0")
-        if batch_create_retries < 0:
-            raise ValueError("batch_create_retries must be >= 0")
-        if batch_create_retry_delay_s < 0:
-            raise ValueError("batch_create_retry_delay_s must be >= 0")
-        if batch_create_retry_max_delay_s < 0:
-            raise ValueError("batch_create_retry_max_delay_s must be >= 0")
-        if operation_retries < 0:
-            raise ValueError("operation_retries must be >= 0")
-        if operation_retry_delay_s < 0:
-            raise ValueError("operation_retry_delay_s must be >= 0")
-        if operation_retry_max_delay_s < 0:
-            raise ValueError("operation_retry_max_delay_s must be >= 0")
-        if command_retries is not None and command_retries < 0:
-            raise ValueError("command_retries must be >= 0")
-        if sdk_pool_reconcile_interval_s <= 0:
-            raise ValueError("sdk_pool_reconcile_interval_s must be > 0")
-        if sdk_pool_acquire_poll_interval_s <= 0:
-            raise ValueError("sdk_pool_acquire_poll_interval_s must be > 0")
-        if sdk_pool_idle_timeout_s is not None and sdk_pool_idle_timeout_s <= 0:
-            raise ValueError("sdk_pool_idle_timeout_s must be > 0")
-        if sdk_pool_primary_lock_ttl_s is not None and sdk_pool_primary_lock_ttl_s <= 0:
-            raise ValueError("sdk_pool_primary_lock_ttl_s must be > 0")
-        if close_timeout_s is not None and close_timeout_s <= 0:
-            raise ValueError("close_timeout_s must be > 0")
-        if connect_after_create_attempt_timeout_s <= 0:
-            raise ValueError("connect_after_create_attempt_timeout_s must be > 0")
-        if connect_after_create_poll_s <= 0:
-            raise ValueError("connect_after_create_poll_s must be > 0")
-        self._batch_create_concurrency = batch_create_concurrency
-        self._batch_create_progress_timeout_s = batch_create_progress_timeout_s
-        self._batch_create_retries = batch_create_retries
-        self._batch_create_retry_delay_s = batch_create_retry_delay_s
-        self._batch_create_retry_max_delay_s = batch_create_retry_max_delay_s
-        self._operation_retries = operation_retries
-        self._operation_retry_delay_s = operation_retry_delay_s
-        self._operation_retry_max_delay_s = operation_retry_max_delay_s
-        self._command_retries = command_retries
-        self._sdk_pool_reconcile_interval_s = sdk_pool_reconcile_interval_s
-        self._sdk_pool_acquire_poll_interval_s = sdk_pool_acquire_poll_interval_s
-        self._sdk_pool_idle_timeout_s = sdk_pool_idle_timeout_s
-        self._sdk_pool_primary_lock_ttl_s = sdk_pool_primary_lock_ttl_s
-        self._close_timeout_s = close_timeout_s
-        self._image_pull_policy = image_pull_policy
-        self._sdk_skip_health_check = sdk_skip_health_check
-        self._connect_after_create_attempt_timeout_s = connect_after_create_attempt_timeout_s
-        self._connect_after_create_poll_s = connect_after_create_poll_s
+        self._connection = _coerce_config(connection, OpenSandboxConnectionConfig)
+        self._create = _coerce_config(create, OpenSandboxCreateConfig)
+        self._probe = _coerce_config(probe, OpenSandboxProbeConfig)
+        self._operations = _coerce_config(operations, OpenSandboxOperationConfig)
+        self._pool = _coerce_config(pool, OpenSandboxPoolConfig)
 
     def _with_default_image_pull_policy(self, spec: SandboxSpec) -> SandboxSpec:
         """Ensure SDK create requests carry the desired image pull policy."""
-        if self._image_pull_policy is None:
+        if self._create.image_pull_policy is None:
             return spec
 
         extensions = dict(spec.extensions)
@@ -479,7 +506,7 @@ class OpenSandboxProvider:
             IMAGE_PULL_POLICY_ANNOTATION_EXTENSION_KEY
         )
         if image_pull_policy is None:
-            image_pull_policy = self._image_pull_policy
+            image_pull_policy = self._create.image_pull_policy
         image_pull_policy = validate_image_pull_policy(image_pull_policy)
         extensions.setdefault(IMAGE_PULL_POLICY_EXTENSION_KEY, image_pull_policy)
         extensions.setdefault(IMAGE_PULL_POLICY_ANNOTATION_EXTENSION_KEY, image_pull_policy)
@@ -493,18 +520,18 @@ class OpenSandboxProvider:
     ) -> Any:
         _, ConnectionConfig, _, _, _ = _require_opensandbox_sdk()
         kwargs: dict[str, Any] = {}
-        if self._domain is not None:
-            kwargs["domain"] = self._domain
-        if self._api_key is not None:
-            kwargs["api_key"] = self._api_key
-        if self._protocol is not None:
-            kwargs["protocol"] = self._protocol
+        if self._connection.domain is not None:
+            kwargs["domain"] = self._connection.domain
+        if self._connection.api_key is not None:
+            kwargs["api_key"] = self._connection.api_key
+        if self._connection.protocol is not None:
+            kwargs["protocol"] = self._connection.protocol
         if use_server_proxy is None:
-            use_server_proxy = self._use_server_proxy
+            use_server_proxy = self._connection.use_server_proxy
         if use_server_proxy is not None:
             kwargs["use_server_proxy"] = use_server_proxy
         if request_timeout_s is None:
-            request_timeout_s = self._request_timeout_s
+            request_timeout_s = self._connection.request_timeout_s
         if request_timeout_s is not None:
             kwargs["request_timeout"] = timedelta(seconds=request_timeout_s)
         return ConnectionConfig(**kwargs)
@@ -516,9 +543,9 @@ class OpenSandboxProvider:
         OpenSandbox server proxy. That keeps clients off pod IP routing and lets
         the server resolve the sandbox backend for each request.
         """
-        use_server_proxy = self._use_server_proxy
-        if self._exec_use_server_proxy is not None:
-            use_server_proxy = self._exec_use_server_proxy
+        use_server_proxy = self._connection.use_server_proxy
+        if self._connection.exec_use_server_proxy is not None:
+            use_server_proxy = self._connection.exec_use_server_proxy
         return self._connection_config(
             request_timeout_s=request_timeout_s,
             use_server_proxy=use_server_proxy,
@@ -559,7 +586,7 @@ class OpenSandboxProvider:
         timeout_s: float | None,
         retries: int | None = None,
     ) -> Any:
-        retry_count = self._operation_retries if retries is None else retries
+        retry_count = self._operations.retries if retries is None else retries
         max_attempts = retry_count + 1
 
         def _before_sleep(retry_state: RetryCallState) -> None:
@@ -584,8 +611,8 @@ class OpenSandboxProvider:
             retry=retry_if_exception(_is_retryable_sdk_operation_error),
             stop=stop_after_attempt(max_attempts),
             wait=wait_random_exponential(
-                multiplier=self._operation_retry_delay_s,
-                max=self._operation_retry_max_delay_s,
+                multiplier=self._operations.retry_delay_s,
+                max=self._operations.retry_max_delay_s,
             ),
             before_sleep=_before_sleep,
             reraise=True,
@@ -618,35 +645,35 @@ class OpenSandboxProvider:
         raise RuntimeError("OpenSandbox SDK operation retry loop did not run")
 
     async def _verify_created_handle(self, handle: SandboxHandle) -> None:
-        if self._create_probe_command is None:
+        if self._probe.command is None:
             return
 
         loop = asyncio.get_running_loop()
-        deadline_s = self._create_probe_deadline_s or float(self._create_probe_timeout_s)
+        deadline_s = self._probe.deadline_s or float(self._probe.timeout_s)
         deadline = loop.time() + deadline_s
         successful_probes = 0
         attempt_number = 0
         last_exception: BaseException | None = None
 
-        while successful_probes < self._create_probe_stable_count:
+        while successful_probes < self._probe.stable_count:
             remaining_s = deadline - loop.time()
             if remaining_s <= 0:
                 error = OpenSandboxCreateVerificationError(
                     "OpenSandbox sandbox failed create probe command before "
                     "the startup deadline; "
                     f"sandbox_id={handle.sandbox_id!r}, "
-                    f"command={self._create_probe_command!r}, "
-                    f"successful_probes={successful_probes}/{self._create_probe_stable_count}, "
+                    f"command={self._probe.command!r}, "
+                    f"successful_probes={successful_probes}/{self._probe.stable_count}, "
                     f"attempts={attempt_number}, deadline_s={deadline_s:g}"
                 )
                 raise error from last_exception
 
             attempt_number += 1
             probe_index = successful_probes
-            if self._create_probe_deadline_s is None:
-                command_timeout_s = float(self._create_probe_timeout_s)
+            if self._probe.deadline_s is None:
+                command_timeout_s = float(self._probe.timeout_s)
             else:
-                command_timeout_s = min(float(self._create_probe_timeout_s), remaining_s)
+                command_timeout_s = min(float(self._probe.timeout_s), remaining_s)
             try:
                 async with observability_span(
                     "sandbox.create_probe",
@@ -655,7 +682,7 @@ class OpenSandboxProvider:
                         "provider": self.name,
                         "sandbox_id": handle.sandbox_id,
                         "probe_index": probe_index,
-                        "probe_count": self._create_probe_stable_count,
+                        "probe_count": self._probe.stable_count,
                         "attempt_number": attempt_number,
                         "deadline_s": deadline_s,
                     },
@@ -663,7 +690,7 @@ class OpenSandboxProvider:
                     result = await asyncio.wait_for(
                         self._exec(
                             handle,
-                            self._create_probe_command,
+                            self._probe.command,
                             timeout_s=command_timeout_s,
                             user="root",
                         ),
@@ -683,49 +710,49 @@ class OpenSandboxProvider:
                         "operation": "create_probe",
                         "attempt_number": attempt_number,
                         "successful_probes": successful_probes,
-                        "required_probes": self._create_probe_stable_count,
+                        "required_probes": self._probe.stable_count,
                         "deadline_s": deadline_s,
                         "remaining_s": max(deadline - loop.time(), 0.0),
                         "error_type": type(e).__name__,
                         "error_message": str(e)[:500],
                     },
                 )
-                sleep_s = min(self._connect_after_create_poll_s, max(deadline - loop.time(), 0.0))
+                sleep_s = min(self._create.connect_poll_s, max(deadline - loop.time(), 0.0))
                 if sleep_s > 0:
                     await asyncio.sleep(sleep_s)
                 continue
 
             stdout = result.stdout or ""
-            expected = self._create_probe_expected_stdout
+            expected = self._probe.expected_stdout
             if result.return_code != 0 or (expected is not None and expected not in stdout):
                 last_exception = OpenSandboxCreateVerificationError(
                     "OpenSandbox sandbox create probe command returned an "
                     f"unexpected result; sandbox_id={handle.sandbox_id!r}, "
                     f"return_code={result.return_code}, expected_stdout={expected!r}, "
                     f"stdout={stdout[:200]!r}, stderr={(result.stderr or '')[:200]!r}, "
-                    f"probe={successful_probes + 1}/{self._create_probe_stable_count}"
+                    f"probe={successful_probes + 1}/{self._probe.stable_count}"
                 )
                 successful_probes = 0
-                sleep_s = min(self._connect_after_create_poll_s, max(deadline - loop.time(), 0.0))
+                sleep_s = min(self._create.connect_poll_s, max(deadline - loop.time(), 0.0))
                 if sleep_s > 0:
                     await asyncio.sleep(sleep_s)
                 continue
 
             successful_probes += 1
-            if successful_probes < self._create_probe_stable_count and self._create_probe_stable_delay_s:
-                await asyncio.sleep(self._create_probe_stable_delay_s)
+            if successful_probes < self._probe.stable_count and self._probe.stable_delay_s:
+                await asyncio.sleep(self._probe.stable_delay_s)
 
     async def _verify_created_handles(
         self,
         handles: list[SandboxHandle],
     ) -> None:
         """Verify a batch of created handles with bounded probe concurrency."""
-        if self._create_probe_command is None or not handles:
+        if self._probe.command is None or not handles:
             return
 
         handles_to_probe = handles
-        if self._create_probe_sample_count is not None and self._create_probe_sample_count < len(handles):
-            sample_count = self._create_probe_sample_count
+        if self._probe.sample_count is not None and self._probe.sample_count < len(handles):
+            sample_count = self._probe.sample_count
             if sample_count == 1:
                 sampled_indices = [0]
             else:
@@ -734,7 +761,7 @@ class OpenSandboxProvider:
                 ]
             handles_to_probe = [handles[index] for index in sampled_indices]
 
-        semaphore = asyncio.Semaphore(self._batch_create_concurrency)
+        semaphore = asyncio.Semaphore(self._pool.concurrency)
 
         async def _verify_one(handle: SandboxHandle) -> None:
             async with semaphore:
@@ -765,9 +792,9 @@ class OpenSandboxProvider:
         """Reconnect after SDK create so follow-up calls use a fresh SDK handle."""
         timeout_s = spec.ready_timeout_s
         if timeout_s is None:
-            timeout_s = self._create_timeout_s
+            timeout_s = self._create.timeout_s
         if timeout_s is None:
-            timeout_s = self._connect_after_create_attempt_timeout_s
+            timeout_s = self._create.connect_attempt_timeout_s
 
         Sandbox, _, _, _, _ = _require_opensandbox_sdk()
         loop = asyncio.get_running_loop()
@@ -783,7 +810,7 @@ class OpenSandboxProvider:
                 )
                 raise error from last_exception
 
-            attempt_timeout_s = min(self._connect_after_create_attempt_timeout_s, remaining_s)
+            attempt_timeout_s = min(self._create.connect_attempt_timeout_s, remaining_s)
             try:
                 sandbox = await asyncio.wait_for(
                     Sandbox.connect(
@@ -801,13 +828,13 @@ class OpenSandboxProvider:
                 last_exception = e
                 if not _is_retryable_create_error(e):
                     raise
-                sleep_s = min(self._connect_after_create_poll_s, max(deadline - loop.time(), 0.0))
+                sleep_s = min(self._create.connect_poll_s, max(deadline - loop.time(), 0.0))
                 if sleep_s > 0:
                     await asyncio.sleep(sleep_s)
 
     async def _create_once(self, spec: SandboxSpec) -> SandboxHandle:
         """Create a sandbox through ``opensandbox.Sandbox.create``."""
-        if spec.extensions.get("poolRef") and self._use_server_proxy is False:
+        if spec.extensions.get("poolRef") and self._connection.use_server_proxy is False:
             raise ValueError(
                 "OpenSandbox pooled creation requires "
                 "use_server_proxy=True so SDK calls are routed through the "
@@ -821,7 +848,7 @@ class OpenSandboxProvider:
             "metadata": spec.metadata,
             "resource": spec.resources,
             "extensions": spec.extensions,
-            "connection_config": self._exec_connection_config(request_timeout_s=self._create_request_timeout_s),
+            "connection_config": self._exec_connection_config(request_timeout_s=self._create.request_timeout_s),
         }
         if spec.image is not None:
             kwargs["image"] = spec.image
@@ -837,14 +864,14 @@ class OpenSandboxProvider:
             kwargs["platform"] = _to_platform_spec(spec.platform)
         if spec.volumes is not None:
             kwargs["volumes"] = _to_volumes(spec.volumes)
-        if self._sdk_skip_health_check:
+        if self._create.skip_health_check:
             kwargs["skip_health_check"] = True
         elif spec.skip_health_check is not None:
             kwargs["skip_health_check"] = spec.skip_health_check
 
-        timeout_s = self._create_timeout_s
-        if timeout_s is None and self._request_timeout_s is not None:
-            timeout_s = float(self._request_timeout_s)
+        timeout_s = self._create.timeout_s
+        if timeout_s is None and self._connection.request_timeout_s is not None:
+            timeout_s = float(self._connection.request_timeout_s)
 
         sandbox_id: str | None = None
         sandbox: Any | None = None
@@ -856,8 +883,8 @@ class OpenSandboxProvider:
                     "provider": self.name,
                     "image": spec.image,
                     "pool_ref": spec.extensions.get("poolRef"),
-                    "sdk_skip_health_check": self._sdk_skip_health_check,
-                    "exec_use_server_proxy": self._exec_use_server_proxy,
+                    "skip_health_check": self._create.skip_health_check,
+                    "exec_use_server_proxy": self._connection.exec_use_server_proxy,
                 },
             ):
                 if timeout_s is None:
@@ -885,7 +912,7 @@ class OpenSandboxProvider:
         )
         handle = created_handle
         try:
-            if self._sdk_skip_health_check:
+            if self._create.skip_health_check:
                 handle = await self._connect_after_create(created_handle, spec)
             await self._verify_created_handle(handle)
         except Exception:
@@ -901,10 +928,10 @@ class OpenSandboxProvider:
     ) -> SandboxHandle:
         retry_policy = AsyncRetrying(
             retry=retry_if_exception(_is_retryable_create_error),
-            stop=stop_after_attempt(self._batch_create_retries + 1),
+            stop=stop_after_attempt(self._create.retries + 1),
             wait=wait_random_exponential(
-                multiplier=self._batch_create_retry_delay_s,
-                max=self._batch_create_retry_max_delay_s,
+                multiplier=self._create.retry_delay_s,
+                max=self._create.retry_max_delay_s,
             ),
             before_sleep=_log_create_retry,
             reraise=True,
@@ -939,7 +966,7 @@ class OpenSandboxProvider:
         *,
         delete: bool,
     ) -> list[Any]:
-        semaphore = asyncio.Semaphore(self._batch_create_concurrency)
+        semaphore = asyncio.Semaphore(self._pool.concurrency)
 
         async def _close_one(handle: SandboxHandle) -> Any:
             async with semaphore:
@@ -1009,7 +1036,7 @@ class OpenSandboxProvider:
                 )
 
             now = loop.time()
-            progress_timeout_s = self._batch_create_progress_timeout_s
+            progress_timeout_s = self._pool.progress_timeout_s
             if progress_timeout_s is not None and now - last_progress_at >= progress_timeout_s:
                 if allow_partial and idle_count > 0:
                     return idle_count
@@ -1028,11 +1055,11 @@ class OpenSandboxProvider:
                     f"snapshot={last_snapshot!r}"
                 )
                 raise error
-            await asyncio.sleep(self._sdk_pool_acquire_poll_interval_s)
+            await asyncio.sleep(self._pool.acquire_poll_interval_s)
 
     async def _direct_exec_handle_for_acquired_sandbox(self, sandbox: Any, spec: SandboxSpec) -> SandboxHandle:
         handle = SandboxHandle(sandbox_id=str(sandbox.id), provider_name=self.name, raw=sandbox)
-        if self._exec_use_server_proxy is None and not self._sdk_skip_health_check:
+        if self._connection.exec_use_server_proxy is None and not self._create.skip_health_check:
             return handle
         return await self._connect_after_create(handle, spec)
 
@@ -1044,13 +1071,13 @@ class OpenSandboxProvider:
         allow_partial: bool,
     ) -> list[SandboxHandle]:
         AcquirePolicy, InMemoryAsyncPoolStateStore, _, SandboxPoolAsync = _require_opensandbox_sdk_pool()
-        ready_timeout_s = float(spec.ready_timeout_s or self._create_timeout_s or self._request_timeout_s or 300.0)
-        idle_timeout_s = float(self._sdk_pool_idle_timeout_s or spec.timeout_s or max(ready_timeout_s * 2.0, 3600.0))
-        primary_lock_ttl_s = float(self._sdk_pool_primary_lock_ttl_s or max(ready_timeout_s + 60.0, 60.0))
+        ready_timeout_s = float(spec.ready_timeout_s or self._create.timeout_s or self._connection.request_timeout_s or 300.0)
+        idle_timeout_s = float(self._pool.idle_timeout_s or spec.timeout_s or max(ready_timeout_s * 2.0, 3600.0))
+        primary_lock_ttl_s = float(self._pool.primary_lock_ttl_s or max(ready_timeout_s + 60.0, 60.0))
         pool_name = f"nemo-gym-{uuid4().hex[:12]}"
 
         async def _warmup_preparer(sandbox: Any) -> None:
-            if self._create_probe_command is None:
+            if self._probe.command is None:
                 return
             handle = await self._direct_exec_handle_for_acquired_sandbox(sandbox, spec)
             try:
@@ -1062,7 +1089,7 @@ class OpenSandboxProvider:
                             handle.raw.close(),
                             operation="close warmup direct handle",
                             sandbox_id=handle.sandbox_id,
-                            timeout_s=self._close_timeout_s,
+                            timeout_s=self._operations.close_timeout_s,
                         )
                     except Exception as e:
                         LOGGER.warning(
@@ -1074,17 +1101,17 @@ class OpenSandboxProvider:
         pool = SandboxPoolAsync(
             pool_name=pool_name,
             max_idle=count,
-            warmup_concurrency=self._batch_create_concurrency,
+            warmup_concurrency=self._pool.concurrency,
             state_store=InMemoryAsyncPoolStateStore(),
-            connection_config=self._connection_config(request_timeout_s=self._create_request_timeout_s),
+            connection_config=self._connection_config(request_timeout_s=self._create.request_timeout_s),
             creation_spec=self._to_pool_creation_spec(spec),
-            reconcile_interval=timedelta(seconds=self._sdk_pool_reconcile_interval_s),
+            reconcile_interval=timedelta(seconds=self._pool.reconcile_interval_s),
             primary_lock_ttl=timedelta(seconds=primary_lock_ttl_s),
             acquire_ready_timeout=timedelta(seconds=ready_timeout_s),
             warmup_ready_timeout=timedelta(seconds=ready_timeout_s),
             warmup_sandbox_preparer=_warmup_preparer,
-            acquire_skip_health_check=bool(self._sdk_skip_health_check or spec.skip_health_check),
-            warmup_skip_health_check=bool(self._sdk_skip_health_check or spec.skip_health_check),
+            acquire_skip_health_check=bool(self._create.skip_health_check or spec.skip_health_check),
+            warmup_skip_health_check=bool(self._create.skip_health_check or spec.skip_health_check),
             idle_timeout=timedelta(seconds=idle_timeout_s),
         )
         handles: list[SandboxHandle] = []
@@ -1096,7 +1123,7 @@ class OpenSandboxProvider:
                 "count": count,
                 "pool_name": pool_name,
                 "pool_ref": spec.extensions.get("poolRef"),
-                "exec_use_server_proxy": self._exec_use_server_proxy,
+                "exec_use_server_proxy": self._connection.exec_use_server_proxy,
             },
         ):
             try:
@@ -1205,13 +1232,13 @@ class OpenSandboxProvider:
         kwargs: dict[str, Any] = {
             "connection_config": self._exec_connection_config(),
         }
-        if self._connect_timeout_s is not None:
-            kwargs["connect_timeout"] = timedelta(seconds=self._connect_timeout_s)
+        if self._connection.connect_timeout_s is not None:
+            kwargs["connect_timeout"] = timedelta(seconds=self._connection.connect_timeout_s)
         sandbox = await Sandbox.connect(sandbox_id, **kwargs)
         return SandboxHandle(sandbox_id=str(sandbox.id), provider_name=self.name, raw=sandbox)
 
     def _command_retry_count(self) -> int:
-        return self._operation_retries if self._command_retries is None else self._command_retries
+        return self._operations.retries if self._operations.command_retries is None else self._operations.command_retries
 
     async def _exec(
         self,
@@ -1244,9 +1271,9 @@ class OpenSandboxProvider:
         sdk_timeout_s = (
             float(timeout_s) + 60.0
             if timeout_s is not None
-            else (float(self._request_timeout_s) if self._request_timeout_s is not None else None)
+            else (float(self._connection.request_timeout_s) if self._connection.request_timeout_s is not None else None)
         )
-        operation_retries = self._command_retry_count() if retries is None else retries
+        effective_retries = self._command_retry_count() if retries is None else retries
         async with observability_span(
             "sandbox.exec",
             phase="execution",
@@ -1254,7 +1281,7 @@ class OpenSandboxProvider:
                 "provider": self.name,
                 "sandbox_id": handle.sandbox_id,
                 "sdk_timeout_s": sdk_timeout_s,
-                "operation_retries": operation_retries,
+                "retries": effective_retries,
                 "command": command,
             },
         ):
@@ -1263,7 +1290,7 @@ class OpenSandboxProvider:
                 operation="command run",
                 sandbox_id=handle.sandbox_id,
                 timeout_s=sdk_timeout_s,
-                retries=operation_retries,
+                retries=effective_retries,
             )
         stdout = "\n".join(msg.text for msg in execution.logs.stdout) or None
         stderr_parts = [msg.text for msg in execution.logs.stderr]
@@ -1316,7 +1343,7 @@ class OpenSandboxProvider:
                 lambda: handle.raw.files.write_file(target_path, data),
                 operation=f"write_file({target_path})",
                 sandbox_id=handle.sandbox_id,
-                timeout_s=float(self._request_timeout_s) if self._request_timeout_s is not None else None,
+                timeout_s=float(self._connection.request_timeout_s) if self._connection.request_timeout_s is not None else None,
             )
 
     async def read_file(self, handle: SandboxHandle, source_path: str) -> bytes:
@@ -1334,7 +1361,7 @@ class OpenSandboxProvider:
                 lambda: handle.raw.files.read_bytes(source_path),
                 operation=f"read_file({source_path})",
                 sandbox_id=handle.sandbox_id,
-                timeout_s=float(self._request_timeout_s) if self._request_timeout_s is not None else None,
+                timeout_s=float(self._connection.request_timeout_s) if self._connection.request_timeout_s is not None else None,
             )
 
     async def upload_file(self, handle: SandboxHandle, source_path: Path, target_path: str) -> None:
@@ -1364,7 +1391,7 @@ class OpenSandboxProvider:
                         lambda: handle.raw.kill(),
                         operation="kill",
                         sandbox_id=handle.sandbox_id,
-                        timeout_s=self._close_timeout_s,
+                        timeout_s=self._operations.close_timeout_s,
                     )
                 except Exception as e:
                     if not _is_missing_sandbox_delete_error(e):
@@ -1381,7 +1408,7 @@ class OpenSandboxProvider:
                     handle.raw.close(),
                     operation="close",
                     sandbox_id=handle.sandbox_id,
-                    timeout_s=self._close_timeout_s,
+                    timeout_s=self._operations.close_timeout_s,
                 )
             except Exception as e:
                 close_error = e
