@@ -136,10 +136,8 @@ ng_collect_rollouts \
 
 - Keys are matched against each row's `agent_ref.name`.
 - The reserved key `_default` is the fallback for rows whose agent isn't explicitly listed.
-- Without `_default`, an unlisted row's agent raises a single consolidated error naming every missing agent — so you fix all typos in one pass.
+- Without `_default`, an unlisted row's agent raises a single consolidated error naming every missing agent.
 - Dict keys that never appear in any input row emit a `UserWarning` (also catches typos).
-
-This is the natural form for jobs that mix, e.g., `simple_agent` at pass@32 alongside `swe_agent` at pass@1.
 
 ## Rollout Generation Parameters
 
