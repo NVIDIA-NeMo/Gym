@@ -5,11 +5,11 @@ position: 1
 ---
 import { NavButton } from "../../../../../components/NavButton";
 
-Generate synthetic task data (user queries) for the [Workplace Assistant](/latest/environment-tutorials/real-world-environment) environment using [NeMo Data Designer](https://github.com/NVIDIA-NeMo/DataDesigner). 
+Generate synthetic task data (user queries) for the [Workplace Assistant](/environment-tutorials/real-world-environment) environment using [NeMo Data Designer](https://github.com/NVIDIA-NeMo/DataDesigner). 
 
 This pipeline focuses on generating tasks for use with the environment. It also simulates agent trajectories, but these are used for quality filtering and validation — the environment itself produces the actual model responses during rollout collection. The Workplace Assistant uses 27 tools across 6 databases, and NeMo Data Designer can produce realistic multi-step user queries at scale.
 
-<NavButton href="/latest/environment-tutorials/real-world-environment" label="Back to Workplace Assistant" direction="back" />
+<NavButton href="/environment-tutorials/real-world-environment" label="Back to Workplace Assistant" direction="back" />
 
 ---
 
@@ -35,6 +35,6 @@ The tutorial is provided as a Jupyter notebook. See the [notebook README](https:
 
 ## What's Next?
 
-After generating your tasks, let's perform [GRPO training](/latest/training-tutorials/nemo-rl-grpo) with NeMo RL by having an agent attempt the tasks in the Workplace Assistant environment.
+After generating your tasks, let's perform [GRPO training](/training-tutorials/nemo-rl-grpo) with NeMo RL by having an agent attempt the tasks in the Workplace Assistant environment.
 
-<NavButton href="/latest/environment-tutorials/real-world-environment/resources-server-implementation" label="Resources Server Implementation" direction="next" />
+<NavButton href="/environment-tutorials/real-world-environment/resources-server-implementation" label="Resources Server Implementation" direction="next" />

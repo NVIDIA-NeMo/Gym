@@ -25,5 +25,5 @@ ng_collect_rollouts \
     +agent_name=answer_judge_math_proof_judgement_simple_agent \
     +input_jsonl_fpath=benchmarks/answer-judge/data/answer-judge_benchmark.jsonl \
     +output_jsonl_fpath=results/answer-judge/rollouts.jsonl \
-    +prompt_config=benchmarks/prompts/math_answer_judge.yaml
+    +prompt_config=benchmarks/prompts/judge/math.yaml
 ```
