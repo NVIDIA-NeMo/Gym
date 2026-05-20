@@ -220,6 +220,18 @@ docs = [
 ]
 
 [project.optional-dependencies]
+sandbox = [
+    # Tenacity: Retry helpers used by sandbox providers.
+    # Updated: Sat May 09, 2026 with tenacity==9.1.4
+    # License: Apache 2.0 https://github.com/jd/tenacity/blob/master/LICENSE
+    "tenacity>=9.1.4",
+
+    # OpenSandbox SDK: used by the OpenSandbox sandbox provider for create/exec/delete and SDK pool creation.
+    # Updated: Sat May 16, 2026 with opensandbox>=0.1.9
+    # License: Apache 2.0
+    "opensandbox>=0.1.9",
+]
+
 # We include dev dependencies as an extra since technically each server module is a consumer (which means we cannot use dependency groups, which are intended to be within a project).
 dev = [
     # Pre-commit: Used for pre-commit hooks.
@@ -395,7 +407,18 @@ ng_reinstall = "nemo_gym.cli:reinstall"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["benchmarks", "resources_servers", "responses_api_agents", "responses_api_models", "nemo_gym"]
+include = [
+    "benchmarks",
+    "benchmarks.*",
+    "resources_servers",
+    "resources_servers.*",
+    "responses_api_agents",
+    "responses_api_agents.*",
+    "responses_api_models",
+    "responses_api_models.*",
+    "nemo_gym",
+    "nemo_gym.*",
+]
 
 ################################################
 # Testing
