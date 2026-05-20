@@ -15,125 +15,120 @@ description: >
 
 # Add Benchmark to NeMo-Gym
 
-## Determine Integration Type
 
-Before starting, determine which type of external benchmark you're adding.
-Does the upstream benchmark expose its agent/harness loop or is the full harness and model
-a sandboxed process that runs on its own? 
+## Ask a few simple questions for documentation and code structure:
 
-Either way, you will integrate at the agent server level and not in resources server.
+- Environment name
+- Source repo/location of benchmark or environment
+- Paper/reference (if applicable)
+- License (I don't know is fine if not known)
+- Brief description: What does this environment evaluate? (e.g. web navigation, code generation, tool use)
+
+If any of the questions the user is not sure about then you can skip over it. 
+Try to figure out any information you're sure of from looking at the benchmark/environment they supply, then
+you can fill in information yourself. 
+
+## Information Gathering and Implementation Planning
+
+To help figure out what kind of environment/benchmark this is it can be helpful to ask the user questions 
+to learn how the agent interacts with the environment and the other dependencies for the environment. 
+
+You can refer to "Background Information about Benchmarks" in this file for additional context.
+
+Use the information already supplied by the user like paper, reference, source repo, etc, to answer the
+below as much as possible. After you have filled in all the information you can ask the user too and use
+these two sources of information to find discrepancies to clarify the environment/benchmark. 
+
+Ask the user to define how the agent interacts with the environment - here are
+some common things to think about and challenge the user on. 
+- Does the agent receive a natural language prompt and return an answer?
+- Does the model use tools (function calling, code execution, web browsing)?
+- Is it single-turn or multi-turn (does the model get feedback and retry)?
+
+Then, ask the user about how verification works. 
+What's the reward signal? Is it binary pass/fail, a score, or multiple
+metrics? How is correctness determined? (exact match, test cases, judge model, human eval)?
+
+Ask about external dependencies.
+Does this environment require external tools, specific runtimes, or sandboxes (e.g. compilers, browsers, Docker, VMs)?
+If so, list them and note whether they can be auto-installed on server startup. 
+
+Ask about data.
+- Dataset source (e.g. HuggingFace, custom):
+- Approximate size (number of tasks):
+- Splits available (train/validation/test):
+If they didn't already provide paper/reference/source repo then ask for this.
+We're looking for published or known results to use as a reference.
+Link to leaderboards, papers, or repos with reported numbers.
+
+Lastly, note anything an engineer should know about running this environment:
+- Does it need specific hardware (GPUs, large memory)?
+- Does it require network access, Docker, or a VM?
+- Are there known limitations on parallelism or throughput?
+- Any OS or platform restrictions?
+
+## Build
+
+Use the information from information gathering from both the user
+and the benchmark/environment source to properly design implementation
+according to the guidelines below: 
+
+No matter what kind of external benchmark/environment you are integrating,
+you will integrate at the agent server level and not in resources server.
 In short, you will wrap the benchmark in the agent server's `/run` endpoint. 
-
-These are the two types of external benchmarks to integrate: 
-**Model benchmark** - wrapping a 3rd-party library that has its own orchestration (tasks, verification) and its own agent loop. The policy model is what is flexible. 
 
 - Integrate at the agent server level (not resources server) 
 - Agent's `/run` endpoint wraps the external library 
 - Pre-process from Gym schema to library input, post-process back to `BaseVerifyResponse`
 - Reproduce publicly reported numbers with the original repo first, then reproduce again after Gym integration
 - Add the dependency in `requirements.txt`
-Reference: `responses_api_agents/tau2`
-
-**Model and Agent benchmark** — wrapping a 3rd-party library that has its own orchestration (tasks and verification) but the agent and model are flexible:
-- Integrate at the agent server level (not resources server)
-- Agent's `/run` endpoint wraps the external library
-- Pre-process from Gym schema to library input, post-process back to `BaseVerifyResponse`
-- Reproduce publicly reported numbers with the original repo first, then reproduce again after Gym integration
-- Add the dependency in `requirements.txt`
-Reference: TODO - do we have a good example of this? 
 
 ## Workflow
+TODO: worried this is overfit to tau2. 
 
-### Step 1: Scaffold the server
+### Step 1: Scaffold the agent server
+TODO: it'd be great if we had a cli command to scaffold - do we have this? 
+Follow the structure of `responses_api_agents/tau2` to start.
 
-Run `ng_init_resources_server` to generate the directory structure:
+  Required structure:
 
-```bash
-ng_init_resources_server +entrypoint=resources_servers/my_benchmark
-```
+  responses_api_agents/<name>/
+  ├── app.py
+  ├── configs/<name>_agent.yaml
+  ├── data/example.jsonl          # 5 entries, committed to git
+  ├── tests/__init__.py
+  ├── tests/test_app.py
+  ├── requirements.txt
+  └── README.md
 
-This creates:
-```
-resources_servers/my_benchmark/
-├── app.py              # Server template
-├── configs/my_benchmark.yaml
-├── data/.gitignore
-├── tests/test_app.py
-├── requirements.txt
-└── README.md
-```
+requirements.txt content:
 
-Then create the agent server manually under `responses_api_agents/my_agent/` with the same structure.
+  -e nemo-gym[dev] @ ../../
+  <upstream-library>==<pin>     # or: git+https://... @ <sha>
 
-### Step 2: Prepare data
+Per the docs, this is the only place upstream dependencies are declared — do not vendor them into nemo_gym/
 
-Convert your source dataset to Gym JSONL format. Each line must have `responses_create_params.input` (OpenAI message format). Task-specific verification data goes in `verifier_metadata`.
+### Step 2: Define request/response schemas
+Subclass BaseRunRequest with any extra fields your library's task runner needs (task spec, seed, run config, etc.). Subclass BaseVerifyResponse for the agent's reply — include
+both reward and any per-task metrics you want logged downstream (duration, step counts, token usage, finish reasons).
 
-```json
-{
-  "responses_create_params": {
-    "input": [
-      {"role": "system", "content": "System prompt"},
-      {"role": "user", "content": "Problem statement"}
-    ]
-  },
-  "verifier_metadata": {
-    "test_cases": [{"input": "...", "expected_output": "..."}],
-    "task_id": "unique_id"
-  }
-}
-```
+Reference: `responses_api_agents/tau2/app.py`
 
-**Data conversion**: Write conversion scripts in the **source repo** (e.g. your dataset repository), not in NeMo-Gym. Prompt files also belong in the source repo. Exception: when there is no external source repo. See `references/patterns.md` § "Data Conversion Script Pattern".
+### Step 3: Implement `/run` - wrap the upstream library 
+Subclass SimpleResponsesAPIAgent. Per the docs, leave responses() as raise NotImplementedError — external integrations only need /run.
 
-**`example.jsonl`**: Generate 5 entries for smoke testing. This file is committed directly to git in `data/example.jsonl`.
+In run():
 
-**`train`/`validation` datasets**: Upload to the GitLab dataset registry — these must NOT be committed to git.
+1. Preprocess — translate BaseRunRequest + responses_create_params into whatever shape your library's entrypoint expects. (See responses_api_agents/tau2/app.py:126-152.)
+2. Point the upstream LLM client at Gym model servers. For each model role the library needs, expose a ModelServerRef field in the agent config (model_server for policy, plus
+extras like user_model_server for simulators). At runtime, set the library's api_base = f"{get_server_url(self.config.<ref>.name)}/v1" and a dummy API key. Tau2 does this for
+both policy and user-sim models at app.py:131-148.
+3. Await the library's task entrypoint. Example: result = await run_single_task(**body_dict) (app.py:152).
+4. Postprocess the trajectory for RL. Convert the library's message list → OpenAI responses items via VLLMConverter.chat_completions_messages_to_responses_items, then split with
+  split_responses_input_output_items. This is what makes the trajectory consumable by Gym's training loop. (app.py:154-169.)
+5. Return your *VerifyResponse with reward set from the library's result object plus any metrics you computed.
 
-```bash 
-ng_upload_dataset_to_gitlab \
-    +dataset_name=my_benchmark \
-    +version=0.0.1 \
-    +input_jsonl_fpath=resources_servers/my_benchmark/data/my_dataset.jsonl
-```
-
-Requires MLflow credentials in `env.yaml` (or passed via CLI):
-```yaml
-mlflow_tracking_uri: <your-gitlab-mlflow-tracking-uri>
-mlflow_tracking_token: <your-gitlab-api-token>
-```
-
-**`data/.gitignore`**: The scaffold generates default patterns (`*train.jsonl`, `*validation.jsonl`, etc.). If your filename doesn't match (e.g. `my_eval.jsonl`), add a custom pattern (e.g. `*eval.jsonl`). If data was previously tracked, run `git rm --cached <file>`.
-
-**Validate** your data:
-```bash
-# Validate example data (for PR submission)
-ng_prepare_data "+config_paths=[resources_servers/my_benchmark/configs/my_benchmark.yaml]" \
-    +output_dirpath=/tmp/prepare +mode=example_validation
-
-# Download and prepare train/validation from GitLab
-ng_prepare_data "+config_paths=[resources_servers/my_benchmark/configs/my_benchmark.yaml]" \
-    +output_dirpath=data/my_benchmark +mode=train_preparation +should_download=true +data_source=gitlab
-```
-
-### Step 3: Implement verify()
-
-Edit `app.py`. The `verify()` method receives model output + `verifier_metadata`, returns reward.
-
-For code execution benchmarks, see `references/patterns.md` § "Subprocess Execution with Ray" and "Resources Server Pattern".
-
-Critical rules:
-- Return `reward` as 0.0 or 1.0 (binary)
-- Handle empty/missing model output gracefully — return 0.0, don't crash
-- Must handle 4k-65k concurrent requests without crashing
-- Use `asyncio.Semaphore` for subprocess concurrency control
-- For Ray remote tasks: `result = await future` (Ray futures are directly awaitable). Never call `ray.get()` in async context.
-- Decode subprocess output with `errors="replace"`
-- Strip `<think>`/`<thinking>` blocks before parsing model output (thinking models emit these)
-- Tests should `pytest.mark.skipif` when external tools aren't installed
-- If the benchmark auto-installs its tool (see Step 3b), add a `pytest_configure` hook in `conftest.py` to run the install before test collection — `skipif` evaluates at import time, before fixtures run
-
-### Step 3b: Auto-install external tools (if applicable)
+### Step 4: Auto-install external tools (if applicable)
 
 If the benchmark requires an external tool (compiler, runtime, etc.), auto-install it on server startup so users don't need manual setup. See `references/patterns.md` § "External Tool Auto-Install Pattern".
 
@@ -143,36 +138,19 @@ Key points:
 - Build scripts should be idempotent and install into a local gitignored prefix
 - Add a `pytest_configure` hook in `tests/conftest.py` that calls `ensure_<tool>()` before collection
 
-### Step 4: Wire YAML config
+### Step 5: Write YAML configs
 
-Edit `configs/my_benchmark.yaml`. Define the resources server instance and agent pairing(s). See `references/patterns.md` § "YAML Config Pattern".
+1. Agent config — `responses_api_agents/<name>/configs/<name>_agent.yaml`
 
-Key points:
-- `verified: false` is auto-added by pre-commit hook (set to `true` after baselining)
-- `license` is required for `train` and `validation` datasets
-- Agent references resources server and model server by instance name
+Declares the agent server: entrypoint, every ModelServerRef the library needs, library-specific settings (max steps, concurrency knobs, debug flags), and an
+example dataset. Reference: `responses_api_agents/tau2/configs/tau2_agent.yaml`.
 
-For multi-turn benchmarks, either use `proof_refinement_agent` or create a custom agent. See `references/patterns.md` § "Agent Patterns".
+2. Benchmark config — `benchmarks/<name>/config.yaml`
 
-For `train`/`validation` datasets, add `gitlab_identifier` alongside `jsonl_fpath`:
-```yaml
-datasets:
-- name: my_dataset
-  type: train
-  jsonl_fpath: resources_servers/my_benchmark/data/my_dataset.jsonl
-  gitlab_identifier:
-    dataset_name: my_benchmark
-    version: 0.0.1
-    artifact_fpath: my_dataset.jsonl
-  license: MIT
-- name: example
-  type: example
-  jsonl_fpath: resources_servers/my_benchmark/data/example.jsonl
-```
+Chains to the agent config via config_paths and uses _inherit_from to override per-variant knobs (which model serves the agent, which model serves the simulator, num_repeats,
+dataset path). This is what isolates one benchmark variant from another so the agent config stays generic. Reference: benchmarks/tau2/config.yaml.
 
-Both fields must coexist: `jsonl_fpath` is the local download destination, `gitlab_identifier` tells the system where to fetch from. `example` datasets don't need `gitlab_identifier` — they're committed to git directly.
-
-### Step 5: Test
+### Step 6: Test
 
 ```bash
 # Run server tests (creates isolated .venv, slow on first run)
@@ -267,3 +245,25 @@ git checkout -- resources_servers/other_server/
 ## Reference
 
 For detailed code patterns, schemas, and examples: see [references/patterns.md](references/patterns.md).
+
+## Background Information about Benchmarks 
+TODO: we could tell the agent to go read fern/versions/latest/pages/about/architecture.mdx 
+to learn about architecture of environments. 
+Benchmarks are fundamentally synonymous with environments, so understanding how
+environments work will help you understand how benchmarks also work. 
+
+There are generally 3 kinds of external benchmarks/environment structure.
+This is based off the information comes "with" the benchmark that's going to be integrated:
+
+1) Benchmarks/environments that define tasks and verifier. These notably don't have an agent harness. 
+A good example of this is MMLU. Users will define the model that they want to improve on this benchmark. 
+TODO: do these have action and state? I don't think so probably? 
+
+2) Benchmarks/environments that define tasks, the agent/agent harness, and the state, action, and verifier. 
+A good example of this kind of environment is tau2. There is a specific tau2 agent harness, which is used
+for doing tool calling for this benchmark. Users will define the model that they want to improve on this benchmark. 
+
+3) Benchmarks/environments that define tasks, the verifier, the state, and actions. 
+A good example of this kind of environment is SWEBench. Users can define the model 
+and/or agent that they want to improve on this benchmark. 
+TODO: include state and actions? 
