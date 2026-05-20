@@ -15,7 +15,6 @@ description: >
 
 # Add Benchmark to NeMo-Gym
 
-
 ## Ask a few simple questions for documentation and code structure:
 
 - Environment name
