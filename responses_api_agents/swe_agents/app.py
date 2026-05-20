@@ -363,6 +363,7 @@ SWEBENCH_COMMIT={swebench_commit} \\
     def get_run_command(self) -> ExecuteContainerCommandArgs:
         swebench_cmd = (
             f'date +"%s.%N" > {self.config.final_eval_apptainer_spinup_timestamp_mounted_fpath} && '
+            f"realpath {self.config.swebench_setup_dir}/SWE-bench/venv/bin/python && "
             f"{self._get_command_sleep_until_predictions_file()} && "
             # Use pre-built SWE-bench
             "cd /swebench_setup/SWE-bench && "
