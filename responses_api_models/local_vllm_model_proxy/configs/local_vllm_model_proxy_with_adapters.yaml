@@ -1,0 +1,34 @@
+# Example: local_vllm_model_proxy with adapter middleware enabled.
+#
+# Demonstrates request-logging + token-accounting + reasoning consolidation
+# observation hooks. The model server keeps its existing forwarding logic;
+# the middleware only observes and mutates request/response payloads.
+#
+# Defaults are off — omitting the `adapters` block (or setting it to null/[])
+# leaves the model server's behavior identical to local_vllm_model_proxy.yaml.
+
+policy_model_proxy:
+  responses_api_models:
+    local_vllm_model_proxy:
+      entrypoint: app.py
+
+      # This class accepts normal VLLMModel config parameters
+      return_token_id_information: false
+      uses_reasoning_parser: true
+
+      model_server:
+        type: responses_api_models
+        name: ???
+
+      # Adapter middleware chain. Interceptors run in order on REQUEST and in
+      # reverse on RESPONSE. The `endpoint` interceptor is intentionally
+      # excluded here — the model server already performs upstream forwarding,
+      # so the middleware only adds observe / mutate behavior around it.
+      adapters:
+        - name: logging
+          config:
+            log_failed_requests: true
+        - name: log_tokens
+          config: {}
+        - name: reasoning
+          config: {}

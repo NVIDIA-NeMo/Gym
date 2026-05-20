@@ -1,0 +1,72 @@
+{
+  "expected_response": {
+    "body": {
+      "choices": [
+        {
+          "finish_reason": "stop",
+          "index": 0,
+          "message": {
+            "content": "fixture-canned",
+            "role": "assistant"
+          }
+        }
+      ],
+      "id": "chatcmpl-fixture",
+      "object": "chat.completion"
+    },
+    "headers": {
+      "content-type": "application/json"
+    },
+    "status_code": 200
+  },
+  "interceptor_specs": [
+    {
+      "config": {
+        "params": [
+          "temperature",
+          "top_p"
+        ]
+      },
+      "name": "drop_params"
+    }
+  ],
+  "request": {
+    "body": {
+      "max_tokens": 16,
+      "messages": [
+        {
+          "content": "hi",
+          "role": "user"
+        }
+      ],
+      "model": "m",
+      "temperature": 0.7,
+      "top_p": 0.95
+    },
+    "headers": {
+      "content-type": "application/json"
+    },
+    "path": "/v1/chat/completions"
+  },
+  "scenario": "drop_params drops temperature and top_p",
+  "upstream_response": {
+    "body": {
+      "choices": [
+        {
+          "finish_reason": "stop",
+          "index": 0,
+          "message": {
+            "content": "fixture-canned",
+            "role": "assistant"
+          }
+        }
+      ],
+      "id": "chatcmpl-fixture",
+      "object": "chat.completion"
+    },
+    "headers": {
+      "content-type": "application/json"
+    },
+    "status_code": 200
+  }
+}

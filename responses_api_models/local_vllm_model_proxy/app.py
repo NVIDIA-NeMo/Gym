@@ -17,11 +17,12 @@ This responses_api_models server is only used to proxy to an existing LocalVLLMM
 """
 
 from time import sleep
-from typing import List, Union
+from typing import Any, Dict, List, Optional, Union
 
 import requests
 from pydantic import Field
 
+from nemo_gym.adapters import install_middleware
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.global_config import get_first_server_config_dict
 from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
@@ -35,6 +36,15 @@ class LocalVLLMModelProxyServerConfig(VLLMModelConfig):
     model: str = "dummy"
 
     model_server: ModelServerRef
+
+    adapters: Optional[List[Dict[str, Any]]] = Field(
+        default=None,
+        description=(
+            "Optional adapter middleware chain. Each entry is "
+            "{'name': '<interceptor>', 'config': {...}}. None disables "
+            "the middleware entirely (default behavior unchanged)."
+        ),
+    )
 
 
 class LocalVLLMModelProxyServer(VLLMModel):
@@ -67,7 +77,14 @@ class LocalVLLMModelProxyServer(VLLMModel):
         # Reset clients after base_url config
         self._post_init()
 
-        return super().setup_webserver()
+        app = super().setup_webserver()
+
+        # Phase-3 adapter middleware: defaults off. When `adapters` is None or
+        # an empty list, `install_middleware` is a no-op and the server behaves
+        # exactly as it did before this hook was added.
+        install_middleware(app, self.config.adapters)
+
+        return app
 
 
 if __name__ == "__main__":

@@ -1,0 +1,72 @@
+{
+  "expected_response": {
+    "body": {
+      "choices": [
+        {
+          "finish_reason": "stop",
+          "index": 0,
+          "message": {
+            "content": "fixture-canned",
+            "role": "assistant"
+          }
+        }
+      ],
+      "id": "chatcmpl-fixture",
+      "object": "chat.completion"
+    },
+    "headers": {
+      "content-type": "application/json"
+    },
+    "status_code": 200
+  },
+  "interceptor_specs": [
+    {
+      "config": {},
+      "name": "consolidate_system"
+    }
+  ],
+  "request": {
+    "body": {
+      "messages": [
+        {
+          "content": "q1",
+          "role": "user"
+        },
+        {
+          "content": "A",
+          "role": "system"
+        },
+        {
+          "content": "B",
+          "role": "system"
+        }
+      ],
+      "model": "m"
+    },
+    "headers": {
+      "content-type": "application/json"
+    },
+    "path": "/v1/chat/completions"
+  },
+  "scenario": "consolidate_system moves system to front and merges",
+  "upstream_response": {
+    "body": {
+      "choices": [
+        {
+          "finish_reason": "stop",
+          "index": 0,
+          "message": {
+            "content": "fixture-canned",
+            "role": "assistant"
+          }
+        }
+      ],
+      "id": "chatcmpl-fixture",
+      "object": "chat.completion"
+    },
+    "headers": {
+      "content-type": "application/json"
+    },
+    "status_code": 200
+  }
+}

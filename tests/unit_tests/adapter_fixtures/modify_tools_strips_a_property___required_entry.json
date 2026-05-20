@@ -1,0 +1,86 @@
+{
+  "expected_response": {
+    "body": {
+      "choices": [
+        {
+          "finish_reason": "stop",
+          "index": 0,
+          "message": {
+            "content": "fixture-canned",
+            "role": "assistant"
+          }
+        }
+      ],
+      "id": "chatcmpl-fixture",
+      "object": "chat.completion"
+    },
+    "headers": {
+      "content-type": "application/json"
+    },
+    "status_code": 200
+  },
+  "interceptor_specs": [
+    {
+      "config": {
+        "strip_properties": [
+          "debug_flag"
+        ]
+      },
+      "name": "modify_tools"
+    }
+  ],
+  "request": {
+    "body": {
+      "messages": [],
+      "model": "m",
+      "tools": [
+        {
+          "function": {
+            "name": "f",
+            "parameters": {
+              "properties": {
+                "debug_flag": {
+                  "type": "boolean"
+                },
+                "value": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "debug_flag",
+                "value"
+              ],
+              "type": "object"
+            }
+          },
+          "type": "function"
+        }
+      ]
+    },
+    "headers": {
+      "content-type": "application/json"
+    },
+    "path": "/v1/chat/completions"
+  },
+  "scenario": "modify_tools strips a property + required entry",
+  "upstream_response": {
+    "body": {
+      "choices": [
+        {
+          "finish_reason": "stop",
+          "index": 0,
+          "message": {
+            "content": "fixture-canned",
+            "role": "assistant"
+          }
+        }
+      ],
+      "id": "chatcmpl-fixture",
+      "object": "chat.completion"
+    },
+    "headers": {
+      "content-type": "application/json"
+    },
+    "status_code": 200
+  }
+}
