@@ -46,7 +46,7 @@ ng_collect_rollouts \
     +agent_name=aime25-x_math_with_judge_simple_agent \
     +input_jsonl_fpath=benchmarks/aime25-x/data/aime25-x_benchmark.jsonl \
     +output_jsonl_fpath=results/aime25-x/rollouts.jsonl \
-    +prompt_config=benchmarks/prompts/generic_default.yaml \
+    +prompt_config=benchmarks/prompts/generic/default.yaml \
     +num_repeats=32 +num_repeats_add_seed=true \
     "+responses_create_params={temperature: 1.0, top_p: 0.95, max_output_tokens: 65536}"
 ```

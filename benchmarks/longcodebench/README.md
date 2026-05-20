@@ -8,7 +8,7 @@ letter; the prompt postfix instructs the model to emit `Answer: \boxed{X}`.
 This benchmark reuses the existing `mcqa` resource server with
 `grading_mode=strict_single_letter_boxed`. Each row's `question` field carries
 the long code prompt plus the postfix; the shared
-`benchmarks/prompts/generic_default.yaml` template (`user: "{question}"`)
+`benchmarks/prompts/generic/default.yaml` template (`user: "{question}"`)
 wraps it as a single user message, mirroring NeMo Skills' `prompt_format=openai`
 behaviour.
 
@@ -28,6 +28,6 @@ ng_collect_rollouts \
     +agent_name=longcodebench_mcqa_simple_agent \
     +input_jsonl_fpath=benchmarks/longcodebench/data/longcodebench_benchmark.jsonl \
     +output_jsonl_fpath=results/longcodebench_rollouts.jsonl \
-    +prompt_config=benchmarks/prompts/generic_default.yaml \
+    +prompt_config=benchmarks/prompts/generic/default.yaml \
     +num_repeats=4
 ```
