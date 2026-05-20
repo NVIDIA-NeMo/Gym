@@ -20,6 +20,6 @@ gpqa_mcqa_simple_agent:
       - name: gpqa
         type: benchmark
         jsonl_fpath: benchmarks/gpqa/data/gpqa_diamond_benchmark.jsonl
-        prompt_config: benchmarks/gpqa/prompts/default.yaml
+        prompt_config: benchmarks/prompts/eval/aai/mcq-4choices.yaml
         prepare_script: benchmarks/gpqa/prepare.py
         num_repeats: 8

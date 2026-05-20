@@ -10,5 +10,5 @@ imo_answerbench_math_with_autograder_simple_agent:
         - name: imo_answerbench
           type: benchmark
           jsonl_fpath: benchmarks/imo_answerbench/data/imo_answerbench_benchmark.jsonl
-          prompt_config: benchmarks/imo_answerbench/prompts/default.yaml
+          prompt_config: benchmarks/prompts/generic/math.yaml
           prepare_script: benchmarks/imo_answerbench/prepare.py

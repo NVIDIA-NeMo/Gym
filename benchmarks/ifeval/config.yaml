@@ -9,6 +9,6 @@ ifeval_instruction_following_simple_agent:
       - name: ifeval
         type: benchmark
         jsonl_fpath: benchmarks/ifeval/data/ifeval_benchmark.jsonl
-        prompt_config: benchmarks/prompts/generic_default.yaml
+        prompt_config: benchmarks/prompts/generic/default.yaml
         prepare_script: benchmarks/ifeval/prepare.py
         license: Apache 2.0
