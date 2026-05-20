@@ -84,7 +84,7 @@ ng_collect_rollouts +agent_name=example_single_tool_call_simple_agent \
 | `+input_jsonl_fpath` | `str` | Path to input JSONL file (required) |
 | `+output_jsonl_fpath` | `str` | Path to output JSONL file (required) |
 | `+limit` | `int` | Max examples to process (default: `null` = all) |
-| `+num_repeats` | `int` | Rollouts per example (default: `null` = 1) |
+| `+num_repeats` | `int` or `dict` | Rollouts per row (default: `1`). Pass an int for a uniform count, or a dict keyed by `agent_ref.name` (e.g. `{alpha: 4, beta: 1, _default: 1}`) for per-agent counts. See [Per-agent rollouts](#per-agent-rollouts) below. |
 | `+num_samples_in_parallel` | `int` | Concurrent requests (default: `null` = unlimited) |
 | `+responses_create_params` | `dict` | Sampling parameter overrides (default: `null` = no overrides) |
 
@@ -122,6 +122,24 @@ Each rollout row should contain:
 - **Reward**: Verification score (0.0–1.0)
 
 ---
+
+## Per-agent rollouts
+
+When your input JSONL pins different agents per row (each row's `agent_ref.name` may differ), pass `+num_repeats` as a dict to set a per-agent sample count in a single job:
+
+```bash
+ng_collect_rollouts \
+    +input_jsonl_fpath=mixed_agents.jsonl \
+    +output_jsonl_fpath=mixed_rollouts.jsonl \
+    '+num_repeats={agent_alpha: 4, agent_beta: 1}'
+```
+
+- Keys are matched against each row's `agent_ref.name`.
+- The reserved key `_default` is the fallback for rows whose agent isn't explicitly listed.
+- Without `_default`, an unlisted row's agent raises a single consolidated error naming every missing agent — so you fix all typos in one pass.
+- Dict keys that never appear in any input row emit a `UserWarning` (also catches typos).
+
+This is the natural form for jobs that mix, e.g., `simple_agent` at pass@32 alongside `swe_agent` at pass@1.
 
 ## Rollout Generation Parameters
 
