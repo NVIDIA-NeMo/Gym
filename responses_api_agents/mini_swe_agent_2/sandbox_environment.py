@@ -1,0 +1,199 @@
+# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""mini-swe-agent environment adapter backed by the Gym sandbox API."""
+
+import os
+import shlex
+from dataclasses import dataclass, field
+from typing import Any
+
+
+try:
+    from minisweagent.exceptions import Submitted
+except ModuleNotFoundError:
+
+    class Submitted(Exception):
+        """Compatibility shim for local mini-swe-agent versions before v2."""
+
+        def __init__(self, *messages: dict[str, Any]) -> None:
+            self.messages = messages
+            super().__init__()
+
+
+from nemo_gym.sandbox import Sandbox, SandboxSpec, rewrite_image
+
+
+@dataclass
+class MiniSWESandboxEnvironmentConfig:
+    """Configuration for mini-swe-agent runs inside a sandbox."""
+
+    image: str
+    cwd: str = "/workspace"
+    env: dict[str, str] = field(default_factory=dict)
+    forward_env: list[str] = field(default_factory=list)
+    timeout: int = 60
+    step_timeout: int = 600
+    eval_timeout: int = 1800
+    interpreter: list[str] = field(default_factory=lambda: ["bash", "-c"])
+    executable: str = "sandbox"
+    run_args: list[str] = field(default_factory=list)
+    start_args: list[str] = field(default_factory=list)
+    container_timeout: str = "2h"
+    instance_id: str | None = None
+    provider: dict[str, Any] = field(default_factory=dict)
+    spec: dict[str, Any] = field(default_factory=dict)
+    conda_env: str | None = None
+    activate_conda: bool = False
+    user: str | int | None = "root"
+    delete: bool = True
+
+
+class MiniSWESandboxEnvironment:
+    """mini-swe-agent sync environment implemented with ``nemo_gym.sandbox.Sandbox``."""
+
+    def __init__(
+        self,
+        *,
+        config_class: type = MiniSWESandboxEnvironmentConfig,
+        **kwargs: Any,
+    ) -> None:
+        self.config = config_class(**kwargs)
+        if not self.config.provider:
+            raise ValueError("MiniSWESandboxEnvironment requires provider")
+
+        self._handle: Any | None = None
+        self._closed = False
+
+        spec_config = dict(self.config.spec)
+        image = spec_config.pop("image", None) or self.config.image
+        image = rewrite_image(image, spec_config.pop("image_rewrites", []))
+
+        env = dict(spec_config.pop("env", {}))
+        for key in self.config.forward_env:
+            value = os.getenv(key)
+            if value is not None:
+                env[key] = value
+        env.update(self.config.env)
+
+        self._sandbox = Sandbox(self.config.provider)
+        self._handle = self._sandbox.create(
+            SandboxSpec(
+                image=image,
+                snapshot_id=spec_config.pop("snapshot_id", None),
+                timeout_s=spec_config.pop("timeout_s", None),
+                ready_timeout_s=spec_config.pop("ready_timeout_s", None),
+                env=env,
+                metadata={
+                    **spec_config.pop("metadata", {}),
+                    "nemo_gym_agent": "mini_swe_agent_2",
+                    "instance_id": (self.config.instance_id or "unknown")[:63],
+                },
+                resources=spec_config.pop("resources", {}),
+                entrypoint=spec_config.pop("entrypoint", None),
+                extensions=spec_config.pop("extensions", {}),
+                platform=spec_config.pop("platform", None),
+                volumes=spec_config.pop("volumes", None),
+                skip_health_check=spec_config.pop("skip_health_check", None),
+            )
+        )
+
+    def get_template_vars(self, **kwargs: Any) -> dict[str, Any]:
+        return {**self.config.__dict__, **kwargs}
+
+    def serialize(self) -> dict[str, Any]:
+        return {
+            "info": {
+                "config": {
+                    "environment": self.config.__dict__,
+                    "environment_type": f"{self.__class__.__module__}.{self.__class__.__name__}",
+                }
+            }
+        }
+
+    def _command(self, command: str, cwd: str) -> str:
+        if not self.config.activate_conda or not self.config.conda_env:
+            return command
+        quoted_cwd = shlex.quote(cwd)
+        quoted_env = shlex.quote(self.config.conda_env)
+        return (
+            f"cd {quoted_cwd} && "
+            "source $(conda info --base)/etc/profile.d/conda.sh && "
+            f"conda activate {quoted_env} && "
+            f"{command}"
+        )
+
+    def execute(
+        self,
+        action: dict[str, Any] | str,
+        cwd: str = "",
+        is_eval: bool = False,
+        timeout: int | None = None,
+    ) -> dict[str, Any]:
+        command = action.get("command", "") if isinstance(action, dict) else action
+        timeout_s = timeout or (self.config.eval_timeout if is_eval else self.config.step_timeout)
+        exec_cwd = cwd or self.config.cwd
+
+        result = self._sandbox.exec(
+            self._handle,
+            self._command(command, exec_cwd),
+            cwd="/",
+            timeout_s=timeout_s,
+            user=self.config.user,
+        )
+        output = "\n".join(part for part in (result.stdout, result.stderr) if part)
+        response = {
+            "output": output,
+            "returncode": result.return_code,
+            "exception_info": "",
+        }
+        self._check_finished(response)
+        return response
+
+    def _check_finished(self, output: dict[str, Any]) -> None:
+        """Match mini-swe-agent's submit sentinel handling for sandbox-backed runs."""
+        lines = output.get("output", "").lstrip().splitlines(keepends=True)
+        if lines and lines[0].strip() == "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT" and output["returncode"] == 0:
+            submission = "".join(lines[1:])
+            raise Submitted(
+                {
+                    "role": "exit",
+                    "content": submission,
+                    "extra": {"exit_status": "Submitted", "submission": submission},
+                }
+            )
+
+    def cleanup(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            if self._handle is not None:
+                self._sandbox.close(self._handle, delete=self.config.delete)
+                self._handle = None
+        finally:
+            self._sandbox.shutdown()
+
+    def __enter__(self) -> "MiniSWESandboxEnvironment":
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        self.cleanup()
+
+    def __del__(self) -> None:
+        if hasattr(self, "_closed") and not self._closed:
+            try:
+                self.cleanup()
+            except Exception:
+                pass
