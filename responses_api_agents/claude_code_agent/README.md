@@ -89,6 +89,8 @@ claude_code_agent:
 - `thinking`: passed to `--thinking` (`disabled`, `adaptive`, or `enabled`)
 - `max_thinking_tokens`: passed to `--max-thinking-tokens` to cap thinking token usage
 
+For the full set of Claude Code CLI flags see the [CLI reference](https://code.claude.com/docs/cli-reference).
+
 ## Limitations
 
 - Eval only for now. Token IDs and logprobs are not wired up yet.
