@@ -375,7 +375,7 @@ SWEBENCH_COMMIT={swebench_commit} \\
             f"ls -lrt /root/dataset && "
             # Run with clean environment to avoid venv contamination
             # Use the pre-built venv directly with its absolute path
-            f"env -u VIRTUAL_ENV {self.config.swebench_setup_dir}/SWE-bench/venv/bin/python -m swebench.harness.run_local_evaluation "
+            f"env -u VIRTUAL_ENV {self.config.swebench_setup_dir}/python/cpython-3.12.13-linux-aarch64-gnu/bin/python3.12 -m swebench.harness.run_local_evaluation "
             f"    --predictions_path {self.config.output_for_eval_mounted_path} "
             f"    --instance_ids {self.config.instance_id} "
             f"    --timeout {self.config.swebench_tests_timeout} "
