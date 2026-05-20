@@ -219,6 +219,8 @@ class ClaudeCodeAgentConfig(BaseResponsesAPIAgentConfig):
     allowed_tools: Optional[str] = None
     disallowed_tools: Optional[str] = None
     claude_code_version: Optional[str] = None
+    thinking: Optional[str] = None
+    max_thinking_tokens: Optional[int] = None
 
 
 class ClaudeCodeAgentRunRequest(BaseRunRequest):
@@ -254,7 +256,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             return self.server_client._build_server_base_url(cfg)
         return self.config.anthropic_base_url or ""
 
-    async def _run_claude_code(self, instruction: str) -> tuple[str, str]:
+    async def _run_claude_code(self, instruction: str, system_prompt: Optional[str] = None) -> tuple[str, str]:
         """Run claude -p --output-format=stream-json and return (stdout, model_name)."""
         base_url = self._resolve_base_url()
         # Keep full model name for local/custom endpoints; strip provider prefix for real Anthropic API.
@@ -304,12 +306,16 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 "--model",
                 model,
             ]
-            if self.config.system_prompt:
-                cmd += ["--append-system-prompt", self.config.system_prompt]
+            if system_prompt:
+                cmd += ["--append-system-prompt", system_prompt]
             if self.config.allowed_tools:
                 cmd += ["--allowedTools", self.config.allowed_tools]
             if self.config.disallowed_tools:
                 cmd += ["--disallowedTools", self.config.disallowed_tools]
+            if self.config.thinking:
+                cmd += ["--thinking", self.config.thinking]
+            if self.config.max_thinking_tokens is not None:
+                cmd += ["--max-thinking-tokens", str(self.config.max_thinking_tokens)]
             cmd += ["--", instruction]
 
             proc = await asyncio.create_subprocess_exec(
@@ -344,10 +350,10 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
 
         user_message, input_system = _extract_instruction(body.input)
-        system_message = self.config.system_prompt or input_system
-        instruction = f"{system_message}\n\n{user_message}" if system_message else user_message
+        system_parts = [p for p in [self.config.system_prompt, input_system] if p]
+        system_prompt = "\n\n".join(system_parts) if system_parts else None
 
-        stdout, model_name = await self._run_claude_code(instruction)
+        stdout, model_name = await self._run_claude_code(user_message, system_prompt=system_prompt)
         output_items, usage = parse_stream_json(stdout)
 
         if not any(

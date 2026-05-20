@@ -72,6 +72,8 @@ claude_code_agent:
       allowed_tools: null
       disallowed_tools: null
       claude_code_version: null
+      thinking: null
+      max_thinking_tokens: null
 ```
 
 - `concurrency`: max simultaneous `run()` calls
@@ -80,10 +82,12 @@ claude_code_agent:
 - `anthropic_base_url`: if set, used as `ANTHROPIC_BASE_URL`. Leave null for the real Anthropic API
 - `max_turns`: passed to `--max-turns`
 - `timeout`: per-request wall-clock seconds
-- `system_prompt`: appended to the default Claude Code system prompt via `--append-system-prompt`
+- `system_prompt`: appended to Claude Code's built-in system prompt via `--append-system-prompt`. The data's system message (if any) is also appended after this.
 - `allowed_tools`: passed to `--allowedTools` (e.g. `"Bash,Read"`)
 - `disallowed_tools`: passed to `--disallowedTools`
 - `claude_code_version`: npm version to pin on auto-install (null means latest)
+- `thinking`: passed to `--thinking` (`disabled`, `adaptive`, or `enabled`)
+- `max_thinking_tokens`: passed to `--max-thinking-tokens` to cap thinking token usage
 
 ## Limitations
 

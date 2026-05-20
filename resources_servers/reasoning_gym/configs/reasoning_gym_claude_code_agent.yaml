@@ -20,6 +20,7 @@ reasoning_gym_claude_code_agent:
       anthropic_base_url: ${anthropic_base_url}
       max_turns: 30
       timeout: 300
+      thinking: disabled
       system_prompt: |
         You are a precise reasoning assistant. You have access to Bash to run Python for calculations.
         For every problem: think step by step, use code to verify when helpful, and state your final answer clearly.
