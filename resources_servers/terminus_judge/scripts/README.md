@@ -4,6 +4,8 @@ Use a single entrypoint:
 
 - `prepare.py` for conversion, split, and smoke rollout collection.
 
+This pipeline uses the public `open-thoughts/OpenThoughts-Agent-v1-SFT` dataset as an example input and can be adapted to similar trajectory-format datasets.
+
 ## Prerequisites
 
 1. Python env with:
@@ -67,7 +69,3 @@ python resources_servers/terminus_judge/scripts/prepare.py smoke \
   --policy_api_key "<key>" \
   --policy_model_name "<model-name>"
 ```
-
-## Notes
-
-- Generated dataset artifacts (`samples.jsonl`, `train.jsonl`, `validation.jsonl`) are local outputs and are not meant to be committed.
