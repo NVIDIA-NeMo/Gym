@@ -82,6 +82,7 @@ equivalence_llm_judge:
       # group is returned; otherwise, the entire last match is used.
       # Example: "^Answer:\\s*(.*)$"
       response_extract_regex: Answer:\s*```(?:\w+)?\s*([\s\S]*?)\s*```(?=[\s\S]*$)
+      msg_extraction_failure: ""
 
       # Swap check: Run second judge pass with swapped expected/generated to detect positional bias
       check_twice_swap: true
@@ -148,5 +149,3 @@ equivalence_llm_judge_simple_agent:
           version: 0.0.1
           artifact_fpath: nl2bash-super-validation-0901.jsonl
         license: GNU General Public License v3.0
-
-

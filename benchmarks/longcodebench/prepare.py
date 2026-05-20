@@ -18,7 +18,7 @@
 LongCodeBench is a multi-choice QA benchmark over long code contexts, ported
 1-to-1 from the NeMo Skills `longcodebench` dataset. Each row's `question`
 field is the long code prompt plus the postfix that instructs the model to
-emit `Answer: \\boxed{X}`. The shared `benchmarks/prompts/generic_default.yaml`
+emit `Answer: \\boxed{X}`. The shared `benchmarks/prompts/generic/default.yaml`
 template (`user: "{question}"`) wraps it as a single user message, mirroring
 Skills' `prompt_format=openai` behaviour.
 

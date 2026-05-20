@@ -17,5 +17,5 @@ polymath_benchmark_simple_agent:
       - name: polymath
         type: benchmark
         jsonl_fpath: benchmarks/polymath/data/polymath_benchmark.jsonl
-        prompt_config: benchmarks/polymath/prompts/default.yaml
+        prompt_config: benchmarks/prompts/generic/default.yaml
         prepare_script: benchmarks/polymath/prepare.py

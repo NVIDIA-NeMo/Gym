@@ -1,0 +1,28 @@
+# Chain to existing finance_sec_search resource server + agent config
+config_paths:
+  - resources_servers/finance_sec_search/configs/finance_sec_search.yaml
+
+# Defaults for judge model interpolation variables from finance_sec_search.yaml.
+# Override via env.yaml or CLI when running actual evaluations.
+search_judge_model_base_url: https://api.openai.com/v1
+search_judge_model_api_key: ""
+search_judge_model_name: gpt-4o
+
+# Isolated copy of the resource server for this benchmark
+finance_sec_search_benchmark_resources_server:
+  _inherit_from: finance_sec_search_resources_server
+
+# Benchmark agent — inherits from finance_agent, overrides datasets
+finance_sec_search_benchmark_agent:
+  _inherit_from: finance_agent
+  responses_api_agents:
+    finance_agent:
+      resources_server:
+        name: finance_sec_search_benchmark_resources_server
+      datasets:
+      - name: finance_sec_search
+        type: benchmark
+        jsonl_fpath: benchmarks/finance_sec_search/data/finance_sec_search_benchmark.jsonl
+        prompt_config: null
+        prepare_script: benchmarks/finance_sec_search/prepare.py
+        num_repeats: 1
