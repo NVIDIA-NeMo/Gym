@@ -1,0 +1,37 @@
+judge_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${judge_base_url}
+      openai_api_key: ${judge_api_key}
+      openai_model: ${judge_model_name}
+
+structured_outputs:
+  resources_servers:
+    structured_outputs:
+      entrypoint: app.py
+      judge_model_server:
+        type: responses_api_models
+        name: judge_model
+      judge_responses_create_params:
+        input: []
+        temperature: 0.0
+        max_output_tokens: 512
+      domain: instruction_following
+      verified: false
+      description: Structured outputs with LLM-as-a-judge semantic verification
+
+structured_outputs_semantic_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: structured_outputs
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/structured_outputs/data/semantic_example.jsonl

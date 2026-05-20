@@ -12,9 +12,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import csv
 import io
 import json
+import re
 import tomllib
 from collections import defaultdict
 from enum import StrEnum
@@ -25,6 +27,7 @@ import xmltodict
 import yaml
 from fastapi import FastAPI
 from openapi_schema_validator import validate as validate_against_schema_openapi
+from pydantic import BaseModel, Field
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -32,10 +35,45 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.config_types import ModelServerRef
+from nemo_gym.openai_utils import (
+    NeMoGymEasyInputMessage,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+)
+from nemo_gym.server_utils import get_response_json
+
+
+JUDGE_PROMPT_TEMPLATE = """You are a strict evaluation judge for structured output quality.
+
+You will be given a model's structured output and a rubric criterion to evaluate.
+
+## Model Output
+{model_output}
+
+## Rubric
+{rubric}
+
+Evaluate the model's output against the rubric. First provide brief reasoning (1-2 sentences), then output your final verdict on a new line: either [[PASS]] or [[FAIL]]."""
+
+JUDGE_SYSTEM_MESSAGE = "You are a precise evaluation judge. Evaluate strictly against the rubric. Always end with [[PASS]] or [[FAIL]]."
 
 
 class StructuredOutputsResourcesServerConfig(BaseResourcesServerConfig):
     xml_coerce_types: bool = True
+    judge_model_server: Optional[ModelServerRef] = None
+    judge_responses_create_params: Optional[NeMoGymResponseCreateParamsNonStreaming] = None
+    judge_prompt_template: str = JUDGE_PROMPT_TEMPLATE
+    judge_system_message: Optional[str] = JUDGE_SYSTEM_MESSAGE
+    pass_label: str = Field(default="[[PASS]]", description="Label indicating PASS verdict")
+    fail_label: str = Field(default="[[FAIL]]", description="Label indicating FAIL verdict")
+    parallel_evaluation: bool = Field(default=True, description="Whether to evaluate criteria in parallel")
+    reward_mode: str = Field(
+        default="combined",
+        description="How to compute the final reward. "
+        "'combined': reward = syntax_reward * semantic_reward. "
+        "'independent': reward = syntax_reward only, semantic_reward is a separate field.",
+    )
 
 
 class SchemaType(StrEnum):
@@ -44,6 +82,14 @@ class SchemaType(StrEnum):
     XML = "xml"
     TOML = "toml"
     CSV = "csv"
+
+
+class SemanticCriterionResult(BaseModel):
+    name: str
+    weight: str
+    criterion_type: str
+    passed: bool
+    judge_response: Optional[str] = None
 
 
 class StructuredOutputsVerifyRequest(BaseVerifyRequest):
@@ -70,6 +116,7 @@ class StructuredOutputsVerifyRequest(BaseVerifyRequest):
     tool_name_style: Optional[str] = None
     distractor_style: Optional[str] = None
     tool_union_mode: Optional[str] = None
+    semantic_verifier_config: Optional[Dict[str, Any]] = None
 
 
 class StructuredOutputsVerifyResponse(BaseVerifyResponse):
@@ -98,6 +145,8 @@ class StructuredOutputsVerifyResponse(BaseVerifyResponse):
     tool_name_style: Optional[str] = None
     distractor_style: Optional[str] = None
     tool_union_mode: Optional[str] = None
+    semantic_reward: Optional[float] = None
+    semantic_results: Optional[List[SemanticCriterionResult]] = None
 
 
 class StructuredOutputsResourcesServer(SimpleResourcesServer):
@@ -123,6 +172,10 @@ class StructuredOutputsResourcesServer(SimpleResourcesServer):
         by_tool_name_style: Dict[str, List[float]] = defaultdict(list)
         by_distractor_style: Dict[str, List[float]] = defaultdict(list)
         by_tool_union_mode: Dict[str, List[float]] = defaultdict(list)
+
+        sem_all: List[float] = []
+        sem_by_fmt: Dict[str, List[float]] = defaultdict(list)
+        sem_by_problem: Dict[str, List[float]] = defaultdict(list)
 
         for rollouts in tasks:
             for r in rollouts:
@@ -171,6 +224,13 @@ class StructuredOutputsResourcesServer(SimpleResourcesServer):
                 if tool_union_mode:
                     by_tool_union_mode[tool_union_mode].append(reward)
 
+                sem_reward = r.get("semantic_reward")
+                if sem_reward is not None:
+                    sem_all.append(sem_reward)
+                    sem_by_fmt[r.get("schema_type", "unknown")].append(sem_reward)
+                    if pt:
+                        sem_by_problem[pt].append(sem_reward)
+
         metrics = {f"mean/reward_{k}": mean(v) for k, v in by_fmt.items() if v}
         metrics.update({f"mean/reward_{k}": mean(v) for k, v in by_problem.items() if v})
         metrics.update({f"mean/reward_repr_{k}": mean(v) for k, v in by_repr.items() if v})
@@ -192,6 +252,12 @@ class StructuredOutputsResourcesServer(SimpleResourcesServer):
         metrics.update({f"mean/reward_tool_name_style_{k}": mean(v) for k, v in by_tool_name_style.items() if v})
         metrics.update({f"mean/reward_distractor_style_{k}": mean(v) for k, v in by_distractor_style.items() if v})
         metrics.update({f"mean/reward_tool_union_mode_{k}": mean(v) for k, v in by_tool_union_mode.items() if v})
+
+        if sem_all:
+            metrics["mean/semantic_reward"] = mean(sem_all)
+            metrics.update({f"mean/semantic_reward_{k}": mean(v) for k, v in sem_by_fmt.items() if v})
+            metrics.update({f"mean/semantic_reward_{k}": mean(v) for k, v in sem_by_problem.items() if v})
+
         return metrics
 
     async def verify(self, body: StructuredOutputsVerifyRequest) -> StructuredOutputsVerifyResponse:
@@ -201,37 +267,124 @@ class StructuredOutputsResourcesServer(SimpleResourcesServer):
         if schema_type not in list(SchemaType):
             raise NotImplementedError(f"SchemaType must be one of {list(SchemaType)}, got {schema_type} !")
 
+        response_text = None
+
         if body.response_mode == "tool_call":
             response_obj, error_type, error_message = self.extract_tool_call_payload(body)
             if error_type is not None:
-                return StructuredOutputsVerifyResponse(
-                    **body.model_dump(), reward=0.0, error_type=error_type, error_message=error_message
-                )
+                reward = 0.0
+            else:
+                reward, error_type, error_message = self.evaluate_structured_object_response(schema_str, response_obj)
+                response_text = json.dumps(response_obj) if response_obj is not None else ""
+        else:
+            assistant_responses = []
+            for output_item in body.response.output:
+                if output_item.type != "message":
+                    continue
+                for content_item in output_item.content:
+                    if content_item.type != "output_text":
+                        continue
+                    assistant_responses.append(content_item.text)
+            response_text = "".join(assistant_responses)
 
-            reward, error_type, error_message = self.evaluate_structured_object_response(schema_str, response_obj)
-            return StructuredOutputsVerifyResponse(
-                **body.model_dump(), reward=reward, error_type=error_type, error_message=error_message
+            reward, error_type, error_message = self.evaluate_structured_output_response(
+                schema_type, schema_str, response_text
             )
 
-        # get model generation.
-        assistant_responses = []
-        for output_item in body.response.output:
-            if output_item.type != "message":
-                continue
+        semantic_reward, semantic_results = await self._evaluate_semantic(body, response_text)
 
-            for content_item in output_item.content:
-                if content_item.type != "output_text":
-                    continue
+        if semantic_reward is None:
+            semantic_reward = 1.0
 
-                assistant_responses.append(content_item.text)
-        response_text = "".join(assistant_responses)
+        if self.config.reward_mode == "combined":
+            reward = reward * semantic_reward
 
-        reward, error_type, error_message = self.evaluate_structured_output_response(
-            schema_type, schema_str, response_text
-        )
         return StructuredOutputsVerifyResponse(
-            **body.model_dump(), reward=reward, error_type=error_type, error_message=error_message
+            **body.model_dump(),
+            reward=reward,
+            error_type=error_type,
+            error_message=error_message,
+            semantic_reward=semantic_reward,
+            semantic_results=semantic_results,
         )
+
+    # ----- Semantic (LLM-as-a-Judge) ----- #
+
+    async def _evaluate_semantic(
+        self, body: StructuredOutputsVerifyRequest, response_text: Optional[str]
+    ) -> Tuple[Optional[float], Optional[List[SemanticCriterionResult]]]:
+        if not body.semantic_verifier_config or not self.config.judge_model_server:
+            return None, None
+
+        criteria = body.semantic_verifier_config.get("criteria", [])
+        llmaaj_criteria = [c for c in criteria if c.get("type") == "llmaaj"]
+        if not llmaaj_criteria:
+            return None, None
+
+        model_output = response_text or ""
+
+        if self.config.parallel_evaluation and len(llmaaj_criteria) > 1:
+            results = await asyncio.gather(
+                *[self._evaluate_criterion(c, model_output) for c in llmaaj_criteria]
+            )
+        else:
+            results = []
+            for c in llmaaj_criteria:
+                result = await self._evaluate_criterion(c, model_output)
+                results.append(result)
+
+        return self._aggregate_semantic(results), results
+
+    async def _evaluate_criterion(
+        self, criterion: Dict[str, Any], model_output: str
+    ) -> SemanticCriterionResult:
+        config = self.config
+        judge_prompt = config.judge_prompt_template.format(
+            model_output=model_output[:8000],
+            rubric=criterion.get("rubric", ""),
+        )
+
+        msgs: List[NeMoGymEasyInputMessage] = []
+        if config.judge_system_message:
+            msgs.append(NeMoGymEasyInputMessage(role="system", content=config.judge_system_message))
+        msgs.append(NeMoGymEasyInputMessage(role="user", content=judge_prompt))
+
+        request_params = config.judge_responses_create_params.model_copy(deep=True)
+        request_params.input = msgs
+
+        try:
+            response_obj = await self.server_client.post(
+                server_name=config.judge_model_server.name,
+                url_path="/v1/responses",
+                json=request_params,
+            )
+            judge_response = NeMoGymResponse.model_validate(await get_response_json(response_obj))
+            judge_text = _extract_judge_text(judge_response)
+            passed = _extract_verdict(judge_text, config.pass_label, config.fail_label)
+        except Exception:
+            judge_text = ""
+            passed = False
+
+        return SemanticCriterionResult(
+            name=criterion.get("name", ""),
+            weight=criterion.get("weight", "minor"),
+            criterion_type="llmaaj",
+            passed=passed,
+            judge_response=judge_text,
+        )
+
+    @staticmethod
+    def _aggregate_semantic(results: List[SemanticCriterionResult]) -> float:
+        if not results:
+            return 0.0
+        weight_map = {"major": 2.0, "minor": 1.0}
+        total_weight = 0.0
+        weighted_score = 0.0
+        for r in results:
+            w = weight_map.get(r.weight, 1.0)
+            total_weight += w
+            weighted_score += w * (1.0 if r.passed else 0.0)
+        return weighted_score / total_weight if total_weight > 0 else 0.0
 
     # ----- Helpers ----- #
     def extract_tool_call_payload(
@@ -295,14 +448,50 @@ class StructuredOutputsResourcesServer(SimpleResourcesServer):
 
     def strictify_schema(self, schema: Dict[str, Any]):
         """Make a schema strict as per OpenAPI guidelines"""
-        if isinstance(schema, Dict):
+        if isinstance(schema, dict):
             if "properties" in schema:
                 schema["required"] = list(schema["properties"])
                 schema["additionalProperties"] = False
+            _SKIP = {"if", "then", "else", "oneOf", "anyOf", "allOf", "$defs", "definitions"}
             for k, v in schema.items():
-                self.strictify_schema(v)
+                if k not in _SKIP:
+                    if isinstance(v, dict):
+                        self.strictify_schema(v)
+                    elif isinstance(v, list):
+                        for item in v:
+                            if isinstance(item, dict):
+                                self.strictify_schema(item)
 
-    def coerce_xml_types(self, data: Any, schema: Dict[str, Any]) -> Any:
+    def _resolve_schema(self, schema: Dict[str, Any], root_schema: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Resolve $ref pointers and flatten allOf for coercion purposes."""
+        if not isinstance(schema, dict):
+            return schema
+        root = root_schema or schema
+
+        if "$ref" in schema:
+            ref = schema["$ref"]
+            path = ref.removeprefix("#/").split("/")
+            resolved = root
+            for part in path:
+                resolved = resolved.get(part, {})
+            return self._resolve_schema(resolved, root)
+
+        if "allOf" in schema:
+            merged: Dict[str, Any] = {}
+            for sub in schema["allOf"]:
+                resolved = self._resolve_schema(sub, root)
+                for k, v in resolved.items():
+                    if k == "properties" and k in merged:
+                        merged[k] = {**merged[k], **v}
+                    elif k == "required" and k in merged:
+                        merged[k] = list(set(merged[k]) | set(v))
+                    else:
+                        merged[k] = v
+            return merged
+
+        return schema
+
+    def coerce_xml_types(self, data: Any, schema: Dict[str, Any], root_schema: Optional[Dict[str, Any]] = None) -> Any:
         """Recursively coerce xmltodict string values to match the JSON schema types.
 
         xmltodict.parse() returns all leaf values as strings. This method walks the
@@ -310,17 +499,50 @@ class StructuredOutputsResourcesServer(SimpleResourcesServer):
         On conversion failure the original value is returned so that schema
         validation can report the error.
         """
-        if not isinstance(schema, dict) or "type" not in schema:
+        root = root_schema or schema
+        if not isinstance(schema, dict):
+            return data
+
+        schema = self._resolve_schema(schema, root)
+
+        # Handle oneOf/anyOf: try each branch and return the first that coerces
+        # without raising. Fall back to first branch if none succeed cleanly.
+        for keyword in ("oneOf", "anyOf"):
+            if keyword in schema:
+                branches = schema[keyword]
+                for branch in branches:
+                    resolved = self._resolve_schema(branch, root)
+                    try:
+                        coerced = self.coerce_xml_types(data, resolved, root)
+                        validate_against_schema_openapi(coerced, resolved)
+                        return coerced
+                    except Exception:
+                        continue
+                # No branch validated cleanly; coerce with the first branch
+                # so at least scalars get type-converted for a better error message.
+                if branches:
+                    return self.coerce_xml_types(data, self._resolve_schema(branches[0], root), root)
+                return data
+
+        if "type" not in schema:
             return data
 
         schema_type = schema["type"]
+        if isinstance(schema_type, list):
+            non_null = [t for t in schema_type if t != "null"]
+            if data is None:
+                return data
+            if len(non_null) == 1:
+                schema_type = non_null[0]
+            else:
+                return data
 
         if schema_type == "object" and isinstance(data, dict):
             properties = schema.get("properties", {})
             coerced = {}
             for key, value in data.items():
                 if key in properties:
-                    coerced[key] = self.coerce_xml_types(value, properties[key])
+                    coerced[key] = self.coerce_xml_types(value, properties[key], root)
                 else:
                     coerced[key] = value
             return coerced
@@ -337,7 +559,7 @@ class StructuredOutputsResourcesServer(SimpleResourcesServer):
                 data = next(iter(data.values()))
             if not isinstance(data, list):
                 data = [data] if data is not None else []
-            return [self.coerce_xml_types(item, items_schema) for item in data]
+            return [self.coerce_xml_types(item, items_schema, root) for item in data]
 
         # xmltodict returns None for empty tags like <field/> or <field></field>.
         # Coerce to "" only for string types (parity with JSON/YAML where "" is valid).
@@ -459,6 +681,37 @@ class StructuredOutputsResourcesServer(SimpleResourcesServer):
             return 1.0, None, None
         except Exception as e:
             return 0.0, "validation_error", f"{type(e).__name__}: {str(e)[:200]}"
+
+
+def _extract_judge_text(response: NeMoGymResponse) -> str:
+    for output in reversed(response.output):
+        if getattr(output, "type", None) == "message":
+            content = getattr(output, "content", None)
+            if isinstance(content, list):
+                texts = []
+                for c in content:
+                    text = getattr(c, "text", None)
+                    if isinstance(text, str):
+                        texts.append(text)
+                full_text = "\n".join(texts).strip()
+            elif isinstance(content, str):
+                full_text = content.strip()
+            else:
+                continue
+            full_text = re.sub(r"<think>.*?</think>", "", full_text, flags=re.DOTALL)
+            full_text = re.sub(r"<thinking>.*?</thinking>", "", full_text, flags=re.DOTALL)
+            full_text = re.sub(r"^.*?</think>", "", full_text, flags=re.DOTALL)
+            full_text = re.sub(r"^.*?</thinking>", "", full_text, flags=re.DOTALL)
+            return full_text.strip()
+    return ""
+
+
+def _extract_verdict(response_text: str, pass_label: str, fail_label: str) -> bool:
+    pass_pos = response_text.rfind(pass_label)
+    fail_pos = response_text.rfind(fail_label)
+    if pass_pos < 0 and fail_pos < 0:
+        return False
+    return pass_pos > fail_pos
 
 
 if __name__ == "__main__":
