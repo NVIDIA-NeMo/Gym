@@ -14,22 +14,24 @@
 
 """Provider registration utilities."""
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any, TypeAlias
 
 from nemo_gym.sandbox.providers.base import SandboxProvider
 
 
 ProviderClass: TypeAlias = type[SandboxProvider]
+ProviderLoader: TypeAlias = Callable[[], ProviderClass]
 
 _PROVIDER_REGISTRY: dict[str, ProviderClass] = {}
+_BUILTIN_PROVIDER_LOADERS: dict[str, ProviderLoader] = {}
 
 
 def register_provider(name: str, provider_class: ProviderClass) -> None:
     """Register a sandbox provider class."""
     if not name:
         raise ValueError("Provider name must be non-empty")
-    if name in _PROVIDER_REGISTRY:
+    if name in _PROVIDER_REGISTRY or name in _BUILTIN_PROVIDER_LOADERS:
         raise ValueError(f"Sandbox provider {name!r} is already registered")
     _PROVIDER_REGISTRY[name] = provider_class
 
@@ -39,7 +41,10 @@ def get_provider_class(name: str) -> ProviderClass:
     try:
         return _PROVIDER_REGISTRY[name]
     except KeyError as e:
-        available = ", ".join(sorted(_PROVIDER_REGISTRY)) or "<none>"
+        loader = _BUILTIN_PROVIDER_LOADERS.get(name)
+        if loader is not None:
+            return loader()
+        available = ", ".join(list_providers()) or "<none>"
         raise ValueError(f"Unknown sandbox provider {name!r}. Available providers: {available}") from e
 
 
@@ -61,14 +66,13 @@ def create_provider(config: Mapping[str, Any]) -> SandboxProvider:
 
 def list_providers() -> list[str]:
     """List registered provider names."""
-    return sorted(_PROVIDER_REGISTRY)
+    return sorted({*_PROVIDER_REGISTRY, *_BUILTIN_PROVIDER_LOADERS})
 
 
-def _register_builtins() -> None:
+def _load_opensandbox_provider() -> ProviderClass:
     from nemo_gym.sandbox.providers.opensandbox import OpenSandboxProvider
 
-    if "opensandbox" not in _PROVIDER_REGISTRY:
-        register_provider("opensandbox", OpenSandboxProvider)
+    return OpenSandboxProvider
 
 
-_register_builtins()
+_BUILTIN_PROVIDER_LOADERS["opensandbox"] = _load_opensandbox_provider
