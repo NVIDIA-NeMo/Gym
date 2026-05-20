@@ -19,7 +19,7 @@ Multilingual LiveCodeBench benchmark ported from NeMo Skills'
     kept for symmetry with Skills' JSONL).
 - Prompting mirrors Skills' `generic/default` behavior: the language-specific
   instruction prefix is baked into each row's `question`, and the prompt
-  template (`benchmarks/prompts/generic_default.yaml`) is a passthrough.
+  template (`benchmarks/prompts/generic/default.yaml`) is a passthrough.
 
 ## Verification
 
@@ -76,7 +76,7 @@ ng_collect_rollouts \
     +agent_name=livecodebench-x_code_gen_simple_agent \
     +input_jsonl_fpath=benchmarks/livecodebench-x/data/livecodebench-x_benchmark.jsonl \
     +output_jsonl_fpath=results/livecodebench-x/rollouts.jsonl \
-    +prompt_config=benchmarks/prompts/generic_default.yaml \
+    +prompt_config=benchmarks/prompts/generic/default.yaml \
     +num_repeats=4 +num_repeats_add_seed=true \
     "+responses_create_params={temperature: 1.0, top_p: 0.95, max_output_tokens: 16384}"
 ```
