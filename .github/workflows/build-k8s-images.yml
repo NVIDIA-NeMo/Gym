@@ -6,6 +6,7 @@ on:
     tags: ['v*']
     paths:
       - 'k8s/Dockerfile'
+      - 'k8s/head/Containerfile'
       - 'k8s/entrypoint.sh'
       - 'nemo_gym/**'
       - 'resources_servers/**'
@@ -16,6 +17,7 @@ on:
     branches: [main]
     paths:
       - 'k8s/Dockerfile'
+      - 'k8s/head/Containerfile'
       - 'k8s/entrypoint.sh'
       - 'nemo_gym/**'
       - 'resources_servers/**'
@@ -34,10 +36,16 @@ jobs:
         include:
           - target: resources
             image-suffix: nemo-gym-resources
+            dockerfile: k8s/Dockerfile
           - target: agent
             image-suffix: nemo-gym-agent
+            dockerfile: k8s/Dockerfile
           - target: model
             image-suffix: nemo-gym-model
+            dockerfile: k8s/Dockerfile
+          - target: head
+            image-suffix: nemo-gym-head
+            dockerfile: k8s/head/Containerfile
     permissions:
       contents: read
       packages: write
@@ -73,7 +81,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: k8s/Dockerfile
+          file: ${{ matrix.dockerfile }}
           target: ${{ matrix.target }}
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}

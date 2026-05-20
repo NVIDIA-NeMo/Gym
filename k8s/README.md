@@ -16,9 +16,10 @@ Deploy NeMo-Gym benchmarks on any Kubernetes cluster using KubeRay for distribut
 │                                                                   │
 │  Deployment: gym-agent (simple_agent on :8080)                    │
 │  Deployment: gym-model (vllm_model proxy on :8080)                │
+│  Deployment: gym-head (config server on :11000)                   │
 │                                                                   │
-│  Services: gym-agent-svc, gym-model-svc, gym-resources-svc        │
-│  Ingress: gym-ray-dashboard (Ray dashboard, optional)             │
+│  Services: gym-agent-svc, gym-model-svc, gym-resources-svc,       │
+│            gym-head-svc                                            │
 └───────────────────────────────────────────────────────────────────┘
         │
         │ HTTPS
@@ -33,6 +34,9 @@ Deploy NeMo-Gym benchmarks on any Kubernetes cluster using KubeRay for distribut
 ```
 k8s/
 ├── Dockerfile                              # Multi-stage: resources, agent, model targets
+├── head/
+│   ├── Containerfile                       # HeadServer image (UBI 10, separate from main Dockerfile)
+│   └── entrypoint.py                       # Standalone HeadServer startup script
 ├── entrypoint.sh                           # Arbitrary UID handler (harmless on standard K8s)
 ├── README.md
 ├── base/                                   # Works on ANY Kubernetes cluster with KubeRay
@@ -43,9 +47,9 @@ k8s/
 │   ├── raycluster.yaml                     # Ray head, workers, resources worker group
 │   ├── deployment-agent.yaml               # simple_agent (skips Ray)
 │   ├── deployment-model.yaml               # vllm_model proxy (skips Ray)
+│   ├── deployment-head.yaml                # HeadServer (config server for CLI tools)
 │   ├── service-*.yaml                      # ClusterIP services
-│   ├── networkpolicy.yaml                  # Internal pod-to-pod traffic
-│   └── ingress-dashboard.yaml              # K8s Ingress for Ray dashboard (optional)
+│   └── networkpolicy.yaml                  # Internal pod-to-pod traffic
 └── overlays/
     ├── openshift/                          # Platform: OpenShift (Kustomize Component)
     ├── code-gen/                           # Benchmark: code generation
@@ -80,6 +84,7 @@ Pre-built images are available from GitHub Container Registry:
 ghcr.io/nvidia-nemo/gym/nemo-gym-resources:latest
 ghcr.io/nvidia-nemo/gym/nemo-gym-agent:latest
 ghcr.io/nvidia-nemo/gym/nemo-gym-model:latest
+ghcr.io/nvidia-nemo/gym/nemo-gym-head:latest
 ```
 
 Or build from source:
@@ -88,6 +93,7 @@ Or build from source:
 docker build -f k8s/Dockerfile --target resources -t ghcr.io/nvidia-nemo/gym/nemo-gym-resources:latest .
 docker build -f k8s/Dockerfile --target agent -t ghcr.io/nvidia-nemo/gym/nemo-gym-agent:latest .
 docker build -f k8s/Dockerfile --target model -t ghcr.io/nvidia-nemo/gym/nemo-gym-model:latest .
+docker build -f k8s/head/Containerfile --target head -t ghcr.io/nvidia-nemo/gym/nemo-gym-head:latest .
 ```
 
 ### 2. Configure LLM credentials
@@ -124,6 +130,7 @@ Expected state:
 | `gym-ray-gym-resources-worker-*` | 1/1 | Resources server + Ray node |
 | `gym-agent-*` | 1/1 | Agent server |
 | `gym-model-*` | 1/1 | Model proxy |
+| `gym-head-*` | 1/1 | HeadServer (config for CLI tools) |
 
 ### 5. Smoke test
 
@@ -133,13 +140,30 @@ curl -s http://localhost:8080/docs | head -5
 kill %1
 ```
 
-### 6. Ray dashboard
+### 6. Use CLI tools via port-forward
+
+The HeadServer enables standard NeMo Gym CLI tools (`ng_collect_rollouts`, `ng_status`, `ng_reward_profile`) to work against the cluster. The config uses OmegaConf `${oc.env:...}` interpolations, so you must set the referenced env vars locally. `AGENT_HOST` must point to `127.0.0.1` (the port-forwarded agent); the others are resolved on-cluster and can be set to placeholders:
+
+```bash
+kubectl port-forward -n gym svc/gym-head-svc 11000:11000 &
+kubectl port-forward -n gym svc/gym-agent-svc 8080:8080 &
+
+AGENT_HOST=127.0.0.1 MODEL_HOST=127.0.0.1 RESOURCES_HOST=127.0.0.1 \
+POLICY_BASE_URL=http://unused POLICY_API_KEY=unused POLICY_MODEL_NAME=unused \
+ng_collect_rollouts +agent_name=simple_agent_instance \
+  +input_jsonl_fpath=resources_servers/code_gen/data/example.jsonl \
+  +output_jsonl_fpath=/tmp/rollouts.jsonl \
+  +num_repeats=1 \
+  "+responses_create_params={max_output_tokens: 16384, temperature: 1.0}"
+```
+
+### 7. Ray dashboard
 
 ```bash
 kubectl port-forward -n gym svc/gym-ray-head-svc 8265:8265
 ```
 
-The base includes a Kubernetes Ingress for the Ray dashboard. If your cluster has an Ingress controller, it will be picked up automatically. Otherwise, use port-forwarding above.
+No services are exposed externally — all access is via `kubectl port-forward`.
 
 ## Available Overlays
 
@@ -149,7 +173,7 @@ Benchmark overlays are platform-agnostic. Platform overlays add cluster-specific
 |---------|------|-------------|
 | `code-gen` | Benchmark | Code generation benchmark (`resources_servers/code_gen`) |
 | `example-single-tool-call` | Benchmark | Minimal single tool call example |
-| `openshift` | Platform | [Kustomize Component](https://kubectl.docs.kubernetes.io/guides/config_management/components/) — adds OpenShift Route, OCP NetworkPolicies, removes Ingress |
+| `openshift` | Platform | [Kustomize Component](https://kubectl.docs.kubernetes.io/guides/config_management/components/) — adds OCP NetworkPolicies, sets `imagePullPolicy: Always` |
 | `code-gen-openshift` | Composition | `code-gen` + `openshift` |
 | `example-single-tool-call-openshift` | Composition | `example-single-tool-call` + `openshift` |
 
@@ -173,6 +197,9 @@ images:
     newTag: v1.0.0
   - name: ghcr.io/nvidia-nemo/gym/nemo-gym-model
     newName: quay.io/myorg/nemo-gym-model
+    newTag: v1.0.0
+  - name: ghcr.io/nvidia-nemo/gym/nemo-gym-head
+    newName: quay.io/myorg/nemo-gym-head
     newTag: v1.0.0
 ```
 
@@ -266,6 +293,7 @@ Then reapply: `kustomize build k8s/overlays/code-gen | kubectl apply -f -`
 | Agent (simple_agent) | 8080 | Standard HTTP |
 | Model (vllm_model) | 8080 | Standard HTTP |
 | Resources (benchmark) | 9080 | Non-default to avoid conflict with Ray metrics on 8080 |
+| HeadServer | 11000 | Config server for CLI tools (`ng_collect_rollouts`, `ng_status`) |
 | Ray GCS | 6379 | Internal |
 | Ray Dashboard | 8265 | Access via `kubectl port-forward` or Ingress |
 

@@ -1,0 +1,67 @@
+# HeadServer — lightweight config-serving sidecar for NeMo Gym on Kubernetes.
+# Serves the global config dict over HTTP so CLI tools (ng_collect_rollouts,
+# ng_status, ng_reward_profile) can discover server addresses via port-forward.
+#
+# Build:
+#   podman build --platform linux/amd64 -f k8s/head/Containerfile --target head -t quay.io/redhat-et/nemo-gym-head:latest .
+
+# --- Build stage ---
+FROM registry.access.redhat.com/ubi10/python-312-minimal AS build
+
+USER 0
+WORKDIR /opt/app-root/src
+
+COPY pyproject.toml README.md LICENSE ./
+COPY nemo_gym/ nemo_gym/
+
+RUN microdnf install -y --nodocs --setopt=install_weak_deps=0 \
+        python3.12-pip && \
+    microdnf clean all && \
+    mkdir -p cache && \
+    pip3.12 install --no-cache-dir -e "." && \
+    rm -rf cache
+
+# --- Runtime stage ---
+FROM registry.access.redhat.com/ubi10/python-312-minimal AS head
+
+LABEL io.k8s.display-name="NeMo Gym HeadServer" \
+      io.k8s.description="Config-serving sidecar for NeMo Gym CLI tool access" \
+      io.openshift.tags="python,fastapi,nemo-gym" \
+      io.openshift.expose-services="11000:http" \
+      name="nemo-gym-head" \
+      summary="NeMo Gym HeadServer" \
+      maintainer="Red Hat ET <redhat-et@redhat.com>"
+
+USER 0
+WORKDIR /opt/app-root/src
+
+RUN microdnf install -y --nodocs --setopt=install_weak_deps=0 \
+        shadow-utils && \
+    microdnf clean all && \
+    rm -rf /var/cache/yum /var/log/dnf* /var/log/yum*
+
+COPY --from=build /opt/app-root/lib /opt/app-root/lib
+COPY --from=build /opt/app-root/bin /opt/app-root/bin
+
+COPY nemo_gym/ nemo_gym/
+COPY pyproject.toml README.md LICENSE ./
+COPY k8s/head/entrypoint.py /opt/app-root/entrypoint.py
+COPY k8s/entrypoint.sh /opt/app-root/entrypoint.sh
+
+# egg_info requires the cache/ directory to exist (pyproject.toml build config)
+RUN mkdir -p cache && \
+    pip3.12 install --no-cache-dir -e . && \
+    rm -rf cache && \
+    chgrp -R 0 /opt/app-root && \
+    chmod -R g=u /opt/app-root && \
+    chmod g=u /etc/passwd && \
+    chmod +x /opt/app-root/entrypoint.sh
+
+ENV PYTHONUNBUFFERED=1 \
+    HOME=/opt/app-root/src
+
+USER 1001
+EXPOSE 11000
+
+ENTRYPOINT ["/opt/app-root/entrypoint.sh"]
+CMD ["python", "/opt/app-root/entrypoint.py"]

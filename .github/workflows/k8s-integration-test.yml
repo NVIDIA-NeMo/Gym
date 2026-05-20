@@ -67,6 +67,17 @@ jobs:
           cache-from: type=gha,scope=model
           cache-to: type=gha,mode=max,scope=model
 
+      - name: Build head image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: k8s/head/Containerfile
+          target: head
+          tags: ghcr.io/nvidia-nemo/gym/nemo-gym-head:latest
+          load: true
+          cache-from: type=gha,scope=head
+          cache-to: type=gha,mode=max,scope=head
+
       - name: Create kind cluster
         uses: helm/kind-action@v1
         with:
@@ -79,6 +90,7 @@ jobs:
             ghcr.io/nvidia-nemo/gym/nemo-gym-resources:latest \
             ghcr.io/nvidia-nemo/gym/nemo-gym-agent:latest \
             ghcr.io/nvidia-nemo/gym/nemo-gym-model:latest \
+            ghcr.io/nvidia-nemo/gym/nemo-gym-head:latest \
             --name gym-ci
 
       - name: Install KubeRay operator
@@ -102,6 +114,7 @@ jobs:
 
       - name: Wait for deployments
         run: |
+          kubectl -n gym rollout status deployment/gym-head --timeout=120s
           kubectl -n gym rollout status deployment/gym-agent --timeout=300s
           kubectl -n gym rollout status deployment/gym-model --timeout=300s
 
@@ -121,6 +134,30 @@ jobs:
 
           echo "All pods ready:"
           kubectl -n gym get pods
+
+      - name: Verify HeadServer serves config
+        run: |
+          kubectl -n gym port-forward svc/gym-head-svc 11000:11000 &
+          PF_PID=$!
+          sleep 2
+
+          CONFIG=""
+          for i in $(seq 1 15); do
+            CONFIG=$(curl -sf http://localhost:11000/global_config_dict_yaml 2>/dev/null) && break
+            echo "Waiting for HeadServer port-forward... (attempt $i/15)"
+            sleep 2
+          done
+
+          if echo "$CONFIG" | grep -q "head_server"; then
+            echo "PASS: HeadServer returns valid config"
+          else
+            echo "FAIL: HeadServer config missing head_server key"
+            echo "Response: $CONFIG"
+            kill $PF_PID 2>/dev/null || true
+            exit 1
+          fi
+
+          kill $PF_PID 2>/dev/null || true
 
       - name: Run e2e smoke test
         run: |
@@ -188,5 +225,7 @@ jobs:
           kubectl -n gym logs deployment/gym-model --tail=100 || true
           echo "=== Resources Logs ==="
           kubectl -n gym logs -l app.kubernetes.io/name=gym-resources --tail=100 || true
+          echo "=== HeadServer Logs ==="
+          kubectl -n gym logs deployment/gym-head --tail=100 || true
           echo "=== Ray Head Logs ==="
           kubectl -n gym logs -l ray.io/node-type=head --tail=100 || true

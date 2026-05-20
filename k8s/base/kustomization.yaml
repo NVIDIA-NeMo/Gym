@@ -10,8 +10,9 @@ resources:
   - raycluster.yaml
   - deployment-agent.yaml
   - deployment-model.yaml
+  - deployment-head.yaml
   - service-resources.yaml
   - service-agent.yaml
   - service-model.yaml
+  - service-head.yaml
   - networkpolicy.yaml
-  - ingress-dashboard.yaml
