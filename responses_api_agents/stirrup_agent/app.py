@@ -175,10 +175,12 @@ def _classify_rollout_failure(exc: BaseException) -> str:
         from ray.exceptions import (
             LocalRayletDiedError,
             NodeDiedError,
-            OutOfMemoryError as RayOutOfMemoryError,
             RayActorError,
             RayTaskError,
             WorkerCrashedError,
+        )
+        from ray.exceptions import (
+            OutOfMemoryError as RayOutOfMemoryError,
         )
     except ImportError:
         # ray.exceptions surface drifted; fail open to bounded retry.
