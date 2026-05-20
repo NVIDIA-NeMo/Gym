@@ -834,6 +834,8 @@ class OpenSandboxProvider:
                     Sandbox.create(**kwargs),
                     timeout=timeout_s,
                 )
+            if sandbox is None:
+                raise RuntimeError("OpenSandbox SDK create returned no sandbox handle")
             sandbox_id = str(sandbox.id)
         except TimeoutError as e:
             error = OpenSandboxCreateTimeoutError(
@@ -843,7 +845,7 @@ class OpenSandboxProvider:
                 f"ready_timeout_s={spec.ready_timeout_s!r}"
             )
             raise error from e
-        if sandbox is None or sandbox_id is None:
+        if sandbox_id is None:
             raise RuntimeError("OpenSandbox SDK create returned no sandbox handle")
         created_handle = SandboxHandle(
             sandbox_id=sandbox_id,

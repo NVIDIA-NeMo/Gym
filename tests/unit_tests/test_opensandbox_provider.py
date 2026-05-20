@@ -14,7 +14,6 @@
 # limitations under the License.
 
 import asyncio
-import importlib.util
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
@@ -24,13 +23,11 @@ from typing import Any
 import pytest
 
 from nemo_gym.sandbox.providers.base import SandboxSpec
+
+
+pytest.importorskip("tenacity", reason="tenacity optional sandbox dependency is not installed")
+
 from nemo_gym.sandbox.providers.opensandbox import provider as opensandbox_provider
-
-
-pytestmark = pytest.mark.skipif(
-    importlib.util.find_spec("tenacity") is None,
-    reason="tenacity optional sandbox dependency is not installed",
-)
 
 
 @dataclass(frozen=True)
@@ -42,6 +39,11 @@ class FakePlatformSpec:
 class FakeConnectionConfig:
     def __init__(self, **kwargs: Any) -> None:
         self.kwargs = kwargs
+
+
+@dataclass(frozen=True)
+class FakeVolume:
+    name: str
 
 
 class FakeSandbox:
@@ -144,6 +146,79 @@ def fake_opensandbox_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
         "_require_opensandbox_sdk_pool",
         require_sdk_pool,
     )
+
+
+def test_sdk_import_helpers_and_retry_classification() -> None:
+    assert len(opensandbox_provider._require_opensandbox_sdk()) == 5
+    assert len(opensandbox_provider._require_opensandbox_sdk_pool()) == 4
+    assert len(opensandbox_provider._require_tenacity()) == 4
+
+    class StatusCodeError(Exception):
+        status_code = 429
+
+    assert opensandbox_provider._exception_status_code(StatusCodeError("rate limited")) == 429
+    assert opensandbox_provider._is_retryable_create_error(
+        opensandbox_provider.OpenSandboxCreateError("create failed")
+    )
+
+    from opensandbox.exceptions import (  # noqa: PLC0415
+        InvalidArgumentException,
+        SandboxApiException,
+        SandboxException,
+        SandboxInternalException,
+    )
+
+    assert opensandbox_provider._is_retryable_create_error(InvalidArgumentException("bad input")) is False
+    assert opensandbox_provider._is_retryable_create_error(SandboxInternalException("server failed")) is True
+
+    retryable_api_error = SandboxApiException("busy")
+    retryable_api_error.status_code = 503
+    assert opensandbox_provider._is_retryable_create_error(retryable_api_error) is True
+
+    nonretryable_api_error = SandboxApiException("not found")
+    nonretryable_api_error.status_code = 404
+    assert opensandbox_provider._is_retryable_create_error(nonretryable_api_error) is False
+    assert opensandbox_provider._is_retryable_create_error(SandboxException("gateway timeout")) is True
+
+    retry_state = SimpleNamespace(
+        outcome=SimpleNamespace(exception=lambda: RuntimeError("temporary")),
+        next_action=SimpleNamespace(sleep=0.5),
+        attempt_number=2,
+    )
+    opensandbox_provider._log_create_retry(retry_state)
+
+
+async def test_provider_reference_materialization_and_conversion_helpers(
+    fake_opensandbox_sdk: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection_config = opensandbox_provider.OpenSandboxConnectionConfig(domain="sandbox.example")
+    assert (
+        opensandbox_provider._coerce_config(connection_config, opensandbox_provider.OpenSandboxConnectionConfig)
+        is connection_config
+    )
+
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_opensandbox_sdk",
+        lambda: (object, object, object, FakePlatformSpec, FakeVolume),
+    )
+    assert opensandbox_provider._to_volumes([{"name": "workspace"}]) == [FakeVolume(name="workspace")]
+
+    provider = opensandbox_provider.OpenSandboxProvider(probe={"command": None})
+    handle = opensandbox_provider.SandboxHandle(sandbox_id="sandbox-1", provider_name="opensandbox", raw=object())
+    assert provider.handle_reference(handle) == {
+        "kind": "sandbox_id",
+        "provider": "opensandbox",
+        "sandbox_id": "sandbox-1",
+    }
+
+    async def connect(sandbox_id: str) -> opensandbox_provider.SandboxHandle:
+        return opensandbox_provider.SandboxHandle(sandbox_id=sandbox_id, provider_name="opensandbox", raw="connected")
+
+    monkeypatch.setattr(provider, "connect", connect)
+    materialized = await provider.materialize_handle({"kind": "sandbox_id", "sandbox_id": "sandbox-2"})
+    assert materialized.raw == "connected"
 
 
 async def test_sdk_pool_passes_platform_through_pool_creation_spec(
@@ -504,6 +579,23 @@ async def test_provider_create_probe_and_close_error_paths(monkeypatch: pytest.M
             delete=True,
         )
 
+    class DeleteFailsCloseSucceedsRaw:
+        async def kill(self) -> None:
+            raise RuntimeError("delete failed")
+
+        async def close(self) -> None:
+            return None
+
+    with pytest.raises(RuntimeError, match="delete failed"):
+        await provider.close(
+            opensandbox_provider.SandboxHandle(
+                sandbox_id="sandbox-3",
+                provider_name="opensandbox",
+                raw=DeleteFailsCloseSucceedsRaw(),
+            ),
+            delete=True,
+        )
+
 
 async def test_create_once_and_connect_after_create_error_paths(
     fake_opensandbox_sdk: None,
@@ -567,6 +659,78 @@ async def test_create_once_and_connect_after_create_error_paths(
             SandboxSpec(image="image:tag"),
         )
 
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"request_timeout_s": 3},
+        probe={"command": None},
+    )
+    handle = await provider._create_once(SandboxSpec(image="image:tag", skip_health_check=True))
+    assert handle.sandbox_id == "sandbox-1"
+    assert FakeSandbox.created_kwargs["skip_health_check"] is True
+
+    class TimeoutSandbox(FakeSandbox):
+        @classmethod
+        async def create(cls, **_kwargs: Any) -> "FakeSandbox":
+            await asyncio.get_running_loop().create_future()
+            return cls()
+
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_opensandbox_sdk",
+        lambda: (TimeoutSandbox, FakeConnectionConfig, object, FakePlatformSpec, object),
+    )
+    provider = opensandbox_provider.OpenSandboxProvider(
+        create={"timeout_s": 0.01},
+        probe={"command": None},
+    )
+    with pytest.raises(opensandbox_provider.OpenSandboxCreateTimeoutError):
+        await provider._create_once(SandboxSpec(image="image:tag"))
+
+    class EmptyCreateSandbox(FakeSandbox):
+        @classmethod
+        async def create(cls, **_kwargs: Any) -> None:
+            return None
+
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_opensandbox_sdk",
+        lambda: (EmptyCreateSandbox, FakeConnectionConfig, object, FakePlatformSpec, object),
+    )
+    provider = opensandbox_provider.OpenSandboxProvider(probe={"command": None})
+    with pytest.raises(RuntimeError, match="returned no sandbox handle"):
+        await provider._create_once(SandboxSpec(image="image:tag"))
+
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_opensandbox_sdk",
+        lambda: (FakeSandbox, FakeConnectionConfig, object, FakePlatformSpec, object),
+    )
+    provider = opensandbox_provider.OpenSandboxProvider(probe={"command": "probe"})
+    cleanup_calls: list[str] = []
+
+    async def fail_verify(_handle: opensandbox_provider.SandboxHandle) -> None:
+        raise RuntimeError("probe failed")
+
+    async def cleanup(handle: opensandbox_provider.SandboxHandle) -> None:
+        cleanup_calls.append(handle.sandbox_id)
+
+    monkeypatch.setattr(provider, "_verify_created_handle", fail_verify)
+    monkeypatch.setattr(provider, "_cleanup_failed_create_handle", cleanup)
+    with pytest.raises(RuntimeError, match="probe failed"):
+        await provider._create_once(SandboxSpec(image="image:tag"))
+    assert cleanup_calls == ["sandbox-1"]
+
+    provider = opensandbox_provider.OpenSandboxProvider(probe={"command": None})
+
+    async def create_once(_spec: SandboxSpec) -> opensandbox_provider.SandboxHandle:
+        return opensandbox_provider.SandboxHandle(
+            sandbox_id="sandbox-semaphore", provider_name="opensandbox", raw=None
+        )
+
+    monkeypatch.setattr(provider, "_create_once", create_once)
+    assert (
+        await provider._create_with_retries(SandboxSpec(image="image:tag"), semaphore=asyncio.Semaphore(1))
+    ).sandbox_id == "sandbox-semaphore"
+
 
 async def test_retry_classification_and_await_sdk_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
     provider = opensandbox_provider.OpenSandboxProvider(
@@ -598,6 +762,81 @@ async def test_retry_classification_and_await_sdk_helpers(monkeypatch: pytest.Mo
             sandbox_id="sandbox-1",
             timeout_s=None,
         )
+
+
+async def test_probe_sampling_pool_progress_and_direct_exec_paths(monkeypatch: pytest.MonkeyPatch) -> None:
+    handles = [
+        opensandbox_provider.SandboxHandle(sandbox_id=f"sandbox-{index}", provider_name="opensandbox", raw=object())
+        for index in range(3)
+    ]
+    seen_handles: list[str] = []
+
+    provider = opensandbox_provider.OpenSandboxProvider(
+        probe={"command": "probe", "sample_count": 2},
+        pool={"progress_timeout_s": 0.01, "acquire_poll_interval_s": 0.01},
+    )
+
+    async def verify_created_handle(handle: opensandbox_provider.SandboxHandle) -> None:
+        seen_handles.append(handle.sandbox_id)
+
+    monkeypatch.setattr(provider, "_verify_created_handle", verify_created_handle)
+    await provider._verify_created_handles(handles)
+    assert seen_handles == ["sandbox-0", "sandbox-2"]
+
+    provider = opensandbox_provider.OpenSandboxProvider(probe={"command": "probe", "sample_count": 1})
+    seen_handles = []
+    monkeypatch.setattr(provider, "_verify_created_handle", verify_created_handle)
+    await provider._verify_created_handles(handles)
+    assert seen_handles == ["sandbox-0"]
+
+    with pytest.raises(ValueError, match="requires SandboxSpec.image"):
+        provider._validate_sdk_pool_spec(SandboxSpec(image=None))
+
+    class Snapshot:
+        idle_count = 0
+        state = SimpleNamespace(value="warming")
+
+    class NoProgressPool:
+        async def snapshot(self) -> Snapshot:
+            return Snapshot()
+
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    provider = opensandbox_provider.OpenSandboxProvider(
+        pool={"progress_timeout_s": 0.001, "acquire_poll_interval_s": 0.001},
+        probe={"command": None},
+    )
+    monkeypatch.setattr(opensandbox_provider.asyncio, "sleep", no_sleep)
+    with pytest.raises(opensandbox_provider.OpenSandboxCreateTimeoutError, match="warmup progress"):
+        await provider._wait_sdk_pool_idle(
+            NoProgressPool(),
+            spec=SandboxSpec(image="image:tag"),
+            requested=2,
+            timeout_s=1,
+            allow_partial=False,
+        )
+
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"exec_use_server_proxy": False},
+        probe={"command": None},
+    )
+
+    async def connect_after_create(
+        handle: opensandbox_provider.SandboxHandle,
+        _spec: SandboxSpec,
+    ) -> opensandbox_provider.SandboxHandle:
+        return opensandbox_provider.SandboxHandle(
+            sandbox_id=handle.sandbox_id,
+            provider_name="opensandbox",
+            raw="direct",
+        )
+
+    monkeypatch.setattr(provider, "_connect_after_create", connect_after_create)
+    direct_handle = await provider._direct_exec_handle_for_acquired_sandbox(
+        FakeSandbox("sandbox-direct"), SandboxSpec()
+    )
+    assert direct_handle.raw == "direct"
 
 
 async def _return_value(value: Any) -> Any:

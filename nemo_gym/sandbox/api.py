@@ -297,7 +297,7 @@ class Sandbox:
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         self.shutdown()
 
-    def __del__(self) -> None:
+    def __del__(self) -> None:  # pragma: no cover
         if hasattr(self, "_closed") and not self._closed:
             try:
                 self.shutdown()
