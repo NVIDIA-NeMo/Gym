@@ -21,26 +21,26 @@ from nemo_gym.openai_utils import NeMoGymResponse
 
 @pytest.fixture
 def server():
-    # Mock get_nvcc_version so the NVCC PATH check in model_post_init doesn't
-    # block the test suite on dev/CI machines that lack the CUDA Toolkit. The
+    # Mock both ensure_cuda_nvcc (avoid the micromamba download in tests) and
+    # get_nvcc_version (avoid PATH dependency on dev/CI machines). The
     # evaluate_solutions call itself is always patched in tests below.
     cfg = ComputeEvalResourcesServerConfig(num_processes=1)
-    with patch("app.get_nvcc_version", return_value="12.4.0"):
+    with patch("app.ensure_cuda_nvcc", return_value=None), patch("app.get_nvcc_version", return_value="12.9.0"):
         return ComputeEvalResourcesServer(config=cfg, server_client=MagicMock())
 
 
 @pytest.fixture
 def server_no_nvcc():
-    """A server config that should raise at construction because nvcc is missing."""
     cfg = ComputeEvalResourcesServerConfig(num_processes=1)
-    with patch("app.get_nvcc_version", return_value=None):
+    with patch("app.ensure_cuda_nvcc", return_value=None), patch("app.get_nvcc_version", return_value=None):
         yield cfg
 
 
 class TestNvccCheck:
     def test_missing_nvcc_raises(self, server_no_nvcc):
-        with pytest.raises(RuntimeError, match="NVCC not found"):
-            ComputeEvalResourcesServer(config=server_no_nvcc, server_client=MagicMock())
+        with patch("app.ensure_cuda_nvcc", return_value=None), patch("app.get_nvcc_version", return_value=None):
+            with pytest.raises(RuntimeError, match="NVCC not found"):
+                ComputeEvalResourcesServer(config=server_no_nvcc, server_client=MagicMock())
 
 
 _MINIMAL_PROBLEM = {

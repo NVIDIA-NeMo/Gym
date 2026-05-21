@@ -14,6 +14,7 @@ from compute_eval.execution import evaluate_solutions
 from compute_eval.generate_completions import _parse_solution
 from compute_eval.utils.eval_utils import get_nvcc_version
 from pydantic import Field, TypeAdapter
+from setup_cuda_nvcc import ensure_cuda_nvcc
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -70,9 +71,13 @@ class ComputeEvalResourcesServer(SimpleResourcesServer):
     config: ComputeEvalResourcesServerConfig
 
     def model_post_init(self, context):
+        # Auto-install the CUDA Toolkit via micromamba if nvcc isn't on PATH.
+        # First boot installs to .cuda_nvcc/env (~5 min, cached on lustre);
+        # subsequent boots short-circuit.
+        ensure_cuda_nvcc()
         nvcc_version = get_nvcc_version()
         if not nvcc_version:
-            raise RuntimeError("NVCC not found. Ensure the CUDA Toolkit is installed and nvcc is on PATH.")
+            raise RuntimeError("NVCC not found after auto-install. Check setup_cuda_nvcc logs.")
         self._semaphore = asyncio.Semaphore(self.config.num_processes)
 
     @staticmethod
