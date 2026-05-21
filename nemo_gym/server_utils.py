@@ -74,6 +74,32 @@ _GLOBAL_AIOHTTP_CLIENT: Union[None, ClientSession] = None
 _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG: bool = False
 
 
+def _redact_large_data_urls(obj: Any) -> Any:
+    """Redact inline image/audio/video data URLs before logging request bodies."""
+    if isinstance(obj, dict):
+        return {k: _redact_large_data_urls(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_redact_large_data_urls(v) for v in obj]
+    if isinstance(obj, tuple):
+        return tuple(_redact_large_data_urls(v) for v in obj)
+    if isinstance(obj, str) and obj.startswith("data:"):
+        media_type = obj.split(";", 1)[0].removeprefix("data:")
+        return f"<redacted {media_type} data URL>"
+    return obj
+
+
+def _redact_large_data_urls_from_bytes(content: bytes) -> bytes:
+    """Best-effort redaction for JSON error bodies before debug printing/storing."""
+    try:
+        parsed = orjson.loads(content)
+    except Exception:
+        return content
+    try:
+        return orjson.dumps(_redact_large_data_urls(parsed))
+    except Exception:
+        return content
+
+
 class GlobalAIOHTTPAsyncClientConfig(BaseModel):
     global_aiohttp_connector_limit: int = 100 * 1024
     global_aiohttp_connector_limit_per_host: int = 1024
@@ -209,15 +235,16 @@ Sleeping 0.5s and retrying...
 async def raise_for_status(response: ClientResponse) -> None:  # pragma: no cover
     if not response.ok:
         content = await response.content.read()
+        redacted_content = _redact_large_data_urls_from_bytes(content)
         if _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:
             print(f"""Request info: {response.request_info}
-Response content: {content}""")
+Response content: {redacted_content}""")
 
         try:
             response.raise_for_status()
         except ClientResponseError as e:
             # Set the response content here so we have access to it down the line.
-            e.response_content = content
+            e.response_content = redacted_content
             raise e
 
 
@@ -619,9 +646,11 @@ repr(e): {repr(e)}"""
 
         @app.exception_handler(RequestValidationError)
         async def validation_exception_handler(request: Request, exc):
+            redacted_errors = _redact_large_data_urls(exc.errors())
+            redacted_body = _redact_large_data_urls(exc.body)
             print(
-                f"""Hit validation exception! Errors: {json.dumps(exc.errors(), indent=4)}
-Full body: {json.dumps(exc.body, indent=4)}
+                f"""Hit validation exception! Errors: {json.dumps(redacted_errors, indent=4)}
+Full body: {json.dumps(redacted_body, indent=4)}
 """
             )
             return await request_validation_exception_handler(request, exc)
