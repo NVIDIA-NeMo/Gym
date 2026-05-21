@@ -34,6 +34,7 @@ import logging
 
 from nemo_gym.adapters import InterceptorRegistry
 
+
 logger = logging.getLogger(__name__)
 
 

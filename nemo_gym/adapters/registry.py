@@ -30,6 +30,7 @@ from nemo_gym.adapters.types import (
     ResponseInterceptor,
 )
 
+
 logger = logging.getLogger(__name__)
 
 InterceptorClass = Type[RequestInterceptor | RequestToResponseInterceptor | ResponseInterceptor]

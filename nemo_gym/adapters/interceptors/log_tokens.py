@@ -18,6 +18,7 @@ import logging
 
 from nemo_gym.adapters.types import AdapterResponse, ResponseInterceptor
 
+
 logger = logging.getLogger(__name__)
 
 

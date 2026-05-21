@@ -194,17 +194,13 @@ def _adapter_response_to_starlette(resp: AdapterResponse) -> Response:
     """
     raw = resp.headers or []
     if isinstance(raw, dict):
-        header_pairs: list[tuple[bytes, bytes]] = [
-            (k.encode("latin-1"), v.encode("latin-1")) for k, v in raw.items()
-        ]
+        header_pairs: list[tuple[bytes, bytes]] = [(k.encode("latin-1"), v.encode("latin-1")) for k, v in raw.items()]
     else:
         header_pairs = list(raw)
 
     # Strip hop-by-hop headers before re-emitting.
     fwd_pairs: list[tuple[bytes, bytes]] = [
-        (name, value)
-        for name, value in header_pairs
-        if name.decode("latin-1").lower() not in _HOP_BY_HOP_HEADERS
+        (name, value) for name, value in header_pairs if name.decode("latin-1").lower() not in _HOP_BY_HOP_HEADERS
     ]
 
     if isinstance(resp.body, bytes):
@@ -219,9 +215,7 @@ def _adapter_response_to_starlette(resp: AdapterResponse) -> Response:
     # (``application/json``) sticks. All other forwarded headers append.
     fwd_keys_lower = {name.lower() for name, _ in fwd_pairs}
     framing_kept = [
-        (k, v)
-        for k, v in out.raw_headers
-        if k.lower() == b"content-length" or k.lower() not in fwd_keys_lower
+        (k, v) for k, v in out.raw_headers if k.lower() == b"content-length" or k.lower() not in fwd_keys_lower
     ]
     out.raw_headers = framing_kept + fwd_pairs
     return out

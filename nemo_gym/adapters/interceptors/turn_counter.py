@@ -23,6 +23,7 @@ from typing import Any
 
 from nemo_gym.adapters.types import AdapterRequest, RequestInterceptor
 
+
 logger = logging.getLogger(__name__)
 
 _WARN_THRESHOLD = 0.80

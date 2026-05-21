@@ -56,6 +56,7 @@ from fastapi.testclient import TestClient
 
 from nemo_gym.adapters import install_middleware
 
+
 FIXTURE_DIR = Path(__file__).parent / "adapter_fixtures"
 
 

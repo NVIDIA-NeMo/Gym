@@ -517,7 +517,7 @@ class TestRequestLoggingBehavior:
     async def test_long_body_preview_is_truncated(self, caplog):
         import logging as _logging
 
-        from nemo_gym.adapters.interceptors.request_logging import Interceptor, _MAX
+        from nemo_gym.adapters.interceptors.request_logging import _MAX, Interceptor
 
         i = Interceptor()
         # Build a body whose JSON representation exceeds _MAX so the preview

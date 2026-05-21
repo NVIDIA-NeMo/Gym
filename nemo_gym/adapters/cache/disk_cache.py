@@ -24,6 +24,7 @@ import threading
 import time
 from typing import Any
 
+
 logger = logging.getLogger(__name__)
 
 _RELEVANT_KEYS = ("model", "messages", "tools", "temperature", "max_tokens", "top_p", "seed")

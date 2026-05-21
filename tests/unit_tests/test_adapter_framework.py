@@ -82,7 +82,5 @@ def test_registry_pre_lists_all_14_builtins() -> None:
     raise. ``available()`` is intentionally cheap and string-only.
     """
     names = set(InterceptorRegistry.available())
-    assert names == _EXPECTED_BUILTINS, (
-        f"Expected exactly the 14 builtin names; got {sorted(names)}"
-    )
+    assert names == _EXPECTED_BUILTINS, f"Expected exactly the 14 builtin names; got {sorted(names)}"
     assert len(names) == 14

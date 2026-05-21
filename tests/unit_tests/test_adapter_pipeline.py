@@ -274,9 +274,7 @@ async def test_upstream_call_skipped_when_chain_short_circuits():
 
     async def _upstream(req: AdapterRequest) -> AdapterResponse:
         upstream_seen.append(req)
-        return AdapterResponse(
-            status_code=200, headers={}, body={"result": "from-upstream"}, ctx=req.ctx
-        )
+        return AdapterResponse(status_code=200, headers={}, body={"result": "from-upstream"}, ctx=req.ctx)
 
     pipeline = AdapterPipeline(
         [

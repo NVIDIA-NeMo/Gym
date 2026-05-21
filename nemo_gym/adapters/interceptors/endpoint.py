@@ -29,6 +29,7 @@ from nemo_gym.adapters.types import (
 )
 from nemo_gym.server_utils import request as global_request
 
+
 logger = logging.getLogger(__name__)
 
 
@@ -164,7 +165,9 @@ class Interceptor(RequestToResponseInterceptor):
                 return AdapterResponse(
                     status_code=504,
                     headers={},
-                    body={"error": {"message": f"Upstream timed out after {self._request_timeout}s", "type": "timeout"}},
+                    body={
+                        "error": {"message": f"Upstream timed out after {self._request_timeout}s", "type": "timeout"}
+                    },
                     latency_ms=latency,
                     ctx=req.ctx,
                 )

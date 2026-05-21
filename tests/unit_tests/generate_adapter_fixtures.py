@@ -96,11 +96,13 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
+
 # Allow running this script directly: ``python generate_adapter_fixtures.py``
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR.parents[1]))
 
 from nemo_gym.adapters import install_middleware  # noqa: E402
+
 
 FIXTURE_DIR = SCRIPT_DIR / "adapter_fixtures"
 
@@ -140,9 +142,7 @@ _SCENARIOS: list[dict[str, Any]] = [
         "interceptor_specs": [
             {"name": "system_message", "config": {"system_message": "be terse", "strategy": "prepend"}},
         ],
-        "request": {
-            "body": {"model": "m", "messages": [{"role": "user", "content": "hi"}]}
-        },
+        "request": {"body": {"model": "m", "messages": [{"role": "user", "content": "hi"}]}},
         "_expect_upstream_body": {
             "model": "m",
             "messages": [
@@ -223,33 +223,25 @@ _SCENARIOS: list[dict[str, Any]] = [
                 "config": {"params_to_remove": ["stream"], "params_to_add": {"temperature": 0.0}},
             }
         ],
-        "request": {
-            "body": {"model": "m", "messages": [], "stream": True}
-        },
+        "request": {"body": {"model": "m", "messages": [], "stream": True}},
         "_expect_upstream_body": {"model": "m", "messages": [], "temperature": 0.0},
     },
     {
         "scenario": "turn_counter passes through under the budget",
         "interceptor_specs": [{"name": "turn_counter", "config": {"max_turns": 5}}],
-        "request": {
-            "body": {"model": "m", "messages": [{"role": "user", "content": "hi"}]}
-        },
+        "request": {"body": {"model": "m", "messages": [{"role": "user", "content": "hi"}]}},
         "_expect_upstream_body": {"model": "m", "messages": [{"role": "user", "content": "hi"}]},
     },
     {
         "scenario": "progress_tracking does not mutate the request",
         "interceptor_specs": [{"name": "progress_tracking", "config": {}}],
-        "request": {
-            "body": {"model": "m", "messages": [{"role": "user", "content": "hi"}]}
-        },
+        "request": {"body": {"model": "m", "messages": [{"role": "user", "content": "hi"}]}},
         "_expect_upstream_body": {"model": "m", "messages": [{"role": "user", "content": "hi"}]},
     },
     {
         "scenario": "logging interceptor does not mutate the request",
         "interceptor_specs": [{"name": "logging", "config": {}}],
-        "request": {
-            "body": {"model": "m", "messages": [{"role": "user", "content": "hi"}]}
-        },
+        "request": {"body": {"model": "m", "messages": [{"role": "user", "content": "hi"}]}},
         "_expect_upstream_body": {"model": "m", "messages": [{"role": "user", "content": "hi"}]},
     },
     # ------------------------------------------------------------------

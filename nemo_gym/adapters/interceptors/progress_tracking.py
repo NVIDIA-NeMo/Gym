@@ -22,6 +22,7 @@ import aiohttp
 from nemo_gym.adapters.types import AdapterResponse, ResponseInterceptor
 from nemo_gym.server_utils import request as global_request
 
+
 logger = logging.getLogger(__name__)
 
 
