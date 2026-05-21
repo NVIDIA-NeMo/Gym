@@ -1,7 +1,7 @@
 -e nemo-gym[dev] @ ../../
 pyyaml==6.0.2
 requests==2.32.3
-pydantic==2.10.6
+pydantic==2.13.4
 python-dotenv==1.0.1
 psutil==6.0.0
 nltk==3.9.4
