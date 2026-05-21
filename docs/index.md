@@ -300,6 +300,8 @@ Rollout Collection <get-started/rollout-collection.md>
 :maxdepth: 1
 
 Overview <agent-server/index>
+Multi-Step Agent <agent-server/multi-step-agent>
+Multi-Turn Agent <agent-server/multi-turn-agent>
 ```
 
 ```{toctree}

@@ -42,8 +42,10 @@ policy_model:                                 # Server ID (use "policy_model" �
 ```
 
 :::{tip}
-Keep the server ID as `policy_model` — agent configs reference this name by default. The `${policy_base_url}`, `${policy_api_key}`, and `${policy_model_name}` placeholders should be defined in `env.yaml` at the repository root, allowing you to change model settings in one place.
+Keep the server ID as `policy_model` — this is the model being trained or evaluated, and agent configs reference this name by default. The `${policy_base_url}`, `${policy_api_key}`, and `${policy_model_name}` placeholders should be defined in `env.yaml` at the repository root, allowing you to change model settings in one place.
 :::
+
+Some configurations require additional model servers beyond the policy model — for example, a user model for multi-turn agents or a judge model for LLM-as-a-judge resources servers. Each uses the same block structure with a different server ID and its own `env.yaml` variables. See the specific agent or resources server documentation for required model servers.
 
 ### Resources Server Fields
 
@@ -62,7 +64,7 @@ my_resource:                                  # Server ID (your choice — agent
 
 ### Agent Server Fields
 
-Agent servers must include both a `resources_server` and `model_server` block to specify which servers to use.
+Agent servers must include both a `resources_server` and `model_server` block to specify which servers to use. Some agents require additional fields (e.g. extra model servers, turn limits). Check the agent's `README.md` and `configs/` directory under `responses_api_agents/<agent>/` for agent-specific fields.
 
 ```yaml
 my_agent:                                     # Server ID (your choice — used in API requests)
@@ -122,6 +124,9 @@ Store secrets and local settings at the repository root. This file is gitignored
 policy_base_url: https://api.openai.com/v1
 policy_api_key: sk-your-api-key
 policy_model_name: gpt-4o-2024-11-20
+
+# Additional model servers follow the same pattern (e.g. user_base_url, judge_base_url)
+# See the specific agent or resources server documentation for required variables.
 
 # Optional: store config paths for reuse
 my_config_paths:
