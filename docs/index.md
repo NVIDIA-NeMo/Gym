@@ -309,6 +309,7 @@ Overview <agent-server/index>
 
 Overview <model-server/index>
 vLLM <model-server/vllm>
+Adapter Middleware <model-server/adapters>
 ```
 
 ```{toctree}
