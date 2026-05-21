@@ -265,8 +265,8 @@ class TestEndpointInterceptorURLStripping:
         assert i._upstream_url == "http://vllm:8000"
 
     def test_api_key_stored(self):
-        i = self._make("http://x", api_key="sk-123")
-        assert i._api_key == "sk-123"
+        i = self._make("http://x", api_key="sk-123")  # pragma: allowlist secret
+        assert i._api_key == "sk-123"  # pragma: allowlist secret
 
     def test_extra_body_merged(self):
         i = self._make("http://x", extra_body={"skip_special_tokens": False})

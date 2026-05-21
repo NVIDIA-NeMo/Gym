@@ -325,7 +325,7 @@ def test_set_cookie_headers_preserved_through_middleware() -> None:
     # Match the order ``SimpleResponsesAPIModel.setup_webserver`` uses:
     # session middleware first, then the route handlers, then (after this
     # builder returns) the adapter middleware on top.
-    app.add_middleware(SessionMiddleware, secret_key="test-secret-key")
+    app.add_middleware(SessionMiddleware, secret_key="test-secret-key")  # pragma: allowlist secret
 
     @app.post("/v1/chat/completions")
     async def _chat(request: Request, body: dict = Body(...)):

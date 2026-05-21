@@ -31,7 +31,7 @@ def test_golden_key_simple():
     body = {"model": "gpt-4", "messages": [{"role": "user", "content": "hello"}], "temperature": 0.7}
     key = _compute_key(body)
     assert key == _compute_key(body)
-    assert key == "92232807c9b5c0bab68fd1abb38bc83c884fb04b0eb9b8b453c19daead7d682f"
+    assert key == "92232807c9b5c0bab68fd1abb38bc83c884fb04b0eb9b8b453c19daead7d682f"  # pragma: allowlist secret
 
 
 def test_golden_key_with_tools():
@@ -42,7 +42,7 @@ def test_golden_key_with_tools():
     }
     key = _compute_key(body)
     assert key == _compute_key(body)
-    assert key == "ce43d524c627c96eaadbb9abdac38ad5eb60a93d15b1d26880fa1fe0f86d4c68"
+    assert key == "ce43d524c627c96eaadbb9abdac38ad5eb60a93d15b1d26880fa1fe0f86d4c68"  # pragma: allowlist secret
 
 
 def test_key_ignores_irrelevant_fields():
