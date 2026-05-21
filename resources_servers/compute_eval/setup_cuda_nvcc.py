@@ -40,6 +40,10 @@ CUDA_PKG_SPEC = (
     "cuda-nvcc=12.9",
     "cuda-cudart-dev=12.9",
     "cuda-cccl=12.9",
+    # Hidden-test code in nvidia/compute-eval problems calls nvtxRangePushA;
+    # without cuda-nvtx-dev the test_main.cu binaries fail to compile/link
+    # regardless of what the model generates.
+    "cuda-nvtx-dev=12.9",
 )
 CONDA_CHANNELS = ("nvidia/label/cuda-12.9.0", "conda-forge")
 
@@ -102,15 +106,21 @@ def _wire_paths(env_dir: Path) -> Path:
     if not nvcc.exists():
         raise RuntimeError(f"nvcc not found at {nvcc} after micromamba install")
 
+    # conda's cuda packages put libcudart + cuda_runtime.h under
+    # targets/<arch>-linux/{lib,include}. Auto-detect the target dir
+    # since arch naming varies (x86_64-linux, sbsa-linux for ARM64 SBSA,
+    # aarch64-linux on some distros).
+    targets_root = env_dir / "targets"
+    target_dirs = sorted(p for p in targets_root.iterdir() if p.is_dir()) if targets_root.exists() else []
+    if not target_dirs:
+        raise RuntimeError(f"no targets/*-linux dirs under {targets_root}")
+    target = target_dirs[0]  # take whichever conda created
+
     bin_dir = str(env_dir / "bin")
     lib_dir = str(env_dir / "lib")
     inc_dir = str(env_dir / "include")
-    targets_lib = str(env_dir / "targets" / "x86_64-linux" / "lib")
-    targets_inc = str(env_dir / "targets" / "x86_64-linux" / "include")
-    # conda's cuda packages put libcudart under targets/aarch64-linux/lib on arm.
-    arch_targets = "aarch64-linux" if platform.machine().lower() in ("aarch64", "arm64") else "x86_64-linux"
-    targets_lib = str(env_dir / "targets" / arch_targets / "lib")
-    targets_inc = str(env_dir / "targets" / arch_targets / "include")
+    targets_lib = str(target / "lib")
+    targets_inc = str(target / "include")
 
     def _prepend(var: str, *vals: str) -> None:
         existing = os.environ.get(var, "")
@@ -120,7 +130,8 @@ def _wire_paths(env_dir: Path) -> Path:
     _prepend("PATH", bin_dir)
     _prepend("LD_LIBRARY_PATH", targets_lib, lib_dir)
     _prepend("CPATH", targets_inc, inc_dir)
-    _prepend("CUDA_HOME", str(env_dir))  # for any user that reads CUDA_HOME
+    _prepend("LIBRARY_PATH", targets_lib, lib_dir)  # for nvcc linker search at compile time
+    os.environ["CUDA_HOME"] = str(env_dir)  # absolute, not list-prepend
 
     return nvcc
 
