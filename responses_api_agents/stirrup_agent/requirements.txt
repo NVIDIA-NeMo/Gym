@@ -3,7 +3,7 @@
 # Kept out of the outer nemo-gym pyproject.toml so core users don't pay
 # the PyTorch/transformers install cost.
 stirrup>=0.1.7
-transformers>=4.57.6
+transformers>=5.8.1
 # Deliverable-processing deps for file_reader.py AND the libraries the agent
 # tells the policy model are available in the sandbox (see
 # prompts/gdpval_user_prompt.txt). The subprocess venv created by ng_run

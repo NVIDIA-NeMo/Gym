@@ -22,6 +22,7 @@ construction, scoring, response building) is delegated to a
 from __future__ import annotations
 
 import asyncio
+import os
 import shutil
 import sys
 import tempfile
@@ -49,6 +50,176 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
 from responses_api_agents.stirrup_agent.task_strategy import TaskSampleSkipError, TaskStrategy
+
+
+# ---------------------------------------------------------------------------
+# Per-task timeout (caps a single Ray rollout attempt's wallclock).
+# Without a per-attempt budget, a single pathological task that exceeds Slurm
+# walltime can permanently consume every chain-hop's compute and never
+# complete.
+# ---------------------------------------------------------------------------
+
+STIRRUP_PER_TASK_TIMEOUT_DEFAULT = 3 * 3600 + 30 * 60  # 3h30m = 12600s
+
+_TIMEOUT_LOGGED = False
+
+
+class TaskPerAttemptTimeoutError(Exception):
+    """Raised when a single Ray rollout attempt exceeds the per-task timeout."""
+
+
+def _get_per_task_timeout() -> float:
+    """Read STIRRUP_PER_TASK_TIMEOUT_S (seconds, float) or fall back to default."""
+    raw = os.environ.get("STIRRUP_PER_TASK_TIMEOUT_S")
+    if raw is None or raw == "":
+        return float(STIRRUP_PER_TASK_TIMEOUT_DEFAULT)
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        print(
+            f"[gdpval_stirrup_agent] WARNING: could not parse STIRRUP_PER_TASK_TIMEOUT_S={raw!r} "
+            f"as float, falling back to default {STIRRUP_PER_TASK_TIMEOUT_DEFAULT} s.",
+            flush=True,
+        )
+        return float(STIRRUP_PER_TASK_TIMEOUT_DEFAULT)
+
+
+def _log_timeout_once(timeout_s: float) -> None:
+    """Emit a single INFO line on the first per-task await of this process."""
+    global _TIMEOUT_LOGGED
+    if _TIMEOUT_LOGGED:
+        return
+    _TIMEOUT_LOGGED = True
+    total = int(timeout_s)
+    hours, rem = divmod(total, 3600)
+    minutes, seconds = divmod(rem, 60)
+    print(
+        f"[gdpval_stirrup_agent] per-task timeout set to {hours}h{minutes}m{seconds}s "
+        f"({timeout_s:g} s). Override with env var STIRRUP_PER_TASK_TIMEOUT_S.",
+        flush=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Failure classification (drives whether a failure is persisted to the main
+# rollouts jsonl, the failures sidecar, or nowhere at all).
+#
+# Five classes:
+#   kill_shaped       Ray worker died (SIGTERM/walltime/OOM/node loss). NO row
+#                     written anywhere; resume's set-difference on the main
+#                     jsonl naturally re-dispatches, capped per-attempt by
+#                     the per-task timeout above.
+#   timeout_exceeded  TaskPerAttemptTimeoutError. Sidecar entry with
+#                     _ng_failure_terminal=True so chain-hop 2 does NOT retry.
+#   skipped           TaskSampleSkipError. Sidecar entry with terminal=True.
+#   transient         verify-side ClientResponseError 5xx / connection /
+#                     asyncio.TimeoutError. Sidecar entry per attempt; retry
+#                     up to max_attempts.
+#   legitimate        Everything else (real Python exception with user code
+#                     in the traceback). Sidecar entry per attempt; retry
+#                     up to max_attempts.
+# ---------------------------------------------------------------------------
+
+# Sentinel keys the dispatcher (nemo_gym.rollout_collection) reads to route a
+# returned payload between the main jsonl, the failures sidecar, or /dev/null.
+NG_FAILURE_CLASS_KEY = "_ng_failure_class"  # str: one of the 5 class names
+NG_NO_PERSIST_KEY = "_ng_no_persist"  # bool: don't write anywhere
+NG_TERMINAL_KEY = "_ng_failure_terminal"  # bool: never retry on resume
+
+_USER_CODE_PATH_SUBSTRINGS = (
+    "responses_api_agents/",
+    "/stirrup/",
+)
+
+
+def _has_user_code_frame(exc: BaseException) -> bool:
+    """Return True iff *exc* (or any cause/context in its chain) has a
+    traceback frame originating in user code (stirrup_agent or Stirrup).
+
+    A ``RayTaskError`` wrapping a user-code failure has those frames present.
+    A ``RayTaskError`` raised purely from Ray's internal post-mortem (e.g.
+    formatting a worker stdout log that Slurm's epilogue already scrubbed)
+    has only Ray internals and ``<frozen genericpath>`` — that's the
+    walltime / SIGTERM signature.
+    """
+    seen: set = set()
+
+    def _walk(e: Optional[BaseException]) -> bool:
+        if e is None or id(e) in seen:
+            return False
+        seen.add(id(e))
+        tb = e.__traceback__
+        while tb is not None:
+            fname = tb.tb_frame.f_code.co_filename
+            for sub in _USER_CODE_PATH_SUBSTRINGS:
+                if sub in fname:
+                    return True
+            tb = tb.tb_next
+        return _walk(e.__cause__) or _walk(e.__context__)
+
+    return _walk(exc)
+
+
+def _classify_rollout_failure(exc: BaseException) -> str:
+    """Classify an exception raised by ``self.responses(...)``.
+
+    Returns one of: 'kill_shaped', 'timeout_exceeded', 'skipped', 'legitimate'.
+    The 'transient' class only applies to verify-side failures and is
+    produced by :func:`_classify_verify_failure`.
+    """
+    if isinstance(exc, TaskPerAttemptTimeoutError):
+        return "timeout_exceeded"
+    if isinstance(exc, TaskSampleSkipError):
+        return "skipped"
+    try:
+        from ray.exceptions import (
+            LocalRayletDiedError,
+            NodeDiedError,
+            RayActorError,
+            RayTaskError,
+            WorkerCrashedError,
+        )
+        from ray.exceptions import (
+            OutOfMemoryError as RayOutOfMemoryError,
+        )
+    except ImportError:
+        # ray.exceptions surface drifted; fail open to bounded retry.
+        return "legitimate"
+    if isinstance(
+        exc,
+        (
+            RayActorError,
+            WorkerCrashedError,
+            NodeDiedError,
+            RayOutOfMemoryError,
+            LocalRayletDiedError,
+        ),
+    ):
+        return "kill_shaped"
+    if isinstance(exc, RayTaskError):
+        # No user-code frame ⇒ Ray internals (e.g. summary-builder hitting
+        # a vanished worker log after Slurm's epilogue scrubbed /tmp/ray).
+        return "legitimate" if _has_user_code_frame(exc) else "kill_shaped"
+    return "legitimate"
+
+
+def _classify_verify_failure(exc: BaseException) -> str:
+    """Classify an exception raised by the ``/verify`` POST. Verify-side
+    failures are never ``kill_shaped`` (we had a rollout response in hand)
+    and never ``timeout_exceeded`` (that's a rollout-side class).
+    """
+    try:
+        import aiohttp
+
+        if isinstance(exc, aiohttp.ClientResponseError):
+            return "transient" if 500 <= exc.status < 600 else "legitimate"
+        if isinstance(exc, aiohttp.ClientConnectionError):
+            return "transient"
+    except ImportError:
+        pass
+    if isinstance(exc, asyncio.TimeoutError):
+        return "transient"
+    return "legitimate"
 
 
 # ---------------------------------------------------------------------------
@@ -139,7 +310,8 @@ async def _run_stirrup_agent(
     max_turns: int = 100,
     temperature: float = 0.6,
     max_tokens: int = 262144,
-    input_files_dir: Optional[str] = None,
+    reference_files: Optional[list] = None,
+    reference_file_urls: Optional[list] = None,
     exec_provider_class: Optional[str] = None,
     exec_provider_kwargs: Optional[Dict[str, Any]] = None,
     persist_deliverables_dir: Optional[str] = None,
@@ -262,6 +434,28 @@ async def _run_stirrup_agent(
     agent = NeMoAgent(**agent_kwargs)
 
     start_time = time.time()
+
+    # Stage GDPVal reference files on this Ray worker (not on the agent server).
+    # This is the cross-node /tmp fix from PR #1366. The worker container has
+    # /cache lustre-bound via deployment.cache_path; the agent-server container
+    # does not. Honor the GDPVAL_REF_FILES_DIR env var as an escape hatch for
+    # operators whose worker /tmp is tight.
+    input_files_dir: Optional[str] = None
+    if is_gdpval and reference_files and reference_file_urls:
+        import os as _os_ref
+
+        from responses_api_agents.stirrup_agent.tasks.gdpval import _download_reference_files
+
+        ref_root = _os_ref.environ.get("GDPVAL_REF_FILES_DIR")
+        if ref_root:
+            Path(ref_root).mkdir(parents=True, exist_ok=True)
+        input_files_dir = tempfile.mkdtemp(prefix="gdpval_ref_files_", dir=ref_root)
+        downloaded = _download_reference_files(reference_files, reference_file_urls, Path(input_files_dir))
+        if downloaded:
+            print(f"Downloaded {len(downloaded)} reference files to {input_files_dir}", flush=True)
+        else:
+            shutil.rmtree(input_files_dir, ignore_errors=True)
+            input_files_dir = None
 
     input_files = f"{input_files_dir}/" if input_files_dir else None
 
@@ -429,6 +623,17 @@ async def _run_stirrup_agent(
             print(f"[stirrup] persisted task artifacts to {task_dir}", flush=True)
     finally:
         shutil.rmtree(output_dir, ignore_errors=True)
+        if input_files_dir:
+            try:
+                shutil.rmtree(input_files_dir)
+            except Exception as cleanup_err:
+                # Don't mask the original exception; just log loudly so operators
+                # see the orphan accumulation (Chapter 3 / 1192-subfolder bug).
+                print(
+                    f"[gdpval_stirrup_agent] WARN: failed to cleanup {input_files_dir}: "
+                    f"{type(cleanup_err).__name__}: {cleanup_err}",
+                    flush=True,
+                )
 
     elapsed = time.time() - start_time
 
@@ -636,8 +841,6 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
 
         model_base_url = self._get_model_base_url()
 
-        input_files_dir = self.task_strategy.prepare_input_files(task_info)
-
         if self.config.task == "gdpval":
             system_prompt = None
             # Raw task prompt — _run_stirrup_agent wraps it in GDPVal template when is_gdpval=True
@@ -660,37 +863,48 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
             exec_provider_class = f"{cls.__module__}.{cls.__qualname__}"
             exec_provider_kwargs = exec_provider._serializable_kwargs()
 
-        try:
-            params = {
-                "task_prompt": user_prompt,
-                "system_prompt": system_prompt,
-                "model_base_url": model_base_url,
-                "model_name": model_name,
-                "api_key": "dummy",  # pragma: allowlist secret
-                "max_turns": self.config.agent_max_turns,
-                "temperature": temperature,
-                "max_tokens": max_tokens,
-                "input_files_dir": input_files_dir,
-                "exec_provider_class": exec_provider_class,
-                "exec_provider_kwargs": exec_provider_kwargs,
-                "persist_deliverables_dir": self.config.persist_deliverables_dir,
-                "task_id": task_info.get("task_id"),
-                "rollout_index": (body.metadata or {}).get("_ng_rollout_index"),
-                "is_gdpval": self.config.task == "gdpval",
-                "model_id": self.config.model_id,
-                "completion_token_buffer": self.config.completion_token_buffer,
-                "top_p": getattr(body, "top_p", None) or self.config.top_p,
-                "enable_thinking": self.config.enable_thinking,
-                "max_completion_tokens_cap": self.config.max_completion_tokens_cap,
-                "tavily_api_key": self.config.tavily_api_key,
-                "tavily_max_sweeps": self.config.tavily_max_sweeps,
-            }
+        # Reference files are downloaded on the Ray worker (see _run_stirrup_agent)
+        # because head-node /tmp is not visible to SPREAD-scheduled workers on other nodes.
+        params = {
+            "task_prompt": user_prompt,
+            "system_prompt": system_prompt,
+            "model_base_url": model_base_url,
+            "model_name": model_name,
+            "api_key": "dummy",  # pragma: allowlist secret
+            "max_turns": self.config.agent_max_turns,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "reference_files": task_info.get("reference_files") if self.config.task == "gdpval" else None,
+            "reference_file_urls": task_info.get("reference_file_urls") if self.config.task == "gdpval" else None,
+            "exec_provider_class": exec_provider_class,
+            "exec_provider_kwargs": exec_provider_kwargs,
+            "persist_deliverables_dir": self.config.persist_deliverables_dir,
+            "task_id": task_info.get("task_id"),
+            "rollout_index": (body.metadata or {}).get("_ng_rollout_index"),
+            "is_gdpval": self.config.task == "gdpval",
+            "model_id": self.config.model_id,
+            "completion_token_buffer": self.config.completion_token_buffer,
+            "top_p": getattr(body, "top_p", None) or self.config.top_p,
+            "enable_thinking": self.config.enable_thinking,
+            "max_completion_tokens_cap": self.config.max_completion_tokens_cap,
+            "tavily_api_key": self.config.tavily_api_key,
+            "tavily_max_sweeps": self.config.tavily_max_sweeps,
+        }
 
-            future = run_stirrup_agent_remote.remote(params)
-            result = await future
-        finally:
-            if input_files_dir:
-                shutil.rmtree(input_files_dir, ignore_errors=True)
+        future = run_stirrup_agent_remote.remote(params)
+        per_task_timeout = _get_per_task_timeout()
+        _log_timeout_once(per_task_timeout)
+        try:
+            result = await asyncio.wait_for(future, timeout=per_task_timeout)
+        except asyncio.TimeoutError:
+            try:
+                ray.cancel(future, force=True)
+            except Exception as _cancel_exc:
+                print(
+                    f"[gdpval_stirrup_agent] WARNING: ray.cancel failed after timeout: {_cancel_exc!r}",
+                    flush=True,
+                )
+            raise TaskPerAttemptTimeoutError(f"per-task timeout exceeded ({per_task_timeout:g} s)") from None
 
         input_items = result["input_items"]
         output_items = result["output_items"]
@@ -784,10 +998,10 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
                 response = await self.responses(fixed_params)
             except Exception as exc:
                 task_info = self.task_strategy.extract_task_info(existing_metadata)
-                label = "skipped" if isinstance(exc, TaskSampleSkipError) else "failed"
+                failure_class = _classify_rollout_failure(exc)
                 instance_hint = task_info.get("instance_id", task_info.get("task_id", "unknown"))
                 print(
-                    f"[stirrup-{label}] {instance_hint}: {type(exc).__name__}: {exc}",
+                    f"[stirrup-{failure_class}] {instance_hint}: {type(exc).__name__}: {exc}",
                     flush=True,
                 )
                 return self._build_failed_run_payload(
@@ -795,7 +1009,8 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
                     fixed_params=fixed_params,
                     task_info=task_info,
                     reason=f"{type(exc).__name__}: {exc}",
-                    skipped=label == "skipped",
+                    skipped=(failure_class == "skipped"),
+                    error_class=failure_class,
                 )
 
             response_clean = response.model_copy(update={"metadata": None})
@@ -831,9 +1046,10 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
                 return await get_response_json(verify_response)
             except Exception as exc:
                 task_info = self.task_strategy.extract_task_info(existing_metadata)
+                failure_class = _classify_verify_failure(exc)
                 instance_hint = task_info.get("instance_id", task_info.get("task_id", "unknown"))
                 print(
-                    f"[stirrup-verify-failed] {instance_hint}: {type(exc).__name__}: {exc}",
+                    f"[stirrup-verify-{failure_class}] {instance_hint}: {type(exc).__name__}: {exc}",
                     flush=True,
                 )
                 return self._build_failed_run_payload(
@@ -842,6 +1058,7 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
                     task_info=task_info,
                     reason=f"verify failed: {type(exc).__name__}: {exc}",
                     skipped=False,
+                    error_class=failure_class,
                 )
 
     def _build_failed_run_payload(
@@ -852,10 +1069,34 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
         task_info: Dict[str, Any],
         reason: str,
         skipped: bool,
+        error_class: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Return a verify-response-shaped dict for runs that never produced a deliverable."""
+        """Return a verify-response-shaped dict for runs that never produced a deliverable.
+
+        The returned payload carries routing flags read by the rollout
+        dispatcher (``nemo_gym.rollout_collection``):
+
+        - ``_ng_no_persist=True`` for ``kill_shaped``: not written anywhere;
+          resume's set-difference on the main jsonl re-dispatches the task.
+        - ``_ng_failure_terminal=True`` for ``timeout_exceeded`` / ``skipped``:
+          one sidecar entry, never retried.
+        - Otherwise (``legitimate``, ``transient``): sidecar entry per attempt;
+          retried up to ``NEMO_GYM_MAX_ROLLOUT_ATTEMPTS`` on chain resume.
+        """
+        if error_class == "timeout_exceeded":
+            suffix = "timeout"
+            status_word = "Timed out"
+        elif error_class == "kill_shaped":
+            suffix = "killed"
+            status_word = "Killed"
+        elif skipped or error_class == "skipped":
+            suffix = "skipped"
+            status_word = "Skipped"
+        else:
+            suffix = "failed"
+            status_word = "Failed"
         placeholder = NeMoGymResponse(
-            id=f"{self.task_strategy.response_id(task_info)}-{'skipped' if skipped else 'failed'}",
+            id=f"{self.task_strategy.response_id(task_info)}-{suffix}",
             created_at=int(time.time()),
             model=fixed_params.model or "unknown",
             object="response",
@@ -865,7 +1106,7 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
                     content=[
                         NeMoGymResponseOutputText(
                             type="output_text",
-                            text=f"{'Skipped' if skipped else 'Failed'}: {reason}",
+                            text=f"{status_word}: {reason}",
                             annotations=[],
                         )
                     ],
@@ -883,6 +1124,18 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
         payload["reward"] = 0.0
         payload["skipped"] = skipped
         payload["error_message"] = reason
+        if error_class is not None:
+            payload["error_class"] = error_class
+            payload[NG_FAILURE_CLASS_KEY] = error_class
+            if error_class == "kill_shaped":
+                # Don't persist: resume's set-difference on the main jsonl
+                # naturally re-dispatches. Bounded across hops by per-task timeout.
+                payload[NG_NO_PERSIST_KEY] = True
+            elif error_class in ("timeout_exceeded", "skipped"):
+                # Sidecar entry written once; chain-hop 2 will not retry.
+                payload[NG_TERMINAL_KEY] = True
+            # 'legitimate' / 'transient': sidecar entry per attempt; retried
+            # by chain-hop up to NEMO_GYM_MAX_ROLLOUT_ATTEMPTS (default 3).
         return payload
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
