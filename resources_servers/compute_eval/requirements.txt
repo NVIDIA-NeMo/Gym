@@ -1,0 +1,2 @@
+-e nemo-gym[dev] @ ../../
+compute-eval @ git+https://github.com/NVIDIA/compute-eval.git@e01a5d2
