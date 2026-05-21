@@ -1,0 +1,19 @@
+nameReference:
+  - kind: ServiceAccount
+    fieldSpecs:
+      - kind: RayCluster
+        group: ray.io
+        path: spec/headGroupSpec/template/spec/serviceAccountName
+      - kind: RayCluster
+        group: ray.io
+        path: spec/workerGroupSpecs/template/spec/serviceAccountName
+  - kind: ConfigMap
+    fieldSpecs:
+      - kind: RayCluster
+        group: ray.io
+        path: spec/workerGroupSpecs/template/spec/containers/env/valueFrom/configMapKeyRef/name
+  - kind: Secret
+    fieldSpecs:
+      - kind: RayCluster
+        group: ray.io
+        path: spec/workerGroupSpecs/template/spec/containers/envFrom/secretRef/name

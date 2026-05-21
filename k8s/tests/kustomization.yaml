@@ -14,4 +14,4 @@ patches:
   - path: deployment-model-patch.yaml
     target:
       kind: Deployment
-      name: gym-model
+      labelSelector: app.kubernetes.io/component=model-server

@@ -103,8 +103,9 @@ jobs:
             --wait \
             --timeout 120s
 
-      - name: Create test secrets from examples
+      - name: Create namespace and test secrets
         run: |
+          kubectl create namespace gym
           for f in k8s/overlays/*/secret.yaml.example; do
             cp "$f" "${f%.example}"
           done
@@ -114,21 +115,21 @@ jobs:
 
       - name: Wait for deployments
         run: |
-          kubectl -n gym rollout status deployment/gym-head --timeout=120s
-          kubectl -n gym rollout status deployment/gym-agent --timeout=300s
-          kubectl -n gym rollout status deployment/gym-model --timeout=300s
+          kubectl -n gym rollout status deployment/estc-gym-head --timeout=120s
+          kubectl -n gym rollout status deployment/estc-gym-agent --timeout=300s
+          kubectl -n gym rollout status deployment/estc-gym-model --timeout=300s
 
       - name: Wait for Ray cluster pods
         run: |
           echo "Waiting for Ray head pod..."
           kubectl -n gym wait pod \
-            -l app.kubernetes.io/part-of=nemo-gym,ray.io/node-type=head \
+            -l app.kubernetes.io/instance=estc,ray.io/node-type=head \
             --for=condition=Ready \
             --timeout=300s
 
           echo "Waiting for resources server pod..."
           kubectl -n gym wait pod \
-            -l app.kubernetes.io/name=gym-resources \
+            -l app.kubernetes.io/instance=estc,app.kubernetes.io/name=gym-resources \
             --for=condition=Ready \
             --timeout=300s
 
@@ -137,7 +138,7 @@ jobs:
 
       - name: Verify HeadServer serves config
         run: |
-          kubectl -n gym port-forward svc/gym-head-svc 11000:11000 &
+          kubectl -n gym port-forward svc/estc-gym-head-svc 11000:11000 &
           PF_PID=$!
           sleep 2
 
@@ -161,7 +162,7 @@ jobs:
 
       - name: Run e2e smoke test
         run: |
-          kubectl -n gym port-forward svc/gym-agent-svc 8080:8080 &
+          kubectl -n gym port-forward svc/estc-gym-agent-svc 8080:8080 &
           PF_PID=$!
 
           for i in $(seq 1 30); do
@@ -220,12 +221,12 @@ jobs:
           echo "=== Pod Events ==="
           kubectl -n gym get events --sort-by='.lastTimestamp'
           echo "=== Agent Logs ==="
-          kubectl -n gym logs deployment/gym-agent --tail=100 || true
+          kubectl -n gym logs deployment/estc-gym-agent --tail=100 || true
           echo "=== Model Logs ==="
-          kubectl -n gym logs deployment/gym-model --tail=100 || true
+          kubectl -n gym logs deployment/estc-gym-model --tail=100 || true
           echo "=== Resources Logs ==="
-          kubectl -n gym logs -l app.kubernetes.io/name=gym-resources --tail=100 || true
+          kubectl -n gym logs -l app.kubernetes.io/instance=estc,app.kubernetes.io/name=gym-resources --tail=100 || true
           echo "=== HeadServer Logs ==="
-          kubectl -n gym logs deployment/gym-head --tail=100 || true
+          kubectl -n gym logs deployment/estc-gym-head --tail=100 || true
           echo "=== Ray Head Logs ==="
           kubectl -n gym logs -l ray.io/node-type=head --tail=100 || true

@@ -5,6 +5,23 @@ resources:
   - ../../base
   - secret.yaml
 
+namePrefix: cg-
+
+labels:
+  - includeSelectors: true
+    includeTemplates: true
+    pairs:
+      app.kubernetes.io/instance: cg
+    fields:
+      - path: spec/headGroupSpec/template/metadata/labels
+        kind: RayCluster
+        group: ray.io
+        create: true
+      - path: spec/workerGroupSpecs/template/metadata/labels
+        kind: RayCluster
+        group: ray.io
+        create: true
+
 patches:
   - path: configmap-patch.yaml
     target:
@@ -20,3 +37,50 @@ patches:
     target:
       kind: RayCluster
       name: gym-ray
+
+replacements:
+  - source:
+      kind: Service
+      name: gym-resources-svc
+      fieldPath: metadata.name
+    targets:
+      - select:
+          kind: Deployment
+          name: gym-agent
+        fieldPaths:
+          - spec.template.spec.containers.[name=agent].env.[name=RESOURCES_HOST].value
+      - select:
+          kind: Deployment
+          name: gym-model
+        fieldPaths:
+          - spec.template.spec.containers.[name=model].env.[name=RESOURCES_HOST].value
+  - source:
+      kind: Service
+      name: gym-agent-svc
+      fieldPath: metadata.name
+    targets:
+      - select:
+          kind: Deployment
+          name: gym-model
+        fieldPaths:
+          - spec.template.spec.containers.[name=model].env.[name=AGENT_HOST].value
+      - select:
+          kind: RayCluster
+          name: gym-ray
+        fieldPaths:
+          - spec.workerGroupSpecs.1.template.spec.containers.[name=ray-worker].env.[name=AGENT_HOST].value
+  - source:
+      kind: Service
+      name: gym-model-svc
+      fieldPath: metadata.name
+    targets:
+      - select:
+          kind: Deployment
+          name: gym-agent
+        fieldPaths:
+          - spec.template.spec.containers.[name=agent].env.[name=MODEL_HOST].value
+      - select:
+          kind: RayCluster
+          name: gym-ray
+        fieldPaths:
+          - spec.workerGroupSpecs.1.template.spec.containers.[name=ray-worker].env.[name=MODEL_HOST].value

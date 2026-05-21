@@ -3,7 +3,7 @@
 # ng_status, ng_reward_profile) can discover server addresses via port-forward.
 #
 # Build:
-#   podman build --platform linux/amd64 -f k8s/head/Containerfile --target head -t quay.io/redhat-et/nemo-gym-head:latest .
+#   podman build --platform linux/amd64 -f k8s/head/Containerfile --target head -t ghcr.io/nvidia-nemo/gym/nemo-gym-head:latest .
 
 # --- Build stage ---
 FROM registry.access.redhat.com/ubi10/python-312-minimal AS build

@@ -3,8 +3,10 @@ kind: Kustomization
 
 namespace: gym
 
+configurations:
+  - configurations/name-reference.yaml
+
 resources:
-  - namespace.yaml
   - serviceaccount.yaml
   - configmap.yaml
   - raycluster.yaml
@@ -15,4 +17,3 @@ resources:
   - service-agent.yaml
   - service-model.yaml
   - service-head.yaml
-  - networkpolicy.yaml
