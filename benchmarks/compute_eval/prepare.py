@@ -2,29 +2,40 @@
 # SPDX-License-Identifier: Apache-2.0
 """compute-eval dataset prep.
 
-Direct port of NeMo-Skills' ``nemo_skills/dataset/compute-eval/prepare.py``:
-- downloads ``nvidia/compute-eval`` from HuggingFace (gated; requires HF_TOKEN)
-- pre-formats the per-row ``context_files`` list into a single string block
-  (``context_files_block``) using the same fence-language heuristic as Skills
-- emits Gym-shaped JSONL with ``question`` + ``verifier_metadata``
+Fetches the per-release problems tarball from the public NVIDIA/compute-eval
+GitHub repo (``data/releases/<release>-problems.tar.gz``). This is the
+same data the HuggingFace dataset ``nvidia/compute-eval`` exposes, but
+served straight from the source so prepare doesn't need HF_TOKEN and
+doesn't depend on the host's ``datasets`` version (``nvidia/compute-eval``'s
+HF metadata references a ``Json`` feature type that was removed in
+``datasets`` 4.x, which the Gym container ships).
 
-The ``question`` field contains the three placeholder values the prompt
-template substitutes in (``problem_prompt``, ``build_command``,
-``context_files_block``). ``verifier_metadata`` carries the full original
-problem record so the resources server can compile + run hidden tests via
-``compute_eval.execution.evaluate_solutions``.
+The Skills counterpart at ``nemo_skills/dataset/compute-eval/prepare.py``
+uses ``datasets.load_dataset("nvidia/compute-eval", ...)`` because Skills'
+nemo-skills container ships an older ``datasets``. Both paths yield
+identical problems; B3 data validation confirms parity.
 """
 
 import argparse
-import os
+import io
+import json
+import tarfile
+import urllib.request
 from pathlib import Path
 
-import datasets
 import orjson
 
 
 DATA_DIR = Path(__file__).parent / "data"
-DEFAULT_RELEASE = None  # None → compute-eval's default release
+DEFAULT_RELEASE = "2026-1"
+# Pin the upstream commit so the data is reproducible. e01a5d2 is the
+# "Release 2026.1" commit and matches the compute-eval @ git+... pin used
+# by Skills' core/requirements.txt and our resources_servers/compute_eval/
+# requirements.txt.
+UPSTREAM_REV = "e01a5d2"
+TARBALL_URL_TMPL = (
+    "https://raw.githubusercontent.com/NVIDIA/compute-eval/{rev}/data/releases/{release}-problems.tar.gz"
+)
 
 _CONTEXT_FILES_BLOCK_TEMPLATE = """
 --- file: {path}
@@ -59,28 +70,34 @@ def _format_context_files_block(context_files: list[dict[str, str]]) -> str:
     return "".join(blocks)
 
 
+def _load_problems(release: str, rev: str = UPSTREAM_REV) -> list[dict]:
+    url = TARBALL_URL_TMPL.format(rev=rev, release=release)
+    print(f"Fetching {url}")
+    with urllib.request.urlopen(url, timeout=120) as resp:
+        blob = resp.read()
+    with tarfile.open(fileobj=io.BytesIO(blob), mode="r:gz") as tf:
+        member = tf.getmember("problems.jsonl")
+        f = tf.extractfile(member)
+        if f is None:
+            raise RuntimeError(f"problems.jsonl is unreadable inside {url}")
+        return [json.loads(line) for line in f.read().decode("utf-8").splitlines() if line.strip()]
+
+
 def prepare(
     output_path: Path = DATA_DIR / "compute_eval_benchmark.jsonl",
-    release: str | None = DEFAULT_RELEASE,
+    release: str = DEFAULT_RELEASE,
+    rev: str = UPSTREAM_REV,
 ) -> Path:
-    token = os.environ.get("HF_TOKEN")
-    if not token:
-        raise SystemExit("HF_TOKEN must be set in the environment (nvidia/compute-eval is gated on HF).")
-
-    dataset = datasets.load_dataset("nvidia/compute-eval", release, token=token)
+    problems = _load_problems(release, rev=rev)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     n_written = 0
     with open(output_path, "wb") as f:
-        for item in dataset["eval"]:
-            problem_prompt = item["prompt"]
-            build_command = item["build_command"]
-            context_files_block = _format_context_files_block(item["context_files"])
-
+        for item in problems:
             out = {
-                "problem_prompt": problem_prompt,
-                "build_command": build_command,
-                "context_files_block": context_files_block,
+                "problem_prompt": item["prompt"],
+                "build_command": item["build_command"],
+                "context_files_block": _format_context_files_block(item["context_files"]),
                 "verifier_metadata": {
                     "task_id": item["task_id"],
                     "problem": item,
@@ -89,17 +106,22 @@ def prepare(
             f.write(orjson.dumps(out, option=orjson.OPT_SERIALIZE_NUMPY) + b"\n")
             n_written += 1
 
-    print(f"Wrote {n_written} problems to {output_path}")
+    print(f"Wrote {n_written} problems from compute-eval {release} @ {rev[:7]} to {output_path}")
     return output_path
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Prepare nvidia/compute-eval for NeMo Gym")
+    parser = argparse.ArgumentParser(description="Prepare NVIDIA/compute-eval for NeMo Gym (offline)")
     parser.add_argument(
         "--release",
         default=DEFAULT_RELEASE,
-        help="HuggingFace release name (e.g., '2025-1', '2025-2'). Default: dataset default.",
+        help="Release name (e.g. '2025-1', '2025-2', '2025-3', '2026-1').",
+    )
+    parser.add_argument(
+        "--rev",
+        default=UPSTREAM_REV,
+        help="Upstream NVIDIA/compute-eval git rev (commit or tag) to fetch tarball from.",
     )
     parser.add_argument("--output-path", type=Path, default=DATA_DIR / "compute_eval_benchmark.jsonl")
     args = parser.parse_args()
-    prepare(output_path=args.output_path, release=args.release)
+    prepare(output_path=args.output_path, release=args.release, rev=args.rev)
