@@ -77,10 +77,14 @@ def _download_micromamba(target: Path) -> Path:
 
 def _run_micromamba_install(mamba: Path, prefix: Path) -> None:
     env_dir = prefix / "env"
-    print(f"[setup_cuda_nvcc] installing {CUDA_PKG_SPEC} into {env_dir}")
+    # `micromamba install` requires the env to exist; `create` makes it
+    # first. We always go through `create` here because if env_dir already
+    # existed with a valid nvcc, ensure_cuda_nvcc() short-circuited
+    # upstream.
+    print(f"[setup_cuda_nvcc] creating env with {CUDA_PKG_SPEC} at {env_dir}")
     cmd = [
         str(mamba),
-        "install",
+        "create",
         "--yes",
         "--root-prefix",
         str(prefix / "mamba_root"),
