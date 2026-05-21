@@ -28,11 +28,13 @@ import orjson
 
 DATA_DIR = Path(__file__).parent / "data"
 DEFAULT_RELEASE = "2026-1"
-# Pin the upstream commit so the data is reproducible. e01a5d2 is the
-# "Release 2026.1" commit and matches the compute-eval @ git+... pin used
-# by Skills' core/requirements.txt and our resources_servers/compute_eval/
-# requirements.txt.
-UPSTREAM_REV = "e01a5d2"
+# Pin the upstream commit so the data is reproducible. eede5ce ("Add eng diary;
+# sync problems") is the rev whose tarballs match what HuggingFace currently
+# serves for nvidia/compute-eval — confirmed by byte-comparing build_command,
+# problem_prompt, and context_files_block fields against Skills' HF-sourced
+# eval.jsonl. The earlier e01a5d2 ("Release 2026.1") tarball is stale: HF was
+# updated to eede5ce's content but the pkg release wasn't bumped.
+UPSTREAM_REV = "eede5ce"
 TARBALL_URL_TMPL = (
     "https://raw.githubusercontent.com/NVIDIA/compute-eval/{rev}/data/releases/{release}-problems.tar.gz"
 )
