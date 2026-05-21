@@ -48,10 +48,6 @@ class Interceptor(ResponseInterceptor):
             logger.info("progress completed=%d", n)
             if self._webhook_url:
                 try:
-                    # Route through the global aiohttp client (CLAUDE.md:358);
-                    # creating a fresh ``ClientSession`` per webhook fire is
-                    # what the pre-fix #4 shape did and what the architect
-                    # flagged as the global-pool deviation.
                     webhook_resp = await global_request(
                         method="POST",
                         url=self._webhook_url,

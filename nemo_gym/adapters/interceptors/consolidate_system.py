@@ -12,14 +12,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Consolidate all system messages into a single message at position 0.
+"""Merge all system messages into one at position 0.
 
-Some agents or middleware may produce system messages mid-conversation.
-Models like Qwen3 reject these with ``System message must be at the
-beginning``.  This interceptor detects any ``role: system`` message that
-is NOT at position 0, merges all system content, and places the result
-at the front—logging full diagnostics on every fix so we can trace
-the root cause.
+Models like Qwen3 reject system messages that appear mid-conversation
+(``System message must be at the beginning``).
 """
 
 from __future__ import annotations

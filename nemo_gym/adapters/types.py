@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Core types and ABCs for the Gym adapter interceptor pipeline."""
+"""Core types and ABCs for the adapter interceptor pipeline."""
 
 from __future__ import annotations
 
@@ -24,17 +24,9 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
-# ---------------------------------------------------------------------------
-# InterceptorContext — per-request cross-cutting state via ContextVar
-# ---------------------------------------------------------------------------
-
-
 @dataclass
 class InterceptorContext:
-    """Per-request context shared across all interceptors via ContextVar.
-
-    Provides trace/request id and timing without mutable-bag passing.
-    """
+    """Per-request state shared across interceptors via ContextVar."""
 
     request_id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
     extra: dict[str, Any] = field(default_factory=dict)
@@ -44,7 +36,6 @@ _current_context: ContextVar[InterceptorContext] = ContextVar("adapter_ctx")
 
 
 def get_context() -> InterceptorContext:
-    """Return the current request's InterceptorContext (or create one)."""
     try:
         return _current_context.get()
     except LookupError:
@@ -57,15 +48,8 @@ def set_context(ctx: InterceptorContext) -> None:
     _current_context.set(ctx)
 
 
-# ---------------------------------------------------------------------------
-# Request / Response data objects
-# ---------------------------------------------------------------------------
-
-
 @dataclass
 class AdapterRequest:
-    """An interceptable HTTP request flowing through the pipeline."""
-
     method: str
     path: str
     headers: dict[str, str]
@@ -75,19 +59,9 @@ class AdapterRequest:
 
 @dataclass
 class AdapterResponse:
-    """An interceptable HTTP response flowing back through the pipeline.
-
-    ``headers`` is a list of ``(name, value)`` byte tuples — the same shape
-    Starlette uses on ``Response.raw_headers``. The list form is load-bearing:
-    a Python ``dict`` silently collapses duplicate keys, which breaks any
-    multi-valued header (most importantly ``Set-Cookie``). The pre-fix shape
-    was ``dict[str, str]``; that collapsed a response with two ``Set-Cookie``
-    headers down to one before it reached the client. For backward compat
-    with test code that constructs ``AdapterResponse(headers={...})``, a
-    ``dict[str, str]`` is also accepted — the middleware re-emit path
-    handles both.
-    """
-
+    # ``headers`` is a list of byte-tuples (Starlette's ``raw_headers`` shape)
+    # so multi-valued headers like ``Set-Cookie`` survive. A plain ``dict`` is
+    # also accepted for convenience.
     status_code: int
     headers: list[tuple[bytes, bytes]] | dict[str, str]
     body: dict[str, Any] | bytes
@@ -99,26 +73,13 @@ class AdapterResponse:
         return 200 <= self.status_code < 400
 
 
-# ---------------------------------------------------------------------------
-# Interceptor stage enum
-# ---------------------------------------------------------------------------
-
-
 class Stage(enum.Enum):
     REQUEST = "request"
     REQUEST_TO_RESPONSE = "request_to_response"
     RESPONSE = "response"
 
 
-# ---------------------------------------------------------------------------
-# Interceptor ABCs
-# ---------------------------------------------------------------------------
-
-
 class RequestInterceptor(ABC):
-    """Runs during the request phase — may modify the request but cannot
-    produce a response (use ``RequestToResponseInterceptor`` for that)."""
-
     stage: Stage = Stage.REQUEST
     stream_safe: bool = True
     best_effort: bool = False
@@ -128,8 +89,7 @@ class RequestInterceptor(ABC):
 
 
 class RequestToResponseInterceptor(ABC):
-    """Runs during the request phase and may either pass the request through
-    or short-circuit by returning an ``AdapterResponse`` directly."""
+    """Request-phase interceptor that may short-circuit by returning a response."""
 
     stage: Stage = Stage.REQUEST_TO_RESPONSE
     stream_safe: bool = True
@@ -143,9 +103,6 @@ class RequestToResponseInterceptor(ABC):
 
 
 class ResponseInterceptor(ABC):
-    """Runs during the response phase (reverse order). May modify the
-    response but cannot re-issue the upstream call."""
-
     stage: Stage = Stage.RESPONSE
     stream_safe: bool = True
     best_effort: bool = False
@@ -155,22 +112,9 @@ class ResponseInterceptor(ABC):
 
 
 class PostEvalHook(ABC):
-    """Optional hook invoked once after the entire evaluation completes."""
-
     @abstractmethod
     async def post_eval(self) -> None: ...
 
 
-# ---------------------------------------------------------------------------
-# Errors
-# ---------------------------------------------------------------------------
-
-
 class GracefulError(Exception):
-    """Signal that the pipeline should terminate the current request with a
-    429 (session budget exhausted) rather than a generic 500.
-
-    Ported from NEL's ``nemo_evaluator.errors.GracefulError`` so middleware
-    can preserve the session-budget-exhausted behavior that clients rely on
-    without forcing Gym to depend on the NEL package.
-    """
+    """Terminate the request with a 429 (e.g. session budget exhausted)."""

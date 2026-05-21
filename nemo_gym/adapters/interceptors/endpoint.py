@@ -53,18 +53,12 @@ class Interceptor(RequestToResponseInterceptor):
         self._upstream_url = clean
         self._api_key = api_key
         self._extra_body = extra_body or {}
-        # Retain the timeout setting so we can pass it through ``global_request``
-        # on every call. The global aiohttp client owns connector lifetime per
-        # CLAUDE.md:358 — this interceptor no longer creates its own
-        # ``ClientSession``/``TCPConnector`` (that was the pre-fix #4 shape).
         self._request_timeout = float(request_timeout)
         self._timeout = aiohttp.ClientTimeout(total=request_timeout)
         self._max_retries = max_retries
         self._retry_on_status = set(retry_on_status or [429, 502, 503, 504])
-        # ``max_concurrent`` is retained on the instance for backward compat
-        # with NEL-style configuration, but it is no longer applied here:
-        # connector limits live on the global aiohttp client and are governed
-        # by ``GlobalAIOHTTPAsyncClientConfig`` in ``nemo_gym.server_utils``.
+        # ``max_concurrent`` is config-shape compatibility only; connector
+        # limits live on the global aiohttp client.
         self._max_concurrent = max_concurrent
 
     @staticmethod
@@ -92,11 +86,6 @@ class Interceptor(RequestToResponseInterceptor):
         while True:
             t0 = time.perf_counter()
             try:
-                # Route through the global aiohttp client (CLAUDE.md:358).
-                # ``global_request`` accepts the same ``_RequestOptions`` kwargs
-                # as ``aiohttp.ClientSession.request`` and uses orjson for the
-                # json kwarg when supplied. We pass ``data`` (already JSON-
-                # encoded bytes) to keep header semantics identical.
                 resp = await global_request(
                     method="POST",
                     url=url,
@@ -107,10 +96,8 @@ class Interceptor(RequestToResponseInterceptor):
                 async with resp:
                     raw = await resp.read()
                     latency = (time.perf_counter() - t0) * 1000
-                    # Preserve duplicate header keys (Set-Cookie etc.) by
-                    # iterating ``resp.headers.items()`` — aiohttp's
-                    # CIMultiDict yields a separate tuple per occurrence.
-                    # A plain ``dict(resp.headers)`` would collapse them.
+                    # Iterate ``resp.headers.items()`` to preserve multi-valued
+                    # keys (e.g. Set-Cookie) that a plain ``dict()`` collapses.
                     resp_headers: list[tuple[bytes, bytes]] = [
                         (k.encode("latin-1"), v.encode("latin-1")) for k, v in resp.headers.items()
                     ]
@@ -190,7 +177,4 @@ class Interceptor(RequestToResponseInterceptor):
                 raise
 
     async def close(self) -> None:
-        # The global aiohttp client manages its own lifetime via the atexit
-        # hook in ``nemo_gym.server_utils``. This interceptor no longer owns
-        # a session, so ``close`` is a no-op kept for API back-compat.
         return None

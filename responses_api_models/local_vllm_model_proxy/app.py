@@ -39,11 +39,7 @@ class LocalVLLMModelProxyServerConfig(VLLMModelConfig):
 
     adapters: Optional[List[Dict[str, Any]]] = Field(
         default=None,
-        description=(
-            "Optional adapter middleware chain. Each entry is "
-            "{'name': '<interceptor>', 'config': {...}}. None disables "
-            "the middleware entirely (default behavior unchanged)."
-        ),
+        description="Adapter middleware chain: list of {'name': ..., 'config': {...}}. None disables.",
     )
 
 
@@ -78,12 +74,7 @@ class LocalVLLMModelProxyServer(VLLMModel):
         self._post_init()
 
         app = super().setup_webserver()
-
-        # Phase-3 adapter middleware: defaults off. When `adapters` is None or
-        # an empty list, `install_middleware` is a no-op and the server behaves
-        # exactly as it did before this hook was added.
         install_middleware(app, self.config.adapters)
-
         return app
 
 

@@ -44,11 +44,7 @@ def _stage_of(
 
 
 class AdapterPipeline:
-    """Async interceptor chain.
-
-    Stage order is validated at build time:
-        REQUEST  →  REQUEST_TO_RESPONSE  →  RESPONSE
-    """
+    """Async interceptor chain: REQUEST → REQUEST_TO_RESPONSE → RESPONSE."""
 
     def __init__(
         self,
@@ -62,26 +58,17 @@ class AdapterPipeline:
             [getattr(i, "_registry_name", type(i).__name__) for i in self._chain],
         )
 
-    # ------------------------------------------------------------------
-    # Construction helpers
-    # ------------------------------------------------------------------
-
     @classmethod
     def from_config(
         cls,
         interceptor_specs: list[dict[str, Any]],
     ) -> AdapterPipeline:
-        """Build a pipeline from a list of ``{"name": ..., "config": ...}`` dicts."""
         chain: list[RequestInterceptor | RequestToResponseInterceptor | ResponseInterceptor] = []
         for spec in interceptor_specs:
             name = spec["name"]
             config = spec.get("config") or {}
             chain.append(InterceptorRegistry.create(name, config))
         return cls(chain)
-
-    # ------------------------------------------------------------------
-    # Validation
-    # ------------------------------------------------------------------
 
     _STAGE_ORDER = [Stage.REQUEST, Stage.REQUEST_TO_RESPONSE, Stage.RESPONSE]
 
@@ -102,27 +89,16 @@ class AdapterPipeline:
                 )
             current_idx = max(current_idx, idx)
 
-    # ------------------------------------------------------------------
-    # Request / response processing
-    # ------------------------------------------------------------------
-
     async def process(
         self,
         request: AdapterRequest,
         upstream_call: UpstreamCall | None = None,
     ) -> AdapterResponse:
-        """Run *request* through the full chain and return the response.
+        """Run *request* through the chain and return the response.
 
-        1. Request interceptors run in order, possibly mutating the request.
-        2. The first ``RequestToResponseInterceptor`` that returns an
-           ``AdapterResponse`` short-circuits the chain (e.g. cache hits).
-        3. If no short-circuit fires and ``upstream_call`` is provided, it is
-           invoked with the (possibly mutated) request to produce the response
-           — this is how middleware layers the chain on top of an existing
-           model server's own request handler. If ``upstream_call`` is
-           ``None`` and no short-circuit fired, the legacy Phase-1 behavior
-           applies: a ``RuntimeError`` is raised pointing at ``endpoint``.
-        4. Response interceptors run in **reverse** order on success only.
+        If no ``RequestToResponseInterceptor`` short-circuits, ``upstream_call``
+        is invoked with the (possibly mutated) request. Response interceptors
+        then run in reverse order.
         """
         ctx = InterceptorContext(request_id=request.ctx.request_id)
         set_context(ctx)
