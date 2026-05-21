@@ -26,5 +26,5 @@ ng_collect_rollouts \
     +agent_name=supergpqa_mcqa_simple_agent \
     +input_jsonl_fpath=benchmarks/supergpqa/data/supergpqa_benchmark.jsonl \
     +output_jsonl_fpath=results/supergpqa/rollouts.jsonl \
-    +prompt_config=benchmarks/prompts/mcq_10choices.yaml
+    +prompt_config=benchmarks/prompts/eval/aai/mcq-10choices.yaml
 ```

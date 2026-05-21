@@ -4,7 +4,7 @@ gym-sokoban==0.0.6
 numpy>=1.26
 scipy>=1.11
 imageio>=2.31
-pillow>=10
+pillow==12.2.0
 pyyaml>=6.0
 pkgconfig>=1.5
 setuptools>=70
