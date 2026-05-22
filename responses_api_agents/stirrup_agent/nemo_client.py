@@ -87,7 +87,12 @@ def _install_tool_arg_error_surfacing() -> None:
     async def run_tool_with_error_surfacing(self, tool_call, run_metadata):
         result_msg = await _orig_run_tool(self, tool_call, run_metadata)
         if (not getattr(result_msg, "args_was_valid", True)) and result_msg.content == "Tool arguments are not valid":
-            tool = next((t for t in self._tools if t.name == tool_call.name), None)
+            # Mirror upstream stirrup's lookup: self._active_tools is the {name: Tool}
+            # dict built from self._tools filtered by isinstance(Tool). Looking up
+            # via the dict avoids iterating self._tools which mixes Tool instances
+            # with provider objects (e.g. ApptainerCodeExecToolProvider) that don't
+            # have a .name attribute and crash a naive `t.name` lookup.
+            tool = self._active_tools.get(tool_call.name)
             if tool is not None:
                 args = tool_call.arguments if tool_call.arguments and tool_call.arguments.strip() else "{}"
                 try:
