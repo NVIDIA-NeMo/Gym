@@ -48,6 +48,8 @@ import logging
 from time import perf_counter
 from typing import Any, Optional
 
+import stirrup.core.agent as _stirrup_agent_mod
+from pydantic import ValidationError as _PydanticValidationError
 from stirrup.clients.chat_completions_client import ChatCompletionsClient
 from stirrup.clients.utils import to_openai_tools
 from stirrup.core.models import (
@@ -64,6 +66,52 @@ from responses_api_agents.stirrup_agent.stirrup_utils import to_provider_openai_
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+# Monkey-patch stirrup.core.agent.Agent.run_tool to surface pydantic
+# ValidationError detail into the ToolResult content. Upstream stirrup
+# returns the bare string "Tool arguments are not valid", hiding the
+# pydantic error detail (e.g., "paths: Input should be a valid list,
+# input_type=str"). Without that detail the agent has no signal to
+# self-correct and just retries the same broken shape forever.
+#
+# Observed on DSv4-Pro GDPVal r5/r7: the model emitted `paths` as a JSON
+# string literal ("[]") instead of a JSON array ([]). All ~660 finish
+# attempts in r5 failed with the same bare-string error; the agent
+# never learned what was wrong.
+def _install_tool_arg_error_surfacing() -> None:
+    _orig_run_tool = _stirrup_agent_mod.Agent.run_tool
+    if getattr(_orig_run_tool, "_gym_surfacing_patched", False):
+        return
+
+    async def run_tool_with_error_surfacing(self, tool_call, run_metadata):
+        result_msg = await _orig_run_tool(self, tool_call, run_metadata)
+        if (not getattr(result_msg, "args_was_valid", True)) and result_msg.content == "Tool arguments are not valid":
+            tool = next((t for t in self._tools if t.name == tool_call.name), None)
+            if tool is not None:
+                args = tool_call.arguments if tool_call.arguments and tool_call.arguments.strip() else "{}"
+                try:
+                    tool.parameters.model_validate_json(args)
+                except _PydanticValidationError as exc:
+                    errors_str = "; ".join(
+                        f"{'.'.join(str(p) for p in e['loc']) or '<root>'}: {e['msg']} (type={e.get('type', '?')})"
+                        for e in exc.errors()
+                    )
+                    args_preview = (tool_call.arguments or "")[:500]
+                    detailed = (
+                        f"Tool arguments are not valid: {errors_str}. "
+                        f"Submitted arguments (first 500 chars): {args_preview!r}"
+                    )
+                    result_msg = result_msg.model_copy(update={"content": detailed})
+                except Exception:
+                    pass
+        return result_msg
+
+    run_tool_with_error_surfacing._gym_surfacing_patched = True
+    _stirrup_agent_mod.Agent.run_tool = run_tool_with_error_surfacing
+
+
+_install_tool_arg_error_surfacing()
 
 # Floor for per-call max_completion_tokens.  Below this the model basically
 # cannot produce a useful answer — treat as a hard minimum.
