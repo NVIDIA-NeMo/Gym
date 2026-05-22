@@ -31,7 +31,28 @@ import urllib.request
 from pathlib import Path
 
 
-DEFAULT_PREFIX = Path(__file__).parent / ".cuda_nvcc"
+# Resolution order for the cuda-nvcc env prefix:
+#   1. $COMPUTE_EVAL_CUDA_NVCC_PREFIX (explicit override; matches what the
+#      Skills baseline's installation_command sets).
+#   2. Shared lustre install at /lustre/.../shared/cuda_nvcc_12_9 — keeps
+#      Skills and Gym using identical toolchains and avoids re-installing
+#      per recipe.
+#   3. Local per-server install under resources_servers/compute_eval/.cuda_nvcc
+#      (used on first boot in any environment that lacks the shared path).
+_SHARED_PREFIX_DEFAULT = Path("/lustre/fsw/portfolios/llmservice/users/georgea/shared/cuda_nvcc_12_9")
+_LOCAL_PREFIX_DEFAULT = Path(__file__).parent / ".cuda_nvcc"
+
+
+def _resolve_default_prefix() -> Path:
+    env_override = os.environ.get("COMPUTE_EVAL_CUDA_NVCC_PREFIX")
+    if env_override:
+        return Path(env_override)
+    if (_SHARED_PREFIX_DEFAULT / "env" / "bin" / "nvcc").exists():
+        return _SHARED_PREFIX_DEFAULT
+    return _LOCAL_PREFIX_DEFAULT
+
+
+DEFAULT_PREFIX = _resolve_default_prefix()
 
 # Pin a known-good cuda-nvcc version — must be compatible with the host
 # driver (CUDA 12.x). aws-dfw + the Nemotron-3-Nano-30B vLLM container use
