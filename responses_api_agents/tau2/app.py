@@ -100,7 +100,7 @@ class Tau2Agent(SimpleResponsesAPIAgent):
             run(
                 """git clone https://github.com/bxyu-nvidia/tau2-bench \
 && cd tau2-bench \
-&& git checkout bxyu/nemo_gym_stable \
+&& git checkout edobrowolska/anthropic_prompts \
 && cd .. \
 && mv tau2-bench/data tau2_data \
 && rm -rf tau2-bench""",

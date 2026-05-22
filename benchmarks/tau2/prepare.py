@@ -34,7 +34,7 @@ def prepare() -> Path:
         run(
             """git clone https://github.com/bxyu-nvidia/tau2-bench \
 && cd tau2-bench \
-&& git checkout bxyu/nemo_gym_data \
+&& git checkout edobrowolska/bxyu/nemo_gym_data \
 && bash dump_nemo_gym_data.sh \
 && cp -r nemo_gym_data ../nemo_gym_data \
 && cd .. \
