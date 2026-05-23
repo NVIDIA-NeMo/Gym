@@ -94,16 +94,32 @@ def apply_anthropic_tau2_prompt_overrides():
     if not PROMPT_OVERRIDE_DIR.exists():
         return
 
+    def verify_markers(path: Path, markers: list[str]):
+        text = path.read_text()
+        missing = [marker for marker in markers if marker not in text]
+        if missing:
+            raise RuntimeError(
+                f"Anthropic tau2 prompt override missing markers in {path}: {missing}"
+            )
+
+    user_sim_markers = [
+        "ONLY generate the '###TRANSFER###'",
+        "ALREADY been transferred",
+    ]
+
     airline_override = PROMPT_OVERRIDE_DIR / "airline_policy.md"
     telecom_addendum = PROMPT_OVERRIDE_DIR / "telecom_policy_addendum.md"
+    user_override = PROMPT_OVERRIDE_DIR / "simulation_guidelines.md"
     tools_user_override = PROMPT_OVERRIDE_DIR / "simulation_guidelines_tools.md"
 
     airline_policy = DATA_DIR / "tau2/domains/airline/policy.md"
     telecom_manual = DATA_DIR / "tau2/domains/telecom/tech_support_manual.md"
+    user_prompt = DATA_DIR / "tau2/user_simulator/simulation_guidelines.md"
     tools_user_prompt = DATA_DIR / "tau2/user_simulator/simulation_guidelines_tools.md"
 
     if airline_override.exists():
         airline_policy.write_text(airline_override.read_text())
+        verify_markers(airline_policy, ["LAST resort", "No circumvention"])
         logger.info("Applied Anthropic tau2 airline policy override")
 
     if telecom_addendum.exists():
@@ -113,9 +129,16 @@ def apply_anthropic_tau2_prompt_overrides():
                 current_telecom_manual.rstrip() + "\n\n" + telecom_addendum.read_text()
             )
             logger.info("Applied Anthropic tau2 telecom policy addendum")
+        verify_markers(telecom_manual, ["# CRITICAL CHECKS", "# PRE-TRANSFER CHECKLIST"])
+
+    if user_override.exists():
+        user_prompt.write_text(user_override.read_text())
+        verify_markers(user_prompt, user_sim_markers)
+        logger.info("Applied Anthropic tau2 user-simulator override")
 
     if tools_user_override.exists():
         tools_user_prompt.write_text(tools_user_override.read_text())
+        verify_markers(tools_user_prompt, user_sim_markers)
         logger.info("Applied Anthropic tau2 tools user-simulator override")
 
 
