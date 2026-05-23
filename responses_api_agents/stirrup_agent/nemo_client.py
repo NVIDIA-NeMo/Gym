@@ -118,6 +118,41 @@ def _install_tool_arg_error_surfacing() -> None:
 
 _install_tool_arg_error_surfacing()
 
+
+# Replace stirrup's SIMPLE_FINISH_TOOL with a coercing variant whose
+# FinishParams accepts `paths` as a JSON-encoded string and normalizes to
+# list[str]. vLLM 0.20.0's --tool-call-parser deepseek_v4 forwards DSv4's
+# string="false" args as JSON strings (the unwrap landed upstream in vLLM
+# PR #41801, merged 2026-05-06, but the wedu image predates the merge).
+# See responses_api_agents/stirrup_agent/finish_tool_coercing.py for the
+# coerced schema. The override happens at module-import time so any Agent
+# constructed after this point picks up the coercing variant via the
+# default-arg path in stirrup.core.agent.Agent.__init__.
+def _install_coercing_finish_tool() -> None:
+    import stirrup.tools as _tools_mod
+    import stirrup.tools.finish as _finish_mod
+
+    if getattr(_finish_mod.SIMPLE_FINISH_TOOL, "_gym_coercing_finish_patched", False):
+        return
+
+    from responses_api_agents.stirrup_agent.finish_tool_coercing import (
+        COERCING_FINISH_TOOL,
+    )
+
+    # Tag for idempotency.
+    setattr(COERCING_FINISH_TOOL, "_gym_coercing_finish_patched", True)
+
+    # Patch the canonical binding plus every place stirrup or its callers
+    # captured a reference via `from ... import SIMPLE_FINISH_TOOL`.
+    _finish_mod.SIMPLE_FINISH_TOOL = COERCING_FINISH_TOOL
+    if hasattr(_tools_mod, "SIMPLE_FINISH_TOOL"):
+        _tools_mod.SIMPLE_FINISH_TOOL = COERCING_FINISH_TOOL
+    if hasattr(_stirrup_agent_mod, "SIMPLE_FINISH_TOOL"):
+        _stirrup_agent_mod.SIMPLE_FINISH_TOOL = COERCING_FINISH_TOOL
+
+
+_install_coercing_finish_tool()
+
 # Floor for per-call max_completion_tokens.  Below this the model basically
 # cannot produce a useful answer — treat as a hard minimum.
 _MIN_COMPLETION_TOKENS = 1024
