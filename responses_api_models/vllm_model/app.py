@@ -638,23 +638,21 @@ class VLLMConverter(BaseModel):
     # =======================================================
 
     def model_post_init(self, context) -> None:
+        """Pre-compile the configured reasoning-tag regex once at initialization time."""
+
         self._reasoning_tag_regex = re.compile(
             rf"{re.escape(self.reasoning_start_tag)}(.*?){re.escape(self.reasoning_end_tag)}",
             re.DOTALL,
         )
-
-    def _reasoning_tag_pattern(self) -> re.Pattern:
-        return self._reasoning_tag_regex
 
     def _wrap_reasoning_in_tags(self, texts: List[str]) -> str:
         return "".join(f"{self.reasoning_start_tag}{t}{self.reasoning_end_tag}" for t in texts if t)
 
     def _parse_reasoning_tags(self, content: str) -> Tuple[List[str], str]:
         # Extract reasoning content from between the configured reasoning tags.
-        pattern = self._reasoning_tag_pattern()
-        matches = pattern.findall(content)
+        matches = self._reasoning_tag_regex.findall(content)
         # Remove reasoning from main content
-        cleaned = pattern.sub("", content)
+        cleaned = self._reasoning_tag_regex.sub("", content)
         return matches, cleaned
 
     # =======================================================
