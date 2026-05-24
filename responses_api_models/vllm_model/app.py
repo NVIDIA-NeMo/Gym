@@ -23,7 +23,7 @@ from uuid import uuid4
 
 from aiohttp.client_exceptions import ClientResponseError
 from fastapi import Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 
 from nemo_gym.base_responses_api_model import (
     BaseResponsesAPIModelConfig,
@@ -67,6 +67,8 @@ from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
 
 
 class ReasoningTagsConfig(BaseModel):
+    """Configures the tag pair used to wrap and parse reasoning content in assistant messages."""
+
     start: str = "<think>"
     end: str = "</think>"
 
@@ -629,16 +631,20 @@ class VLLMConverter(BaseModel):
     return_token_id_information: bool
     reasoning_start_tag: str = "<think>"
     reasoning_end_tag: str = "</think>"
+    _reasoning_tag_regex: re.Pattern = PrivateAttr()
 
     # =======================================================
     # Reasoning handling. This may change across models and model families
     # =======================================================
 
-    def _reasoning_tag_pattern(self) -> re.Pattern:
-        return re.compile(
+    def model_post_init(self, context) -> None:
+        self._reasoning_tag_regex = re.compile(
             rf"{re.escape(self.reasoning_start_tag)}(.*?){re.escape(self.reasoning_end_tag)}",
             re.DOTALL,
         )
+
+    def _reasoning_tag_pattern(self) -> re.Pattern:
+        return self._reasoning_tag_regex
 
     def _wrap_reasoning_in_tags(self, texts: List[str]) -> str:
         return "".join(f"{self.reasoning_start_tag}{t}{self.reasoning_end_tag}" for t in texts if t)

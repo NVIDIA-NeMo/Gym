@@ -683,7 +683,7 @@ class TestApp:
     async def test_sanity(self, monkeypatch: MonkeyPatch) -> None:
         self._setup_server(monkeypatch)
 
-    def test_get_converter_uses_configured_reasoning_tags(self, monkeypatch: MonkeyPatch) -> None:
+    def test_converter_initialization_uses_configured_reasoning_tags(self, monkeypatch: MonkeyPatch) -> None:
         config = VLLMModelConfig(
             host="0.0.0.0",
             port=8081,
