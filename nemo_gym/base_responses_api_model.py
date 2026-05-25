@@ -13,9 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from abc import abstractmethod
+from typing import Any, Optional
 
 from fastapi import Body, FastAPI
+from pydantic import Field
 
+from nemo_gym.adapters import install_middleware
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
@@ -26,7 +29,10 @@ from nemo_gym.server_utils import BaseRunServerInstanceConfig, BaseServer, Simpl
 
 
 class BaseResponsesAPIModelConfig(BaseRunServerInstanceConfig):
-    pass
+    adapters: Optional[list[dict[str, Any]]] = Field(
+        default=None,
+        description="Adapter middleware chain: list of {'name': ..., 'config': {...}}. None disables.",
+    )
 
 
 class BaseResponsesAPIModel(BaseServer):
@@ -42,6 +48,8 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         app.post("/v1/chat/completions")(self.chat_completions)
 
         app.post("/v1/responses")(self.responses)
+
+        install_middleware(app, self.config.adapters)
 
         return app
 

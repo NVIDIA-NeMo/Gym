@@ -289,7 +289,13 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 "IS_SANDBOX": "1",
                 "CLAUDE_CONFIG_DIR": str(claude_config_dir),
             }
-            if base_url:
+            if self._proxy_handle is not None:
+                # Adapter-proxy mode: proxy is transparently in front of Anthropic.
+                # Let the SDK use ANTHROPIC_API_KEY via x-api-key (proxy forwards
+                # the header). Do NOT set ANTHROPIC_AUTH_TOKEN — that flips the SDK
+                # to Bearer auth, which Anthropic rejects.
+                env["ANTHROPIC_BASE_URL"] = self._proxy_handle.url
+            elif base_url:
                 env["ANTHROPIC_BASE_URL"] = base_url
                 env["ANTHROPIC_AUTH_TOKEN"] = api_key or "local"
 

@@ -33,3 +33,9 @@ Self-hosted inference with vLLM for maximum control.
 :::{seealso}
 [Model Server Fields](../reference/configuration.md#model-server-fields) for server configuration syntax and fields.
 :::
+
+## Middleware
+
+Model servers can attach an interceptor chain that observes or mutates request and response payloads — useful for logging, caching, system-prompt injection, turn budgeting, reasoning-field normalization, and similar cross-cutting hooks.
+
+See {ref}`model-server-adapters` for the built-in interceptor catalog and configuration syntax.

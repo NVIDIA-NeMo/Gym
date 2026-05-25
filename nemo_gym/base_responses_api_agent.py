@@ -12,10 +12,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import atexit
 from abc import abstractmethod
+from typing import Any, Optional
 
 from fastapi import Body, FastAPI
+from pydantic import Field
 
+from nemo_gym.adapters import AdapterProxyConfig, ProxyHandle, install_middleware, start_adapter_proxy
 from nemo_gym.base_resources_server import (
     AggregateMetrics,
     AggregateMetricsRequest,
@@ -31,7 +35,18 @@ from nemo_gym.server_utils import BaseRunServerInstanceConfig, BaseServer, Simpl
 
 
 class BaseResponsesAPIAgentConfig(BaseRunServerInstanceConfig):
-    pass
+    adapters: Optional[list[dict[str, Any]]] = Field(
+        default=None,
+        description="Adapter middleware chain: list of {'name': ..., 'config': {...}}. None disables.",
+    )
+    adapter_proxy: Optional[AdapterProxyConfig] = Field(
+        default=None,
+        description=(
+            "Optional localhost proxy in front of an external inference upstream. "
+            "When set, the agent's SDK client should point its *_BASE_URL at "
+            "``self._proxy_handle.url`` so model traffic flows through the chain."
+        ),
+    )
 
 
 class BaseResponsesAPIAgent(BaseServer):
@@ -40,8 +55,21 @@ class BaseResponsesAPIAgent(BaseServer):
 
 class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, SimpleServer):
     config: BaseResponsesAPIAgentConfig
+    _proxy_handle: Optional[ProxyHandle] = None
 
     def setup_webserver(self) -> FastAPI:
+        if self.config.adapter_proxy is not None:
+            cfg = self.config.adapter_proxy
+            self._proxy_handle = start_adapter_proxy(
+                upstream_url=cfg.upstream_url,
+                adapters=[spec.model_dump() for spec in cfg.adapters],
+                host=cfg.host,
+                port=cfg.port,
+                request_timeout=cfg.request_timeout,
+                unsafe_allow_remote=cfg.unsafe_allow_remote,
+            )
+            atexit.register(self._proxy_handle.stop)
+
         app = FastAPI()
 
         self.setup_session_middleware(app)
@@ -49,6 +77,8 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         app.post("/v1/responses")(self.responses)
         app.post("/run")(self.run)
         app.post("/aggregate_metrics")(self.aggregate_metrics)
+
+        install_middleware(app, self.config.adapters)
 
         return app
 
