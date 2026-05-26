@@ -69,7 +69,7 @@ class SimpleModelServer(SimpleResponsesAPIModel):
 
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         body_dict = self.config.extra_body | body.model_dump(exclude_unset=True)
-        body_dict.setdefault("model", self.config.openai_model)
+        body_dict["model"] = self.config.openai_model
         async with self._semaphore:
             openai_response_dict = await self._client.create_response(**body_dict)
         return NeMoGymResponse.model_validate(openai_response_dict)
@@ -78,7 +78,7 @@ class SimpleModelServer(SimpleResponsesAPIModel):
         self, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
     ) -> NeMoGymChatCompletion:
         body_dict = self.config.extra_body | body.model_dump(exclude_unset=True)
-        body_dict.setdefault("model", self.config.openai_model)
+        body_dict["model"] = self.config.openai_model
         async with self._semaphore:
             openai_response_dict = await self._client.create_chat_completion(**body_dict)
         return NeMoGymChatCompletion.model_validate(openai_response_dict)

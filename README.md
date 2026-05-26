@@ -28,13 +28,13 @@ If you're scoring model outputs with a stateless check and don't need scale or t
 
 ## 🌎 Ecosystem
 
-NeMo Gym is a component of [NVIDIA NeMo](https://docs.nvidia.com/nemo/gym/latest/about/ecosystem.html#related-nemo-libraries), a GPU-accelerated platform for training generative AI models and optimizing AI agents. NeMo Gym is integrated with the broader agentic ecosystem - see the [Ecosystem](https://docs.nvidia.com/nemo/gym/latest/about/ecosystem.html) page for more details.
+NeMo Gym is a component of [NVIDIA NeMo](https://docs.nvidia.com/nemo/gym/latest/about/ecosystem#related-nemo-libraries), a GPU-accelerated platform for training generative AI models and optimizing AI agents. NeMo Gym is integrated with the broader agentic ecosystem - see the [Ecosystem](https://docs.nvidia.com/nemo/gym/latest/about/ecosystem) page for more details.
 
 **Environment Libraries:** Seamlessly combine environments and benchmarks from other libraries alongside NeMo Gym environments. Examples: 
 [Aviary](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/aviary) • [Harbor](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/harbor_agent) • [OpenEnv](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/openenv) • [Reasoning Gym](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/reasoning_gym) • [Verifiers](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/verifiers_agent)
 
 **Training Framework Libraries:** Use environments for SFT and RL training.
-[NeMo RL](https://docs.nvidia.com/nemo/gym/latest/training-tutorials/nemo-rl-grpo/index.html) • [Unsloth](https://docs.nvidia.com/nemo/gym/latest/training-tutorials/unsloth-training.html) • [VeRL](https://docs.nvidia.com/nemo/gym/latest/training-tutorials/verl.html)
+[NeMo RL](https://docs.nvidia.com/nemo/gym/latest/training-tutorials/nemo-rl-grpo) • [Unsloth](https://docs.nvidia.com/nemo/gym/latest/training-tutorials/unsloth) • [VeRL](https://docs.nvidia.com/nemo/gym/latest/training-tutorials)
 
 **Agent Harnesses:** Agent harnesses for evaluation and training available out of the box. Examples:
 [OpenHands](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/swe_agents) • [Mini SWE Agent](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/mini_swe_agent) • [LangGraph](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/langgraph_agent)
@@ -61,7 +61,7 @@ NeMo Gym is designed to run on standard development machines:
 
 ## 🚀 Quick Start
 
-Requires Python 3.12+ on x86_64 or ARM64 (Linux, macOS, Windows via WSL2). No GPU required. See the [Getting Started](https://docs.nvidia.com/nemo/gym/latest/get-started/prerequisites) docs for a more comprehensive walkthrough.
+Requires Python 3.12+ on x86_64 or ARM64 (Linux, macOS, Windows via WSL2). No GPU required. See the [Getting Started](https://docs.nvidia.com/nemo/gym/latest/get-started) docs for a more comprehensive walkthrough.
 
 **Install NeMo Gym:**
 
@@ -145,9 +145,9 @@ For per-task pass rates, see the [`ng_reward_profile`](https://docs.nvidia.com/n
 ### Next Steps
 
 - **[Browse Environments](#-available-environments)** — Browse available environments for evaluation and training.
-- **[Agents](https://docs.nvidia.com/nemo/gym/latest/agent-server/index.html)** — Explore available agent harnesses and learn how to integrate your own.
-- **[Training](https://docs.nvidia.com/nemo/gym/latest/training-tutorials/index.html)** — Improve your agent or model with RL or fine-tuning.
-- **[Build Custom Environments](https://docs.nvidia.com/nemo/gym/latest/environment-tutorials/index.html)** — Create your own evaluation or training environments.
+- **[Agents](https://docs.nvidia.com/nemo/gym/latest/agent-server)** — Explore available agent harnesses and learn how to integrate your own.
+- **[Training](https://docs.nvidia.com/nemo/gym/latest/training-tutorials)** — Improve your agent or model with RL or fine-tuning.
+- **[Build Custom Environments](https://docs.nvidia.com/nemo/gym/latest/environment-tutorials)** — Create your own evaluation or training environments.
 
 ## 📦 Available Environments
 
@@ -302,9 +302,9 @@ The Dataset column links to publicly available datasets (e.g., on HuggingFace). 
 
 ## 📖 Documentation & Resources
 
-- **[Documentation](https://docs.nvidia.com/nemo/gym/latest/index.html)** - Technical reference docs
-- **[Training Tutorials](https://docs.nvidia.com/nemo/gym/latest/training-tutorials/index.html)** - Train with NeMo Gym environments
-- **[API Reference](https://docs.nvidia.com/nemo/gym/latest/apidocs/index.html)** - Complete class and function reference
+- **[Documentation](https://docs.nvidia.com/nemo/gym/latest/documentation/home)** - Technical reference docs
+- **[Training Tutorials](https://docs.nvidia.com/nemo/gym/latest/training-tutorials)** - Train with NeMo Gym environments
+- **[API Reference](https://docs.nvidia.com/nemo/gym/latest/api/reference/api-reference)** - Complete class and function reference
  
 
 ## 🤝 Community & Support
@@ -312,7 +312,7 @@ The Dataset column links to publicly available datasets (e.g., on HuggingFace). 
 We'd love your contributions! Here's how to get involved:
 
 - **[Report Issues](https://github.com/NVIDIA-NeMo/Gym/issues)** - Bug reports and feature requests
-- **[Contributing Guide](https://docs.nvidia.com/nemo/gym/latest/contribute/index.html)** - How to contribute code, docs, new environments, or training framework integrations
+- **[Contributing Guide](https://docs.nvidia.com/nemo/gym/latest/contribute)** - How to contribute code, docs, new environments, or training framework integrations
 
 ## 📚 Citations
 
