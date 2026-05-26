@@ -219,6 +219,11 @@ redirects:
   # to fire on the no-extension form before the slug-only catch-all takes over.
   - source: "/nemo/gym/:path*.html"
     destination: "/nemo/gym/:path*"
+  # LLM-as-Judge moved into verification-patterns subsection
+  - source: "/nemo/gym/environment-tutorials/llm-as-judge-verification"
+    destination: "/nemo/gym/main/environment-tutorials/verification-patterns/llm-as-judge"
+  - source: "/nemo/gym/main/environment-tutorials/llm-as-judge-verification"
+    destination: "/nemo/gym/main/environment-tutorials/verification-patterns/llm-as-judge"
   # Version alias: latest → main (the `Latest` slug was retired; trunk lives at `main`)
   # Intentionally last so .html stripping and specific reorg rules win first.
   - source: "/nemo/gym/latest"
