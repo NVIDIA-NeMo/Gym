@@ -34,7 +34,7 @@ Additional fields like `expected_answer` vary by resources server—the componen
 | Field | Added By | Description |
 |-------|----------|-------------|
 | `responses_create_params` | User | Input to the model during training. Contains `input` (messages) and optional `tools`, `temperature`, etc. |
-| `agent_ref` | `ng_prepare_data` | Routes each row to its resources server. Auto-generated during data preparation. |
+| `agent_ref` | `ng_prepare_data` | Routes each row to its agent server. Auto-generated during data preparation. |
 
 ### Optional Fields
 
@@ -51,7 +51,7 @@ Check `resources_servers/<name>/README.md` for fields required by each resources
 
 ### The `agent_ref` Field
 
-The `agent_ref` field maps each row to a specific resources server. A training dataset can blend multiple resources servers in a single file—`agent_ref` tells NeMo Gym which server handles each row.
+The `agent_ref` field maps each row to a specific agent server, which in turn knows its resources server from the YAML config. A training dataset can blend multiple agent servers in a single file—`agent_ref` tells NeMo Gym which server handles each row.
 
 ```json
 {
