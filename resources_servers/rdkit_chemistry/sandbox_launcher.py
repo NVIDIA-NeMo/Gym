@@ -501,11 +501,17 @@ def _stop_sandbox() -> None:
     global _sandbox_proc
     with _lock:
         if _sandbox_proc is not None:
+            pid: int = _sandbox_proc.pid
             _sandbox_proc.terminate()
             try:
                 _sandbox_proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 _sandbox_proc.kill()
+                # Reap the child after SIGKILL so it doesn't linger as <defunct>.
+                try:
+                    _sandbox_proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    logger.error("Sandbox (pid=%d) did not exit after SIGKILL; may leak as a zombie", pid)
             _sandbox_proc = None
             logger.info("Sandbox stopped")
 

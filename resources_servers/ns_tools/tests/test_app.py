@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import subprocess
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from app import (
@@ -266,3 +267,54 @@ class TestApp:
         assert "expected_answer" in json_data
         assert "responses_create_params" in json_data
         assert "response" in json_data
+
+
+class TestPythonToolShutdownReap:
+    """Shutdown must reap the python_tool subprocess on every exit path."""
+
+    def _make_server(self) -> NSToolsResourcesServer:
+        config = NSToolsConfig(host="0.0.0.0", port=8080, entrypoint="", name="ns_tools")
+        return NSToolsResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+    async def test_kill_is_followed_by_reap_wait(self) -> None:
+        server = self._make_server()
+        proc = MagicMock(spec=subprocess.Popen)
+        proc.pid = 12345
+        proc.wait.side_effect = [subprocess.TimeoutExpired(cmd="python_tool", timeout=5), 0]
+        server._python_tool_process = proc
+
+        await server.shutdown()
+
+        proc.terminate.assert_called_once()
+        proc.kill.assert_called_once()
+        assert proc.wait.call_count == 2
+        assert server._python_tool_process is None
+
+    async def test_unreaped_child_after_sigkill_is_logged(self) -> None:
+        server = self._make_server()
+        proc = MagicMock(spec=subprocess.Popen)
+        proc.pid = 12345
+        proc.wait.side_effect = subprocess.TimeoutExpired(cmd="python_tool", timeout=5)
+        server._python_tool_process = proc
+
+        with patch("app.logger") as mock_logger:
+            await server.shutdown()
+
+        proc.kill.assert_called_once()
+        assert proc.wait.call_count == 2
+        mock_logger.error.assert_called_once()
+        assert server._python_tool_process is None
+
+    async def test_graceful_termination_does_not_kill(self) -> None:
+        server = self._make_server()
+        proc = MagicMock(spec=subprocess.Popen)
+        proc.pid = 12345
+        proc.wait.return_value = 0
+        server._python_tool_process = proc
+
+        await server.shutdown()
+
+        proc.terminate.assert_called_once()
+        proc.kill.assert_not_called()
+        proc.wait.assert_called_once_with(timeout=5)
+        assert server._python_tool_process is None
