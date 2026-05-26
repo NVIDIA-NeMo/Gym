@@ -176,11 +176,17 @@ def run_osworld_task(
                 result = _orig_exec_py(command)
                 try:
                     with open(_vm_exec_log_path, "a") as fh:
-                        fh.write(json.dumps({
-                            "call_idx": idx,
-                            "command_head": (command or "")[:300],
-                            "response": result if isinstance(result, dict) else {"_repr": repr(result)[:200]},
-                        }, default=str) + "\n")
+                        fh.write(
+                            json.dumps(
+                                {
+                                    "call_idx": idx,
+                                    "command_head": (command or "")[:300],
+                                    "response": result if isinstance(result, dict) else {"_repr": repr(result)[:200]},
+                                },
+                                default=str,
+                            )
+                            + "\n"
+                        )
                 except Exception:
                     LOG.exception("Failed to write VM exec log entry %d", idx)
                 return result
@@ -278,14 +284,17 @@ def run_osworld_task(
             if len(png) > cold_boot_min_png_bytes:
                 LOG.info(
                     "VM ready after %.1fs (screenshot %d bytes >= threshold %d)",
-                    time.monotonic() - boot_start, len(png), cold_boot_min_png_bytes,
+                    time.monotonic() - boot_start,
+                    len(png),
+                    cold_boot_min_png_bytes,
                 )
                 break
             time.sleep(cold_boot_poll_s)
         else:
             LOG.warning(
                 "VM cold-boot timed out at %ds; proceeding with last obs (screenshot %d bytes)",
-                cold_boot_timeout, len(obs.get("screenshot") or b""),
+                cold_boot_timeout,
+                len(obs.get("screenshot") or b""),
             )
 
         # Capture the focus state of the X server right before the
@@ -404,13 +413,20 @@ def run_osworld_task(
                     os.makedirs(os.path.dirname(obs_diag_log), exist_ok=True)
                     a11y = obs.get("accessibility_tree") or ""
                     with open(obs_diag_log, "a") as fh:
-                        fh.write(json.dumps({
-                            "step": step_idx,
-                            "png_bytes": len(obs.get("screenshot") or b""),
-                            "a11y_type": type(a11y).__name__,
-                            "a11y_bytes": len(a11y) if isinstance(a11y, (str, bytes)) else -1,
-                            "a11y_head": (a11y[:300] if isinstance(a11y, str) else repr(a11y)[:300]) if a11y else "",
-                        }) + "\n")
+                        fh.write(
+                            json.dumps(
+                                {
+                                    "step": step_idx,
+                                    "png_bytes": len(obs.get("screenshot") or b""),
+                                    "a11y_type": type(a11y).__name__,
+                                    "a11y_bytes": len(a11y) if isinstance(a11y, (str, bytes)) else -1,
+                                    "a11y_head": (a11y[:300] if isinstance(a11y, str) else repr(a11y)[:300])
+                                    if a11y
+                                    else "",
+                                }
+                            )
+                            + "\n"
+                        )
                 except Exception:
                     LOG.exception("Failed to write obs diag for step %d", step_idx)
             # Opt-in: dump the FULL a11y XML per step to a sidecar dir, so

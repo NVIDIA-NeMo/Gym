@@ -108,6 +108,15 @@ VLM API key.
 **One-time setup**:
 
 ```bash
+# Recommended one-shot host prep — installs docker + uv + ffmpeg/xvfb/
+# tigervnc (for video recording) + symlinks uv into /usr/local/bin so
+# ng_run's `bash -c` subshells can find it. Idempotent.
+bash responses_api_agents/osworld_agent/scripts/bringup_local_host.sh
+```
+
+Or the bare-minimum manual equivalent:
+
+```bash
 sudo apt-get install -y docker.io
 sudo usermod -aG docker $USER  # re-login required for group to take effect
 ```
