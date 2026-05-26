@@ -28,6 +28,28 @@ source .venv/bin/activate
 uv pip install hf_transfer vllm --torch-backend=auto
 ```
 
+<Tip>
+**Recommended on workstations without a system CUDA toolkit** (i.e. no `/usr/local/cuda`). Install FlashInfer's pre-built kernel packages so vLLM's sampler and allreduce paths do not try to JIT-compile via `nvcc` at startup:
+
+```bash
+# Pre-compiled CUBINs (CUTLASS / TRTLLM-gen kernels)
+uv pip install flashinfer-cubin
+
+# Pre-built JIT object cache. Replace cu130 with the value of
+# `python -c "import torch; print(torch.version.cuda)"` (e.g. cu128, cu129, cu130).
+uv pip install flashinfer-jit-cache --index-url https://flashinfer.ai/whl/cu130
+```
+
+Without these, the first sampling step inside `vllm serve` may fail with:
+
+```
+RuntimeError: Could not find nvcc and default cuda_home='/usr/local/cuda' doesn't exist
+```
+
+because PyPI's PyTorch wheels ship the CUDA runtime libraries but not the `nvcc` compiler that FlashInfer's JIT path falls back to. See the [FlashInfer installation docs](https://docs.flashinfer.ai/installation.html) for details.
+
+</Tip>
+
 ### Download the model
 This download will take a few minutes.
 ```bash
