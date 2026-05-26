@@ -305,22 +305,49 @@ how to pre-stage.
 
 ## First-Run Cache Acquisition
 
-The first time a rollout runs on a given worker node, the agent will
-populate two caches (on the worker's filesystem, persistent across
-runs):
+The first time a rollout runs on a given worker node, the agent populates
+two caches (on the worker's filesystem, persistent across runs):
 
 | Cache | Default Location | Size | Source | First-Run Time |
 | ----- | ---------------- | ---- | ------ | -------------- |
 | OSWorld VM image (qemu wrapper SIF / Docker image) | `cache/osworld-images/happysixd_osworld-docker_latest.sif` (Apptainer) or Docker daemon's image store | ~80 MB | `docker.io/happysixd/osworld-docker:latest` | ~30 s |
-| Ubuntu desktop qcow2 | `cache/osworld-images/Ubuntu.qcow2` | ~10 GB compressed, ~25 GB extracted | `huggingface.co/datasets/xlangai/ubuntu_osworld` | ~5–15 min depending on bandwidth |
+| Ubuntu desktop qcow2 | `docker_vm_data/Ubuntu.qcow2` (Docker provider) / `cache/osworld-images/Ubuntu.qcow2` (Apptainer) | ~12 GB compressed, ~23 GB extracted | `huggingface.co/datasets/xlangai/ubuntu_osworld` | ~1–15 min depending on bandwidth |
 
-Subsequent rollouts on the same node skip both downloads and start
-in seconds.
+Subsequent rollouts on the same node skip both downloads and start in
+seconds.
 
-### Pre-staging the cache (optional, recommended for shared clusters)
+### Pre-staging the cache — required when `concurrency > 1`
 
-To avoid the ~15 min cold-start penalty on every fresh worker, pre-stage
-the cache once and bind-mount it on every job:
+> ⚠️ **Required for any run with concurrency > 1** (osworld_agent.yaml
+> default is `concurrency: 4`). OSWorld's docker provider does not
+> serialize first-run downloads: with 4 parallel rollouts each calling
+> `DesktopEnv(...)` simultaneously, all four write the same
+> `docker_vm_data/Ubuntu.qcow2.zip` at once. The resulting torn file
+> (~49 GB observed vs 12 GB normal) trips
+> `zipfile.BadZipFile: File is not a zip file` on every rollout,
+> producing 5/5 reward=0 with no clear root-cause hint. Single-threaded
+> prestage before the first `ng_collect_rollouts` eliminates the race
+> for good (the cache is then reused, no concurrent writers).
+
+Lower concurrency (`concurrency: 1`) avoids the race without prestage,
+but is much slower. Prestage is the default-correct path.
+
+#### Docker provider recipe (Mode A)
+
+```bash
+# From the gym-osworld project root, before ng_run + ng_collect_rollouts:
+mkdir -p docker_vm_data && cd docker_vm_data
+curl -fL --retry 3 -O \
+  https://huggingface.co/datasets/xlangai/ubuntu_osworld/resolve/main/Ubuntu.qcow2.zip
+unzip Ubuntu.qcow2.zip && rm Ubuntu.qcow2.zip
+docker pull happysixd/osworld-docker:latest
+# Verify: should be ~23 GB
+ls -lh Ubuntu.qcow2
+```
+
+That's it — the docker provider auto-discovers `docker_vm_data/Ubuntu.qcow2`.
+
+#### Apptainer provider recipe (Mode B / SLURM-style clusters)
 
 ```bash
 # Pre-pull the Apptainer SIF
@@ -330,19 +357,17 @@ apptainer pull \
 
 # Pre-download the Ubuntu desktop qcow2
 mkdir -p $CACHE_DIR/osworld-images && cd $_
-curl -fL -O https://huggingface.co/datasets/xlangai/ubuntu_osworld/resolve/main/Ubuntu.qcow2.zip
+curl -fL --retry 3 -O \
+  https://huggingface.co/datasets/xlangai/ubuntu_osworld/resolve/main/Ubuntu.qcow2.zip
 unzip Ubuntu.qcow2.zip && rm Ubuntu.qcow2.zip
 ```
 
-Then point the agent at the shared cache via env vars:
+Point the agent at the shared cache via env vars:
 
 ```bash
 export OSWORLD_APPTAINER_SIF_CACHE=$CACHE_DIR/osworld-images
 export OSWORLD_APPTAINER_VMS_DIR=$CACHE_DIR/osworld-images
 ```
-
-(Docker provider uses Docker's own image cache + `cache_dir` config
-field; nothing to set.)
 
 ## Usage
 
