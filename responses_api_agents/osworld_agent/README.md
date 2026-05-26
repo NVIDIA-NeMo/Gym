@@ -497,6 +497,22 @@ ls $OSWORLD_RECORD_VIDEO_DIR/   # one mp4 per task, named {task_id}.mp4
 
 ## Troubleshooting
 
+### `ng_run` reports `bash: line 1: uv: command not found`
+
+`ng_run` launches each FastAPI server in a `bash -c "uv run ..."` subshell.
+Non-interactive bash doesn't source `~/.bashrc`, so the uv installer's
+PATH edit (`$HOME/.local/bin`) isn't visible. Quick fix:
+
+```bash
+sudo ln -sf "$(which uv)"  /usr/local/bin/uv
+sudo ln -sf "$(which uvx)" /usr/local/bin/uvx
+```
+
+`/usr/local/bin` is on the default non-interactive `PATH` on every standard
+Linux distro, so once symlinked uv is reachable from any subshell. The
+host-prep helper at [`scripts/bringup_local_host.sh`](scripts/bringup_local_host.sh)
+does this automatically.
+
 ### Rollouts time out at the first `/screenshot` poll
 
 Most common cause: the VM image is still downloading on first run. Tail
