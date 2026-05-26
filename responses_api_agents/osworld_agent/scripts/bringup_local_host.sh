@@ -136,26 +136,51 @@ fi
 
 cat <<EOF
 
-✓ Host is ready for OSWorld Mode A. Next:
+✓ Host is ready for OSWorld Mode A. Three things left to do before \`ng_run\`:
 
-    git clone https://github.com/<your-fork-or-NeMo-Gym>.git
-    cd <Gym-checkout>
-    uv venv && uv sync --extra dev
+  [1] Get the agent code
+  -----------------------------------------------------------------------------
+      git clone https://github.com/<your-fork-or-NeMo-Gym>.git
+      cd <Gym-checkout>
+      uv venv && uv sync --extra dev
 
-    # fill in env.yaml at project root (see README's "Quickstart")
+  [2] Write env.yaml (REQUIRED — ng_run resolves OmegaConf refs from this)
+  -----------------------------------------------------------------------------
+      The policy MUST be a VLM (vision-language model). Text-only models
+      score 0 on every OSWorld task. Fill in your VLM endpoint:
 
-    # MANDATORY when concurrency > 1: prestage Ubuntu.qcow2 (~12 GB)
-    # so concurrent rollouts don't race to download it. See README
-    # "First-Run Cache Acquisition" for the recipe.
+      cat > env.yaml <<YAML
+      policy_base_url: https://your-vlm-endpoint/v1
+      policy_api_key: <your-key>
+      policy_model_name: <your-vlm-model>     # must be VLM
+      YAML
+      chmod 600 env.yaml                       # contains a key
 
-    # run servers + rollouts:
-    ng_run "+config_paths=[\\
-      responses_api_agents/osworld_agent/configs/osworld_agent.yaml,\\
-      responses_api_models/openai_model/configs/openai_model.yaml]" &
-    ng_collect_rollouts \\
-      +agent_name=osworld_simple_agent \\
-      +input_jsonl_fpath=responses_api_agents/osworld_agent/data/example.jsonl \\
-      +output_jsonl_fpath=results/osworld_example.jsonl \\
-      +num_repeats=1
+  [3] Prestage Ubuntu.qcow2 (REQUIRED when concurrency > 1)
+  -----------------------------------------------------------------------------
+      Concurrent first-run downloads race to write the same docker_vm_data/
+      Ubuntu.qcow2.zip — torn file. Recipe (12 GB compressed, ~5 min on a
+      fast link):
+
+      mkdir -p docker_vm_data && cd docker_vm_data
+      curl -fL --retry 3 -O \\
+        https://huggingface.co/datasets/xlangai/ubuntu_osworld/resolve/main/Ubuntu.qcow2.zip
+      unzip Ubuntu.qcow2.zip && rm Ubuntu.qcow2.zip
+      cd ..
+
+  Then run servers + rollouts:
+  -----------------------------------------------------------------------------
+      ng_run "+config_paths=[\\
+responses_api_agents/osworld_agent/configs/osworld_agent.yaml,\\
+responses_api_models/openai_model/configs/openai_model.yaml]" &
+
+      ng_collect_rollouts \\
+        +agent_name=osworld_simple_agent \\
+        +input_jsonl_fpath=responses_api_agents/osworld_agent/data/example.jsonl \\
+        +output_jsonl_fpath=results/osworld_example.jsonl \\
+        +num_repeats=1
+
+  Optional: set OSWORLD_RECORD_VIDEO_DIR before ng_run to capture per-task
+  mp4. See README's "Recording rollout videos" section.
 
 EOF

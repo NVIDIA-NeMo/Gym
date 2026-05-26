@@ -28,13 +28,27 @@ git clone https://github.com/<your-fork-or-NeMo-Gym>.git
 cd <Gym-checkout>
 uv venv && uv sync --extra dev
 
-# 3. Fill in env.yaml at project root (see main README Quickstart for fields)
+# 3. Write env.yaml (REQUIRED — ng_run resolves OmegaConf refs from this).
+#    The policy MUST be a VLM. Text-only models score 0 on every OSWorld task.
+cat > env.yaml <<YAML
+policy_base_url: https://your-vlm-endpoint/v1
+policy_api_key: <your-key>
+policy_model_name: <your-vlm-model>     # must be VLM
+YAML
+chmod 600 env.yaml
 
 # 4. MANDATORY when concurrency > 1: prestage Ubuntu.qcow2 (12 GB) so
-#    parallel rollouts don't race to download it. See main README
-#    "First-Run Cache Acquisition" for the curl + unzip recipe.
+#    parallel rollouts don't race to download it.
+mkdir -p docker_vm_data && cd docker_vm_data
+curl -fL --retry 3 -O \
+  https://huggingface.co/datasets/xlangai/ubuntu_osworld/resolve/main/Ubuntu.qcow2.zip
+unzip Ubuntu.qcow2.zip && rm Ubuntu.qcow2.zip
+cd ..
 
-# 5. Run:
+# 5. (optional) record per-rollout mp4
+# export OSWORLD_RECORD_VIDEO_DIR=/tmp/smoke/videos && mkdir -p $OSWORLD_RECORD_VIDEO_DIR
+
+# 6. Run:
 ng_run "+config_paths=[\
 responses_api_agents/osworld_agent/configs/osworld_agent.yaml,\
 responses_api_models/openai_model/configs/openai_model.yaml]" &
