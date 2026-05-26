@@ -8,4 +8,6 @@ docker==7.1.0
 # two server venvs at different times and pull different Ray versions,
 # breaking cluster join with "Version mismatch: cluster has Ray X, this node
 # has Ray Y". Keep in lockstep with the model server's requirements.txt.
-ray==2.52.1
+# Bumped 2026-05-26 from 2.52.1 to satisfy nemo-gym pyproject's
+# `ray[default]>=2.55.1` (CVE remediation from 2026-05-19).
+ray==2.55.1
