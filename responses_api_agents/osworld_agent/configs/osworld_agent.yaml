@@ -33,7 +33,7 @@ osworld_simple_agent:
         type: example
         jsonl_fpath: responses_api_agents/osworld_agent/data/example.jsonl
       concurrency: 4
-      provider_name: remote_docker
+      provider_name: docker
       container_image: docker://happysixd/osworld-docker:latest
       headless: true
       screen_width: 1920
