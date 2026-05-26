@@ -11,3 +11,21 @@ docker==7.1.0
 # Bumped 2026-05-26 from 2.52.1 to satisfy nemo-gym pyproject's
 # `ray[default]>=2.55.1` (CVE remediation from 2026-05-19).
 ray==2.55.1
+# Workaround for a reproducible uv 0.11.16 install bug: when `-e nemo-gym[dev]`
+# and `osworld @ git+https://...` are resolved together (same `uv pip install
+# -r requirements.txt` invocation), 7 of osworld's pyproject deps are silently
+# skipped — the Ray task then crashes at first /run with
+# `ModuleNotFoundError: No module named 'cryptography'` and similar. Minimal
+# repro: a fresh venv with ONLY `osworld @ git+...` installs all 89 deps
+# correctly; the combination with the editable nemo-gym triggers the skip.
+# Listing the affected deps directly here forces uv to install them as
+# top-level pins, which is reliable. Drop once the uv bug is fixed upstream.
+# (`func-timeout` was inconsistently affected; included as belt-and-suspenders.)
+cryptography
+cffi
+scipy
+Pillow~=11.0.0
+scikit-learn
+matplotlib~=3.7.4
+flask~=3.0.0
+func-timeout
