@@ -132,6 +132,12 @@ def run_osworld_task(
     timed_out = False
     task_start = time.monotonic()
 
+    # Opt-in mp4 recording of the entire rollout, captured server-side inside
+    # the VM and pulled back on env.close(). Saved at
+    # ${OSWORLD_RECORD_VIDEO_DIR}/{task_id}.mp4.
+    _record_dir = os.environ.get("OSWORLD_RECORD_VIDEO_DIR", "")
+    _recording_started = False
+
     try:
         env = DesktopEnv(
             provider_name=provider_name,
@@ -144,6 +150,13 @@ def run_osworld_task(
             cache_dir=cache_dir,
         )
         env.reset(task_config=task_config)
+        if _record_dir:
+            try:
+                env.controller.start_recording()
+                _recording_started = True
+                LOG.info("Started VM recording → %s/<task_id>.mp4", _record_dir)
+            except Exception:  # noqa: BLE001 — best-effort, recording is opt-in.
+                LOG.exception("start_recording() failed; continuing without recording")
         # Opt-in: log every controller.execute_python_command request +
         # response from the VM's /execute endpoint as JSONL. The /execute
         # endpoint returns {status, output, error, returncode}; OSWorld's
@@ -482,6 +495,15 @@ def run_osworld_task(
         error = f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}"
         LOG.exception("OSWorld rollout failed before evaluation")
     finally:
+        if _recording_started and env is not None:
+            try:
+                os.makedirs(_record_dir, exist_ok=True)
+                _task_id = task_config.get("id", "unknown")
+                _mp4_path = os.path.join(_record_dir, f"{_task_id}.mp4")
+                env.controller.end_recording(_mp4_path)
+                LOG.info("Saved VM recording: %s", _mp4_path)
+            except Exception:  # noqa: BLE001 — best-effort.
+                LOG.exception("end_recording() failed; mp4 may be missing or partial")
         if env is not None:
             try:
                 env.close()
