@@ -15,6 +15,7 @@ OS-level tasks).
 - [First-Run Cache Acquisition](#first-run-cache-acquisition)
 - [Usage](#usage)
 - [Configuration](#configuration)
+- [Recording rollout videos](#recording-rollout-videos)
 - [Troubleshooting](#troubleshooting)
 - [Reward Profiling](#reward-profiling)
 - [Dataset Information](#dataset-information)
@@ -441,6 +442,33 @@ Per-rollout values can be set three ways, in increasing priority:
    `temperature` / `top_p`).
 3. CLI overrides (`+responses_create_params={…}` on
    `ng_collect_rollouts`).
+
+## Recording rollout videos
+
+Set `OSWORLD_RECORD_VIDEO_DIR` before launching `ng_run` to capture an mp4
+per rollout. The agent calls OSWorld's `controller.start_recording()` after
+`env.reset()` and `controller.end_recording(path)` in the finally block,
+which downloads the mp4 from the VM to the host filesystem.
+
+```bash
+export OSWORLD_RECORD_VIDEO_DIR=/tmp/osworld-videos
+mkdir -p "$OSWORLD_RECORD_VIDEO_DIR"
+ng_run "+config_paths=[...]" &
+ng_collect_rollouts ...
+ls $OSWORLD_RECORD_VIDEO_DIR/   # one mp4 per task, named {task_id}.mp4
+```
+
+- Works for **every provider** that exposes the controller recording API
+  (verified on `docker`; same call path used in OSWorld's own
+  `lib_run_single.py`, so `apptainer` / `vmware` / `virtualbox` also work).
+- File size is typically 1-10 MB per task at OSWorld's 1920x1080 default
+  (verified: 5 example tasks → 1.5-5.2 MB each, 16 MB total).
+- Recording is best-effort — if `start_recording()` or `end_recording()`
+  raises (e.g. ffmpeg-in-VM missing, network blip during mp4 download),
+  the error is logged and the rollout still completes normally.
+- Mode B `remote_docker` users get the same env var honored, plus an
+  additional VNC-stream recording path on the bare-metal host (see
+  the existing description in the Mode B architecture diagram).
 
 ## Troubleshooting
 
