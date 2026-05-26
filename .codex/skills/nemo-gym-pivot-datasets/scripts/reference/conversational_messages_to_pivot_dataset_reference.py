@@ -322,6 +322,10 @@ def _chat_messages_to_responses_input(messages: list[dict]) -> list[dict]:
 def _expected_action(message: dict) -> dict | None:
     tool_calls = message.get("tool_calls") or []
     if tool_calls:
+        # Refuse multi-call targets: expected_action is singular, so silently
+        # taking tool_calls[0] would drop the rest of the label.
+        if len(tool_calls) > 1:
+            return None
         tool_call = tool_calls[0]
         arguments = tool_call["function"]["arguments"]
         try:
@@ -404,6 +408,19 @@ def _make_pivot_rows(row: dict, trajectory_id: int, agent_ref: dict, metrics: Co
 
         pivot_has_reasoning = bool(answer.get("reasoning_content"))
         previous_steps_in_turn_have_reasoning = previous_steps_in_turn_with_reasoning > 0
+
+        # Skip multi-call targets to keep the singular expected_action
+        # contract honest; surface the drop in the metrics summary.
+        answer_tool_calls = answer.get("tool_calls") or []
+        if len(answer_tool_calls) > 1:
+            metrics["skipped_multi_tool_targets"] += 1
+            metrics["skipped_multi_tool_count", len(answer_tool_calls)] += 1
+            pivot_assistant_index += 1
+            previous_steps_in_turn += 1
+            if pivot_has_reasoning:
+                previous_steps_in_turn_with_reasoning += 1
+            continue
+
         expected_action = _expected_action(answer)
         if expected_action is None:
             metrics["malformed_expected_actions"] += 1
@@ -500,7 +517,9 @@ def _write_metrics_md(
 ) -> None:
     total_pivots = metrics["pivot_rows_written"]
     total_trajectories = metrics["trajectories_seen"]
-    total_expected_action_candidates = total_pivots + metrics["malformed_expected_actions"]
+    total_expected_action_candidates = (
+        total_pivots + metrics["malformed_expected_actions"] + metrics["skipped_multi_tool_targets"]
+    )
     summary_rows = [
         ["input", in_path],
         ["output", out_path],
@@ -534,6 +553,10 @@ def _write_metrics_md(
         ],
         ["dropped_user_tool_call_messages", metrics["dropped_user_tool_call_messages"]],
         ["dropped_user_tool_output_messages", metrics["dropped_user_tool_output_messages"]],
+        [
+            "skipped_multi_tool_targets",
+            _count_pct(metrics["skipped_multi_tool_targets"], total_expected_action_candidates),
+        ],
         [
             "malformed_expected_actions",
             _count_pct(metrics["malformed_expected_actions"], total_expected_action_candidates),
@@ -645,6 +668,7 @@ def main(args) -> None:
     )
     print(f"Dropped user tool calls: {metrics['dropped_user_tool_call_messages']}")
     print(f"Dropped user tool outputs: {metrics['dropped_user_tool_output_messages']}")
+    print(f"Skipped multi-tool targets: {metrics['skipped_multi_tool_targets']}")
 
 
 if __name__ == "__main__":
