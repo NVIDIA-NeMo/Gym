@@ -261,6 +261,16 @@ ng_prepare_data "+config_paths=[${config_paths}]" \
     +mode=example_validation
 ```
 
+To download missing datasets from a config before validation, add `+should_download=true` and set `+data_source` to the registry used by that dataset's identifier. For example, configs with `gitlab_identifier` use the GitLab dataset registry:
+
+```bash
+ng_prepare_data "+config_paths=[responses_api_agents/swe_agents/configs/swebench_openhands.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]" \
+    +output_dirpath=data/swebench_openhands \
+    +mode=train_preparation \
+    +should_download=true \
+    +data_source=gitlab
+```
+
 ---
 
 ## Dataset Registry - GitLab
