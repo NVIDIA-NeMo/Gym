@@ -19,7 +19,7 @@ NeMo Gym implements environments as composable FastAPI servers that communicate 
 | Concept | NeMo Gym Component Implementation |
 |---------|---------------|
 | Dataset | JSONL: Responses API input — each row is a task (a single problem or challenge) for the agent to solve |
-| Agent Harness | FastAPI Agent Server or your own agent via HTTP |
+| Agent Harness | FastAPI Agent Server |
 | Verifier + State | FastAPI Resources Server |
 | Model | FastAPI Model Server or managed by your own agent harness |
 
@@ -27,8 +27,8 @@ All components are composable. Use different datasets with the same resources se
 
 This gives you flexibility to integrate with your existing models and agents:
 
-- **Bring your own agent** — Call Gym Resources Servers directly over HTTP. Your agent handles orchestration and inference; Gym provides the tasks, environment-specific tools, and verification.
-- **Use Gym's agent harnesses** — The Agent Server provides native agent implementations (e.g. multi-step) as well as built-in integrations with external harnesses like OpenHands.
+- **Bring your own agent** — Integrate your existing agent to use it with any Gym environment components.
+- **Use a built-in agent** — NeMo Gym includes some native agents, e.g. general-purpose multi-step tool calling, as well as built-in integrations with external harnesses like OpenHands.
 - **Train with any model endpoint** — The Model Server standardizes different LLM endpoints behind the Responses API and provides token IDs and log probabilities needed for RL training.
 
 ## How an Agent Runs a Task in NeMo Gym Environments
@@ -45,7 +45,7 @@ Each task attempt flows through three steps. The resulting trajectory is called 
        │
        ▼
 ┌──────────────────────────────────────────┐
-│        Agent Server or External Agent    │
+│               Agent Server               │
 │                                          │
 │  run():                                  │
 │    1. resources.seed_session()  ─────────────►  Resources Server
@@ -69,7 +69,7 @@ Each task attempt flows through three steps. The resulting trajectory is called 
 
 ### Agent Server
 
-Hosts built-in agent harnesses, including NeMo Gym native harnesses and integrated harnesses such as OpenHands and Mini SWE Agent.
+Hosts agent harnesses that orchestrate rollouts. Use your own harness, or use built-in harnesses such as OpenHands or NeMo Gym's native harnesses such as Simple Agent.
 
 ### Model Server
 
