@@ -28,7 +28,7 @@ from pathlib import Path
 from .prepare import prepare as _prepare
 
 
-TOKENIZER_NAME = "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16"
+TOKENIZER_NAME = "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16"  # pragma: allowlist secret
 MAX_CONTEXT_TOKENS = 131072
 OUTPUT_FPATH = Path(__file__).parent / "data" / "mrcr_n3_128k_benchmark.jsonl"
 
