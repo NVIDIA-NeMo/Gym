@@ -1024,6 +1024,16 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
                 json=retrieval_params,
             )
 
+            # Surface HTTP-level failures (e.g. 4xx context-overflow from vLLM)
+            # explicitly rather than letting them fall through to the vague
+            # "no output" branch.  Body is capped to avoid polluting agent
+            # context with multi-KB error bodies (e.g. vLLM HTML pages).
+            if not llm_response.ok:
+                body_text = (await llm_response.text())[:500]
+                return RetrieveInformationResponse(
+                    results=f"ERROR: Retrieval LLM HTTP {llm_response.status}: {body_text}"
+                )
+
             llm_response_json = await get_response_json(llm_response)
             llm_response_obj = NeMoGymResponse.model_validate(llm_response_json)
 
@@ -1035,7 +1045,26 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
                             result_text += getattr(content_item, "text", "")
 
             if not result_text:
-                return RetrieveInformationResponse(results="ERROR: Retrieval LLM returned no output.")
+                # Include any diagnostic the server returned so the agent can
+                # see why output was empty (e.g. incomplete_details.reason ==
+                # "max_output_tokens" or content_filter).  Bare "no output"
+                # masks these.
+                diagnostic_parts: List[str] = []
+                incomplete_details = getattr(llm_response_obj, "incomplete_details", None)
+                if incomplete_details is not None:
+                    reason = getattr(incomplete_details, "reason", None)
+                    if reason:
+                        diagnostic_parts.append(f"incomplete_details.reason={reason}")
+                status = getattr(llm_response_obj, "status", None)
+                if status:
+                    diagnostic_parts.append(f"status={status}")
+                error_field = getattr(llm_response_obj, "error", None)
+                if error_field is not None:
+                    diagnostic_parts.append(f"error={error_field}")
+                diagnostic = (" (" + ", ".join(diagnostic_parts) + ")") if diagnostic_parts else ""
+                return RetrieveInformationResponse(
+                    results=f"ERROR: Retrieval LLM returned no output.{diagnostic}"
+                )
 
             return RetrieveInformationResponse(results=result_text)
 

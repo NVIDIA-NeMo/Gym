@@ -769,6 +769,93 @@ class TestRetrieveInformation:
         response = await server.retrieve_information(_mock_request(), body)
         assert "Summary of huge doc" in response.results
 
+    # ------------------------------------------------------------------
+    # F2: HTTP status check + richer empty-output diagnostic
+    # ------------------------------------------------------------------
+    # Background: the pre-F2 branch surfaced 4xx/5xx from vLLM as a bare
+    # "Retrieval LLM returned no output" message because the JSON parser
+    # swallowed the error body.  Operators were left guessing whether
+    # the retrieval model was misconfigured, oversubscribed, or just
+    # quietly silent.  These tests pin the diagnostic contract.
+
+    @pytest.mark.asyncio
+    async def test_http_error_surfaces_status_and_body(self, server) -> None:
+        """4xx/5xx from the retrieval model server must surface the status
+        code + body excerpt (not be silently converted to 'no output').
+        """
+        server._data_storage[_TEST_SESSION_ID] = {"doc": "Annual Report 2023"}
+        mock_response = MagicMock()
+        mock_response.ok = False
+        mock_response.status = 500
+        mock_response.text = AsyncMock(return_value="Internal Server Error: model is overloaded")
+        server.server_client = MagicMock()
+        server.server_client.post = AsyncMock(return_value=mock_response)
+
+        body = RetrieveInformationRequest(prompt="Summarize {{doc}}")
+        response = await server.retrieve_information(_mock_request(), body)
+
+        assert "ERROR" in response.results
+        assert "HTTP 500" in response.results
+        assert "Internal Server Error" in response.results
+        assert "model is overloaded" in response.results
+
+    @pytest.mark.asyncio
+    async def test_http_error_body_is_capped_at_500_chars(self, server) -> None:
+        """Error bodies are truncated to avoid polluting agent context with
+        multi-KB vLLM HTML error pages.
+        """
+        server._data_storage[_TEST_SESSION_ID] = {"doc": "Annual Report 2023"}
+        huge_body = "X" * 5000
+        mock_response = MagicMock()
+        mock_response.ok = False
+        mock_response.status = 503
+        mock_response.text = AsyncMock(return_value=huge_body)
+        server.server_client = MagicMock()
+        server.server_client.post = AsyncMock(return_value=mock_response)
+
+        body = RetrieveInformationRequest(prompt="Summarize {{doc}}")
+        response = await server.retrieve_information(_mock_request(), body)
+
+        assert "HTTP 503" in response.results
+        # Body excerpt must be capped to ≤500 chars; full 5000-char body
+        # would have ballooned the agent's next prompt by ~5KB.
+        assert response.results.count("X") <= 500
+
+    @pytest.mark.asyncio
+    async def test_empty_output_includes_incomplete_details(self, server) -> None:
+        """When the LLM returns 200 OK but no output text, the empty-output
+        branch must surface ``incomplete_details.reason`` so the operator
+        can distinguish max-output-token truncation from a model bug.
+        """
+        import orjson
+
+        server._data_storage[_TEST_SESSION_ID] = {"doc": "Annual Report 2023"}
+        payload = orjson.dumps(
+            {
+                "id": "resp_1",
+                "created_at": 0,
+                "model": "m",
+                "object": "response",
+                "output": [],
+                "incomplete_details": {"reason": "max_output_tokens"},
+                "parallel_tool_calls": False,
+                "tool_choice": "auto",
+                "tools": [],
+            }
+        )
+        mock_response = MagicMock()
+        mock_response.ok = True
+        mock_response.read = AsyncMock(return_value=payload)
+        server.server_client = MagicMock()
+        server.server_client.post = AsyncMock(return_value=mock_response)
+
+        body = RetrieveInformationRequest(prompt="Summarize {{doc}}")
+        response = await server.retrieve_information(_mock_request(), body)
+
+        assert "ERROR" in response.results
+        assert "no output" in response.results
+        assert "max_output_tokens" in response.results
+
 
 # ============================================================================
 # Test: Verify (reward calculation)
