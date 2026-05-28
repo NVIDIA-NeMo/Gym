@@ -730,8 +730,6 @@ class TestApp:
             assert not hasattr(result.response, "completion_evidence")
             assert not hasattr(result.response, "agent_input")
             assert not hasattr(result.response, "seed_obs")
-        inner_responses_call = server.server_client.post.call_args_list[1]
-        assert inner_responses_call.kwargs["cookies"][_CONTEXT_COMPACTION_ROLLOUT_ID_COOKIE] == "rollout-run"
 
     @pytest.mark.parametrize("resolved", [False, None])
     async def test_run_emits_standard_turns_and_tool_observation(self, resolved: bool | None) -> None:
@@ -817,7 +815,6 @@ class TestApp:
             (item.kwargs["server_name"], item.kwargs["url_path"]) for item in server_client.post.await_args_list
         ] == [
             ("resources", "/seed_session"),
-            ("simple", "/ng-rollout/4-1/v1/responses"),
             ("model", "/ng-rollout/4-1/v1/responses"),
             ("resources", "/lookup"),
             ("model", "/ng-rollout/4-1/v1/responses"),
@@ -872,12 +869,12 @@ class TestApp:
         assert tool.started_at is not None and tool.completed_at is not None and tool.duration_ms is not None
 
     @pytest.mark.parametrize(("capture_enabled", "override_responses"), ((False, False), (True, False), (True, True)))
-    async def test_run_preserves_self_dispatch(self, capture_enabled: bool, override_responses: bool) -> None:
+    async def test_run_dispatches_model_in_process(self, capture_enabled: bool, override_responses: bool) -> None:
         agent_type = SimpleAgentWithCompaction
         if override_responses:
 
             async def overridden_responses(*args, **kwargs):
-                raise AssertionError("run must preserve self-dispatch for responses overrides")
+                raise AssertionError("run must bypass the public HTTP adapter")
 
             agent_type = type(
                 "OverriddenSimpleAgentWithCompaction",
@@ -891,7 +888,15 @@ class TestApp:
             "created_at": 1.0,
             "model": "model",
             "object": "response",
-            "output": [],
+            "output": [
+                {
+                    "id": "message-1",
+                    "content": [{"annotations": [], "text": "done", "type": "output_text"}],
+                    "role": "assistant",
+                    "status": "completed",
+                    "type": "message",
+                }
+            ],
             "parallel_tool_calls": True,
             "tool_choice": "auto",
             "tools": [],
@@ -922,7 +927,8 @@ class TestApp:
             "/ng-rollout/0-0/v1/responses" if capture_enabled else "/v1/responses",
             "/verify",
         ]
-        assert "ng_trajectory" not in result.model_dump(mode="json")
+        assert server_client.post.await_args_list[1].kwargs["server_name"] == "model"
+        assert ("ng_trajectory" in result.model_dump(mode="json")) is capture_enabled
 
     async def test_responses_continues_on_malformed_tool_call_arguments(self, monkeypatch: MonkeyPatch) -> None:
         """Malformed JSON in a tool-call's arguments must not crash the rollout.
@@ -1140,7 +1146,6 @@ class TestApp:
             call().read(),
             call().cookies.items(),
             call().cookies.items().__iter__(),
-            call().cookies.items().__len__(),
         ]
         server.server_client.post.assert_has_calls(expected_calls)
 
@@ -1383,7 +1388,6 @@ class TestApp:
             call().read(),
             call().cookies.items(),
             call().cookies.items().__iter__(),
-            call().cookies.items().__len__(),
         ]
         server.server_client.post.assert_has_calls(expected_calls)
 
@@ -1465,7 +1469,15 @@ class TestApp:
             "created_at": 1,
             "model": "dummy_model",
             "object": "response",
-            "output": [],
+            "output": [
+                {
+                    "id": "message-1",
+                    "content": [{"annotations": [], "text": "done", "type": "output_text"}],
+                    "role": "assistant",
+                    "status": "completed",
+                    "type": "message",
+                }
+            ],
             "parallel_tool_calls": True,
             "tool_choice": "auto",
             "tools": [],
@@ -1494,5 +1506,5 @@ class TestApp:
             "/v1/responses",
         ]
         assert post_call_kwargs[0]["server_name"] == "my resources server"
-        assert post_call_kwargs[1]["server_name"] == "simple_agent"
-        assert post_call_kwargs[1]["cookies"] == {"session": "seeded"}
+        assert post_call_kwargs[1]["server_name"] == "my model server"
+        assert post_call_kwargs[1]["cookies"] is None

@@ -26,6 +26,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
@@ -278,6 +279,23 @@ class CVDPAgent(SimpleResponsesAPIAgent):
         if self.config.model_server is None:
             raise RuntimeError("simple_agent mode requires model_server to be configured")
 
+        result, set_cookies = await self._responses(
+            body,
+            model_url_path=self.url_path_for_request("/v1/responses", request),
+            cookies=request.cookies,
+        )
+        for k, v in set_cookies.items():
+            response.set_cookie(k, v)
+        return result
+
+    async def _responses(
+        self,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        *,
+        model_url_path: str,
+        cookies: Optional[Mapping[str, str]] = None,
+    ) -> tuple[NeMoGymResponse, dict[str, str]]:
+        """Implementation of `/v1/responses`; `run` invokes this in-process."""
         body = body.model_copy(deep=True)
 
         if isinstance(body.input, str):
@@ -287,7 +305,9 @@ class CVDPAgent(SimpleResponsesAPIAgent):
         usage = None
         step = 0
         model_server_cookies = None  # update the cookies on every model response
-        resources_server_cookies = request.cookies  # update the cookies on every resources server response
+        resources_server_cookies = (
+            dict(cookies) if cookies else {}
+        )  # update the cookies on every resources server response
 
         while True:
             step += 1
@@ -295,7 +315,7 @@ class CVDPAgent(SimpleResponsesAPIAgent):
 
             model_response = await self.server_client.post(
                 server_name=self.config.model_server.name,
-                url_path=self.url_path_for_request("/v1/responses", request),
+                url_path=model_url_path,
                 json=new_body,
                 cookies=model_server_cookies,
             )
@@ -347,12 +367,13 @@ class CVDPAgent(SimpleResponsesAPIAgent):
                 break
 
         # Propogate any extra cookies necessary for downstream verification
+        set_cookies: dict[str, str] = {}
         for k, v in (*resources_server_cookies.items(), *model_server_cookies.items()):
-            response.set_cookie(k, v)
+            set_cookies[k] = v
 
         model_response.output = new_outputs
         model_response.usage = usage
-        return model_response
+        return model_response, set_cookies
 
     async def _run_simple(self, request: Request, body: CVDPAgentRunRequest) -> CVDPAgentVerifyResponse:
         cookies = request.cookies
@@ -378,24 +399,22 @@ class CVDPAgent(SimpleResponsesAPIAgent):
         retries_left = self.config.llm_parse_retries
         while True:
             try:
-                response = await self.server_client.post(
-                    server_name=self.config.name,
-                    url_path=self.url_path_for_run("/v1/responses", body),
-                    json=body.responses_create_params,
+                inproc_response, set_cookies = await self._responses(
+                    body.responses_create_params,
+                    model_url_path=self.url_path_for_run("/v1/responses", body),
                     cookies=cookies,
                 )
-                await raise_for_status(response)
-                cookies = response.cookies
+                attempt_cookies = set_cookies
 
                 verify_request = CVDPAgentVerifyRequest.model_validate(
-                    body.model_dump() | {"response": await get_response_json(response)}
+                    body.model_dump() | {"response": inproc_response.model_dump()}
                 )
 
                 verify_response = await self.server_client.post(
                     server_name=self.config.resources_server.name,
                     url_path="/verify",
                     json=verify_request.model_dump(),
-                    cookies=cookies,
+                    cookies=attempt_cookies,
                 )
                 await raise_for_status(verify_response)
                 result = CVDPAgentVerifyResponse.model_validate(await get_response_json(verify_response))

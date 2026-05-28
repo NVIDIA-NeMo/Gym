@@ -92,12 +92,7 @@ class RemoteAgentError(RuntimeError):
 
 
 class RemoteAgentTerminalError(RemoteAgentError):
-    """A failure that will not fix itself on retry (e.g. an invalid response shape).
-
-    run() reaches responses() over an HTTP self-post, so this class's NAME is the wire
-    contract: the exception middleware serializes it into the 500 body and run() matches
-    the name string to set the terminal routing flag.
-    """
+    """A failure that will not fix itself on retry (e.g. an invalid response shape)."""
 
 
 def normalize_remote_url(url: str) -> str:
@@ -165,6 +160,17 @@ class RemoteAgent(SimpleResponsesAPIAgent):
         response: Response,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
+        result, resources_server_cookies = await self._responses(body, resources_server_cookies=request.cookies)
+        for key, value in resources_server_cookies.items():
+            response.set_cookie(key, value)
+        return result
+
+    async def _responses(
+        self,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        *,
+        resources_server_cookies: Dict[str, str],
+    ) -> Tuple[NeMoGymResponse, Dict[str, str]]:
         body = body.model_copy(deep=True)
 
         if isinstance(body.input, str):
@@ -174,7 +180,6 @@ class RemoteAgent(SimpleResponsesAPIAgent):
         usage = None
         step = 0
         agent_server_cookies = None  # the service's own cookies, round-tripped so it can keep per-rollout state
-        resources_server_cookies = request.cookies
 
         while True:
             step += 1
@@ -245,14 +250,9 @@ class RemoteAgent(SimpleResponsesAPIAgent):
             if self.config.max_steps and step >= self.config.max_steps:
                 break
 
-        # Resources-server cookies propagate for downstream verification; the service's own
-        # cookies are its private session and deliberately stay out.
-        for k, v in resources_server_cookies.items():
-            response.set_cookie(k, v)
-
         agent_response.output = new_outputs
         agent_response.usage = usage
-        return agent_response
+        return agent_response, resources_server_cookies
 
     async def _post_agent_responses(
         self, new_body: NeMoGymResponseCreateParamsNonStreaming, cookies: Optional[Dict[str, str]]
@@ -398,23 +398,15 @@ class RemoteAgent(SimpleResponsesAPIAgent):
             )
 
         try:
-            loop_response = await self.server_client.post(
-                server_name=self.config.name,
-                url_path=self.url_path_for_run("/v1/responses", body),
-                json=body.responses_create_params,
-                cookies=cookies,
+            loop_response, cookies = await self._responses(
+                body.responses_create_params,
+                resources_server_cookies=dict(cookies),
             )
-            await raise_for_status(loop_response)
-            response_json = await get_response_json(loop_response)
-            cookies = loop_response.cookies
+            response_json = loop_response.model_dump(mode="json")
+        except RemoteAgentTerminalError as e:
+            return self._failure_response(record, f"agent loop failed: {type(e).__name__}: {e}", terminal=True)
         except Exception as e:
-            content = getattr(e, "response_content", b"")
-            text = content.decode(errors="replace") if isinstance(content, (bytes, bytearray)) else str(content)
-            # Terminal classification crosses the HTTP self-post boundary by exception NAME:
-            # the middleware serialized the raised RemoteAgentTerminalError into the 500 body.
-            terminal = "RemoteAgentTerminalError" in text
-            detail = text or f"{type(e).__name__}: {e}"
-            return self._failure_response(record, f"agent loop failed: {detail[:500]}", terminal=terminal)
+            return self._failure_response(record, f"agent loop failed: {type(e).__name__}: {e}"[:500])
 
         self._warn_on_response_quality(response_json)
 

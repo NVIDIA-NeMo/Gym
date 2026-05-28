@@ -132,11 +132,29 @@ class ConversationalToolUseAgent(SimpleResponsesAPIAgent):
         response: Response,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
+        result, resources_server_cookies, model_server_cookies = await self._responses(
+            body,
+            resources_server_cookies=request.cookies,
+            model_url_path=self.url_path_for_request("/v1/responses", request),
+        )
+        for cookie_source in (resources_server_cookies, model_server_cookies):
+            if cookie_source is None:
+                continue
+            for key, value in cookie_source.items():
+                response.set_cookie(key, value)
+        return result
+
+    async def _responses(
+        self,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        *,
+        resources_server_cookies: Dict[str, str],
+        model_url_path: str,
+    ) -> tuple[NeMoGymResponse, Dict[str, str], Optional[Dict[str, str]]]:
         body = body.model_copy(deep=True)
         if isinstance(body.input, str):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
 
-        resources_server_cookies = request.cookies
         model_server_cookies = None
         new_outputs: List[Any] = []
         usage = None
@@ -200,7 +218,7 @@ class ConversationalToolUseAgent(SimpleResponsesAPIAgent):
             model_payload["input"] = self._normalize_response_input_items(body.input + new_outputs)
             model_response_http = await self.server_client.post(
                 server_name=self.config.model_server.name,
-                url_path=self.url_path_for_request("/v1/responses", request),
+                url_path=model_url_path,
                 json=model_payload,
                 cookies=model_server_cookies,
             )
@@ -295,17 +313,11 @@ class ConversationalToolUseAgent(SimpleResponsesAPIAgent):
                     resources_server_cookies = terminal["cookies"]
                     break
 
-        for cookie_source in (resources_server_cookies, model_server_cookies):
-            if cookie_source is None:
-                continue
-            for key, value in cookie_source.items():
-                response.set_cookie(key, value)
-
         if last_model_response is None:
             last_model_response = self._empty_response()
         last_model_response.output = new_outputs
         last_model_response.usage = usage
-        return last_model_response
+        return last_model_response, resources_server_cookies, model_server_cookies
 
     async def run(
         self, request: Request, body: ConversationalToolUseAgentRunRequest
@@ -333,15 +345,13 @@ class ConversationalToolUseAgent(SimpleResponsesAPIAgent):
         try:
             responses_create_params = body.responses_create_params.model_copy(deep=True)
             try:
-                response = await self.server_client.post(
-                    server_name=self.config.name,
-                    url_path=self.url_path_for_run("/v1/responses", body),
-                    json=responses_create_params,
-                    cookies=cookies,
+                response, resources_cookies, model_cookies = await self._responses(
+                    responses_create_params,
+                    resources_server_cookies=cookies,
+                    model_url_path=self.url_path_for_run("/v1/responses", body),
                 )
-                await raise_for_status(response)
-                cookies = self._merge_cookies(cookies, response.cookies)
-                response_payload = await get_response_json(response)
+                cookies = self._merge_cookies(resources_cookies, model_cookies)
+                response_payload = response.model_dump(mode="json", exclude_unset=True)
                 responses_create_params, response_payload = self._canonicalize_run_transcript(
                     responses_create_params,
                     response_payload,

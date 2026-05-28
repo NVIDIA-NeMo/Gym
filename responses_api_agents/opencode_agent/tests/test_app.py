@@ -472,8 +472,7 @@ class TestRolloutObservability:
         assert result.ng_agent_observations is not None
         assert _invocations(result.ng_agent_observations)[0].conversation
         assert agent._run_opencode.await_args.kwargs["rollout_id"] == "1-2"
-        assert agent.server_client.post.await_args_list[1].kwargs["url_path"] == "/ng-rollout/1-2/v1/responses"
-        verify_json = agent.server_client.post.await_args_list[2].kwargs["json"]
+        verify_json = agent.server_client.post.await_args_list[1].kwargs["json"]
         assert "_ng_agent_observations" not in verify_json["response"]
 
 

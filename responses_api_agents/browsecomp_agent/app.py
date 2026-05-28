@@ -17,7 +17,7 @@ import json
 import re
 import traceback
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Mapping, Optional, Tuple
 
 import aiohttp
 from fastapi import Request, Response
@@ -259,7 +259,14 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         # RE-RAISE unchanged so run()'s containment behaves exactly as before.
         # Grep the next run for [browsecomp][responses_exc].
         try:
-            return await self._responses_impl(request, response, body)
+            result, set_cookies = await self._responses_impl(
+                body,
+                model_url_path=self.url_path_for_request("/v1/responses", request),
+                cookies=request.cookies,
+            )
+            for k, v in set_cookies.items():
+                response.set_cookie(k, v)
+            return result
         except Exception as e:
             print(f"[browsecomp][responses_exc] error_type={type(e).__name__} error={str(e)[:300]}", flush=True)
             traceback.print_exc()
@@ -267,10 +274,12 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
 
     async def _responses_impl(
         self,
-        request: Request,
-        response: Response,
         body: NeMoGymResponseCreateParamsNonStreaming,
-    ) -> NeMoGymResponse:
+        *,
+        model_url_path: str,
+        cookies: Optional[Mapping[str, str]] = None,
+    ) -> Tuple[NeMoGymResponse, dict]:
+        """Implementation of `/v1/responses`; `run` invokes this in-process."""
         body = body.model_copy(deep=True)
 
         if isinstance(body.input, str):
@@ -283,7 +292,9 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         usage = None
         step = 0
         model_server_cookies = None  # update the cookies on every model response
-        resources_server_cookies = request.cookies  # update the cookies on every resources server response
+        resources_server_cookies = (
+            dict(cookies) if cookies else {}
+        )  # update the cookies on every resources server response
 
         reset_threshold = self._reset_threshold(self.config)
 
@@ -421,7 +432,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
 
             model_response = await self.server_client.post(
                 server_name=self.config.model_server.name,
-                url_path=self.url_path_for_request("/v1/responses", request),
+                url_path=model_url_path,
                 json=new_body,
                 cookies=model_server_cookies,
             )
@@ -720,8 +731,9 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             )
 
         # Propogate any extra cookies necessary for downstream verification
+        set_cookies: dict[str, str] = {}
         for k, v in (*resources_server_cookies.items(), *model_server_cookies.items()):
-            response.set_cookie(k, v)
+            set_cookies[k] = v
 
         model_response.output = full_trajectory
         model_response.usage = usage
@@ -730,7 +742,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         model_response.reset_count = reset_count
         model_response.num_tool_calls = num_tool_calls
         model_response.pre_reset_warning_steps = pre_reset_warning_steps
-        return model_response
+        return model_response, set_cookies
 
     async def run(self, request: Request, body: BrowsecompAgentRunRequest) -> BrowsecompAgentVerifyResponse:
         cookies = request.cookies
@@ -769,19 +781,17 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                     rollout_index = getattr(body, "_ng_rollout_index", None)
                     if rollout_index is not None:
                         body.responses_create_params.metadata["rollout_index"] = str(rollout_index)
-                response = await self.server_client.post(
-                    server_name=self.config.name,
-                    url_path=self.url_path_for_run("/v1/responses", body),
-                    json=body.responses_create_params,
+                inproc_response, set_cookies = await self._responses_impl(
+                    body.responses_create_params,
+                    model_url_path=self.url_path_for_run("/v1/responses", body),
                     cookies=cookies,
                 )
-                await raise_for_status(response)
-                cookies = response.cookies
+                cookies = set_cookies
 
                 # Retry if the model's LAST content-bearing turn was empty after <think>-strip.
                 # (Keyed on the last assistant message, matching the reference harness, NOT the concatenated
                 # output_text — a final think-only turn retries even if an earlier turn had text.)
-                response_json = await get_response_json(response)
+                response_json = inproc_response.model_dump(mode="json")
                 last_response_json = response_json
                 raw_output_text = self._last_message_text(NeMoGymResponse.model_validate(response_json))
                 cleaned_output_text = re.sub(r"<think>.*?</think>", "", raw_output_text, flags=re.DOTALL).strip()

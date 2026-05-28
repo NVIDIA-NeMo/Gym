@@ -425,18 +425,41 @@ class SimpleAgentWithCompaction(SimpleResponsesAPIAgent):
     ) -> ContextCompactedResponse | NeMoGymResponse:
         path_params = getattr(request, "path_params", None)
         rollout_id = path_params.get("rollout_id") if isinstance(path_params, Mapping) else None
+        model_response, resources_server_cookies, model_server_cookies = await self._responses(
+            body,
+            model_url_path=self.url_path_for_request("/v1/responses", request),
+            request_cookies=request.cookies,
+            rollout_id=rollout_id,
+            request_session_id=str(request.session.get(SESSION_ID_KEY, "request")),
+        )
+        for cookie_source in (resources_server_cookies, model_server_cookies):
+            if cookie_source is None:
+                continue
+            for key, value in cookie_source.items():
+                response.set_cookie(key, value)
+        return model_response
+
+    async def _responses(
+        self,
+        body: ContextCompactionResponseCreateParams,
+        *,
+        model_url_path: str,
+        request_cookies: Any,
+        rollout_id: str | None,
+        request_session_id: str = "request",
+    ) -> tuple[ContextCompactedResponse | NeMoGymResponse, Any, Any]:
         collect_trajectory = self._model_call_capture_enabled() and isinstance(rollout_id, str)
-        seed_count_raw = request.cookies.get(_CONTEXT_COMPACTION_SEED_COUNT_COOKIE, "0")
+        seed_count_raw = request_cookies.get(_CONTEXT_COMPACTION_SEED_COUNT_COOKIE, "0")
         try:
             seed_count = int(seed_count_raw)
         except (TypeError, ValueError) as exc:
             raise RuntimeError("Invalid internal context-compaction seed count") from exc
-        context_compaction_rollout_id = request.cookies.get(_CONTEXT_COMPACTION_ROLLOUT_ID_COOKIE)
+        context_compaction_rollout_id = request_cookies.get(_CONTEXT_COMPACTION_ROLLOUT_ID_COOKIE)
         if context_compaction_rollout_id is None:
-            context_compaction_rollout_id = rollout_id or str(request.session.get(SESSION_ID_KEY, "request"))
+            context_compaction_rollout_id = rollout_id or request_session_id
         resources_server_cookies = {
             key: value
-            for key, value in request.cookies.items()
+            for key, value in request_cookies.items()
             if key
             not in {
                 _CONTEXT_COMPACTION_SEED_COUNT_COOKIE,
@@ -445,21 +468,18 @@ class SimpleAgentWithCompaction(SimpleResponsesAPIAgent):
         }
         model_response, trajectory, model_server_cookies, resources_server_cookies = await self._create_episode(
             body,
-            model_url_path=self.url_path_for_request("/v1/responses", request),
+            model_url_path=model_url_path,
             resources_server_cookies=resources_server_cookies,
             rollout_id=rollout_id or "unscoped",
             context_compaction_rollout_id=context_compaction_rollout_id,
             seed_count=seed_count,
             collect_trajectory=collect_trajectory,
         )
-        # Propogate any extra cookies necessary for downstream verification
-        for k, v in (*resources_server_cookies.items(), *model_server_cookies.items()):
-            response.set_cookie(k, v)
         if trajectory is not None:
             model_response = model_response.model_copy(
                 update={_INTERNAL_TRAJECTORY_KEY: trajectory.model_dump(mode="json")}
             )
-        return model_response
+        return model_response, resources_server_cookies, model_server_cookies
 
     async def run(
         self,
@@ -495,18 +515,17 @@ class SimpleAgentWithCompaction(SimpleResponsesAPIAgent):
             responses_body.input = [*responses_body.input, *seed_messages]
             cookies[_CONTEXT_COMPACTION_SEED_COUNT_COOKIE] = str(len(seed_messages))
 
-        response = await self.server_client.post(
-            server_name=self.config.name,
-            url_path=self.url_path_for_run("/v1/responses", body),
-            json=responses_body,
-            cookies=cookies,
+        expected_rollout_id = self.rollout_id_from_run(body)
+        model_response, resources_server_cookies, model_server_cookies = await self._responses(
+            ContextCompactionResponseCreateParams.model_validate(responses_body.model_dump()),
+            model_url_path=self.url_path_for_run("/v1/responses", body),
+            request_cookies=cookies,
+            rollout_id=expected_rollout_id,
         )
-        await raise_for_status(response)
-        model_response_json = await get_response_json(response)
-        cookies = response.cookies
+        cookies = {**dict(resources_server_cookies or {}), **dict(model_server_cookies or {})}
+        model_response_json = model_response.model_dump(mode="json")
 
         trajectory = None
-        expected_rollout_id = self.rollout_id_from_run(body)
         raw_trajectory = (
             model_response_json.pop(_INTERNAL_TRAJECTORY_KEY, None) if expected_rollout_id is not None else None
         )

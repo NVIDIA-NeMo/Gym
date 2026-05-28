@@ -27,7 +27,7 @@ The agent controls the retry loop and turn counting.
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from fastapi import Request, Response
 from pydantic import ConfigDict
@@ -105,11 +105,23 @@ class ProofRefinementAgent(SimpleResponsesAPIAgent):
         response: Response,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
-        """Generate a model response (single turn, no tool calls).
+        result, set_cookies = await self._responses(
+            body,
+            model_url_path=self.url_path_for_request("/v1/responses", request),
+            cookies=request.cookies,
+        )
+        for k, v in set_cookies.items():
+            response.set_cookie(k, v)
+        return result
 
-        This is called for each generation turn. The verify-correction loop
-        is handled in run().
-        """
+    async def _responses(
+        self,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        *,
+        model_url_path: str,
+        cookies: Optional[Mapping[str, str]] = None,
+    ) -> Tuple[NeMoGymResponse, dict]:
+        """Implementation of `/v1/responses`; `run` invokes this in-process per correction turn."""
         body = body.model_copy(deep=True)
 
         if isinstance(body.input, str):
@@ -117,18 +129,18 @@ class ProofRefinementAgent(SimpleResponsesAPIAgent):
 
         model_response = await self.server_client.post(
             server_name=self.config.model_server.name,
-            url_path=self.url_path_for_request("/v1/responses", request),
+            url_path=model_url_path,
             json=body,
-            cookies=request.cookies,
+            cookies=dict(cookies) if cookies else None,
         )
         await raise_for_status(model_response)
         model_response_json = await model_response.json()
 
-        # Propagate cookies
+        set_cookies: dict[str, str] = {}
         for k, v in model_response.cookies.items():
-            response.set_cookie(k, v)
+            set_cookies[k] = v
 
-        return NeMoGymResponse.model_validate(model_response_json)
+        return NeMoGymResponse.model_validate(model_response_json), set_cookies
 
     async def run(self, request: Request, body: ProofRefinementRunRequest) -> ProofRefinementVerifyResponse:
         """Execute the proof refinement loop.
@@ -165,15 +177,17 @@ class ProofRefinementAgent(SimpleResponsesAPIAgent):
             LOG.info("Turn %d: Generating proof attempt", turn_index)
 
             # 2. Generate proof attempt
-            gen_response = await self.server_client.post(
-                server_name=self.config.name,
-                url_path=self.url_path_for_run("/v1/responses", body),
-                json=current_input,
+            if isinstance(current_input, NeMoGymResponseCreateParamsNonStreaming):
+                gen_input = current_input
+            else:
+                gen_input = NeMoGymResponseCreateParamsNonStreaming.model_validate(current_input)
+            gen_model_response, set_cookies = await self._responses(
+                gen_input,
+                model_url_path=self.url_path_for_run("/v1/responses", body),
                 cookies=cookies,
             )
-            await raise_for_status(gen_response)
-            cookies = gen_response.cookies
-            model_response_json = await gen_response.json()
+            cookies = set_cookies
+            model_response_json = gen_model_response.model_dump()
 
             # 3. Verify the proof
             verify_request_data = body.model_dump()

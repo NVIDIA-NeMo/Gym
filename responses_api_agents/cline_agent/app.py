@@ -647,6 +647,14 @@ class ClineAgent(SimpleResponsesAPIAgent):
         request: Request,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
+        return await self._responses(body, rollout_id=request.path_params.get("rollout_id"))
+
+    async def _responses(
+        self,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        *,
+        rollout_id: Optional[str] = None,
+    ) -> NeMoGymResponse:
         body = body.model_copy(deep=True)
         if isinstance(body.input, str):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
@@ -655,10 +663,6 @@ class ClineAgent(SimpleResponsesAPIAgent):
         system_parts = [p for p in [self.config.system_prompt, input_system] if p]
         system_prompt = "\n\n".join(system_parts) if system_parts else None
 
-        # run() reaches this handler through the /ng-rollout/<id> self-call route, which carries
-        # the correlation id Cline's model calls are tagged with. Absent on a direct
-        # /v1/responses call.
-        rollout_id = request.path_params.get("rollout_id")
         output_items, metadata, model_name = await self._run_cline(user_message, system_prompt, rollout_id)
 
         if not any(
@@ -711,15 +715,11 @@ class ClineAgent(SimpleResponsesAPIAgent):
             await raise_for_status(seed_resp)
             cookies = seed_resp.cookies
 
-            agent_resp = await self.server_client.post(
-                server_name=self.config.name,
-                url_path=self.url_path_for_run("/v1/responses", body),
-                json=body.responses_create_params,
-                cookies=cookies,
+            agent_response = await self._responses(
+                body.responses_create_params,
+                rollout_id=self.rollout_id_from_run(body),
             )
-            await raise_for_status(agent_resp)
-            cookies = agent_resp.cookies
-            agent_resp_json = await get_response_json(agent_resp)
+            agent_resp_json = agent_response.model_dump(mode="json")
 
             verify_resp = await self.server_client.post(
                 server_name=self.config.resources_server.name,

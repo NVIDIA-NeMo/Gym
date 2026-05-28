@@ -660,6 +660,14 @@ class PiAgent(SimpleResponsesAPIAgent):
     ) -> NeMoGymResponse:
         path_params = getattr(request, "path_params", None)
         rollout_id = path_params.get("rollout_id") if isinstance(path_params, Mapping) else None
+        return await self._responses(body, rollout_id=rollout_id)
+
+    async def _responses(
+        self,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        *,
+        rollout_id: Optional[str] = None,
+    ) -> NeMoGymResponse:
         episode = await self._create_episode(
             body,
             rollout_id=rollout_id,
@@ -685,15 +693,8 @@ class PiAgent(SimpleResponsesAPIAgent):
             cookies = seed_resp.cookies
 
             rollout_id = self.rollout_id_from_run(body)
-            agent_resp = await self.server_client.post(
-                server_name=self.config.name,
-                url_path=self.url_path_for_run("/v1/responses", body),
-                json=body.responses_create_params,
-                cookies=cookies,
-            )
-            await raise_for_status(agent_resp)
-            cookies = agent_resp.cookies
-            agent_resp_json = await get_response_json(agent_resp)
+            agent_response = await self._responses(body.responses_create_params, rollout_id=rollout_id)
+            agent_resp_json = agent_response.model_dump(mode="json")
             raw_observations = (
                 agent_resp_json.pop(_INTERNAL_OBSERVATIONS_KEY, None) if rollout_id is not None else None
             )

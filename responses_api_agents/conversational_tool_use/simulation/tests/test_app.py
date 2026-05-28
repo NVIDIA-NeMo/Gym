@@ -26,6 +26,7 @@ from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
+    NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
 )
@@ -990,12 +991,11 @@ async def test_final_agent_tool_calls_terminate_without_tool_simulation_or_dummy
 
 async def test_run_routes_rollout_5xx_to_transient_failure_sidecar_contract() -> None:
     agent = make_agent()
+    agent._responses = AsyncMock(side_effect=http_error(503))
 
     async def route_post(**kwargs):
         if kwargs["url_path"] == "/seed_session":
             return JsonResponseStub({}, cookies={"session_id": "session-1"})
-        if kwargs["url_path"] == "/v1/responses":
-            raise http_error(503)
         if kwargs["url_path"] == "/discard_session":
             assert kwargs["cookies"] == {"session_id": "session-1"}
             return JsonResponseStub({"discarded": True})
@@ -1016,11 +1016,18 @@ async def test_run_routes_rollout_5xx_to_transient_failure_sidecar_contract() ->
     assert "503" in result_payload["error_message"]
     assert result.instance_config == {"mask_sample": True}
     assert result.response.id == "conversational_tool_use_rollout_failed"
-    assert agent.server_client.post.await_count == 3
+    assert agent.server_client.post.await_count == 2
 
 
 async def test_run_correlates_self_and_resource_model_calls_with_rollout_identity() -> None:
     agent = make_agent(observability=True)
+    agent._responses = AsyncMock(
+        return_value=(
+            NeMoGymResponse.model_validate(response_payload([assistant_message("msg_1", "Done.")])),
+            {"session_id": "session-1"},
+            None,
+        )
+    )
     requests = []
 
     async def route_post(**kwargs):
@@ -1028,8 +1035,6 @@ async def test_run_correlates_self_and_resource_model_calls_with_rollout_identit
         if kwargs["url_path"] == "/seed_session":
             assert kwargs["json"]["rollout_id"] == "7-2"
             return JsonResponseStub({}, cookies={"session_id": "session-1"})
-        if kwargs["url_path"] == "/ng-rollout/7-2/v1/responses":
-            return JsonResponseStub(response_payload([assistant_message("msg_1", "Done.")]))
         if kwargs["url_path"] == "/verify":
             return JsonResponseStub(
                 kwargs["json"]
@@ -1053,9 +1058,9 @@ async def test_run_correlates_self_and_resource_model_calls_with_rollout_identit
     assert result.reward == 1.0
     assert [request["url_path"] for request in requests] == [
         "/seed_session",
-        "/ng-rollout/7-2/v1/responses",
         "/verify",
     ]
+    assert agent._responses.await_args.kwargs["model_url_path"] == "/ng-rollout/7-2/v1/responses"
 
 
 async def test_run_routes_seed_rate_limit_to_transient_failure_sidecar_contract() -> None:
@@ -1077,12 +1082,17 @@ async def test_run_routes_seed_rate_limit_to_transient_failure_sidecar_contract(
 
 async def test_run_routes_verify_5xx_to_transient_failure_sidecar_contract() -> None:
     agent = make_agent()
+    agent._responses = AsyncMock(
+        return_value=(
+            NeMoGymResponse.model_validate(response_payload([assistant_message("msg_1", "Done.")])),
+            {"session_id": "session-1"},
+            None,
+        )
+    )
 
     async def route_post(**kwargs):
         if kwargs["url_path"] == "/seed_session":
             return JsonResponseStub({}, cookies={"session_id": "session-1"})
-        if kwargs["url_path"] == "/v1/responses":
-            return JsonResponseStub(response_payload([assistant_message("msg_1", "Done.")]))
         if kwargs["url_path"] == "/verify":
             raise http_error(502)
         if kwargs["url_path"] == "/discard_session":
@@ -1102,17 +1112,22 @@ async def test_run_routes_verify_5xx_to_transient_failure_sidecar_contract() -> 
     assert result_payload["error_stage"] == "verify"
     assert "502" in result_payload["error_message"]
     assert result.instance_config == {"mask_sample": True}
-    assert agent.server_client.post.await_count == 4
+    assert agent.server_client.post.await_count == 3
 
 
 async def test_run_preserves_verified_semantic_zero_as_scored_result() -> None:
     agent = make_agent()
+    agent._responses = AsyncMock(
+        return_value=(
+            NeMoGymResponse.model_validate(response_payload([assistant_message("msg_1", "Incorrect answer.")])),
+            {"session_id": "session-1"},
+            None,
+        )
+    )
 
     async def route_post(**kwargs):
         if kwargs["url_path"] == "/seed_session":
             return JsonResponseStub({}, cookies={"session_id": "session-1"})
-        if kwargs["url_path"] == "/v1/responses":
-            return JsonResponseStub(response_payload([assistant_message("msg_1", "Incorrect answer.")]))
         if kwargs["url_path"] == "/verify":
             return JsonResponseStub(
                 kwargs["json"]
@@ -1140,12 +1155,11 @@ async def test_run_preserves_verified_semantic_zero_as_scored_result() -> None:
 
 async def test_run_does_not_convert_non_retryable_4xx_to_transient_failure() -> None:
     agent = make_agent()
+    agent._responses = AsyncMock(side_effect=http_error(400))
 
     async def route_post(**kwargs):
         if kwargs["url_path"] == "/seed_session":
             return JsonResponseStub({}, cookies={"session_id": "session-1"})
-        if kwargs["url_path"] == "/v1/responses":
-            raise http_error(400)
         if kwargs["url_path"] == "/discard_session":
             return JsonResponseStub({"discarded": True})
         raise AssertionError(f"Unexpected request: {kwargs}")

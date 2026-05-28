@@ -145,6 +145,17 @@ class ScicodeAgent(SimpleResponsesAPIAgent):
         response: Response,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
+        result, cookies = await self._responses(body, cookies=request.cookies)
+        for key, value in cookies.items():
+            response.set_cookie(key, value)
+        return result
+
+    async def _responses(
+        self,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        *,
+        cookies: Any = None,
+    ) -> tuple[NeMoGymResponse, Any]:
         body = body.model_copy(deep=True)
 
         if isinstance(body.input, str):
@@ -154,15 +165,11 @@ class ScicodeAgent(SimpleResponsesAPIAgent):
             server_name=self.config.model_server.name,
             url_path="/v1/responses",
             json=body,
-            cookies=request.cookies,
+            cookies=cookies,
         )
         await raise_for_status(model_response)
         model_response_json = await model_response.json()
-
-        for k, v in model_response.cookies.items():
-            response.set_cookie(k, v)
-
-        return NeMoGymResponse.model_validate(model_response_json)
+        return NeMoGymResponse.model_validate(model_response_json), model_response.cookies
 
     async def run(self, request: Request, body: ScicodeAgentRunRequest):
         """Generate code for each sub-step (accumulating prior code as context), then verify."""
@@ -193,13 +200,12 @@ class ScicodeAgent(SimpleResponsesAPIAgent):
             )
 
             try:
-                gen_response = await self.server_client.post(
-                    server_name=self.config.name,
-                    url_path="/v1/responses",
-                    json={"input": [{"role": "user", "content": user_content}]},
+                agent_response, cookies = await self._responses(
+                    NeMoGymResponseCreateParamsNonStreaming(
+                        input=[NeMoGymEasyInputMessage(role="user", content=user_content)]
+                    ),
                     cookies=cookies,
                 )
-                await raise_for_status(gen_response)
             except Exception as error:
                 if is_context_window_error(error):
                     LOG.warning("SciCode step %s: context window exceeded; failing remaining steps.", cur_step)
@@ -208,9 +214,8 @@ class ScicodeAgent(SimpleResponsesAPIAgent):
                     continue
                 raise
 
-            cookies = gen_response.cookies
-            last_response_json = await gen_response.json()
-            generation = NeMoGymResponse.model_validate(last_response_json).output_text
+            last_response_json = agent_response.model_dump(mode="json")
+            generation = agent_response.output_text
             extracted = extract_python_script(generation)
             previous_llm_code[cur_step] = extracted
             solutions[f"{body.problem_id}.{cur_step + 1}"] = f"{previous_code}\n{extracted}"

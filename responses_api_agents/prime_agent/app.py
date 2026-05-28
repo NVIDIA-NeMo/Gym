@@ -426,6 +426,14 @@ class PrimeAgent(SimpleResponsesAPIAgent):
         request: Request,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
+        return await self._responses(body, rollout_id=request.path_params.get("rollout_id"))
+
+    async def _responses(
+        self,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        *,
+        rollout_id: Optional[str] = None,
+    ) -> NeMoGymResponse:
         body = body.model_copy(deep=True)
         if isinstance(body.input, str):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
@@ -433,8 +441,6 @@ class PrimeAgent(SimpleResponsesAPIAgent):
         user_message, input_system = _extract_instruction(body.input)
         system_parts = [part for part in [self.config.system_prompt, body.instructions, input_system] if part]
         system_prompt = "\n\n".join(system_parts) if system_parts else None
-        rollout_id = request.path_params.get("rollout_id") if request is not None else None
-
         output_items, usage, model_name, timed_out = await self._run_prime_agent(
             user_message,
             system_prompt,
@@ -492,15 +498,11 @@ class PrimeAgent(SimpleResponsesAPIAgent):
             await raise_for_status(seed_resp)
             cookies = seed_resp.cookies
 
-            agent_resp = await self.server_client.post(
-                server_name=self.config.name,
-                url_path=self.url_path_for_run("/v1/responses", body),
-                json=body.responses_create_params,
-                cookies=cookies,
+            agent_response = await self._responses(
+                body.responses_create_params,
+                rollout_id=self.rollout_id_from_run(body),
             )
-            await raise_for_status(agent_resp)
-            cookies = agent_resp.cookies
-            agent_resp_json = await get_response_json(agent_resp)
+            agent_resp_json = agent_response.model_dump(mode="json")
 
             verify_resp = await self.server_client.post(
                 server_name=self.config.resources_server.name,
