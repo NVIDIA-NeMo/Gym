@@ -1,5 +1,6 @@
 ---
 name: nemo-gym-reward-profiling
+license: Apache-2.0
 description: >-
   Use to help users get started with Nemo Gym reward profiling. Covers the basic
   ng_run, ng_collect_rollouts, and ng_reward_profile workflow, repeated rollouts,
