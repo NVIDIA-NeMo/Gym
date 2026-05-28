@@ -113,6 +113,15 @@ Scale to multi-node GRPO training for production.
 {bdg-primary}`training`
 :::
 
+:::{grid-item-card} RLHF with GenRM + HelpSteer3
+:link: training-nemo-rl-grpo-rlhf-genrm-helpsteer3
+:link-type: ref
+
+Prepare HelpSteer3 as Gym JSONL, wire `genrm_compare`, and evaluate on Arena-Hard v2.
++++
+{bdg-secondary}`rlhf` {bdg-secondary}`genrm`
+:::
+
 ::::
 
 ---
@@ -154,4 +163,5 @@ nemo-rl-configuration.md
 setup.md
 single-node-training.md
 multi-node-training.md
+rlhf-genrm-helpsteer3.md
 ```

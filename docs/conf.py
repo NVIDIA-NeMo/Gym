@@ -139,6 +139,7 @@ redirects = {
     "tutorials/nemo-rl-grpo/setup.html": "../../training-tutorials/nemo-rl-grpo/setup.html",
     "tutorials/nemo-rl-grpo/single-node-training.html": "../../training-tutorials/nemo-rl-grpo/single-node-training.html",
     "tutorials/nemo-rl-grpo/multi-node-training.html": "../../training-tutorials/nemo-rl-grpo/multi-node-training.html",
+    "tutorials/nemo-rl-grpo/rlhf-genrm-helpsteer3.html": "../../training-tutorials/nemo-rl-grpo/rlhf-genrm-helpsteer3.html",
     # Get Started section renames (same directory)
     "get-started/setup-installation.html": "detailed-setup.html",
     # RL Framework Integration moved from training/ to contribute/
