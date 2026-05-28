@@ -1,0 +1,213 @@
+---
+title: "Resources Server Interface"
+description: "The two APIs for building environment verification and state management."
+position: 1.5
+---
+<Info>
+
+**Goal**: Understand the two interfaces for building a Resources Server and how each divides responsibility between the agent harness and the resources server.
+
+**Read first**:
+- [Environments](/about/concepts/environments) — what an environment is and how it decomposes into dataset, agent harness, verifier, and state.
+- [Architecture](/about/architecture) — how NeMo Gym implements environments as composable servers.
+
+</Info>
+
+An [environment](/about/concepts/environments) decomposes into dataset, agent harness, verifier, and state. The Resources Server implements the verifier, state, and environment-specific tools. The Agent Server implements the agent harness. Both are part of the environment.
+
+NeMo Gym provides two interfaces for building a Resources Server. They differ in how orchestration is divided between the agent harness and the resources server:
+
+- With `SimpleResourcesServer`, the **agent harness** orchestrates — it loops model calls, calls tool endpoints on the resources server, and calls `verify()` at the end. The resources server is reactive.
+- With `GymnasiumServer`, the **resources server** takes more control via `step()` — it returns observations, controls episode boundaries (terminated/truncated), and scores each step. The agent harness becomes simpler, shuttling data between the model and `step()`.
+
+| | `SimpleResourcesServer` | `GymnasiumServer` |
+|---|---|---|
+| **Initialize** | `seed_session()` | `reset()` |
+| **During rollout** | Agent harness calls your tool endpoints | Agent harness calls `step()` |
+| **Score** | `verify()` at the end | Inside `step()` (via the reward return value) |
+
+Any agent can work with either interface by calling the correct HTTP endpoints.
+
+---
+
+## SimpleResourcesServer: `seed_session()` + `verify()`
+
+The native interface. The agent controls the interaction loop — calling your tool endpoints as needed — and calls `verify()` once at the end to get a reward.
+
+```python
+from nemo_gym.base_resources_server import SimpleResourcesServer, BaseVerifyRequest, BaseVerifyResponse
+
+class MyResourcesServer(SimpleResourcesServer):
+
+    async def seed_session(self, body):
+        # Initialize per-rollout state (optional)
+        session_id = self.get_session_id(body)
+        self.state[session_id] = setup_environment(body)
+        return BaseSeedSessionResponse()
+
+    async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
+        # Score the full trajectory
+        reward = 1.0 if is_correct(body.response, body.verifier_metadata) else 0.0
+        return BaseVerifyResponse(**body.model_dump(), reward=reward)
+```
+
+Tools are defined as additional HTTP endpoints on the server. The agent calls them during the rollout, and the results are returned as tool outputs to the model:
+
+```python
+class MyResourcesServer(SimpleResourcesServer):
+
+    def setup_webserver(self):
+        app = super().setup_webserver()
+        app.post("/my_tool")(self.my_tool)
+        return app
+
+    async def my_tool(self, request: Request, body: MyToolRequest):
+        session_id = request.session.get(SESSION_ID_KEY)
+        result = execute(self.state[session_id], body)
+        return {"output": result}
+```
+
+### Examples
+
+- [`workplace_assistant`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/workplace_assistant) — 26 tools across 5 databases, state-matching verification
+- [`math_with_code`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/math_with_code) — `execute_python()` tool with answer extraction at the end
+
+---
+
+## GymnasiumServer: `reset()` + `step()`
+
+Inspired by [Gymnasium](https://gymnasium.farama.org/). You implement `step()`, which is called after every model response. The agent handles the loop protocol — calling `reset()` at the start, `step()` after each model response, and stopping when the episode ends.
+
+```python
+from resources_servers.gymnasium import GymnasiumServer
+from resources_servers.gymnasium.base import extract_text
+
+class MyEnv(GymnasiumServer):
+
+    async def reset(self, metadata: dict, session_id=None) -> tuple[str | None, dict]:
+        # Optional: initialize state and return an initial observation
+        return None, {}
+
+    async def step(self, action, metadata, session_id=None) -> tuple[str | None, float, bool, bool, dict]:
+        # Required: evaluate the model's response
+        reward = 1.0 if metadata.get("answer") in extract_text(action) else 0.0
+        return None, reward, True, False, {}
+```
+
+`step()` returns a 5-tuple:
+
+| Field | Type | Description |
+|---|---|---|
+| `observation` | `str \| None` | Next message to the model, or `None` to end the episode |
+| `reward` | `float` | Score for this step |
+| `terminated` | `bool` | Episode ended naturally (task solved, game over) |
+| `truncated` | `bool` | Episode cut short (step limit, timeout) |
+| `info` | `dict` | Extra metadata; also how the env sends `tool_outputs` to the agent |
+
+Only `step()` is required. The default `reset()` returns `(None, {})`, meaning the prompt from the dataset is used as-is.
+
+### Arguments
+
+Both methods receive the same arguments:
+
+- **`metadata`** — extra fields from the JSONL row (e.g. `ground_truth`, `category`). Use for task config or scoring references.
+- **`session_id`** — unique string per rollout. Use as a key into `self.session_state` for per-episode state. Stateless environments can ignore it.
+- **`action`** (step only) — the model's response. Use `extract_text(action)` for text, or iterate `action.output` for structured items like tool calls.
+
+### Tool calling
+
+For tool-calling environments, `step()` inspects `action.output` for tool calls, executes them, and returns outputs via `info["tool_outputs"]`. The agent synthesizes proper `function_call_output` items tied to each `call_id`. Tool schemas go in `responses_create_params.tools` in your JSONL.
+
+```python
+import json
+
+class MyToolEnv(GymnasiumServer):
+
+    async def step(self, action, metadata, session_id=None):
+        tool_calls = [o for o in action.output if o.type == "function_call"]
+
+        if tool_calls:
+            fns = self.session_state[session_id]["functions"]
+            outputs = [self.tool_output(c, fns[c.name](**json.loads(c.arguments))) for c in tool_calls]
+            return None, 0.0, False, False, {"tool_outputs": outputs}
+
+        reward = self._grade(action, metadata)
+        return None, reward, True, False, {}
+```
+
+`self.tool_output(call, result)` is a helper that builds the `{"call_id", "output"}` dict the agent expects.
+
+### Examples
+
+- [`blackjack`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/blackjack) — multi-step game with action tags and per-session state
+
+---
+
+## State Management
+
+Both interfaces use `session_id` for per-rollout state isolation. Every concurrent rollout gets its own session, so attempts never interfere with each other.
+
+```python
+async def seed_session(self, body):
+    session_id = self.get_session_id(body)
+    self.state[session_id] = {"board": new_board(), "moves": []}
+
+async def my_tool(self, request, body):
+    session_id = request.session.get(SESSION_ID_KEY)
+    state = self.state[session_id]
+    # ... use and mutate state ...
+```
+
+For `GymnasiumServer`, use `self.session_state`:
+
+```python
+async def reset(self, metadata, session_id=None):
+    self.session_state[session_id] = {"board": new_board()}
+    return f"Game started: {self.session_state[session_id]['board']}", {}
+
+async def step(self, action, metadata, session_id=None):
+    state = self.session_state[session_id]
+    # ... use and mutate state ...
+```
+
+Sessions are cleaned up automatically when the episode ends (`GymnasiumServer` calls `close_session()` on termination or truncation).
+
+Environments range from stateless (verify a math answer — no state needed) to heavyweight (provision a Docker container with a specific repo checkout for each rollout).
+
+---
+
+## YAML Configuration
+
+Both interfaces use the same config structure. The resources server is a top-level key that maps to a server type and directory:
+
+```yaml
+my_env:
+  resources_servers:
+    my_server:
+      entrypoint: app.py
+      domain: coding
+```
+
+An agent references the resources server by name:
+
+```yaml
+my_agent:
+  responses_api_agents:
+    simple_agent:  # or gymnasium_agent
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: my_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/my_server/data/example.jsonl
+```
+
+<Note>
+See [Resources Server Fields](/reference/configuration#resources-server-fields) and [Agent Server Fields](/reference/configuration#agent-server-fields) for the full configuration reference.
+
+</Note>
