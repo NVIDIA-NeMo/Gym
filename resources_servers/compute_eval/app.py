@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import concurrent.futures
 from typing import Annotated, Any, Dict, List, Optional
 
 from compute_eval.data.data_model import (
@@ -78,6 +79,19 @@ class ComputeEvalResourcesServer(SimpleResourcesServer):
         nvcc_version = get_nvcc_version()
         if not nvcc_version:
             raise RuntimeError("NVCC not found after auto-install. Check setup_cuda_nvcc logs.")
+        # compute_eval's verify_source_references path uses a tree-sitter
+        # Parser from tree_sitter_language_pack, which is a pyo3-backed Rust
+        # type marked unsendable. asyncio.to_thread cycles through threads in
+        # the default executor — a Parser created on thread A panics when
+        # touched from thread B on a later call. Pin all evaluate_solutions
+        # invocations to a single dedicated worker thread so the parser is
+        # created and used exclusively on that one thread.
+        self._eval_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="compute-eval-parser"
+        )
+        # Bound concurrent evaluate_solutions calls — they're all serialized
+        # by the single-thread executor anyway, so the semaphore prevents
+        # unbounded queue growth.
         self._semaphore = asyncio.Semaphore(self.config.num_processes)
 
     @staticmethod
@@ -160,12 +174,15 @@ class ComputeEvalResourcesServer(SimpleResourcesServer):
 
         async with self._semaphore:
             try:
-                graded_list = await asyncio.to_thread(
-                    evaluate_solutions,
-                    problem=problem,
-                    solutions=[solution],
-                    eval_mode="local",
-                    profile_mode=None,
+                loop = asyncio.get_running_loop()
+                graded_list = await loop.run_in_executor(
+                    self._eval_executor,
+                    lambda: evaluate_solutions(
+                        problem=problem,
+                        solutions=[solution],
+                        eval_mode="local",
+                        profile_mode=None,
+                    ),
                 )
             except Exception as e:
                 return ComputeEvalVerifyResponse(
