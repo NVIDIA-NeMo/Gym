@@ -1,5 +1,6 @@
 ---
 name: nemo-gym-pivot-datasets
+license: Apache-2.0
 description: >-
   Use when creating, validating, or documenting Nemo Gym pivot datasets from rollout,
   trajectory, chat-completion, Responses API, or tool-call artifacts. Covers Gym
