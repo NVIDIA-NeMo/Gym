@@ -1,5 +1,6 @@
 ---
 name: nemo-gym-docs
+license: Apache-2.0
 description: >
   Maintain the NeMo Gym Fern docs site — add, update, move, or remove pages
   under fern/. Use for any documentation change. Triggered by: "edit docs",

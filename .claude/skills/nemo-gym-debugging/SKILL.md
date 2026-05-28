@@ -1,5 +1,6 @@
 ---
 name: nemo-gym-debugging
+license: Apache-2.0
 description: >-
   Use when debugging a Nemo Gym run or reward profiling job. Covers rollout collection failures,
   empty or partial JSONL outputs, stale materialized inputs, verifier/schema errors, Ray or Slurm

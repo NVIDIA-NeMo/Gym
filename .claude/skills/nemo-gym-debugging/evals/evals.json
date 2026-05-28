@@ -1,0 +1,73 @@
+[
+  {
+    "id": "nemo-gym-debugging-positive-001",
+    "question": "My ng_collect_rollouts job finished but rollouts.jsonl only has 2 rows even though my input has 100 tasks. The reward profile is empty. What's going on?",
+    "expected_skill": "nemo-gym-debugging",
+    "ground_truth": "The agent loads the nemo-gym-debugging skill, classifies the symptom as a partial-output + verifier issue, inspects the first real verifier exception (not shutdown noise), checks for stale materialized inputs if resume_from_cache was on, and compares the failing row schema against the resource-server request model.",
+    "expected_behavior": [
+      "The agent read nemo-gym-debugging/SKILL.md before acting",
+      "The agent classified the failing layer (data/schema, verifier, or cache) rather than guessing",
+      "The agent inspected the first real verifier exception rather than shutdown noise",
+      "The agent considered stale materialized inputs as a first-class suspect if resume_from_cache was enabled",
+      "The agent checked rollout output and profiling row counts"
+    ]
+  },
+  {
+    "id": "nemo-gym-debugging-positive-002",
+    "question": "All my Gym servers are up and vLLM is ready, but the resources server keeps returning 422 errors from the verifier endpoint. Help me figure out why.",
+    "expected_skill": "nemo-gym-debugging",
+    "ground_truth": "The agent loads the nemo-gym-debugging skill, recognizes that ready servers + 422 means a data/schema mismatch, compares the request body against the resources server's Pydantic request model, and inspects the first real verifier exception before touching infra or model settings.",
+    "expected_behavior": [
+      "The agent read nemo-gym-debugging/SKILL.md before acting",
+      "The agent classified the failure as data/schema rather than infra or model serving",
+      "The agent compared the failing row schema against the resources-server request model",
+      "The agent did not chase infra or vLLM tuning before checking the request body"
+    ]
+  },
+  {
+    "id": "nemo-gym-debugging-positive-003",
+    "question": "My tool-call rollouts hang almost immediately with vLLM grammar/schema errors before any generation happens. What should I check?",
+    "expected_skill": "nemo-gym-debugging",
+    "ground_truth": "The agent loads the nemo-gym-debugging skill, reads references/vllm-tool-call-schema-checks.md, and runs a static tool-schema check against the dataset before changing Gym wrappers or model settings.",
+    "expected_behavior": [
+      "The agent read nemo-gym-debugging/SKILL.md before acting",
+      "The agent loaded references/vllm-tool-call-schema-checks.md for the tool-call schema check",
+      "The agent ran a static tool-schema check before changing Gym wrappers",
+      "The agent did not change model settings as the first move"
+    ]
+  },
+  {
+    "id": "nemo-gym-debugging-positive-004",
+    "question": "I'm only seeing nested 'inner server' 500s in my logs and I can't tell which row or provider call actually failed. How do I get the real error?",
+    "expected_skill": "nemo-gym-debugging",
+    "ground_truth": "The agent loads the nemo-gym-debugging skill, enables ++global_aiohttp_client_request_debug=True to surface request-boundary visibility, and reads references/request-boundary-visibility.md before changing code.",
+    "expected_behavior": [
+      "The agent read nemo-gym-debugging/SKILL.md before acting",
+      "The agent enabled ++global_aiohttp_client_request_debug=True instead of editing code first",
+      "The agent loaded references/request-boundary-visibility.md",
+      "The agent did not start changing wrappers or provider code as a first move"
+    ]
+  },
+  {
+    "id": "nemo-gym-debugging-negative-001",
+    "question": "Add a new benchmark called wmt-comet to NeMo-Gym, including data prep and the resources server.",
+    "expected_skill": null,
+    "should_trigger": false,
+    "ground_truth": "The agent should not activate the nemo-gym-debugging skill for a benchmark integration task. It should use the add-benchmark skill instead.",
+    "expected_behavior": [
+      "The agent did not read or activate nemo-gym-debugging/SKILL.md",
+      "The agent recognized this as a benchmark integration task"
+    ]
+  },
+  {
+    "id": "nemo-gym-debugging-negative-002",
+    "question": "Document the new ng_reward_profile --pass_threshold flag in the Fern docs under the reward profiling section.",
+    "expected_skill": null,
+    "should_trigger": false,
+    "ground_truth": "The agent should not activate the nemo-gym-debugging skill for a documentation task. It should use the nemo-gym-docs skill instead.",
+    "expected_behavior": [
+      "The agent did not read or activate nemo-gym-debugging/SKILL.md",
+      "The agent recognized this as a docs edit"
+    ]
+  }
+]

@@ -1,0 +1,63 @@
+[
+  {
+    "id": "add-benchmark-positive-001",
+    "question": "I want to add the HumanEval+ benchmark to NeMo-Gym. How do I scaffold the resources server and wire it up?",
+    "expected_skill": "add-benchmark",
+    "ground_truth": "The agent loads the add-benchmark skill, classifies HumanEval+ as a native code-gen benchmark, runs ng_init_resources_server to scaffold the directory, converts the source data to Gym JSONL with verifier_metadata, implements verify() with subprocess execution, wires the YAML config, and runs ng_test plus ng_collect_rollouts for smoke testing before baselining.",
+    "expected_behavior": [
+      "The agent read add-benchmark/SKILL.md before acting",
+      "The agent classified the benchmark as native vs external",
+      "The agent ran ng_init_resources_server to scaffold the server directory",
+      "The agent described converting the source dataset to Gym JSONL with responses_create_params.input and verifier_metadata",
+      "The agent mentioned reward as binary 0.0 or 1.0 and graceful handling of empty model output"
+    ]
+  },
+  {
+    "id": "add-benchmark-positive-002",
+    "question": "Wrap the SWE-bench library as a NeMo-Gym agent server so we can run it against our policy model.",
+    "expected_skill": "add-benchmark",
+    "ground_truth": "The agent loads the add-benchmark skill, classifies SWE-bench as an external benchmark wrapped at the agent-server level, creates the agent under responses_api_agents/, pre-processes from Gym schema to the SWE-bench input and post-processes back to BaseVerifyResponse, adds the dependency, and reproduces the published numbers with the original repo first before reproducing post-integration.",
+    "expected_behavior": [
+      "The agent read add-benchmark/SKILL.md before acting",
+      "The agent classified SWE-bench as an external benchmark (not a native resources server)",
+      "The agent placed the wrapper under responses_api_agents/ rather than resources_servers/",
+      "The agent mentioned reproducing the original repo's numbers first, then reproducing after integration",
+      "The agent added the dependency to requirements.txt"
+    ]
+  },
+  {
+    "id": "add-benchmark-positive-003",
+    "question": "Add a new training environment for grade-school math word problems with binary reward, ready for reward profiling.",
+    "expected_skill": "add-benchmark",
+    "ground_truth": "The agent loads the add-benchmark skill, scaffolds a native resources server, prepares example.jsonl plus train/validation datasets uploaded to the GitLab dataset registry, implements verify() returning 0.0 or 1.0, wires the YAML config with the train dataset entry and gitlab_identifier, runs ng_test, smoke tests with ng_collect_rollouts, and baselines against multiple models including at least one closed-source model.",
+    "expected_behavior": [
+      "The agent read add-benchmark/SKILL.md before acting",
+      "The agent ran ng_init_resources_server to scaffold the server",
+      "The agent uploaded train/validation datasets to GitLab via ng_upload_dataset_to_gitlab rather than committing them to git",
+      "The agent added gitlab_identifier alongside jsonl_fpath in the YAML for train datasets",
+      "The agent ran the baselining suite across an open-source instruct, open-source thinking, and closed-source model"
+    ]
+  },
+  {
+    "id": "add-benchmark-negative-001",
+    "question": "Debug why my existing ng_reward_profile job is producing empty profile rows even though rollouts.jsonl has 100 lines.",
+    "expected_skill": null,
+    "should_trigger": false,
+    "ground_truth": "The agent should not activate the add-benchmark skill for a debugging task on an existing benchmark. It should use the nemo-gym-debugging skill instead.",
+    "expected_behavior": [
+      "The agent did not read or activate add-benchmark/SKILL.md",
+      "The agent recognized this as a debugging task for an existing benchmark"
+    ]
+  },
+  {
+    "id": "add-benchmark-negative-002",
+    "question": "Update the quickstart page in the Gym Fern docs to mention the new ng_run --port flag.",
+    "expected_skill": null,
+    "should_trigger": false,
+    "ground_truth": "The agent should not activate the add-benchmark skill for a documentation update. It should use the nemo-gym-docs skill instead.",
+    "expected_behavior": [
+      "The agent did not read or activate add-benchmark/SKILL.md",
+      "The agent recognized this as a docs edit, not a benchmark integration"
+    ]
+  }
+]
