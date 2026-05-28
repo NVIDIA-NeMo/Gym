@@ -347,6 +347,43 @@ ng_prepare_data "+config_paths=[${config_paths}]" \
 
 ---
 
+### `ng_materialize_prompts` / `nemo_gym_materialize_prompts`
+
+Apply a prompt template to raw JSONL data, producing materialized JSONL with populated `responses_create_params.input` for RL training.
+
+Use this command when your dataset does not have `responses_create_params.input` pre-populated and you want to apply a YAML prompt template before data preparation. Run `ng_prepare_data` on the output afterwards to validate and generate metrics.
+
+**Parameters**
+
+```{list-table}
+:header-rows: 1
+:widths: 20 10 70
+
+* - Parameter
+  - Type
+  - Description
+* - `input_jsonl_fpath`
+  - str
+  - Path to raw JSONL file. Rows must not have `responses_create_params.input` pre-populated.
+* - `prompt_config`
+  - str
+  - Path to prompt YAML file to apply.
+* - `output_jsonl_fpath`
+  - str
+  - Output path for materialized JSONL with populated prompts.
+```
+
+**Example**
+
+```bash
+ng_materialize_prompts \
+    +input_jsonl_fpath=data/my_dataset.jsonl \
+    +prompt_config=resources_servers/my_server/configs/my_prompt.yaml \
+    +output_jsonl_fpath=data/my_dataset_materialized.jsonl
+```
+
+---
+
 ## Dataset Registry - GitLab
 
 Commands for uploading, downloading, and managing datasets in GitLab Model Registry.
