@@ -1,0 +1,67 @@
+{
+  "expected_response": {
+    "body": {
+      "choices": [
+        {
+          "finish_reason": "stop",
+          "index": 0,
+          "message": {
+            "content": "fixture-canned",
+            "role": "assistant"
+          }
+        }
+      ],
+      "id": "chatcmpl-fixture",
+      "object": "chat.completion"
+    },
+    "headers": {
+      "content-type": "application/json"
+    },
+    "status_code": 200
+  },
+  "interceptor_specs": [
+    {
+      "config": {
+        "params_to_add": {
+          "temperature": 0.0
+        },
+        "params_to_remove": [
+          "stream"
+        ]
+      },
+      "name": "payload_modifier"
+    }
+  ],
+  "request": {
+    "body": {
+      "messages": [],
+      "model": "m",
+      "stream": true
+    },
+    "headers": {
+      "content-type": "application/json"
+    },
+    "path": "/v1/chat/completions"
+  },
+  "scenario": "payload_modifier removes one param and adds another",
+  "upstream_response": {
+    "body": {
+      "choices": [
+        {
+          "finish_reason": "stop",
+          "index": 0,
+          "message": {
+            "content": "fixture-canned",
+            "role": "assistant"
+          }
+        }
+      ],
+      "id": "chatcmpl-fixture",
+      "object": "chat.completion"
+    },
+    "headers": {
+      "content-type": "application/json"
+    },
+    "status_code": 200
+  }
+}
