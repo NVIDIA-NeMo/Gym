@@ -33,3 +33,10 @@ Self-hosted inference with vLLM for maximum control.
 :::{seealso}
 [Model Server Fields](../reference/configuration.md#model-server-fields) for server configuration syntax and fields.
 :::
+
+```{toctree}
+:hidden:
+:maxdepth: 1
+
+vLLM <vllm>
+```
