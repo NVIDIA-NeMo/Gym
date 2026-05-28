@@ -1,0 +1,109 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gym-agent
+  namespace: gym
+  labels:
+    app.kubernetes.io/name: gym-agent
+    app.kubernetes.io/component: agent-server
+    app.kubernetes.io/part-of: nemo-gym
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  replicas: 1
+  minReadySeconds: 10
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gym-agent
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: gym-agent
+        app.kubernetes.io/component: agent-server
+        app.kubernetes.io/part-of: nemo-gym
+    spec:
+      serviceAccountName: gym-sa
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: agent
+          image: ghcr.io/nvidia-nemo/gym/nemo-gym-agent:latest
+          imagePullPolicy: IfNotPresent
+          workingDir: /opt/app-root/src
+          env:
+            - name: NEMO_GYM_CONFIG_DICT
+              valueFrom:
+                configMapKeyRef:
+                  name: gym-config
+                  key: config.yaml
+            - name: NEMO_GYM_CONFIG_PATH
+              value: simple_agent_instance
+            - name: RAY_TMPDIR
+              value: /tmp
+            - name: NEMO_GYM_SKIP_RAY_INIT
+              value: "1"
+            - name: RESOURCES_HOST
+              value: "gym-resources-svc"
+            - name: AGENT_HOST
+              value: "0.0.0.0"
+            - name: MODEL_HOST
+              value: "gym-model-svc"
+            - name: PYTHONPATH
+              value: /opt/app-root/src
+          envFrom:
+            - secretRef:
+                name: gym-secrets
+          ports:
+            - containerPort: 8080
+              name: http
+              protocol: TCP
+          resources:
+            requests:
+              cpu: "250m"
+              memory: 512Mi
+            limits:
+              memory: 1Gi
+          startupProbe:
+            httpGet:
+              path: /docs
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            httpGet:
+              path: /docs
+              port: 8080
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /docs
+              port: 8080
+            periodSeconds: 30
+            failureThreshold: 5
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sleep", "5"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 1Gi

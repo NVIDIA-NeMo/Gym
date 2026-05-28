@@ -237,3 +237,6 @@ env.yaml
 
 # Backup files
 *.backup
+
+# Kubernetes secrets (use secret.yaml.example as template)
+k8s/overlays/*/secret.yaml

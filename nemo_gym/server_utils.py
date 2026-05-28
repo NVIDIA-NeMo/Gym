@@ -403,6 +403,10 @@ def initialize_ray() -> None:
     Note: This function will modify the global config dict - update `ray_head_node_address`
     """
 
+    if getenv("NEMO_GYM_SKIP_RAY_INIT") == "1":
+        print("Skipping Ray initialization (NEMO_GYM_SKIP_RAY_INIT=1)")
+        return
+
     if ray.is_initialized():
         print("Ray already initialized")
         return
