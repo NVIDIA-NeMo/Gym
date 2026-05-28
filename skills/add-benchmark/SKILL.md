@@ -1,5 +1,6 @@
 ---
 name: add-benchmark
+license: Apache-2.0
 description: >
   Guide for adding a new benchmark or training environment to NeMo-Gym.
   Use when the user asks to add, create, or integrate a benchmark, evaluation,
