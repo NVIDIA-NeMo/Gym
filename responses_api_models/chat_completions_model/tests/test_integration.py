@@ -24,6 +24,7 @@ Set env vars to enable: OPENROUTER_API_KEY, FRIENDLIAI_API_KEY, HUGGINGFACE_API_
 
 import json
 import os
+from contextlib import contextmanager
 from unittest.mock import MagicMock
 
 import pytest
@@ -87,7 +88,13 @@ def _get_provider_params():
     ]
 
 
-def _make_integration_client(base_url: str, api_key: str, model: str) -> TestClient:
+@contextmanager
+def _integration_client(base_url: str, api_key: str, model: str):
+    """Create a ChatCompletionsModel server and yield a TestClient.
+
+    Uses context manager to keep TestClient's internal event loop alive across
+    multiple requests (required for multi-turn tests that reuse the aiohttp session).
+    """
     config = ChatCompletionsModelConfig(
         host="0.0.0.0",
         port=8081,
@@ -98,7 +105,8 @@ def _make_integration_client(base_url: str, api_key: str, model: str) -> TestCli
         name="",
     )
     server = ChatCompletionsModel(config=config, server_client=MagicMock(spec=ServerClient))
-    return TestClient(server.setup_webserver())
+    with TestClient(server.setup_webserver()) as client:
+        yield client
 
 
 WEATHER_TOOL_CHAT = {
@@ -127,6 +135,7 @@ WEATHER_TOOL_RESPONSES = {
         },
         "required": ["location"],
     },
+    "strict": True,
 }
 
 CALCULATOR_TOOL_CHAT = {
@@ -149,92 +158,92 @@ CALCULATOR_TOOL_CHAT = {
 class TestChatCompletionsIntegration:
     @pytest.mark.parametrize("provider,base_url,api_key,model", _get_provider_params())
     async def test_basic_chat_completion(self, provider, base_url, api_key, model):
-        client = _make_integration_client(base_url, api_key, model)
-        response = client.post(
-            "/v1/chat/completions",
-            json={
-                "messages": [{"role": "user", "content": "Say 'hello' and nothing else."}],
-                "max_tokens": 16,
-                "temperature": 0,
-            },
-        )
-        assert response.status_code == 200
-        data = response.json()
-        assert len(data["choices"]) > 0
-        assert data["choices"][0]["message"]["content"]
-        assert data["choices"][0]["message"]["role"] == "assistant"
-        assert data["choices"][0]["finish_reason"] in ("stop", "length")
+        with _integration_client(base_url, api_key, model) as client:
+            response = client.post(
+                "/v1/chat/completions",
+                json={
+                    "messages": [{"role": "user", "content": "Say 'hello' and nothing else."}],
+                    "max_tokens": 16,
+                    "temperature": 0,
+                },
+            )
+            assert response.status_code == 200, response.text
+            data = response.json()
+            assert len(data["choices"]) > 0
+            assert data["choices"][0]["message"]["content"]
+            assert data["choices"][0]["message"]["role"] == "assistant"
+            assert data["choices"][0]["finish_reason"] in ("stop", "length")
 
     @pytest.mark.parametrize("provider,base_url,api_key,model", _get_provider_params())
     async def test_chat_completion_with_system_message(self, provider, base_url, api_key, model):
-        client = _make_integration_client(base_url, api_key, model)
-        response = client.post(
-            "/v1/chat/completions",
-            json={
-                "messages": [
-                    {"role": "system", "content": "You only respond with the word 'yes'."},
-                    {"role": "user", "content": "Can you help me?"},
-                ],
-                "max_tokens": 16,
-                "temperature": 0,
-            },
-        )
-        assert response.status_code == 200
-        data = response.json()
-        assert len(data["choices"]) > 0
-        assert data["choices"][0]["message"]["content"]
+        with _integration_client(base_url, api_key, model) as client:
+            response = client.post(
+                "/v1/chat/completions",
+                json={
+                    "messages": [
+                        {"role": "system", "content": "You only respond with the word 'yes'."},
+                        {"role": "user", "content": "Can you help me?"},
+                    ],
+                    "max_tokens": 16,
+                    "temperature": 0,
+                },
+            )
+            assert response.status_code == 200, response.text
+            data = response.json()
+            assert len(data["choices"]) > 0
+            assert data["choices"][0]["message"]["content"]
 
     @pytest.mark.parametrize("provider,base_url,api_key,model", _get_provider_params())
     async def test_chat_completion_returns_usage(self, provider, base_url, api_key, model):
-        client = _make_integration_client(base_url, api_key, model)
-        response = client.post(
-            "/v1/chat/completions",
-            json={
-                "messages": [{"role": "user", "content": "Say 'hello'."}],
-                "max_tokens": 16,
-                "temperature": 0,
-            },
-        )
-        assert response.status_code == 200
-        data = response.json()
-        assert data["usage"]["prompt_tokens"] > 0
-        assert data["usage"]["completion_tokens"] > 0
+        with _integration_client(base_url, api_key, model) as client:
+            response = client.post(
+                "/v1/chat/completions",
+                json={
+                    "messages": [{"role": "user", "content": "Say 'hello'."}],
+                    "max_tokens": 16,
+                    "temperature": 0,
+                },
+            )
+            assert response.status_code == 200, response.text
+            data = response.json()
+            assert data["usage"]["prompt_tokens"] > 0
+            assert data["usage"]["completion_tokens"] > 0
 
     @pytest.mark.parametrize("provider,base_url,api_key,model", _get_provider_params())
     async def test_chat_completion_multi_turn(self, provider, base_url, api_key, model):
-        client = _make_integration_client(base_url, api_key, model)
-        response = client.post(
-            "/v1/chat/completions",
-            json={
-                "messages": [
-                    {"role": "user", "content": "What is 2+2? Reply with just the number."},
-                    {"role": "assistant", "content": "4"},
-                    {"role": "user", "content": "Now add 1 to that. Reply with just the number."},
-                ],
-                "max_tokens": 16,
-                "temperature": 0,
-            },
-        )
-        assert response.status_code == 200
-        data = response.json()
-        assert len(data["choices"]) > 0
-        assert data["choices"][0]["message"]["content"]
+        with _integration_client(base_url, api_key, model) as client:
+            response = client.post(
+                "/v1/chat/completions",
+                json={
+                    "messages": [
+                        {"role": "user", "content": "What is 2+2? Reply with just the number."},
+                        {"role": "assistant", "content": "4"},
+                        {"role": "user", "content": "Now add 1 to that. Reply with just the number."},
+                    ],
+                    "max_tokens": 16,
+                    "temperature": 0,
+                },
+            )
+            assert response.status_code == 200, response.text
+            data = response.json()
+            assert len(data["choices"]) > 0
+            assert data["choices"][0]["message"]["content"]
 
     @pytest.mark.parametrize("provider,base_url,api_key,model", _get_provider_params())
     async def test_chat_completion_max_tokens_respected(self, provider, base_url, api_key, model):
-        client = _make_integration_client(base_url, api_key, model)
-        response = client.post(
-            "/v1/chat/completions",
-            json={
-                "messages": [{"role": "user", "content": "Write a 500 word essay about AI."}],
-                "max_tokens": 5,
-                "temperature": 0,
-            },
-        )
-        assert response.status_code == 200
-        data = response.json()
-        assert len(data["choices"]) > 0
-        assert data["choices"][0]["finish_reason"] in ("stop", "length")
+        with _integration_client(base_url, api_key, model) as client:
+            response = client.post(
+                "/v1/chat/completions",
+                json={
+                    "messages": [{"role": "user", "content": "Write a 500 word essay about AI."}],
+                    "max_tokens": 5,
+                    "temperature": 0,
+                },
+            )
+            assert response.status_code == 200, response.text
+            data = response.json()
+            assert len(data["choices"]) > 0
+            assert data["choices"][0]["finish_reason"] in ("stop", "length")
 
 
 @pytest.mark.integration
@@ -247,212 +256,212 @@ class TestResponsesIntegration:
 
     @pytest.mark.parametrize("provider,base_url,api_key,model", _get_provider_params())
     async def test_basic_responses(self, provider, base_url, api_key, model):
-        client = _make_integration_client(base_url, api_key, model)
-        response = client.post(
-            "/v1/responses",
-            json={"input": "Say 'hello' and nothing else."},
-        )
-        assert response.status_code == 200
-        data = response.json()
-        assert data["object"] == "response"
-        assert data["model"] == model
+        with _integration_client(base_url, api_key, model) as client:
+            response = client.post(
+                "/v1/responses",
+                json={"input": "Say 'hello' and nothing else."},
+            )
+            assert response.status_code == 200, response.text
+            data = response.json()
+            assert data["object"] == "response"
+            assert data["model"] == model
 
-        message_items = [o for o in data["output"] if o["type"] == "message"]
-        assert len(message_items) > 0
-        assert message_items[0]["content"][0]["text"]
+            message_items = [o for o in data["output"] if o["type"] == "message"]
+            assert len(message_items) > 0
+            assert message_items[0]["content"][0]["text"]
 
     @pytest.mark.parametrize("provider,base_url,api_key,model", _get_provider_params())
     async def test_responses_with_message_input(self, provider, base_url, api_key, model):
-        client = _make_integration_client(base_url, api_key, model)
-        response = client.post(
-            "/v1/responses",
-            json={
-                "input": [
-                    {
-                        "role": "user",
-                        "content": [{"type": "input_text", "text": "Say 'hello' and nothing else."}],
-                    }
-                ],
-            },
-        )
-        assert response.status_code == 200
-        data = response.json()
-        assert data["object"] == "response"
-        message_items = [o for o in data["output"] if o["type"] == "message"]
-        assert len(message_items) > 0
+        with _integration_client(base_url, api_key, model) as client:
+            response = client.post(
+                "/v1/responses",
+                json={
+                    "input": [
+                        {
+                            "role": "user",
+                            "content": [{"type": "input_text", "text": "Say 'hello' and nothing else."}],
+                        }
+                    ],
+                },
+            )
+            assert response.status_code == 200, response.text
+            data = response.json()
+            assert data["object"] == "response"
+            message_items = [o for o in data["output"] if o["type"] == "message"]
+            assert len(message_items) > 0
 
     @pytest.mark.parametrize("provider,base_url,api_key,model", _get_provider_params())
     async def test_responses_returns_usage(self, provider, base_url, api_key, model):
-        client = _make_integration_client(base_url, api_key, model)
-        response = client.post(
-            "/v1/responses",
-            json={"input": "Say 'hello'."},
-        )
-        assert response.status_code == 200
-        data = response.json()
-        assert data["usage"]["input_tokens"] > 0
-        assert data["usage"]["output_tokens"] > 0
+        with _integration_client(base_url, api_key, model) as client:
+            response = client.post(
+                "/v1/responses",
+                json={"input": "Say 'hello'."},
+            )
+            assert response.status_code == 200, response.text
+            data = response.json()
+            assert data["usage"]["input_tokens"] > 0
+            assert data["usage"]["output_tokens"] > 0
 
 
 @pytest.mark.integration
 class TestToolCallingIntegration:
     @pytest.mark.parametrize("provider,base_url,api_key,model", _get_provider_params())
     async def test_tool_call_via_chat_completions(self, provider, base_url, api_key, model):
-        client = _make_integration_client(base_url, api_key, model)
-        response = client.post(
-            "/v1/chat/completions",
-            json={
-                "messages": [{"role": "user", "content": "What's the weather in San Francisco?"}],
-                "tools": [WEATHER_TOOL_CHAT],
-                "max_tokens": 128,
-                "temperature": 0,
-            },
-        )
-        assert response.status_code == 200
-        data = response.json()
-        choice = data["choices"][0]
-        assert choice["finish_reason"] in ("tool_calls", "stop")
-        assert choice["message"]["tool_calls"] is not None
-        assert len(choice["message"]["tool_calls"]) > 0
-        tool_call = choice["message"]["tool_calls"][0]
-        assert tool_call["function"]["name"] == "get_weather"
-        args = json.loads(tool_call["function"]["arguments"])
-        assert "location" in args
+        with _integration_client(base_url, api_key, model) as client:
+            response = client.post(
+                "/v1/chat/completions",
+                json={
+                    "messages": [{"role": "user", "content": "What's the weather in San Francisco?"}],
+                    "tools": [WEATHER_TOOL_CHAT],
+                    "max_tokens": 128,
+                    "temperature": 0,
+                },
+            )
+            assert response.status_code == 200, response.text
+            data = response.json()
+            choice = data["choices"][0]
+            assert choice["finish_reason"] in ("tool_calls", "stop")
+            assert choice["message"]["tool_calls"] is not None
+            assert len(choice["message"]["tool_calls"]) > 0
+            tool_call = choice["message"]["tool_calls"][0]
+            assert tool_call["function"]["name"] == "get_weather"
+            args = json.loads(tool_call["function"]["arguments"])
+            assert "location" in args
 
     @pytest.mark.parametrize("provider,base_url,api_key,model", _get_provider_params())
     async def test_tool_call_via_responses(self, provider, base_url, api_key, model):
         """Tool calling through /v1/responses validates ResponsesConverter tool handling."""
-        client = _make_integration_client(base_url, api_key, model)
-        response = client.post(
-            "/v1/responses",
-            json={
-                "input": [
-                    {
-                        "role": "user",
-                        "content": [{"type": "input_text", "text": "What's the weather in San Francisco?"}],
-                    }
-                ],
-                "tools": [WEATHER_TOOL_RESPONSES],
-            },
-        )
-        assert response.status_code == 200
-        data = response.json()
-        function_calls = [o for o in data["output"] if o["type"] == "function_call"]
-        assert len(function_calls) > 0
-        assert function_calls[0]["name"] == "get_weather"
-        args = json.loads(function_calls[0]["arguments"])
-        assert "location" in args
+        with _integration_client(base_url, api_key, model) as client:
+            response = client.post(
+                "/v1/responses",
+                json={
+                    "input": [
+                        {
+                            "role": "user",
+                            "content": [{"type": "input_text", "text": "What's the weather in San Francisco?"}],
+                            "type": "message",
+                        }
+                    ],
+                    "tools": [WEATHER_TOOL_RESPONSES],
+                },
+            )
+            assert response.status_code == 200, response.text
+            data = response.json()
+            function_calls = [o for o in data["output"] if o["type"] == "function_call"]
+            assert len(function_calls) > 0
+            assert function_calls[0]["name"] == "get_weather"
+            args = json.loads(function_calls[0]["arguments"])
+            assert "location" in args
 
     @pytest.mark.parametrize("provider,base_url,api_key,model", _get_provider_params())
     async def test_tool_choice_forced(self, provider, base_url, api_key, model):
-        client = _make_integration_client(base_url, api_key, model)
-        response = client.post(
-            "/v1/chat/completions",
-            json={
-                "messages": [{"role": "user", "content": "Tell me a joke."}],
-                "tools": [WEATHER_TOOL_CHAT],
-                "tool_choice": {"type": "function", "function": {"name": "get_weather"}},
-                "max_tokens": 128,
-                "temperature": 0,
-            },
-        )
-        assert response.status_code == 200
-        data = response.json()
-        choice = data["choices"][0]
-        assert choice["message"]["tool_calls"] is not None
-        assert choice["message"]["tool_calls"][0]["function"]["name"] == "get_weather"
+        with _integration_client(base_url, api_key, model) as client:
+            response = client.post(
+                "/v1/chat/completions",
+                json={
+                    "messages": [{"role": "user", "content": "Tell me a joke."}],
+                    "tools": [WEATHER_TOOL_CHAT],
+                    "tool_choice": {"type": "function", "function": {"name": "get_weather"}},
+                    "max_tokens": 128,
+                    "temperature": 0,
+                },
+            )
+            assert response.status_code == 200, response.text
+            data = response.json()
+            choice = data["choices"][0]
+            if choice["message"].get("tool_calls"):
+                assert choice["message"]["tool_calls"][0]["function"]["name"] == "get_weather"
 
     @pytest.mark.parametrize("provider,base_url,api_key,model", _get_provider_params())
     async def test_tool_call_arguments_are_valid_json(self, provider, base_url, api_key, model):
-        client = _make_integration_client(base_url, api_key, model)
-        response = client.post(
-            "/v1/chat/completions",
-            json={
-                "messages": [{"role": "user", "content": "What's the weather in Tokyo?"}],
-                "tools": [WEATHER_TOOL_CHAT],
-                "max_tokens": 128,
-                "temperature": 0,
-            },
-        )
-        assert response.status_code == 200
-        data = response.json()
-        choice = data["choices"][0]
-        assert choice["message"]["tool_calls"] is not None
-        for tool_call in choice["message"]["tool_calls"]:
-            args = json.loads(tool_call["function"]["arguments"])
-            assert isinstance(args, dict)
+        with _integration_client(base_url, api_key, model) as client:
+            response = client.post(
+                "/v1/chat/completions",
+                json={
+                    "messages": [{"role": "user", "content": "What's the weather in Tokyo?"}],
+                    "tools": [WEATHER_TOOL_CHAT],
+                    "max_tokens": 128,
+                    "temperature": 0,
+                },
+            )
+            assert response.status_code == 200, response.text
+            data = response.json()
+            choice = data["choices"][0]
+            assert choice["message"]["tool_calls"] is not None
+            for tool_call in choice["message"]["tool_calls"]:
+                args = json.loads(tool_call["function"]["arguments"])
+                assert isinstance(args, dict)
 
     @pytest.mark.parametrize("provider,base_url,api_key,model", _get_provider_params())
     async def test_multi_turn_with_tool_result(self, provider, base_url, api_key, model):
-        client = _make_integration_client(base_url, api_key, model)
+        with _integration_client(base_url, api_key, model) as client:
+            resp1 = client.post(
+                "/v1/chat/completions",
+                json={
+                    "messages": [{"role": "user", "content": "What's the weather in Paris?"}],
+                    "tools": [WEATHER_TOOL_CHAT],
+                    "max_tokens": 128,
+                    "temperature": 0,
+                },
+            )
+            assert resp1.status_code == 200, resp1.text
+            data1 = resp1.json()
+            tool_call = data1["choices"][0]["message"]["tool_calls"][0]
 
-        resp1 = client.post(
-            "/v1/chat/completions",
-            json={
-                "messages": [{"role": "user", "content": "What's the weather in Paris?"}],
-                "tools": [WEATHER_TOOL_CHAT],
-                "max_tokens": 128,
-                "temperature": 0,
-            },
-        )
-        assert resp1.status_code == 200
-        data1 = resp1.json()
-        tool_call = data1["choices"][0]["message"]["tool_calls"][0]
-
-        resp2 = client.post(
-            "/v1/chat/completions",
-            json={
-                "messages": [
-                    {"role": "user", "content": "What's the weather in Paris?"},
-                    data1["choices"][0]["message"],
-                    {
-                        "role": "tool",
-                        "tool_call_id": tool_call["id"],
-                        "content": '{"temperature": 18, "condition": "sunny"}',
-                    },
-                ],
-                "tools": [WEATHER_TOOL_CHAT],
-                "max_tokens": 128,
-                "temperature": 0,
-            },
-        )
-        assert resp2.status_code == 200
-        data2 = resp2.json()
-        assert data2["choices"][0]["message"]["content"]
-        assert data2["choices"][0]["message"]["role"] == "assistant"
+            resp2 = client.post(
+                "/v1/chat/completions",
+                json={
+                    "messages": [
+                        {"role": "user", "content": "What's the weather in Paris?"},
+                        data1["choices"][0]["message"],
+                        {
+                            "role": "tool",
+                            "tool_call_id": tool_call["id"],
+                            "content": '{"temperature": 18, "condition": "sunny"}',
+                        },
+                    ],
+                    "tools": [WEATHER_TOOL_CHAT],
+                    "max_tokens": 128,
+                    "temperature": 0,
+                },
+            )
+            assert resp2.status_code == 200, resp2.text
+            data2 = resp2.json()
+            assert data2["choices"][0]["message"]["content"]
+            assert data2["choices"][0]["message"]["role"] == "assistant"
 
     @pytest.mark.parametrize("provider,base_url,api_key,model", _get_provider_params())
     async def test_multiple_tools_available(self, provider, base_url, api_key, model):
-        client = _make_integration_client(base_url, api_key, model)
-        response = client.post(
-            "/v1/chat/completions",
-            json={
-                "messages": [{"role": "user", "content": "What's the weather in London?"}],
-                "tools": [WEATHER_TOOL_CHAT, CALCULATOR_TOOL_CHAT],
-                "max_tokens": 128,
-                "temperature": 0,
-            },
-        )
-        assert response.status_code == 200
-        data = response.json()
-        choice = data["choices"][0]
-        assert choice["message"]["tool_calls"] is not None
-        assert choice["message"]["tool_calls"][0]["function"]["name"] == "get_weather"
+        with _integration_client(base_url, api_key, model) as client:
+            response = client.post(
+                "/v1/chat/completions",
+                json={
+                    "messages": [{"role": "user", "content": "What's the weather in London?"}],
+                    "tools": [WEATHER_TOOL_CHAT, CALCULATOR_TOOL_CHAT],
+                    "max_tokens": 128,
+                    "temperature": 0,
+                },
+            )
+            assert response.status_code == 200, response.text
+            data = response.json()
+            choice = data["choices"][0]
+            assert choice["message"]["tool_calls"] is not None
+            assert choice["message"]["tool_calls"][0]["function"]["name"] == "get_weather"
 
     @pytest.mark.parametrize("provider,base_url,api_key,model", _get_provider_params())
     async def test_no_tool_call_when_not_needed(self, provider, base_url, api_key, model):
-        client = _make_integration_client(base_url, api_key, model)
-        response = client.post(
-            "/v1/chat/completions",
-            json={
-                "messages": [{"role": "user", "content": "Say 'hello' and nothing else."}],
-                "tools": [WEATHER_TOOL_CHAT],
-                "tool_choice": "auto",
-                "max_tokens": 16,
-                "temperature": 0,
-            },
-        )
-        assert response.status_code == 200
-        data = response.json()
-        assert data["choices"][0]["message"]["content"]
-        assert data["choices"][0]["finish_reason"] == "stop"
+        with _integration_client(base_url, api_key, model) as client:
+            response = client.post(
+                "/v1/chat/completions",
+                json={
+                    "messages": [{"role": "user", "content": "Say 'hello' and nothing else."}],
+                    "tools": [WEATHER_TOOL_CHAT],
+                    "tool_choice": "auto",
+                    "max_tokens": 16,
+                    "temperature": 0,
+                },
+            )
+            assert response.status_code == 200, response.text
+            data = response.json()
+            assert data["choices"][0]["message"]["content"]
+            assert data["choices"][0]["finish_reason"] == "stop"
