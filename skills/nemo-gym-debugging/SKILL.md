@@ -2,17 +2,33 @@
 name: nemo-gym-debugging
 license: Apache-2.0
 description: >-
-  Use when debugging a Nemo Gym run or reward profiling job. Covers rollout collection failures,
-  empty or partial JSONL outputs, stale materialized inputs, verifier/schema errors, Ray or Slurm
-  issues, vLLM readiness, judge failures, tool/sandbox failures, cache problems, and throughput
-  bottlenecks.
+  Debug a Nemo Gym run or reward-profiling job: rollout collection failures,
+  empty or partial JSONL outputs, stale materialized inputs, verifier and schema
+  errors, Ray or Slurm issues, vLLM readiness, judge failures, tool and sandbox
+  failures, cache problems, and throughput bottlenecks. Not for adding new
+  benchmarks (use add-benchmark) or routine profiling setup (use
+  nemo-gym-reward-profiling).
+metadata:
+  author: NVIDIA <nemo-gym@nvidia.com>
+  tags:
+    - debugging
+    - rollouts
+    - reward-profiling
+    - troubleshooting
+    - observability
 ---
 
 # Nemo Gym Debugging
 
+## Purpose
+
+Diagnose and resolve failures in a Nemo Gym run or reward-profiling job by
+classifying the failing layer (infra, model serving, config, data/schema,
+verifier/runtime, cache/resume, or throughput) before changing code or data.
+
 ## Invocation Check
 
-Use this skill when something failed or looks suspicious in a Nemo Gym run. If the task is adding a new env, use the `nemo-gym-env-integration` skill; if it is changing profiling behavior, use the `nemo-gym-reward-profiling` skill.
+Use this skill when something failed or looks suspicious in a Nemo Gym run. If the task is adding a new benchmark or environment, use the `add-benchmark` skill; if it is changing profiling behavior, use the `nemo-gym-reward-profiling` skill.
 
 Debug by classification, not by guessing. The first goal is to decide whether the issue is:
 
@@ -24,7 +40,9 @@ Debug by classification, not by guessing. The first goal is to decide whether th
 - cache/resume: stale materialized inputs or partial rollout output
 - throughput/resources: concurrency too high, judge bottleneck, tool/sandbox latency
 
-## Debug Order
+## Instructions
+
+Work through these checks in order:
 
 1. Check Slurm/Ray job state and logs.
 2. Check vLLM readiness and `/models` availability.
@@ -50,6 +68,19 @@ Debug by classification, not by guessing. The first goal is to decide whether th
 - Read `references/diagnostic-snippets.md` when you need copy-paste commands to inspect logs, output counts, materialized inputs, rollout JSONL shape, server readiness, or reward summaries without mutating run state.
 - Read `references/vllm-tool-call-schema-checks.md` when a tool-call dataset may be rejected by vLLM/Outlines grammar compilation before any meaningful generation happens.
 - Read `references/request-boundary-visibility.md` when `/run` 500s hide row identity or nested Gym 500s hide the inner model/verifier/provider error. It covers the existing Gym debug flag, shipped request-boundary markers, empty provider bodies, and vLLM provider-side escalation.
+
+## Examples
+
+Empty reward-profiling output with a populated rollouts file: confirm the
+`rollouts.jsonl` row count, then inspect the first real verifier exception rather
+than shutdown noise. If the data changed and `resume_from_cache` was enabled,
+suspect stale materialized inputs and compare source-data and materialized-input
+timestamps before rerunning.
+
+Tool-call rows failing before generation: run the static tool-schema check in
+`references/vllm-tool-call-schema-checks.md` before modifying Gym wrappers, since
+vLLM and Outlines reject malformed tool schemas during grammar compilation, ahead
+of any meaningful generation.
 
 ## Communication Pattern
 
