@@ -2,10 +2,8 @@
 name: add-benchmark
 license: Apache-2.0
 description: >
-  Add or integrate a new benchmark, evaluation, or training environment into
-  NeMo-Gym — scaffolding, data prep, verifier logic, agent wiring, YAML config,
-  and reward profiling. Not for debugging existing runs (use
-  nemo-gym-debugging) or editing documentation (use nemo-gym-docs).
+  Add or scaffold a new benchmark, evaluation, or training environment in
+  NeMo-Gym, through reward profiling. Not for debugging runs or editing docs.
 metadata:
   author: NVIDIA <nemo-gym@nvidia.com>
   tags:
@@ -31,6 +29,18 @@ profiling (baselining).
   Use the `nemo-gym-debugging` skill instead.
 - Editing or adding documentation pages. Use the `nemo-gym-docs` skill instead.
 - General code questions unrelated to adding a benchmark.
+
+## Prerequisites
+
+- NeMo Gym installed with the `ng_*` CLI available (`ng_init_resources_server`,
+  `ng_prepare_data`, `ng_collect_rollouts`, `ng_reward_profile`, `ng_test`).
+- A Linux host; executed code and servers run on Linux.
+- A model server for smoke testing and baselining (an OpenAI-compatible endpoint
+  or a local vLLM model server).
+- For `train`/`validation` datasets: GitLab dataset-registry access and MLflow
+  credentials in `env.yaml`.
+- For external benchmarks: the upstream library and its dependencies, plus the
+  original repo to reproduce published numbers.
 
 ## Determine Integration Type
 
@@ -295,6 +305,26 @@ models, then run GRPO training with NeMo RL.
 - `/run` endpoint must be async
 - Errors from tool execution or bad model output must return error responses, not crash
 - All commits require DCO sign-off (`-s`) and cryptographic signature (`-S`)
+
+## Limitations
+
+- No built-in sandboxing for executed code; isolation is the operator's
+  responsibility (see the security notes above).
+- Reward is binary only; this workflow does not cover graded or partial credit.
+- Supported on Linux only.
+- `train` and `validation` data must come from the GitLab dataset registry, not
+  git; only `example.jsonl` is committed.
+- Meaningful pass-rate variance requires multiple rollouts per task.
+
+## Troubleshooting
+
+| Symptom | Likely cause | Resolution |
+|---|---|---|
+| Verifier returns 422 or 500 | Row schema does not match the resources server request model | Compare the failing JSONL row against the server's request model before changing infra |
+| `ng_test` skips all tests | External tool not installed at collection time | Add a `pytest_configure` hook in `conftest.py` that runs the auto-install before collection |
+| Empty or partial reward-profiling output | Verifier exceptions or a partial rollout cache | Inspect the first real verifier exception; for deeper diagnosis use the `nemo-gym-debugging` skill |
+| Dataset accidentally tracked by git | Filename does not match the `data/.gitignore` patterns | Add a matching pattern and run `git rm --cached <file>` |
+| Closed-source model scores below open-source | Usually a verifier or code-extraction bug | Inspect failure cases in the rollout JSONL rather than aggregate numbers |
 
 ## Reference
 
