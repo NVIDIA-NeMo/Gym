@@ -26,172 +26,39 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  smoke-test:
-    name: ${{ matrix.provider }}
+  integration-tests:
+    name: Integration tests
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - provider: fireworks
-            base_url: https://api.fireworks.ai/inference/v1
-            secret_name: FIREWORKS
-            model: accounts/fireworks/models/llama4-scout-instruct-basic
-            blocking: false
-          - provider: openrouter
-            base_url: https://openrouter.ai/api/v1
-            secret_name: OPENROUTER
-            model: meta-llama/llama-3.1-8b-instruct
-            blocking: true
-          - provider: deepinfra
-            base_url: https://api.deepinfra.com/v1/openai
-            secret_name: DEEPINFRA
-            model: meta-llama/Meta-Llama-3.1-8B-Instruct
-            blocking: false
-          - provider: friendli
-            base_url: https://api.friendli.ai/serverless/v1
-            secret_name: FRIENDLIAI
-            model: meta-llama-3.1-8b-instruct
-            blocking: true
-          - provider: hf_inference
-            base_url: https://router.huggingface.co/v1
-            secret_name: HUGGINGFACE
-            model: meta-llama/Llama-3.1-8B-Instruct
-            blocking: true
+    env:
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER }}
+      FRIENDLIAI_API_KEY: ${{ secrets.FRIENDLIAI }}
+      HUGGINGFACE_API_KEY: ${{ secrets.HUGGINGFACE }}
+      FIREWORKS_API_KEY: ${{ secrets.FIREWORKS }}
+      DEEPINFRA_API_KEY: ${{ secrets.DEEPINFRA }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - name: Cache uv dependencies
+        uses: actions/cache@v4
         with:
-          python-version: "3.12"
+          path: ~/.cache/uv
+          key: uv-${{ runner.os }}-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            uv-${{ runner.os }}-
 
-      - name: Install openai client
-        run: pip install "openai>=1.0,<3"
-
-      - name: Verify API key is set
-        env:
-          API_KEY: ${{ secrets[matrix.secret_name] }}
+      - name: Setup and install
         run: |
-          if [ -z "$API_KEY" ]; then
-            echo "::error::Secret ${{ matrix.secret_name }} is not set"
-            exit 1
-          fi
-          echo "Secret ${{ matrix.secret_name }} is configured"
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          uv venv --python 3.12
+          source .venv/bin/activate
+          uv sync --extra dev
 
-      - name: Smoke test chat completion
-        id: smoke
-        continue-on-error: ${{ matrix.blocking == false }}
-        env:
-          API_KEY: ${{ secrets[matrix.secret_name] }}
+      - name: Run integration tests
         run: |
-          mkdir -p /tmp/results
-          python - <<'PYEOF'
-          import os, sys, json, traceback
-          from openai import OpenAI
-
-          provider = "${{ matrix.provider }}"
-          model = "${{ matrix.model }}"
-          result = {"provider": provider, "model": model, "base_url": "${{ matrix.base_url }}"}
-
-          client = OpenAI(
-              base_url="${{ matrix.base_url }}",
-              api_key=os.environ["API_KEY"],
-          )
-
-          # List models (best-effort)
-          try:
-              models_resp = client.models.list()
-              result["available_models"] = sorted(m.id for m in models_resp.data)[:30]
-          except Exception as e:
-              result["models_error"] = str(e)
-
-          # Chat completion
-          print(f"Testing {provider} with model {model} ...")
-          try:
-              response = client.chat.completions.create(
-                  model=model,
-                  messages=[{"role": "user", "content": "Say 'hello' and nothing else."}],
-                  max_tokens=16,
-                  temperature=0,
-              )
-              content = response.choices[0].message.content
-              result["status"] = "pass"
-              result["response"] = content
-              result["model_returned"] = response.model
-              print(f"✓ {provider}: {content!r}")
-          except Exception as e:
-              result["status"] = "fail"
-              result["error"] = str(e)
-              result["traceback"] = traceback.format_exc()
-              print(f"✗ {provider}: {e}", file=sys.stderr)
-
-          with open(f"/tmp/results/{provider}.json", "w") as f:
-              json.dump(result, f, indent=2)
-
-          if result["status"] == "fail":
-              sys.exit(1)
-          PYEOF
-
-      - name: Upload result
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: result-${{ matrix.provider }}
-          path: /tmp/results/${{ matrix.provider }}.json
-
-  report:
-    name: Collect results
-    runs-on: ubuntu-latest
-    needs: smoke-test
-    if: always()
-    steps:
-      - name: Download all results
-        uses: actions/download-artifact@v4
-        with:
-          pattern: result-*
-          merge-multiple: true
-          path: results
-
-      - name: Print report
-        run: |
-          echo "## Inference Provider Smoke Test Results" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Provider | Status | Details |" >> $GITHUB_STEP_SUMMARY
-          echo "|----------|--------|---------|" >> $GITHUB_STEP_SUMMARY
-
-          for f in results/*.json; do
-            provider=$(python3 -c "import json; print(json.load(open('$f'))['provider'])")
-            status=$(python3 -c "import json; print(json.load(open('$f'))['status'])")
-            if [ "$status" = "pass" ]; then
-              detail=$(python3 -c "import json; d=json.load(open('$f')); print(f\"response: {d['response']}\")")
-              echo "| $provider | ✅ | $detail |" >> $GITHUB_STEP_SUMMARY
-            else
-              detail=$(python3 -c "import json; d=json.load(open('$f')); print(d.get('error','unknown')[:120])")
-              echo "| $provider | ❌ | $detail |" >> $GITHUB_STEP_SUMMARY
-            fi
-          done
-
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Full error details" >> $GITHUB_STEP_SUMMARY
-          for f in results/*.json; do
-            status=$(python3 -c "import json; print(json.load(open('$f'))['status'])")
-            if [ "$status" = "fail" ]; then
-              provider=$(python3 -c "import json; print(json.load(open('$f'))['provider'])")
-              echo "" >> $GITHUB_STEP_SUMMARY
-              echo "<details><summary>$provider</summary>" >> $GITHUB_STEP_SUMMARY
-              echo "" >> $GITHUB_STEP_SUMMARY
-              echo '```json' >> $GITHUB_STEP_SUMMARY
-              cat "$f" >> $GITHUB_STEP_SUMMARY
-              echo '```' >> $GITHUB_STEP_SUMMARY
-              echo "</details>" >> $GITHUB_STEP_SUMMARY
-            fi
-          done
-
-          # Also print to stdout for logs
-          echo "=== Results ==="
-          for f in results/*.json; do
-            cat "$f"
-            echo
-          done
+          source .venv/bin/activate
+          pytest responses_api_models/chat_completions_model/tests/test_integration.py \
+            -m integration \
+            -v \
+            --tb=short \
+            -x
