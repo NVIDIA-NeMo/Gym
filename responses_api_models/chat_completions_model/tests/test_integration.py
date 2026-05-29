@@ -20,9 +20,14 @@ Set env vars to enable: OPENROUTER_API_KEY, FRIENDLIAI_API_KEY, HUGGINGFACE_API_
 
 import json
 import os
+import time
 
+import httpx
 import pytest
 from openai import OpenAI
+
+REQUEST_TIMEOUT = 60.0
+MAX_RETRIES = 3
 
 PROVIDERS = {
     "openrouter": {
@@ -50,6 +55,11 @@ PROVIDERS = {
     #     "env_var": "DEEPINFRA_API_KEY",
     #     "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
     # },
+    # "baseten": {
+    #     "base_url": "https://bridge.baseten.co/v1",
+    #     "env_var": "BASETEN_API_KEY",
+    #     "model": "<deployment-model-id>",
+    # },
 }
 
 
@@ -71,7 +81,43 @@ def _get_provider_params():
 
 
 def _make_client(base_url: str, api_key: str) -> OpenAI:
-    return OpenAI(base_url=base_url, api_key=api_key)
+    return OpenAI(
+        base_url=base_url,
+        api_key=api_key,
+        timeout=httpx.Timeout(REQUEST_TIMEOUT),
+        max_retries=MAX_RETRIES,
+    )
+
+
+WEATHER_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "get_weather",
+        "description": "Get the current weather for a location.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "location": {"type": "string", "description": "City name"},
+            },
+            "required": ["location"],
+        },
+    },
+}
+
+CALCULATOR_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "calculate",
+        "description": "Evaluate a math expression.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "expression": {"type": "string", "description": "The math expression to evaluate"},
+            },
+            "required": ["expression"],
+        },
+    },
+}
 
 
 @pytest.mark.integration
@@ -159,37 +205,6 @@ class TestChatCompletionsIntegration:
         assert response.choices[0].finish_reason in ("stop", "length")
 
 
-WEATHER_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "get_weather",
-        "description": "Get the current weather for a location.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "location": {"type": "string", "description": "City name"},
-            },
-            "required": ["location"],
-        },
-    },
-}
-
-CALCULATOR_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "calculate",
-        "description": "Evaluate a math expression.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "expression": {"type": "string", "description": "The math expression to evaluate"},
-            },
-            "required": ["expression"],
-        },
-    },
-}
-
-
 @pytest.mark.integration
 class TestToolCallingIntegration:
     @pytest.mark.parametrize("provider,base_url,api_key,model", _get_provider_params())
@@ -266,7 +281,6 @@ class TestToolCallingIntegration:
     def test_multi_turn_with_tool_result(self, provider, base_url, api_key, model):
         client = _make_client(base_url, api_key)
 
-        # Turn 1: user asks, model calls tool
         response = client.chat.completions.create(
             model=model,
             messages=[{"role": "user", "content": "What's the weather in Paris?"}],
@@ -278,7 +292,6 @@ class TestToolCallingIntegration:
         assert choice.message.tool_calls is not None
         tool_call = choice.message.tool_calls[0]
 
-        # Turn 2: provide tool result, model responds with natural language
         response2 = client.chat.completions.create(
             model=model,
             messages=[
