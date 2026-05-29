@@ -1,4 +1,4 @@
-# ARC-AGI resources server
+# ARC-AGI
 
 Abstraction and Reasoning Corpus for Artificial General Intelligence ([ARC-AGI](https://github.com/fchollet/ARC-AGI/)) is a benchmark with training and evaluation data to test general reasoning. It consists of grid-based puzzles, providing a few input output pairs and the system must infer the underlying abstract transformation rule and apply it to a new input. "ARC can be seen as a general artificial intelligence benchmark, as a program synthesis benchmark, or as a psychometric intelligence test. It is targeted at both humans and artificially intelligent systems that aim at emulating a human-like form of general fluid intelligence."
 
