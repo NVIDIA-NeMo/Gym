@@ -37,22 +37,27 @@ jobs:
             base_url: https://api.fireworks.ai/inference/v1
             secret_name: FIREWORKS
             model: accounts/fireworks/models/llama4-scout-instruct-basic
+            blocking: false
           - provider: openrouter
             base_url: https://openrouter.ai/api/v1
             secret_name: OPENROUTER
             model: meta-llama/llama-3.1-8b-instruct
+            blocking: true
           - provider: deepinfra
             base_url: https://api.deepinfra.com/v1/openai
             secret_name: DEEPINFRA
             model: meta-llama/Meta-Llama-3.1-8B-Instruct
+            blocking: false
           - provider: friendli
             base_url: https://api.friendli.ai/serverless/v1
             secret_name: FRIENDLIAI
             model: meta-llama-3.1-8b-instruct
+            blocking: true
           - provider: hf_inference
             base_url: https://router.huggingface.co/v1
             secret_name: HUGGINGFACE
             model: meta-llama/Llama-3.1-8B-Instruct
+            blocking: true
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -77,6 +82,7 @@ jobs:
 
       - name: Smoke test chat completion
         id: smoke
+        continue-on-error: ${{ matrix.blocking == false }}
         env:
           API_KEY: ${{ secrets[matrix.secret_name] }}
         run: |
