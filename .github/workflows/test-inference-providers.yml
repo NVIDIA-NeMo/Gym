@@ -36,7 +36,7 @@ jobs:
           - provider: fireworks
             base_url: https://api.fireworks.ai/inference/v1
             secret_name: FIREWORKS
-            model: accounts/fireworks/models/llama-v3p1-8b-instruct
+            model: accounts/fireworks/models/llama4-scout-instruct-basic
           - provider: openrouter
             base_url: https://openrouter.ai/api/v1
             secret_name: OPENROUTER
