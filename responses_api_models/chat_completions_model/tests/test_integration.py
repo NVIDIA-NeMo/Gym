@@ -148,7 +148,7 @@ CALCULATOR_TOOL_CHAT = {
 @pytest.mark.integration
 class TestChatCompletionsIntegration:
     @pytest.mark.parametrize("provider,base_url,api_key,model", _get_provider_params())
-    def test_basic_chat_completion(self, provider, base_url, api_key, model):
+    async def test_basic_chat_completion(self, provider, base_url, api_key, model):
         client = _make_integration_client(base_url, api_key, model)
         response = client.post(
             "/v1/chat/completions",
@@ -166,7 +166,7 @@ class TestChatCompletionsIntegration:
         assert data["choices"][0]["finish_reason"] in ("stop", "length")
 
     @pytest.mark.parametrize("provider,base_url,api_key,model", _get_provider_params())
-    def test_chat_completion_with_system_message(self, provider, base_url, api_key, model):
+    async def test_chat_completion_with_system_message(self, provider, base_url, api_key, model):
         client = _make_integration_client(base_url, api_key, model)
         response = client.post(
             "/v1/chat/completions",
@@ -185,7 +185,7 @@ class TestChatCompletionsIntegration:
         assert data["choices"][0]["message"]["content"]
 
     @pytest.mark.parametrize("provider,base_url,api_key,model", _get_provider_params())
-    def test_chat_completion_returns_usage(self, provider, base_url, api_key, model):
+    async def test_chat_completion_returns_usage(self, provider, base_url, api_key, model):
         client = _make_integration_client(base_url, api_key, model)
         response = client.post(
             "/v1/chat/completions",
@@ -201,7 +201,7 @@ class TestChatCompletionsIntegration:
         assert data["usage"]["completion_tokens"] > 0
 
     @pytest.mark.parametrize("provider,base_url,api_key,model", _get_provider_params())
-    def test_chat_completion_multi_turn(self, provider, base_url, api_key, model):
+    async def test_chat_completion_multi_turn(self, provider, base_url, api_key, model):
         client = _make_integration_client(base_url, api_key, model)
         response = client.post(
             "/v1/chat/completions",
@@ -221,7 +221,7 @@ class TestChatCompletionsIntegration:
         assert data["choices"][0]["message"]["content"]
 
     @pytest.mark.parametrize("provider,base_url,api_key,model", _get_provider_params())
-    def test_chat_completion_max_tokens_respected(self, provider, base_url, api_key, model):
+    async def test_chat_completion_max_tokens_respected(self, provider, base_url, api_key, model):
         client = _make_integration_client(base_url, api_key, model)
         response = client.post(
             "/v1/chat/completions",
@@ -246,7 +246,7 @@ class TestResponsesIntegration:
     """
 
     @pytest.mark.parametrize("provider,base_url,api_key,model", _get_provider_params())
-    def test_basic_responses(self, provider, base_url, api_key, model):
+    async def test_basic_responses(self, provider, base_url, api_key, model):
         client = _make_integration_client(base_url, api_key, model)
         response = client.post(
             "/v1/responses",
@@ -262,7 +262,7 @@ class TestResponsesIntegration:
         assert message_items[0]["content"][0]["text"]
 
     @pytest.mark.parametrize("provider,base_url,api_key,model", _get_provider_params())
-    def test_responses_with_message_input(self, provider, base_url, api_key, model):
+    async def test_responses_with_message_input(self, provider, base_url, api_key, model):
         client = _make_integration_client(base_url, api_key, model)
         response = client.post(
             "/v1/responses",
@@ -282,7 +282,7 @@ class TestResponsesIntegration:
         assert len(message_items) > 0
 
     @pytest.mark.parametrize("provider,base_url,api_key,model", _get_provider_params())
-    def test_responses_returns_usage(self, provider, base_url, api_key, model):
+    async def test_responses_returns_usage(self, provider, base_url, api_key, model):
         client = _make_integration_client(base_url, api_key, model)
         response = client.post(
             "/v1/responses",
@@ -297,7 +297,7 @@ class TestResponsesIntegration:
 @pytest.mark.integration
 class TestToolCallingIntegration:
     @pytest.mark.parametrize("provider,base_url,api_key,model", _get_provider_params())
-    def test_tool_call_via_chat_completions(self, provider, base_url, api_key, model):
+    async def test_tool_call_via_chat_completions(self, provider, base_url, api_key, model):
         client = _make_integration_client(base_url, api_key, model)
         response = client.post(
             "/v1/chat/completions",
@@ -320,7 +320,7 @@ class TestToolCallingIntegration:
         assert "location" in args
 
     @pytest.mark.parametrize("provider,base_url,api_key,model", _get_provider_params())
-    def test_tool_call_via_responses(self, provider, base_url, api_key, model):
+    async def test_tool_call_via_responses(self, provider, base_url, api_key, model):
         """Tool calling through /v1/responses validates ResponsesConverter tool handling."""
         client = _make_integration_client(base_url, api_key, model)
         response = client.post(
@@ -344,7 +344,7 @@ class TestToolCallingIntegration:
         assert "location" in args
 
     @pytest.mark.parametrize("provider,base_url,api_key,model", _get_provider_params())
-    def test_tool_choice_forced(self, provider, base_url, api_key, model):
+    async def test_tool_choice_forced(self, provider, base_url, api_key, model):
         client = _make_integration_client(base_url, api_key, model)
         response = client.post(
             "/v1/chat/completions",
@@ -363,7 +363,7 @@ class TestToolCallingIntegration:
         assert choice["message"]["tool_calls"][0]["function"]["name"] == "get_weather"
 
     @pytest.mark.parametrize("provider,base_url,api_key,model", _get_provider_params())
-    def test_tool_call_arguments_are_valid_json(self, provider, base_url, api_key, model):
+    async def test_tool_call_arguments_are_valid_json(self, provider, base_url, api_key, model):
         client = _make_integration_client(base_url, api_key, model)
         response = client.post(
             "/v1/chat/completions",
@@ -383,7 +383,7 @@ class TestToolCallingIntegration:
             assert isinstance(args, dict)
 
     @pytest.mark.parametrize("provider,base_url,api_key,model", _get_provider_params())
-    def test_multi_turn_with_tool_result(self, provider, base_url, api_key, model):
+    async def test_multi_turn_with_tool_result(self, provider, base_url, api_key, model):
         client = _make_integration_client(base_url, api_key, model)
 
         resp1 = client.post(
@@ -422,7 +422,7 @@ class TestToolCallingIntegration:
         assert data2["choices"][0]["message"]["role"] == "assistant"
 
     @pytest.mark.parametrize("provider,base_url,api_key,model", _get_provider_params())
-    def test_multiple_tools_available(self, provider, base_url, api_key, model):
+    async def test_multiple_tools_available(self, provider, base_url, api_key, model):
         client = _make_integration_client(base_url, api_key, model)
         response = client.post(
             "/v1/chat/completions",
@@ -440,7 +440,7 @@ class TestToolCallingIntegration:
         assert choice["message"]["tool_calls"][0]["function"]["name"] == "get_weather"
 
     @pytest.mark.parametrize("provider,base_url,api_key,model", _get_provider_params())
-    def test_no_tool_call_when_not_needed(self, provider, base_url, api_key, model):
+    async def test_no_tool_call_when_not_needed(self, provider, base_url, api_key, model):
         client = _make_integration_client(base_url, api_key, model)
         response = client.post(
             "/v1/chat/completions",
