@@ -176,7 +176,7 @@ def format_entry_to_nemo_gym(entry: dict) -> dict:
             "input": [{"role": "user", "content": entry["question"]}],
         },
         **entry,
-        "agent_ref": {"type": "responses_api_agents", "name": "reasoning_gym_simple_agent"},
+        "agent_ref": {"type": "responses_api_agents", "name": "reasoning_gym_rewoo_agent"},
     }
 
 

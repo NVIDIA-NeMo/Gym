@@ -14,19 +14,19 @@
 
 """
 # Single task with default config
-python environments/reasoning_gym_reflection/prepare.py --task knights_knaves --size 500 --seed 42 --output data/train.jsonl
+python environments/reasoning_gym_hermes/prepare.py --task knights_knaves --size 500 --seed 42 --output data/train.jsonl
 
 # Multiple tasks (creates composite dataset with equal weights)
-python environments/reasoning_gym_reflection/prepare.py --tasks knights_knaves,syllogism --size 500 --output data/train.jsonl
+python environments/reasoning_gym_hermes/prepare.py --tasks knights_knaves,syllogism --size 500 --output data/train.jsonl
 
 # All tasks in a category
-python environments/reasoning_gym_reflection/prepare.py --category logic --size 500 --output data/train.jsonl
+python environments/reasoning_gym_hermes/prepare.py --category logic --size 500 --output data/train.jsonl
 
 # All tasks from all categories
-python environments/reasoning_gym_reflection/prepare.py --all-tasks --size 5000 --output data/train_all.jsonl
+python environments/reasoning_gym_hermes/prepare.py --all-tasks --size 5000 --output data/train_all.jsonl
 
 # Single task with custom config
-python environments/reasoning_gym_reflection/prepare.py --task knights_knaves --size 500 --config '{"n_people": 3}' --output data/train.jsonl
+python environments/reasoning_gym_hermes/prepare.py --task knights_knaves --size 500 --config '{"n_people": 3}' --output data/train.jsonl
 """
 
 import argparse
@@ -176,7 +176,7 @@ def format_entry_to_nemo_gym(entry: dict) -> dict:
             "input": [{"role": "user", "content": entry["question"]}],
         },
         **entry,
-        "agent_ref": {"type": "responses_api_agents", "name": "reasoning_gym_reflection_agent"},
+        "agent_ref": {"type": "responses_api_agents", "name": "reasoning_gym_hermes_agent"},
     }
 
 

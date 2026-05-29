@@ -30,8 +30,5 @@ reasoning_gym_claude_code_agent:
         jsonl_fpath: environments/reasoning_gym_claude_code/data/example.jsonl
       - name: train
         type: train
-        jsonl_fpath: environments/reasoning_gym_claude_code/data/Nemotron-RL-ReasoningGym-v1_train.jsonl
-        huggingface_identifier:
-          repo_id: nvidia/Nemotron-RL-ReasoningGym-v1
-          artifact_fpath: data/train.jsonl
-        license: Creative Commons Attribution 4.0 International
+        jsonl_fpath: environments/reasoning_gym_claude_code/data/train_knights_knaves.jsonl
+        license: Apache 2.0

@@ -7,7 +7,7 @@ reasoning_gym:
       value: Iterative test time scaling for improved performance in reasoning tasks
       verified: false
 
-reasoning_gym_langgraph_agent:
+reasoning_gym_reflection_agent:
   responses_api_agents:
     langgraph_agent:
       entrypoint: reflection_agent.py

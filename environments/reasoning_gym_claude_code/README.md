@@ -42,5 +42,9 @@ ng_collect_rollouts \
 ## Prepare training data
 
 ```bash
-python environments/reasoning_gym_claude_code/prepare.py
+python environments/reasoning_gym_claude_code/prepare.py --task knights_knaves --size 1000 --output environments/reasoning_gym_claude_code/data/train_knights_knaves.jsonl
 ```
+
+See `prepare.py` for all available tasks, categories, and config options.
+
+Alternatively, a pre-built dataset is hosted on HuggingFace at [nvidia/Nemotron-RL-ReasoningGym-v1](https://huggingface.co/datasets/nvidia/Nemotron-RL-ReasoningGym-v1).

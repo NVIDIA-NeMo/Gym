@@ -24,3 +24,5 @@ python environments/reasoning_gym_rewoo/prepare.py --task knights_knaves --size 
 ```
 
 See `prepare.py` for all available tasks, categories, and config options.
+
+Alternatively, a pre-built dataset is hosted on HuggingFace at [nvidia/Nemotron-RL-ReasoningGym-v1](https://huggingface.co/datasets/nvidia/Nemotron-RL-ReasoningGym-v1).

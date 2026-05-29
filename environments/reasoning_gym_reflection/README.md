@@ -12,7 +12,7 @@ ng_run "+config_paths=[environments/reasoning_gym_reflection/config.yaml,respons
 
 ```bash
 ng_collect_rollouts \
-    +agent_name=reasoning_gym_langgraph_agent \
+    +agent_name=reasoning_gym_reflection_agent \
     +input_jsonl_fpath=environments/reasoning_gym_reflection/data/example.jsonl \
     +output_jsonl_fpath=results/reasoning_gym_reflection_rollouts.jsonl
 ```
@@ -24,3 +24,5 @@ python environments/reasoning_gym_reflection/prepare.py --task knights_knaves --
 ```
 
 See `prepare.py` for all available tasks, categories, and config options.
+
+Alternatively, a pre-built dataset is hosted on HuggingFace at [nvidia/Nemotron-RL-ReasoningGym-v1](https://huggingface.co/datasets/nvidia/Nemotron-RL-ReasoningGym-v1).
