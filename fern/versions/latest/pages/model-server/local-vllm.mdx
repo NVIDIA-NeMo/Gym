@@ -8,7 +8,7 @@ NeMo Gym can launch and manage the vLLM server for you using LocalVLLMModel (in 
 LocalVLLMModel is a subclass of VLLMModel that spawns the vLLM engine and auto-configures the model server to use it.
 The Chat Completions to Responses API conversion is inherited from VLLMModel. See [VLLMModel](/model-server/vllm) for details.
 
-A single LocalVLLMModel deployment can back multiple model servers, even when they need different request-time settings (e.g. sampling parameters or reasoning on/off).
+A single LocalVLLMModel deployment can back multiple model servers, even when they need different request-time settings (for example, sampling parameters or reasoning on or off).
 See [Local vLLM Proxy](/model-server/local-vllm-proxy) for this configuration.
 
 <Note>
@@ -49,7 +49,7 @@ LocalVLLMModel inherits all fields from VLLMModel (see [VLLMModel configuration 
 |-----------|------|---------|-------------|
 | `vllm_serve_kwargs` | `dict` | — | **Required.** Arguments passed through to `vllm serve`. See `vllm_serve_kwargs` below. |
 | `vllm_serve_env_vars` | `dict` | — | **Required.** Environment variables for the vLLM process. Must include `VLLM_RAY_DP_PACK_STRATEGY`. |
-| `hf_home` | `str` | `<cwd>/.cache/huggingface` | Hugging Face cache directory. Set this if you've already downloaded weights elsewhere. |
+| `hf_home` | `str` | `<cwd>/.cache/huggingface` | Hugging Face cache directory. Set this if you have already downloaded weights elsewhere. |
 | `debug` | `bool` | `false` | Print vLLM server logs to stderr. |
 | `show_vllm_engine_stats` | `bool` | `false` | Periodically log vLLM engine throughput stats. |
 | `ray_worker_py_executable` | `str` | `sys.executable` | Python interpreter Ray uses for worker processes. |
@@ -152,7 +152,7 @@ ng_run "+config_paths=[${config_paths}]"
 The following capabilities work the same as in VLLMModel. See [VLLMModel configuration reference](/model-server/vllm#vllmmodel-configuration-reference) for details.
 
 - **`chat_template_kwargs`**: override chat template behavior per model.
-- **`extra_body`**: pass vLLM-specific request parameters (e.g. `guided_json`, `reasoning.effort`).
+- **`extra_body`**: pass vLLM-specific request parameters (for example, `guided_json`, `reasoning.effort`).
 - **`return_token_id_information`**: enable for training workflows that need `prompt_token_ids`, `generation_token_ids`, and `generation_log_probs`.
 
 <Note>
