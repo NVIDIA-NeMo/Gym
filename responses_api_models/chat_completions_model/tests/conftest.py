@@ -31,6 +31,7 @@ def _manage_global_aiohttp_client():
     with (
         patch.object(server_utils, "get_global_config_dict", return_value={}),
         patch.object(openai_utils, "MAX_NUM_TRIES", 1),
+        patch.object(openai_utils, "RETRY_ERROR_CODES", []),
     ):
         yield
     server_utils._GLOBAL_AIOHTTP_CLIENT = None
