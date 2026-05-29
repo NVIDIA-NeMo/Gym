@@ -21,12 +21,12 @@ workplace_assistant_simple_agent:
       datasets:
         - name: train
           type: train
-          jsonl_fpath: environments/workplace_assistant_simple_agent/data/train.jsonl
+          jsonl_fpath: environments/workplace_assistant/data/train.jsonl
           license: Apache 2.0
         - name: validation
           type: validation
-          jsonl_fpath: environments/workplace_assistant_simple_agent/data/validation.jsonl
+          jsonl_fpath: environments/workplace_assistant/data/validation.jsonl
           license: Apache 2.0
         - name: example
           type: example
-          jsonl_fpath: environments/workplace_assistant_simple_agent/data/example.jsonl
+          jsonl_fpath: environments/workplace_assistant/data/example.jsonl
