@@ -1,3 +1,4 @@
+# shared prompt for longmt (long machine translation) benchmarks.
 user: |
   You are a professional translator.
   Your task is to translate a long document from {source_lang_name} to {target_lang_name}.

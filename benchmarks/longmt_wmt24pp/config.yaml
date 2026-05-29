@@ -14,7 +14,7 @@ longmt_wmt24pp_agent:
       - name: wmt24pp_benchmark
         type: benchmark
         jsonl_fpath: benchmarks/longmt_wmt24pp/data/wmt24pp_benchmark.jsonl
-        prompt_config: benchmarks/longmt_wmt24pp/prompts/default.yaml
+        prompt_config: benchmarks/prompts/generic/longmt.yaml
         prepare_script: benchmarks/longmt_wmt24pp/prepare.py
         num_repeats: 5
         license: Creative Commons Attribution-ShareAlike 4.0 International
