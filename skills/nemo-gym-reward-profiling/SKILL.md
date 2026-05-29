@@ -2,14 +2,26 @@
 name: nemo-gym-reward-profiling
 license: Apache-2.0
 description: >-
-  Use to help users get started with Nemo Gym reward profiling. Covers the basic
-  ng_run, ng_collect_rollouts, and ng_reward_profile workflow, repeated rollouts,
-  materialized inputs, rollout JSONL artifacts, task and rollout identity, output
-  inspection, partial profiling, and rollout_infos. For failed jobs, prefer
-  nemo-gym-debugging.
+  Get started with Nemo Gym reward profiling: the ng_run, ng_collect_rollouts,
+  and ng_reward_profile workflow, repeated rollouts, materialized inputs, rollout
+  JSONL artifacts, task and rollout identity, output inspection, partial
+  profiling, and rollout_infos. For failed jobs, prefer nemo-gym-debugging.
+metadata:
+  author: NVIDIA <nemo-gym@nvidia.com>
+  tags:
+    - reward-profiling
+    - rollouts
+    - evaluation
+    - metrics
 ---
 
 # Nemo Gym Reward Profiling
+
+## Purpose
+
+Run and understand Nemo Gym reward profiling: start servers with `ng_run`,
+collect rollout artifacts with `ng_collect_rollouts`, and produce profiling
+output with `ng_reward_profile`, then inspect the resulting rows and metrics.
 
 ## Invocation Check
 
@@ -19,7 +31,7 @@ Use this skill when the user wants to run, understand, or lightly modify Nemo Gy
 
 If the user is primarily debugging a failed job or stack trace, use the `nemo-gym-debugging` skill first.
 
-## Basic Workflow
+## Instructions
 
 1. Identify the environment config paths and input JSONL.
 2. Start Gym servers with `ng_run`.
@@ -52,3 +64,14 @@ Load references only when the user needs that detail:
 - Treat `ng_reward_profile` as the reward profiling step; rollout collection does not write reward profile files.
 - Run strict profiling by default. If rollout collection stopped early, use `++allow_partial_rollouts=True` to profile completed rollouts and drop original input rows with no completed rollout.
 - Trust the target checkout's CLI help and `nemo_gym/reward_profile.py` over memory if flags differ.
+
+## Examples
+
+Profiling a single config: run `ng_run` for the environment, collect rollouts
+with `+num_repeats` greater than one so per-task averages and variance are
+meaningful, then run `ng_reward_profile` on the materialized inputs and rollout
+JSONL and compare line counts across the artifacts.
+
+Recovering from an interrupted collection: rerun `ng_reward_profile` with
+`++allow_partial_rollouts=True` to profile completed rollouts and drop original
+input rows that have no completed rollout.
