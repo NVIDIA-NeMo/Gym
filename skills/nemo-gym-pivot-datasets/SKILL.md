@@ -1,13 +1,30 @@
 ---
 name: nemo-gym-pivot-datasets
+license: Apache-2.0
 description: >-
-  Use when creating, validating, or documenting Nemo Gym pivot datasets from rollout,
-  trajectory, chat-completion, Responses API, or tool-call artifacts. Covers Gym
-  Responses-style row conversion, pivot selection, single-step tool-use configs,
-  agent_ref alignment, verifier knobs, expected-action row contracts, and train/eval usage.
+  Create, validate, or document Nemo Gym pivot datasets from rollout, trajectory,
+  chat-completion, Responses API, or tool-call artifacts: Gym Responses-style row
+  conversion, pivot selection, single-step tool-use configs, agent_ref alignment,
+  verifier knobs, expected-action row contracts, and train/eval usage. Not for
+  general reward profiling (use nemo-gym-reward-profiling) or debugging runs (use
+  nemo-gym-debugging).
+metadata:
+  author: NVIDIA <nemo-gym@nvidia.com>
+  tags:
+    - pivot-dataset
+    - dataset-conversion
+    - reinforcement-learning
+    - single-step
+    - trajectory
 ---
 
 # Nemo Gym Pivot Datasets
+
+## Purpose
+
+Convert agent trajectories and rollout artifacts into single-step Nemo Gym pivot
+datasets for local RL or evaluation, and validate that a pivot JSONL and its Gym
+config can be used together.
 
 ## Paper Reference
 
@@ -25,7 +42,7 @@ Before writing a converter, inspect representative source rows and the target re
 Do not assume the source field names are the contract. Convert by reconstructing the semantic
 pieces needed by Gym's Responses-style row format.
 
-## Core Workflow
+## Instructions
 
 1. Inspect the source data shape and count the candidate assistant decision points.
 2. Identify the semantic fields needed for each pivot:
@@ -117,3 +134,17 @@ resource-server request model.
 
 The validator accepts both supported expected-action types by default (`function_call` and `message`)
 and prints an end summary split between tool-call and message pivots.
+
+## Examples
+
+Converting chat-completion logs: inspect representative rows, identify each
+assistant decision point, and reconstruct `responses_create_params`,
+`expected_action` (a single `function_call` or `message`), and `agent_ref` for
+each accepted pivot. Route turns with more than one tool call into a skipped-row
+audit. Borrow from
+`scripts/reference/chat_messages_to_pivot_dataset_reference.py` rather than
+running it unchanged.
+
+Validating a finished dataset: run `scripts/validate_pivot_dataset.py` with the
+expected `--agent-ref`, and add `--gym-repo` when the Gym checkout is available
+to also validate against the resource-server Pydantic models.

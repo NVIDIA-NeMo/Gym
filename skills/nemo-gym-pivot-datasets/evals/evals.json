@@ -1,0 +1,62 @@
+[
+  {
+    "id": "nemo-gym-pivot-datasets-positive-001",
+    "question": "Convert these tool-call trajectories in a JSONL file into a NeMo Gym pivot dataset I can use for single-step training.",
+    "expected_skill": "nemo-gym-pivot-datasets",
+    "ground_truth": "The agent loads the nemo-gym-pivot-datasets skill, inspects representative source rows and the target resource server before writing a converter, identifies the semantic fields needed per pivot, converts each accepted decision point to one row with responses_create_params, expected_action, and agent_ref, and runs the bundled validator against the output.",
+    "expected_behavior": [
+      "The agent read nemo-gym-pivot-datasets/SKILL.md before acting",
+      "The agent inspected representative source rows before writing a converter",
+      "The agent emitted one pivot row per accepted decision point with responses_create_params, expected_action, and agent_ref",
+      "The agent filtered out source turns with more than one tool call rather than emitting multi-action rows",
+      "The agent ran scripts/validate_pivot_dataset.py on the output"
+    ]
+  },
+  {
+    "id": "nemo-gym-pivot-datasets-positive-002",
+    "question": "Validate this pivot.jsonl file against the resources-server request models and the agent_ref I expect — is it usable for training?",
+    "expected_skill": "nemo-gym-pivot-datasets",
+    "ground_truth": "The agent loads the nemo-gym-pivot-datasets skill and runs the bundled validator with both --agent-ref and --gym-repo, checks that agent_ref matches the config's agent block, and confirms the row contract for single_step_tool_use_with_argument_comparison.",
+    "expected_behavior": [
+      "The agent read nemo-gym-pivot-datasets/SKILL.md before acting",
+      "The agent ran scripts/validate_pivot_dataset.py with --agent-ref",
+      "The agent passed --gym-repo to validate against the resources-server Pydantic models when the Gym repo is available",
+      "The agent confirmed agent_ref.name matches the agent block used by the config"
+    ]
+  },
+  {
+    "id": "nemo-gym-pivot-datasets-positive-003",
+    "question": "I have a batch of chat-completion rollouts from a different framework. Build me a NeMo Gym pivot dataset and the matching Gym YAML config.",
+    "expected_skill": "nemo-gym-pivot-datasets",
+    "ground_truth": "The agent loads the nemo-gym-pivot-datasets skill, normalizes the chat-completion rows into Gym Responses-style pivot rows (one expected_action per row), uses tool_choice: auto in the generated config, points the train dataset entry at the pivot JSONL, and aligns agent_ref with the agent block before validating.",
+    "expected_behavior": [
+      "The agent read nemo-gym-pivot-datasets/SKILL.md before acting",
+      "The agent normalized the chat-completion rows into Responses-style pivot rows",
+      "The agent set tool_choice: auto in the generated config rather than required",
+      "The agent pointed the config's train dataset entry directly at the pivot JSONL",
+      "The agent ensured row-level agent_ref matches the config's agent block"
+    ]
+  },
+  {
+    "id": "nemo-gym-pivot-datasets-negative-001",
+    "question": "Add the cuOpt vehicle-routing benchmark to NeMo-Gym, including data prep and the resources server.",
+    "expected_skill": null,
+    "should_trigger": false,
+    "ground_truth": "The agent should not activate the nemo-gym-pivot-datasets skill for a new-benchmark integration task. It should use the add-benchmark skill instead.",
+    "expected_behavior": [
+      "The agent did not read or activate nemo-gym-pivot-datasets/SKILL.md",
+      "The agent recognized this as a benchmark integration task"
+    ]
+  },
+  {
+    "id": "nemo-gym-pivot-datasets-negative-002",
+    "question": "My ng_reward_profile job is producing empty profile rows for half the tasks. Help me figure out what's wrong.",
+    "expected_skill": null,
+    "should_trigger": false,
+    "ground_truth": "The agent should not activate the nemo-gym-pivot-datasets skill for a debugging task on an existing reward profiling run. It should use the nemo-gym-debugging skill instead.",
+    "expected_behavior": [
+      "The agent did not read or activate nemo-gym-pivot-datasets/SKILL.md",
+      "The agent recognized this as a debugging task"
+    ]
+  }
+]
