@@ -1,2 +1,2 @@
 -e nemo-gym[dev] @ ../../
-git+https://github.com/bxyu-nvidia/tau2-bench@c0d62a67e21bca90911099b0e4554d7634bafda8
+git+https://github.com/bxyu-nvidia/tau2-bench@4629ee4882366b6e7872d9ee809ed0e798d75aee
