@@ -387,6 +387,17 @@ class NeMoGymChatCompletionAssistantMessageParam(ChatCompletionAssistantMessageP
     # Override the iterable which is annoying to work with.
     content: Union[str, List[ContentArrayOfContentPart], None]
     tool_calls: Optional[List[NeMoGymChatCompletionMessageToolCallParam]] = None
+    # Reasoning trace propagated back to the model on multi-turn input.
+    # OpenAI's base ChatCompletionAssistantMessageParam doesn't declare these
+    # fields, so without explicit declarations Pydantic's default
+    # `extra="ignore"` silently drops them at FastAPI Body() validation in
+    # responses_api_models/vllm_model/app.py — the model never sees prior-turn
+    # `<think>...</think>` reasoning, which degrades DeepSeek V3/V4 multi-turn
+    # tool-call argument fidelity.
+    # Both names supported: `reasoning_content` (legacy, pre-vLLM-0.16) and
+    # `reasoning` (vLLM 0.16+).
+    reasoning_content: Optional[str] = None
+    reasoning: Optional[str] = None
 
 
 class NeMoGymChatCompletionAssistantMessageForTrainingParam(
