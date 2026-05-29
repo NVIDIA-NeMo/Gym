@@ -304,7 +304,7 @@ Process `{process_name}` stderr:
             if len(successful_servers) != total_servers:
                 if poll_count % 10 == 0:  # Print every sleep_interval * poll_count = 3 * 10 = 30s
                     print(
-                        f"""Checking for HTTP server statuses (you should see some HTTP requests to `/` that may 404. This is expected.
+                        f"""Checking for HTTP server statuses.
 {len(successful_servers)} / {total_servers} servers ready. Waiting for servers to spin up: {waiting}"""
                     )
                 poll_count += 1
