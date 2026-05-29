@@ -139,7 +139,7 @@ Key points:
 - `judge_model_server` references a model server by name. Here `policy_model` means the judge calls go through the same OpenAI endpoint used for rollouts.
 - `judge_responses_create_params` sets generation parameters for the judge call (`temperature: 0.0` for determinism).
 - `complied_label` / `refused_label` are specific to `over_refusal_detection`. Other servers define their own verdict labels. For example, `equivalence_llm_judge` uses `judge_equal_label` / `judge_not_equal_label`. The names and values are up to each server's design.
-- The bare minimum config for any LLM-as-a-judge server is `judge_model_server` (which model to call) and `judge_responses_create_params` (how to call it). Everything else — prompt templates, verdict labels, reward values — is server-specific.
+- The bare minimum config for any LLM-as-Judge server is `judge_model_server` (which model to call) and `judge_responses_create_params` (how to call it). Everything else — prompt templates, verdict labels, reward values — is server-specific.
 
 #### Build Judge Input and Call the Responses API
 

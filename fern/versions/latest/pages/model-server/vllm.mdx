@@ -28,6 +28,43 @@ source .venv/bin/activate
 uv pip install hf_transfer vllm --torch-backend=auto
 ```
 
+<Tip>
+**Recommended on workstations without a system CUDA toolkit** (i.e. no `/usr/local/cuda`). Install FlashInfer's pre-built kernel packages so vLLM's sampler and allreduce paths do not try to JIT-compile via `nvcc` at startup. Both companion packages enforce strict version equality with the `flashinfer-python` that vLLM pulled in, so pin them to its exact version:
+
+```bash
+# Discover the flashinfer-python version that vLLM installed
+FI_VER=$(python -c "import flashinfer; print(flashinfer.__version__)")
+echo "flashinfer-python: $FI_VER"
+
+# Discover your torch CUDA tag (e.g. cu128, cu129, cu130)
+TORCH_CU=$(python -c "import torch; print('cu' + torch.version.cuda.replace('.', ''))")
+echo "torch CUDA tag: $TORCH_CU"
+
+# Pre-compiled CUBINs (CUTLASS / TRTLLM-gen kernels)
+uv pip install "flashinfer-cubin==${FI_VER}"
+
+# Pre-built JIT object cache for your CUDA build
+uv pip install "flashinfer-jit-cache==${FI_VER}" --index-url "https://flashinfer.ai/whl/${TORCH_CU}"
+```
+
+Without these, the first sampling step inside `vllm serve` may fail with:
+
+```
+RuntimeError: Could not find nvcc and default cuda_home='/usr/local/cuda' doesn't exist
+```
+
+because PyPI's PyTorch wheels ship the CUDA runtime libraries but not the `nvcc` compiler that FlashInfer's JIT path falls back to.
+
+If you install the companions without pinning their versions (e.g. `uv pip install flashinfer-jit-cache --index-url https://flashinfer.ai/whl/cu130`), the resolver picks the newest wheel on the index, and you will hit a different error at first sampling:
+
+```
+RuntimeError: flashinfer-jit-cache version (X.Y.Z+cuNNN) does not match flashinfer version (A.B.C)
+```
+
+That's the version-equality check in `flashinfer/jit/env.py` — fix by pinning both companions to `flashinfer.__version__` as shown above. See the [FlashInfer installation docs](https://docs.flashinfer.ai/installation.html) for details.
+
+</Tip>
+
 ### Download the model
 This download will take a few minutes.
 ```bash
