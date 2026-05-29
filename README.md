@@ -1,5 +1,11 @@
 # NeMo Gym
 
+[![PyPI](https://img.shields.io/pypi/v/nemo-gym)](https://pypi.org/project/nemo-gym/)
+[![Python](https://img.shields.io/pypi/pyversions/nemo-gym)](https://pypi.org/project/nemo-gym/)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![CI](https://github.com/NVIDIA-NeMo/Gym/actions/workflows/unit-tests.yml/badge.svg)](https://github.com/NVIDIA-NeMo/Gym/actions/workflows/unit-tests.yml)
+[![Docs](https://img.shields.io/badge/docs-NVIDIA-brightgreen)](https://docs.nvidia.com/nemo/gym/main/about/)
+
 **[Requirements](#-requirements)** • **[Quick Start](#-quick-start)** • **[Available Environments](#-available-environments)** • **[Documentation & Resources](#-documentation--resources)** • **[Community & Support](#-community--support)** • **[Citations](#-citations)**
 
 NeMo Gym is a library for evaluating and improving models and agents using environments. NeMo Gym provides infrastructure to develop environments, scalably run evaluation and training, and a collection of popular benchmarks and training environments.
@@ -28,13 +34,13 @@ If you're scoring model outputs with a stateless check and don't need scale or t
 
 ## 🌎 Ecosystem
 
-NeMo Gym is a component of [NVIDIA NeMo](https://docs.nvidia.com/nemo/gym/latest/about/ecosystem.html#related-nemo-libraries), a GPU-accelerated platform for training generative AI models and optimizing AI agents. NeMo Gym is integrated with the broader agentic ecosystem - see the [Ecosystem](https://docs.nvidia.com/nemo/gym/latest/about/ecosystem.html) page for more details.
+NeMo Gym is a component of [NVIDIA NeMo](https://docs.nvidia.com/nemo/gym/latest/about/ecosystem#related-nemo-libraries), a GPU-accelerated platform for training generative AI models and optimizing AI agents. NeMo Gym is integrated with the broader agentic ecosystem - see the [Ecosystem](https://docs.nvidia.com/nemo/gym/latest/about/ecosystem) page for more details.
 
 **Environment Libraries:** Seamlessly combine environments and benchmarks from other libraries alongside NeMo Gym environments. Examples: 
 [Aviary](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/aviary) • [Harbor](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/harbor_agent) • [OpenEnv](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/openenv) • [Reasoning Gym](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/reasoning_gym) • [Verifiers](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/verifiers_agent)
 
 **Training Framework Libraries:** Use environments for SFT and RL training.
-[NeMo RL](https://docs.nvidia.com/nemo/gym/latest/training-tutorials/nemo-rl-grpo/index.html) • [Unsloth](https://docs.nvidia.com/nemo/gym/latest/training-tutorials/unsloth-training.html) • [VeRL](https://docs.nvidia.com/nemo/gym/latest/training-tutorials/verl.html)
+[NeMo RL](https://docs.nvidia.com/nemo/gym/latest/training-tutorials/nemo-rl-grpo) • [Unsloth](https://docs.nvidia.com/nemo/gym/latest/training-tutorials/unsloth) • [VeRL](https://docs.nvidia.com/nemo/gym/latest/training-tutorials)
 
 **Agent Harnesses:** Agent harnesses for evaluation and training available out of the box. Examples:
 [OpenHands](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/swe_agents) • [Mini SWE Agent](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/mini_swe_agent) • [LangGraph](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/langgraph_agent)
@@ -61,7 +67,7 @@ NeMo Gym is designed to run on standard development machines:
 
 ## 🚀 Quick Start
 
-Requires Python 3.12+ on x86_64 or ARM64 (Linux, macOS, Windows via WSL2). No GPU required. See the [Getting Started](https://docs.nvidia.com/nemo/gym/latest/get-started/prerequisites) docs for a more comprehensive walkthrough.
+Requires Python 3.12+ on x86_64 or ARM64 (Linux, macOS, Windows via WSL2). No GPU required. See the [Getting Started](https://docs.nvidia.com/nemo/gym/latest/get-started) docs for a more comprehensive walkthrough.
 
 **Install NeMo Gym:**
 
@@ -145,9 +151,9 @@ For per-task pass rates, see the [`ng_reward_profile`](https://docs.nvidia.com/n
 ### Next Steps
 
 - **[Browse Environments](#-available-environments)** — Browse available environments for evaluation and training.
-- **[Agents](https://docs.nvidia.com/nemo/gym/latest/agent-server/index.html)** — Explore available agent harnesses and learn how to integrate your own.
-- **[Training](https://docs.nvidia.com/nemo/gym/latest/training-tutorials/index.html)** — Improve your agent or model with RL or fine-tuning.
-- **[Build Custom Environments](https://docs.nvidia.com/nemo/gym/latest/environment-tutorials/index.html)** — Create your own evaluation or training environments.
+- **[Agents](https://docs.nvidia.com/nemo/gym/latest/agent-server)** — Explore available agent harnesses and learn how to integrate your own.
+- **[Training](https://docs.nvidia.com/nemo/gym/latest/training-tutorials)** — Improve your agent or model with RL or fine-tuning.
+- **[Build Custom Environments](https://docs.nvidia.com/nemo/gym/latest/environment-tutorials)** — Create your own evaluation or training environments.
 
 ## 📦 Available Environments
 
@@ -158,11 +164,12 @@ NeMo Gym includes a curated collection of environments for training and evaluati
 Purpose: Demonstrate NeMo Gym patterns and concepts.
 
 <!-- START_EXAMPLE_ONLY_SERVERS_TABLE -->
-| Name               | Demonstrates                         | Config                                                                                                                             | README                                                                      |
-| ------------------ | ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
-| Multi Step         | Multi-step tool calling              | <a href='resources_servers/example_multi_step/configs/example_multi_step.yaml'>example_multi_step.yaml</a>                         | <a href='resources_servers/example_multi_step/README.md'>README</a>         |
-| Session State Mgmt | Session state management (in-memory) | <a href='resources_servers/example_session_state_mgmt/configs/example_session_state_mgmt.yaml'>example_session_state_mgmt.yaml</a> | <a href='resources_servers/example_session_state_mgmt/README.md'>README</a> |
-| Single Tool Call   | Basic single-step tool calling       | <a href='resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml'>example_single_tool_call.yaml</a>       | <a href='resources_servers/example_single_tool_call/README.md'>README</a>   |
+| Name                 | Demonstrates                                   | Config                                                                                                                                   | README                                                                        |
+| -------------------- | ---------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| Multi Step           | Multi-step tool calling                        | <a href='resources_servers/example_multi_step/configs/example_multi_step.yaml'>example_multi_step.yaml</a>                               | <a href='resources_servers/example_multi_step/README.md'>README</a>           |
+| Multi Turn Gymnasium | Example multi-turn environment using Gymnasium | <a href='resources_servers/example_multi_turn_gymnasium/configs/example_multi_turn_gymnasium.yaml'>example_multi_turn_gymnasium.yaml</a> | <a href='resources_servers/example_multi_turn_gymnasium/README.md'>README</a> |
+| Session State Mgmt   | Session state management (in-memory)           | <a href='resources_servers/example_session_state_mgmt/configs/example_session_state_mgmt.yaml'>example_session_state_mgmt.yaml</a>       | <a href='resources_servers/example_session_state_mgmt/README.md'>README</a>   |
+| Single Tool Call     | Basic single-step tool calling                 | <a href='resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml'>example_single_tool_call.yaml</a>             | <a href='resources_servers/example_single_tool_call/README.md'>README</a>     |
 <!-- END_EXAMPLE_ONLY_SERVERS_TABLE -->
 
 ### Environments for Training & Evaluation
@@ -301,9 +308,9 @@ The Dataset column links to publicly available datasets (e.g., on HuggingFace). 
 
 ## 📖 Documentation & Resources
 
-- **[Documentation](https://docs.nvidia.com/nemo/gym/latest/index.html)** - Technical reference docs
-- **[Training Tutorials](https://docs.nvidia.com/nemo/gym/latest/training-tutorials/index.html)** - Train with NeMo Gym environments
-- **[API Reference](https://docs.nvidia.com/nemo/gym/latest/apidocs/index.html)** - Complete class and function reference
+- **[Documentation](https://docs.nvidia.com/nemo/gym/latest/documentation/home)** - Technical reference docs
+- **[Training Tutorials](https://docs.nvidia.com/nemo/gym/latest/training-tutorials)** - Train with NeMo Gym environments
+- **[API Reference](https://docs.nvidia.com/nemo/gym/latest/api/reference/api-reference)** - Complete class and function reference
  
 
 ## 🤝 Community & Support
@@ -311,7 +318,7 @@ The Dataset column links to publicly available datasets (e.g., on HuggingFace). 
 We'd love your contributions! Here's how to get involved:
 
 - **[Report Issues](https://github.com/NVIDIA-NeMo/Gym/issues)** - Bug reports and feature requests
-- **[Contributing Guide](https://docs.nvidia.com/nemo/gym/latest/contribute/index.html)** - How to contribute code, docs, new environments, or training framework integrations
+- **[Contributing Guide](https://docs.nvidia.com/nemo/gym/latest/contribute)** - How to contribute code, docs, new environments, or training framework integrations
 
 ## 📚 Citations
 

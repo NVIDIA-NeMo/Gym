@@ -48,6 +48,8 @@ import logging
 from time import perf_counter
 from typing import Any, Optional
 
+import stirrup.core.agent as _stirrup_agent_mod
+from pydantic import ValidationError as _PydanticValidationError
 from stirrup.clients.chat_completions_client import ChatCompletionsClient
 from stirrup.clients.utils import to_openai_tools
 from stirrup.core.models import (
@@ -64,6 +66,92 @@ from responses_api_agents.stirrup_agent.stirrup_utils import to_provider_openai_
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+# Monkey-patch stirrup.core.agent.Agent.run_tool to surface pydantic
+# ValidationError detail into the ToolResult content. Upstream stirrup
+# returns the bare string "Tool arguments are not valid", hiding the
+# pydantic error detail (e.g., "paths: Input should be a valid list,
+# input_type=str"). Without that detail the agent has no signal to
+# self-correct and just retries the same broken shape forever.
+#
+# Observed on DSv4-Pro GDPVal r5/r7: the model emitted `paths` as a JSON
+# string literal ("[]") instead of a JSON array ([]). All ~660 finish
+# attempts in r5 failed with the same bare-string error; the agent
+# never learned what was wrong.
+def _install_tool_arg_error_surfacing() -> None:
+    _orig_run_tool = _stirrup_agent_mod.Agent.run_tool
+    if getattr(_orig_run_tool, "_gym_surfacing_patched", False):
+        return
+
+    async def run_tool_with_error_surfacing(self, tool_call, run_metadata):
+        result_msg = await _orig_run_tool(self, tool_call, run_metadata)
+        if (not getattr(result_msg, "args_was_valid", True)) and result_msg.content == "Tool arguments are not valid":
+            # Mirror upstream stirrup's lookup: self._active_tools is the {name: Tool}
+            # dict built from self._tools filtered by isinstance(Tool). Looking up
+            # via the dict avoids iterating self._tools which mixes Tool instances
+            # with provider objects (e.g. ApptainerCodeExecToolProvider) that don't
+            # have a .name attribute and crash a naive `t.name` lookup.
+            tool = self._active_tools.get(tool_call.name)
+            if tool is not None:
+                args = tool_call.arguments if tool_call.arguments and tool_call.arguments.strip() else "{}"
+                try:
+                    tool.parameters.model_validate_json(args)
+                except _PydanticValidationError as exc:
+                    errors_str = "; ".join(
+                        f"{'.'.join(str(p) for p in e['loc']) or '<root>'}: {e['msg']} (type={e.get('type', '?')})"
+                        for e in exc.errors()
+                    )
+                    args_preview = (tool_call.arguments or "")[:500]
+                    detailed = (
+                        f"Tool arguments are not valid: {errors_str}. "
+                        f"Submitted arguments (first 500 chars): {args_preview!r}"
+                    )
+                    result_msg = result_msg.model_copy(update={"content": detailed})
+                except Exception:
+                    pass
+        return result_msg
+
+    run_tool_with_error_surfacing._gym_surfacing_patched = True
+    _stirrup_agent_mod.Agent.run_tool = run_tool_with_error_surfacing
+
+
+_install_tool_arg_error_surfacing()
+
+
+# Replace stirrup's SIMPLE_FINISH_TOOL with a coercing variant whose
+# FinishParams accepts `paths` as a JSON-encoded string and normalizes to
+# list[str]. vLLM 0.20.0's --tool-call-parser deepseek_v4 forwards DSv4's
+# string="false" args as JSON strings (the unwrap landed upstream in vLLM
+# PR #41801, merged 2026-05-06, but the wedu image predates the merge).
+# See responses_api_agents/stirrup_agent/finish_tool_coercing.py for the
+# coerced schema. The override happens at module-import time so any Agent
+# constructed after this point picks up the coercing variant via the
+# default-arg path in stirrup.core.agent.Agent.__init__.
+def _install_coercing_finish_tool() -> None:
+    import stirrup.tools as _tools_mod
+    import stirrup.tools.finish as _finish_mod
+
+    if getattr(_finish_mod.SIMPLE_FINISH_TOOL, "_gym_coercing_finish_patched", False):
+        return
+
+    from responses_api_agents.stirrup_agent.finish_tool_coercing import (
+        COERCING_FINISH_TOOL,
+    )
+
+    # Tag for idempotency.
+    setattr(COERCING_FINISH_TOOL, "_gym_coercing_finish_patched", True)
+
+    # Patch the canonical binding plus every place stirrup or its callers
+    # captured a reference via `from ... import SIMPLE_FINISH_TOOL`.
+    _finish_mod.SIMPLE_FINISH_TOOL = COERCING_FINISH_TOOL
+    if hasattr(_tools_mod, "SIMPLE_FINISH_TOOL"):
+        _tools_mod.SIMPLE_FINISH_TOOL = COERCING_FINISH_TOOL
+    if hasattr(_stirrup_agent_mod, "SIMPLE_FINISH_TOOL"):
+        _stirrup_agent_mod.SIMPLE_FINISH_TOOL = COERCING_FINISH_TOOL
+
+
+_install_coercing_finish_tool()
 
 # Floor for per-call max_completion_tokens.  Below this the model basically
 # cannot produce a useful answer — treat as a hard minimum.
@@ -299,6 +387,10 @@ class DynamicMaxTokensChatCompletionsClient(ChatCompletionsClient):
         reasoning: Optional[Reasoning] = None
         if hasattr(msg, "reasoning_content") and msg.reasoning_content:
             reasoning = Reasoning(content=msg.reasoning_content)
+        elif hasattr(msg, "reasoning") and msg.reasoning:
+            # vLLM >= 0.16.0 emits `reasoning` (Responses-API convention) instead of
+            # `reasoning_content`; e.g. DeepSeek-V4's `--reasoning-parser deepseek_v4`.
+            reasoning = Reasoning(content=msg.reasoning)
 
         tool_calls = [
             ToolCall(
