@@ -34,7 +34,7 @@ ng_collect_rollouts \
 ## Preprocessing HotPotQA data
 
 ```bash
-python environments/abstention/scripts/dataset_preprocess.py \
+python environments/abstention/prepare.py \
     --download \
     --raw-data-dir /path/to/data/hotpotqa \
     --output-dir environments/abstention/data
