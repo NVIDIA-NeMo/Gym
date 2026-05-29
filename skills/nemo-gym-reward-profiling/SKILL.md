@@ -2,10 +2,8 @@
 name: nemo-gym-reward-profiling
 license: Apache-2.0
 description: >-
-  Get started with Nemo Gym reward profiling: the ng_run, ng_collect_rollouts,
-  and ng_reward_profile workflow, repeated rollouts, materialized inputs, rollout
-  JSONL artifacts, task and rollout identity, output inspection, partial
-  profiling, and rollout_infos. For failed jobs, prefer nemo-gym-debugging.
+  Get started with Nemo Gym reward profiling: ng_run, ng_collect_rollouts, and
+  ng_reward_profile. For failed jobs, prefer nemo-gym-debugging.
 metadata:
   author: NVIDIA <nemo-gym@nvidia.com>
   tags:
@@ -22,6 +20,13 @@ metadata:
 Run and understand Nemo Gym reward profiling: start servers with `ng_run`,
 collect rollout artifacts with `ng_collect_rollouts`, and produce profiling
 output with `ng_reward_profile`, then inspect the resulting rows and metrics.
+
+## Prerequisites
+
+- NeMo Gym installed with the `ng_run`, `ng_collect_rollouts`, and `ng_reward_profile` CLIs.
+- An environment config bundle and an input JSONL dataset.
+- A reachable model server (an OpenAI-compatible endpoint or a local vLLM model server).
+- Enough disk for rollout and materialized-input artifacts.
 
 ## Invocation Check
 
@@ -75,3 +80,17 @@ JSONL and compare line counts across the artifacts.
 Recovering from an interrupted collection: rerun `ng_reward_profile` with
 `++allow_partial_rollouts=True` to profile completed rollouts and drop original
 input rows that have no completed rollout.
+
+## Limitations
+
+- Per-task averages and variance are only meaningful with multiple rollouts per task; single-repeat runs give point estimates.
+- This step summarizes existing rollout artifacts; it does not collect rollouts or fix failed runs.
+- Reward semantics are defined by the resource server, not by this workflow.
+
+## Troubleshooting
+
+| Symptom | Likely cause | Resolution |
+|---|---|---|
+| No reward profile file produced | Expected it from rollout collection | Reward profiling is a separate step; run it on the materialized inputs and rollout JSONL |
+| Profile rows fewer than input tasks | Rollout collection stopped early | Rerun profiling with partial rollouts allowed (see Practical Defaults) |
+| CLI flags differ from this guide | Target checkout version differs | Trust the checkout's CLI help and `nemo_gym/reward_profile.py` |
