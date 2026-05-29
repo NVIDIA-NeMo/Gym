@@ -16,16 +16,21 @@ from unittest.mock import patch
 
 import pytest
 
+import nemo_gym.openai_utils as openai_utils
 import nemo_gym.server_utils as server_utils
 
 
 @pytest.fixture(autouse=True)
 def _manage_global_aiohttp_client():
-    """Prevent Hydra CLI parsing and reset the global aiohttp client between tests.
+    """Prevent Hydra CLI parsing, disable retries, and reset the global aiohttp client between tests.
 
     get_global_aiohttp_client() calls get_global_config_dict() which parses Hydra CLI args.
     Under pytest, those args cause argparse.SystemExit. Mocking returns default config values.
+    MAX_NUM_TRIES=1 disables retries so tests fail fast on rate limits or server errors.
     """
-    with patch.object(server_utils, "get_global_config_dict", return_value={}):
+    with (
+        patch.object(server_utils, "get_global_config_dict", return_value={}),
+        patch.object(openai_utils, "MAX_NUM_TRIES", 1),
+    ):
         yield
     server_utils._GLOBAL_AIOHTTP_CLIENT = None
