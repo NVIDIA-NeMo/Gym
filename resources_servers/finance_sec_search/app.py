@@ -210,7 +210,16 @@ class FinanceAgentSearchResponse(BaseModel):
 class RetrieveInformationRequest(BaseModel):
     """Request model for retrieve_information tool."""
 
-    prompt: str = Field(description="Prompt with {{key_name}} placeholders for stored documents.")
+    prompt: str = Field(
+        description=(
+            "An LLM prompt applied to your saved documents. You MUST include at least "
+            "one data-storage key using the exact double-brace format {{key_name}} -- "
+            "for example: 'Summarize this 10-K filing: {{company_10k}}'. The full text "
+            "stored under each key replaces its {{key_name}} placeholder before the "
+            "prompt is sent. If you do not use this exact {{key_name}} format, the tool "
+            "will fail."
+        )
+    )
     input_character_ranges: Optional[List[Dict[str, Any]]] = Field(
         default=None, description="Optional list of character ranges: [{'key': 'doc', 'start': 0, 'end': 100000}]"
     )
