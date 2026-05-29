@@ -8,6 +8,9 @@ NeMo Gym can launch and manage the vLLM server for you using LocalVLLMModel (in 
 LocalVLLMModel is a subclass of VLLMModel that spawns the vLLM engine and auto-configures the model server to use it.
 The Chat Completions to Responses API conversion is inherited from VLLMModel. See [VLLMModel](/model-server/vllm) for details.
 
+A single LocalVLLMModel deployment can back multiple model servers, even when they need different request-time settings (e.g. sampling parameters or reasoning on/off).
+See [Local vLLM Proxy](/model-server/local-vllm-proxy) for this configuration.
+
 <Note>
 If you want to connect NeMo Gym to a vLLM server you start and manage yourself, use VLLMModel directly. See [VLLMModel](/model-server/vllm) for more details.
 </Note>
