@@ -60,5 +60,4 @@ jobs:
           pytest responses_api_models/chat_completions_model/tests/test_integration.py \
             -m integration \
             -v \
-            --tb=short \
-            -x
+            --tb=short
