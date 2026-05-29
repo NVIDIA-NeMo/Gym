@@ -25,4 +25,4 @@ mrcr_n3_1m_benchmark_simple_agent:
         # placeholder — it only triggers row duplication for
         # `type: train`/`validation`. To actually get N rollouts per task,
         # pass `+num_repeats=N` on the `ng_collect_rollouts` CLI.
-        num_repeats: 4
+        num_repeats: 1
