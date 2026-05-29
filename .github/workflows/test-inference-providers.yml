@@ -79,6 +79,29 @@ jobs:
           fi
           echo "Secret ${{ matrix.secret_name }} is configured"
 
+      - name: List available models
+        env:
+          API_KEY: ${{ secrets[matrix.secret_name] }}
+        continue-on-error: true
+        run: |
+          python - <<'PYEOF'
+          import os
+          from openai import OpenAI
+
+          client = OpenAI(
+              base_url="${{ matrix.base_url }}",
+              api_key=os.environ["API_KEY"],
+          )
+          try:
+              models = client.models.list()
+              names = sorted(m.id for m in models.data)[:20]
+              print(f"${{ matrix.provider }} — {len(names)} models (showing first 20):")
+              for n in names:
+                  print(f"  {n}")
+          except Exception as e:
+              print(f"${{ matrix.provider }} /v1/models: {e}")
+          PYEOF
+
       - name: Smoke test chat completion
         env:
           API_KEY: ${{ secrets[matrix.secret_name] }}
