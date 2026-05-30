@@ -14,6 +14,8 @@
 # limitations under the License.
 import contextlib
 import logging
+import re
+from decimal import Decimal, InvalidOperation
 from io import StringIO
 from typing import Any, ClassVar, Dict, List, Optional, Union
 
@@ -187,6 +189,119 @@ Example output: "My final verdict is different [[A!=B]]"."""
             s = s[1:-1].strip()
         return s
 
+    @staticmethod
+    def _strip_outer_latex_command(s: str, command: str) -> str:
+        prefix = f"\\{command}{{"
+        if not s.startswith(prefix):
+            return s
+
+        content = s[len(prefix) :]
+        depth = 1
+        for i, char in enumerate(content):
+            if char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+            if depth == 0:
+                if i == len(content) - 1:
+                    return content[:i].strip()
+                return s
+        return s
+
+    @classmethod
+    def _extract_all_boxed(cls, text: str) -> list[str]:
+        if "\\boxed{" not in text:
+            return []
+
+        results: list[str] = []
+        parts = text.split("\\boxed{")[1:]
+        for part in parts:
+            depth = 1
+            for i, char in enumerate(part):
+                if char == "{":
+                    depth += 1
+                elif char == "}":
+                    depth -= 1
+                if depth == 0:
+                    results.append(part[:i].strip())
+                    break
+        return results
+
+    @classmethod
+    def _normalize_lenient_answer(cls, answer: Any) -> str:
+        answer = str(answer).strip()
+        answer = cls._strip_math_delimiters(answer)
+
+        previous = None
+        while answer != previous:
+            previous = answer
+            for command in ("boxed", "text", "mathrm", "operatorname"):
+                answer = cls._strip_outer_latex_command(answer, command)
+                answer = cls._strip_math_delimiters(answer)
+
+        replacements = {
+            "\u00b0": "",
+            "^\\circ": "",
+            "^{\\circ}": "",
+            "\\circ": "",
+            "\\degree": "",
+            "\\%": "%",
+            "\\,": "",
+            "\u2212": "-",
+            "\ufe63": "-",
+            "\ufe62": "+",
+            "\ufe66": "=",
+            "\ufe64": "<",
+            "\ufe65": ">",
+            "\uff1a": ":",
+        }
+        for old, new in replacements.items():
+            answer = answer.replace(old, new)
+
+        answer = answer.strip().strip(".")
+        answer = re.sub(r"(?<=\d),(?=\d{3}(?:\D|$))", "", answer)
+        answer = answer.replace("%", "")
+        answer = answer.lower()
+        answer = re.sub(r"\s+", "", answer)
+        return answer
+
+    @classmethod
+    def _normalize_numeric_answer(cls, answer: Any) -> Optional[Decimal]:
+        normalized = cls._normalize_lenient_answer(answer)
+        normalized = re.sub(r"(?:cm2|cm\^2|cm|m3|m\^3|m2|m\^2|m|kg|\u514b)$", "", normalized)
+        normalized = normalized.strip()
+        if not re.fullmatch(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?", normalized):
+            return None
+        try:
+            return Decimal(normalized)
+        except InvalidOperation:
+            return None
+
+    @classmethod
+    def _lenient_answers_equal(cls, expected_answer: str, predicted_answer: Any) -> bool:
+        expected_numeric = cls._normalize_numeric_answer(expected_answer)
+        predicted_numeric = cls._normalize_numeric_answer(predicted_answer)
+        if expected_numeric is not None and predicted_numeric is not None:
+            return expected_numeric == predicted_numeric
+
+        return cls._normalize_lenient_answer(expected_answer) == cls._normalize_lenient_answer(predicted_answer)
+
+    @classmethod
+    def _try_lenient_fallback(
+        cls, expected_answer: str, generated_answer: str, extracted_answer: Optional[Any]
+    ) -> tuple[float, Optional[Any]]:
+        candidate_answers: list[Any] = []
+        if extracted_answer is not None:
+            candidate_answers.append(extracted_answer)
+        boxed_answers = cls._extract_all_boxed(generated_answer)
+        if boxed_answers:
+            candidate_answers.append(boxed_answers[-1])
+
+        for candidate_answer in candidate_answers:
+            if cls._lenient_answers_equal(expected_answer, candidate_answer):
+                return 1.0, candidate_answer
+        return 0.0, extracted_answer
+
     def _verify_answer_with_library(self, expected_answer: str, generated_answer: str) -> tuple[float, Optional[str]]:
         # This functionality is migrated from Nemo RL.
         # https://github.com/NVIDIA-NeMo/RL/blob/e1f56c42ae175d3863ccaf4e21b7de7e9c46c2e1/nemo_rl/environments/math_environment.py
@@ -214,6 +329,11 @@ Example output: "My final verdict is different [[A!=B]]"."""
                     # incorrect.  The first prediction is used as the extracted
                     # answer.
                     extracted_answer = extracted_prediction[0] if extracted_prediction else None
+
+            if reward <= 0.0:
+                reward, extracted_answer = self._try_lenient_fallback(
+                    expected_answer, generated_answer, extracted_answer
+                )
 
             return reward, extracted_answer
 

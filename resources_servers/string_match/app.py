@@ -83,14 +83,6 @@ def _strip_latex_wrappers(s: str) -> str:
     return s
 
 
-def _normalize(s: str) -> str:
-    """Lowercase, strip, collapse whitespace, normalize unicode."""
-    s = unicodedata.normalize("NFKC", s)
-    s = s.strip()
-    s = " ".join(s.split())
-    return s.lower()
-
-
 def _extract_boxed(text: str) -> Optional[str]:
     """Extract the last \\boxed{...} content."""
     matches = BOXED_PATTERN.findall(text)
@@ -139,10 +131,226 @@ def _extract_answer(text: str, mode: str) -> Optional[str]:
     return None
 
 
-def _answers_match(extracted: str, expected: str, case_sensitive: bool) -> bool:
+def _grade_string_match(gt_answer: str, pred_answer: str) -> float:
+    """NeMoRL string-match verifier without format reward."""
+    pred_answer = unicodedata.normalize("NFKC", pred_answer)
+    gt_answer = unicodedata.normalize("NFKC", gt_answer)
+    pred_answer = _strip_outer_quotes(pred_answer).lower()
+    gt_answer = _strip_outer_quotes(gt_answer).lower()
+    pred_answer = _strip_trailing_punctuation(pred_answer)
+    gt_answer = _strip_trailing_punctuation(gt_answer)
+
+    if pred_answer == gt_answer:
+        return 1.0
+    if _normalize_float(pred_answer) == _normalize_float(gt_answer):
+        return 1.0
+    if _normalize_numbers(pred_answer) == _normalize_numbers(gt_answer):
+        return 1.0
+    if _normalize_latex(pred_answer) == _normalize_latex(gt_answer):
+        return 1.0
+    if _normalize_lists(pred_answer) == _normalize_lists(gt_answer):
+        return 1.0
+    if _normalize_states(pred_answer) == _normalize_states(gt_answer):
+        return 1.0
+    if _soft_numeric_grade(gt_answer, pred_answer) > 0.98:
+        return 0.98
+
+    pred_stripped = _MATH_UNITS_RE.sub(
+        "", _normalize_unicode_math(_normalize_latex(pred_answer))
+    ).strip()
+    gt_stripped = _MATH_UNITS_RE.sub(
+        "", _normalize_unicode_math(_normalize_latex(gt_answer))
+    ).strip()
+    if pred_stripped == gt_stripped:
+        return 1.0
+    if _soft_numeric_grade(gt_stripped, pred_stripped) > 0.98:
+        return 0.98
+    return 0.0
+
+
+def _answers_match(extracted: str, expected: str, case_sensitive: bool) -> float:
     if case_sensitive:
-        return extracted.strip() == expected.strip()
-    return _normalize(extracted) == _normalize(expected)
+        return 1.0 if extracted.strip() == expected.strip() else 0.0
+    return _grade_string_match(expected, extracted)
+
+
+def _strip_outer_quotes(text: str) -> str:
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
+        return text[1:-1]
+    return text
+
+
+def _strip_trailing_punctuation(text: str) -> str:
+    stripped = text.rstrip(".!?")
+    return stripped or text
+
+
+def _normalize_float(text: str) -> str:
+    cleaned = text.replace("\\%", "").replace("\\$", "").replace("$", "").strip()
+    try:
+        return str(float(cleaned))
+    except ValueError:
+        return text
+
+
+def _normalize_numbers(text: str) -> str:
+    text = re.sub(r"(\d+),(\d+)", r"\1\2", text)
+    text = text.replace("\\%", "%")
+    return text
+
+
+def _normalize_lists(text: str) -> str:
+    orig_text = text
+    orig_len = len(text)
+    text = text.replace(",", " ").replace(";", " ")
+    text = text.replace("and", " ").replace("or", " ")
+    if len(text) < 0.9 * orig_len:
+        return orig_text
+    text = " ".join(text.split())
+    return text
+
+
+def _normalize_latex(text: str) -> str:
+    for cmd in (
+        "\\boxed",
+        "\\text",
+        "\\textbf",
+        "\\textit",
+        "\\texttt",
+        "\\mathrm",
+        "\\mathbf",
+        "\\mathit",
+        "\\mathsf",
+        "\\mathbb",
+        "\\mathcal",
+        "\\emph",
+        "\\url",
+    ):
+        text = _remove_latex_command(cmd, text)
+    for token in ("\\(", "\\)", "\\[", "\\]"):
+        text = text.replace(token, "")
+    text = text.replace("$", "")
+    text = " ".join(text.split())
+    return text
+
+
+def _remove_latex_command(cmd: str, text: str) -> str:
+    assert cmd.startswith("\\"), f"command must start with \\: {cmd}"
+    while cmd + "{" in text:
+        prefix, suffix = text.split(cmd + "{", 1)
+        depth = 1
+        for i, char in enumerate(suffix):
+            if char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+            if depth == 0:
+                text = prefix + suffix[:i] + suffix[i + 1 :]
+                break
+        if depth != 0:
+            text = prefix + suffix
+    return text
+
+
+def _normalize_states(text: str) -> str:
+    text = (
+        text.replace("district of columbia", "DC")
+        .replace("new hampshire", "NH")
+        .replace("new jersey", "NJ")
+        .replace("new mexico", "NM")
+        .replace("new york", "NY")
+        .replace("north carolina", "NC")
+        .replace("north dakota", "ND")
+        .replace("rhode island", "RI")
+        .replace("south carolina", "SC")
+        .replace("south dakota", "SD")
+        .replace("west virginia", "WV")
+        .replace("alabama", "AL")
+        .replace("alaska", "AK")
+        .replace("arizona", "AZ")
+        .replace("arkansas", "AR")
+        .replace("california", "CA")
+        .replace("colorado", "CO")
+        .replace("connecticut", "CT")
+        .replace("delaware", "DE")
+        .replace("florida", "FL")
+        .replace("georgia", "GA")
+        .replace("hawaii", "HI")
+        .replace("idaho", "ID")
+        .replace("illinois", "IL")
+        .replace("indiana", "IN")
+        .replace("iowa", "IA")
+        .replace("kansas", "KS")
+        .replace("kentucky", "KY")
+        .replace("louisiana", "LA")
+        .replace("maine", "ME")
+        .replace("maryland", "MD")
+        .replace("massachusetts", "MA")
+        .replace("michigan", "MI")
+        .replace("minnesota", "MN")
+        .replace("mississippi", "MS")
+        .replace("missouri", "MO")
+        .replace("montana", "MT")
+        .replace("nebraska", "NE")
+        .replace("nevada", "NV")
+        .replace("ohio", "OH")
+        .replace("oklahoma", "OK")
+        .replace("oregon", "OR")
+        .replace("pennsylvania", "PA")
+        .replace("tennessee", "TN")
+        .replace("texas", "TX")
+        .replace("utah", "UT")
+        .replace("vermont", "VT")
+        .replace("virginia", "VA")
+        .replace("washington", "WA")
+        .replace("wisconsin", "WI")
+        .replace("wyoming", "WY")
+    )
+    return _normalize_lists(text)
+
+
+def _normalize_unicode_math(text: str) -> str:
+    return (
+        text.replace("°", "^\\circ")
+        .replace("²", "^2")
+        .replace("³", "^3")
+        .replace("⁴", "^4")
+        .replace("⁵", "^5")
+        .replace("⁶", "^6")
+        .replace("⁷", "^7")
+        .replace("⁸", "^8")
+        .replace("⁹", "^9")
+        .replace("√", "\\sqrt")
+        .replace("﹣", "-")
+        .replace("﹢", "+")
+        .replace("﹦", "=")
+        .replace("﹤", "<")
+        .replace("﹥", ">")
+        .replace("：", ":")
+        .replace("π", "\\pi")
+    )
+
+
+_MATH_UNITS_RE = re.compile(r"\^\{?\\circ\}?|\\circ|°|cm[²³]?|mm|km|m[²³]?|kg")
+
+
+def _strip_numeric(text: str) -> str:
+    for ch in "$£€%,":
+        text = text.replace(ch, "")
+    text = _MATH_UNITS_RE.sub("", _normalize_unicode_math(text))
+    return text.replace("\\%", "").replace("\\$", "").strip()
+
+
+def _soft_numeric_grade(gt_answer: str, pred_answer: str) -> float:
+    pred = _strip_numeric(pred_answer)
+    gt = _strip_numeric(gt_answer)
+    try:
+        pv = float(pred)
+        gv = float(gt)
+    except ValueError:
+        return 0.0
+    rel_error = abs(pv - gv) / max(abs(gv), 1e-9)
+    return max(0.0, 1.0 - rel_error) ** 2
 
 
 class StringMatchResourcesServer(SimpleResourcesServer):
@@ -156,11 +364,9 @@ class StringMatchResourcesServer(SimpleResourcesServer):
         text = _extract_last_assistant_text(body)
         extracted = _extract_answer(text, body.extraction_mode)
 
-        is_correct = False
+        reward = 0.0
         if extracted is not None and body.expected_answer:
-            is_correct = _answers_match(extracted, body.expected_answer, body.case_sensitive)
-
-        reward = 1.0 if is_correct else 0.0
+            reward = _answers_match(extracted, body.expected_answer, body.case_sensitive)
 
         return StringMatchVerifyResponse(
             **body.model_dump(exclude={"expected_answer", "extracted_answer"}),

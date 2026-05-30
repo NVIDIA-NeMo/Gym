@@ -321,6 +321,36 @@ class TestApp:
             approx(1.0),
             "4",
         )
+        assert resources_server._verify_answer_with_library("40\u00b0", "Angle is \\boxed{40}") == (
+            approx(1.0),
+            "40",
+        )
+        assert resources_server._verify_answer_with_library("37.04%", "Accuracy is \\boxed{37.04}") == (
+            approx(1.0),
+            "37.0400000000000",
+        )
+        assert resources_server._verify_answer_with_library("5,881.", "Total is \\boxed{5881}") == (
+            approx(1.0),
+            "5881",
+        )
+        assert resources_server._verify_answer_with_library("Mice", "The answer is \\boxed{MICE}") == (
+            approx(1.0),
+            "MICE",
+        )
+        assert resources_server._verify_answer_with_library(
+            "[1, 1] at level 0", "The cell is \\boxed{[1,1] at level 0}"
+        ) == (
+            approx(1.0),
+            "[1,1] at level 0",
+        )
+        assert resources_server._verify_answer_with_library("4", "\\boxed{2} and finally \\boxed{4}") == (
+            approx(1.0),
+            "4",
+        )
+        assert resources_server._verify_answer_with_library("4", "\\boxed{4} and finally \\boxed{5}") == (
+            approx(0.0),
+            "{4, 5}",
+        )
 
         assert resources_server._verify_answer_with_library("\\boxed{12}", "3 * 4 = 13") == (approx(0.0), "13")
         assert resources_server._verify_answer_with_library("17.001", "17") == (
