@@ -1,4 +1,4 @@
-# Turing VIF Resource Server Dependencies
+# VerifIF Resource Server Dependencies
 # Install nemo_gym from parent directory (provides fastapi, pydantic, etc.)
 -e nemo-gym[dev] @ ../../
 

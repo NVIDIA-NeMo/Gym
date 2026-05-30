@@ -1,6 +1,6 @@
-# Turing VIF Resource Server
+# VerifIF Resource Server
 
-A NeMo Gym resource server that integrates **Turing VIF** (Verifiable Instruction Following) validators for comprehensive instruction-following evaluation in reinforcement learning training.
+A NeMo Gym resource server that integrates **VerifIF** (Verifiable Instruction Following) validators for comprehensive instruction-following evaluation in reinforcement learning training.
 
 ## Overview
 
@@ -31,22 +31,22 @@ policy_model_name: gpt-5-2025-08-07  # or gpt-4.1-2025-04-14
 ```bash
 cd /path/to/Gym
 source .venv/bin/activate
-ng_run "+config_paths=[resources_servers/turing_vif/configs/turing_vif.yaml,responses_api_models/openai_model/configs/openai_model.yaml]"
+ng_run "+config_paths=[resources_servers/verifif/configs/verifif.yaml,responses_api_models/openai_model/configs/openai_model.yaml]"
 ```
 
 ### 3. Run a test
 
 ```bash
 ng_collect_rollouts \
-    +agent_name=turing_vif_simple_agent \
-    +input_jsonl_fpath=resources_servers/turing_vif/data/example.jsonl \
+    +agent_name=verifif_simple_agent \
+    +input_jsonl_fpath=resources_servers/verifif/data/example.jsonl \
     +output_jsonl_fpath=results.jsonl
 ```
 
 ## Architecture
 
 ```
-turing_vif/
+verifif/
 ├── app.py                    # Main resource server (TuringVIFResourcesServer)
 ├── vif_validators/           # Validation logic
 │   ├── __init__.py
@@ -56,7 +56,7 @@ turing_vif/
 │   ├── subinstruction_definition.csv
 │   └── evaluation_modes.csv
 ├── configs/
-│   └── turing_vif.yaml       # Server configuration
+│   └── verifif.yaml       # Server configuration
 ├── data/
 │   └── example.jsonl         # Example dataset
 ├── tests/
@@ -90,12 +90,12 @@ turing_vif/
 
 ## Configuration
 
-### Server Config (`configs/turing_vif.yaml`)
+### Server Config (`configs/verifif.yaml`)
 
 ```yaml
-turing_vif:
+verifif:
   resources_servers:
-    turing_vif:
+    verifif:
       entrypoint: app.py
       domain: instruction_following
       # Reward aggregation mode
@@ -123,9 +123,9 @@ Override in your experiment YAML:
 ```yaml
 env:
   nemo_gym:
-    turing_vif:
+    verifif:
       resources_servers:
-        turing_vif:
+        verifif:
           aggregation_mode: mean
 ```
 
@@ -168,7 +168,7 @@ Each entry in your JSONL dataset should have:
 ```bash
 cd /path/to/Gym
 source .venv/bin/activate
-pytest resources_servers/turing_vif/tests/ -v
+pytest resources_servers/verifif/tests/ -v
 ```
 
 ## API Endpoints
@@ -237,7 +237,7 @@ For high-throughput training:
 | `401 Unauthorized` | Check `policy_api_key` in `env.yaml` |
 | `400 Bad Request` with GPT-5 | Ensure you're using the latest `app.py` with Responses API support |
 | `ModuleNotFoundError` | Run `ray stop --force` and restart servers |
-| Server won't start | Delete `.venv` in `resources_servers/turing_vif/` and restart |
+| Server won't start | Delete `.venv` in `resources_servers/verifif/` and restart |
 
 ### Debugging
 

@@ -1,14 +1,14 @@
-# Turing VIF Resource Server Configuration
+# VerifIF Resource Server Configuration
 # This server validates LLM responses against instruction-following criteria
 # using both fast rule-based validators and async LLM-as-a-judge validators.
 
-turing_vif:
+verifif:
   resources_servers:
-    turing_vif:
+    verifif:
       entrypoint: app.py
       domain: instruction_following
       verified: false
-      description: Turing VIF instruction following validators with rule-based and LLM judge support
+      description: VerifIF instruction following validators with rule-based and LLM judge support
       value: Improve instruction following capabilities with comprehensive validation
       # Reward aggregation: how individual check verdicts combine into the final reward
       # Options: all (AND), any (OR), mean, min, max
@@ -22,17 +22,17 @@ turing_vif:
       judge_top_p: 0.8
       judge_max_tokens: 10000
 
-turing_vif_simple_agent:
+verifif_simple_agent:
   responses_api_agents:
     simple_agent:
       entrypoint: app.py
       resources_server:
         type: resources_servers
-        name: turing_vif
+        name: verifif
       model_server:
         type: responses_api_models
         name: policy_model
       datasets:
       - name: example
         type: example
-        jsonl_fpath: resources_servers/turing_vif/data/example.jsonl
+        jsonl_fpath: resources_servers/verifif/data/example.jsonl

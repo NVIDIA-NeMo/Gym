@@ -13,14 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for the Turing VIF Resource Server."""
+"""Unit tests for the VerifIF Resource Server."""
 
 import asyncio
 from unittest.mock import MagicMock
 
 from nemo_gym.base_resources_server import NeMoGymResponse
 from nemo_gym.server_utils import ServerClient
-from resources_servers.turing_vif.app import (
+from resources_servers.verifif.app import (
     TuringVIFResourcesServer,
     TuringVIFResourcesServerConfig,
     TuringVIFVerifyRequest,
@@ -41,7 +41,7 @@ def _normalize_instructions(instructions):
 
 
 class TestTuringVIFApp:
-    """Test suite for the Turing VIF Resource Server."""
+    """Test suite for the VerifIF Resource Server."""
 
     def _create_server(self):
         """Helper to create server instance."""
@@ -121,7 +121,7 @@ class TestTuringVIFApp:
 
     def test_validator_imports(self) -> None:
         """Test that VIF validators can be imported."""
-        from resources_servers.turing_vif.vif_validators.data_loader import (
+        from resources_servers.verifif.vif_validators.data_loader import (
             EXPECTED_ARGUMENTS,
             LLM_INSTRUCTIONS,
         )

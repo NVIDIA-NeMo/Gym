@@ -14,5 +14,5 @@
 # limitations under the License.
 
 """
-Turing VIF tests.
+VerifIF tests.
 """

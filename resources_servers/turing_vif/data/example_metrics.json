@@ -1,7 +1,7 @@
 {
     "name": "example",
     "type": "example",
-    "jsonl_fpath": "resources_servers/turing_vif/data/example.jsonl",
+    "jsonl_fpath": "resources_servers/verifif/data/example.jsonl",
     "num_repeats": 1,
     "gitlab_identifier": null,
     "huggingface_identifier": null,

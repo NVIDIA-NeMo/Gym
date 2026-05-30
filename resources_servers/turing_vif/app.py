@@ -14,9 +14,9 @@
 # limitations under the License.
 
 """
-Turing VIF Resource Server for NeMo Gym.
+VerifIF Resource Server for NeMo Gym.
 
-This resource server integrates the Turing VIF (Verifiable Instruction Following)
+This resource server integrates the VerifIF (Verifiable Instruction Following)
 validators into NeMo Gym's reinforcement learning framework. It supports both
 fast rule-based validators and async LLM-based judge validators.
 """
@@ -99,7 +99,7 @@ class AggregationMode(str, Enum):
 
 
 class TuringVIFResourcesServerConfig(BaseResourcesServerConfig):
-    """Configuration for the Turing VIF Resource Server."""
+    """Configuration for the VerifIF Resource Server."""
 
     judge_server_name: Optional[str] = Field(
         default=None,
@@ -165,7 +165,7 @@ class LLMJudgeItem(BaseModel):
 
 
 class TuringVIFRunRequest(BaseRunRequest):
-    """Request model for the Turing VIF resource server."""
+    """Request model for the VerifIF resource server."""
 
     id: int = Field(default=0, description="Request identifier")
     instructions: List[Dict[str, Any]] = Field(
@@ -285,7 +285,7 @@ def _extract_text_from_response(response, exclude_thinking: bool = True) -> str:
 
 class TuringVIFResourcesServer(SimpleResourcesServer):
     """
-    Turing VIF Resource Server for NeMo Gym.
+    VerifIF Resource Server for NeMo Gym.
 
     Validates LLM responses against instruction-following criteria using both
     fast rule-based validators and async LLM-as-a-judge validators.
