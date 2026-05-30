@@ -18,9 +18,9 @@ Downloads train and validation splits from HuggingFace and converts them
 to Gym JSONL format.
 
 Usage:
-    python environments/workplace_assistant_simple_agent/prepare.py
-    python environments/workplace_assistant_simple_agent/prepare.py --split train
-    python environments/workplace_assistant_simple_agent/prepare.py --split validation
+    python environments/workplace_assistant/prepare.py
+    python environments/workplace_assistant/prepare.py --split train
+    python environments/workplace_assistant/prepare.py --split validation
 """
 
 import argparse

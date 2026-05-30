@@ -12,14 +12,14 @@ Spin up server:
 
 ```
 config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
-environments/workplace_assistant_simple_agent/config.yaml"
+environments/workplace_assistant/config.yaml"
 ng_run "+config_paths=[$config_paths]"
 ```
 
 Collect trajectories:
 ```
 ng_collect_rollouts +agent_name=workplace_assistant_simple_agent \
-    +input_jsonl_fpath=environments/workplace_assistant_simple_agent/data/example.jsonl \
+    +input_jsonl_fpath=environments/workplace_assistant/data/example.jsonl \
     +output_jsonl_fpath=results/workplace_assistant_trajectory_collection.jsonl \
    +limit=1
 ```
