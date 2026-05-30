@@ -41,6 +41,12 @@ Use this skill when the task is to turn existing agent trajectories or rollout a
 Nemo Gym pivot dataset, or to validate whether a pivot JSONL/config pair can be used for
 single-step local RL or evaluation.
 
+Do not activate this skill for these adjacent tasks:
+
+- Running or profiling rewards on an existing dataset. Use `nemo-gym-reward-profiling`.
+- Debugging a failed or crashed run (Ray/vLLM stack traces, empty output). Use `nemo-gym-debugging`.
+- Adding or scaffolding a new benchmark or training environment. Use `add-benchmark`.
+
 Before writing a converter, inspect representative source rows and the target resource server.
 Do not assume the source field names are the contract. Convert by reconstructing the semantic
 pieces needed by Gym's Responses-style row format.
