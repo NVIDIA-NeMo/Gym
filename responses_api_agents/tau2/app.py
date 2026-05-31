@@ -199,10 +199,17 @@ class Tau2Agent(SimpleResponsesAPIAgent):
             max_completion_tokens = max(completion_usages)
         print(f"Domain: {body.config.domain} Task ID: {body.task.id} | After usages max", file=sys.stderr)
 
-        return Tau2VerifyResponse(
+        num_steps = len(result.messages)
+        rcp_input = body.responses_create_params.input + input_items_1 + input_items_2
+        print(
+            f"Domain: {body.config.domain} Task ID: {body.task.id} | After verify result preprocessing. {len(body.responses_create_params.input)} {len(input_items_1)} {len(input_items_2)} {len(output_items)} {list(map(id, rcp_input))} {list(map(id, output_items))}",
+            file=sys.stderr,
+        )
+
+        result = Tau2VerifyResponse(
             **body_dict,
             responses_create_params=dict(
-                input=body.responses_create_params.input + input_items_1 + input_items_2,
+                input=rcp_input,
                 model=body.responses_create_params.model or "",
                 parallel_tool_calls=body.responses_create_params.parallel_tool_calls,
                 tool_choice=body.responses_create_params.tool_choice,
@@ -221,7 +228,7 @@ class Tau2Agent(SimpleResponsesAPIAgent):
             reward=result.reward_info.reward,
             result=result,
             duration=result.duration,
-            num_steps=len(result.messages),
+            num_steps=num_steps,
             num_agent_calls=num_agent_calls,
             min_prompt_tokens=min_prompt_tokens,
             min_completion_tokens=min_completion_tokens,
@@ -230,6 +237,9 @@ class Tau2Agent(SimpleResponsesAPIAgent):
             max_prompt_tokens=max_prompt_tokens,
             max_completion_tokens=max_completion_tokens,
         )
+        print(f"Domain: {body.config.domain} Task ID: {body.task.id} | After verify result creation", file=sys.stderr)
+
+        return result
 
     def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
         """Override to select headline metrics for this benchmark.
