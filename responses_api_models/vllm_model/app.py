@@ -23,7 +23,7 @@ from uuid import uuid4
 
 from aiohttp.client_exceptions import ClientResponseError
 from fastapi import Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 
 from nemo_gym.base_responses_api_model import (
     BaseResponsesAPIModelConfig,
@@ -66,6 +66,13 @@ from nemo_gym.openai_utils import (
 from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
 
 
+class ReasoningTagsConfig(BaseModel):
+    """Configures the tag pair used to wrap and parse reasoning content in assistant messages."""
+
+    start: str = "<think>"
+    end: str = "</think>"
+
+
 class VLLMModelConfig(BaseResponsesAPIModelConfig):
     base_url: Union[str, List[str]]
     api_key: str
@@ -94,6 +101,7 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     # ``data:audio/<fmt>;base64,...`` URI at request time — keeps the JSONL
     # small without depending on vLLM's ``--allowed-local-media-path``.
     audio_root: Optional[str] = None
+    reasoning_tags: ReasoningTagsConfig = Field(default_factory=ReasoningTagsConfig)
 
     def model_post_init(self, context):
         if isinstance(self.base_url, str):
@@ -111,6 +119,8 @@ class VLLMModel(SimpleResponsesAPIModel):
         """
         return VLLMConverter(
             return_token_id_information=self.config.return_token_id_information,
+            reasoning_start_tag=self.config.reasoning_tags.start,
+            reasoning_end_tag=self.config.reasoning_tags.end,
         )
 
     def model_post_init(self, context):
@@ -489,8 +499,9 @@ class VLLMModel(SimpleResponsesAPIModel):
                 # See the TODO wrt reasoning_content above
                 choice_dict["message"].pop("reasoning", None)
 
-                # We wrap this here in think tags for Gym's sake and to return a valid OpenAI Chat Completions response.
-                choice_dict["message"]["content"] = self._converter._wrap_reasoning_in_think_tags(
+                # We wrap this here in the configured reasoning tags for Gym's sake and to return a valid OpenAI Chat
+                # Completions response.
+                choice_dict["message"]["content"] = self._converter._wrap_reasoning_in_tags(
                     [reasoning_content]
                 ) + (choice_dict["message"].get("content") or "")
         else:
@@ -618,23 +629,30 @@ class VLLMConverterResponsesToChatCompletionsState(BaseModel):
 
 class VLLMConverter(BaseModel):
     return_token_id_information: bool
+    reasoning_start_tag: str = "<think>"
+    reasoning_end_tag: str = "</think>"
+    _reasoning_tag_regex: re.Pattern = PrivateAttr()
 
     # =======================================================
     # Reasoning handling. This may change across models and model families
     # =======================================================
 
-    THINK_TAG_PATTERN: ClassVar = re.compile(r"<think>(.*?)</think>", re.DOTALL)
+    def model_post_init(self, context) -> None:
+        """Pre-compile the configured reasoning-tag regex once at initialization time."""
 
-    @staticmethod
-    def _wrap_reasoning_in_think_tags(texts: List[str]) -> str:
-        return "".join(f"<think>{t}</think>" for t in texts if t)
+        self._reasoning_tag_regex = re.compile(
+            rf"{re.escape(self.reasoning_start_tag)}(.*?){re.escape(self.reasoning_end_tag)}",
+            re.DOTALL,
+        )
 
-    @classmethod
-    def _parse_think_tags(cls, content: str) -> Tuple[List[str], str]:
-        # Extract reasoning content from between <think></think> tags.
-        matches = cls.THINK_TAG_PATTERN.findall(content)
+    def _wrap_reasoning_in_tags(self, texts: List[str]) -> str:
+        return "".join(f"{self.reasoning_start_tag}{t}{self.reasoning_end_tag}" for t in texts if t)
+
+    def _parse_reasoning_tags(self, content: str) -> Tuple[List[str], str]:
+        # Extract reasoning content from between the configured reasoning tags.
+        matches = self._reasoning_tag_regex.findall(content)
         # Remove reasoning from main content
-        cleaned = cls.THINK_TAG_PATTERN.sub("", content)
+        cleaned = self._reasoning_tag_regex.sub("", content)
         return matches, cleaned
 
     # =======================================================
@@ -822,7 +840,7 @@ class VLLMConverter(BaseModel):
         """
         if "summary" in m and m["summary"]:
             texts = [s["text"] for s in m["summary"]]
-            state.content_buffer += self._wrap_reasoning_in_think_tags(texts)
+            state.content_buffer += self._wrap_reasoning_in_tags(texts)
 
     def _format_function_call(
         self,
@@ -913,9 +931,8 @@ class VLLMConverter(BaseModel):
         return response_output
 
     def _extract_reasoning_from_content(self, content: str) -> Tuple[List[str], str]:
-        # TODO: Currently only parses reasoning wrapped in <think>...</think> tags.
-        # Maybe parameterize to support other model formats in the future.
-        return self._parse_think_tags(content)
+        # Parse reasoning wrapped in the configured reasoning tags.
+        return self._parse_reasoning_tags(content)
 
     def chat_completions_messages_to_responses_items(
         self, messages: List[Dict[str, Any]]

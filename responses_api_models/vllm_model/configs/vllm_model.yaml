@@ -8,6 +8,9 @@ policy_model:
       return_token_id_information: false
       uses_reasoning_parser: true
       uses_interleaved_reasoning: true
+      reasoning_tags:
+        start: "<think>"
+        end: "</think>"
       chat_template_kwargs: null
       extra_body: null
       default_headers: {}

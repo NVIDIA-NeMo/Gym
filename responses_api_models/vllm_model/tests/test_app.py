@@ -683,6 +683,29 @@ class TestApp:
     async def test_sanity(self, monkeypatch: MonkeyPatch) -> None:
         self._setup_server(monkeypatch)
 
+    def test_converter_initialization_uses_configured_reasoning_tags(self, monkeypatch: MonkeyPatch) -> None:
+        config = VLLMModelConfig(
+            host="0.0.0.0",
+            port=8081,
+            base_url="http://api.openai.com/v1",
+            api_key="dummy_key",  # pragma: allowlist secret
+            model="dummy_model",
+            entrypoint="",
+            name="",
+            return_token_id_information=False,
+            uses_reasoning_parser=True,
+            reasoning_tags={"start": "<reasoning>", "end": "</reasoning>"},
+        )
+
+        get_global_config_dict_mock = MagicMock()
+        get_global_config_dict_mock.return_value = dict()
+        monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", get_global_config_dict_mock)
+
+        server = VLLMModel(config=config, server_client=MagicMock(spec=ServerClient))
+
+        assert server._converter.reasoning_start_tag == "<reasoning>"
+        assert server._converter.reasoning_end_tag == "</reasoning>"
+
     def test_responses_multistep(self, monkeypatch: MonkeyPatch):
         server = self._setup_server(monkeypatch)
         app = server.setup_webserver()
@@ -2725,6 +2748,57 @@ class TestVLLMConverter:
         reasoning_none, main_content_none = self.converter._extract_reasoning_from_content(content_none)
         assert reasoning_none == []
         assert main_content_none == "Just plain content here."
+
+    def test_extract_reasoning_from_content_custom_tags(self):
+        converter = VLLMConverter(
+            return_token_id_information=False,
+            reasoning_start_tag="<reasoning>",
+            reasoning_end_tag="</reasoning>",
+        )
+
+        content = "First.<reasoning>Thought 1.</reasoning>Second.<reasoning>Thought 2.</reasoning>Done."
+        reasoning, main_content = converter._extract_reasoning_from_content(content)
+
+        assert reasoning == ["Thought 1.", "Thought 2."]
+        assert main_content == "First.Second.Done."
+
+    def test_responses_to_chat_completion_create_params_uses_configured_reasoning_tags(self):
+        converter = VLLMConverter(
+            return_token_id_information=False,
+            reasoning_start_tag="<reasoning>",
+            reasoning_end_tag="</reasoning>",
+        )
+        responses_create_params = NeMoGymResponseCreateParamsNonStreaming(
+            input=[
+                NeMoGymResponseReasoningItem(
+                    id="rs_123",
+                    type="reasoning",
+                    summary=[
+                        NeMoGymSummary(type="summary_text", text="Thought 1."),
+                        NeMoGymSummary(type="summary_text", text="Thought 2."),
+                    ],
+                ),
+                NeMoGymResponseOutputMessage(
+                    id="msg_123",
+                    role="assistant",
+                    type="message",
+                    content=[NeMoGymResponseOutputText(type="output_text", text="Hello!", annotations=[])],
+                    status="completed",
+                ),
+            ]
+        )
+
+        actual_chat_completion_create_params = converter.responses_to_chat_completion_create_params(
+            responses_create_params
+        )
+
+        assert actual_chat_completion_create_params.messages == [
+            NeMoGymChatCompletionAssistantMessageParam(
+                role="assistant",
+                content="<reasoning>Thought 1.</reasoning><reasoning>Thought 2.</reasoning>Hello!",
+                tool_calls=[],
+            )
+        ]
 
     def test_postprocess_chat_response_multiple_reasoning_items(self, monkeypatch: MonkeyPatch):
         monkeypatch.setattr("responses_api_models.vllm_model.app.uuid4", lambda: FakeUUID())
