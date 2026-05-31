@@ -162,29 +162,15 @@ class Tau2Agent(SimpleResponsesAPIAgent):
             elif message.role == "tool" and message.requestor == "user":
                 continue
             messages_to_convert.append(message)
-        print(f"Domain: {body.config.domain} Task ID: {body.task.id} | After messages_to_convert", file=sys.stderr)
 
         message_dicts = to_litellm_messages(messages_to_convert)
-        print(f"Domain: {body.config.domain} Task ID: {body.task.id} | After to_litellm_messages", file=sys.stderr)
 
         converter = VLLMConverter(return_token_id_information=True)
         all_items = converter.chat_completions_messages_to_responses_items(message_dicts)
-        print(
-            f"Domain: {body.config.domain} Task ID: {body.task.id} | After chat_completions_messages_to_responses_items",
-            file=sys.stderr,
-        )
         input_items_1, output_items = split_responses_input_output_items(all_items)
-        print(
-            f"Domain: {body.config.domain} Task ID: {body.task.id} | After split_responses_input_output_items 1",
-            file=sys.stderr,
-        )
         # Tau starts trajectories with an assistant message
         input_items_1 += output_items[:1]
         input_items_2, output_items = split_responses_input_output_items(output_items[1:])
-        print(
-            f"Domain: {body.config.domain} Task ID: {body.task.id} | After split_responses_input_output_items 2",
-            file=sys.stderr,
-        )
 
         prompt_usages = []
         completion_usages = []
@@ -197,7 +183,6 @@ class Tau2Agent(SimpleResponsesAPIAgent):
             if message.usage:
                 prompt_usages.append(message.usage["prompt_tokens"])
                 completion_usages.append(message.usage["completion_tokens"])
-        print(f"Domain: {body.config.domain} Task ID: {body.task.id} | After usages list", file=sys.stderr)
 
         min_prompt_tokens = None
         min_completion_tokens = None
