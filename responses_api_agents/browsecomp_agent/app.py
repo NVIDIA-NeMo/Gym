@@ -56,7 +56,7 @@ class BrowsecompAgentConfig(BaseResponsesAPIAgentConfig):
     keep_rounds: int = 9999
     nudge_steps: bool = True
     max_context_tokens: int = 196608
-    context_reset_pct: float = 0.3
+    context_reset_pct: float = 0.5
     context_reset_keep_rounds: int = 3
     max_run_retries: int = 1
 
