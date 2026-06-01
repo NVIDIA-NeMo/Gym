@@ -6,7 +6,7 @@ and `simple_agent` (single-turn, matching NeMo-Skills' evaluation protocol).
 
 - **Tasks**: 360 theorems (test split, all entries)
 - **Source**: [Goedel-LM/Goedel-Prover-V2 MOBench JSONL](https://github.com/Goedel-LM/Goedel-Prover-V2/blob/2e9036e118464aa96a8bebaf9f5b9d091aa3585c/dataset/MOBench.jsonl), pinned to commit `2e9036e118464aa96a8bebaf9f5b9d091aa3585c`.
-- **Prompt**: shared `benchmarks/prompts/lean4_formal_proof_deepseek_prover_v2.yaml` (same as miniF2F and ProofNet).
+- **Prompt**: shared `benchmarks/prompts/lean4/formal-proof-deepseek-prover-v2.yaml` (same as miniF2F and ProofNet).
 - **Reward**: binary; 1.0 iff the Lean4 compiler accepts the proof with no `sorry`.
 
 ## Preparation
@@ -42,7 +42,7 @@ ng_collect_rollouts \
     +input_jsonl_fpath=benchmarks/mobench/data/mobench_benchmark.jsonl \
     +output_jsonl_fpath=results/mobench_rollouts.jsonl \
     +num_repeats=32 \
-    +prompt_config=benchmarks/prompts/lean4_formal_proof_deepseek_prover_v2.yaml \
+    +prompt_config=benchmarks/prompts/lean4/formal-proof-deepseek-prover-v2.yaml \
     "+responses_create_params={max_output_tokens: 16384, temperature: 1.0}"
 ```
 

@@ -16,6 +16,7 @@ lc_judge:
       reward_if_swap_fails: 0.0
       question_extract_regex: ^QUESTION:\s*(.*)$|</text>\n\n(.*)$
       response_extract_regex: null
+      msg_extraction_failure: ""
       domain: knowledge
       verified: false
 lc_judge_simple_agent:

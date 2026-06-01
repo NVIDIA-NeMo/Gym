@@ -1,8 +1,16 @@
 # NeMo Gym
 
+[![PyPI](https://img.shields.io/pypi/v/nemo-gym)](https://pypi.org/project/nemo-gym/)
+[![Python](https://img.shields.io/pypi/pyversions/nemo-gym)](https://pypi.org/project/nemo-gym/)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![CI](https://github.com/NVIDIA-NeMo/Gym/actions/workflows/unit-tests.yml/badge.svg)](https://github.com/NVIDIA-NeMo/Gym/actions/workflows/unit-tests.yml)
+[![Docs](https://img.shields.io/badge/docs-NVIDIA-brightgreen)](https://docs.nvidia.com/nemo/gym/main/about/)
+
 **[Requirements](#-requirements)** • **[Quick Start](#-quick-start)** • **[Available Environments](#-available-environments)** • **[Documentation & Resources](#-documentation--resources)** • **[Community & Support](#-community--support)** • **[Citations](#-citations)**
 
 NeMo Gym is a library for evaluating and improving models and agents using environments. NeMo Gym provides infrastructure to develop environments, scalably run evaluation and training, and a collection of popular benchmarks and training environments.
+
+An environment is the complete system an agent interacts with to complete a task. It consists of a dataset (tasks to solve), an agent harness (how the model interacts with the world), a verifier (task completion scoring), and state (per-task execution context).
 
 ## 🎯 When to Use NeMo Gym
 
@@ -26,13 +34,13 @@ If you're scoring model outputs with a stateless check and don't need scale or t
 
 ## 🌎 Ecosystem
 
-NeMo Gym is a component of [NVIDIA NeMo](https://docs.nvidia.com/nemo/gym/latest/about/ecosystem.html#related-nemo-libraries), a GPU-accelerated platform for training generative AI models and optimizing AI agents. NeMo Gym is integrated with the broader agentic ecosystem - see the [Ecosystem](https://docs.nvidia.com/nemo/gym/latest/about/ecosystem.html) page for more details.
+NeMo Gym is a component of [NVIDIA NeMo](https://docs.nvidia.com/nemo/gym/latest/about/ecosystem#related-nemo-libraries), a GPU-accelerated platform for training generative AI models and optimizing AI agents. NeMo Gym is integrated with the broader agentic ecosystem - see the [Ecosystem](https://docs.nvidia.com/nemo/gym/latest/about/ecosystem) page for more details.
 
 **Environment Libraries:** Seamlessly combine environments and benchmarks from other libraries alongside NeMo Gym environments. Examples: 
 [Aviary](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/aviary) • [Harbor](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/harbor_agent) • [OpenEnv](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/openenv) • [Reasoning Gym](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/reasoning_gym) • [Verifiers](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/verifiers_agent)
 
 **Training Framework Libraries:** Use environments for SFT and RL training.
-[NeMo RL](https://docs.nvidia.com/nemo/gym/latest/training-tutorials/nemo-rl-grpo/index.html) • [Unsloth](https://docs.nvidia.com/nemo/gym/latest/training-tutorials/unsloth-training.html) • [VeRL](https://docs.nvidia.com/nemo/gym/latest/training-tutorials/verl.html)
+[NeMo RL](https://docs.nvidia.com/nemo/gym/latest/training-tutorials/nemo-rl-grpo) • [Unsloth](https://docs.nvidia.com/nemo/gym/latest/training-tutorials/unsloth) • [VeRL](https://docs.nvidia.com/nemo/gym/latest/training-tutorials)
 
 **Agent Harnesses:** Agent harnesses for evaluation and training available out of the box. Examples:
 [OpenHands](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/swe_agents) • [Mini SWE Agent](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/mini_swe_agent) • [LangGraph](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/langgraph_agent)
@@ -59,89 +67,93 @@ NeMo Gym is designed to run on standard development machines:
 
 ## 🚀 Quick Start
 
-Install NeMo Gym, start the servers, and collect your first verified rollouts for RL training.
+Requires Python 3.12+ on x86_64 or ARM64 (Linux, macOS, Windows via WSL2). No GPU required. See the [Getting Started](https://docs.nvidia.com/nemo/gym/latest/get-started) docs for a more comprehensive walkthrough.
 
-### Setup
+**Install NeMo Gym:**
+
+Requires [uv](https://docs.astral.sh/uv/getting-started/installation/) and Python 3.12+.
+
 ```bash
-# Clone the repository
 git clone git@github.com:NVIDIA-NeMo/Gym.git
 cd Gym
+uv venv --python 3.12 && source .venv/bin/activate
+uv sync
+```
 
-# Install UV (Python package manager)
-curl -LsSf https://astral.sh/uv/install.sh | sh
-source $HOME/.local/bin/env
+**Configure your model:**
 
-# Create virtual environment
-uv venv --python 3.12
+This quickstart uses OpenAI. NeMo Gym supports local and hosted inference — see [Configure Model](https://docs.nvidia.com/nemo/gym/latest/model-server) for vLLM, Fireworks, OpenRouter, and others.
+
+Create `env.yaml` in the project root:
+```yaml
+policy_base_url: https://api.openai.com/v1
+policy_api_key: <your-openai-api-key>
+policy_model_name: gpt-4.1-2025-04-14
+```
+
+### Run Evaluation
+
+Run your agent on a set of tasks and score the results. This example uses a simple tool calling agent [`simple_agent`](responses_api_agents/simple_agent/README.md) with the [`mcqa`](resources_servers/mcqa/README.md) (multiple-choice Q&A) environment and its included example data.
+
+**1. Start servers**
+
+NeMo Gym uses local servers to coordinate your model, agent, and task verification. Start them first:
+
+```bash
+environment_config="resources_servers/mcqa/configs/mcqa.yaml"
+model_config="responses_api_models/openai_model/configs/openai_model.yaml"
+
+ng_run "+config_paths=[${environment_config},${model_config}]"
+```
+
+You should see three server instances starting:
+
+```text
+[1] mcqa (resources_servers/mcqa)
+[2] mcqa_simple_agent (responses_api_agents/simple_agent)
+[3] policy_model (responses_api_models/openai_model)
+```
+
+**2. Evaluate your agent** 
+
+In a new terminal, run your agent on a single task to verify everything works:
+
+```bash
 source .venv/bin/activate
 
-# Install NeMo Gym
-uv sync --extra dev --group docs
-```
-
-### Configure Your API Key
-Create an `env.yaml` file that contains your OpenAI API key and the [policy model](https://docs.nvidia.com/nemo/gym/latest/about/concepts/key-terminology.html#term-Policy-Model) you want to use. Replace `your-openai-api-key` with your actual key. This file helps keep your secrets out of version control while still making them available to NeMo Gym.
-
-```bash
-echo "policy_base_url: https://api.openai.com/v1
-policy_api_key: your-openai-api-key
-policy_model_name: gpt-4.1-2025-04-14" > env.yaml
-```
-
-> [!NOTE]
-> We use GPT-4.1 in this quickstart because it provides low latency (no reasoning step) and works reliably out-of-the-box. NeMo Gym is **not limited to OpenAI models**—you can use self-hosted models via vLLM or any OpenAI-compatible inference server. See the [documentation](https://docs.nvidia.com/nemo/gym/latest/get-started/detailed-setup.html) for details.
-
-### Start Servers
-
-**Terminal 1 (start servers)**:
-```bash
-# Start servers (this will keep running)
-config_paths="resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml,\
-responses_api_models/openai_model/configs/openai_model.yaml"
-ng_run "+config_paths=[${config_paths}]"
-```
-
-**Terminal 2 (interact with agent)**:
-```bash
-# In a NEW terminal, activate environment
-source .venv/bin/activate
-
-# Interact with your agent
-python responses_api_agents/simple_agent/client.py
-```
-
-### Collect Rollouts
-
-**Terminal 2** (keep servers running in Terminal 1):
-```bash
-# Create a simple dataset with one query
-echo '{"responses_create_params":{"input":[{"role":"developer","content":"You are a helpful assistant."},{"role":"user","content":"What is the weather in Seattle?"}]}}' > weather_query.jsonl
-
-# Collect verified rollouts
 ng_collect_rollouts \
-    +agent_name=example_single_tool_call_simple_agent \
-    +input_jsonl_fpath=weather_query.jsonl \
-    +output_jsonl_fpath=weather_rollouts.jsonl
-
-# View the result
-cat weather_rollouts.jsonl | python -m json.tool
+    +agent_name=mcqa_simple_agent \
+    +input_jsonl_fpath=resources_servers/mcqa/data/example.jsonl \
+    +output_jsonl_fpath=results/mcqa_rollouts.jsonl \
+    +limit=5 \
+    +num_repeats=1
 ```
-This generates training data with verification scores!
 
-### Clean Up Servers
+You should see a progress bar followed by aggregate metrics:
 
-**Terminal 1** with the running servers: Ctrl+C to stop the ng_run process.
+```text
+Collecting rollouts: 100%|██████| 5/5 [01:22<00:00, 16.44s/it]
+
+Key metrics for mcqa_simple_agent:
+{
+    "mean/reward": 0.8,
+    "pass@1[avg-of-1]/accuracy": 80.0,
+    "pass@1/accuracy": 80.0
+}
+Finished rollout collection! View results at:
+Fully materialized inputs: results/mcqa_rollouts_materialized_inputs.jsonl
+Rollouts: results/mcqa_rollouts.jsonl
+Aggregate metrics: results/mcqa_rollouts_aggregate_metrics.json
+```
+
+For per-task pass rates, see the [`ng_reward_profile`](https://docs.nvidia.com/nemo/gym/latest/reference/cli-commands) command.
 
 ### Next Steps
 
-Now that you can generate rollouts, choose your path:
-
-- **Start training** — Train models using NeMo Gym with your preferred RL framework. See the [Training Tutorials](https://docs.nvidia.com/nemo/gym/latest/training-tutorials/index.html).
-
-- **Use an existing environment** — Browse the [Available Environments](#-available-environments) below to find an environment that matches your goals.
-
-- **Build a custom environment** — Implement or integrate existing tools and define task verification logic. Get started with the [Creating a Training Environment](https://docs.nvidia.com/nemo/gym/latest/environment-tutorials/creating-training-environment.html) tutorial.
-
+- **[Browse Environments](#-available-environments)** — Browse available environments for evaluation and training.
+- **[Agents](https://docs.nvidia.com/nemo/gym/latest/agent-server)** — Explore available agent harnesses and learn how to integrate your own.
+- **[Training](https://docs.nvidia.com/nemo/gym/latest/training-tutorials)** — Improve your agent or model with RL or fine-tuning.
+- **[Build Custom Environments](https://docs.nvidia.com/nemo/gym/latest/environment-tutorials)** — Create your own evaluation or training environments.
 
 ## 📦 Available Environments
 
@@ -152,11 +164,12 @@ NeMo Gym includes a curated collection of environments for training and evaluati
 Purpose: Demonstrate NeMo Gym patterns and concepts.
 
 <!-- START_EXAMPLE_ONLY_SERVERS_TABLE -->
-| Name               | Demonstrates                         | Config                                                                                                                             | README                                                                      |
-| ------------------ | ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
-| Multi Step         | Multi-step tool calling              | <a href='resources_servers/example_multi_step/configs/example_multi_step.yaml'>example_multi_step.yaml</a>                         | <a href='resources_servers/example_multi_step/README.md'>README</a>         |
-| Session State Mgmt | Session state management (in-memory) | <a href='resources_servers/example_session_state_mgmt/configs/example_session_state_mgmt.yaml'>example_session_state_mgmt.yaml</a> | <a href='resources_servers/example_session_state_mgmt/README.md'>README</a> |
-| Single Tool Call   | Basic single-step tool calling       | <a href='resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml'>example_single_tool_call.yaml</a>       | <a href='resources_servers/example_single_tool_call/README.md'>README</a>   |
+| Name                 | Demonstrates                                   | Config                                                                                                                                   | README                                                                        |
+| -------------------- | ---------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| Multi Step           | Multi-step tool calling                        | <a href='resources_servers/example_multi_step/configs/example_multi_step.yaml'>example_multi_step.yaml</a>                               | <a href='resources_servers/example_multi_step/README.md'>README</a>           |
+| Multi Turn Gymnasium | Example multi-turn environment using Gymnasium | <a href='resources_servers/example_multi_turn_gymnasium/configs/example_multi_turn_gymnasium.yaml'>example_multi_turn_gymnasium.yaml</a> | <a href='resources_servers/example_multi_turn_gymnasium/README.md'>README</a> |
+| Session State Mgmt   | Session state management (in-memory)           | <a href='resources_servers/example_session_state_mgmt/configs/example_session_state_mgmt.yaml'>example_session_state_mgmt.yaml</a>       | <a href='resources_servers/example_session_state_mgmt/README.md'>README</a>   |
+| Single Tool Call     | Basic single-step tool calling                 | <a href='resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml'>example_single_tool_call.yaml</a>             | <a href='resources_servers/example_single_tool_call/README.md'>README</a>     |
 <!-- END_EXAMPLE_ONLY_SERVERS_TABLE -->
 
 ### Environments for Training & Evaluation
@@ -201,8 +214,11 @@ The Dataset column links to publicly available datasets (e.g., on HuggingFace). 
 | Genrm Compare                                 | rlhf                  | GenRM pairwise comparison for RLHF training                                                                                                                                                                                  | Compare multiple candidate responses using GenRM model                                                                                | -     | -          | -                                                         | <a href='resources_servers/genrm_compare/configs/genrm_compare.yaml'>genrm_compare.yaml</a>                                                                                                                                 | -                                                                                                                                                              |
 | Google Search                                 | agent                 | Multi-choice question answering problems with search tools integrated                                                                                                                                                        | Improve knowledge-related benchmarks with search tools                                                                                | ✓     | -          | Apache 2.0                                                | <a href='resources_servers/google_search/configs/google_search.yaml'>google_search.yaml</a>                                                                                                                                 | <a href='https://huggingface.co/datasets/nvidia/Nemotron-RL-knowledge-web_search-mcqa'>Nemotron-RL-knowledge-web_search-mcqa</a>                               |
 | Gpqa Diamond                                  | knowledge             | GPQA Diamond multiple-choice question answering problems                                                                                                                                                                     | Evaluate graduate-level scientific reasoning via MCQ verification                                                                     | ✓     | -          | MIT                                                       | <a href='resources_servers/gpqa_diamond/configs/gpqa_diamond.yaml'>gpqa_diamond.yaml</a>                                                                                                                                    | -                                                                                                                                                              |
+| Grl Sokoban                                   | games                 | Single-box Sokoban in Gymnasium API style.                                                                                                                                                                                   | Model emits one move per turn until the puzzle is solved.                                                                             | -     | -          | -                                                         | <a href='resources_servers/grl_sokoban/configs/grl_sokoban.yaml'>grl_sokoban.yaml</a>                                                                                                                                       | -                                                                                                                                                              |
+| Grl Tetris                                    | games                 | Tetris in Gymnasium API style. Model emits one or more moves per turn.                                                                                                                                                       | Multi-step Tetris environment                                                                                                         | -     | -          | -                                                         | <a href='resources_servers/grl_tetris/configs/grl_tetris.yaml'>grl_tetris.yaml</a>                                                                                                                                          | -                                                                                                                                                              |
 | Gymnasium                                     | other                 | Base class for Gymnasium-style servers. Not a standalone server.                                                                                                                                                             | Reusable base class for step/reset style environments                                                                                 | -     | -          | -                                                         | <a href='resources_servers/gymnasium/configs/gymnasium.yaml'>gymnasium.yaml</a>                                                                                                                                             | -                                                                                                                                                              |
 | Harbor Agent                                  | agent                 | Harbor integration for ageng harnesses and environments.                                                                                                                                                                     | Improve models in popular agentic environments supported by Harbor such as Terminus2.                                                 | ✓     | -          | -                                                         | <a href='responses_api_agents/harbor_agent/configs/harbor_agent.yaml'>harbor_agent.yaml</a>                                                                                                                                 | -                                                                                                                                                              |
+| Harbor Agent                                  | agent                 | Harbor integration for agent harnesses and environments.                                                                                                                                                                     | Improve models in popular agentic environments supported by Harbor such as Terminus2.                                                 | ✓     | -          | -                                                         | <a href='responses_api_agents/harbor_agent/configs/harbor_agent_daytona.yaml'>harbor_agent_daytona.yaml</a>                                                                                                                 | -                                                                                                                                                              |
 | Hotpotqa Qa                                   | knowledge             | Short-answer QA with deterministic SQuAD-style + alternative-aware substring verification (HotpotQA closed-book).                                                                                                            | Improve closed-book multi-hop question-answering accuracy.                                                                            | -     | -          | -                                                         | <a href='resources_servers/hotpotqa_qa/configs/hotpotqa_qa.yaml'>hotpotqa_qa.yaml</a>                                                                                                                                       | -                                                                                                                                                              |
 | Ifbench                                       | instruction_following | IFBench instruction following evaluation using AllenAI's IFBench library (57 instruction types)                                                                                                                              | Improve IFBench instruction following                                                                                                 | -     | -          | -                                                         | <a href='resources_servers/ifbench/configs/ifbench.yaml'>ifbench.yaml</a>                                                                                                                                                   | -                                                                                                                                                              |
 | Imo Gradingbench                              | math                  | Four-class grading of math proofs — the policy model reads a problem plus a candidate proof and emits one of correct / almost / partial / incorrect as the last word.                                                        | Improve the IMO-GradingBench benchmark and proof-grading skill.                                                                       | -     | -          | -                                                         | <a href='resources_servers/imo_gradingbench/configs/imo_gradingbench.yaml'>imo_gradingbench.yaml</a>                                                                                                                        | -                                                                                                                                                              |
@@ -244,6 +260,7 @@ The Dataset column links to publicly available datasets (e.g., on HuggingFace). 
 | Proof Judge                                   | math                  | Theorem proving with verifier + meta-verifier judge (combined env)                                                                                                                                                           | -                                                                                                                                     | -     | -          | -                                                         | <a href='resources_servers/proof_judge/configs/proof_judge.yaml'>proof_judge.yaml</a>                                                                                                                                       | -                                                                                                                                                              |
 | Proof Verification                            | math                  | Proof verification scored against ground truth and meta-verifier agreement                                                                                                                                                   | -                                                                                                                                     | -     | -          | -                                                         | <a href='resources_servers/proof_verification/configs/proof_verification.yaml'>proof_verification.yaml</a>                                                                                                                  | -                                                                                                                                                              |
 | Rdkit Chemistry                               | knowledge             | Molecular chemistry question answering: calculate properties of SMILES. Includes a mix of tool-use (python + rdkit) and no-tool-use questions.                                                                               | Improve molecular reasoning and SMILES parsing.                                                                                       | ✓     | -          | TBD                                                       | <a href='resources_servers/rdkit_chemistry/configs/rdkit_chemistry.yaml'>rdkit_chemistry.yaml</a>                                                                                                                           | -                                                                                                                                                              |
+| Reasoning Gym                                 | knowledge             | Claude Code agent harness for reasoning gym tasks                                                                                                                                                                            | Evaluate model capabilities in the Claude Code agent harness                                                                          | ✓     | -          | Creative Commons Attribution 4.0 International            | <a href='resources_servers/reasoning_gym/configs/reasoning_gym_claude_code_agent.yaml'>reasoning_gym_claude_code_agent.yaml</a>                                                                                             | <a href='https://huggingface.co/datasets/nvidia/Nemotron-RL-ReasoningGym-v1'>Nemotron-RL-ReasoningGym-v1</a>                                                   |
 | Reasoning Gym                                 | knowledge             | LangGraph orchestrator agent compatible with resource servers that do not use tools; enables diverse agent training data and test time scaling vs a simple agent, extensible to use tools or other agent architectures       | Iterative test time scaling for improved performance in reasoning tasks                                                               | ✓     | -          | Apache 2.0                                                | <a href='resources_servers/reasoning_gym/configs/orchestrator_agent.yaml'>orchestrator_agent.yaml</a>                                                                                                                       | -                                                                                                                                                              |
 | Reasoning Gym                                 | knowledge             | LangGraph parallel thinking agent compatible with resource servers that do not use tools; enables diverse agent training data and test time scaling vs a simple agent, extensible to use tools or other agent architectures  | Iterative test time scaling for improved performance in reasoning tasks                                                               | ✓     | -          | Apache 2.0                                                | <a href='resources_servers/reasoning_gym/configs/parallel_thinking_agent.yaml'>parallel_thinking_agent.yaml</a>                                                                                                             | -                                                                                                                                                              |
 | Reasoning Gym                                 | knowledge             | LangGraph reflection agent compatible with resource servers that do not use tools; provides iterative reflection for diverse agent training data and test time scaling, extensible to use tools or other agent architectures | Iterative test time scaling for improved performance in reasoning tasks                                                               | ✓     | -          | Apache 2.0                                                | <a href='resources_servers/reasoning_gym/configs/reflection_agent.yaml'>reflection_agent.yaml</a>                                                                                                                           | -                                                                                                                                                              |
@@ -291,9 +308,9 @@ The Dataset column links to publicly available datasets (e.g., on HuggingFace). 
 
 ## 📖 Documentation & Resources
 
-- **[Documentation](https://docs.nvidia.com/nemo/gym/latest/index.html)** - Technical reference docs
-- **[Training Tutorials](https://docs.nvidia.com/nemo/gym/latest/training-tutorials/index.html)** - Train with NeMo Gym environments
-- **[API Reference](https://docs.nvidia.com/nemo/gym/latest/apidocs/index.html)** - Complete class and function reference
+- **[Documentation](https://docs.nvidia.com/nemo/gym/latest/documentation/home)** - Technical reference docs
+- **[Training Tutorials](https://docs.nvidia.com/nemo/gym/latest/training-tutorials)** - Train with NeMo Gym environments
+- **[API Reference](https://docs.nvidia.com/nemo/gym/latest/api/reference/api-reference)** - Complete class and function reference
  
 
 ## 🤝 Community & Support
@@ -301,7 +318,7 @@ The Dataset column links to publicly available datasets (e.g., on HuggingFace). 
 We'd love your contributions! Here's how to get involved:
 
 - **[Report Issues](https://github.com/NVIDIA-NeMo/Gym/issues)** - Bug reports and feature requests
-- **[Contributing Guide](https://docs.nvidia.com/nemo/gym/latest/contribute/index.html)** - How to contribute code, docs, new environments, or training framework integrations
+- **[Contributing Guide](https://docs.nvidia.com/nemo/gym/latest/contribute)** - How to contribute code, docs, new environments, or training framework integrations
 
 ## 📚 Citations
 

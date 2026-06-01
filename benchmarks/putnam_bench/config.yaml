@@ -16,6 +16,6 @@ putnam_bench_math_formal_lean_simple_agent:
       - name: putnam_bench
         type: benchmark
         jsonl_fpath: benchmarks/putnam_bench/data/putnam_bench_benchmark.jsonl
-        prompt_config: benchmarks/prompts/lean4_formal_proof_deepseek_prover_v2.yaml
+        prompt_config: benchmarks/prompts/lean4/formal-proof-deepseek-prover-v2.yaml
         prepare_script: benchmarks/putnam_bench/prepare.py
         num_repeats: 32

@@ -17,6 +17,7 @@ The entrypoint is [`app.py`](app.py), which exposes a `SWEBenchWrapper` (a `Simp
 - [Configuration reference](#configuration-reference)
 - [Quick Start](#quick-start)
 - [Batch evaluation / data collection](#batch-evaluation--data-collection)
+- [Golden-patch validation](#golden-patch-validation)
 - [Output format](#output-format)
 - [GRPO masking and failure modes](#grpo-masking-and-failure-modes)
 - [Debug / profiling](#debug--profiling)
@@ -78,7 +79,7 @@ Implemented in `RunOpenHandsAgent.process_single_datapoint` (and `_run_golden_pa
 7. **Decide `mask_sample`** (GRPO) — see [GRPO masking and failure modes](#grpo-masking-and-failure-modes).
 8. **Build the response** — convert the OpenHands chat-completions trajectory to Responses-API items via `VLLMConverter`, attach the tool list, return reward = `1.0 if resolved else 0.0` and metrics.
 
-If `verify_golden_patch=true` (currently only for `swe-bench-ext`), step 2–4 are skipped: the dataset's golden patch is written directly as the prediction and the eval container is the only thing that runs. This is a sanity check that a dataset sample's golden patch actually resolves under our local eval.
+If `verify_golden_patch=true`, step 2–4 are skipped: the dataset's golden patch (`instance_dict["patch"]`) is written directly as the prediction and the eval container is the only thing that runs. This is a sanity check that a dataset sample's golden patch actually resolves under our local eval. Supported for `swe-bench-ext` and the SWE-bench / SWE-bench_Multilingual families (e.g. `princeton-nlp/SWE-bench_Verified`, `SWE-bench/SWE-bench_Multilingual`). See [Golden-patch validation](#golden-patch-validation).
 
 ---
 
@@ -195,7 +196,7 @@ The full schema lives in `SWEBenchWrapperConfig` (and the per-override `AgentPro
 | `command_exec_timeout`             | `300`                                             | OpenHands per-command timeout inside the agent container.               |
 | `concurrency`                      | `256`                                             | Server-side asyncio semaphore for concurrent instances.                 |
 | `dataset_path`                     | `null`                                            | Optional default dataset JSONL.                                         |
-| `verify_golden_patch`              | `false`                                           | Skip the agent and eval the dataset's own golden patch (currently `swe-bench-ext` only). |
+| `verify_golden_patch`              | `false`                                           | Skip the agent and eval the dataset's own golden patch. Supported for `swe-bench-ext` and the SWE-bench / SWE-bench_Multilingual families. See [Golden-patch validation](#golden-patch-validation). |
 | `agent_prompt_overrides`           | `null`                                            | List of `AgentPromptOverride` entries. See above.                       |
 | `agent_prompt_override_random`     | `false`                                           | `false` = deterministic per `instance_id`; `true` = random per run.     |
 | `openhands_should_log`             | `false`                                           | If true, sets `LOG_LEVEL=DEBUG`, `LOG_TO_FILE=true`, etc.               |
@@ -295,6 +296,74 @@ ng_collect_rollouts +agent_name=swe_agents \
 
 ```bash
 ng_viewer +jsonl_fpath=swebench-verified.openhands.qwen3-30b-coder.jsonl
+```
+
+---
+
+## Golden-patch validation
+
+`verify_golden_patch=true` bypasses the agent entirely and runs only the dataset's evaluation harness against the sample's **own** golden patch (`instance_dict["patch"]`). Use it to:
+
+- Verify that a dataset sample is well-formed — i.e. its stored golden patch actually `resolves` under our local eval harness.
+- Smoke-test container images, SIF mounts, and harness setup without paying the agent's wall-clock cost.
+- Triage failing samples — if the golden patch itself does not resolve, the agent's failure on the same sample is not the agent's fault.
+
+Supported datasets:
+
+| `dataset_name`                           | Processor                            |
+|------------------------------------------|--------------------------------------|
+| `swe-bench-ext`                          | `SweBenchExtDatasetProcessor`        |
+| `princeton-nlp/SWE-bench*` (e.g. `_Verified`, `_Lite`) | `SweBenchDatasetProcessor`           |
+| `SWE-bench/SWE-bench_Multilingual` (any name containing `SWE-bench_Multilingual`) | `SweBenchMultilingualDatasetProcessor` |
+
+For each supported dataset, the wrapper:
+
+1. Extracts the golden patch from `instance_dict["patch"]`.
+2. Writes it into the predictions JSONL (`output_for_eval.jsonl`) in standard SWE-bench format (`{"instance_id", "model_patch", "model_name_or_path": "golden_patch_verification"}`) and also as a `.diff` file (used by `swe-bench-ext`).
+3. Launches only the eval container; the agent container is skipped.
+4. Returns `reward=1.0` iff the harness reports `resolved=true` for that instance.
+
+### Running it
+
+Start the server with `verify_golden_patch=true`:
+
+```bash
+# SWE-bench Verified
+ng_run "+config_paths=[responses_api_agents/swe_agents/configs/swebench_openhands.yaml,\
+responses_api_models/vllm_model/configs/vllm_model.yaml]" \
+    +swe_agents.responses_api_agents.swe_agents.verify_golden_patch=true \
+    +swe_agents.responses_api_agents.swe_agents.container_formatter=/lustre/xxx/images/swe-bench/swebench_sweb.eval.x86_64.\{instance_id\}.sif \
+    +swe_agents.responses_api_agents.swe_agents.model_server.name=vllm_model
+```
+
+Then collect rollouts against the dataset of interest:
+
+```bash
+# SWE-bench Verified
+ng_collect_rollouts +agent_name=swe_agents \
+    +input_jsonl_fpath=/lustre/fsw/portfolios/llmservice/users/sdevare/repos/ultra/datasets/swe/swe_public_datasets_val_swebench.jsonl \
+    +output_jsonl_fpath=results/swebench_verified.golden.jsonl \
+    +num_repeats=1
+
+# SWE-bench Multilingual
+ng_collect_rollouts +agent_name=swe_agents \
+    +input_jsonl_fpath=/lustre/fsw/portfolios/llmservice/users/sdevare/repos/ultra/datasets/swe/swe_swebench_multilingual_test.jsonl \
+    +output_jsonl_fpath=results/swebench_multilingual.golden.jsonl \
+    +num_repeats=1
+```
+
+`num_repeats=1` is sufficient since the golden patch is deterministic — the only variance is harness-side flakiness.
+
+A healthy dataset should report `reward=1.0` (i.e. `resolved=true`) on (close to) 100% of samples. Any sample that fails is either malformed (bad `FAIL_TO_PASS` / `PASS_TO_PASS`, wrong `base_commit`, stale `test_patch`) or its container image diverges from the harness expectation — fix those before training/eval'ing the agent against them.
+
+### Aggregating results
+
+```bash
+ng_reward_profile +input_jsonl_fpath=<dataset.jsonl> \
+    +rollouts_jsonl_fpath=results/<dataset>.golden.jsonl \
+    +output_jsonl_fpath=results/<dataset>.golden.profiled.jsonl \
+    +pass_threshold=1.0
+python scripts/print_aggregate_results.py +jsonl_fpath=results/<dataset>.golden.profiled.jsonl
 ```
 
 ---
