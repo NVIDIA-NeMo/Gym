@@ -15,6 +15,6 @@ compute_eval_compute_eval_simple_agent:
       - name: compute_eval
         type: benchmark
         jsonl_fpath: benchmarks/compute_eval/data/compute_eval_benchmark.jsonl
-        prompt_config: benchmarks/compute_eval/prompts/default.yaml
+        prompt_config: benchmarks/prompts/compute-eval/baseline.yaml
         prepare_script: benchmarks/compute_eval/prepare.py
         license: NVIDIA Compute Eval (open-source, gated HF distribution)

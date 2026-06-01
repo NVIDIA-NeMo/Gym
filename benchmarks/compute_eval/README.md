@@ -28,7 +28,7 @@ ng_collect_rollouts \
     +agent_name=compute_eval_compute_eval_simple_agent \
     +input_jsonl_fpath=benchmarks/compute_eval/data/compute_eval_benchmark.jsonl \
     +output_jsonl_fpath=results/compute_eval_rollouts.jsonl \
-    +prompt_config=benchmarks/compute_eval/prompts/default.yaml \
+    +prompt_config=benchmarks/prompts/compute-eval/baseline.yaml \
     +num_repeats=4
 ```
 
