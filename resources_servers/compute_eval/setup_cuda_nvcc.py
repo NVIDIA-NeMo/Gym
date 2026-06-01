@@ -16,16 +16,16 @@ to ``PATH``, ``LD_LIBRARY_PATH``, and ``CPATH``.
 Install paths live in ``.cuda_nvcc/`` next to ``app.py`` so they're tied to
 the resources-server venv (cached on lustre via the per-recipe Gym worktree
 mount). First boot installs (~5 min); subsequent boots short-circuit on the
-existing prefix.
+existing prefix. To share an install across multiple consumers (e.g. a
+NeMo Skills eval client running alongside the Gym resource server), set
+``$COMPUTE_EVAL_CUDA_NVCC_PREFIX`` on every consumer to the same prefix —
+the first one to boot installs, the rest reuse.
 
-Parity guard: when a caller pins a specific prefix (via
-``$COMPUTE_EVAL_CUDA_NVCC_PREFIX`` or by passing the shared-lustre default),
-``ensure_cuda_nvcc`` installs into that prefix even if ``nvcc`` happens to
-be on PATH — otherwise a container shipping ``/usr/local/cuda/bin/nvcc`` at
-a different CUDA version would silently win, and Gym would compile against
-that version while Skills compiles against the pinned 12.9 (Skills' recipe
-sources ``env.sh`` to force the 12.9 onto PATH). Same nvcc on both sides is
-non-negotiable for parity.
+We deliberately do NOT fall back to ``which("nvcc")``: a container shipping
+``/usr/local/cuda/bin/nvcc`` at a different CUDA version would silently
+win the PATH lookup, and the server would compile against a different
+toolchain than any other consumer that explicitly points at the pinned
+prefix. Same nvcc on both sides is a parity invariant.
 
 Follows the External Tool Auto-Install pattern from Gym's CLAUDE.md.
 """
@@ -34,21 +34,21 @@ from __future__ import annotations
 
 import os
 import platform
-import shutil
 import subprocess
 import urllib.request
 from pathlib import Path
 
 
-# Resolution order for the cuda-nvcc env prefix:
-#   1. $COMPUTE_EVAL_CUDA_NVCC_PREFIX (explicit override; matches what the
-#      Skills baseline's installation_command sets).
-#   2. Shared lustre install at /lustre/.../shared/cuda_nvcc_12_9 — keeps
-#      Skills and Gym using identical toolchains and avoids re-installing
-#      per recipe.
-#   3. Local per-server install under resources_servers/compute_eval/.cuda_nvcc
-#      (used on first boot in any environment that lacks the shared path).
-_SHARED_PREFIX_DEFAULT = Path("/lustre/fsw/portfolios/llmservice/users/georgea/shared/cuda_nvcc_12_9")
+# Two supported installation prefixes:
+#   * Default: ``.cuda_nvcc/`` next to this file. The server installs into
+#     here on first boot and reuses on subsequent boots. When the server's
+#     directory lives on shared storage (lustre via a Gym worktree mount),
+#     this naturally persists across SLURM jobs.
+#   * Override: set $COMPUTE_EVAL_CUDA_NVCC_PREFIX to point at a different
+#     prefix. This is how multiple servers / pipelines (e.g. a NeMo Skills
+#     eval client running alongside the Gym resource server) share a single
+#     install — every consumer points at the same prefix and gets bit-
+#     identical nvcc.
 _LOCAL_PREFIX_DEFAULT = Path(__file__).parent / ".cuda_nvcc"
 
 
@@ -56,8 +56,6 @@ def _resolve_default_prefix() -> Path:
     env_override = os.environ.get("COMPUTE_EVAL_CUDA_NVCC_PREFIX")
     if env_override:
         return Path(env_override)
-    if (_SHARED_PREFIX_DEFAULT / "env" / "bin" / "nvcc").exists():
-        return _SHARED_PREFIX_DEFAULT
     return _LOCAL_PREFIX_DEFAULT
 
 
@@ -169,40 +167,24 @@ def _wire_paths(env_dir: Path) -> Path:
 def ensure_cuda_nvcc(prefix: Path = DEFAULT_PREFIX) -> Path:
     """Return a usable nvcc path. Installs into ``prefix`` if necessary.
 
-    Resolution order is deliberately PATH-last whenever the caller asked for
-    a specific prefix. A container that happens to ship ``/usr/local/cuda/bin/nvcc``
-    at a different version would otherwise silently win the PATH lookup,
-    introducing a toolchain drift between Skills (which always uses the
-    shared cuda-nvcc env via its installation_command) and Gym (which would
-    fall through to whatever's baked into the container). That's a hidden
-    parity bug — both sides need to compile against the SAME nvcc.
+    Only two supported paths:
 
-    Concrete order:
+      1. ``prefix/env/bin/nvcc`` exists → reuse (wires PATH/LD_LIBRARY_PATH).
+      2. Otherwise → install via micromamba into ``prefix``.
 
-      1. ``prefix/env/bin/nvcc`` exists → reuse it (wires PATH/LD_LIBRARY_PATH).
-      2. Caller pinned a specific prefix (via ``$COMPUTE_EVAL_CUDA_NVCC_PREFIX``
-         or by passing the shared-lustre default) → install into that prefix,
-         do NOT fall back to PATH.
-      3. Caller didn't pin a prefix (dev / CI default points at the per-server
-         local prefix) AND ``nvcc`` is on PATH → use the PATH nvcc as a
-         convenience to avoid the ~5 min micromamba install on every dev test.
-      4. Otherwise → install into ``prefix``.
+    No fallback to ``PATH``-nvcc. A container that happens to ship
+    ``/usr/local/cuda/bin/nvcc`` at a different CUDA version would otherwise
+    silently win the lookup, and the server would compile against a
+    different toolchain than any other consumer that points at the same
+    pinned prefix (e.g. a NeMo Skills eval client sourcing the same env).
+    Compiling against the SAME nvcc on both sides is a parity invariant;
+    we'd rather pay a one-time install than risk silent version drift.
     """
     env_dir = prefix / "env"
     nvcc = env_dir / "bin" / "nvcc"
     if nvcc.exists():
         print(f"[setup_cuda_nvcc] reusing existing install at {env_dir}")
         return _wire_paths(env_dir)
-
-    pinned_prefix = os.environ.get("COMPUTE_EVAL_CUDA_NVCC_PREFIX") is not None or prefix == _SHARED_PREFIX_DEFAULT
-    if not pinned_prefix:
-        existing = shutil.which("nvcc")
-        if existing:
-            print(
-                f"[setup_cuda_nvcc] nvcc already on PATH at {existing} "
-                "(no shared/env prefix requested — using PATH for dev convenience)"
-            )
-            return Path(existing)
 
     mamba = _download_micromamba(prefix)
     _run_micromamba_install(mamba, prefix)

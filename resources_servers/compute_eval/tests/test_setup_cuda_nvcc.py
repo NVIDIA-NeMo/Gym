@@ -1,12 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Hermetic tests for setup_cuda_nvcc.ensure_cuda_nvcc resolution order.
+"""Hermetic tests for setup_cuda_nvcc.
 
-Locks in the parity guard: when a caller pins a prefix (via the env var or
-the shared-lustre default), the function must NOT fall back to PATH-nvcc.
-A container shipping /usr/local/cuda/bin/nvcc at a different CUDA version
-would otherwise silently win and introduce toolchain drift between Skills
-and Gym.
+Locks in the two-branch resolution and the parity guard: ``ensure_cuda_nvcc``
+never falls back to ``which("nvcc")``. A container-bundled nvcc at a
+different CUDA version would otherwise silently win and introduce toolchain
+drift between consumers that share a pinned prefix.
 """
 
 from pathlib import Path
@@ -40,101 +39,89 @@ def clean_env(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Branch 1: prefix has env/bin/nvcc → reuse (no install, no PATH check)
+# Branch 1: prefix has env/bin/nvcc → reuse
 # ---------------------------------------------------------------------------
 
 
 class TestExistingInstall:
-    def test_reuses_existing_install_even_when_nvcc_on_path(self, tmp_path, clean_env):
+    def test_reuses_existing_install(self, tmp_path, clean_env):
         prefix = _make_prefix_with_nvcc(tmp_path)
-        # PATH-nvcc would normally short-circuit, but we should hit branch 1 first
         with (
-            patch.object(setup_cuda_nvcc.shutil, "which", return_value="/usr/local/cuda/bin/nvcc"),
             patch.object(setup_cuda_nvcc, "_download_micromamba") as dl,
             patch.object(setup_cuda_nvcc, "_run_micromamba_install") as inst,
         ):
             nvcc = setup_cuda_nvcc.ensure_cuda_nvcc(prefix)
         assert nvcc == prefix / "env" / "bin" / "nvcc"
-        # Neither install path was taken
         dl.assert_not_called()
         inst.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
-# Branch 2: pinned prefix without an existing install → install, NEVER PATH
+# Branch 2: no existing install → install via micromamba.
+# In every case the install fires; we never inspect or use PATH-nvcc.
 # ---------------------------------------------------------------------------
 
 
-class TestPinnedPrefixInstalls:
-    def test_pinned_via_env_var_installs_even_when_nvcc_on_path(self, tmp_path, monkeypatch):
-        """The container has nvcc but the user pinned a specific prefix via
-        env var — must install into the pinned prefix, not use PATH nvcc."""
-        prefix = tmp_path / "explicit_prefix"
-        monkeypatch.setenv("COMPUTE_EVAL_CUDA_NVCC_PREFIX", str(prefix))
+class TestAlwaysInstallsWithoutExistingPrefix:
+    def test_installs_into_default_prefix(self, tmp_path, clean_env):
+        prefix = tmp_path / "fresh_prefix"
         with (
-            patch.object(setup_cuda_nvcc.shutil, "which", return_value="/usr/local/cuda/bin/nvcc"),
             patch.object(setup_cuda_nvcc, "_download_micromamba") as dl,
             patch.object(setup_cuda_nvcc, "_run_micromamba_install") as inst,
-            patch.object(setup_cuda_nvcc, "_wire_paths", return_value=prefix / "env" / "bin" / "nvcc") as wire,
+            patch.object(setup_cuda_nvcc, "_wire_paths", return_value=prefix / "env" / "bin" / "nvcc"),
         ):
             setup_cuda_nvcc.ensure_cuda_nvcc(prefix)
-        # Install fired even though PATH-nvcc was available
         dl.assert_called_once_with(prefix)
         inst.assert_called_once()
-        wire.assert_called_once_with(prefix / "env")
 
-    def test_shared_lustre_default_installs_even_when_nvcc_on_path(self, clean_env):
-        """When the caller passes the shared-lustre default (the cluster
-        production path), PATH-nvcc must not short-circuit."""
+    def test_env_var_override_routes_install_to_custom_prefix(self, tmp_path, monkeypatch):
+        """COMPUTE_EVAL_CUDA_NVCC_PREFIX redirects the install. Used when
+        multiple consumers want to share a single install — they all point
+        at the same prefix and the first to boot performs the install."""
+        custom = tmp_path / "shared_prefix"
+        monkeypatch.setenv("COMPUTE_EVAL_CUDA_NVCC_PREFIX", str(custom))
+        # Re-import to recompute DEFAULT_PREFIX. Simpler: just verify
+        # _resolve_default_prefix picks up the env var.
+        assert setup_cuda_nvcc._resolve_default_prefix() == custom
+
+
+# ---------------------------------------------------------------------------
+# Parity guard: PATH-nvcc MUST be ignored even when available.
+# ---------------------------------------------------------------------------
+
+
+class TestPathFallbackDisabled:
+    """If a container ships /usr/local/cuda/bin/nvcc at a different CUDA
+    version, ensure_cuda_nvcc must not pick it up — install into prefix
+    regardless. setup_cuda_nvcc.py doesn't even import shutil any more, so
+    the only way PATH could leak in would be via subprocess.run downstream.
+    """
+
+    def test_setup_does_not_import_shutil(self):
+        import importlib
+
+        importlib.reload(setup_cuda_nvcc)
+        assert not hasattr(setup_cuda_nvcc, "shutil"), (
+            "setup_cuda_nvcc must not depend on shutil — "
+            "a previous version used shutil.which('nvcc') to short-circuit "
+            "the install, which is the parity hazard this guard prevents."
+        )
+
+    def test_install_fires_even_with_a_plausible_path_nvcc(self, tmp_path, clean_env, monkeypatch):
+        """Smoke test: even if PATH contains a directory holding a binary
+        called 'nvcc', the install path is taken because the function
+        never consults PATH."""
+        fake_nvcc_dir = tmp_path / "fakebin"
+        fake_nvcc_dir.mkdir()
+        (fake_nvcc_dir / "nvcc").touch(mode=0o755)
+        monkeypatch.setenv("PATH", str(fake_nvcc_dir))
+
+        prefix = tmp_path / "fresh_prefix"
         with (
-            patch.object(setup_cuda_nvcc.shutil, "which", return_value="/usr/local/cuda/bin/nvcc"),
             patch.object(setup_cuda_nvcc, "_download_micromamba") as dl,
             patch.object(setup_cuda_nvcc, "_run_micromamba_install") as inst,
-            patch.object(setup_cuda_nvcc, "_wire_paths", return_value=Path("/dev/null")),
+            patch.object(setup_cuda_nvcc, "_wire_paths", return_value=prefix / "env" / "bin" / "nvcc"),
         ):
-            setup_cuda_nvcc.ensure_cuda_nvcc(setup_cuda_nvcc._SHARED_PREFIX_DEFAULT)
+            setup_cuda_nvcc.ensure_cuda_nvcc(prefix)
         dl.assert_called_once()
-        inst.assert_called_once()
-
-
-# ---------------------------------------------------------------------------
-# Branch 3: unpinned (local) prefix + nvcc on PATH → use PATH (dev convenience)
-# ---------------------------------------------------------------------------
-
-
-class TestUnpinnedFallback:
-    def test_unpinned_prefix_uses_path_nvcc_when_available(self, tmp_path, clean_env):
-        """On dev / CI without a shared lustre install, fall back to PATH-nvcc
-        so test runs don't pay the ~5 min micromamba install on every invocation."""
-        # Use the local default to signal "unpinned"
-        local_prefix = setup_cuda_nvcc._LOCAL_PREFIX_DEFAULT
-        path_nvcc = tmp_path / "fake-host-nvcc"
-        path_nvcc.touch()
-        with (
-            patch.object(setup_cuda_nvcc.shutil, "which", return_value=str(path_nvcc)),
-            patch.object(setup_cuda_nvcc, "_download_micromamba") as dl,
-            patch.object(setup_cuda_nvcc, "_run_micromamba_install") as inst,
-        ):
-            result = setup_cuda_nvcc.ensure_cuda_nvcc(local_prefix)
-        assert result == path_nvcc
-        dl.assert_not_called()
-        inst.assert_not_called()
-
-
-# ---------------------------------------------------------------------------
-# Branch 4: no prefix, no PATH-nvcc → install
-# ---------------------------------------------------------------------------
-
-
-class TestColdInstall:
-    def test_installs_when_neither_prefix_nor_path_has_nvcc(self, tmp_path, clean_env):
-        local_prefix = setup_cuda_nvcc._LOCAL_PREFIX_DEFAULT
-        with (
-            patch.object(setup_cuda_nvcc.shutil, "which", return_value=None),
-            patch.object(setup_cuda_nvcc, "_download_micromamba") as dl,
-            patch.object(setup_cuda_nvcc, "_run_micromamba_install") as inst,
-            patch.object(setup_cuda_nvcc, "_wire_paths", return_value=Path("/dev/null")),
-        ):
-            setup_cuda_nvcc.ensure_cuda_nvcc(local_prefix)
-        dl.assert_called_once_with(local_prefix)
         inst.assert_called_once()
