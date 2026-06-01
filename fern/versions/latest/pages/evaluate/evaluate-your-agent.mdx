@@ -1,0 +1,376 @@
+---
+title: "Evaluate Your Agent"
+description: "Use NeMo Gym environments to score your own agent over HTTP."
+position: 1
+---
+
+<Info>
+
+**Goal**: Learn how to evaluate your own Python agent using NeMo Gym environments — without rewriting it as a Gym server.
+
+**Time**: ~15 minutes
+
+</Info>
+
+## When to Use This Guide
+
+You have your own agent — a LangChain app, a custom Python script, a service running in your infrastructure — and you want to evaluate it against NeMo Gym's environments and verifiers. You don't want to rewrite it as a Gym server class or package it inside a container. You want Gym to provide the environment (tasks, tools, verification) and you'll drive it from outside.
+
+NeMo Gym resources servers are standard HTTP services. Your agent calls them directly: seed a session, execute tools, then verify the result and get a reward. No Gym agent server required.
+
+---
+
+## Architecture
+
+```
+┌─────────────────────────┐         ┌─────────────────────────────────┐
+│     Your Agent          │         │     NeMo Gym Resources Server   │
+│                         │         │                                 │
+│  for each task:         │         │                                 │
+│    1. POST /seed_session ───────► │  seed_session(): init state     │
+│    2. call your model   │         │                                 │
+│    3. POST /{tool_name}  ───────► │  {tool}(): execute action       │
+│       (if tool calls)   │ ◄─────  │    → observation                │
+│    4. POST /verify       ───────► │  verify(): score → reward       │
+│       ◄──────────────── │         │                                 │
+│    5. record reward     │         │                                 │
+└─────────────────────────┘         └─────────────────────────────────┘
+```
+
+Your agent owns the model calls and orchestration. The resources server owns the tasks, tools, state, and verification.
+
+---
+
+## Step 1: Start a Resources Server
+
+Pick an environment and start just its resources server — no model or agent server needed.
+
+For a simple environment without tools (MCQA — multiple-choice question answering):
+
+```bash
+ng_run "+config_paths=[resources_servers/mcqa/configs/mcqa.yaml]"
+```
+
+For an environment with tools (weather tool calling):
+
+```bash
+ng_run "+config_paths=[resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml]"
+```
+
+Wait for "All servers ready!" — this starts the resources server and a head server for config discovery.
+
+<Tip>
+
+You can find the resources server's host and port in the startup logs, or query the head server:
+
+```bash
+curl http://localhost:11000/global_config_dict_yaml
+```
+
+The resources server URL is typically `http://localhost:<port>` where the port is auto-assigned. The examples below use `$RESOURCES_URL` — set it from the startup logs.
+
+</Tip>
+
+---
+
+## Step 2: Load the Task Data
+
+Each environment ships example data in its `data/` directory. Tasks follow the NeMo Gym JSONL schema:
+
+```python
+import json
+
+with open("resources_servers/mcqa/data/example.jsonl") as f:
+    tasks = [json.loads(line) for line in f]
+
+task = tasks[0]
+```
+
+Each task has `responses_create_params` (the prompt for your model) plus environment-specific fields used for verification (e.g., `expected_answer`, `options`).
+
+---
+
+## Step 3: Call the Resources Server from Your Agent
+
+### Simple environment (no tools)
+
+For environments like MCQA where the model just generates a response and the verifier scores it:
+
+```python
+import aiohttp
+import asyncio
+import json
+
+
+RESOURCES_URL = "http://localhost:<port>"  # from ng_run startup logs
+
+
+async def evaluate_task(task: dict, model_response_text: str):
+    async with aiohttp.ClientSession() as session:
+        # 1. Seed the session (initializes per-task state)
+        async with session.post(
+            f"{RESOURCES_URL}/seed_session", json={}
+        ) as resp:
+            resp.raise_for_status()
+
+        # 2. Call verify with the original task + model response
+        verify_request = {
+            **task,
+            "response": {
+                "id": "eval-1",
+                "output": [
+                    {
+                        "type": "message",
+                        "id": "msg-1",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": model_response_text}],
+                        "status": "completed",
+                    }
+                ],
+                "output_text": model_response_text,
+                "status": "completed",
+            },
+        }
+
+        async with session.post(
+            f"{RESOURCES_URL}/verify", json=verify_request
+        ) as resp:
+            resp.raise_for_status()
+            result = await resp.json()
+
+    return result["reward"]
+```
+
+### Environment with tools
+
+For environments where the model makes tool calls, your agent routes them to the resources server:
+
+```python
+async def evaluate_task_with_tools(task: dict):
+    jar = aiohttp.CookieJar()
+    async with aiohttp.ClientSession(cookie_jar=jar) as session:
+        # 1. Seed the session
+        async with session.post(
+            f"{RESOURCES_URL}/seed_session", json=task
+        ) as resp:
+            resp.raise_for_status()
+
+        # 2. Your agent loop — call your model, route tool calls
+        conversation = task["responses_create_params"]["input"]
+        tools = task["responses_create_params"].get("tools", [])
+
+        model_output = await call_your_model(conversation, tools)
+
+        # If the model made a tool call, execute it via the resources server
+        if model_output.tool_calls:
+            for tool_call in model_output.tool_calls:
+                async with session.post(
+                    f"{RESOURCES_URL}/{tool_call.name}",
+                    json=tool_call.arguments,
+                ) as resp:
+                    resp.raise_for_status()
+                    tool_result = await resp.json()
+
+                # Feed tool result back to your model for the next turn
+                # ... continue your agent loop ...
+
+        # 3. Verify the final response
+        verify_request = {
+            **task,
+            "response": format_as_gym_response(model_output),
+        }
+
+        async with session.post(
+            f"{RESOURCES_URL}/verify", json=verify_request
+        ) as resp:
+            resp.raise_for_status()
+            result = await resp.json()
+
+    return result["reward"]
+```
+
+<Warning>
+
+**Cookie propagation**: For environments with stateful tools, the resources server tracks per-rollout state via session cookies. Use a shared `aiohttp.CookieJar` (or forward `Set-Cookie` headers) across `seed_session`, tool calls, and `verify` within a single task attempt.
+
+</Warning>
+
+---
+
+## Step 4: Run Your Evaluation
+
+Loop over tasks, call your model, collect rewards:
+
+```python
+async def run_evaluation(tasks: list[dict], num_repeats: int = 1):
+    results = []
+    for task_idx, task in enumerate(tasks):
+        for repeat in range(num_repeats):
+            prompt = task["responses_create_params"]["input"]
+
+            # Call your model (replace with your actual model call)
+            model_response_text = await call_your_model(prompt)
+
+            reward = await evaluate_task(task, model_response_text)
+            results.append({
+                "task_index": task_idx,
+                "repeat": repeat,
+                "reward": reward,
+            })
+            print(f"Task {task_idx} repeat {repeat}: reward={reward}")
+
+    avg_reward = sum(r["reward"] for r in results) / len(results)
+    print(f"\nAverage reward (pass@1): {avg_reward:.3f}")
+    return results
+```
+
+---
+
+## The `/verify` Request Schema
+
+The `POST /verify` endpoint expects a JSON body with two required fields:
+
+| Field | Type | Description |
+|---|---|---|
+| `responses_create_params` | object | The original task prompt and tools (from the JSONL row) |
+| `response` | object | The model's response in [NeMo Gym Response format](#response-format) |
+
+Plus any environment-specific fields from the JSONL row (e.g., `expected_answer`, `options`, `verifier_metadata`). Pass the full JSONL row merged with the `response` field.
+
+The response returns at minimum:
+
+| Field | Type | Description |
+|---|---|---|
+| `reward` | float | Score between 0.0 and 1.0 |
+
+Individual environments may return additional fields (e.g., `extracted_answer` from MCQA).
+
+### Response Format
+
+The `response` field follows the [OpenAI Responses API](https://platform.openai.com/docs/api-reference/responses) schema. At minimum:
+
+```json
+{
+  "id": "any-id",
+  "output": [
+    {
+      "type": "message",
+      "id": "any-msg-id",
+      "role": "assistant",
+      "content": [{"type": "output_text", "text": "your model's output"}],
+      "status": "completed"
+    }
+  ],
+  "output_text": "your model's output",
+  "status": "completed"
+}
+```
+
+If your model uses the OpenAI Responses API, you can pass the response object directly. If your model uses Chat Completions, you'll need to convert the response — map `choices[0].message.content` to the structure above.
+
+---
+
+## Full Working Example: MCQA Evaluation
+
+This end-to-end example evaluates an OpenAI model against the MCQA environment:
+
+```python
+import aiohttp
+import asyncio
+import json
+from openai import OpenAI
+
+
+RESOURCES_URL = "http://localhost:<port>"  # from ng_run startup logs
+
+
+async def evaluate_mcqa():
+    client = OpenAI()
+
+    with open("resources_servers/mcqa/data/example.jsonl") as f:
+        tasks = [json.loads(line) for line in f]
+
+    results = []
+    async with aiohttp.ClientSession() as session:
+        for i, task in enumerate(tasks):
+            # Seed session
+            async with session.post(f"{RESOURCES_URL}/seed_session", json={}) as resp:
+                resp.raise_for_status()
+
+            # Call your model
+            prompt = task["responses_create_params"]["input"]
+            completion = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=prompt,
+            )
+            model_text = completion.choices[0].message.content
+
+            # Verify
+            verify_body = {
+                **task,
+                "response": {
+                    "id": f"eval-{i}",
+                    "output": [
+                        {
+                            "type": "message",
+                            "id": f"msg-{i}",
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": model_text}],
+                            "status": "completed",
+                        }
+                    ],
+                    "output_text": model_text,
+                    "status": "completed",
+                },
+            }
+
+            async with session.post(f"{RESOURCES_URL}/verify", json=verify_body) as resp:
+                resp.raise_for_status()
+                result = await resp.json()
+
+            results.append(result)
+            print(f"Task {i}: reward={result['reward']}, "
+                  f"expected={result.get('expected_answer')}, "
+                  f"extracted={result.get('extracted_answer')}")
+
+    avg = sum(r["reward"] for r in results) / len(results)
+    print(f"\nAccuracy: {avg:.1%} ({sum(r['reward'] == 1.0 for r in results)}/{len(results)})")
+
+
+asyncio.run(evaluate_mcqa())
+```
+
+Run the resources server in one terminal, this script in another.
+
+---
+
+## Resources Server HTTP API Summary
+
+Every resources server exposes these endpoints:
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/seed_session` | POST | Initialize per-task state. Call once per task attempt. |
+| `/{tool_name}` | POST | Execute a tool (environment-specific). Only for environments with tools. |
+| `/verify` | POST | Score the model's response. Returns `reward` and environment-specific fields. |
+| `/aggregate_metrics` | POST | Compute aggregate metrics over a batch of verify responses. |
+
+---
+
+## What's Next
+
+<Cards>
+
+<Card title="Available Environments" href="https://github.com/NVIDIA-NeMo/Gym#-available-environments">
+Browse the environments available for evaluation and training.
+</Card>
+
+<Card title="Build a Custom Environment" href="/latest/environment-tutorials">
+Create your own environment with custom tools and verification logic.
+</Card>
+
+<Card title="Training Tutorials" href="/latest/training-tutorials">
+Use collected rollouts to train models with RL.
+</Card>
+
+</Cards>
