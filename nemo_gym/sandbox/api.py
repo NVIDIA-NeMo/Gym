@@ -29,6 +29,7 @@ from typing import Any, TypeVar
 from nemo_gym.sandbox.providers import (
     SandboxExecResult,
     SandboxHandle,
+    SandboxHandleReferenceProvider,
     SandboxProvider,
     SandboxSpec,
     create_provider,
@@ -38,16 +39,10 @@ from nemo_gym.sandbox.providers import (
 T = TypeVar("T")
 
 
-def rewrite_image(image: str | None, rewrites: list[dict[str, str]]) -> str | None:
-    """Apply ordered image-prefix rewrites used by sandbox configs."""
-    if image is None:
-        return None
-    for rewrite in rewrites:
-        from_prefix = rewrite["from"]
-        to_prefix = rewrite["to"]
-        if image.startswith(from_prefix):
-            return to_prefix + image[len(from_prefix) :]
-    return image
+async def _maybe_await(value: T | Awaitable[T]) -> T:
+    if hasattr(value, "__await__"):
+        return await value
+    return value
 
 
 class AsyncSandbox:
@@ -109,15 +104,11 @@ class AsyncSandbox:
     async def close(self, handle: SandboxHandle, *, delete: bool = False) -> None:
         await self._provider.close(handle, delete=delete)
 
-    async def delete(self, handle: SandboxHandle) -> None:
-        await self.close(handle, delete=True)
-
     async def aclose(self) -> None:
-        close_provider = getattr(self._provider, "aclose", None)
-        if close_provider is not None:
-            await close_provider()
+        await self._provider.aclose()
 
     async def shutdown(self) -> None:
+        """Close provider-scoped resources such as SDK clients or warm pools."""
         await self.aclose()
 
     async def __aenter__(self) -> "AsyncSandbox":
@@ -126,21 +117,17 @@ class AsyncSandbox:
     async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         await self.aclose()
 
-    def handle_reference(self, handle: SandboxHandle) -> Any:
-        make_reference = getattr(self._provider, "handle_reference", None)
-        if make_reference is None:
+    async def handle_reference(self, handle: SandboxHandle) -> Any:
+        if not isinstance(self._provider, SandboxHandleReferenceProvider):
             return handle
-        return make_reference(handle)
+        return await _maybe_await(self._provider.handle_reference(handle))
 
     async def materialize_handle(self, value: Any) -> SandboxHandle:
-        materialize = getattr(self._provider, "materialize_handle", None)
-        if materialize is None:
+        if not isinstance(self._provider, SandboxHandleReferenceProvider):
             if isinstance(value, SandboxHandle):
                 return value
             raise ValueError(f"Provider {self.provider_name!r} cannot materialize handle references")
-        result = materialize(value)
-        if hasattr(result, "__await__"):
-            result = await result
+        result = await _maybe_await(self._provider.materialize_handle(value))
         if not isinstance(result, SandboxHandle):
             raise TypeError(f"materialize_handle must return SandboxHandle, got {type(result).__name__}")
         return result
@@ -273,10 +260,8 @@ class Sandbox:
     def close(self, handle: SandboxHandle, *, delete: bool = False) -> None:
         self._runner.run("close", lambda: self._async_sandbox.close(handle, delete=delete))
 
-    def delete(self, handle: SandboxHandle) -> None:
-        self.close(handle, delete=True)
-
     def shutdown(self) -> None:
+        """Close provider-scoped resources such as SDK clients or warm pools."""
         if self._closed:
             return
         self._closed = True
@@ -286,7 +271,7 @@ class Sandbox:
             self._runner.close()
 
     def handle_reference(self, handle: SandboxHandle) -> Any:
-        return self._runner.call("handle_reference", lambda: self._async_sandbox.handle_reference(handle))
+        return self._runner.run("handle_reference", lambda: self._async_sandbox.handle_reference(handle))
 
     def materialize_handle(self, value: Any) -> SandboxHandle:
         return self._runner.run("materialize_handle", lambda: self._async_sandbox.materialize_handle(value))

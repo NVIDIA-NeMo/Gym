@@ -19,9 +19,10 @@ Gym agents and external harnesses consume the public ``nemo_gym.sandbox`` API
 instead of importing provider-specific modules.
 """
 
+from collections.abc import Awaitable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 
 @dataclass(frozen=True)
@@ -37,14 +38,18 @@ class SandboxSpec:
     resources: dict[str, str] = field(default_factory=dict)
     entrypoint: list[str] | None = None
     extensions: dict[str, str] = field(default_factory=dict)
-    platform: dict[str, Any] | None = None
-    volumes: list[dict[str, Any]] | None = None
-    skip_health_check: bool | None = None
+    provider_options: dict[str, Any] = field(default_factory=dict)
 
 
-@dataclass(frozen=True)
+@dataclass
 class SandboxHandle:
-    """Provider-neutral handle to a created sandbox."""
+    """Provider-neutral handle to a created sandbox.
+
+    ``raw`` is provider-owned opaque state, such as an SDK sandbox object,
+    transport session, or lightweight provider reference. Public Gym code
+    should pass it back to the provider through this handle rather than
+    inspecting or mutating it directly.
+    """
 
     sandbox_id: str
     provider_name: str
@@ -53,18 +58,25 @@ class SandboxHandle:
 
 @dataclass(frozen=True)
 class SandboxExecResult:
-    """Provider-neutral process execution result."""
+    """Provider-neutral process execution result.
+
+    ``return_code`` is the process exit code when the sandbox actually ran the
+    command. Providers may use a non-process sentinel with ``error_type`` set
+    when the sandbox runtime reports an execution failure without a process
+    exit code.
+    """
 
     stdout: str | None
     stderr: str | None
     return_code: int
+    error_type: str | None = None
 
 
 class SandboxCreateError(RuntimeError):
     """Raised when a provider cannot create a sandbox."""
 
 
-class SandboxBatchCreateError(SandboxCreateError):
+class SandboxBatchCreateError(RuntimeError):
     """Raised when a provider cannot complete sandbox batch creation."""
 
 
@@ -90,8 +102,12 @@ class SandboxProvider(Protocol):
     ) -> list[SandboxHandle]:
         """Create several equivalent sandboxes.
 
-        Providers that have a native bulk-allocation primitive should use it.
-        Providers without one may fall back to calling ``create`` repeatedly.
+        Providers that have a native bulk-allocation primitive or warm-pool
+        implementation should use it. Providers without one may fall back to
+        calling ``create`` repeatedly. Long-lived pools are provider-owned and
+        configured through provider config or ``SandboxSpec.provider_options``,
+        rather than through a separate public pool handle.
+
         When ``allow_partial`` is true, providers may return a smaller
         contiguous prefix of successfully created handles instead of failing the
         whole batch.
@@ -131,6 +147,23 @@ class SandboxProvider(Protocol):
         """Download one sandbox file to the local filesystem."""
         ...
 
-    async def close(self, handle: SandboxHandle, *, delete: bool) -> None:
+    async def close(self, handle: SandboxHandle, *, delete: bool = False) -> None:
         """Close provider resources and optionally delete the sandbox."""
+        ...
+
+    async def aclose(self) -> None:
+        """Close provider-scoped resources such as SDK clients or warm pools."""
+        ...
+
+
+@runtime_checkable
+class SandboxHandleReferenceProvider(Protocol):
+    """Optional provider trait for loop-safe sandbox handle references."""
+
+    def handle_reference(self, handle: SandboxHandle) -> Any | Awaitable[Any]:
+        """Return a serializable or loop-safe reference for ``handle``."""
+        ...
+
+    def materialize_handle(self, value: Any) -> SandboxHandle | Awaitable[SandboxHandle]:
+        """Convert a value from ``handle_reference`` back into a local handle."""
         ...

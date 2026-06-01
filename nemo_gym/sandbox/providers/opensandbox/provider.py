@@ -96,6 +96,9 @@ METADATA_VALUE_RE = re.compile(r"[^A-Za-z0-9_.-]+")
 DEFAULT_IMAGE_PULL_POLICY = "IfNotPresent"
 IMAGE_PULL_POLICY_EXTENSION_KEY = "imagePullPolicy"
 IMAGE_PULL_POLICY_ANNOTATION_EXTENSION_KEY = "opensandbox.extensions.image-pull-policy"
+PROVIDER_OPTION_PLATFORM = "platform"
+PROVIDER_OPTION_SKIP_HEALTH_CHECK = "skip_health_check"
+PROVIDER_OPTION_VOLUMES = "volumes"
 VALID_IMAGE_PULL_POLICIES = {"Always", "IfNotPresent", "Never"}
 STATUS_CODE_RE = re.compile(r"(?:status code|http)\D+(\d{3})", re.IGNORECASE)
 
@@ -117,7 +120,7 @@ def _require_opensandbox_sdk() -> tuple[Any, Any, Any, Any, Any]:
     except ModuleNotFoundError as e:
         raise ModuleNotFoundError(
             "OpenSandbox SDK is required for the opensandbox sandbox provider. "
-            "Install it in the NeMo-RL runtime image before using "
+            "Install nemo-gym[sandbox] in the runtime image before using "
             "env.sandbox.provider.name=opensandbox."
         ) from e
 
@@ -135,7 +138,7 @@ def _require_opensandbox_sdk_pool() -> tuple[Any, Any, Any, Any]:
     except ImportError as e:
         raise ModuleNotFoundError(
             "OpenSandbox SDK >=0.1.9 is required for native SDK pool batch creation. "
-            "Install opensandbox>=0.1.9 in the NeMo-RL runtime image."
+            "Install nemo-gym[sandbox] in the runtime image."
         ) from e
 
     return AcquirePolicy, InMemoryAsyncPoolStateStore, PoolCreationSpec, SandboxPoolAsync
@@ -345,6 +348,15 @@ def _to_volumes(volumes: list[dict[str, Any]]) -> list[Any]:
     return [Volume(**volume) for volume in volumes]
 
 
+def _provider_option_bool(provider_options: dict[str, Any], key: str) -> bool | None:
+    value = provider_options.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, bool):
+        raise TypeError(f"OpenSandbox provider option {key!r} must be a bool")
+    return value
+
+
 def _seconds_to_timedelta(seconds: int | float | None) -> timedelta | None:
     if seconds is None:
         return None
@@ -403,8 +415,8 @@ class OpenSandboxCreateConfig:
 class OpenSandboxProbeConfig:
     """Post-create probe settings."""
 
-    command: str | None = "printf nemo-rl-sandbox-ready"
-    expected_stdout: str | None = "nemo-rl-sandbox-ready"
+    command: str | None = "printf nemo-gym-sandbox-ready"
+    expected_stdout: str | None = "nemo-gym-sandbox-ready"
     timeout_s: int = 30
     deadline_s: float | None = None
     sample_count: int | None = None
@@ -811,14 +823,18 @@ class OpenSandboxProvider:
             kwargs["ready_timeout"] = timedelta(seconds=spec.ready_timeout_s)
         if spec.entrypoint is not None:
             kwargs["entrypoint"] = spec.entrypoint
-        if spec.platform is not None:
-            kwargs["platform"] = _to_platform_spec(spec.platform)
-        if spec.volumes is not None:
-            kwargs["volumes"] = _to_volumes(spec.volumes)
+        platform = spec.provider_options.get(PROVIDER_OPTION_PLATFORM)
+        volumes = spec.provider_options.get(PROVIDER_OPTION_VOLUMES)
+        if platform is not None:
+            kwargs["platform"] = _to_platform_spec(platform)
+        if volumes is not None:
+            kwargs["volumes"] = _to_volumes(volumes)
         if self._create.skip_health_check:
             kwargs["skip_health_check"] = True
-        elif spec.skip_health_check is not None:
-            kwargs["skip_health_check"] = spec.skip_health_check
+        else:
+            skip_health_check = _provider_option_bool(spec.provider_options, PROVIDER_OPTION_SKIP_HEALTH_CHECK)
+            if skip_health_check is not None:
+                kwargs["skip_health_check"] = skip_health_check
 
         timeout_s = self._create.timeout_s
         if timeout_s is None and self._connection.request_timeout_s is not None:
@@ -928,8 +944,12 @@ class OpenSandboxProvider:
             env=spec.env or None,
             metadata=spec.metadata or None,
             extensions=spec.extensions or None,
-            platform=_to_platform_spec(spec.platform) if spec.platform is not None else None,
-            volumes=_to_volumes(spec.volumes) if spec.volumes is not None else None,
+            platform=_to_platform_spec(spec.provider_options[PROVIDER_OPTION_PLATFORM])
+            if PROVIDER_OPTION_PLATFORM in spec.provider_options
+            else None,
+            volumes=_to_volumes(spec.provider_options[PROVIDER_OPTION_VOLUMES])
+            if PROVIDER_OPTION_VOLUMES in spec.provider_options
+            else None,
         )
 
     async def _wait_sdk_pool_idle(
@@ -998,6 +1018,10 @@ class OpenSandboxProvider:
         idle_timeout_s = float(self._pool.idle_timeout_s or spec.timeout_s or max(ready_timeout_s * 2.0, 3600.0))
         primary_lock_ttl_s = float(self._pool.primary_lock_ttl_s or max(ready_timeout_s + 60.0, 60.0))
         pool_name = f"nemo-gym-{uuid4().hex[:12]}"
+        skip_health_check = bool(
+            self._create.skip_health_check
+            or _provider_option_bool(spec.provider_options, PROVIDER_OPTION_SKIP_HEALTH_CHECK)
+        )
 
         async def _warmup_preparer(sandbox: Any) -> None:
             if self._probe.command is None:
@@ -1033,8 +1057,8 @@ class OpenSandboxProvider:
             acquire_ready_timeout=timedelta(seconds=ready_timeout_s),
             warmup_ready_timeout=timedelta(seconds=ready_timeout_s),
             warmup_sandbox_preparer=_warmup_preparer,
-            acquire_skip_health_check=bool(self._create.skip_health_check or spec.skip_health_check),
-            warmup_skip_health_check=bool(self._create.skip_health_check or spec.skip_health_check),
+            acquire_skip_health_check=skip_health_check,
+            warmup_skip_health_check=skip_health_check,
             idle_timeout=timedelta(seconds=idle_timeout_s),
         )
         handles: list[SandboxHandle] = []
@@ -1190,14 +1214,16 @@ class OpenSandboxProvider:
         if execution.error is not None:
             stderr_parts.append(f"{execution.error.name}: {execution.error.value}")
         stderr = "\n".join(stderr_parts) or None
+        error_type = None
         if execution.exit_code is not None:
             return_code = execution.exit_code
         elif execution.error is not None:
-            return_code = 1
+            return_code = 125
+            error_type = "sandbox"
         else:
             return_code = 0
 
-        return SandboxExecResult(stdout=stdout, stderr=stderr, return_code=return_code)
+        return SandboxExecResult(stdout=stdout, stderr=stderr, return_code=return_code, error_type=error_type)
 
     async def exec(
         self,

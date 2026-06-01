@@ -24,6 +24,7 @@ import nemo_gym.sandbox.providers.registry as provider_registry
 from nemo_gym.sandbox import (
     AsyncSandbox,
     Sandbox,
+    SandboxBatchCreateError,
     SandboxCreateError,
     SandboxExecResult,
     SandboxHandle,
@@ -32,8 +33,8 @@ from nemo_gym.sandbox import (
     get_provider_class,
     list_providers,
     register_provider,
-    rewrite_image,
 )
+from nemo_gym.sandbox.utils import rewrite_image
 from responses_api_agents.mini_swe_agent_2.sandbox_environment import MiniSWESandboxEnvironment
 
 
@@ -152,6 +153,59 @@ class FakeSandboxProvider:
         return SandboxHandle(sandbox_id=value["sandbox_id"], provider_name=self.name, raw={"materialized": True})
 
 
+class PlainSandboxProvider:
+    name = "plain"
+
+    async def create(self, spec: SandboxSpec) -> SandboxHandle:
+        return SandboxHandle(sandbox_id="plain-1", provider_name=self.name, raw={"spec": spec})
+
+    async def create_batch(
+        self,
+        spec: SandboxSpec,
+        count: int,
+        *,
+        allow_partial: bool = False,
+    ) -> list[SandboxHandle]:
+        del allow_partial
+        return [await self.create(spec) for _ in range(count)]
+
+    async def connect(self, sandbox_id: str) -> SandboxHandle:
+        return SandboxHandle(sandbox_id=sandbox_id, provider_name=self.name, raw={})
+
+    async def exec(
+        self,
+        handle: SandboxHandle,
+        command: str,
+        *,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        timeout_s: int | None = None,
+        user: str | int | None = None,
+    ) -> SandboxExecResult:
+        del handle, command, cwd, env, timeout_s, user
+        return SandboxExecResult(stdout="ok", stderr=None, return_code=0)
+
+    async def write_file(self, handle: SandboxHandle, target_path: str, data: str | bytes) -> None:
+        del handle, target_path, data
+
+    async def read_file(self, handle: SandboxHandle, source_path: str) -> bytes:
+        del handle
+        return f"read:{source_path}".encode()
+
+    async def upload_file(self, handle: SandboxHandle, source_path: Path, target_path: str) -> None:
+        del handle, source_path, target_path
+
+    async def download_file(self, handle: SandboxHandle, source_path: str, target_path: Path) -> None:
+        del handle, source_path
+        target_path.write_bytes(b"downloaded")
+
+    async def close(self, handle: SandboxHandle, *, delete: bool = False) -> None:
+        del handle, delete
+
+    async def aclose(self) -> None:
+        return None
+
+
 def test_sandbox_facade_uses_public_provider_api() -> None:
     asyncio.run(_assert_sandbox_facade_uses_public_provider_api())
 
@@ -180,9 +234,9 @@ async def _assert_sandbox_facade_uses_public_provider_api() -> None:
         "user": "agent",
     }
 
-    await sandbox.delete(handle)
+    await sandbox.close(handle, delete=True)
     assert provider.closed[0] == (handle, True)
-    assert sandbox.handle_reference(handle) == {"kind": "fake", "sandbox_id": "fake-1"}
+    assert await sandbox.handle_reference(handle) == {"kind": "fake", "sandbox_id": "fake-1"}
     assert await sandbox.materialize_handle({"sandbox_id": "fake-2"}) == SandboxHandle(
         sandbox_id="fake-2", provider_name="fake", raw={"materialized": True}
     )
@@ -209,12 +263,15 @@ def test_provider_registry_validation_and_listing(monkeypatch: pytest.MonkeyPatc
         register_provider(provider_name, FakeSandboxProvider)
     with pytest.raises(ValueError, match="already registered"):
         register_provider("opensandbox", FakeSandboxProvider)
+    register_provider(provider_name, FakeSandboxProvider, override=True)
     with pytest.raises(ValueError, match="Unknown sandbox provider"):
         get_provider_class(f"missing-{uuid4().hex}")
 
     builtin_name = f"builtin-{uuid4().hex}"
     monkeypatch.setitem(provider_registry._BUILTIN_PROVIDER_LOADERS, builtin_name, lambda: FakeSandboxProvider)
     assert get_provider_class(builtin_name) is FakeSandboxProvider
+    register_provider(builtin_name, PlainSandboxProvider, override=True)
+    assert get_provider_class(builtin_name) is PlainSandboxProvider
     assert builtin_name in list_providers()
 
 
@@ -286,12 +343,10 @@ async def _assert_async_sandbox_batch_file_and_fallback_reference_operations(tmp
     assert provider.download_calls == [(connected, "/remote/source.txt", target_path)]
     assert target_path.read_bytes() == b"downloaded"
 
-    plain_provider = FakeSandboxProvider()
-    plain_provider.handle_reference = None  # type: ignore[method-assign]
-    plain_provider.materialize_handle = None  # type: ignore[method-assign]
+    plain_provider = PlainSandboxProvider()
     plain_sandbox = AsyncSandbox(plain_provider)
-    plain_handle = SandboxHandle(sandbox_id="plain-1", provider_name="fake", raw={})
-    assert plain_sandbox.handle_reference(plain_handle) is plain_handle
+    plain_handle = SandboxHandle(sandbox_id="plain-1", provider_name="plain", raw={})
+    assert await plain_sandbox.handle_reference(plain_handle) is plain_handle
     assert await plain_sandbox.materialize_handle(plain_handle) is plain_handle
     try:
         await plain_sandbox.materialize_handle({"sandbox_id": "plain-2"})
@@ -325,7 +380,7 @@ def test_sync_sandbox_facade_uses_public_provider_api() -> None:
             "user": "agent",
         }
 
-        sandbox.delete(handle)
+        sandbox.close(handle, delete=True)
         assert provider.closed[0] == (handle, True)
         assert sandbox.handle_reference(handle) == {"kind": "fake", "sandbox_id": "fake-1"}
         assert sandbox.materialize_handle({"sandbox_id": "fake-3"}).sandbox_id == "fake-3"
@@ -584,6 +639,7 @@ def test_opensandbox_create_probe_failures_are_retryable() -> None:
     error = OpenSandboxCreateVerificationError("pod sdk-sandbox-0 failed create probe")
 
     assert isinstance(error, SandboxCreateError)
+    assert not isinstance(SandboxBatchCreateError("batch failed"), SandboxCreateError)
     assert opensandbox_provider_module._is_retryable_create_error(error) is True
 
 
