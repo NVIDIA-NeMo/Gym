@@ -232,7 +232,7 @@ async def test_sdk_pool_passes_platform_through_pool_creation_spec(
     handles = await provider.create_batch(
         SandboxSpec(
             image="mirror.gcr.io/astral/uv:python3.12-bookworm-slim",
-            platform={"os": "linux", "arch": "amd64"},
+            provider_options={"platform": {"os": "linux", "arch": "amd64"}},
         ),
         1,
     )
@@ -479,7 +479,8 @@ async def test_exec_file_operations_and_batch_validation(monkeypatch: pytest.Mon
     }
 
     result = await provider.exec(handle, "fail", user="agent")
-    assert result.return_code == 1
+    assert result.return_code == 125
+    assert result.error_type == "sandbox"
     assert result.stderr == "stderr\nCommandError: failed"
     assert raw.commands.calls[1][0] == "su -s /bin/sh -c fail agent"
 
@@ -619,9 +620,11 @@ async def test_create_once_and_connect_after_create_error_paths(
         timeout_s=10,
         ready_timeout_s=20,
         entrypoint=["/bin/sh"],
-        platform={"os": "linux", "arch": "amd64"},
-        volumes=[{"name": "workspace"}],
-        skip_health_check=False,
+        provider_options={
+            "platform": {"os": "linux", "arch": "amd64"},
+            "volumes": [{"name": "workspace"}],
+            "skip_health_check": False,
+        },
     )
     handle = await provider._create_once(spec)
     assert handle.sandbox_id == "sandbox-1"
@@ -663,7 +666,7 @@ async def test_create_once_and_connect_after_create_error_paths(
         connection={"request_timeout_s": 3},
         probe={"command": None},
     )
-    handle = await provider._create_once(SandboxSpec(image="image:tag", skip_health_check=True))
+    handle = await provider._create_once(SandboxSpec(image="image:tag", provider_options={"skip_health_check": True}))
     assert handle.sandbox_id == "sandbox-1"
     assert FakeSandbox.created_kwargs["skip_health_check"] is True
 

@@ -147,9 +147,10 @@ mini_swe_agent_2:
           cpu: "2"
           memory: 8Gi
           ephemeral-storage: 20Gi
-        platform:
-          os: linux
-          arch: amd64
+        provider_options:
+          platform:
+            os: linux
+            arch: amd64
         metadata:
           benchmark: swebench-verified
           harness: mini-swe-agent
@@ -289,7 +290,8 @@ environment:
       connection: ...
   spec:
     resources: ...
-    platform: ...
+    provider_options:
+      platform: ...
     metadata: ...
 ```
 

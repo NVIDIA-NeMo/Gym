@@ -20,6 +20,7 @@ from nemo_gym.sandbox.providers.base import (
     SandboxCreateVerificationError,
     SandboxExecResult,
     SandboxHandle,
+    SandboxHandleReferenceProvider,
     SandboxProvider,
     SandboxSpec,
 )
@@ -37,6 +38,7 @@ __all__ = [
     "SandboxCreateVerificationError",
     "SandboxExecResult",
     "SandboxHandle",
+    "SandboxHandleReferenceProvider",
     "SandboxProvider",
     "SandboxSpec",
     "create_provider",

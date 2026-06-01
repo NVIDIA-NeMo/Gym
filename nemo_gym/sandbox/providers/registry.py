@@ -27,11 +27,11 @@ _PROVIDER_REGISTRY: dict[str, ProviderClass] = {}
 _BUILTIN_PROVIDER_LOADERS: dict[str, ProviderLoader] = {}
 
 
-def register_provider(name: str, provider_class: ProviderClass) -> None:
+def register_provider(name: str, provider_class: ProviderClass, *, override: bool = False) -> None:
     """Register a sandbox provider class."""
     if not name:
         raise ValueError("Provider name must be non-empty")
-    if name in _PROVIDER_REGISTRY or name in _BUILTIN_PROVIDER_LOADERS:
+    if not override and (name in _PROVIDER_REGISTRY or name in _BUILTIN_PROVIDER_LOADERS):
         raise ValueError(f"Sandbox provider {name!r} is already registered")
     _PROVIDER_REGISTRY[name] = provider_class
 

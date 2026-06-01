@@ -32,7 +32,8 @@ except ModuleNotFoundError:
             super().__init__()
 
 
-from nemo_gym.sandbox import Sandbox, SandboxSpec, rewrite_image
+from nemo_gym.sandbox import Sandbox, SandboxSpec
+from nemo_gym.sandbox.utils import rewrite_image
 
 
 @dataclass
@@ -79,6 +80,10 @@ class MiniSWESandboxEnvironment:
         spec_config = dict(self.config.spec)
         image = spec_config.pop("image", None) or self.config.image
         image = rewrite_image(image, spec_config.pop("image_rewrites", []))
+        provider_options = dict(spec_config.pop("provider_options", {}))
+        for option_key in ("platform", "volumes", "skip_health_check"):
+            if option_key in spec_config:
+                provider_options[option_key] = spec_config.pop(option_key)
 
         env = dict(spec_config.pop("env", {}))
         for key in self.config.forward_env:
@@ -103,9 +108,7 @@ class MiniSWESandboxEnvironment:
                 resources=spec_config.pop("resources", {}),
                 entrypoint=spec_config.pop("entrypoint", None),
                 extensions=spec_config.pop("extensions", {}),
-                platform=spec_config.pop("platform", None),
-                volumes=spec_config.pop("volumes", None),
-                skip_health_check=spec_config.pop("skip_health_check", None),
+                provider_options=provider_options,
             )
         )
 
