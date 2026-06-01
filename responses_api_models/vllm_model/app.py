@@ -22,6 +22,7 @@ from uuid import uuid4
 
 from aiohttp.client_exceptions import ClientResponseError
 from fastapi import Request
+from pydantic import Field
 
 from nemo_gym.base_responses_api_model import (
     BaseResponsesAPIModelConfig,
