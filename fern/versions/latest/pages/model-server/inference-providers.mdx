@@ -4,7 +4,7 @@ description: "Use hosted inference providers like Fireworks, Together.ai, OpenRo
 position: 3
 ---
 
-The `chat_completions_model` server connects NeMo Gym to any hosted inference provider that exposes an OpenAI-compatible `/v1/chat/completions` endpoint.
+The `inference_provider` server connects NeMo Gym to any hosted inference provider that exposes an OpenAI-compatible `/v1/chat/completions` endpoint.
 
 <Info>
 For **training** workloads that require token IDs and log probabilities, use [vLLM](/latest/model-server/vllm) instead. Hosted providers don't expose the token-level information needed for RL training.
@@ -13,7 +13,7 @@ For **training** workloads that require token IDs and log probabilities, use [vL
 
 ## Supported Providers
 
-All provider configs live in [`responses_api_models/chat_completions_model/configs/`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_models/chat_completions_model/configs).
+All provider configs live in [`responses_api_models/inference_provider/configs/`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_models/inference_provider/configs).
 
 | Provider | Config | Base URL |
 |----------|--------|----------|
@@ -68,10 +68,10 @@ In this example we use Together.ai:
 
 ```bash
 environment_config="resources_servers/mcqa/configs/mcqa.yaml"
-model_config="responses_api_models/chat_completions_model/configs/together.yaml"
+model_config="responses_api_models/inference_provider/configs/together.yaml"
 ```
 
-For unlisted providers, use the generic config: `responses_api_models/chat_completions_model/configs/chat_completions_model.yaml`
+For unlisted providers, use the generic config: `responses_api_models/inference_provider/configs/inference_provider.yaml`
 
 ### 2. Start servers
 
