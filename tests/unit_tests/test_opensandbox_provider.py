@@ -67,94 +67,16 @@ class FakeSandbox:
         return cls()
 
 
-@dataclass
-class FakePoolCreationSpec:
-    image: str
-    entrypoint: list[str] | None = None
-    resource: dict[str, str] | None = None
-    env: dict[str, str] | None = None
-    metadata: dict[str, str] | None = None
-    extensions: dict[str, str] | None = None
-    platform: Any | None = None
-    volumes: list[Any] | None = None
-
-
-class FakeAcquirePolicy:
-    FAIL_FAST = "fail_fast"
-
-
-class FakeStateStore:
-    pass
-
-
-class FakeSnapshot:
-    idle_count = 1
-    state = None
-
-
-class FakeSandboxPoolAsync:
-    received_kwargs: dict[str, Any] = {}
-
-    def __init__(self, **kwargs: Any) -> None:
-        self.received_kwargs = kwargs
-        type(self).received_kwargs = kwargs
-
-    async def start(self) -> None:
-        preparer = self.received_kwargs.get("warmup_sandbox_preparer")
-        if preparer is not None:
-            await preparer(FakeSandbox("warmup-1"))
-        return None
-
-    async def snapshot(self) -> FakeSnapshot:
-        return FakeSnapshot()
-
-    async def resize(self, _count: int) -> None:
-        return None
-
-    async def acquire(
-        self,
-        *,
-        sandbox_timeout: timedelta | None,
-        policy: str,
-    ) -> FakeSandbox:
-        del sandbox_timeout, policy
-        creation_spec = self.received_kwargs["creation_spec"]
-        return await FakeSandbox.create(
-            creation_spec.image,
-            platform=creation_spec.platform,
-        )
-
-    async def shutdown(self, *, graceful: bool) -> None:
-        del graceful
-
-    async def release_all_idle(self) -> None:
-        return None
-
-
 @pytest.fixture
 def fake_opensandbox_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
     def require_sdk() -> tuple[Any, Any, Any, Any, Any]:
         return FakeSandbox, FakeConnectionConfig, object, FakePlatformSpec, object
 
-    def require_sdk_pool() -> tuple[Any, Any, Any, Any]:
-        return (
-            FakeAcquirePolicy,
-            FakeStateStore,
-            FakePoolCreationSpec,
-            FakeSandboxPoolAsync,
-        )
-
     monkeypatch.setattr(opensandbox_provider, "_require_opensandbox_sdk", require_sdk)
-    monkeypatch.setattr(
-        opensandbox_provider,
-        "_require_opensandbox_sdk_pool",
-        require_sdk_pool,
-    )
 
 
 def test_sdk_import_helpers_and_retry_classification() -> None:
     assert len(opensandbox_provider._require_opensandbox_sdk()) == 5
-    assert len(opensandbox_provider._require_opensandbox_sdk_pool()) == 4
     assert len(opensandbox_provider._require_tenacity()) == 4
 
     class StatusCodeError(Exception):
@@ -213,10 +135,6 @@ def test_missing_optional_dependency_import_helpers(monkeypatch: pytest.MonkeyPa
     with pytest.raises(ModuleNotFoundError, match="OpenSandbox SDK is required"):
         opensandbox_provider._require_opensandbox_sdk()
 
-    block_imports("opensandbox")
-    with pytest.raises(ModuleNotFoundError, match="OpenSandbox SDK >=0.1.9"):
-        opensandbox_provider._require_opensandbox_sdk_pool()
-
     block_imports("tenacity")
     with pytest.raises(ModuleNotFoundError, match="tenacity is required"):
         opensandbox_provider._require_tenacity()
@@ -228,7 +146,7 @@ def test_missing_optional_dependency_import_helpers(monkeypatch: pytest.MonkeyPa
     assert opensandbox_provider._is_retryable_create_error(RuntimeError("gateway timeout")) is True
 
 
-async def test_provider_reference_materialization_and_conversion_helpers(
+async def test_provider_conversion_helpers(
     fake_opensandbox_sdk: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -245,23 +163,8 @@ async def test_provider_reference_materialization_and_conversion_helpers(
     )
     assert opensandbox_provider._to_volumes([{"name": "workspace"}]) == [FakeVolume(name="workspace")]
 
-    provider = opensandbox_provider.OpenSandboxProvider(probe={"command": None})
-    handle = opensandbox_provider.SandboxHandle(sandbox_id="sandbox-1", provider_name="opensandbox", raw=object())
-    assert provider.handle_reference(handle) == {
-        "kind": "sandbox_id",
-        "provider": "opensandbox",
-        "sandbox_id": "sandbox-1",
-    }
 
-    async def connect(sandbox_id: str) -> opensandbox_provider.SandboxHandle:
-        return opensandbox_provider.SandboxHandle(sandbox_id=sandbox_id, provider_name="opensandbox", raw="connected")
-
-    monkeypatch.setattr(provider, "connect", connect)
-    materialized = await provider.materialize_handle({"kind": "sandbox_id", "sandbox_id": "sandbox-2"})
-    assert materialized.raw == "connected"
-
-
-async def test_sdk_pool_passes_platform_through_pool_creation_spec(
+async def test_direct_create_passes_platform_to_sdk_create(
     fake_opensandbox_sdk: None,
 ) -> None:
     provider = opensandbox_provider.OpenSandboxProvider(
@@ -269,36 +172,18 @@ async def test_sdk_pool_passes_platform_through_pool_creation_spec(
         probe={"command": None},
     )
 
-    handles = await provider.create_batch(
+    handle = await provider.create(
         SandboxSpec(
             image="mirror.gcr.io/astral/uv:python3.12-bookworm-slim",
             provider_options={"platform": {"os": "linux", "arch": "amd64"}},
         ),
-        1,
     )
 
-    assert len(handles) == 1
-    assert handles[0].sandbox_id == "sandbox-1"
-    assert "sandbox_factory" not in FakeSandboxPoolAsync.received_kwargs
+    assert handle.sandbox_id == "sandbox-1"
     assert FakeSandbox.created_kwargs["platform"] == FakePlatformSpec(
         os="linux",
         arch="amd64",
     )
-
-
-async def test_connect_passes_configured_connect_timeout(
-    fake_opensandbox_sdk: None,
-) -> None:
-    provider = opensandbox_provider.OpenSandboxProvider(
-        connection={"connect_timeout_s": 300, "request_timeout_s": 10},
-        probe={"command": None},
-    )
-
-    handle = await provider.connect("sandbox-123")
-
-    assert handle.sandbox_id == "sandbox-1"
-    assert FakeSandbox.connected_args == ("sandbox-123",)
-    assert FakeSandbox.connected_kwargs["connect_timeout"] == timedelta(seconds=300)
 
 
 def test_provider_validation_and_retry_helpers() -> None:
@@ -332,13 +217,9 @@ def test_provider_validation_and_retry_helpers() -> None:
     assert opensandbox_provider._to_sandbox_status(None) == SandboxStatus.UNKNOWN
 
     invalid_kwargs = [
-        {"pool": {"concurrency": 0}},
-        {"connection": {"connect_timeout_s": 0}},
-        {"pool": {"progress_timeout_s": 0}},
         {"create": {"timeout_s": 0}},
         {"probe": {"timeout_s": 0}},
         {"probe": {"deadline_s": 0}},
-        {"probe": {"sample_count": 0}},
         {"probe": {"stable_count": 0}},
         {"probe": {"stable_delay_s": -1}},
         {"create": {"retries": -1}},
@@ -348,10 +229,6 @@ def test_provider_validation_and_retry_helpers() -> None:
         {"operations": {"retry_delay_s": -1}},
         {"operations": {"retry_max_delay_s": -1}},
         {"operations": {"command_retries": -1}},
-        {"pool": {"reconcile_interval_s": 0}},
-        {"pool": {"acquire_poll_interval_s": 0}},
-        {"pool": {"idle_timeout_s": 0}},
-        {"pool": {"primary_lock_ttl_s": 0}},
         {"operations": {"close_timeout_s": 0}},
         {"create": {"connect_attempt_timeout_s": 0}},
         {"create": {"connect_poll_s": 0}},
@@ -378,8 +255,6 @@ def test_provider_validation_and_retry_helpers() -> None:
     assert attrs["status_code"] == 502
     assert attrs["attempt_number"] == 2
     assert attrs["next_sleep_s"] == 0.5
-    assert opensandbox_provider._seconds_to_timedelta(None) is None
-    assert opensandbox_provider._seconds_to_timedelta(1.5) == timedelta(seconds=1.5)
 
 
 def test_connection_config_exec_proxy_and_image_policy(fake_opensandbox_sdk: None) -> None:
@@ -415,77 +290,7 @@ def test_connection_config_exec_proxy_and_image_policy(fake_opensandbox_sdk: Non
     assert no_policy_provider._with_default_image_pull_policy(spec) is spec
 
 
-async def test_wait_sdk_pool_idle_success_partial_and_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
-    class Snapshot:
-        def __init__(self, idle_count: int) -> None:
-            self.idle_count = idle_count
-            self.state = SimpleNamespace(value="warming")
-
-    class FakePool:
-        def __init__(self, counts: list[int]) -> None:
-            self.counts = counts
-            self.index = 0
-            self._config = SimpleNamespace(pool_name="pool-1")
-
-        async def snapshot(self) -> Snapshot:
-            count = self.counts[min(self.index, len(self.counts) - 1)]
-            self.index += 1
-            return Snapshot(count)
-
-    async def no_sleep(_seconds: float) -> None:
-        return None
-
-    monkeypatch.setattr(opensandbox_provider.asyncio, "sleep", no_sleep)
-
-    provider = opensandbox_provider.OpenSandboxProvider(
-        pool={"acquire_poll_interval_s": 0.01},
-        probe={"command": None},
-    )
-    assert (
-        await provider._wait_sdk_pool_idle(
-            FakePool([0, 1, 2]),
-            spec=SandboxSpec(image="image:tag"),
-            requested=2,
-            timeout_s=1,
-            allow_partial=False,
-        )
-        == 2
-    )
-    assert (
-        await provider._wait_sdk_pool_idle(
-            FakePool([1]),
-            spec=SandboxSpec(image="image:tag"),
-            requested=2,
-            timeout_s=0,
-            allow_partial=True,
-        )
-        == 1
-    )
-    progress_timeout_provider = opensandbox_provider.OpenSandboxProvider(
-        pool={"progress_timeout_s": 0.000001, "acquire_poll_interval_s": 0.000001},
-        probe={"command": None},
-    )
-    assert (
-        await progress_timeout_provider._wait_sdk_pool_idle(
-            FakePool([1]),
-            spec=SandboxSpec(image="image:tag"),
-            requested=2,
-            timeout_s=1,
-            allow_partial=True,
-        )
-        == 1
-    )
-    with pytest.raises(opensandbox_provider.OpenSandboxCreateTimeoutError):
-        await provider._wait_sdk_pool_idle(
-            FakePool([0]),
-            spec=SandboxSpec(image="image:tag"),
-            requested=2,
-            timeout_s=0,
-            allow_partial=False,
-        )
-
-
-async def test_exec_file_operations_and_batch_validation(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+async def test_exec_file_operations_and_reference_validation(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     class FakeRunCommandOpts:
         def __init__(self, **kwargs: Any) -> None:
             self.kwargs = kwargs
@@ -584,15 +389,6 @@ async def test_exec_file_operations_and_batch_validation(monkeypatch: pytest.Mon
     assert await provider.status(bare_handle) == SandboxStatus.UNKNOWN
     assert await provider.container_ip(bare_handle) is None
 
-    with pytest.raises(ValueError, match="count"):
-        await provider._create_batch_sdk(SandboxSpec(image="image:tag"), 0)
-    with pytest.raises(ValueError, match="count"):
-        await provider.create_batch(SandboxSpec(image="image:tag"), 0)
-    with pytest.raises(ValueError, match="snapshot_id"):
-        provider._validate_sdk_pool_spec(SandboxSpec(image="image:tag", provider_options={"snapshot_id": "snapshot"}))
-    with pytest.raises(ValueError, match="Unsupported"):
-        await provider.materialize_handle({"kind": "other"})
-
 
 async def test_provider_create_probe_and_close_error_paths(monkeypatch: pytest.MonkeyPatch) -> None:
     provider = opensandbox_provider.OpenSandboxProvider(
@@ -642,17 +438,7 @@ async def test_provider_create_probe_and_close_error_paths(monkeypatch: pytest.M
     with pytest.raises(asyncio.CancelledError):
         await provider._verify_created_handle(handle)
 
-    provider = opensandbox_provider.OpenSandboxProvider(probe={"command": "probe"})
-
-    async def fail_verify(_handle: Any) -> None:
-        raise RuntimeError("probe failed")
-
-    monkeypatch.setattr(provider, "_verify_created_handle", fail_verify)
-    with pytest.raises(opensandbox_provider.OpenSandboxCreateVerificationError):
-        await provider._verify_created_handles([handle, handle])
-
     provider = opensandbox_provider.OpenSandboxProvider(probe={"command": None})
-    await provider._verify_created_handles([])
 
     async def close_raises(_handle: Any, *, delete: bool) -> None:
         del delete
@@ -677,21 +463,6 @@ async def test_provider_create_probe_and_close_error_paths(monkeypatch: pytest.M
         ),
         delete=True,
     )
-
-    class CloseSucceedsRaw:
-        async def close(self) -> None:
-            return None
-
-    assert await provider._close_many(
-        [
-            opensandbox_provider.SandboxHandle(
-                sandbox_id="sandbox-close",
-                provider_name="opensandbox",
-                raw=CloseSucceedsRaw(),
-            )
-        ],
-        delete=False,
-    ) == [None]
 
     class DeleteAndCloseFailRaw:
         async def kill(self) -> None:
@@ -732,13 +503,6 @@ async def test_create_once_and_connect_after_create_error_paths(
     fake_opensandbox_sdk: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    provider = opensandbox_provider.OpenSandboxProvider(
-        connection={"use_server_proxy": False},
-        probe={"command": None},
-    )
-    with pytest.raises(ValueError, match="pooled creation"):
-        await provider._create_once(SandboxSpec(image="image:tag", extensions={"poolRef": "pool"}))
-
     provider = opensandbox_provider.OpenSandboxProvider(
         create={"timeout_s": 1, "skip_health_check": True},
         probe={"command": None},
@@ -897,18 +661,6 @@ async def test_create_once_and_connect_after_create_error_paths(
         await provider._create_once(SandboxSpec(image="image:tag"))
     assert cleanup_calls == ["sandbox-1"]
 
-    provider = opensandbox_provider.OpenSandboxProvider(probe={"command": None})
-
-    async def create_once(_spec: SandboxSpec) -> opensandbox_provider.SandboxHandle:
-        return opensandbox_provider.SandboxHandle(
-            sandbox_id="sandbox-semaphore", provider_name="opensandbox", raw=None
-        )
-
-    monkeypatch.setattr(provider, "_create_once", create_once)
-    assert (
-        await provider._create_with_retries(SandboxSpec(image="image:tag"), semaphore=asyncio.Semaphore(1))
-    ).sandbox_id == "sandbox-semaphore"
-
 
 async def test_retry_classification_and_await_sdk_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
     provider = opensandbox_provider.OpenSandboxProvider(
@@ -940,81 +692,6 @@ async def test_retry_classification_and_await_sdk_helpers(monkeypatch: pytest.Mo
             sandbox_id="sandbox-1",
             timeout_s=None,
         )
-
-
-async def test_probe_sampling_pool_progress_and_direct_exec_paths(monkeypatch: pytest.MonkeyPatch) -> None:
-    handles = [
-        opensandbox_provider.SandboxHandle(sandbox_id=f"sandbox-{index}", provider_name="opensandbox", raw=object())
-        for index in range(3)
-    ]
-    seen_handles: list[str] = []
-
-    provider = opensandbox_provider.OpenSandboxProvider(
-        probe={"command": "probe", "sample_count": 2},
-        pool={"progress_timeout_s": 0.01, "acquire_poll_interval_s": 0.01},
-    )
-
-    async def verify_created_handle(handle: opensandbox_provider.SandboxHandle) -> None:
-        seen_handles.append(handle.sandbox_id)
-
-    monkeypatch.setattr(provider, "_verify_created_handle", verify_created_handle)
-    await provider._verify_created_handles(handles)
-    assert seen_handles == ["sandbox-0", "sandbox-2"]
-
-    provider = opensandbox_provider.OpenSandboxProvider(probe={"command": "probe", "sample_count": 1})
-    seen_handles = []
-    monkeypatch.setattr(provider, "_verify_created_handle", verify_created_handle)
-    await provider._verify_created_handles(handles)
-    assert seen_handles == ["sandbox-0"]
-
-    with pytest.raises(ValueError, match="requires SandboxSpec.image"):
-        provider._validate_sdk_pool_spec(SandboxSpec(image=None))
-
-    class Snapshot:
-        idle_count = 0
-        state = SimpleNamespace(value="warming")
-
-    class NoProgressPool:
-        async def snapshot(self) -> Snapshot:
-            return Snapshot()
-
-    async def no_sleep(_seconds: float) -> None:
-        return None
-
-    provider = opensandbox_provider.OpenSandboxProvider(
-        pool={"progress_timeout_s": 0.001, "acquire_poll_interval_s": 0.001},
-        probe={"command": None},
-    )
-    monkeypatch.setattr(opensandbox_provider.asyncio, "sleep", no_sleep)
-    with pytest.raises(opensandbox_provider.OpenSandboxCreateTimeoutError, match="warmup progress"):
-        await provider._wait_sdk_pool_idle(
-            NoProgressPool(),
-            spec=SandboxSpec(image="image:tag"),
-            requested=2,
-            timeout_s=1,
-            allow_partial=False,
-        )
-
-    provider = opensandbox_provider.OpenSandboxProvider(
-        connection={"exec_use_server_proxy": False},
-        probe={"command": None},
-    )
-
-    async def connect_after_create(
-        handle: opensandbox_provider.SandboxHandle,
-        _spec: SandboxSpec,
-    ) -> opensandbox_provider.SandboxHandle:
-        return opensandbox_provider.SandboxHandle(
-            sandbox_id=handle.sandbox_id,
-            provider_name="opensandbox",
-            raw="direct",
-        )
-
-    monkeypatch.setattr(provider, "_connect_after_create", connect_after_create)
-    direct_handle = await provider._direct_exec_handle_for_acquired_sandbox(
-        FakeSandbox("sandbox-direct"), SandboxSpec()
-    )
-    assert direct_handle.raw == "direct"
 
 
 async def _return_value(value: Any) -> Any:
