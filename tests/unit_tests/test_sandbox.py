@@ -27,7 +27,6 @@ from nemo_gym.sandbox import (
     ImageSpec,
     OutsideEndpoint,
     Sandbox,
-    SandboxBatchCreateError,
     SandboxCreateError,
     SandboxExecResult,
     SandboxHandle,
@@ -107,16 +106,6 @@ class FakeSandboxProvider:
         self.created_handles.append(handle)
         return handle
 
-    async def create_batch(
-        self,
-        spec: SandboxSpec,
-        count: int,
-        *,
-        allow_partial: bool = False,
-    ) -> list[SandboxHandle]:
-        del allow_partial
-        return [await self.create(spec) for _ in range(count)]
-
     async def exec(
         self,
         handle: SandboxHandle,
@@ -184,16 +173,6 @@ class PlainSandboxProvider:
         self.created_handles.append(handle)
         return handle
 
-    async def create_batch(
-        self,
-        spec: SandboxSpec,
-        count: int,
-        *,
-        allow_partial: bool = False,
-    ) -> list[SandboxHandle]:
-        del allow_partial
-        return [await self.create(spec) for _ in range(count)]
-
     async def exec(
         self,
         handle: SandboxHandle,
@@ -237,16 +216,6 @@ class TransferOnlySandboxProvider:
         )
         self.created_handles.append(handle)
         return handle
-
-    async def create_batch(
-        self,
-        spec: SandboxSpec,
-        count: int,
-        *,
-        allow_partial: bool = False,
-    ) -> list[SandboxHandle]:
-        del allow_partial
-        return [await self.create(spec) for _ in range(count)]
 
     async def exec(
         self,
@@ -776,7 +745,6 @@ def test_opensandbox_create_probe_failures_are_retryable() -> None:
     error = OpenSandboxCreateVerificationError("pod sdk-sandbox-0 failed create probe")
 
     assert isinstance(error, SandboxCreateError)
-    assert not isinstance(SandboxBatchCreateError("batch failed"), SandboxCreateError)
     assert opensandbox_provider_module._is_retryable_create_error(error) is True
 
 
