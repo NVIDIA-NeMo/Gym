@@ -23,12 +23,16 @@ import pytest
 import nemo_gym.sandbox.providers.registry as provider_registry
 from nemo_gym.sandbox import (
     AsyncSandbox,
+    ImageBuildRequest,
+    ImageSpec,
+    OutsideEndpoint,
     Sandbox,
     SandboxBatchCreateError,
     SandboxCreateError,
     SandboxExecResult,
     SandboxHandle,
     SandboxSpec,
+    SandboxStatus,
     create_provider,
     get_provider_class,
     list_providers,
@@ -78,6 +82,7 @@ class FakeSandboxProvider:
         self.marker = marker
         self.created_specs: list[SandboxSpec] = []
         self.exec_calls: list[dict[str, Any]] = []
+        self.image_build_requests: list[ImageBuildRequest] = []
         self.write_calls: list[tuple[SandboxHandle, str, str | bytes]] = []
         self.read_calls: list[tuple[SandboxHandle, str]] = []
         self.upload_calls: list[tuple[SandboxHandle, Path, str]] = []
@@ -85,6 +90,10 @@ class FakeSandboxProvider:
         self.closed: list[tuple[SandboxHandle, bool]] = []
         self.aclosed = False
         FakeSandboxProvider.last_instance = self
+
+    async def build_images(self, request: ImageBuildRequest) -> list[str]:
+        self.image_build_requests.append(request)
+        return [spec.image for spec in request.specs]
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
         self.created_specs.append(spec)
@@ -110,7 +119,7 @@ class FakeSandboxProvider:
         *,
         cwd: str | None = None,
         env: dict[str, str] | None = None,
-        timeout_s: int | None = None,
+        timeout_s: int | float | None = None,
         user: str | int | None = None,
     ) -> SandboxExecResult:
         self.exec_calls.append(
@@ -139,6 +148,14 @@ class FakeSandboxProvider:
         self.download_calls.append((handle, source_path, target_path))
         target_path.parent.mkdir(parents=True, exist_ok=True)
         target_path.write_bytes(b"downloaded")
+
+    async def status(self, handle: SandboxHandle) -> SandboxStatus:
+        del handle
+        return SandboxStatus.RUNNING
+
+    async def container_ip(self, handle: SandboxHandle) -> str | None:
+        del handle
+        return "10.0.0.1"
 
     async def close(self, handle: SandboxHandle, *, delete: bool) -> None:
         self.closed.append((handle, delete))
@@ -179,7 +196,7 @@ class PlainSandboxProvider:
         *,
         cwd: str | None = None,
         env: dict[str, str] | None = None,
-        timeout_s: int | None = None,
+        timeout_s: int | float | None = None,
         user: str | int | None = None,
     ) -> SandboxExecResult:
         del handle, command, cwd, env, timeout_s, user
@@ -198,6 +215,53 @@ class PlainSandboxProvider:
     async def download_file(self, handle: SandboxHandle, source_path: str, target_path: Path) -> None:
         del handle, source_path
         target_path.write_bytes(b"downloaded")
+
+    async def close(self, handle: SandboxHandle, *, delete: bool = False) -> None:
+        del handle, delete
+
+    async def aclose(self) -> None:
+        return None
+
+
+class TransferOnlySandboxProvider:
+    name = "transfer-only"
+
+    def __init__(self) -> None:
+        self.upload_calls: list[tuple[SandboxHandle, Path, str]] = []
+        self.download_calls: list[tuple[SandboxHandle, str, Path]] = []
+
+    async def create(self, spec: SandboxSpec) -> SandboxHandle:
+        return SandboxHandle(sandbox_id="transfer-1", provider_name=self.name, raw={"spec": spec})
+
+    async def create_batch(
+        self,
+        spec: SandboxSpec,
+        count: int,
+        *,
+        allow_partial: bool = False,
+    ) -> list[SandboxHandle]:
+        del allow_partial
+        return [await self.create(spec) for _ in range(count)]
+
+    async def exec(
+        self,
+        handle: SandboxHandle,
+        command: str,
+        *,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        timeout_s: int | float | None = None,
+        user: str | int | None = None,
+    ) -> SandboxExecResult:
+        del handle, command, cwd, env, timeout_s, user
+        return SandboxExecResult(stdout="ok", stderr=None, return_code=0)
+
+    async def upload_file(self, handle: SandboxHandle, source_path: Path, target_path: str) -> None:
+        self.upload_calls.append((handle, source_path, target_path))
+
+    async def download_file(self, handle: SandboxHandle, source_path: str, target_path: Path) -> None:
+        self.download_calls.append((handle, source_path, target_path))
+        target_path.write_bytes(b"fallback")
 
     async def close(self, handle: SandboxHandle, *, delete: bool = False) -> None:
         del handle, delete
@@ -233,9 +297,39 @@ async def _assert_sandbox_facade_uses_public_provider_api() -> None:
         "timeout_s": 60,
         "user": "agent",
     }
+    assert await sandbox.status(handle) == SandboxStatus.RUNNING
+    assert await sandbox.container_ip(handle) == "10.0.0.1"
+
+    built_handle = await sandbox.create(
+        SandboxSpec(image_build=ImageSpec(image="built:tag", source={"context": "repo"}))
+    )
+    assert built_handle.sandbox_id == "fake-1"
+    assert provider.image_build_requests[-1].specs[0].source == {"context": "repo"}
+    assert provider.created_specs[-1].image == "built:tag"
+
+    session = await sandbox.start(
+        SandboxSpec(
+            image="image:tag",
+            workdir="/session",
+            files={"/tmp/bootstrap.txt": "hello"},
+        ),
+        outside_endpoints=[OutsideEndpoint(url="http://outside", env_var="OUTSIDE_URL")],
+        delete_on_stop=True,
+    )
+    try:
+        assert session.spec.env["OUTSIDE_URL"] == "http://outside"
+        assert await session.is_running() is True
+        assert await session.container_ip() == "10.0.0.1"
+        session_result = await session.exec("pwd")
+        assert session_result.return_code == 0
+        assert provider.exec_calls[-1]["cwd"] == "/session"
+    finally:
+        await session.stop()
+    assert provider.write_calls[-1] == (session.handle, "/tmp/bootstrap.txt", "hello")
+    assert provider.closed[-1] == (session.handle, True)
 
     await sandbox.close(handle, delete=True)
-    assert provider.closed[0] == (handle, True)
+    assert provider.closed[-1] == (handle, True)
     assert await sandbox.handle_reference(handle) == {"kind": "fake", "sandbox_id": "fake-1"}
     assert await sandbox.materialize_handle({"sandbox_id": "fake-2"}) == SandboxHandle(
         sandbox_id="fake-2", provider_name="fake", raw={"materialized": True}
@@ -343,6 +437,17 @@ async def _assert_async_sandbox_batch_file_and_fallback_reference_operations(tmp
     assert provider.download_calls == [(connected, "/remote/source.txt", target_path)]
     assert target_path.read_bytes() == b"downloaded"
 
+    transfer_provider = TransferOnlySandboxProvider()
+    transfer_sandbox = AsyncSandbox(transfer_provider)
+    transfer_handle = SandboxHandle(sandbox_id="transfer-1", provider_name="transfer-only", raw={})
+    await transfer_sandbox.write_file(transfer_handle, "/remote/inline.txt", b"fallback")
+    assert transfer_provider.upload_calls[0][0] == transfer_handle
+    assert transfer_provider.upload_calls[0][2] == "/remote/inline.txt"
+    assert await transfer_sandbox.read_file(transfer_handle, "/remote/inline.txt") == b"fallback"
+    assert transfer_provider.download_calls == [
+        (transfer_handle, "/remote/inline.txt", transfer_provider.download_calls[0][2])
+    ]
+
     plain_provider = PlainSandboxProvider()
     plain_sandbox = AsyncSandbox(plain_provider)
     plain_handle = SandboxHandle(sandbox_id="plain-1", provider_name="plain", raw={})
@@ -386,6 +491,13 @@ def test_sync_sandbox_facade_uses_public_provider_api() -> None:
         assert sandbox.materialize_handle({"sandbox_id": "fake-3"}).sandbox_id == "fake-3"
         assert sandbox.provider_name == "fake"
         assert len(sandbox.create_batch(SandboxSpec(image="image:tag"), 2)) == 2
+        session = sandbox.start(SandboxSpec(image="image:tag", workdir="/sync-session"), delete_on_stop=True)
+        assert session.is_running is True
+        assert session.container_ip() == "10.0.0.1"
+        assert session.exec("pwd").return_code == 0
+        assert provider.exec_calls[-1]["cwd"] == "/sync-session"
+        session.stop()
+        assert provider.closed[-1] == (session.handle, True)
         sandbox.shutdown()
         sandbox.shutdown()
         assert provider.aclosed is True
@@ -555,7 +667,7 @@ async def _assert_opensandbox_create_probe_can_require_stable_successes(monkeypa
         *,
         cwd: str | None = None,
         env: dict[str, str] | None = None,
-        timeout_s: int | None = None,
+        timeout_s: int | float | None = None,
         user: str | int | None = None,
     ) -> SandboxExecResult:
         calls.append(
@@ -608,7 +720,7 @@ async def _assert_opensandbox_create_probe_polls_same_sandbox_after_transient_er
         *,
         cwd: str | None = None,
         env: dict[str, str] | None = None,
-        timeout_s: int | None = None,
+        timeout_s: int | float | None = None,
         user: str | int | None = None,
     ) -> SandboxExecResult:
         del command, cwd, env, timeout_s, user
@@ -909,7 +1021,7 @@ def test_mini_swe_sandbox_environment_submit_sentinel() -> None:
             *,
             cwd: str | None = None,
             env: dict[str, str] | None = None,
-            timeout_s: int | None = None,
+            timeout_s: int | float | None = None,
             user: str | int | None = None,
         ) -> SandboxExecResult:
             del handle, command, cwd, env, timeout_s, user

@@ -74,6 +74,8 @@ class MiniSWESandboxEnvironment:
         if not self.config.provider:
             raise ValueError("MiniSWESandboxEnvironment requires provider")
 
+        self._sandbox_client: Sandbox | None = None
+        self._sandbox: Any | None = None
         self._handle: Any | None = None
         self._closed = False
 
@@ -84,6 +86,8 @@ class MiniSWESandboxEnvironment:
         for option_key in ("platform", "volumes", "skip_health_check"):
             if option_key in spec_config:
                 provider_options[option_key] = spec_config.pop(option_key)
+        if "snapshot_id" in spec_config:
+            provider_options["snapshot_id"] = spec_config.pop("snapshot_id")
 
         env = dict(spec_config.pop("env", {}))
         for key in self.config.forward_env:
@@ -92,14 +96,15 @@ class MiniSWESandboxEnvironment:
                 env[key] = value
         env.update(self.config.env)
 
-        self._sandbox = Sandbox(self.config.provider)
-        self._handle = self._sandbox.create(
+        self._sandbox_client = Sandbox(self.config.provider)
+        self._sandbox = self._sandbox_client.start(
             SandboxSpec(
                 image=image,
-                snapshot_id=spec_config.pop("snapshot_id", None),
                 timeout_s=spec_config.pop("timeout_s", None),
                 ready_timeout_s=spec_config.pop("ready_timeout_s", None),
+                workdir=spec_config.pop("workdir", self.config.cwd),
                 env=env,
+                files=spec_config.pop("files", {}),
                 metadata={
                     **spec_config.pop("metadata", {}),
                     "nemo_gym_agent": "mini_swe_agent_2",
@@ -107,10 +112,13 @@ class MiniSWESandboxEnvironment:
                 },
                 resources=spec_config.pop("resources", {}),
                 entrypoint=spec_config.pop("entrypoint", None),
+                environment_dir=spec_config.pop("environment_dir", None),
                 extensions=spec_config.pop("extensions", {}),
                 provider_options=provider_options,
-            )
+            ),
+            delete_on_stop=self.config.delete,
         )
+        self._handle = self._sandbox.handle
 
     def get_template_vars(self, **kwargs: Any) -> dict[str, Any]:
         return {**self.config.__dict__, **kwargs}
@@ -149,10 +157,9 @@ class MiniSWESandboxEnvironment:
         exec_cwd = cwd or self.config.cwd
 
         result = self._sandbox.exec(
-            self._handle,
             self._command(command, exec_cwd),
+            timeout_sec=timeout_s,
             cwd="/",
-            timeout_s=timeout_s,
             user=self.config.user,
         )
         output = "\n".join(part for part in (result.stdout, result.stderr) if part)
@@ -182,11 +189,14 @@ class MiniSWESandboxEnvironment:
             return
         self._closed = True
         try:
-            if self._handle is not None:
-                self._sandbox.close(self._handle, delete=self.config.delete)
+            if self._sandbox is not None:
+                self._sandbox.stop()
+                self._sandbox = None
                 self._handle = None
         finally:
-            self._sandbox.shutdown()
+            if self._sandbox_client is not None:
+                self._sandbox_client.shutdown()
+                self._sandbox_client = None
 
     def __enter__(self) -> "MiniSWESandboxEnvironment":
         return self

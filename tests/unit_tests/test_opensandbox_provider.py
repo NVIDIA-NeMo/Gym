@@ -22,7 +22,7 @@ from typing import Any
 
 import pytest
 
-from nemo_gym.sandbox.providers.base import SandboxSpec
+from nemo_gym.sandbox.providers.base import SandboxSpec, SandboxStatus, VolumeMount
 
 
 pytest.importorskip("tenacity", reason="tenacity optional sandbox dependency is not installed")
@@ -443,9 +443,14 @@ async def test_exec_file_operations_and_batch_validation(monkeypatch: pytest.Mon
             return f"bytes:{source_path}".encode()
 
     class FakeRaw:
+        container_ip = "10.1.2.3"
+
         def __init__(self) -> None:
             self.commands = FakeCommands()
             self.files = FakeFiles()
+
+        async def get_info(self) -> Any:
+            return SimpleNamespace(status=SimpleNamespace(state="RUNNING"))
 
     monkeypatch.setattr(
         opensandbox_provider,
@@ -493,13 +498,15 @@ async def test_exec_file_operations_and_batch_validation(monkeypatch: pytest.Mon
     await provider.download_file(handle, "/remote/download.txt", download_path)
     assert raw.files.writes == [("/tmp/file.txt", "contents"), ("/remote/upload.txt", b"upload")]
     assert download_path.read_bytes() == b"bytes:/remote/download.txt"
+    assert await provider.status(handle) == SandboxStatus.RUNNING
+    assert await provider.container_ip(handle) == "10.1.2.3"
 
     with pytest.raises(ValueError, match="count"):
         await provider._create_batch_sdk(SandboxSpec(image="image:tag"), 0)
     with pytest.raises(ValueError, match="count"):
         await provider.create_batch(SandboxSpec(image="image:tag"), 0)
     with pytest.raises(ValueError, match="snapshot_id"):
-        provider._validate_sdk_pool_spec(SandboxSpec(image="image:tag", snapshot_id="snapshot"))
+        provider._validate_sdk_pool_spec(SandboxSpec(image="image:tag", provider_options={"snapshot_id": "snapshot"}))
     with pytest.raises(ValueError, match="Unsupported"):
         await provider.materialize_handle({"kind": "other"})
 
@@ -616,11 +623,12 @@ async def test_create_once_and_connect_after_create_error_paths(
     monkeypatch.setattr(opensandbox_provider, "_to_volumes", lambda volumes: volumes)
     spec = SandboxSpec(
         image="image:tag",
-        snapshot_id="snapshot-1",
         timeout_s=10,
         ready_timeout_s=20,
         entrypoint=["/bin/sh"],
+        volumes=[VolumeMount(host_path="/host/workspace", container_path="/mnt/workspace", readonly=True)],
         provider_options={
+            "snapshot_id": "snapshot-1",
             "platform": {"os": "linux", "arch": "amd64"},
             "volumes": [{"name": "workspace"}],
             "skip_health_check": False,
@@ -633,7 +641,10 @@ async def test_create_once_and_connect_after_create_error_paths(
     assert FakeSandbox.created_kwargs["ready_timeout"] == timedelta(seconds=20)
     assert FakeSandbox.created_kwargs["entrypoint"] == ["/bin/sh"]
     assert FakeSandbox.created_kwargs["platform"] == FakePlatformSpec(os="linux", arch="amd64")
-    assert FakeSandbox.created_kwargs["volumes"] == [{"name": "workspace"}]
+    assert FakeSandbox.created_kwargs["volumes"] == [
+        VolumeMount(host_path="/host/workspace", container_path="/mnt/workspace", readonly=True),
+        {"name": "workspace"},
+    ]
     assert FakeSandbox.created_kwargs["skip_health_check"] is True
 
     class FailingConnectSandbox(FakeSandbox):
