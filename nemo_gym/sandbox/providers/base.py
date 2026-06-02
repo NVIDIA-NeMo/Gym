@@ -19,7 +19,7 @@ Gym agents and external harnesses consume the public ``nemo_gym.sandbox`` API
 instead of importing provider-specific modules.
 """
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -142,10 +142,6 @@ class SandboxCreateError(RuntimeError):
     """Raised when a provider cannot create a sandbox."""
 
 
-class SandboxBatchCreateError(RuntimeError):
-    """Raised when a provider cannot complete sandbox batch creation."""
-
-
 class SandboxCreateVerificationError(SandboxCreateError):
     """Raised when a newly-created sandbox fails provider readiness checks."""
 
@@ -162,27 +158,6 @@ class SandboxProvider(Protocol):
         commands and transfer files. If the sandbox cannot become ready before
         the configured timeout, providers should raise ``SandboxCreateError``
         or a provider-specific subclass.
-        """
-        ...
-
-    async def create_batch(
-        self,
-        spec: SandboxSpec,
-        count: int,
-        *,
-        allow_partial: bool = False,
-    ) -> list[SandboxHandle]:
-        """Create several equivalent sandboxes.
-
-        Providers that have a native bulk-allocation primitive or warm-pool
-        implementation should use it. Providers without one may fall back to
-        calling ``create`` repeatedly. Long-lived pools are provider-owned and
-        configured through provider config or ``SandboxSpec.provider_options``,
-        rather than through a separate public pool handle.
-
-        When ``allow_partial`` is true, providers may return a smaller
-        contiguous prefix of successfully created handles instead of failing the
-        whole batch.
         """
         ...
 
@@ -212,20 +187,7 @@ class SandboxProvider(Protocol):
         ...
 
     async def aclose(self) -> None:
-        """Close provider-scoped resources such as SDK clients or warm pools."""
-        ...
-
-
-@runtime_checkable
-class SandboxHandleReferenceProvider(Protocol):
-    """Optional provider trait for loop-safe sandbox handle references."""
-
-    def handle_reference(self, handle: SandboxHandle) -> Any | Awaitable[Any]:
-        """Return a serializable or loop-safe reference for ``handle``."""
-        ...
-
-    def materialize_handle(self, value: Any) -> SandboxHandle | Awaitable[SandboxHandle]:
-        """Convert a value from ``handle_reference`` back into a local handle."""
+        """Close provider-scoped resources such as SDK clients."""
         ...
 
 
