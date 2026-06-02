@@ -1,0 +1,58 @@
+[
+    {
+        "agent_ref": {
+            "name": "bunsen_chem_simple_agent"
+        },
+        "agent_metrics": {
+            "mean/reward": 1.0,
+            "mean/no_answer": 0.0,
+            "pass@1/accuracy": 100.0,
+            "pass@1/no_answer": 0.0,
+            "majority@1/accuracy": 100.0,
+            "by_source/example/pass@1/accuracy": 100.0,
+            "by_source/example/pass@1/no_answer": 0.0,
+            "by_bct_field/general/pass@1/accuracy": 100.0,
+            "by_bct_field/organic/pass@1/accuracy": 100.0,
+            "by_bct_field/analytical/pass@1/accuracy": 100.0,
+            "by_bct_field/not_chemistry/pass@1/accuracy": 100.0,
+            "by_bct_subfield/general/acids_bases/pass@1/accuracy": 100.0,
+            "by_bct_subfield/organic/structure/pass@1/accuracy": 100.0,
+            "by_bct_subfield/general/nomenclature/pass@1/accuracy": 100.0,
+            "by_bct_subfield/analytical/chromatography/pass@1/accuracy": 100.0,
+            "by_bct_subfield/not_chemistry/not_chemistry/pass@1/accuracy": 100.0
+        },
+        "key_metrics": {
+            "mean/reward": 1.0,
+            "pass@1/accuracy": 100.0,
+            "pass@1/no_answer": 0.0,
+            "majority@1/accuracy": 100.0
+        },
+        "group_level_metrics": [
+            {
+                "_ng_task_index": 0,
+                "mean/reward": 1.0,
+                "mean/no_answer": 0.0
+            },
+            {
+                "_ng_task_index": 1,
+                "mean/reward": 1.0,
+                "mean/no_answer": 0.0
+            },
+            {
+                "_ng_task_index": 2,
+                "mean/reward": 1.0,
+                "mean/no_answer": 0.0
+            },
+            {
+                "_ng_task_index": 3,
+                "mean/reward": 1.0,
+                "mean/no_answer": 0.0
+            },
+            {
+                "_ng_task_index": 4,
+                "mean/reward": 1.0,
+                "mean/no_answer": 0.0
+            }
+        ]
+    }
+]
