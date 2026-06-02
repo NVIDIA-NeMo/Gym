@@ -14,14 +14,13 @@
 
 """Public sandbox API for NeMo Gym."""
 
-from nemo_gym.sandbox.api import AsyncSandbox, AsyncSandboxInstance, Sandbox, SandboxInstance
+from nemo_gym.sandbox.api import AsyncSandbox, Sandbox
 from nemo_gym.sandbox.providers import (
     ExecResult,
     ImageBuildRequest,
     ImageSpec,
     OutsideEndpoint,
     SandboxAddressProvider,
-    SandboxAttachProvider,
     SandboxBatchCreateError,
     SandboxCreateError,
     SandboxCreateVerificationError,
@@ -45,15 +44,12 @@ from nemo_gym.sandbox.utils import rewrite_image
 
 __all__ = [
     "Sandbox",
-    "SandboxInstance",
     "AsyncSandbox",
-    "AsyncSandboxInstance",
     "ExecResult",
     "ImageBuildRequest",
     "ImageSpec",
     "OutsideEndpoint",
     "SandboxAddressProvider",
-    "SandboxAttachProvider",
     "SandboxBatchCreateError",
     "SandboxCreateError",
     "SandboxCreateVerificationError",

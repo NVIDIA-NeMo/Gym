@@ -74,9 +74,7 @@ class MiniSWESandboxEnvironment:
         if not self.config.provider:
             raise ValueError("MiniSWESandboxEnvironment requires provider")
 
-        self._sandbox_client: Sandbox | None = None
-        self._sandbox: Any | None = None
-        self._handle: Any | None = None
+        self._sandbox: Sandbox | None = None
         self._closed = False
 
         spec_config = dict(self.config.spec)
@@ -96,8 +94,7 @@ class MiniSWESandboxEnvironment:
                 env[key] = value
         env.update(self.config.env)
 
-        self._sandbox_client = Sandbox(self.config.provider)
-        self._sandbox = self._sandbox_client.start(
+        self._sandbox = Sandbox(self.config.provider).start(
             SandboxSpec(
                 image=image,
                 timeout_s=spec_config.pop("timeout_s", None),
@@ -118,7 +115,6 @@ class MiniSWESandboxEnvironment:
             ),
             delete_on_stop=self.config.delete,
         )
-        self._handle = self._sandbox.handle
 
     def get_template_vars(self, **kwargs: Any) -> dict[str, Any]:
         return {**self.config.__dict__, **kwargs}
@@ -155,10 +151,12 @@ class MiniSWESandboxEnvironment:
         command = action.get("command", "") if isinstance(action, dict) else action
         timeout_s = timeout or (self.config.eval_timeout if is_eval else self.config.step_timeout)
         exec_cwd = cwd or self.config.cwd
+        if self._sandbox is None:
+            raise RuntimeError("Sandbox is not available")
 
         result = self._sandbox.exec(
             self._command(command, exec_cwd),
-            timeout_sec=timeout_s,
+            timeout_s=timeout_s,
             cwd="/",
             user=self.config.user,
         )
@@ -188,15 +186,9 @@ class MiniSWESandboxEnvironment:
         if self._closed:
             return
         self._closed = True
-        try:
-            if self._sandbox is not None:
-                self._sandbox.stop()
-                self._sandbox = None
-                self._handle = None
-        finally:
-            if self._sandbox_client is not None:
-                self._sandbox_client.shutdown()
-                self._sandbox_client = None
+        if self._sandbox is not None:
+            self._sandbox.shutdown()
+            self._sandbox = None
 
     def __enter__(self) -> "MiniSWESandboxEnvironment":
         return self

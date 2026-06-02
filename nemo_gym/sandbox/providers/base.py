@@ -230,15 +230,6 @@ class SandboxHandleReferenceProvider(Protocol):
 
 
 @runtime_checkable
-class SandboxAttachProvider(Protocol):
-    """Optional provider trait for attaching to an existing sandbox."""
-
-    async def attach(self, sandbox_id: str) -> SandboxHandle:
-        """Attach to an existing sandbox and return a loop-local handle."""
-        ...
-
-
-@runtime_checkable
 class SandboxInlineFileProvider(Protocol):
     """Optional provider trait for efficient inline file reads and writes."""
 
