@@ -15,4 +15,3 @@ longcodebench_n3_1m_mcqa_simple_agent:
         jsonl_fpath: benchmarks/longcodebench/data/longcodebench_n3_1m_benchmark.jsonl
         prompt_config: benchmarks/prompts/generic/default.yaml
         prepare_script: benchmarks/longcodebench/prepare_n3_1m.py
-        license: Creative Commons Attribution 4.0 International

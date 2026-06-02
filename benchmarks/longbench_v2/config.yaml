@@ -11,4 +11,3 @@ longbench_v2_mcqa_simple_agent:
         jsonl_fpath: benchmarks/longbench_v2/data/longbench_v2_benchmark.jsonl
         prompt_config: benchmarks/longbench_v2/prompts/default.yaml
         prepare_script: benchmarks/longbench_v2/prepare.py
-        license: Apache 2.0
