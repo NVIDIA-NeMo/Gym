@@ -1209,10 +1209,6 @@ class OpenSandboxProvider:
         sandbox = await Sandbox.connect(sandbox_id, **kwargs)
         return SandboxHandle(sandbox_id=str(sandbox.id), provider_name=self.name, raw=sandbox)
 
-    async def attach(self, sandbox_id: str) -> SandboxHandle:
-        """Attach to an existing OpenSandbox sandbox."""
-        return await self.connect(sandbox_id)
-
     async def status(self, handle: SandboxHandle) -> SandboxStatus:
         """Return the current OpenSandbox lifecycle status."""
         get_info = getattr(handle.raw, "get_info", None)

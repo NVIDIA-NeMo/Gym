@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import asyncio
+import builtins
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
@@ -99,6 +100,9 @@ class FakeSandboxPoolAsync:
         type(self).received_kwargs = kwargs
 
     async def start(self) -> None:
+        preparer = self.received_kwargs.get("warmup_sandbox_preparer")
+        if preparer is not None:
+            await preparer(FakeSandbox("warmup-1"))
         return None
 
     async def snapshot(self) -> FakeSnapshot:
@@ -188,6 +192,42 @@ def test_sdk_import_helpers_and_retry_classification() -> None:
     opensandbox_provider._log_create_retry(retry_state)
 
 
+def test_missing_optional_dependency_import_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
+    real_import = builtins.__import__
+
+    def block_imports(*blocked_names: str) -> None:
+        def fake_import(
+            name: str,
+            globals_: dict[str, Any] | None = None,
+            locals_: dict[str, Any] | None = None,
+            fromlist: tuple[str, ...] = (),
+            level: int = 0,
+        ) -> Any:
+            if any(name == blocked or name.startswith(f"{blocked}.") for blocked in blocked_names):
+                raise ModuleNotFoundError(name)
+            return real_import(name, globals_, locals_, fromlist, level)
+
+        monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    block_imports("opensandbox")
+    with pytest.raises(ModuleNotFoundError, match="OpenSandbox SDK is required"):
+        opensandbox_provider._require_opensandbox_sdk()
+
+    block_imports("opensandbox")
+    with pytest.raises(ModuleNotFoundError, match="OpenSandbox SDK >=0.1.9"):
+        opensandbox_provider._require_opensandbox_sdk_pool()
+
+    block_imports("tenacity")
+    with pytest.raises(ModuleNotFoundError, match="tenacity is required"):
+        opensandbox_provider._require_tenacity()
+
+    block_imports("httpx")
+    assert opensandbox_provider._httpx_retryable_types() == tuple()
+
+    block_imports("opensandbox.exceptions")
+    assert opensandbox_provider._is_retryable_create_error(RuntimeError("gateway timeout")) is True
+
+
 async def test_provider_reference_materialization_and_conversion_helpers(
     fake_opensandbox_sdk: None,
     monkeypatch: pytest.MonkeyPatch,
@@ -264,6 +304,32 @@ async def test_connect_passes_configured_connect_timeout(
 def test_provider_validation_and_retry_helpers() -> None:
     with pytest.raises(ValueError, match="image_pull_policy"):
         opensandbox_provider.validate_image_pull_policy("Sometimes")
+
+    volume_mapping = opensandbox_provider._volume_to_mapping(
+        VolumeMount(host_path="/host/workspace", container_path="/mnt/workspace", readonly=True),
+        0,
+    )
+    assert volume_mapping == {
+        "name": "mnt-workspace",
+        "host": {"path": "/host/workspace"},
+        "mount_path": "/mnt/workspace",
+        "read_only": True,
+    }
+    assert opensandbox_provider._volume_to_mapping({"name": "raw-volume"}, 1) == {"name": "raw-volume"}
+    assert opensandbox_provider._volume_mount_name(VolumeMount(container_path="/"), 2) == "volume-2"
+    with pytest.raises(TypeError, match="VolumeMount"):
+        opensandbox_provider._volume_to_mapping(object(), 0)
+    with pytest.raises(ValueError, match="EFS"):
+        opensandbox_provider._volume_to_mapping(VolumeMount(efs_filesystem_id="fs-1"), 0)
+    with pytest.raises(ValueError, match="host_path"):
+        opensandbox_provider._volume_to_mapping(VolumeMount(), 0)
+    with pytest.raises(TypeError, match="must be a bool"):
+        opensandbox_provider._provider_option_bool({"skip_health_check": "true"}, "skip_health_check")
+
+    assert opensandbox_provider._to_sandbox_status("starting") == SandboxStatus.STARTING
+    assert opensandbox_provider._to_sandbox_status("terminated") == SandboxStatus.STOPPED
+    assert opensandbox_provider._to_sandbox_status("failed") == SandboxStatus.ERROR
+    assert opensandbox_provider._to_sandbox_status(None) == SandboxStatus.UNKNOWN
 
     invalid_kwargs = [
         {"pool": {"concurrency": 0}},
@@ -395,6 +461,20 @@ async def test_wait_sdk_pool_idle_success_partial_and_timeout(monkeypatch: pytes
         )
         == 1
     )
+    progress_timeout_provider = opensandbox_provider.OpenSandboxProvider(
+        pool={"progress_timeout_s": 0.000001, "acquire_poll_interval_s": 0.000001},
+        probe={"command": None},
+    )
+    assert (
+        await progress_timeout_provider._wait_sdk_pool_idle(
+            FakePool([1]),
+            spec=SandboxSpec(image="image:tag"),
+            requested=2,
+            timeout_s=1,
+            allow_partial=True,
+        )
+        == 1
+    )
     with pytest.raises(opensandbox_provider.OpenSandboxCreateTimeoutError):
         await provider._wait_sdk_pool_idle(
             FakePool([0]),
@@ -500,6 +580,9 @@ async def test_exec_file_operations_and_batch_validation(monkeypatch: pytest.Mon
     assert download_path.read_bytes() == b"bytes:/remote/download.txt"
     assert await provider.status(handle) == SandboxStatus.RUNNING
     assert await provider.container_ip(handle) == "10.1.2.3"
+    bare_handle = opensandbox_provider.SandboxHandle(sandbox_id="sandbox-2", provider_name="opensandbox", raw=object())
+    assert await provider.status(bare_handle) == SandboxStatus.UNKNOWN
+    assert await provider.container_ip(bare_handle) is None
 
     with pytest.raises(ValueError, match="count"):
         await provider._create_batch_sdk(SandboxSpec(image="image:tag"), 0)
@@ -532,6 +615,31 @@ async def test_provider_create_probe_and_close_error_paths(monkeypatch: pytest.M
     monkeypatch.setattr(opensandbox_provider.asyncio, "sleep", no_sleep)
     monkeypatch.setattr(provider, "_exec", bad_probe)
     with pytest.raises(opensandbox_provider.OpenSandboxCreateVerificationError):
+        await provider._verify_created_handle(handle)
+
+    provider = opensandbox_provider.OpenSandboxProvider(
+        probe={"command": "probe", "expected_stdout": None, "stable_count": 2, "stable_delay_s": 0.01},
+    )
+    sleep_calls: list[float] = []
+
+    async def record_sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+
+    async def good_probe(*_args: Any, **_kwargs: Any) -> opensandbox_provider.SandboxExecResult:
+        return opensandbox_provider.SandboxExecResult(stdout="ready", stderr=None, return_code=0)
+
+    monkeypatch.setattr(opensandbox_provider.asyncio, "sleep", record_sleep)
+    monkeypatch.setattr(provider, "_exec", good_probe)
+    await provider._verify_created_handle(handle)
+    assert sleep_calls == [0.01]
+
+    provider = opensandbox_provider.OpenSandboxProvider(probe={"command": "probe"})
+
+    async def cancelled_probe(*_args: Any, **_kwargs: Any) -> opensandbox_provider.SandboxExecResult:
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(provider, "_exec", cancelled_probe)
+    with pytest.raises(asyncio.CancelledError):
         await provider._verify_created_handle(handle)
 
     provider = opensandbox_provider.OpenSandboxProvider(probe={"command": "probe"})
@@ -569,6 +677,21 @@ async def test_provider_create_probe_and_close_error_paths(monkeypatch: pytest.M
         ),
         delete=True,
     )
+
+    class CloseSucceedsRaw:
+        async def close(self) -> None:
+            return None
+
+    assert await provider._close_many(
+        [
+            opensandbox_provider.SandboxHandle(
+                sandbox_id="sandbox-close",
+                provider_name="opensandbox",
+                raw=CloseSucceedsRaw(),
+            )
+        ],
+        delete=False,
+    ) == [None]
 
     class DeleteAndCloseFailRaw:
         async def kill(self) -> None:
@@ -673,6 +796,47 @@ async def test_create_once_and_connect_after_create_error_paths(
             SandboxSpec(image="image:tag"),
         )
 
+    class CancelledConnectSandbox(FakeSandbox):
+        @classmethod
+        async def connect(cls, *args: Any, **kwargs: Any) -> "FakeSandbox":
+            del args, kwargs
+            raise asyncio.CancelledError()
+
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_opensandbox_sdk",
+        lambda: (CancelledConnectSandbox, FakeConnectionConfig, object, FakePlatformSpec, object),
+    )
+    provider = opensandbox_provider.OpenSandboxProvider(probe={"command": None})
+    with pytest.raises(asyncio.CancelledError):
+        await provider._connect_after_create(
+            opensandbox_provider.SandboxHandle(sandbox_id="sandbox-1", provider_name="opensandbox", raw=None),
+            SandboxSpec(image="image:tag", ready_timeout_s=1),
+        )
+
+    class NonRetryableConnectSandbox(FakeSandbox):
+        @classmethod
+        async def connect(cls, *args: Any, **kwargs: Any) -> "FakeSandbox":
+            del args, kwargs
+            raise ValueError("bad connection request")
+
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_opensandbox_sdk",
+        lambda: (NonRetryableConnectSandbox, FakeConnectionConfig, object, FakePlatformSpec, object),
+    )
+    provider = opensandbox_provider.OpenSandboxProvider(probe={"command": None})
+    with pytest.raises(ValueError, match="bad connection request"):
+        await provider._connect_after_create(
+            opensandbox_provider.SandboxHandle(sandbox_id="sandbox-1", provider_name="opensandbox", raw=None),
+            SandboxSpec(image="image:tag", ready_timeout_s=1),
+        )
+
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_opensandbox_sdk",
+        lambda: (FakeSandbox, FakeConnectionConfig, object, FakePlatformSpec, object),
+    )
     provider = opensandbox_provider.OpenSandboxProvider(
         connection={"request_timeout_s": 3},
         probe={"command": None},
