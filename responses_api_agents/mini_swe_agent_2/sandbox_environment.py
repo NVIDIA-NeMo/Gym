@@ -187,7 +187,7 @@ class MiniSWESandboxEnvironment:
             return
         self._closed = True
         if self._sandbox is not None:
-            self._sandbox.shutdown()
+            self._sandbox.stop()
             self._sandbox = None
 
     def __enter__(self) -> "MiniSWESandboxEnvironment":

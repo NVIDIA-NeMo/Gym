@@ -82,6 +82,7 @@ class FakeSandboxProvider:
     def __init__(self, marker: str = "default") -> None:
         self.marker = marker
         self.created_specs: list[SandboxSpec] = []
+        self.created_handles: list[SandboxHandle] = []
         self.exec_calls: list[dict[str, Any]] = []
         self.image_build_requests: list[ImageBuildRequest] = []
         self.write_calls: list[tuple[SandboxHandle, str, str | bytes]] = []
@@ -98,7 +99,13 @@ class FakeSandboxProvider:
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
         self.created_specs.append(spec)
-        return SandboxHandle(sandbox_id="fake-1", provider_name=self.name, raw={"spec": spec})
+        handle = SandboxHandle(
+            sandbox_id=f"fake-{len(self.created_handles) + 1}",
+            provider_name=self.name,
+            raw={"spec": spec},
+        )
+        self.created_handles.append(handle)
+        return handle
 
     async def create_batch(
         self,
@@ -165,8 +172,17 @@ class FakeSandboxProvider:
 class PlainSandboxProvider:
     name = "plain"
 
+    def __init__(self) -> None:
+        self.created_handles: list[SandboxHandle] = []
+
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
-        return SandboxHandle(sandbox_id="plain-1", provider_name=self.name, raw={"spec": spec})
+        handle = SandboxHandle(
+            sandbox_id=f"plain-{len(self.created_handles) + 1}",
+            provider_name=self.name,
+            raw={"spec": spec},
+        )
+        self.created_handles.append(handle)
+        return handle
 
     async def create_batch(
         self,
@@ -209,11 +225,18 @@ class TransferOnlySandboxProvider:
     name = "transfer-only"
 
     def __init__(self) -> None:
+        self.created_handles: list[SandboxHandle] = []
         self.upload_calls: list[tuple[SandboxHandle, Path, str]] = []
         self.download_calls: list[tuple[SandboxHandle, str, Path]] = []
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
-        return SandboxHandle(sandbox_id="transfer-1", provider_name=self.name, raw={"spec": spec})
+        handle = SandboxHandle(
+            sandbox_id=f"transfer-{len(self.created_handles) + 1}",
+            provider_name=self.name,
+            raw={"spec": spec},
+        )
+        self.created_handles.append(handle)
+        return handle
 
     async def create_batch(
         self,
@@ -283,14 +306,14 @@ async def _assert_sandbox_facade_uses_public_provider_api(tmp_path: Path) -> Non
         outside_endpoints=[OutsideEndpoint(url="http://outside", env_var="OUTSIDE_URL")],
         delete_on_stop=True,
     )
-    handle = sandbox.handle
 
     provider = FakeSandboxProvider.last_instance
     assert provider is not None
+    handle = provider.created_handles[0]
     assert provider.marker == "configured"
     assert provider.created_specs[0].image == "image:tag"
     assert provider.created_specs[0].metadata == {"suite": "unit"}
-    assert sandbox.spec.env["OUTSIDE_URL"] == "http://outside"
+    assert provider.created_specs[0].env["OUTSIDE_URL"] == "http://outside"
     assert provider.write_calls == [(handle, "/tmp/bootstrap.txt", "hello")]
 
     result = await sandbox.exec("pytest -q", timeout_s=60, user="agent")
@@ -304,8 +327,6 @@ async def _assert_sandbox_facade_uses_public_provider_api(tmp_path: Path) -> Non
         "user": "agent",
     }
     assert await sandbox.status() == SandboxStatus.RUNNING
-    assert await sandbox.is_running() is True
-    assert await sandbox.container_ip() == "10.0.0.1"
 
     source_path = tmp_path / "source.txt"
     target_path = tmp_path / "nested" / "target.txt"
@@ -320,21 +341,20 @@ async def _assert_sandbox_facade_uses_public_provider_api(tmp_path: Path) -> Non
     await sandbox.stop()
     assert provider.closed[-1] == (handle, True)
     assert await sandbox.status() == SandboxStatus.STOPPED
+    assert provider.aclosed is True
 
-    built_sandbox = AsyncSandbox(provider)
+    build_provider = FakeSandboxProvider()
+    built_sandbox = AsyncSandbox(build_provider)
     await built_sandbox.start(SandboxSpec(image_build=ImageSpec(image="built:tag", source={"context": "repo"})))
-    assert provider.image_build_requests[-1].specs[0].source == {"context": "repo"}
-    assert provider.created_specs[-1].image == "built:tag"
+    assert build_provider.image_build_requests[-1].specs[0].source == {"context": "repo"}
+    assert build_provider.created_specs[-1].image == "built:tag"
     await built_sandbox.stop(delete=True)
 
-    async with AsyncSandbox(provider) as context_sandbox:
-        assert context_sandbox.provider_name == "fake"
+    context_provider = FakeSandboxProvider()
+    async with AsyncSandbox(context_provider) as context_sandbox:
         await context_sandbox.start(SandboxSpec(image="image:tag"), delete_on_stop=True)
-        context_handle = context_sandbox.handle
-    assert provider.closed[-1] == (context_handle, True)
-
-    await sandbox.aclose()
-    assert provider.aclosed is True
+        context_handle = context_provider.created_handles[0]
+    assert context_provider.closed[-1] == (context_handle, True)
 
 
 def test_async_sandbox_build_and_initial_file_error_paths() -> None:
@@ -372,6 +392,8 @@ async def _assert_async_sandbox_build_and_initial_file_error_paths() -> None:
     with pytest.raises(RuntimeError, match="already started"):
         await started.start(SandboxSpec(image="image:tag"))
     await started.stop()
+    with pytest.raises(RuntimeError, match="has been stopped"):
+        await started.start(SandboxSpec(image="image:tag"))
 
 
 def test_rewrite_image_validation() -> None:
@@ -436,7 +458,7 @@ async def _assert_async_sandbox_transfer_fallback_and_unknown_status(tmp_path: P
     transfer_provider = TransferOnlySandboxProvider()
     transfer_sandbox = AsyncSandbox(transfer_provider)
     await transfer_sandbox.start(SandboxSpec(image="image:tag", files={"/remote/inline.txt": "fallback"}))
-    transfer_handle = transfer_sandbox.handle
+    transfer_handle = transfer_provider.created_handles[0]
     assert transfer_provider.upload_calls[0][0] == transfer_handle
     assert transfer_provider.upload_calls[0][2] == "/remote/inline.txt"
     source_path = tmp_path / "source.txt"
@@ -452,7 +474,6 @@ async def _assert_async_sandbox_transfer_fallback_and_unknown_status(tmp_path: P
     plain_sandbox = AsyncSandbox(plain_provider)
     await plain_sandbox.start(SandboxSpec(image="image:tag"))
     assert await plain_sandbox.status() == SandboxStatus.UNKNOWN
-    assert await plain_sandbox.container_ip() is None
 
 
 def test_sync_sandbox_facade_uses_public_provider_api(tmp_path: Path) -> None:
@@ -470,14 +491,14 @@ def test_sync_sandbox_facade_uses_public_provider_api(tmp_path: Path) -> None:
             outside_endpoints=[OutsideEndpoint(url="http://outside", env_var="OUTSIDE_URL")],
             delete_on_stop=True,
         )
-        handle = sandbox.handle
 
         provider = FakeSandboxProvider.last_instance
         assert provider is not None
+        handle = provider.created_handles[0]
         assert provider.marker == "configured"
         assert provider.created_specs[0].image == "image:tag"
         assert provider.created_specs[0].metadata == {"suite": "unit"}
-        assert sandbox.spec.env["OUTSIDE_URL"] == "http://outside"
+        assert provider.created_specs[0].env["OUTSIDE_URL"] == "http://outside"
         assert provider.write_calls == [(handle, "/tmp/bootstrap.txt", "hello")]
 
         result = sandbox.exec("pytest -q", timeout_s=60, user="agent")
@@ -490,10 +511,7 @@ def test_sync_sandbox_facade_uses_public_provider_api(tmp_path: Path) -> None:
             "timeout_s": 60,
             "user": "agent",
         }
-        assert sandbox.build_images(ImageBuildRequest(specs=[ImageSpec(image="sync-built:tag")])) == ["sync-built:tag"]
         assert sandbox.status() == SandboxStatus.RUNNING
-        assert sandbox.is_running is True
-        assert sandbox.container_ip() == "10.0.0.1"
 
         upload_path = tmp_path / "sync-upload.txt"
         upload_path.write_text("sync", encoding="utf-8")
@@ -501,17 +519,12 @@ def test_sync_sandbox_facade_uses_public_provider_api(tmp_path: Path) -> None:
         sandbox.upload(upload_path, "/tmp/sync-upload.txt")
         sandbox.download("/tmp/sync-download.txt", download_path)
         assert download_path.read_bytes() == b"downloaded"
-        assert sandbox.provider_name == "fake"
         sandbox.stop()
         assert provider.closed[-1] == (handle, True)
-        sandbox.start(SandboxSpec(image="image:tag", workdir="/sync-session"), delete_on_stop=True)
-        assert sandbox.exec("pwd").return_code == 0
-        assert provider.exec_calls[-1]["cwd"] == "/sync-session"
-        sandbox.shutdown()
-        sandbox.shutdown()
+        assert sandbox.status() == SandboxStatus.STOPPED
         assert provider.aclosed is True
         try:
-            sandbox.provider_name
+            sandbox.exec("pwd")
         except RuntimeError as e:
             assert "sync loop is closed" in str(e)
         else:
@@ -528,7 +541,7 @@ def test_sync_sandbox_file_operations(tmp_path: Path) -> None:
     provider = FakeSandboxProvider()
     with Sandbox(provider) as sandbox:
         sandbox.start(SandboxSpec(image="image:tag"))
-        handle = sandbox.handle
+        handle = provider.created_handles[0]
         source_path = tmp_path / "source.txt"
         target_path = tmp_path / "target.txt"
         source_path.write_text("local", encoding="utf-8")
@@ -1019,7 +1032,8 @@ def test_mini_swe_sandbox_environment_validation_and_context_manager() -> None:
         delete=False,
     ) as env:
         assert env._sandbox is not None
-        assert env._sandbox.handle.sandbox_id == "fake-1"
+        assert FakeSandboxProvider.last_instance is not None
+        assert FakeSandboxProvider.last_instance.created_handles[0].sandbox_id == "fake-1"
 
     assert FakeSandboxProvider.last_instance is not None
     assert FakeSandboxProvider.last_instance.closed[-1][1] is False
