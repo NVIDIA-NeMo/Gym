@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[project]
+name = "local-sglang-model"
+dynamic = ["dependencies"]
+version = "0.2.0rc0"
+requires-python = ">=3.12"
+
+[build-system]
+build-backend = "setuptools.build_meta"
+requires = ["setuptools>=61", "setuptools-scm"]
+
+[tool.setuptools.packages.find]
+where = [".."]
+include = ["local_sglang_model"]
+
+[tool.uv.sources]
+nemo-gym = { path = "../..", editable = true }
+
+[tool.uv.pip]
+torch-backend = "auto"

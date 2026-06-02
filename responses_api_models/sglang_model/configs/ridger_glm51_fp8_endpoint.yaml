@@ -1,0 +1,14 @@
+glm51_fp8:
+  responses_api_models:
+    sglang_model:
+      entrypoint: app.py
+      base_url: ${policy_base_url}
+      api_key: ${policy_api_key}
+      model: GLM-5.1-FP8
+      return_token_id_information: false
+      uses_reasoning_parser: true
+      uses_interleaved_reasoning: true
+      replace_developer_role_with_system: true
+      chat_template_kwargs: null
+      extra_body: null
+      default_headers: {}

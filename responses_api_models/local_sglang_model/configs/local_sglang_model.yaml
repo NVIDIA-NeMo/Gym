@@ -1,0 +1,25 @@
+policy_model:
+  responses_api_models:
+    local_sglang_model:
+      entrypoint: app.py
+      model: ${policy_model_name}
+      model_path: null
+      return_token_id_information: false
+      uses_reasoning_parser: true
+      uses_interleaved_reasoning: true
+      replace_developer_role_with_system: true
+      debug: false
+      hf_home: null
+      sglang_env_prefix: /mnt/nfs/wangling/envs/sglang
+      sglang_python: null
+      log_file: null
+      startup_timeout_seconds: 1200
+      chat_template_kwargs: null
+      extra_body: null
+      default_headers: {}
+
+      sglang_serve_env_vars: {}
+
+      sglang_serve_kwargs:
+        tensor_parallel_size: 1
+        trust_remote_code: true
