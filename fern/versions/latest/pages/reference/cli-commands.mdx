@@ -130,8 +130,8 @@ Perform a batch of rollout collection.
 | `num_repeats` | Optional[int] | The number of times to repeat each example to run. Useful if you want to calculate mean@k, such as mean@4 or mean@16. |
 | `num_repeats_add_seed` | bool | When num_repeats &gt;1, add a "seed" parameter on the Responses create params. |
 | `num_samples_in_parallel` | Optional[int] | Limit the number of concurrent samples running at once. |
-| `responses_create_params` | Dict | Overrides for the `responses_create_params`, such as `temperature` and `max_output_tokens`. See [Generation parameters](#generation-parameters). |
-| `resume_from_cache` | bool | Resume an interrupted run by skipping rows already completed. Default: `False`. See [Resume interrupted runs](#resume-interrupted-runs). |
+| `responses_create_params` | Dict | Overrides for the `responses_create_params`, such as `temperature` and `max_output_tokens`. Refer to [Generation Parameters](#generation-parameters). |
+| `resume_from_cache` | bool | Resume an interrupted run by skipping rows already completed. Default: `False`. Refer to [Resume Interrupted Runs](#resume-interrupted-runs). |
 
 **Example**
 
@@ -145,7 +145,7 @@ ng_collect_rollouts \
     +num_samples_in_parallel=10
 ```
 
-#### Generation parameters
+#### Generation Parameters
 
 Sampling parameters such as `temperature`, `max_output_tokens`, and `top_p` are not standalone CLI flags — they are passed as overrides inside `responses_create_params` using Hydra's nested dot syntax. Each override is merged into every input row's existing `responses_create_params`:
 
@@ -161,7 +161,7 @@ ng_collect_rollouts \
 
 The same syntax works for `ng_e2e_collect_rollouts`. Any field accepted by the Responses API create params can be set this way (for example, `++responses_create_params.reasoning.effort=low`).
 
-#### Resume interrupted runs
+#### Resume Interrupted Runs
 
 Setting `+resume_from_cache=true` lets you restart the **same command** after a crash or interruption and pick up only the rows that have not finished yet. It works for both `ng_collect_rollouts` and `ng_e2e_collect_rollouts`, across any environment.
 
@@ -170,7 +170,7 @@ How it works:
 - **Materialized inputs.** On the first run, the fully expanded input rows (after `num_repeats`, `limit`, `prompt_config`, and any overrides) are written to a sidecar file next to your output. The path is derived from `output_jsonl_fpath` by appending `_materialized_inputs` to the stem — so `rollouts.jsonl` produces `rollouts_materialized_inputs.jsonl`.
 - **Incremental output.** Results are flushed to `output_jsonl_fpath` after each completed rollout, so partial output survives a crash.
 - **Matching.** On resume, completed work is matched by `(task_index, rollout_index)` against the materialized inputs, and already-completed rows are skipped. The run prints a summary such as the number of original input rows, rows already done, and rows that still need to be run.
-- **Fallback.** If either the materialized inputs or the output file is missing, resume is skipped gracefully and the run starts fresh. With the default `resume_from_cache=False`, existing output is cleared before the run.
+- **Fallback.** If either the materialized inputs or the output file is missing, resume is skipped and the run starts fresh. With the default `resume_from_cache=False`, existing output is cleared before the run.
 
 <Warning>
 If you change the config, schema, or data between runs, the materialized inputs become stale and resume will diff against the old expansion. Delete the `*_materialized_inputs.jsonl` file (and the output file) to start fresh.
@@ -186,8 +186,8 @@ Spin up all necessary servers and perform a batch of rollout collection using ea
 | --- | --- | --- |
 | `output_jsonl_fpath` | str | The output data JSONL file path. |
 | `num_samples_in_parallel` | Optional[int] | Limit the number of concurrent samples running at once. |
-| `responses_create_params` | Dict | Overrides for the `responses_create_params`, such as `temperature` and `max_output_tokens`. See [Generation parameters](#generation-parameters). |
-| `resume_from_cache` | bool | Resume an interrupted run by skipping rows already completed. Default: `False`. See [Resume interrupted runs](#resume-interrupted-runs). |
+| `responses_create_params` | Dict | Overrides for the `responses_create_params`, such as `temperature` and `max_output_tokens`. Refer to [Generation Parameters](#generation-parameters). |
+| `resume_from_cache` | bool | Resume an interrupted run by skipping rows already completed. Default: `False`. Refer to [Resume Interrupted Runs](#resume-interrupted-runs). |
 
 **Examples**
 
