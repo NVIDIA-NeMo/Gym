@@ -12,17 +12,19 @@ This guide covers how to set up and launch RL training on NeMo Gym environments 
 - **NeMo Gym**: 0.2.1+ — `pip install nemo-gym` or `pip install -e $NEMO_GYM_ROOT` at job start
 - **Slurm cluster** with GPU nodes
 
-Clone verl with its recipe submodule:
+Clone verl with its recipe submodule at the commit pinned in [`REQUIRED_VERL.txt`](https://github.com/verl-project/verl-recipe/blob/main/nemo_gym/REQUIRED_VERL.txt):
 
 ```bash
-cd $WORKSPACE
 git clone --recurse-submodules https://github.com/verl-project/verl.git
+cd verl
+git checkout 695ac0ebcb5d4e1ca7bcb88fd952b0214daf199f
+git submodule update --init --recursive recipe
+cd recipe && git checkout main && cd ..
 ```
 
 If you already cloned verl without submodules:
 
 ```bash
-cd $WORKSPACE/verl
 git submodule update --init --recursive
 ```
 
@@ -98,7 +100,6 @@ In your verl training script, swap in the NeMo Gym dataset loader and agent-loop
 The recipe includes example Slurm job submission scripts (`submit_math.sh`, `submit_workplace.sh`, `submit_multienv.sh`). Update these with your Slurm-specific variables such as account and partition, then submit:
 
 ```bash
-cd $VERL_ROOT
 sbatch recipe/nemo_gym/submit_workplace.sh
 ```
 
