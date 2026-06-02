@@ -450,13 +450,19 @@ class NSToolsResourcesServer(SimpleResourcesServer):
 
         # Terminate the python_tool subprocess if one was started.
         if self._python_tool_process:
-            logger.info(f"Terminating python_tool server (PID: {self._python_tool_process.pid})")
+            pid: int = self._python_tool_process.pid
+            logger.info(f"Terminating python_tool server (PID: {pid})")
             self._python_tool_process.terminate()
             try:
                 self._python_tool_process.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 logger.warning("python_tool server did not terminate gracefully, killing...")
                 self._python_tool_process.kill()
+                # Reap the child after SIGKILL so it doesn't linger as <defunct>.
+                try:
+                    self._python_tool_process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    logger.error(f"python_tool server (PID: {pid}) did not exit after SIGKILL; may leak as a zombie")
             self._python_tool_process = None
 
 
