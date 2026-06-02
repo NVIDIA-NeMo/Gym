@@ -1,0 +1,20 @@
+# Chain to the BunsenChem resource server + simple agent config.
+config_paths:
+  - resources_servers/bunsen_chem/configs/bunsen_chem.yaml
+
+bunsen_chem_benchmark_resources_server:
+  _inherit_from: bunsen_chem
+
+bunsen_chem_benchmark_simple_agent:
+  _inherit_from: bunsen_chem_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: bunsen_chem_benchmark_resources_server
+      datasets:
+      - name: bunsen_chem
+        type: benchmark
+        jsonl_fpath: benchmarks/bunsen_chem/data/bunsen_chem_benchmark.jsonl
+        prompt_config: benchmarks/bunsen_chem/prompts/default.yaml
+        prepare_script: benchmarks/bunsen_chem/prepare.py
+        num_repeats: 8
