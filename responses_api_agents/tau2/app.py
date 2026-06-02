@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from asyncio import get_running_loop
 from collections import defaultdict
 from os import environ
 from pathlib import Path
@@ -93,8 +92,6 @@ class Tau2VerifyResponse(Tau2RunRequest, BaseVerifyResponse):
 class Tau2Agent(SimpleResponsesAPIAgent):
     config: Tau2Config
 
-    set_loop_callback: bool = False
-
     __key_metrics: Optional[List[str]] = None
 
     def setup_webserver(self):
@@ -126,13 +123,6 @@ class Tau2Agent(SimpleResponsesAPIAgent):
         raise NotImplementedError
 
     async def run(self, body: Tau2RunRequest) -> Tau2VerifyResponse:
-        if not self.set_loop_callback:
-            self.set_loop_callback = True
-            loop = get_running_loop()
-            loop.set_debug(True)
-            # @bxyu-nvidia: May need to enable this to avoid spamming :skull:
-            # loop.slow_callback_duration = 1000  # 1000ms = 1s
-
         body_dict = {name: getattr(body, name) for name in Tau2RunRequest.model_fields}
         responses_create_params = body_dict.pop("responses_create_params").model_dump(exclude_unset=True)
 
