@@ -11,7 +11,13 @@ from app import (
 )
 from compute_eval.data.data_model import SourceFile
 
-from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.openai_utils import (
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseOutputMessage,
+    NeMoGymResponseOutputText,
+)
+from nemo_gym.server_utils import ServerClient
 
 
 # ---------------------------------------------------------------------------
@@ -24,14 +30,14 @@ def server():
     # Mock both ensure_cuda_nvcc (avoid the micromamba download in tests) and
     # get_nvcc_version (avoid PATH dependency on dev/CI machines). The
     # evaluate_solutions call itself is always patched in tests below.
-    cfg = ComputeEvalResourcesServerConfig(num_processes=1)
+    cfg = ComputeEvalResourcesServerConfig(num_processes=1, host="0.0.0.0", port=8080, entrypoint="", name="")
     with patch("app.ensure_cuda_nvcc", return_value=None), patch("app.get_nvcc_version", return_value="12.9.0"):
-        return ComputeEvalResourcesServer(config=cfg, server_client=MagicMock())
+        return ComputeEvalResourcesServer(config=cfg, server_client=MagicMock(spec=ServerClient))
 
 
 @pytest.fixture
 def server_no_nvcc():
-    cfg = ComputeEvalResourcesServerConfig(num_processes=1)
+    cfg = ComputeEvalResourcesServerConfig(num_processes=1, host="0.0.0.0", port=8080, entrypoint="", name="")
     with patch("app.ensure_cuda_nvcc", return_value=None), patch("app.get_nvcc_version", return_value=None):
         yield cfg
 
@@ -40,7 +46,7 @@ class TestNvccCheck:
     def test_missing_nvcc_raises(self, server_no_nvcc):
         with patch("app.ensure_cuda_nvcc", return_value=None), patch("app.get_nvcc_version", return_value=None):
             with pytest.raises(RuntimeError, match="NVCC not found"):
-                ComputeEvalResourcesServer(config=server_no_nvcc, server_client=MagicMock())
+                ComputeEvalResourcesServer(config=server_no_nvcc, server_client=MagicMock(spec=ServerClient))
 
 
 _MINIMAL_PROBLEM = {
@@ -50,14 +56,13 @@ _MINIMAL_PROBLEM = {
     "date": "2026-01-01",
     "prompt": "Write a CUDA kernel that adds 1.",
     "metadata": {},
-    "group": "test",
+    "group": "cuda-kernels",
     "context_files": [],
     "test_files": [],
     "source_references": [],
     "build_command": "nvcc kernel.cu -o kernel",
     "test_command": "./kernel",
     "benchmark_command": "",
-    "timing_mode": "wall_clock",
     "min_cuda_toolkit": "12.0",
     "compute_capability": "80",
     "requires_datacenter_gpu": False,
@@ -68,9 +73,24 @@ _MINIMAL_PROBLEM = {
 
 def _make_request(output_text: str, problem: dict | None = None, task_id: str = "test-task"):
     return ComputeEvalVerifyRequest(
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
         response=NeMoGymResponse(
-            output=[],
-            output_text=output_text,
+            id="r",
+            created_at=0.0,
+            model="m",
+            object="response",
+            output=[
+                NeMoGymResponseOutputMessage(
+                    id="msg",
+                    content=[NeMoGymResponseOutputText(annotations=[], text=output_text, type="output_text")],
+                    role="assistant",
+                    status="completed",
+                    type="message",
+                )
+            ],
+            parallel_tool_calls=True,
+            tool_choice="auto",
+            tools=[],
         ),
         verifier_metadata={
             "task_id": task_id,
@@ -191,7 +211,8 @@ class TestMetrics:
         assert ComputeEvalResourcesServer._score_fn({"reward": 0.0}) == {"accuracy": 0.0}
 
     def test_compute_metrics_shape(self, server):
-        # One task with two rollouts: one pass, one fail. pass@1 = 0.5, pass@2 = 1.0.
+        # One task with two rollouts: one pass, one fail. pass@1 = 50%, pass@2 = 100%
+        # (compute_pass_majority_metrics reports percentages, not fractions).
         tasks = [
             [
                 {"reward": 1.0, "extracted_model_output": "// file: a.cu\nok"},
@@ -200,9 +221,9 @@ class TestMetrics:
         ]
         metrics = server.compute_metrics(tasks)
         assert "pass@1[avg-of-2]/accuracy" in metrics
-        assert metrics["pass@1[avg-of-2]/accuracy"] == pytest.approx(0.5)
+        assert metrics["pass@1[avg-of-2]/accuracy"] == pytest.approx(50.0)
         assert "pass@2/accuracy" in metrics
-        assert metrics["pass@2/accuracy"] == pytest.approx(1.0)
+        assert metrics["pass@2/accuracy"] == pytest.approx(100.0)
 
 
 # ---------------------------------------------------------------------------
