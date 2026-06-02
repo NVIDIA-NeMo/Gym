@@ -1,0 +1,45 @@
+{
+    "name": "example",
+    "type": "example",
+    "jsonl_fpath": "resources_servers/arc_agi/data/example.jsonl",
+    "num_repeats": 1,
+    "gitlab_identifier": null,
+    "license": null,
+    "Number of examples": 5,
+    "Number of tools": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Median": 0.0,
+        "Standard deviation": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 5,
+        "Average": 2071.0,
+        "Min": 110.0,
+        "Max": 6135.0,
+        "Median": 1386.0,
+        "Standard deviation": 2386.43
+    },
+    "Number of turns": {
+        "Total # non-null values": 5,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Median": 1.0,
+        "Standard deviation": 0.0
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Median": 0.0,
+        "Standard deviation": 0.0
+    },
+    "task_id": {
+        "unique_count": 5,
+        "total_count": 5
+    }
+}
