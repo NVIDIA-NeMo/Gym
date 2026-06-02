@@ -26,7 +26,6 @@ from typing import Any, TypeVar
 from nemo_gym.sandbox.providers import (
     ImageBuildRequest,
     OutsideEndpoint,
-    SandboxAddressProvider,
     SandboxExecResult,
     SandboxHandle,
     SandboxImageBuildProvider,
@@ -57,35 +56,25 @@ class AsyncSandbox:
         self._handle: SandboxHandle | None = None
         self._delete_on_stop = delete_on_stop
         self._stopped = True
+        self._closed = False
 
-    @property
-    def provider_name(self) -> str:
+    def _provider_name(self) -> str:
         return self._provider.name
-
-    @property
-    def spec(self) -> SandboxSpec:
-        if self._spec is None:
-            raise RuntimeError("Sandbox has not been configured")
-        return self._spec
-
-    @property
-    def handle(self) -> SandboxHandle:
-        return self._require_handle()
 
     def _require_handle(self) -> SandboxHandle:
         if self._handle is None or self._stopped:
             raise RuntimeError("Sandbox has not been started")
         return self._handle
 
-    async def build_images(self, request: ImageBuildRequest) -> list[str]:
+    async def _build_images(self, request: ImageBuildRequest) -> list[str]:
         if not isinstance(self._provider, SandboxImageBuildProvider):
-            raise NotImplementedError(f"Provider {self.provider_name!r} does not support sandbox image builds")
+            raise NotImplementedError(f"Provider {self._provider_name()!r} does not support sandbox image builds")
         return await self._provider.build_images(request)
 
     async def _resolve_image_build(self, spec: SandboxSpec) -> SandboxSpec:
         if spec.image_build is None:
             return spec
-        built_images = await self.build_images(ImageBuildRequest(specs=[spec.image_build]))
+        built_images = await self._build_images(ImageBuildRequest(specs=[spec.image_build]))
         if not built_images:
             raise ValueError("build_images returned no image references")
         return replace(spec, image=spec.image or built_images[0])
@@ -123,6 +112,8 @@ class AsyncSandbox:
         outside_endpoints: list[OutsideEndpoint] | None = None,
         delete_on_stop: bool | None = None,
     ) -> "AsyncSandbox":
+        if self._closed:
+            raise RuntimeError("Sandbox has been stopped")
         if self._handle is not None and not self._stopped:
             raise RuntimeError("Sandbox is already started")
         requested_spec = spec if spec is not None else self._spec
@@ -136,6 +127,8 @@ class AsyncSandbox:
             await self._write_initial_files(handle, resolved_spec.files)
         except Exception:
             await self._provider.close(handle, delete=True)
+            await self._provider.aclose()
+            self._closed = True
             raise
 
         self._spec = resolved_spec
@@ -156,7 +149,7 @@ class AsyncSandbox:
         return await self._provider.exec(
             self._require_handle(),
             command,
-            cwd=cwd if cwd is not None else self.spec.workdir,
+            cwd=cwd if cwd is not None else self._spec.workdir if self._spec is not None else None,
             env=env,
             timeout_s=timeout_s,
             user=user,
@@ -177,34 +170,25 @@ class AsyncSandbox:
             return SandboxStatus.UNKNOWN
         return await self._provider.status(self._handle)
 
-    async def is_running(self) -> bool:
-        return await self.status() == SandboxStatus.RUNNING
-
-    async def container_ip(self) -> str | None:
-        if not isinstance(self._provider, SandboxAddressProvider):
-            return None
-        return await self._provider.container_ip(self._require_handle())
-
     async def stop(self, *, delete: bool | None = None) -> None:
-        if self._handle is None or self._stopped:
+        if self._closed:
             return
-        self._stopped = True
-        await self._provider.close(
-            self._handle,
-            delete=self._delete_on_stop if delete is None else delete,
-        )
-
-    async def aclose(self) -> None:
         try:
-            await self.stop()
+            if self._handle is not None and not self._stopped:
+                self._stopped = True
+                await self._provider.close(
+                    self._handle,
+                    delete=self._delete_on_stop if delete is None else delete,
+                )
         finally:
             await self._provider.aclose()
+            self._closed = True
 
     async def __aenter__(self) -> "AsyncSandbox":
         return self
 
     async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
-        await self.aclose()
+        await self.stop()
 
 
 class _AsyncLoopRunner:
@@ -281,21 +265,6 @@ class Sandbox:
             raise
         self._closed = False
 
-    @property
-    def provider_name(self) -> str:
-        return self._runner.call("provider_name", lambda: self._async_sandbox.provider_name)
-
-    @property
-    def spec(self) -> SandboxSpec:
-        return self._runner.call("spec", lambda: self._async_sandbox.spec)
-
-    @property
-    def handle(self) -> SandboxHandle:
-        return self._runner.call("handle", lambda: self._async_sandbox.handle)
-
-    def build_images(self, request: ImageBuildRequest) -> list[str]:
-        return self._runner.run("build_images", lambda: self._async_sandbox.build_images(request))
-
     def start(
         self,
         spec: SandboxSpec | None = None,
@@ -340,24 +309,16 @@ class Sandbox:
         self._runner.run("download", lambda: self._async_sandbox.download(remote_path, local_path))
 
     def status(self) -> SandboxStatus:
+        if self._closed:
+            return SandboxStatus.STOPPED
         return self._runner.run("status", self._async_sandbox.status)
 
-    @property
-    def is_running(self) -> bool:
-        return self.status() == SandboxStatus.RUNNING
-
-    def container_ip(self) -> str | None:
-        return self._runner.run("container_ip", self._async_sandbox.container_ip)
-
     def stop(self, *, delete: bool | None = None) -> None:
-        self._runner.run("stop", lambda: self._async_sandbox.stop(delete=delete))
-
-    def shutdown(self) -> None:
         if self._closed:
             return
         self._closed = True
         try:
-            self._runner.run("shutdown", self._async_sandbox.aclose)
+            self._runner.run("stop", lambda: self._async_sandbox.stop(delete=delete))
         finally:
             self._runner.close()
 
@@ -365,11 +326,11 @@ class Sandbox:
         return self
 
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
-        self.shutdown()
+        self.stop()
 
     def __del__(self) -> None:  # pragma: no cover
         if hasattr(self, "_closed") and not self._closed:
             try:
-                self.shutdown()
+                self.stop()
             except Exception:
                 pass
