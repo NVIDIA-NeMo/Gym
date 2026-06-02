@@ -20,18 +20,28 @@ Provider packages implement the lower-level async protocol; callers use
 """
 
 import asyncio
+import tempfile
 import threading
 from collections.abc import Awaitable, Callable, Mapping
 from concurrent.futures import Future
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, TypeVar
 
 from nemo_gym.sandbox.providers import (
+    ImageBuildRequest,
+    OutsideEndpoint,
+    SandboxAddressProvider,
+    SandboxAttachProvider,
     SandboxExecResult,
     SandboxHandle,
     SandboxHandleReferenceProvider,
+    SandboxImageBuildProvider,
+    SandboxInlineFileProvider,
     SandboxProvider,
     SandboxSpec,
+    SandboxStatus,
+    SandboxStatusProvider,
     create_provider,
 )
 
@@ -55,8 +65,32 @@ class AsyncSandbox:
     def provider_name(self) -> str:
         return self._provider.name
 
+    async def build_images(self, request: ImageBuildRequest) -> list[str]:
+        if not isinstance(self._provider, SandboxImageBuildProvider):
+            raise NotImplementedError(f"Provider {self.provider_name!r} does not support sandbox image builds")
+        return await self._provider.build_images(request)
+
+    async def _resolve_image_build(self, spec: SandboxSpec) -> SandboxSpec:
+        if spec.image_build is None:
+            return spec
+        built_images = await self.build_images(ImageBuildRequest(specs=[spec.image_build]))
+        if not built_images:
+            raise ValueError("build_images returned no image references")
+        return replace(spec, image=spec.image or built_images[0])
+
+    async def _write_initial_files(self, handle: SandboxHandle, files: dict[str, str]) -> None:
+        for target_path, contents in files.items():
+            await self.write_file(handle, target_path, contents)
+
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
-        return await self._provider.create(spec)
+        spec = await self._resolve_image_build(spec)
+        handle = await self._provider.create(spec)
+        try:
+            await self._write_initial_files(handle, spec.files)
+        except Exception:
+            await self.close(handle, delete=True)
+            raise
+        return handle
 
     async def create_batch(
         self,
@@ -65,10 +99,44 @@ class AsyncSandbox:
         *,
         allow_partial: bool = False,
     ) -> list[SandboxHandle]:
-        return await self._provider.create_batch(spec, count, allow_partial=allow_partial)
+        spec = await self._resolve_image_build(spec)
+        handles = await self._provider.create_batch(spec, count, allow_partial=allow_partial)
+        try:
+            await asyncio.gather(*(self._write_initial_files(handle, spec.files) for handle in handles))
+        except Exception:
+            await asyncio.gather(*(self.close(handle, delete=True) for handle in handles), return_exceptions=True)
+            raise
+        return handles
+
+    async def start(
+        self,
+        spec: SandboxSpec,
+        *,
+        outside_endpoints: list[OutsideEndpoint] | None = None,
+        delete_on_stop: bool = False,
+    ) -> "AsyncSandboxInstance":
+        if outside_endpoints:
+            endpoint_env = {endpoint.env_var: endpoint.url for endpoint in outside_endpoints}
+            spec = replace(spec, env={**spec.env, **endpoint_env})
+        handle = await self.create(spec)
+        return AsyncSandboxInstance(
+            sandbox=self,
+            spec=spec,
+            handle=handle,
+            delete_on_stop=delete_on_stop,
+        )
+
+    async def attach(self, sandbox_id: str) -> SandboxHandle:
+        if isinstance(self._provider, SandboxAttachProvider):
+            return await self._provider.attach(sandbox_id)
+        connect = getattr(self._provider, "connect", None)
+        if connect is None:
+            raise NotImplementedError(f"Provider {self.provider_name!r} does not support attaching to sandboxes")
+        return await connect(sandbox_id)
 
     async def connect(self, sandbox_id: str) -> SandboxHandle:
-        return await self._provider.connect(sandbox_id)
+        """Compatibility alias for ``attach``."""
+        return await self.attach(sandbox_id)
 
     async def exec(
         self,
@@ -77,7 +145,7 @@ class AsyncSandbox:
         *,
         cwd: str | None = None,
         env: dict[str, str] | None = None,
-        timeout_s: int | None = None,
+        timeout_s: int | float | None = None,
         user: str | int | None = None,
     ) -> SandboxExecResult:
         return await self._provider.exec(
@@ -90,10 +158,24 @@ class AsyncSandbox:
         )
 
     async def write_file(self, handle: SandboxHandle, target_path: str, data: str | bytes) -> None:
-        await self._provider.write_file(handle, target_path, data)
+        if isinstance(self._provider, SandboxInlineFileProvider):
+            await self._provider.write_file(handle, target_path, data)
+            return
+        with tempfile.TemporaryDirectory(prefix="nemo-gym-sandbox-upload-") as tmp_dir:
+            source_path = Path(tmp_dir) / "contents"
+            if isinstance(data, str):
+                source_path.write_text(data, encoding="utf-8")
+            else:
+                source_path.write_bytes(data)
+            await self.upload_file(handle, source_path, target_path)
 
     async def read_file(self, handle: SandboxHandle, source_path: str) -> bytes:
-        return await self._provider.read_file(handle, source_path)
+        if isinstance(self._provider, SandboxInlineFileProvider):
+            return await self._provider.read_file(handle, source_path)
+        with tempfile.TemporaryDirectory(prefix="nemo-gym-sandbox-download-") as tmp_dir:
+            target_path = Path(tmp_dir) / "contents"
+            await self.download_file(handle, source_path, target_path)
+            return target_path.read_bytes()
 
     async def upload_file(self, handle: SandboxHandle, source_path: Path, target_path: str) -> None:
         await self._provider.upload_file(handle, source_path, target_path)
@@ -103,6 +185,16 @@ class AsyncSandbox:
 
     async def close(self, handle: SandboxHandle, *, delete: bool = False) -> None:
         await self._provider.close(handle, delete=delete)
+
+    async def status(self, handle: SandboxHandle) -> SandboxStatus:
+        if not isinstance(self._provider, SandboxStatusProvider):
+            return SandboxStatus.UNKNOWN
+        return await self._provider.status(handle)
+
+    async def container_ip(self, handle: SandboxHandle) -> str | None:
+        if not isinstance(self._provider, SandboxAddressProvider):
+            return None
+        return await self._provider.container_ip(handle)
 
     async def aclose(self) -> None:
         await self._provider.aclose()
@@ -131,6 +223,90 @@ class AsyncSandbox:
         if not isinstance(result, SandboxHandle):
             raise TypeError(f"materialize_handle must return SandboxHandle, got {type(result).__name__}")
         return result
+
+
+class AsyncSandboxInstance:
+    """Evaluator-style async sandbox object returned by ``AsyncSandbox.start``."""
+
+    def __init__(
+        self,
+        *,
+        sandbox: AsyncSandbox,
+        spec: SandboxSpec,
+        handle: SandboxHandle,
+        delete_on_stop: bool,
+    ) -> None:
+        self._sandbox = sandbox
+        self._spec = spec
+        self._handle = handle
+        self._delete_on_stop = delete_on_stop
+        self._stopped = False
+
+    @property
+    def spec(self) -> SandboxSpec:
+        return self._spec
+
+    @property
+    def handle(self) -> SandboxHandle:
+        return self._handle
+
+    async def exec(
+        self,
+        command: str,
+        timeout_sec: int | float | None = 180,
+        *,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        user: str | int | None = None,
+        timeout_s: int | float | None = None,
+    ) -> SandboxExecResult:
+        return await self._sandbox.exec(
+            self._handle,
+            command,
+            cwd=cwd if cwd is not None else self._spec.workdir,
+            env=env,
+            timeout_s=timeout_s if timeout_s is not None else timeout_sec,
+            user=user,
+        )
+
+    async def write_file(self, target_path: str, data: str | bytes) -> None:
+        await self._sandbox.write_file(self._handle, target_path, data)
+
+    async def read_file(self, source_path: str) -> bytes:
+        return await self._sandbox.read_file(self._handle, source_path)
+
+    async def upload(self, local_path: Path | str, remote_path: str) -> None:
+        await self._sandbox.upload_file(self._handle, Path(local_path), remote_path)
+
+    async def download(self, remote_path: str, local_path: Path | str) -> None:
+        await self._sandbox.download_file(self._handle, remote_path, Path(local_path))
+
+    async def status(self) -> SandboxStatus:
+        return await self._sandbox.status(self._handle)
+
+    async def is_running(self) -> bool:
+        return await self.status() == SandboxStatus.RUNNING
+
+    async def container_ip(self) -> str | None:
+        return await self._sandbox.container_ip(self._handle)
+
+    async def stop(self, *, delete: bool | None = None) -> None:
+        if self._stopped:
+            return
+        self._stopped = True
+        await self._sandbox.close(
+            self._handle,
+            delete=self._delete_on_stop if delete is None else delete,
+        )
+
+    async def close(self, *, delete: bool | None = None) -> None:
+        await self.stop(delete=delete)
+
+    async def __aenter__(self) -> "AsyncSandboxInstance":
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        await self.stop()
 
 
 class _AsyncLoopRunner:
@@ -205,6 +381,9 @@ class Sandbox:
     def provider_name(self) -> str:
         return self._runner.call("provider_name", lambda: self._async_sandbox.provider_name)
 
+    def build_images(self, request: ImageBuildRequest) -> list[str]:
+        return self._runner.run("build_images", lambda: self._async_sandbox.build_images(request))
+
     def create(self, spec: SandboxSpec) -> SandboxHandle:
         return self._runner.run("create", lambda: self._async_sandbox.create(spec))
 
@@ -220,8 +399,29 @@ class Sandbox:
             lambda: self._async_sandbox.create_batch(spec, count, allow_partial=allow_partial),
         )
 
+    def start(
+        self,
+        spec: SandboxSpec,
+        *,
+        outside_endpoints: list[OutsideEndpoint] | None = None,
+        delete_on_stop: bool = False,
+    ) -> "SandboxInstance":
+        async_instance = self._runner.run(
+            "start",
+            lambda: self._async_sandbox.start(
+                spec,
+                outside_endpoints=outside_endpoints,
+                delete_on_stop=delete_on_stop,
+            ),
+        )
+        return SandboxInstance(self, async_instance)
+
+    def attach(self, sandbox_id: str) -> SandboxHandle:
+        return self._runner.run("attach", lambda: self._async_sandbox.attach(sandbox_id))
+
     def connect(self, sandbox_id: str) -> SandboxHandle:
-        return self._runner.run("connect", lambda: self._async_sandbox.connect(sandbox_id))
+        """Compatibility alias for ``attach``."""
+        return self.attach(sandbox_id)
 
     def exec(
         self,
@@ -230,7 +430,7 @@ class Sandbox:
         *,
         cwd: str | None = None,
         env: dict[str, str] | None = None,
-        timeout_s: int | None = None,
+        timeout_s: int | float | None = None,
         user: str | int | None = None,
     ) -> SandboxExecResult:
         return self._runner.run(
@@ -260,6 +460,12 @@ class Sandbox:
     def close(self, handle: SandboxHandle, *, delete: bool = False) -> None:
         self._runner.run("close", lambda: self._async_sandbox.close(handle, delete=delete))
 
+    def status(self, handle: SandboxHandle) -> SandboxStatus:
+        return self._runner.run("status", lambda: self._async_sandbox.status(handle))
+
+    def container_ip(self, handle: SandboxHandle) -> str | None:
+        return self._runner.run("container_ip", lambda: self._async_sandbox.container_ip(handle))
+
     def shutdown(self) -> None:
         """Close provider-scoped resources such as SDK clients or warm pools."""
         if self._closed:
@@ -288,3 +494,84 @@ class Sandbox:
                 self.shutdown()
             except Exception:
                 pass
+
+
+class SandboxInstance:
+    """Evaluator-style sync sandbox object returned by ``Sandbox.start``."""
+
+    def __init__(self, owner: Sandbox, async_instance: AsyncSandboxInstance) -> None:
+        self._owner = owner
+        self._async_instance = async_instance
+
+    @property
+    def spec(self) -> SandboxSpec:
+        return self._owner._runner.call("spec", lambda: self._async_instance.spec)
+
+    @property
+    def handle(self) -> SandboxHandle:
+        return self._owner._runner.call("handle", lambda: self._async_instance.handle)
+
+    def exec(
+        self,
+        command: str,
+        timeout_sec: int | float | None = 180,
+        *,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        user: str | int | None = None,
+        timeout_s: int | float | None = None,
+    ) -> SandboxExecResult:
+        return self._owner._runner.run(
+            "instance.exec",
+            lambda: self._async_instance.exec(
+                command,
+                timeout_sec=timeout_sec,
+                cwd=cwd,
+                env=env,
+                user=user,
+                timeout_s=timeout_s,
+            ),
+        )
+
+    def write_file(self, target_path: str, data: str | bytes) -> None:
+        self._owner._runner.run(
+            "instance.write_file",
+            lambda: self._async_instance.write_file(target_path, data),
+        )
+
+    def read_file(self, source_path: str) -> bytes:
+        return self._owner._runner.run("instance.read_file", lambda: self._async_instance.read_file(source_path))
+
+    def upload(self, local_path: Path | str, remote_path: str) -> None:
+        self._owner._runner.run(
+            "instance.upload",
+            lambda: self._async_instance.upload(local_path, remote_path),
+        )
+
+    def download(self, remote_path: str, local_path: Path | str) -> None:
+        self._owner._runner.run(
+            "instance.download",
+            lambda: self._async_instance.download(remote_path, local_path),
+        )
+
+    def status(self) -> SandboxStatus:
+        return self._owner._runner.run("instance.status", self._async_instance.status)
+
+    @property
+    def is_running(self) -> bool:
+        return self.status() == SandboxStatus.RUNNING
+
+    def container_ip(self) -> str | None:
+        return self._owner._runner.run("instance.container_ip", self._async_instance.container_ip)
+
+    def stop(self, *, delete: bool | None = None) -> None:
+        self._owner._runner.run("instance.stop", lambda: self._async_instance.stop(delete=delete))
+
+    def close(self, *, delete: bool | None = None) -> None:
+        self.stop(delete=delete)
+
+    def __enter__(self) -> "SandboxInstance":
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        self.stop()

@@ -32,6 +32,8 @@ from nemo_gym.sandbox.providers.base import (
     SandboxExecResult,
     SandboxHandle,
     SandboxSpec,
+    SandboxStatus,
+    VolumeMount,
 )
 
 
@@ -98,6 +100,7 @@ IMAGE_PULL_POLICY_EXTENSION_KEY = "imagePullPolicy"
 IMAGE_PULL_POLICY_ANNOTATION_EXTENSION_KEY = "opensandbox.extensions.image-pull-policy"
 PROVIDER_OPTION_PLATFORM = "platform"
 PROVIDER_OPTION_SKIP_HEALTH_CHECK = "skip_health_check"
+PROVIDER_OPTION_SNAPSHOT_ID = "snapshot_id"
 PROVIDER_OPTION_VOLUMES = "volumes"
 VALID_IMAGE_PULL_POLICIES = {"Always", "IfNotPresent", "Never"}
 STATUS_CODE_RE = re.compile(r"(?:status code|http)\D+(\d{3})", re.IGNORECASE)
@@ -343,9 +346,41 @@ def _to_platform_spec(platform: dict[str, Any]) -> Any:
     return PlatformSpec(**platform)
 
 
-def _to_volumes(volumes: list[dict[str, Any]]) -> list[Any]:
+def _volume_mount_name(volume: VolumeMount, index: int) -> str:
+    source = volume.container_path or volume.host_path or f"volume-{index}"
+    normalized = METADATA_VALUE_RE.sub("-", source.strip("/")).strip("-")
+    return (normalized or f"volume-{index}")[:63]
+
+
+def _volume_to_mapping(volume: VolumeMount | Mapping[str, Any], index: int) -> dict[str, Any]:
+    if isinstance(volume, Mapping):
+        return dict(volume)
+    if not isinstance(volume, VolumeMount):
+        raise TypeError(f"OpenSandbox volume entries must be mappings or VolumeMount instances, got {type(volume)!r}")
+    if volume.is_efs:
+        raise ValueError("OpenSandbox does not support provider-neutral EFS VolumeMount entries")
+    if volume.host_path is None:
+        raise ValueError("OpenSandbox VolumeMount entries require host_path")
+    return {
+        "name": _volume_mount_name(volume, index),
+        "host": {"path": volume.host_path},
+        "mount_path": volume.container_path,
+        "read_only": volume.readonly,
+    }
+
+
+def _to_volumes(volumes: list[VolumeMount | Mapping[str, Any]]) -> list[Any]:
     _, _, _, _, Volume = _require_opensandbox_sdk()
-    return [Volume(**volume) for volume in volumes]
+    return [Volume(**_volume_to_mapping(volume, index)) for index, volume in enumerate(volumes)]
+
+
+def _spec_volumes(spec: SandboxSpec) -> list[VolumeMount | Mapping[str, Any]] | None:
+    volumes: list[VolumeMount | Mapping[str, Any]] = []
+    volumes.extend(spec.volumes)
+    provider_volumes = spec.provider_options.get(PROVIDER_OPTION_VOLUMES)
+    if provider_volumes is not None:
+        volumes.extend(provider_volumes)
+    return volumes or None
 
 
 def _provider_option_bool(provider_options: dict[str, Any], key: str) -> bool | None:
@@ -361,6 +396,19 @@ def _seconds_to_timedelta(seconds: int | float | None) -> timedelta | None:
     if seconds is None:
         return None
     return timedelta(seconds=float(seconds))
+
+
+def _to_sandbox_status(state: Any) -> SandboxStatus:
+    normalized = str(state or "").lower()
+    if normalized in {"active", "ready", "running"}:
+        return SandboxStatus.RUNNING
+    if normalized in {"creating", "initializing", "pending", "starting"}:
+        return SandboxStatus.STARTING
+    if normalized in {"completed", "deleted", "exited", "stopped", "terminated"}:
+        return SandboxStatus.STOPPED
+    if normalized in {"crashed", "error", "failed", "unhealthy"}:
+        return SandboxStatus.ERROR
+    return SandboxStatus.UNKNOWN
 
 
 @dataclass(frozen=True)
@@ -815,8 +863,9 @@ class OpenSandboxProvider:
         }
         if spec.image is not None:
             kwargs["image"] = spec.image
-        if spec.snapshot_id is not None:
-            kwargs["snapshot_id"] = spec.snapshot_id
+        snapshot_id = spec.provider_options.get(PROVIDER_OPTION_SNAPSHOT_ID)
+        if snapshot_id is not None:
+            kwargs["snapshot_id"] = snapshot_id
         if spec.timeout_s is not None:
             kwargs["timeout"] = timedelta(seconds=spec.timeout_s)
         if spec.ready_timeout_s is not None:
@@ -824,7 +873,7 @@ class OpenSandboxProvider:
         if spec.entrypoint is not None:
             kwargs["entrypoint"] = spec.entrypoint
         platform = spec.provider_options.get(PROVIDER_OPTION_PLATFORM)
-        volumes = spec.provider_options.get(PROVIDER_OPTION_VOLUMES)
+        volumes = _spec_volumes(spec)
         if platform is not None:
             kwargs["platform"] = _to_platform_spec(platform)
         if volumes is not None:
@@ -931,12 +980,13 @@ class OpenSandboxProvider:
     def _validate_sdk_pool_spec(self, spec: SandboxSpec) -> None:
         if spec.image is None:
             raise ValueError("OpenSandbox SDK pool requires SandboxSpec.image")
-        if spec.snapshot_id is not None:
+        if spec.provider_options.get(PROVIDER_OPTION_SNAPSHOT_ID) is not None:
             raise ValueError("OpenSandbox SDK pool does not support snapshot_id")
 
     def _to_pool_creation_spec(self, spec: SandboxSpec) -> Any:
         self._validate_sdk_pool_spec(spec)
         _, _, PoolCreationSpec, _ = _require_opensandbox_sdk_pool()
+        volumes = _spec_volumes(spec)
         return PoolCreationSpec(
             image=spec.image,
             entrypoint=spec.entrypoint,
@@ -947,9 +997,7 @@ class OpenSandboxProvider:
             platform=_to_platform_spec(spec.provider_options[PROVIDER_OPTION_PLATFORM])
             if PROVIDER_OPTION_PLATFORM in spec.provider_options
             else None,
-            volumes=_to_volumes(spec.provider_options[PROVIDER_OPTION_VOLUMES])
-            if PROVIDER_OPTION_VOLUMES in spec.provider_options
-            else None,
+            volumes=_to_volumes(volumes) if volumes is not None else None,
         )
 
     async def _wait_sdk_pool_idle(
@@ -1161,6 +1209,34 @@ class OpenSandboxProvider:
         sandbox = await Sandbox.connect(sandbox_id, **kwargs)
         return SandboxHandle(sandbox_id=str(sandbox.id), provider_name=self.name, raw=sandbox)
 
+    async def attach(self, sandbox_id: str) -> SandboxHandle:
+        """Attach to an existing OpenSandbox sandbox."""
+        return await self.connect(sandbox_id)
+
+    async def status(self, handle: SandboxHandle) -> SandboxStatus:
+        """Return the current OpenSandbox lifecycle status."""
+        get_info = getattr(handle.raw, "get_info", None)
+        if get_info is None:
+            return SandboxStatus.UNKNOWN
+        info = await self._await_sdk_operation(
+            get_info,
+            operation="get_info",
+            sandbox_id=handle.sandbox_id,
+            timeout_s=float(self._connection.request_timeout_s)
+            if self._connection.request_timeout_s is not None
+            else None,
+        )
+        raw_status = getattr(info, "status", None)
+        return _to_sandbox_status(getattr(raw_status, "state", None) if raw_status is not None else None)
+
+    async def container_ip(self, handle: SandboxHandle) -> str | None:
+        """Return the container IP when the OpenSandbox SDK handle exposes it."""
+        for attr in ("container_ip", "container_ip_address", "pod_ip", "ip"):
+            value = getattr(handle.raw, attr, None)
+            if value:
+                return str(value)
+        return None
+
     def _command_retry_count(self) -> int:
         return (
             self._operations.retries if self._operations.command_retries is None else self._operations.command_retries
@@ -1173,7 +1249,7 @@ class OpenSandboxProvider:
         *,
         cwd: str | None = None,
         env: dict[str, str] | None = None,
-        timeout_s: int | None = None,
+        timeout_s: int | float | None = None,
         user: str | int | None = None,
         retries: int | None = None,
     ) -> SandboxExecResult:
@@ -1232,7 +1308,7 @@ class OpenSandboxProvider:
         *,
         cwd: str | None = None,
         env: dict[str, str] | None = None,
-        timeout_s: int | None = None,
+        timeout_s: int | float | None = None,
         user: str | int | None = None,
     ) -> SandboxExecResult:
         """Run a command inside an OpenSandbox sandbox."""
