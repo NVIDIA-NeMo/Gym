@@ -127,7 +127,7 @@ Perform a batch of rollout collection.
 | `input_jsonl_fpath` | str | The input data source to use to collect rollouts, in the form of a file path to a JSONL file. |
 | `output_jsonl_fpath` | str | The output data JSONL file path. |
 | `limit` | Optional[int] | Maximum number of examples to load and take from the input dataset. |
-| `num_repeats` | Optional[int] | The number of times to repeat each example to run. Useful if you want to calculate mean@k, such as mean@4 or mean@16. |
+| `num_repeats` | int or Dict[str, int] | Rollouts per row (default: `1`). Pass an int to apply to every row, or a dict keyed by `agent_ref.name` for per-agent counts (e.g. `{simple_agent: 32, swe_agent: 1}`). In dict form, the special key `_default` is the fallback for agents not explicitly listed; without it, any unlisted row's agent raises a single consolidated error. Useful for mean@k or for mixing multiple agents with different sample budgets in one job. |
 | `num_repeats_add_seed` | bool | When num_repeats &gt;1, add a "seed" parameter on the Responses create params. |
 | `num_samples_in_parallel` | Optional[int] | Limit the number of concurrent samples running at once. |
 | `responses_create_params` | Dict | Overrides for the `responses_create_params`, such as `temperature` and `max_output_tokens`. |
@@ -142,6 +142,15 @@ ng_collect_rollouts \
     +limit=100 \
     +num_repeats=4 \
     +num_samples_in_parallel=10
+```
+
+Per-agent dict form, when one input file pins different agents per row via `agent_ref.name`:
+
+```bash
+ng_collect_rollouts \
+    +input_jsonl_fpath=mixed_agents.jsonl \
+    +output_jsonl_fpath=mixed_rollouts.jsonl \
+    '+num_repeats={agent_alpha: 4, agent_beta: 1, _default: 1}'
 ```
 
 ### `ng_e2e_collect_rollouts` / `nemo_gym_e2e_collect_rollouts`
