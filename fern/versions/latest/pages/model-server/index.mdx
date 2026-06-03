@@ -38,3 +38,9 @@ Let NeMo Gym launch and manage the vLLM server for you.
 [Model Server Fields](/reference/configuration#model-server-fields) for server configuration syntax and fields.
 
 </Note>
+
+## Middleware
+
+Model servers can attach an interceptor chain that observes or mutates request and response payloads — useful for logging, caching, system-prompt injection, turn budgeting, reasoning-field normalization, and similar cross-cutting hooks.
+
+See [Adapter Middleware](/model-server/adapters) for the framework, built-in interceptors, and configuration syntax.

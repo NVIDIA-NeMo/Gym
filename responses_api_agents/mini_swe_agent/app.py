@@ -28,6 +28,7 @@ from minisweagent.config import builtin_config_dir, get_config_path
 from minisweagent.run.extra.swegym_runner import _main as run_swegym
 from pydantic import ConfigDict
 
+from nemo_gym.adapters import install_middleware
 from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyRequest,
@@ -96,6 +97,7 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
         app = FastAPI()
         app.post("/v1/responses")(self.responses)
         app.post("/run")(self.run)
+        install_middleware(app, self.config.adapters)
         return app
 
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:

@@ -330,8 +330,10 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
     async def _run_claude_code(self, instruction: str, system_prompt: Optional[str] = None) -> tuple[str, str]:
         """Run claude -p --output-format=stream-json and return (stdout, model_name)."""
         base_url = self._resolve_base_url()
-        # Keep full model name for local/custom endpoints; strip provider prefix for real Anthropic API.
-        model = self.config.model if base_url else self.config.model.split("/")[-1]
+        # Keep full model name for local/custom endpoints (proxy mode counts);
+        # strip provider prefix only for real Anthropic API.
+        custom_upstream = bool(base_url) or self._proxy_handle is not None
+        model = self.config.model if custom_upstream else self.config.model.split("/")[-1]
         api_key = self.config.anthropic_api_key
 
         claude_config_dir = self._setup_config_dir()
@@ -347,8 +349,17 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 "IS_SANDBOX": "1",
                 "CLAUDE_CONFIG_DIR": str(claude_config_dir),
             }
-            if base_url:
-                env["ANTHROPIC_BASE_URL"] = base_url
+            proxy_or_base = self._proxy_handle.url if self._proxy_handle is not None else base_url
+            if proxy_or_base:
+                # Custom upstream (proxy in front of an inference endpoint OR a
+                # direct non-Anthropic endpoint). The claude CLI sends Bearer
+                # auth via ANTHROPIC_AUTH_TOKEN whenever ANTHROPIC_BASE_URL is
+                # set; ANTHROPIC_API_KEY (x-api-key) is ignored in that mode.
+                # Falls back to "local" only when no api_key is configured —
+                # api.anthropic.com rejects Bearer for sk-ant-... keys, so
+                # users targeting Anthropic directly must use an OAuth-issued
+                # token or accept that this auth shape won't work there.
+                env["ANTHROPIC_BASE_URL"] = proxy_or_base
                 env["ANTHROPIC_AUTH_TOKEN"] = api_key or "local"
 
             cmd = self._build_command(model, instruction, system_prompt=system_prompt)
