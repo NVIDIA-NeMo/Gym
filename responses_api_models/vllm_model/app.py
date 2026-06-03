@@ -111,6 +111,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         """
         return VLLMConverter(
             return_token_id_information=self.config.return_token_id_information,
+            uses_reasoning_parser=self.config.uses_reasoning_parser,
         )
 
     def model_post_init(self, context):
@@ -618,6 +619,7 @@ class VLLMConverterResponsesToChatCompletionsState(BaseModel):
 
 class VLLMConverter(BaseModel):
     return_token_id_information: bool
+    uses_reasoning_parser: bool = True
 
     # =======================================================
     # Reasoning handling. This may change across models and model families
@@ -851,7 +853,10 @@ class VLLMConverter(BaseModel):
         response_output = []
 
         content = message_dict.get("content") or ""
-        reasoning_matches, content = self._extract_reasoning_from_content(content)
+        if self.uses_reasoning_parser:
+            reasoning_matches, content = self._extract_reasoning_from_content(content)
+        else:
+            reasoning_matches = []
         if reasoning_matches:
             reasoning_item = NeMoGymResponseReasoningItem(
                 id=f"rs_{uuid4().hex}",

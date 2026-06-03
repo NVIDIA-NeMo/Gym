@@ -781,14 +781,18 @@ class TestApp:
             created_at=FIXED_TIME,
             model="dummy_model",
             output=[
-                NeMoGymResponseReasoningItem(
-                    id="rs_123",
+                # uses_reasoning_parser=False: <think> tags are NOT extracted; raw text
+                # stays in output_text instead of being split into a reasoning item.
+                NeMoGymResponseOutputMessage(
+                    id="msg_123",
+                    role="assistant",
                     status="completed",
-                    type="reasoning",
-                    summary=[
-                        NeMoGymSummary(
-                            type="summary_text",
-                            text="Gathering order status and delivery info...",
+                    type="message",
+                    content=[
+                        NeMoGymResponseOutputText(
+                            type="output_text",
+                            text="<think>Gathering order status and delivery info...</think>",
+                            annotations=[],
                         )
                     ],
                 ),
@@ -953,17 +957,8 @@ class TestApp:
             created_at=FIXED_TIME,
             model="dummy_model",
             output=[
-                NeMoGymResponseReasoningItem(
-                    id="rs_123",
-                    status="completed",
-                    type="reasoning",
-                    summary=[
-                        NeMoGymSummary(
-                            type="summary_text",
-                            text="Searching for a location before analyzing weather patterns...",
-                        )
-                    ],
-                ),
+                # uses_reasoning_parser=False: <think> tags are NOT extracted; raw text
+                # stays in output_text instead of being split into a reasoning item.
                 NeMoGymResponseOutputMessage(
                     id="msg_123",
                     status="completed",
@@ -972,7 +967,7 @@ class TestApp:
                     content=[
                         NeMoGymResponseOutputText(
                             type="output_text",
-                            text="What city and/or region do you need weather data for?",
+                            text="<think>Searching for a location before analyzing weather patterns...</think>What city and/or region do you need weather data for?",
                             annotations=[],
                         )
                     ],
@@ -1196,14 +1191,18 @@ class TestApp:
             created_at=FIXED_TIME,
             model="dummy_model",
             output=[
-                NeMoGymResponseReasoningItem(
-                    id="rs_123",
+                # uses_reasoning_parser=False: <think> tags are NOT extracted; raw text
+                # stays in output_text instead of being split into a reasoning item.
+                NeMoGymResponseOutputMessage(
+                    id="msg_123",
                     status="completed",
-                    type="reasoning",
-                    summary=[
-                        NeMoGymSummary(
-                            type="summary_text",
-                            text="Order #1234 is shipped and scheduled for delivery tomorrow. Tomorrow's date is 2025-08-14. The next day is 2025-08-15 and is not a holiday. I need to send a note to the courier to update the delivery date to 2025-08-15.",
+                    role="assistant",
+                    type="message",
+                    content=[
+                        NeMoGymResponseOutputText(
+                            type="output_text",
+                            text="<think>Order #1234 is shipped and scheduled for delivery tomorrow. Tomorrow's date is 2025-08-14. The next day is 2025-08-15 and is not a holiday. I need to send a note to the courier to update the delivery date to 2025-08-15.</think>",
+                            annotations=[],
                         )
                     ],
                 ),
@@ -1381,6 +1380,9 @@ class TestApp:
         Response Create Params -> Response
         """
         server = self._setup_server(monkeypatch)
+        # PARAMETERIZE_DATA expected responses assume reasoning extraction; enable it
+        # on the converter so the e2e test exercises the full parsing path.
+        server._converter.uses_reasoning_parser = True
         app = server.setup_webserver()
         client = TestClient(app)
 
@@ -1589,6 +1591,7 @@ class TestApp:
     def test_responses_reasoning_parser(self, monkeypatch: MonkeyPatch):
         server = self._setup_server(monkeypatch)
         server.config.uses_reasoning_parser = True
+        server._converter.uses_reasoning_parser = True
 
         app = server.setup_webserver()
         client = TestClient(app)
@@ -2046,6 +2049,7 @@ class TestApp:
         # See the TODO wrt reasoning_content in vllm_model/app.py
         server = self._setup_server(monkeypatch)
         server.config.uses_reasoning_parser = True
+        server._converter.uses_reasoning_parser = True
 
         app = server.setup_webserver()
         client = TestClient(app)
