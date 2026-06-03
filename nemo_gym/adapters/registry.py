@@ -52,6 +52,15 @@ _BUILTIN: dict[str, str] = {
 # Each family adds entries under its own family-named comment marker so
 # different families don't fight for the same diff context.
 
+# Request-rewriting family — mutate the outbound request body before
+# upstream sees it.
+_BUILTIN["drop_params"] = "nemo_gym.adapters.interceptors.drop_params"
+_BUILTIN["payload_modifier"] = "nemo_gym.adapters.interceptors.payload_modifier"
+_BUILTIN["system_message"] = "nemo_gym.adapters.interceptors.system_message"
+_BUILTIN["consolidate_system"] = "nemo_gym.adapters.interceptors.consolidate_system"
+_BUILTIN["modify_tools"] = "nemo_gym.adapters.interceptors.modify_tools"
+_BUILTIN["turn_counter"] = "nemo_gym.adapters.interceptors.turn_counter"
+
 # External / plugin registrations at runtime.
 _EXTRA: dict[str, str] = {}
 

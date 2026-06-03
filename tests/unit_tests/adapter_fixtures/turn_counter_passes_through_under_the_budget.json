@@ -1,0 +1,66 @@
+{
+  "expected_response": {
+    "body": {
+      "choices": [
+        {
+          "finish_reason": "stop",
+          "index": 0,
+          "message": {
+            "content": "fixture-canned",
+            "role": "assistant"
+          }
+        }
+      ],
+      "id": "chatcmpl-fixture",
+      "object": "chat.completion"
+    },
+    "headers": {
+      "content-type": "application/json"
+    },
+    "status_code": 200
+  },
+  "interceptor_specs": [
+    {
+      "config": {
+        "max_turns": 5
+      },
+      "name": "turn_counter"
+    }
+  ],
+  "request": {
+    "body": {
+      "messages": [
+        {
+          "content": "hi",
+          "role": "user"
+        }
+      ],
+      "model": "m"
+    },
+    "headers": {
+      "content-type": "application/json"
+    },
+    "path": "/v1/chat/completions"
+  },
+  "scenario": "turn_counter passes through under the budget",
+  "upstream_response": {
+    "body": {
+      "choices": [
+        {
+          "finish_reason": "stop",
+          "index": 0,
+          "message": {
+            "content": "fixture-canned",
+            "role": "assistant"
+          }
+        }
+      ],
+      "id": "chatcmpl-fixture",
+      "object": "chat.completion"
+    },
+    "headers": {
+      "content-type": "application/json"
+    },
+    "status_code": 200
+  }
+}

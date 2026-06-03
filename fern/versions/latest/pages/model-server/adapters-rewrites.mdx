@@ -1,0 +1,74 @@
+---
+title: "Request-Rewriting Interceptors"
+description: "Interceptors that mutate the outbound request body before it reaches the upstream."
+position: 6
+---
+
+Interceptors that mutate the outbound request body before it reaches the upstream. Run in the REQUEST stage.
+
+| Name | Stage | Purpose |
+|------|-------|---------|
+| `drop_params` | request | Remove named parameters from the outbound body. |
+| `payload_modifier` | request | Add, remove, and rename body fields. |
+| `system_message` | request | Inject a system message (prepend / append / replace). |
+| `consolidate_system` | request | Merge displaced system messages into one at position 0. |
+| `modify_tools` | request | Strip or add properties on `tools[].function.parameters`. |
+| `turn_counter` | request | Per-session turn budget; raises `GracefulError` (→ 429) on exhaustion. |
+
+### `drop_params`
+
+```yaml
+- name: drop_params
+  config:
+    params: ["top_k", "frequency_penalty"]
+```
+
+### `payload_modifier`
+
+```yaml
+- name: payload_modifier
+  config:
+    params_to_remove: ["secret_field"]
+    params_to_add: { "max_completion_tokens": 4096 }
+    params_to_rename: { "old_name": "new_name" }
+```
+
+### `system_message`
+
+```yaml
+- name: system_message
+  config:
+    system_message: "You are a careful assistant."
+    strategy: prepend   # one of: prepend | append | replace
+```
+
+### `consolidate_system`
+
+```yaml
+- name: consolidate_system
+  config:
+    separator: "\n\n"
+```
+
+### `modify_tools`
+
+```yaml
+- name: modify_tools
+  config:
+    strip_properties: ["internal_flag"]
+    add_properties:
+      reasoning:
+        type: string
+        description: "model's chain-of-thought"
+```
+
+### `turn_counter`
+
+```yaml
+- name: turn_counter
+  config:
+    every: 1            # log on every Nth turn
+    max_turns: 20       # null disables the budget
+```
+
+The session key is taken from `ctx.extra["session_id"]` (set by the middleware when the path matches `/s/<hex>/...`); otherwise a body-hash fallback is used.
