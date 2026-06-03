@@ -641,6 +641,15 @@ async def test_retry_classification_and_await_sdk_helpers(monkeypatch: pytest.Mo
     wrapped = RuntimeError("wrapper")
     wrapped.__cause__ = ConnectionError("connection reset")
     assert opensandbox_provider._is_retryable_sdk_operation_error(wrapped) is True
+    wrapped.__cause__ = wrapped
+    assert opensandbox_provider._is_retryable_sdk_operation_error(wrapped) is False
+
+    from opensandbox.exceptions import SandboxApiException  # noqa: PLC0415
+
+    cyclic_api_error = SandboxApiException("proxy failed")
+    cyclic_api_error.status_code = 500
+    cyclic_api_error.__cause__ = cyclic_api_error
+    assert opensandbox_provider._is_retryable_sdk_operation_error(cyclic_api_error) is True
 
     async def cancelled() -> None:
         raise asyncio.CancelledError()
