@@ -242,6 +242,7 @@ def test_connection_config_and_image_policy(fake_opensandbox_sdk: None) -> None:
             "api_key": "key",  # pragma: allowlist secret
             "protocol": "https",
             "request_timeout_s": 10,
+            "use_server_proxy": True,
         }
     )
 
@@ -251,6 +252,7 @@ def test_connection_config_and_image_policy(fake_opensandbox_sdk: None) -> None:
         "api_key": "key",  # pragma: allowlist secret
         "protocol": "https",
         "request_timeout": timedelta(seconds=10),
+        "use_server_proxy": True,
     }
     short_timeout_config = provider._connection_config(request_timeout_s=3)
     assert short_timeout_config.kwargs["request_timeout"] == timedelta(seconds=3)
