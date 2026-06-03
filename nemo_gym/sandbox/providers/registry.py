@@ -75,4 +75,11 @@ def _load_opensandbox_provider() -> ProviderClass:
     return OpenSandboxProvider
 
 
+def _load_ecs_fargate_provider() -> ProviderClass:
+    from nemo_gym.sandbox.providers.ecs_fargate import EcsFargateProvider
+
+    return EcsFargateProvider
+
+
 _BUILTIN_PROVIDER_LOADERS["opensandbox"] = _load_opensandbox_provider
+_BUILTIN_PROVIDER_LOADERS["ecs_fargate"] = _load_ecs_fargate_provider
