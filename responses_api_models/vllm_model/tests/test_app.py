@@ -781,8 +781,6 @@ class TestApp:
             created_at=FIXED_TIME,
             model="dummy_model",
             output=[
-                # uses_reasoning_parser=False: <think> tags are NOT extracted; raw text
-                # stays in output_text instead of being split into a reasoning item.
                 NeMoGymResponseOutputMessage(
                     id="msg_123",
                     role="assistant",
@@ -957,8 +955,6 @@ class TestApp:
             created_at=FIXED_TIME,
             model="dummy_model",
             output=[
-                # uses_reasoning_parser=False: <think> tags are NOT extracted; raw text
-                # stays in output_text instead of being split into a reasoning item.
                 NeMoGymResponseOutputMessage(
                     id="msg_123",
                     status="completed",
@@ -1191,8 +1187,6 @@ class TestApp:
             created_at=FIXED_TIME,
             model="dummy_model",
             output=[
-                # uses_reasoning_parser=False: <think> tags are NOT extracted; raw text
-                # stays in output_text instead of being split into a reasoning item.
                 NeMoGymResponseOutputMessage(
                     id="msg_123",
                     status="completed",
@@ -1380,8 +1374,6 @@ class TestApp:
         Response Create Params -> Response
         """
         server = self._setup_server(monkeypatch)
-        # PARAMETERIZE_DATA expected responses assume reasoning extraction; enable it
-        # on the converter so the e2e test exercises the full parsing path.
         server._converter.uses_reasoning_parser = True
         app = server.setup_webserver()
         client = TestClient(app)
