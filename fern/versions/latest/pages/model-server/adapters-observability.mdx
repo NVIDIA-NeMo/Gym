@@ -1,0 +1,62 @@
+---
+title: "Observability Interceptors"
+description: "Passive (or mildly-normalizing) interceptors for inspecting traffic without changing semantics."
+position: 4
+---
+
+Passive (or mildly-normalizing) interceptors for inspecting traffic without changing semantics.
+
+| Name | Stage | Purpose |
+|------|-------|---------|
+| `log_tokens` | response | Log `usage` token counts and latency. |
+| `response_stats` | response | Accumulate request count / total tokens / total latency; periodic summary. |
+| `progress_tracking` | response | Optional webhook ping every N completed responses. |
+| `reasoning` | response | Normalize `<think>...</think>` content or a `reasoning` field into `reasoning_content`. |
+| `raise_client_errors` | response | Convert non-retriable 4xx responses into `RuntimeError`. 429/408 pass through (retriable). |
+
+### `log_tokens`
+
+```yaml
+- name: log_tokens
+  config: {}
+```
+
+### `response_stats`
+
+```yaml
+- name: response_stats
+  config:
+    every: 100
+```
+
+### `progress_tracking`
+
+```yaml
+- name: progress_tracking
+  config:
+    webhook_url: http://progress-endpoint/ping
+    every: 10
+```
+
+Webhook errors are logged and swallowed (`best_effort = True`).
+
+### `reasoning`
+
+```yaml
+- name: reasoning
+  config: {}
+```
+
+Handles three response shapes:
+- already has `reasoning_content` → no-op
+- has a `reasoning` field → renamed to `reasoning_content`
+- `content` starts with `<think>...</think>` → extracted into `reasoning_content`
+
+### `raise_client_errors`
+
+```yaml
+- name: raise_client_errors
+  config: {}
+```
+
+429 and 408 are treated as retriable and pass through.

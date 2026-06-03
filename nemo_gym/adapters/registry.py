@@ -52,6 +52,13 @@ _BUILTIN: dict[str, str] = {
 # Each family adds entries under its own family-named comment marker so
 # different families don't fight for the same diff context.
 
+# Observability family — passive (or mildly-normalizing) interceptors.
+_BUILTIN["log_tokens"] = "nemo_gym.adapters.interceptors.log_tokens"
+_BUILTIN["response_stats"] = "nemo_gym.adapters.interceptors.response_stats"
+_BUILTIN["progress_tracking"] = "nemo_gym.adapters.interceptors.progress_tracking"
+_BUILTIN["reasoning"] = "nemo_gym.adapters.interceptors.reasoning"
+_BUILTIN["raise_client_errors"] = "nemo_gym.adapters.interceptors.raise_client_errors"
+
 # External / plugin registrations at runtime.
 _EXTRA: dict[str, str] = {}
 

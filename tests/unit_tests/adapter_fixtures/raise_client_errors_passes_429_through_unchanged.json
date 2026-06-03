@@ -1,0 +1,37 @@
+{
+  "expected_response": {
+    "body": {
+      "error": "rate limited"
+    },
+    "headers": {
+      "content-type": "application/json"
+    },
+    "status_code": 429
+  },
+  "interceptor_specs": [
+    {
+      "config": {},
+      "name": "raise_client_errors"
+    }
+  ],
+  "request": {
+    "body": {
+      "messages": [],
+      "model": "m"
+    },
+    "headers": {
+      "content-type": "application/json"
+    },
+    "path": "/v1/chat/completions"
+  },
+  "scenario": "raise_client_errors passes 429 through unchanged",
+  "upstream_response": {
+    "body": {
+      "error": "rate limited"
+    },
+    "headers": {
+      "content-type": "application/json"
+    },
+    "status_code": 429
+  }
+}
