@@ -16,6 +16,7 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from fastapi.testclient import TestClient
 
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
@@ -174,6 +175,34 @@ class TestApp:
             assert mock_request.call_count == 2
         finally:
             _stop_patches(patches)
+
+    @pytest.mark.asyncio
+    async def test_status_endpoint_reports_buffer_fill(self):
+        """GET /status returns current buffered count and batch_size."""
+        server = _make_server(_make_config(batch_size=3))
+        client = TestClient(server.setup_webserver())
+
+        # Empty buffer
+        resp = client.get("/status")
+        assert resp.status_code == 200
+        assert resp.json() == {"buffered": 0, "batch_size": 3}
+
+        # After one partial verify, buffer should report 1
+        async def add_one():
+            mock_request, patches = _mock_api({"accuracy": 0.5, "timeout_rate": 0.0})
+            try:
+                task = asyncio.create_task(server.verify(_make_verify_request("```python\nx=1\n```", problem_id="p1")))
+                with pytest.raises(asyncio.TimeoutError):
+                    await asyncio.wait_for(asyncio.shield(task), timeout=0.05)
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+            finally:
+                _stop_patches(patches)
+
+        await add_one()
+        resp = client.get("/status")
+        assert resp.json() == {"buffered": 1, "batch_size": 3}
 
     @pytest.mark.asyncio
     async def test_empty_code_still_included_in_batch(self):

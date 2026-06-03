@@ -17,6 +17,8 @@ import logging
 import re
 from typing import Any, Optional
 
+from fastapi import FastAPI
+
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
     BaseRunRequest,
@@ -63,6 +65,17 @@ class CritPtResourcesServer(SimpleResourcesServer):
         # Reset to None once batch_size is reached; new calls start a fresh batch.
         self._current_batch: Optional[dict] = None
 
+    def setup_webserver(self) -> FastAPI:
+        app = super().setup_webserver()
+        app.get("/status")(self.status)
+        return app
+
+    async def status(self) -> dict:
+        """Return the current batch fill (buffered submissions vs batch_size). Read-only; no lock."""
+        batch = self._current_batch
+        buffered = len(batch["submissions"]) if batch is not None else 0
+        return {"buffered": buffered, "batch_size": self.config.batch_size}
+
     async def verify(self, body: CritPtVerifyRequest) -> CritPtVerifyResponse:
         code = _extract_code(_extract_output_text(body))
         submission = {
@@ -81,6 +94,12 @@ class CritPtResourcesServer(SimpleResourcesServer):
             batch = self._current_batch
             batch["submissions"][body.problem_id] = submission
             future = batch["future"]
+            LOG.warning(
+                "CritPt verify: %d/%d submissions buffered (problem_id=%s)",
+                len(batch["submissions"]),
+                self.config.batch_size,
+                body.problem_id,
+            )
 
             ready_to_fire = len(batch["submissions"]) >= self.config.batch_size
             if ready_to_fire:
