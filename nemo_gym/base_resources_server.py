@@ -44,6 +44,11 @@ class BaseVerifyRequest(BaseRunRequest):
 
 class BaseVerifyResponse(BaseVerifyRequest):
     reward: float
+    # Optional decoupled reward components (component-name -> score) for multi-reward
+    # RL such as GDPO. None for single-reward environments. Consumed downstream by
+    # NeMo-RL (nemo_rl.environments.nemo_gym.extract_reward_components), which exposes
+    # them as reward1, reward2, ... ordered by component name.
+    reward_components: dict[str, float] | None = None
 
 
 class BaseSeedSessionRequest(BaseModel):
