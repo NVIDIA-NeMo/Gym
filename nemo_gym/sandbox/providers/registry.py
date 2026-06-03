@@ -69,10 +69,17 @@ def list_providers() -> list[str]:
     return sorted({*_PROVIDER_REGISTRY, *_BUILTIN_PROVIDER_LOADERS})
 
 
+def _load_daytona_provider() -> ProviderClass:
+    from nemo_gym.sandbox.providers.daytona import DaytonaProvider
+
+    return DaytonaProvider
+
+
 def _load_opensandbox_provider() -> ProviderClass:
     from nemo_gym.sandbox.providers.opensandbox import OpenSandboxProvider
 
     return OpenSandboxProvider
 
 
+_BUILTIN_PROVIDER_LOADERS["daytona"] = _load_daytona_provider
 _BUILTIN_PROVIDER_LOADERS["opensandbox"] = _load_opensandbox_provider
