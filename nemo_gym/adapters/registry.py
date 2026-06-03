@@ -52,6 +52,9 @@ _BUILTIN: dict[str, str] = {
 # Each family adds entries under its own family-named comment marker so
 # different families don't fight for the same diff context.
 
+# Caching family.
+_BUILTIN["caching"] = "nemo_gym.adapters.interceptors.caching"
+
 # External / plugin registrations at runtime.
 _EXTRA: dict[str, str] = {}
 

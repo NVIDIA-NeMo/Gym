@@ -1,0 +1,26 @@
+---
+title: "Caching Interceptor"
+description: "Disk-backed cache that short-circuits the chain on cache hit."
+position: 5
+---
+
+Disk-backed cache keyed by a SHA-256 hash of the canonicalized request body (+ optional session prefix). On cache hit, the interceptor short-circuits the chain and returns the stored response without invoking the upstream.
+
+| Name | Stage | Purpose |
+|------|-------|---------|
+| `caching` | request → response | Disk-backed cache (sqlite). Hits short-circuit upstream. |
+
+### `caching`
+
+```yaml
+- name: caching
+  config:
+    cache_dir: /var/cache/gym-adapter
+    bypass: false
+```
+
+Cache keys include the session prefix when present (via `ctx.extra["session_id"]`), so the same body in different sessions does not collide.
+
+<Note>
+Per-replica proxy or server instance means per-replica disk cache: if multiple replicas share the same `cache_dir`, sqlite write contention is real. Configure a per-replica path (e.g. `cache_dir: /tmp/adapter_cache_${pod_id}`) or accept the race.
+</Note>
