@@ -11,7 +11,7 @@ longmt_eval:
       comet_batch_size: 8
       comet_num_shards: 8
       embed_batch_size: 512
-      strip_reasoning: true
+      assert_no_reasoning: true
 
 longmt_eval_simple_agent:
   responses_api_agents:

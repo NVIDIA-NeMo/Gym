@@ -38,16 +38,21 @@ LOG = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Reasoning-preamble stripping (same logic as wmt_translation)
+# Reasoning-tag assertion
 # ---------------------------------------------------------------------------
+# Reasoning must be parsed/stripped by the inference server (e.g. via
+# vLLM's --reasoning-parser flag or an equivalent agent-side step) before the
+# response reaches the verifier. We assert that contract here instead of
+# silently rescuing malformed generations — a leaked <think>...</think>
+# preamble is a configuration bug, not something to paper over.
 
 
-def _strip_reasoning_preamble(text: str) -> str:
-    if "</think>" in text:
-        return text.rsplit("</think>", 1)[1].lstrip("\n")
-    if "<think>" in text:
-        return ""
-    return text
+def _assert_no_reasoning(text: str) -> None:
+    assert "<think>" not in text and "</think>" not in text, (
+        "longmt_eval received a generation containing <think>/</think> "
+        "reasoning tags. Reasoning must be parsed by the inference server "
+        "before reaching the verifier."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -81,8 +86,10 @@ class LongmtEvalConfig(BaseResourcesServerConfig):
         embed_batch_size: Number of overlap strings per LASER2 encode_sentences()
             call inside each actor. Larger values improve GPU utilisation for
             long documents with many overlaps; 512 is a safe default.
-        strip_reasoning: Drop <think>...</think> preambles from reasoning models
-            before scoring. Safe to leave True for non-reasoning models.
+        assert_no_reasoning: When True, assert the incoming generation contains
+            no <think>...</think> tags. Reasoning is expected to be parsed by
+            the inference server upstream; an assertion failure here surfaces
+            misconfiguration instead of silently scoring a leaked preamble.
         use_extra_gpu: When False (default), SEGALE actors claim fractional
             num_gpus so Ray manages CUDA_VISIBLE_DEVICES. Use this when the gym
             runs its own Ray cluster with dedicated GPU nodes (HTTP-separated
@@ -98,7 +105,7 @@ class LongmtEvalConfig(BaseResourcesServerConfig):
     comet_num_shards: int = 4
     actors_per_gpu: int = 4
     embed_batch_size: int = 512
-    strip_reasoning: bool = True
+    assert_no_reasoning: bool = True
     use_extra_gpu: bool = False
 
 
@@ -108,6 +115,7 @@ class LongmtEvalRunRequest(BaseRunRequest):
     source_language: str
     target_language: str
     doc_id: str
+    target_len: Optional[int] = None  # tiktoken token count the source was truncated to
 
 
 class LongmtEvalVerifyRequest(LongmtEvalRunRequest, BaseVerifyRequest):
@@ -222,8 +230,8 @@ class LongmtEvalServer(SimpleResourcesServer):
             self._ensure_actors()
 
         raw = body.response.output_text or ""
-        if self.config.strip_reasoning:
-            raw = _strip_reasoning_preamble(raw)
+        if self.config.assert_no_reasoning:
+            _assert_no_reasoning(raw)
         generation = raw.strip()
 
         base = dict(body.model_dump(), generation=generation)

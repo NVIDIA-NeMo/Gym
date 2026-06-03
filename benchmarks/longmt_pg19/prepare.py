@@ -2,15 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 """Prepare pg19 benchmark for long-document translation.
 
-Downloads emozilla/pg19 (test split, 100 books) and writes pg19_{N}k.jsonl
-with one record per (book, target language). Books are tiktoken-truncated to
---max_tokens at prep time. Truncation removes the middle of the book and
-preserves the beginning and end — same semantics as NeMo-Skills'
-reduce_prompt_from_middle.
+Downloads emozilla/pg19 (test split, 100 books) and writes pg19_benchmark.jsonl
+with one record per (book, target language, truncation length). Each row has a
+`target_len` field (int, tiktoken cl100k_base tokens) so rollouts can be
+grouped or filtered by context length.
 
-Output files are named by token limit (e.g. pg19_100k.jsonl, pg19_50k.jsonl)
-so multiple limits can coexist in the data dir. Select the desired file via
---input_file in the run script.
+Books are truncated from the end so the model always sees the beginning of the
+book without skipping content.
 
 Also pre-fetches the SEGALE judge models (LASER2, ersatz, wmt22-cometkiwi-da)
 into their cache directories so the resource server can run with
@@ -19,7 +17,8 @@ HF_HUB_OFFLINE=1 from the first verify() call.
 Usage:
     python prepare.py
     python prepare.py --target_languages de_DE fr_FR ja_JP
-    python prepare.py --max_tokens 50000 --no_prefetch
+    python prepare.py --lengths 8 32 65
+    python prepare.py --no_prefetch
 """
 
 from __future__ import annotations
@@ -37,12 +36,8 @@ DATA_DIR = BENCHMARK_DIR / "data"
 
 HF_REPO_ID = "emozilla/pg19"
 
-# Default tiktoken cl100k_base tokens to keep per book.
-# cl100k_base is used as a model-agnostic approximation — it tends to produce
-# similar token counts to GPT-4/Qwen tokenizers and provides a clean round limit.
-# The output file is named pg19_{max_tokens//1000}k.jsonl so multiple token limits
-# can coexist in the data dir and be selected via --input_file in the run script.
-MAX_TIKTOKEN_TOKENS = 20_000
+# Truncation lengths in tiktoken cl100k_base tokens (powers of 2).
+DEFAULT_LENGTHS = [2048, 4096, 8192, 16384, 32768, 65536]
 
 # 6 core languages matching the initial pg19 evaluation runs.
 DEFAULT_TARGET_LANGUAGES = ["de_DE", "es_MX", "fr_FR", "it_IT", "ja_JP", "zh_CN"]
@@ -130,12 +125,11 @@ def _sanitize_doc_id(title: str) -> str:
     return "".join(c for c in title if c not in invalid)
 
 
-def _truncate_middle(text: str, max_tokens: int) -> str:
-    """Truncate text to max_tokens using tiktoken cl100k_base, removing the middle.
+def _truncate_end(text: str, max_tokens: int) -> str:
+    """Truncate text to max_tokens using tiktoken cl100k_base, dropping from the end.
 
-    Keeps the first half and last half of the token budget so the model sees
-    both the beginning (title, author, opening) and the end of the book. If the
-    text fits within max_tokens it is returned unchanged.
+    The model always sees the beginning of the book. If the text fits within
+    max_tokens it is returned unchanged.
     """
     try:
         import tiktoken
@@ -147,11 +141,7 @@ def _truncate_middle(text: str, max_tokens: int) -> str:
     tokens = enc.encode(text)
     if len(tokens) <= max_tokens:
         return text
-
-    half = max_tokens // 2
-    head = enc.decode(tokens[:half])
-    tail = enc.decode(tokens[len(tokens) - half :])
-    return head + "\n\n[...]\n\n" + tail
+    return enc.decode(tokens[:max_tokens])
 
 
 def _prefetch_judge_models() -> None:
@@ -194,45 +184,59 @@ def _prefetch_judge_models() -> None:
 
 def prepare(
     target_languages: list[str] | None = None,
-    max_tokens: int = MAX_TIKTOKEN_TOKENS,
+    lengths: list[int] | None = None,
     prefetch: bool = True,
 ) -> Path:
-    """Download emozilla/pg19 test split and write pg19_{max_tokens//1000}k.jsonl.
+    """Download emozilla/pg19 test split and write pg19_benchmark.jsonl.
+
+    One row per (book, target_language, truncation_length). The `target_len`
+    field (int, tiktoken tokens) lets callers filter rollouts by context length.
 
     Returns the path to the written file.
     """
     if target_languages is None:
         target_languages = DEFAULT_TARGET_LANGUAGES
+    if lengths is None:
+        lengths = DEFAULT_LENGTHS
+
+    lengths_tokens = sorted(lengths)
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-
-    output_fpath = DATA_DIR / f"pg19_{max_tokens // 1000}k.jsonl"
+    output_fpath = DATA_DIR / "pg19_benchmark.jsonl"
 
     print(f"Loading {HF_REPO_ID} test split...")
     dataset = load_dataset(HF_REPO_ID, split="test", streaming=True)
     books = list(dataset)
     print(f"Loaded {len(books)} books")
+    print(f"Lengths (tokens): {lengths_tokens}")
 
     count = 0
     with output_fpath.open("w", encoding="utf-8") as fout:
-        for tgt_lang in target_languages:
-            for book in books:
-                text = _truncate_middle(book["text"], max_tokens)
-                row = {
-                    "text": text,
-                    "source_language": "en",
-                    "target_language": tgt_lang,
-                    "source_lang_name": "English",
-                    "target_lang_name": _lang_name(tgt_lang),
-                    "doc_id": _sanitize_doc_id(book["short_book_title"]),
-                    "seg_id": 1,
-                    "publication_date": int(book["publication_date"]),
-                    "url": book["url"],
-                }
-                fout.write(json.dumps(row, ensure_ascii=False) + "\n")
-                count += 1
+        for target_len in lengths_tokens:
+            for tgt_lang in target_languages:
+                for book in books:
+                    text = _truncate_end(book["text"], target_len)
+                    row = {
+                        "text": text,
+                        "source_language": "en",
+                        "target_language": tgt_lang,
+                        "source_lang_name": "English",
+                        "target_lang_name": _lang_name(tgt_lang),
+                        "doc_id": _sanitize_doc_id(book["short_book_title"]),
+                        "target_len": target_len,
+                        "seg_id": 1,
+                        "publication_date": int(book["publication_date"]),
+                        "url": book["url"],
+                    }
+                    fout.write(json.dumps(row, ensure_ascii=False) + "\n")
+                    count += 1
 
-    print(f"Wrote {count} rows ({len(books)} books × {len(target_languages)} languages) to {output_fpath}")
+    n_lengths = len(lengths_tokens)
+    print(
+        f"Wrote {count} rows "
+        f"({len(books)} books × {len(target_languages)} languages × {n_lengths} lengths) "
+        f"to {output_fpath}"
+    )
 
     if prefetch:
         _prefetch_judge_models()
@@ -249,10 +253,12 @@ if __name__ == "__main__":
         "--all_languages", action="store_true", help="Use all 55 language codes instead of the 6 defaults"
     )
     parser.add_argument(
-        "--max_tokens",
+        "--lengths",
+        nargs="+",
         type=int,
-        default=MAX_TIKTOKEN_TOKENS,
-        help=f"Max tiktoken tokens per book (default: {MAX_TIKTOKEN_TOKENS})",
+        default=None,
+        metavar="N",
+        help=f"Truncation lengths in tiktoken tokens (default: {DEFAULT_LENGTHS})",
     )
     parser.add_argument(
         "--no_prefetch", action="store_true", help="Skip judge model prefetch (useful on machines without GPU)"
@@ -260,4 +266,4 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     langs = ALL_LANGUAGES if args.all_languages else args.target_languages
-    prepare(target_languages=langs, max_tokens=args.max_tokens, prefetch=not args.no_prefetch)
+    prepare(target_languages=langs, lengths=args.lengths, prefetch=not args.no_prefetch)

@@ -13,7 +13,7 @@ longmt_pg19_agent:
       datasets:
       - name: pg19_benchmark
         type: benchmark
-        jsonl_fpath: benchmarks/longmt_pg19/data/pg19_100k.jsonl
+        jsonl_fpath: benchmarks/longmt_pg19/data/pg19_benchmark.jsonl
         prompt_config: benchmarks/prompts/generic/longmt.yaml
         prepare_script: benchmarks/longmt_pg19/prepare.py
         num_repeats: 5

@@ -187,7 +187,7 @@ For a full SLURM run with SEGALE enabled on WMT24++ see
 | `comet_num_shards` | `8` (`4` for wmt24pp/pg19) | Physical GPUs to use; total actors = `comet_num_shards × actors_per_gpu` |
 | `actors_per_gpu` | `1` (`4` for wmt24pp/pg19) | Actors co-placed on each GPU; each claims `1/actors_per_gpu` of the GPU |
 | `embed_batch_size` | `512` | Overlap strings per LASER2 `encode_sentences()` call |
-| `strip_reasoning` | `true` | Strip `<think>...</think>` preambles before scoring |
+| `assert_no_reasoning` | `true` | Assert the generation contains no `<think>...</think>` tags. Reasoning must be parsed by the inference server upstream — a leaked preamble surfaces as an `AssertionError` instead of being silently rescued |
 | `use_extra_gpu` | `false` | Actor resource mode; see Deployment modes above |
 
 ## Environment variables

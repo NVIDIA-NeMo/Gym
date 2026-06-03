@@ -12,7 +12,7 @@ longmt_eval:
       comet_num_shards: 4
       actors_per_gpu: 4
       embed_batch_size: 512
-      strip_reasoning: true
+      assert_no_reasoning: true
 
 longmt_wmt24pp_simple_agent:
   responses_api_agents:

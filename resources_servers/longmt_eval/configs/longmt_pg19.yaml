@@ -13,7 +13,7 @@ longmt_eval:
       actors_per_gpu: 4
       use_extra_gpu: false
       embed_batch_size: 512
-      strip_reasoning: true
+      assert_no_reasoning: true
 
 longmt_pg19_simple_agent:
   responses_api_agents:

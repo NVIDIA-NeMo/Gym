@@ -9,7 +9,7 @@ from app import (
     LongmtEvalConfig,
     LongmtEvalServer,
     LongmtEvalVerifyRequest,
-    _strip_reasoning_preamble,
+    _assert_no_reasoning,
 )
 
 from nemo_gym.openai_utils import NeMoGymResponse
@@ -39,7 +39,7 @@ def _make_response(text: str) -> NeMoGymResponse:
 
 def _make_server(
     compute_segale: bool = False,
-    strip_reasoning: bool = False,
+    assert_no_reasoning: bool = False,
     comet_num_shards: int = 4,
 ) -> LongmtEvalServer:
     config = LongmtEvalConfig(
@@ -48,7 +48,7 @@ def _make_server(
         entrypoint="",
         name="",
         compute_segale=compute_segale,
-        strip_reasoning=strip_reasoning,
+        assert_no_reasoning=assert_no_reasoning,
         comet_num_shards=comet_num_shards,
     )
     return LongmtEvalServer(config=config, server_client=MagicMock(spec=ServerClient))
@@ -74,27 +74,24 @@ def _make_request(
     )
 
 
-class TestStripReasoningPreamble:
-    def test_takes_text_after_close_tag(self) -> None:
-        text = "We need to translate the segment.\n</think>\nDie Sonne"
-        assert _strip_reasoning_preamble(text) == "Die Sonne"
+class TestAssertNoReasoning:
+    def test_passes_clean_text(self) -> None:
+        _assert_no_reasoning("Die Sonne geht auf.")
 
-    def test_strips_leading_newlines_before_answer(self) -> None:
-        text = "Reasoning.\n</think>\n\nDie Sonne geht auf."
-        assert _strip_reasoning_preamble(text) == "Die Sonne geht auf."
+    def test_passes_empty(self) -> None:
+        _assert_no_reasoning("")
 
-    def test_uses_last_close_tag(self) -> None:
-        text = "Step 1: </think> Step 2 thinking. </think>\nFinal answer."
-        assert _strip_reasoning_preamble(text) == "Final answer."
+    def test_raises_on_open_tag(self) -> None:
+        with pytest.raises(AssertionError, match="reasoning tags"):
+            _assert_no_reasoning("<think>still thinking")
 
-    def test_empty_when_truncated_mid_reasoning(self) -> None:
-        assert _strip_reasoning_preamble("<think>unfinished reasoning...") == ""
+    def test_raises_on_close_tag(self) -> None:
+        with pytest.raises(AssertionError, match="reasoning tags"):
+            _assert_no_reasoning("Reasoning.\n</think>\nDie Sonne")
 
-    def test_returns_text_unchanged_when_no_reasoning_tags(self) -> None:
-        assert _strip_reasoning_preamble("Die Sonne geht auf.") == "Die Sonne geht auf."
-
-    def test_empty_input(self) -> None:
-        assert _strip_reasoning_preamble("") == ""
+    def test_raises_on_both_tags(self) -> None:
+        with pytest.raises(AssertionError, match="reasoning tags"):
+            _assert_no_reasoning("<think>r</think>Die Sonne")
 
 
 class TestVerify:
@@ -117,31 +114,28 @@ class TestVerify:
         assert result.reward == 0.0
         assert result.generation == "Die Sonne ging über die Hügel auf."
 
-    async def test_strip_reasoning_removes_preamble(self) -> None:
-        server = _make_server(compute_segale=False, strip_reasoning=True)
-        preamble = "Let me think about this translation.\n</think>\n"
-        translation = "Die Sonne ging über die Hügel auf."
+    async def test_assert_no_reasoning_raises_on_think_tags(self) -> None:
+        server = _make_server(compute_segale=False, assert_no_reasoning=True)
         request = _make_request(
             text="The sun rose over the hills.",
-            generation=preamble + translation,
+            generation="<think>let me think</think>\nDie Sonne ging über die Hügel auf.",
             target_language="de_DE",
         )
-        result = await server.verify(request)
-        assert result.generation == translation
+        with pytest.raises(AssertionError, match="reasoning tags"):
+            await server.verify(request)
 
-    async def test_strip_reasoning_empty_when_truncated(self) -> None:
-        server = _make_server(compute_segale=False, strip_reasoning=True)
+    async def test_assert_no_reasoning_raises_on_unterminated_open_tag(self) -> None:
+        server = _make_server(compute_segale=False, assert_no_reasoning=True)
         request = _make_request(
             text="The sun rose.",
             generation="<think>Still thinking, no close tag.",
             target_language="de_DE",
         )
-        result = await server.verify(request)
-        assert result.generation == ""
-        assert result.reward == 0.0
+        with pytest.raises(AssertionError, match="reasoning tags"):
+            await server.verify(request)
 
-    async def test_strip_reasoning_preserves_clean_output(self) -> None:
-        server = _make_server(compute_segale=False, strip_reasoning=True)
+    async def test_assert_no_reasoning_passes_clean_output(self) -> None:
+        server = _make_server(compute_segale=False, assert_no_reasoning=True)
         translation = "Die Sonne ging über die Hügel auf."
         request = _make_request(
             text="The sun rose over the hills.",
