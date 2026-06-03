@@ -81,7 +81,7 @@ class MiniSWESandboxEnvironment:
         image = spec_config.pop("image", None) or self.config.image
         image = rewrite_image(image, spec_config.pop("image_rewrites", []))
         provider_options = dict(spec_config.pop("provider_options", {}))
-        for option_key in ("platform", "volumes", "skip_health_check"):
+        for option_key in ("platform", "volumes", "skip_health_check", "extensions"):
             if option_key in spec_config:
                 provider_options[option_key] = spec_config.pop(option_key)
         if "snapshot_id" in spec_config:
@@ -109,8 +109,6 @@ class MiniSWESandboxEnvironment:
                 },
                 resources=spec_config.pop("resources", {}),
                 entrypoint=spec_config.pop("entrypoint", None),
-                environment_dir=spec_config.pop("environment_dir", None),
-                extensions=spec_config.pop("extensions", {}),
                 provider_options=provider_options,
             ),
             delete_on_stop=self.config.delete,
