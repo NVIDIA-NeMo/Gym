@@ -119,8 +119,6 @@ mini_swe_agent_2:
             domain: opensandbox-server.opensandbox-system.svc.cluster.local
             api_key: ${oc.env:OPENSANDBOX_API_KEY}
             protocol: http
-            use_server_proxy: true
-            exec_use_server_proxy: true
             request_timeout_s: 300
           create:
             request_timeout_s: 1200
@@ -301,11 +299,10 @@ environment:
 
 - Validates that a sandbox provider was configured.
 - Builds a `SandboxSpec` from the task image, environment variables, metadata,
-  resources, platform, volumes, provider-specific extensions, and health-check
-  settings.
+  resources, and provider-specific options.
 - Adds standard metadata such as `nemo_gym_agent=mini_swe_agent_2` and
   `instance_id`.
-- Creates a `Sandbox` facade and calls `Sandbox.create(...)`.
+- Creates a `Sandbox` facade and calls `Sandbox.start(...)`.
 
 `execute()`:
 
@@ -329,9 +326,8 @@ command output begins with `COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT` and the
 command succeeded, it raises `minisweagent.exceptions.Submitted` with the final
 submission payload.
 
-`cleanup()` calls `Sandbox.close(..., delete=config.delete)` and then
-`Sandbox.shutdown()` to release provider-owned async resources and stop the sync
-facade's private loop.
+`cleanup()` calls `Sandbox.stop(...)` to release provider-owned resources and
+stop the sync facade's private loop.
 
 ## Contributing
 

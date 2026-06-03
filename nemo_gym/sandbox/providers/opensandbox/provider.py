@@ -31,7 +31,6 @@ from nemo_gym.sandbox.providers.base import (
     SandboxHandle,
     SandboxSpec,
     SandboxStatus,
-    VolumeMount,
 )
 
 
@@ -136,25 +135,6 @@ def _require_tenacity() -> tuple[Any, Any, Any, Any]:
     return AsyncRetrying, retry_if_exception, stop_after_attempt, wait_random_exponential
 
 
-def _httpx_retryable_types() -> tuple[type[BaseException], ...]:
-    try:
-        import httpx
-    except ModuleNotFoundError:
-        return tuple()
-    return (
-        httpx.RemoteProtocolError,
-        httpx.ReadError,
-        httpx.WriteError,
-        httpx.ConnectError,
-        httpx.ConnectTimeout,
-        httpx.ReadTimeout,
-        httpx.WriteTimeout,
-        httpx.PoolTimeout,
-        httpx.TimeoutException,
-        httpx.NetworkError,
-    )
-
-
 def _has_retryable_error_marker(exception: BaseException) -> bool:
     message = str(exception).lower()
     return any(marker in message for marker in RETRYABLE_ERROR_MARKERS)
@@ -207,9 +187,6 @@ def _is_retryable_create_error(exception: BaseException) -> bool:
         return True
     if isinstance(exception, (ConnectionError, OSError, TimeoutError)):
         return True
-    httpx_types = _httpx_retryable_types()
-    if httpx_types and isinstance(exception, httpx_types):
-        return True
 
     try:
         from opensandbox.exceptions import (
@@ -261,9 +238,6 @@ def _is_retryable_sdk_operation_error(exception: BaseException) -> bool:
         return True
     if isinstance(exception, (ConnectionError, OSError)):
         return True
-    httpx_types = _httpx_retryable_types()
-    if httpx_types and isinstance(exception, httpx_types):
-        return True
     return _is_retryable_create_error(exception)
 
 
@@ -314,7 +288,6 @@ def _normalize_spec(spec: SandboxSpec) -> SandboxSpec:
         env=_string_map(spec.env),
         metadata=_metadata_map(spec.metadata),
         resources=_string_map(spec.resources),
-        extensions=_string_map(spec.extensions),
     )
 
 
@@ -323,41 +296,20 @@ def _to_platform_spec(platform: dict[str, Any]) -> Any:
     return PlatformSpec(**platform)
 
 
-def _volume_mount_name(volume: VolumeMount, index: int) -> str:
-    source = volume.container_path or volume.host_path or f"volume-{index}"
-    normalized = METADATA_VALUE_RE.sub("-", source.strip("/")).strip("-")
-    return (normalized or f"volume-{index}")[:63]
-
-
-def _volume_to_mapping(volume: VolumeMount | Mapping[str, Any], index: int) -> dict[str, Any]:
-    if isinstance(volume, Mapping):
-        return dict(volume)
-    if not isinstance(volume, VolumeMount):
-        raise TypeError(f"OpenSandbox volume entries must be mappings or VolumeMount instances, got {type(volume)!r}")
-    if volume.is_efs:
-        raise ValueError("OpenSandbox does not support provider-neutral EFS VolumeMount entries")
-    if volume.host_path is None:
-        raise ValueError("OpenSandbox VolumeMount entries require host_path")
-    return {
-        "name": _volume_mount_name(volume, index),
-        "host": {"path": volume.host_path},
-        "mount_path": volume.container_path,
-        "read_only": volume.readonly,
-    }
-
-
-def _to_volumes(volumes: list[VolumeMount | Mapping[str, Any]]) -> list[Any]:
+def _to_volumes(volumes: list[Mapping[str, Any]]) -> list[Any]:
     _, _, _, _, Volume = _require_opensandbox_sdk()
-    return [Volume(**_volume_to_mapping(volume, index)) for index, volume in enumerate(volumes)]
+    return [Volume(**dict(volume)) for volume in volumes]
 
 
-def _spec_volumes(spec: SandboxSpec) -> list[VolumeMount | Mapping[str, Any]] | None:
-    volumes: list[VolumeMount | Mapping[str, Any]] = []
-    volumes.extend(spec.volumes)
-    provider_volumes = spec.provider_options.get(PROVIDER_OPTION_VOLUMES)
-    if provider_volumes is not None:
-        volumes.extend(provider_volumes)
-    return volumes or None
+def _spec_volumes(spec: SandboxSpec) -> list[Mapping[str, Any]] | None:
+    return spec.provider_options.get(PROVIDER_OPTION_VOLUMES)
+
+
+def _spec_extensions(spec: SandboxSpec) -> dict[str, str]:
+    value = spec.provider_options.get("extensions", {})
+    if not isinstance(value, Mapping):
+        raise TypeError("OpenSandbox provider option 'extensions' must be a mapping")
+    return _string_map(dict(value))
 
 
 def _provider_option_bool(provider_options: dict[str, Any], key: str) -> bool | None:
@@ -389,8 +341,6 @@ class OpenSandboxConnectionConfig:
     domain: str | None = None
     api_key: str | None = None
     protocol: str | None = None
-    use_server_proxy: bool | None = None
-    exec_use_server_proxy: bool | None = None
     request_timeout_s: int | None = None
 
 
@@ -503,7 +453,8 @@ class OpenSandboxProvider:
         if self._create.image_pull_policy is None:
             return spec
 
-        extensions = dict(spec.extensions)
+        provider_options = dict(spec.provider_options)
+        extensions = _spec_extensions(spec)
         image_pull_policy = extensions.get(IMAGE_PULL_POLICY_EXTENSION_KEY) or extensions.get(
             IMAGE_PULL_POLICY_ANNOTATION_EXTENSION_KEY
         )
@@ -512,13 +463,12 @@ class OpenSandboxProvider:
         image_pull_policy = validate_image_pull_policy(image_pull_policy)
         extensions.setdefault(IMAGE_PULL_POLICY_EXTENSION_KEY, image_pull_policy)
         extensions.setdefault(IMAGE_PULL_POLICY_ANNOTATION_EXTENSION_KEY, image_pull_policy)
-        return replace(spec, extensions=extensions)
+        provider_options["extensions"] = extensions
+        return replace(spec, provider_options=provider_options)
 
     def _connection_config(
         self,
         request_timeout_s: int | float | None = None,
-        *,
-        use_server_proxy: bool | None = None,
     ) -> Any:
         _, ConnectionConfig, _, _, _ = _require_opensandbox_sdk()
         kwargs: dict[str, Any] = {}
@@ -528,37 +478,14 @@ class OpenSandboxProvider:
             kwargs["api_key"] = self._connection.api_key
         if self._connection.protocol is not None:
             kwargs["protocol"] = self._connection.protocol
-        if use_server_proxy is None:
-            use_server_proxy = self._connection.use_server_proxy
-        if use_server_proxy is not None:
-            kwargs["use_server_proxy"] = use_server_proxy
         if request_timeout_s is None:
             request_timeout_s = self._connection.request_timeout_s
         if request_timeout_s is not None:
             kwargs["request_timeout"] = timedelta(seconds=request_timeout_s)
         return ConnectionConfig(**kwargs)
 
-    def _exec_connection_config(self, request_timeout_s: int | float | None = None) -> Any:
-        """Connection config for SDK handles that issue execd/filesystem calls.
-
-        For clustered evaluations, exec traffic should normally use the
-        OpenSandbox server proxy. That keeps clients off pod IP routing and lets
-        the server resolve the sandbox backend for each request.
-        """
-        use_server_proxy = self._connection.use_server_proxy
-        if self._connection.exec_use_server_proxy is not None:
-            use_server_proxy = self._connection.exec_use_server_proxy
-        return self._connection_config(
-            request_timeout_s=request_timeout_s,
-            use_server_proxy=use_server_proxy,
-        )
-
     async def aclose(self) -> None:
-        """Close provider-owned resources.
-
-        The provider intentionally does not inject or own OpenSandbox SDK
-        network clients. SDK handles are closed per sandbox in ``close``.
-        """
+        """Close provider-owned resources."""
         return None
 
     async def _await_sdk_call(
@@ -722,7 +649,7 @@ class OpenSandboxProvider:
                 sandbox = await asyncio.wait_for(
                     Sandbox.connect(
                         handle.sandbox_id,
-                        connection_config=self._exec_connection_config(request_timeout_s=attempt_timeout_s),
+                        connection_config=self._connection_config(request_timeout_s=attempt_timeout_s),
                         connect_timeout=timedelta(seconds=attempt_timeout_s),
                         skip_health_check=True,
                     ),
@@ -747,8 +674,8 @@ class OpenSandboxProvider:
             "env": spec.env,
             "metadata": spec.metadata,
             "resource": spec.resources,
-            "extensions": spec.extensions,
-            "connection_config": self._exec_connection_config(request_timeout_s=self._create.request_timeout_s),
+            "extensions": _spec_extensions(spec),
+            "connection_config": self._connection_config(request_timeout_s=self._create.request_timeout_s),
         }
         if spec.image is not None:
             kwargs["image"] = spec.image
@@ -857,14 +784,6 @@ class OpenSandboxProvider:
         raw_status = getattr(info, "status", None)
         return _to_sandbox_status(getattr(raw_status, "state", None) if raw_status is not None else None)
 
-    async def container_ip(self, handle: SandboxHandle) -> str | None:
-        """Return the container IP when the OpenSandbox SDK handle exposes it."""
-        for attr in ("container_ip", "container_ip_address", "pod_ip", "ip"):
-            value = getattr(handle.raw, attr, None)
-            if value:
-                return str(value)
-        return None
-
     def _command_retry_count(self) -> int:
         return (
             self._operations.retries if self._operations.command_retries is None else self._operations.command_retries
@@ -950,7 +869,7 @@ class OpenSandboxProvider:
             retries=self._command_retry_count(),
         )
 
-    async def write_file(self, handle: SandboxHandle, target_path: str, data: str | bytes) -> None:
+    async def _write_file(self, handle: SandboxHandle, target_path: str, data: str | bytes) -> None:
         """Write one file into an OpenSandbox sandbox."""
         await self._await_sdk_operation(
             lambda: handle.raw.files.write_file(target_path, data),
@@ -961,7 +880,7 @@ class OpenSandboxProvider:
             else None,
         )
 
-    async def read_file(self, handle: SandboxHandle, source_path: str) -> bytes:
+    async def _read_file(self, handle: SandboxHandle, source_path: str) -> bytes:
         """Read one file from an OpenSandbox sandbox."""
         return await self._await_sdk_operation(
             lambda: handle.raw.files.read_bytes(source_path),
@@ -974,12 +893,12 @@ class OpenSandboxProvider:
 
     async def upload_file(self, handle: SandboxHandle, source_path: Path, target_path: str) -> None:
         """Upload one local file into an OpenSandbox sandbox."""
-        await self.write_file(handle, target_path, source_path.read_bytes())
+        await self._write_file(handle, target_path, source_path.read_bytes())
 
     async def download_file(self, handle: SandboxHandle, source_path: str, target_path: Path) -> None:
         """Download one file from an OpenSandbox sandbox."""
         target_path.parent.mkdir(parents=True, exist_ok=True)
-        target_path.write_bytes(await self.read_file(handle, source_path))
+        target_path.write_bytes(await self._read_file(handle, source_path))
 
     async def close(self, handle: SandboxHandle, *, delete: bool) -> None:
         """Close local SDK resources and optionally terminate the sandbox."""

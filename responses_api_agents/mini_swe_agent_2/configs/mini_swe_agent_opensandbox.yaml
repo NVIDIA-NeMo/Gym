@@ -16,8 +16,6 @@ mini_swe_agent_2:
             domain: opensandbox-server.opensandbox-system.svc.cluster.local
             api_key: ${oc.env:OPENSANDBOX_API_KEY}
             protocol: http
-            use_server_proxy: true
-            exec_use_server_proxy: true
             request_timeout_s: 300
           create:
             request_timeout_s: 1200

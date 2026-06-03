@@ -19,21 +19,15 @@ import tempfile
 import threading
 from collections.abc import Awaitable, Callable, Mapping
 from concurrent.futures import Future
-from dataclasses import replace
 from pathlib import Path
 from typing import Any, TypeVar
 
 from nemo_gym.sandbox.providers import (
-    ImageBuildRequest,
-    OutsideEndpoint,
     SandboxExecResult,
     SandboxHandle,
-    SandboxImageBuildProvider,
-    SandboxInlineFileProvider,
     SandboxProvider,
     SandboxSpec,
     SandboxStatus,
-    SandboxStatusProvider,
     create_provider,
 )
 
@@ -58,41 +52,12 @@ class AsyncSandbox:
         self._stopped = True
         self._closed = False
 
-    def _provider_name(self) -> str:
-        return self._provider.name
-
     def _require_handle(self) -> SandboxHandle:
         if self._handle is None or self._stopped:
             raise RuntimeError("Sandbox has not been started")
         return self._handle
 
-    async def _build_images(self, request: ImageBuildRequest) -> list[str]:
-        if not isinstance(self._provider, SandboxImageBuildProvider):
-            raise NotImplementedError(f"Provider {self._provider_name()!r} does not support sandbox image builds")
-        return await self._provider.build_images(request)
-
-    async def _resolve_image_build(self, spec: SandboxSpec) -> SandboxSpec:
-        if spec.image_build is None:
-            return spec
-        built_images = await self._build_images(ImageBuildRequest(specs=[spec.image_build]))
-        if not built_images:
-            raise ValueError("build_images returned no image references")
-        return replace(spec, image=spec.image or built_images[0])
-
-    def _with_outside_endpoints(
-        self,
-        spec: SandboxSpec,
-        outside_endpoints: list[OutsideEndpoint] | None,
-    ) -> SandboxSpec:
-        if not outside_endpoints:
-            return spec
-        endpoint_env = {endpoint.env_var: endpoint.url for endpoint in outside_endpoints}
-        return replace(spec, env={**spec.env, **endpoint_env})
-
     async def _write_inline_file(self, handle: SandboxHandle, target_path: str, data: str | bytes) -> None:
-        if isinstance(self._provider, SandboxInlineFileProvider):
-            await self._provider.write_file(handle, target_path, data)
-            return
         with tempfile.TemporaryDirectory(prefix="nemo-gym-sandbox-upload-") as tmp_dir:
             source_path = Path(tmp_dir) / "contents"
             if isinstance(data, str):
@@ -109,7 +74,6 @@ class AsyncSandbox:
         self,
         spec: SandboxSpec | None = None,
         *,
-        outside_endpoints: list[OutsideEndpoint] | None = None,
         delete_on_stop: bool | None = None,
     ) -> "AsyncSandbox":
         if self._closed:
@@ -120,18 +84,16 @@ class AsyncSandbox:
         if requested_spec is None:
             raise ValueError("Sandbox.start() requires a SandboxSpec")
 
-        requested_spec = self._with_outside_endpoints(requested_spec, outside_endpoints)
-        resolved_spec = await self._resolve_image_build(requested_spec)
-        handle = await self._provider.create(resolved_spec)
+        handle = await self._provider.create(requested_spec)
         try:
-            await self._write_initial_files(handle, resolved_spec.files)
+            await self._write_initial_files(handle, requested_spec.files)
         except Exception:
             await self._provider.close(handle, delete=True)
             await self._provider.aclose()
             self._closed = True
             raise
 
-        self._spec = resolved_spec
+        self._spec = requested_spec
         self._handle = handle
         self._delete_on_stop = self._delete_on_stop if delete_on_stop is None else delete_on_stop
         self._stopped = False
@@ -166,8 +128,6 @@ class AsyncSandbox:
             return SandboxStatus.UNKNOWN
         if self._stopped:
             return SandboxStatus.STOPPED
-        if not isinstance(self._provider, SandboxStatusProvider):
-            return SandboxStatus.UNKNOWN
         return await self._provider.status(self._handle)
 
     async def stop(self, *, delete: bool | None = None) -> None:
@@ -269,14 +229,12 @@ class Sandbox:
         self,
         spec: SandboxSpec | None = None,
         *,
-        outside_endpoints: list[OutsideEndpoint] | None = None,
         delete_on_stop: bool | None = None,
     ) -> "Sandbox":
         self._runner.run(
             "start",
             lambda: self._async_sandbox.start(
                 spec,
-                outside_endpoints=outside_endpoints,
                 delete_on_stop=delete_on_stop,
             ),
         )

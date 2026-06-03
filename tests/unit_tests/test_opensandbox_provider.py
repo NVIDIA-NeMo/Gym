@@ -23,7 +23,7 @@ from typing import Any
 
 import pytest
 
-from nemo_gym.sandbox.providers.base import SandboxSpec, SandboxStatus, VolumeMount
+from nemo_gym.sandbox.providers.base import SandboxSpec, SandboxStatus
 
 
 pytest.importorskip("tenacity", reason="tenacity optional sandbox dependency is not installed")
@@ -139,9 +139,6 @@ def test_missing_optional_dependency_import_helpers(monkeypatch: pytest.MonkeyPa
     with pytest.raises(ModuleNotFoundError, match="tenacity is required"):
         opensandbox_provider._require_tenacity()
 
-    block_imports("httpx")
-    assert opensandbox_provider._httpx_retryable_types() == tuple()
-
     block_imports("opensandbox.exceptions")
     assert opensandbox_provider._is_retryable_create_error(RuntimeError("gateway timeout")) is True
 
@@ -189,25 +186,6 @@ async def test_direct_create_passes_platform_to_sdk_create(
 def test_provider_validation_and_retry_helpers() -> None:
     with pytest.raises(ValueError, match="image_pull_policy"):
         opensandbox_provider.validate_image_pull_policy("Sometimes")
-
-    volume_mapping = opensandbox_provider._volume_to_mapping(
-        VolumeMount(host_path="/host/workspace", container_path="/mnt/workspace", readonly=True),
-        0,
-    )
-    assert volume_mapping == {
-        "name": "mnt-workspace",
-        "host": {"path": "/host/workspace"},
-        "mount_path": "/mnt/workspace",
-        "read_only": True,
-    }
-    assert opensandbox_provider._volume_to_mapping({"name": "raw-volume"}, 1) == {"name": "raw-volume"}
-    assert opensandbox_provider._volume_mount_name(VolumeMount(container_path="/"), 2) == "volume-2"
-    with pytest.raises(TypeError, match="VolumeMount"):
-        opensandbox_provider._volume_to_mapping(object(), 0)
-    with pytest.raises(ValueError, match="EFS"):
-        opensandbox_provider._volume_to_mapping(VolumeMount(efs_filesystem_id="fs-1"), 0)
-    with pytest.raises(ValueError, match="host_path"):
-        opensandbox_provider._volume_to_mapping(VolumeMount(), 0)
     with pytest.raises(TypeError, match="must be a bool"):
         opensandbox_provider._provider_option_bool({"skip_health_check": "true"}, "skip_health_check")
 
@@ -257,14 +235,12 @@ def test_provider_validation_and_retry_helpers() -> None:
     assert attrs["next_sleep_s"] == 0.5
 
 
-def test_connection_config_exec_proxy_and_image_policy(fake_opensandbox_sdk: None) -> None:
+def test_connection_config_and_image_policy(fake_opensandbox_sdk: None) -> None:
     provider = opensandbox_provider.OpenSandboxProvider(
         connection={
             "domain": "sandbox.example",
             "api_key": "key",  # pragma: allowlist secret
             "protocol": "https",
-            "use_server_proxy": True,
-            "exec_use_server_proxy": False,
             "request_timeout_s": 10,
         }
     )
@@ -274,17 +250,16 @@ def test_connection_config_exec_proxy_and_image_policy(fake_opensandbox_sdk: Non
         "domain": "sandbox.example",
         "api_key": "key",  # pragma: allowlist secret
         "protocol": "https",
-        "use_server_proxy": True,
         "request_timeout": timedelta(seconds=10),
     }
-    exec_config = provider._exec_connection_config(request_timeout_s=3)
-    assert exec_config.kwargs["use_server_proxy"] is False
-    assert exec_config.kwargs["request_timeout"] == timedelta(seconds=3)
+    short_timeout_config = provider._connection_config(request_timeout_s=3)
+    assert short_timeout_config.kwargs["request_timeout"] == timedelta(seconds=3)
 
-    spec = SandboxSpec(image="image:tag", extensions={"imagePullPolicy": "Never"})
+    spec = SandboxSpec(image="image:tag", provider_options={"extensions": {"imagePullPolicy": "Never"}})
     updated = provider._with_default_image_pull_policy(spec)
-    assert updated.extensions["imagePullPolicy"] == "Never"
-    assert updated.extensions["opensandbox.extensions.image-pull-policy"] == "Never"
+    extensions = updated.provider_options["extensions"]
+    assert extensions["imagePullPolicy"] == "Never"
+    assert extensions["opensandbox.extensions.image-pull-policy"] == "Never"
 
     no_policy_provider = opensandbox_provider.OpenSandboxProvider(create={"image_pull_policy": None})
     assert no_policy_provider._with_default_image_pull_policy(spec) is spec
@@ -328,8 +303,6 @@ async def test_exec_file_operations_and_reference_validation(monkeypatch: pytest
             return f"bytes:{source_path}".encode()
 
     class FakeRaw:
-        container_ip = "10.1.2.3"
-
         def __init__(self) -> None:
             self.commands = FakeCommands()
             self.files = FakeFiles()
@@ -374,20 +347,16 @@ async def test_exec_file_operations_and_reference_validation(monkeypatch: pytest
     assert result.stderr == "stderr\nCommandError: failed"
     assert raw.commands.calls[1][0] == "su -s /bin/sh -c fail agent"
 
-    await provider.write_file(handle, "/tmp/file.txt", "contents")
-    assert await provider.read_file(handle, "/tmp/file.txt") == b"bytes:/tmp/file.txt"
     upload_path = tmp_path / "upload.txt"
     upload_path.write_text("upload", encoding="utf-8")
     await provider.upload_file(handle, upload_path, "/remote/upload.txt")
     download_path = tmp_path / "nested" / "download.txt"
     await provider.download_file(handle, "/remote/download.txt", download_path)
-    assert raw.files.writes == [("/tmp/file.txt", "contents"), ("/remote/upload.txt", b"upload")]
+    assert raw.files.writes == [("/remote/upload.txt", b"upload")]
     assert download_path.read_bytes() == b"bytes:/remote/download.txt"
     assert await provider.status(handle) == SandboxStatus.RUNNING
-    assert await provider.container_ip(handle) == "10.1.2.3"
     bare_handle = opensandbox_provider.SandboxHandle(sandbox_id="sandbox-2", provider_name="opensandbox", raw=object())
     assert await provider.status(bare_handle) == SandboxStatus.UNKNOWN
-    assert await provider.container_ip(bare_handle) is None
 
 
 async def test_provider_create_probe_and_close_error_paths(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -513,7 +482,6 @@ async def test_create_once_and_connect_after_create_error_paths(
         timeout_s=10,
         ready_timeout_s=20,
         entrypoint=["/bin/sh"],
-        volumes=[VolumeMount(host_path="/host/workspace", container_path="/mnt/workspace", readonly=True)],
         provider_options={
             "snapshot_id": "snapshot-1",
             "platform": {"os": "linux", "arch": "amd64"},
@@ -528,10 +496,7 @@ async def test_create_once_and_connect_after_create_error_paths(
     assert FakeSandbox.created_kwargs["ready_timeout"] == timedelta(seconds=20)
     assert FakeSandbox.created_kwargs["entrypoint"] == ["/bin/sh"]
     assert FakeSandbox.created_kwargs["platform"] == FakePlatformSpec(os="linux", arch="amd64")
-    assert FakeSandbox.created_kwargs["volumes"] == [
-        VolumeMount(host_path="/host/workspace", container_path="/mnt/workspace", readonly=True),
-        {"name": "workspace"},
-    ]
+    assert FakeSandbox.created_kwargs["volumes"] == [{"name": "workspace"}]
     assert FakeSandbox.created_kwargs["skip_health_check"] is True
 
     class FailingConnectSandbox(FakeSandbox):
@@ -670,17 +635,10 @@ async def test_retry_classification_and_await_sdk_helpers(monkeypatch: pytest.Mo
     assert await provider.aclose() is None
     assert await provider._await_sdk_call(_return_value("ok"), operation="op", sandbox_id="sandbox-1", timeout_s=None)
     assert opensandbox_provider._is_retryable_sdk_operation_error(TimeoutError("command timeout")) is False
-    assert opensandbox_provider._is_retryable_sdk_operation_error(ConnectionError("proxy failed")) is True
+    assert opensandbox_provider._is_retryable_sdk_operation_error(ConnectionError("connection failed")) is True
     wrapped = RuntimeError("wrapper")
     wrapped.__cause__ = ConnectionError("connection reset")
     assert opensandbox_provider._is_retryable_sdk_operation_error(wrapped) is True
-
-    class FakeHttpxConnectError(Exception):
-        pass
-
-    monkeypatch.setattr(opensandbox_provider, "_httpx_retryable_types", lambda: (FakeHttpxConnectError,))
-    assert opensandbox_provider._is_retryable_create_error(FakeHttpxConnectError("temporary")) is True
-    assert opensandbox_provider._is_retryable_sdk_operation_error(FakeHttpxConnectError("temporary")) is True
 
     async def cancelled() -> None:
         raise asyncio.CancelledError()

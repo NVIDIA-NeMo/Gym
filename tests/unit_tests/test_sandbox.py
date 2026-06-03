@@ -14,6 +14,7 @@
 
 import asyncio
 import importlib.util
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -23,9 +24,6 @@ import pytest
 import nemo_gym.sandbox.providers.registry as provider_registry
 from nemo_gym.sandbox import (
     AsyncSandbox,
-    ImageBuildRequest,
-    ImageSpec,
-    OutsideEndpoint,
     Sandbox,
     SandboxCreateError,
     SandboxExecResult,
@@ -83,18 +81,11 @@ class FakeSandboxProvider:
         self.created_specs: list[SandboxSpec] = []
         self.created_handles: list[SandboxHandle] = []
         self.exec_calls: list[dict[str, Any]] = []
-        self.image_build_requests: list[ImageBuildRequest] = []
-        self.write_calls: list[tuple[SandboxHandle, str, str | bytes]] = []
-        self.read_calls: list[tuple[SandboxHandle, str]] = []
         self.upload_calls: list[tuple[SandboxHandle, Path, str]] = []
         self.download_calls: list[tuple[SandboxHandle, str, Path]] = []
         self.closed: list[tuple[SandboxHandle, bool]] = []
         self.aclosed = False
         FakeSandboxProvider.last_instance = self
-
-    async def build_images(self, request: ImageBuildRequest) -> list[str]:
-        self.image_build_requests.append(request)
-        return [spec.image for spec in request.specs]
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
         self.created_specs.append(spec)
@@ -128,13 +119,6 @@ class FakeSandboxProvider:
         )
         return SandboxExecResult(stdout="ok", stderr=None, return_code=0)
 
-    async def write_file(self, handle: SandboxHandle, target_path: str, data: str | bytes) -> None:
-        self.write_calls.append((handle, target_path, data))
-
-    async def read_file(self, handle: SandboxHandle, source_path: str) -> bytes:
-        self.read_calls.append((handle, source_path))
-        return f"read:{source_path}".encode()
-
     async def upload_file(self, handle: SandboxHandle, source_path: Path, target_path: str) -> None:
         self.upload_calls.append((handle, source_path, target_path))
 
@@ -146,10 +130,6 @@ class FakeSandboxProvider:
     async def status(self, handle: SandboxHandle) -> SandboxStatus:
         del handle
         return SandboxStatus.RUNNING
-
-    async def container_ip(self, handle: SandboxHandle) -> str | None:
-        del handle
-        return "10.0.0.1"
 
     async def close(self, handle: SandboxHandle, *, delete: bool) -> None:
         self.closed.append((handle, delete))
@@ -192,6 +172,10 @@ class PlainSandboxProvider:
     async def download_file(self, handle: SandboxHandle, source_path: str, target_path: Path) -> None:
         del handle, source_path
         target_path.write_bytes(b"downloaded")
+
+    async def status(self, handle: SandboxHandle) -> SandboxStatus:
+        del handle
+        return SandboxStatus.UNKNOWN
 
     async def close(self, handle: SandboxHandle, *, delete: bool = False) -> None:
         del handle, delete
@@ -237,6 +221,10 @@ class TransferOnlySandboxProvider:
         self.download_calls.append((handle, source_path, target_path))
         target_path.write_bytes(b"fallback")
 
+    async def status(self, handle: SandboxHandle) -> SandboxStatus:
+        del handle
+        return SandboxStatus.RUNNING
+
     async def close(self, handle: SandboxHandle, *, delete: bool = False) -> None:
         del handle, delete
 
@@ -244,16 +232,10 @@ class TransferOnlySandboxProvider:
         return None
 
 
-class EmptyImageBuildProvider(FakeSandboxProvider):
-    async def build_images(self, request: ImageBuildRequest) -> list[str]:
-        self.image_build_requests.append(request)
-        return []
-
-
-class FailingWriteProvider(FakeSandboxProvider):
-    async def write_file(self, handle: SandboxHandle, target_path: str, data: str | bytes) -> None:
-        self.write_calls.append((handle, target_path, data))
-        raise RuntimeError("write failed")
+class FailingUploadProvider(FakeSandboxProvider):
+    async def upload_file(self, handle: SandboxHandle, source_path: Path, target_path: str) -> None:
+        self.upload_calls.append((handle, source_path, target_path))
+        raise RuntimeError("upload failed")
 
 
 def test_sandbox_facade_uses_public_provider_api(tmp_path: Path) -> None:
@@ -272,7 +254,6 @@ async def _assert_sandbox_facade_uses_public_provider_api(tmp_path: Path) -> Non
             workdir="/repo",
             files={"/tmp/bootstrap.txt": "hello"},
         ),
-        outside_endpoints=[OutsideEndpoint(url="http://outside", env_var="OUTSIDE_URL")],
         delete_on_stop=True,
     )
 
@@ -282,8 +263,8 @@ async def _assert_sandbox_facade_uses_public_provider_api(tmp_path: Path) -> Non
     assert provider.marker == "configured"
     assert provider.created_specs[0].image == "image:tag"
     assert provider.created_specs[0].metadata == {"suite": "unit"}
-    assert provider.created_specs[0].env["OUTSIDE_URL"] == "http://outside"
-    assert provider.write_calls == [(handle, "/tmp/bootstrap.txt", "hello")]
+    assert provider.upload_calls[0][0] == handle
+    assert provider.upload_calls[0][2] == "/tmp/bootstrap.txt"
 
     result = await sandbox.exec("pytest -q", timeout_s=60, user="agent")
     assert result == SandboxExecResult(stdout="ok", stderr=None, return_code=0)
@@ -302,7 +283,7 @@ async def _assert_sandbox_facade_uses_public_provider_api(tmp_path: Path) -> Non
     source_path.write_text("local", encoding="utf-8")
     await sandbox.upload(source_path, "/remote/source.txt")
     await sandbox.download("/remote/source.txt", target_path)
-    assert provider.upload_calls == [(handle, source_path, "/remote/source.txt")]
+    assert provider.upload_calls[1] == (handle, source_path, "/remote/source.txt")
     assert provider.download_calls == [(handle, "/remote/source.txt", target_path)]
     assert target_path.read_bytes() == b"downloaded"
 
@@ -312,13 +293,6 @@ async def _assert_sandbox_facade_uses_public_provider_api(tmp_path: Path) -> Non
     assert await sandbox.status() == SandboxStatus.STOPPED
     assert provider.aclosed is True
 
-    build_provider = FakeSandboxProvider()
-    built_sandbox = AsyncSandbox(build_provider)
-    await built_sandbox.start(SandboxSpec(image_build=ImageSpec(image="built:tag", source={"context": "repo"})))
-    assert build_provider.image_build_requests[-1].specs[0].source == {"context": "repo"}
-    assert build_provider.created_specs[-1].image == "built:tag"
-    await built_sandbox.stop(delete=True)
-
     context_provider = FakeSandboxProvider()
     async with AsyncSandbox(context_provider) as context_sandbox:
         await context_sandbox.start(SandboxSpec(image="image:tag"), delete_on_stop=True)
@@ -326,20 +300,14 @@ async def _assert_sandbox_facade_uses_public_provider_api(tmp_path: Path) -> Non
     assert context_provider.closed[-1] == (context_handle, True)
 
 
-def test_async_sandbox_build_and_initial_file_error_paths() -> None:
-    asyncio.run(_assert_async_sandbox_build_and_initial_file_error_paths())
+def test_async_sandbox_initial_file_error_paths() -> None:
+    asyncio.run(_assert_async_sandbox_initial_file_error_paths())
 
 
-async def _assert_async_sandbox_build_and_initial_file_error_paths() -> None:
-    empty_build_provider = EmptyImageBuildProvider()
-    empty_build_sandbox = AsyncSandbox(empty_build_provider)
-    with pytest.raises(ValueError, match="build_images returned no image references"):
-        await empty_build_sandbox.start(SandboxSpec(image_build=ImageSpec(image="missing:tag")))
-    assert empty_build_provider.image_build_requests[0].specs[0].image == "missing:tag"
-
-    failing_provider = FailingWriteProvider()
+async def _assert_async_sandbox_initial_file_error_paths() -> None:
+    failing_provider = FailingUploadProvider()
     failing_sandbox = AsyncSandbox(failing_provider)
-    with pytest.raises(RuntimeError, match="write failed"):
+    with pytest.raises(RuntimeError, match="upload failed"):
         await failing_sandbox.start(SandboxSpec(image="image:tag", files={"/tmp/bootstrap.txt": "hello"}))
     assert failing_provider.closed == [
         (
@@ -457,7 +425,6 @@ def test_sync_sandbox_facade_uses_public_provider_api(tmp_path: Path) -> None:
                 workdir="/repo",
                 files={"/tmp/bootstrap.txt": "hello"},
             ),
-            outside_endpoints=[OutsideEndpoint(url="http://outside", env_var="OUTSIDE_URL")],
             delete_on_stop=True,
         )
 
@@ -467,8 +434,8 @@ def test_sync_sandbox_facade_uses_public_provider_api(tmp_path: Path) -> None:
         assert provider.marker == "configured"
         assert provider.created_specs[0].image == "image:tag"
         assert provider.created_specs[0].metadata == {"suite": "unit"}
-        assert provider.created_specs[0].env["OUTSIDE_URL"] == "http://outside"
-        assert provider.write_calls == [(handle, "/tmp/bootstrap.txt", "hello")]
+        assert provider.upload_calls[0][0] == handle
+        assert provider.upload_calls[0][2] == "/tmp/bootstrap.txt"
 
         result = sandbox.exec("pytest -q", timeout_s=60, user="agent")
         assert result == SandboxExecResult(stdout="ok", stderr=None, return_code=0)
@@ -570,7 +537,7 @@ async def _assert_opensandbox_sdk_create_receives_default_image_pull_policy(monk
     )
 
     provider = OpenSandboxProvider(probe={"command": None})
-    monkeypatch.setattr(provider, "_connection_config", lambda request_timeout_s=None, use_server_proxy=None: object())
+    monkeypatch.setattr(provider, "_connection_config", lambda request_timeout_s=None: object())
 
     handle = await provider.create(
         SandboxSpec(
@@ -592,11 +559,11 @@ async def _assert_opensandbox_sdk_create_receives_default_image_pull_policy(monk
 
 
 @requires_tenacity
-def test_opensandbox_connect_after_create_can_use_direct_exec_endpoint(monkeypatch) -> None:
-    asyncio.run(_assert_opensandbox_connect_after_create_can_use_direct_exec_endpoint(monkeypatch))
+def test_opensandbox_connect_after_create_uses_connection_config(monkeypatch) -> None:
+    asyncio.run(_assert_opensandbox_connect_after_create_uses_connection_config(monkeypatch))
 
 
-async def _assert_opensandbox_connect_after_create_can_use_direct_exec_endpoint(monkeypatch) -> None:
+async def _assert_opensandbox_connect_after_create_uses_connection_config(monkeypatch) -> None:
     opensandbox_provider_module, OpenSandboxProvider, *_unused = _require_opensandbox_provider()
 
     class FakeConnectionConfig:
@@ -621,7 +588,7 @@ async def _assert_opensandbox_connect_after_create_can_use_direct_exec_endpoint(
     )
 
     provider = OpenSandboxProvider(
-        connection={"use_server_proxy": True, "exec_use_server_proxy": False},
+        connection={"domain": "sandbox.example", "protocol": "https"},
         create={"connect_attempt_timeout_s": 1},
         probe={"command": None},
     )
@@ -634,7 +601,11 @@ async def _assert_opensandbox_connect_after_create_can_use_direct_exec_endpoint(
     assert isinstance(handle.raw, FakeSDKSandbox)
     connect_call = FakeSDKSandbox.connect_calls[0]
     assert connect_call["skip_health_check"] is True
-    assert connect_call["connection_config"].kwargs["use_server_proxy"] is False
+    assert connect_call["connection_config"].kwargs == {
+        "domain": "sandbox.example",
+        "protocol": "https",
+        "request_timeout": timedelta(seconds=1),
+    }
 
 
 @requires_tenacity
@@ -792,7 +763,7 @@ async def _assert_opensandbox_exec_retries_retryable_sdk_failures(monkeypatch) -
             del command, opts
             self.calls += 1
             if self.calls <= 2:
-                raise ConnectionError("transient proxy failure")
+                raise ConnectionError("transient connection failure")
             return FakeExecution()
 
     class FakeRaw:
@@ -843,7 +814,7 @@ async def _assert_opensandbox_command_retries_can_be_disabled(monkeypatch) -> No
         async def run(self, command: str, *, opts: FakeRunCommandOpts) -> None:
             del command, opts
             self.calls += 1
-            raise ConnectionError("transient proxy failure")
+            raise ConnectionError("transient connection failure")
 
     class FakeRaw:
         def __init__(self) -> None:
