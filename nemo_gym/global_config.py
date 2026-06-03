@@ -203,6 +203,18 @@ class GlobalConfigDictParser(BaseModel):
                 cwd_path = Path.cwd() / config_path
                 config_path = cwd_path if cwd_path.exists() else PARENT_DIR / config_path
 
+            # Fail fast with an actionable message instead of an opaque OmegaConf
+            # FileNotFoundError traceback when a config path is mistyped or missing.
+            # Paths may come from `+config_paths` on the CLI or be referenced
+            # recursively from another config's `config_paths`.
+            if not config_path.exists():
+                raise SystemExit(
+                    f"Config file not found: {config_path}\n"
+                    f"Checked relative to cwd ({Path.cwd()}) and install root ({PARENT_DIR}).\n"
+                    f"Check the `{CONFIG_PATHS_KEY_NAME}` entries (passed via `+{CONFIG_PATHS_KEY_NAME}=[...]` "
+                    f"or referenced from another config)."
+                )
+
             extra_config = OmegaConf.load(config_path)
             for new_config_path in extra_config.get(CONFIG_PATHS_KEY_NAME) or []:
                 if new_config_path not in config_paths:
@@ -409,7 +421,15 @@ Duplicate config paths:
         merged_config_for_config_paths = OmegaConf.merge(dotenv_extra_config, global_config_dict)
         ta = TypeAdapter(List[str])
         config_paths = merged_config_for_config_paths.get(CONFIG_PATHS_KEY_NAME) or []
-        config_paths = ta.validate_python(config_paths)
+        try:
+            config_paths = ta.validate_python(config_paths)
+        except ValidationError:
+            # A malformed value (e.g. a scalar instead of a list) should explain the
+            # expected Hydra syntax rather than surface a raw Pydantic traceback.
+            raise SystemExit(
+                f"`+{CONFIG_PATHS_KEY_NAME}` must be a list of config paths, e.g. "
+                f"`+{CONFIG_PATHS_KEY_NAME}=[a.yaml,b.yaml]` (got: {config_paths!r})."
+            )
 
         config_paths, extra_configs = self.load_extra_config_paths(config_paths)
 
@@ -651,6 +671,24 @@ def get_first_server_config_dict(global_config_dict: DictConfig, top_level_path:
     server_config_dict = list(server_config_dict.values())[0]
 
     return server_config_dict
+
+
+def require_configured_servers(global_config_dict: DictConfig) -> None:
+    """Fail fast if no servers are configured.
+
+    Without this guard, running with no config (e.g. `+config_paths` omitted)
+    starts Ray and the head server with nothing to do; the process never
+    converges and is eventually killed with low-level signal noise. Raise a
+    clean, actionable error before any startup instead.
+    """
+    server_keys = [k for k in global_config_dict if k not in NEMO_GYM_RESERVED_TOP_LEVEL_KEYS]
+    if not server_keys:
+        raise SystemExit(
+            f"No servers configured. Pass at least one config via "
+            f"`+{CONFIG_PATHS_KEY_NAME}=[...]`, e.g. "
+            f"`+{CONFIG_PATHS_KEY_NAME}=[resources_servers/example_single_tool_call/configs/"
+            f"example_single_tool_call.yaml]`. See `ng_help` for usage."
+        )
 
 
 def find_open_port(

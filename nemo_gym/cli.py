@@ -51,6 +51,7 @@ from nemo_gym.global_config import (
     NEMO_GYM_RESERVED_TOP_LEVEL_KEYS,
     GlobalConfigDictParserConfig,
     get_global_config_dict,
+    require_configured_servers,
 )
 from nemo_gym.rollout_collection import E2ERolloutCollectionConfig, RolloutCollectionConfig, RolloutCollectionHelper
 from nemo_gym.server_status import StatusCommand
@@ -129,6 +130,10 @@ class RunHelper:  # pragma: no cover
 
     def start(self, global_config_dict_parser_config: GlobalConfigDictParserConfig) -> None:
         global_config_dict = get_global_config_dict(global_config_dict_parser_config=global_config_dict_parser_config)
+
+        # Fail fast before Ray / head-server startup if nothing is configured to run,
+        # otherwise the process spins up with zero servers and hangs until killed.
+        require_configured_servers(global_config_dict)
 
         # Initialize Ray cluster in the main process
         # Note: This function will modify the global config dict - update `ray_head_node_address`
