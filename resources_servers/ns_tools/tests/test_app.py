@@ -13,14 +13,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import subprocess
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from app import (
     NSToolsConfig,
     NSToolsResourcesServer,
     NSToolsVerifyRequest,
 )
+from fastapi import FastAPI
 
+from nemo_gym.base_resources_server import SimpleResourcesServer
 from nemo_gym.config_types import ResourcesServerRef
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.server_utils import ServerClient
@@ -317,4 +321,103 @@ class TestPythonToolShutdownReap:
         proc.terminate.assert_called_once()
         proc.kill.assert_not_called()
         proc.wait.assert_called_once_with(timeout=5)
+        assert server._python_tool_process is None
+
+
+class TestSidecarTeardownWiredToLifespan:
+    """shutdown() must be connected to the server lifetime, not just defined.
+
+    The base runner only starts Uvicorn; nothing calls shutdown() on its own.
+    setup_webserver() must register it so a normal server stop reaps the
+    python_tool sidecar instead of leaving it bound to its fixed port.
+    """
+
+    def _make_server(self) -> NSToolsResourcesServer:
+        config = NSToolsConfig(host="0.0.0.0", port=8080, entrypoint="", name="ns_tools")
+        return NSToolsResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+    async def test_lifespan_context_invokes_shutdown(self) -> None:
+        server = self._make_server()
+        app = server.setup_webserver()
+
+        proc = MagicMock(spec=subprocess.Popen)
+        proc.pid = 12345
+        proc.wait.return_value = 0
+        server._python_tool_process = proc
+
+        # Exiting the app lifespan context must reap the sidecar.
+        async with app.router.lifespan_context(app):
+            pass
+
+        proc.terminate.assert_called_once()
+        assert server._python_tool_process is None
+
+    def test_lifespan_shutdown_reaps_sidecar_via_testclient(self) -> None:
+        from fastapi.testclient import TestClient
+
+        server = self._make_server()
+        app = server.setup_webserver()
+
+        proc = MagicMock(spec=subprocess.Popen)
+        proc.pid = 12345
+        proc.wait.return_value = 0
+        server._python_tool_process = proc
+
+        # Entering/exiting TestClient drives the app startup/shutdown lifespan.
+        with TestClient(app):
+            pass
+
+        proc.terminate.assert_called_once()
+        assert server._python_tool_process is None
+
+    async def test_shutdown_runs_when_lifespan_body_raises(self) -> None:
+        """The try/finally must reap the sidecar even if the running app errors/cancels.
+
+        An exception raised inside the lifespan body is thrown into the wrapper at
+        the `yield`. Without the finally, shutdown() is skipped and the sidecar leaks.
+        """
+        server = self._make_server()
+        app = server.setup_webserver()
+
+        proc = MagicMock(spec=subprocess.Popen)
+        proc.pid = 12345
+        proc.wait.return_value = 0
+        server._python_tool_process = proc
+
+        with pytest.raises(RuntimeError, match="boom"):
+            async with app.router.lifespan_context(app):
+                raise RuntimeError("boom")
+
+        proc.terminate.assert_called_once()
+        assert server._python_tool_process is None
+
+    async def test_shutdown_runs_when_inner_lifespan_teardown_raises(self) -> None:
+        """The try/finally must reap the sidecar even if the inner lifespan teardown raises.
+
+        The wrapper wraps the base app's lifespan; if that inner teardown raises on a
+        clean exit, the finally still runs shutdown() before the error propagates.
+        """
+
+        @asynccontextmanager
+        async def raising_inner_lifespan(app):
+            yield None
+            raise RuntimeError("inner lifespan teardown failed")
+
+        base_app = FastAPI()
+        base_app.router.lifespan_context = raising_inner_lifespan
+
+        server = self._make_server()
+        with patch.object(SimpleResourcesServer, "setup_webserver", return_value=base_app):
+            app = server.setup_webserver()
+
+        proc = MagicMock(spec=subprocess.Popen)
+        proc.pid = 12345
+        proc.wait.return_value = 0
+        server._python_tool_process = proc
+
+        with pytest.raises(RuntimeError, match="inner lifespan teardown failed"):
+            async with app.router.lifespan_context(app):
+                pass
+
+        proc.terminate.assert_called_once()
         assert server._python_tool_process is None
