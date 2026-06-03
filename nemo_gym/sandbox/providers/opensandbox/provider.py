@@ -342,6 +342,7 @@ class OpenSandboxConnectionConfig:
     api_key: str | None = None
     protocol: str | None = None
     request_timeout_s: int | None = None
+    use_server_proxy: bool = False
 
 
 @dataclass(frozen=True)
@@ -482,6 +483,8 @@ class OpenSandboxProvider:
             request_timeout_s = self._connection.request_timeout_s
         if request_timeout_s is not None:
             kwargs["request_timeout"] = timedelta(seconds=request_timeout_s)
+        if self._connection.use_server_proxy:
+            kwargs["use_server_proxy"] = True
         return ConnectionConfig(**kwargs)
 
     async def aclose(self) -> None:
