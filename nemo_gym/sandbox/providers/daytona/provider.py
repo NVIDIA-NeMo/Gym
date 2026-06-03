@@ -1,0 +1,856 @@
+# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Daytona provider implementation."""
+
+import asyncio
+import logging
+import math
+import re
+import shlex
+from collections.abc import Mapping
+from dataclasses import dataclass, fields, replace
+from pathlib import Path
+from typing import Any, Awaitable, Callable
+
+from nemo_gym.sandbox.providers.base import (
+    SandboxCreateError,
+    SandboxCreateVerificationError,
+    SandboxExecResult,
+    SandboxHandle,
+    SandboxSpec,
+    SandboxStatus,
+)
+
+
+LOGGER = logging.getLogger(__name__)
+RETRYABLE_HTTP_STATUS_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
+RETRYABLE_ERROR_MARKERS = (
+    "connection refused",
+    "connection reset",
+    "gateway timeout",
+    "http 408",
+    "http 409",
+    "http 425",
+    "http 429",
+    "http 500",
+    "http 502",
+    "http 503",
+    "http 504",
+    "rate limit",
+    "service unavailable",
+    "temporarily unavailable",
+    "timed out",
+    "timeout",
+)
+STATUS_CODE_RE = re.compile(r"(?:status code|http)\D+(\d{3})", re.IGNORECASE)
+DAYTONA_EXTENSION_PREFIX = "daytona."
+PROVIDER_OPTION_EXTENSIONS = "extensions"
+PROVIDER_OPTION_SNAPSHOT_ID = "snapshot_id"
+PROVIDER_OPTION_VOLUMES = "volumes"
+
+
+class DaytonaCreateError(SandboxCreateError):
+    """Raised when Daytona cannot create a sandbox."""
+
+
+class DaytonaCreateTimeoutError(DaytonaCreateError):
+    """Raised when Daytona sandbox creation exceeds the client timeout."""
+
+
+class DaytonaCreateVerificationError(SandboxCreateVerificationError):
+    """Raised when a newly-created Daytona sandbox cannot execute a probe command."""
+
+
+def _require_daytona_sdk() -> tuple[Any, Any, Any, Any, Any, Any]:
+    try:
+        from daytona import (
+            AsyncDaytona,
+            CreateSandboxFromImageParams,
+            CreateSandboxFromSnapshotParams,
+            DaytonaConfig,
+            Resources,
+            VolumeMount,
+        )
+    except ImportError as e:
+        raise ModuleNotFoundError(
+            "Daytona SDK is required for the daytona sandbox provider. "
+            "Install nemo-gym[sandbox] before using env.sandbox.provider.name=daytona."
+        ) from e
+
+    return (
+        AsyncDaytona,
+        DaytonaConfig,
+        CreateSandboxFromImageParams,
+        CreateSandboxFromSnapshotParams,
+        Resources,
+        VolumeMount,
+    )
+
+
+def _daytona_error_types() -> dict[str, type[BaseException]]:
+    try:
+        from daytona import (
+            DaytonaAuthenticationError,
+            DaytonaAuthorizationError,
+            DaytonaConflictError,
+            DaytonaConnectionError,
+            DaytonaError,
+            DaytonaNotFoundError,
+            DaytonaRateLimitError,
+            DaytonaTimeoutError,
+            DaytonaValidationError,
+        )
+    except ImportError:
+        return {}
+
+    return {
+        "authentication": DaytonaAuthenticationError,
+        "authorization": DaytonaAuthorizationError,
+        "conflict": DaytonaConflictError,
+        "connection": DaytonaConnectionError,
+        "error": DaytonaError,
+        "not_found": DaytonaNotFoundError,
+        "rate_limit": DaytonaRateLimitError,
+        "timeout": DaytonaTimeoutError,
+        "validation": DaytonaValidationError,
+    }
+
+
+def _exception_status_code(exception: BaseException) -> int | None:
+    status_code = getattr(exception, "status_code", None)
+    if isinstance(status_code, int):
+        return status_code
+    match = STATUS_CODE_RE.search(str(exception))
+    if match is None:
+        return None
+    return int(match.group(1))
+
+
+def _has_retryable_error_marker(exception: BaseException) -> bool:
+    message = str(exception).lower()
+    return any(marker in message for marker in RETRYABLE_ERROR_MARKERS)
+
+
+def _is_retryable_create_error(exception: BaseException) -> bool:
+    if isinstance(exception, SandboxCreateVerificationError):
+        return True
+    if isinstance(exception, SandboxCreateError):
+        return True
+    if isinstance(exception, (ConnectionError, OSError, TimeoutError)):
+        return True
+
+    error_types = _daytona_error_types()
+    if error_types:
+        non_retryable_types = (
+            error_types["authentication"],
+            error_types["authorization"],
+            error_types["not_found"],
+            error_types["validation"],
+        )
+        retryable_types = (
+            error_types["conflict"],
+            error_types["connection"],
+            error_types["rate_limit"],
+            error_types["timeout"],
+        )
+        if isinstance(exception, non_retryable_types):
+            return False
+        if isinstance(exception, retryable_types):
+            return True
+        if isinstance(exception, error_types["error"]):
+            status_code = _exception_status_code(exception)
+            if status_code in RETRYABLE_HTTP_STATUS_CODES:
+                return True
+            if status_code is not None and status_code < 500:
+                return False
+
+    status_code = _exception_status_code(exception)
+    if status_code in RETRYABLE_HTTP_STATUS_CODES:
+        return True
+    if status_code is not None and status_code < 500:
+        return False
+    return _has_retryable_error_marker(exception)
+
+
+def _is_retryable_operation_error(exception: BaseException) -> bool:
+    if isinstance(exception, TimeoutError):
+        return False
+    cause = exception.__cause__
+    if isinstance(cause, BaseException) and _is_retryable_operation_error(cause):
+        return True
+    if isinstance(exception, (ConnectionError, OSError)):
+        return True
+
+    error_types = _daytona_error_types()
+    if error_types:
+        non_retryable_types = (
+            error_types["authentication"],
+            error_types["authorization"],
+            error_types["not_found"],
+            error_types["timeout"],
+            error_types["validation"],
+        )
+        retryable_types = (
+            error_types["conflict"],
+            error_types["connection"],
+            error_types["rate_limit"],
+        )
+        if isinstance(exception, non_retryable_types):
+            return False
+        if isinstance(exception, retryable_types):
+            return True
+    return _is_retryable_create_error(exception)
+
+
+def _is_missing_sandbox_delete_error(exception: BaseException) -> bool:
+    if _exception_status_code(exception) == 404:
+        return True
+    message = str(exception).lower()
+    return "sandbox" in message and "not found" in message
+
+
+def _coerce_config(value: Any, config_cls: type[Any]) -> Any:
+    if value is None:
+        return config_cls()
+    if isinstance(value, config_cls):
+        return value
+    if isinstance(value, Mapping):
+        field_names = {field.name for field in fields(config_cls)}
+        unsupported_keys = sorted(str(key) for key in value if key not in field_names)
+        if unsupported_keys:
+            LOGGER.debug(
+                "Ignoring unsupported Daytona %s settings: %s", config_cls.__name__, ", ".join(unsupported_keys)
+            )
+        return config_cls(**{key: val for key, val in value.items() if key in field_names})
+    raise TypeError(f"{config_cls.__name__} must be a mapping or {config_cls.__name__} instance")
+
+
+def _string_map(values: dict[str, Any]) -> dict[str, str]:
+    return {str(key): str(value) for key, value in values.items()}
+
+
+def _normalize_spec(spec: SandboxSpec) -> SandboxSpec:
+    return replace(
+        spec,
+        env=_string_map(spec.env),
+        metadata=_string_map(spec.metadata),
+        resources=_string_map(spec.resources),
+    )
+
+
+def _coerce_bool(name: str, value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be a boolean value")
+
+
+def _coerce_int(name: str, value: Any) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be an integer")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    return int(str(value).strip())
+
+
+def _quantity_to_int(name: str, value: Any) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"resources.{name} must be an integer-like quantity")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if not value.is_integer():
+            raise ValueError(f"resources.{name} must be an integer-like quantity")
+        return int(value)
+
+    text = str(value).strip()
+    match = re.fullmatch(r"(\d+(?:\.\d+)?)([A-Za-z]*)", text)
+    if match is None:
+        raise ValueError(f"resources.{name} must be an integer-like quantity")
+    number = float(match.group(1))
+    unit = match.group(2).lower()
+    if name == "cpu" and unit == "m":
+        return max(1, math.ceil(number / 1000))
+    if unit in {"mi", "mib"}:
+        return math.ceil(number / 1024)
+    if unit in {"", "g", "gb", "gi", "gib"}:
+        return math.ceil(number)
+    raise ValueError(f"resources.{name} uses unsupported unit {unit!r}")
+
+
+def _spec_extensions(spec: SandboxSpec) -> dict[str, str]:
+    value = spec.provider_options.get(PROVIDER_OPTION_EXTENSIONS, {})
+    if not isinstance(value, Mapping):
+        raise TypeError("Daytona provider option 'extensions' must be a mapping")
+    return _string_map(dict(value))
+
+
+def _extension_value(spec: SandboxSpec, key: str) -> str | None:
+    return _spec_extensions(spec).get(f"{DAYTONA_EXTENSION_PREFIX}{key}")
+
+
+def _configured_or_extension(spec: SandboxSpec, key: str, configured: Any) -> Any:
+    value = _extension_value(spec, key)
+    return configured if value is None else value
+
+
+def _to_resources(resources: dict[str, Any]) -> Any | None:
+    _, _, _, _, Resources, _ = _require_daytona_sdk()
+    kwargs: dict[str, int] = {}
+    if "cpu" in resources:
+        kwargs["cpu"] = _quantity_to_int("cpu", resources["cpu"])
+    if "memory" in resources:
+        kwargs["memory"] = _quantity_to_int("memory", resources["memory"])
+    disk_value = resources.get("disk", resources.get("ephemeral-storage", resources.get("ephemeral_storage")))
+    if disk_value is not None:
+        kwargs["disk"] = _quantity_to_int("disk", disk_value)
+    if "gpu" in resources:
+        kwargs["gpu"] = _quantity_to_int("gpu", resources["gpu"])
+    if not kwargs:
+        return None
+    return Resources(**kwargs)
+
+
+def _to_volume_mounts(volumes: list[dict[str, Any]]) -> list[Any]:
+    _, _, _, _, _, VolumeMount = _require_daytona_sdk()
+    return [VolumeMount(**volume) for volume in volumes]
+
+
+def _spec_volumes(spec: SandboxSpec) -> list[dict[str, Any]] | None:
+    value = spec.provider_options.get(PROVIDER_OPTION_VOLUMES)
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise TypeError("Daytona provider option 'volumes' must be a list")
+    return [dict(volume) for volume in value]
+
+
+def _spec_snapshot_id(spec: SandboxSpec) -> str | None:
+    value = spec.provider_options.get(PROVIDER_OPTION_SNAPSHOT_ID)
+    return None if value is None else str(value)
+
+
+def _to_sandbox_status(value: Any) -> SandboxStatus:
+    normalized = str(value or "").lower()
+    if normalized in {"active", "ready", "running", "started"}:
+        return SandboxStatus.RUNNING
+    if normalized in {"creating", "initializing", "pending", "starting"}:
+        return SandboxStatus.STARTING
+    if normalized in {"archived", "completed", "deleted", "exited", "stopped", "terminated"}:
+        return SandboxStatus.STOPPED
+    if normalized in {"crashed", "error", "failed", "unhealthy"}:
+        return SandboxStatus.ERROR
+    return SandboxStatus.UNKNOWN
+
+
+@dataclass(frozen=True)
+class DaytonaConnectionConfig:
+    """Daytona API client connection settings."""
+
+    api_key: str | None = None
+    jwt_token: str | None = None
+    organization_id: str | None = None
+    api_url: str | None = None
+    server_url: str | None = None
+    target: str | None = None
+    connection_pool_maxsize: int | None = None
+    otel_enabled: bool | None = None
+
+    def __post_init__(self) -> None:
+        if self.connection_pool_maxsize is not None and self.connection_pool_maxsize <= 0:
+            raise ValueError("connection.connection_pool_maxsize must be > 0")
+
+
+@dataclass(frozen=True)
+class DaytonaCreateConfig:
+    """Daytona sandbox creation settings."""
+
+    timeout_s: float = 60.0
+    retries: int = 2
+    retry_delay_s: float = 1.0
+    retry_max_delay_s: float = 30.0
+    language: str | None = None
+    os_user: str | None = None
+    public: bool | None = None
+    auto_stop_interval: int | None = None
+    auto_archive_interval: int | None = None
+    auto_delete_interval: int | None = None
+    ephemeral: bool | None = None
+    network_block_all: bool | None = None
+    network_allow_list: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.timeout_s < 0:
+            raise ValueError("create.timeout_s must be >= 0")
+        if self.retries < 0:
+            raise ValueError("create.retries must be >= 0")
+        if self.retry_delay_s < 0:
+            raise ValueError("create.retry_delay_s must be >= 0")
+        if self.retry_max_delay_s < 0:
+            raise ValueError("create.retry_max_delay_s must be >= 0")
+
+
+@dataclass(frozen=True)
+class DaytonaProbeConfig:
+    """Post-create probe settings."""
+
+    command: str | None = "printf nemo-rl-sandbox-ready"
+    expected_stdout: str | None = "nemo-rl-sandbox-ready"
+    timeout_s: int = 30
+    deadline_s: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.command is not None and self.timeout_s <= 0:
+            raise ValueError("probe.timeout_s must be > 0")
+        if self.deadline_s is not None and self.deadline_s <= 0:
+            raise ValueError("probe.deadline_s must be > 0")
+
+
+@dataclass(frozen=True)
+class DaytonaOperationConfig:
+    """Retry and timeout settings for Daytona operations after create."""
+
+    retries: int = 3
+    retry_delay_s: float = 1.0
+    retry_max_delay_s: float = 15.0
+    command_retries: int | None = None
+    command_timeout_margin_s: float = 60.0
+    file_timeout_s: int | None = 30 * 60
+    close_timeout_s: float | None = 60.0
+
+    def __post_init__(self) -> None:
+        if self.retries < 0:
+            raise ValueError("operations.retries must be >= 0")
+        if self.retry_delay_s < 0:
+            raise ValueError("operations.retry_delay_s must be >= 0")
+        if self.retry_max_delay_s < 0:
+            raise ValueError("operations.retry_max_delay_s must be >= 0")
+        if self.command_retries is not None and self.command_retries < 0:
+            raise ValueError("operations.command_retries must be >= 0")
+        if self.command_timeout_margin_s < 0:
+            raise ValueError("operations.command_timeout_margin_s must be >= 0")
+        if self.file_timeout_s is not None and self.file_timeout_s <= 0:
+            raise ValueError("operations.file_timeout_s must be > 0")
+        if self.close_timeout_s is not None and self.close_timeout_s <= 0:
+            raise ValueError("operations.close_timeout_s must be > 0")
+
+
+@dataclass(frozen=True)
+class DaytonaBatchConfig:
+    """Client-side batch fanout settings."""
+
+    concurrency: int = 4
+
+    def __post_init__(self) -> None:
+        if self.concurrency < 1:
+            raise ValueError("batch.concurrency must be >= 1")
+
+
+class DaytonaProvider:
+    """Provider backed by the Daytona Python SDK."""
+
+    name = "daytona"
+
+    def __init__(
+        self,
+        *,
+        connection: DaytonaConnectionConfig | Mapping[str, Any] | None = None,
+        create: DaytonaCreateConfig | Mapping[str, Any] | None = None,
+        probe: DaytonaProbeConfig | Mapping[str, Any] | None = None,
+        operations: DaytonaOperationConfig | Mapping[str, Any] | None = None,
+        batch: DaytonaBatchConfig | Mapping[str, Any] | None = None,
+    ) -> None:
+        self._connection = _coerce_config(connection, DaytonaConnectionConfig)
+        self._create = _coerce_config(create, DaytonaCreateConfig)
+        self._probe = _coerce_config(probe, DaytonaProbeConfig)
+        self._operations = _coerce_config(operations, DaytonaOperationConfig)
+        self._batch = _coerce_config(batch, DaytonaBatchConfig)
+        self._daytona: Any | None = None
+
+    def _client(self) -> Any:
+        if self._daytona is not None:
+            return self._daytona
+        AsyncDaytona, DaytonaConfig, _, _, _, _ = _require_daytona_sdk()
+        kwargs: dict[str, Any] = {}
+        for key in (
+            "api_key",
+            "jwt_token",
+            "organization_id",
+            "api_url",
+            "server_url",
+            "target",
+            "connection_pool_maxsize",
+            "otel_enabled",
+        ):
+            value = getattr(self._connection, key)
+            if value is not None:
+                kwargs[key] = value
+        self._daytona = AsyncDaytona() if not kwargs else AsyncDaytona(DaytonaConfig(**kwargs))
+        return self._daytona
+
+    async def aclose(self) -> None:
+        if self._daytona is None:
+            return
+        daytona = self._daytona
+        self._daytona = None
+        await daytona.close()
+
+    @staticmethod
+    def _retry_sleep_s(attempt_number: int, delay_s: float, max_delay_s: float) -> float:
+        return min(max_delay_s, delay_s * (2 ** max(attempt_number - 1, 0)))
+
+    async def _await_call(
+        self,
+        awaitable: Awaitable[Any],
+        *,
+        operation: str,
+        sandbox_id: str,
+        timeout_s: float | None,
+    ) -> Any:
+        if timeout_s is None or timeout_s == 0:
+            return await awaitable
+        try:
+            return await asyncio.wait_for(awaitable, timeout=timeout_s)
+        except asyncio.TimeoutError as e:
+            raise TimeoutError(f"Timed out during Daytona {operation}; sandbox_id={sandbox_id!r}") from e
+
+    async def _await_operation(
+        self,
+        operation_factory: Callable[[], Awaitable[Any]],
+        *,
+        operation: str,
+        sandbox_id: str,
+        timeout_s: float | None,
+        retries: int | None = None,
+    ) -> Any:
+        max_attempts = (self._operations.retries if retries is None else retries) + 1
+        for attempt_number in range(1, max_attempts + 1):
+            try:
+                return await self._await_call(
+                    operation_factory(),
+                    operation=operation,
+                    sandbox_id=sandbox_id,
+                    timeout_s=timeout_s,
+                )
+            except Exception as e:
+                if attempt_number >= max_attempts or not _is_retryable_operation_error(e):
+                    raise
+                sleep_s = self._retry_sleep_s(
+                    attempt_number, self._operations.retry_delay_s, self._operations.retry_max_delay_s
+                )
+                LOGGER.warning(
+                    "Retrying Daytona operation after attempt %s; operation=%s; sandbox_id=%s; error=%r",
+                    attempt_number,
+                    operation,
+                    sandbox_id,
+                    e,
+                )
+                await asyncio.sleep(sleep_s)
+        raise RuntimeError("Daytona operation retry loop did not run")
+
+    def _base_create_kwargs(self, spec: SandboxSpec) -> dict[str, Any]:
+        kwargs: dict[str, Any] = {}
+        if (name := _extension_value(spec, "name")) is not None:
+            kwargs["name"] = name
+        if (language := _configured_or_extension(spec, "language", self._create.language)) is not None:
+            kwargs["language"] = language
+        if (os_user := _configured_or_extension(spec, "os_user", self._create.os_user)) is not None:
+            kwargs["os_user"] = os_user
+        if spec.env:
+            kwargs["env_vars"] = spec.env
+        if spec.metadata:
+            kwargs["labels"] = spec.metadata
+        configured_values = {
+            "public": self._create.public,
+            "auto_stop_interval": self._create.auto_stop_interval,
+            "auto_archive_interval": self._create.auto_archive_interval,
+            "auto_delete_interval": self._create.auto_delete_interval,
+            "ephemeral": self._create.ephemeral,
+            "network_block_all": self._create.network_block_all,
+            "network_allow_list": self._create.network_allow_list,
+        }
+        for key, configured in configured_values.items():
+            value = _configured_or_extension(spec, key, configured)
+            if value is None:
+                continue
+            if key in {"public", "ephemeral", "network_block_all"}:
+                kwargs[key] = _coerce_bool(f"daytona.{key}", value)
+            elif key in {"auto_stop_interval", "auto_archive_interval", "auto_delete_interval"}:
+                kwargs[key] = _coerce_int(f"daytona.{key}", value)
+            else:
+                kwargs[key] = str(value)
+        volumes = _spec_volumes(spec)
+        if volumes is not None:
+            kwargs["volumes"] = _to_volume_mounts(volumes)
+        return kwargs
+
+    def _to_create_params(self, spec: SandboxSpec) -> Any | None:
+        _, _, ImageParams, SnapshotParams, _, _ = _require_daytona_sdk()
+        snapshot_id = _spec_snapshot_id(spec)
+        if spec.image is not None and snapshot_id is not None:
+            raise ValueError("Daytona provider does not support both image and snapshot_id")
+        kwargs = self._base_create_kwargs(spec)
+        if spec.image is not None:
+            kwargs["image"] = spec.image
+            resources = _to_resources(spec.resources) if spec.resources else None
+            if resources is not None:
+                kwargs["resources"] = resources
+            return ImageParams(**kwargs)
+        if snapshot_id is not None:
+            kwargs["snapshot"] = snapshot_id
+            return SnapshotParams(**kwargs)
+        return SnapshotParams(**kwargs) if kwargs else None
+
+    async def _verify_created_handle(self, handle: SandboxHandle) -> None:
+        if self._probe.command is None:
+            return
+        deadline_s = self._probe.deadline_s or float(self._probe.timeout_s)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + deadline_s
+        last_exception: BaseException | None = None
+        while loop.time() < deadline:
+            try:
+                result = await self._exec(handle, self._probe.command, timeout_s=self._probe.timeout_s, retries=0)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                last_exception = e
+                await asyncio.sleep(min(1.0, max(deadline - loop.time(), 0.0)))
+                continue
+            stdout = result.stdout or ""
+            if result.return_code == 0 and (
+                self._probe.expected_stdout is None or self._probe.expected_stdout in stdout
+            ):
+                return
+            last_exception = DaytonaCreateVerificationError(
+                f"Daytona create probe failed; sandbox_id={handle.sandbox_id!r}, "
+                f"return_code={result.return_code}, stdout={stdout[:200]!r}, stderr={(result.stderr or '')[:200]!r}"
+            )
+            await asyncio.sleep(min(1.0, max(deadline - loop.time(), 0.0)))
+        raise DaytonaCreateVerificationError(
+            f"Daytona sandbox failed create probe before deadline; sandbox_id={handle.sandbox_id!r}"
+        ) from last_exception
+
+    async def _create_once(self, spec: SandboxSpec) -> SandboxHandle:
+        params = self._to_create_params(spec)
+        timeout_s = float(spec.ready_timeout_s if spec.ready_timeout_s is not None else self._create.timeout_s)
+        try:
+            sandbox = await self._await_call(
+                self._client().create(params, timeout=timeout_s),
+                operation="create",
+                sandbox_id="<pending>",
+                timeout_s=timeout_s + 5.0 if timeout_s > 0 else None,
+            )
+        except TimeoutError as e:
+            raise DaytonaCreateTimeoutError(
+                f"Timed out creating Daytona sandbox after {timeout_s:g}s; image={spec.image!r}"
+            ) from e
+        handle = SandboxHandle(sandbox_id=str(sandbox.id), provider_name=self.name, raw=sandbox)
+        try:
+            await self._verify_created_handle(handle)
+        except Exception:
+            await self.close(handle, delete=True)
+            raise
+        return handle
+
+    async def create(self, spec: SandboxSpec) -> SandboxHandle:
+        spec = _normalize_spec(spec)
+        max_attempts = self._create.retries + 1
+        for attempt_number in range(1, max_attempts + 1):
+            try:
+                return await self._create_once(spec)
+            except Exception as e:
+                if attempt_number >= max_attempts or not _is_retryable_create_error(e):
+                    raise
+                await asyncio.sleep(
+                    self._retry_sleep_s(attempt_number, self._create.retry_delay_s, self._create.retry_max_delay_s)
+                )
+        raise RuntimeError("Daytona create retry loop did not run")
+
+    async def create_batch(self, spec: SandboxSpec, count: int, *, allow_partial: bool = False) -> list[SandboxHandle]:
+        if count < 1:
+            raise ValueError("count must be >= 1")
+        semaphore = asyncio.Semaphore(self._batch.concurrency)
+
+        async def _create_one() -> SandboxHandle:
+            async with semaphore:
+                return await self.create(spec)
+
+        results = await asyncio.gather(*(_create_one() for _ in range(count)), return_exceptions=True)
+        errors = [result for result in results if isinstance(result, Exception)]
+        handles = [result for result in results if isinstance(result, SandboxHandle)]
+        if not errors:
+            return handles
+        if allow_partial:
+            prefix: list[SandboxHandle] = []
+            for result in results:
+                if isinstance(result, Exception):
+                    break
+                prefix.append(result)
+            return prefix
+        for handle in handles:
+            await self.close(handle, delete=True)
+        raise DaytonaCreateError(
+            f"One or more Daytona sandboxes failed during batch create; failed={len(errors)}, requested={count}"
+        ) from errors[0]
+
+    async def connect(self, sandbox_id: str) -> SandboxHandle:
+        sandbox = await self._client().get(sandbox_id)
+        return SandboxHandle(sandbox_id=str(sandbox.id), provider_name=self.name, raw=sandbox)
+
+    async def status(self, handle: SandboxHandle) -> SandboxStatus:
+        status_value = getattr(handle.raw, "status", None)
+        if status_value is not None:
+            state = getattr(status_value, "state", status_value)
+            return _to_sandbox_status(state)
+
+        get_info = getattr(handle.raw, "get_info", None)
+        if get_info is None:
+            return SandboxStatus.UNKNOWN
+        info = await self._await_operation(
+            get_info,
+            operation="get_info",
+            sandbox_id=handle.sandbox_id,
+            timeout_s=self._operations.close_timeout_s,
+        )
+        info_status = getattr(info, "status", None)
+        return _to_sandbox_status(getattr(info_status, "state", info_status))
+
+    def _command_retry_count(self) -> int:
+        return (
+            self._operations.retries if self._operations.command_retries is None else self._operations.command_retries
+        )
+
+    @staticmethod
+    def _effective_command(command: str, user: str | int | None) -> str:
+        if user is None or user == "root":
+            return command
+        if isinstance(user, int):
+            return f"setpriv --reuid={user} --regid={user} --clear-groups /bin/sh -c {shlex.quote(command)}"
+        return f"su -s /bin/sh -c {shlex.quote(command)} {shlex.quote(user)}"
+
+    async def _exec(
+        self,
+        handle: SandboxHandle,
+        command: str,
+        *,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        timeout_s: int | None = None,
+        user: str | int | None = None,
+        retries: int | None = None,
+    ) -> SandboxExecResult:
+        response = await self._await_operation(
+            lambda: handle.raw.process.exec(
+                self._effective_command(command, user),
+                cwd=cwd,
+                env=env,
+                timeout=timeout_s,
+            ),
+            operation="process.exec",
+            sandbox_id=handle.sandbox_id,
+            timeout_s=float(timeout_s) + self._operations.command_timeout_margin_s if timeout_s is not None else None,
+            retries=self._command_retry_count() if retries is None else retries,
+        )
+        artifacts = getattr(response, "artifacts", None)
+        stdout = getattr(response, "result", None)
+        if stdout is None and artifacts is not None:
+            stdout = getattr(artifacts, "stdout", None)
+        stderr = getattr(response, "stderr", None)
+        if stderr is None and artifacts is not None:
+            stderr = getattr(artifacts, "stderr", None)
+        return_code = getattr(response, "exit_code", None)
+        return SandboxExecResult(stdout=stdout, stderr=stderr, return_code=0 if return_code is None else return_code)
+
+    async def exec(
+        self,
+        handle: SandboxHandle,
+        command: str,
+        *,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        timeout_s: int | None = None,
+        user: str | int | None = None,
+    ) -> SandboxExecResult:
+        return await self._exec(handle, command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
+
+    async def write_file(self, handle: SandboxHandle, target_path: str, data: str | bytes) -> None:
+        payload = data.encode() if isinstance(data, str) else data
+        timeout_s = self._operations.file_timeout_s
+        await self._await_operation(
+            lambda: handle.raw.fs.upload_file(payload, target_path)
+            if timeout_s is None
+            else handle.raw.fs.upload_file(payload, target_path, timeout=timeout_s),
+            operation=f"upload_file({target_path})",
+            sandbox_id=handle.sandbox_id,
+            timeout_s=float(timeout_s) if timeout_s is not None else None,
+        )
+
+    async def read_file(self, handle: SandboxHandle, source_path: str) -> bytes:
+        timeout_s = self._operations.file_timeout_s
+        result = await self._await_operation(
+            lambda: handle.raw.fs.download_file(source_path)
+            if timeout_s is None
+            else handle.raw.fs.download_file(source_path, timeout_s),
+            operation=f"download_file({source_path})",
+            sandbox_id=handle.sandbox_id,
+            timeout_s=float(timeout_s) if timeout_s is not None else None,
+        )
+        return result.encode() if isinstance(result, str) else result
+
+    async def upload_file(self, handle: SandboxHandle, source_path: Path, target_path: str) -> None:
+        timeout_s = self._operations.file_timeout_s
+        await self._await_operation(
+            lambda: handle.raw.fs.upload_file(str(source_path), target_path)
+            if timeout_s is None
+            else handle.raw.fs.upload_file(str(source_path), target_path, timeout=timeout_s),
+            operation=f"upload_file({target_path})",
+            sandbox_id=handle.sandbox_id,
+            timeout_s=float(timeout_s) if timeout_s is not None else None,
+        )
+
+    async def download_file(self, handle: SandboxHandle, source_path: str, target_path: Path) -> None:
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        timeout_s = self._operations.file_timeout_s
+        await self._await_operation(
+            lambda: handle.raw.fs.download_file(source_path, str(target_path))
+            if timeout_s is None
+            else handle.raw.fs.download_file(source_path, str(target_path), timeout_s),
+            operation=f"download_file({source_path})",
+            sandbox_id=handle.sandbox_id,
+            timeout_s=float(timeout_s) if timeout_s is not None else None,
+        )
+
+    async def close(self, handle: SandboxHandle, *, delete: bool) -> None:
+        if not delete:
+            return
+        try:
+            await self._await_operation(
+                lambda: self._client().delete(handle.raw, timeout=self._operations.close_timeout_s or 0),
+                operation="delete",
+                sandbox_id=handle.sandbox_id,
+                timeout_s=self._operations.close_timeout_s,
+            )
+        except Exception as e:
+            if _is_missing_sandbox_delete_error(e):
+                LOGGER.info("Daytona sandbox %r was already deleted during close", handle.sandbox_id)
+                return
+            raise
