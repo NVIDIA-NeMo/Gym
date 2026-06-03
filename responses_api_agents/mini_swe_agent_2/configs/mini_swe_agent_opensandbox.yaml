@@ -17,6 +17,7 @@ mini_swe_agent_2:
             api_key: ${oc.env:OPENSANDBOX_API_KEY}
             protocol: http
             request_timeout_s: 300
+            use_server_proxy: true
           create:
             request_timeout_s: 1200
             timeout_s: 1200
