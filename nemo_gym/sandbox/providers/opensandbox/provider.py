@@ -223,22 +223,23 @@ def _is_retryable_create_error(exception: BaseException) -> bool:
     return _has_retryable_error_marker(exception)
 
 
-def _is_retryable_sdk_operation_error(exception: BaseException) -> bool:
-    """Return whether an SDK operation can be retried by Gym.
-
-    The OpenSandbox Python SDK does not retry generated lifecycle, execd, or
-    filesystem HTTP calls. It converts network failures into SDK exceptions and
-    exposes API status codes, so classify both the wrapper and its original
-    cause here.
-    """
+def _is_retryable_sdk_operation_error(exception: BaseException, seen: set[int] | None = None) -> bool:
+    """Return whether an SDK operation can be retried."""
     if isinstance(exception, TimeoutError):
         return False
-    cause = exception.__cause__
-    if isinstance(cause, BaseException) and _is_retryable_sdk_operation_error(cause):
-        return True
+    seen = set() if seen is None else seen
+    exception_id = id(exception)
+    if exception_id in seen:
+        return False
+    seen.add(exception_id)
     if isinstance(exception, (ConnectionError, OSError)):
         return True
-    return _is_retryable_create_error(exception)
+    if _is_retryable_create_error(exception):
+        return True
+    cause = exception.__cause__
+    if isinstance(cause, BaseException):
+        return _is_retryable_sdk_operation_error(cause, seen)
+    return False
 
 
 def _is_missing_sandbox_delete_error(exception: BaseException) -> bool:
