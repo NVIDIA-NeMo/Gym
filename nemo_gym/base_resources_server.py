@@ -13,10 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from abc import abstractmethod
+from typing import Any, Optional
 
 from fastapi import FastAPI
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
+from nemo_gym.adapters import install_middleware
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
@@ -27,7 +29,10 @@ from nemo_gym.server_utils import BaseRunServerInstanceConfig, BaseServer, Simpl
 
 
 class BaseResourcesServerConfig(BaseRunServerInstanceConfig):
-    pass
+    adapters: Optional[list[dict[str, Any]]] = Field(
+        default=None,
+        description="Adapter middleware chain: list of {'name': ..., 'config': {...}}. None disables.",
+    )
 
 
 class BaseResourcesServer(BaseServer):
@@ -65,6 +70,8 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         app.post("/seed_session")(self.seed_session)
         app.post("/verify")(self.verify)
         app.post("/aggregate_metrics")(self.aggregate_metrics)
+
+        install_middleware(app, self.config.adapters)
 
         return app
 
