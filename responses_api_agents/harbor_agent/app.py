@@ -26,6 +26,7 @@ import ray
 from fastapi import Body, FastAPI
 from pydantic import BaseModel, ConfigDict
 
+from nemo_gym.adapters import install_middleware
 from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyResponse,
@@ -200,6 +201,7 @@ class HarborAgent(SimpleResponsesAPIAgent):
         app = FastAPI()
         app.post("/v1/responses")(self.responses)
         app.post("/run")(self.run)
+        install_middleware(app, self.config.adapters)
         return app
 
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
