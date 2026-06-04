@@ -5,21 +5,22 @@ position: 2
 ---
 Reference for NeMo Gym version compatibility with supported training frameworks.
 
-<Note>
-[Ecosystem](/about/ecosystem) for training framework integrations and [NeMo RL GRPO](/training-tutorials/nemo-rl-grpo) for training with NeMo Gym.
-
-</Note>
-
 ---
 
 ## NeMo RL Container
 
 The following table maps NeMo Gym versions to compatible NeMo RL containers. Use the latest version when possible; the table provides historical compatibility for users who cannot upgrade.
 
-| NeMo Gym Version | NeMo RL Container | Recipe |
+| NeMo Gym Version | Container / Docker File | Recipe |
 | --- | --- | --- |
 | v0.1.1 | [`nvcr.io/nvidia/nemo-rl:v0.4.0.nemotron_3_nano`](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/nemo-rl/tags?version=v0.4.0) | [Nemotron 3 Nano](/model-recipes/nemotron-3-nano) |
 | v0.2.0 | [`nvcr.io/nvidia/nemo-rl:v0.5.0.nemotron_3_super`](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/nemo-rl/tags?version=v0.5.0) | [Nemotron 3 Super](/model-recipes/nemotron-3-super) |
+| v0.3.0 | [Dockerfile](https://github.com/NVIDIA-NeMo/RL/blob/ultra-v3/docker/Dockerfile) | [Nemotron 3 Ultra](https://github.com/NVIDIA-NeMo/RL/blob/ultra-v3/docs/guides/nemotron-3-ultra.md) |
+
+<Note>
+[NeMo RL GRPO](/training-tutorials/nemo-rl-grpo) for the NeMo RL training tutorial.
+
+</Note>
 
 ---
 
@@ -29,5 +30,16 @@ The NeMo Gym integration with Unsloth is tested on `unsloth==2026.1.4` and `unsl
 
 <Note>
 [Unsloth](/training-tutorials/unsloth) for the Unsloth training tutorial.
+
+</Note>
+
+---
+
+## VeRL
+
+NeMo Gym 0.2.1+ is compatible with verl pinned to the commit in [`REQUIRED_VERL.txt`](https://github.com/verl-project/verl-recipe/blob/main/nemo_gym/REQUIRED_VERL.txt), tested on the `verlai/verl:vllm017.latest` container (vLLM 0.17.0). Other versions are not guaranteed to work.
+
+<Note>
+[Training with VeRL](/training-tutorials/verl) for the verl training tutorial.
 
 </Note>
