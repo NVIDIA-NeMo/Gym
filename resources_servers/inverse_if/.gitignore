@@ -1,0 +1,5 @@
+# Ignore data files (datasets should not be committed)
+data/*.jsonl
+!data/example.jsonl
+*.json
+!configs/*.yaml
