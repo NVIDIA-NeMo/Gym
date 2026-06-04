@@ -40,6 +40,9 @@ class CritPtResourcesServerConfig(BaseResourcesServerConfig):
     # The server buffers verify() calls until batch_size unique problem_ids accumulate,
     # then fires one API call and distributes the aggregate accuracy to all waiters.
     batch_size: int = 70
+    # Per-batch AA API call timeout. AA can take ~minutes to evaluate 70 submissions
+    # server-side; default generously, override if needed.
+    api_timeout_seconds: float = 1800.0
 
 
 class CritPtRunRequest(BaseRunRequest):
@@ -122,11 +125,15 @@ class CritPtResourcesServer(SimpleResourcesServer):
                 submissions_snapshot = None
 
         if ready_to_fire:
-            LOG.info("CritPt batch full (%d submissions); firing AA API.", len(submissions_snapshot))
+            LOG.warning("CritPt batch full (%d submissions); firing AA API.", len(submissions_snapshot))
             try:
-                result = await _call_api(self.config.api_url, self.config.api_key, submissions_snapshot)
+                result = await asyncio.wait_for(
+                    _call_api(self.config.api_url, self.config.api_key, submissions_snapshot),
+                    timeout=self.config.api_timeout_seconds,
+                )
                 future.set_result(result)
             except Exception as e:
+                LOG.exception("CritPt AA API call failed; failing all %d waiters: %s", len(submissions_snapshot), e)
                 future.set_exception(e)
 
         result = await future
