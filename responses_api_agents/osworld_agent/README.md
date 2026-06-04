@@ -304,8 +304,9 @@ ng_collect_rollouts \
   +output_jsonl_fpath=results/osworld_example.jsonl \
   +num_repeats=1
 
-# 4) Inspect rollout trajectories
-ng_viewer +jsonl_fpath=results/osworld_example.jsonl
+# 4) Inspect rollout trajectories — each line of the output JSONL carries
+#    reward + verifier_metadata.osworld_steps (per-step action/observation)
+jq '{task: .verifier_metadata.task_id, reward}' results/osworld_example.jsonl
 ```
 
 The first rollout takes longer than subsequent ones — see [First-Run
@@ -398,8 +399,9 @@ ng_collect_rollouts +agent_name=osworld_simple_agent \
     +output_jsonl_fpath=results/osworld_example.jsonl \
     +num_repeats=1
 
-# Inspect rollout trajectories (screenshots, per-step actions, final reward)
-ng_viewer +jsonl_fpath=results/osworld_example.jsonl
+# Inspect rollout trajectories (per-step actions + final reward) — read the
+# output JSONL directly; reward is top-level, steps in verifier_metadata
+jq '{task: .verifier_metadata.task_id, reward}' results/osworld_example.jsonl
 
 # Reward profile (per-task pass rates across multiple repeats)
 ng_collect_rollouts +agent_name=osworld_simple_agent \
