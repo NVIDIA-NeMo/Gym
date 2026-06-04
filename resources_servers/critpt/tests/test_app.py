@@ -39,7 +39,7 @@ def _make_config(batch_size: int = 70, **kwargs) -> CritPtResourcesServerConfig:
         port=8080,
         entrypoint="",
         name="",
-        api_key="test-key",
+        api_key="test-key",  # pragma: allowlist secret
         batch_size=batch_size,
         **kwargs,
     )
