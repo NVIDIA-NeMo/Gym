@@ -5,13 +5,98 @@ position: 4
 ---
 
 <AccordionGroup>
-<Accordion title="v0.2.1" defaultOpen>
+<Accordion title="v0.3.0" defaultOpen>
+
+### Release Summary
+
+NeMo Gym v0.3.0 ships alongside the NVIDIA Nemotron 3 Ultra model release, open sourcing the environments and corresponding datasets used during training.
+
+Highlights:
+
+- 70+ new environments, including benchmarks such as Tau2 and Nemotron RL training environments
+- Popular harness available out-of-the-box such as Claude Code and Hermes
+- Integrations with OpenEnv and Harbor - use environments from these libraries directly with NeMo Gym
+- Integration with VeRL - train with VeRL and scale rollout collection with NeMo Gym
+
+### First-Time Contributors
+
+We welcomed 30+ new contributors to this release! Here are a few highlights:
+
+- **@grace-lam** added the integration to run Harbor environments with NeMo Gym
+- **@aleksficek** — added Competitive Coding Challenges environment
+- **@jthomson04** improved rollout resilience when models emit malformed tool-call arguments or missing message content
+
+Thank you to all the new contributors for helping make NeMo Gym better!
+
+### New Environments & Benchmarks
+
+Added 70+ new environments including novel datasets and integrations of popular benchmarks. New coverage spans:
+- **Coding** — competitive programming, code infilling, SQL generation, and software-engineering benchmarks with execution-based verification
+- **Math & proofs** — olympiad-style problems, proof grading and validation, and formal verification (including Lean)
+- **Knowledge & science** — graduate-level QA, chemistry and physics tasks, and lab-style reasoning (including multimodal figure, table, and protocol tasks)
+- **Agentic** — multi-turn tool use, search, sandboxed execution, finance workflows, and tau-bench-style conversational agents
+- **Instruction following** — format constraints, citation compliance, and IFBench-style rule verification
+- **Safety & RLHF** — jailbreak detection, abstention calibration, prompt-injection resistance, and generative reward modeling
+- **Multimodal, speech & translation** — VLM benchmarks, visual grounding, ASR evaluation, and machine-translation quality metrics
+- **Chat & broad knowledge** — arena-style preference evaluation and MMLU-family benchmarks
+- **Interactive RL** — Gymnasium-style multi-step environments for spatial and game-based training
+
+See the [Available Environments](https://github.com/NVIDIA-NeMo/Gym#-available-environments) table for the full list.
+
+### Configure Agent Harnesses
+
+- Claude Code — available out of the box in NeMo Gym
+- Hermes — available out of the box in NeMo Gym
+- LangGraph agent — an adapter that lets you build custom agents using LangGraph patterns (reflection, subagent orchestration, parallel thinking, rewoo)
+- Gymnasium agent — generic multi-turn harness for use with OpenAI Gym-style environments
+
+### Configure Models
+
+- Optional `max_concurrent_requests` on the OpenAI model server to cap in-flight API calls — useful for rate-limited external endpoints when rollout concurrency is high
+
+### Rollout Collection & Profiling
+
+- New `ng_aggregate_rollouts` command to merge rollout shards collected independently across multiple nodes, enabling distributed eval without requiring a single coordinated collection job
+
+### Environment Library Integrations
+
+- OpenEnv — combine OpenEnv environments with NeMo Gym environments
+- Harbor — combine Harbor environments with NeMo Gym environments
+
+### Deprecation Notices
+
+- Documentation has moved from Sphinx to Fern. Old Sphinx URLs redirect to the new site at docs.nvidia.com/nemo/gym. The `docs/` directory is no longer used for publishing.
+
+### Bug Fixes
+
+- Fixed aiohttp connection limit exhaustion under FastAPI/Uvicorn with multiple workers
+- Fixed session cookie propagation for Starlette >= 1.0.0
+- Fixed duplicated usage counting and errors on empty usage in subsequent model calls
+- Improved rollout resilience when models emit malformed tool-call arguments or missing message content
+- Fixed prompt-key hashing when inputs contain Pydantic BaseModel objects
+
+### Documentation
+
+- New concepts pages for environments, evaluation, and training
+- Improved Architecture page to clarify how environments map to NeMo Gym components
+- Consolidated detailed setup and quickstart into a single improved quickstart with clearer descriptions
+- Expanded Ecosystem page with environment library, training framework, and agent harness integrations
+
+### Release Assets
+
+[GitHub Release v0.3.0](https://github.com/NVIDIA-NeMo/Gym/releases/tag/v0.3.0)
+
+
+
+</Accordion>
+
+<Accordion title="v0.2.1">
 
 Fixed PyPI package distribution that was broken in v0.2.0. No functional changes — all features and fixes from v0.2.0 apply.
 
 </Accordion>
 
-<Accordion title="v0.2.0" defaultOpen>
+<Accordion title="v0.2.0">
 
 NeMo Gym v0.2.0 ships alongside the NVIDIA Nemotron 3 Super model release, open sourcing the RL environments and corresponding datasets used during training. This release adds 17 new training environments across coding, math, science, reasoning, agentic tasks, and safety, plus integrations with Aviary, Reasoning Gym, and Verifiers to combine additional environments. You can now run end-to-end rollout collection locally with vLLM and install directly from PyPI.
 
