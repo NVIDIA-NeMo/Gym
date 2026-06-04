@@ -7,6 +7,7 @@ Releases follow a three-phase flow: code freeze, release, and cleanup. All workf
 ## Prerequisites
 
 - Admin access to the [Gym repo](https://github.com/NVIDIA-NeMo/Gym)
+- Push access to `r*` release branches — the branch protection rule restricts pushes to specific users and apps. Check Settings → Branches → `r*` rule to verify you're on the allowlist before triggering a release.
 - The `r*` branch protection rule must have valid required status checks (`Test`, `Lint check`, `DCO`) — not stale checks from other repos
 - PyPI maintainer access for the `nemo-gym` package
 
