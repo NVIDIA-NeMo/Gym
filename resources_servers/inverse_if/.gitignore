@@ -2,4 +2,5 @@
 data/*.jsonl
 !data/example.jsonl
 *.json
+!data/example_metrics.json
 !configs/*.yaml

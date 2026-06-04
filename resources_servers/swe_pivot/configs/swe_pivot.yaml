@@ -34,3 +34,7 @@ swe_pivot_tool_simulation_agent:
           version: 0.0.1
           artifact_fpath: validation.jsonl
         license: Apache 2.0
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/swe_pivot/data/example.jsonl
+        license: Apache 2.0
