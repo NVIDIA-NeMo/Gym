@@ -468,6 +468,25 @@ the rollout timed out, exhausted `max_steps` without the model emitting
 DONE/FAIL, or the evaluator threw. RL trainers drop the gradient on those
 samples so unreliable zero rewards don't pollute the policy update.
 
+### Observation modes
+
+OSWorld evaluates agents under four observation modes (cf. the original
+paper, Table 5). Select them with `require_a11y_tree` plus the
+`OSWORLD_OMIT_SCREENSHOT_IN_OBS` environment variable:
+
+| Mode | `require_a11y_tree` | `OSWORLD_OMIT_SCREENSHOT_IN_OBS` |
+| ---- | ------------------- | -------------------------------- |
+| Screenshot only | `false` | unset |
+| Screenshot + Accessibility tree | `true` | unset |
+| Accessibility tree only | `true` | `1` |
+| Set-of-Mark (SoM) | — | not yet supported (needs an annotation pipeline) |
+
+When `OSWORLD_OMIT_SCREENSHOT_IN_OBS` is set, the screenshot is blanked
+from the observation sent to the model, leaving only the accessibility
+tree — this is the paper's "a11y only" setting (e.g. its GPT-4 12.24%
+headline). It is an env var rather than a YAML key because it toggles a
+single field in the per-step observation payload.
+
 ### Override priority
 
 Per-rollout values can be set three ways, in increasing priority:
@@ -553,15 +572,28 @@ commit a second time; the hook will report `Passed`.
 
 ## Reward Profiling
 
-_Profiling pending — needs an end-to-end run on a host with docker (or
-any other supported provider). The plan is to baseline on
-`test_small.json` (12 tasks) with one open-weights and one closed-source
-VLM, then expand to `test_all.json` (~369 tasks) once variance is < 1%
-across `num_repeats` runs._
+We validated the reward pipeline by **strictly reproducing one cell of the
+official [OSWorld verified leaderboard](https://os-world.github.io/)** —
+matching the model, observation mode, `max_steps`, and task set so the
+number is directly comparable:
 
-| Model | Subset       | Pass@1 | Notes |
-| ----- | ------------ | ------ | ----- |
-| TBD   | test_small   | TBD    | TBD   |
+| Model | Subset | Obs / max_steps | Our Pass@1 | Official | Δ |
+| ----- | ------ | --------------- | ---------- | -------- | - |
+| `o3` (via NVIDIA Inference Hub) | `test_all` (369) | Screenshot only / 15 | **9.21%** (34/369) | 9.10% (32.85/361) | +0.11 pp |
+
+The +0.11 pp gap is within run-to-run variance. (Task count differs
+slightly: we run the full 369 tasks, while the board's 361 reflects a few
+retired tasks — a known < 2 pp effect.) Per-domain, `o3` is strong on
+`os` (13/24 = 54.2%) and shut out on `libreoffice_impress` (0/47).
+
+A 5-task smoke on `data/example.jsonl` with `claude-opus-4-7` (Screenshot
+only) returns 4/5 reward=1.0 — the saved outputs are in
+`data/example_rollouts.jsonl` (chrome / gimp / calc / writer pass,
+impress fails), demonstrating the reward signal both awards and withholds
+credit.
+
+_Further model × obs-mode × max_steps cells are in progress (a
+`claude-sonnet-4-6` / max=100 run targeting the board's 72.1% is next)._
 
 ## Dataset Information
 
@@ -569,7 +601,7 @@ OSWorld tasks live at three difficulty / coverage levels:
 
 | Subset                | Tasks | Use                                                              |
 | --------------------- | ----- | ---------------------------------------------------------------- |
-| `test_small.json`     | 12    | Quick smoke test — one or two tasks per application              |
+| `test_small.json`     | 39    | Quick smoke subset (multi-app tasks dominate; ≤4 per application)|
 | `test_all.json`       | ~369  | Full benchmark across all apps                                   |
 | `test_infeasible.json`| —     | Infeasible-task subset (model is expected to return `FAIL`)      |
 | `test_nogdrive.json`  | —     | All tasks except those that require Google Drive credentials     |
@@ -577,9 +609,27 @@ OSWorld tasks live at three difficulty / coverage levels:
 Source: <https://github.com/xlang-ai/OSWorld/tree/main/evaluation_examples>
 (license: Apache-2.0).
 
-The committed `data/example.jsonl` contains 5 representative tasks for
-smoke testing. Train / validation JSONLs are uploaded to the GitLab
-dataset registry (see `gitlab_identifier` blocks in the YAML).
+The manifests above ship from upstream as `{domain: [task_id, ...]}`
+dicts. Convert any of them into the gym-consumable JSONL the agent
+expects with
+[`scripts/paper_to_gym_jsonl.py`](scripts/paper_to_gym_jsonl.py):
+
+```bash
+python responses_api_agents/osworld_agent/scripts/paper_to_gym_jsonl.py \
+  --osworld-root /path/to/OSWorld \
+  --manifest test_all \
+  --output responses_api_agents/osworld_agent/data/test_all.jsonl
+```
+
+Committed under `data/`:
+- `example.jsonl` — 5 representative tasks for smoke testing
+- `example_rollouts.jsonl` — saved rollouts for those 5 tasks
+  (`claude-opus-4-7`, Screenshot only), 4/5 reward=1.0
+- `test_small.jsonl` — the 39-task smoke subset, ready to run
+
+`test_all.jsonl` (369 tasks) is **not** committed — regenerate it with the
+command above. Train / validation JSONLs live in the GitLab dataset
+registry (see `gitlab_identifier` blocks in the YAML).
 
 JSONL row shape:
 

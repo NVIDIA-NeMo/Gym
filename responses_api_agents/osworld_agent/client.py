@@ -390,6 +390,8 @@ def run_osworld_task(
                 "screenshot_b64": _b64(obs.get("screenshot")),
                 "accessibility_tree": obs.get("accessibility_tree"),
             }
+            if os.environ.get("OSWORLD_OMIT_SCREENSHOT_IN_OBS"):
+                obs_entry["screenshot_b64"] = ""
             # Opt-in screenshot dump for debug (set OSWORLD_SAVE_SCREENSHOTS_DIR
             # to a path on shared storage). Writes <task_id>-step<NN>.png so
             # we can eyeball what the agent actually saw at each step.
