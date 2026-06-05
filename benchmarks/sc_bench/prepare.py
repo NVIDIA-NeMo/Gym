@@ -23,7 +23,7 @@ TRAIN_FPATH = Path(__file__).resolve().parents[2] / "resources_servers" / "sc_be
 VALIDATION_FPATH = Path(__file__).resolve().parents[2] / "resources_servers" / "sc_bench" / "data" / "validation.jsonl"
 CSV_DEST_DIR = Path(__file__).resolve().parents[2] / "resources_servers" / "sc_bench" / "data" / "csv"
 
-SC_BENCH_REPO = "https://github.com/Damon-GSY/SC-bench.git"
+SC_BENCH_REPO = "https://github.com/aneesh-iyer29/SC-bench"
 
 
 def _find_local_sc_bench() -> Path | None:

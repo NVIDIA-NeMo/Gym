@@ -3,7 +3,7 @@ sc_bench_resources_server:
     sc_bench:
       entrypoint: app.py
       domain: agent
-      verified: false
+      verified: true
       description: SupChain-Bench supply chain order management tool-use tasks
       value: Multi-step tool calling over trade, fulfillment, and warehouse orders
       data_dir: resources_servers/sc_bench/data/csv

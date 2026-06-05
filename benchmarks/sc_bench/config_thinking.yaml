@@ -1,0 +1,11 @@
+# SupChain-Bench (SC-bench): OpenRouter thinking models via HUD chat-completions.
+# Recommended: qwen3.6-plus (Provider=OpenRouter on hud.ai/models). Also: glm-5.1, glm-5, hy3-preview.
+# Without this config, models that emit reasoning_content cause vllm_model to assert → /run 500.
+config_paths:
+  - benchmarks/sc_bench/config.yaml
+
+policy_model:
+  responses_api_models:
+    vllm_model:
+      uses_reasoning_parser: true
+      uses_interleaved_reasoning: true

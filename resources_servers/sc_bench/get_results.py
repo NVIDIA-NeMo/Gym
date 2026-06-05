@@ -1,3 +1,8 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 AIDC-SupplyChain-AI
+# SPDX-License-Identifier: Apache-2.0
+#
+# Adapted from https://github.com/Damon-GSY/SC-bench/blob/main/get_results.py
+
 import re
 from collections import defaultdict
 from typing import Any, Dict, List, Optional, Tuple
