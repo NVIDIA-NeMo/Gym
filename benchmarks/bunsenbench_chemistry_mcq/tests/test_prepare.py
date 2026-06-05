@@ -56,6 +56,13 @@ def test_upstream_config_metadata_rejects_unexpected_versions() -> None:
         upstream.validate_config_metadata(builder)
 
 
+def test_upstream_config_metadata_rejects_unexpected_split() -> None:
+    builder = _builder(splits={"manifest": object()})
+
+    with pytest.raises(ValueError, match="Unexpected Bunsen Bench splits"):
+        upstream.validate_config_metadata(builder)
+
+
 def test_reconstitute_upstream_dataset_uses_hf_builder_and_tool(monkeypatch: pytest.MonkeyPatch) -> None:
     builder = _builder()
     calls = []
@@ -215,9 +222,9 @@ def test_materialize_row_is_deterministic_and_letter_grades() -> None:
     assert first["options_text"].endswith("</choice>\n</choices>")
     assert "A:" not in first["options_text"]
     assert first["metadata"]["source_row_index"] == 0
-    assert first["metadata"]["bunsen_bench_revision"] == "v0.1.2"
-    assert first["metadata"]["bunsen_bench_config"] == "chemistry_mcq"
-    assert first["metadata"]["bunsen_bench_config_version"] == "0.1.2"
+    assert first["metadata"]["bunsen_bench_revision"] == upstream.BUNSEN_BENCH_REVISION
+    assert first["metadata"]["bunsen_bench_config"] == upstream.BUNSEN_BENCH_CONFIG_NAME
+    assert first["metadata"]["bunsen_bench_config_version"] == upstream.BUNSEN_BENCH_VERSION
     assert first["metadata"]["prompt_version"] == PROMPT_VERSION
     assert "filter_flags" not in first["metadata"]
     assert "release" not in first["metadata"]
@@ -233,7 +240,12 @@ def test_materialize_row_is_deterministic_and_letter_grades() -> None:
 def _builder(
     *,
     name: str = "chemistry_mcq",
-    version: str = "0.1.2",
+    version: str = upstream.BUNSEN_BENCH_VERSION,
     description: str = "Chemistry MCQ evaluation manifest",
+    splits: dict[str, object] | None = None,
 ) -> SimpleNamespace:
-    return SimpleNamespace(config=SimpleNamespace(name=name, version=version, description=description))
+    splits = splits or {upstream.BUNSEN_BENCH_SPLIT_NAME: object()}
+    return SimpleNamespace(
+        config=SimpleNamespace(name=name, version=version, description=description),
+        info=SimpleNamespace(splits=splits),
+    )

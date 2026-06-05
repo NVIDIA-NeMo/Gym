@@ -14,10 +14,11 @@ ng_prepare_benchmark "+config_paths=[benchmarks/bunsenbench_chemistry_mcq/config
 ```
 
 Preparation loads the `chemistry_mcq` config from pinned
-`nvidia/bunsen-bench` revision tag `v0.1.2`, downloads that dataset's
+`nvidia/bunsen-bench` revision tag `v0.1.4`, downloads that dataset's
 `tools/reconstitute.py` helper, and uses it to fetch the pinned upstream
-sources and validate source/canonical problem hashes from the manifest. Gym
-then writes the generated runnable JSONL to
+sources and validate source/canonical problem hashes from the manifest. The
+upstream Hugging Face split is named `test` because the subset is evaluation
+data. Gym then writes the generated runnable JSONL to
 `benchmarks/bunsenbench_chemistry_mcq/data/bunsenbench_chemistry_mcq_benchmark.jsonl`.
 Generated JSONL under `data/` is gitignored; rerun preparation to recreate it.
 
@@ -27,7 +28,7 @@ dataset and pinned source datasets.
 
 ## Sources
 
-The v0.1.2 source mix is:
+The v0.1.4 source mix is:
 
 - MMLU-Redux high school chemistry
 - MMLU-Redux college chemistry
@@ -40,7 +41,9 @@ The Gym implementation uses the upstream helper and the manifest's pinned
 Hugging Face revisions. It fails loudly if a source row is missing, changed,
 ambiguous, or inaccessible.
 
-Rows classified as `not_chemistry` are excluded by the upstream v0.1.2 manifest.
+Rows classified as `not_chemistry` are excluded by the upstream manifest. The
+v0.1.4 manifest also removes cross-source duplicates by normalized question and
+answer, producing 5,100 runnable evaluation rows.
 
 ## Licensing
 

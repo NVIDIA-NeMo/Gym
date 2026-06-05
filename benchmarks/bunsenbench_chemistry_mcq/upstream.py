@@ -15,8 +15,9 @@ from typing import Any
 BUNSEN_BENCH_REPO_ID = "nvidia/bunsen-bench"
 BUNSEN_BENCH_CONFIG_NAME = "chemistry_mcq"
 BUNSEN_BENCH_REPO_TYPE = "dataset"
-BUNSEN_BENCH_VERSION = "0.1.2"
+BUNSEN_BENCH_VERSION = "0.1.4"
 BUNSEN_BENCH_REVISION = f"v{BUNSEN_BENCH_VERSION}"
+BUNSEN_BENCH_SPLIT_NAME = "test"
 RECONSTITUTE_TOOL_FPATH = "tools/reconstitute.py"
 
 UPSTREAM_CONFIG_METADATA = {
@@ -111,6 +112,7 @@ def validate_config_metadata(builder: Any) -> dict[str, str]:
         actual = metadata.get(key)
         if actual != expected:
             raise ValueError(f"Unexpected Bunsen Bench config metadata {key}={actual!r}; expected {expected!r}")
+    validate_config_split(builder)
     return metadata
 
 
@@ -127,3 +129,11 @@ def _config_version_string(version: Any) -> str:
     if version is None:
         return ""
     return str(version)
+
+
+def validate_config_split(builder: Any) -> None:
+    splits = getattr(getattr(builder, "info", None), "splits", None)
+    if not splits:
+        return
+    if BUNSEN_BENCH_SPLIT_NAME not in set(splits):
+        raise ValueError(f"Unexpected Bunsen Bench splits {sorted(splits)}; expected {BUNSEN_BENCH_SPLIT_NAME!r}")
