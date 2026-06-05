@@ -14,7 +14,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 from benchmarks.bunsenbench_chemistry_mcq.materialize import materialize_row
-from benchmarks.bunsenbench_chemistry_mcq.upstream import EXPECTED_CONFIG_METADATA
+from benchmarks.bunsenbench_chemistry_mcq.upstream import UPSTREAM_CONFIG_METADATA
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config
 from nemo_gym.server_utils import ServerClient
@@ -34,13 +34,10 @@ PROMPT_CONFIG_FPATH = (
 )
 AGENT_REF = {"type": "responses_api_agents", "name": "bunsenbench_chemistry_mcq_simple_agent"}
 
-COMMITTED_FIELDS = frozenset(
-    {"responses_create_params", "options", "expected_answer", "uuid", "metadata", "agent_ref"}
-)
+COMMITTED_FIELDS = ("responses_create_params", "options", "expected_answer", "uuid", "metadata", "agent_ref")
 
 SYNTHETIC_CONFIG_METADATA = {
-    **EXPECTED_CONFIG_METADATA,
-    "taxonomy_version": "bct_gpt55_low_v1",
+    **UPSTREAM_CONFIG_METADATA,
 }
 
 SYNTHETIC_RECONSTITUTED_ROWS: list[dict] = [
@@ -56,7 +53,6 @@ SYNTHETIC_RECONSTITUTED_ROWS: list[dict] = [
         "source_row_index": 0,
         "source_record_sha256": "example-hash-1",
         "canonical_problem_sha256": "example-problem-1",
-        "filter_flags": ["chemistry", "mcq", "example"],
         "bct_field": "general",
         "bct_subfield": "acids_bases",
         "question": "Which species is the conjugate base of hydronium?",
@@ -76,7 +72,6 @@ SYNTHETIC_RECONSTITUTED_ROWS: list[dict] = [
         "source_row_index": 1,
         "source_record_sha256": "example-hash-2",
         "canonical_problem_sha256": "example-problem-2",
-        "filter_flags": ["chemistry", "mcq", "example"],
         "bct_field": "organic",
         "bct_subfield": "structure",
         "question": "Which option names a common organic functional group?",
@@ -96,7 +91,6 @@ SYNTHETIC_RECONSTITUTED_ROWS: list[dict] = [
         "source_row_index": 2,
         "source_record_sha256": "example-hash-3",
         "canonical_problem_sha256": "example-problem-3",
-        "filter_flags": ["chemistry", "mcq", "example"],
         "bct_field": "general",
         "bct_subfield": "nomenclature",
         "question": "Which formula represents carbon dioxide?",
@@ -116,7 +110,6 @@ SYNTHETIC_RECONSTITUTED_ROWS: list[dict] = [
         "source_row_index": 3,
         "source_record_sha256": "example-hash-4",
         "canonical_problem_sha256": "example-problem-4",
-        "filter_flags": ["chemistry", "mcq", "example"],
         "bct_field": "analytical",
         "bct_subfield": "chromatography",
         "question": "Which technique separates compounds by interaction with a stationary phase?",
@@ -136,13 +129,12 @@ SYNTHETIC_RECONSTITUTED_ROWS: list[dict] = [
         "source_row_index": 4,
         "source_record_sha256": "example-hash-5",
         "canonical_problem_sha256": "example-problem-5",
-        "filter_flags": ["chemistry", "mcq", "example"],
-        "bct_field": "not_chemistry",
-        "bct_subfield": "not_chemistry",
-        "question": "Which response is a valid multiple-choice answer letter?",
-        "choices": ["Alpha", "Beta", "Gamma", "Delta"],
-        "answer": "Delta",
-        "answer_index": 3,
+        "bct_field": "physical",
+        "bct_subfield": "thermodynamics",
+        "question": "Which quantity is measured in kelvin?",
+        "choices": ["Temperature", "Pressure", "Mass", "Charge"],
+        "answer": "Temperature",
+        "answer_index": 0,
     },
 ]
 

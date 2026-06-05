@@ -30,7 +30,7 @@ Each row includes:
 - `options`: list of letter-to-text maps, e.g. `[{"A": "H2O"}, {"B": "CO2"}]`
 - `expected_answer`: gold letter after deterministic option shuffle
 - `uuid`: stable row id (e.g. `bunsen:example:1`)
-- `metadata`: release, source, BCT taxonomy, and upstream locator fields
+- `metadata`: upstream version tag, source, BCT labels, and upstream locator fields
 - `agent_ref`: `{"type": "responses_api_agents", "name": "bunsenbench_chemistry_mcq_simple_agent"}`
 
 Regenerate with:
