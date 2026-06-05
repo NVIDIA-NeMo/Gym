@@ -119,6 +119,13 @@ class Terminus2NemoGym(Terminus2):
             self.logger.info(f"Agent error: {type(e).__name__}: {e}. Returning history from completed turns.")
         finally:
             self._write_agent_error_flags()
+            # Close the LLM's persistent HTTP client now the episode is done.
+            llm = getattr(self, "_llm", None)
+            if isinstance(llm, NemoGymLLM):
+                try:
+                    await llm.aclose()
+                except Exception:
+                    pass  # teardown is best-effort; never fail the trial on cleanup
 
     def _write_agent_error_flags(self) -> None:
         """Write agent error flags to disk for app.py to pick up."""
