@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+"""Tests for ``benchmarks/bunsen_chem/prepare.py`` and materialization helpers."""
 
 import json
 from pathlib import Path
@@ -281,6 +282,7 @@ def test_materialize_row_is_deterministic_and_letter_grades() -> None:
     assert "question" not in first["metadata"]
     assert "source_meta" not in first["metadata"]
     assert "responses_create_params" not in first
+    assert "grading_mode" not in first
 
 
 def _metadata_description() -> str:

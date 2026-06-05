@@ -91,7 +91,6 @@ def materialize_row(row: dict) -> dict:
         "options_text": options_text,
         "options": options,
         "expected_answer": expected_letter,
-        "grading_mode": "lenient_answer_colon",
         "uuid": row["bunsen_id"],
         "metadata": metadata,
     }
