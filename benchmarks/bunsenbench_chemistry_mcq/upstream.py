@@ -11,7 +11,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any
 
-from benchmarks.bunsen_chem.taxonomy import TAXONOMY_VERSION
+from benchmarks.bunsenbench_chemistry_mcq.taxonomy import TAXONOMY_VERSION
 
 
 BUNSEN_BENCH_REPO_ID = "nvidia/bunsen-bench"

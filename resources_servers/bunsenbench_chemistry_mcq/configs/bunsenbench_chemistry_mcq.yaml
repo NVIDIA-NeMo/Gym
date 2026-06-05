@@ -19,4 +19,4 @@ bunsenbench_chemistry_mcq_simple_agent:
       datasets:
       - name: example
         type: example
-        jsonl_fpath: resources_servers/bunsen_chem/data/example.jsonl
+        jsonl_fpath: resources_servers/bunsenbench_chemistry_mcq/data/example.jsonl

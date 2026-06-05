@@ -6,8 +6,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from benchmarks.bunsen_chem.materialize import materialize_dataset
-from benchmarks.bunsen_chem.upstream import reconstitute_upstream_dataset
+from benchmarks.bunsenbench_chemistry_mcq.materialize import materialize_dataset
+from benchmarks.bunsenbench_chemistry_mcq.upstream import reconstitute_upstream_dataset
 
 
 BENCHMARK_DIR = Path(__file__).parent
