@@ -21,8 +21,7 @@ from benchmarks.bunsenbench_chemistry_mcq.materialize import (
 def _row(label: dict[str, str] | None = None) -> dict:
     label = label or {"bct_field": "general", "bct_subfield": "bonding"}
     return {
-        **upstream.EXPECTED_CONFIG_METADATA,
-        "taxonomy_version": "bct_gpt55_low_v1",
+        **upstream.UPSTREAM_CONFIG_METADATA,
         "bunsen_id": "bunsen:example:1",
         "source": "chembench_general_chemistry",
         "source_dataset": "jablonkagroup/ChemBench",
@@ -33,7 +32,6 @@ def _row(label: dict[str, str] | None = None) -> dict:
         "source_row_index": 0,
         "source_record_sha256": "source-hash",
         "canonical_problem_sha256": "problem-hash",
-        "filter_flags": ["chemistry", "mcq", "valid_answer", "public_source", "chembench"],
         "bct_field": label["bct_field"],
         "bct_subfield": label["bct_subfield"],
         "question": "Which formula is water?",
@@ -45,35 +43,21 @@ def _row(label: dict[str, str] | None = None) -> dict:
 
 
 def test_upstream_config_metadata_matches_expected_versions() -> None:
-    builder = SimpleNamespace(
-        config=SimpleNamespace(
-            description=(
-                "Chemistry MCQ; release=bunsen_chem_public_v0.1.0; "
-                "transform_version=bunsen_chem_sources_v2; filter_version=mcq_public_v1"
-            )
-        )
-    )
+    builder = _builder()
 
-    assert upstream.config_metadata(builder) == upstream.EXPECTED_CONFIG_METADATA
-    assert upstream.validate_config_metadata(builder) == upstream.EXPECTED_CONFIG_METADATA
+    assert upstream.config_metadata(builder) == upstream.UPSTREAM_CONFIG_METADATA
+    assert upstream.validate_config_metadata(builder) == upstream.UPSTREAM_CONFIG_METADATA
 
 
 def test_upstream_config_metadata_rejects_unexpected_versions() -> None:
-    builder = SimpleNamespace(
-        config=SimpleNamespace(
-            description=(
-                "Chemistry MCQ; release=bunsen_chem_public_v0.1.0; "
-                "transform_version=bunsen_chem_sources_v2; filter_version=unexpected"
-            )
-        )
-    )
+    builder = _builder(version="0.1.1")
 
-    with pytest.raises(ValueError, match="filter_version"):
+    with pytest.raises(ValueError, match="bunsen_bench_config_version"):
         upstream.validate_config_metadata(builder)
 
 
 def test_reconstitute_upstream_dataset_uses_hf_builder_and_tool(monkeypatch: pytest.MonkeyPatch) -> None:
-    builder = SimpleNamespace(config=SimpleNamespace(description=_metadata_description()))
+    builder = _builder()
     calls = []
 
     class FakeTool:
@@ -104,20 +88,20 @@ def test_reconstitute_upstream_dataset_uses_hf_builder_and_tool(monkeypatch: pyt
 
 
 def test_reconstitute_upstream_dataset_rejects_metadata_collisions(monkeypatch: pytest.MonkeyPatch) -> None:
-    builder = SimpleNamespace(config=SimpleNamespace(description=_metadata_description()))
+    builder = _builder()
 
     class FakeTool:
         @staticmethod
         def reconstitute(*args, **kwargs):
             row = _row()
-            row["release"] = "unexpected"
+            row["bunsen_bench_revision"] = "unexpected"
             return [row]
 
     monkeypatch.setattr(upstream, "get_hf_token", lambda token=None: "hf-token")
     monkeypatch.setattr(upstream, "load_manifest_builder", lambda *, token: builder)
     monkeypatch.setattr(upstream, "load_reconstitute_tool", lambda *, token: FakeTool)
 
-    with pytest.raises(ValueError, match="release"):
+    with pytest.raises(ValueError, match="bunsen_bench_revision"):
         upstream.reconstitute_upstream_dataset()
 
 
@@ -231,9 +215,13 @@ def test_materialize_row_is_deterministic_and_letter_grades() -> None:
     assert first["options_text"].endswith("</choice>\n</choices>")
     assert "A:" not in first["options_text"]
     assert first["metadata"]["source_row_index"] == 0
-    assert first["metadata"]["release"] == "bunsen_chem_public_v0.1.0"
-    assert first["metadata"]["taxonomy_version"] == "bct_gpt55_low_v1"
+    assert first["metadata"]["bunsen_bench_revision"] == "v0.1.2"
+    assert first["metadata"]["bunsen_bench_config"] == "chemistry_mcq"
+    assert first["metadata"]["bunsen_bench_config_version"] == "0.1.2"
     assert first["metadata"]["prompt_version"] == PROMPT_VERSION
+    assert "filter_flags" not in first["metadata"]
+    assert "release" not in first["metadata"]
+    assert "taxonomy_version" not in first["metadata"]
     assert "answer" not in first["metadata"]
     assert "choices" not in first["metadata"]
     assert "question" not in first["metadata"]
@@ -242,8 +230,10 @@ def test_materialize_row_is_deterministic_and_letter_grades() -> None:
     assert "grading_mode" not in first
 
 
-def _metadata_description() -> str:
-    return (
-        "Chemistry MCQ; release=bunsen_chem_public_v0.1.0; "
-        "transform_version=bunsen_chem_sources_v2; filter_version=mcq_public_v1"
-    )
+def _builder(
+    *,
+    name: str = "chemistry_mcq",
+    version: str = "0.1.2",
+    description: str = "Chemistry MCQ evaluation manifest",
+) -> SimpleNamespace:
+    return SimpleNamespace(config=SimpleNamespace(name=name, version=version, description=description))

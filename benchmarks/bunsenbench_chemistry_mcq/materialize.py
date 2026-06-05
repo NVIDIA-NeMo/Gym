@@ -14,11 +14,12 @@ from typing import Iterable
 
 PROMPT_VERSION = "bunsen_chem_mcq_xml_choice_v1"
 OPTION_LETTERS = tuple("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
-PUBLIC_METADATA_FIELDS = {
-    "release",
-    "transform_version",
-    "filter_version",
-    "taxonomy_version",
+UPSTREAM_CONFIG_METADATA_FIELDS = {
+    "bunsen_bench_revision",
+    "bunsen_bench_config",
+    "bunsen_bench_config_version",
+}
+MANIFEST_METADATA_FIELDS = {
     "bunsen_id",
     "source",
     "source_dataset",
@@ -29,13 +30,13 @@ PUBLIC_METADATA_FIELDS = {
     "source_row_index",
     "source_record_sha256",
     "canonical_problem_sha256",
-    "filter_flags",
     "bct_field",
     "bct_subfield",
 }
+PUBLIC_METADATA_FIELDS = UPSTREAM_CONFIG_METADATA_FIELDS | MANIFEST_METADATA_FIELDS
 PAYLOAD_FIELDS = {"question", "choices", "answer", "answer_index", "source_meta"}
 EXPECTED_RECONSTITUTED_FIELDS = PUBLIC_METADATA_FIELDS | PAYLOAD_FIELDS
-REQUIRED_RECONSTITUTED_FIELDS = EXPECTED_RECONSTITUTED_FIELDS - {"source_meta"}
+REQUIRED_RECONSTITUTED_FIELDS = (MANIFEST_METADATA_FIELDS | PAYLOAD_FIELDS) - {"source_meta"}
 
 
 def materialize_dataset(rows: Iterable[dict], output_path: Path) -> Path:
@@ -81,7 +82,7 @@ def materialize_row(row: dict) -> dict:
     expected_letter = OPTION_LETTERS[expected_idx]
     options = [{OPTION_LETTERS[i]: choice} for i, choice in enumerate(shuffled)]
     options_text = _choices_xml(shuffled)
-    metadata = {key: row[key] for key in sorted(PUBLIC_METADATA_FIELDS)}
+    metadata = {key: row[key] for key in sorted(PUBLIC_METADATA_FIELDS) if key in row}
     metadata["prompt_version"] = PROMPT_VERSION
     return {
         "question": row["question"],

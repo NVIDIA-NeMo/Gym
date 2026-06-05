@@ -15,13 +15,14 @@ from typing import Any
 BUNSEN_BENCH_REPO_ID = "nvidia/bunsen-bench"
 BUNSEN_BENCH_CONFIG_NAME = "chemistry_mcq"
 BUNSEN_BENCH_REPO_TYPE = "dataset"
-BUNSEN_BENCH_REVISION = "dd45f25dd10ccd977a8058c40de8ea3fc818c910"
+BUNSEN_BENCH_VERSION = "0.1.2"
+BUNSEN_BENCH_REVISION = f"v{BUNSEN_BENCH_VERSION}"
 RECONSTITUTE_TOOL_FPATH = "tools/reconstitute.py"
 
-EXPECTED_CONFIG_METADATA = {
-    "release": "bunsen_chem_public_v0.1.0",
-    "transform_version": "bunsen_chem_sources_v2",
-    "filter_version": "mcq_public_v1",
+UPSTREAM_CONFIG_METADATA = {
+    "bunsen_bench_revision": BUNSEN_BENCH_REVISION,
+    "bunsen_bench_config": BUNSEN_BENCH_CONFIG_NAME,
+    "bunsen_bench_config_version": BUNSEN_BENCH_VERSION,
 }
 
 
@@ -106,20 +107,23 @@ def import_module_from_path(module_name: str, path: Path) -> ModuleType:
 
 def validate_config_metadata(builder: Any) -> dict[str, str]:
     metadata = config_metadata(builder)
-    for key, expected in EXPECTED_CONFIG_METADATA.items():
+    for key, expected in UPSTREAM_CONFIG_METADATA.items():
         actual = metadata.get(key)
         if actual != expected:
-            raise ValueError(
-                f"Unexpected Bunsen Bench config metadata {key}={actual!r}; expected {expected!r}"
-            )
+            raise ValueError(f"Unexpected Bunsen Bench config metadata {key}={actual!r}; expected {expected!r}")
     return metadata
 
 
 def config_metadata(builder: Any) -> dict[str, str]:
-    description = str(getattr(builder.config, "description", "") or "")
-    metadata: dict[str, str] = {}
-    for part in description.split(";"):
-        key, separator, value = part.strip().partition("=")
-        if separator:
-            metadata[key.strip()] = value.strip()
-    return metadata
+    config = builder.config
+    return {
+        "bunsen_bench_revision": BUNSEN_BENCH_REVISION,
+        "bunsen_bench_config": str(getattr(config, "name", "") or ""),
+        "bunsen_bench_config_version": _config_version_string(getattr(config, "version", None)),
+    }
+
+
+def _config_version_string(version: Any) -> str:
+    if version is None:
+        return ""
+    return str(version)

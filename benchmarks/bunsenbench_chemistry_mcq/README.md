@@ -3,9 +3,9 @@
 BunsenBench Chemistry MCQ is the public Gym version of the BunsenBench chemistry MCQ benchmark.
 The source manifest is hosted in the upstream Hugging Face dataset
 [`nvidia/bunsen-bench`](https://huggingface.co/datasets/nvidia/bunsen-bench).
-The `chemistry_mcq` config stores source locators, pinned Hugging Face revisions,
-hashes, filter flags, and BCT labels without redistributing source question
-text, choices, or answers.
+The `chemistry_mcq` config stores source locators, pinned Hugging Face source
+revisions, hashes, and BCT labels without redistributing source question text,
+choices, or answers.
 
 ## Prepare
 
@@ -13,10 +13,11 @@ text, choices, or answers.
 ng_prepare_benchmark "+config_paths=[benchmarks/bunsenbench_chemistry_mcq/config.yaml]"
 ```
 
-Preparation loads the `chemistry_mcq` config from a pinned
-`nvidia/bunsen-bench` commit, downloads that dataset's `tools/reconstitute.py`
-helper, and uses it to fetch the pinned upstream sources and validate
-source/canonical problem hashes from the manifest. Gym then writes the generated runnable JSONL to
+Preparation loads the `chemistry_mcq` config from pinned
+`nvidia/bunsen-bench` revision tag `v0.1.2`, downloads that dataset's
+`tools/reconstitute.py` helper, and uses it to fetch the pinned upstream
+sources and validate source/canonical problem hashes from the manifest. Gym
+then writes the generated runnable JSONL to
 `benchmarks/bunsenbench_chemistry_mcq/data/bunsenbench_chemistry_mcq_benchmark.jsonl`.
 Generated JSONL under `data/` is gitignored; rerun preparation to recreate it.
 
@@ -26,7 +27,7 @@ dataset and pinned source datasets.
 
 ## Sources
 
-The v0.1.0 source mix is:
+The v0.1.2 source mix is:
 
 - MMLU-Redux high school chemistry
 - MMLU-Redux college chemistry
@@ -39,8 +40,7 @@ The Gym implementation uses the upstream helper and the manifest's pinned
 Hugging Face revisions. It fails loudly if a source row is missing, changed,
 ambiguous, or inaccessible.
 
-ChemBench rows with zero or multiple positive `target_scores` are excluded for
-v0.1.0 because the public verifier uses a single expected answer letter.
+Rows classified as `not_chemistry` are excluded by the upstream v0.1.2 manifest.
 
 ## Licensing
 
