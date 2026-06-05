@@ -14,9 +14,9 @@ ng_prepare_benchmark "+config_paths=[benchmarks/bunsen_chem/config.yaml]"
 ```
 
 Preparation loads the `chemistry_mcq` config from a pinned
-`nvidia/bunsen-bench` commit, downloads and verifies that dataset's
-`tools/reconstitute.py` helper, and uses it to fetch the pinned upstream sources
-and validate source/canonical problem hashes. Gym then writes the generated runnable JSONL to
+`nvidia/bunsen-bench` commit, downloads that dataset's `tools/reconstitute.py`
+helper, and uses it to fetch the pinned upstream sources and validate
+source/canonical problem hashes from the manifest. Gym then writes the generated runnable JSONL to
 `benchmarks/bunsen_chem/data/bunsen_chem_benchmark.jsonl`.
 Generated JSONL under `data/` is gitignored; rerun preparation to recreate it.
 

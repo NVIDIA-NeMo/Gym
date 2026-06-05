@@ -148,17 +148,12 @@ def test_load_reconstitute_tool_downloads_from_upstream_dataset(
     tool_path = tmp_path / "reconstitute.py"
     tool_path.write_text("VALUE = 1\n", encoding="utf-8")
     calls = []
-    verify_calls = []
 
     def fake_hf_hub_download(**kwargs):
         calls.append(kwargs)
         return str(tool_path)
 
-    def fake_verify_file_sha256(path: Path, expected_sha256: str) -> None:
-        verify_calls.append((path, expected_sha256))
-
     monkeypatch.setattr("huggingface_hub.hf_hub_download", fake_hf_hub_download)
-    monkeypatch.setattr(upstream, "verify_file_sha256", fake_verify_file_sha256)
 
     module = upstream.load_reconstitute_tool(token="hf-token")
 
@@ -172,17 +167,6 @@ def test_load_reconstitute_tool_downloads_from_upstream_dataset(
             "token": "hf-token",
         }
     ]
-    assert verify_calls == [(tool_path, upstream.RECONSTITUTE_TOOL_SHA256)]
-
-
-def test_verify_file_sha256_rejects_mismatch(tmp_path: Path) -> None:
-    path = tmp_path / "file.txt"
-    path.write_text("payload", encoding="utf-8")
-
-    upstream.verify_file_sha256(path, "239f59ed55e737c77147cf55ad0c1b030b6d7ee748a7426952f9b852d5a935e5")
-
-    with pytest.raises(ValueError, match="Unexpected sha256"):
-        upstream.verify_file_sha256(path, "0" * 64)
 
 
 def test_prepare_materializes_reconstituted_upstream_dataset(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
