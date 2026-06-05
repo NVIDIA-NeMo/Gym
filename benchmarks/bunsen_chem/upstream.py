@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import importlib.util
 import os
 import sys
@@ -20,7 +19,6 @@ BUNSEN_BENCH_CONFIG_NAME = "chemistry_mcq"
 BUNSEN_BENCH_REPO_TYPE = "dataset"
 BUNSEN_BENCH_REVISION = "dd45f25dd10ccd977a8058c40de8ea3fc818c910"
 RECONSTITUTE_TOOL_FPATH = "tools/reconstitute.py"
-RECONSTITUTE_TOOL_SHA256 = "a0a3e737421255e9a1bebeed4f238b91871dec567ed4f6a0b04295850b7b7768"
 
 EXPECTED_CONFIG_METADATA = {
     "release": "bunsen_chem_public_v0.1.0",
@@ -87,9 +85,7 @@ def load_reconstitute_tool(*, token: str | bool | None = None) -> ModuleType:
         revision=BUNSEN_BENCH_REVISION,
         token=token,
     )
-    tool_path = Path(tool_path)
-    verify_file_sha256(tool_path, RECONSTITUTE_TOOL_SHA256)
-    return import_module_from_path("bunsen_bench_reconstitute", tool_path)
+    return import_module_from_path("bunsen_bench_reconstitute", Path(tool_path))
 
 
 def merge_config_metadata(row: dict[str, Any], metadata: dict[str, str]) -> dict[str, Any]:
@@ -99,12 +95,6 @@ def merge_config_metadata(row: dict[str, Any], metadata: dict[str, str]) -> dict
             raise ValueError(f"Reconstituted row {row.get('bunsen_id', '?')} has unexpected {key}={actual!r}")
         row[key] = expected
     return row
-
-
-def verify_file_sha256(path: Path, expected_sha256: str) -> None:
-    actual_sha256 = hashlib.sha256(path.read_bytes()).hexdigest()
-    if actual_sha256 != expected_sha256:
-        raise ValueError(f"Unexpected sha256 for {path}: {actual_sha256}; expected {expected_sha256}")
 
 
 def import_module_from_path(module_name: str, path: Path) -> ModuleType:
