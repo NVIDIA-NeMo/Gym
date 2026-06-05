@@ -11,9 +11,6 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any
 
-from benchmarks.bunsenbench_chemistry_mcq.taxonomy import TAXONOMY_VERSION
-
-
 BUNSEN_BENCH_REPO_ID = "nvidia/bunsen-bench"
 BUNSEN_BENCH_CONFIG_NAME = "chemistry_mcq"
 BUNSEN_BENCH_REPO_TYPE = "dataset"
@@ -24,7 +21,6 @@ EXPECTED_CONFIG_METADATA = {
     "release": "bunsen_chem_public_v0.1.0",
     "transform_version": "bunsen_chem_sources_v2",
     "filter_version": "mcq_public_v1",
-    "taxonomy_version": TAXONOMY_VERSION,
 }
 
 

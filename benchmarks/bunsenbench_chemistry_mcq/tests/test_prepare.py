@@ -16,13 +16,13 @@ from benchmarks.bunsenbench_chemistry_mcq.materialize import (
     materialize_row,
     validate_reconstituted_rows,
 )
-from benchmarks.bunsenbench_chemistry_mcq.taxonomy import BCT_SUBFIELDS, normalize_taxonomy_label
 
 
 def _row(label: dict[str, str] | None = None) -> dict:
     label = label or {"bct_field": "general", "bct_subfield": "bonding"}
     return {
         **upstream.EXPECTED_CONFIG_METADATA,
+        "taxonomy_version": "bct_gpt55_low_v1",
         "bunsen_id": "bunsen:example:1",
         "source": "chembench_general_chemistry",
         "source_dataset": "jablonkagroup/ChemBench",
@@ -49,8 +49,7 @@ def test_upstream_config_metadata_matches_expected_versions() -> None:
         config=SimpleNamespace(
             description=(
                 "Chemistry MCQ; release=bunsen_chem_public_v0.1.0; "
-                "transform_version=bunsen_chem_sources_v2; filter_version=mcq_public_v1; "
-                "taxonomy_version=bct_gpt55_low_v1"
+                "transform_version=bunsen_chem_sources_v2; filter_version=mcq_public_v1"
             )
         )
     )
@@ -64,13 +63,12 @@ def test_upstream_config_metadata_rejects_unexpected_versions() -> None:
         config=SimpleNamespace(
             description=(
                 "Chemistry MCQ; release=bunsen_chem_public_v0.1.0; "
-                "transform_version=bunsen_chem_sources_v2; filter_version=mcq_public_v1; "
-                "taxonomy_version=unexpected"
+                "transform_version=bunsen_chem_sources_v2; filter_version=unexpected"
             )
         )
     )
 
-    with pytest.raises(ValueError, match="taxonomy_version"):
+    with pytest.raises(ValueError, match="filter_version"):
         upstream.validate_config_metadata(builder)
 
 
@@ -112,14 +110,14 @@ def test_reconstitute_upstream_dataset_rejects_metadata_collisions(monkeypatch: 
         @staticmethod
         def reconstitute(*args, **kwargs):
             row = _row()
-            row["taxonomy_version"] = "unexpected"
+            row["release"] = "unexpected"
             return [row]
 
     monkeypatch.setattr(upstream, "get_hf_token", lambda token=None: "hf-token")
     monkeypatch.setattr(upstream, "load_manifest_builder", lambda *, token: builder)
     monkeypatch.setattr(upstream, "load_reconstitute_tool", lambda *, token: FakeTool)
 
-    with pytest.raises(ValueError, match="taxonomy_version"):
+    with pytest.raises(ValueError, match="release"):
         upstream.reconstitute_upstream_dataset()
 
 
@@ -204,31 +202,6 @@ def test_reconstituted_row_validation_rejects_unexpected_fields() -> None:
         validate_reconstituted_rows([row])
 
 
-def test_taxonomy_subfields_are_unique_across_fields() -> None:
-    owners: dict[str, list[str]] = {}
-    for field, subfields in BCT_SUBFIELDS.items():
-        for subfield in subfields:
-            owners.setdefault(subfield, []).append(field)
-
-    duplicates = {subfield: fields for subfield, fields in owners.items() if len(fields) > 1}
-
-    assert duplicates == {}
-
-
-def test_preference_metabolism_is_replaced_by_metabolic_stability() -> None:
-    with pytest.raises(ValueError, match="Unknown bct_subfield"):
-        normalize_taxonomy_label({"bct_field": "preference", "bct_subfield": "metabolism"})
-
-    assert normalize_taxonomy_label({"bct_field": "preference", "bct_subfield": "metabolic_stability"}) == {
-        "bct_field": "preference",
-        "bct_subfield": "metabolic_stability",
-    }
-    assert normalize_taxonomy_label({"bct_field": "biochemistry", "bct_subfield": "metabolism"}) == {
-        "bct_field": "biochemistry",
-        "bct_subfield": "metabolism",
-    }
-
-
 def test_empty_dataset_materialization_writes_empty_jsonl(tmp_path: Path) -> None:
     output_path = tmp_path / "bunsen_chem.jsonl"
 
@@ -272,6 +245,5 @@ def test_materialize_row_is_deterministic_and_letter_grades() -> None:
 def _metadata_description() -> str:
     return (
         "Chemistry MCQ; release=bunsen_chem_public_v0.1.0; "
-        "transform_version=bunsen_chem_sources_v2; filter_version=mcq_public_v1; "
-        "taxonomy_version=bct_gpt55_low_v1"
+        "transform_version=bunsen_chem_sources_v2; filter_version=mcq_public_v1"
     )

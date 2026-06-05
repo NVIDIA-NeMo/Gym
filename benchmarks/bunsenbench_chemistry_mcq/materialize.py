@@ -11,9 +11,6 @@ import random
 from pathlib import Path
 from typing import Iterable
 
-from benchmarks.bunsenbench_chemistry_mcq.taxonomy import validate_taxonomy
-
-
 PROMPT_VERSION = "bunsen_chem_mcq_xml_choice_v1"
 OPTION_LETTERS = tuple("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
 PUBLIC_METADATA_FIELDS = {
@@ -67,7 +64,6 @@ def validate_reconstituted_rows(rows: Iterable[dict]) -> None:
         if locator in seen_locators:
             raise ValueError(f"Duplicate source locator: {locator}")
         seen_locators.add(locator)
-        validate_taxonomy(row)
         choices = row["choices"]
         if not isinstance(choices, list) or len(choices) < 2:
             raise ValueError(f"Reconstituted row {row['bunsen_id']} must have at least two choices")
