@@ -1,8 +1,8 @@
-# BunsenChem Resources Server
+# BunsenBench Chemistry MCQ Resources Server
 
 ## Overview
 
-BunsenChem verifies chemistry multiple-choice outputs for the public BunsenBench Gym benchmark. It stores materialized answer letters internally, accepts exact choice-text answers, and passes source/taxonomy metadata through to aggregate metrics.
+BunsenBench Chemistry MCQ verifies chemistry multiple-choice outputs for the public BunsenBench Gym benchmark. It stores materialized answer letters internally, accepts exact choice-text answers, and passes source/taxonomy metadata through to aggregate metrics.
 
 - Task type: single-turn MCQ
 - Domain: `knowledge`
@@ -12,11 +12,11 @@ The examples in `data/example.jsonl` are synthetic. They are not redistributed b
 
 ## Server Composition
 
-Use BunsenChem with:
+Use BunsenBench Chemistry MCQ with:
 
-- `responses_api_agents/simple_agent` via `bunsen_chem_simple_agent`
+- `responses_api_agents/simple_agent` via `bunsenbench_chemistry_mcq_simple_agent`
 - `responses_api_models/*` (typically `policy_model` or `openai_model`)
-- `resources_servers/bunsen_chem`
+- `resources_servers/bunsen_chem` (config key: `bunsenbench_chemistry_mcq`)
 
 The server verifies the model response and returns reward `1.0` when the extracted answer letter matches `expected_answer`, else `0.0`.
 
@@ -31,7 +31,7 @@ Each row includes:
 - `expected_answer`: gold letter after deterministic option shuffle
 - `uuid`: stable row id (e.g. `bunsen:example:1`)
 - `metadata`: release, source, BCT taxonomy, and upstream locator fields
-- `agent_ref`: `{"type": "responses_api_agents", "name": "bunsen_chem_simple_agent"}`
+- `agent_ref`: `{"type": "responses_api_agents", "name": "bunsenbench_chemistry_mcq_simple_agent"}`
 
 Regenerate with:
 
@@ -66,7 +66,7 @@ Source/taxonomy fields may be top-level or nested under `metadata`:
 
 ### Grading modes and MCQA fields
 
-BunsenChem uses **custom deterministic extraction** in `BunsenChemResourcesServer.verify()`. It does **not** use shared MCQA `grading_mode` or `template_metadata.output_regex` behavior from `resources_servers/mcqa`.
+BunsenBench Chemistry MCQ uses **custom deterministic extraction** in `BunsenChemResourcesServer.verify()`. It does **not** use shared MCQA `grading_mode` or `template_metadata.output_regex` behavior from `resources_servers/mcqa`.
 
 ## Answer Extraction
 
@@ -95,12 +95,12 @@ Metric group segments are slugged for stable keys.
 ```bash
 config_paths="responses_api_agents/simple_agent/configs/simple_agent.yaml,\
 responses_api_models/openai_model/configs/openai_model.yaml,\
-resources_servers/bunsen_chem/configs/bunsen_chem.yaml"
+resources_servers/bunsen_chem/configs/bunsenbench_chemistry_mcq.yaml"
 
 ng_run "+config_paths=[$config_paths]"
 
 ng_collect_rollouts \
-    +agent_name=bunsen_chem_simple_agent \
+    +agent_name=bunsenbench_chemistry_mcq_simple_agent \
     +input_jsonl_fpath=resources_servers/bunsen_chem/data/example.jsonl \
     +output_jsonl_fpath=resources_servers/bunsen_chem/data/example_rollouts.jsonl \
     +limit=5

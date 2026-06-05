@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Materialize reconstituted BunsenChem rows into runnable Gym MCQA JSONL."""
+"""Materialize reconstituted BunsenBench Chemistry MCQ rows into runnable Gym MCQA JSONL."""
 
 from __future__ import annotations
 

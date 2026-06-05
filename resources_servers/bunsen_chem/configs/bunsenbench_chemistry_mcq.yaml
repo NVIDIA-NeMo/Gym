@@ -1,18 +1,18 @@
-bunsen_chem:
+bunsenbench_chemistry_mcq:
   resources_servers:
-    bunsen_chem:
+    bunsenbench_chemistry_mcq:
       entrypoint: app.py
       domain: knowledge
       verified: false
       description: Public BunsenBench chemistry multiple-choice benchmark verifier
       value: Measure chemistry MCQ reasoning with source and taxonomy breakdowns
-bunsen_chem_simple_agent:
+bunsenbench_chemistry_mcq_simple_agent:
   responses_api_agents:
     simple_agent:
       entrypoint: app.py
       resources_server:
         type: resources_servers
-        name: bunsen_chem
+        name: bunsenbench_chemistry_mcq
       model_server:
         type: responses_api_models
         name: policy_model

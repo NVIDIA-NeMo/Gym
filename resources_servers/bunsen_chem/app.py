@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""BunsenChem MCQ verifier and grouped aggregate metrics."""
+"""BunsenBench Chemistry MCQ verifier and grouped aggregate metrics."""
 
 from __future__ import annotations
 
