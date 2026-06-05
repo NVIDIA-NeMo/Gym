@@ -1,20 +1,8 @@
-# SupChain-Bench (SC-bench): open-source models via chat-completions (vllm_model)
-# For closed-source GPT models on HUD /v1/responses, use config_openai.yaml instead.
+# SupChain-Bench (SC-bench): closed-source models via HUD /v1/responses
 # Source: https://github.com/Damon-GSY/SC-bench
 config_paths:
   - resources_servers/sc_bench/configs/sc_bench.yaml
-  - responses_api_models/vllm_model/configs/vllm_model.yaml
-
-# Default for instruct models on HUD (Kimi K2, Qwen instruct, etc.)
-policy_model:
-  responses_api_models:
-    vllm_model:
-      uses_reasoning_parser: false
-      uses_interleaved_reasoning: false
-
-# For thinking models: restart ng_run with config_thinking.yaml or override via CLI:
-#   +policy_model.responses_api_models.vllm_model.uses_reasoning_parser=true
-#   +policy_model.responses_api_models.vllm_model.uses_interleaved_reasoning=true
+  - responses_api_models/openai_model/configs/openai_model.yaml
 
 sc_bench_benchmark_resources_server:
   _inherit_from: sc_bench_resources_server
