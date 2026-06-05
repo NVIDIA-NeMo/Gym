@@ -1,0 +1,4 @@
+[run]
+omit =
+    */evaluation.py
+    */get_results.py
