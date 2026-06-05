@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Bunsen Chemistry Taxonomy labels for BunsenChem."""
+"""Bunsen Chemistry Taxonomy labels for BunsenBench Chemistry MCQ."""
 
 from __future__ import annotations
 

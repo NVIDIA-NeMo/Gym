@@ -1,6 +1,6 @@
-# BunsenChem Benchmark
+# BunsenBench Chemistry MCQ Benchmark
 
-BunsenChem is the public Gym version of the BunsenBench chemistry MCQ benchmark.
+BunsenBench Chemistry MCQ is the public Gym version of the BunsenBench chemistry MCQ benchmark.
 The source manifest is hosted in the upstream Hugging Face dataset
 [`nvidia/bunsen-bench`](https://huggingface.co/datasets/nvidia/bunsen-bench).
 The `chemistry_mcq` config stores source locators, pinned Hugging Face revisions,
@@ -17,7 +17,7 @@ Preparation loads the `chemistry_mcq` config from a pinned
 `nvidia/bunsen-bench` commit, downloads that dataset's `tools/reconstitute.py`
 helper, and uses it to fetch the pinned upstream sources and validate
 source/canonical problem hashes from the manifest. Gym then writes the generated runnable JSONL to
-`benchmarks/bunsen_chem/data/bunsen_chem_benchmark.jsonl`.
+`benchmarks/bunsen_chem/data/bunsenbench_chemistry_mcq_benchmark.jsonl`.
 Generated JSONL under `data/` is gitignored; rerun preparation to recreate it.
 
 Access to `nvidia/bunsen-bench` and GPQA-Diamond can require Hugging Face account

@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Generate synthetic smoke-test example.jsonl for BunsenChem.
+"""Generate synthetic smoke-test example.jsonl for BunsenBench Chemistry MCQ.
 
 These rows are not redistributed benchmark-source questions. They are built from
 the same materialize + prompt pipeline used for the full benchmark.
@@ -30,7 +30,7 @@ DATA_DIR = SERVER_DIR / "data"
 EXAMPLE_FPATH = DATA_DIR / "example.jsonl"
 ROLLOUTS_FPATH = DATA_DIR / "example_rollouts.jsonl"
 PROMPT_CONFIG_FPATH = SERVER_DIR.parent.parent / "benchmarks" / "bunsen_chem" / "prompts" / "default.yaml"
-AGENT_REF = {"type": "responses_api_agents", "name": "bunsen_chem_simple_agent"}
+AGENT_REF = {"type": "responses_api_agents", "name": "bunsenbench_chemistry_mcq_simple_agent"}
 
 COMMITTED_FIELDS = frozenset(
     {"responses_create_params", "options", "expected_answer", "uuid", "metadata", "agent_ref"}

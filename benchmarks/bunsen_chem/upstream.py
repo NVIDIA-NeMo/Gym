@@ -48,7 +48,7 @@ def reconstitute_upstream_dataset(
     verify_hashes: bool = True,
     verbose: bool = True,
 ) -> Any:
-    """Load and reconstitute BunsenChem rows using the upstream helper."""
+    """Load and reconstitute BunsenBench Chemistry MCQ rows using the upstream helper."""
     resolved_token = get_hf_token(token)
     builder = load_manifest_builder(token=resolved_token)
     metadata = validate_config_metadata(builder)
