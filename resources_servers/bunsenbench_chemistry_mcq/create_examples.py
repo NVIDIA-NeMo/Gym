@@ -29,16 +29,23 @@ SERVER_DIR = Path(__file__).resolve().parent
 DATA_DIR = SERVER_DIR / "data"
 EXAMPLE_FPATH = DATA_DIR / "example.jsonl"
 ROLLOUTS_FPATH = DATA_DIR / "example_rollouts.jsonl"
-PROMPT_CONFIG_FPATH = SERVER_DIR.parent.parent / "benchmarks" / "bunsenbench_chemistry_mcq" / "prompts" / "default.yaml"
+PROMPT_CONFIG_FPATH = (
+    SERVER_DIR.parent.parent / "benchmarks" / "bunsenbench_chemistry_mcq" / "prompts" / "default.yaml"
+)
 AGENT_REF = {"type": "responses_api_agents", "name": "bunsenbench_chemistry_mcq_simple_agent"}
 
 COMMITTED_FIELDS = frozenset(
     {"responses_create_params", "options", "expected_answer", "uuid", "metadata", "agent_ref"}
 )
 
+SYNTHETIC_CONFIG_METADATA = {
+    **EXPECTED_CONFIG_METADATA,
+    "taxonomy_version": "bct_gpt55_low_v1",
+}
+
 SYNTHETIC_RECONSTITUTED_ROWS: list[dict] = [
     {
-        **EXPECTED_CONFIG_METADATA,
+        **SYNTHETIC_CONFIG_METADATA,
         "bunsen_id": "bunsen:example:1",
         "source": "example",
         "source_dataset": "synthetic",
@@ -58,7 +65,7 @@ SYNTHETIC_RECONSTITUTED_ROWS: list[dict] = [
         "answer_index": 0,
     },
     {
-        **EXPECTED_CONFIG_METADATA,
+        **SYNTHETIC_CONFIG_METADATA,
         "bunsen_id": "bunsen:example:2",
         "source": "example",
         "source_dataset": "synthetic",
@@ -78,7 +85,7 @@ SYNTHETIC_RECONSTITUTED_ROWS: list[dict] = [
         "answer_index": 0,
     },
     {
-        **EXPECTED_CONFIG_METADATA,
+        **SYNTHETIC_CONFIG_METADATA,
         "bunsen_id": "bunsen:example:3",
         "source": "example",
         "source_dataset": "synthetic",
@@ -98,7 +105,7 @@ SYNTHETIC_RECONSTITUTED_ROWS: list[dict] = [
         "answer_index": 1,
     },
     {
-        **EXPECTED_CONFIG_METADATA,
+        **SYNTHETIC_CONFIG_METADATA,
         "bunsen_id": "bunsen:example:4",
         "source": "example",
         "source_dataset": "synthetic",
@@ -118,7 +125,7 @@ SYNTHETIC_RECONSTITUTED_ROWS: list[dict] = [
         "answer_index": 0,
     },
     {
-        **EXPECTED_CONFIG_METADATA,
+        **SYNTHETIC_CONFIG_METADATA,
         "bunsen_id": "bunsen:example:5",
         "source": "example",
         "source_dataset": "synthetic",
@@ -217,6 +224,7 @@ async def build_example_rollouts(example_rows: list[dict]) -> list[dict]:
                 "reward": verified.reward,
                 "extracted_answer": verified.extracted_answer,
                 "no_answer": verified.no_answer,
+                "error_mode": verified.error_mode,
                 "source": verified.source,
                 "bct_field": verified.bct_field,
                 "bct_subfield": verified.bct_subfield,

@@ -11,6 +11,7 @@ import random
 from pathlib import Path
 from typing import Iterable
 
+
 PROMPT_VERSION = "bunsen_chem_mcq_xml_choice_v1"
 OPTION_LETTERS = tuple("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
 PUBLIC_METADATA_FIELDS = {

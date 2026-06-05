@@ -13,23 +13,39 @@ from resources_servers.bunsenbench_chemistry_mcq.app import (
     BunsenChemResourcesServer,
     BunsenChemResourcesServerConfig,
     BunsenChemVerifyRequest,
+    classify_error_mode,
     extract_bunsen_answer,
     normalize_chemistry_text,
 )
 
 
-def _response(text: str) -> NeMoGymResponse:
+def _response(
+    text: str,
+    *,
+    status: str = "completed",
+    response_status: str | None = None,
+    incomplete_reason: str | None = None,
+    refusal: str | None = None,
+) -> NeMoGymResponse:
+    content: list[dict] = []
+    if text:
+        content.append({"annotations": [], "text": text, "type": "output_text"})
+    if refusal is not None:
+        content.append({"refusal": refusal, "type": "refusal"})
+    incomplete_details = {"reason": incomplete_reason} if incomplete_reason is not None else None
     return NeMoGymResponse(
         id="resp_test",
         created_at=0.0,
         model="dummy",
         object="response",
+        status=response_status,
+        incomplete_details=incomplete_details,
         output=[
             {
                 "id": "msg_test",
-                "content": [{"annotations": [], "text": text, "type": "output_text"}],
+                "content": content,
                 "role": "assistant",
-                "status": "completed",
+                "status": status,
                 "type": "message",
             }
         ],
@@ -112,6 +128,52 @@ class TestApp:
 
         assert extract_bunsen_answer(f"<choice>{option_a}</choice>", options, allowed) == "A"
         assert extract_bunsen_answer(f"<choice>{option_b}</choice>", options, allowed) == "B"
+
+    def test_classify_error_mode_correct_and_wrong(self) -> None:
+        assert classify_error_mode(_response("<choice>CO2</choice>"), "<choice>CO2</choice>", "B", "B") == "correct"
+        assert (
+            classify_error_mode(_response("<choice>H2O</choice>"), "<choice>H2O</choice>", "A", "B") == "wrong_answer"
+        )
+
+    def test_classify_error_mode_refusal(self) -> None:
+        text = "I'm sorry, but I can't help with that."
+        assert classify_error_mode(_response(text), text, None, "B") == "refusal"
+        # Refusal content type with no output text still classifies as a refusal.
+        refusal_resp = _response("", refusal="I cannot assist with this request.")
+        assert classify_error_mode(refusal_resp, "", None, "B") == "refusal"
+
+    def test_classify_error_mode_early_termination(self) -> None:
+        unclosed = "<think>Let me reason about this step by step and consider"
+        assert classify_error_mode(_response(unclosed), unclosed, None, "B") == "early_termination"
+
+        truncated = _response("Some partial reasoning", incomplete_reason="max_output_tokens")
+        assert classify_error_mode(truncated, "Some partial reasoning", None, "B") == "early_termination"
+
+        incomplete_status = _response("Some partial reasoning", status="incomplete")
+        assert classify_error_mode(incomplete_status, "Some partial reasoning", None, "B") == "early_termination"
+
+    def test_classify_error_mode_malformed_choice(self) -> None:
+        text = "<choice>none of the above</choice>"
+        assert classify_error_mode(_response(text), text, None, "B") == "malformed_choice"
+
+    def test_classify_error_mode_format_violation(self) -> None:
+        text = "I think the answer relates to carbon but I'm not stating it in the required form."
+        assert classify_error_mode(_response(text), text, None, "B") == "format_violation"
+
+    async def test_verify_records_error_mode(self) -> None:
+        server = BunsenChemResourcesServer(
+            config=BunsenChemResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name=""),
+            server_client=MagicMock(spec=ServerClient),
+        )
+
+        correct = await server.verify(_request("<choice>CO2</choice>"))
+        assert correct.error_mode == "correct"
+
+        wrong = await server.verify(_request("<choice>H2O</choice>"))
+        assert wrong.error_mode == "wrong_answer"
+
+        malformed = await server.verify(_request("<choice>maybe carbon dioxide?</choice>"))
+        assert malformed.error_mode == "malformed_choice"
 
     async def test_verify_preserves_group_metadata(self) -> None:
         server = BunsenChemResourcesServer(
@@ -221,6 +283,29 @@ class TestApp:
         assert metrics["by_bct_field/physical/pass@1/accuracy"] == pytest.approx(100.0)
         assert metrics["by_bct_subfield/organic/structure/pass@1/accuracy"] == pytest.approx(50.0)
         assert result.key_metrics["pass@1/accuracy"] == pytest.approx(75.0)
+
+    async def test_aggregate_metrics_report_error_mode_breakdown(self) -> None:
+        server = BunsenChemResourcesServer(
+            config=BunsenChemResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name=""),
+            server_client=MagicMock(spec=ServerClient),
+        )
+        responses = [
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0, "error_mode": "correct"},
+            {TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 0.0, "error_mode": "wrong_answer"},
+            {TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 0.0, "error_mode": "refusal"},
+            {TASK_INDEX_KEY_NAME: 3, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 0.0, "error_mode": "early_termination"},
+        ]
+
+        result = await server.aggregate_metrics(AggregateMetricsRequest(verify_responses=responses))
+        metrics = result.agent_metrics
+
+        assert metrics["error_modes/correct"] == pytest.approx(25.0)
+        assert metrics["error_modes/wrong_answer"] == pytest.approx(25.0)
+        assert metrics["error_modes/refusal"] == pytest.approx(25.0)
+        assert metrics["error_modes/early_termination"] == pytest.approx(25.0)
+        assert metrics["error_modes/malformed_choice"] == pytest.approx(0.0)
+        assert metrics["error_modes/refusal/count"] == pytest.approx(1.0)
+        assert result.key_metrics["error_modes/refusal"] == pytest.approx(25.0)
 
     async def test_aggregate_metrics_bct_subfields_include_parent_field(self) -> None:
         server = BunsenChemResourcesServer(

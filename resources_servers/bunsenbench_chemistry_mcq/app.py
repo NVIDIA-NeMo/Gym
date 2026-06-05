@@ -37,6 +37,7 @@ class BunsenChemVerifyResponse(MCQAVerifyResponse):
     bunsen_id: Optional[str] = None
     choices: Optional[list[str | dict[str, Any]]] = None
     no_answer: bool
+    error_mode: Optional[str] = None
     source: Optional[str] = None
     bct_field: Optional[str] = None
     bct_subfield: Optional[str] = None
@@ -55,6 +56,30 @@ XML_ANSWER_PATTERN = re.compile(
     re.I | re.S,
 )
 CHOICES_BLOCK_PATTERN = re.compile(r"<\s*choices\b[^>]*>.*?<\s*/\s*choices\s*>", re.I | re.S)
+CHOICE_TAG_PATTERN = re.compile(r"<\s*choice\b[^>]*>\s*(.*?)\s*<\s*/\s*choice\s*>", re.I | re.S)
+THINK_OPEN_PATTERN = re.compile(r"<\s*think\b[^>]*>", re.I)
+THINK_CLOSE_PATTERN = re.compile(r"<\s*/\s*think\s*>", re.I)
+REFUSAL_PATTERN = re.compile(
+    r"(?i)(?:"
+    r"i\s*(?:'|’)?\s*m\s+sorry[, ]+(?:but\s+)?i\s+(?:can(?:'|’)?t|cannot|am\s+unable|won(?:'|’)?t)"
+    r"|i\s+(?:can(?:'|’)?t|cannot)\s+(?:help|assist|comply|provide|answer|do\s+that|continue)"
+    r"|i\s+am\s+(?:not\s+able|unable)\s+to\s+(?:help|assist|comply|provide|answer)"
+    r"|i\s+won(?:'|’)?t\s+be\s+able\s+to\s+(?:help|assist|provide|answer)"
+    r"|as\s+an\s+ai(?:\s+language)?\s+model[, ]+i"
+    r"|i\s+(?:must|have\s+to|will\s+have\s+to)\s+(?:decline|refuse)"
+    r"|i\s+do\s+not\s+feel\s+comfortable"
+    r")"
+)
+
+# Ordered, mutually exclusive classification buckets for every rollout.
+ERROR_MODES: tuple[str, ...] = (
+    "correct",
+    "wrong_answer",
+    "refusal",
+    "early_termination",
+    "malformed_choice",
+    "format_violation",
+)
 
 SUBSCRIPT_TRANSLATION = str.maketrans(
     {
@@ -110,6 +135,7 @@ class BunsenChemResourcesServer(MCQAResourcesServer):
         for group_key in ("source", "bct_field"):
             metrics.update(_grouped_metrics(tasks, group_key, f"by_{group_key}"))
         metrics.update(_grouped_bct_subfield_metrics(tasks))
+        metrics.update(_error_mode_metrics(tasks))
         return metrics
 
     def get_key_metrics(self, agent_metrics):
@@ -119,6 +145,10 @@ class BunsenChemResourcesServer(MCQAResourcesServer):
             key["pass@1/accuracy"] = agent_metrics["pass@1/accuracy"]
         if "pass@1/no_answer" in agent_metrics:
             key["pass@1/no_answer"] = agent_metrics["pass@1/no_answer"]
+        for mode in ERROR_MODES:
+            metric_key = f"error_modes/{mode}"
+            if metric_key in agent_metrics:
+                key[metric_key] = agent_metrics[metric_key]
         return key
 
     async def verify(self, body: BunsenChemVerifyRequest) -> BunsenChemVerifyResponse:
@@ -128,13 +158,15 @@ class BunsenChemResourcesServer(MCQAResourcesServer):
         if len(gold) == 1 and gold.isalpha():
             allowed_letters.add(gold)
 
-        text = body.response.output_text.strip()
+        raw_text = body.response.output_text or ""
+        text = raw_text.strip()
         pred: Optional[str] = None
 
         if text:
             pred = extract_bunsen_answer(text, options, allowed_letters)
 
         reward = 1.0 if pred is not None and pred == gold else 0.0
+        error_mode = classify_error_mode(body.response, raw_text, pred, gold)
 
         response_payload = body.model_dump(exclude={"expected_answer", "extracted_answer"})
         response_payload.update(
@@ -143,6 +175,7 @@ class BunsenChemResourcesServer(MCQAResourcesServer):
                 "expected_answer": gold,
                 "extracted_answer": pred,
                 "no_answer": pred is None,
+                "error_mode": error_mode,
                 "bunsen_id": _metadata_value(body, "bunsen_id"),
                 "source": _metadata_value(body, "source"),
                 "bct_field": _metadata_value(body, "bct_field"),
@@ -171,6 +204,77 @@ def extract_bunsen_answer(text: str, options: list[dict[str, str]], allowed_lett
             return parsed
 
     return None
+
+
+def classify_error_mode(response: Any, text: str, pred: Optional[str], gold: str) -> str:
+    """Classify a rollout into a single, mutually exclusive error mode.
+
+    The buckets are diagnostic: ``correct``/``wrong_answer`` cover responses where we
+    could identify the model's choice, while the remaining buckets explain *why* no
+    valid choice was recovered (refusal, truncated/early termination, a ``<choice>``
+    tag whose content matched nothing, or a response that ignored the format entirely).
+    """
+    if pred is not None:
+        return "correct" if pred == gold else "wrong_answer"
+
+    # No parseable answer below. Explicit API-level refusals are the most definitive.
+    if _has_refusal_content(response):
+        return "refusal"
+
+    # Truncation / unfinished generation: the model never reached a final choice.
+    if _is_truncated(response) or _has_unclosed_think(text):
+        return "early_termination"
+
+    if REFUSAL_PATTERN.search(text):
+        return "refusal"
+
+    # A well-formed <choice> tag was emitted, but its content matched no option.
+    if _choice_tag_present(text):
+        return "malformed_choice"
+
+    # Anything else: no recognizable answer and the required format was not followed.
+    return "format_violation"
+
+
+def _has_refusal_content(response: Any) -> bool:
+    for item in getattr(response, "output", None) or []:
+        content = getattr(item, "content", None)
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if getattr(part, "type", None) == "refusal" or (isinstance(part, dict) and part.get("type") == "refusal"):
+                return True
+    return False
+
+
+def _is_truncated(response: Any) -> bool:
+    if getattr(response, "status", None) == "incomplete":
+        return True
+    details = getattr(response, "incomplete_details", None)
+    reason = None
+    if isinstance(details, dict):
+        reason = details.get("reason")
+    elif details is not None:
+        reason = getattr(details, "reason", None)
+    if reason == "max_output_tokens":
+        return True
+    for item in getattr(response, "output", None) or []:
+        status = item.get("status") if isinstance(item, dict) else getattr(item, "status", None)
+        if status == "incomplete":
+            return True
+    return False
+
+
+def _has_unclosed_think(text: str) -> bool:
+    return len(THINK_OPEN_PATTERN.findall(text)) > len(THINK_CLOSE_PATTERN.findall(text))
+
+
+def _choice_tag_present(text: str) -> bool:
+    choices_spans = [match.span() for match in CHOICES_BLOCK_PATTERN.finditer(text)]
+    for match in CHOICE_TAG_PATTERN.finditer(text):
+        if not any(start <= match.start() < end for start, end in choices_spans):
+            return True
+    return False
 
 
 def _answer_candidates(text: str) -> list[tuple[int, str]]:
@@ -402,6 +506,32 @@ def _grouped_bct_subfield_metrics(tasks: list[list[dict[str, Any]]]) -> dict[str
             if metric_key != "per_sample_aggregate":
                 metrics[f"by_bct_subfield/{value}/{metric_key}"] = metric_value
     return metrics
+
+
+def _error_mode_metrics(tasks: list[list[dict[str, Any]]]) -> dict[str, float]:
+    counts: dict[str, int] = {mode: 0 for mode in ERROR_MODES}
+    total = 0
+    for rollouts in tasks:
+        for rollout in rollouts:
+            mode = rollout.get("error_mode") or _fallback_error_mode(rollout)
+            counts[mode] = counts.get(mode, 0) + 1
+            total += 1
+
+    metrics: dict[str, float] = {}
+    for mode in counts:
+        count = counts[mode]
+        metrics[f"error_modes/{mode}/count"] = float(count)
+        metrics[f"error_modes/{mode}"] = (100.0 * count / total) if total else 0.0
+    return metrics
+
+
+def _fallback_error_mode(rollout: dict[str, Any]) -> str:
+    """Best-effort mode for rollouts produced before error_mode was recorded."""
+    if rollout.get("reward"):
+        return "correct"
+    if rollout.get("extracted_answer") is not None:
+        return "wrong_answer"
+    return "format_violation"
 
 
 def _metric_segment(value: Any) -> str:

@@ -11,6 +11,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any
 
+
 BUNSEN_BENCH_REPO_ID = "nvidia/bunsen-bench"
 BUNSEN_BENCH_CONFIG_NAME = "chemistry_mcq"
 BUNSEN_BENCH_REPO_TYPE = "dataset"
