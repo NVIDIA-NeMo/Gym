@@ -90,6 +90,17 @@ The standard `/aggregate_metrics` framework hook calls `BunsenChemResourcesServe
 
 Metric group segments are slugged for stable keys.
 
+### Error Mode Breakdown
+
+Beyond accuracy, each rollout is classified into exactly one mutually exclusive error mode (stored on the verify response as `error_mode` and rolled up under `error_modes/<mode>` as a percentage of all rollouts, with `error_modes/<mode>/count` raw counts):
+
+- `correct` — the extracted choice matched the gold answer.
+- `wrong_answer` — a valid choice was identified but it was incorrect (a plain wrong answer).
+- `refusal` — the model declined to answer (refusal content type or phrases like "I'm sorry, I can't…").
+- `early_termination` — generation was cut off before a choice was produced (truncated/`incomplete` response, `max_output_tokens`, or an unclosed `<think>` block).
+- `malformed_choice` — a well-formed `<choice>…</choice>` tag was emitted but its content matched no option.
+- `format_violation` — no answer could be recovered and the required `<choice>` format was not followed.
+
 ## Example Usage
 
 ```bash
