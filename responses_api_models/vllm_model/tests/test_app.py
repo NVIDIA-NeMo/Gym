@@ -757,10 +757,7 @@ class TestApp:
             return_token_id_information=False,
             uses_reasoning_parser=False,
             max_input_tokens=10,
-            extra_body={
-                "bad_words": ["<image>"],
-                "mm_processor_kwargs": {"precomputed_imgs_sizes": [[128, 256]]},
-            },
+            extra_body={"bad_words": ["<image>"]},
         )
         get_global_config_dict_mock = MagicMock()
         get_global_config_dict_mock.return_value = dict()
@@ -806,13 +803,10 @@ class TestApp:
         )
         assert response.status_code == 200
         assert response.json()["id"] == "chtcmpl-clamped"
-        assert mock_client.create_tokenize.await_args.kwargs["mm_processor_kwargs"] == {
-            "precomputed_imgs_sizes": [[128, 256]]
-        }
         assert "bad_words" not in mock_client.create_tokenize.await_args.kwargs
         assert mock_client.create_chat_completion.await_args.kwargs["max_tokens"] == 2
 
-    def test_responses_return_token_id_information_uses_native_vllm_token_ids(
+    def test_responses_return_token_id_information_uses_tokenize_prompt_ids(
         self,
         monkeypatch: MonkeyPatch,
     ):
@@ -872,7 +866,7 @@ class TestApp:
         mock_client.create_chat_completion = AsyncMock(
             side_effect=mock_create_chat_completion
         )
-        mock_client.create_tokenize = AsyncMock()
+        mock_client.create_tokenize = AsyncMock(return_value={"tokens": [1, 2, 3]})
         server._clients = [mock_client]
 
         client = TestClient(app)
@@ -894,12 +888,12 @@ class TestApp:
         assert response.status_code == 200
         assert captured_kwargs["logprobs"] is True
         assert captured_kwargs["return_tokens_as_token_ids"] is True
-        assert captured_kwargs["return_token_ids"] is True
-        mock_client.create_tokenize.assert_not_awaited()
+        assert "return_token_ids" not in captured_kwargs
+        mock_client.create_tokenize.assert_awaited()
 
         output_item = response.json()["output"][0]
         assert output_item["prompt_token_ids"] == [1, 2, 3]
-        assert output_item["generation_token_ids"] == [41, 42]
+        assert output_item["generation_token_ids"] == [999, 998]
         assert output_item["generation_log_probs"] == [-0.1, -0.2]
 
     def test_responses_multistep(self, monkeypatch: MonkeyPatch):

@@ -160,7 +160,7 @@ class VLLMModel(SimpleResponsesAPIModel):
     @staticmethod
     def _get_tokenize_body_dict(body_dict: Dict[str, Any]) -> Dict[str, Any]:
         tokenize_body_dict = {}
-        for key in ("model", "messages", "tools", "chat_template_kwargs", "mm_processor_kwargs"):
+        for key in ("model", "messages", "tools", "chat_template_kwargs"):
             if key in body_dict:
                 tokenize_body_dict[key] = body_dict[key]
         return tokenize_body_dict
@@ -317,11 +317,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         if self.config.return_token_id_information:
             body_dict |= dict(
                 logprobs=True,
-                # Typically passed via OpenAI client extra_body.
                 return_tokens_as_token_ids=True,
-                # TODO add this when NeMo RL upgrades to vLLM 0.10.2 support for prompt token ids
-                # For prompt and generation token IDs
-                # return_token_ids=True,
                 # For prompt token IDs
                 # prompt_logprobs=0,
             )
@@ -477,37 +473,20 @@ class VLLMModel(SimpleResponsesAPIModel):
             log_probs = (choice_dict.get("logprobs") or {}).get("content") or []
             generation_log_probs = [log_prob["logprob"] for log_prob in log_probs]
 
-            """
-            START TODO remove this when NeMo RL upgrades to vLLM 0.10.2 support for prompt token ids
-            """
-            # Looks like `"token_id:151667"`
-            generation_token_ids = [log_prob["token"].removeprefix("token_id:") for log_prob in log_probs]
+            # Looks like `"token_id:151667"` when
+            # return_tokens_as_token_ids=True.
+            generation_token_ids = [
+                log_prob["token"].removeprefix("token_id:")
+                for log_prob in log_probs
+            ]
 
-            # The tokenize endpoint doesn't accept any sampling parameters
-            # The only relevant params are model, messages, and tools.
-            #
-            # IMPORTANT: pass through chat-template knobs (e.g. enable_thinking)
-            # when tokenizing, otherwise `prompt_token_ids` (and therefore logged
-            # `prompt_str`) can be built with different chat template settings than
-            # the actual generation request.
-            tokenize_body_dict = dict()
-            for key in ("model", "messages", "tools", "chat_template_kwargs"):
-                if key in body_dict:
-                    tokenize_body_dict[key] = body_dict[key]
-
-            # The base url has /v1 at the end but vLLM's tokenize endpoint does not have v1, hence the ..
-            tokenize_response = await client.create_tokenize(**tokenize_body_dict)
-            """
-            END
-            """
+            tokenize_response = await self._get_tokenize_response(client, body_dict)
+            prompt_token_ids = tokenize_response["tokens"]
 
             message_dict = choice_dict["message"]
             message_dict.update(
                 dict(
-                    # TODO add this when NeMo RL upgrades to vLLM 0.10.2 support for prompt token ids
-                    # prompt_token_ids=chat_completion_dict["prompt_token_ids"],
-                    prompt_token_ids=tokenize_response["tokens"],
-                    # generation_token_ids=choice_dict["token_ids"],
+                    prompt_token_ids=prompt_token_ids,
                     generation_token_ids=generation_token_ids,
                     generation_log_probs=generation_log_probs,
                 )
@@ -515,9 +494,8 @@ class VLLMModel(SimpleResponsesAPIModel):
 
             # Clean the duplicated information
             choice_dict.pop("logprobs")
-            # TODO add this when NeMo RL upgrades to vLLM 0.10.2 support for prompt token ids
-            # chat_completion_dict.pop("prompt_token_ids")
-            # choice_dict.pop("token_ids")
+            chat_completion_dict.pop("prompt_token_ids", None)
+            choice_dict.pop("token_ids", None)
 
         return NeMoGymChatCompletion.model_validate(chat_completion_dict)
 
