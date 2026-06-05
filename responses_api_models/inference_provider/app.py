@@ -65,7 +65,10 @@ class InferenceProvider(SimpleResponsesAPIModel):
             base_url=self.config.base_url,
             api_key=self.config.api_key,
         )
-        self._converter = ResponsesConverter(return_token_id_information=False)
+        self._converter = ResponsesConverter(
+            return_token_id_information=False,
+            uses_reasoning_parser=self.config.uses_reasoning_parser,
+        )
         self._semaphore = Semaphore(self.config.num_concurrent_requests)
         return super().model_post_init(context)
 

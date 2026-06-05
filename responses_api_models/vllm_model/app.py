@@ -94,6 +94,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         """
         return VLLMConverter(
             return_token_id_information=self.config.return_token_id_information,
+            uses_reasoning_parser=self.config.uses_reasoning_parser,
         )
 
     def model_post_init(self, context):

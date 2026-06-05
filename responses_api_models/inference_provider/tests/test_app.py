@@ -350,7 +350,7 @@ class TestResponses:
         assert function_calls[0]["call_id"] == "call_abc123"
 
     async def test_responses_with_reasoning(self, monkeypatch: MonkeyPatch) -> None:
-        server = _make_server()
+        server = _make_server(uses_reasoning_parser=True)
         app = server.setup_webserver()
         client = TestClient(app)
 
@@ -377,6 +377,36 @@ class TestResponses:
         assert reasoning_items[0]["summary"][0]["text"] == "Let me reason about this..."
         assert len(message_items) == 1
         assert message_items[0]["content"][0]["text"] == "The answer is 42."
+
+    async def test_responses_without_reasoning_parser_keeps_think_tags_inline(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        server = _make_server(uses_reasoning_parser=False)
+        app = server.setup_webserver()
+        client = TestClient(app)
+
+        monkeypatch.setattr("responses_api_models.inference_provider.app.time", lambda: FIXED_TIME)
+        monkeypatch.setattr("responses_api_models.inference_provider.app.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
+
+        mock_data = _mock_chat_response(content="<think>Let me reason about this...</think>The answer is 42.")
+
+        async def mock_create_chat(**kwargs):
+            return mock_data
+
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_chat_completion = AsyncMock(side_effect=mock_create_chat)
+
+        response = client.post("/v1/responses", json={"input": "What is 6*7?"})
+        assert response.status_code == 200
+        data = response.json()
+
+        reasoning_items = [o for o in data["output"] if o["type"] == "reasoning"]
+        message_items = [o for o in data["output"] if o["type"] == "message"]
+
+        assert len(reasoning_items) == 0
+        assert len(message_items) == 1
+        assert message_items[0]["content"][0]["text"] == "<think>Let me reason about this...</think>The answer is 42."
 
     async def test_responses_with_usage(self, monkeypatch: MonkeyPatch) -> None:
         server = _make_server()

@@ -91,6 +91,7 @@ class ResponsesConverter(BaseModel):
     """Converts between OpenAI Responses API and Chat Completions API formats."""
 
     return_token_id_information: bool
+    uses_reasoning_parser: bool = True
 
     THINK_TAG_PATTERN: ClassVar = re.compile(r"<think>(.*?)</think>", re.DOTALL)
 
@@ -309,7 +310,10 @@ class ResponsesConverter(BaseModel):
         response_output = []
 
         content = message_dict.get("content") or ""
-        reasoning_matches, content = self._extract_reasoning_from_content(content)
+        if self.uses_reasoning_parser:
+            reasoning_matches, content = self._extract_reasoning_from_content(content)
+        else:
+            reasoning_matches = []
         if reasoning_matches:
             reasoning_item = NeMoGymResponseReasoningItem(
                 id=f"rs_{uuid4().hex}",
