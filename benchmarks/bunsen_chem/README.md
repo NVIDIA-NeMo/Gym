@@ -41,3 +41,20 @@ ambiguous, or inaccessible.
 
 ChemBench rows with zero or multiple positive `target_scores` are excluded for
 v0.1.0 because the public verifier uses a single expected answer letter.
+
+## Licensing
+
+Code: Apache 2.0
+
+The benchmark mixes upstream datasets with different licenses. Consult each
+source dataset for redistribution and evaluation terms:
+
+| Source | Typical license |
+|--------|-----------------|
+| MMLU-Redux (chemistry) | MIT |
+| MMLU-Pro (chemistry) | MIT |
+| GPQA-Diamond (chemistry) | MIT |
+| SuperGPQA (chemistry) | Apache 2.0 |
+| ChemBench MCQ configs | MIT |
+
+The benchmark config uses `license: TBD` until composite licensing is finalized.
