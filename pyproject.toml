@@ -448,7 +448,6 @@ omit = [
     "results/*",
     "/tmp/*",
     "benchmarks/*",
-    "nemo_gym/responses_converter.py",
     "environments/*/prepare.py",
 ]
 data_file = "results/.coverage"
