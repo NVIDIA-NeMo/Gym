@@ -11,7 +11,7 @@ import random
 from pathlib import Path
 from typing import Iterable
 
-from benchmarks.bunsen_chem.taxonomy import validate_taxonomy
+from benchmarks.bunsenbench_chemistry_mcq.taxonomy import validate_taxonomy
 
 
 PROMPT_VERSION = "bunsen_chem_mcq_xml_choice_v1"

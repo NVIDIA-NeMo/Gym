@@ -13,12 +13,12 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from benchmarks.bunsen_chem.materialize import materialize_row
-from benchmarks.bunsen_chem.upstream import EXPECTED_CONFIG_METADATA
+from benchmarks.bunsenbench_chemistry_mcq.materialize import materialize_row
+from benchmarks.bunsenbench_chemistry_mcq.upstream import EXPECTED_CONFIG_METADATA
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config
 from nemo_gym.server_utils import ServerClient
-from resources_servers.bunsen_chem.app import (
+from resources_servers.bunsenbench_chemistry_mcq.app import (
     BunsenChemResourcesServer,
     BunsenChemResourcesServerConfig,
     BunsenChemVerifyRequest,
@@ -29,7 +29,7 @@ SERVER_DIR = Path(__file__).resolve().parent
 DATA_DIR = SERVER_DIR / "data"
 EXAMPLE_FPATH = DATA_DIR / "example.jsonl"
 ROLLOUTS_FPATH = DATA_DIR / "example_rollouts.jsonl"
-PROMPT_CONFIG_FPATH = SERVER_DIR.parent.parent / "benchmarks" / "bunsen_chem" / "prompts" / "default.yaml"
+PROMPT_CONFIG_FPATH = SERVER_DIR.parent.parent / "benchmarks" / "bunsenbench_chemistry_mcq" / "prompts" / "default.yaml"
 AGENT_REF = {"type": "responses_api_agents", "name": "bunsenbench_chemistry_mcq_simple_agent"}
 
 COMMITTED_FIELDS = frozenset(

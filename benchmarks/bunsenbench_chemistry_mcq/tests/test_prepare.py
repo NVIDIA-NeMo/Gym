@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for ``benchmarks/bunsen_chem/prepare.py`` and materialization helpers."""
+"""Tests for ``benchmarks/bunsenbench_chemistry_mcq/prepare.py`` and materialization helpers."""
 
 import json
 from pathlib import Path
@@ -8,15 +8,15 @@ from types import SimpleNamespace
 
 import pytest
 
-from benchmarks.bunsen_chem import prepare as prepare_module
-from benchmarks.bunsen_chem import upstream
-from benchmarks.bunsen_chem.materialize import (
+from benchmarks.bunsenbench_chemistry_mcq import prepare as prepare_module
+from benchmarks.bunsenbench_chemistry_mcq import upstream
+from benchmarks.bunsenbench_chemistry_mcq.materialize import (
     PROMPT_VERSION,
     materialize_dataset,
     materialize_row,
     validate_reconstituted_rows,
 )
-from benchmarks.bunsen_chem.taxonomy import BCT_SUBFIELDS, normalize_taxonomy_label
+from benchmarks.bunsenbench_chemistry_mcq.taxonomy import BCT_SUBFIELDS, normalize_taxonomy_label
 
 
 def _row(label: dict[str, str] | None = None) -> dict:

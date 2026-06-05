@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from resources_servers.bunsen_chem.create_examples import AGENT_REF, build_example_rows
+from resources_servers.bunsenbench_chemistry_mcq.create_examples import AGENT_REF, build_example_rows
 
 
 class TestCreateExamples:

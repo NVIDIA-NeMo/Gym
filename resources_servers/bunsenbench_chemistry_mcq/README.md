@@ -6,7 +6,7 @@ BunsenBench Chemistry MCQ verifies chemistry multiple-choice outputs for the pub
 
 - Task type: single-turn MCQ
 - Domain: `knowledge`
-- Prompt format: XML `<choice>` exact-match (see [benchmarks/bunsen_chem/prompts/default.yaml](../../benchmarks/bunsen_chem/prompts/default.yaml))
+- Prompt format: XML `<choice>` exact-match (see [benchmarks/bunsenbench_chemistry_mcq/prompts/default.yaml](../../benchmarks/bunsenbench_chemistry_mcq/prompts/default.yaml))
 
 The examples in `data/example.jsonl` are synthetic. They are not redistributed benchmark-source questions.
 
@@ -16,7 +16,7 @@ Use BunsenBench Chemistry MCQ with:
 
 - `responses_api_agents/simple_agent` via `bunsenbench_chemistry_mcq_simple_agent`
 - `responses_api_models/*` (typically `policy_model` or `openai_model`)
-- `resources_servers/bunsen_chem` (config key: `bunsenbench_chemistry_mcq`)
+- `resources_servers/bunsenbench_chemistry_mcq` (config key: `bunsenbench_chemistry_mcq`)
 
 The server verifies the model response and returns reward `1.0` when the extracted answer letter matches `expected_answer`, else `0.0`.
 
@@ -36,12 +36,12 @@ Each row includes:
 Regenerate with:
 
 ```bash
-python resources_servers/bunsen_chem/create_examples.py
+python resources_servers/bunsenbench_chemistry_mcq/create_examples.py
 ```
 
 ### Full benchmark eval set
 
-The full public benchmark is prepared under [benchmarks/bunsen_chem/](../../benchmarks/bunsen_chem/). See [benchmarks/bunsen_chem/README.md](../../benchmarks/bunsen_chem/README.md) for `ng_prepare_benchmark` and upstream access requirements.
+The full public benchmark is prepared under [benchmarks/bunsenbench_chemistry_mcq/](../../benchmarks/bunsenbench_chemistry_mcq/). See [benchmarks/bunsenbench_chemistry_mcq/README.md](../../benchmarks/bunsenbench_chemistry_mcq/README.md) for `ng_prepare_benchmark` and upstream access requirements.
 
 Benchmark rows are materialized without `responses_create_params.input`; the prompt template is applied at rollout time from `question` and `options_text`.
 
@@ -95,14 +95,14 @@ Metric group segments are slugged for stable keys.
 ```bash
 config_paths="responses_api_agents/simple_agent/configs/simple_agent.yaml,\
 responses_api_models/openai_model/configs/openai_model.yaml,\
-resources_servers/bunsen_chem/configs/bunsenbench_chemistry_mcq.yaml"
+resources_servers/bunsenbench_chemistry_mcq/configs/bunsenbench_chemistry_mcq.yaml"
 
 ng_run "+config_paths=[$config_paths]"
 
 ng_collect_rollouts \
     +agent_name=bunsenbench_chemistry_mcq_simple_agent \
-    +input_jsonl_fpath=resources_servers/bunsen_chem/data/example.jsonl \
-    +output_jsonl_fpath=resources_servers/bunsen_chem/data/example_rollouts.jsonl \
+    +input_jsonl_fpath=resources_servers/bunsenbench_chemistry_mcq/data/example.jsonl \
+    +output_jsonl_fpath=resources_servers/bunsenbench_chemistry_mcq/data/example_rollouts.jsonl \
     +limit=5
 ```
 
@@ -111,11 +111,11 @@ ng_collect_rollouts \
 ## Tests
 
 ```bash
-ng_test +entrypoint=resources_servers/bunsen_chem
+ng_test +entrypoint=resources_servers/bunsenbench_chemistry_mcq
 ```
 
 ## Licensing
 
 Code: Apache 2.0
 
-Benchmark upstream sources use mixed licenses (MMLU-Redux, MMLU-Pro, GPQA-Diamond, SuperGPQA, ChemBench). See [benchmarks/bunsen_chem/README.md](../../benchmarks/bunsen_chem/README.md) for the source list and license notes.
+Benchmark upstream sources use mixed licenses (MMLU-Redux, MMLU-Pro, GPQA-Diamond, SuperGPQA, ChemBench). See [benchmarks/bunsenbench_chemistry_mcq/README.md](../../benchmarks/bunsenbench_chemistry_mcq/README.md) for the source list and license notes.
