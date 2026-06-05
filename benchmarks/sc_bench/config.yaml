@@ -10,7 +10,7 @@ sc_bench_benchmark_resources_server:
     sc_bench:
       data_dir: resources_servers/sc_bench/data/csv
       domain: agent
-      verified: false
+      verified: true
       description: SupChain-Bench supply chain order management tool-use evaluation
       value: Evaluate multi-step tool calling on trade/fulfillment/warehouse queries
 

@@ -55,12 +55,43 @@ ng_collect_rollouts +agent_name=sc_bench_benchmark_simple_agent \
   +output_jsonl_fpath=results/sc_bench_example_rollouts.jsonl \
   +num_repeats=1
 
-# Full benchmark evaluation
+# Full benchmark evaluation (name outputs by model, e.g. gpt-5-mini)
 ng_collect_rollouts +agent_name=sc_bench_benchmark_simple_agent \
   +input_jsonl_fpath=benchmarks/sc_bench/data/sc_bench_benchmark.jsonl \
-  +output_jsonl_fpath=results/sc_bench_rollouts.jsonl \
-  +num_repeats=1
+  +output_jsonl_fpath=results/sc_bench_gpt-5-mini_benchmark.jsonl \
+  +num_repeats=5 \
+  +num_samples_in_parallel=1 \
+  "+responses_create_params={max_output_tokens: 8192}"
+
+# Reward profiling (omit temperature for gpt-5-mini on HUD responses API)
+ng_reward_profile \
+  ++materialized_inputs_jsonl_fpath=results/sc_bench_gpt-5-mini_benchmark_materialized_inputs.jsonl \
+  ++rollouts_jsonl_fpath=results/sc_bench_gpt-5-mini_benchmark.jsonl
+
+python scripts/print_aggregate_results.py \
+  +jsonl_fpath=results/sc_bench_gpt-5-mini_benchmark_reward_profiling.jsonl
 ```
+
+### gpt-5-mini baseline (HUD, 100 tasks × 5 repeats)
+
+**Setup:** `openai_model` → HUD `/v1/responses`, `max_output_tokens: 8192`, no `temperature`, `num_samples_in_parallel: 1`
+
+| Metric | Value |
+| --- | --- |
+| **pass@1** (mean/reward) | **0.726** |
+| **pass@5** (≥1 perfect rollout / task) | **0.820** (82/100 tasks) |
+| mean/line_match_rate | 0.726 |
+| mean/input_tokens | 25,380 |
+| mean/output_tokens | 3,538 |
+| mean/total_tokens | 28,918 |
+| std/reward (per rollout) | 0.446 |
+| mean within-task std (5 repeats) | 0.096 |
+| median within-task std | 0.000 |
+| Tasks: 5/5 pass | 62 |
+| Tasks: mixed | 20 |
+| Tasks: 5/5 fail | 18 |
+
+Artifacts: `results/gpt-5-mini/sc_bench_gpt-5-mini_benchmark*.jsonl`
 
 ## JSONL schema
 
