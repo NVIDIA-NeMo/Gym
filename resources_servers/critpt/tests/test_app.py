@@ -79,15 +79,15 @@ def _make_verify_request(output_text: str, problem_id: str = "1") -> CritPtVerif
 
 
 def _mock_api(api_result: dict):
-    """Patch the module-level request + raise_for_status. Returns the mock_request handle."""
+    """Patch the module-level request(). Returns the mock_request handle."""
     request_patch = patch("resources_servers.critpt.app.request")
-    rfs_patch = patch("resources_servers.critpt.app.raise_for_status", new_callable=AsyncMock)
     mock_request = request_patch.start()
-    rfs_patch.start()
     mock_response = AsyncMock()
+    mock_response.ok = True
+    mock_response.status = 200
     mock_response.json = AsyncMock(return_value=api_result)
     mock_request.return_value = mock_response
-    return mock_request, [request_patch, rfs_patch]
+    return mock_request, [request_patch]
 
 
 def _stop_patches(patches):

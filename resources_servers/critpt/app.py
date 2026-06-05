@@ -71,6 +71,10 @@ class CritPtResourcesServer(SimpleResourcesServer):
         # or creates a new batch if all existing batches already have it. This enables
         # num_repeats > 1: each repeat of a given problem flows into a distinct batch.
         self._batches: list[dict] = []
+        # Monotonic counter of verify() calls received since startup. Surfaced in the
+        # per-verify log line so users tailing the log can read the running total inline
+        # without grepping for line counts.
+        self._total_verify_calls: int = 0
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -109,8 +113,10 @@ class CritPtResourcesServer(SimpleResourcesServer):
 
             target_batch["submissions"][body.problem_id] = submission
             future = target_batch["future"]
+            self._total_verify_calls += 1
             LOG.warning(
-                "CritPt verify: batch %d at %d/%d submissions buffered (problem_id=%s)",
+                "CritPt verify #%d: batch %d at %d/%d submissions buffered (problem_id=%s)",
+                self._total_verify_calls,
                 self._batches.index(target_batch),
                 len(target_batch["submissions"]),
                 self.config.batch_size,
