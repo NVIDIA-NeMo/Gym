@@ -209,10 +209,9 @@ class GlobalConfigDictParser(BaseModel):
             # recursively from another config's `config_paths`.
             if not config_path.exists():
                 raise SystemExit(
-                    f"Config file not found: {config_path}\n"
-                    f"Checked relative to cwd ({Path.cwd()}) and install root ({PARENT_DIR}).\n"
-                    f"Check the `{CONFIG_PATHS_KEY_NAME}` entries (passed via `+{CONFIG_PATHS_KEY_NAME}=[...]` "
-                    f"or referenced from another config)."
+                    f"""Config file not found: {config_path}
+Checked relative to cwd ({Path.cwd()}) and install root ({PARENT_DIR}).
+Check the `{CONFIG_PATHS_KEY_NAME}` entries (passed via `+{CONFIG_PATHS_KEY_NAME}=[...]` or referenced from another config)."""
                 )
 
             extra_config = OmegaConf.load(config_path)
@@ -423,13 +422,13 @@ Duplicate config paths:
         config_paths = merged_config_for_config_paths.get(CONFIG_PATHS_KEY_NAME) or []
         try:
             config_paths = ta.validate_python(config_paths)
-        except ValidationError:
+        except ValidationError as e:
             # A malformed value (e.g. a scalar instead of a list) should explain the
             # expected Hydra syntax rather than surface a raw Pydantic traceback.
             raise SystemExit(
                 f"`+{CONFIG_PATHS_KEY_NAME}` must be a list of config paths, e.g. "
                 f"`+{CONFIG_PATHS_KEY_NAME}=[a.yaml,b.yaml]` (got: {config_paths!r})."
-            )
+            ) from e
 
         config_paths, extra_configs = self.load_extra_config_paths(config_paths)
 
