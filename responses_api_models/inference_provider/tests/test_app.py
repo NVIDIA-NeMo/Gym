@@ -378,9 +378,7 @@ class TestResponses:
         assert len(message_items) == 1
         assert message_items[0]["content"][0]["text"] == "The answer is 42."
 
-    async def test_responses_without_reasoning_parser_keeps_think_tags_inline(
-        self, monkeypatch: MonkeyPatch
-    ) -> None:
+    async def test_responses_without_reasoning_parser_keeps_think_tags_inline(self, monkeypatch: MonkeyPatch) -> None:
         server = _make_server(uses_reasoning_parser=False)
         app = server.setup_webserver()
         client = TestClient(app)
