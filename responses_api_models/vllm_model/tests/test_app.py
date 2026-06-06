@@ -3306,6 +3306,60 @@ class TestVLLMConverter:
         assert captured_kwargs["min_tokens"] == 20
         assert captured_kwargs["new_param"] == "value"
 
+    async def test_chat_completions_tokenize_fallback_forwards_required_prefix_token_ids(self) -> None:
+        config = VLLMModelConfig(
+            host="0.0.0.0",
+            port=8081,
+            base_url="http://api.openai.com/v1",
+            api_key="dummy_key",  # pragma: allowlist secret
+            model="dummy_model",
+            entrypoint="",
+            name="",
+            return_token_id_information=True,
+            uses_reasoning_parser=False,
+        )
+        server = VLLMModel(config=config, server_client=MagicMock(spec=ServerClient))
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(
+            return_value={
+                "id": "chtcmpl",
+                "object": "chat.completion",
+                "created": FIXED_TIME,
+                "model": "dummy_model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": "response"},
+                        "logprobs": {
+                            "content": [
+                                {
+                                    "token": "token_id:123",
+                                    "logprob": -0.1,
+                                    "bytes": [],
+                                    "top_logprobs": [],
+                                }
+                            ]
+                        },
+                    }
+                ],
+            }
+        )
+        mock_client.create_tokenize = AsyncMock(return_value={"tokens": [10, 11, 12]})
+        server._clients = [mock_client]
+
+        body = NeMoGymChatCompletionCreateParamsNonStreaming(
+            messages=[NeMoGymChatCompletionUserMessageParam(role="user", content="hello")],
+            required_prefix_token_ids=[1, 2, 3],
+        )
+
+        response = await server.chat_completions(MagicMock(), body)
+
+        mock_client.create_tokenize.assert_awaited_once()
+        assert mock_client.create_tokenize.await_args.kwargs["required_prefix_token_ids"] == [1, 2, 3]
+        assert response.choices[0].message.prompt_token_ids == [10, 11, 12]
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Audio sidechannel splice (metadata.audio_data → user-message content block)

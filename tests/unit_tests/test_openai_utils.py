@@ -15,7 +15,12 @@
 import pytest
 from pydantic import ValidationError
 
-from nemo_gym.openai_utils import NeMoGymAsyncOpenAI, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.openai_utils import (
+    NeMoGymAsyncOpenAI,
+    NeMoGymChatCompletionCreateParamsNonStreaming,
+    NeMoGymChatCompletionUserMessageParam,
+    NeMoGymResponseCreateParamsNonStreaming,
+)
 
 
 class TestOpenAIUtils:
@@ -37,3 +42,13 @@ class TestNeMoGymResponseCreateParamsNonStreaming:
     def test_unknown_field_still_forbidden(self) -> None:
         with pytest.raises(ValidationError):
             NeMoGymResponseCreateParamsNonStreaming(input="hello", not_a_real_field=1)
+
+
+class TestNeMoGymChatCompletionCreateParamsNonStreaming:
+    def test_required_prefix_token_ids_preserved_in_model_dump(self) -> None:
+        params = NeMoGymChatCompletionCreateParamsNonStreaming(
+            messages=[NeMoGymChatCompletionUserMessageParam(role="user", content="hello")],
+            required_prefix_token_ids=[1, 2, 3],
+        )
+
+        assert params.model_dump(exclude_unset=True)["required_prefix_token_ids"] == [1, 2, 3]

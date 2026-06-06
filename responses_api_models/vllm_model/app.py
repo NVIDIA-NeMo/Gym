@@ -517,8 +517,18 @@ class VLLMModel(SimpleResponsesAPIModel):
             # when tokenizing, otherwise `prompt_token_ids` (and therefore logged
             # `prompt_str`) can be built with different chat template settings than
             # the actual generation request.
+            #
+            # Keep the NeMo-RL prefix-token repair field aligned with generation;
+            # its vLLM OpenAI preprocessing hook applies `_replace_prefix_tokens`.
+            # https://github.com/NVIDIA-NeMo/RL/blob/main/nemo_rl/models/generation/vllm/vllm_worker_async.py
             tokenize_body_dict = dict()
-            for key in ("model", "messages", "tools", "chat_template_kwargs"):
+            for key in (
+                "model",
+                "messages",
+                "tools",
+                "chat_template_kwargs",
+                "required_prefix_token_ids",
+            ):
                 if key in body_dict:
                     tokenize_body_dict[key] = body_dict[key]
 

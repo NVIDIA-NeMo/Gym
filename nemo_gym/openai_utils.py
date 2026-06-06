@@ -433,6 +433,10 @@ class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
     prediction: Optional[ChatCompletionPredictionContentParam] = None
     presence_penalty: Optional[float] = None
     reasoning_effort: Optional[ReasoningEffort] = None
+    # NeMo-RL's vLLM OpenAI preprocessing hook uses `_replace_prefix_tokens`
+    # to splice these exact prior model tokens back into multi-turn prompts:
+    # https://github.com/NVIDIA-NeMo/RL/blob/main/nemo_rl/models/generation/vllm/vllm_worker_async.py
+    required_prefix_token_ids: Optional[List[int]] = None
     response_format: Optional[ResponseFormat] = None
     seed: Optional[int] = None
     service_tier: Optional[Literal["auto", "default", "flex", "scale", "priority"]] = None
