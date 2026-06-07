@@ -14,6 +14,8 @@
 # limitations under the License.
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+from aiohttp import ClientOSError, ServerDisconnectedError
 from pytest import MonkeyPatch, raises
 
 import nemo_gym.global_config
@@ -22,6 +24,7 @@ from nemo_gym.global_config import (
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
 )
 from nemo_gym.server_utils import (
+    MAX_NUM_TRIES,
     BaseServer,
     BaseServerConfig,
     ConnectionError,
@@ -30,7 +33,63 @@ from nemo_gym.server_utils import (
     ServerClient,
     SimpleServer,
     initialize_ray,
+    request,
 )
+
+
+class TestRequest:
+    """Tests for the request() retry logic."""
+
+    @pytest.mark.asyncio
+    async def test_server_disconnected_error_respects_max_retries(self, monkeypatch: MonkeyPatch) -> None:
+        """ServerDisconnectedError must stop retrying after MAX_NUM_TRIES."""
+        mock_client = AsyncMock()
+        mock_client.request = AsyncMock(side_effect=ServerDisconnectedError())
+        monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", lambda: mock_client)
+
+        with pytest.raises(ServerDisconnectedError):
+            await request("GET", "http://fake-url")
+
+        assert mock_client.request.call_count == MAX_NUM_TRIES
+
+    @pytest.mark.asyncio
+    async def test_internal_requests_respect_max_retries(self, monkeypatch: MonkeyPatch) -> None:
+        """_internal=True requests must also stop retrying after MAX_NUM_TRIES."""
+        mock_client = AsyncMock()
+        mock_client.request = AsyncMock(side_effect=RuntimeError("server down"))
+        monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", lambda: mock_client)
+
+        with pytest.raises(RuntimeError, match="server down"):
+            await request("GET", "http://fake-url", _internal=True)
+
+        assert mock_client.request.call_count == MAX_NUM_TRIES
+
+    @pytest.mark.asyncio
+    async def test_client_os_error_respects_max_retries(self, monkeypatch: MonkeyPatch) -> None:
+        """ClientOSError must stop retrying after MAX_NUM_TRIES."""
+        mock_client = AsyncMock()
+        mock_client.request = AsyncMock(side_effect=ClientOSError("connection reset"))
+        monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", lambda: mock_client)
+
+        with pytest.raises(ClientOSError):
+            await request("GET", "http://fake-url")
+
+        assert mock_client.request.call_count == MAX_NUM_TRIES
+
+    @pytest.mark.asyncio
+    async def test_request_succeeds_on_retry(self, monkeypatch: MonkeyPatch) -> None:
+        """Request should return successfully if a retry succeeds within the budget."""
+        mock_response = MagicMock()
+        mock_client = AsyncMock()
+        mock_client.request = AsyncMock(
+            side_effect=[ServerDisconnectedError(), ServerDisconnectedError(), mock_response]
+        )
+        monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", lambda: mock_client)
+
+        result = await request("GET", "http://fake-url")
+
+        assert result is mock_response
+        assert mock_client.request.call_count == 3
 
 
 class TestServerUtils:

@@ -34,7 +34,6 @@ import ray
 import requests
 import uvicorn
 from aiohttp import (
-    ClientOSError,
     ClientResponse,
     ClientResponseError,
     ClientSession,
@@ -187,6 +186,9 @@ async def request(
                     flush=True,
                 )
 
+            if num_tries >= MAX_NUM_TRIES:
+                raise
+            num_tries += 1
             await asyncio.sleep(0.5)
         except ClientOSError:
             global _NUM_CLIENT_OS_ERROR
@@ -199,23 +201,23 @@ async def request(
                     flush=True,
                 )
 
+            if num_tries >= MAX_NUM_TRIES:
+                raise
+            num_tries += 1
             await asyncio.sleep(0.5)
         except Exception as e:
             if _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:
                 print_exc()
 
-            # Don't increment internal since we know we are ok. If we are not, the head server will shut everything down anyways.
             if not _internal:
                 print(
                     f"""Hit an exception while making a request (try {num_tries}): {type(e)}: {e}
 Sleeping 0.5s and retrying...
 """
                 )
-                if num_tries >= MAX_NUM_TRIES:
-                    raise e
-
-                num_tries += 1
-
+            if num_tries >= MAX_NUM_TRIES:
+                raise
+            num_tries += 1
             await asyncio.sleep(0.5)
 
 
