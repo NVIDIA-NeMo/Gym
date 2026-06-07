@@ -1,0 +1,82 @@
+# Multi-turn (refine) SWE-bench wrapper configuration for OpenHands.
+# Same swe_agents package, entrypoint = refine_app.py (SWEBenchRefineWrapper).
+# Adds the per-attempt loop knobs; everything else mirrors swebench_openhands_training.yaml.
+swe_agents_refine_train:
+  responses_api_agents:
+    swe_agents:
+      entrypoint: refine_app.py
+      # Agent framework configuration
+      agent_framework: openhands
+      agent_config: responses_api_agents/swe_agents/configs/oh_config.toml
+      agent_max_turns: 100
+      agent_framework_repo: https://github.com/sdevare-nv/nv-OpenHands.git
+      agent_framework_commit: 25bacbc60f7491e562022d6021e155af6b92fccb  # pragma: allowlist secret
+      # Container configuration
+      container_formatter: ???
+      container_folder_path: null
+      swebench_agent_timeout: 1800
+      swebench_tests_timeout: 1200
+      apptainer_memory_limit_mb: 32768
+      command_exec_timeout: 300
+      dataset_path: ???
+      # --- refine (multi-turn) knobs ---
+      max_attempts: 2
+      carry_over_token_budget: 40000
+      skip_reset_after_first: false  # true → container-persistent refine (needs OpenHands SKIP_INITIAL_RESET)
+      agent_prompt_overrides:
+      # CodeAct agent
+      - user_prompt_template: responses_api_agents/swe_agents/prompts/openhands/user_prompt.j2
+        system_prompt_template: responses_api_agents/swe_agents/prompts/openhands/system_prompt.j2
+        agent_cls: CodeActAgent
+        diversify_tool_names: false
+      model_server:
+        name: policy_model
+        type: responses_api_models
+      datasets:
+        - name: train
+          type: train
+          jsonl_fpath: responses_api_agents/swe_agents/data/swegym_for_sweagent_and_openhands.jsonl
+          gitlab_identifier:
+            dataset_name: swegym_for_sweagent_and_openhands
+            version: 0.0.2
+            artifact_fpath: swegym-converted.jsonl
+          license: Apache 2.0
+        - name: example
+          type: example
+          jsonl_fpath: responses_api_agents/swe_agents/data/example.jsonl
+swe_agents_refine_val:
+  responses_api_agents:
+    swe_agents:
+      entrypoint: refine_app.py
+      agent_framework: openhands
+      agent_config: responses_api_agents/swe_agents/configs/oh_config.toml
+      agent_max_turns: 100
+      agent_framework_repo: https://github.com/sdevare-nv/nv-OpenHands.git
+      agent_framework_commit: 25bacbc60f7491e562022d6021e155af6b92fccb  # pragma: allowlist secret
+      container_formatter: ???
+      container_folder_path: null
+      swebench_agent_timeout: 1800
+      swebench_tests_timeout: 1200
+      apptainer_memory_limit_mb: 32768
+      command_exec_timeout: 300
+      dataset_path: ???
+      max_attempts: 2
+      carry_over_token_budget: 40000
+      skip_reset_after_first: false
+      agent_prompt_overrides:
+      - user_prompt_template: responses_api_agents/swe_agents/prompts/openhands/user_prompt.j2
+        system_prompt_template: responses_api_agents/swe_agents/prompts/openhands/system_prompt.j2
+        agent_cls: CodeActAgent
+        diversify_tool_names: false
+      model_server:
+        name: policy_model
+        type: responses_api_models
+      datasets:
+        - name: validation
+          type: validation
+          jsonl_fpath: responses_api_agents/swe_agents/data/swebench_verified_for_sweagent_and_openhands.jsonl
+          gitlab_identifier:
+            dataset_name: swebench_verified_for_sweagent_and_openhands
+            version: 0.0.1
+            artifact_fpath: swebench_verified_for_sweagent_and_openhands.jsonl
+          license: TBD
