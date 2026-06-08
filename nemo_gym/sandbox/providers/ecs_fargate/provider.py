@@ -199,6 +199,7 @@ def engine_config_from_mapping(config: dict[str, Any]) -> engine.EcsFargateConfi
         codebuild_service_role=pick("codebuild_service_role"),
         codebuild_compute_type=config.get("codebuild_compute_type") or "BUILD_GENERAL1_MEDIUM",
         codebuild_build_timeout=config.get("codebuild_build_timeout") or 60,
+        auto_mirror=config.get("auto_mirror", True),
         dockerhub_secret_arn=pick("dockerhub_secret_arn"),
         efs_filesystem_id=pick("efs_filesystem_id"),
         efs_access_point_id=pick("efs_access_point_id"),

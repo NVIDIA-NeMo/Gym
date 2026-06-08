@@ -195,6 +195,19 @@ def _sanitize_id(value: str, max_len: int = 100) -> str:
     return cleaned[:max_len] or "task"
 
 
+_ECR_IMAGE_REF_RE = re.compile(r"^[0-9]{12}\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com/", re.IGNORECASE)
+
+
+def _is_ecr_image_ref(image: str) -> bool:
+    """True for references already pointing at an ECR registry host.
+
+    Such references (e.g. an image resolved against the configured ECR mirror)
+    must be used as-is; reapplying the ``ecr_repository`` + sanitize rewrite
+    would corrupt the tag.
+    """
+    return bool(_ECR_IMAGE_REF_RE.match(image))
+
+
 @dataclass(frozen=True)
 class SshSidecarConfig:
     """SSH sidecar container configuration.
@@ -249,6 +262,12 @@ class EcsFargateConfig:
     codebuild_build_timeout: int = 60
     dockerhub_secret_arn: str | None = None
     build_parallelism: int = 50
+    # When a public/bare image is routed to the ECR mirror and is not yet
+    # present, pull it into ECR on demand (via CodeBuild) during create. The
+    # mirror normally runs ahead of time, but this keeps create self-healing so
+    # callers never have to pre-stage images manually. Set False to require a
+    # pre-populated mirror and fail fast on a miss.
+    auto_mirror: bool = True
     efs_filesystem_id: str | None = None
     efs_access_point_id: str | None = None
     ssm_project: str = DEFAULT_SSM_PROJECT
@@ -1108,6 +1127,97 @@ class ImageBuilder:
                 cls._inflight_builds.pop(tag, None)
         return image_url
 
+    @classmethod
+    def ensure_mirrored(cls, *, cfg: EcsFargateConfig, src_image: str, force: bool = False) -> str:
+        """Ensure ``src_image`` is present in the ECR mirror, pulling it if not.
+
+        Public/bare image references are served from the ECR mirror tag
+        (``{ecr_repository}:{sanitize(src_image)}``) rather than pulled from
+        their origin registry at task-launch time. This mirrors the image into
+        ECR on demand via a self-contained CodeBuild job (privileged DinD that
+        logs into Docker Hub + ECR, pulls, retags, and pushes), so callers never
+        have to pre-stage images. Concurrent callers for the same tag dedup on a
+        shared in-flight event, exactly like :meth:`ensure_image_built`.
+        """
+        ecr_repo = cfg.ecr_repository
+        if not ecr_repo:
+            raise ValueError("ecr_repository is required to mirror images")
+        tag = _sanitize_id(src_image)
+        image_url = f"{ecr_repo}:{tag}"
+
+        with cls._lock:
+            if tag in cls._inflight_builds:
+                cls._inflight_builds[tag].wait()
+                return image_url
+        if not force and cls.image_exists_in_ecr(ecr_repo, tag, cfg.region):
+            logger.info("ECR mirror hit — skipping pull: %s", image_url)
+            return image_url
+
+        event = threading.Event()
+        with cls._lock:
+            if tag in cls._inflight_builds:
+                cls._inflight_builds[tag].wait()
+                return image_url
+            cls._inflight_builds[tag] = event
+        with cls._lock:
+            if cls._build_semaphore is None or cls._build_semaphore_size != cfg.build_parallelism:
+                cls._build_semaphore = threading.Semaphore(cfg.build_parallelism)
+                cls._build_semaphore_size = cfg.build_parallelism
+        try:
+            cls._build_semaphore.acquire()  # type: ignore[union-attr]
+            try:
+                if not force and cls.image_exists_in_ecr(ecr_repo, tag, cfg.region):
+                    return image_url
+                logger.info("Mirroring %s -> %s via CodeBuild ...", src_image, image_url)
+                buildspec = cls._generate_mirror_buildspec(cfg, src_image, image_url)
+                cls.run_buildspec_via_codebuild(
+                    cfg=cfg,
+                    buildspec=buildspec,
+                    job_label=f"mirror::{tag}",
+                    timeout_minutes=cfg.codebuild_build_timeout,
+                )
+                logger.info("Mirrored OK: %s -> %s", src_image, image_url)
+            finally:
+                cls._build_semaphore.release()  # type: ignore[union-attr]
+        finally:
+            event.set()
+            with cls._lock:
+                cls._inflight_builds.pop(tag, None)
+        return image_url
+
+    @staticmethod
+    def _generate_mirror_buildspec(cfg: EcsFargateConfig, src_image: str, ecr_url: str) -> str:
+        ecr_registry = (cfg.ecr_repository or "").split("/")[0]
+        ecr_region = ImageBuilder._ecr_region(cfg.ecr_repository or "", fallback="$AWS_DEFAULT_REGION")
+        pre_build_cmds = [
+            f"aws ecr get-login-password --region {ecr_region}"
+            f" | docker login --username AWS --password-stdin {ecr_registry}",
+        ]
+        if cfg.dockerhub_secret_arn:
+            pre_build_cmds.append(
+                f"DOCKERHUB_CREDS=$(aws secretsmanager get-secret-value"
+                f" --secret-id {cfg.dockerhub_secret_arn}"
+                f" --query SecretString --output text --region $AWS_DEFAULT_REGION)"
+                f' && DH_USER=$(echo "$DOCKERHUB_CREDS" | python3 -c'
+                """ "import sys,json;print(json.load(sys.stdin)['username'])")"""
+                f' && if [ -n "$DH_USER" ]; then echo "$DOCKERHUB_CREDS" | python3 -c'
+                """ "import sys,json;print(json.load(sys.stdin)['password'])" """
+                f'| docker login -u "$DH_USER" --password-stdin; fi'
+                f' || echo "Docker Hub login failed — continuing without auth"'
+            )
+        pull_cmd = (
+            f"for i in 1 2 3; do docker pull --platform linux/amd64 {src_image} && break; "
+            f'echo "pull failed ($i/3), retry in 30s"; sleep 30; done'
+        )
+        pre_yaml = "\n".join(f"      - {c}" for c in pre_build_cmds)
+        return (
+            "version: 0.2\nphases:\n  pre_build:\n    commands:\n"
+            f"{pre_yaml}\n  build:\n    commands:\n"
+            f"      - {pull_cmd}\n"
+            f"      - docker tag {src_image} {ecr_url}\n"
+            f"  post_build:\n    commands:\n      - docker push {ecr_url}\n"
+        )
+
     @staticmethod
     def _upload_build_context(cfg: EcsFargateConfig, environment_name: str, nonce: str) -> str:
         boto3, *_ = _require_aws_sdks()
@@ -1528,6 +1638,17 @@ class EcsFargateSandbox:
             built_image = ImageBuilder.ensure_image_built(
                 cfg=per_task_cfg, environment_name=_sanitize_id(self._spec.image or "sandbox")
             )
+        elif (
+            cfg.auto_mirror
+            and cfg.ecr_repository
+            and self._spec.image
+            and not cfg.image_template
+            and not _is_ecr_image_ref(self._spec.image)
+        ):
+            # The bare/public image is served from the ECR mirror tag; pull it
+            # into ECR on demand so a missing mirror entry self-heals instead of
+            # failing the task's image pull.
+            ImageBuilder.ensure_mirrored(cfg=cfg, src_image=self._spec.image)
         image = self._resolve_image(built_image)
 
         if not sidecar.private_key_secret_arn or not sidecar.public_key_secret_arn:
@@ -1599,9 +1720,18 @@ class EcsFargateSandbox:
                     f"metadata) instead of ecs.image_template for task-specific "
                     f"placeholders like {{task_id}}."
                 ) from exc
-        if cfg.ecr_repository and self._spec.image:
-            return f"{cfg.ecr_repository}:{_sanitize_id(self._spec.image)}"
         if self._spec.image:
+            # A reference that already points at an ECR registry (e.g. the
+            # configured mirror) is used verbatim — re-prefixing it under
+            # ecr_repository and re-sanitizing would corrupt the tag and make
+            # an existing image unresolvable.
+            if _is_ecr_image_ref(self._spec.image):
+                return self._spec.image
+            # Bare / public names are routed to the ECR mirror tag rather than
+            # pulled directly from their origin registry (avoids Docker Hub
+            # rate limits when many tasks start concurrently).
+            if cfg.ecr_repository:
+                return f"{cfg.ecr_repository}:{_sanitize_id(self._spec.image)}"
             return self._spec.image
         if not cfg.task_definition:
             raise ValueError(

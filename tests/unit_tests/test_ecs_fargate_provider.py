@@ -261,6 +261,108 @@ def test_generate_buildspec_pushes_to_ecr():
     assert f"docker push {cfg.ecr_repository}:tag1" in spec
 
 
+def _resolve_image_for(image, **cfg_overrides):
+    cfg = engine.EcsFargateConfig(region="us-east-1", **cfg_overrides)
+    sandbox = engine.EcsFargateSandbox(engine.SandboxSpec(image=image), ecs_config=cfg)
+    return sandbox._resolve_image()
+
+
+def test_resolve_image_routes_bare_name_to_ecr_mirror():
+    # Bare/public names are mirrored to the ECR tag, never pulled directly.
+    ecr = "463701203462.dkr.ecr.us-east-1.amazonaws.com/harbor-us-east-1"
+    resolved = _resolve_image_for("docker.io/swebench/sweb.eval.x86_64.astropy_1776_astropy-12907:latest", ecr_repository=ecr)
+    assert resolved == f"{ecr}:{engine._sanitize_id('docker.io/swebench/sweb.eval.x86_64.astropy_1776_astropy-12907:latest')}"
+    assert "docker.io" not in resolved.split(":", 1)[1]  # origin registry not used for the pull
+
+
+def test_resolve_image_passes_through_existing_ecr_ref():
+    # A reference already in the ECR mirror is used verbatim (tag preserved,
+    # including the double underscore the sanitizer would otherwise collapse).
+    ecr = "463701203462.dkr.ecr.us-east-1.amazonaws.com/harbor-us-east-1"
+    existing = f"{ecr}:nel-harbor-tasks-swe-bench-astropy-1-1ccf0d50cb33__1ccf0d50"
+    assert _resolve_image_for(existing, ecr_repository=ecr) == existing
+
+
+def test_resolve_image_template_takes_precedence():
+    ecr = "463701203462.dkr.ecr.us-east-1.amazonaws.com/harbor-us-east-1"
+    resolved = _resolve_image_for(
+        "anything", ecr_repository=ecr, image_template="{task_id}-built"
+    )
+    assert resolved == "anything-built"
+
+
+def test_is_ecr_image_ref_matches_only_ecr_hosts():
+    assert engine._is_ecr_image_ref("463701203462.dkr.ecr.us-east-1.amazonaws.com/repo:tag")
+    assert not engine._is_ecr_image_ref("docker.io/swebench/sweb.eval:latest")
+    assert not engine._is_ecr_image_ref("ubuntu:24.04")
+
+
+def test_generate_mirror_buildspec_pulls_tags_and_pushes():
+    cfg = engine.EcsFargateConfig(
+        region="us-east-1",
+        ecr_repository="123.dkr.ecr.us-east-1.amazonaws.com/mirror",
+        dockerhub_secret_arn="arn:aws:secretsmanager:us-east-1:123:secret:dh",
+    )
+    src = "docker.io/swebench/sweb.eval.x86_64.astropy_1776_astropy-12907:latest"
+    ecr_url = f"{cfg.ecr_repository}:{engine._sanitize_id(src)}"
+    spec = engine.ImageBuilder._generate_mirror_buildspec(cfg, src, ecr_url)
+    assert f"docker pull --platform linux/amd64 {src}" in spec
+    assert f"docker tag {src} {ecr_url}" in spec
+    assert f"docker push {ecr_url}" in spec
+    assert "get-login-password" in spec  # ECR login
+    assert "secretsmanager get-secret-value" in spec  # Docker Hub login
+
+
+def test_ensure_mirrored_skips_when_already_present():
+    cfg = engine.EcsFargateConfig(region="us-east-1", ecr_repository="123.dkr.ecr.us-east-1.amazonaws.com/mirror")
+    with (
+        patch.object(engine.ImageBuilder, "image_exists_in_ecr", return_value=True),
+        patch.object(engine.ImageBuilder, "run_buildspec_via_codebuild") as cb,
+    ):
+        url = engine.ImageBuilder.ensure_mirrored(cfg=cfg, src_image="ubuntu:24.04")
+    cb.assert_not_called()
+    assert url == f"{cfg.ecr_repository}:{engine._sanitize_id('ubuntu:24.04')}"
+
+
+def test_ensure_mirrored_runs_codebuild_when_missing():
+    cfg = engine.EcsFargateConfig(region="us-east-1", ecr_repository="123.dkr.ecr.us-east-1.amazonaws.com/mirror")
+    with (
+        patch.object(engine.ImageBuilder, "image_exists_in_ecr", return_value=False),
+        patch.object(engine.ImageBuilder, "run_buildspec_via_codebuild") as cb,
+    ):
+        url = engine.ImageBuilder.ensure_mirrored(cfg=cfg, src_image="ubuntu:24.04")
+    cb.assert_called_once()
+    assert url.endswith(engine._sanitize_id("ubuntu:24.04"))
+
+
+async def test_create_auto_mirrors_missing_public_image():
+    ecr = "123.dkr.ecr.us-east-1.amazonaws.com/mirror"
+    provider = create_provider(_provider_config(ecr_repository=ecr))
+    spec = SandboxSpec(image="docker.io/swebench/sweb.eval:latest")
+    with _mock_engine_start(), patch.object(engine.ImageBuilder, "ensure_mirrored") as m:
+        await provider.create(spec)
+    m.assert_called_once()
+    assert m.call_args.kwargs["src_image"] == "docker.io/swebench/sweb.eval:latest"
+
+
+async def test_create_skips_mirror_for_existing_ecr_ref():
+    ecr = "463701203462.dkr.ecr.us-east-1.amazonaws.com/mirror"
+    provider = create_provider(_provider_config(ecr_repository=ecr))
+    spec = SandboxSpec(image=f"{ecr}:already-mirrored")
+    with _mock_engine_start(), patch.object(engine.ImageBuilder, "ensure_mirrored") as m:
+        await provider.create(spec)
+    m.assert_not_called()
+
+
+async def test_create_skips_mirror_when_auto_mirror_disabled():
+    ecr = "123.dkr.ecr.us-east-1.amazonaws.com/mirror"
+    provider = create_provider(_provider_config(ecr_repository=ecr, auto_mirror=False))
+    spec = SandboxSpec(image="docker.io/swebench/sweb.eval:latest")
+    with _mock_engine_start(), patch.object(engine.ImageBuilder, "ensure_mirrored") as m:
+        await provider.create(spec)
+    m.assert_not_called()
+
+
 def test_get_ecr_image_tag_is_content_addressed(tmp_path):
     (tmp_path / "Dockerfile").write_text("FROM scratch")
     tag1 = engine.ImageBuilder.get_ecr_image_tag(tmp_path, "env")
