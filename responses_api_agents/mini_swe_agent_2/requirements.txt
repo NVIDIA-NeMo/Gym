@@ -1,3 +1,3 @@
--e nemo-gym[dev,sandbox] @ ../../
+-e nemo-gym[dev,sandbox,sandbox-ecs] @ ../../
 mini-swe-agent==2.1.0
 swebench==4.1.0
