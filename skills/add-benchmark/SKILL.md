@@ -1,16 +1,46 @@
 ---
 name: add-benchmark
+license: Apache-2.0
 description: >
-  Guide for adding a new benchmark or training environment to NeMo-Gym.
-  Use when the user asks to add, create, or integrate a benchmark, evaluation,
-  training environment, or resources server into NeMo-Gym. Also use when wrapping
-  an existing 3rd-party benchmark library. Covers the full workflow: data preparation,
-  resources server implementation, agent wiring, YAML config, testing, and reward
-  profiling (baselining). Triggered by: "add benchmark", "new resources server",
-  "integrate benchmark", "wrap benchmark", "add training environment", "add eval".
+  Add or scaffold a new benchmark, evaluation, or training environment in
+  NeMo-Gym, through reward profiling. Not for debugging runs or editing docs.
+metadata:
+  author: NVIDIA <nemo-gym@nvidia.com>
+  tags:
+    - benchmark
+    - training-environment
+    - resources-server
+    - reward-profiling
+    - evaluation
 ---
 
 # Add Benchmark to NeMo-Gym
+
+## Purpose
+
+Integrate a new benchmark, evaluation, or training environment into NeMo-Gym
+end to end: scaffold a resources/agent server, convert source data to Gym JSONL,
+implement reward verification, wire the YAML config, and validate with reward
+profiling (baselining).
+
+## When not to use this skill
+
+- Debugging or fixing an existing benchmark, rollout, or reward-profiling run.
+  Use the `nemo-gym-debugging` skill instead.
+- Editing or adding documentation pages. Use the `nemo-gym-docs` skill instead.
+- General code questions unrelated to adding a benchmark.
+
+## Prerequisites
+
+- NeMo Gym installed with the `ng_*` CLI available (`ng_init_resources_server`,
+  `ng_prepare_data`, `ng_collect_rollouts`, `ng_reward_profile`, `ng_test`).
+- A Linux host; executed code and servers run on Linux.
+- A model server for smoke testing and baselining (an OpenAI-compatible endpoint
+  or a local vLLM model server).
+- For `train`/`validation` datasets: GitLab dataset-registry access and MLflow
+  credentials in `env.yaml`.
+- For external benchmarks: the upstream library and its dependencies, plus the
+  original repo to reproduce published numbers.
 
 ## Determine Integration Type
 
@@ -28,7 +58,7 @@ Before starting, determine which type of benchmark you're adding:
 - Reproduce publicly reported numbers with the original repo first, then reproduce again after Gym integration
 - Add the dependency in `requirements.txt`
 
-## Workflow
+## Instructions
 
 ### Step 1: Scaffold the server
 
@@ -74,7 +104,7 @@ Convert your source dataset to Gym JSONL format. Each line must have `responses_
 
 **`example.jsonl`**: Generate 5 entries for smoke testing. This file is committed directly to git in `data/example.jsonl`.
 
-**`train`/`validation` datasets**: Upload to the GitLab dataset registry — these must NOT be committed to git.
+**`train`/`validation` datasets**: Upload to the GitLab dataset registry. These must not be committed to git.
 
 ```bash
 ng_upload_dataset_to_gitlab \
@@ -83,30 +113,40 @@ ng_upload_dataset_to_gitlab \
     +input_jsonl_fpath=resources_servers/my_benchmark/data/my_dataset.jsonl
 ```
 
-Requires MLflow credentials in `env.yaml` (or passed via CLI):
+Requires MLflow credentials in `env.yaml`:
 ```yaml
 mlflow_tracking_uri: <your-gitlab-mlflow-tracking-uri>
 mlflow_tracking_token: <your-gitlab-api-token>
 ```
 
+Security note: `env.yaml` holds credentials, so it should not be committed.
+Confirm it is covered by `.gitignore` before staging. Where possible, source the
+token from an environment variable or a secrets manager rather than a plaintext
+file, and avoid passing tokens as command-line arguments, since these can be
+recorded in shell history and process listings.
+
 **`data/.gitignore`**: The scaffold generates default patterns (`*train.jsonl`, `*validation.jsonl`, etc.). If your filename doesn't match (e.g. `my_eval.jsonl`), add a custom pattern (e.g. `*eval.jsonl`). If data was previously tracked, run `git rm --cached <file>`.
 
-**Validate** your data:
-```bash
-# Validate example data (for PR submission)
-ng_prepare_data "+config_paths=[resources_servers/my_benchmark/configs/my_benchmark.yaml]" \
-    +output_dirpath=/tmp/prepare +mode=example_validation
-
-# Download and prepare train/validation from GitLab
-ng_prepare_data "+config_paths=[resources_servers/my_benchmark/configs/my_benchmark.yaml]" \
-    +output_dirpath=data/my_benchmark +mode=train_preparation +should_download=true +data_source=gitlab
-```
+**Validate** your data with `ng_prepare_data` (example validation for PR
+submission, and train/validation download from GitLab). See
+[Verification with `ng_prepare_data`](references/patterns.md#verification-with-ng_prepare_data)
+in patterns.md for the exact commands.
 
 ### Step 3: Implement verify()
 
 Edit `app.py`. The `verify()` method receives model output + `verifier_metadata`, returns reward.
 
 For code execution benchmarks, see `references/patterns.md` § "Subprocess Execution with Ray" and "Resources Server Pattern".
+
+Security note: code-execution benchmarks run untrusted, model-generated code,
+and dataset payloads may be adversarial. NeMo-Gym does not currently sandbox
+executed code; the `tempfile` working directory used by the subprocess pattern
+isolates files but is not a security boundary. Until per-execution sandboxing is
+available, run these benchmarks only in an isolated, disposable environment that
+you control, such as a dedicated CI container or VM, and not on hosts with access
+to sensitive credentials or networks. Apply the timeout and concurrency limits
+described below. See the security note in `references/patterns.md` § "Subprocess
+Execution with Ray".
 
 Critical rules:
 - Return `reward` as 0.0 or 1.0 (binary)
@@ -176,7 +216,9 @@ Test coverage must be >= 95%. Write tests for: verify pass, verify fail (wrong o
 # Start servers
 ng_run "+config_paths=[resources_servers/my_benchmark/configs/my_benchmark.yaml,responses_api_models/openai_model/configs/openai_model.yaml]"
 
-# Quick test with example data
+# Collect rollouts. This is the canonical rollout command used throughout:
+# for a quick smoke test point at example.jsonl with +num_repeats=1; for
+# baselining (Step 7) point at the full dataset and raise +num_repeats.
 ng_collect_rollouts +agent_name=my_benchmark_simple_agent \
   +input_jsonl_fpath=resources_servers/my_benchmark/data/example.jsonl \
   +output_jsonl_fpath=results/example_rollouts.jsonl \
@@ -194,14 +236,11 @@ Run against multiple models to validate correctness. Recommended suite:
 - At least one open-source thinking model (e.g. Qwen 3 30B A3B Thinking)
 - At least one closed-source model (e.g. GPT-5 Nano or GPT-5)
 
-```bash
-# Collect rollouts
-ng_collect_rollouts +agent_name=my_benchmark_simple_agent \
-  +input_jsonl_fpath=resources_servers/my_benchmark/data/my_dataset.jsonl \
-  +output_jsonl_fpath=results/rollouts.jsonl \
-  +num_repeats=5 \
-  "+responses_create_params={max_output_tokens: 16384, temperature: 1.0}"
+Re-run the Step 6 `ng_collect_rollouts` command against the full dataset
+(`my_dataset.jsonl`, `+output_jsonl_fpath=results/rollouts.jsonl`) with
+`+num_repeats=5` for variance estimation, then profile the rewards:
 
+```bash
 # Compute per-task pass rates
 ng_reward_profile +input_jsonl_fpath=resources_servers/my_benchmark/data/my_dataset.jsonl \
   +rollouts_jsonl_fpath=results/rollouts.jsonl \
@@ -237,6 +276,26 @@ If hooks modify files in other directories, discard those changes:
 git checkout -- resources_servers/other_server/
 ```
 
+## Examples
+
+**Native code-gen benchmark (e.g. HumanEval+):** classify as native, run
+`ng_init_resources_server`, convert problems to Gym JSONL with `test_cases` in
+`verifier_metadata`, implement `verify()` that extracts code and runs it in a
+sandbox returning binary reward, wire `simple_agent` in YAML, then smoke test
+and baseline.
+
+**External library wrapper (e.g. SWE-bench):** classify as external, create an
+agent server under `responses_api_agents/`, pre-process the Gym schema into the
+library's input and post-process its result into `BaseVerifyResponse`, add the
+dependency to `requirements.txt`, and reproduce the published numbers with the
+original repo both before and after integration.
+
+**Training environment (e.g. grade-school math):** scaffold a native resources
+server, upload `train`/`validation` splits to the GitLab dataset registry (only
+`example.jsonl` is committed to git), add `gitlab_identifier` alongside
+`jsonl_fpath` in the YAML, baseline across instruct/thinking/closed-source
+models, then run GRPO training with NeMo RL.
+
 ## Constraints
 
 - Use NeMo Gym's OpenAI client (`nemo_gym/openai_utils.py`), not LiteLLM/Anthropic/other
@@ -246,6 +305,26 @@ git checkout -- resources_servers/other_server/
 - `/run` endpoint must be async
 - Errors from tool execution or bad model output must return error responses, not crash
 - All commits require DCO sign-off (`-s`) and cryptographic signature (`-S`)
+
+## Limitations
+
+- No built-in sandboxing for executed code; isolation is the operator's
+  responsibility (see the security notes above).
+- Reward is binary only; this workflow does not cover graded or partial credit.
+- Supported on Linux only.
+- `train` and `validation` data must come from the GitLab dataset registry, not
+  git; only `example.jsonl` is committed.
+- Meaningful pass-rate variance requires multiple rollouts per task.
+
+## Troubleshooting
+
+| Symptom | Likely cause | Resolution |
+|---|---|---|
+| Verifier returns 422 or 500 | Row schema does not match the resources server request model | Compare the failing JSONL row against the server's request model before changing infra |
+| `ng_test` skips all tests | External tool not installed at collection time | Add a `pytest_configure` hook in `conftest.py` that runs the auto-install before collection |
+| Empty or partial reward-profiling output | Verifier exceptions or a partial rollout cache | Inspect the first real verifier exception; for deeper diagnosis use the `nemo-gym-debugging` skill |
+| Dataset accidentally tracked by git | Filename does not match the `data/.gitignore` patterns | Add a matching pattern and run `git rm --cached <file>` |
+| Closed-source model scores below open-source | Usually a verifier or code-extraction bug | Inspect failure cases in the rollout JSONL rather than aggregate numbers |
 
 ## Reference
 
