@@ -1,0 +1,12 @@
+policy_model:
+  responses_api_models:
+    claude_model:
+      entrypoint: app.py
+      anthropic_base_url: ${policy_base_url}
+      anthropic_api_key: ${policy_api_key}
+      anthropic_model: ${policy_model_name}
+      max_tokens: 4096
+      anthropic_version: "2023-06-01"
+      thinking_budget_tokens: null
+      max_concurrent_requests: null
+      extra_body: {}
