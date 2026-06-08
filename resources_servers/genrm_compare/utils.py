@@ -222,6 +222,10 @@ def parse_genrm_output(
         if not isinstance(parsed, dict):
             return None
 
+        # Handle nested format: {"rubric_evaluations": [...], "overall": {...}}
+        if "overall" in parsed and isinstance(parsed["overall"], dict):
+            parsed = parsed["overall"]
+
         # Must have at least one expected key
         if not any(k in parsed for k in ("score_1", "score_2", "ranking")):
             return None
@@ -234,20 +238,55 @@ def parse_genrm_output(
         except (TypeError, ValueError):
             return None
 
-    try:
-        # Strategy 1: Look for fenced JSON blocks (```json {...} ```)
-        for match in re.finditer(r"```json\s*(\{[\s\S]*?\})\s*```", output, flags=re.IGNORECASE):
-            result = _try_parse(match.group(1))
-            if result is not None:
-                return result
+    def _find_json_objects(text: str) -> List[str]:
+        """Find top-level JSON objects in text using brace counting."""
+        results = []
+        i = 0
+        while i < len(text):
+            if text[i] == "{":
+                depth = 0
+                start = i
+                in_string = False
+                escape_next = False
+                for j in range(i, len(text)):
+                    ch = text[j]
+                    if escape_next:
+                        escape_next = False
+                        continue
+                    if ch == "\\" and in_string:
+                        escape_next = True
+                        continue
+                    if ch == '"' and not escape_next:
+                        in_string = not in_string
+                        continue
+                    if in_string:
+                        continue
+                    if ch == "{":
+                        depth += 1
+                    elif ch == "}":
+                        depth -= 1
+                        if depth == 0:
+                            results.append(text[start : j + 1])
+                            i = j
+                            break
+            i += 1
+        return results
 
-        # Strategy 2: Find all {...} and take the last valid one.
+    try:
+        # Strategy 1: Look for fenced JSON blocks (```json ... ```)
+        for match in re.finditer(r"```json\s*([\s\S]*?)\s*```", output, flags=re.IGNORECASE):
+            for json_str in _find_json_objects(match.group(1)):
+                result = _try_parse(json_str)
+                if result is not None:
+                    return result
+
+        # Strategy 2: Find all top-level {...} and take the last valid one.
         #
         # Note: We keep this intentionally permissive because model outputs can include
         # extra prose around a JSON blob, and the JSON may be pretty-printed across lines.
         last_valid: Optional[Tuple[float, float, float]] = None
-        for match in re.finditer(r"(\{[\s\S]*?\})", output):
-            result = _try_parse(match.group(1))
+        for json_str in _find_json_objects(output):
+            result = _try_parse(json_str)
             if result is not None:
                 last_valid = result
 
