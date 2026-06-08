@@ -58,9 +58,14 @@ Flat-field JSONL (prompt templating happens at runtime via
 Both signals surface in the run log (prefixed `(critpt_resources_server)`):
 
 - Per-`verify()` log line at WARNING level:
-  `CritPt verify: N/70 submissions buffered (problem_id=...)`
-- Batch-fire log line:
+  `CritPt verify #<N>: batch <B> at <K>/70 submissions buffered (problem_id=...)`
+  where `#<N>` is a monotonic counter of all verify calls received since startup (useful
+  when tailing the log with `num_repeats > 1`, since per-batch counts interleave but `#N`
+  always increases), `<B>` is the pending-batch index, and `<K>/70` is that batch's fill.
+- Batch-fire log line (WARNING level):
   `CritPt batch full (70 submissions); firing AA API.`
+- On AA API failure, full exception + traceback is logged via `LOG.exception(...)` and
+  every waiter in that batch is failed with the same exception.
 
 `GET /status` returns the live buffer count:
 
