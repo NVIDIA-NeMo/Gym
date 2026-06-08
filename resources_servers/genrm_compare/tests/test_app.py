@@ -18,16 +18,29 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from pytest import approx
+from pytest import MonkeyPatch, approx
 
+import resources_servers.genrm_compare.app
 from nemo_gym.config_types import ModelServerRef
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.openai_utils import (
+    NeMoGymEasyInputMessage,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseOutputMessage,
+    NeMoGymResponseOutputText,
+    NeMoGymResponseReasoningItem,
+    NeMoGymSummary,
+)
 from resources_servers.genrm_compare.app import (
     GenRMCompareConfig,
     GenRMCompareRequest,
     GenRMCompareResourcesServer,
     GenRMCompareResponse,
+    GenRMCompareVerifyRequest,
+    _input_to_conversation_history,
 )
+from resources_servers.genrm_compare.utils import get_prompt_key_from_input
 
 
 class TestGenRMCompareConfig:
@@ -124,6 +137,234 @@ class TestGenRMCompareResourcesServer:
         assert response.rewards[0] == config.default_score
         assert response.comparison_results is None
         assert response.metrics is None
+
+    def test_verify_cohort_key_prefers_task_index_then_prompt_id(self, config):
+        """Cohort key should use explicit task/prompt identifiers to avoid avoidable collisions."""
+        server = GenRMCompareResourcesServer.model_construct(config=config, server_client=MagicMock())
+        input_messages = [NeMoGymEasyInputMessage(role="user", content="hello", type="message")]
+        prompt_hash = get_prompt_key_from_input(input_messages, "Be concise")
+
+        task_request = GenRMCompareVerifyRequest.model_validate(
+            {
+                "responses_create_params": NeMoGymResponseCreateParamsNonStreaming(input=input_messages),
+                "response": NeMoGymResponse(
+                    id="resp_task",
+                    created_at=0.0,
+                    model="dummy_model",
+                    tools=[],
+                    parallel_tool_calls=True,
+                    tool_choice="auto",
+                    output=[],
+                    object="response",
+                ),
+                "principle": "Be concise",
+                TASK_INDEX_KEY_NAME: 7,
+                ROLLOUT_INDEX_KEY_NAME: 2,
+            }
+        )
+        assert task_request.task_index == 7
+        assert task_request.rollout_index == 2
+        assert server._get_verify_cohort_key(task_request, input_messages, task_request.principle) == (
+            f"task_idx::7::{prompt_hash}"
+        )
+
+        prompt_request = GenRMCompareVerifyRequest.model_validate(
+            {
+                "responses_create_params": NeMoGymResponseCreateParamsNonStreaming(input=input_messages),
+                "response": NeMoGymResponse(
+                    id="resp_prompt",
+                    created_at=0.0,
+                    model="dummy_model",
+                    tools=[],
+                    parallel_tool_calls=True,
+                    tool_choice="auto",
+                    output=[],
+                    object="response",
+                ),
+                "principle": "Be concise",
+                "prompt_id": "prompt-123",
+            }
+        )
+        assert server._get_verify_cohort_key(prompt_request, input_messages, prompt_request.principle) == (
+            f"prompt_id::prompt-123::{prompt_hash}"
+        )
+
+    async def test_run_jit_compare_using_most_recent_response_obj(self, monkeypatch: MonkeyPatch) -> None:
+        config = GenRMCompareConfig(
+            host="localhost",
+            port=8000,
+            entrypoint="app.py",
+            domain="rlhf",
+            name="genrm_compare",
+            genrm_model_server=ModelServerRef(type="responses_api_models", name="genrm_model"),
+            genrm_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[], max_output_tokens=1024),
+            comparison_strategy="circular",
+            num_judges_per_comparison=1,
+            num_rollouts_per_prompt=16,
+            debug_logging=False,
+        )
+        server = GenRMCompareResourcesServer.model_construct(config=config, server_client=MagicMock())
+
+        request = GenRMCompareVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+                input=[
+                    NeMoGymEasyInputMessage(
+                        role="user",
+                        content=[{"type": "input_text", "text": "hello"}],
+                        type="message",
+                    )
+                ],
+            ),
+            response=NeMoGymResponse(
+                id="resp_123",
+                created_at=0.0,
+                model="dummy_model",
+                tools=[],
+                parallel_tool_calls=True,
+                tool_choice="auto",
+                output=[
+                    NeMoGymResponseReasoningItem(
+                        id="rs_123",
+                        type="reasoning",
+                        summary=[
+                            NeMoGymSummary(
+                                text="I have identified the city as San Francisco based on user input.",
+                                type="summary_text",
+                            )
+                        ],
+                        status="completed",
+                    ),
+                    NeMoGymResponseOutputMessage(
+                        id="msg_123",
+                        role="assistant",
+                        status="completed",
+                        type="message",
+                        content=[
+                            NeMoGymResponseOutputText(
+                                text="hi :) how are you?",
+                                type="output_text",
+                                annotations=[],
+                            )
+                        ],
+                    ),
+                ],
+                object="response",
+            ),
+        )
+
+        # Patch `aggregate_scores`
+        aggregate_scores_mock = MagicMock(side_effect=resources_servers.genrm_compare.app.aggregate_scores)
+        monkeypatch.setattr(resources_servers.genrm_compare.app, "aggregate_scores", aggregate_scores_mock)
+
+        # Patch `_run_single_comparison`
+        async def run_single_comparison_mock(*args, **kwargs):
+            i, j = kwargs["pair_idx"]
+            # Random deterministic return
+            return (5 * (i + 1 / 16), 5 * (j + 1 / 16), 2 if i % 2 else 5)
+
+        monkeypatch.setattr(server, "_run_single_comparison", run_single_comparison_mock)
+
+        golden_result = await server._run_compare(
+            conversation_history=_input_to_conversation_history(request.responses_create_params.input),
+            response_objs=[request.response.model_dump() for _ in range(16)],
+        )
+        golden_rewards = golden_result[0]
+
+        tasks = []
+        for _ in range(16):
+            tasks.append(server.verify(request))
+
+        results = await asyncio.gather(*tasks)
+
+        expected_metadata = (
+            (
+                0,
+                1,
+                0,
+            ),
+            (
+                1,
+                2,
+                0,
+            ),
+            (
+                2,
+                3,
+                0,
+            ),
+            (
+                3,
+                4,
+                0,
+            ),
+            (
+                4,
+                5,
+                0,
+            ),
+            (
+                5,
+                6,
+                0,
+            ),
+            (
+                6,
+                7,
+                0,
+            ),
+            (
+                7,
+                8,
+                0,
+            ),
+            (
+                8,
+                9,
+                0,
+            ),
+            (
+                9,
+                10,
+                0,
+            ),
+            (
+                10,
+                11,
+                0,
+            ),
+            (
+                11,
+                12,
+                0,
+            ),
+            (
+                12,
+                13,
+                0,
+            ),
+            (
+                13,
+                14,
+                0,
+            ),
+            (
+                14,
+                15,
+                0,
+            ),
+            (
+                15,
+                0,
+                0,
+            ),
+        )
+        # Call 1 since the second call is our tested call
+        actual_metadata = aggregate_scores_mock.call_args_list[1].kwargs["comparison_metadata"]
+        assert expected_metadata == actual_metadata
+
+        expected_rewards = golden_rewards
+        actual_rewards = [r.reward for r in results]
+        assert expected_rewards == actual_rewards
 
 
 class TestRunSingleComparison:
