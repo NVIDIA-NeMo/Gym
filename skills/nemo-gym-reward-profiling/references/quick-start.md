@@ -4,12 +4,20 @@ Substitute environment-specific config paths, input data, model endpoint, and ou
 
 ## Minimal Flow
 
+Provide the policy endpoint key through the environment rather than on the
+command line. Export it from your shell session or a secrets manager before
+running. It is read at runtime via the `${oc.env:...}` resolver, so the value
+never appears in the process arguments (visible via `ps`) or in shell history.
+
 ```bash
 CONFIG_PATHS="your_model_config_paths,your_env_config_paths"
 
 POLICY_MODEL_NAME="your_policy_model_name"
 POLICY_BASE_URL="your_policy_base_url"
-POLICY_ENDPOINT_KEY="your_policy_endpoint_key"
+
+# Require the key from the environment; this validates presence without echoing
+# the value. Set it beforehand, e.g. with `export POLICY_ENDPOINT_KEY=...`.
+: "${POLICY_ENDPOINT_KEY:?export POLICY_ENDPOINT_KEY before running}"
 
 DATA_JSONL="/path/to/your_input.jsonl"
 ROLLOUTS_JSONL="/path/to/your_rollouts.jsonl"
@@ -22,7 +30,7 @@ NUM_SAMPLES_IN_PARALLEL=8
 ng_run "+config_paths=[$CONFIG_PATHS]" \
     +policy_model_name="$POLICY_MODEL_NAME" \
     +policy_base_url="$POLICY_BASE_URL" \
-    +policy_api_key="$POLICY_ENDPOINT_KEY" &
+    '++policy_api_key=${oc.env:POLICY_ENDPOINT_KEY}' &
 NG_RUN_PID=$!
 trap 'kill "$NG_RUN_PID" 2>/dev/null || true' EXIT
 ./scripts/wait_for_servers.sh "$NG_RUN_PID"
