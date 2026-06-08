@@ -18,7 +18,6 @@ import asyncio
 import logging
 import math
 import re
-import shlex
 from collections.abc import Mapping
 from dataclasses import dataclass, fields, replace
 from pathlib import Path
@@ -29,6 +28,7 @@ from nemo_gym.sandbox.providers.base import (
     SandboxCreateVerificationError,
     SandboxExecResult,
     SandboxHandle,
+    SandboxResources,
     SandboxSpec,
     SandboxStatus,
 )
@@ -146,9 +146,13 @@ def _has_retryable_error_marker(exception: BaseException) -> bool:
 def _is_retryable_create_error(exception: BaseException) -> bool:
     if isinstance(exception, SandboxCreateVerificationError):
         return True
+    if isinstance(exception, DaytonaCreateTimeoutError):
+        return False
     if isinstance(exception, SandboxCreateError):
         return True
-    if isinstance(exception, (ConnectionError, OSError, TimeoutError)):
+    if isinstance(exception, TimeoutError):
+        return False
+    if isinstance(exception, (ConnectionError, OSError)):
         return True
 
     error_types = _daytona_error_types()
@@ -157,13 +161,13 @@ def _is_retryable_create_error(exception: BaseException) -> bool:
             error_types["authentication"],
             error_types["authorization"],
             error_types["not_found"],
+            error_types["timeout"],
             error_types["validation"],
         )
         retryable_types = (
             error_types["conflict"],
             error_types["connection"],
             error_types["rate_limit"],
-            error_types["timeout"],
         )
         if isinstance(exception, non_retryable_types):
             return False
@@ -230,9 +234,7 @@ def _coerce_config(value: Any, config_cls: type[Any]) -> Any:
         field_names = {field.name for field in fields(config_cls)}
         unsupported_keys = sorted(str(key) for key in value if key not in field_names)
         if unsupported_keys:
-            LOGGER.debug(
-                "Ignoring unsupported Daytona %s settings: %s", config_cls.__name__, ", ".join(unsupported_keys)
-            )
+            raise ValueError(f"Unsupported Daytona {config_cls.__name__} settings: {', '.join(unsupported_keys)}")
         return config_cls(**{key: val for key, val in value.items() if key in field_names})
     raise TypeError(f"{config_cls.__name__} must be a mapping or {config_cls.__name__} instance")
 
@@ -246,7 +248,6 @@ def _normalize_spec(spec: SandboxSpec) -> SandboxSpec:
         spec,
         env=_string_map(spec.env),
         metadata=_string_map(spec.metadata),
-        resources=_string_map(spec.resources),
     )
 
 
@@ -312,18 +313,49 @@ def _configured_or_extension(spec: SandboxSpec, key: str, configured: Any) -> An
     return configured if value is None else value
 
 
-def _to_resources(resources: dict[str, Any]) -> Any | None:
+def _resources_requested(resources: SandboxResources | Mapping[str, Any]) -> bool:
+    if isinstance(resources, SandboxResources):
+        return any(getattr(resources, field.name) is not None for field in fields(SandboxResources))
+    return bool(resources)
+
+
+def _mib_to_gib(name: str, value: Any) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"resources.{name} must be an integer-like quantity")
+    return math.ceil(float(value) / 1024)
+
+
+def _to_resources(resources: SandboxResources | Mapping[str, Any]) -> Any | None:
     _, _, _, _, Resources, _ = _require_daytona_sdk()
     kwargs: dict[str, int] = {}
-    if "cpu" in resources:
-        kwargs["cpu"] = _quantity_to_int("cpu", resources["cpu"])
-    if "memory" in resources:
-        kwargs["memory"] = _quantity_to_int("memory", resources["memory"])
-    disk_value = resources.get("disk", resources.get("ephemeral-storage", resources.get("ephemeral_storage")))
-    if disk_value is not None:
-        kwargs["disk"] = _quantity_to_int("disk", disk_value)
-    if "gpu" in resources:
-        kwargs["gpu"] = _quantity_to_int("gpu", resources["gpu"])
+    if isinstance(resources, SandboxResources):
+        if resources.cpu is not None:
+            kwargs["cpu"] = math.ceil(resources.cpu)
+        if resources.memory_mib is not None:
+            kwargs["memory"] = _mib_to_gib("memory_mib", resources.memory_mib)
+        if resources.disk_gib is not None:
+            kwargs["disk"] = resources.disk_gib
+        if resources.gpu is not None:
+            kwargs["gpu"] = resources.gpu
+        if resources.gpu_type is not None:
+            raise ValueError("Daytona resource overrides do not support gpu_type")
+    else:
+        if "cpu" in resources:
+            kwargs["cpu"] = _quantity_to_int("cpu", resources["cpu"])
+        if "memory" in resources:
+            kwargs["memory"] = _quantity_to_int("memory", resources["memory"])
+        if "memory_mib" in resources:
+            kwargs["memory"] = _mib_to_gib("memory_mib", resources["memory_mib"])
+        disk_value = resources.get(
+            "disk",
+            resources.get("disk_gib", resources.get("ephemeral-storage", resources.get("ephemeral_storage"))),
+        )
+        if disk_value is not None:
+            kwargs["disk"] = _quantity_to_int("disk", disk_value)
+        if "gpu" in resources:
+            kwargs["gpu"] = _quantity_to_int("gpu", resources["gpu"])
+        if resources.get("gpu_type") is not None:
+            raise ValueError("Daytona resource overrides do not support gpu_type")
     if not kwargs:
         return None
     return Resources(**kwargs)
@@ -431,7 +463,7 @@ class DaytonaOperationConfig:
     retries: int = 3
     retry_delay_s: float = 1.0
     retry_max_delay_s: float = 15.0
-    command_retries: int | None = None
+    command_retries: int = 0
     command_timeout_margin_s: float = 60.0
     file_timeout_s: int | None = 30 * 60
     close_timeout_s: float | None = 60.0
@@ -443,7 +475,7 @@ class DaytonaOperationConfig:
             raise ValueError("operations.retry_delay_s must be >= 0")
         if self.retry_max_delay_s < 0:
             raise ValueError("operations.retry_max_delay_s must be >= 0")
-        if self.command_retries is not None and self.command_retries < 0:
+        if self.command_retries < 0:
             raise ValueError("operations.command_retries must be >= 0")
         if self.command_timeout_margin_s < 0:
             raise ValueError("operations.command_timeout_margin_s must be >= 0")
@@ -610,11 +642,13 @@ class DaytonaProvider:
         kwargs = self._base_create_kwargs(spec)
         if spec.image is not None:
             kwargs["image"] = spec.image
-            resources = _to_resources(spec.resources) if spec.resources else None
+            resources = _to_resources(spec.resources) if _resources_requested(spec.resources) else None
             if resources is not None:
                 kwargs["resources"] = resources
             return ImageParams(**kwargs)
         if snapshot_id is not None:
+            if _resources_requested(spec.resources):
+                raise ValueError("Daytona snapshot creation does not support resource overrides")
             kwargs["snapshot"] = snapshot_id
             return SnapshotParams(**kwargs)
         return SnapshotParams(**kwargs) if kwargs else None
@@ -700,16 +734,21 @@ class DaytonaProvider:
         if not errors:
             return handles
         if allow_partial:
-            prefix: list[SandboxHandle] = []
-            for result in results:
-                if isinstance(result, Exception):
-                    break
-                prefix.append(result)
-            return prefix
+            return handles
+        cleanup_errors: list[tuple[str, BaseException]] = []
         for handle in handles:
-            await self.close(handle, delete=True)
+            try:
+                await self.close(handle, delete=True)
+            except Exception as cleanup_error:
+                cleanup_errors.append((handle.sandbox_id, cleanup_error))
+        cleanup_suffix = ""
+        if cleanup_errors:
+            cleanup_suffix = "; cleanup_errors=" + ", ".join(
+                f"{sandbox_id}: {type(error).__name__}: {error}" for sandbox_id, error in cleanup_errors
+            )
         raise DaytonaCreateError(
-            f"One or more Daytona sandboxes failed during batch create; failed={len(errors)}, requested={count}"
+            "One or more Daytona sandboxes failed during batch create; "
+            f"failed={len(errors)}, requested={count}{cleanup_suffix}"
         ) from errors[0]
 
     async def connect(self, sandbox_id: str) -> SandboxHandle:
@@ -717,6 +756,16 @@ class DaytonaProvider:
         return SandboxHandle(sandbox_id=str(sandbox.id), provider_name=self.name, raw=sandbox)
 
     async def status(self, handle: SandboxHandle) -> SandboxStatus:
+        refresh_data = getattr(handle.raw, "refresh_data", None)
+        if refresh_data is not None:
+            await self._await_operation(
+                refresh_data,
+                operation="refresh_data",
+                sandbox_id=handle.sandbox_id,
+                timeout_s=self._operations.close_timeout_s,
+            )
+            return _to_sandbox_status(getattr(handle.raw, "state", None))
+
         status_value = getattr(handle.raw, "status", None)
         if status_value is not None:
             state = getattr(status_value, "state", status_value)
@@ -735,17 +784,16 @@ class DaytonaProvider:
         return _to_sandbox_status(getattr(info_status, "state", info_status))
 
     def _command_retry_count(self) -> int:
-        return (
-            self._operations.retries if self._operations.command_retries is None else self._operations.command_retries
-        )
+        return self._operations.command_retries
 
     @staticmethod
     def _effective_command(command: str, user: str | int | None) -> str:
-        if user is None or user == "root":
+        if user is None or user == "root" or user == 0:
             return command
-        if isinstance(user, int):
-            return f"setpriv --reuid={user} --regid={user} --clear-groups /bin/sh -c {shlex.quote(command)}"
-        return f"su -s /bin/sh -c {shlex.quote(command)} {shlex.quote(user)}"
+        raise NotImplementedError(
+            "Daytona provider does not support per-command user switching. "
+            "Configure create.os_user for sandbox-level user selection until Daytona exposes native per-command users."
+        )
 
     async def _exec(
         self,
