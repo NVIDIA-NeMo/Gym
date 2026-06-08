@@ -25,7 +25,7 @@ NVIDIA repo (``HF_TOKEN`` env or ``huggingface-cli login``).
 
 from pathlib import Path
 
-from .prepare import prepare as _prepare
+from benchmarks.longcodebench.prepare import prepare as _prepare
 
 
 TOKENIZER_NAME = "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16"  # pragma: allowlist secret
