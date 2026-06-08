@@ -959,6 +959,37 @@ def test_mini_swe_sandbox_environment_owns_conda_setup(monkeypatch) -> None:
     assert FakeSandboxProvider.last_instance.closed[0][1] is True
 
 
+def test_mini_swe_sandbox_environment_only_uses_explicit_provider_options() -> None:
+    provider_name = f"fake-{uuid4().hex}"
+    register_provider(provider_name, FakeSandboxProvider)
+
+    env = MiniSWESandboxEnvironment(
+        image="image:tag",
+        provider={provider_name: {}},
+        spec={
+            "provider_options": {
+                "platform": {"os": "linux", "arch": "amd64"},
+                "snapshot_id": "snapshot-1",
+            },
+            "platform": {"os": "ignored", "arch": "ignored"},
+            "extensions": {"imagePullPolicy": "Never"},
+            "snapshot_id": "ignored-snapshot",
+            "skip_health_check": True,
+            "volumes": [{"name": "ignored"}],
+        },
+    )
+
+    try:
+        provider = FakeSandboxProvider.last_instance
+        assert provider is not None
+        assert provider.created_specs[0].provider_options == {
+            "platform": {"os": "linux", "arch": "amd64"},
+            "snapshot_id": "snapshot-1",
+        }
+    finally:
+        env.cleanup()
+
+
 def test_mini_swe_sandbox_environment_validation_and_context_manager() -> None:
     with pytest.raises(ValueError, match="requires provider"):
         MiniSWESandboxEnvironment(image="image:tag")
