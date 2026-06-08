@@ -26,7 +26,15 @@ from pydantic import BaseModel, Field
 from rich.table import Table
 from tqdm.auto import tqdm
 
-from nemo_gym import PARENT_DIR
+import nemo_gym
+from nemo_gym import (
+    NEMO_GYM_ALLOW_ROOT_OVERRIDE_ENV_VAR,
+    NEMO_GYM_EXTRA_ROOTS_ENV_VAR,
+    NEMO_GYM_ROOT_ENV_VAR,
+    PARENT_DIR,
+    ArtifactCollisionError,
+    get_artifact_roots,
+)
 from nemo_gym.config_types import BaseNeMoGymCLIConfig, BenchmarkDatasetConfig
 from nemo_gym.global_config import (
     POLICY_MODEL_KEY_NAME,
@@ -37,7 +45,51 @@ from nemo_gym.global_config import (
 )
 
 
+# Default benchmarks directory under the Gym install. The list_benchmarks command
+# also searches every root returned by ``get_artifact_roots()`` so plugins outside
+# Gym can contribute benchmarks; see external-artifact-roots.md.
 BENCHMARKS_DIR = PARENT_DIR / "benchmarks"
+
+
+def _discover_benchmark_config_paths() -> List[Path]:
+    """Glob ``benchmarks/**/config.yaml`` across every artifact root.
+
+    A benchmark is identified by the basename of its containing directory, e.g.
+    ``benchmarks/aime24/config.yaml`` -> ``aime24``. By default, if multiple roots
+    define the same benchmark name, ``ArtifactCollisionError`` is raised so the
+    user disambiguates explicitly. Set ``NEMO_GYM_ALLOW_ROOT_OVERRIDE=1`` to fall
+    back to earliest-wins (cwd > extra roots > install).
+    """
+    candidates: Dict[str, List[Path]] = {}
+    seen_dirs: set[Path] = set()
+    for root in get_artifact_roots():
+        benchmarks_dir = root / "benchmarks"
+        if not benchmarks_dir.exists():
+            continue
+        resolved_dir = benchmarks_dir.resolve()
+        if resolved_dir in seen_dirs:
+            continue
+        seen_dirs.add(resolved_dir)
+        for rel in sorted(glob("**/config.yaml", root_dir=benchmarks_dir, recursive=True)):
+            name = Path(rel).parent.name
+            candidates.setdefault(name, []).append(benchmarks_dir / rel)
+
+    if not nemo_gym.ALLOW_ROOT_OVERRIDE:
+        collisions = {n: paths for n, paths in candidates.items() if len(paths) > 1}
+        if collisions:
+            lines: List[str] = []
+            for n, paths in sorted(collisions.items()):
+                formatted = "\n    ".join(str(p) for p in paths)
+                lines.append(f"  {n!r}:\n    {formatted}")
+            joined = "\n".join(lines)
+            raise ArtifactCollisionError(
+                f"Benchmark name collisions across artifact roots:\n{joined}\n"
+                f"Set {NEMO_GYM_ALLOW_ROOT_OVERRIDE_ENV_VAR}=1 to use the earliest "
+                f"(cwd > {NEMO_GYM_EXTRA_ROOTS_ENV_VAR} > {NEMO_GYM_ROOT_ENV_VAR}), "
+                f"or rename the duplicates."
+            )
+
+    return [paths[0] for paths in candidates.values()]
 
 
 class BenchmarkConfig(BaseModel):
@@ -116,17 +168,18 @@ def list_benchmarks() -> None:
     )
     BaseNeMoGymCLIConfig.model_validate(global_config_dict)
 
-    assert BENCHMARKS_DIR.exists(), "Missing benchmarks directory"
+    config_paths = _discover_benchmark_config_paths()
 
-    config_paths = glob("**/config.yaml", root_dir=BENCHMARKS_DIR, recursive=True)
-    config_paths = [BENCHMARKS_DIR / p for p in config_paths]
-    config_paths = sorted(config_paths)
+    if not config_paths:
+        rich.print("[yellow]No benchmarks found.[/yellow]")
+        rich.print(f"Searched roots: {[str(r) for r in get_artifact_roots()]}")
+        return
 
     benchmarks = _load_benchmarks_from_config_paths(config_paths)
 
     if not benchmarks:
         rich.print("[yellow]No benchmarks found.[/yellow]")
-        rich.print(f"Expected benchmarks directory: {BENCHMARKS_DIR}")
+        rich.print(f"Searched roots: {[str(r) for r in get_artifact_roots()]}")
         return
 
     table = Table(title=f"Available benchmarks in NeMo Gym ({len(benchmarks)})")

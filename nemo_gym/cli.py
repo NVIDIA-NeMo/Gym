@@ -41,7 +41,7 @@ from pydantic import Field
 from rich.table import Table
 from tqdm.auto import tqdm
 
-from nemo_gym import PARENT_DIR, ROOT_DIR, __version__
+from nemo_gym import PARENT_DIR, ROOT_DIR, __version__, resolve_artifact
 from nemo_gym.cli_setup_command import run_command, setup_env_command
 from nemo_gym.config_types import BaseNeMoGymCLIConfig
 from nemo_gym.global_config import (
@@ -169,11 +169,12 @@ class RunHelper:  # pragma: no cover
             entrypoint_fpath = Path(server_config_dict.entrypoint)
             assert not entrypoint_fpath.is_absolute()
 
-            # Check cwd first for a local server, fall back to the install location for built-ins.
-            _server_rel_path = Path(first_key, second_key)
-            _cwd_path = Path.cwd() / _server_rel_path
-            _cwd_is_server = (_cwd_path / "requirements.txt").exists() or (_cwd_path / "pyproject.toml").exists()
-            dir_path = _cwd_path if _cwd_is_server else PARENT_DIR / _server_rel_path
+            # Search cwd, NEMO_GYM_EXTRA_ROOTS, then the install location. A directory only
+            # counts as a server if it has the install marker for one of our two venv setups.
+            dir_path = resolve_artifact(
+                Path(first_key, second_key),
+                validator=lambda d: (d / "requirements.txt").exists() or (d / "pyproject.toml").exists(),
+            )
 
             command = f"""{setup_env_command(dir_path, global_config_dict, top_level_path)} \\
     && {NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME}={escaped_config_dict_yaml_str} \\

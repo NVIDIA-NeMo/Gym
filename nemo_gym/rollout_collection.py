@@ -30,7 +30,7 @@ from pydantic import BaseModel, Field
 from tqdm.asyncio import tqdm
 from wandb import Table
 
-from nemo_gym import PARENT_DIR
+from nemo_gym import resolve_artifact
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.config_types import BaseNeMoGymCLIConfig, BaseServerConfig
 from nemo_gym.global_config import (
@@ -243,10 +243,7 @@ class RolloutCollectionHelper(BaseModel):
             prompt_cfg = load_prompt_config(config.prompt_config)
             print(f"Using prompt config: {config.prompt_config}")
 
-        _input_path = Path(config.input_jsonl_fpath)
-        if not _input_path.is_absolute():
-            _cwd_path = Path.cwd() / _input_path
-            _input_path = _cwd_path if _cwd_path.exists() else PARENT_DIR / _input_path
+        _input_path = resolve_artifact(config.input_jsonl_fpath)
         with open(_input_path) as input_file:
             rows_iterator: Iterator[str] = tqdm(input_file, desc="Reading rows")
             rows_iterator: Iterator[tuple[int, str]] = zip(range_iterator, rows_iterator)
