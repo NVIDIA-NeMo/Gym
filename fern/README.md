@@ -54,10 +54,9 @@ make docs-check
 fern/
 ├── fern.config.json          # Fern CLI org slug + version pin
 ├── package.json              # `npm run check|dev|generate|generate:library`
-├── docs.yml                  # Site config: instances, versions, redirects, libraries, theme
-├── main.css                  # NVIDIA-green theme overrides
-├── assets/                   # Logos, shared SVGs, page images
-├── components/               # BadgeLinks, CTAButtons, CustomFooter, Include, NavButton, NotebookViewer (TSX)
+├── docs.yml                  # Site config: instances, versions, redirects, libraries (`global-theme: nvidia`)
+├── assets/                   # Page images (logos/favicon/fonts come from the `nvidia` global theme)
+├── components/               # NavButton.tsx + co-located NavButton.css
 ├── versions/
 │   ├── main.yml              # Nav for the bleeding-edge train — paths point at ./latest/pages/
 │   ├── latest/pages/         # Bleeding-edge MDX content (edited on every PR; published at /main/...)
@@ -121,12 +120,11 @@ Use the bundled custom components in `components/`:
 
 | Component | Purpose |
 |---|---|
-| `<BadgeLinks ... />` | Header badge rows on landing pages (PyPI, license, GitHub, …) |
-| `<CTAButtons ... />` | Side-by-side CTA buttons on landing pages |
-| `<NavButton ... />` | Inline navigation buttons |
-| `<NotebookViewer ... />` | Embed a Jupyter notebook |
-| `<Include ... />` | Reuse an MDX snippet across pages |
-| `<CustomFooter />` | Wired in `docs.yml` `footer:`; **required** for NVIDIA legal/privacy compliance |
+| `<NavButton ... />` | Inline wayfinding pill button for tutorial back/prev/next links |
+
+Component-scoped CSS lives next to its TSX (e.g. `NavButton.css` next to `NavButton.tsx`) and is loaded via a sibling `import "./NavButton.css"` — keep new component styles co-located the same way.
+
+The footer, logos, favicon, fonts, brand colors, base CSS, and OneTrust JS are all inherited from the `nvidia` global theme published from [NVIDIA/fern-components](https://github.com/NVIDIA/fern-components) via `global-theme: nvidia` in `docs.yml`. Don't re-add `footer:`, `logo: { dark, light, height }`, `favicon:`, `css:`, `js:`, `colors:`, `layout:`, `theme:`, or `navbar-links:` here — change them upstream and re-upload the theme. The one exception is the `logo.right-text: NeMo Gym` override (the theme hardcodes "Documentation").
 
 Standard Fern components are also available — `<Note>`, `<Tip>`, `<Info>`, `<Warning>`, `<Cards>` / `<Card>`, `<Badge>`, etc. Don't use GitHub `> [!NOTE]` syntax — it does not render in MDX.
 
@@ -204,7 +202,7 @@ PR titles follow Conventional Commits (e.g. `docs(fern): add rollout collection 
 | Page 404 in preview | `slug:` missing/duplicated in the same section, or `position:` collision in an auto-discovered folder |
 | Broken-link warning for cross-version path | False positive in `fern docs dev`; the published site resolves it correctly |
 | `JSX expressions must have one parent element` | Wrap multi-element MDX content in `<>...</>` or a `<div>` |
-| Card badges have no spacing | Don't add inline styles — `main.css` `.fern-card .fern-docs-badge` rules handle it |
+| Card badges have no spacing | Don't add inline styles — the `nvidia` global theme handles `.fern-card .fern-docs-badge` spacing |
 | Old URL breaks | Add a `redirects:` entry in `docs.yml` |
 | Library reference missing after generation | Re-run `npm run generate:library`; check `libraries:` block in `docs.yml` matches the package source path |
 

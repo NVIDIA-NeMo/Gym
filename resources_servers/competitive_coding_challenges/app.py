@@ -16,7 +16,7 @@ import json
 import logging
 import os
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import FastAPI
 from pydantic import ConfigDict, Field, PrivateAttr
@@ -85,6 +85,7 @@ class CompetitiveCodingChallengesResourcesServerConfig(BaseResourcesServerConfig
     num_parallel_requests: int = 16
     time_scale: float = 2.0
     shared_dir: str = "/tmp"
+    reward_mode: Literal["binary", "fraction"] = "binary"
 
 
 class CompetitiveCodingChallengesResourcesServer(SimpleResourcesServer):
@@ -115,6 +116,9 @@ class CompetitiveCodingChallengesResourcesServer(SimpleResourcesServer):
         body: CompetitiveCodingChallengesVerifyRequest,
         evaluation_result: dict[str, Any],
     ) -> float:
+        if self.config.reward_mode == "fraction":
+            return self._compute_fraction_reward(body, evaluation_result)
+
         test_case_results = evaluation_result.get("test_case_results") or {}
         if body.subtask and body.subtask in test_case_results:
             subtask_result = test_case_results[body.subtask]
@@ -144,6 +148,31 @@ class CompetitiveCodingChallengesResourcesServer(SimpleResourcesServer):
         ):
             return 1.0
         return 0.0
+
+    def _compute_fraction_reward(
+        self,
+        body: CompetitiveCodingChallengesVerifyRequest,
+        evaluation_result: dict[str, Any],
+    ) -> float:
+        test_case_results = evaluation_result.get("test_case_results") or {}
+        outputs = []
+        if body.subtask and body.subtask in test_case_results:
+            outputs = test_case_results[body.subtask].get("outputs", []) or []
+        else:
+            seen_test_names = set()
+            for subtask_name, subtask_result in test_case_results.items():
+                for output_idx, output in enumerate(subtask_result.get("outputs", []) or []):
+                    test_name = output.get("test_name")
+                    key = test_name if test_name is not None else (subtask_name, output_idx)
+                    if key in seen_test_names:
+                        continue
+                    seen_test_names.add(key)
+                    outputs.append(output)
+
+        if not outputs:
+            return 0.0
+        passed = sum(1 for output in outputs if float(output.get("score", 0.0) or 0.0) >= 1.0)
+        return float(passed / len(outputs))
 
     # ---------------------------
     # Aggregate metrics
@@ -259,6 +288,7 @@ class CompetitiveCodingChallengesResourcesServer(SimpleResourcesServer):
                 "test_batch_size": self.config.test_batch_size,
                 "time_scale": self.config.time_scale,
                 "shared_dir": self.config.shared_dir,
+                "run_all_tests": self.config.reward_mode == "fraction",
             },
             num_parallel_requests=self.config.num_parallel_requests,
         )
@@ -285,15 +315,16 @@ class CompetitiveCodingChallengesResourcesServer(SimpleResourcesServer):
         reward = 0.0
         details: dict[str, Any] = {}
         try:
-            details = await self._evaluator.eval_single(
-                {
-                    "competition_id": body.competition_id,
-                    "name": payload["name"],
-                    "problem_id": body.problem_id,
-                    "subtask": body.subtask,
-                    "generation": _extract_last_assistant_text(body),
-                }
-            )
+            evaluation_entry = {
+                "competition_id": body.competition_id,
+                "name": payload["name"],
+                "problem_id": body.problem_id,
+                "subtask": body.subtask,
+                "generation": _extract_last_assistant_text(body),
+            }
+            if payload.get("total_time") is not None:
+                evaluation_entry["total_time"] = payload["total_time"]
+            details = await self._evaluator.eval_single(evaluation_entry)
             reward = self._compute_reward(body, details)
         except Exception as e:
             details = {"error": str(e)}

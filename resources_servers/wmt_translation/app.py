@@ -166,7 +166,9 @@ def _build_comet_actor_class():
     """
     import os
     import shutil
+    import socket
     import sys
+    import uuid
     from pathlib import Path
 
     # Cross-node Python setup. The server's venv python may be a symlink into
@@ -199,13 +201,22 @@ def _build_comet_actor_class():
             mirrored_python_root,
         )
         mirrored_python_root.parent.mkdir(parents=True, exist_ok=True)
-        # copytree refuses to overwrite, so use a two-stage atomic rename
-        # via a .tmp dir to avoid half-populated caches if interrupted.
-        tmp = mirrored_python_root.with_suffix(".tmp")
-        if tmp.exists():
-            shutil.rmtree(tmp)
-        shutil.copytree(uv_python_root, tmp, symlinks=True)
-        tmp.rename(mirrored_python_root)
+        # Stage per-writer; a shared staging path races on rmtree and on the final rename.
+        tmp: Path = (
+            mirrored_python_root.parent
+            / f".{mirrored_python_root.name}.tmp.{socket.gethostname()}.{os.getpid()}.{uuid.uuid4().hex[:8]}"
+        )
+        try:
+            shutil.copytree(uv_python_root, tmp, symlinks=True)
+            try:
+                tmp.rename(mirrored_python_root)
+            except OSError:
+                # Another builder won the publish; adopt their mirror if it's valid, else re-raise.
+                if not mirrored_python_bin.exists():
+                    raise
+        finally:
+            if tmp.exists():
+                shutil.rmtree(tmp, ignore_errors=True)
 
     venv_dir = Path(sys.executable).parent.parent
     site_packages = venv_dir / "lib" / "python3.12" / "site-packages"
