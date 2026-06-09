@@ -29,6 +29,7 @@ from nemo_gym.sandbox.providers.base import (
     SandboxCreateVerificationError,
     SandboxExecResult,
     SandboxHandle,
+    SandboxResources,
     SandboxSpec,
     SandboxStatus,
 )
@@ -269,8 +270,29 @@ def _log_operation_retry(retry_state: Any) -> None:
     )
 
 
-def _string_map(values: dict[str, Any]) -> dict[str, str]:
+def _string_map(values: Mapping[str, Any]) -> dict[str, str]:
     return {str(key): str(value) for key, value in values.items()}
+
+
+def _resource_quantity(value: float | int) -> str:
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
+
+
+def _resource_map(resources: SandboxResources) -> dict[str, str]:
+    values: dict[str, str] = {}
+    if resources.cpu is not None:
+        values["cpu"] = _resource_quantity(resources.cpu)
+    if resources.memory_mib is not None:
+        values["memory"] = f"{resources.memory_mib}Mi"
+    if resources.disk_gib is not None:
+        values["ephemeral-storage"] = f"{resources.disk_gib}Gi"
+    if resources.gpu is not None:
+        values["gpu"] = str(resources.gpu)
+    if resources.gpu_type is not None:
+        values["gpu_type"] = resources.gpu_type
+    return values
 
 
 def _metadata_value(value: Any) -> str:
@@ -288,7 +310,6 @@ def _normalize_spec(spec: SandboxSpec) -> SandboxSpec:
         spec,
         env=_string_map(spec.env),
         metadata=_metadata_map(spec.metadata),
-        resources=_string_map(spec.resources),
     )
 
 
@@ -618,7 +639,7 @@ class OpenSandboxProvider:
 
     async def _cleanup_failed_create_handle(self, handle: SandboxHandle) -> None:
         try:
-            await self.close(handle, delete=True)
+            await self.close(handle)
         except Exception as e:
             LOGGER.warning(
                 "Failed to clean up OpenSandbox sandbox after create probe failure; sandbox_id=%s; error=%r",
@@ -677,7 +698,7 @@ class OpenSandboxProvider:
         kwargs: dict[str, Any] = {
             "env": spec.env,
             "metadata": spec.metadata,
-            "resource": spec.resources,
+            "resource": _resource_map(spec.resources),
             "extensions": _spec_extensions(spec),
             "connection_config": self._connection_config(request_timeout_s=self._create.request_timeout_s),
         }
@@ -686,8 +707,8 @@ class OpenSandboxProvider:
         snapshot_id = spec.provider_options.get(PROVIDER_OPTION_SNAPSHOT_ID)
         if snapshot_id is not None:
             kwargs["snapshot_id"] = snapshot_id
-        if spec.timeout_s is not None:
-            kwargs["timeout"] = timedelta(seconds=spec.timeout_s)
+        if spec.ttl_s is not None:
+            kwargs["timeout"] = timedelta(seconds=spec.ttl_s)
         if spec.ready_timeout_s is not None:
             kwargs["ready_timeout"] = timedelta(seconds=spec.ready_timeout_s)
         if spec.entrypoint is not None:
@@ -904,25 +925,24 @@ class OpenSandboxProvider:
         target_path.parent.mkdir(parents=True, exist_ok=True)
         target_path.write_bytes(await self._read_file(handle, source_path))
 
-    async def close(self, handle: SandboxHandle, *, delete: bool) -> None:
-        """Close local SDK resources and optionally terminate the sandbox."""
-        kill_error: Exception | None = None
-        if delete:
-            try:
-                await self._await_sdk_operation(
-                    lambda: handle.raw.kill(),
-                    operation="kill",
-                    sandbox_id=handle.sandbox_id,
-                    timeout_s=self._operations.close_timeout_s,
+    async def close(self, handle: SandboxHandle) -> None:
+        """Terminate the sandbox and close local SDK resources."""
+        stop_error: Exception | None = None
+        try:
+            await self._await_sdk_operation(
+                lambda: handle.raw.kill(),
+                operation="kill",
+                sandbox_id=handle.sandbox_id,
+                timeout_s=self._operations.close_timeout_s,
+            )
+        except Exception as e:
+            if not _is_missing_sandbox_delete_error(e):
+                stop_error = e
+            else:
+                LOGGER.info(
+                    "OpenSandbox sandbox %r was already deleted during close",
+                    handle.sandbox_id,
                 )
-            except Exception as e:
-                if not _is_missing_sandbox_delete_error(e):
-                    kill_error = e
-                else:
-                    LOGGER.info(
-                        "OpenSandbox sandbox %r was already deleted during close",
-                        handle.sandbox_id,
-                    )
 
         close_error: Exception | None = None
         try:
@@ -940,15 +960,13 @@ class OpenSandboxProvider:
                 e,
             )
 
-        if kill_error is not None:
+        if stop_error is not None:
             if close_error is not None:
                 raise RuntimeError(
-                    "Failed to delete and close OpenSandbox sandbox "
-                    f"{handle.sandbox_id!r}: delete_error={kill_error!r}, "
+                    "Failed to stop and close OpenSandbox sandbox "
+                    f"{handle.sandbox_id!r}: stop_error={stop_error!r}, "
                     f"close_error={close_error!r}"
-                ) from kill_error
-            raise kill_error
+                ) from stop_error
+            raise stop_error
         if close_error is not None:
-            if delete:
-                return
-            raise close_error
+            return

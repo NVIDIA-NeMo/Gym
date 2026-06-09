@@ -32,7 +32,7 @@ except ModuleNotFoundError:
             super().__init__()
 
 
-from nemo_gym.sandbox import Sandbox, SandboxSpec
+from nemo_gym.sandbox import Sandbox, SandboxResources, SandboxSpec
 from nemo_gym.sandbox.utils import rewrite_image
 
 
@@ -58,7 +58,6 @@ class MiniSWESandboxEnvironmentConfig:
     conda_env: str | None = None
     activate_conda: bool = False
     user: str | int | None = "root"
-    delete: bool = True
 
 
 class MiniSWESandboxEnvironment:
@@ -92,7 +91,7 @@ class MiniSWESandboxEnvironment:
         self._sandbox = Sandbox(self.config.provider).start(
             SandboxSpec(
                 image=image,
-                timeout_s=spec_config.pop("timeout_s", None),
+                ttl_s=spec_config.pop("ttl_s", None),
                 ready_timeout_s=spec_config.pop("ready_timeout_s", None),
                 workdir=spec_config.pop("workdir", self.config.cwd),
                 env=env,
@@ -102,11 +101,10 @@ class MiniSWESandboxEnvironment:
                     "nemo_gym_agent": "mini_swe_agent_2",
                     "instance_id": (self.config.instance_id or "unknown")[:63],
                 },
-                resources=spec_config.pop("resources", {}),
+                resources=SandboxResources.from_mapping(spec_config.pop("resources", {})),
                 entrypoint=spec_config.pop("entrypoint", None),
                 provider_options=provider_options,
-            ),
-            delete_on_stop=self.config.delete,
+            )
         )
 
     def get_template_vars(self, **kwargs: Any) -> dict[str, Any]:

@@ -28,6 +28,7 @@ from nemo_gym.sandbox import (
     SandboxCreateError,
     SandboxExecResult,
     SandboxHandle,
+    SandboxResources,
     SandboxSpec,
     SandboxStatus,
     create_provider,
@@ -83,7 +84,7 @@ class FakeSandboxProvider:
         self.exec_calls: list[dict[str, Any]] = []
         self.upload_calls: list[tuple[SandboxHandle, Path, str]] = []
         self.download_calls: list[tuple[SandboxHandle, str, Path]] = []
-        self.closed: list[tuple[SandboxHandle, bool]] = []
+        self.closed: list[SandboxHandle] = []
         self.aclosed = False
         FakeSandboxProvider.last_instance = self
 
@@ -131,8 +132,8 @@ class FakeSandboxProvider:
         del handle
         return SandboxStatus.RUNNING
 
-    async def close(self, handle: SandboxHandle, *, delete: bool) -> None:
-        self.closed.append((handle, delete))
+    async def close(self, handle: SandboxHandle) -> None:
+        self.closed.append(handle)
 
     async def aclose(self) -> None:
         self.aclosed = True
@@ -177,8 +178,8 @@ class PlainSandboxProvider:
         del handle
         return SandboxStatus.UNKNOWN
 
-    async def close(self, handle: SandboxHandle, *, delete: bool = False) -> None:
-        del handle, delete
+    async def close(self, handle: SandboxHandle) -> None:
+        del handle
 
     async def aclose(self) -> None:
         return None
@@ -225,8 +226,8 @@ class TransferOnlySandboxProvider:
         del handle
         return SandboxStatus.RUNNING
 
-    async def close(self, handle: SandboxHandle, *, delete: bool = False) -> None:
-        del handle, delete
+    async def close(self, handle: SandboxHandle) -> None:
+        del handle
 
     async def aclose(self) -> None:
         return None
@@ -254,7 +255,6 @@ async def _assert_sandbox_facade_uses_public_provider_api(tmp_path: Path) -> Non
             workdir="/repo",
             files={"/tmp/bootstrap.txt": "hello"},
         ),
-        delete_on_stop=True,
     )
 
     provider = FakeSandboxProvider.last_instance
@@ -289,15 +289,15 @@ async def _assert_sandbox_facade_uses_public_provider_api(tmp_path: Path) -> Non
 
     await sandbox.stop()
     await sandbox.stop()
-    assert provider.closed[-1] == (handle, True)
+    assert provider.closed[-1] == handle
     assert await sandbox.status() == SandboxStatus.STOPPED
     assert provider.aclosed is True
 
     context_provider = FakeSandboxProvider()
     async with AsyncSandbox(context_provider) as context_sandbox:
-        await context_sandbox.start(SandboxSpec(image="image:tag"), delete_on_stop=True)
+        await context_sandbox.start(SandboxSpec(image="image:tag"))
         context_handle = context_provider.created_handles[0]
-    assert context_provider.closed[-1] == (context_handle, True)
+    assert context_provider.closed[-1] == context_handle
 
 
 def test_async_sandbox_initial_file_error_paths() -> None:
@@ -315,8 +315,7 @@ async def _assert_async_sandbox_initial_file_error_paths() -> None:
                 sandbox_id="fake-1",
                 provider_name="fake",
                 raw={"spec": SandboxSpec(image="image:tag", files={"/tmp/bootstrap.txt": "hello"})},
-            ),
-            True,
+            )
         )
     ]
 
@@ -336,6 +335,14 @@ async def _assert_async_sandbox_initial_file_error_paths() -> None:
 def test_rewrite_image_validation() -> None:
     assert rewrite_image(None, []) is None
     assert rewrite_image("image:tag", [{"from": "other/", "to": "mirror/"}]) == "image:tag"
+
+
+def test_sandbox_resources_validation() -> None:
+    spec = SandboxSpec(resources={"cpu": "0.5", "memory_mib": "4096", "disk_gib": "8"})
+    assert spec.resources == SandboxResources(cpu=0.5, memory_mib=4096, disk_gib=8)
+
+    with pytest.raises(ValueError, match="Unknown sandbox resource keys"):
+        SandboxSpec(resources={"memory": "4Gi"})
 
 
 def test_provider_registry_validation_and_listing(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -425,7 +432,6 @@ def test_sync_sandbox_facade_uses_public_provider_api(tmp_path: Path) -> None:
                 workdir="/repo",
                 files={"/tmp/bootstrap.txt": "hello"},
             ),
-            delete_on_stop=True,
         )
 
         provider = FakeSandboxProvider.last_instance
@@ -456,7 +462,7 @@ def test_sync_sandbox_facade_uses_public_provider_api(tmp_path: Path) -> None:
         sandbox.download("/tmp/sync-download.txt", download_path)
         assert download_path.read_bytes() == b"downloaded"
         sandbox.stop()
-        assert provider.closed[-1] == (handle, True)
+        assert provider.closed[-1] == handle
         assert sandbox.status() == SandboxStatus.STOPPED
         assert provider.aclosed is True
         try:
@@ -849,11 +855,11 @@ async def _assert_opensandbox_command_retries_can_be_disabled(monkeypatch) -> No
 
 
 @requires_tenacity
-def test_opensandbox_close_timeout_does_not_fail_after_delete() -> None:
-    asyncio.run(_assert_opensandbox_close_timeout_does_not_fail_after_delete())
+def test_opensandbox_close_timeout_does_not_fail_after_stop() -> None:
+    asyncio.run(_assert_opensandbox_close_timeout_does_not_fail_after_stop())
 
 
-async def _assert_opensandbox_close_timeout_does_not_fail_after_delete() -> None:
+async def _assert_opensandbox_close_timeout_does_not_fail_after_stop() -> None:
     _opensandbox_provider_module, OpenSandboxProvider, *_unused = _require_opensandbox_provider()
 
     class SlowCloseRaw:
@@ -873,35 +879,34 @@ async def _assert_opensandbox_close_timeout_does_not_fail_after_delete() -> None
     )
     handle = SandboxHandle(sandbox_id="sdk-sandbox-1", provider_name="opensandbox", raw=raw)
 
-    await provider.close(handle, delete=True)
+    await provider.close(handle)
 
     assert raw.killed is True
 
 
 @requires_tenacity
-def test_opensandbox_close_timeout_still_fails_without_delete() -> None:
-    asyncio.run(_assert_opensandbox_close_timeout_still_fails_without_delete())
+def test_opensandbox_close_propagates_stop_failure() -> None:
+    asyncio.run(_assert_opensandbox_close_propagates_stop_failure())
 
 
-async def _assert_opensandbox_close_timeout_still_fails_without_delete() -> None:
+async def _assert_opensandbox_close_propagates_stop_failure() -> None:
     _opensandbox_provider_module, OpenSandboxProvider, *_unused = _require_opensandbox_provider()
 
-    class SlowCloseRaw:
+    class StopFailureRaw:
+        async def kill(self) -> None:
+            raise RuntimeError("stop failed")
+
         async def close(self) -> None:
-            await asyncio.sleep(60)
+            return None
 
     provider = OpenSandboxProvider(
         operations={"close_timeout_s": 0.01},
         probe={"command": None},
     )
-    handle = SandboxHandle(sandbox_id="sdk-sandbox-1", provider_name="opensandbox", raw=SlowCloseRaw())
+    handle = SandboxHandle(sandbox_id="sdk-sandbox-1", provider_name="opensandbox", raw=StopFailureRaw())
 
-    try:
-        await provider.close(handle, delete=False)
-    except TimeoutError:
-        pass
-    else:
-        raise AssertionError("expected close timeout to fail when delete=False")
+    with pytest.raises(RuntimeError, match="stop failed"):
+        await provider.close(handle)
 
 
 def test_mini_swe_sandbox_environment_owns_conda_setup(monkeypatch) -> None:
@@ -916,14 +921,13 @@ def test_mini_swe_sandbox_environment_owns_conda_setup(monkeypatch) -> None:
         spec={
             "image_rewrites": [{"from": "upstream/", "to": "mirror/"}],
             "metadata": {"suite": "unit"},
-            "resources": {"cpu": "1"},
+            "resources": {"cpu": 1},
         },
         env={"STATIC_KEY": "static-value"},
         forward_env=["FORWARDED_KEY"],
         conda_env="testbed",
         activate_conda=True,
         user="agent",
-        delete=True,
     )
 
     try:
@@ -942,6 +946,7 @@ def test_mini_swe_sandbox_environment_owns_conda_setup(monkeypatch) -> None:
             "FORWARDED_KEY": "forwarded-value",
             "STATIC_KEY": "static-value",
         }
+        assert provider.created_specs[0].resources == SandboxResources(cpu=1.0)
 
         result = env.execute("pytest -q", is_eval=True)
         assert result == {"output": "ok", "returncode": 0, "exception_info": ""}
@@ -956,7 +961,7 @@ def test_mini_swe_sandbox_environment_owns_conda_setup(monkeypatch) -> None:
         env.cleanup()
 
     assert FakeSandboxProvider.last_instance is not None
-    assert FakeSandboxProvider.last_instance.closed[0][1] is True
+    assert FakeSandboxProvider.last_instance.closed[0].sandbox_id == "fake-1"
 
 
 def test_mini_swe_sandbox_environment_only_uses_explicit_provider_options() -> None:
@@ -999,14 +1004,13 @@ def test_mini_swe_sandbox_environment_validation_and_context_manager() -> None:
     with MiniSWESandboxEnvironment(
         image="image:tag",
         provider={provider_name: {}},
-        delete=False,
     ) as env:
         assert env._sandbox is not None
         assert FakeSandboxProvider.last_instance is not None
         assert FakeSandboxProvider.last_instance.created_handles[0].sandbox_id == "fake-1"
 
     assert FakeSandboxProvider.last_instance is not None
-    assert FakeSandboxProvider.last_instance.closed[-1][1] is False
+    assert FakeSandboxProvider.last_instance.closed[-1].sandbox_id == "fake-1"
 
 
 def test_mini_swe_sandbox_environment_submit_sentinel() -> None:

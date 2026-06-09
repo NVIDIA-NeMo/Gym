@@ -300,17 +300,17 @@ class TestApp:
 
     def test_sandbox_resource_profiles_override_static_resources(self) -> None:
         spec = _sandbox_spec_for_instance(
-            {"resources": {"cpu": "1", "memory": "8Gi", "ephemeral-storage": "20Gi"}},
+            {"resources": {"cpu": 1, "memory_mib": 8192, "disk_gib": 20}},
             resource_profiles=[
-                {"cpu": "250m", "memory": "3Gi", "ephemeral-storage": "1Gi"},
-                {"cpu": "500m", "memory": "4Gi", "ephemeral-storage": "1Gi"},
+                {"cpu": 0.25, "memory_mib": 3072, "disk_gib": 1},
+                {"cpu": 0.5, "memory_mib": 4096, "disk_gib": 1},
             ],
             instance_id="django__django-12345",
         )
 
         assert spec["resources"] in (
-            {"cpu": "250m", "memory": "3Gi", "ephemeral-storage": "1Gi"},
-            {"cpu": "500m", "memory": "4Gi", "ephemeral-storage": "1Gi"},
+            {"cpu": 0.25, "memory_mib": 3072, "disk_gib": 1},
+            {"cpu": 0.5, "memory_mib": 4096, "disk_gib": 1},
         )
         assert _sandbox_spec_for_instance(None, resource_profiles=None, instance_id="task") == {}
 

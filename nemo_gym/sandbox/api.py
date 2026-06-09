@@ -42,13 +42,10 @@ class AsyncSandbox:
         self,
         provider: Mapping[str, Any] | SandboxProvider,
         spec: SandboxSpec | None = None,
-        *,
-        delete_on_stop: bool = False,
     ) -> None:
         self._provider = create_provider(provider) if isinstance(provider, Mapping) else provider
         self._spec = spec
         self._handle: SandboxHandle | None = None
-        self._delete_on_stop = delete_on_stop
         self._stopped = True
         self._closed = False
 
@@ -60,8 +57,6 @@ class AsyncSandbox:
     async def start(
         self,
         spec: SandboxSpec | None = None,
-        *,
-        delete_on_stop: bool | None = None,
     ) -> "AsyncSandbox":
         if self._closed:
             raise RuntimeError("Sandbox has been stopped")
@@ -81,14 +76,13 @@ class AsyncSandbox:
                         source_path.write_text(contents, encoding="utf-8")
                         await self._provider.upload_file(handle, source_path, target_path)
         except Exception:
-            await self._provider.close(handle, delete=True)
+            await self._provider.close(handle)
             await self._provider.aclose()
             self._closed = True
             raise
 
         self._spec = requested_spec
         self._handle = handle
-        self._delete_on_stop = self._delete_on_stop if delete_on_stop is None else delete_on_stop
         self._stopped = False
         return self
 
@@ -123,16 +117,13 @@ class AsyncSandbox:
             return SandboxStatus.STOPPED
         return await self._provider.status(self._handle)
 
-    async def stop(self, *, delete: bool | None = None) -> None:
+    async def stop(self) -> None:
         if self._closed:
             return
         try:
             if self._handle is not None and not self._stopped:
                 self._stopped = True
-                await self._provider.close(
-                    self._handle,
-                    delete=self._delete_on_stop if delete is None else delete,
-                )
+                await self._provider.close(self._handle)
         finally:
             await self._provider.aclose()
             self._closed = True
@@ -204,14 +195,12 @@ class Sandbox:
         self,
         provider: Mapping[str, Any] | SandboxProvider,
         spec: SandboxSpec | None = None,
-        *,
-        delete_on_stop: bool = False,
     ) -> None:
         self._runner = _AsyncLoopRunner()
         try:
             self._async_sandbox = self._runner.call(
                 "__init__",
-                lambda: AsyncSandbox(provider, spec, delete_on_stop=delete_on_stop),
+                lambda: AsyncSandbox(provider, spec),
             )
         except BaseException:
             self._runner.close()
@@ -221,15 +210,10 @@ class Sandbox:
     def start(
         self,
         spec: SandboxSpec | None = None,
-        *,
-        delete_on_stop: bool | None = None,
     ) -> "Sandbox":
         self._runner.run(
             "start",
-            lambda: self._async_sandbox.start(
-                spec,
-                delete_on_stop=delete_on_stop,
-            ),
+            lambda: self._async_sandbox.start(spec),
         )
         return self
 
@@ -264,12 +248,12 @@ class Sandbox:
             return SandboxStatus.STOPPED
         return self._runner.run("status", self._async_sandbox.status)
 
-    def stop(self, *, delete: bool | None = None) -> None:
+    def stop(self) -> None:
         if self._closed:
             return
         self._closed = True
         try:
-            self._runner.run("stop", lambda: self._async_sandbox.stop(delete=delete))
+            self._runner.run("stop", self._async_sandbox.stop)
         finally:
             self._runner.close()
 
