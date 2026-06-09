@@ -40,18 +40,14 @@ judge.
 On 2026-06-09, the 60 public research tasks were reproduced with direct
 NVIDIA inference API calls and the research rubric judge. Both policy runs
 used `reasoning_effort: high`, `stream: false`, and no temperature override.
-The judge model was `openai/openai/gpt-5.5`.
+The judge model was `openai/openai/gpt-5.5`. For comparison, the
+[FrontierScience paper](https://arxiv.org/pdf/2601.21165) reports 17.5% for
+Claude Opus 4.5 and 19.4% for OpenAI GPT-5.1 on the Research track.
 
-| Policy model | Endpoint | Max tokens used | Completed | Accuracy | Mean rubric score |
-| --- | --- | ---: | ---: | ---: | ---: |
-| `aws/anthropic/claude-opus-4-5` | `/v1/messages` | 64000 | 60/60 | 16.67% | 3.865/10 |
-| `openai/openai/gpt-5.1` | `/v1/chat/completions` | 128000 | 59/60 | 21.67% | 4.600/10 on completed rows |
-
-The requested `max_tokens: 200000` setting was rejected by the API for both
-models. The accepted caps were 64000 for Claude Opus 4.5 and 128000 for
-GPT-5.1. The remaining GPT-5.1 task, `research-8`, timed out at 128000 and
-32768 max tokens; an 8192-token fallback returned an empty answer and scored
-0/10.
+| Policy model | Endpoint | Max tokens used | Completed | Reproduced accuracy | Paper accuracy | Mean rubric score |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| `aws/anthropic/claude-opus-4-5` | `/v1/messages` | 64000 | 60/60 | 16.67% | 17.5% | 3.865/10 |
+| `openai/openai/gpt-5.1` | `/v1/chat/completions` | 128000 | 59/60 | 21.67% | 19.4% | 4.600/10 on completed rows |
 
 ## Example usage
 
