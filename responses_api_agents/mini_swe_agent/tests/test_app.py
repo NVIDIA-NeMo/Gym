@@ -112,10 +112,8 @@ def create_test_config(
     )
 
 
-def setup_server_client_mocks(mock_load_from_global_config, mock_get_first_server_config_dict):
-    mock_server_client_instance = MagicMock()
-    mock_server_client_instance.global_config_dict = {"policy_model_name": "test_model"}
-    mock_load_from_global_config.return_value = mock_server_client_instance
+def setup_server_client_mocks(mock_server_client, mock_get_first_server_config_dict):
+    mock_server_client.global_config_dict = {"policy_model_name": "test_model"}
 
     mock_get_first_server_config_dict.return_value = {
         "host": "0.0.0.0",
@@ -219,7 +217,6 @@ class TestApp:
         config = create_test_config(model_name="", cache_dir_template="/")
         MiniSWEAgent(config=config, server_client=MagicMock(spec=ServerClient))
 
-    @patch("responses_api_agents.mini_swe_agent.app.ServerClient.load_from_global_config")
     @patch("responses_api_agents.mini_swe_agent.app.get_first_server_config_dict")
     @patch("responses_api_agents.mini_swe_agent.app.get_config_path")
     @patch("responses_api_agents.mini_swe_agent.app.runner_ray_remote")
@@ -230,7 +227,6 @@ class TestApp:
         mock_runner_ray_remote,
         mock_get_config_path,
         mock_get_first_server_config_dict,
-        mock_load_from_global_config,
     ) -> None:
         """Test successful execution of the run method with mocked run_swegym."""
 
@@ -238,7 +234,7 @@ class TestApp:
         mock_server_client = MagicMock(spec=ServerClient)
         server = MiniSWEAgent(config=config, server_client=mock_server_client)
 
-        setup_server_client_mocks(mock_load_from_global_config, mock_get_first_server_config_dict)
+        setup_server_client_mocks(mock_server_client, mock_get_first_server_config_dict)
         setup_config_path_mock(mock_get_config_path)
         setup_run_swegym_mock(mock_to_thread, mock_runner_ray_remote)
 
@@ -250,7 +246,6 @@ class TestApp:
 
         assert_run_swegym_called(mock_to_thread)
 
-    @patch("responses_api_agents.mini_swe_agent.app.ServerClient.load_from_global_config")
     @patch("responses_api_agents.mini_swe_agent.app.get_first_server_config_dict")
     @patch("responses_api_agents.mini_swe_agent.app.get_config_path")
     @patch("responses_api_agents.mini_swe_agent.app.runner_ray_remote")
@@ -261,7 +256,6 @@ class TestApp:
         mock_runner_ray_remote,
         mock_get_config_path,
         mock_get_first_server_config_dict,
-        mock_load_from_global_config,
     ) -> None:
         """Test run method when run_swegym fails."""
 
@@ -269,7 +263,7 @@ class TestApp:
         mock_server_client = MagicMock(spec=ServerClient)
         server = MiniSWEAgent(config=config, server_client=mock_server_client)
 
-        setup_server_client_mocks(mock_load_from_global_config, mock_get_first_server_config_dict)
+        setup_server_client_mocks(mock_server_client, mock_get_first_server_config_dict)
         setup_config_path_mock(mock_get_config_path)
 
         # Mock Ray remote function
@@ -293,7 +287,6 @@ class TestApp:
 
         assert_run_swegym_called(mock_to_thread, instance_id="test_instance_456")
 
-    @patch("responses_api_agents.mini_swe_agent.app.ServerClient.load_from_global_config")
     @patch("responses_api_agents.mini_swe_agent.app.get_first_server_config_dict")
     @patch("responses_api_agents.mini_swe_agent.app.get_config_path")
     @patch("responses_api_agents.mini_swe_agent.app.runner_ray_remote")
@@ -304,13 +297,12 @@ class TestApp:
         mock_runner_ray_remote,
         mock_get_config_path,
         mock_get_first_server_config_dict,
-        mock_load_from_global_config,
     ) -> None:
         config = create_test_config(env="docker")
         mock_server_client = MagicMock(spec=ServerClient)
         server = MiniSWEAgent(config=config, server_client=mock_server_client)
 
-        setup_server_client_mocks(mock_load_from_global_config, mock_get_first_server_config_dict)
+        setup_server_client_mocks(mock_server_client, mock_get_first_server_config_dict)
         setup_config_path_mock(mock_get_config_path)
 
         # Mock Ray remote function

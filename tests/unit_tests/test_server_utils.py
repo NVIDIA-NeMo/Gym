@@ -14,11 +14,13 @@
 # limitations under the License.
 from unittest.mock import AsyncMock, MagicMock
 
+from omegaconf import OmegaConf
 from pytest import MonkeyPatch, raises
 
 import nemo_gym.global_config
 import nemo_gym.server_utils
 from nemo_gym.global_config import (
+    NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
 )
 from nemo_gym.server_utils import (
@@ -58,6 +60,7 @@ class TestServerUtils:
         assert actual_config.port == 0
 
     def test_ServerClient_load_from_global_config(self, monkeypatch: MonkeyPatch) -> None:
+        """HTTP fallback path: simulate an ad-hoc client.py with no local cache."""
         global_config_dict = DictConfig(
             {
                 "head_server": {
@@ -70,6 +73,10 @@ class TestServerUtils:
         get_global_config_dict_mock.return_value = global_config_dict
         monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", get_global_config_dict_mock)
 
+        # Force the slow path: no local cache and no env var.
+        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+        monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
+
         httpx_client_mock = MagicMock()
         httpx_response_mock = MagicMock()
         httpx_client_mock.return_value = httpx_response_mock
@@ -78,6 +85,48 @@ class TestServerUtils:
 
         actual_client = ServerClient.load_from_global_config()
         assert {"a": 2} == actual_client.global_config_dict
+
+    def test_ServerClient_load_from_global_config_prefers_local_cache(self, monkeypatch: MonkeyPatch) -> None:
+        """When `_GLOBAL_CONFIG_DICT` is populated locally, no HTTP fetch happens."""
+        global_config_dict = DictConfig(
+            {
+                "head_server": {"host": "", "port": 0},
+                "my_server": {"a": {"b": {"host": "x", "port": 1}}},
+            }
+        )
+        get_global_config_dict_mock = MagicMock(return_value=global_config_dict)
+        monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", get_global_config_dict_mock)
+
+        # Simulate a worker process: the global config dict is cached locally.
+        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", global_config_dict)
+
+        # If the fast path is taken, requests.get is never called. Make it loud
+        # if it does get called so the test fails clearly.
+        def boom(*args, **kwargs):
+            raise AssertionError("requests.get should not be called on the fast path")
+
+        monkeypatch.setattr(nemo_gym.server_utils.requests, "get", boom)
+
+        client = ServerClient.load_from_global_config()
+        assert client.global_config_dict is global_config_dict
+
+    def test_ServerClient_load_from_global_config_fast_path_via_env(self, monkeypatch: MonkeyPatch) -> None:
+        """`NEMO_GYM_CONFIG_DICT` env var alone is enough to trigger the fast path
+        (covers the first call inside a fresh worker before the singleton is hit)."""
+        global_config_dict = DictConfig({"head_server": {"host": "", "port": 0}})
+        get_global_config_dict_mock = MagicMock(return_value=global_config_dict)
+        monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", get_global_config_dict_mock)
+
+        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+        monkeypatch.setenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, "head_server: {host: '', port: 0}")
+
+        def boom(*args, **kwargs):
+            raise AssertionError("requests.get should not be called on the fast path")
+
+        monkeypatch.setattr(nemo_gym.server_utils.requests, "get", boom)
+
+        client = ServerClient.load_from_global_config()
+        assert client.global_config_dict is global_config_dict
 
     def test_ServerClient_load_from_global_config_propogate_ConnectionError(self, monkeypatch: MonkeyPatch) -> None:
         global_config_dict = DictConfig(
@@ -91,6 +140,10 @@ class TestServerUtils:
         get_global_config_dict_mock = MagicMock()
         get_global_config_dict_mock.return_value = global_config_dict
         monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", get_global_config_dict_mock)
+
+        # Force the slow path so the ConnectionError can fire.
+        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+        monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
 
         httpx_client_mock = MagicMock()
         httpx_client_mock.side_effect = ConnectionError
@@ -164,6 +217,63 @@ class TestServerUtils:
         resp = await head_server.global_config_dict_yaml()
 
         assert "a: 2\n" == resp
+
+    async def test_HeadServer_global_config_dict_yaml_caches(self, monkeypatch: MonkeyPatch) -> None:
+        """Step 2: the immutable config dict is serialized to YAML at most once."""
+        global_config_dict = DictConfig({"a": 2})
+        get_global_config_dict_mock = MagicMock(return_value=global_config_dict)
+        monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", get_global_config_dict_mock)
+
+        to_yaml_mock = MagicMock(wraps=OmegaConf.to_yaml)
+        monkeypatch.setattr(nemo_gym.server_utils.OmegaConf, "to_yaml", to_yaml_mock)
+
+        head_server = HeadServer(config=BaseServerConfig(host="", port=0))
+        first = await head_server.global_config_dict_yaml()
+        second = await head_server.global_config_dict_yaml()
+
+        # Same string object — proves the cache, not just value-equal.
+        assert first is second
+        assert to_yaml_mock.call_count == 1
+
+        # Explicit invalidation re-serializes.
+        head_server.invalidate_global_config_dict_yaml_cache()
+        third = await head_server.global_config_dict_yaml()
+        assert third == first  # value
+        assert to_yaml_mock.call_count == 2
+
+    async def test_ServerClient_request_uses_base_url_table(self, monkeypatch: MonkeyPatch) -> None:
+        """Step 3: after the first request to a server_name, `request()` no longer
+        walks the OmegaConf DictConfig — the base URL comes from the cached
+        `_server_base_urls` table."""
+        server_client = ServerClient(
+            head_server_config=BaseServerConfig(host="head", port=11000),
+            global_config_dict=DictConfig({"my_server": {"a": {"b": {"host": "xyz", "port": 54321}}}}),
+        )
+
+        httpx_client_mock = MagicMock()
+        httpx_client_request_mock = AsyncMock()
+        httpx_client_request_mock.return_value = "ok"
+        httpx_client_mock.return_value.request = httpx_client_request_mock
+        monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", httpx_client_mock)
+
+        # First call: populates the table.
+        await server_client.post(server_name="my_server", url_path="/x")
+        assert server_client._server_base_urls == {"my_server": "http://xyz:54321"}
+
+        # Second call: must not touch the OmegaConf walker. Make
+        # `get_first_server_config_dict` loud to prove the fast path.
+        def boom(*_args, **_kwargs):
+            raise AssertionError("get_first_server_config_dict should not be called once the URL is cached")
+
+        monkeypatch.setattr(nemo_gym.server_utils, "get_first_server_config_dict", boom)
+
+        await server_client.post(server_name="my_server", url_path="/y")
+        await server_client.get(server_name="my_server", url_path="/z")
+
+        # All three calls dispatched to the same precomputed URL.
+        assert httpx_client_request_mock.call_count == 3
+        for call in httpx_client_request_mock.call_args_list:
+            assert call.kwargs["url"].startswith("http://xyz:54321")
 
     def _mock_ray_return_value(self, monkeypatch: MonkeyPatch, return_value: bool) -> MagicMock:
         ray_is_initialized_mock = MagicMock()
