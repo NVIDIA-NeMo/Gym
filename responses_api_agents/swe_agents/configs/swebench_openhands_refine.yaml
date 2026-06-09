@@ -1,7 +1,7 @@
 # Multi-turn (refine) SWE-bench wrapper configuration for OpenHands.
 # Same swe_agents package, entrypoint = refine_app.py (SWEBenchRefineWrapper).
 # Adds the per-attempt loop knobs; everything else mirrors swebench_openhands_training.yaml.
-swe_agents_refine_train:
+swe_agents_train:
   responses_api_agents:
     swe_agents:
       entrypoint: refine_app.py
@@ -44,7 +44,7 @@ swe_agents_refine_train:
         - name: example
           type: example
           jsonl_fpath: responses_api_agents/swe_agents/data/example.jsonl
-swe_agents_refine_val:
+swe_agents_val:
   responses_api_agents:
     swe_agents:
       entrypoint: refine_app.py
