@@ -57,19 +57,6 @@ class AsyncSandbox:
             raise RuntimeError("Sandbox has not been started")
         return self._handle
 
-    async def _write_inline_file(self, handle: SandboxHandle, target_path: str, data: str | bytes) -> None:
-        with tempfile.TemporaryDirectory(prefix="nemo-gym-sandbox-upload-") as tmp_dir:
-            source_path = Path(tmp_dir) / "contents"
-            if isinstance(data, str):
-                source_path.write_text(data, encoding="utf-8")
-            else:
-                source_path.write_bytes(data)
-            await self._provider.upload_file(handle, source_path, target_path)
-
-    async def _write_initial_files(self, handle: SandboxHandle, files: dict[str, str]) -> None:
-        for target_path, contents in files.items():
-            await self._write_inline_file(handle, target_path, contents)
-
     async def start(
         self,
         spec: SandboxSpec | None = None,
@@ -86,7 +73,13 @@ class AsyncSandbox:
 
         handle = await self._provider.create(requested_spec)
         try:
-            await self._write_initial_files(handle, requested_spec.files)
+            if requested_spec.files:
+                with tempfile.TemporaryDirectory(prefix="nemo-gym-sandbox-upload-") as tmp_dir:
+                    tmp_path = Path(tmp_dir)
+                    for index, (target_path, contents) in enumerate(requested_spec.files.items()):
+                        source_path = tmp_path / f"file-{index}"
+                        source_path.write_text(contents, encoding="utf-8")
+                        await self._provider.upload_file(handle, source_path, target_path)
         except Exception:
             await self._provider.close(handle, delete=True)
             await self._provider.aclose()
