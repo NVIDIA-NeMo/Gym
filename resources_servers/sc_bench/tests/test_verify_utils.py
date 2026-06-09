@@ -3,28 +3,39 @@
 
 import json
 
+import pytest
+
 from resources_servers.sc_bench.verify_utils import (
+    _assert_no_reasoning,
     compute_episode_reward,
     extract_tool_trace_from_response,
     extract_trade_order_id,
     get_verifier_fields,
     parse_tool_arguments,
-    strip_thinking_traces,
 )
 
 
-class TestThinkingStrip:
-    def test_strip_closed_tags(self) -> None:
-        text = '<think>reasoning</think>{"order_id": "T1001"}'
-        assert strip_thinking_traces(text) == '{"order_id": "T1001"}'
+class TestAssertNoReasoning:
+    def test_passes_clean_text(self) -> None:
+        _assert_no_reasoning('{"order_id": "T1001"}')
+        _assert_no_reasoning("")
 
-    def test_strip_orphan_close_tag(self) -> None:
-        text = 'hidden reasoning</thinking>{"fulfillment_id": "FO1"}'
-        assert strip_thinking_traces(text) == '{"fulfillment_id": "FO1"}'
+    @pytest.mark.parametrize(
+        "text",
+        [
+            '<think>reasoning</think>{"order_id": "T1"}',
+            'hidden</think>{"order_id": "T1"}',
+            '<thinking>plan</thinking>{"order_id": "T1"}',
+            'hidden</thinking>{"order_id": "T1"}',
+        ],
+    )
+    def test_raises_on_reasoning_tags(self, text: str) -> None:
+        with pytest.raises(AssertionError, match="reasoning tags"):
+            _assert_no_reasoning(text)
 
-    def test_parse_arguments_with_thinking(self) -> None:
-        args = '<thinking>plan</thinking>{"order_id": "T1003"}'
-        assert parse_tool_arguments(args) == {"order_id": "T1003"}
+    def test_parse_arguments_rejects_thinking(self) -> None:
+        with pytest.raises(AssertionError, match="reasoning tags"):
+            parse_tool_arguments('<thinking>plan</thinking>{"order_id": "T1003"}')
 
 
 class TestVerifierMetadata:
@@ -71,7 +82,7 @@ class TestToolTrace:
                 type="function_call",
                 call_id="c1",
                 name="query_buyer_and_related",
-                arguments="<thinking>x</thinking>" + json.dumps({"order_id": "T1003"}),
+                arguments=json.dumps({"order_id": "T1003"}),
             ),
             Item(
                 type="function_call_output",
@@ -82,6 +93,23 @@ class TestToolTrace:
         trace = extract_tool_trace_from_response(output)
         assert len(trace) == 1
         assert trace[0]["arguments"] == {"order_id": "T1003"}
+
+    def test_extract_tool_trace_rejects_thinking_in_arguments(self) -> None:
+        output = [
+            {
+                "type": "function_call",
+                "call_id": "c1",
+                "name": "query_buyer_and_related",
+                "arguments": "<thinking>x</thinking>" + json.dumps({"order_id": "T1003"}),
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "c1",
+                "output": json.dumps({"buyer_id": {"id": 1}, "related_item": []}),
+            },
+        ]
+        with pytest.raises(AssertionError, match="reasoning tags"):
+            extract_tool_trace_from_response(output)
 
     def test_extract_tool_trace_dict_output(self) -> None:
         output = [

@@ -8,17 +8,17 @@ from typing import Any, Dict, List, Optional
 from resources_servers.sc_bench.evaluation import compute_reward_from_tool_trace
 
 
-_THINK_TAG_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
-_THINKING_TAG_RE = re.compile(r"<thinking>.*?</thinking>", re.DOTALL)
-
-
-def strip_thinking_traces(text: str) -> str:
-    """Remove thinking-model reasoning blocks before parsing tool arguments."""
-    text = _THINK_TAG_RE.sub("", text)
-    text = _THINKING_TAG_RE.sub("", text)
-    text = re.sub(r"^.*?</think>", "", text, flags=re.DOTALL)
-    text = re.sub(r"^.*?</thinking>", "", text, flags=re.DOTALL)
-    return text.strip()
+def _assert_no_reasoning(text: str) -> None:
+    assert "<think>" not in text and "</think>" not in text, (
+        "sc_bench received tool-call text containing <think>/</think> "
+        "reasoning tags. Reasoning must be parsed by the inference server before "
+        "reaching the verifier."
+    )
+    assert "<thinking>" not in text and "</thinking>" not in text, (
+        "sc_bench received tool-call text containing <thinking>/</thinking> "
+        "reasoning tags. Reasoning must be parsed by the inference server before "
+        "reaching the verifier."
+    )
 
 
 def extract_trade_order_id(question: str) -> Optional[str]:
@@ -33,9 +33,9 @@ def parse_tool_arguments(arguments: Any) -> Dict[str, Any]:
         return arguments
     if not isinstance(arguments, str):
         return {}
-    cleaned = strip_thinking_traces(arguments)
+    _assert_no_reasoning(arguments)
     try:
-        parsed = json.loads(cleaned)
+        parsed = json.loads(arguments.strip())
         return parsed if isinstance(parsed, dict) else {}
     except (json.JSONDecodeError, TypeError):
         return {}
@@ -61,7 +61,8 @@ def extract_tool_trace_from_response(response_output: List[Any]) -> List[Dict[st
             call = pending_calls.pop(call_id)
             if isinstance(output_raw, str):
                 try:
-                    output = json.loads(strip_thinking_traces(output_raw))
+                    _assert_no_reasoning(output_raw)
+                    output = json.loads(output_raw.strip())
                 except (json.JSONDecodeError, TypeError):
                     output = {"raw_output": output_raw}
             else:
