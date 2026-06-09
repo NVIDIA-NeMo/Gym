@@ -45,17 +45,26 @@ uniform `num_repeats` across problems (which `ng_collect_rollouts` enforces).
 
 ## Dataset Format
 
-Flat-field JSONL (prompt templating happens at runtime via
-`benchmarks/critpt/prompts/turn1.yaml`). Each row:
+Two JSONL files coexist with different shapes:
 
-- `problem_id`: AA API submission key, e.g. `Challenge_1_main`
-- `problem`: physics question (Markdown)
-- `code_template`: Python function stub the model populates in Turn 2
-- `uuid`: same as `problem_id`
+- **`benchmarks/critpt/data/critpt_benchmark.jsonl`** (full 70-row dataset, gitignored;
+  produced by `prepare.py`). **Flat-field**: each row has `problem_id`, `problem` (Markdown
+  question), `code_template` (Python stub), and `uuid`. Prompt templating happens at
+  rollout time via the dataset entry's `prompt_config:
+  benchmarks/critpt/prompts/turn1.yaml`.
+- **`resources_servers/critpt/data/example.jsonl`** (5-row hand-curated fixture,
+  committed). **Pre-materialized**: same flat fields plus `responses_create_params.input`
+  already filled in from the Turn 1 template, matching the convention of every other
+  paired server's example fixture. Because it's pre-materialized, callers must NOT pass
+  `+prompt_config` when running rollouts against this file (the framework rejects rows
+  that have both).
 
 ## Observability
 
-Both signals surface in the run log (prefixed `(critpt_resources_server)`):
+Both signals surface in the run log, prefixed with the resources-server instance name —
+`(critpt_resources_server)` when launched directly from this server's config, or
+`(critpt_benchmark_resources_server)` when launched via `benchmarks/critpt/config.yaml`
+(the inheriting instance):
 
 - Per-`verify()` log line at WARNING level:
   `CritPt verify #<N>: batch <B> at <K>/70 submissions buffered (problem_id=...)`
@@ -70,7 +79,7 @@ Both signals surface in the run log (prefixed `(critpt_resources_server)`):
 `GET /status` returns the live buffer count:
 
 ```bash
-PORT=$(grep "critpt_resources_server.*Uvicorn running" <run.log> | grep -oE '127\.0\.0\.1:[0-9]+' | cut -d: -f2)
+PORT=$(grep -E "critpt(_benchmark)?_resources_server.*Uvicorn running" <run.log> | head -1 | grep -oE '127\.0\.0\.1:[0-9]+' | cut -d: -f2)
 curl -s http://127.0.0.1:$PORT/status
 # {"pending_batches": [47], "batch_size": 70}
 # (with num_repeats=N, the list grows up to N entries — one per concurrently-filling batch)
@@ -107,7 +116,7 @@ ng_run "+config_paths=[benchmarks/critpt/config.yaml,responses_api_models/openai
 ng_collect_rollouts \
     +agent_name=critpt_benchmark_agent \
     +input_jsonl_fpath=resources_servers/critpt/data/example.jsonl \
-    +output_jsonl_fpath=results/critpt_rollouts.jsonl \
+    +output_jsonl_fpath=results/critpt_smoke.jsonl \
     +num_repeats=1 \
     "++responses_create_params={temperature: 0.0}"
 ```

@@ -5,7 +5,7 @@ Benchmark wrapper for [CritPt](https://huggingface.co/datasets/CritPt-Benchmark/
 code template; the model must produce a precise numerical answer.
 
 - **Tasks**: 70 physics problems
-- **Reward**: binary; scored by the [Artificial Analysis API](https://artificialanalysis.ai/documentation#critpt-api) — private test cases run server-side
+- **Reward**: aggregate accuracy from the [Artificial Analysis API](https://artificialanalysis.ai/documentation#critpt-api) (private test cases run server-side), distributed uniformly across the batch — every rollout shares the same float reward
 - **Metrics**: `pass@1/accuracy` — fraction of problems the AA API accepts
 
 The agent runs two LLM turns per problem:
