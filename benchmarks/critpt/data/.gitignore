@@ -1,6 +1,1 @@
-critpt_benchmark.jsonl
-*train.jsonl
-*validation.jsonl
-*train_prepare.jsonl
-*validation_prepare.jsonl
-*example_prepare.jsonl
+*.jsonl

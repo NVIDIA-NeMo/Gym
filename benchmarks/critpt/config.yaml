@@ -1,27 +1,22 @@
-# Compose the CritPt resources server + custom 2-turn agent + dataset entries.
+# Chain to the resources server + custom agent config (server, agent, example dataset
+# are all defined in critpt.yaml). This benchmark config narrows the agent's dataset
+# list to just the benchmark dataset.
 config_paths:
   - resources_servers/critpt/configs/critpt.yaml
-  - responses_api_agents/critpt_agent/configs/critpt_agent.yaml
 
-# CritPt benchmark agent: pairs critpt_agent with critpt_resources_server and the
-# CritPt benchmark dataset. The agent runs Turn 1 with prompts/turn1.yaml, then
-# constructs Turn 2 internally (see CritPtAgent._build_turn2_user_message).
+critpt_benchmark_resources_server:
+  _inherit_from: critpt_resources_server
+
 critpt_benchmark_agent:
   _inherit_from: critpt_agent
   responses_api_agents:
     critpt_agent:
       resources_server:
-        name: critpt_resources_server
-      turn2_prompt_fpath: benchmarks/critpt/prompts/turn2.yaml
+        name: critpt_benchmark_resources_server
       datasets:
         - name: critpt
           type: benchmark
           jsonl_fpath: benchmarks/critpt/data/critpt_benchmark.jsonl
           prompt_config: benchmarks/critpt/prompts/turn1.yaml
           prepare_script: benchmarks/critpt/prepare.py
-          num_repeats: 1
-        - name: example
-          type: example
-          jsonl_fpath: resources_servers/critpt/data/example.jsonl
-          prompt_config: benchmarks/critpt/prompts/turn1.yaml
           num_repeats: 1
