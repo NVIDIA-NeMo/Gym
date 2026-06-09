@@ -14,6 +14,7 @@ Models answer natural-language questions about trade, fulfillment, and warehouse
 | Conversion script                  | `SC-bench/scripts/convert_to_nemo_gym.py` (upstream source repo) |
 | Benchmark (100 tool-use questions) | `benchmarks/sc_bench/prepare.py`                                 |
 | Example (5 rows)                   | `data/example.jsonl` (committed)                                 |
+| Example rollouts (5 rows)          | `data/example_rollouts.jsonl` (committed)                        |
 | Train / validation (80/20 split)   | `data/train.jsonl`, `data/validation.jsonl`                      |
 | CSV tables                         | `data/csv/` (copied by prepare)                                  |
 
