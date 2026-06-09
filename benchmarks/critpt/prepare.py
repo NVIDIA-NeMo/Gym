@@ -27,8 +27,10 @@ from pathlib import Path
 BENCHMARK_DIR = Path(__file__).parent
 DATA_DIR = BENCHMARK_DIR / "data"
 OUTPUT_FPATH = DATA_DIR / "critpt_benchmark.jsonl"
-EXAMPLE_FPATH = DATA_DIR / "example.jsonl"
-EXAMPLE_SIZE = 5
+
+# Note: data/example.jsonl is a hand-curated repo artifact (5 problems spanning multiple
+# physics domains) committed under resources_servers/critpt/data/example.jsonl. It is
+# intentionally NOT regenerated here — running prepare() will not touch it.
 
 
 def prepare() -> Path:
@@ -52,10 +54,6 @@ def prepare() -> Path:
     with open(OUTPUT_FPATH, "w") as f:
         f.writelines(rows)
     print(f"Wrote {len(rows)} problems to {OUTPUT_FPATH}")
-
-    with open(EXAMPLE_FPATH, "w") as f:
-        f.writelines(rows[:EXAMPLE_SIZE])
-    print(f"Wrote {min(EXAMPLE_SIZE, len(rows))} problems to {EXAMPLE_FPATH}")
 
     return OUTPUT_FPATH
 

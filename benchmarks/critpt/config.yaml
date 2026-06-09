@@ -22,7 +22,6 @@ critpt_benchmark_agent:
           num_repeats: 1
         - name: example
           type: example
-          jsonl_fpath: benchmarks/critpt/data/example.jsonl
+          jsonl_fpath: resources_servers/critpt/data/example.jsonl
           prompt_config: benchmarks/critpt/prompts/turn1.yaml
-          prepare_script: benchmarks/critpt/prepare.py
           num_repeats: 1
