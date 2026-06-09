@@ -311,9 +311,7 @@ class TestResponses:
             "loop should have run max_steps=3 model calls instead of breaking after first text response"
         )
 
-        user_continues = [
-            o for o in output if o["type"] == "message" and o["role"] == "user"
-        ]
+        user_continues = [o for o in output if o["type"] == "message" and o["role"] == "user"]
         assert len(user_continues) >= 1, "no 'Continue.' user message injected"
         assert any(o["content"] == "Continue." for o in user_continues), (
             f"Continue. literal missing; got user contents: {[o['content'] for o in user_continues]}"

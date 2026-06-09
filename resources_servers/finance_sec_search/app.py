@@ -68,6 +68,7 @@ class FinanceAgentResourcesServerConfig(BaseResourcesServerConfig):
         default=None,
         description="Path for caching ticker mappings and filing metadata. Defaults to ~/.cache/nemo_gym/finance_sec_search/ if not set. Relative paths are resolved from cwd.",
     )
+    use_cache: bool = Field(default=False, description="Keep False to always fetch fresh filings (used for eval).")
     user_agent: str = Field(
         default="Gym-SEC-Search/1.0 (research@nvidia.com)", description="User-Agent header for SEC.gov requests"
     )
@@ -110,9 +111,11 @@ class FinanceAgentResourcesServerConfig(BaseResourcesServerConfig):
         "'binary': only [[2]] → 1.0, else 0.0. "
         "'scaled': [[0]] → 0.0, [[1]] → 0.5, [[2]] → 1.0.",
     )
-    retrieval_max_output_tokens: int = Field(
-        default=8192,
-        description="Max output tokens for retrieve_information LLM calls. Increase for thinking models.",
+    retrieval_max_output_tokens: Optional[int] = Field(
+        default=None,
+        description="Max output tokens for retrieve_information LLM calls. Increase for thinking models. "
+        "Set to null/None to leave it unset so the retrieval call inherits the full generation budget "
+        "(used for eval); set an integer to cap it (used for training).",
     )
     retrieval_model_context_length: int = Field(
         default=131072,
@@ -358,12 +361,15 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
             if not self._cache_dir.is_absolute():
                 self._cache_dir = Path.cwd() / self._cache_dir
                 logger.info("Resolved relative cache_dir to %s", self._cache_dir)
-        self._cache_dir.mkdir(parents=True, exist_ok=True)
         self._filings_metadata_dir = self._cache_dir / "filings_metadata"
-        self._filings_metadata_dir.mkdir(exist_ok=True)
         self._filings_dir = self._cache_dir / "filings"
-        self._filings_dir.mkdir(exist_ok=True)
         self._tickers_file = self._cache_dir / "tickers.json"
+        # Only materialize the on-disk cache when caching is enabled. With
+        # use_cache=False every request fetches live and no dirs are created.
+        if self.config.use_cache:
+            self._cache_dir.mkdir(parents=True, exist_ok=True)
+            self._filings_metadata_dir.mkdir(exist_ok=True)
+            self._filings_dir.mkdir(exist_ok=True)
 
         self._rate_limiter = RateLimiter(max_requests=self.config.requests_per_second, window_seconds=1.0)
 
@@ -544,7 +550,7 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
 
         raw = None
 
-        if self._tickers_file.exists():
+        if self.config.use_cache and self._tickers_file.exists():
             try:
                 with open(self._tickers_file, "r") as f:
                     raw = json.load(f)
@@ -559,8 +565,9 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
                     with urllib.request.urlopen(req, timeout=30) as resp:
                         data = resp.read().decode("utf-8")
                     raw = json.loads(data)
-                    with open(self._tickers_file, "w") as f:
-                        json.dump(raw, f)
+                    if self.config.use_cache:
+                        with open(self._tickers_file, "w") as f:
+                            json.dump(raw, f)
                     break
                 except (urllib.error.URLError, json.JSONDecodeError, OSError) as e:
                     wait = 2**attempt
@@ -655,7 +662,7 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
                 return self._filings_cache[cik_padded]
 
             cache_path = self._get_company_cache_path(cik)
-            if cache_path.exists():
+            if self.config.use_cache and cache_path.exists():
                 with open(cache_path, "r") as f:
                     filings = json.load(f)
                 self._filings_cache[cik_padded] = filings
@@ -684,7 +691,7 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
                         except json.JSONDecodeError:
                             logger.warning("Failed to parse supplementary file %s for CIK %s", filename, cik)
 
-                if filings:
+                if filings and self.config.use_cache:
                     self._atomic_write(cache_path, json.dumps(filings))
                 self._filings_cache[cik_padded] = filings
                 return filings
@@ -777,6 +784,7 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
         cik, accession_number = parts["cik"], parts["accession_number"]
         cik_padded = str(cik).zfill(10)
         acc_nodash = accession_number.replace("-", "")
+        # TODO: this path assumes the URL is for the primary filing document only, which is true because of how sec_filing_search is constructed
         return self._filings_dir / cik_padded / f"{acc_nodash}.txt"
 
     # ========================================================================
@@ -891,12 +899,12 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
             raise ValueError(f"Invalid SEC URL format: {url}")
 
         text_content = None
-        if file_path.exists():
+        if self.config.use_cache and file_path.exists():
             text_content = file_path.read_text(encoding="utf-8")
 
         if text_content is None and self.config.sec_dump_path:
             text_content = await self._lookup_dump(url)
-            if text_content:
+            if text_content and self.config.use_cache:
                 self._atomic_write(file_path, text_content)
 
         if text_content is None:
@@ -909,7 +917,8 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
             text_content = await asyncio.get_running_loop().run_in_executor(
                 None, self._parse_html_to_text, html_content
             )
-            self._atomic_write(file_path, text_content)
+            if self.config.use_cache:
+                self._atomic_write(file_path, text_content)
 
         if not text_content:
             raise ValueError("Filing content was empty after parsing.")
@@ -1071,9 +1080,7 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
                 if error_field is not None:
                     diagnostic_parts.append(f"error={error_field}")
                 diagnostic = (" (" + ", ".join(diagnostic_parts) + ")") if diagnostic_parts else ""
-                return RetrieveInformationResponse(
-                    results=f"ERROR: Retrieval LLM returned no output.{diagnostic}"
-                )
+                return RetrieveInformationResponse(results=f"ERROR: Retrieval LLM returned no output.{diagnostic}")
 
             return RetrieveInformationResponse(results=result_text)
 

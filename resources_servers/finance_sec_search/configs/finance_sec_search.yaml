@@ -8,6 +8,7 @@ finance_sec_search_resources_server:
       description: SEC EDGAR filing search for financial analysis questions
       value: Enable LLMs to search and analyze SEC filings
       cache_dir: null  # defaults to ~/.cache/nemo_gym/finance_sec_search/ if not set
+      use_cache: false  # keep false for eval to fetch fresh filings, set to true for training to reuse cached filings
       tavily_api_key: ${tavily_api_key}
       retrieval_model_server:
         type: responses_api_models

@@ -89,6 +89,10 @@ def server_config(temp_cache_dir):
         entrypoint="",
         name="finance_sec_search_test",
         cache_dir=temp_cache_dir,
+        # The default is use_cache=False (eval). The bulk of these tests exercise
+        # the on-disk cache, so the shared fixture pins it True; the use_cache=False
+        # bypass path is covered explicitly in TestUseCacheFlag.
+        use_cache=True,
         judge_prompt_template_fpath=str(_prompt_dir / "finance_sec_search_judge.yaml"),
         retrieval_system_prompt_fpath=str(_prompt_dir / "finance_sec_search_retrieval.yaml"),
     )
@@ -116,6 +120,96 @@ class TestServerInitialization:
         assert Path(temp_cache_dir).exists()
         assert (Path(temp_cache_dir) / "filings_metadata").exists()
         assert (Path(temp_cache_dir) / "filings").exists()
+
+
+# ============================================================================
+# Test: use_cache flag (on-disk cache enable/disable)
+# ============================================================================
+
+
+class TestUseCacheFlag:
+    """Tests that the use_cache flag fully gates the on-disk SEC cache."""
+
+    _SEC_URL = "https://www.sec.gov/Archives/edgar/data/320193/000032019325000008/aapl-20241228.htm"
+
+    @staticmethod
+    def _make_server(cache_dir: Path, use_cache: bool) -> FinanceAgentResourcesServer:
+        _pd = Path(__file__).resolve().parents[1] / "prompt_templates"
+        config = FinanceAgentResourcesServerConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="finance_sec_search_test",
+            cache_dir=str(cache_dir),
+            use_cache=use_cache,
+            judge_prompt_template_fpath=str(_pd / "finance_sec_search_judge.yaml"),
+            retrieval_system_prompt_fpath=str(_pd / "finance_sec_search_retrieval.yaml"),
+        )
+        return FinanceAgentResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+    def test_directories_created_when_enabled(self, tmp_path) -> None:
+        """use_cache=True creates the cache directories."""
+        cache_dir = tmp_path / "cache"
+        self._make_server(cache_dir, use_cache=True)
+        assert (cache_dir / "filings").exists()
+        assert (cache_dir / "filings_metadata").exists()
+
+    def test_directories_not_created_when_disabled(self, tmp_path) -> None:
+        """use_cache=False does not create any cache directories."""
+        cache_dir = tmp_path / "cache"
+        server = self._make_server(cache_dir, use_cache=False)
+        assert not (cache_dir / "filings").exists()
+        assert not (cache_dir / "filings_metadata").exists()
+        # The path is still derived so URL→path conversion keeps working.
+        assert server._url_to_filing_path(self._SEC_URL) is not None
+
+    @pytest.mark.asyncio
+    async def test_cache_hit_served_when_enabled(self, tmp_path) -> None:
+        """use_cache=True serves a pre-populated filing from disk without fetching."""
+        server = self._make_server(tmp_path / "cache", use_cache=True)
+        path = server._url_to_filing_path(self._SEC_URL)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("CACHED CONTENT", encoding="utf-8")
+
+        fetch_mock = AsyncMock(return_value="<html><body><p>LIVE CONTENT</p></body></html>")
+        with patch.object(server, "_fetch_with_retry", fetch_mock):
+            text = await server._fetch_sec_filing_text(self._SEC_URL)
+
+        assert text == "CACHED CONTENT"
+        fetch_mock.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_cache_bypassed_when_disabled(self, tmp_path) -> None:
+        """use_cache=False ignores an existing cache file, fetches live, and never writes back."""
+        server = self._make_server(tmp_path / "cache", use_cache=False)
+        path = server._url_to_filing_path(self._SEC_URL)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("CACHED CONTENT", encoding="utf-8")
+
+        fetch_mock = AsyncMock(return_value="<html><body><p>LIVE CONTENT</p></body></html>")
+        with patch.object(server, "_fetch_with_retry", fetch_mock):
+            text = await server._fetch_sec_filing_text(self._SEC_URL)
+
+        assert "LIVE CONTENT" in text
+        assert "CACHED CONTENT" not in text
+        fetch_mock.assert_called_once()
+        # The live result must NOT overwrite the cache file when caching is disabled.
+        assert path.read_text(encoding="utf-8") == "CACHED CONTENT"
+
+    @pytest.mark.asyncio
+    async def test_cache_written_when_enabled(self, tmp_path) -> None:
+        """use_cache=True writes a freshly fetched filing to the cache file."""
+        server = self._make_server(tmp_path / "cache", use_cache=True)
+        path = server._url_to_filing_path(self._SEC_URL)
+        assert not path.exists()
+
+        fetch_mock = AsyncMock(return_value="<html><body><p>FRESH CONTENT</p></body></html>")
+        with patch.object(server, "_fetch_with_retry", fetch_mock):
+            text = await server._fetch_sec_filing_text(self._SEC_URL)
+
+        assert "FRESH CONTENT" in text
+        assert path.exists()
+        assert "FRESH CONTENT" in path.read_text(encoding="utf-8")
 
 
 # ============================================================================
