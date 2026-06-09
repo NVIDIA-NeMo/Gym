@@ -29,9 +29,11 @@ from resources_servers.frontierscience_judge.app import (
     FrontierScienceJudgeConfig,
     FrontierScienceJudgeServer,
     FrontierScienceJudgeVerifyRequest,
+    _resolve_prompt_path,
     _strip_thinking_traces,
     extract_text_from_response,
     parse_judgement,
+    parse_rubric_score,
 )
 
 
@@ -74,6 +76,33 @@ class TestParseJudgement:
 
     def test_empty(self) -> None:
         assert parse_judgement("") is None
+
+
+class TestParseRubricScore:
+    def test_score_slash_ten(self) -> None:
+        assert parse_rubric_score("Reasoning\nScore: 7.5/10\nJudgement: YES") == approx(7.5)
+
+    def test_score_out_of_ten(self) -> None:
+        assert parse_rubric_score("Final score: 6 out of 10") == approx(6.0)
+
+    def test_bracketed_score_format(self) -> None:
+        assert parse_rubric_score("FINAL_SCORE[8] / MAX_POSSIBLE_SCORE[10]") == approx(8.0)
+
+    def test_last_score_line_wins(self) -> None:
+        assert parse_rubric_score("Score: 3/10\nrevised\nScore: 7/10") == approx(7.0)
+
+    def test_no_score(self) -> None:
+        assert parse_rubric_score("Judgement: YES") is None
+
+
+class TestResolvePromptPath:
+    def test_resolves_repo_relative_prompt(self) -> None:
+        path = _resolve_prompt_path("resources_servers/frontierscience_judge/prompts/research_judge.yaml")
+        assert path.exists()
+
+    def test_resolves_server_relative_prompt(self) -> None:
+        path = _resolve_prompt_path("prompts/research_judge.yaml")
+        assert path.exists()
 
 
 class TestExtractTextFromResponse:
@@ -438,6 +467,95 @@ class TestFrontierScienceJudgeServer:
             assert f in dump
         assert result.expected_answer == "Test answer"
 
+    async def test_verify_rubric_mode_passes_at_threshold(self, config: FrontierScienceJudgeConfig) -> None:
+        rubric_config = config.model_copy(deep=True)
+        rubric_config.judge_mode = "rubric"
+        rubric_config.judge_prompt_path = "resources_servers/frontierscience_judge/prompts/research_judge.yaml"
+
+        server_mock = MagicMock(spec=ServerClient)
+        server = FrontierScienceJudgeServer(config=rubric_config, server_client=server_mock)
+
+        response_mock = AsyncMock()
+        response_mock.json = AsyncMock(
+            return_value=self._make_judge_response("Rubric notes...\nScore: 7.0/10\nJudgement: YES")
+        )
+        server_mock.post = AsyncMock(return_value=response_mock)
+
+        model_response = self._make_model_response("Detailed research answer")
+        request = FrontierScienceJudgeVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            response=model_response,
+            question="Research task",
+            expected_answer="Points: 10, Item: complete answer",
+            subject="physics",
+        )
+
+        result = await server.verify(request)
+        assert result.reward == approx(1.0)
+        assert result.verdict == "YES"
+        assert result.rubric_score == approx(7.0)
+        assert result.rubric_score_normalized == approx(0.7)
+        assert not result.invalid_judge_response
+
+    async def test_verify_rubric_mode_fails_below_threshold(self, config: FrontierScienceJudgeConfig) -> None:
+        rubric_config = config.model_copy(deep=True)
+        rubric_config.judge_mode = "rubric"
+        rubric_config.judge_prompt_path = "resources_servers/frontierscience_judge/prompts/research_judge.yaml"
+
+        server_mock = MagicMock(spec=ServerClient)
+        server = FrontierScienceJudgeServer(config=rubric_config, server_client=server_mock)
+
+        response_mock = AsyncMock()
+        response_mock.json = AsyncMock(
+            return_value=self._make_judge_response("Rubric notes...\nScore: 6.5/10\nJudgement: NO")
+        )
+        server_mock.post = AsyncMock(return_value=response_mock)
+
+        model_response = self._make_model_response("Incomplete research answer")
+        request = FrontierScienceJudgeVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            response=model_response,
+            question="Research task",
+            expected_answer="Points: 10, Item: complete answer",
+            subject="biology",
+        )
+
+        result = await server.verify(request)
+        assert result.reward == approx(0.0)
+        assert result.verdict == "NO"
+        assert result.rubric_score == approx(6.5)
+        assert result.rubric_score_normalized == approx(0.65)
+
+    async def test_verify_rubric_mode_prompt_contains_rubric(self, config: FrontierScienceJudgeConfig) -> None:
+        rubric_config = config.model_copy(deep=True)
+        rubric_config.judge_mode = "rubric"
+        rubric_config.judge_prompt_path = "resources_servers/frontierscience_judge/prompts/research_judge.yaml"
+
+        server_mock = MagicMock(spec=ServerClient)
+        server = FrontierScienceJudgeServer(config=rubric_config, server_client=server_mock)
+
+        response_mock = AsyncMock()
+        response_mock.json = AsyncMock(return_value=self._make_judge_response("Score: 8/10\nJudgement: YES"))
+        server_mock.post = AsyncMock(return_value=response_mock)
+
+        model_response = self._make_model_response("answer")
+        request = FrontierScienceJudgeVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            response=model_response,
+            question="Research question?",
+            expected_answer="Points: 1.0, Item: Required derivation",
+            subject="chemistry",
+        )
+
+        await server.verify(request)
+
+        call_kwargs = server_mock.post.call_args
+        json_payload = call_kwargs.kwargs["json"]
+        judge_input = json_payload.input[0].content
+        assert "Research question?" in judge_input
+        assert "Points: 1.0, Item: Required derivation" in judge_input
+        assert "Score: <number>/10" in judge_input
+
 
 class TestComputeMetrics:
     @fixture
@@ -482,6 +600,17 @@ class TestComputeMetrics:
         assert result["chemistry/pass@1/accuracy"] == approx(50.0, abs=0.01)
         # physics: task0=0.5 -> pass@1 = 50%
         assert result["physics/pass@1/accuracy"] == approx(50.0, abs=0.01)
+
+    def test_rubric_score_metrics(self, server: FrontierScienceJudgeServer) -> None:
+        tasks = [
+            [
+                {"reward": 1.0, "subject": "physics", "extracted_answer": "a", "rubric_score_normalized": 0.8},
+                {"reward": 0.0, "subject": "physics", "extracted_answer": "b", "rubric_score_normalized": 0.6},
+            ]
+        ]
+        result = server.compute_metrics(tasks)
+        assert result["pass@1/rubric_score"] == approx(80.0)
+        assert result["pass@1[avg-of-2]/rubric_score"] == approx(70.0)
 
     def test_empty_tasks(self, server: FrontierScienceJudgeServer) -> None:
         assert server.compute_metrics([]) == {}
