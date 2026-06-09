@@ -44,7 +44,7 @@ cd Gym && source .venv/bin/activate
 # Instruct models (config.yaml disables reasoning parser)
 ng_run "+config_paths=[benchmarks/sc_bench/config.yaml]"
 
-# Thinking models — required for PR baselines (see § Open-source thinking baselines)
+# Thinking models
 ng_run "+config_paths=[benchmarks/sc_bench/config_thinking.yaml]"
 
 # Smoke test
