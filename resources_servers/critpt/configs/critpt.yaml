@@ -5,6 +5,7 @@ critpt_resources_server:
       domain: other
       api_key: ${artificial_analysis_api_key}
       verified: false
+      fire_after: null  # smoke-test only; CLI override fires the batch after N real submissions
 
 critpt_agent:
   responses_api_agents:
