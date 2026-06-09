@@ -470,9 +470,9 @@ class TestFrontierScienceJudgeServer:
             assert f in dump
         assert result.expected_answer == "Test answer"
 
-    async def test_verify_rubric_mode_passes_at_threshold(self, config: FrontierScienceJudgeConfig) -> None:
+    async def test_verify_research_mode_passes_at_threshold(self, config: FrontierScienceJudgeConfig) -> None:
         rubric_config = config.model_copy(deep=True)
-        rubric_config.judge_mode = "rubric"
+        rubric_config.judge_mode = "research"
         rubric_config.judge_prompt_path = "resources_servers/frontierscience_judge/prompts/research_judge.yaml"
 
         server_mock = MagicMock(spec=ServerClient)
@@ -500,9 +500,9 @@ class TestFrontierScienceJudgeServer:
         assert result.rubric_score_normalized == approx(0.7)
         assert not result.invalid_judge_response
 
-    async def test_verify_rubric_mode_fails_below_threshold(self, config: FrontierScienceJudgeConfig) -> None:
+    async def test_verify_research_mode_fails_below_threshold(self, config: FrontierScienceJudgeConfig) -> None:
         rubric_config = config.model_copy(deep=True)
-        rubric_config.judge_mode = "rubric"
+        rubric_config.judge_mode = "research"
         rubric_config.judge_prompt_path = "resources_servers/frontierscience_judge/prompts/research_judge.yaml"
 
         server_mock = MagicMock(spec=ServerClient)
@@ -529,9 +529,9 @@ class TestFrontierScienceJudgeServer:
         assert result.rubric_score == approx(6.5)
         assert result.rubric_score_normalized == approx(0.65)
 
-    async def test_verify_rubric_mode_prompt_contains_rubric(self, config: FrontierScienceJudgeConfig) -> None:
+    async def test_verify_research_mode_prompt_contains_rubric(self, config: FrontierScienceJudgeConfig) -> None:
         rubric_config = config.model_copy(deep=True)
-        rubric_config.judge_mode = "rubric"
+        rubric_config.judge_mode = "research"
         rubric_config.judge_prompt_path = "resources_servers/frontierscience_judge/prompts/research_judge.yaml"
 
         server_mock = MagicMock(spec=ServerClient)
@@ -559,11 +559,11 @@ class TestFrontierScienceJudgeServer:
         assert "Points: 1.0, Item: Required derivation" in judge_input
         assert "Score: <number>/10" in judge_input
 
-    async def test_verify_rubric_mode_chat_completion_omits_sampling_defaults(
+    async def test_verify_research_mode_chat_completion_omits_sampling_defaults(
         self, config: FrontierScienceJudgeConfig
     ) -> None:
         rubric_config = config.model_copy(deep=True)
-        rubric_config.judge_mode = "rubric"
+        rubric_config.judge_mode = "research"
         rubric_config.judge_prompt_path = "resources_servers/frontierscience_judge/prompts/research_judge.yaml"
         rubric_config.use_chat_completions_for_judge = True
 

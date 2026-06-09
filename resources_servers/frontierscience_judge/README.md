@@ -3,9 +3,9 @@
 Single-pass LLM-judge resource server for FrontierScience grading. It supports
 two modes:
 
-- `judge_mode: short_answer` for FrontierScience-Olympiad free-form answer
+- `judge_mode: olympiad` for FrontierScience-Olympiad free-form answer
   equivalence.
-- `judge_mode: rubric` for FrontierScience-Research 10-point rubric scoring,
+- `judge_mode: research` for FrontierScience-Research 10-point rubric scoring,
   with `reward = 1.0` when the parsed score is at least
   `rubric_pass_score_threshold` (`7.0` by default).
 
@@ -28,7 +28,7 @@ verification pipeline:
 The judge is invoked once per attempt (no two-order A/B comparison). Output
 fields: `reward` (1.0 if `YES`, else 0.0), `verdict` (`YES`/`NO`/`null`),
 `extracted_answer` (the model's post-thinking text), `judge_output` (the
-judge's full text), and in rubric mode `rubric_score` plus
+judge's full text), and in research mode `rubric_score` plus
 `rubric_score_normalized`.
 
 ## Example usage

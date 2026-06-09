@@ -15,7 +15,7 @@ counted correct at `>= 7/10`.
 ## Verification
 
 Uses the shared [`frontierscience_judge`](../../resources_servers/frontierscience_judge/)
-resource server in `judge_mode: rubric`. The judge receives the task, the
+resource server in `judge_mode: research`. The judge receives the task, the
 model answer, and the per-task rubric from the dataset's `answer` field.
 It emits `Score: X/10` and `Judgement: YES/NO`; `YES` means the parsed score
 is at least 7 points.

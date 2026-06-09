@@ -13,7 +13,7 @@ frontierscience_judge:
       judge_responses_create_params:
         input: []
         max_output_tokens: 2048
-      judge_mode: short_answer
+      judge_mode: olympiad
       rubric_pass_score_threshold: 7.0
       rubric_max_score: 10.0
       judge_prompt_path: resources_servers/frontierscience_judge/prompts/judge.yaml

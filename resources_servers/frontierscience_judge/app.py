@@ -16,11 +16,11 @@
 """
 FrontierScience Judge Resources Server.
 
-Single-pass LLM-judge verifier for FrontierScience. In ``short_answer`` mode
+Single-pass LLM-judge verifier for FrontierScience. In ``olympiad`` mode
 it mirrors NeMo Skills' `frontierscience-olympiad` benchmark verification:
 the judge sees the problem, reference answer, and attempted answer, then
 emits ``Judgement: YES`` or ``Judgement: NO`` on its final line. In
-``rubric`` mode it parses a 10-point research rubric score and maps scores
+``research`` mode it parses a 10-point research rubric score and maps scores
 at or above the configured threshold to ``reward=1.0``.
 
 The judge prompt is loaded from a YAML file at startup and is configurable
@@ -175,10 +175,10 @@ def _resolve_prompt_path(path: str) -> Path:
 class FrontierScienceJudgeConfig(BaseResourcesServerConfig):
     judge_model_server: ModelServerRef
     judge_responses_create_params: NeMoGymResponseCreateParamsNonStreaming
-    judge_mode: Literal["short_answer", "rubric"] = Field(
-        default="short_answer",
+    judge_mode: Literal["olympiad", "research"] = Field(
+        default="olympiad",
         description=(
-            "short_answer parses Judgement: YES/NO directly; rubric parses a 0-10 score and "
+            "olympiad parses Judgement: YES/NO directly; research parses a 0-10 score and "
             "marks the attempt correct at rubric_pass_score_threshold or above."
         ),
     )
@@ -315,11 +315,11 @@ class FrontierScienceJudgeServer(SimpleResourcesServer):
             }
             if self.config.judge_responses_create_params.temperature is not None:
                 chat_params_kwargs["temperature"] = self.config.judge_responses_create_params.temperature
-            elif self.config.judge_mode == "short_answer":
+            elif self.config.judge_mode == "olympiad":
                 chat_params_kwargs["temperature"] = 0.0
             if self.config.judge_responses_create_params.top_p is not None:
                 chat_params_kwargs["top_p"] = self.config.judge_responses_create_params.top_p
-            elif self.config.judge_mode == "short_answer":
+            elif self.config.judge_mode == "olympiad":
                 chat_params_kwargs["top_p"] = 1.0
             chat_params = NeMoGymChatCompletionCreateParamsNonStreaming(**chat_params_kwargs)
             response_obj = await self.server_client.post(
@@ -350,7 +350,7 @@ class FrontierScienceJudgeServer(SimpleResourcesServer):
         rubric_score_normalized = None
         invalid_judge_response = False
 
-        if self.config.judge_mode == "rubric":
+        if self.config.judge_mode == "research":
             rubric_score = parse_rubric_score(judge_text, max_score=self.config.rubric_max_score)
             if rubric_score is None:
                 invalid_judge_response = True
