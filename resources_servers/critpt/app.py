@@ -32,17 +32,14 @@ from nemo_gym.server_utils import request
 
 LOG = logging.getLogger(__name__)
 
-# CritPt's canonical PUBLIC problem set — Challenge_1_main through Challenge_70_main.
-# Used to pad sub-batch fires up to the AA-required 70 in smoke-test mode (fire_after set).
+# Canonical PUBLIC problem set; used to pad sub-batch fires in smoke-test mode.
 _ALL_PROBLEM_IDS = [f"Challenge_{n}_main" for n in range(1, 71)]
 
 
 class CritPtResourcesServerConfig(BaseResourcesServerConfig):
     api_url: str = "https://artificialanalysis.ai/api/v2/critpt/evaluate"
     api_key: str
-    # AA API requires submissions for every hosted problem in PUBLIC mode (currently 70).
-    # The server buffers verify() calls until batch_size unique problem_ids accumulate,
-    # then fires one API call and distributes the aggregate accuracy to all waiters.
+    # AA PUBLIC mode requires all 70 problems in one call; verify() buffers until full.
     batch_size: int = 70
     # Per-batch AA API call timeout. AA can take ~minutes to evaluate 70 submissions server-side.
     api_timeout_seconds: float = 1800.0
@@ -76,19 +73,11 @@ class CritPtResourcesServer(SimpleResourcesServer):
     def model_post_init(self, context: Any) -> None:
         super().model_post_init(context)
         self._lock = asyncio.Lock()
-        # Serializes AA API calls: the endpoint 500s when two full-batch submissions are
-        # in flight at once (e.g. num_repeats>1, where multiple batches fill ~simultaneously).
-        # Holding this lock around _call_api fires them one at a time.
+        # AA 500s on concurrent full-batch submissions; serialize them.
         self._api_lock = asyncio.Lock()
-        # Pending batches, oldest first. Each batch is
-        # {"future": asyncio.Future, "submissions": dict[problem_id, submission]}.
-        # A verify() call joins the first batch that doesn't already contain its problem_id,
-        # or creates a new batch if all existing batches already have it. This enables
-        # num_repeats > 1: each repeat of a given problem flows into a distinct batch.
+        # Pending batches, oldest first; each verify() joins the first batch lacking its problem_id.
         self._batches: list[dict] = []
-        # Monotonic counter of verify() calls received since startup. Surfaced in the
-        # per-verify log line so users tailing the log can read the running total inline
-        # without grepping for line counts.
+        # Monotonic counter surfaced in per-verify log lines for inline progress tracking.
         self._total_verify_calls: int = 0
 
     def setup_webserver(self) -> FastAPI:
@@ -194,9 +183,7 @@ class CritPtResourcesServer(SimpleResourcesServer):
 
         accuracy = result["accuracy"]
         timeout_rate = result.get("timeout_rate", 0.0)
-        # AA API returns only an aggregate accuracy. Following nemo-skills, every rollout in the
-        # batch receives the same aggregate as its reward; pass@1 across the dataset then equals
-        # the aggregate accuracy.
+        # AA returns one aggregate accuracy; distribute it as each rollout's reward (matches nemo-skills).
         return CritPtVerifyResponse(
             **body.model_dump(),
             reward=accuracy,
