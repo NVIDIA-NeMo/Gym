@@ -254,6 +254,21 @@ class TestApp:
             _stop_patches(patches)
 
     @pytest.mark.asyncio
+    async def test_verify_times_out_when_batch_never_fills(self):
+        """If only some of `batch_size` real submissions arrive (e.g. sibling rollout died),
+        waiters time out instead of hanging forever."""
+        server = _make_server(_make_config(batch_size=3, verify_timeout_seconds=0.1))
+
+        mock_request, patches = _mock_api({"accuracy": 0.5, "timeout_rate": 0.0})
+        try:
+            # Only 1 verify arrives; batch needs 3 → never fires.
+            with pytest.raises(asyncio.TimeoutError):
+                await server.verify(_make_verify_request("```python\nx=1\n```", problem_id="p1"))
+            mock_request.assert_not_called()
+        finally:
+            _stop_patches(patches)
+
+    @pytest.mark.asyncio
     async def test_empty_code_still_included_in_batch(self):
         """A verify() with no extractable code still contributes to the batch (slot must be filled)."""
         server = _make_server(_make_config(batch_size=2))

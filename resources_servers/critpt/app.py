@@ -44,19 +44,16 @@ class CritPtResourcesServerConfig(BaseResourcesServerConfig):
     # The server buffers verify() calls until batch_size unique problem_ids accumulate,
     # then fires one API call and distributes the aggregate accuracy to all waiters.
     batch_size: int = 70
-    # Per-batch AA API call timeout. AA can take ~minutes to evaluate 70 submissions
-    # server-side; default generously, override if needed.
+    # Per-batch AA API call timeout. AA can take ~minutes to evaluate 70 submissions server-side.
     api_timeout_seconds: float = 1800.0
-    # Retries for the AA API call on 5xx server errors (transient). 4xx (bad payload)
-    # fails immediately — retrying won't help.
     api_max_retries: int = 4
-    # Base seconds for exponential backoff between AA retries (2nd try waits this, then 2x, ...).
     api_retry_backoff_seconds: float = 5.0
     # Smoke-test only. When set < batch_size, the buffer fires after this many real
-    # submissions arrive and pads up to batch_size with empty dummies (using the canonical
-    # _ALL_PROBLEM_IDS for the missing slots). Production runs leave this unset; the
-    # buffer naturally fills with all batch_size real submissions.
+    # submissions arrive and pads up to batch_size with empty dummies.
     fire_after: Optional[int] = None
+    # Max time a single verify() will wait for its batch to fill (and the AA call to
+    # finish) to prevent hang.
+    verify_timeout_seconds: float = 9000.0  # (2.5h)
 
 
 class CritPtRunRequest(BaseRunRequest):
@@ -184,7 +181,17 @@ class CritPtResourcesServer(SimpleResourcesServer):
                 LOG.exception("CritPt AA API call failed; failing all %d waiters: %s", len(submissions_snapshot), e)
                 future.set_exception(e)
 
-        result = await future
+        try:
+            result = await asyncio.wait_for(future, timeout=self.config.verify_timeout_seconds)
+        except asyncio.TimeoutError:
+            LOG.error(
+                "CritPt verify timed out after %ss waiting for batch to fire (problem_id=%s). "
+                "Likely a sibling rollout failed before reaching verify().",
+                self.config.verify_timeout_seconds,
+                body.problem_id,
+            )
+            raise
+
         accuracy = result["accuracy"]
         timeout_rate = result.get("timeout_rate", 0.0)
         # AA API returns only an aggregate accuracy. Following nemo-skills, every rollout in the
