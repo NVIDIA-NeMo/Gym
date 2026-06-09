@@ -26,7 +26,7 @@ genrm_compare_resources_server:
         name: genrm_model
       
       # Cohort-based verify (Difference 1): number of rollouts per prompt before running comparison.
-      # When > 1, verify() buffers by prompt and returns relative rewards when cohort is full.
+      # When > 1, verify() buffers by task/prompt identity and returns relative rewards when a cohort is full.
       # Ensure rollout data has this many rows per prompt (e.g. num_repeats in rollout collection).
       num_rollouts_per_prompt: 16
       
