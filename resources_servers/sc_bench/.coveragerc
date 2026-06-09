@@ -1,4 +1,8 @@
 [run]
+source = resources_servers/sc_bench
 omit =
-    */evaluation.py
-    */get_results.py
+    */tests/*
+
+[report]
+fail_under = 96
+show_missing = true
