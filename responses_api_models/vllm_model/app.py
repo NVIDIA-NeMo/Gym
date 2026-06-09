@@ -88,6 +88,11 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     extra_body: Optional[Dict[str, Any]] = None
 
     default_headers: Dict[str, str] = Field(default_factory=dict)
+
+    # Dynamo consumes token-prefix splicing at message granularity. When enabled,
+    # rewrite Gym's training token fields into Dynamo's message-level extension.
+    send_required_prefix_token_ids_dynamo: bool = False
+
     # Optional prefix for resolving relative ``metadata.audio_path`` (or
     # entries in ``metadata.audio_paths``) against. Absolute paths are used
     # as-is. When unset, relative paths raise. Audio is always inlined as a
@@ -436,24 +441,17 @@ class VLLMModel(SimpleResponsesAPIModel):
                 # No user message found — create one with just the audio blocks.
                 body_dict.setdefault("messages", []).append({"role": "user", "content": list(audio_blocks)})
 
-        # Auto-derive `required_prefix_token_ids` from the latest assistant
-        # message that has per-message token IDs attached. Both Dynamo's
-        # Rust preprocessor and NeMo-RL's custom vLLM serving mixin honor
-        # this field to splice verbatim model-emitted tokens into the
-        # template-tokenized prefix, preserving byte-level token continuity
-        # across multi-turn replays. The vLLM mixin auto-derives from
-        # per-message `prompt_token_ids` itself (see
-        # `nemo_rl/models/generation/vllm/vllm_worker_async.py`
-        # `NeMoRLOpenAIChatRequestMixin.model_post_init`); Dynamo does not,
-        # so we set it server-agnostically here. When the vLLM mixin sees
-        # the field already populated, its auto-derive short-circuits.
-        if "required_prefix_token_ids" not in body_dict:
-            for message in reversed(body_dict.get("messages", [])):
-                if "prompt_token_ids" in message:
-                    body_dict["required_prefix_token_ids"] = list(message["prompt_token_ids"]) + list(
-                        message["generation_token_ids"]
+        if self.config.send_required_prefix_token_ids_dynamo:
+            # NeMo-RL's vLLM worker still derives request-level
+            # `required_prefix_token_ids` from these per-message fields:
+            # https://github.com/NVIDIA-NeMo/RL/blob/d9ba460fa63e0e079fd18eb207e1febf6485b5e2/nemo_rl/models/generation/vllm/vllm_worker_async.py#L350-L360
+            # Dynamo uses a message-level extension instead, so avoid sending
+            # both representations on the Dynamo path.
+            for message in body_dict.get("messages", []):
+                if "prompt_token_ids" in message and "generation_token_ids" in message:
+                    message["required_prefix_token_ids"] = list(message.pop("prompt_token_ids")) + list(
+                        message.pop("generation_token_ids")
                     )
-                    break
 
         return body_dict
 
@@ -537,12 +535,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             # `prompt_str`) can be built with different chat template settings than
             # the actual generation request.
             tokenize_body_dict = dict()
-            # `required_prefix_token_ids` is forwarded here too: the gym's
-            # contiguity assert reads `prompt_token_ids` from this tokenize
-            # response (not from the chat response), so the splice must
-            # happen on this leg as well — otherwise the chat-side fix above
-            # is invisible to the assert.
-            for key in ("model", "messages", "tools", "chat_template_kwargs", "required_prefix_token_ids"):
+            for key in ("model", "messages", "tools", "chat_template_kwargs"):
                 if key in body_dict:
                     tokenize_body_dict[key] = body_dict[key]
 
