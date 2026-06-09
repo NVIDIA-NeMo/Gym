@@ -1,7 +1,8 @@
 # DSPy recipe
 
-In this example, `optimize.py` uses DSPy's GEPA or MIPRO to optimize a NeMo Gym agent system prompt. It uses a running agent's
-`/run` endpoint, so no changes to NeMo Gym are needed. Supports `--optimizer gepa` and `--optimizer mipro`.
+In this example we use GEPA or MIPRO from DSPy in `optimize.py` to optimize a NeMo Gym agent system prompt. It uses a running agent's
+`/run` endpoint, so no changes to NeMo Gym are needed. Supports `--optimizer gepa` and `--optimizer mipro`. In the future, this can 
+be expanded to integrate with NeMo Gym rollout collection helpers to automate server launching, port discovery, and CLI integration.
 
 ## 1. Set up Gym
 
@@ -12,9 +13,6 @@ uv venv ; source .venv/bin/activate; uv sync
 uv pip install "dspy>=2.5" gepa requests "openai<=2.7.2"
 ```
 
-Keep the `openai<=2.7.2` pin: NeMo Gym requires it, and installing dspy/gepa without it
-upgrades openai and makes `ng_run`'s per-server venvs fail to resolve. dspy works fine with it.
-
 ## 2. Set env.yaml
 
 Set `env.yaml` in the repo root, for example:
@@ -22,7 +20,7 @@ Set `env.yaml` in the repo root, for example:
 ```yaml
 hf_token: <your-hf-token>
 policy_base_url: https://inference-api.nvidia.com/v1
-policy_api_key: <your-nvidia-inference-api-key>
+policy_api_key: <your-api-key>
 policy_model_name: nvidia/meta/llama-3.1-70b-instruct
 ```
 
@@ -41,9 +39,6 @@ ng_run "+config_paths=[benchmarks/gpqa/config.yaml,responses_api_models/vllm_mod
 From the logs, copy the agent endpoint URL (`gpqa_mcqa_simple_agent`), e.g. `http://127.0.0.1:17349`. The
 port is assigned per run, so use the one in your own logs, not this example. If optimize.py reports the agent is
 not reachable, the URL is wrong.
-
-Note that ng_run and copying the endpoint url can be automated through integration with Gym's rollout 
-collection helper interface and head server, but this is the minimal code path for demo.
 
 ## 5. Optimize
 
