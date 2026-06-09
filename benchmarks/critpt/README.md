@@ -33,14 +33,9 @@ in any committed file.
 ng_prepare_benchmark "+config_paths=[benchmarks/critpt/config.yaml]"
 ```
 
-This invokes `benchmarks/critpt/prepare.py` (declared as `prepare_script` in `config.yaml`) and
-then applies the Turn 1 prompt template to materialize `responses_create_params.input` for
-each row.
-
-Writes:
-- `benchmarks/critpt/data/critpt_benchmark.jsonl` — full 70-problem flat-field dataset (gitignored)
-- `benchmarks/critpt/data/example.jsonl` — first 5 problems (committed)
-- A materialized version under `results/<run_name>/preprocessed_datasets/benchmark.jsonl`
+This invokes `benchmarks/critpt/prepare.py` (declared as `prepare_script` in `config.yaml`),
+which downloads the dataset and writes the full 70-problem flat-field JSONL to
+`benchmarks/critpt/data/critpt_benchmark.jsonl` (gitignored).
 
 ## Run servers
 

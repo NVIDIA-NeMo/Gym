@@ -79,6 +79,43 @@ curl -s http://127.0.0.1:$PORT/status
 On HPC: bind is `127.0.0.1` on the compute node — curl from the same host, or
 `ssh <node> "curl ..."`.
 
+## Running servers
+
+```bash
+ng_run "+config_paths=[benchmarks/critpt/config.yaml,responses_api_models/openai_model/configs/openai_model.yaml]"
+```
+
+## Smoke test (5 example problems)
+
+**Note:** The AA API rejects sub-70 batches. To run e2e on the 5 example problems, the resources server
+has one opt-in config knob:
+
+- `fire_after: int` — fire the batch after this many real submissions arrive, then pad
+  up to `batch_size` (70) with empty dummies for the missing problem_ids (drawn from the
+  hardcoded canonical CritPt problem list, `Challenge_<N>_main` for `N` in 1..70)
+
+Defaults to `None`/unset, so production behavior is unchanged. Set it only for testing purposes:
+
+```bash
+ng_run "+config_paths=[benchmarks/critpt/config.yaml,responses_api_models/openai_model/configs/openai_model.yaml]" \
+    '++critpt_benchmark_resources_server.resources_servers.critpt.fire_after=5'
+```
+
+## Collecting rollouts
+
+```bash
+ng_collect_rollouts \
+    +agent_name=critpt_benchmark_agent \
+    +input_jsonl_fpath=resources_servers/critpt/data/example.jsonl \
+    +output_jsonl_fpath=results/critpt_rollouts.jsonl \
+    +num_repeats=1 \
+    "++responses_create_params={temperature: 0.0}"
+```
+
+What this exercises: agent runs Turn 1 + Turn 2 on exactly 5 problems -> 5 verify() calls
+arrive -> server fires the batch after the 5th, pads with 65 empty dummies -> real AA
+call -> aggregate distributed to the 5 real rollouts.
+
 ## Tests
 
 ```bash

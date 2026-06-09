@@ -15,7 +15,7 @@
 import asyncio
 import logging
 import re
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, List, Optional, Union
 
 from fastapi import FastAPI
 
@@ -31,6 +31,10 @@ from nemo_gym.server_utils import request
 
 
 LOG = logging.getLogger(__name__)
+
+# CritPt's canonical PUBLIC problem set — Challenge_1_main through Challenge_70_main.
+# Used to pad sub-batch fires up to the AA-required 70 in smoke-test mode (fire_after set).
+_ALL_PROBLEM_IDS = [f"Challenge_{n}_main" for n in range(1, 71)]
 
 
 class CritPtResourcesServerConfig(BaseResourcesServerConfig):
@@ -48,6 +52,11 @@ class CritPtResourcesServerConfig(BaseResourcesServerConfig):
     api_max_retries: int = 4
     # Base seconds for exponential backoff between AA retries (2nd try waits this, then 2x, ...).
     api_retry_backoff_seconds: float = 5.0
+    # Smoke-test only. When set < batch_size, the buffer fires after this many real
+    # submissions arrive and pads up to batch_size with empty dummies (using the canonical
+    # _ALL_PROBLEM_IDS for the missing slots). Production runs leave this unset; the
+    # buffer naturally fills with all batch_size real submissions.
+    fire_after: Optional[int] = None
 
 
 class CritPtRunRequest(BaseRunRequest):
@@ -132,10 +141,26 @@ class CritPtResourcesServer(SimpleResourcesServer):
                 body.problem_id,
             )
 
-            ready_to_fire = len(target_batch["submissions"]) >= self.config.batch_size
+            ready_to_fire = len(target_batch["submissions"]) >= (self.config.fire_after or self.config.batch_size)
             if ready_to_fire:
                 submissions_snapshot = list(target_batch["submissions"].values())
                 self._batches.remove(target_batch)
+                # Smoke-mode padding: top up to batch_size with empty dummies for missing
+                # problem_ids. In production (full batch arrives naturally), this is a no-op.
+                if len(submissions_snapshot) < self.config.batch_size:
+                    existing = {s["problem_id"] for s in submissions_snapshot}
+                    for pid in _ALL_PROBLEM_IDS:
+                        if len(submissions_snapshot) >= self.config.batch_size:
+                            break
+                        if pid not in existing:
+                            submissions_snapshot.append(
+                                {
+                                    "problem_id": pid,
+                                    "generated_code": "```python\n```",
+                                    "model": "unknown",
+                                    "generation_config": {},
+                                }
+                            )
             else:
                 submissions_snapshot = None
 
