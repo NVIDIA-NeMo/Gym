@@ -28,7 +28,7 @@ My computer's password is '{CLIENT_PASSWORD}', feel free to use it when you need
 First give the current screenshot and previous things we did a short reflection, then RETURN ME THE CODE OR SPECIAL CODE I ASKED FOR. NEVER EVER RETURN ME ANYTHING ELSE.
 """
 
-DEFAULT_CLIENT_PASSWORD = "password"
+DEFAULT_CLIENT_PASSWORD = "password"  # pragma: allowlist secret
 
 
 def get_system_prompt(client_password: str = DEFAULT_CLIENT_PASSWORD) -> str:

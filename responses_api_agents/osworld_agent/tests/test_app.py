@@ -73,7 +73,7 @@ def make_config(**overrides: Any) -> OSWorldAgentConfig:
         screen_width=1280,
         screen_height=800,
         require_a11y_tree=False,
-        client_password="password",
+        client_password="password",  # pragma: allowlist secret
         max_steps=3,
         max_trajectory_length=3,
         sleep_after_execution=0.0,
@@ -110,7 +110,7 @@ def setup_server_client_mocks(mock_load_from_global_config, mock_get_first_serve
     mock_client = MagicMock()
     mock_client.global_config_dict = {
         "policy_model_name": "test-policy",
-        "policy_api_key": "test-key",
+        "policy_api_key": "test-key",  # pragma: allowlist secret
     }
     mock_load_from_global_config.return_value = mock_client
     mock_get_first_server_config_dict.return_value = {"host": "127.0.0.1", "port": 8000}

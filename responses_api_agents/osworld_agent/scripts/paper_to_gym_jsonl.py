@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 """paper_to_gym_jsonl.py — convert OSWorld upstream task JSON to gym JSONL
 
 OSWorld benchmark (NeurIPS 2024, xlang-ai/OSWorld) ships 369 tasks under
@@ -33,7 +35,9 @@ Usage:
 Or generate ALL four standard manifests at once:
     paper_to_gym_jsonl.py --osworld-root /path/to/forked-osworld --all
 """
+
 from __future__ import annotations
+
 import argparse
 import json
 import pathlib
@@ -91,19 +95,30 @@ def convert(osworld_root: pathlib.Path, manifest_name: str, out_path: pathlib.Pa
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--osworld-root", required=True, type=pathlib.Path,
-                    help="Path to a clone of xlang-ai/OSWorld (or a fork). "
-                         "Must contain `evaluation_examples/{examples/,test_*.json}`.")
-    ap.add_argument("--manifest", default=None,
-                    help="A single manifest name (without .json), e.g. test_all. "
-                         "Use --all to convert all four standard manifests.")
-    ap.add_argument("--output", default=None, type=pathlib.Path,
-                    help="Output JSONL path (required when --manifest is given).")
-    ap.add_argument("--all", action="store_true",
-                    help="Convert all four standard manifests "
-                         "(test_all / test_small / test_infeasible / test_nogdrive) "
-                         "into the data/ dir alongside this script "
-                         "(i.e. responses_api_agents/osworld_agent/data/).")
+    ap.add_argument(
+        "--osworld-root",
+        required=True,
+        type=pathlib.Path,
+        help="Path to a clone of xlang-ai/OSWorld (or a fork). "
+        "Must contain `evaluation_examples/{examples/,test_*.json}`.",
+    )
+    ap.add_argument(
+        "--manifest",
+        default=None,
+        help="A single manifest name (without .json), e.g. test_all. "
+        "Use --all to convert all four standard manifests.",
+    )
+    ap.add_argument(
+        "--output", default=None, type=pathlib.Path, help="Output JSONL path (required when --manifest is given)."
+    )
+    ap.add_argument(
+        "--all",
+        action="store_true",
+        help="Convert all four standard manifests "
+        "(test_all / test_small / test_infeasible / test_nogdrive) "
+        "into the data/ dir alongside this script "
+        "(i.e. responses_api_agents/osworld_agent/data/).",
+    )
     args = ap.parse_args()
 
     if args.all == bool(args.manifest):
