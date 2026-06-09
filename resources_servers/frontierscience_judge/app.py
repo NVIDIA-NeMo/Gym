@@ -315,8 +315,12 @@ class FrontierScienceJudgeServer(SimpleResourcesServer):
             }
             if self.config.judge_responses_create_params.temperature is not None:
                 chat_params_kwargs["temperature"] = self.config.judge_responses_create_params.temperature
+            elif self.config.judge_mode == "short_answer":
+                chat_params_kwargs["temperature"] = 0.0
             if self.config.judge_responses_create_params.top_p is not None:
                 chat_params_kwargs["top_p"] = self.config.judge_responses_create_params.top_p
+            elif self.config.judge_mode == "short_answer":
+                chat_params_kwargs["top_p"] = 1.0
             chat_params = NeMoGymChatCompletionCreateParamsNonStreaming(**chat_params_kwargs)
             response_obj = await self.server_client.post(
                 server_name=self.config.judge_model_server.name,

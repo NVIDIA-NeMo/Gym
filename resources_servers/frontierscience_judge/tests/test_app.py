@@ -408,6 +408,9 @@ class TestFrontierScienceJudgeServer:
         # The chat-completions endpoint was hit, not /v1/responses.
         call_kwargs = server_mock.post.call_args
         assert call_kwargs.kwargs["url_path"] == "/v1/chat/completions"
+        chat_payload = call_kwargs.kwargs["json"]
+        assert chat_payload.temperature == approx(0.0)
+        assert chat_payload.top_p == approx(1.0)
         assert result.reward == approx(1.0)
         assert result.verdict == "YES"
         assert "Judgement: YES" in (result.judge_output or "")
@@ -555,6 +558,57 @@ class TestFrontierScienceJudgeServer:
         assert "Research question?" in judge_input
         assert "Points: 1.0, Item: Required derivation" in judge_input
         assert "Score: <number>/10" in judge_input
+
+    async def test_verify_rubric_mode_chat_completion_omits_sampling_defaults(
+        self, config: FrontierScienceJudgeConfig
+    ) -> None:
+        rubric_config = config.model_copy(deep=True)
+        rubric_config.judge_mode = "rubric"
+        rubric_config.judge_prompt_path = "resources_servers/frontierscience_judge/prompts/research_judge.yaml"
+        rubric_config.use_chat_completions_for_judge = True
+
+        server_mock = MagicMock(spec=ServerClient)
+        server = FrontierScienceJudgeServer(config=rubric_config, server_client=server_mock)
+
+        chat_response_dict = {
+            "id": "chat-rubric",
+            "created": 0,
+            "model": "judge_model",
+            "object": "chat.completion",
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": "stop",
+                    "message": {
+                        "role": "assistant",
+                        "content": "Rubric notes...\nScore: 8/10\nJudgement: YES",
+                    },
+                }
+            ],
+        }
+        response_mock = AsyncMock()
+        response_mock.json = AsyncMock(return_value=chat_response_dict)
+        server_mock.post = AsyncMock(return_value=response_mock)
+
+        model_response = self._make_model_response("answer")
+        request = FrontierScienceJudgeVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            response=model_response,
+            question="Research question?",
+            expected_answer="Points: 1.0, Item: Required derivation",
+            subject="chemistry",
+        )
+
+        result = await server.verify(request)
+
+        call_kwargs = server_mock.post.call_args
+        json_payload = call_kwargs.kwargs["json"]
+        assert call_kwargs.kwargs["url_path"] == "/v1/chat/completions"
+        assert json_payload.temperature is None
+        assert json_payload.top_p is None
+        assert "Research question?" in json_payload.messages[0]["content"]
+        assert result.reward == approx(1.0)
+        assert result.rubric_score == approx(8.0)
 
 
 class TestComputeMetrics:
