@@ -14,6 +14,7 @@
 
 """Provider-facing sandbox protocol."""
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -31,19 +32,52 @@ class SandboxStatus(str, Enum):
 
 
 @dataclass(frozen=True)
+class SandboxResources:
+    """Provider-neutral resource request."""
+
+    cpu: float | None = None
+    memory_mib: int | None = None
+    disk_gib: int | None = None
+    gpu: int | None = None
+    gpu_type: str | None = None
+
+    @classmethod
+    def from_mapping(cls, resources: Mapping[str, Any] | None) -> "SandboxResources":
+        if resources is None:
+            return cls()
+        allowed_keys = set(cls.__dataclass_fields__)
+        unknown_keys = set(resources) - allowed_keys
+        if unknown_keys:
+            unknown = ", ".join(sorted(unknown_keys))
+            allowed = ", ".join(sorted(allowed_keys))
+            raise ValueError(f"Unknown sandbox resource keys: {unknown}. Expected keys: {allowed}")
+        return cls(
+            cpu=float(resources["cpu"]) if resources.get("cpu") is not None else None,
+            memory_mib=int(resources["memory_mib"]) if resources.get("memory_mib") is not None else None,
+            disk_gib=int(resources["disk_gib"]) if resources.get("disk_gib") is not None else None,
+            gpu=int(resources["gpu"]) if resources.get("gpu") is not None else None,
+            gpu_type=str(resources["gpu_type"]) if resources.get("gpu_type") is not None else None,
+        )
+
+
+@dataclass(frozen=True)
 class SandboxSpec:
     """Sandbox creation request."""
 
     image: str | None = None
-    timeout_s: int | float | None = None
+    ttl_s: int | float | None = None
     ready_timeout_s: int | float | None = None
     workdir: str | None = None
     env: dict[str, str] = field(default_factory=dict)
     files: dict[str, str] = field(default_factory=dict)
     metadata: dict[str, str] = field(default_factory=dict)
-    resources: dict[str, str] = field(default_factory=dict)
+    resources: SandboxResources | Mapping[str, Any] = field(default_factory=SandboxResources)
     entrypoint: list[str] | None = None
     provider_options: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.resources, SandboxResources):
+            object.__setattr__(self, "resources", SandboxResources.from_mapping(self.resources))
 
 
 @dataclass
@@ -127,8 +161,8 @@ class SandboxProvider(Protocol):
         """Return the current sandbox lifecycle status."""
         ...
 
-    async def close(self, handle: SandboxHandle, *, delete: bool = False) -> None:
-        """Close provider resources and optionally delete the sandbox."""
+    async def close(self, handle: SandboxHandle) -> None:
+        """End the sandbox lifecycle and close provider resources for it."""
         ...
 
     async def aclose(self) -> None:

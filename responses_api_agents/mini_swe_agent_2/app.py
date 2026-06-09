@@ -144,7 +144,7 @@ def _bash_tool_choice() -> dict[str, Any]:
 def _sandbox_spec_for_instance(
     spec: dict[str, Any] | None,
     *,
-    resource_profiles: list[dict[str, str]] | None,
+    resource_profiles: list[dict[str, Any]] | None,
     instance_id: str,
 ) -> dict[str, Any]:
     instance_spec = dict(spec or {})

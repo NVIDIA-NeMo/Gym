@@ -140,12 +140,12 @@ mini_swe_agent_2:
             command_retries: 3
             close_timeout_s: 30
       sandbox_spec:
-        timeout_s: 18000
+        ttl_s: 18000
         ready_timeout_s: 1200
         resources:
-          cpu: "2"
-          memory: 8Gi
-          ephemeral-storage: 20Gi
+          cpu: 2
+          memory_mib: 8192
+          disk_gib: 20
         provider_options:
           platform:
             os: linux
@@ -159,7 +159,6 @@ mini_swe_agent_2:
         conda_env: testbed
         activate_conda: true
         user: root
-        delete: true
       run_golden: false
       step_timeout: 600
       eval_timeout: 1800
@@ -225,7 +224,7 @@ ng_run "+config_paths=[$CONFIG_PATHS]" \
     +mini_swe_agent_2.responses_api_agents.mini_swe_agent_2.eval_timeout=1800 \
     +mini_swe_agent_2.responses_api_agents.mini_swe_agent_2.step_limit=50 \
     +mini_swe_agent_2.responses_api_agents.mini_swe_agent_2.run_golden=false \
-    '+mini_swe_agent_2.responses_api_agents.mini_swe_agent_2.sandbox_spec.resources={cpu: 500m, memory: 4Gi, ephemeral-storage: 8Gi}' \
+    '+mini_swe_agent_2.responses_api_agents.mini_swe_agent_2.sandbox_spec.resources={cpu: 0.5, memory_mib: 4096, disk_gib: 8}' \
     '+mini_swe_agent_2.responses_api_agents.mini_swe_agent_2.sandbox_spec.metadata={benchmark: swebench-verified, harness: mini_swe_agent_2, endpoint_label: hosted-vllm, run_family: mini-swe-agent-2-pass8}'
 ```
 

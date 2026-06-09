@@ -23,7 +23,7 @@ from typing import Any
 
 import pytest
 
-from nemo_gym.sandbox.providers.base import SandboxSpec, SandboxStatus
+from nemo_gym.sandbox.providers.base import SandboxResources, SandboxSpec, SandboxStatus
 
 
 pytest.importorskip("tenacity", reason="tenacity optional sandbox dependency is not installed")
@@ -411,15 +411,14 @@ async def test_provider_create_probe_and_close_error_paths(monkeypatch: pytest.M
 
     provider = opensandbox_provider.OpenSandboxProvider(probe={"command": None})
 
-    async def close_raises(_handle: Any, *, delete: bool) -> None:
-        del delete
+    async def close_raises(_handle: Any) -> None:
         raise RuntimeError("close failed")
 
     monkeypatch.setattr(provider, "close", close_raises)
     await provider._cleanup_failed_create_handle(handle)
     provider = opensandbox_provider.OpenSandboxProvider(probe={"command": None})
 
-    class DeleteAlreadyGoneRaw:
+    class StopAlreadyGoneRaw:
         async def kill(self) -> None:
             raise RuntimeError("sandbox sandbox-1 not found")
 
@@ -430,43 +429,40 @@ async def test_provider_create_probe_and_close_error_paths(monkeypatch: pytest.M
         opensandbox_provider.SandboxHandle(
             sandbox_id="sandbox-1",
             provider_name="opensandbox",
-            raw=DeleteAlreadyGoneRaw(),
+            raw=StopAlreadyGoneRaw(),
         ),
-        delete=True,
     )
 
-    class DeleteAndCloseFailRaw:
+    class StopAndCloseFailRaw:
         async def kill(self) -> None:
-            raise RuntimeError("delete failed")
+            raise RuntimeError("stop failed")
 
         async def close(self) -> None:
             raise RuntimeError("close failed")
 
-    with pytest.raises(RuntimeError, match="Failed to delete and close"):
+    with pytest.raises(RuntimeError, match="Failed to stop and close"):
         await provider.close(
             opensandbox_provider.SandboxHandle(
                 sandbox_id="sandbox-2",
                 provider_name="opensandbox",
-                raw=DeleteAndCloseFailRaw(),
+                raw=StopAndCloseFailRaw(),
             ),
-            delete=True,
         )
 
-    class DeleteFailsCloseSucceedsRaw:
+    class StopFailsCloseSucceedsRaw:
         async def kill(self) -> None:
-            raise RuntimeError("delete failed")
+            raise RuntimeError("stop failed")
 
         async def close(self) -> None:
             return None
 
-    with pytest.raises(RuntimeError, match="delete failed"):
+    with pytest.raises(RuntimeError, match="stop failed"):
         await provider.close(
             opensandbox_provider.SandboxHandle(
                 sandbox_id="sandbox-3",
                 provider_name="opensandbox",
-                raw=DeleteFailsCloseSucceedsRaw(),
+                raw=StopFailsCloseSucceedsRaw(),
             ),
-            delete=True,
         )
 
 
@@ -481,8 +477,9 @@ async def test_create_once_and_connect_after_create_error_paths(
     monkeypatch.setattr(opensandbox_provider, "_to_volumes", lambda volumes: volumes)
     spec = SandboxSpec(
         image="image:tag",
-        timeout_s=10,
+        ttl_s=10,
         ready_timeout_s=20,
+        resources=SandboxResources(cpu=2, memory_mib=8192, disk_gib=20, gpu=1, gpu_type="H100"),
         entrypoint=["/bin/sh"],
         provider_options={
             "snapshot_id": "snapshot-1",
@@ -496,6 +493,13 @@ async def test_create_once_and_connect_after_create_error_paths(
     assert FakeSandbox.created_kwargs["snapshot_id"] == "snapshot-1"
     assert FakeSandbox.created_kwargs["timeout"] == timedelta(seconds=10)
     assert FakeSandbox.created_kwargs["ready_timeout"] == timedelta(seconds=20)
+    assert FakeSandbox.created_kwargs["resource"] == {
+        "cpu": "2",
+        "memory": "8192Mi",
+        "ephemeral-storage": "20Gi",
+        "gpu": "1",
+        "gpu_type": "H100",
+    }
     assert FakeSandbox.created_kwargs["entrypoint"] == ["/bin/sh"]
     assert FakeSandbox.created_kwargs["platform"] == FakePlatformSpec(os="linux", arch="amd64")
     assert FakeSandbox.created_kwargs["volumes"] == [{"name": "workspace"}]
