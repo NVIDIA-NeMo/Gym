@@ -19,4 +19,3 @@ critpt_benchmark_agent:
           jsonl_fpath: benchmarks/critpt/data/critpt_benchmark.jsonl
           prompt_config: benchmarks/critpt/prompts/turn1.yaml
           prepare_script: benchmarks/critpt/prepare.py
-          num_repeats: 1

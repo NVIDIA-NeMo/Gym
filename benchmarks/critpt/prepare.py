@@ -15,7 +15,7 @@
 
 """Prepare CritPt evaluation data for NeMo Gym.
 
-Downloads CritPt-Benchmark/Cr   itPt from HuggingFace (public dataset, no token required)
+Downloads CritPt-Benchmark/CritPt from HuggingFace (public dataset, no token required)
 and converts to Gym JSONL format. Flat-field schema; prompt templating happens at runtime
 via the dataset's `prompt_config` pointing at `prompts/turn1.yaml`.
 """
