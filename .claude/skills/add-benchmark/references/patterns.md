@@ -247,8 +247,7 @@ my_benchmark_eval_agent:
 ### Key rules
 
 - The `verified: false` flag is auto-added by pre-commit hook. Set to `true` after baselining.
-- `license` is required for `train` and `validation` datasets.
-- Valid license values: `Apache 2.0`, `MIT`, `CC-BY-4.0`, etc.
+- `license` is required for `train` and `validation` datasets. It must be one of the values accepted by the dataset config schema (validated enum in `config_types.py`).
 - `domain` should be one of: `coding`, `math`, `other`, or check `config_types.py` for current enum.
 - Dataset `type` must be one of: `train`, `validation`, `example`.
 - `gitlab_identifier` is required for `train`/`validation` datasets. `jsonl_fpath` is the local download path. Both fields coexist.
