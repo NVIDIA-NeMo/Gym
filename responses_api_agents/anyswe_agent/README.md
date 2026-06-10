@@ -1,6 +1,6 @@
 # anyswe_agent
 
-Runs a Gym agent inside each SWE-bench task container and evaluates the resulting
+Runs any Gym agent inside a SWE-style task container and evaluates the resulting
 `git diff HEAD` patch with the dataset harness. Works with `hermes_agent`,
 `claude_code_agent`, or another compatible Gym agent.
 
