@@ -46,7 +46,7 @@ from nemo_gym.server_utils import get_response_json, raise_for_status
 from nemo_gym.server_utils import request as aiohttp_request
 
 
-class ClaudeModelConfig(BaseResponsesAPIModelConfig):
+class AnthropicModelConfig(BaseResponsesAPIModelConfig):
     anthropic_base_url: str = "https://api.anthropic.com/v1"
     anthropic_api_key: str
     anthropic_model: str
@@ -63,11 +63,11 @@ class ClaudeModelConfig(BaseResponsesAPIModelConfig):
     extra_body: Dict[str, Any] = Field(default_factory=dict)
 
 
-class ClaudeModel(SimpleResponsesAPIModel):
-    config: ClaudeModelConfig
+class AnthropicModel(SimpleResponsesAPIModel):
+    config: AnthropicModelConfig
 
     def model_post_init(self, context):
-        self._converter = ClaudeConverter()
+        self._converter = AnthropicConverter()
         self._semaphore = (
             asyncio.Semaphore(self.config.max_concurrent_requests)
             if self.config.max_concurrent_requests is not None
@@ -101,7 +101,7 @@ class ClaudeModel(SimpleResponsesAPIModel):
     async def chat_completions(
         self, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
     ) -> NeMoGymChatCompletion:
-        raise NotImplementedError("claude_model supports /v1/responses only")
+        raise NotImplementedError("anthropic_model supports /v1/responses only")
 
     async def _messages_create(self, body: Dict[str, Any], cookies: Dict[str, str]) -> Dict[str, Any]:
         request_kwargs = {
@@ -124,7 +124,7 @@ class ClaudeModel(SimpleResponsesAPIModel):
         return f"{base_url}/v1/messages"
 
 
-class ClaudeConverter:
+class AnthropicConverter:
     def responses_to_anthropic(
         self,
         body: NeMoGymResponseCreateParamsNonStreaming,
@@ -487,4 +487,4 @@ class ClaudeConverter:
 
 
 if __name__ == "__main__":
-    ClaudeModel.run_webserver()
+    AnthropicModel.run_webserver()

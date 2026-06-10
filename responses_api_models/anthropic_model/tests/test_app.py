@@ -22,12 +22,12 @@ from fastapi.testclient import TestClient
 
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
-from responses_api_models.claude_model.app import ClaudeConverter, ClaudeModel, ClaudeModelConfig
+from responses_api_models.anthropic_model.app import AnthropicConverter, AnthropicModel, AnthropicModelConfig
 
 
-class TestClaudeConverter:
+class TestAnthropicConverter:
     def test_responses_to_anthropic_maps_messages_tools_and_thinking(self) -> None:
-        converter = ClaudeConverter()
+        converter = AnthropicConverter()
         body = NeMoGymResponseCreateParamsNonStreaming(
             input=[
                 {
@@ -143,7 +143,7 @@ class TestClaudeConverter:
         }
 
     def test_anthropic_to_responses_maps_text_thinking_tools_and_usage(self) -> None:
-        converter = ClaudeConverter()
+        converter = AnthropicConverter()
         request_body = NeMoGymResponseCreateParamsNonStreaming(input="hello")
 
         response = converter.anthropic_to_responses(
@@ -189,7 +189,7 @@ class TestClaudeConverter:
         assert response.usage.input_tokens_details.cached_tokens == 3
 
     def test_anthropic_to_responses_maps_stop_reasons_to_incomplete_details(self) -> None:
-        converter = ClaudeConverter()
+        converter = AnthropicConverter()
         request_body = NeMoGymResponseCreateParamsNonStreaming(input="hello")
 
         base_response = {
@@ -229,7 +229,7 @@ class TestClaudeConverter:
         assert tool_use_response.incomplete_details is None
 
     def test_responses_to_anthropic_maps_typed_adaptive_thinking(self) -> None:
-        converter = ClaudeConverter()
+        converter = AnthropicConverter()
         body = NeMoGymResponseCreateParamsNonStreaming(input="Hello")
 
         actual = converter.responses_to_anthropic(
@@ -244,7 +244,7 @@ class TestClaudeConverter:
         assert actual["thinking"] == {"type": "adaptive"}
 
     def test_responses_to_anthropic_rejects_ambiguous_thinking_config(self) -> None:
-        converter = ClaudeConverter()
+        converter = AnthropicConverter()
         body = NeMoGymResponseCreateParamsNonStreaming(input="Hello")
 
         with pytest.raises(ValueError, match="Configure Claude thinking in only one place"):
@@ -258,7 +258,7 @@ class TestClaudeConverter:
             )
 
     def test_responses_to_anthropic_rejects_opus_4_8_sampling_params(self) -> None:
-        converter = ClaudeConverter()
+        converter = AnthropicConverter()
 
         with pytest.raises(ValueError, match="does not support configurable sampling"):
             converter.responses_to_anthropic(
@@ -281,7 +281,7 @@ class TestClaudeConverter:
             )
 
 
-class TestClaudeModel:
+class TestAnthropicModel:
     def _setup_server(
         self,
         max_concurrent_requests=None,
@@ -291,8 +291,8 @@ class TestClaudeModel:
         max_tokens=4096,
         extra_body=None,
         anthropic_base_url="https://api.anthropic.com/v1",
-    ) -> ClaudeModel:
-        config = ClaudeModelConfig(
+    ) -> AnthropicModel:
+        config = AnthropicModelConfig(
             host="0.0.0.0",
             port=8081,
             anthropic_base_url=anthropic_base_url,
@@ -306,7 +306,7 @@ class TestClaudeModel:
             thinking_budget_tokens=thinking_budget_tokens,
             extra_body=extra_body or {},
         )
-        return ClaudeModel(config=config, server_client=MagicMock(spec=ServerClient))
+        return AnthropicModel(config=config, server_client=MagicMock(spec=ServerClient))
 
     async def test_sanity(self) -> None:
         self._setup_server()

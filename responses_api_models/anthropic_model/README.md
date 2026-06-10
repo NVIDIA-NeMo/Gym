@@ -1,15 +1,15 @@
 # Description
 
-`claude_model` is a native Anthropic Messages API model server behind NeMo Gym's `/v1/responses` interface. It translates NeMo Gym Responses API requests to Anthropic `/v1/messages` payloads and maps Anthropic responses back to NeMo Gym Responses API objects.
+`anthropic_model` is a native Anthropic Messages API model server behind NeMo Gym's `/v1/responses` interface. It translates NeMo Gym Responses API requests to Anthropic `/v1/messages` payloads and maps Anthropic responses back to NeMo Gym Responses API objects.
 
 It supports text messages, system/developer prompt extraction, function tools, previous tool calls/results, thinking blocks, usage mapping, and optional request concurrency limiting. It uses `nemo_gym.server_utils.request()` for raw aiohttp transport instead of the Anthropic Python SDK.
 
 # Usage
 
-Start with a resources server config and the Claude model config:
+Start with a resources server config and the Anthropic model config:
 
 ```bash
-ng_run "+config_paths=[resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml,responses_api_models/claude_model/configs/claude_model.yaml]" \
+ng_run "+config_paths=[resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml,responses_api_models/anthropic_model/configs/anthropic_model.yaml]" \
   +policy_base_url="$ANTHROPIC_BASE_URL" \
   +policy_api_key="$ANTHROPIC_API_KEY" \
   +policy_model_name="$ANTHROPIC_MODEL_NAME"
@@ -17,7 +17,7 @@ ng_run "+config_paths=[resources_servers/example_single_tool_call/configs/exampl
 
 `anthropic_base_url` accepts either host-only or `/v1` style URLs. Both `https://api.anthropic.com` and `https://api.anthropic.com/v1` resolve to `/v1/messages`.
 
-This example uses the simple agent harness because it exercises `claude_model` as the policy model server through NeMo Gym's `/v1/responses` interface. `claude_code_agent` is a separate agent harness that invokes Claude Code/Anthropic directly, so it is useful for testing Claude Code workflows but does not validate this model server.
+This example uses the simple agent harness because it exercises `anthropic_model` as the policy model server through NeMo Gym's `/v1/responses` interface. `claude_code_agent` is a separate agent harness that invokes Claude Code/Anthropic directly, so it is useful for testing Claude Code workflows but does not validate this model server.
 
 For modern Claude models, prefer adaptive thinking with the typed `thinking` config:
 
