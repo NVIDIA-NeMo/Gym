@@ -15,10 +15,12 @@
 import asyncio
 import hashlib
 import json
+import os
 import sys
 import time
 import traceback
 from asyncio import Semaphore
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, Callable, Literal, Optional, cast
 from uuid import uuid4
@@ -49,6 +51,10 @@ from nemo_gym.server_utils import (
     ServerClient,
     get_first_server_config_dict,
 )
+
+
+OPENSANDBOX_PROVIDER_NAME = "opensandbox"
+OPENSANDBOX_API_KEY_ENV = "OPENSANDBOX_API_KEY"  # pragma: allowlist secret
 
 
 class MiniSWEAgentConfig(BaseResponsesAPIAgentConfig):
@@ -135,6 +141,47 @@ def _responses_create_params_to_model_kwargs(
         model_kwargs["tool_choice"] = tool_choice
 
     return model_kwargs
+
+
+def _opensandbox_connection(provider: dict[str, Any] | None) -> dict[str, Any] | None:
+    if provider is None:
+        return None
+    provider_config = provider.get(OPENSANDBOX_PROVIDER_NAME)
+    if not isinstance(provider_config, dict):
+        return None
+    connection = provider_config.get("connection")
+    if not isinstance(connection, dict):
+        return None
+    return connection
+
+
+def _sandbox_provider_for_config_dump(provider: dict[str, Any]) -> dict[str, Any]:
+    provider_for_disk = deepcopy(provider)
+    connection = _opensandbox_connection(provider_for_disk)
+    if connection is not None:
+        connection.pop("api_key", None)
+    return provider_for_disk
+
+
+def _sandbox_runtime_env(provider: dict[str, Any] | None) -> dict[str, Any]:
+    runtime_env: dict[str, Any] = {"py_executable": sys.executable}
+    connection = _opensandbox_connection(provider)
+    if connection is None:
+        return runtime_env
+    api_key = connection.get("api_key")
+    if api_key:
+        runtime_env["env_vars"] = {OPENSANDBOX_API_KEY_ENV: str(api_key)}
+    return runtime_env
+
+
+def _restore_sandbox_provider_secrets(config: dict[str, Any]) -> None:
+    provider = config.get("environment", {}).get("provider")
+    connection = _opensandbox_connection(provider if isinstance(provider, dict) else None)
+    if connection is None or connection.get("api_key"):
+        return
+    api_key = os.getenv(OPENSANDBOX_API_KEY_ENV)
+    if api_key:
+        connection["api_key"] = api_key
 
 
 def _bash_tool_choice() -> dict[str, Any]:
@@ -449,6 +496,7 @@ def _run_mini_swe_v2(**params: Any) -> dict[str, Any]:
     instance_dir.mkdir(parents=True, exist_ok=True)
 
     config = yaml.safe_load(get_config_path(params["config"]).read_text())
+    _restore_sandbox_provider_secrets(config)
     model_config = config.setdefault("model", {})
     model_config["model_class"] = "litellm"
     model_config["model_name"] = params["model"]
@@ -700,7 +748,7 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
             if self.config.sandbox_provider is None:
                 raise ValueError("mini_swe_agent_2 requires sandbox_provider")
             config.setdefault("environment", {}).update(self.config.sandbox_environment_kwargs or {})
-            config["environment"]["provider"] = self.config.sandbox_provider
+            config["environment"]["provider"] = _sandbox_provider_for_config_dump(self.config.sandbox_provider)
             config["environment"]["spec"] = _sandbox_spec_for_instance(
                 self.config.sandbox_spec,
                 resource_profiles=self.config.sandbox_resource_profiles,
@@ -742,7 +790,11 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
                     eval_timeout=eval_timeout,
                     step_limit=step_limit,
                 )
-                future = runner_ray_remote.remote(run_mini_swe_with_sandbox, params)
+                runner = runner_ray_remote
+                runtime_env = _sandbox_runtime_env(self.config.sandbox_provider)
+                if runtime_env.get("env_vars"):
+                    runner = runner.options(runtime_env=runtime_env)
+                future = runner.remote(run_mini_swe_with_sandbox, params)
                 result = await asyncio.to_thread(ray.get, future)
                 result = result[instance_id]
                 input_messages = result["input_messages"]

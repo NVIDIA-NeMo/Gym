@@ -19,6 +19,7 @@ import tempfile
 import threading
 from collections.abc import Awaitable, Callable, Mapping
 from concurrent.futures import Future
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -33,6 +34,8 @@ from nemo_gym.sandbox.providers import (
 
 
 T = TypeVar("T")
+SYNC_OPERATION_TIMEOUT_S = 3600.0
+SYNC_LOOP_CLOSE_TIMEOUT_S = 5.0
 
 
 class AsyncSandbox:
@@ -138,7 +141,14 @@ class AsyncSandbox:
 class _AsyncLoopRunner:
     """Run async sandbox operations for sync callers."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        wait_timeout_s: float = SYNC_OPERATION_TIMEOUT_S,
+        close_timeout_s: float = SYNC_LOOP_CLOSE_TIMEOUT_S,
+    ) -> None:
+        self._wait_timeout_s = wait_timeout_s
+        self._close_timeout_s = close_timeout_s
         self._loop = asyncio.new_event_loop()
         self._ready = threading.Event()
         self._closed = False
@@ -160,23 +170,42 @@ class _AsyncLoopRunner:
             return
         raise RuntimeError(f"Sandbox.{operation}() is blocking; use AsyncSandbox in async code instead.")
 
+    def _wait_for_result(self, operation: str, future: Future[T]) -> T:
+        try:
+            return future.result(timeout=self._wait_timeout_s)
+        except FutureTimeoutError as e:
+            future.cancel()
+            raise TimeoutError(
+                f"Sandbox.{operation}() timed out waiting for the sync loop after {self._wait_timeout_s:g}s"
+            ) from e
+
     def call(self, operation: str, func: Callable[[], T]) -> T:
         self._ensure_can_block(operation)
         future: Future[T] = Future()
 
         def invoke() -> None:
             try:
-                future.set_result(func())
+                result = func()
             except BaseException as e:
-                future.set_exception(e)
+                if not future.cancelled():
+                    future.set_exception(e)
+            else:
+                if not future.cancelled():
+                    future.set_result(result)
 
         self._loop.call_soon_threadsafe(invoke)
-        return future.result()
+        return self._wait_for_result(operation, future)
 
     def run(self, operation: str, awaitable_factory: Callable[[], Awaitable[T]]) -> T:
         self._ensure_can_block(operation)
         future = asyncio.run_coroutine_threadsafe(awaitable_factory(), self._loop)
-        return future.result()
+        try:
+            return future.result(timeout=self._wait_timeout_s)
+        except FutureTimeoutError as e:
+            future.cancel()
+            raise TimeoutError(
+                f"Sandbox.{operation}() timed out waiting for the sync loop after {self._wait_timeout_s:g}s"
+            ) from e
 
     def close(self) -> None:
         if self._closed:
@@ -184,7 +213,9 @@ class _AsyncLoopRunner:
         self._closed = True
         if not self._loop.is_closed():
             self._loop.call_soon_threadsafe(self._loop.stop)
-            self._thread.join(timeout=5)
+            self._thread.join(timeout=self._close_timeout_s)
+            if self._thread.is_alive():
+                return
             self._loop.close()
 
 

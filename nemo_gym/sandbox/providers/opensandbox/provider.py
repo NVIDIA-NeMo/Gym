@@ -427,7 +427,7 @@ class OpenSandboxOperationConfig:
     retries: int = 3
     retry_delay_s: float = 1.0
     retry_max_delay_s: float = 15.0
-    command_retries: int | None = None
+    command_retries: int = 0
     close_timeout_s: float | None = 30.0
 
     def __post_init__(self) -> None:
@@ -437,7 +437,7 @@ class OpenSandboxOperationConfig:
             raise ValueError("operations.retry_delay_s must be >= 0")
         if self.retry_max_delay_s < 0:
             raise ValueError("operations.retry_max_delay_s must be >= 0")
-        if self.command_retries is not None and self.command_retries < 0:
+        if self.command_retries < 0:
             raise ValueError("operations.command_retries must be >= 0")
         if self.close_timeout_s is not None and self.close_timeout_s <= 0:
             raise ValueError("operations.close_timeout_s must be > 0")
@@ -810,9 +810,7 @@ class OpenSandboxProvider:
         return _to_sandbox_status(getattr(raw_status, "state", None) if raw_status is not None else None)
 
     def _command_retry_count(self) -> int:
-        return (
-            self._operations.retries if self._operations.command_retries is None else self._operations.command_retries
-        )
+        return self._operations.command_retries
 
     async def _exec(
         self,

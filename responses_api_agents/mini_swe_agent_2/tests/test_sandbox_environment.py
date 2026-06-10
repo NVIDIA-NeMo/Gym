@@ -13,7 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from responses_api_agents.mini_swe_agent_2.sandbox_environment import MiniSWESandboxEnvironment, Submitted
+from typing import Any
+
+from responses_api_agents.mini_swe_agent_2.sandbox_environment import (
+    MiniSWESandboxEnvironment,
+    MiniSWESandboxEnvironmentConfig,
+    Submitted,
+)
 
 
 def test_check_finished_raises_submitted_for_submit_sentinel() -> None:
@@ -49,3 +55,36 @@ def test_check_finished_ignores_nonzero_submit_sentinel() -> None:
             "exception_info": "",
         }
     )
+
+
+def test_execute_passes_configured_cwd_without_conda_cd() -> None:
+    class FakeSandbox:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        def exec(self, command: str, **kwargs: Any):
+            self.calls.append({"command": command, **kwargs})
+            return type("Result", (), {"stdout": "ok", "stderr": None, "return_code": 0})()
+
+    fake_sandbox = FakeSandbox()
+    env = MiniSWESandboxEnvironment.__new__(MiniSWESandboxEnvironment)
+    env.config = MiniSWESandboxEnvironmentConfig(
+        image="image:tag",
+        provider={"fake": {}},
+        cwd="/default",
+        activate_conda=False,
+    )
+    env._sandbox = fake_sandbox
+
+    assert env.execute("pwd", cwd="/repo") == {"output": "ok", "returncode": 0, "exception_info": ""}
+    assert fake_sandbox.calls[-1]["command"] == "pwd"
+    assert fake_sandbox.calls[-1]["cwd"] == "/repo"
+
+    env.config.activate_conda = True
+    env.config.conda_env = "testbed"
+    env.execute("python -V", cwd="/repo")
+    assert fake_sandbox.calls[-1]["command"] == (
+        "source $(conda info --base)/etc/profile.d/conda.sh && conda activate testbed && python -V"
+    )
+    assert "cd /repo" not in fake_sandbox.calls[-1]["command"]
+    assert fake_sandbox.calls[-1]["cwd"] == "/repo"

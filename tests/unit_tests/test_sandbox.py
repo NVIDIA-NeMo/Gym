@@ -14,6 +14,7 @@
 
 import asyncio
 import importlib.util
+import threading
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -479,6 +480,23 @@ def test_sync_loop_runner_close_is_idempotent() -> None:
     runner.close()
 
 
+def test_sync_loop_runner_times_out_waits_and_skips_running_loop_close() -> None:
+    runner = _AsyncLoopRunner(wait_timeout_s=0.01, close_timeout_s=0.01)
+    release = threading.Event()
+
+    try:
+        with pytest.raises(TimeoutError, match="timed out waiting for the sync loop"):
+            runner.call("blocked", release.wait)
+
+        runner.close()
+        assert runner._thread.is_alive()
+    finally:
+        release.set()
+        runner._thread.join(timeout=1)
+        if not runner._loop.is_closed():
+            runner._loop.close()
+
+
 def test_sync_sandbox_file_operations(tmp_path: Path) -> None:
     provider = FakeSandboxProvider()
     with Sandbox(provider) as sandbox:
@@ -802,11 +820,11 @@ async def _assert_opensandbox_exec_retries_retryable_sdk_failures(monkeypatch) -
 
 
 @requires_tenacity
-def test_opensandbox_command_retries_can_be_disabled(monkeypatch) -> None:
-    asyncio.run(_assert_opensandbox_command_retries_can_be_disabled(monkeypatch))
+def test_opensandbox_command_retries_default_to_disabled(monkeypatch) -> None:
+    asyncio.run(_assert_opensandbox_command_retries_default_to_disabled(monkeypatch))
 
 
-async def _assert_opensandbox_command_retries_can_be_disabled(monkeypatch) -> None:
+async def _assert_opensandbox_command_retries_default_to_disabled(monkeypatch) -> None:
     opensandbox_provider_module, OpenSandboxProvider, *_unused = _require_opensandbox_provider()
 
     class FakeRunCommandOpts:
@@ -837,7 +855,6 @@ async def _assert_opensandbox_command_retries_can_be_disabled(monkeypatch) -> No
             "retries": 2,
             "retry_delay_s": 0,
             "retry_max_delay_s": 0,
-            "command_retries": 0,
         },
         probe={"command": None},
     )
@@ -935,7 +952,7 @@ def test_mini_swe_sandbox_environment_owns_conda_setup(monkeypatch) -> None:
         serialized = env.serialize()
         assert serialized["info"]["config"]["environment_type"].endswith("MiniSWESandboxEnvironment")
         env.config.activate_conda = False
-        assert env._command("echo plain", "/tmp/work") == "echo plain"
+        assert env._command("echo plain") == "echo plain"
         env.config.activate_conda = True
 
         provider = FakeSandboxProvider.last_instance
@@ -951,9 +968,10 @@ def test_mini_swe_sandbox_environment_owns_conda_setup(monkeypatch) -> None:
         result = env.execute("pytest -q", is_eval=True)
         assert result == {"output": "ok", "returncode": 0, "exception_info": ""}
         exec_call = provider.exec_calls[0]
-        assert exec_call["cwd"] == "/"
+        assert exec_call["cwd"] == "/testbed"
         assert exec_call["timeout_s"] == 1800
         assert exec_call["user"] == "agent"
+        assert "cd /testbed" not in exec_call["command"]
         assert "conda activate testbed" in exec_call["command"]
         assert exec_call["command"].endswith("pytest -q")
     finally:

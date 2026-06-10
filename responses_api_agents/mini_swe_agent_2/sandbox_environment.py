@@ -120,17 +120,11 @@ class MiniSWESandboxEnvironment:
             }
         }
 
-    def _command(self, command: str, cwd: str) -> str:
+    def _command(self, command: str) -> str:
         if not self.config.activate_conda or not self.config.conda_env:
             return command
-        quoted_cwd = shlex.quote(cwd)
         quoted_env = shlex.quote(self.config.conda_env)
-        return (
-            f"cd {quoted_cwd} && "
-            "source $(conda info --base)/etc/profile.d/conda.sh && "
-            f"conda activate {quoted_env} && "
-            f"{command}"
-        )
+        return f"source $(conda info --base)/etc/profile.d/conda.sh && conda activate {quoted_env} && {command}"
 
     def execute(
         self,
@@ -146,9 +140,9 @@ class MiniSWESandboxEnvironment:
             raise RuntimeError("Sandbox is not available")
 
         result = self._sandbox.exec(
-            self._command(command, exec_cwd),
+            self._command(command),
             timeout_s=timeout_s,
-            cwd="/",
+            cwd=exec_cwd,
             user=self.config.user,
         )
         output = "\n".join(part for part in (result.stdout, result.stderr) if part)

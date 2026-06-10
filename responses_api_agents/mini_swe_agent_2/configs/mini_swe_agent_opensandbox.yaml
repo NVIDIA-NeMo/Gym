@@ -34,7 +34,7 @@ mini_swe_agent_2:
             retries: 5
             retry_delay_s: 1.0
             retry_max_delay_s: 45.0
-            command_retries: 3
+            command_retries: 0
             close_timeout_s: 30
       sandbox_spec:
         ttl_s: 18000
