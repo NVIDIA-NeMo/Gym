@@ -53,12 +53,12 @@ from nemo_gym.base_responses_api_agent import (
 )
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.global_config import OmegaConf, get_global_config_dict
+from nemo_gym.server_utils import get_first_server_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.profiling import Profiler
-from nemo_gym.server_utils import get_first_server_config_dict
 from responses_api_models.vllm_model.app import VLLMConverter, split_responses_input_output_items
 
 
@@ -1089,15 +1089,6 @@ printf '{{"_test_completed": true, "exit_code": %d}}\\n' $TEST_EXIT \
 
 class OpenHandsHarnessProcessor(BaseDatasetHarnessProcessor):
     def setup(self) -> Path:
-        override_setup_dir = os.environ.get("SWE_OPENHANDS_SETUP_DIR")
-        if override_setup_dir:
-            setup_dir = Path(override_setup_dir)
-            openhands_python = setup_dir / "OpenHands" / ".venv" / "bin" / "python"
-            if not openhands_python.exists():
-                raise FileNotFoundError(f"SWE_OPENHANDS_SETUP_DIR={setup_dir} is missing {openhands_python}")
-            print(f"Using OpenHands setup override at {setup_dir}", flush=True)
-            return setup_dir
-
         setup_dir = self.parent_dir / "swe_openhands_setup"
 
         with self._setup_directory_lock(setup_dir, "OpenHands"):
@@ -1134,42 +1125,12 @@ AGENT_FRAMEWORK_COMMIT={self.config.agent_framework_commit} \\
         with open(agent_config, "r") as f:
             config = tomlkit.parse(f.read())
 
-        # Rollout datasets often carry the OpenHands placeholder model name
-        # "default". The local vLLM endpoint only serves the configured policy
-        # model name, so resolve the placeholder before writing oh_config.toml.
-        try:
-            model_server_cfg = get_first_server_config_dict(get_global_config_dict(), self.config.model_server_name)
-            default_model_name = (
-                getattr(model_server_cfg, "openai_model", None) or getattr(model_server_cfg, "model", None) or ""
-            )
-        except Exception as e:
-            raise RuntimeError(
-                f"Could not resolve model server '{self.config.model_server_name}' for OpenHands bench: {e}"
-            )
-
-        requested_model = self.config.body.model
-        effective_model = default_model_name if requested_model in (None, "", "default") else requested_model
-
-        llm_model_config = config["llm"]["model"]
-        llm_model_config |= {
-            "model": effective_model,
+        config["llm"]["model"] |= {
+            "model": self.config.body.model,
             "base_url": "",  # May need to populate this
             "temperature": self.config.inference_params["temperature"],
             "top_p": self.config.inference_params["top_p"],
         }
-
-        for env_name, config_key in (
-            ("SWE_OPENHANDS_MAX_INPUT_TOKENS", "max_input_tokens"),
-            ("SWE_OPENHANDS_MAX_OUTPUT_TOKENS", "max_output_tokens"),
-            ("SWE_OPENHANDS_MAX_MESSAGE_CHARS", "max_message_chars"),
-        ):
-            env_value = os.environ.get(env_name)
-            if env_value in (None, ""):
-                continue
-            try:
-                llm_model_config[config_key] = int(env_value)
-            except ValueError as e:
-                raise RuntimeError(f"{env_name} must be an integer, got {env_value!r}") from e
 
         config_str = tomlkit.dumps(config)
 
@@ -1222,15 +1183,7 @@ AGENT_FRAMEWORK_COMMIT={self.config.agent_framework_commit} \\
         else:
             camel_case_tool_names_cmd = ""
 
-        openhands_eval_condenser = os.environ.get("SWE_OPENHANDS_EVAL_CONDENSER", "").strip()
-        if openhands_eval_condenser:
-            eval_condenser_cmd = f"export EVAL_CONDENSER={shlex.quote(openhands_eval_condenser)} && "
-        else:
-            eval_condenser_cmd = ""
-
         workspace_check_cmd = ""
-
-        agent_framework_commit = os.environ.get("SWE_OPENHANDS_COMMIT", self.config.agent_framework_commit)
 
         agent_main_cmd = (
             f"{workspace_check_cmd}"
@@ -1257,7 +1210,6 @@ AGENT_FRAMEWORK_COMMIT={self.config.agent_framework_commit} \\
             f"export NEMO_GYM_MODEL_SERVER_NAME={self.config.model_server_name} &&"
             "export VIRTUAL_ENV=/openhands_setup/OpenHands/.venv && "
             "export PATH=$PATH:/openhands_setup/OpenHands/.venv/bin && "
-            "export PYTHONPATH=/openhands_setup/OpenHands:${PYTHONPATH:-} && "
             # CRITICAL: Configure poetry to only use the OpenHands venv (ignore external venvs)
             "export POETRY_VIRTUALENVS_IN_PROJECT=true && "
             "export POETRY_VIRTUALENVS_CREATE=false && "
@@ -1267,12 +1219,11 @@ AGENT_FRAMEWORK_COMMIT={self.config.agent_framework_commit} \\
             f"{crypto_fix_cmd}"
             f"{diversify_tool_names_cmd}"
             f"{camel_case_tool_names_cmd}"
-            f"{eval_condenser_cmd}"
             f"echo {shlex.quote(config_str)} >{config_file_path} && "
             # f" export EVAL_OUTPUT_DIR={eval_dir_in_openhands} && "
             f"./evaluation/benchmarks/swe_bench/scripts/run_infer.sh "
             f"    llm.model "  # name of llm config section in config.toml
-            f"    {agent_framework_commit} "  # openhands commit
+            f"    {self.config.agent_framework_commit} "  # openhands commit
             f"    {self.config.resolved_agent_cls} "  # agent
             f"    0 "  # Note: this is eval limit which randomly chooses an instance from the dataset
             f"    {self.config.agent_max_turns} "  # max agent iterations
@@ -1449,7 +1400,9 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
             model_server_cfg = get_first_server_config_dict(get_global_config_dict(), self.config.model_server_name)
             model_server_base_url = f"http://{model_server_cfg.host}:{model_server_cfg.port}"
             default_model_name = (
-                getattr(model_server_cfg, "openai_model", None) or getattr(model_server_cfg, "model", None) or ""
+                getattr(model_server_cfg, "openai_model", None)
+                or getattr(model_server_cfg, "model", None)
+                or ""
             )
         except Exception as e:
             raise RuntimeError(
@@ -1457,8 +1410,7 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
             )
 
         # Falls back to the policy model so opencode doesn't POST model=default.
-        requested_model = self.config.body.model
-        effective_model = default_model_name if requested_model in (None, "", "default") else requested_model
+        effective_model = self.config.body.model or default_model_name
         config_str = json.dumps({"llm": {"model": {"model": effective_model}}})
 
         workspace_path = _resolve_opencode_workspace_path(data_point)
@@ -1541,7 +1493,7 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
             "trap '_rc=$?; "
             "mkdir -p /trajectories_mount/opencode_logs 2>/dev/null; "
             "cp -r /root/.local/share/opencode /trajectories_mount/opencode_logs/xdg 2>/dev/null; "
-            "for d in /tmp/bench-*; do "
+            'for d in /tmp/bench-*; do '
             '[ -d "$d/data/log" ] && '
             'cp -r "$d/data/log" "/trajectories_mount/opencode_logs/bench_$(basename "$d")" 2>/dev/null; '
             "done; "
@@ -2016,11 +1968,6 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
     def model_post_init(self, context: Any) -> None:
         run_session_id = f"{int(time.time() * 1000)}_{str(uuid.uuid4())[:8]}"
         workspace_root = Path(__file__).parent
-        base_results_root = os.environ.get("SWE_AGENT_BASE_RESULTS_ROOT", "").strip()
-        if base_results_root:
-            base_results_dir = Path(base_results_root).expanduser()
-        else:
-            base_results_dir = workspace_root / f"swebench_results_{run_session_id}"
         # Only set up the agent harness that's actually selected. Both share the
         # same dataset/eval setup paths.
         openhands_setup_dir, opencode_setup_dir = None, None
@@ -2031,7 +1978,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
         self._swe_bench_wrapper_server_config = SWEBenchWrapperServerConfig(
             run_session_id=run_session_id,
-            base_results_dir=base_results_dir,
+            base_results_dir=workspace_root / f"swebench_results_{run_session_id}",
             ng_global_config_dict_str=shlex.quote(OmegaConf.to_yaml(get_global_config_dict())),
             model_server_name=self.config.model_server.name,
             openhands_setup_dir=openhands_setup_dir,
@@ -2107,7 +2054,9 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
         return self._materialize_trajectory(main_data)
 
-    def get_all_session_trajectories_from_completions(self, trajectories_dir: Path, instance_id: str) -> list[dict]:
+    def get_all_session_trajectories_from_completions(
+        self, trajectories_dir: Path, instance_id: str
+    ) -> list[dict]:
         """All per-session trajectories on disk (opencode subagent capture).
 
         Returns one entry per session_id with its full message history, tools,
@@ -2302,8 +2251,8 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             # we don't repeat the long base64 string.
             container_commands.append(
                 "for d in /home/gradle/.gradle/init.d /home/user/.gradle/init.d; do "
-                '[ -d "$d" ] && cp /root/.gradle/init.d/maven_central_mirror.gradle '
-                '"$d/maven_central_mirror.gradle" 2>/dev/null; done; true'
+                "[ -d \"$d\" ] && cp /root/.gradle/init.d/maven_central_mirror.gradle "
+                "\"$d/maven_central_mirror.gradle\" 2>/dev/null; done; true"
             )
 
         # Chrome wrapper for Karma-based JS tests. Karma's default
@@ -2317,8 +2266,8 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             "for b in /opt/google/chrome/google-chrome /opt/google/chrome/chrome "
             "/usr/bin/google-chrome-stable /usr/bin/google-chrome "
             "/usr/lib/chromium/chrome /usr/bin/chromium-browser /usr/bin/chromium; do\n"
-            '  if [ -x "$b" ] && [ "$(realpath "$b")" != "$(realpath "$0")" ]; then\n'
-            '    exec "$b" --no-sandbox --disable-dev-shm-usage "$@"\n'
+            "  if [ -x \"$b\" ] && [ \"$(realpath \"$b\")\" != \"$(realpath \"$0\")\" ]; then\n"
+            "    exec \"$b\" --no-sandbox --disable-dev-shm-usage \"$@\"\n"
             "  fi\n"
             "done\n"
             "echo 'chrome-wrapper.sh: no real chrome binary found' >&2\n"
@@ -2357,7 +2306,8 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             )
             user_message_host = params.persistent_dir / f"user_message_{params.agent_run_id}.txt"
             mount_args.append(
-                f"--mount type=bind,src={user_message_host},dst=/opencode_setup/opencode/user_message.txt,ro"
+                f"--mount type=bind,src={user_message_host},"
+                f"dst=/opencode_setup/opencode/user_message.txt,ro"
             )
             if params.resolved_system_prompt_template:
                 mount_args.append(
