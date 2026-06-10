@@ -67,9 +67,7 @@ def _to_gym_row(inst: dict, split: str, sampling: dict) -> dict:
     }
 
 
-def build_dataset(
-    output: Path, split: str, limit: int | None, instance_id: str | None, sampling: dict
-) -> list[str]:
+def build_dataset(output: Path, split: str, limit: int | None, instance_id: str | None, sampling: dict) -> list[str]:
     try:
         from datasets import load_dataset
     except ImportError:

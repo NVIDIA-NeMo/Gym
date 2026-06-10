@@ -354,6 +354,7 @@ Path("/trajectories_mount/patch.diff").write_text(patch)
 
 ### Configuration
 
+
 class AnySweAgentConfig(BaseResponsesAPIAgentConfig):
     model_server: Optional[ModelServerRef] = None
 
@@ -731,9 +732,7 @@ class AnySweAgent(SimpleResponsesAPIAgent):
         script_path = script_dir / "agent_script.sh"
         script_path.write_text(params.agent_command.command)
         mounts.append(f"--mount type=bind,src={script_path},dst=/container_scripts/agent_script.sh,ro")
-        return self._apptainer_exec(
-            params, mounts, "bash /container_scripts/agent_script.sh", env=env
-        )
+        return self._apptainer_exec(params, mounts, "bash /container_scripts/agent_script.sh", env=env)
 
     def _build_eval_apptainer_cmd(self, params: AnySweInstanceConfig) -> str:
         dataset_name = params.problem_info.get("dataset_name", "")
