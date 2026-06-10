@@ -33,7 +33,7 @@ from pydantic import ConfigDict, Field
 
 from nemo_gym.base_resources_server import BaseRunRequest
 
-from .app import (
+from app import (
     SWEBenchMetrics,
     SWEBenchVerifyResponse,
     SWEBenchWrapper,
