@@ -34,6 +34,8 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
+from pydantic import BaseModel
+
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
@@ -92,22 +94,49 @@ def _safe_output_text(response: Any) -> str:
     return "\n".join(p for p in parts if p)
 
 
+class ReferenceModelConfig(BaseModel):
+    """A single reference model for comparison-mode pairwise ELO.
+
+    ``deliverables_dir`` is a directory tree of the reference model's
+    deliverables, laid out as ``<deliverables_dir>/task_<task_id>/`` (optionally
+    with ``repeat_<n>/`` subdirs) containing the same files the agent would
+    persist (deliverable artifacts + finish_params.json + reference_files/).
+    ``elo`` is the reference's known rating (e.g. a published Arena/AA number),
+    held fixed when the eval model's MLE rating is fit.
+    """
+
+    deliverables_dir: str
+    elo: float = _DEFAULT_REFERENCE_ELO
+
+
 class GDPValResourcesServerConfig(BaseResourcesServerConfig):
     reward_mode: Literal["rubric", "comparison"] = "rubric"
 
-    # Comparison-mode: directory tree containing the reference model's
-    # deliverables, laid out as ``<reference_deliverables_dir>/task_<task_id>/``
-    # with the same files the agent would persist (deliverable artifacts +
-    # finish_params.json + reference_files/). Required when
-    # ``reward_mode=comparison``.
+    # Comparison-mode: one or more reference models the eval deliverable is
+    # pairwise-judged against. The eval model's ELO is then estimated globally
+    # via an anchored Bradley-Terry MLE over all references (see
+    # ``comparison.calculate_mle_elo``). Keyed by an arbitrary reference id used
+    # in the per-reference aggregate metrics.
+    #
+    #   reference_models:
+    #     kimi_k2.5_thinking: {deliverables_dir: /gdpval/refs/kimi, elo: 1290}
+    #     glm5.1:            {deliverables_dir: /gdpval/refs/glm5.1, elo: 1535}
+    #
+    # For back-compat the legacy single-reference fields
+    # ``reference_deliverables_dir`` + ``reference_elo`` are still honored when
+    # ``reference_models`` is empty (treated as a single reference id
+    # ``"reference"``).
+    reference_models: Dict[str, ReferenceModelConfig] = {}
+
+    # Legacy single-reference fields. Prefer ``reference_models``.
     reference_deliverables_dir: Optional[str] = None
 
     # Pairwise judge trials per task. 4 is the historical default; alternates
     # swap/no-swap to debias position effects.
     num_comparison_trials: int = 4
 
-    # ELO assigned to the reference model in pairwise mode. ``aggregate_metrics``
-    # reports the eval model's ELO relative to this anchor.
+    # ELO assigned to the (legacy single) reference model in pairwise mode.
+    # Ignored when ``reference_models`` is set (each carries its own ``elo``).
     reference_elo: float = _DEFAULT_REFERENCE_ELO
 
     # Office→PDF preconversion for deliverables before pairwise judging.
@@ -166,12 +195,17 @@ class GDPValVerifyResponse(GDPValVerifyRequest, BaseVerifyResponse):
     win: Optional[bool] = None
     loss: Optional[bool] = None
     tie: Optional[bool] = None
-    # Raw judge vote counts aggregated over every reference repeat × trial.
-    # ``aggregate_metrics`` prefers these so the win rate reflects all
+    # Raw judge vote counts aggregated over every reference (model × repeat ×
+    # trial). ``aggregate_metrics`` prefers these so the win rate reflects all
     # comparisons rather than treating each verify call as a single vote.
     total_wins: Optional[int] = None
     total_losses: Optional[int] = None
     total_ties: Optional[int] = None
+    # Per-reference-model vote breakdown for multi-reference comparison mode.
+    # Maps reference id -> {wins, losses, ties, reference_elo, ref_repeat_count}.
+    # ``aggregate_metrics`` uses these to build the per-reference battle table
+    # that the anchored Bradley-Terry MLE is fit over.
+    per_reference: Optional[Dict[str, Dict[str, Any]]] = None
 
 
 class GDPValResourcesServer(SimpleResourcesServer):
@@ -179,8 +213,24 @@ class GDPValResourcesServer(SimpleResourcesServer):
 
     def model_post_init(self, context: Any) -> None:
         self._judge_prompt_fpath: str = self.config.judge_prompt_template_fpath or _DEFAULT_JUDGE_PROMPT_FPATH
-        if self.config.reward_mode == "comparison" and not self.config.reference_deliverables_dir:
-            raise ValueError("reward_mode=comparison requires reference_deliverables_dir to be set")
+        # Normalize the reference-model set: prefer the multi-reference
+        # ``reference_models`` mapping; fall back to the legacy single-reference
+        # fields (treated as a single reference id ``"reference"``).
+        self._references: Dict[str, ReferenceModelConfig] = {}
+        if self.config.reward_mode == "comparison":
+            if self.config.reference_models:
+                self._references = dict(self.config.reference_models)
+            elif self.config.reference_deliverables_dir:
+                self._references = {
+                    "reference": ReferenceModelConfig(
+                        deliverables_dir=self.config.reference_deliverables_dir,
+                        elo=self.config.reference_elo,
+                    )
+                }
+            else:
+                raise ValueError(
+                    "reward_mode=comparison requires reference_deliverables_dir or reference_models to be set"
+                )
         if self.config.preconvert_office_to_pdf:
             from resources_servers.gdpval.setup_libreoffice import ensure_libreoffice
 
@@ -317,12 +367,19 @@ class GDPValResourcesServer(SimpleResourcesServer):
             task_attempted,
         )
 
-        ref_root = Path(self.config.reference_deliverables_dir)
-        ref_task_root = ref_root / f"task_{body.task_id}"
-        ref_task_dirs = [d for d in _iter_ref_repeat_dirs(ref_task_root) if task_attempted(str(d))]
         eval_task_dir = Path(body.deliverables_dir) if body.deliverables_dir else None
 
-        if not ref_task_dirs:
+        # Resolve, per reference model, the available (attempted) repeat dirs
+        # for this task. A reference that has no deliverable for this task is
+        # simply skipped — the eval model just isn't judged against it here.
+        ref_dirs_by_id: Dict[str, List[Path]] = {}
+        for ref_id, ref_cfg in self._references.items():
+            ref_task_root = Path(ref_cfg.deliverables_dir) / f"task_{body.task_id}"
+            dirs = [d for d in _iter_ref_repeat_dirs(ref_task_root) if task_attempted(str(d))]
+            if dirs:
+                ref_dirs_by_id[ref_id] = dirs
+
+        if not ref_dirs_by_id:
             print(f"[gdpval] no reference deliverable for task {body.task_id}", flush=True)
             return GDPValVerifyResponse(
                 **body.model_dump(),
@@ -343,8 +400,9 @@ class GDPValResourcesServer(SimpleResourcesServer):
 
         if self.config.preconvert_office_to_pdf:
             await self._preconvert_and_log(eval_task_dir, label=f"eval/{body.task_id}")
-            for ref_dir in ref_task_dirs:
-                await self._preconvert_and_log(ref_dir, label=f"ref/{body.task_id}/{ref_dir.name}")
+            for ref_id, dirs in ref_dirs_by_id.items():
+                for ref_dir in dirs:
+                    await self._preconvert_and_log(ref_dir, label=f"ref/{ref_id}/{body.task_id}/{ref_dir.name}")
 
         clean_up_list: List[Path] = []
         overrides = dict(self.config.judge_responses_create_params_overrides or {})
@@ -360,37 +418,54 @@ class GDPValResourcesServer(SimpleResourcesServer):
         total_wins = 0
         total_losses = 0
         total_ties = 0
+        # Per-reference-model vote tallies + a flat list of every (ref × repeat)
+        # matchup for back-compat with the single-reference judge_response shape.
+        per_reference: Dict[str, Dict[str, Any]] = {}
         per_ref_results: List[Dict[str, Any]] = []
         try:
             eval_submission = build_file_section(str(eval_task_dir), clean_up_list)
 
-            # Judge eval submission against every available reference repeat. Raw
-            # vote counts (not just per-matchup majority) are summed so the win
-            # rate averages over reference variance — see ``_iter_ref_repeat_dirs``.
-            for ref_dir in ref_task_dirs:
-                refs_subdir = ref_dir / "reference_files"
-                refs = build_file_section(
-                    str(refs_subdir) if refs_subdir.is_dir() else None,
-                    clean_up_list,
-                )
-                ref_submission = build_file_section(str(ref_dir), clean_up_list)
-                result = await asyncio.to_thread(
-                    run_trials,
-                    client=client,
-                    model=judge_model_name,
-                    task_prompt=body.prompt or "",
-                    refs=refs,
-                    submission_a=ref_submission,
-                    submission_b=eval_submission,
-                    num_trials=self.config.num_comparison_trials,
-                    return_raw_responses=self.config.persist_raw_judge_responses,
-                )
-                # ``run_trials`` casts submission_a=ref, submission_b=eval, so
-                # ``win_count_b`` is eval wins.
-                total_wins += result["win_count_b"]
-                total_losses += result["win_count_a"]
-                total_ties += result["tie_count"]
-                per_ref_results.append({"ref_repeat": ref_dir.name, **result})
+            # Judge the eval submission against every reference model, and within
+            # each model against every available reference repeat. Raw vote
+            # counts (not just per-matchup majority) are summed so the win rate
+            # averages over reference variance — see ``_iter_ref_repeat_dirs``.
+            for ref_id, dirs in ref_dirs_by_id.items():
+                ref_wins = ref_losses = ref_ties = 0
+                for ref_dir in dirs:
+                    refs_subdir = ref_dir / "reference_files"
+                    refs = build_file_section(
+                        str(refs_subdir) if refs_subdir.is_dir() else None,
+                        clean_up_list,
+                    )
+                    ref_submission = build_file_section(str(ref_dir), clean_up_list)
+                    result = await asyncio.to_thread(
+                        run_trials,
+                        client=client,
+                        model=judge_model_name,
+                        task_prompt=body.prompt or "",
+                        refs=refs,
+                        submission_a=ref_submission,
+                        submission_b=eval_submission,
+                        num_trials=self.config.num_comparison_trials,
+                        return_raw_responses=self.config.persist_raw_judge_responses,
+                    )
+                    # ``run_trials`` casts submission_a=ref, submission_b=eval, so
+                    # ``win_count_b`` is eval wins.
+                    ref_wins += result["win_count_b"]
+                    ref_losses += result["win_count_a"]
+                    ref_ties += result["tie_count"]
+                    per_ref_results.append({"ref_id": ref_id, "ref_repeat": ref_dir.name, **result})
+
+                per_reference[ref_id] = {
+                    "wins": ref_wins,
+                    "losses": ref_losses,
+                    "ties": ref_ties,
+                    "reference_elo": self._references[ref_id].elo,
+                    "ref_repeat_count": len(dirs),
+                }
+                total_wins += ref_wins
+                total_losses += ref_losses
+                total_ties += ref_ties
         finally:
             clean_up_paths(clean_up_list)
 
@@ -407,12 +482,15 @@ class GDPValResourcesServer(SimpleResourcesServer):
             reward=reward,
             verify_mode="comparison",
             judge_response={
+                "per_reference": per_reference,
                 "per_ref_repeat": per_ref_results,
                 "total_wins": total_wins,
                 "total_losses": total_losses,
                 "total_ties": total_ties,
                 "total_judged": total_judged,
-                "ref_repeat_count": len(ref_task_dirs),
+                "reference_count": len(per_reference),
+                # Back-compat: total matchups across all references × repeats.
+                "ref_repeat_count": len(per_ref_results),
             },
             win=reward == 1.0,
             loss=reward == 0.0,
@@ -420,17 +498,22 @@ class GDPValResourcesServer(SimpleResourcesServer):
             total_wins=total_wins,
             total_losses=total_losses,
             total_ties=total_ties,
+            per_reference=per_reference,
         )
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest) -> AggregateMetrics:
         if self.config.reward_mode != "comparison":
             return await super().aggregate_metrics(body)
 
-        from resources_servers.gdpval.comparison import calculate_elo
+        from resources_servers.gdpval.comparison import (
+            calculate_elo,
+            calculate_mle_elo,
+            predict_win_rate,
+        )
 
         # Prefer the raw judge vote counts (``total_wins``/``total_losses``/
         # ``total_ties``) when present so the win rate reflects every
-        # eval×ref_repeat×trial comparison. Fall back to the bool flags for
+        # eval×ref×repeat×trial comparison. Fall back to the bool flags for
         # verify responses produced before this field existed — those count as
         # one vote each.
         def _votes(vr: Dict[str, Any]) -> tuple[int, int, int]:
@@ -439,31 +522,85 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 return int(tw or 0), int(tl or 0), int(tt or 0)
             return int(bool(vr.get("win"))), int(bool(vr.get("loss"))), int(bool(vr.get("tie")))
 
+        # Pooled (total) win stats across all references.
         wins = losses = ties = 0
+        # Per-reference-model win stats: ref_id -> [wins, losses, ties, ref_elo].
+        per_ref_totals: Dict[str, List[Any]] = {}
         for vr in body.verify_responses:
             w, ls, t = _votes(vr)
             wins += w
             losses += ls
             ties += t
-        judged = wins + losses + ties
 
+            per_reference = vr.get("per_reference") or {}
+            for ref_id, counts in per_reference.items():
+                entry = per_ref_totals.setdefault(ref_id, [0, 0, 0, None])
+                entry[0] += int(counts.get("wins", 0) or 0)
+                entry[1] += int(counts.get("losses", 0) or 0)
+                entry[2] += int(counts.get("ties", 0) or 0)
+                if entry[3] is None:
+                    # Prefer the ELO from config; fall back to whatever the
+                    # verify response recorded at judging time.
+                    cfg_ref = self._references.get(ref_id)
+                    entry[3] = cfg_ref.elo if cfg_ref is not None else counts.get("reference_elo")
+
+        judged = wins + losses + ties
         if judged == 0:
             return await super().aggregate_metrics(body)
 
         win_rate = (wins + 0.5 * ties) / judged
-        eval_elo, normalized_elo = calculate_elo(win_rate, self.config.reference_elo)
 
         base = await super().aggregate_metrics(body)
-        extra = {
+        # Total win stats (always emitted).
+        extra: Dict[str, Any] = {
             "comparison/wins": wins,
             "comparison/losses": losses,
             "comparison/ties": ties,
             "comparison/judged": judged,
             "comparison/win_rate": win_rate,
-            "comparison/eval_elo": eval_elo,
-            "comparison/normalized_elo": normalized_elo,
-            "comparison/reference_elo": self.config.reference_elo,
         }
+
+        # Per-reference win stats (always emitted when present).
+        for ref_id, (rw, rl, rt, ref_elo) in per_ref_totals.items():
+            r_judged = rw + rl + rt
+            r_win_rate = (rw + 0.5 * rt) / r_judged if r_judged else float("nan")
+            extra[f"comparison/ref/{ref_id}/wins"] = rw
+            extra[f"comparison/ref/{ref_id}/losses"] = rl
+            extra[f"comparison/ref/{ref_id}/ties"] = rt
+            extra[f"comparison/ref/{ref_id}/judged"] = r_judged
+            extra[f"comparison/ref/{ref_id}/win_rate"] = r_win_rate
+            if ref_elo is not None:
+                extra[f"comparison/ref/{ref_id}/reference_elo"] = ref_elo
+
+        # ELO estimate. With per-reference battles we fit an anchored
+        # Bradley-Terry MLE across all references; otherwise fall back to the
+        # legacy single-anchor closed form.
+        battles = [
+            (float(ref_elo), rw, rl, rt)
+            for (rw, rl, rt, ref_elo) in per_ref_totals.values()
+            if ref_elo is not None and (rw + rl + rt) > 0
+        ]
+        mle = calculate_mle_elo(battles) if battles else None
+        if mle is not None:
+            eval_elo, normalized_elo = mle
+            extra["comparison/eval_elo"] = eval_elo
+            extra["comparison/normalized_elo"] = normalized_elo
+            extra["comparison/num_references"] = len(battles)
+            extra["comparison/elo_method"] = "bradley_terry_mle"
+            # Predicted (model-implied) win rate vs each reference, useful to
+            # eyeball MLE fit against the observed per-reference win rate.
+            for ref_id, (rw, rl, rt, ref_elo) in per_ref_totals.items():
+                if ref_elo is not None:
+                    extra[f"comparison/ref/{ref_id}/predicted_win_rate"] = predict_win_rate(
+                        eval_elo, float(ref_elo)
+                    )
+        else:
+            eval_elo, normalized_elo = calculate_elo(win_rate, self.config.reference_elo)
+            extra["comparison/eval_elo"] = eval_elo
+            extra["comparison/normalized_elo"] = normalized_elo
+            extra["comparison/reference_elo"] = self.config.reference_elo
+            extra["comparison/elo_method"] = "single_reference"
+
         merged_agent = {**base.agent_metrics, **extra}
         merged_key = {**base.key_metrics, **extra}
         return AggregateMetrics(
