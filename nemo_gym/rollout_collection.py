@@ -15,6 +15,7 @@
 import asyncio
 import glob as glob_module
 import json
+import os
 from asyncio import Future, Semaphore
 from collections import Counter
 from contextlib import nullcontext
@@ -50,6 +51,63 @@ from nemo_gym.server_utils import (
     raise_for_status,
     set_global_aiohttp_client,
 )
+
+
+# ---------------------------------------------------------------------------
+# Failure-routing sentinels (set by agent servers, read by the dispatcher).
+#
+# Background:
+#   The historical contract was "every dispatched task produces one row in
+#   the main rollouts jsonl, succeeded or failed." That contract broke
+#   resume-after-walltime: synthetic ``-failed`` rows written during a
+#   SIGTERM grace window look identical to real successes to the dedup in
+#   ``_load_from_cache`` (which keys only on (task_index, rollout_index)),
+#   so chain-hop 2 thinks failed tasks are done and never retries them.
+#
+# New contract:
+#   - Successes go to the main jsonl (``output_jsonl_fpath``).
+#   - Failures go to a sidecar (``<output_stem>_failures.jsonl``), one row
+#     per attempt, with ``_ng_failure_class`` set.
+#   - ``kill_shaped`` failures (Slurm SIGTERM, Ray actor died, OOM, ...) go
+#     NOWHERE: the absence of a row is the canonical signal. Resume's
+#     set-difference re-dispatches them naturally; per-task timeout bounds
+#     the chain-hop wallclock.
+#   - On resume, ``_load_from_cache`` reads BOTH files: main jsonl tells
+#     it what's permanently done, sidecar tells it how many attempts each
+#     non-success has consumed (capped at NEMO_GYM_MAX_ROLLOUT_ATTEMPTS,
+#     default 3). Rows flagged ``_ng_failure_terminal=True`` are never
+#     retried regardless of attempt count.
+# ---------------------------------------------------------------------------
+
+NG_FAILURE_CLASS_KEY = "_ng_failure_class"
+NG_NO_PERSIST_KEY = "_ng_no_persist"
+NG_TERMINAL_KEY = "_ng_failure_terminal"
+
+_DEFAULT_MAX_ROLLOUT_ATTEMPTS = 3
+
+
+def _get_max_rollout_attempts() -> int:
+    """Read ``NEMO_GYM_MAX_ROLLOUT_ATTEMPTS`` (positive int) or default to 3."""
+    raw = os.environ.get("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS")
+    if raw is None or raw == "":
+        return _DEFAULT_MAX_ROLLOUT_ATTEMPTS
+    try:
+        n = int(raw)
+        if n < 1:
+            raise ValueError(f"must be >= 1, got {n}")
+        return n
+    except (TypeError, ValueError) as e:
+        print(
+            f"WARNING: could not parse NEMO_GYM_MAX_ROLLOUT_ATTEMPTS={raw!r} ({e}); "
+            f"falling back to default {_DEFAULT_MAX_ROLLOUT_ATTEMPTS}.",
+            flush=True,
+        )
+        return _DEFAULT_MAX_ROLLOUT_ATTEMPTS
+
+
+def _failures_path_for(output_fpath: Path) -> Path:
+    """Sidecar path used by the dispatcher and ``_load_from_cache``."""
+    return output_fpath.with_name(output_fpath.stem + "_failures.jsonl")
 
 
 class SharedRolloutCollectionConfig(BaseNeMoGymCLIConfig):
@@ -256,8 +314,34 @@ class RolloutCollectionHelper(BaseModel):
 
         get_key = lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME])
 
-        seen_rows = set(map(get_key, results))
-        input_rows = [row for row in original_input_rows if get_key(row) not in seen_rows]
+        # Successes (and any legacy '-failed' rows written by pre-fix Gym
+        # builds) live in the main jsonl. They short-circuit dispatch.
+        successes_seen = set(map(get_key, results))
+
+        # Sidecar: one row per non-kill_shaped failure attempt. Count attempts
+        # per key + flag terminal rows so chain-hop 2 retries the right ones.
+        failures_fpath = _failures_path_for(Path(config.output_jsonl_fpath))
+        attempts_by_key: Counter = Counter()
+        terminal_keys: set = set()
+        if failures_fpath.exists():
+            with failures_fpath.open("rb") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    fr = orjson.loads(line)
+                    if TASK_INDEX_KEY_NAME not in fr or ROLLOUT_INDEX_KEY_NAME not in fr:
+                        continue
+                    k = (fr[TASK_INDEX_KEY_NAME], fr[ROLLOUT_INDEX_KEY_NAME])
+                    attempts_by_key[k] += 1
+                    if fr.get(NG_TERMINAL_KEY):
+                        terminal_keys.add(k)
+
+        max_attempts = _get_max_rollout_attempts()
+        maxed_out = {k for k, n in attempts_by_key.items() if n >= max_attempts}
+        gated = successes_seen | terminal_keys | maxed_out
+
+        input_rows = [row for row in original_input_rows if get_key(row) not in gated]
 
         key_to_row = dict(zip(map(get_key, original_input_rows), original_input_rows))
         rows = [key_to_row[get_key(result)] for result in results]
@@ -265,7 +349,10 @@ class RolloutCollectionHelper(BaseModel):
         print(
             f"""Resumed from cache. Found:
 - {len(original_input_rows)} original input rows
-- {len(rows)} rows that have already been run
+- {len(rows)} rows already done (in main jsonl)
+- {sum(attempts_by_key.values())} prior failure attempts ({len(attempts_by_key)} unique tasks) in sidecar
+- {len(terminal_keys)} sidecar-terminal (timeout_exceeded / skipped) → not retried
+- {len(maxed_out)} hit max_attempts={max_attempts} → not retried
 - {len(input_rows)} rows that still need to be run"""
         )
 
@@ -311,10 +398,12 @@ class RolloutCollectionHelper(BaseModel):
             semaphore = Semaphore(config.num_samples_in_parallel)
 
         output_fpath.parent.mkdir(exist_ok=True, parents=True)
+        failures_fpath = _failures_path_for(output_fpath)
 
         pcts_to_print = [20, 40, 60, 80, 90, 95, 98, 99, 100]
         counts_left = Counter(r[AGENT_REF_KEY_NAME]["name"] for r in input_rows)
         results_file = output_fpath.open("ab")
+        failures_file = failures_fpath.open("ab")
         for future in self.run_examples(input_rows, semaphore=semaphore):
             row, result = await future
 
@@ -322,11 +411,27 @@ class RolloutCollectionHelper(BaseModel):
             result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
             result[AGENT_REF_KEY_NAME] = row[AGENT_REF_KEY_NAME]
 
+            no_persist = bool(result.get(NG_NO_PERSIST_KEY))
+            failure_class = result.get(NG_FAILURE_CLASS_KEY)
+
             rows.append(row)
             results.append(result)
-            result_strs.append([orjson.dumps(result)])
-            results_file.write(result_strs[-1][0] + b"\n")
-            results_file.flush()
+            serialized = orjson.dumps(result)
+            result_strs.append([serialized])
+
+            if no_persist:
+                # kill_shaped: don't write anywhere. Set-difference on resume
+                # naturally re-dispatches; per-task timeout bounds wallclock.
+                pass
+            elif failure_class is not None:
+                # Non-kill_shaped failure → sidecar. The aggregator only reads
+                # the main jsonl, so this keeps win-rate uncontaminated.
+                failures_file.write(serialized + b"\n")
+                failures_file.flush()
+            else:
+                # Success → main jsonl.
+                results_file.write(serialized + b"\n")
+                results_file.flush()
 
             counts_left[row[AGENT_REF_KEY_NAME]["name"]] -= 1
             if counts_left[row[AGENT_REF_KEY_NAME]["name"]] <= 0:
@@ -344,6 +449,7 @@ class RolloutCollectionHelper(BaseModel):
                     tqdm.write(f"Examples left:\n{top_left_str}")
 
         results_file.close()
+        failures_file.close()
 
         if config.upload_rollouts_to_wandb and get_wandb_run():  # pragma: no cover
             print("Uploading rollouts to W&B. This may take a few minutes if your data is large.")

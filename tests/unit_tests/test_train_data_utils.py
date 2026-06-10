@@ -51,6 +51,47 @@ def load_example_multi_step_test_global_config_dict() -> DictConfig:
     )
 
 
+def _make_agent_instance_config(name: str, dataset_specs: list) -> "ResponsesAPIAgentServerInstanceConfig":
+    """Build an in-memory ResponsesAPIAgentServerInstanceConfig with the given datasets."""
+
+    def _default_license(dataset_type: str) -> str | None:
+        return None if dataset_type == "example" else "Apache 2.0"
+
+    server_type_config_dict = {
+        "responses_api_agents": {
+            "simple_agent": {
+                "host": "127.0.0.1",
+                "port": 12345,
+                "entrypoint": "app.py",
+                "datasets": [
+                    {
+                        "name": d["name"],
+                        "type": d["type"],
+                        "jsonl_fpath": d.get("jsonl_fpath", f"path/{d['name']}.jsonl"),
+                        "num_repeats": d.get("num_repeats", 1),
+                        "gitlab_identifier": d.get("gitlab_identifier"),
+                        "license": d.get("license", _default_license(d["type"])),
+                    }
+                    for d in dataset_specs
+                ],
+                "resources_server": {
+                    "type": "resources_servers",
+                    "name": f"{name}_resources_server",
+                },
+                "model_server": {
+                    "type": "responses_api_models",
+                    "name": "policy_model",
+                },
+            }
+        }
+    }
+    return ResponsesAPIAgentServerInstanceConfig(
+        name=name,
+        server_type_config_dict=DictConfig(server_type_config_dict),
+        responses_api_agents=server_type_config_dict["responses_api_agents"],
+    )
+
+
 class TestLoadAndValidateServerInstanceConfigs:
     def test_load_and_validate_server_instance_configs_sanity(self, monkeypatch: MonkeyPatch) -> None:
         # Fix the port returned
@@ -105,6 +146,54 @@ class TestLoadAndValidateServerInstanceConfigs:
             c.model_dump(mode="json", warnings="none") for c in actual_agent_configs_with_data
         ]
         assert expected_agent_configs_with_data_dict == actual_agent_configs_with_data_dict
+
+    def test_load_and_validate_server_instance_configs_filters_out_of_scope_datasets(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        """The returned list must (a) drop agents whose datasets are all out
+        of scope for the mode, and (b) restrict mixed agents to their
+        in-scope datasets only."""
+        agent_in_scope_only = _make_agent_instance_config("agent_in_scope_only", [{"name": "ex", "type": "example"}])
+        agent_out_of_scope_only = _make_agent_instance_config(
+            "agent_out_of_scope_only", [{"name": "train", "type": "train"}]
+        )
+        agent_mixed = _make_agent_instance_config(
+            "agent_mixed",
+            [
+                {"name": "ex", "type": "example"},
+                {"name": "train", "type": "train"},
+            ],
+        )
+
+        monkeypatch.setattr(
+            GlobalConfigDictParser,
+            "filter_for_server_instance_configs",
+            lambda self, _global_config_dict: [
+                agent_in_scope_only,
+                agent_out_of_scope_only,
+                agent_mixed,
+            ],
+        )
+
+        config = TrainDataProcessorConfig(
+            output_dirpath="",
+            mode="example_validation",
+            should_download=False,
+        )
+        processor = TrainDataProcessor()
+        result = processor.load_and_validate_server_instance_configs(
+            config=config,
+            global_config_dict=DictConfig({}),
+        )
+
+        result_names = [c.name for c in result]
+        assert result_names == ["agent_in_scope_only", "agent_mixed"], result_names
+
+        result_datasets = {c.name: [(d.name, d.type) for d in c.datasets] for c in result}
+        assert result_datasets == {
+            "agent_in_scope_only": [("ex", "example")],
+            "agent_mixed": [("ex", "example")],
+        }
 
 
 class TestLoadDatasets:

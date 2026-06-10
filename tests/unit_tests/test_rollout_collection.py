@@ -27,13 +27,37 @@ from nemo_gym.global_config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, T
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.reward_profile import compute_aggregate_metrics
 from nemo_gym.rollout_collection import (
+    _DEFAULT_MAX_ROLLOUT_ATTEMPTS,
     RolloutAggregationConfig,
     RolloutAggregationHelper,
     RolloutCollectionConfig,
     RolloutCollectionHelper,
     _expand_input_glob,
+    _get_max_rollout_attempts,
     _rollout_request_debug_summary,
 )
+
+
+class TestGetMaxRolloutAttempts:
+    def test_default_when_unset(self, monkeypatch) -> None:
+        monkeypatch.delenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", raising=False)
+        assert _get_max_rollout_attempts() == _DEFAULT_MAX_ROLLOUT_ATTEMPTS
+
+    def test_default_when_empty(self, monkeypatch) -> None:
+        monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "")
+        assert _get_max_rollout_attempts() == _DEFAULT_MAX_ROLLOUT_ATTEMPTS
+
+    def test_valid_value(self, monkeypatch) -> None:
+        monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "5")
+        assert _get_max_rollout_attempts() == 5
+
+    def test_non_integer_falls_back_to_default(self, monkeypatch) -> None:
+        monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "not-an-int")
+        assert _get_max_rollout_attempts() == _DEFAULT_MAX_ROLLOUT_ATTEMPTS
+
+    def test_non_positive_falls_back_to_default(self, monkeypatch) -> None:
+        monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "0")
+        assert _get_max_rollout_attempts() == _DEFAULT_MAX_ROLLOUT_ATTEMPTS
 
 
 class TestRolloutCollection:
