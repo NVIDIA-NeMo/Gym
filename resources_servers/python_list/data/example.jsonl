@@ -1,0 +1,2 @@
+{"responses_create_params": {"input": [{"role": "user", "content": "Which cell should be selected? Give the final answer as a Python tuple."}]}, "expected_answer": "(4, 3)", "extraction_mode": "final_answer"}
+{"responses_create_params": {"input": [{"role": "user", "content": "List the five temperatures from left to right. Give the final answer as a Python list."}]}, "expected_answer": "[30, 45, 60, 75, 90]", "extraction_mode": "final_answer"}
