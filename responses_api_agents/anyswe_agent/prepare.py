@@ -16,7 +16,7 @@
     python prepare.py --limit 5                # 5 instances + their 5 SIFs (smoke test)
     python prepare.py --instance-id django__django-13741
     python prepare.py --no-images              # dataset only, skip image builds
-    python prepare.py --no-dataset --sif-dir … # (re)build images only
+    python prepare.py --no-dataset --sif-dir PATH # build images only
 
 schema anyswe_agent expects: each line has
 `responses_create_params.metadata` with `instance_id`, `dataset_name`, `split`,
@@ -75,7 +75,7 @@ def build_dataset(
     except ImportError:
         sys.exit("`datasets` is required for dataset prep: pip install datasets")
 
-    print(f"Loading {HF_DATASET} [{split}] …", flush=True)
+    print(f"Loading {HF_DATASET} [{split}]...", flush=True)
     rows = load_dataset(HF_DATASET, split=split)
 
     if instance_id:
@@ -116,7 +116,7 @@ def build_images(instance_ids: list[str], sif_dir: Path, jobs: int, force: bool)
     if not _which("apptainer"):
         sys.exit("`apptainer` not found on PATH. Install it or pass --no-images")
     sif_dir.mkdir(parents=True, exist_ok=True)
-    print(f"Building {len(instance_ids)} SIF(s) into {sif_dir} with {jobs} worker(s) …", flush=True)
+    print(f"Building {len(instance_ids)} SIF(s) into {sif_dir} with {jobs} worker(s)...", flush=True)
     failures: list[str] = []
     with ThreadPoolExecutor(max_workers=jobs) as pool:
         futures = {pool.submit(_build_one_sif, iid, sif_dir, force): iid for iid in instance_ids}

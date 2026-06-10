@@ -63,7 +63,7 @@ class TestRunnerTemplate:
 
     def test_patch_extraction_is_git_diff(self) -> None:
         # The runner always extracts the patch via `git diff HEAD`, independent
-        # of which agent ran — this is the core agent-agnostic contract.
+        # of which agent ran; this is the core agent-agnostic contract.
         assert '"git", "diff", "HEAD"' in _RUNNER_TEMPLATE
         assert "patch.diff" in _RUNNER_TEMPLATE
 

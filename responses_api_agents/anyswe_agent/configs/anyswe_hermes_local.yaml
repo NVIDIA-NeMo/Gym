@@ -14,7 +14,7 @@ anyswe_hermes:
         temperature: 1.0
         terminal_backend: local
         enabled_toolsets: null
-        system_prompt: "You are an expert software engineer. The source code repository is at /testbed. Use your terminal and file tools to: 1) Explore the repository to understand the code structure, 2) Reproduce the bug, 3) Find and fix the root cause in the source files, 4) Verify your fix works. You MUST actually use terminal and file tools to explore, edit, and test the code — do not just describe what to do."
+        system_prompt: "You are an expert software engineer. The source code repository is at /testbed. Explore the code, reproduce the bug, fix the root cause, and verify the fix. You MUST actually use terminal and file tools to explore, edit, and test the code; do not just describe what to do."
 
       # Relative to responses_api_agents/anyswe_agent.
       container_formatter: data/sifs/{instance_id}.sif
@@ -22,7 +22,7 @@ anyswe_hermes:
       swebench_tests_timeout: 1800
       apptainer_memory_limit_mb: 32768
       concurrency: 4
-      skip_eval: true
+      skip_eval: false
 
       model_server:
         name: policy_model
