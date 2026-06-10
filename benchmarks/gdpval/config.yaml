@@ -10,6 +10,15 @@
 # Comparison mode (pairwise ELO vs a reference model's deliverables):
 #   ++gdpval_resources_server.resources_servers.gdpval.reward_mode=comparison \
 #   ++gdpval_resources_server.resources_servers.gdpval.reference_deliverables_dir=/path/to/fork
+#
+# Multi-reference comparison mode (anchored Bradley-Terry MLE ELO over N
+# references — each reference is judged separately and the eval model's rating
+# is fit globally, with per-reference + total win stats reported):
+#   ++gdpval_resources_server.resources_servers.gdpval.reward_mode=comparison \
+#   ++gdpval_resources_server.resources_servers.gdpval.reference_models.kimi.deliverables_dir=/gdpval/refs/kimi \
+#   ++gdpval_resources_server.resources_servers.gdpval.reference_models.kimi.elo=1290 \
+#   ++gdpval_resources_server.resources_servers.gdpval.reference_models.gpt5.deliverables_dir=/gdpval/refs/gpt5 \
+#   ++gdpval_resources_server.resources_servers.gdpval.reference_models.gpt5.elo=1320
 
 # Judge model — proxy to NVIDIA inference API for Gemini 3.1 Pro.
 gdpval_judge_model:
@@ -28,9 +37,14 @@ gdpval_resources_server:
       domain: other
       verified: false
       reward_mode: rubric
+      # Single-reference (legacy) comparison fields.
       reference_deliverables_dir: null
-      num_comparison_trials: 4
       reference_elo: 1000.0
+      # Multi-reference comparison: map of reference id -> {deliverables_dir, elo}.
+      # When set, the eval model's ELO is fit via anchored Bradley-Terry MLE
+      # across all references and per-reference win stats are reported.
+      reference_models: {}
+      num_comparison_trials: 4
       preconvert_office_to_pdf: true
       preconvert_max_concurrent: 1
       judge_model_server:
