@@ -1,0 +1,34 @@
+# anyswe_agent driving the claude_code_agent inside each SWEBench container.
+# NOTE: claude-code speaks the Anthropic Messages API. The model_server must
+# expose POST /v1/messages (or sit behind an Anthropic-compatible shim).
+anyswe_claude_code:
+  responses_api_agents:
+    anyswe_agent:
+      entrypoint: app.py
+      domain: coding
+      description: SWE-bench run by claude-code natively inside the task container.
+      value: Eval software engineering capabilities on SWE-bench with any Gym agent.
+
+      agent_server_module: responses_api_agents.claude_code_agent.app
+      agent_server_class: ClaudeCodeAgent
+      agent_config_class: ClaudeCodeAgentConfig
+      agent_kwargs:
+        max_turns: 100
+        timeout: 1800
+        model: claude-sonnet-4-6
+
+      container_formatter: ???
+      swebench_agent_timeout: 2700
+      swebench_tests_timeout: 1800
+      apptainer_memory_limit_mb: 32768
+      concurrency: 64
+      skip_eval: false
+
+      model_server:
+        name: policy_model
+        type: responses_api_models
+
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: responses_api_agents/anyswe_agent/data/example.jsonl
