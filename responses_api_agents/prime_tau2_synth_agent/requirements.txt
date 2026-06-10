@@ -1,0 +1,5 @@
+-e nemo-gym[dev] @ ../../
+verifiers @ git+https://github.com/PrimeIntellect-ai/verifiers.git@v0.1.14
+--extra-index-url https://hub.primeintellect.ai/prime/simple/
+tau2 @ git+https://github.com/eligotts/tau2-bench.git@4839dd6
+tau2-synth==0.2.0
