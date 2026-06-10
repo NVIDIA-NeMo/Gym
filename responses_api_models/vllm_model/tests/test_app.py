@@ -683,6 +683,24 @@ class TestApp:
     async def test_sanity(self, monkeypatch: MonkeyPatch) -> None:
         self._setup_server(monkeypatch)
 
+    def test_tokenize_body_keeps_multimodal_processor_kwargs(self) -> None:
+        body_dict = {
+            "model": "dummy_model",
+            "messages": [{"role": "user", "content": "hello"}],
+            "chat_template_kwargs": {"enable_thinking": True},
+            "mm_processor_kwargs": {"precomputed_imgs_sizes": [[480, 1024]]},
+            "bad_words": ["<image>"],
+        }
+
+        tokenize_body = VLLMModel._get_tokenize_body_dict(body_dict)
+
+        assert tokenize_body == {
+            "model": "dummy_model",
+            "messages": [{"role": "user", "content": "hello"}],
+            "chat_template_kwargs": {"enable_thinking": True},
+            "mm_processor_kwargs": {"precomputed_imgs_sizes": [[480, 1024]]},
+        }
+
     def test_responses_marks_context_length_exceeded_on_preflight(
         self, monkeypatch: MonkeyPatch
     ) -> None:
@@ -806,7 +824,7 @@ class TestApp:
         assert "bad_words" not in mock_client.create_tokenize.await_args.kwargs
         assert mock_client.create_chat_completion.await_args.kwargs["max_tokens"] == 2
 
-    def test_responses_return_token_id_information_uses_tokenize_prompt_ids(
+    def test_responses_return_token_id_information_prefers_chat_prompt_ids(
         self,
         monkeypatch: MonkeyPatch,
     ):
@@ -833,7 +851,7 @@ class TestApp:
                 "object": "chat.completion",
                 "created": FIXED_TIME,
                 "model": "dummy_model",
-                "prompt_token_ids": [1, 2, 3],
+                "prompt_token_ids": [7, 8, 9],
                 "choices": [
                     {
                         "index": 0,
@@ -888,11 +906,11 @@ class TestApp:
         assert response.status_code == 200
         assert captured_kwargs["logprobs"] is True
         assert captured_kwargs["return_tokens_as_token_ids"] is True
-        assert "return_token_ids" not in captured_kwargs
-        mock_client.create_tokenize.assert_awaited()
+        assert captured_kwargs["return_token_ids"] is True
+        mock_client.create_tokenize.assert_not_awaited()
 
         output_item = response.json()["output"][0]
-        assert output_item["prompt_token_ids"] == [1, 2, 3]
+        assert output_item["prompt_token_ids"] == [7, 8, 9]
         assert output_item["generation_token_ids"] == [999, 998]
         assert output_item["generation_log_probs"] == [-0.1, -0.2]
 
@@ -3522,3 +3540,36 @@ class TestVLLMConverter:
         assert captured_kwargs["guided_json"] == '{"type": "object"}'
         assert captured_kwargs["min_tokens"] == 20
         assert captured_kwargs["new_param"] == "value"
+
+    def test_response_path_does_not_set_sampling_defaults(self):
+        config = VLLMModelConfig(
+            host="0.0.0.0",
+            port=8081,
+            base_url="http://api.openai.com/v1",
+            api_key="dummy_key",  # pragma: allowlist secret
+            model="dummy_model",
+            entrypoint="",
+            name="",
+            return_token_id_information=True,
+            uses_reasoning_parser=False,
+        )
+        server = VLLMModel(config=config, server_client=MagicMock(spec=ServerClient))
+        body_dict = {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "hello",
+                }
+            ],
+        }
+
+        processed = server._preprocess_chat_completion_create_params(
+            request=MagicMock(),
+            body_dict=body_dict,
+        )
+
+        assert "temperature" not in processed
+        assert "top_p" not in processed
+        assert "top_k" not in processed
+        assert processed["logprobs"] is True
+        assert processed["return_token_ids"] is True

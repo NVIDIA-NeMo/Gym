@@ -160,7 +160,17 @@ class VLLMModel(SimpleResponsesAPIModel):
     @staticmethod
     def _get_tokenize_body_dict(body_dict: Dict[str, Any]) -> Dict[str, Any]:
         tokenize_body_dict = {}
-        for key in ("model", "messages", "tools", "chat_template_kwargs"):
+        # Keep prompt-affecting multimodal processor overrides aligned with the
+        # chat completion request. Otherwise the fallback /tokenize prompt IDs
+        # can disagree with the effective generation prompt for dynamic-resolution
+        # image requests.
+        for key in (
+            "model",
+            "messages",
+            "tools",
+            "chat_template_kwargs",
+            "mm_processor_kwargs",
+        ):
             if key in body_dict:
                 tokenize_body_dict[key] = body_dict[key]
         return tokenize_body_dict
@@ -318,6 +328,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             body_dict |= dict(
                 logprobs=True,
                 return_tokens_as_token_ids=True,
+                return_token_ids=True,
                 # For prompt token IDs
                 # prompt_logprobs=0,
             )
