@@ -7,7 +7,7 @@ tales:
       description: TALES text-adventure games (textworld, textworld_express, alfworld, scienceworld, jericho) in Gymnasium API style.
       value: Multi-turn reasoning and progress through open-ended, situated text environments.
       expose_admissible_commands: false
-      # Fallback defaults; per-task framework/task_no/split/seed/max_episode_steps come from the dataset row.
+      # Default values below. Per-task framework/task_no/split/seed/max_episode_steps come from the dataset row.
       framework: textworld
       task_no: 0
       seed: 0
