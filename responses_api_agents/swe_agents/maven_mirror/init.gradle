@@ -1,0 +1,64 @@
+// Gradle init script that redirects Maven Central lookups to the Google mirror.
+// Loaded automatically by Gradle when placed at $GRADLE_USER_HOME/init.d/*.gradle.
+//
+// We use `repositories.all { ... }` (fires once per repo, including ones
+// added later) rather than `repositories.each { ... }` (snapshot at the
+// time of registration) so that repos declared in the project's
+// build.gradle, in `dependencyResolutionManagement { }`, or by plugins
+// at any point during configuration are all rewritten.
+
+def MIRROR_URL = 'https://maven-central.storage-download.googleapis.com/maven2/'
+
+def mavenCentralPrefixes = [
+    'https://repo.maven.apache.org/maven2',
+    'https://repo1.maven.org/maven2',
+    'http://repo.maven.apache.org/maven2',
+    'http://repo1.maven.org/maven2',
+]
+
+def rewriteHandler = { repositoryHandler ->
+    repositoryHandler.all { repo ->
+        if (repo instanceof MavenArtifactRepository) {
+            def existing = repo.url?.toString() ?: ''
+            for (pfx in mavenCentralPrefixes) {
+                if (existing.startsWith(pfx)) {
+                    try {
+                        repo.url = MIRROR_URL
+                    } catch (Throwable ignored) {
+                        // Some Gradle versions / repo types make `url`
+                        // immutable after first access. Best-effort.
+                    }
+                    break
+                }
+            }
+        }
+    }
+}
+
+allprojects {
+    buildscript {
+        rewriteHandler(repositories)
+    }
+    rewriteHandler(repositories)
+}
+
+settingsEvaluated { settings ->
+    rewriteHandler(settings.pluginManagement.repositories)
+    try {
+        rewriteHandler(settings.dependencyResolutionManagement.repositories)
+    } catch (ignored) {
+        // older Gradle without dependencyResolutionManagement API
+    }
+}
+
+gradle.beforeProject { project ->
+    rewriteHandler(project.buildscript.repositories)
+    rewriteHandler(project.repositories)
+}
+
+// Last-resort: also rewrite at afterProject in case some block adds
+// mavenCentral() inside afterEvaluate blocks.
+gradle.afterProject { project ->
+    rewriteHandler(project.buildscript.repositories)
+    rewriteHandler(project.repositories)
+}

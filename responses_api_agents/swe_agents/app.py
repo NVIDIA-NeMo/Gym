@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import base64
 import glob
 import importlib.util
 import json
@@ -52,6 +53,7 @@ from nemo_gym.base_responses_api_agent import (
 )
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.global_config import OmegaConf, get_global_config_dict
+from nemo_gym.server_utils import get_first_server_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -92,6 +94,12 @@ class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
     model_server: ModelServerRef
 
     # Agent framework configuration
+    agent_framework: Literal["openhands", "opencode"] = Field(
+        default="openhands",
+        description="Which agent harness drives the SWE-bench rollout. 'openhands' uses the nv-OpenHands "
+        "fork at swe_openhands_setup/. 'opencode' uses the opencode fork at swe_opencode_setup/ via "
+        "its bench/ entry point.",
+    )
     agent_config: Optional[str] = Field(default=None, description="Path to agent configuration file")
     agent_tools_file: Optional[str] = Field(
         default=None, description="Path to JSON file containing tool definitions in OpenAI format (for SWE-agent)"
@@ -153,17 +161,28 @@ class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
     openhands_should_log: bool = False
     debug: bool = False
 
+    opencode_subagents_enabled: bool = Field(
+        default=False,
+        description=(
+            "If True (opencode harness only), enable opencode's `task` tool so "
+            "the main agent can spawn subagent sessions. Each session's "
+            "trajectory is captured to its own `llm_completions/<id>/*.json` "
+            "files keyed by sessionID."
+        ),
+    )
+
 
 class SWEBenchWrapperServerConfig(BaseModel):
     ng_global_config_dict_str: str
     model_server_name: str
-    openhands_setup_dir: Path
     swebench_setup_dir: Path
     r2e_gym_setup_dir: Path
     swe_rebench_setup_dir: Path
     swebench_multilingual_setup_dir: Path
     run_session_id: str
     base_results_dir: Path
+    openhands_setup_dir: Optional[Path] = None
+    opencode_setup_dir: Optional[Path] = None
 
 
 class ExecuteContainerCommandArgs(BaseModel):
@@ -1245,6 +1264,261 @@ AGENT_FRAMEWORK_COMMIT={self.config.agent_framework_commit} \\
         )
 
 
+def _resolve_swebench_workspace_dir_name(instance: Dict[str, Any], dataset_name: str) -> str:
+    """Workspace directory NAME (no leading slash). Mirrors openhands'
+    `_get_swebench_workspace_dir_name` at
+    `temp/nv-OpenHands/.../run_infer.py:210`.
+    """
+    if "SWE-bench-Live" in dataset_name:
+        return str(instance.get("instance_id", ""))
+    repo = str(instance.get("repo", instance.get("repo_name", "")))
+    version = str(instance.get("version", ""))
+    return f"{repo}__{version}".replace("/", "__")
+
+
+def _resolve_opencode_workspace_path(problem_info: Dict[str, Any]) -> str:
+    """Resolve the absolute repo path inside the SIF (dataset-aware)."""
+    dataset_name = str(problem_info.get("dataset_name", ""))
+    instance = _extract_instance_dict(problem_info)
+
+    if dataset_name == "nv-internal-1":
+        return "/app"
+    if dataset_name == "swe-bench-ext":
+        return "/workspace/repo"
+    if "SWE-rebench-V2" in dataset_name:
+        repo = str(instance.get("repo", problem_info.get("repo", "")))
+        repo_name = repo.split("/", 1)[1] if "/" in repo else repo
+        return f"/{repo_name}"
+    return "/testbed"
+
+
+def _extract_instance_dict(problem_info: Dict[str, Any]) -> Dict[str, Any]:
+    raw = problem_info.get("instance_dict")
+    if isinstance(raw, str):
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+    if isinstance(raw, dict):
+        return raw
+    return {}
+
+
+_DEFAULT_OPENCODE_USER_PROMPT_TEMPLATE = (
+    Path(__file__).parent / "prompts" / "opencode_harness" / "user_prompt.txt"
+).read_text()
+
+
+def _render_opencode_user_message(
+    problem_info: Dict[str, Any],
+    workspace_path: str,
+    template_override_path: Optional[str] = None,
+) -> str:
+    """Render the user prompt for the opencode session."""
+    if template_override_path:
+        try:
+            template = Path(template_override_path).read_text()
+        except OSError as e:
+            print(
+                f"[opencode] failed to read user prompt override at {template_override_path}: {e}; "
+                f"falling back to default template",
+                flush=True,
+            )
+            template = _DEFAULT_OPENCODE_USER_PROMPT_TEMPLATE
+    else:
+        template = _DEFAULT_OPENCODE_USER_PROMPT_TEMPLATE
+
+    problem_statement = str(problem_info.get("problem_statement", ""))
+    try:
+        return template.format(workspace_path=workspace_path, problem_statement=problem_statement)
+    except (KeyError, IndexError) as e:
+        print(
+            f"[opencode] template format error ({e}); rendering with the default template instead",
+            flush=True,
+        )
+        return _DEFAULT_OPENCODE_USER_PROMPT_TEMPLATE.format(
+            workspace_path=workspace_path, problem_statement=problem_statement
+        )
+
+
+class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
+    """Drives the opencode fork; mirrors OpenHandsHarnessProcessor."""
+
+    def setup(self) -> Path:
+        setup_dir = self.parent_dir / "swe_opencode_setup"
+
+        with self._setup_directory_lock(setup_dir, "opencode"):
+            opencode_dir = setup_dir / "opencode"
+            bun_dir = setup_dir / "bun"
+
+            opencode_bundle = opencode_dir / ".bench-build" / "opencode.js"
+            if (
+                (opencode_dir / "node_modules").exists()
+                and (bun_dir / "bin" / "bun").exists()
+                and opencode_bundle.exists()
+            ):
+                print(f"opencode already set up at {setup_dir}", flush=True)
+                return setup_dir
+
+            print(f"Setting up opencode environment at {setup_dir}...", flush=True)
+            setup_dir.mkdir(parents=True, exist_ok=True)
+
+            script_fpath = self.parent_dir / "setup_scripts/opencode.sh"
+            command = (
+                f"SETUP_DIR={setup_dir} "
+                f"OPENCODE_DIR={opencode_dir} "
+                f"BUN_DIR={bun_dir} "
+                f"AGENT_FRAMEWORK_REPO={self.config.agent_framework_repo} "
+                f"AGENT_FRAMEWORK_COMMIT={self.config.agent_framework_commit} "
+                f"bash {script_fpath}"
+            )
+            self._run_setup_command(command)
+            return setup_dir
+
+    def get_run_command(self) -> ExecuteContainerCommandArgs:
+        data_point = self.config.problem_info
+        agent_run_id = self.config.agent_run_id
+
+        eval_dir_in_opencode = self.config.eval_dir_in_openhands
+        local_dataset_path = "/root/dataset/data.jsonl"
+        config_file_path = self.config.openhands_config_file_path
+
+        assert self.config.opencode_setup_dir is not None, (
+            "opencode setup directory is not set; agent_framework='opencode' requires that "
+            "OpenCodeHarnessProcessor.setup() ran in model_post_init."
+        )
+
+        # openai_model.yaml uses `openai_model`; vllm_model.yaml uses `model`.
+        try:
+            model_server_cfg = get_first_server_config_dict(get_global_config_dict(), self.config.model_server_name)
+            model_server_base_url = f"http://{model_server_cfg.host}:{model_server_cfg.port}"
+            default_model_name = (
+                getattr(model_server_cfg, "openai_model", None)
+                or getattr(model_server_cfg, "model", None)
+                or ""
+            )
+        except Exception as e:
+            raise RuntimeError(
+                f"Could not resolve model server '{self.config.model_server_name}' for opencode bench: {e}"
+            )
+
+        # Falls back to the policy model so opencode doesn't POST model=default.
+        effective_model = self.config.body.model or default_model_name
+        config_str = json.dumps({"llm": {"model": {"model": effective_model}}})
+
+        workspace_path = _resolve_opencode_workspace_path(data_point)
+        user_message = _render_opencode_user_message(
+            data_point,
+            workspace_path,
+            template_override_path=self.config.resolved_user_prompt_template,
+        )
+        user_message_host_path = self.config.persistent_dir / f"user_message_{agent_run_id}.txt"
+        user_message_host_path.write_text(user_message)
+        user_message_in_sif = "/opencode_setup/opencode/user_message.txt"
+
+        # Dataset-aware env activation before launching the agent. Activating
+        # in the parent shell means the PATH / VIRTUAL_ENV / CONDA_DEFAULT_ENV
+        # propagate down through run_infer.sh -> bun -> opencode's bash tool.
+        # Wrapped in `|| true` so a missing env doesn't kill the rollout.
+        dataset_name = str(data_point.get("dataset_name", ""))
+        if "SWE-Gym" in dataset_name:
+            # SWE-Gym: deactivate any active venv, then activate conda testbed.
+            conda_activate_cmd = (
+                "{ deactivate >/dev/null 2>&1 || true; unset VIRTUAL_ENV; "
+                "if [ -d /opt/miniconda3 ]; then "
+                ". /opt/miniconda3/etc/profile.d/conda.sh && conda activate testbed || true; "
+                "fi; } && "
+            )
+        elif "R2E-Gym" in dataset_name:
+            # R2E-Gym: deactivate any active venv, then source the bundled venv.
+            conda_activate_cmd = (
+                "{ deactivate >/dev/null 2>&1 || true; unset VIRTUAL_ENV; "
+                "if [ -f /testbed/.venv/bin/activate ]; then "
+                ". /testbed/.venv/bin/activate || true; "
+                "fi; } && "
+            )
+        elif dataset_name in ("nv-internal-1", "swe-bench-ext") or "SWE-rebench-V2" in dataset_name:
+            # These SIFs ship with the right interpreter already on PATH.
+            conda_activate_cmd = ""
+        else:
+            # Default SWE-bench (Verified/Lite/Multilingual/Live): conda
+            # testbed env at /opt/miniconda3 holds the per-instance Python.
+            conda_activate_cmd = (
+                "if [ -d /opt/miniconda3 ]; then "
+                ". /opt/miniconda3/etc/profile.d/conda.sh "
+                "&& conda activate testbed || true; "
+                "fi && "
+            )
+
+        agent_main_cmd = (
+            "mkdir -p /tmp/ && "
+            "export PATH=/opencode_setup/bun/bin:$PATH && "
+            "cd /opencode_setup/opencode && "
+            f'date +"%s.%N" > {self.config.generation_apptainer_spinup_timestamp_mounted_fpath} && '
+            f"export NEMO_GYM_METRICS_FPATH={self.config.base_mounted_dir}/nemo_gym_metrics.json && "
+            f"export NEMO_GYM_CONFIG_DICT={self.config.ng_global_config_dict_str} && "
+            f"export NEMO_GYM_MODEL_SERVER_NAME={self.config.model_server_name} && "
+            f"export NEMO_GYM_MODEL_SERVER_BASE_URL={shlex.quote(model_server_base_url)} && "
+            f"export COMMAND_EXEC_TIMEOUT={self.config.command_exec_timeout} && "
+            f"export ENABLE_SUBAGENTS={'1' if self.config.opencode_subagents_enabled else '0'} && "
+            f"echo {shlex.quote(config_str)} >{config_file_path} && "
+            f"{conda_activate_cmd}"
+            "./evaluation/benchmarks/swe_bench/scripts/run_infer.sh "
+            f"    {self.config.agent_framework_commit} "  # $1: opencode commit
+            f"    {self.config.resolved_agent_cls} "  # $2: agent class (informational)
+            f"    {self.config.agent_max_turns} "  # $3: max turns
+            f"    {data_point['dataset_name']} "  # $4: dataset name
+            f"    {data_point['split']} "  # $5: split
+            f"    {eval_dir_in_opencode} "  # $6: eval output dir (relative to opencode dir)
+            f"    {data_point['instance_id']} "  # $7: selected id
+            f"    {local_dataset_path} "  # $8: instance dict path
+            f"    {config_file_path} "  # $9: config file
+            f"    {shlex.quote(workspace_path)} "  # $10: resolved workspace path inside SIF
+            f"    {user_message_in_sif} "  # $11: pre-rendered user message file
+        )
+
+        if self.config.resolved_system_prompt_template is not None:
+            agent_main_cmd += "    /opencode_setup/opencode/system_prompt.txt "  # $12: system override
+
+        agent_script_name = f"agent_script_{agent_run_id}.sh"
+        agent_script_path = self.config.persistent_dir / agent_script_name
+        opencode_log_trap = (
+            "trap '_rc=$?; "
+            "mkdir -p /trajectories_mount/opencode_logs 2>/dev/null; "
+            "cp -r /root/.local/share/opencode /trajectories_mount/opencode_logs/xdg 2>/dev/null; "
+            'for d in /tmp/bench-*; do '
+            '[ -d "$d/data/log" ] && '
+            'cp -r "$d/data/log" "/trajectories_mount/opencode_logs/bench_$(basename "$d")" 2>/dev/null; '
+            "done; "
+            "exit $_rc' EXIT\n"
+        )
+        with open(agent_script_path, "w") as f:
+            f.write("#!/bin/bash\nset -e\n")
+            f.write(opencode_log_trap)
+            f.write(agent_main_cmd)
+            f.flush()
+            os.fsync(f.fileno())
+
+        agent_timeout_seconds = self.config.swebench_agent_timeout
+        opencode_cmd = (
+            f"timeout --signal=TERM --kill-after=30 {agent_timeout_seconds} "
+            f"bash /trajectories_mount/{agent_script_name}"
+        )
+
+        search_path = os.path.join(
+            self.config.opencode_setup_dir / "opencode" / eval_dir_in_opencode,
+            "**",
+            "output.jsonl",
+        )
+
+        return ExecuteContainerCommandArgs(
+            command=opencode_cmd,
+            expected_file_pattern=search_path,
+            mode="agent",
+            timeout=self.config.swebench_agent_timeout + 60,
+        )
+
+
 ########################################
 # START Ray worker logic
 ########################################
@@ -1321,7 +1595,14 @@ class RunOpenHandsAgent(BaseModel):
         eval_dir_in_openhands = self.config.eval_dir_in_openhands
         config_file_path = self.config.openhands_config_file_path
 
-        eval_dir_on_host = Path(self.config.openhands_setup_dir) / "OpenHands" / eval_dir_in_openhands
+        # Read from whichever harness wrote — they both use the same in-SIF
+        # eval_dir_in_openhands path, but the host-side root differs.
+        if self.config.agent_framework == "opencode":
+            assert self.config.opencode_setup_dir is not None
+            eval_dir_on_host = Path(self.config.opencode_setup_dir) / "opencode" / eval_dir_in_openhands
+        else:
+            assert self.config.openhands_setup_dir is not None
+            eval_dir_on_host = Path(self.config.openhands_setup_dir) / "OpenHands" / eval_dir_in_openhands
         trajectories_root = self.config.trajectories_root
         llm_completions_dir = trajectories_root / "llm_completions" / data_point["instance_id"]
         trajectories_root.mkdir(parents=True, exist_ok=True)
@@ -1344,13 +1625,35 @@ class RunOpenHandsAgent(BaseModel):
             shutil.copy2(source_output, dest_output_path)
             dest_output = str(dest_output_path)
 
-        completion_candidates = glob.glob(str(eval_dir_on_host / "*/*/*/llm_completions/*/*.json"))
+        # Recursive glob handles both openhands' 3-dirs-deep path
+        # (<eval>/<inst>/<cfg>/<run>/llm_completions/<id>/*.json) and opencode's
+        # 2-dirs-deep path (<eval>/<inst>/bench_run/llm_completions/<id>/*.json).
+        completion_candidates = glob.glob(
+            str(eval_dir_on_host / "**" / "llm_completions" / "*" / "*.json"),
+            recursive=True,
+        )
+        # When subagents are enabled (opencode) we get multiple sessions, each
+        # writing its own per-turn JSONs. Group by session_id (from the file
+        # payload) and copy each session's most recent turn — that file's
+        # `messages` field carries the full cumulative history for the session.
         if completion_candidates:
-            latest_completion = max(completion_candidates, key=os.path.getmtime)
-            shutil.copy2(
-                latest_completion,
-                llm_completions_dir / Path(latest_completion).name,
-            )
+            latest_per_session: dict[str, str] = {}
+            session_mtime: dict[str, float] = {}
+            for path_str in completion_candidates:
+                sess_id = "main"
+                try:
+                    with open(path_str, "r") as f:
+                        payload = json.load(f)
+                    if isinstance(payload, dict) and payload.get("session_id"):
+                        sess_id = str(payload["session_id"])
+                except (OSError, json.JSONDecodeError):
+                    pass
+                mtime = os.path.getmtime(path_str)
+                if mtime > session_mtime.get(sess_id, -1):
+                    session_mtime[sess_id] = mtime
+                    latest_per_session[sess_id] = path_str
+            for path_str in latest_per_session.values():
+                shutil.copy2(path_str, llm_completions_dir / Path(path_str).name)
 
         shutil.rmtree(eval_dir_on_host, ignore_errors=True)
         try:
@@ -1638,12 +1941,21 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
     def model_post_init(self, context: Any) -> None:
         run_session_id = f"{int(time.time() * 1000)}_{str(uuid.uuid4())[:8]}"
         workspace_root = Path(__file__).parent
+        # Only set up the agent harness that's actually selected. Both share the
+        # same dataset/eval setup paths.
+        openhands_setup_dir, opencode_setup_dir = None, None
+        if self.config.agent_framework == "opencode":
+            opencode_setup_dir = OpenCodeHarnessProcessor(config=self.config).setup()
+        else:
+            openhands_setup_dir = OpenHandsHarnessProcessor(config=self.config).setup()
+
         self._swe_bench_wrapper_server_config = SWEBenchWrapperServerConfig(
             run_session_id=run_session_id,
             base_results_dir=workspace_root / f"swebench_results_{run_session_id}",
             ng_global_config_dict_str=shlex.quote(OmegaConf.to_yaml(get_global_config_dict())),
             model_server_name=self.config.model_server.name,
-            openhands_setup_dir=OpenHandsHarnessProcessor(config=self.config).setup(),
+            openhands_setup_dir=openhands_setup_dir,
+            opencode_setup_dir=opencode_setup_dir,
             swebench_setup_dir=SweBenchDatasetProcessor(config=self.config).setup(),
             swebench_multilingual_setup_dir=SweBenchMultilingualDatasetProcessor(config=self.config).setup(),
             r2e_gym_setup_dir=R2EGymDatasetProcessor(config=self.config).setup(),
@@ -1659,9 +1971,32 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
     # START Results processing logic
     ########################################
 
+    @staticmethod
+    def _materialize_trajectory(data: dict) -> tuple[list, list]:
+        """Inflate one completion-file payload into (messages, tools)."""
+        messages = list(data.get("messages") or [])
+        tools = data.get("kwargs", {}).get("tools", [])
+        provider_specific_fields = data.get("provider_specific_fields", {})
+        try:
+            final_assistant_message = data["response"]["choices"][0]["message"]
+        except (KeyError, IndexError):
+            return messages, tools
+
+        for key in ["prompt_token_ids", "generation_token_ids", "generation_log_probs"]:
+            if key in provider_specific_fields:
+                final_assistant_message[key] = provider_specific_fields[key]
+
+        if final_assistant_message.get("content") or final_assistant_message.get("tool_calls"):
+            messages.append(final_assistant_message)
+
+        return messages, tools
+
     def get_openhands_trajectory_from_completions(self, trajectories_dir: Path, instance_id: str) -> tuple:
-        """
-        This reads the trajectories directly dumped by OpenHands.
+        """Extract the main session's trajectory for the API response.
+
+        When opencode subagents are enabled there are multiple session_id
+        files; we return the main session (no parent_session_id). All other
+        per-session files stay on disk for offline training pickup.
         """
         messages, tools = [], []
 
@@ -1675,25 +2010,58 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             print(f"No completion files found in: {completions_dir}", flush=True)
             return messages, tools
 
-        last_file = completion_files[-1]
+        # Prefer the main session (no parent_session_id). Fall back to the
+        # last file if the payload predates session tagging (openhands).
+        main_data = None
+        for fpath in completion_files:
+            try:
+                with open(fpath, "r") as f:
+                    data = json.load(f)
+            except (OSError, json.JSONDecodeError):
+                continue
+            if "session_id" in data and data.get("parent_session_id") in (None, ""):
+                main_data = data
+        if main_data is None:
+            with open(completion_files[-1], "r") as f:
+                main_data = json.load(f)
 
-        with open(last_file, "r") as f:
-            data = json.load(f)
+        return self._materialize_trajectory(main_data)
 
-        messages = data["messages"]
-        provider_specific_fields = data.get("provider_specific_fields", {})
-        final_assistant_message = data["response"]["choices"][0]["message"]
+    def get_all_session_trajectories_from_completions(
+        self, trajectories_dir: Path, instance_id: str
+    ) -> list[dict]:
+        """All per-session trajectories on disk (opencode subagent capture).
 
-        for key in ["prompt_token_ids", "generation_token_ids", "generation_log_probs"]:
-            if key in provider_specific_fields:
-                final_assistant_message[key] = provider_specific_fields[key]
-
-        if final_assistant_message.get("content") or final_assistant_message.get("tool_calls"):
-            messages.append(final_assistant_message)
-
-        tools = data.get("kwargs", {}).get("tools", [])
-
-        return messages, tools
+        Returns one entry per session_id with its full message history, tools,
+        and parent_session_id link. Empty list when no session-tagged dumps
+        exist (e.g. openhands path).
+        """
+        out: list[dict] = []
+        completions_dir = trajectories_dir / instance_id / "llm_completions" / instance_id
+        if not completions_dir.exists():
+            return out
+        by_session: dict[str, dict] = {}
+        for fpath in sorted(completions_dir.glob("*.json")):
+            try:
+                with open(fpath, "r") as f:
+                    data = json.load(f)
+            except (OSError, json.JSONDecodeError):
+                continue
+            sess_id = data.get("session_id")
+            if not sess_id:
+                continue
+            by_session[sess_id] = data
+        for sess_id, data in by_session.items():
+            messages, tools = self._materialize_trajectory(data)
+            out.append(
+                {
+                    "session_id": sess_id,
+                    "parent_session_id": data.get("parent_session_id"),
+                    "messages": messages,
+                    "tools": tools,
+                }
+            )
+        return out
 
     ########################################
     # START Main methods
@@ -1807,43 +2175,153 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         container_commands = []
         container_commands.append("echo '127.0.0.1 localhost' >/etc/hosts")
 
+        # Apptainer uid namespacing makes the eval-image's `chmod` against
+        # /var/run/postgresql fail with "Value too large for defined data
+        # type". Pre-create the directory and best-effort chown to a
+        # postgres user if one exists, so the dataset's later chmod is a
+        # no-op against an already-correct path. Each step is independently
+        # tolerant of failure (using `;` and trailing `|| true`) — earlier
+        # gating on `getent passwd postgres` skipped the mkdir on images
+        # that have /var/run/postgresql but no nss postgres entry.
+        container_commands.append(
+            "(mkdir -p /var/run/postgresql; "
+            "chown postgres:postgres /var/run/postgresql 2>/dev/null; "
+            "chmod 2775 /var/run/postgresql 2>/dev/null) >/dev/null 2>&1 || true"
+        )
+
+        # Redirect Maven Central lookups to the Google mirror to avoid HTTP 429
+        # throttling under heavy parallelism. Write configs inline rather than
+        # via bind mount because Apptainer's file-bind into a non-existent
+        # parent (e.g. /root/.gradle/init.d/) is unreliable, and silently
+        # losing the Gradle init script costs hundreds of failed dep fetches.
+        #
+        # Gradle home is placed under /trajectories_mount (bind-mounted from
+        # persistent_dir on Lustre) rather than /root/.gradle — the writable
+        # tmpfs overlay has a size cap that the ~150MB Gradle distribution
+        # download can blow through, leaving the wrapper unable to create
+        # /root/.gradle/wrapper/dists/* (Gradle "could not create parent
+        # directory for lock file" errors).
+        maven_mirror_dir = Path(__file__).parent / "maven_mirror"
+        mvn_settings_path = maven_mirror_dir / "settings.xml"
+        gradle_init_path = maven_mirror_dir / "init.gradle"
+        if mvn_settings_path.exists() and gradle_init_path.exists():
+            mvn_b64 = base64.b64encode(mvn_settings_path.read_bytes()).decode()
+            grad_b64 = base64.b64encode(gradle_init_path.read_bytes()).decode()
+            # Belt-and-suspenders: write init.gradle to every common
+            # $GRADLE_USER_HOME location on the in-container tmpfs. Some
+            # images set GRADLE_USER_HOME via gradle.properties or a
+            # wrapper script, ignoring our --env override.
+            container_commands.append(
+                "mkdir -p /root/.m2 /root/.gradle/init.d "
+                "/home/gradle/.gradle/init.d "
+                "/home/user/.gradle/init.d 2>/dev/null || true"
+            )
+            container_commands.append(f"echo {mvn_b64} | base64 -d > /root/.m2/settings.xml")
+            container_commands.append(
+                f"echo {grad_b64} | base64 -d > /root/.gradle/init.d/maven_central_mirror.gradle"
+            )
+            # Fan-out the init script. Use `cp` from the canonical write so
+            # we don't repeat the long base64 string.
+            container_commands.append(
+                "for d in /home/gradle/.gradle/init.d /home/user/.gradle/init.d; do "
+                "[ -d \"$d\" ] && cp /root/.gradle/init.d/maven_central_mirror.gradle "
+                "\"$d/maven_central_mirror.gradle\" 2>/dev/null; done; true"
+            )
+
+        # Chrome wrapper for Karma-based JS tests. Karma's default
+        # ChromeHeadless launcher reads CHROME_BIN; we point it at a wrapper
+        # that exec's whatever real chrome lives in the image, with the
+        # standard apptainer-container flags applied. Karma configs that
+        # use `customLaunchers` with hardcoded flag lists override
+        # CHROME_BIN and stay unfixable from outside.
+        chrome_wrapper = (
+            "#!/bin/sh\n"
+            "for b in /opt/google/chrome/google-chrome /opt/google/chrome/chrome "
+            "/usr/bin/google-chrome-stable /usr/bin/google-chrome "
+            "/usr/lib/chromium/chrome /usr/bin/chromium-browser /usr/bin/chromium; do\n"
+            "  if [ -x \"$b\" ] && [ \"$(realpath \"$b\")\" != \"$(realpath \"$0\")\" ]; then\n"
+            "    exec \"$b\" --no-sandbox --disable-dev-shm-usage \"$@\"\n"
+            "  fi\n"
+            "done\n"
+            "echo 'chrome-wrapper.sh: no real chrome binary found' >&2\n"
+            "exit 1\n"
+        )
+        chrome_b64 = base64.b64encode(chrome_wrapper.encode()).decode()
+        container_commands.append(
+            f"echo {chrome_b64} | base64 -d > /tmp/chrome-wrapper.sh && chmod +x /tmp/chrome-wrapper.sh"
+        )
+
         # Build mount arguments
         mount_args = [
             f"--mount type=bind,src={params.persistent_dir},dst=/trajectories_mount",
         ]
 
-        openhands_dir = f"{params.openhands_setup_dir}/OpenHands"
-        mount_args.extend(
-            [
-                # Read-only base mounts (parent first)
-                f"--mount type=bind,src={openhands_dir},dst=/openhands_setup/OpenHands,ro",
-                f"--mount type=bind,src={openhands_dir},dst={openhands_dir},ro",
-                f"--mount type=bind,src={openhands_dir}/.eval_sessions,dst=/openhands_setup/OpenHands/.eval_sessions",
-                f"--mount type=bind,src={openhands_dir}/.eval_sessions,dst={openhands_dir}/.eval_sessions",
-                f"--mount type=bind,src={openhands_dir}/logs,dst=/openhands_setup/OpenHands/logs",
-                f"--mount type=bind,src={openhands_dir}/logs,dst={openhands_dir}/logs",
-                f"--mount type=bind,src={openhands_dir}/evaluation/oh,dst=/openhands_setup/OpenHands/evaluation/oh",
-                f"--mount type=bind,src={openhands_dir}/evaluation/oh,dst={openhands_dir}/evaluation/oh",
-                # Data
-                f"--mount type=bind,src={dataset_path_to_mount},dst=/root/dataset/data.jsonl",
-            ]
-        )
+        if params.agent_framework == "opencode" and command.mode == "eval":
+            mount_args.append(f"--mount type=bind,src={dataset_path_to_mount},dst=/root/dataset/data.jsonl")
+        elif params.agent_framework == "opencode" and command.mode == "agent":
+            assert params.opencode_setup_dir is not None, "opencode_setup_dir not set"
+            opencode_dir = f"{params.opencode_setup_dir}/opencode"
+            bun_dir = f"{params.opencode_setup_dir}/bun"
+            (Path(opencode_dir) / "evaluation" / "oh").mkdir(parents=True, exist_ok=True)
+            # opencode reads SQLite migrations from `<bundle>/../../migration`
+            # (packages/opencode/src/storage/db.ts) → /opencode_setup/migration.
+            mount_args.extend(
+                [
+                    f"--mount type=bind,src={opencode_dir},dst=/opencode_setup/opencode,ro",
+                    f"--mount type=bind,src={opencode_dir},dst={opencode_dir},ro",
+                    f"--mount type=bind,src={opencode_dir}/evaluation/oh,dst=/opencode_setup/opencode/evaluation/oh",
+                    f"--mount type=bind,src={opencode_dir}/evaluation/oh,dst={opencode_dir}/evaluation/oh",
+                    f"--mount type=bind,src={bun_dir},dst=/opencode_setup/bun,ro",
+                    f"--mount type=bind,src={bun_dir},dst={bun_dir},ro",
+                    f"--mount type=bind,src={dataset_path_to_mount},dst=/root/dataset/data.jsonl",
+                    f"--mount type=bind,src={opencode_dir}/packages/opencode/migration,dst=/opencode_setup/migration,ro",
+                ]
+            )
+            user_message_host = params.persistent_dir / f"user_message_{params.agent_run_id}.txt"
+            mount_args.append(
+                f"--mount type=bind,src={user_message_host},"
+                f"dst=/opencode_setup/opencode/user_message.txt,ro"
+            )
+            if params.resolved_system_prompt_template:
+                mount_args.append(
+                    f"--mount type=bind,src={params.resolved_system_prompt_template},"
+                    f"dst=/opencode_setup/opencode/system_prompt.txt,ro"
+                )
+        else:
+            # OpenHands path (default).
+            assert params.openhands_setup_dir is not None, "openhands_setup_dir not set"
+            openhands_dir = f"{params.openhands_setup_dir}/OpenHands"
+            mount_args.extend(
+                [
+                    # Read-only base mounts (parent first)
+                    f"--mount type=bind,src={openhands_dir},dst=/openhands_setup/OpenHands,ro",
+                    f"--mount type=bind,src={openhands_dir},dst={openhands_dir},ro",
+                    f"--mount type=bind,src={openhands_dir}/.eval_sessions,dst=/openhands_setup/OpenHands/.eval_sessions",
+                    f"--mount type=bind,src={openhands_dir}/.eval_sessions,dst={openhands_dir}/.eval_sessions",
+                    f"--mount type=bind,src={openhands_dir}/logs,dst=/openhands_setup/OpenHands/logs",
+                    f"--mount type=bind,src={openhands_dir}/logs,dst={openhands_dir}/logs",
+                    f"--mount type=bind,src={openhands_dir}/evaluation/oh,dst=/openhands_setup/OpenHands/evaluation/oh",
+                    f"--mount type=bind,src={openhands_dir}/evaluation/oh,dst={openhands_dir}/evaluation/oh",
+                    # Data
+                    f"--mount type=bind,src={dataset_path_to_mount},dst=/root/dataset/data.jsonl",
+                ]
+            )
 
-        if params.resolved_user_prompt_template:
-            mount_args.append(
-                f"--mount type=bind,src={params.resolved_user_prompt_template},dst=/openhands_setup/OpenHands/user_prompt.j2"
-            )
-        if params.resolved_system_prompt_template:
-            mount_args.append(
-                f"--mount type=bind,src={params.resolved_system_prompt_template},dst=/openhands_setup/OpenHands/system_prompt.j2"
-            )
-            mount_args.append(
-                f"--mount type=bind,src={params.resolved_system_prompt_template},dst=/openhands_setup/OpenHands/system_prompt_long_horizon.j2"
-            )
+            if params.resolved_user_prompt_template:
+                mount_args.append(
+                    f"--mount type=bind,src={params.resolved_user_prompt_template},dst=/openhands_setup/OpenHands/user_prompt.j2"
+                )
+            if params.resolved_system_prompt_template:
+                mount_args.append(
+                    f"--mount type=bind,src={params.resolved_system_prompt_template},dst=/openhands_setup/OpenHands/system_prompt.j2"
+                )
+                mount_args.append(
+                    f"--mount type=bind,src={params.resolved_system_prompt_template},dst=/openhands_setup/OpenHands/system_prompt_long_horizon.j2"
+                )
 
-        miniforge3_path = Path(params.openhands_setup_dir) / "miniforge3"
-        mount_args.append(f"--mount type=bind,src={miniforge3_path},dst=/openhands_setup/miniforge3,ro")
-        mount_args.append(f"--mount type=bind,src={miniforge3_path},dst={miniforge3_path},ro")
+            miniforge3_path = Path(params.openhands_setup_dir) / "miniforge3"
+            mount_args.append(f"--mount type=bind,src={miniforge3_path},dst=/openhands_setup/miniforge3,ro")
+            mount_args.append(f"--mount type=bind,src={miniforge3_path},dst={miniforge3_path},ro")
 
         # Add SWE-bench setup directory mount if available (for evaluation)
         # swe-bench-ext and nv-internal-1 don't use the swebench harness
@@ -1932,9 +2410,45 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
         mount_str = " ".join(mount_args)
 
-        env_args = ""
-        if "SWE-rebench" in data_point["dataset_name"]:
-            env_args = "--env _JAVA_OPTIONS=-Djava.net.preferIPv6Addresses=false "
+        # _JAVA_OPTIONS bundles JVM-wide settings that benefit Maven, Gradle,
+        # and Robolectric-using tests:
+        #   - preferIPv6Addresses=false: dual-stack networks misroute
+        #     Maven/Gradle requests over IPv6 in some apptainer setups.
+        #   - robolectric.dependency.repo.url: Robolectric's MavenArtifactFetcher
+        #     does its own Maven Central pull bypassing project repositories,
+        #     so we redirect it to the Google mirror directly.
+        java_options = (
+            "-Djava.net.preferIPv6Addresses=false "
+            "-Drobolectric.dependency.repo.url=https://maven-central.storage-download.googleapis.com/maven2/"
+        )
+        env_args = f"--env _JAVA_OPTIONS='{java_options}' "
+
+        # Force Gradle to read init.d from /root/.gradle regardless of the
+        # container image's default user. We use the tmpfs path (not the
+        # bind-mounted /trajectories_mount) because Gradle's per-instance
+        # caches can be tens of thousands of files and quickly exhaust the
+        # operator's Lustre inode quota when run across many parallel
+        # containers. The init.gradle script is fan-written to multiple
+        # candidate home paths a few lines below.
+        env_args += "--env GRADLE_USER_HOME=/root/.gradle "
+
+        # Cap CoreCLR heap reservation to 8 GiB so .NET / PowerShell-Pester
+        # tests survive the apptainer-imposed `ulimit -v` virtual-memory
+        # limit. Without this, CoreCLR's default upfront heap reservation
+        # exceeds the v-limit and fails with HRESULT 0x8007000E
+        # ("GC heap initialization failed").
+        env_args += "--env DOTNET_GCHeapHardLimit=0x200000000 "
+
+        # Point Karma at our Chrome-flags wrapper. Real chrome is at well-known
+        # paths inside the eval images; the wrapper exec's the first one it
+        # finds with --no-sandbox --disable-dev-shm-usage. Karma reads
+        # CHROME_BIN for Chrome/ChromeHeadless launchers and CHROMIUM_BIN
+        # for Chromium/ChromiumHeadless launchers — we set both so a karma
+        # config using either name routes through the wrapper. Configs that
+        # use `customLaunchers` with hardcoded flag lists override these
+        # vars and stay unfixable from outside.
+        env_args += "--env CHROME_BIN=/tmp/chrome-wrapper.sh "
+        env_args += "--env CHROMIUM_BIN=/tmp/chrome-wrapper.sh "
 
         # Launch Apptainer container and execute the script file
         apptainer_cmd = (
@@ -2072,7 +2586,10 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         params.eval_command = dataset_processor.get_run_command()
         params.eval_apptainer_command_str = self._build_apptainer_command(params, params.eval_command)
 
-        params.agent_command = OpenHandsHarnessProcessor(config=params).get_run_command()
+        if self.config.agent_framework == "opencode":
+            params.agent_command = OpenCodeHarnessProcessor(config=params).get_run_command()
+        else:
+            params.agent_command = OpenHandsHarnessProcessor(config=params).get_run_command()
         params.agent_apptainer_command_str = self._build_apptainer_command(params, params.agent_command)
         params.agent_script = params.agent_script_path.read_text()
 
