@@ -1,17 +1,10 @@
-# TALES Resource Server
+# TALES environments
 
 Integrates [TALES](https://github.com/microsoft/tale-suite)
 
 Specifically, this uses the `tt_split` branch, which provides both a set of tasks for
 training and evaluation across five text-adventure frameworks: `textworld`,
 `textworld_express`, `alfworld`, `scienceworld`, and `jericho`.
-
-This server is a thin adapter over each framework's Gymnasium environment, built on
-NeMo Gym's [`GymnasiumServer`](../gymnasium/base.py) step/reset base class and driven by
-the shared [`gymnasium_agent`](../../responses_api_agents/gymnasium_agent). The agent calls
-`/reset` once, then loops `/step` (feeding each observation back as a `user` turn) until the
-episode terminates or truncates. The environment itself supplies the reward, so it acts as
-its own verifier.
 
 ## Install
 
@@ -27,6 +20,22 @@ sudo apt-get update && sudo apt-get install -y default-jre default-jdk
 brew install openjdk
 export JAVA_HOME="$(brew --prefix)/opt/openjdk/libexec/openjdk.jdk/Contents/Home"
 export PATH="$(brew --prefix)/opt/openjdk/bin:$PATH"
+```
+
+## Quickstart
+
+```bash
+# Set inference endpoint in env.yaml as in other Gym environments, then
+
+# Start environment 
+ng_run "+config_paths=[resources_servers/tales/configs/tales.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
+
+# Collect example rollouts
+ng_collect_rollouts \
+  +agent_name=tales_gymnasium_agent \
+  +input_jsonl_fpath=resources_servers/tales/data/example.jsonl \
+  +output_jsonl_fpath=results/tales_rollouts.jsonl \
+  +num_repeats=1
 ```
 
 ## Per-task selection
@@ -62,21 +71,3 @@ walkthrough.
 Set `expose_admissible_commands: true` in the config to surface each env's
 `admissible_commands` in the step/reset `info`.
 
-## Run
-
-```bash
-# Set inference endpoint in env.yaml as in other Gym environments, then
-
-# Start environment 
-ng_run "+config_paths=[resources_servers/tales/configs/tales.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
-
-# Collect example rollouts
-ng_collect_rollouts \
-  +agent_name=tales_gymnasium_agent \
-  +input_jsonl_fpath=resources_servers/tales/data/example.jsonl \
-  +output_jsonl_fpath=results/tales_rollouts.jsonl \
-  +num_repeats=1
-```
-
-For reasoning models that emit `<think>…</think>`, start vLLM with the appropriate
-`--reasoning-parser`.
