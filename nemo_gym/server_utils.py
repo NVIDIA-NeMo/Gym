@@ -110,6 +110,7 @@ def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSess
         connector=TCPConnector(
             limit=cfg.global_aiohttp_connector_limit // num_workers,
             limit_per_host=cfg.global_aiohttp_connector_limit_per_host // num_workers,
+            keepalive_timeout=15.0,
         ),
         timeout=ClientTimeout(),
         cookie_jar=DummyCookieJar(),
@@ -672,6 +673,8 @@ Full body: {json.dumps(exc.body, indent=4)}
             timeout_graceful_shutdown=0.5,
             # Some workers may take a while for imports and setup_webserver.
             timeout_worker_healthcheck=30,
+            # Ensure server keepalive > client keepalive
+            timeout_keep_alive=30,
         )
 
         if server.config.num_workers and server.config.num_workers > 1:
