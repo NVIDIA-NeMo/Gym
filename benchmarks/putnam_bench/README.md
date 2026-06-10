@@ -6,7 +6,7 @@ and `simple_agent` (single-turn, matching NeMo-Skills' evaluation protocol).
 
 - **Tasks**: 660 theorems (test split)
 - **Source**: [`trishullab/PutnamBench`](https://github.com/trishullab/PutnamBench/tree/64cedd86ef523f3d5f5dc7a21c10e3f69564c7d4) at pinned commit `64cedd86ef523f3d5f5dc7a21c10e3f69564c7d4`. `prepare.py` clones the repo, runs the upstream `lean4/scripts/rewrite_solutions.py` to generate 660 `.lean` files with `sorry`-swapping applied, then regex-parses each.
-- **Prompt**: shared `benchmarks/prompts/lean4_formal_proof_deepseek_prover_v2.yaml` (same as miniF2F, MOBench, ProofNet). Intentionally differs from NeMo-Skills' upstream choice of `lean4/formal-proof` for this benchmark.
+- **Prompt**: shared `benchmarks/prompts/lean4/formal-proof-deepseek-prover-v2.yaml` (same as miniF2F, MOBench, ProofNet). Intentionally differs from NeMo-Skills' upstream choice of `lean4/formal-proof` for this benchmark.
 - **Reward**: binary; 1.0 iff the Lean4 compiler accepts the proof with no `sorry`.
 
 ## Preparation
@@ -41,6 +41,6 @@ ng_collect_rollouts \
     +input_jsonl_fpath=benchmarks/putnam_bench/data/putnam_bench_benchmark.jsonl \
     +output_jsonl_fpath=results/putnam_bench_rollouts.jsonl \
     +num_repeats=32 \
-    +prompt_config=benchmarks/prompts/lean4_formal_proof_deepseek_prover_v2.yaml \
+    +prompt_config=benchmarks/prompts/lean4/formal-proof-deepseek-prover-v2.yaml \
     "+responses_create_params={max_output_tokens: 16384, temperature: 1.0}"
 ```

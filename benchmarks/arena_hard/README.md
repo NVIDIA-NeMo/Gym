@@ -40,7 +40,7 @@ ng_collect_rollouts \
     +agent_name=arena_hard_arena_judge_simple_agent \
     +input_jsonl_fpath=benchmarks/arena_hard/data/arena_hard_benchmark.jsonl \
     +output_jsonl_fpath=results/arena_hard_rollouts.jsonl \
-    +prompt_config=benchmarks/prompts/generic_default.yaml \
+    +prompt_config=benchmarks/prompts/generic/default.yaml \
     +num_repeats=4
 ```
 

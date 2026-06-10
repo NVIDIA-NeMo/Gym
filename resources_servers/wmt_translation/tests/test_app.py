@@ -515,20 +515,18 @@ class TestBuildCometActorClass:
             _build_comet_actor_class()
             mock_copy.assert_not_called()
 
-    def test_cleans_stale_tmp_before_copy(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        """A leftover .tmp from an interrupted prior mirror must be cleared.
-
-        ``Path("cpython-3.12.12-linux-x86_64-gnu").with_suffix(".tmp")``
-        produces ``cpython-3.12.tmp`` (pathlib replaces from the last dot).
-        Seed the stale path there to exercise the rmtree branch.
-        """
+    def test_stale_unique_tmp_from_prior_crash_does_not_block_new_build(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Per-writer staging paths are isolated, so a stale tmp from a crashed builder is ignored."""
         import app as app_module
 
         fake_python = self._fake_venv(tmp_path)
         mirror_root = tmp_path / "mirror_cache"
-        stale_tmp = mirror_root / "cpython-3.12.tmp"
-        stale_tmp.mkdir(parents=True)
-        (stale_tmp / "leftover.txt").write_text("from prior run")
+        mirror_root.mkdir()
+        stale_tmp = mirror_root / ".cpython-3.12.12-linux-x86_64-gnu.tmp.someoldhost.99999.deadbeef"
+        stale_tmp.mkdir()
+        (stale_tmp / "leftover.txt").write_text("from prior crashed builder")
 
         monkeypatch.setattr(sys, "executable", str(fake_python))
         monkeypatch.setenv("WMT_TRANSLATION_COMET_PY_CACHE", str(mirror_root))
@@ -536,9 +534,100 @@ class TestBuildCometActorClass:
 
         _build_comet_actor_class()
 
-        # After the run, the .tmp dir is gone (rmtree'd + copytree'd + renamed).
-        assert not stale_tmp.exists()
         assert (mirror_root / "cpython-3.12.12-linux-x86_64-gnu" / "bin" / "python3.12").exists()
+        assert stale_tmp.exists()
+
+    def test_concurrent_builders_both_succeed(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        """Two builders racing the same cache root both return cleanly, leave one mirror, no leaks."""
+        import shutil as shutil_mod
+        import threading
+
+        import app as app_module
+
+        fake_python = self._fake_venv(tmp_path)
+        mirror_root = tmp_path / "mirror_cache"
+
+        monkeypatch.setattr(sys, "executable", str(fake_python))
+        monkeypatch.setenv("WMT_TRANSLATION_COMET_PY_CACHE", str(mirror_root))
+        monkeypatch.setattr(app_module, "ray", MagicMock(remote=self._stub_ray_remote({})))
+
+        # Barrier at the start of copytree forces both threads into the rename phase together.
+        barrier = threading.Barrier(2)
+        real_copytree = shutil_mod.copytree
+
+        def _coordinated_copytree(*args, **kwargs):
+            barrier.wait(timeout=5)
+            return real_copytree(*args, **kwargs)
+
+        monkeypatch.setattr(shutil_mod, "copytree", _coordinated_copytree)
+
+        results: list[BaseException | None] = [None, None]
+
+        def _run(idx: int) -> None:
+            try:
+                _build_comet_actor_class()
+            except BaseException as exc:
+                results[idx] = exc
+
+        threads = [threading.Thread(target=_run, args=(i,)) for i in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        assert results[0] is None, f"builder 0 raised: {results[0]!r}"
+        assert results[1] is None, f"builder 1 raised: {results[1]!r}"
+
+        published = mirror_root / "cpython-3.12.12-linux-x86_64-gnu"
+        assert (published / "bin" / "python3.12").exists()
+
+        leftover_tmps = list(mirror_root.glob(".cpython-3.12.12-linux-x86_64-gnu.tmp.*"))
+        assert leftover_tmps == [], f"staging tmp dirs leaked: {leftover_tmps}"
+
+    def test_rename_loser_adopts_winner_mirror(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        """A rename collision against a valid published mirror is silently adopted and staging is cleaned."""
+        import app as app_module
+
+        fake_python = self._fake_venv(tmp_path)
+        mirror_root = tmp_path / "mirror_cache"
+        mirror_root.mkdir()
+        published_bin = mirror_root / "cpython-3.12.12-linux-x86_64-gnu" / "bin"
+
+        monkeypatch.setattr(sys, "executable", str(fake_python))
+        monkeypatch.setenv("WMT_TRANSLATION_COMET_PY_CACHE", str(mirror_root))
+        monkeypatch.setattr(app_module, "ray", MagicMock(remote=self._stub_ray_remote({})))
+
+        # Simulate "winner published between our copytree and our rename".
+        def _failing_rename(self, *_args, **_kwargs):
+            published_bin.mkdir(parents=True, exist_ok=True)
+            (published_bin / "python3.12").write_text("winner's python")
+            raise OSError(39, "Directory not empty")
+
+        with patch.object(Path, "rename", new=_failing_rename):
+            _build_comet_actor_class()
+
+        assert (published_bin / "python3.12").read_text() == "winner's python"
+        leftover_tmps = list(mirror_root.glob(".cpython-3.12.12-linux-x86_64-gnu.tmp.*"))
+        assert leftover_tmps == [], f"staging tmp dirs leaked: {leftover_tmps}"
+
+    def test_rename_failure_without_valid_mirror_reraises(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A rename OSError with no published mirror re-raises (genuine permission / disk error)."""
+        import app as app_module
+
+        fake_python = self._fake_venv(tmp_path)
+        mirror_root = tmp_path / "mirror_cache"
+
+        monkeypatch.setattr(sys, "executable", str(fake_python))
+        monkeypatch.setenv("WMT_TRANSLATION_COMET_PY_CACHE", str(mirror_root))
+        monkeypatch.setattr(app_module, "ray", MagicMock(remote=self._stub_ray_remote({})))
+
+        def _failing_rename(self, *_args, **_kwargs):
+            raise OSError(13, "Permission denied")
+
+        with patch.object(Path, "rename", new=_failing_rename), pytest.raises(OSError, match="Permission denied"):
+            _build_comet_actor_class()
 
     def test_raises_if_sys_executable_missing(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         """Defensive: if sys.executable points at a vanished path, fail loudly."""

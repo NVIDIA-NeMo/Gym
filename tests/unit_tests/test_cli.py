@@ -18,14 +18,22 @@ import tomllib
 from importlib import import_module
 from io import StringIO
 from pathlib import Path
-from unittest.mock import patch
+from subprocess import TimeoutExpired
+from unittest.mock import MagicMock, patch
 
 from omegaconf import OmegaConf
 from pytest import MonkeyPatch, raises
 
 import nemo_gym.global_config
 from nemo_gym import PARENT_DIR
-from nemo_gym.cli import RunConfig, display_help, init_resources_server
+from nemo_gym.cli import (
+    _FORCE_KILL_REAP_TIMEOUT_SEC,
+    _GRACEFUL_SHUTDOWN_TIMEOUT_SEC,
+    RunConfig,
+    RunHelper,
+    display_help,
+    init_resources_server,
+)
 from nemo_gym.config_types import ResourcesServerInstanceConfig
 
 
@@ -154,3 +162,68 @@ class TestCLI:
             dir_path = _cwd_path if _cwd_path.exists() else PARENT_DIR / Path("resources_servers", "arc_agi")
 
         assert dir_path == PARENT_DIR / "resources_servers" / "arc_agi"
+
+
+class TestRunHelperShutdownReap:
+    """RunHelper.shutdown must reap every server subprocess on every exit path."""
+
+    def _make_runner_with_processes(self, processes: dict) -> RunHelper:
+        runner = RunHelper()
+        runner._processes = processes
+        runner._head_server = MagicMock()
+        runner._head_server_thread = MagicMock()
+        return runner
+
+    def test_kill_is_followed_by_reap_wait(self) -> None:
+        good = MagicMock()
+        good.wait.return_value = 0
+        bad = MagicMock()
+        bad.wait.side_effect = [TimeoutExpired(cmd="bad", timeout=_GRACEFUL_SHUTDOWN_TIMEOUT_SEC), 0]
+
+        runner = self._make_runner_with_processes({"good_server": good, "bad_server": bad})
+        runner.shutdown()
+
+        good.send_signal.assert_called_once()
+        bad.send_signal.assert_called_once()
+        good.kill.assert_not_called()
+        bad.kill.assert_called_once()
+        assert good.wait.call_count == 1
+        assert bad.wait.call_count == 2
+        assert runner._processes == {}
+
+    def test_unreaped_server_after_sigkill_is_warned(self, capsys) -> None:
+        zombie = MagicMock()
+        zombie.wait.side_effect = TimeoutExpired(cmd="zombie", timeout=_GRACEFUL_SHUTDOWN_TIMEOUT_SEC)
+
+        runner = self._make_runner_with_processes({"zombie_server": zombie})
+        runner.shutdown()
+
+        zombie.kill.assert_called_once()
+        assert zombie.wait.call_count == 2
+        out: str = capsys.readouterr().out
+        assert "zombie_server" in out
+        assert f"{_GRACEFUL_SHUTDOWN_TIMEOUT_SEC}s timeout" in out
+        assert f"{_FORCE_KILL_REAP_TIMEOUT_SEC}s after SIGKILL" in out
+
+    def test_shutdown_message_matches_actual_timeout(self, capsys) -> None:
+        bad = MagicMock()
+        bad.wait.side_effect = [TimeoutExpired(cmd="bad", timeout=_GRACEFUL_SHUTDOWN_TIMEOUT_SEC), 0]
+        runner = self._make_runner_with_processes({"bad": bad})
+        runner.shutdown()
+
+        out: str = capsys.readouterr().out
+        assert f"{_GRACEFUL_SHUTDOWN_TIMEOUT_SEC}s timeout" in out
+
+    def test_graceful_termination_does_not_kill(self) -> None:
+        a = MagicMock()
+        a.wait.return_value = 0
+        b = MagicMock()
+        b.wait.return_value = 0
+        runner = self._make_runner_with_processes({"a": a, "b": b})
+        runner.shutdown()
+
+        a.kill.assert_not_called()
+        b.kill.assert_not_called()
+        assert a.wait.call_count == 1
+        assert b.wait.call_count == 1
+        assert runner._processes == {}

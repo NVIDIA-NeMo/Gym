@@ -65,6 +65,12 @@ from nemo_gym.server_utils import (
 from nemo_gym.train_data_utils import TrainDataProcessor
 
 
+# Grace period after SIGINT before escalating to SIGKILL. Kept short so Ctrl-C is responsive.
+_GRACEFUL_SHUTDOWN_TIMEOUT_SEC: int = 1
+# Grace period after SIGKILL for the kernel to reap the child and avoid <defunct> entries.
+_FORCE_KILL_REAP_TIMEOUT_SEC: int = 2
+
+
 class RunConfig(BaseNeMoGymCLIConfig):
     """
     Start NeMo Gym servers for agents, models, and resources.
@@ -304,7 +310,7 @@ Process `{process_name}` stderr:
             if len(successful_servers) != total_servers:
                 if poll_count % 10 == 0:  # Print every sleep_interval * poll_count = 3 * 10 = 30s
                     print(
-                        f"""Checking for HTTP server statuses (you should see some HTTP requests to `/` that may 404. This is expected.
+                        f"""Checking for HTTP server statuses.
 {len(successful_servers)} / {total_servers} servers ready. Waiting for servers to spin up: {waiting}"""
                     )
                 poll_count += 1
@@ -322,20 +328,32 @@ Process `{process_name}` stderr:
 
         print("Waiting for processes to finish...")
         killed_process_names: List[str] = []
+        unreaped_process_names: List[str] = []
         for process_name, process in self._processes.items():
             try:
-                process.wait(timeout=1)
+                process.wait(timeout=_GRACEFUL_SHUTDOWN_TIMEOUT_SEC)
             except TimeoutExpired:
                 process.kill()
                 killed_process_names.append(process_name)
+                # Reap the child after SIGKILL to avoid leaving a <defunct> entry.
+                try:
+                    process.wait(timeout=_FORCE_KILL_REAP_TIMEOUT_SEC)
+                except TimeoutExpired:
+                    unreaped_process_names.append(process_name)
 
         if killed_process_names:
             print(
-                f"""Some processes ({", ".join(killed_process_names)}) didn't shutdown within the 5s timeout, killing instead. You may see messages like:
+                f"""Some processes ({", ".join(killed_process_names)}) didn't shutdown within the {_GRACEFUL_SHUTDOWN_TIMEOUT_SEC}s timeout, killing instead. You may see messages like:
 ```bash
 rpc_client.h:203: Failed to connect to GCS within 60 seconds. GCS may have been killed. It's either GCS is terminated by `ray stop` or is killed unexpectedly. If it is killed unexpectedly, see the log file gcs_server.out. https://docs.ray.io/en/master/ray-observability/user-guides/configure-logging.html#logging-directory-structure. The program will terminate.
 ```
 """
+            )
+        if unreaped_process_names:
+            print(
+                f"WARNING: processes ({', '.join(unreaped_process_names)}) did not exit "
+                f"within {_FORCE_KILL_REAP_TIMEOUT_SEC}s after SIGKILL; "
+                "they may remain as zombies until this process exits."
             )
         self._processes = dict()
 
