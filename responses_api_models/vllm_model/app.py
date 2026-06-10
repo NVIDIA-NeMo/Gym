@@ -259,11 +259,10 @@ class VLLMModel(SimpleResponsesAPIModel):
                 top_logprobs=0,
                 # Typically passed via OpenAI client extra_body.
                 return_tokens_as_token_ids=True,
-                # TODO add this when NeMo RL upgrades to vLLM 0.10.2 support for prompt token ids
-                # For prompt and generation token IDs
-                # return_token_ids=True,
-                # For prompt token IDs
-                # prompt_logprobs=0,
+                # Return token IDs inline (top-level prompt_token_ids, per-choice token_ids)
+                # so we can skip the /tokenize call below. Engines that don't support it omit
+                # the fields and we fall back.
+                return_token_ids=True,
             )
 
         if self.config.uses_reasoning_parser:
@@ -459,47 +458,47 @@ class VLLMModel(SimpleResponsesAPIModel):
             log_probs = logprobs_block["content"]
             generation_log_probs = [log_prob["logprob"] for log_prob in log_probs]
 
-            """
-            START TODO remove this when NeMo RL upgrades to vLLM 0.10.2 support for prompt token ids
-            """
-            # Looks like `"token_id:151667"`
-            generation_token_ids = [log_prob["token"].removeprefix("token_id:") for log_prob in log_probs]
+            # Prefer the inline IDs: prompt_token_ids is the exact prompt the engine generated
+            # from, so it can't diverge from the sampled tokens and needs no second /tokenize call.
+            inline_prompt_token_ids = chat_completion_dict.get("prompt_token_ids")
+            inline_generation_token_ids = choice_dict.get("token_ids")
 
-            # The tokenize endpoint doesn't accept any sampling parameters
-            # The only relevant params are model, messages, and tools.
-            #
-            # IMPORTANT: pass through chat-template knobs (e.g. enable_thinking)
-            # when tokenizing, otherwise `prompt_token_ids` (and therefore logged
-            # `prompt_str`) can be built with different chat template settings than
-            # the actual generation request.
-            tokenize_body_dict = dict()
-            for key in ("model", "messages", "tools", "chat_template_kwargs"):
-                if key in body_dict:
-                    tokenize_body_dict[key] = body_dict[key]
+            if inline_prompt_token_ids is not None and inline_generation_token_ids is not None:
+                prompt_token_ids = inline_prompt_token_ids
+                generation_token_ids = inline_generation_token_ids
+            else:
+                # Looks like "token_id:151667"
+                generation_token_ids = [log_prob["token"].removeprefix("token_id:") for log_prob in log_probs]
 
-            # The base url has /v1 at the end but vLLM's tokenize endpoint does not have v1, hence the ..
-            tokenize_response = await client.create_tokenize(**tokenize_body_dict)
-            """
-            END
-            """
+                # The tokenize endpoint doesn't accept any sampling parameters
+                # The only relevant params are model, messages, and tools.
+                #
+                # IMPORTANT: pass through chat-template knobs (e.g. enable_thinking)
+                # when tokenizing, otherwise prompt_token_ids (and therefore logged
+                # prompt_str) can be built with different chat template settings than
+                # the actual generation request.
+                tokenize_body_dict = dict()
+                for key in ("model", "messages", "tools", "chat_template_kwargs"):
+                    if key in body_dict:
+                        tokenize_body_dict[key] = body_dict[key]
+
+                # The base url has /v1 at the end but vLLM's tokenize endpoint does not have v1, hence the ..
+                tokenize_response = await client.create_tokenize(**tokenize_body_dict)
+                prompt_token_ids = tokenize_response["tokens"]
 
             message_dict = choice_dict["message"]
             message_dict.update(
                 dict(
-                    # TODO add this when NeMo RL upgrades to vLLM 0.10.2 support for prompt token ids
-                    # prompt_token_ids=chat_completion_dict["prompt_token_ids"],
-                    prompt_token_ids=tokenize_response["tokens"],
-                    # generation_token_ids=choice_dict["token_ids"],
+                    prompt_token_ids=prompt_token_ids,
                     generation_token_ids=generation_token_ids,
                     generation_log_probs=generation_log_probs,
                 )
             )
 
-            # Clean the duplicated information
+            # Drop the now-redundant fields; they aren't part of the chat-completion schema.
             choice_dict.pop("logprobs")
-            # TODO add this when NeMo RL upgrades to vLLM 0.10.2 support for prompt token ids
-            # chat_completion_dict.pop("prompt_token_ids")
-            # choice_dict.pop("token_ids")
+            chat_completion_dict.pop("prompt_token_ids", None)
+            choice_dict.pop("token_ids", None)
 
         return NeMoGymChatCompletion.model_validate(chat_completion_dict)
 
