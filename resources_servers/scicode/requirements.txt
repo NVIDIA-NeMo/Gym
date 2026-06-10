@@ -1,9 +1,8 @@
 -e nemo-gym[dev] @ ../..
-# Generated SciCode solutions import these at execution time, so they must be importable
-# in this server's venv (the Ray workers exec the code in-process).
-# scipy<1.14 keeps scipy.integrate.simps (removed in 1.14.0) while still shipping
-# Python 3.12 wheels (scipy==1.10.1, the nemo-skills pin, has no cp312 wheel).
+# The executed SciCode solutions + test helpers import these at runtime, so they must be in
+# this server's venv. scipy<1.14 keeps scipy.integrate.simps (removed in 1.14) and has cp312 wheels.
 scipy<1.14
 numpy
 matplotlib
 h5py
+sympy
