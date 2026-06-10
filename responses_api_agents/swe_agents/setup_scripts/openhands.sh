@@ -45,7 +45,7 @@ mamba --version
 
 # Install required packages
 echo "Installing conda packages (this may take 5-10 minutes)..."
-mamba install -y --override-channels conda-forge::python=3.12 conda-forge::nodejs conda-forge::poetry conda-forge::tmux conda-forge::git
+mamba install -y -c conda-forge --override-channels python=3.12 nodejs poetry tmux git
 
 $miniforge_dir/bin/python -m pip install -q 'packaging==26.0'
 

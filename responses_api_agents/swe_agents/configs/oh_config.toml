@@ -5,3 +5,13 @@
 api_key = "EMPTY"  # pragma: allowlist secret
 custom_llm_provider = "openai"
 native_tool_calling = true
+
+[condenser.rollout_recent]
+type = "recent"
+keep_first = 1
+max_events = 80
+
+[condenser.rollout_recent_tight]
+type = "recent"
+keep_first = 1
+max_events = 30

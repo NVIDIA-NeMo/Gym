@@ -14,6 +14,7 @@
 # limitations under the License.
 import importlib.metadata
 import os
+import shlex
 from os import environ
 from pathlib import Path
 from subprocess import Popen
@@ -183,7 +184,17 @@ def run_command(command: str, working_dir_path: Path, server_name: str = "") -> 
     else:
         custom_env["PYTHONPATH"] = work_dir
 
-    custom_env["UV_CACHE_DIR"] = global_config_dict[UV_CACHE_DIR_KEY_NAME]
+    uv_cache_dir = str(global_config_dict[UV_CACHE_DIR_KEY_NAME])
+    xdg_cache_home = custom_env.get("XDG_CACHE_HOME") or str(Path(uv_cache_dir).parent / "xdg")
+    custom_env["UV_CACHE_DIR"] = uv_cache_dir
+    custom_env["XDG_CACHE_HOME"] = xdg_cache_home
+
+    cache_export_cmd = (
+        f"export UV_CACHE_DIR={shlex.quote(uv_cache_dir)} "
+        f"XDG_CACHE_HOME={shlex.quote(xdg_cache_home)}; "
+        f"mkdir -p {shlex.quote(uv_cache_dir)} {shlex.quote(xdg_cache_home)}; "
+    )
+    command = f"{cache_export_cmd}{command}"
 
     log_dir = global_config_dict.get(NEMO_GYM_LOG_DIR_KEY_NAME)
     if log_dir:
