@@ -1,0 +1,13 @@
+-e nemo-gym[dev] @ ../../
+# CVE remediation: torch 2.5.1 → 2.12.0.
+# torch 2.12+ defaults to CUDA 13.0 wheels on PyPI. For CUDA 12.x
+# environments, use a cu12-specific wheel index via UV_EXTRA_INDEX_URL.
+setuptools>=70
+torch==2.12.0
+torchvision==0.27.0
+sacrebleu[ja,ko]>=2.4
+unbabel-comet>=2.2
+# scipy is a transitive dep of unbabel-comet (via comet.models.metrics →
+# scipy.stats) but uv's resolution doesn't pull it automatically here —
+# explicit pin avoids ModuleNotFoundError in the COMET Ray task.
+scipy

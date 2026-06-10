@@ -1,0 +1,66 @@
+{
+    "name": "example",
+    "type": "example",
+    "jsonl_fpath": "resources_servers/ns_tools/data/example.jsonl",
+    "num_repeats": 1,
+    "gitlab_identifier": null,
+    "huggingface_identifier": null,
+    "license": "Apache 2.0",
+    "Number of examples": 5,
+    "Number of tools": {
+        "Total # non-null values": 5,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Median": 1.0,
+        "Standard deviation": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 5,
+        "Average": 140.8,
+        "Min": 84.0,
+        "Max": 257.0,
+        "Median": 113.0,
+        "Standard deviation": 71.03
+    },
+    "Number of turns": {
+        "Total # non-null values": 5,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Median": 1.0,
+        "Standard deviation": 0.0
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Median": 0.0,
+        "Standard deviation": 0.0
+    },
+    "id": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "question": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "expected_answer": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "verifier_type": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "subset_for_metrics": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "reference_solution": {
+        "unique_count": 5,
+        "total_count": 5
+    }
+}

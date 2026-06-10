@@ -1,10 +1,11 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -18,6 +19,8 @@ from fastapi import Request, Response
 from pydantic import ConfigDict, ValidationError
 
 from nemo_gym.base_resources_server import (
+    AggregateMetrics,
+    AggregateMetricsRequest,
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
@@ -36,7 +39,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
 )
-from nemo_gym.server_utils import raise_for_status
+from nemo_gym.server_utils import get_response_json, raise_for_status
 
 
 class SimpleAgentConfig(BaseResponsesAPIAgentConfig):
@@ -72,6 +75,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
 
         new_outputs = []
+        usage = None
         step = 0
         model_server_cookies = None  # update the cookies on every model response
         resources_server_cookies = request.cookies  # update the cookies on every resources server response
@@ -88,7 +92,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             )
             # We raise for status here since we expect model calls to always work.
             await raise_for_status(model_response)
-            model_response_json = await model_response.json()
+            model_response_json = await get_response_json(model_response)
             model_server_cookies = model_response.cookies
             try:
                 model_response = NeMoGymResponse.model_validate(model_response_json)
@@ -100,6 +104,22 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             output = model_response.output
             new_outputs.extend(output)
 
+            if not usage:
+                usage = model_response.usage
+                model_response.usage = None
+
+            if usage and model_response.usage:
+                usage.input_tokens += model_response.usage.input_tokens
+                usage.output_tokens += model_response.usage.output_tokens
+                usage.total_tokens += model_response.usage.total_tokens
+
+                # TODO support more advanced token details
+                usage.input_tokens_details.cached_tokens = 0
+                usage.output_tokens_details.reasoning_tokens = 0
+
+            if model_response.incomplete_details:
+                break
+
             all_fn_calls: List[NeMoGymResponseFunctionToolCall] = [o for o in output if o.type == "function_call"]
             all_output_messages: List[NeMoGymResponseOutputMessage] = [
                 o for o in output if o.type == "message" and o.role == "assistant"
@@ -108,10 +128,27 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 break
 
             for output_function_call in all_fn_calls:
+                try:
+                    parsed_arguments = json.loads(output_function_call.arguments)
+                except (json.JSONDecodeError, TypeError) as e:
+                    # Model produced malformed tool-call arguments. Surface the
+                    # error back as a tool response so the rollout can continue
+                    # (or terminate with a low reward) instead of crashing the
+                    # whole batch on json.loads.
+                    tool_response = NeMoGymFunctionCallOutput(
+                        type="function_call_output",
+                        call_id=output_function_call.call_id,
+                        # Use repr(e) so the exception type name is always
+                        # included even when str(e) would be empty.
+                        output=json.dumps({"error": f"Invalid tool call arguments: {e!r}"}),
+                    )
+                    new_outputs.append(tool_response)
+                    continue
+
                 api_response = await self.server_client.post(
                     server_name=self.config.resources_server.name,
                     url_path=f"/{output_function_call.name}",
-                    json=json.loads(output_function_call.arguments),
+                    json=parsed_arguments,
                     cookies=resources_server_cookies,
                 )
                 # We don't raise for status here since it's a valid return for the API to error e.g. if the model outputs an invalid call or something.
@@ -133,6 +170,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             response.set_cookie(k, v)
 
         model_response.output = new_outputs
+        model_response.usage = usage
         return model_response
 
     async def run(self, request: Request, body: SimpleAgentRunRequest) -> SimpleAgentVerifyResponse:
@@ -157,7 +195,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         cookies = response.cookies
 
         verify_request = SimpleAgentVerifyRequest.model_validate(
-            body.model_dump() | {"response": await response.json()}
+            body.model_dump() | {"response": await get_response_json(response)}
         )
 
         verify_response = await self.server_client.post(
@@ -167,7 +205,17 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             cookies=cookies,
         )
         await raise_for_status(verify_response)
-        return SimpleAgentVerifyResponse.model_validate(await verify_response.json())
+        return SimpleAgentVerifyResponse.model_validate(await get_response_json(verify_response))
+
+    async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
+        """Proxy aggregate_metrics to the resources server."""
+        response = await self.server_client.post(
+            server_name=self.config.resources_server.name,
+            url_path="/aggregate_metrics",
+            json=body,
+        )
+        await raise_for_status(response)
+        return AggregateMetrics.model_validate(await get_response_json(response))
 
 
 if __name__ == "__main__":

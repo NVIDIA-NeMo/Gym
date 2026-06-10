@@ -1,0 +1,116 @@
+You are evaluating whether two terminal command responses are functionally equivalent.
+
+Both GOLD and CANDIDATE are JSON objects. Focus on comparing the commands/keystrokes - ignore differences in reasoning or analysis text.
+
+## Step 1: Identify Response Type
+- **CODE_WRITING**: GOLD writes code to a file (heredoc, cat > file, echo > file)
+- **COMMAND_EXECUTION**: GOLD runs commands without writing code files
+
+---
+
+## Step 2: Check EXECUTION STAGE
+
+Determine what stage each response reaches:
+- **Stage 1 - Explore**: Only reads/examines (ls, cat, grep, head, find)
+- **Stage 2 - Write**: Creates/modifies files but doesn't execute
+- **Stage 3 - Execute**: Runs written code/scripts (python script.py, ./script.sh)
+- **Stage 4 - Verify**: Validates output correctness after execution
+
+**RULE:** If GOLD and CANDIDATE are at DIFFERENT stages → [[A!=B]]
+- Write-only (Stage 2) vs Write+Execute (Stage 3) = NOT equivalent
+- Explore (Stage 1) vs Execute (Stage 3) = NOT equivalent
+
+---
+
+## Step 3: Check ACTION TYPE
+
+Compare the PRIMARY action being performed:
+- **Diagnostic**: examine, grep, cat, debug, profile, inspect
+- **Install**: apt install, pip install, npm install (actually installs)
+- **Search**: apt search, pip search, find, locate (only searches)
+- **Modify**: sed, patch, edit, fix, write code
+- **Backup/Restore**: cp backup, restore, revert
+- **Test-edge**: tests specific edge cases, small inputs
+- **Test-stress**: tests performance, large inputs, many iterations
+
+**RULE:** If action TYPES differ → [[A!=B]]
+- Install vs Search = NOT equivalent
+- Examine vs Restore = NOT equivalent
+- Edge-case testing vs Stress testing = NOT equivalent
+
+---
+
+## Step 4: Check SCOPE PARITY
+
+Compare the SCOPE of actions:
+
+**For Exploration:**
+- Count unique files/directories examined
+- GOLD examines 5 files, CANDIDATE examines 2 → NOT equivalent
+
+**For Testing/Verification:**
+- Count test cases or validation checks
+- GOLD tests 6 cases, CANDIDATE tests 2 → NOT equivalent
+- GOLD verifies 3 outputs, CANDIDATE verifies 1 → NOT equivalent
+
+**RULE:** Significant scope difference (>50%) → [[A!=B]]
+
+---
+
+## Step 5: Check FUNCTIONAL EQUIVALENCE
+
+Only check this if Steps 2-4 pass.
+
+**For CODE_WRITING:**
+- E1: Same algorithm/approach to solve the problem?
+- E2: Same output given same input?
+- E3: All key functionality implemented?
+- E4: No critical bugs in candidate?
+
+**For COMMAND_EXECUTION:**
+- E1: Same operation type performed?
+- E2: Same functional outcome achieved?
+- E3: Same purpose in the task workflow?
+
+If ALL checks pass → [[A=B]], otherwise → [[A!=B]]
+
+---
+
+## What to ALLOW (these differences are OK)
+
+- Different command flags achieving same result: -q vs -o for unzip
+- Different tools for same operation: sed vs python for same edit
+- Different installation method if packages available: venv vs --break-system-packages
+- Different sed line ranges if same fix applied
+- Different algorithms if output is identical
+- Different intermediate file names
+- Minor cosmetic differences (variable names, comments)
+
+**Key principle:** Focus on TASK OUTPUT and FUNCTIONAL OUTCOME, not implementation details.
+
+---
+
+## What to REJECT (mark as not equivalent)
+
+- Different execution stages (write-only vs write+execute)
+- Different action types (install vs search, examine vs restore)
+- Significantly different scope (2 tests vs 6 tests)
+- GOLD writes code but CANDIDATE doesn't
+- Missing output artifacts required by task
+
+---
+
+## Output Format
+
+1. **EXECUTION STAGE**: GOLD=[stage] vs CANDIDATE=[stage] - [Match/Mismatch]
+2. **ACTION TYPE**: GOLD=[type] vs CANDIDATE=[type] - [Match/Mismatch]
+3. **SCOPE**: GOLD=[description] vs CANDIDATE=[description] - [Comparable/Different]
+4. **FUNCTIONAL EQUIVALENCE** (if above pass): E1-E4 TRUE/FALSE
+5. **Final verdict**: [[A=B]] or [[A!=B]]
+
+===== Inputs =====
+GOLD:
+{expected_answer}
+
+CANDIDATE:
+{generated_answer}

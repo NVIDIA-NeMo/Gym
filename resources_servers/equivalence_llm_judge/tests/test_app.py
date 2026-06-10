@@ -1,10 +1,11 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,10 +14,8 @@
 # limitations under the License.
 from copy import deepcopy
 from pathlib import Path
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
-from omegaconf import OmegaConf
 from pytest import approx, fixture
 
 from nemo_gym.config_types import ModelServerRef
@@ -38,11 +37,8 @@ from resources_servers.equivalence_llm_judge.app import (
 class TestApp:
     @fixture
     def config(self) -> LLMJudgeResourcesServerConfig:
-        # Load judge template from YAML so tests mirror runtime config
-        yaml_path = Path(__file__).resolve().parents[1] / "configs" / "equivalence_llm_judge.yaml"
-        yaml_cfg = OmegaConf.load(str(yaml_path))
-        judge_template: str = (
-            yaml_cfg.equivalence_llm_judge.resources_servers.equivalence_llm_judge.judge_prompt_template
+        judge_prompt_template_fpath = str(
+            Path(__file__).resolve().parents[1] / "prompt_templates/equivalence_llm_judge.txt"
         )
 
         cfg = LLMJudgeResourcesServerConfig(
@@ -51,13 +47,13 @@ class TestApp:
             entrypoint="",
             judge_model_server=ModelServerRef(type="responses_api_models", name="judge"),
             judge_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
-            judge_prompt_template=judge_template,
+            judge_prompt_template_fpath=judge_prompt_template_fpath,
         )
         cfg.judge_equal_label = "[[A=B]]"
         cfg.judge_not_equal_label = "[[A!=B]]"
         return cfg
 
-    def _create_response(self, id: str, output_item: NeMoGymResponseOutputItem) -> dict[str, Any]:
+    def _create_response(self, id: str, output_item: NeMoGymResponseOutputItem) -> str:
         return NeMoGymResponse(
             id=id,
             created_at=123.0,
@@ -67,7 +63,7 @@ class TestApp:
             parallel_tool_calls=False,
             tool_choice="none",
             tools=[],
-        ).model_dump()
+        ).model_dump_json()
 
     def _msg(self, text: str) -> NeMoGymResponseOutputMessage:
         return NeMoGymResponseOutputMessage(
@@ -85,11 +81,11 @@ class TestApp:
 
         # First: judge says equal; Second: judge says equal => reward 1
         post_mock = MagicMock()
-        post_mock.json = AsyncMock()
+        post_mock.read = AsyncMock()
         server_mock.post = AsyncMock(return_value=post_mock)
 
         # Only the first call is used when check_twice_swap is False
-        post_mock.json.side_effect = [
+        post_mock.read.side_effect = [
             self._create_response("first", self._msg("some text [[A=B]] trailing")),
         ]
 
@@ -121,9 +117,9 @@ class TestApp:
         rs_twice = LLMJudgeResourcesServer(config=config_twice, server_client=server_mock)
 
         post_mock2 = MagicMock()
-        post_mock2.json = AsyncMock()
+        post_mock2.read = AsyncMock()
         server_mock.post = AsyncMock(return_value=post_mock2)
-        post_mock2.json.side_effect = [
+        post_mock2.read.side_effect = [
             self._create_response("first", self._msg("[[A=B]]")),
             self._create_response("second", self._msg("[[A=B]]")),
         ]
@@ -141,7 +137,7 @@ class TestApp:
         rs = LLMJudgeResourcesServer(config=config, server_client=server_mock)
 
         post_mock = MagicMock()
-        post_mock.json = AsyncMock(return_value=self._create_response("f", self._msg("[[A!=B]]")))
+        post_mock.read = AsyncMock(return_value=self._create_response("f", self._msg("[[A!=B]]")))
         server_mock.post = AsyncMock(return_value=post_mock)
 
         model_create_params = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Q: 1+1?"}])
@@ -170,7 +166,7 @@ class TestApp:
         rs = LLMJudgeResourcesServer(config=config, server_client=server_mock)
 
         post_mock = MagicMock()
-        post_mock.json = AsyncMock(return_value=self._create_response("f", self._msg("no label present")))
+        post_mock.read = AsyncMock(return_value=self._create_response("f", self._msg("no label present")))
         server_mock.post = AsyncMock(return_value=post_mock)
 
         req = LLMJudgeVerifyRequest(
@@ -190,6 +186,39 @@ class TestApp:
         res = await rs.verify(req)
         assert res.reward == approx(0.0)
 
+    async def test_missing_assistant_text_uses_configured_failure_message(
+        self, config: LLMJudgeResourcesServerConfig
+    ) -> None:
+        server_mock = MagicMock(spec=ServerClient)
+        cfg = config.model_copy(deep=True)
+        cfg.msg_extraction_failure = "[CUSTOM EXTRACTION FAILURE]"
+        rs = LLMJudgeResourcesServer(config=cfg, server_client=server_mock)
+
+        post_mock = MagicMock()
+        post_mock.read = AsyncMock(return_value=self._create_response("f", self._msg("[[A!=B]]")))
+        server_mock.post = AsyncMock(return_value=post_mock)
+
+        req = LLMJudgeVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            response=NeMoGymResponse(
+                id="r",
+                created_at=0.0,
+                model="m",
+                object="response",
+                output=[],
+                parallel_tool_calls=False,
+                tool_choice="none",
+                tools=[],
+            ),
+            expected_answer="x",
+        )
+
+        res = await rs.verify(req)
+
+        judge_prompt = res.judge_evaluations[0].responses_create_params.input[-1].content
+        assert cfg.msg_extraction_failure in judge_prompt
+        assert res.reward == approx(0.0)
+
     async def test_swap_fails_uses_configured_reward(self, config: LLMJudgeResourcesServerConfig) -> None:
         server_mock = MagicMock(spec=ServerClient)
         cfg = config.model_copy(deep=True)
@@ -198,10 +227,10 @@ class TestApp:
         rs = LLMJudgeResourcesServer(config=cfg, server_client=server_mock)
 
         post_mock = MagicMock()
-        post_mock.json = AsyncMock()
+        post_mock.read = AsyncMock()
         server_mock.post = AsyncMock(return_value=post_mock)
         # First pass equal, second pass not equal -> use configured -1.0
-        post_mock.json.side_effect = [
+        post_mock.read.side_effect = [
             self._create_response("first", self._msg("[[A=B]]")),
             self._create_response("second", self._msg("[[A!=B]]")),
         ]
@@ -234,7 +263,7 @@ class TestApp:
         rs = LLMJudgeResourcesServer(config=cfg, server_client=server_mock)
 
         post_mock = MagicMock()
-        post_mock.json = AsyncMock(return_value=self._create_response("first", self._msg("[[A=B]]")))
+        post_mock.read = AsyncMock(return_value=self._create_response("first", self._msg("[[A=B]]")))
         server_mock.post = AsyncMock(return_value=post_mock)
 
         model_create_params = NeMoGymResponseCreateParamsNonStreaming(
@@ -276,10 +305,10 @@ class TestApp:
         rs = LLMJudgeResourcesServer(config=cfg, server_client=server_mock)
 
         post_mock = MagicMock()
-        post_mock.json = AsyncMock()
+        post_mock.read = AsyncMock()
         server_mock.post = AsyncMock(return_value=post_mock)
         # First call (extracted answer) fails, second call (full generation) succeeds
-        post_mock.json.side_effect = [
+        post_mock.read.side_effect = [
             self._create_response("first", self._msg("[[A!=B]]")),
             self._create_response("second", self._msg("[[A=B]]")),
         ]
@@ -321,7 +350,7 @@ class TestApp:
         rs = LLMJudgeResourcesServer(config=cfg, server_client=server_mock)
 
         post_mock = MagicMock()
-        post_mock.json = AsyncMock(return_value=self._create_response("first", self._msg("[[A=B]]")))
+        post_mock.read = AsyncMock(return_value=self._create_response("first", self._msg("[[A=B]]")))
         server_mock.post = AsyncMock(return_value=post_mock)
 
         model_create_params = NeMoGymResponseCreateParamsNonStreaming(

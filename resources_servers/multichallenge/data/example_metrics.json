@@ -1,0 +1,53 @@
+{
+    "name": "multichallenge_example",
+    "type": "example",
+    "jsonl_fpath": "resources_servers/multichallenge/data/example.jsonl",
+    "num_repeats": 1,
+    "gitlab_identifier": null,
+    "huggingface_identifier": null,
+    "license": "Apache 2.0",
+    "Number of examples": 5,
+    "Number of tools": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 5,
+        "Average": 105.6,
+        "Min": 70.0,
+        "Max": 119.0,
+        "Standard deviation": 21.37
+    },
+    "Number of turns": {
+        "Total # non-null values": 5,
+        "Average": 2.8,
+        "Min": 2.0,
+        "Max": 3.0,
+        "Standard deviation": 0.447
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "uuid": {
+        "unique_count": 3,
+        "total_count": 5
+    },
+    "task_id": {
+        "Total # non-null values": 5,
+        "Average": 2.4,
+        "Min": 1.0,
+        "Max": 3.0,
+        "Standard deviation": 0.894
+    },
+    "context": {
+        "unique_count": 3,
+        "total_count": 5
+    }
+}

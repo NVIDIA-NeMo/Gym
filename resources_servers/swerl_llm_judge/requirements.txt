@@ -1,0 +1,4 @@
+-e nemo-gym[dev] @ ../../
+datasets
+transformers
+tiktoken

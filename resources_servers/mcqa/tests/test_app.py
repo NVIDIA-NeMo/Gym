@@ -1,10 +1,11 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -292,6 +293,82 @@ class TestApp:
         assert result.reward == 1.0
         assert result.extracted_answer == "B"
 
+    async def test_template_metadata_regex_list(self) -> None:
+        """Test that template_metadata can try a list of regexes in order."""
+        server = MCQAResourcesServer(
+            config=MCQAResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name=""),
+            server_client=MagicMock(spec=ServerClient),
+        )
+
+        response = NeMoGymResponse(
+            id="resp_test",
+            created_at=0.0,
+            model="dummy",
+            object="response",
+            output=[
+                {
+                    "id": "msg_test",
+                    "content": [{"annotations": [], "text": "Antwort: B", "type": "output_text"}],
+                    "role": "assistant",
+                    "status": "completed",
+                    "type": "message",
+                }
+            ],
+            parallel_tool_calls=True,
+            tool_choice="auto",
+            tools=[],
+        )
+
+        verify_request = MCQAVerifyRequest(
+            responses_create_params={"input": [{"role": "user", "content": "Question?"}]},
+            response=response,
+            options=[{"A": "optA"}, {"B": "optB"}],
+            expected_answer="B",
+            template_metadata={"output_regex": [r"Answer\s*:\s*([A-Za-z])", r"Antwort\s*:\s*([A-Za-z])"]},
+        )
+
+        result = await server.verify(verify_request)
+        assert result.reward == 1.0
+        assert result.extracted_answer == "B"
+
+    async def test_template_metadata_multilingual_letter_normalization(self) -> None:
+        """Test MMMLU-style localized answer letters normalize to A-D."""
+        server = MCQAResourcesServer(
+            config=MCQAResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name=""),
+            server_client=MagicMock(spec=ServerClient),
+        )
+
+        response = NeMoGymResponse(
+            id="resp_test",
+            created_at=0.0,
+            model="dummy",
+            object="response",
+            output=[
+                {
+                    "id": "msg_test",
+                    "content": [{"annotations": [], "text": "الإجابة: ب", "type": "output_text"}],
+                    "role": "assistant",
+                    "status": "completed",
+                    "type": "message",
+                }
+            ],
+            parallel_tool_calls=True,
+            tool_choice="auto",
+            tools=[],
+        )
+
+        verify_request = MCQAVerifyRequest(
+            responses_create_params={"input": [{"role": "user", "content": "Question?"}]},
+            response=response,
+            options=[{"A": "optA"}, {"B": "optB"}],
+            expected_answer="B",
+            template_metadata={"output_regex": [r"الإجابة:\s*([أ-د])"]},
+        )
+
+        result = await server.verify(verify_request)
+        assert result.reward == 1.0
+        assert result.extracted_answer == "B"
+
     async def test_template_metadata_rightmost_match(self) -> None:
         """Test that rightmost (last) match is used when multiple matches exist"""
         server = MCQAResourcesServer(
@@ -462,3 +539,154 @@ class TestApp:
         result = await server.verify(verify_request)
         assert result.reward == 1.0
         assert result.extracted_answer == "B"
+
+
+def _make_verify_request(text: str, expected: str = "B", grading_mode: str = "strict_single_letter_boxed"):
+    """Helper to build a MCQAVerifyRequest with proper schema."""
+    response = NeMoGymResponse(
+        id="resp_test",
+        created_at=0.0,
+        model="dummy",
+        object="response",
+        output=[
+            {
+                "id": "msg_test",
+                "content": [{"annotations": [], "text": text, "type": "output_text"}],
+                "role": "assistant",
+                "status": "completed",
+                "type": "message",
+            }
+        ],
+        parallel_tool_calls=True,
+        tool_choice="auto",
+        tools=[],
+    )
+    return MCQAVerifyRequest(
+        responses_create_params={"input": [{"role": "user", "content": "Q?"}]},
+        response=response,
+        options=[{"A": "opt1"}, {"B": "opt2"}, {"C": "opt3"}, {"D": "opt4"}],
+        expected_answer=expected,
+        grading_mode=grading_mode,
+    )
+
+
+class TestGradingModeConfig:
+    """Test that MCQAResourcesServerConfig.grading_mode overrides per-row grading_mode."""
+
+    async def test_config_grading_mode_overrides_row(self) -> None:
+        config = MCQAResourcesServerConfig(
+            host="127.0.0.1",
+            port=12345,
+            entrypoint="app.py",
+            name="mcqa",
+            grading_mode="lenient_answer_colon",
+        )
+        server = MCQAResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+        body = _make_verify_request(
+            text="I think the answer is B.\n\nAnswer: B",
+            expected="B",
+            grading_mode="strict_single_letter_boxed",
+        )
+        result = await server.verify(body)
+        assert result.extracted_answer == "B"
+        assert result.reward == 1.0
+
+    async def test_no_config_grading_mode_uses_row_default(self) -> None:
+        config = MCQAResourcesServerConfig(
+            host="127.0.0.1",
+            port=12345,
+            entrypoint="app.py",
+            name="mcqa",
+        )
+        server = MCQAResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+        body = _make_verify_request(
+            text="I think the answer is B.\n\nAnswer: B",
+            expected="B",
+            grading_mode="strict_single_letter_boxed",
+        )
+        result = await server.verify(body)
+        assert result.extracted_answer is None
+        assert result.reward == 0.0
+
+
+class TestGradingModeAnswerColonMD:
+    """Test lenient_answer_colon_md grading mode (markdown-aware Answer: extraction)."""
+
+    def _make_server(self, grading_mode="lenient_answer_colon_md"):
+        config = MCQAResourcesServerConfig(
+            host="127.0.0.1",
+            port=12345,
+            entrypoint="app.py",
+            name="mcqa",
+            grading_mode=grading_mode,
+        )
+        return MCQAResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+    async def test_plain_answer(self) -> None:
+        server = self._make_server()
+        body = _make_verify_request(text="The answer is B.\n\nAnswer: B", expected="B")
+        result = await server.verify(body)
+        assert result.extracted_answer == "B"
+        assert result.reward == 1.0
+
+    async def test_markdown_bold_answer(self) -> None:
+        server = self._make_server()
+        body = _make_verify_request(text="Reasoning here.\n\n**Answer: C**", expected="C")
+        result = await server.verify(body)
+        assert result.extracted_answer == "C"
+        assert result.reward == 1.0
+
+    async def test_markdown_bold_no_match_old_regex(self) -> None:
+        """Verify that lenient_answer_colon does NOT extract **Answer: C** (old behavior preserved)."""
+        server = self._make_server(grading_mode="lenient_answer_colon")
+        body = _make_verify_request(text="**Answer: C**", expected="C")
+        result = await server.verify(body)
+        assert result.extracted_answer is None
+        assert result.reward == 0.0
+
+    async def test_markdown_underscore_answer(self) -> None:
+        server = self._make_server()
+        body = _make_verify_request(text="__Answer__: A", expected="A")
+        result = await server.verify(body)
+        assert result.extracted_answer == "A"
+        assert result.reward == 1.0
+
+    async def test_no_answer_pattern(self) -> None:
+        server = self._make_server()
+        body = _make_verify_request(text="I think it might be B but I'm not sure", expected="B")
+        result = await server.verify(body)
+        assert result.extracted_answer is None
+        assert result.reward == 0.0
+
+
+class TestComputeMetrics:
+    async def test_mcqa_server_returns_pass_majority_metrics(self) -> None:
+        """MCQA server overrides compute_metrics to compute pass@k and majority@k."""
+        from nemo_gym.base_resources_server import AggregateMetricsRequest
+        from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+
+        config = MCQAResourcesServerConfig(host="127.0.0.1", port=12345, entrypoint="app.py", name="mcqa")
+        server = MCQAResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+        responses = [
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0, "extracted_answer": "A"},
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 1, "reward": 1.0, "extracted_answer": "A"},
+            {TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 0.0, "extracted_answer": "B"},
+            {TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 1, "reward": 1.0, "extracted_answer": "C"},
+        ]
+        body = AggregateMetricsRequest(verify_responses=responses)
+        result = await server.aggregate_metrics(body)
+
+        assert "pass@2/accuracy" in result.agent_metrics
+        assert "pass@1[avg-of-2]/accuracy" in result.agent_metrics
+        assert "majority@2/accuracy" in result.agent_metrics
+        assert result.key_metrics == {
+            "pass@1/accuracy": result.agent_metrics["pass@1/accuracy"],
+            "pass@1[avg-of-2]/accuracy": result.agent_metrics["pass@1[avg-of-2]/accuracy"],
+            "pass@1[avg-of-2]/no_answer": result.agent_metrics["pass@1[avg-of-2]/no_answer"],
+            "majority@2/accuracy": result.agent_metrics["majority@2/accuracy"],
+            "pass@2/no_answer": result.agent_metrics["pass@2/no_answer"],
+            "mean/reward": result.agent_metrics["mean/reward"],
+        }

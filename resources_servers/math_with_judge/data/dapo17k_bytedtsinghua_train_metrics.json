@@ -1,0 +1,36 @@
+{
+    "name": "train",
+    "type": "train",
+    "jsonl_fpath": "resources_servers/math_with_judge/data/dapo17k_bytedtsinghua_train.jsonl",
+    "gitlab_identifier": {
+        "dataset_name": "bytedtsinghua_dapo17k",
+        "version": "0.0.1",
+        "artifact_fpath": "dapo17k_bytedtsinghua_train.jsonl"
+    },
+    "license": "Apache 2.0",
+    "Number of examples": 1791700,
+    "Number of tools": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 1791700,
+        "Average": 82.37656973823742,
+        "Min": 42.0,
+        "Max": 319.0
+    },
+    "Number of turns": {
+        "Total # non-null values": 1791700,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0
+    }
+}

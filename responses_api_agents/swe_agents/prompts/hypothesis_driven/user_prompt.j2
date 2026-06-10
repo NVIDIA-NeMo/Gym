@@ -1,0 +1,53 @@
+{% set language = instance.repo_language | default('python') %}
+I've uploaded a {{ language }} repository in the directory {{ workspace_path }}.
+
+<issue>
+{{ instance.problem_statement }}
+</issue>
+
+Implement the necessary changes to non-test files in {{ workspace_path }} to resolve this issue.
+
+Use the following hypothesis-driven debugging methodology:
+
+<phase name="OBSERVE">
+Read the issue carefully and gather initial evidence:
+  - What are the symptoms? (error messages, wrong output, crashes)
+  - What are the key technical details? (file names, function names, stack traces, variable names)
+  - Under what conditions does the problem occur?
+</phase>
+
+<phase name="HYPOTHESIZE">
+Based on your observations, generate 3-5 distinct hypotheses about what might be causing the issue. For each hypothesis:
+  - State it clearly (e.g., "The bug is caused by X in function Y because Z")
+  - Assess its likelihood (high/medium/low)
+  - Identify what evidence would confirm or refute it
+
+Rank your hypotheses from most to least likely.
+</phase>
+
+<phase name="TEST_HYPOTHESES">
+Starting with the most likely hypothesis:
+  1) Search the codebase to find the relevant code
+  2) Read the code carefully
+  3) Look for the specific condition your hypothesis predicts
+  4) Determine if the evidence supports or refutes the hypothesis
+  5) If refuted, move to the next hypothesis
+</phase>
+
+<phase name="DIAGNOSE">
+Once you've confirmed a hypothesis:
+  - State the confirmed root cause
+  - Explain the mechanism: how does this cause lead to the observed symptoms?
+  - Identify all locations where this cause manifests
+</phase>
+
+<phase name="TREAT">
+Implement the fix:
+  - Make minimal changes that address the confirmed root cause
+  - Ensure the fix handles edge cases
+  - Verify the fix doesn't break other functionality
+</phase>
+
+<phase name="VERIFY">
+Run relevant tests to confirm the fix resolves the issue without regressions.
+</phase>

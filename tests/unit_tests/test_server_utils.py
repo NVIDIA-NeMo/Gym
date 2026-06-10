@@ -1,10 +1,11 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -27,11 +28,19 @@ from nemo_gym.server_utils import (
     DictConfig,
     HeadServer,
     ServerClient,
+    SimpleServer,
     initialize_ray,
 )
 
 
 class TestServerUtils:
+    def test_global_aiohttp_client_request_debug_enabled(self, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", False)
+        assert not nemo_gym.server_utils.is_global_aiohttp_client_request_debug_enabled()
+
+        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", True)
+        assert nemo_gym.server_utils.is_global_aiohttp_client_request_debug_enabled()
+
     def test_ServerClient_load_head_server_config(self, monkeypatch: MonkeyPatch) -> None:
         global_config_dict = DictConfig(
             {
@@ -218,3 +227,25 @@ class TestServerUtils:
         get_global_config_dict_mock.assert_called_once()
         ray_init_mock.assert_called_once_with(ignore_reinit_error=True)
         ray_get_runtime_context_mock.assert_called_once()
+
+    def test_dry_run_skips_webserver_spinup(self, monkeypatch: MonkeyPatch) -> None:
+        self._mock_ray_return_value(monkeypatch, True)
+
+        get_global_config_dict_mock = MagicMock()
+        monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", get_global_config_dict_mock)
+
+        ServerClient_mock = MagicMock(spec=ServerClient)
+        monkeypatch.setattr(nemo_gym.server_utils, "ServerClient", ServerClient_mock)
+
+        class TestSimpleServer(SimpleServer):
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def setup_webserver(self):
+                assert False
+
+            @classmethod
+            def load_config_from_global_config(cls) -> None:
+                pass
+
+        TestSimpleServer.run_webserver()

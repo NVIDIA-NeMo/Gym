@@ -5,13 +5,14 @@ Compares a model's generated answer to an expected answer using an LLM judge.
 The judge prompt is fully configurable via server config.
 """
 
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -20,7 +21,9 @@ The judge prompt is fully configurable via server config.
 # limitations under the License.
 from __future__ import annotations
 
+import asyncio
 import re
+from contextlib import nullcontext
 from typing import Any, Optional
 
 from fastapi import FastAPI
@@ -39,6 +42,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.server_utils import get_response_json
 
 
 class LLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
@@ -57,8 +61,11 @@ class LLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
     judge_model_server: ModelServerRef
     judge_responses_create_params: NeMoGymResponseCreateParamsNonStreaming
 
+    # Concurrency limit for judge endpoint requests. Set to None to disable limiting.
+    judge_endpoint_max_concurrency: Optional[int] = 64
+
     judge_system_message: Optional[str] = None
-    judge_prompt_template: str
+    judge_prompt_template_fpath: str = "prompt_templates/equivalence_llm_judge.txt"
     judge_equal_label: str = "[[A=B]]"
     judge_not_equal_label: str = "[[A!=B]]"
     # Optional regex to extract the question from the last user message.
@@ -69,6 +76,7 @@ class LLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
     # The last match is used. If capture groups exist, the first non-empty group is
     # returned; otherwise, the entire last match is used.
     response_extract_regex: Optional[str] = None
+    msg_extraction_failure: str = "[NO VALID ANSWER EXTRACTED]"
 
     # Swap check: Run second judge pass with swapped expected/generated to detect positional bias
     check_twice_swap: bool = False
@@ -133,13 +141,15 @@ class LLMJudgeVerifyResponse(BaseVerifyResponse):
     judge_evaluations: list[JudgeEvaluation]
 
 
-def _extract_last_assistant_text(body: BaseVerifyRequest, extract_regex: Optional[str]) -> str:
+def _extract_last_assistant_text(
+    body: BaseVerifyRequest, extract_regex: Optional[str], extraction_failure_message: str = ""
+) -> str:
     """Extract the last assistant message text from the response.
 
     - If the assistant message has multiple text blocks, they are joined with newlines.
     - If ``extract_regex`` is provided, the last regex match is used; if capture
       groups exist, the first non-empty group is returned, otherwise the full match.
-    - Returns an empty string when no assistant text is available.
+    - Returns ``extraction_failure_message`` when no assistant text is available.
     """
     # Return only the last assistant message's text content.
     for o in reversed(body.response.output):
@@ -155,7 +165,7 @@ def _extract_last_assistant_text(body: BaseVerifyRequest, extract_regex: Optiona
                         texts.append(t)
                 text = "\n".join(texts).strip()
                 if not text:
-                    return text
+                    return extraction_failure_message
                 if extract_regex:
                     try:
                         matches = list(re.finditer(extract_regex, text, flags=re.MULTILINE | re.DOTALL))
@@ -174,7 +184,7 @@ def _extract_last_assistant_text(body: BaseVerifyRequest, extract_regex: Optiona
             elif isinstance(content, str):
                 text = content.strip()
                 if not text:
-                    return text
+                    return extraction_failure_message
                 if extract_regex:
                     try:
                         matches = list(re.finditer(extract_regex, text, flags=re.MULTILINE | re.DOTALL))
@@ -191,7 +201,7 @@ def _extract_last_assistant_text(body: BaseVerifyRequest, extract_regex: Optiona
                         return m.group(0).strip()
                 return text
             break
-    return ""
+    return extraction_failure_message
 
 
 def _extract_expected_answer(req: LLMJudgeRunRequest) -> Optional[str]:
@@ -247,6 +257,17 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
     """Judge-only verifier using an LLM to compare answers."""
 
     config: LLMJudgeResourcesServerConfig
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        if self.config.judge_endpoint_max_concurrency is not None:
+            self._judge_endpoint_max_concurrency = asyncio.Semaphore(value=self.config.judge_endpoint_max_concurrency)
+        else:
+            self._judge_endpoint_max_concurrency = nullcontext()
+
+        with open(self.config.judge_prompt_template_fpath, "r") as f:
+            self._judge_prompt_template = f.read().strip()
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -335,7 +356,9 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
             and body.template_metadata.get("output_regex")
         ):
             # Retry with full generation (no regex) - rescue from regex extraction failure
-            generated_full = _extract_last_assistant_text(body, extract_regex=None)
+            generated_full = _extract_last_assistant_text(
+                body, extract_regex=None, extraction_failure_message=self.config.msg_extraction_failure
+            )
             second_equal, second_eval = await self._generate_judge_evaluation(
                 question=question, expected_answer=expected, generated_answer=generated_full
             )
@@ -397,7 +420,9 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
         # Step 3: Extract answer to judge
         # - If extract_regex is not None → regex-extracted answer
         # - If extract_regex is None (long answer) → full generation
-        generated = _extract_last_assistant_text(body, extract_regex)
+        generated = _extract_last_assistant_text(
+            body, extract_regex, extraction_failure_message=self.config.msg_extraction_failure
+        )
 
         # Step 4: Run first judge evaluation
         first_equal, first_eval = await self._generate_judge_evaluation(
@@ -418,7 +443,7 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
         not_equal_label = cfg.judge_not_equal_label
 
         responses_create_params = cfg.judge_responses_create_params.model_copy(deep=True)
-        prompt_template = cfg.judge_prompt_template
+        prompt_template = self._judge_prompt_template
         system_message = cfg.judge_system_message
 
         user_prompt = prompt_template.format(
@@ -431,12 +456,21 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
         msgs.append(NeMoGymEasyInputMessage(role="user", content=user_prompt))
         responses_create_params.input = msgs
 
-        response = await self.server_client.post(
-            server_name=cfg.judge_model_server.name,
-            url_path="/v1/responses",
-            json=responses_create_params,
-        )
-        judge_response = NeMoGymResponse.model_validate(await response.json())
+        async with self._judge_endpoint_max_concurrency:
+            try:
+                response = await self.server_client.post(
+                    server_name=cfg.judge_model_server.name,
+                    url_path="/v1/responses",
+                    json=responses_create_params,
+                )
+                judge_response = NeMoGymResponse.model_validate(await get_response_json(response))
+            except Exception as e:
+                print(
+                    f"DEBUG: LLMJudgeResourcesServer: judge model server HTTP POST error: {type(e).__name__} {e}",
+                    flush=True,
+                )
+                raise e
+
         eval_record = JudgeEvaluation(
             responses_create_params=responses_create_params,
             response=judge_response,

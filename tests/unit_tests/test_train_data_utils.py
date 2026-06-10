@@ -1,10 +1,11 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -29,15 +30,16 @@ from nemo_gym.train_data_utils import (
     StringMetrics,
     TrainDataProcessor,
     TrainDataProcessorConfig,
+    validate_backend_credentials,
 )
 
 
-def load_multineedle_test_global_config_dict() -> DictConfig:
+def load_example_multi_step_test_global_config_dict() -> DictConfig:
     return GlobalConfigDictParser().parse_no_environment(
         initial_global_config_dict=DictConfig(
             {
                 "config_paths": [
-                    "resources_servers/multineedle/configs/multineedle.yaml",
+                    "resources_servers/example_multi_step/configs/example_multi_step.yaml",
                     "responses_api_models/openai_model/configs/openai_model.yaml",
                 ],
                 # For policy_model
@@ -49,12 +51,53 @@ def load_multineedle_test_global_config_dict() -> DictConfig:
     )
 
 
+def _make_agent_instance_config(name: str, dataset_specs: list) -> "ResponsesAPIAgentServerInstanceConfig":
+    """Build an in-memory ResponsesAPIAgentServerInstanceConfig with the given datasets."""
+
+    def _default_license(dataset_type: str) -> str | None:
+        return None if dataset_type == "example" else "Apache 2.0"
+
+    server_type_config_dict = {
+        "responses_api_agents": {
+            "simple_agent": {
+                "host": "127.0.0.1",
+                "port": 12345,
+                "entrypoint": "app.py",
+                "datasets": [
+                    {
+                        "name": d["name"],
+                        "type": d["type"],
+                        "jsonl_fpath": d.get("jsonl_fpath", f"path/{d['name']}.jsonl"),
+                        "num_repeats": d.get("num_repeats", 1),
+                        "gitlab_identifier": d.get("gitlab_identifier"),
+                        "license": d.get("license", _default_license(d["type"])),
+                    }
+                    for d in dataset_specs
+                ],
+                "resources_server": {
+                    "type": "resources_servers",
+                    "name": f"{name}_resources_server",
+                },
+                "model_server": {
+                    "type": "responses_api_models",
+                    "name": "policy_model",
+                },
+            }
+        }
+    }
+    return ResponsesAPIAgentServerInstanceConfig(
+        name=name,
+        server_type_config_dict=DictConfig(server_type_config_dict),
+        responses_api_agents=server_type_config_dict["responses_api_agents"],
+    )
+
+
 class TestLoadAndValidateServerInstanceConfigs:
     def test_load_and_validate_server_instance_configs_sanity(self, monkeypatch: MonkeyPatch) -> None:
         # Fix the port returned
         find_open_port_mock = MagicMock()
         find_open_port_mock.return_value = 12345
-        monkeypatch.setattr(nemo_gym.global_config, "find_open_port", find_open_port_mock)
+        monkeypatch.setattr(nemo_gym.global_config, "_find_open_port_using_range", find_open_port_mock)
 
         config = TrainDataProcessorConfig(
             output_dirpath="",
@@ -64,30 +107,32 @@ class TestLoadAndValidateServerInstanceConfigs:
         processor = TrainDataProcessor()
         actual_agent_configs_with_data = processor.load_and_validate_server_instance_configs(
             config=config,
-            global_config_dict=load_multineedle_test_global_config_dict(),
+            global_config_dict=load_example_multi_step_test_global_config_dict(),
         )
 
         expected_agent_configs_with_data_dict = [
             {
-                "name": "multineedle_simple_agent",
+                "name": "example_multi_step_simple_agent",
                 "responses_api_agents": {
                     "simple_agent": {
                         "host": "127.0.0.1",
                         "port": 12345,
                         "entrypoint": "app.py",
+                        "num_workers": None,
                         "datasets": [
                             {
                                 "name": "example",
                                 "type": "example",
-                                "jsonl_fpath": "resources_servers/multineedle/data/example.jsonl",
+                                "jsonl_fpath": "resources_servers/example_multi_step/data/example.jsonl",
                                 "num_repeats": 1,
                                 "gitlab_identifier": None,
+                                "huggingface_identifier": None,
                                 "license": None,
                             }
                         ],
                         "resources_server": {
                             "type": "resources_servers",
-                            "name": "multineedle_resources_server",
+                            "name": "example_multi_step_resources_server",
                         },
                         "model_server": {
                             "type": "responses_api_models",
@@ -101,6 +146,54 @@ class TestLoadAndValidateServerInstanceConfigs:
             c.model_dump(mode="json", warnings="none") for c in actual_agent_configs_with_data
         ]
         assert expected_agent_configs_with_data_dict == actual_agent_configs_with_data_dict
+
+    def test_load_and_validate_server_instance_configs_filters_out_of_scope_datasets(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        """The returned list must (a) drop agents whose datasets are all out
+        of scope for the mode, and (b) restrict mixed agents to their
+        in-scope datasets only."""
+        agent_in_scope_only = _make_agent_instance_config("agent_in_scope_only", [{"name": "ex", "type": "example"}])
+        agent_out_of_scope_only = _make_agent_instance_config(
+            "agent_out_of_scope_only", [{"name": "train", "type": "train"}]
+        )
+        agent_mixed = _make_agent_instance_config(
+            "agent_mixed",
+            [
+                {"name": "ex", "type": "example"},
+                {"name": "train", "type": "train"},
+            ],
+        )
+
+        monkeypatch.setattr(
+            GlobalConfigDictParser,
+            "filter_for_server_instance_configs",
+            lambda self, _global_config_dict: [
+                agent_in_scope_only,
+                agent_out_of_scope_only,
+                agent_mixed,
+            ],
+        )
+
+        config = TrainDataProcessorConfig(
+            output_dirpath="",
+            mode="example_validation",
+            should_download=False,
+        )
+        processor = TrainDataProcessor()
+        result = processor.load_and_validate_server_instance_configs(
+            config=config,
+            global_config_dict=DictConfig({}),
+        )
+
+        result_names = [c.name for c in result]
+        assert result_names == ["agent_in_scope_only", "agent_mixed"], result_names
+
+        result_datasets = {c.name: [(d.name, d.type) for d in c.datasets] for c in result}
+        assert result_datasets == {
+            "agent_in_scope_only": [("ex", "example")],
+            "agent_mixed": [("ex", "example")],
+        }
 
 
 class TestLoadDatasets:
@@ -122,7 +215,7 @@ class TestLoadDatasets:
                         {
                             "name": "example",
                             "type": "example",
-                            "jsonl_fpath": "resources_servers/multineedle/data/example.jsonl",
+                            "jsonl_fpath": "resources_servers/example_multi_step/data/example.jsonl",
                             "num_repeats": 1,
                             "gitlab_identifier": None,
                             "license": None,
@@ -130,7 +223,7 @@ class TestLoadDatasets:
                     ],
                     "resources_server": {
                         "type": "resources_servers",
-                        "name": "multineedle_resources_server",
+                        "name": "example_multi_step_resources_server",
                     },
                     "model_server": {
                         "type": "responses_api_models",
@@ -143,7 +236,7 @@ class TestLoadDatasets:
             config=config,
             server_instance_configs=[
                 ResponsesAPIAgentServerInstanceConfig(
-                    name="multineedle_simple_agent",
+                    name="example_multi_step_simple_agent",
                     server_type_config_dict=DictConfig(server_type_config_dict),
                     responses_api_agents=server_type_config_dict["responses_api_agents"],
                 ),
@@ -168,7 +261,7 @@ class TestLoadDatasets:
                         {
                             "name": "example",
                             "type": "example",
-                            "jsonl_fpath": "resources_servers/multineedle/data/example_missing.jsonl",
+                            "jsonl_fpath": "resources_servers/example_multi_step/data/example_missing.jsonl",
                             "num_repeats": 1,
                             "gitlab_identifier": None,
                             "license": None,
@@ -176,7 +269,7 @@ class TestLoadDatasets:
                     ],
                     "resources_server": {
                         "type": "resources_servers",
-                        "name": "multineedle_resources_server",
+                        "name": "example_multi_step_resources_server",
                     },
                     "model_server": {
                         "type": "responses_api_models",
@@ -193,7 +286,7 @@ class TestLoadDatasets:
                 config=config,
                 server_instance_configs=[
                     ResponsesAPIAgentServerInstanceConfig(
-                        name="multineedle_simple_agent",
+                        name="example_multi_step_simple_agent",
                         server_type_config_dict=DictConfig(server_type_config_dict),
                         responses_api_agents=server_type_config_dict["responses_api_agents"],
                     ),
@@ -222,7 +315,7 @@ class TestLoadDatasets:
                             "type": "train",
                             "jsonl_fpath": "some/nonexiststent/path",
                             "gitlab_identifier": {
-                                "dataset_name": "multineedle",
+                                "dataset_name": "example_multi_step",
                                 "version": "0.0.1",
                                 "artifact_fpath": "train.jsonl",
                             },
@@ -231,7 +324,7 @@ class TestLoadDatasets:
                     ],
                     "resources_server": {
                         "type": "resources_servers",
-                        "name": "multineedle_resources_server",
+                        "name": "example_multi_step_resources_server",
                     },
                     "model_server": {
                         "type": "responses_api_models",
@@ -248,12 +341,100 @@ class TestLoadDatasets:
                 config=config,
                 server_instance_configs=[
                     ResponsesAPIAgentServerInstanceConfig(
-                        name="multineedle_simple_agent",
+                        name="example_multi_step_simple_agent",
                         server_type_config_dict=DictConfig(server_type_config_dict),
                         responses_api_agents=server_type_config_dict["responses_api_agents"],
                     ),
                 ],
             )
+
+    def test_load_datasets_missing_credentials(self, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.setattr(nemo_gym.train_data_utils, "get_global_config_dict", lambda: DictConfig({}))
+
+        config = TrainDataProcessorConfig(
+            output_dirpath="",
+            mode="train_preparation",
+            should_download=True,
+        )
+        processor = TrainDataProcessor()
+
+        server_type_config_dict = {
+            "responses_api_agents": {
+                "simple_agent": {
+                    "host": "127.0.0.1",
+                    "port": 12345,
+                    "entrypoint": "app.py",
+                    "datasets": [
+                        {
+                            "name": "train",
+                            "type": "train",
+                            "jsonl_fpath": "some/nonexistent/path.jsonl",
+                            "num_repeats": 1,
+                            "gitlab_identifier": {
+                                "dataset_name": "example_multi_step",
+                                "version": "0.0.1",
+                                "artifact_fpath": "train.jsonl",
+                            },
+                            "license": "Apache 2.0",
+                        }
+                    ],
+                    "resources_server": {
+                        "type": "resources_servers",
+                        "name": "example_multi_step_resources_server",
+                    },
+                    "model_server": {
+                        "type": "responses_api_models",
+                        "name": "policy_model",
+                    },
+                }
+            }
+        }
+
+        with raises(AssertionError, match="GitLab backend selected but missing credentials"):
+            processor.load_datasets(
+                config=config,
+                server_instance_configs=[
+                    ResponsesAPIAgentServerInstanceConfig(
+                        name="example_multi_step_simple_agent",
+                        server_type_config_dict=DictConfig(server_type_config_dict),
+                        responses_api_agents=server_type_config_dict["responses_api_agents"],
+                    ),
+                ],
+            )
+
+    def test_validate_backend_credentials_missing(self, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            nemo_gym.train_data_utils,
+            "get_global_config_dict",
+            lambda: DictConfig({}),
+        )
+
+        is_valid, error_msg = validate_backend_credentials("gitlab")
+        assert not is_valid
+        assert "GitLab backend selected but missing credentials" in error_msg
+        assert "mlflow_tracking_uri" in error_msg
+        assert "mlflow_tracking_token" in error_msg
+
+        is_valid, error_msg = validate_backend_credentials("huggingface")
+        assert not is_valid
+        assert "HuggingFace backend selected but missing credentials" in error_msg
+        assert "hf_token" in error_msg
+
+    def test_validate_backend_credentials_valid(self, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            nemo_gym.train_data_utils,
+            "get_global_config_dict",
+            lambda: DictConfig(
+                {
+                    "mlflow_tracking_uri": "https://example.com",
+                    "mlflow_tracking_token": "token123",
+                }
+            ),
+        )
+
+        is_valid, error_msg = validate_backend_credentials("gitlab")
+        assert is_valid is True
+        assert error_msg == ""
 
 
 class TestValidateSamplesAndAggregateMetrics:
@@ -284,7 +465,7 @@ class TestValidateSamplesAndAggregateMetrics:
                         {
                             "name": "example",
                             "type": "example",
-                            "jsonl_fpath": "resources_servers/multineedle/data/example.jsonl",
+                            "jsonl_fpath": "resources_servers/example_multi_step/data/example.jsonl",
                             "num_repeats": 1,
                             "gitlab_identifier": None,
                             "license": None,
@@ -292,7 +473,7 @@ class TestValidateSamplesAndAggregateMetrics:
                     ],
                     "resources_server": {
                         "type": "resources_servers",
-                        "name": "multineedle_resources_server",
+                        "name": "example_multi_step_resources_server",
                     },
                     "model_server": {
                         "type": "responses_api_models",
@@ -304,11 +485,12 @@ class TestValidateSamplesAndAggregateMetrics:
         actual_dataset_type_to_aggregate_metrics = processor.validate_samples_and_aggregate_metrics(
             server_instance_configs=[
                 ResponsesAPIAgentServerInstanceConfig(
-                    name="multineedle_simple_agent",
+                    name="example_multi_step_simple_agent",
                     server_type_config_dict=DictConfig(server_type_config_dict),
                     responses_api_agents=server_type_config_dict["responses_api_agents"],
                 ),
             ],
+            overwrite_metrics_conflicts=False,
         )
 
         expected_dataset_type_to_aggregate_metrics = {
@@ -321,7 +503,6 @@ class TestValidateSamplesAndAggregateMetrics:
                     average=0,
                     min=2.0,
                     max=2.0,
-                    median=0,
                     stddev=0,
                 ),
                 json_dumped_number_of_words=AvgMinMax(
@@ -330,7 +511,6 @@ class TestValidateSamplesAndAggregateMetrics:
                     average=0,
                     min=1499.0,
                     max=1509.0,
-                    median=0,
                     stddev=0,
                 ),
                 number_of_turns=AvgMinMax(
@@ -339,7 +519,6 @@ class TestValidateSamplesAndAggregateMetrics:
                     average=0,
                     min=1.0,
                     max=1.0,
-                    median=0,
                     stddev=0,
                 ),
                 temperature=AvgMinMax(
@@ -348,7 +527,6 @@ class TestValidateSamplesAndAggregateMetrics:
                     average=0,
                     min=float("inf"),
                     max=float("-inf"),
-                    median=0,
                     stddev=0,
                 ),
                 id=AvgMinMax(
@@ -357,7 +535,6 @@ class TestValidateSamplesAndAggregateMetrics:
                     average=2.0,
                     min=0.0,
                     max=4.0,
-                    median=2.0,
                     stddev=1.58,
                 ),
                 expected_synonym_values=AvgMinMax(
@@ -366,7 +543,6 @@ class TestValidateSamplesAndAggregateMetrics:
                     average=559.0,
                     min=407.0,
                     max=711.0,
-                    median=559.0,
                     stddev=160.22,
                 ),
                 minefield_label_value=AvgMinMax(
@@ -375,7 +551,6 @@ class TestValidateSamplesAndAggregateMetrics:
                     average=299.0,
                     min=299.0,
                     max=299.0,
-                    median=299.0,
                     stddev=0.0,
                 ),
                 expected_synonyms=StringMetrics(unique_count=2, total_count=10),
@@ -387,7 +562,7 @@ class TestValidateSamplesAndAggregateMetrics:
             == actual_dataset_type_to_aggregate_metrics.get("example").model_dump()
         )
 
-        assert write_filenames == [Path("resources_servers/multineedle/data/example_metrics.json")]
+        assert write_filenames == [Path("resources_servers/example_multi_step/data/example_metrics.json")]
 
     def test_validate_samples_and_aggregate_metrics_conflict_raises_ValueError(self, monkeypatch: MonkeyPatch) -> None:
         mock_write_file = mock_open()
@@ -400,9 +575,9 @@ class TestValidateSamplesAndAggregateMetrics:
                 write_filenames.append(filename)
                 return mock_write_file()
 
-            if filename == "resources_servers/multineedle/data/example.jsonl":
+            if filename == "resources_servers/example_multi_step/data/example.jsonl":
                 return original_open(filename, mode)
-            elif filename == Path("resources_servers/multineedle/data/example_metrics.json"):
+            elif filename == Path("resources_servers/example_multi_step/data/example_metrics.json"):
                 with original_open(filename, mode) as f:
                     read_data = json.loads(f.read())
 
@@ -425,7 +600,7 @@ class TestValidateSamplesAndAggregateMetrics:
                         {
                             "name": "example",
                             "type": "example",
-                            "jsonl_fpath": "resources_servers/multineedle/data/example.jsonl",
+                            "jsonl_fpath": "resources_servers/example_multi_step/data/example.jsonl",
                             "num_repeats": 1,
                             "gitlab_identifier": None,
                             "license": None,
@@ -433,7 +608,7 @@ class TestValidateSamplesAndAggregateMetrics:
                     ],
                     "resources_server": {
                         "type": "resources_servers",
-                        "name": "multineedle_resources_server",
+                        "name": "example_multi_step_resources_server",
                     },
                     "model_server": {
                         "type": "responses_api_models",
@@ -449,14 +624,15 @@ class TestValidateSamplesAndAggregateMetrics:
             processor.validate_samples_and_aggregate_metrics(
                 server_instance_configs=[
                     ResponsesAPIAgentServerInstanceConfig(
-                        name="multineedle_simple_agent",
+                        name="example_multi_step_simple_agent",
                         server_type_config_dict=DictConfig(server_type_config_dict),
                         responses_api_agents=server_type_config_dict["responses_api_agents"],
                     ),
                 ],
+                overwrite_metrics_conflicts=False,
             )
 
-        assert write_filenames == [Path("resources_servers/multineedle/data/example_metrics_conflict.json")]
+        assert write_filenames == [Path("resources_servers/example_multi_step/data/example_metrics_conflict.json")]
 
     def test_validate_samples_and_aggregate_metrics_single_sample(self) -> None:
         processor = TrainDataProcessor()
@@ -494,7 +670,6 @@ class TestValidateSamplesAndAggregateMetrics:
                 average=0,
                 min=float("inf"),
                 max=float("-inf"),
-                median=0,
                 stddev=0,
             ),
             json_dumped_number_of_words=AvgMinMax(
@@ -503,7 +678,6 @@ class TestValidateSamplesAndAggregateMetrics:
                 average=0,
                 min=2.0,
                 max=2.0,
-                median=0,
                 stddev=0,
             ),
             number_of_turns=AvgMinMax(
@@ -512,7 +686,6 @@ class TestValidateSamplesAndAggregateMetrics:
                 average=0,
                 min=float("inf"),
                 max=float("-inf"),
-                median=0,
                 stddev=0,
             ),
             temperature=AvgMinMax(
@@ -521,7 +694,6 @@ class TestValidateSamplesAndAggregateMetrics:
                 average=0,
                 min=float("inf"),
                 max=float("-inf"),
-                median=0,
                 stddev=0,
             ),
         )
@@ -654,6 +826,11 @@ class TestValidateSamplesAndAggregateMetrics:
                 {"items": [1, 1, 2]},
                 {"items": [1, 2, 2]},  # different duplicates
                 False,
+            ),
+            (
+                {"items": [{"a": 1}, {"b": 2}]},
+                {"items": [{"b": 2}, {"a": 1}]},  # lists containing dicts
+                True,
             ),
         ]
 
@@ -883,7 +1060,7 @@ class TestCollateSamples:
                         {
                             "name": "example",
                             "type": "example",
-                            "jsonl_fpath": "resources_servers/multineedle/data/example.jsonl",
+                            "jsonl_fpath": "resources_servers/example_multi_step/data/example.jsonl",
                             "num_repeats": 1,
                             "gitlab_identifier": None,
                             "license": None,
@@ -891,7 +1068,7 @@ class TestCollateSamples:
                     ],
                     "resources_server": {
                         "type": "resources_servers",
-                        "name": "multineedle_resources_server",
+                        "name": "example_multi_step_resources_server",
                     },
                     "model_server": {
                         "type": "responses_api_models",
@@ -904,7 +1081,7 @@ class TestCollateSamples:
             config=config,
             server_instance_configs=[
                 ResponsesAPIAgentServerInstanceConfig(
-                    name="multineedle_simple_agent",
+                    name="example_multi_step_simple_agent",
                     server_type_config_dict=DictConfig(server_type_config_dict),
                     responses_api_agents=server_type_config_dict["responses_api_agents"],
                 ),
@@ -935,7 +1112,7 @@ class TestCollateSamples:
 
         assert list(write_filenames_to_mock.keys()) == [
             Path("example_metrics.json"),
-            Path("resources_servers/multineedle/data/example_prepare.jsonl"),
+            Path("resources_servers/example_multi_step/data/example_prepare.jsonl"),
             Path("example.jsonl"),
         ]
 
@@ -980,7 +1157,7 @@ class TestCollateSamples:
                         {
                             "name": "example",
                             "type": "example",
-                            "jsonl_fpath": "resources_servers/multineedle/data/example.jsonl",
+                            "jsonl_fpath": "resources_servers/example_multi_step/data/example.jsonl",
                             "num_repeats": 1,
                             "gitlab_identifier": None,
                             "license": None,
@@ -988,7 +1165,7 @@ class TestCollateSamples:
                     ],
                     "resources_server": {
                         "type": "resources_servers",
-                        "name": "multineedle_resources_server",
+                        "name": "example_multi_step_resources_server",
                     },
                     "model_server": {
                         "type": "responses_api_models",
@@ -1005,7 +1182,7 @@ class TestCollateSamples:
                 config=config,
                 server_instance_configs=[
                     ResponsesAPIAgentServerInstanceConfig(
-                        name="multineedle_simple_agent",
+                        name="example_multi_step_simple_agent",
                         server_type_config_dict=DictConfig(server_type_config_dict),
                         responses_api_agents=server_type_config_dict["responses_api_agents"],
                     ),

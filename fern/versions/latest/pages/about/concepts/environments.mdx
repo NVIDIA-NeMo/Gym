@@ -1,0 +1,83 @@
+---
+title: "Environments"
+description: "Environments decompose into dataset, agent harness, verifier, and state — unifying evaluation, agent optimization, and training."
+position: 1.5
+---
+
+<Info>
+
+**Goal**: Understand what an environment is, where the concept comes from, and how it decomposes into components that serve evaluation, agent optimization, and training.
+
+</Info>
+
+## Environment Origins
+
+The term *environment* comes from reinforcement learning, where it describes the world an agent interacts with. The agent takes actions, the environment returns observations and a reward, and the cycle repeats. Historically, the word "Gym" refers to a collection of RL training environments, which inspired the naming of NeMo Gym.
+
+The concept is the same today but the usage of environments has expanded beyond RL to include much more, such as model evaluation, agent evaluation, agent harness optimization, and synthetic data generation.
+
+Accordingly, an environment contains everything required for an agent to complete a task:
+- Dataset
+- Agent Harness
+- Verifier
+- State
+
+The model powering the agent is external to the environment. It generates a response (actions), which the environment processes. The environment updates its internal state, returns observations (tool results, error messages, state changes), and produces a reward (a numerical score of how well the agent performed).
+
+## Anatomy of an Environment
+
+### Dataset
+
+A collection of tasks (prompts for the agent to solve), along with metadata and privileged information necessary for scoring each task attempt. Each task defines a problem for the model: e.g. a coding issue to fix, a math problem to solve, a tool-calling scenario to navigate.
+
+Tasks can vary structurally: single-turn question answering, multi-step tool use, multi-turn dialogue, agentic workflows with sandboxed execution, and more.
+
+### Agent Harness
+
+Agent = model + agent harness. The agent harness defines how the model interacts with the environment. Language models perform stateless inference; the harness is what turns a model into an agent — it loops model calls, routes tool use, manages context, and decides when the task is done.
+
+Harnesses exist on a spectrum. A simple harness just loops model calls until the task is complete. Other harnesses like Claude Code or OpenClaw include tools, planning, memory, self-correction, skills and more.
+
+### Verifier
+
+The verifier (sometimes referred to as a scorer or grader) scores a task attempt to calculate a reward, typically between 0 and 1. It defines what "good" means for this environment by scoring the model's output against task-specific metadata — e.g. expected answers, test cases, unit tests, ground truth, rubrics.
+
+Common patterns include exact match, code execution (run tests and check if they pass), state matching, LLM-as-Judge, and reward models.
+
+The verifier is used for both evaluation and training:
+
+- **For evaluation**: verifier scores become benchmark metrics (e.g. accuracy, pass@1, pass@k).
+- **For training**: the same scores become the reward signal that drives reinforcement learning.
+
+### State
+
+Per-task state that changes as the agent takes actions. Each task attempt starts from a clean state, this ensures attempts are independent and rewards are attributable to the agent's actions on that task.
+
+Some environments have minimal state (e.g., math — just input and output). Others have rich state that evolves across turns: file systems being modified, databases being updated, code repositories being patched, game boards advancing.
+
+Runtimes and sandboxes host and run the environment. A runtime is the execution infrastructure (e.g. local process, Docker, Apptainer). A sandbox is a runtime with isolated execution — for example, a container per episode — providing security boundaries when the agent can execute arbitrary code.
+
+
+## Environments Unify Agent Improvement
+
+![Evaluate-improve loop](/assets/images/eval-improve-loop.png)
+
+- **Evaluation:** scores become metrics (e.g. accuracy, pass@1, pass@k).
+- **Harness optimization:** scores guide harness-level changes: e.g. prompt rewrites, tool changes, context management, orchestration tuning.
+- **Training:** scores become the reward signal that drives reinforcement learning. A training framework consumes rewards and updates model weights, improving the capabilities of the underlying model.
+
+## Next Steps
+
+Continue with the other concept pages:
+
+<Cards>
+
+<Card title="Evaluation" href="/about/concepts/evaluation">
+How environments are used to measure model and agent performance.
+</Card>
+
+<Card title="Training" href="/about/concepts/training">
+Post-training techniques and how environments are used for training.
+</Card>
+
+</Cards>

@@ -1,0 +1,61 @@
+# Finance SEC search: SEC filing search with optional web search (via tavily_api_key in env.yaml)
+finance_sec_search_resources_server:
+  resources_servers:
+    finance_sec_search:
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: SEC EDGAR filing search for financial analysis questions
+      value: Enable LLMs to search and analyze SEC filings
+      cache_dir: null  # defaults to ~/.cache/nemo_gym/finance_sec_search/ if not set
+      tavily_api_key: ${tavily_api_key}
+      retrieval_model_server:
+        type: responses_api_models
+        name: policy_model
+      judge_model_server:
+        type: responses_api_models
+        name: search_judge_model
+      judge_responses_create_params:
+        input: []
+        max_output_tokens: 8192
+        reasoning:
+          effort: high
+      # Judge prompt: loaded from this file at startup. To override inline (e.g. from
+      # NVFlow), set judge_prompt_template directly — it takes priority over the file.
+      judge_prompt_template_fpath: prompt_templates/finance_sec_search_judge.yaml
+      retrieval_responses_create_params:
+        input: []
+      judge_call_timeout: 60.0  # seconds; prevents stale connections from blocking rollout
+      # Retrieval prompt: loaded from this file at startup. To override inline,
+      # set retrieval_system_prompt directly — it takes priority over the file.
+      retrieval_system_prompt_fpath: prompt_templates/finance_sec_search_retrieval.yaml
+      # Retrieval model parameters (adjust when swapping between thinking/instruct models)
+      retrieval_max_output_tokens: 8192
+      retrieval_model_context_length: 131072
+
+# Judge model server (OpenAI or local — configured via env.yaml)
+search_judge_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${search_judge_model_base_url}
+      openai_api_key: ${search_judge_model_api_key}
+      openai_model: ${search_judge_model_name}
+
+finance_agent:
+  responses_api_agents:
+    finance_agent:
+      entrypoint: app.py
+      max_steps: 50
+      truncate_on_overflow: false
+      tool_call_timeout: 300
+      resources_server:
+        type: resources_servers
+        name: finance_sec_search_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/finance_sec_search/data/example.jsonl

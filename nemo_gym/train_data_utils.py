@@ -1,10 +1,11 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -22,7 +23,6 @@ from typing import Any, Dict, List, Literal, Optional, Self, Tuple, Union
 from devtools import pprint
 from omegaconf import DictConfig
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
-from tdigest import TDigest
 from tqdm.auto import tqdm
 
 from nemo_gym.base_resources_server import BaseRunRequest
@@ -33,30 +33,57 @@ from nemo_gym.config_types import (
     DatasetConfig,
     DatasetType,
     DownloadJsonlDatasetGitlabConfig,
+    DownloadJsonlDatasetHuggingFaceConfig,
     ServerInstanceConfig,
 )
 from nemo_gym.gitlab_utils import download_jsonl_dataset
 from nemo_gym.global_config import (
+    HF_TOKEN_KEY_NAME,
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
     get_global_config_dict,
 )
+from nemo_gym.hf_utils import (
+    download_hf_dataset_as_jsonl,
+)
+from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 
 
 class TrainDataProcessorConfig(BaseNeMoGymCLIConfig):
-    output_dirpath: str = Field(description="Path to the directory to save the outputs.")
+    """
+    Prepare and validate training data, generating metrics and statistics for datasets.
+
+    Examples:
+
+    ```bash
+    config_paths="resources_servers/example_multi_step/configs/example_multi_step.yaml,\\
+    responses_api_models/openai_model/configs/openai_model.yaml"
+    ng_prepare_data "+config_paths=[${config_paths}]" \
+        +output_dirpath=data/example_multi_step \
+        +mode=example_validation
+    ```
+    """
+
+    output_dirpath: str = Field(description="Directory path where processed datasets and metrics will be saved.")
     mode: Union[Literal["train_preparation"], Literal["example_validation"]] = Field(
-        description="Whether to do train_preparation or example_validation."
+        description="Processing mode: 'train_preparation' prepares train/validation datasets for training, 'example_validation' validates example data for PR submission."
     )
     should_download: bool = Field(
         default=False,
-        description="Whether or not to download missing datasets. By default, no datasets will be downloaded.",
+        description="Whether to automatically download missing datasets from remote registries (default: False).",
+    )
+    data_source: Literal["gitlab", "huggingface"] = Field(
+        default="huggingface",
+        description="Where to download missing datasets from: 'gitlab' (NVIDIA internal) or 'huggingface' (external).",
+    )
+    overwrite_metrics_conflicts: bool = Field(
+        default=False, description="Whether or not to overwrite metrics conflicts."
     )
 
     @property
     def in_scope_dataset_types(self) -> List[DatasetType]:
         if self.mode == "train_preparation":
-            return ["train", "validation"]
+            return ["train", "validation", "benchmark"]
         elif self.mode == "example_validation":
             return ["example"]
         else:
@@ -91,15 +118,10 @@ class AvgMinMax(Accumulator):
     average: float = Field(serialization_alias="Average", default=0)
     min: float = Field(serialization_alias="Min", default=float("inf"))
     max: float = Field(serialization_alias="Max", default=float("-inf"))
-    median: float = Field(serialization_alias="Median", default=0)
     stddev: float = Field(serialization_alias="Standard deviation", default=0)
     # Internal state
     mean: float = Field(default=0, exclude=True)  # running value (before final average)
     M2: float = Field(default=0, exclude=True)  # sum of squared differences (for variance)
-    tdigest: TDigest = Field(default_factory=TDigest, exclude=True)
-    """
-    T-Digest is used to estimate the Median without storing and sorting all values. The Median is essentially an approximation using the 50th percentile, which is very close to the true Median.
-    """
 
     def observe(self, x: float) -> None:
         if x < self.min:
@@ -113,9 +135,6 @@ class AvgMinMax(Accumulator):
         self.mean += delta / self.total
         self.M2 += delta * (x - self.mean)
 
-        # Update quantile estimator (for median)
-        self.tdigest.update(x)
-
     def _add(self: Self, other: Self) -> None:
         # Merge accumulators
         if other.total == 0:
@@ -126,8 +145,6 @@ class AvgMinMax(Accumulator):
             self.M2 = other.M2
             self.min = other.min
             self.max = other.max
-            self.tdigest = TDigest()
-            self.tdigest = self.tdigest + other.tdigest
             return
 
         # Merge mean and variance
@@ -143,9 +160,6 @@ class AvgMinMax(Accumulator):
         if other.max > self.max:
             self.max = other.max
 
-        # Merge t-digests for quantiles/median
-        self.tdigest = self.tdigest + other.tdigest
-
     def _aggregate(self: Self) -> Self:
         def round_metric(x: float) -> float:
             if x >= 1 or x <= -1:
@@ -155,14 +169,12 @@ class AvgMinMax(Accumulator):
         n = self.total
         mean = self.mean if n > 0 else 0.0
         stddev = sqrt(self.M2 / (n - 1)) if n > 1 else 0.0
-        med = float(self.tdigest.percentile(50)) if n > 0 and self.tdigest.n > 0 else 0.0
 
         params = {
             "total": self.total,
             "average": mean,
             "min": self.min if n > 0 else 0.0,
             "max": self.max if n > 0 else 0.0,
-            "median": med,
             "stddev": stddev,
         }
 
@@ -323,7 +335,9 @@ class TrainDataProcessor(BaseModel):
         self.load_datasets(config, server_instance_configs)
 
         self._print_title("Validate samples and aggregate metrics")
-        dataset_type_to_aggregate_metrics = self.validate_samples_and_aggregate_metrics(server_instance_configs)
+        dataset_type_to_aggregate_metrics = self.validate_samples_and_aggregate_metrics(
+            server_instance_configs, config.overwrite_metrics_conflicts
+        )
 
         self._print_title("Collate samples and aggregate metrics")
         self.collate_samples(config, server_instance_configs, dataset_type_to_aggregate_metrics)
@@ -396,10 +410,10 @@ class TrainDataProcessor(BaseModel):
             server_names_list_str += f"{server_str}{datasets_str}"
         print(f"In scope dataset types for `{config.mode}` mode: {in_scope_dataset_types}")
         print(
-            f"Found {len(agent_configs_with_data)} agent server instance configs with in-scope datasets:{server_names_list_str}"
+            f"Found {len(agent_configs_with_in_scope_datasets)} agent server instance configs with in-scope datasets:{server_names_list_str}"
         )
 
-        return agent_configs_with_data
+        return agent_configs_with_in_scope_datasets
 
     def load_datasets(
         self,
@@ -436,16 +450,51 @@ class TrainDataProcessor(BaseModel):
                 "Missing local datasets. You must provide local datasets since download is disabled. Run with `+should_download=true` to enable downloading."
             )
 
+        if not local_datasets_not_found:
+            return
+
+        hf_backend_ok, hf_error_msg = validate_backend_credentials("huggingface")
+        gitlab_backend_ok, gitlab_error_msg = validate_backend_credentials("gitlab")
+
+        global_config = get_global_config_dict()
+
         for (
             server_name,
             datasets,
         ) in local_datasets_not_found.items():  # pragma: no cover
             for d in datasets:
-                download_config = DownloadJsonlDatasetGitlabConfig.model_validate(
-                    d.gitlab_identifier.model_dump() | {"output_fpath": d.jsonl_fpath}
-                )
-                print(f"Downloading dataset `{d.name}` from `{server_name}` using {download_config}")
-                download_jsonl_dataset(download_config)
+                if d.gitlab_identifier and d.huggingface_identifier:
+                    backend = config.data_source
+                elif not d.gitlab_identifier:
+                    assert hf_backend_ok, hf_error_msg
+                    backend = "huggingface"
+                elif not d.huggingface_identifier:
+                    assert gitlab_backend_ok, gitlab_error_msg
+                    backend = "gitlab"
+                else:
+                    raise NotImplementedError
+
+                if backend == "gitlab":
+                    download_config = DownloadJsonlDatasetGitlabConfig.model_validate(
+                        d.gitlab_identifier.model_dump() | {"output_fpath": d.jsonl_fpath}
+                    )
+                    print(f"Downloading dataset `{d.name}` for `{server_name}` from {backend} using {download_config}")
+                    download_jsonl_dataset(download_config)
+
+                elif backend == "huggingface":
+                    hf_identifier = d.huggingface_identifier
+                    download_config = DownloadJsonlDatasetHuggingFaceConfig.model_validate(
+                        {
+                            "repo_id": hf_identifier.repo_id,
+                            "artifact_fpath": hf_identifier.artifact_fpath,
+                            "output_fpath": d.jsonl_fpath,
+                            # Only pass split if artifact_fpath is not set
+                            **({"split": d.type} if not hf_identifier.artifact_fpath else {}),
+                            HF_TOKEN_KEY_NAME: global_config.get(HF_TOKEN_KEY_NAME),
+                        }
+                    )
+                    print(f"Downloading '{d.type}' split from {hf_identifier.repo_id} to {d.jsonl_fpath}...")
+                    download_hf_dataset_as_jsonl(download_config)
 
     ########################################
     # Validate samples and aggregate metrics
@@ -476,7 +525,7 @@ class TrainDataProcessor(BaseModel):
 
         # Don't load everything into memory at once. Throw things away immediately.
         with open(dataset_config.jsonl_fpath) as f:
-            for line in f:
+            for line in tqdm(f, desc=f"{dataset_config.jsonl_fpath}"):
                 for _ in range(repeats):
                     yield line
 
@@ -497,92 +546,94 @@ class TrainDataProcessor(BaseModel):
         """
         Returns the conflicting metrics fpath if invalid. Else returns None
         """
-        if metrics_fpath.exists():
-            with open(metrics_fpath) as f:
-                previous_aggregate_metrics_dict = json.load(f)
+        if not metrics_fpath.exists():
+            return
 
-            def numeric_close(a: float, b: float) -> bool:
-                """Helper to compare numbers with a tolerance"""
-                if a == b:
-                    return True
+        with open(metrics_fpath) as f:
+            previous_aggregate_metrics_dict = json.load(f)
+
+        def numeric_close(a: float, b: float) -> bool:
+            """Helper to compare numbers with a tolerance"""
+            if a == b:
+                return True
+            try:
+                a_f = float(a)
+                b_f = float(b)
+            except Exception:
+                return False
+            scale = max(abs(a_f), abs(b_f))  # Adjuster for tolerance
+
+            # may need to adjust this threshold:
+            tol = 5e-3 if scale >= 1 else 5e-4  # Higher threshold for larger numbers
+            return abs(a_f - b_f) <= max(tol, 1e-9)  # Allow small differences
+
+        def diff_values(prev_v, new_v, path: str, diffs: List[str]) -> None:
+            """
+            Recursively compare values at the given path.
+            Keys from previous dict must be present in new dict.
+            Additional fields in new dict are allowed.
+            """
+            if isinstance(prev_v, dict) and isinstance(new_v, dict):
+                for k in prev_v.keys():
+                    sub_path = f"{path}.{k}" if path else k
+                    if k not in new_v:
+                        diffs.append(f"Missing key in new metrics: {sub_path}")
+                        continue
+                    diff_values(prev_v[k], new_v[k], sub_path, diffs)
+                return
+
+            # Lists: Check for equality regardless of order
+            if isinstance(prev_v, list) and isinstance(new_v, list):
+                if len(prev_v) != len(new_v):
+                    diffs.append(f"List length differs at {path}: {len(prev_v)} != {len(new_v)}")
+                    return
                 try:
-                    a_f = float(a)
-                    b_f = float(b)
-                except Exception:
-                    return False
-                scale = max(abs(a_f), abs(b_f))  # Adjuster for tolerance
-
-                # may need to adjust this threshold:
-                tol = 5e-3 if scale >= 1 else 5e-4  # Higher threshold for larger numbers
-                return abs(a_f - b_f) <= max(tol, 1e-9)  # Allow small differences
-
-            def diff_values(prev_v, new_v, path: str, diffs: List[str]) -> None:
-                """
-                Recursively compare values at the given path.
-                Keys from previous dict must be present in new dict.
-                Additional fields in new dict are allowed.
-                """
-                if isinstance(prev_v, dict) and isinstance(new_v, dict):
-                    for k in prev_v.keys():
-                        sub_path = f"{path}.{k}" if path else k
-                        if k not in new_v:
-                            diffs.append(f"Missing key in new metrics: {sub_path}")
-                            continue
-                        diff_values(prev_v[k], new_v[k], sub_path, diffs)
+                    prev_counter = Counter(prev_v)
+                    new_counter = Counter(new_v)
+                    if prev_counter != new_counter:
+                        diffs.append(f"Multiset mismatch at {path}: {prev_counter} != {new_counter}")
+                    return
+                except TypeError:
+                    # Manual fallback for unhashable elements
+                    used = set()
+                    for i, pv in enumerate(prev_v):
+                        found = False
+                        for j, nv in enumerate(new_v):
+                            if j in used:
+                                continue
+                            sub_diffs = []
+                            diff_values(pv, nv, f"{path}[{i}]", sub_diffs)
+                            if not sub_diffs:
+                                used.add(j)
+                                found = True
+                                break
+                        if not found:
+                            diffs.append(f"No matching element for {path}[{i}] in new metrics (unordered)")
                     return
 
-                # Lists: Check for equality regardless of order
-                if isinstance(prev_v, list) and isinstance(new_v, list):
-                    if len(prev_v) != len(new_v):
-                        diffs.append(f"List length differs at {path}: {len(prev_v)} != {len(new_v)}")
-                        return
-                    try:
-                        prev_counter = Counter(prev_v)
-                        new_counter = Counter(new_v)
-                        if prev_counter != new_counter:
-                            diffs.append(f"Multiset mismatch at {path}: {prev_counter} != {new_counter}")
-                        return
-                    except TypeError:
-                        # Manual fallback for unhashable elements
-                        used = set()
-                        for i, pv in enumerate(prev_v):
-                            found = False
-                            for j, nv in enumerate(new_v):
-                                if j in used:
-                                    continue
-                                sub_diffs = []
-                                diff_values(pv, nv, f"{path}[{i}]", sub_diffs)
-                                if not sub_diffs:
-                                    used.add(j)
-                                    found = True
-                                    break
-                            if not found:
-                                diffs.append(f"No matching element for {path}[{i}] in new metrics (unordered)")
-                        return
+            if isinstance(prev_v, float) and isinstance(new_v, float):
+                if not numeric_close(prev_v, new_v):
+                    diffs.append(f"Numeric mismatch at {path}: {prev_v} != {new_v}")
+                return
 
-                if isinstance(prev_v, float) and isinstance(new_v, float):
-                    if not numeric_close(prev_v, new_v):
-                        diffs.append(f"Numeric mismatch at {path}: {prev_v} != {new_v}")
-                    return
+            if prev_v != new_v:
+                diffs.append(f"Value differs at {path}: {prev_v} != {new_v}")
 
-                if prev_v != new_v:
-                    diffs.append(f"Value differs at {path}: {prev_v} != {new_v}")
+        diffs: List[str] = []
+        diff_values(previous_aggregate_metrics_dict, aggregate_metrics_dict, path="", diffs=diffs)
 
-            diffs: List[str] = []
-            diff_values(previous_aggregate_metrics_dict, aggregate_metrics_dict, path="", diffs=diffs)
+        if diffs:
+            print("Differences found in aggregate metrics:")
+            pprint(diffs)
 
-            if diffs:
-                print("Differences found in aggregate metrics:")
-                pprint(diffs)
+            conflicting_metrics_fpath = metrics_fpath.with_name(f"{metrics_fpath.stem}_conflict.json")
+            with open(conflicting_metrics_fpath, "w") as f:
+                json.dump(aggregate_metrics_dict, f, indent=4)
 
-                conflicting_metrics_fpath = metrics_fpath.with_name(f"{metrics_fpath.stem}_conflict.json")
-                with open(conflicting_metrics_fpath, "w") as f:
-                    json.dump(aggregate_metrics_dict, f, indent=4)
-
-                return conflicting_metrics_fpath
+            return conflicting_metrics_fpath
 
     def validate_samples_and_aggregate_metrics(
-        self, server_instance_configs: List[ServerInstanceConfig]
+        self, server_instance_configs: List[ServerInstanceConfig], overwrite_metrics_conflicts: bool
     ) -> Dict[str, DatasetMetrics]:
         conflicting_fpaths: List[str] = []
         dataset_type_to_aggregate_metrics: Dict[str, DatasetMetrics] = defaultdict(DatasetMetrics)
@@ -595,7 +646,7 @@ class TrainDataProcessor(BaseModel):
                 aggregate_metrics = state.metrics.aggregate()
 
                 aggregate_metrics_dict = aggregate_metrics.model_dump(mode="json", by_alias=True)
-                aggregate_metrics_dict = d.model_dump() | aggregate_metrics_dict
+                aggregate_metrics_dict = d.model_dump(mode="json") | aggregate_metrics_dict
 
                 data_fpath = Path(d.jsonl_fpath)
                 metrics_fpath = data_fpath.with_name(f"{data_fpath.stem}_metrics.json")
@@ -605,7 +656,11 @@ class TrainDataProcessor(BaseModel):
                 )
                 if maybe_conflicting_metrics_fpath is not None:
                     conflicting_fpaths.append(str(maybe_conflicting_metrics_fpath))
-                    continue
+
+                    if overwrite_metrics_conflicts:
+                        pass
+                    else:
+                        continue
 
                 with open(metrics_fpath, "w") as f:
                     json.dump(aggregate_metrics_dict, f, indent=4)
@@ -618,11 +673,16 @@ class TrainDataProcessor(BaseModel):
             target_fpaths_str = "\n- ".join(
                 [""] + [fp.replace("_conflict.json", ".json") for fp in conflicting_fpaths]
             )
-            raise ValueError(f"""
+            print_str = f"""
 Found conflicting aggregate metrics that need to be corrected:{conflicting_fpaths_str}
 
 This could be due to a change in how metrics are calculated, leading to outdated metrics. Try deleting the below file(s) and rerunning data preparation:{target_fpaths_str}
-""")
+"""
+
+            if overwrite_metrics_conflicts:
+                print(print_str)
+            else:
+                raise ValueError(print_str)
 
         return dict(dataset_type_to_aggregate_metrics)
 
@@ -641,11 +701,20 @@ This could be due to a change in how metrics are calculated, leading to outdated
                 if d.type != type:
                     continue
 
+                prompt_cfg = None
+                if d.type == "benchmark" and d.prompt_config:
+                    prompt_cfg = load_prompt_config(d.prompt_config)
+
                 data_path = Path(d.jsonl_fpath)
                 prepare_path = data_path.with_name(f"{data_path.stem}_prepare.jsonl")
                 with open(prepare_path, "w") as target:
                     for line in self._iter_dataset_lines(d):
                         d = json.loads(line)
+
+                        if prompt_cfg:
+                            validate_prompt_compatibility([d], prompt_cfg)
+                            d = apply_prompt_to_row(d, prompt_cfg)
+
                         d[AGENT_REF_KEY] = AgentServerRef(type="responses_api_agents", name=c.name).model_dump()
                         target.write(f"{json.dumps(d)}\n")
 
@@ -669,9 +738,15 @@ This could be due to a change in how metrics are calculated, leading to outdated
             aggregate_metrics = aggregate_metrics.aggregate()
 
             aggregate_metrics_dict = aggregate_metrics.model_dump(mode="json", by_alias=True)
+            d = next(
+                (dataset for c in server_instance_configs for dataset in c.datasets if dataset.type == type),
+                None,
+            )
+            if d is not None:
+                aggregate_metrics_dict = d.model_dump(mode="json") | aggregate_metrics_dict
 
             parent = Path(config.output_dirpath)
-            parent.mkdir(exist_ok=True)
+            parent.mkdir(exist_ok=True, parents=True)
             metrics_fpath = parent / f"{type}_metrics.json"
             maybe_conflicting_metrics_fpath = self._validate_aggregate_metrics(
                 aggregate_metrics_dict=aggregate_metrics_dict,
@@ -679,7 +754,11 @@ This could be due to a change in how metrics are calculated, leading to outdated
             )
             if maybe_conflicting_metrics_fpath is not None:
                 conflicting_fpaths.append(str(maybe_conflicting_metrics_fpath))
-                continue
+
+                if config.overwrite_metrics_conflicts:
+                    pass
+                else:
+                    continue
 
             with open(metrics_fpath, "w") as f:
                 json.dump(aggregate_metrics_dict, f, indent=4)
@@ -704,14 +783,46 @@ This could be due to a change in how metrics are calculated, leading to outdated
             target_fpaths_str = "\n- ".join(
                 [""] + [fp.replace("_conflict.json", ".json") for fp in conflicting_fpaths]
             )
-            raise ValueError(f"""
+            print_str = f"""
 Found conflicting aggregate metrics that need to be corrected:{conflicting_fpaths_str}
 
 This could be due to a change in how metrics are calculated, leading to outdated metrics. Try deleting the below file(s) and rerunning data preparation:{target_fpaths_str}
-""")
+"""
+            if config.overwrite_metrics_conflicts:
+                print(print_str)
+            else:
+                raise ValueError(print_str)
 
         final_fpaths_str = "\n- ".join([""] + [f"{type}: {fpath}" for type, fpath in final_fpaths.items()])
         print(f"View your final data!{final_fpaths_str}")
+
+
+def validate_backend_credentials(backend: str) -> tuple[bool, str]:
+    """Check if required env variables are present for the chosen backend"""
+    global_config = get_global_config_dict()
+
+    if backend == "gitlab":
+        required = ["mlflow_tracking_uri", "mlflow_tracking_token"]
+        missing = [k for k in required if k not in global_config or not global_config[k]]
+        if missing:
+            return False, (
+                f"GitLab backend selected but missing credentials: {missing}\n"
+                f"Add to env.yaml:\n"
+                f"  mlflow_tracking_uri: <your_gitlab_uri>\n"
+                f"  mlflow_tracking_token: <your_gitlab_token>"
+            )
+
+    elif backend == "huggingface":
+        required = [HF_TOKEN_KEY_NAME]
+        missing = [k for k in required if k not in global_config or not global_config[k]]
+        if missing:
+            return False, (
+                f"HuggingFace backend selected but missing credentials: {missing}\n"
+                f"Add to env.yaml:\n"
+                f"  {HF_TOKEN_KEY_NAME}: <your_hf_token>\n"
+            )
+
+    return True, ""
 
 
 def prepare_data():  # pragma: no cover

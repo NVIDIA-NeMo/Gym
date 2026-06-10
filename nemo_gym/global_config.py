@@ -1,28 +1,43 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from os import getenv
+from argparse import ArgumentParser
+from collections import defaultdict
+from copy import deepcopy
+from importlib import import_module
+from os import environ, getenv
 from pathlib import Path
-from socket import socket
+from platform import python_version
+from random import randint
+from socket import gethostbyname, gethostname, socket
 from typing import ClassVar, List, Optional, Tuple, Type
 
 import hydra
-from omegaconf import DictConfig, OmegaConf, open_dict
-from pydantic import BaseModel, ConfigDict, TypeAdapter
+import rich
+import wandb
+import wandb.util
+from omegaconf import DictConfig, ListConfig, OmegaConf, open_dict
+from openai import __version__ as openai_version
+from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
+from ray import __version__ as ray_version
+from wandb import Run
 
-from nemo_gym import PARENT_DIR
+from nemo_gym import CACHE_DIR, PARENT_DIR, RESULTS_DIR, WORKING_DIR
 from nemo_gym.config_types import (
     ServerInstanceConfig,
+    WANDBConfig,
+    is_almost_server,
     is_server_ref,
     maybe_get_server_instance_config,
 )
@@ -35,20 +50,81 @@ CONFIG_PATHS_KEY_NAME = "config_paths"
 ENTRYPOINT_KEY_NAME = "entrypoint"
 DEFAULT_HOST_KEY_NAME = "default_host"
 HEAD_SERVER_KEY_NAME = "head_server"
+DISALLOWED_PORTS_KEY_NAME = "disallowed_ports"
 HEAD_SERVER_DEPS_KEY_NAME = "head_server_deps"
+PYTHON_VERSION_KEY_NAME = "python_version"
+PIP_INSTALL_VERBOSE_KEY_NAME = "pip_install_verbose"
+USE_ABSOLUTE_IP = "use_absolute_ip"
+UV_PIP_SET_PYTHON_KEY_NAME = "uv_pip_set_python"
+SKIP_VENV_IF_PRESENT_KEY_NAME = "skip_venv_if_present"
+HF_TOKEN_KEY_NAME = "hf_token"
+RAY_HEAD_NODE_ADDRESS_KEY_NAME = "ray_head_node_address"
+PORT_RANGE_LOW_KEY_NAME = "port_range_low"
+PORT_RANGE_HIGH_KEY_NAME = "port_range_high"
+DRY_RUN_KEY_NAME = "dry_run"
+UV_CACHE_DIR_KEY_NAME = "uv_cache_dir"
+UV_VENV_DIR_KEY_NAME = "uv_venv_dir"
+INHERIT_FROM_KEY_NAME = "_inherit_from"
+COPY_KEY_NAME = "_copy"
+DELETE_KEY_KEY_NAME = "_delete_key"
+NEMO_GYM_LOG_DIR_KEY_NAME = "nemo_gym_log_dir"
 NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     CONFIG_PATHS_KEY_NAME,
     ENTRYPOINT_KEY_NAME,
     DEFAULT_HOST_KEY_NAME,
     HEAD_SERVER_KEY_NAME,
+    DISALLOWED_PORTS_KEY_NAME,
     HEAD_SERVER_DEPS_KEY_NAME,
+    PYTHON_VERSION_KEY_NAME,
+    PIP_INSTALL_VERBOSE_KEY_NAME,
+    USE_ABSOLUTE_IP,
+    UV_PIP_SET_PYTHON_KEY_NAME,
+    SKIP_VENV_IF_PRESENT_KEY_NAME,
+    HF_TOKEN_KEY_NAME,
+    RAY_HEAD_NODE_ADDRESS_KEY_NAME,
+    PORT_RANGE_LOW_KEY_NAME,
+    PORT_RANGE_HIGH_KEY_NAME,
+    DRY_RUN_KEY_NAME,
+    UV_CACHE_DIR_KEY_NAME,
+    UV_VENV_DIR_KEY_NAME,
+    INHERIT_FROM_KEY_NAME,
+    COPY_KEY_NAME,
+    NEMO_GYM_LOG_DIR_KEY_NAME,
 ]
+
+# Data keys
+TASK_INDEX_KEY_NAME = "_ng_task_index"
+ROLLOUT_INDEX_KEY_NAME = "_ng_rollout_index"
+RESPONSES_CREATE_PARAMS_KEY_NAME = "responses_create_params"
+RESPONSE_KEY_NAME = "response"
+AGENT_REF_KEY_NAME = "agent_ref"
 
 POLICY_BASE_URL_KEY_NAME = "policy_base_url"
 POLICY_API_KEY_KEY_NAME = "policy_api_key"  # pragma: allowlist secret
 POLICY_MODEL_NAME_KEY_NAME = "policy_model_name"
+POLICY_MODEL_KEY_NAME = "policy_model"
 
 DEFAULT_HEAD_SERVER_PORT = 11000
+
+
+# W&B
+# Increase row limit since some of our rollouts are pretty hefty
+wandb.util.VALUE_BYTES_LIMIT = 10_000_000
+_WANDB_RUN: Optional[Run] = None
+
+
+def get_wandb_run() -> Optional[Run]:
+    return _WANDB_RUN
+
+
+# HuggingFace
+def get_hf_token() -> Optional[str]:  # pragma: no cover
+    return get_global_config_dict().get(HF_TOKEN_KEY_NAME)
+
+
+# OmegaConf new resolvers
+OmegaConf.register_new_resolver("inherit_from", lambda a: f"${{inherit_from:{a}}}")
+OmegaConf.register_new_resolver("copy", lambda a: f"${{copy:{a}}}")
 
 
 class GlobalConfigDictParserConfig(BaseModel):
@@ -59,17 +135,44 @@ class GlobalConfigDictParserConfig(BaseModel):
     skip_load_from_cli: bool = False
     skip_load_from_dotenv: bool = False
 
+    hide_secrets: bool = False
+
+    # This is a shorthand we use for config resolution use cases that shouldn't require a model
+    # e.g. data loading, etc
     NO_MODEL_GLOBAL_CONFIG_DICT: ClassVar[DictConfig] = DictConfig(
         {
             POLICY_BASE_URL_KEY_NAME: "",
             POLICY_API_KEY_KEY_NAME: "",
             POLICY_MODEL_NAME_KEY_NAME: "",
+            POLICY_MODEL_KEY_NAME: {"responses_api_models": {"dummy_model": {"entrypoint": "app.py"}}},
         }
     )
 
 
 class GlobalConfigDictParser(BaseModel):
     def parse_global_config_dict_from_cli(self) -> DictConfig:
+        # We need to monkeypatch hydra here so that it doesn't use Hydra help so that we can use our own help down the line
+        hydra_main_module = import_module("hydra.main")
+        original_get_args_parser = hydra_main_module.get_args_parser
+
+        def new_get_args_parser():
+            parser: ArgumentParser = original_get_args_parser()
+            # Set the conflict handlers to resolve so we can disable the help.
+            parser.conflict_handler = "resolve"
+            for action_group in parser._action_groups:
+                action_group.conflict_handler = "resolve"
+
+            parser.add_argument("--help", "-h", action="store_false", default=False)
+
+            # Reset to the original conflict_handler error scheme
+            parser.conflict_handler = "error"
+            for action_group in parser._action_groups:
+                action_group.conflict_handler = "error"
+
+            return parser
+
+        hydra_main_module.get_args_parser = new_get_args_parser
+
         # This function is just to get the config object out of the hydra main call.
         # Need a closure. We simply use an outer ref of a list
         config_list = []
@@ -91,17 +194,29 @@ class GlobalConfigDictParser(BaseModel):
         config_paths = config_paths.copy()
 
         extra_configs: List[DictConfig] = []
+        duplicate_config_paths: List[str] = []
+        # Just a careful note here that we explicitly mutate config_paths as it is being appended to
         for config_path in config_paths:
             config_path = Path(config_path)
-            # Assume relative to the parent dir
+            # Check cwd first for user's local configs, then install location
             if not config_path.is_absolute():
-                config_path = PARENT_DIR / config_path
+                cwd_path = Path.cwd() / config_path
+                config_path = cwd_path if cwd_path.exists() else PARENT_DIR / config_path
 
             extra_config = OmegaConf.load(config_path)
             for new_config_path in extra_config.get(CONFIG_PATHS_KEY_NAME) or []:
                 if new_config_path not in config_paths:
                     config_paths.append(new_config_path)
+                else:
+                    duplicate_config_paths.append(new_config_path)
             extra_configs.append(extra_config)
+
+        if duplicate_config_paths:
+            duplicate_config_paths_str = "".join(f"- {p}\n" for p in duplicate_config_paths)
+            print(f"""Found configs that reference the same source config path. You may want to double check whether the configs you have need to use different configs for the same server.
+In cases like these, you may want to consider using the `inherit_from` OmegaConf directive e.g. '++my_specific_server=${{inherit_from:generic_server}}' and then overriding config parameters in `my_specific_server`.
+Duplicate config paths:
+{duplicate_config_paths_str}""")
 
         return config_paths, extra_configs
 
@@ -114,7 +229,7 @@ class GlobalConfigDictParser(BaseModel):
         # Do one pass to get the server instance configs
         server_instance_configs: List[ServerInstanceConfig] = []
         for server_name, server_type_config_dict in non_reserved_items:
-            maybe_server_instance_config = maybe_get_server_instance_config(
+            maybe_server_instance_config, _ = maybe_get_server_instance_config(
                 name=server_name, server_type_config_dict=server_type_config_dict
             )
             if maybe_server_instance_config is not None:
@@ -123,9 +238,17 @@ class GlobalConfigDictParser(BaseModel):
         return server_instance_configs
 
     def validate_and_populate_defaults(
-        self, server_instance_configs: List[ServerInstanceConfig], default_host: str
-    ) -> None:
+        self,
+        server_instance_configs: List[ServerInstanceConfig],
+        default_host: str,
+        port_range_low: int,
+        port_range_high: int,
+        initial_disallowed_ports: Optional[List[int]] = None,
+    ) -> List[int]:
         server_refs = [c.get_server_ref() for c in server_instance_configs]
+
+        disallowed_ports = initial_disallowed_ports.copy() if initial_disallowed_ports is not None else []
+
         for server_instance_config in server_instance_configs:
             run_server_config_dict = server_instance_config.get_inner_run_server_config_dict()
 
@@ -144,7 +267,120 @@ class GlobalConfigDictParser(BaseModel):
                 if not run_server_config_dict.get("host"):
                     run_server_config_dict["host"] = default_host
                 if not run_server_config_dict.get("port"):
-                    run_server_config_dict["port"] = find_open_port()
+                    port = _find_open_port_using_range(
+                        disallowed_ports=disallowed_ports,
+                        port_range_low=port_range_low,
+                        port_range_high=port_range_high,
+                    )
+                    run_server_config_dict["port"] = port
+                    disallowed_ports.append(port)  # Disallow newly allocated port.
+                else:
+                    # Port already exists, add it to the disallowed list.
+                    disallowed_ports.append(run_server_config_dict["port"])
+
+        return disallowed_ports
+
+    def _recursively_hide_secrets(self, dict_config: DictConfig) -> None:
+        with open_dict(dict_config):
+            self._recursively_hide_secrets_helper(dict_config)
+
+    def _recursively_hide_secrets_helper(self, dict_config: DictConfig) -> None:
+        for k, v in list(dict_config.items()):
+            if isinstance(v, (DictConfig, dict)):
+                self._recursively_hide_secrets_helper(v)
+            elif isinstance(v, (ListConfig, list)):
+                if "token" in k or "key" in k:
+                    dict_config[k] = ["****"] * len(v)
+                else:
+                    for inner_v in v:
+                        if isinstance(inner_v, (DictConfig, dict)):
+                            self._recursively_hide_secrets_helper(inner_v)
+            else:
+                if "token" in k or "key" in k:
+                    dict_config[k] = "****"
+
+    def _recursively_swap_keys(self, dict_config: DictConfig) -> None:
+        frozen_dict_config = deepcopy(dict_config)
+        with open_dict(dict_config):
+            self._recursively_swap_keys_helper(dict_config, dict_config, frozen_dict_config)
+
+    def _recursively_swap_keys_helper(
+        self, dict_config: DictConfig, original_dict_config: DictConfig, frozen_dict_config: DictConfig
+    ) -> None:
+        for k, v in list(dict_config.items()):
+            is_delete_property = isinstance(v, DictConfig) and DELETE_KEY_KEY_NAME in v
+
+            if is_delete_property:
+                keys_to_delete = v.pop(DELETE_KEY_KEY_NAME).split(",")
+                keys_to_delete = set(map(str.strip, keys_to_delete))
+
+                # Delete first so we don't resolve the deleted keys
+                # but only delete keys that are present in case the key-to-delete comes from a downstream inherit or swap
+                existing_keys = set(k for k in keys_to_delete if k in v)
+                for key in existing_keys:
+                    v.pop(key)
+                keys_to_delete -= existing_keys
+
+            if isinstance(v, (DictConfig, dict)):
+                self._recursively_swap_keys_helper(v, original_dict_config, frozen_dict_config)
+            elif isinstance(v, (ListConfig, list)):
+                for inner_v in v:
+                    if isinstance(inner_v, (DictConfig, dict)):
+                        self._recursively_swap_keys_helper(inner_v, original_dict_config, frozen_dict_config)
+
+            # e.g. ${inherit_from:grpo.num_prompts_per_step}
+            is_swap_str = isinstance(v, str) and v.startswith("${inherit_from:")
+            is_swap_property = isinstance(v, DictConfig) and INHERIT_FROM_KEY_NAME in v
+            is_swap = is_swap_str or is_swap_property
+
+            is_copy_str = isinstance(v, str) and v.startswith("${copy:")
+            is_copy_property = isinstance(v, DictConfig) and COPY_KEY_NAME in v
+            is_copy = is_copy_str or is_copy_property
+            if not (is_swap or is_copy):
+                continue
+
+            if is_swap_str:
+                path_to_swap = v.removeprefix("${inherit_from:").removesuffix("}")
+            elif is_swap_property:
+                path_to_swap = v.pop(INHERIT_FROM_KEY_NAME)
+
+            if is_copy_str:
+                path_to_swap = v.removeprefix("${copy:").removesuffix("}")
+            elif is_copy_property:
+                path_to_swap = v.pop(COPY_KEY_NAME)
+
+            path_to_swap = path_to_swap.split(".")
+
+            # Pop the swapped value
+            dict_containing_key_to_swap = self._recursive_index_dict_using_path(
+                original_dict_config, path_to_swap[:-1]
+            )
+            if is_swap:
+                # Pop with a default since multiple configs may refer to the same path
+                # We don't want to pop if it's just a copy
+                dict_containing_key_to_swap.pop(path_to_swap[-1], None)
+
+            swapped_value = self._recursive_index_dict_using_path(frozen_dict_config, path_to_swap)
+            if is_swap_property or is_copy_property:
+                swapped_value = OmegaConf.merge(swapped_value, v)
+
+            dict_config[k] = swapped_value
+
+            # TODO We may want to recurse again after swap since we are not guaranteed to traverse the swapped-from value before hitting this swap.
+
+            if is_delete_property:
+                # Enforce that every key-to-delete exists
+                for key in keys_to_delete:
+                    dict_config[k].pop(key)
+
+    def _recursive_index_dict_using_path(self, dict_config: DictConfig, path: List[str]) -> DictConfig:
+        for k in path:
+            if k not in dict_config:
+                raise ValueError(f"Path specified does not exist in config: {path}")
+
+            dict_config = dict_config[k]
+
+        return dict_config
 
     def parse(self, parse_config: Optional[GlobalConfigDictParserConfig] = None) -> DictConfig:
         if parse_config is None:
@@ -159,7 +395,13 @@ class GlobalConfigDictParser(BaseModel):
         global_config_dict: DictConfig = OmegaConf.merge(initial_global_config_dict, global_config_dict)
 
         # Load the env.yaml config. We load it early so that people can use it to conveniently store config paths.
-        dotenv_path = parse_config.dotenv_path or Path(PARENT_DIR) / "env.yaml"
+        # Check cwd first for user's local env.yaml, then fall back to PARENT_DIR
+        if parse_config.dotenv_path:
+            dotenv_path = parse_config.dotenv_path
+        else:
+            cwd_env_yaml = Path.cwd() / "env.yaml"
+            dotenv_path = cwd_env_yaml if cwd_env_yaml.exists() else PARENT_DIR / "env.yaml"
+
         dotenv_extra_config = DictConfig({})
         if dotenv_path.exists() and not parse_config.skip_load_from_dotenv:
             dotenv_extra_config = OmegaConf.load(dotenv_path)
@@ -183,20 +425,134 @@ class GlobalConfigDictParser(BaseModel):
             with open_dict(global_config_dict):
                 global_config_dict[CONFIG_PATHS_KEY_NAME] = config_paths
 
+        self._recursively_swap_keys(global_config_dict)
+
+        # TODO @bxyu-nvidia: We need a better way of handling dummy model configs
+        with open_dict(global_config_dict):
+            for top_level_value in global_config_dict.values():
+                if not (
+                    isinstance(top_level_value, (DictConfig))
+                    and "responses_api_models" in top_level_value
+                    # We check `len(top_level_value) > 1` in case the policy model is inherited from.
+                    and (len(top_level_value) > 1 or len(top_level_value["responses_api_models"]) > 1)
+                    and "dummy_model" in top_level_value["responses_api_models"]
+                ):
+                    continue
+
+                dummy_value = top_level_value["responses_api_models"].pop("dummy_model")
+                actual_key = next(iter(top_level_value["responses_api_models"]))
+                top_level_value["responses_api_models"][actual_key] = OmegaConf.merge(
+                    dummy_value, top_level_value["responses_api_models"][actual_key]
+                )
+
+        # Almost-server detection and reporting
+        almost_servers = self.detect_and_report_almost_servers(global_config_dict)
+
+        if almost_servers:
+            rich.print("[yellow]═══════════════════════════════════════════════════[/yellow]")
+            rich.print("[yellow]Configuration Warnings: Almost-Servers Detected[/yellow]")
+            rich.print("[yellow]═══════════════════════════════════════════════════[/yellow]")
+
+            for server_name, error in almost_servers:
+                rich.print(format_almost_server_warning(server_name, error))
+
+            rich.print("[yellow]═══════════════════════════════════════════════════[/yellow]\n")
+
+            error_on_almost_servers = global_config_dict.get("error_on_almost_servers", True)
+            if error_on_almost_servers:
+                config_dict_to_log = deepcopy(global_config_dict)
+                self._recursively_hide_secrets(config_dict_to_log)
+                config_to_log_yaml = OmegaConf.to_yaml(config_dict_to_log)
+
+                error_msg = f"""Found {len(almost_servers)} almost-server(s) with validation errors. Fix the issues above or set error_on_almost_servers=false to bypass this error.
+Found global config dict yaml:
+{config_to_log_yaml}"""
+
+                raise ValueError(error_msg)
+
         server_instance_configs = self.filter_for_server_instance_configs(global_config_dict)
 
-        # Do one pass through all the configs validate and populate various configs for our servers.
-        default_host = global_config_dict.get(DEFAULT_HOST_KEY_NAME) or "127.0.0.1"
+        with open_dict(global_config_dict):
+            use_absolute_ip = global_config_dict.setdefault(USE_ABSOLUTE_IP, False)
+        if use_absolute_ip:
+            default_host = gethostbyname(gethostname())
+        else:
+            # Do one pass through all the configs validate and populate various configs for our servers.
+            default_host = global_config_dict.get(DEFAULT_HOST_KEY_NAME) or "127.0.0.1"
 
-        self.validate_and_populate_defaults(server_instance_configs, default_host)
+        head_server_config = global_config_dict.get(HEAD_SERVER_KEY_NAME, {})
+        head_server_port = head_server_config.get("port", DEFAULT_HEAD_SERVER_PORT)
 
-        # Populate head server defaults
-        if not global_config_dict.get(HEAD_SERVER_KEY_NAME):
-            with open_dict(global_config_dict):
+        initial_disallowed_ports = [head_server_port] if head_server_port is not None else []
+
+        with open_dict(global_config_dict):
+            port_range_low = global_config_dict.setdefault(PORT_RANGE_LOW_KEY_NAME, 10_001)
+            port_range_high = global_config_dict.setdefault(PORT_RANGE_HIGH_KEY_NAME, 20_000)
+
+        disallowed_ports = self.validate_and_populate_defaults(
+            server_instance_configs=server_instance_configs,
+            default_host=default_host,
+            initial_disallowed_ports=initial_disallowed_ports,
+            port_range_low=port_range_low,
+            port_range_high=port_range_high,
+        )
+
+        with open_dict(global_config_dict):
+            # Populate head server defaults
+            if not global_config_dict.get(HEAD_SERVER_KEY_NAME):
                 global_config_dict[HEAD_SERVER_KEY_NAME] = {
                     "host": default_host,
                     "port": DEFAULT_HEAD_SERVER_PORT,
                 }
+
+            # Store final list of disallowed ports.
+            global_config_dict[DISALLOWED_PORTS_KEY_NAME] = disallowed_ports
+
+            # Constrain sensitive package versions
+            global_config_dict[HEAD_SERVER_DEPS_KEY_NAME] = [
+                # The ray version is very sensitive. The children ray versions must exactly match those of the parent ray.
+                # The ray extra [default] should also exactly match the extra in the top-level Gym pyproject.toml.
+                f"ray[default]=={ray_version}",
+                # OpenAI version is also sensitive since it changes so often and may introduce subtle incompatibilities.
+                f"openai=={openai_version}",
+            ]
+
+            # Constrain python version since ray is sensitive to this.
+            global_config_dict[PYTHON_VERSION_KEY_NAME] = python_version()
+
+            # Skip venv setup is opt-in and defaults to False.
+            global_config_dict.setdefault(SKIP_VENV_IF_PRESENT_KEY_NAME, False)
+
+            global_config_dict.setdefault(DRY_RUN_KEY_NAME, False)
+
+            # UV related configuration
+            # UV caching directory overrides to local folders.
+            global_config_dict.setdefault(UV_CACHE_DIR_KEY_NAME, str(CACHE_DIR / "uv"))
+            # Set the appropriate environment variable here, and matche the config
+            environ["UV_CACHE_DIR"] = global_config_dict[UV_CACHE_DIR_KEY_NAME]
+            # By default, build the directories in their individual folders using the root repository
+            # e.g. WORKING_DIR/responses_api_models/my_server
+            global_config_dict.setdefault(UV_VENV_DIR_KEY_NAME, str(WORKING_DIR))
+
+        if parse_config.hide_secrets:  # pragma: no cover
+            self._recursively_hide_secrets(global_config_dict)
+
+        # Set up W&B and log config. This must happen at the very last step.
+        wandb_config = WANDBConfig.model_validate(global_config_dict)
+        if wandb_config.is_available:  # pragma: no cover
+            environ["WANDB_API_KEY"] = wandb_config.wandb_api_key
+
+            global _WANDB_RUN
+            _WANDB_RUN = wandb.init(
+                project=wandb_config.wandb_project,
+                name=wandb_config.wandb_name,
+                dir=str(RESULTS_DIR / "wandb"),
+            )
+
+            # Log params
+            config_dict_to_log = deepcopy(global_config_dict)
+            self._recursively_hide_secrets(config_dict_to_log)
+            _WANDB_RUN.config.update(OmegaConf.to_container(config_dict_to_log))
 
         return global_config_dict
 
@@ -212,6 +568,29 @@ class GlobalConfigDictParser(BaseModel):
                 skip_load_from_dotenv=True,
             )
         )
+
+    def detect_and_report_almost_servers(
+        self,
+        global_config_dict: DictConfig,
+    ) -> List[Tuple[str, ValidationError]]:
+        non_reserved_items = [
+            (key, v) for key, v in global_config_dict.items() if key not in NEMO_GYM_RESERVED_TOP_LEVEL_KEYS
+        ]
+
+        almost_servers = []
+
+        # Try to get config with error capture.
+        for server_name, server_type_config_dict in non_reserved_items:
+            config, error = maybe_get_server_instance_config(
+                name=server_name, server_type_config_dict=server_type_config_dict
+            )
+
+            # Failed validation but looks like a server = almost-server
+            if config is None and error is not None:
+                if is_almost_server(server_type_config_dict):
+                    almost_servers.append((server_name, error))
+
+        return almost_servers
 
 
 def get_global_config_dict(
@@ -247,11 +626,22 @@ def get_global_config_dict(
 
         return global_config_dict
 
+    set_global_config_dict(
+        global_config_dict_parser_config=global_config_dict_parser_config,
+        global_config_dict_parser_cls=global_config_dict_parser_cls,
+    )
+
+    return _GLOBAL_CONFIG_DICT
+
+
+def set_global_config_dict(
+    global_config_dict_parser_config: Optional[GlobalConfigDictParserConfig] = None,
+    global_config_dict_parser_cls: Type[GlobalConfigDictParser] = GlobalConfigDictParser,
+) -> None:
+    global _GLOBAL_CONFIG_DICT
     global_config_dict = global_config_dict_parser_cls().parse(global_config_dict_parser_config)
 
     _GLOBAL_CONFIG_DICT = global_config_dict
-
-    return global_config_dict
 
 
 def get_first_server_config_dict(global_config_dict: DictConfig, top_level_path: str) -> DictConfig:
@@ -262,7 +652,144 @@ def get_first_server_config_dict(global_config_dict: DictConfig, top_level_path:
     return server_config_dict
 
 
-def find_open_port() -> int:  # pragma: no cover
+def find_open_port(
+    disallowed_ports: Optional[List[int]] = None,
+    max_retries: int = 50,
+) -> int:  # pragma: no cover
+    if disallowed_ports is None:
+        disallowed_ports = []
+
+    global_config_dict = get_global_config_dict()
+
+    return _find_open_port_using_range(
+        disallowed_ports=disallowed_ports,
+        max_retries=max_retries,
+        port_range_low=global_config_dict[PORT_RANGE_LOW_KEY_NAME],
+        port_range_high=global_config_dict[PORT_RANGE_HIGH_KEY_NAME],
+    )
+
+
+def _find_open_port_using_range(
+    disallowed_ports: List[int],
+    port_range_low: int,
+    port_range_high: int,
+    max_retries: int = 50,
+) -> int:  # pragma: no cover
+    # Find an open port that doesn't conflict with disallowed ports.
+
     with socket() as s:
-        s.bind(("", 0))  # Bind to a free port provided by the host.
-        return s.getsockname()[1]  # Return the port number assigned.
+        for _ in range(max_retries):
+            # Pick a random port in our range that is not disallowed
+            port = None
+            while port is None or port in disallowed_ports:
+                port = randint(port_range_low, port_range_high)
+
+            try:
+                s.bind(("", port))
+                return port
+            except OSError:
+                pass
+
+    raise RuntimeError(
+        f"Unable to find an open port that doesn't conflict with disallowed ports "
+        f"{disallowed_ports} after {max_retries} attempts"
+    )
+
+
+def format_almost_server_warning(server_name: str, error: ValidationError) -> str:
+    """Format user-friendly warning. Union literal errors are consolidated.
+    Union discriminator noise is filtered out. Explanation:
+    Pydantic validation is quirky- it will report all failures in the union if any union member fails. Example:
+    If an agent server contains an invalid license, it will not only show the error for the invalid license in ResponsesAPIAgentServerInstanceConfig, but also missing values for ResponsesAPIModelServerInstanceConfig `responses_api_models` and ResourcesServerInstanceConfig `resources_servers`.
+    """
+
+    errors = error.errors()
+
+    # Identify the actual server type from the error (excluding Union discriminator noise)
+    server_type_keys = ["responses_api_models", "resources_servers", "responses_api_agents"]
+    actual_server_type = None
+
+    # Example error structure: ('ResponsesAPIAgentServerInstanceConfig', 'responses_api_agents', 'simple_agent', 'datasets', 0, 'license')
+    for err in errors:
+        loc = err["loc"]
+        # loc[1] is the actual server type key.
+        # Skip "missing" errors from the irrelevant Union variants.
+        if len(loc) > 1 and loc[1] in server_type_keys and err["type"] != "missing":
+            actual_server_type = loc[1]
+            break
+
+    # Fallback: if all errors are "missing", check the input dict for the actual server type.
+    if not actual_server_type:  # pragma: no cover
+        for err in errors:
+            if "input" in err and isinstance(err["input"], dict):
+                for key in server_type_keys:
+                    if key in err["input"]:
+                        actual_server_type = key
+                        break
+                if actual_server_type:
+                    break
+
+    # Filter out Union discriminator false positives.
+    filtered_errors = []
+    for err in errors:
+        loc = err["loc"]
+
+        # Filter out "Field required" errors from wrong Union variants.
+        if (
+            err["type"] == "missing"
+            and len(loc) > 1
+            and loc[1] in server_type_keys
+            and actual_server_type
+            and loc[1] != actual_server_type
+        ):
+            continue
+
+        filtered_errors.append(err)
+
+    # Group errors by location to consolidate Union literals.
+    error_groups = defaultdict(list)
+
+    for err in filtered_errors:
+        loc = err["loc"]
+
+        # Check if literal union error (starts with "literal[").
+        if loc and isinstance(loc[-1], str) and loc[-1].startswith("literal["):
+            # Group without the literal type prefix.
+            base_loc = loc[:-1]
+            error_groups[base_loc].append(err)
+        else:
+            error_groups[loc].append(err)
+
+    error_details = []
+    for loc, errs in error_groups.items():
+        if len(errs) > 1 and all(isinstance(e["loc"][-1], str) and e["loc"][-1].startswith("literal[") for e in errs):
+            # Consolidate errors for literals into "Must be one of: X, Y, Z" format.
+            loc_str = " -> ".join(str(item) for item in loc)
+            valid_options = []
+            for e in errs:
+                literal_str = e["loc"][-1]
+                if literal_str.startswith("literal["):
+                    value = literal_str[8:-2]  # Remove "literal['" and "']"
+                    valid_options.append(value)
+
+            if valid_options:
+                options_str = "', ".join(valid_options)
+                error_details.append(f"  - {loc_str}: Must be one of: {options_str}'")
+            else:
+                error_details.append(f"  - {loc_str}: {errs[0]['msg']}")
+
+        else:
+            err = errs[0]
+            loc_str = " -> ".join(str(item) for item in err["loc"])
+            error_details.append(f"  - {loc_str}: {err['msg']}")
+
+    error_str = "\n".join(error_details)
+
+    return f"""
+    Almost-Server Detected: '{server_name}'
+    This server configuration failed validation:
+
+{error_str}
+
+    This server will NOT be started.
+    """

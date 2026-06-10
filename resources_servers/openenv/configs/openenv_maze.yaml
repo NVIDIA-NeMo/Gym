@@ -1,0 +1,25 @@
+openenv_maze_resources_server:
+  resources_servers:
+    openenv:
+      entrypoint: app.py
+      domain: games
+      verified: false
+      description: "Maze navigation environment via OpenEnv. Agent navigates an 8x8 grid to find the exit."
+      env_class: "maze_env.server.maze_env_environment.MazeEnvironment"
+      action_class: "maze_env.models.MazeAction"
+      is_mcp: false
+
+openenv_maze_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: openenv_maze_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/openenv/data/maze/example.jsonl

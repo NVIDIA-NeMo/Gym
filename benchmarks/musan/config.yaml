@@ -1,0 +1,22 @@
+config_paths:
+  - resources_servers/asr_with_pc/configs/asr_with_pc.yaml
+
+musan_asr_with_pc_resources_server:
+  _inherit_from: asr_with_pc
+  resources_servers:
+    asr_with_pc:
+      task_type: Hallucination
+
+musan_asr_with_pc_simple_agent:
+  _inherit_from: asr_with_pc_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: musan_asr_with_pc_resources_server
+      datasets:
+      - name: musan
+        type: benchmark
+        jsonl_fpath: benchmarks/musan/data/musan_benchmark.jsonl
+        prompt_config: benchmarks/musan/prompts/default.yaml
+        prepare_script: benchmarks/musan/prepare.py
+        license: Attribution 4.0 International

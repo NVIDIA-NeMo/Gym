@@ -1,0 +1,44 @@
+structured_outputs:
+  resources_servers:
+    structured_outputs:
+      entrypoint: app.py
+      domain: instruction_following
+      verified: false
+      description: Check if responses are following structured output requirements in prompts
+      value: Improve instruction following capabilities
+structured_outputs_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: structured_outputs
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: train
+        type: train
+        jsonl_fpath: resources_servers/structured_outputs/data/structured_outputs_251027_nano_v3_sdg_json_train.jsonl
+        gitlab_identifier:
+          dataset_name: structured_outputs_251027_nano_v3_sdg_json_train
+          version: 0.0.2
+          artifact_fpath: structured_outputs_251027_nano_v3_sdg_json_train.jsonl
+        huggingface_identifier:
+          repo_id: nvidia/Nemotron-RL-instruction_following-structured_outputs
+          artifact_fpath: structured_outputs_251027_nano_v3_sdg_json_train.jsonl
+        license: Apache 2.0
+      - name: validation
+        type: validation
+        jsonl_fpath: resources_servers/structured_outputs/data/structured_outputs_251027_nano_v3_sdg_json_val.jsonl
+        gitlab_identifier:
+          dataset_name: structured_outputs_251027_nano_v3_sdg_json_val
+          version: 0.0.2
+          artifact_fpath: structured_outputs_251027_nano_v3_sdg_json_val.jsonl
+        huggingface_identifier:
+          repo_id: nvidia/Nemotron-RL-instruction_following-structured_outputs
+          artifact_fpath: structured_outputs_251027_nano_v3_sdg_json_val.jsonl
+        license: Apache 2.0
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/structured_outputs/data/example.jsonl
