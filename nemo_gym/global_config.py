@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import difflib
 from argparse import ArgumentParser
 from collections import defaultdict
 from copy import deepcopy
@@ -36,6 +37,7 @@ from wandb import Run
 from nemo_gym import CACHE_DIR, PARENT_DIR, RESULTS_DIR, WORKING_DIR
 from nemo_gym.config_types import (
     ServerInstanceConfig,
+    ServerRefNotFoundError,
     WANDBConfig,
     is_almost_server,
     is_server_ref,
@@ -253,14 +255,24 @@ Duplicate config paths:
             run_server_config_dict = server_instance_config.get_inner_run_server_config_dict()
 
             # Check server refs
-            for v in run_server_config_dict.values():
+            for field_name, v in run_server_config_dict.items():
                 maybe_server_ref = is_server_ref(v)
                 if not maybe_server_ref:
                     continue
 
-                assert maybe_server_ref in server_refs, (
-                    f"Could not find {maybe_server_ref} in the list of available servers: {server_refs}"
-                )
+                if maybe_server_ref not in server_refs:
+                    same_type_names = [ref.name for ref in server_refs if ref.type == maybe_server_ref.type]
+                    suggestions = difflib.get_close_matches(maybe_server_ref.name, same_type_names, n=3, cutoff=0.6)
+                    if suggestions:
+                        hint = "Did you mean: " + ", ".join(repr(s) for s in suggestions) + "?"
+                    else:
+                        available = ", ".join(repr(n) for n in sorted(same_type_names)) or "(none)"
+                        hint = f"Available {maybe_server_ref.type}: {available}"
+                    raise ServerRefNotFoundError(
+                        f"In server instance '{server_instance_config.name}', field "
+                        f"'{field_name}' references {maybe_server_ref.type}/'{maybe_server_ref.name}', "
+                        f"which is not defined in the merged config.\n{hint}"
+                    )
 
             # Populate the host and port values if they are not present in the config.
             with open_dict(run_server_config_dict):
