@@ -12,10 +12,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import difflib
 from argparse import ArgumentParser
 from collections import defaultdict
 from copy import deepcopy
+from difflib import get_close_matches
 from importlib import import_module
 from os import environ, getenv
 from pathlib import Path
@@ -262,16 +262,15 @@ Duplicate config paths:
 
                 if maybe_server_ref not in server_refs:
                     same_type_names = [ref.name for ref in server_refs if ref.type == maybe_server_ref.type]
-                    suggestions = difflib.get_close_matches(maybe_server_ref.name, same_type_names, n=3, cutoff=0.6)
+                    suggestions = get_close_matches(maybe_server_ref.name, same_type_names, n=3, cutoff=0.6)
                     if suggestions:
                         hint = "Did you mean: " + ", ".join(repr(s) for s in suggestions) + "?"
                     else:
                         available = ", ".join(repr(n) for n in sorted(same_type_names)) or "(none)"
                         hint = f"Available {maybe_server_ref.type}: {available}"
                     raise ServerRefNotFoundError(
-                        f"In server instance '{server_instance_config.name}', field "
-                        f"'{field_name}' references {maybe_server_ref.type}/'{maybe_server_ref.name}', "
-                        f"which is not defined in the merged config.\n{hint}"
+                        f"""In server instance '{server_instance_config.name}', field '{field_name}' references {maybe_server_ref.type}/'{maybe_server_ref.name}', which is not defined in the merged config.
+{hint}"""
                     )
 
             # Populate the host and port values if they are not present in the config.
