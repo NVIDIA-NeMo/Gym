@@ -216,8 +216,9 @@ def build_test_program(full_generation: str, h5_path: str, step_number: str, san
     return program
 
 
-@ray.remote
-def run_substep_remote(program: str, timeout_secs: float) -> dict:
+# Kept as a plain function (then wrapped with ray.remote below) so the executor logic can be
+# unit-tested directly without launching Ray.
+def run_substep(program: str, timeout_secs: float) -> dict:
     """Run one sub-step program in a subprocess. Exit code 0 == all assertions passed."""
     try:
         proc = subprocess.run([sys.executable, "-c", program], capture_output=True, timeout=timeout_secs)
@@ -225,3 +226,6 @@ def run_substep_remote(program: str, timeout_secs: float) -> dict:
         return {"passed": False, "error": "timeout"}
     passed = proc.returncode == 0
     return {"passed": passed, "error": "" if passed else proc.stderr.decode("utf-8", errors="replace")[-_STDERR_TAIL:]}
+
+
+run_substep_remote = ray.remote(run_substep)
