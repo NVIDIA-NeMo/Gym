@@ -7,7 +7,6 @@ openclaw_agent:
         name: ???
       concurrency: 32
       command: openclaw
-      # <provider>/<model-name>. Provider name must not prefix the model name (so "nvinf", not "nvidia").
       model: nvinf/nvidia/meta/llama-3.3-70b-instruct
       workspace_root: outputs/openclaw_agent/workspaces
       openclaw_agent_id: main
@@ -17,7 +16,6 @@ openclaw_agent:
       timeout: 900
       extra_args: []
       env: {}
-      # deep-merged into the config openclaw setup generates
       openclaw_config:
         models:
           providers:
