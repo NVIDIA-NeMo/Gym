@@ -2,7 +2,7 @@
 {{ workspace_path }}
 </uploaded_files>
 
-{% set language = instance.repo_language | default('python') %}
+{% set language = instance.repo_language | default('') %}
 I've uploaded a {{ language }} code repository in the directory {{ workspace_path }}. Consider the following issue description:
 
 <issue_description>

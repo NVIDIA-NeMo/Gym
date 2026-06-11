@@ -1,4 +1,4 @@
-{% set language = instance.repo_language | default('python') %}
+{% set language = instance.repo_language | default('') %}
 I've uploaded a {{ language }} repository in the directory {{ workspace_path }}.
 
 <issue>
@@ -6,5 +6,3 @@ I've uploaded a {{ language }} repository in the directory {{ workspace_path }}.
 </issue>
 
 Fix this issue by modifying non-test files in {{ workspace_path }}.
-
-Work incrementally: make one small change at a time and verify it before moving on to the next.

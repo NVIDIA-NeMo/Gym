@@ -1,0 +1,12 @@
+{% set language = instance.repo_language | default('') %}
+I've uploaded a {{ language }} code repository in the directory {{ workspace_path }}. Consider the following issue description:
+
+<issue_description>
+{{ instance.problem_statement }}
+</issue_description>
+
+<uploaded_files>
+{{ workspace_path }}
+</uploaded_files>
+
+Implement the necessary changes to non-test files in {{ workspace_path }} to resolve this issue.

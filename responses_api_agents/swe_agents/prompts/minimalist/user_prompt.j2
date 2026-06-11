@@ -1,8 +1,8 @@
-{% set language = instance.repo_language | default('python') %}
+{% set language = instance.repo_language | default('') %}
 {{ language }} repo at {{ workspace_path }}.
 
 <issue>
 {{ instance.problem_statement }}
 </issue>
 
-Fix it. Only change non-test source files.
+Fix it.
