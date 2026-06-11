@@ -1,0 +1,53 @@
+{
+    "name": "example",
+    "type": "example",
+    "jsonl_fpath": "resources_servers/instruction_following/data/example.jsonl",
+    "num_repeats": 1,
+    "gitlab_identifier": null,
+    "huggingface_identifier": null,
+    "license": null,
+    "Number of examples": 5,
+    "Number of tools": {
+        "Total # non-null values": 5,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 5,
+        "Average": 91.6,
+        "Min": 57.0,
+        "Max": 180.0,
+        "Standard deviation": 49.95
+    },
+    "Number of turns": {
+        "Total # non-null values": 5,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Standard deviation": 0.0
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "id": {
+        "Total # non-null values": 5,
+        "Average": 23561.4,
+        "Min": 2228.0,
+        "Max": 44655.0,
+        "Standard deviation": 20015.81
+    },
+    "instruction_id_list": {
+        "unique_count": 13,
+        "total_count": 13
+    },
+    "prompt": {
+        "unique_count": 5,
+        "total_count": 5
+    }
+}
