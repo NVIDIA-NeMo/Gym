@@ -12,266 +12,143 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Diagnostic: *why* a dedicated sglang_model server is needed (vs. reusing vllm_model).
+"""Diagnostic (Brian's experiment): run the EXISTING vllm_model path against a REAL SGLang server
+and see what breaks.
 
-This is the "run SGLang through the existing vllm_model and see what breaks" experiment,
-implemented as a self-contained, server-free probe. It drives the **real**
-`vllm_model.VLLMModel.chat_completions` against two response shapes:
+This sends **real HTTP requests to a live SGLang OpenAI endpoint** (no mocks, no canned responses)
+and checks whether the server actually satisfies the assumptions `vllm_model` depends on. If no
+server is provided it does NOT run and does NOT "pass" — it prints how to run it and exits non-zero.
 
-  - vLLM-shaped:  chat-completions logprobs whose `token` is the string ``"token_id:NNN"``
-                  (vLLM with return_tokens_as_token_ids=True), plus a working `/tokenize`.
-  - SGLang-shaped: chat-completions logprobs whose `token` is the actual token *text*
-                  (the ordinary OpenAI convention SGLang follows), and no vLLM `/tokenize`.
+The assumptions it probes (see responses_api_models/vllm_model/app.py):
+  #2a  L324 sets `return_tokens_as_token_ids=True` and L511 does `token.removeprefix("token_id:")`
+       -> vllm_model needs the chat-completions logprob `token` to be the literal string
+          ``"token_id:NNN"``. We check what the real server returns.
+  #2b  L526 calls `client.create_tokenize(...)` (a vLLM ``/tokenize`` endpoint) to recover the
+       prompt token ids. We check whether that endpoint exists on SGLang.
+  #4   L472 detects context overflow by string-matching the *vLLM* 400 message
+       (``"context length"`` / ``"max_tokens"``). We trigger an overflow and inspect the message.
 
-It is NOT a pytest test (filename isn't test_*.py) so it never becomes a CI gate asserting
-that another component is "broken" — it's an on-demand experiment that prints a report.
+How to run (Brian's experiment, end to end):
+  1) start a stock SGLang server for any model:
+       python -m sglang.launch_server --model-path <model> --port 30000
+  2) point this probe at it:
+       SGLANG_BASE_URL=http://localhost:30000 SGLANG_MODEL=<model> \
+           python responses_api_models/sglang_model/diagnostic_vllm_vs_sglang.py
 
-Run:  python responses_api_models/sglang_model/diagnostic_vllm_vs_sglang.py
-Needs only the Gym framework (nemo_gym + aiohttp + fastapi). No GPU, no live server.
-
-What it shows (and why sglang_model exists):
-  #2 logprobs/token-ids — vllm_model recovers ids via `token.removeprefix("token_id:")` and a
-     vLLM `/tokenize` call. On SGLang-shaped data the "ids" are silently the token *text*
-     (no error raised) and `/tokenize` is absent. sglang_model sidesteps both by using SGLang
-     native `/generate` (token-in / token-out).
-  #4 max-seq-len — vllm_model detects overflow by string-matching the *vLLM* 400 message;
-     SGLang's message differs, so it is missed and re-raised. sglang_model prevents overflow
-     with cap_to_context instead.
+Any BREAK below is a real vllm_model<->SGLang incompatibility that the sglang_model server avoids
+(native /generate token-in/out, local tokenization, cap_to_context). The fix itself is verified in
+tests/test_app.py and tests/test_logic.py — this file's job is only the "what breaks" experiment.
 """
 
-import asyncio
+import json
 import os
 import sys
-from types import SimpleNamespace
+import urllib.error
+import urllib.request
 
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-
-try:
-    from aiohttp.client_exceptions import ClientResponseError
-
-    from responses_api_models.vllm_model.app import VLLMModel
-
-    _IMPORT_ERR = None
-except Exception as e:  # nemo_gym / vllm_model not importable here
-    _IMPORT_ERR = e
-
-# sglang_model's pure request/response logic is framework-free (no nemo_gym / transformers needed),
-# so we can demonstrate the fix for each requirement right here.
-from responses_api_models.sglang_model._logic import (  # noqa: E402
-    cap_to_context,
-    extract_generated_tokens_and_logprobs,
-    normalize_token_ids,
-)
+BASE_URL = os.environ.get("SGLANG_BASE_URL", "").rstrip("/")
+MODEL = os.environ.get("SGLANG_MODEL", "")
 
 
-# ----------------------------- fakes (drive the real chat_completions) -----------------------------
-class _FakeBody:
-    def model_dump(self, exclude_unset=True):
-        return {"messages": [{"role": "user", "content": "hi"}], "model": "m"}
-
-
-class _MockClient:
-    """Stands in for Gym's ServerClient: create_chat_completion + create_tokenize."""
-
-    def __init__(self, *, completion=None, raise_chat=None, tokenize=None, raise_tokenize=None):
-        self._completion = completion
-        self._raise_chat = raise_chat
-        self._tokenize = tokenize
-        self._raise_tokenize = raise_tokenize
-
-    async def create_chat_completion(self, **kw):
-        if self._raise_chat is not None:
-            raise self._raise_chat
-        return self._completion
-
-    async def create_tokenize(self, **kw):
-        if self._raise_tokenize is not None:
-            raise self._raise_tokenize
-        return self._tokenize
-
-
-def _make_vllm_self(client):
-    cfg = SimpleNamespace(
-        sequential_reasoning_allowed=True,
-        uses_reasoning_parser=False,
-        return_token_id_information=True,
-        name="sglang_diag",
-        model="m",
-    )
-    me = SimpleNamespace(config=cfg)
-    me._preprocess_chat_completion_create_params = lambda request, body_dict: body_dict
-    me._resolve_client = lambda request: client
-    # reuse the real empty-completion builder (only touches me.config.model)
-    me._create_empty_chat_completion = lambda: VLLMModel._create_empty_chat_completion(me)
-    return me
-
-
-def _completion(tokens):
-    """A /v1/chat/completions response whose logprob `token` fields are `tokens`."""
-    return {
-        "id": "chatcmpl-x",
-        "object": "chat.completion",
-        "created": 0,
-        "model": "m",
-        "choices": [
-            {
-                "index": 0,
-                "finish_reason": "stop",
-                "message": {"role": "assistant", "content": "hi"},
-                "logprobs": {"content": [{"token": t, "logprob": -0.1} for t in tokens]},
-            }
-        ],
-        "usage": {"prompt_tokens": 3, "completion_tokens": len(tokens), "total_tokens": 3 + len(tokens)},
-    }
-
-
-def _http_400(body: bytes):
-    err = ClientResponseError(request_info=None, history=(), status=400)
-    err.response_content = body
-    return err
-
-
-def _call(client):
-    me = _make_vllm_self(client)
-    return asyncio.run(VLLMModel.chat_completions(me, SimpleNamespace(), _FakeBody()))
-
-
-# ----------------------------- scenarios -----------------------------
-def scenario_2_vllm_shaped():
-    """CONTROL: vLLM emits `token_id:NNN` + a working /tokenize -> usable integer token-ids."""
-    client = _MockClient(completion=_completion(["token_id:10", "token_id:11"]), tokenize={"tokens": [1, 2, 3]})
-    out = _call(client)
-    ids = out.choices[0].message.generation_token_ids
-    ok = ids == [10, 11]
-    return ok, f"recovered generation_token_ids={ids} (ints) — vllm_model works against vLLM"
-
-
-def scenario_2_sglang_token_text():
-    """BREAK (silent): SGLang logprob `token` is token TEXT, not `token_id:NNN`. vllm_model does
-    `token.removeprefix("token_id:")`, which is a no-op on plain text -> the "token ids" are
-    actually token strings. No exception is raised; training silently gets corrupt ids."""
-    client = _MockClient(completion=_completion(["He", "llo"]), tokenize={"tokens": [1, 2, 3]})
-    out = _call(client)
-    ids = out.choices[0].message.generation_token_ids
-    all_int = isinstance(ids, list) and all(isinstance(x, int) for x in ids)
-    broke = not all_int  # SGLang -> token text strings, not integer ids
-    return broke, f"generation_token_ids={ids} -> token TEXT, not integer ids (SILENT corruption, no error raised)"
-
-
-def scenario_2_sglang_no_tokenize():
-    """BREAK: SGLang has no vLLM-style /tokenize endpoint -> prompt_token_ids unrecoverable."""
-    client = _MockClient(
-        completion=_completion(["token_id:10"]),
-        raise_tokenize=_http_400(b'{"object":"error","message":"Not Found","code":404}'),
+def _post(path, payload, timeout=120):
+    """POST json to BASE_URL+path; return (status_or_None, parsed_or_text)."""
+    url = BASE_URL + path
+    req = urllib.request.Request(
+        url, data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"}, method="POST"
     )
     try:
-        _call(client)
-        return False, "UNEXPECTED success: /tokenize did not break"
-    except Exception as e:
-        return True, f"{type(e).__name__}: client.create_tokenize() (vLLM /tokenize) is absent on SGLang"
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            raw = r.read().decode("utf-8", "replace")
+            try:
+                return r.status, json.loads(raw)
+            except json.JSONDecodeError:
+                return r.status, raw
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode("utf-8", "replace")
+    except Exception as e:  # connection refused / timeout / DNS
+        return None, f"{type(e).__name__}: {e}"
 
 
-def scenario_4_vllm_context_handled():
-    """CONTROL: vLLM 400 'maximum context length...' -> detected, graceful empty (finish=length)."""
-    msg = b'{"object":"error","message":"This model\'s maximum context length is 4096 tokens. ...","code":400}'
-    client = _MockClient(raise_chat=_http_400(msg))
-    out = _call(client)
-    ok = out.choices[0].finish_reason == "length"
-    return ok, f"detected overflow -> finish_reason={out.choices[0].finish_reason!r} (graceful)"
-
-
-def scenario_4_sglang_context_missed():
-    """BREAK: SGLang's 400 message differs -> not detected -> re-raised (not graceful)."""
-    msg = b'{"object":"error","message":"Input length 5000 exceeds the maximum allowed length 4096","code":400}'
-    client = _MockClient(raise_chat=_http_400(msg))
+def probe_2a_token_id_format():
+    """Does the real /v1/chat/completions return logprob tokens as `token_id:NNN`?"""
+    status, body = _post(
+        "/v1/chat/completions",
+        {
+            "model": MODEL,
+            "messages": [{"role": "user", "content": "Say hi."}],
+            "max_tokens": 5,
+            "logprobs": True,
+            "top_logprobs": 1,
+            "return_tokens_as_token_ids": True,  # exactly what vllm_model sends (app.py L323)
+        },
+    )
+    if status != 200:
+        return "ERROR", f"chat/completions -> {status}: {str(body)[:140]}"
     try:
-        _call(client)
-        return False, "UNEXPECTED: overflow handled (string matched?)"
-    except ClientResponseError:
-        return True, "SGLang's 400 message lacks 'context length'/'max_tokens' -> undetected -> raised"
+        tok = body["choices"][0]["logprobs"]["content"][0]["token"]
+    except (KeyError, IndexError, TypeError) as e:
+        return "BREAK", f"no logprobs.content[].token in response ({e!r}) -> vllm_model L504/511 cannot read ids"
+    if str(tok).startswith("token_id:"):
+        return "OK", f"logprob token={tok!r} -> 'token_id:' convention present; vllm_model id-recovery works"
+    return (
+        "BREAK",
+        f"logprob token={tok!r} is token TEXT, not 'token_id:NNN' (server ignores "
+        f"return_tokens_as_token_ids); removeprefix is a no-op -> generation_token_ids become token "
+        f"strings: silent corruption",
+    )
 
 
-SCENARIOS = [
-    ("#2 token-ids", "vLLM-shaped", "CONTROL (should work)", scenario_2_vllm_shaped),
-    ("#2 token-ids", "SGLang-shaped", "EXPECTED BREAK (silent)", scenario_2_sglang_token_text),
-    ("#2 /tokenize", "SGLang-shaped", "EXPECTED BREAK", scenario_2_sglang_no_tokenize),
-    ("#4 overflow", "vLLM-shaped", "CONTROL (should work)", scenario_4_vllm_context_handled),
-    ("#4 overflow", "SGLang-shaped", "EXPECTED BREAK", scenario_4_sglang_context_missed),
-]
+def probe_2b_tokenize_endpoint():
+    """Does the vLLM-style /tokenize endpoint (used for prompt ids) exist on SGLang?"""
+    status, body = _post("/tokenize", {"model": MODEL, "prompt": "hello world"})
+    if status == 200:
+        return "OK", "/tokenize exists -> vllm_model can recover prompt_token_ids"
+    return "BREAK", f"/tokenize -> {status} (vLLM endpoint absent on SGLang) -> vllm_model L526 create_tokenize fails"
 
 
-# ----------------------------- the fix: sglang_model's approach -----------------------------
-def fix_2_token_ids_native_generate():
-    """#2 FIXED: SGLang native /generate returns (token_id, logprob) pairs directly -> integer ids;
-    no `token_id:NNN` string convention to parse."""
-    result = {"meta_info": {"output_token_logprobs": [[-0.1, 10, "He"], [-0.2, 11, "llo"]]}}
-    ids, lps = extract_generated_tokens_and_logprobs(result)
-    ok = ids == [10, 11] and all(isinstance(x, int) for x in ids)
-    return ok, f"native /generate -> generation_token_ids={ids} (ints), logprobs={lps}; no token_id: parsing"
+def probe_4_overflow_message():
+    """Trigger a context overflow; does the 400 message match vllm_model's detector?"""
+    huge = "word " * 100000  # force an over-context prompt
+    status, body = _post("/v1/chat/completions", {"model": MODEL, "messages": [{"role": "user", "content": huge}]})
+    s = str(body)
+    if status == 200:
+        return "?", "no overflow error returned (server silently truncated?) -> can't confirm vllm_model's path"
+    matched = ("context length" in s) or ("max_tokens" in s)
+    if matched:
+        return "OK", f"overflow {status} message matches vllm_model's string check"
+    return (
+        "BREAK",
+        f"overflow {status} message lacks 'context length'/'max_tokens' -> vllm_model L472 misses it: {s[:120]}",
+    )
 
 
-def fix_2_prompt_ids_local_tokenizer():
-    """#2 FIXED: prompt ids come from the local HF chat template; normalize_token_ids flattens the
-    transformers return shapes -> no dependency on a vLLM /tokenize endpoint."""
-    ids = normalize_token_ids({"input_ids": [5, 6, 7]})  # transformers 5.x dict/BatchEncoding return
-    ok = ids == [5, 6, 7] and all(isinstance(x, int) for x in ids)
-    return ok, f"local chat-template tokenize -> prompt_token_ids={ids} (no server /tokenize call)"
-
-
-def fix_4_overflow_prevented():
-    """#4 FIXED: cap_to_context shrinks the request client-side so input+gen stays strictly under
-    ctx -> /generate never overflows; no dependency on matching a server-specific error string.
-    Shown on the worst case: a prompt longer than the entire context."""
-    ctx = 4096
-    ids, sp = cap_to_context(list(range(5000)), {"max_new_tokens": 4000}, ctx)  # prompt > ctx
-    total = len(ids) + sp["max_new_tokens"]
-    ok = total < ctx and sp["max_new_tokens"] >= 1
-    return ok, f"cap_to_context -> input={len(ids)} + max_new_tokens={sp['max_new_tokens']} = {total} < ctx={ctx} (≥1 gen, no overflow)"
-
-
-FIXES = [
-    ("#2 token-ids", fix_2_token_ids_native_generate),
-    ("#2 prompt-ids", fix_2_prompt_ids_local_tokenizer),
-    ("#4 overflow", fix_4_overflow_prevented),
+PROBES = [
+    ("#2a token-id fmt", probe_2a_token_id_format),
+    ("#2b /tokenize", probe_2b_tokenize_endpoint),
+    ("#4 overflow msg", probe_4_overflow_message),
 ]
 
 
 def main():
-    if _IMPORT_ERR is not None:
-        print(f"SKIP diagnostic: vllm_model/nemo_gym not importable here: {_IMPORT_ERR}")
-        return 0
-    print("=" * 96)
-    print("DIAGNOSTIC: can the existing vllm_model serve SGLang? (drives real VLLMModel.chat_completions)")
-    print("=" * 96)
-    all_as_expected = True
-
-    print("\n### PROBLEM: existing vllm_model pointed at SGLang ###")
-    for req, shape, expectation, fn in SCENARIOS:
-        as_expected, detail = fn()
-        # CONTROL expects ok==True; EXPECTED BREAK expects the break to be observed (fn returns True when broken)
-        verdict = "OK" if as_expected else "!! UNEXPECTED !!"
-        all_as_expected = all_as_expected and as_expected
-        print(f"\n[{req:13}] {shape:14} {expectation:24} -> {verdict}")
-        print(f"    {detail}")
-
-    print("\n### FIX: sglang_model (native /generate token-in/out, local tokenize, cap_to_context) ###")
-    for req, fn in FIXES:
-        ok, detail = fn()
-        all_as_expected = all_as_expected and ok
-        print(f"\n[{req:13}] sglang_model   {'FIXED' if ok else 'NOT FIXED':24} -> {'OK' if ok else '!! FAIL !!'}")
-        print(f"    {detail}")
-
-    print("\n" + "-" * 96)
-    print("CONCLUSION: vllm_model recovers token-ids via the vLLM `token_id:NNN` logprob convention +")
-    print("a vLLM `/tokenize` endpoint, and detects overflow via vLLM's 400 message — none of which")
-    print("SGLang provides (#2 silently corrupts token-ids, #4 mis-detects overflow). The fix is the")
-    print("sglang_model server: native /generate (token-in/out) gives integer ids directly, the prompt")
-    print("is tokenized locally, and cap_to_context prevents overflow client-side — all demonstrated")
-    print("above. #3 (Responses<->ChatCompletions converter) is reused unchanged; #1 (multi-turn")
-    print("on-policy retokenization) is a nemo_rl-worker concern, out of scope for the Gym model server.")
-    print("-" * 96)
-    return 0 if all_as_expected else 1
+    if not BASE_URL:
+        print("NOT RUN — Brian's experiment needs a live SGLang server (this probe does not mock).")
+        print("  1) python -m sglang.launch_server --model-path <model> --port 30000")
+        print("  2) SGLANG_BASE_URL=http://localhost:30000 SGLANG_MODEL=<model> python <this file>")
+        print("\n(No server provided -> not run. This is intentionally NOT a pass.)")
+        return 2  # not-run sentinel: never let "no server" masquerade as success
+    print(f"Brian's experiment: probing LIVE SGLang at {BASE_URL} (model={MODEL or '<unset>'})")
+    print("against the assumptions the existing vllm_model server makes:\n")
+    breaks = 0
+    for name, fn in PROBES:
+        verdict, detail = fn()
+        if verdict == "BREAK":
+            breaks += 1
+        print(f"[{name:16}] {verdict:6} {detail}")
+    print(f"\n{breaks} of {len(PROBES)} vllm_model assumptions broke against this SGLang server.")
+    print("Each BREAK is what sglang_model avoids via native /generate (token-in/out), local")
+    print("tokenization, and cap_to_context. (sglang_model's own behavior is verified in tests/.)")
+    return 0
 
 
 if __name__ == "__main__":
