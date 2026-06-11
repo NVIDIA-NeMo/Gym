@@ -1,0 +1,112 @@
+{
+  "model": "Nemotron Super 49b",
+  "num_rollouts": 18,
+  "num_tasks": 6,
+  "pass_at_1": 0.0,
+  "pass_at_k": 0.0,
+  "consistency": 0.0,
+  "phase_counts": {
+    "P2": 2,
+    "P1": 8,
+    "P3": 7,
+    "P0": 1
+  },
+  "error_totals": {
+    "E_other": 20,
+    "E1:path_not_found": 53,
+    "E3:compilation_error": 14
+  },
+  "pattern_totals": {
+    "B4:no_verification": 2,
+    "B6:early_exit": 5,
+    "B2:repeated_reads": 7,
+    "B1:path_thrashing": 8,
+    "B7:compile_no_run": 7,
+    "B3:write_without_read": 2,
+    "B5:step_exhaustion": 1
+  },
+  "file_modification_rate": 0.5,
+  "compile_attempt_rate": 0.3888888888888889,
+  "test_attempt_rate": 0.0,
+  "tb_discovery_rate": 0.3333333333333333,
+  "self_test_rate": 0.0,
+  "mean_feedback_loops": 0.0,
+  "mean_steps": 11.666666666666666,
+  "mean_tokens": 126355.22222222222,
+  "per_task": {
+    "cvdp_agentic_heavy_axi4_lite_0002": {
+      "pass_rate": 0.0,
+      "best_phase": "P3",
+      "task_type": "CD",
+      "project": "axi4_lite",
+      "mean_steps": 12.666666666666666,
+      "patterns": [
+        "B1:path_thrashing",
+        "B2:repeated_reads",
+        "B4:no_verification",
+        "B7:compile_no_run",
+        "B3:write_without_read"
+      ]
+    },
+    "cvdp_agentic_heavy_enso_0007": {
+      "pass_rate": 0.0,
+      "best_phase": "P1",
+      "task_type": "CM",
+      "project": "enso",
+      "mean_steps": 6.333333333333333,
+      "patterns": [
+        "B6:early_exit"
+      ]
+    },
+    "cvdp_agentic_heavy_enso_0017": {
+      "pass_rate": 0.0,
+      "best_phase": "P1",
+      "task_type": "CD",
+      "project": "enso",
+      "mean_steps": 14.666666666666666,
+      "patterns": [
+        "B1:path_thrashing",
+        "B2:repeated_reads"
+      ]
+    },
+    "cvdp_agentic_heavy_enso_0037": {
+      "pass_rate": 0.0,
+      "best_phase": "P2",
+      "task_type": "CM",
+      "project": "enso",
+      "mean_steps": 9.0,
+      "patterns": [
+        "B4:no_verification",
+        "B6:early_exit",
+        "B2:repeated_reads"
+      ]
+    },
+    "cvdp_agentic_heavy_reckon_0001": {
+      "pass_rate": 0.0,
+      "best_phase": "P3",
+      "task_type": "CD",
+      "project": "reckon",
+      "mean_steps": 16.0,
+      "patterns": [
+        "B7:compile_no_run",
+        "B5:step_exhaustion",
+        "B1:path_thrashing",
+        "B2:repeated_reads"
+      ]
+    },
+    "cvdp_agentic_heavy_ultraembedded_biriscv_0001": {
+      "pass_rate": 0.0,
+      "best_phase": "P3",
+      "task_type": "CD",
+      "project": "ultraembedded_biriscv",
+      "mean_steps": 11.333333333333334,
+      "patterns": [
+        "B6:early_exit",
+        "B1:path_thrashing",
+        "B2:repeated_reads",
+        "B7:compile_no_run",
+        "B3:write_without_read"
+      ]
+    }
+  }
+}

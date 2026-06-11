@@ -1,0 +1,161 @@
+{
+  "benchmark": "cvdp_agentic_heavy",
+  "model": "nemotron_super_49b",
+  "extraction_models": [
+    "extractor_model_a",
+    "extractor_model_b",
+    "extractor_model_c"
+  ],
+  "anchor_facts": [
+    {
+      "id": "B1",
+      "fact": "On one task, a rollout attempted eleven consecutive iverilog compilations all failing on include path issues, trying variations like +incdir+ (which caused a segfault), wrong directory paths, and paths with typos \u2014 classic perseveration where the model repeats failing strategies without meaningful adaptation.",
+      "difficulty": "high",
+      "mean_score": 4.17
+    },
+    {
+      "id": "B2",
+      "fact": "The model sometimes produces zero tool calls in a rollout, outputting only text and failing to engage with the agentic environment entirely.",
+      "difficulty": "high",
+      "mean_score": 4.0
+    },
+    {
+      "id": "B3",
+      "fact": "On one task, a rollout used only a single tool call (one cat) out of roughly twenty available steps, representing extreme minimal engagement \u2014 the model read one file and stopped, leaving over 90% of its step budget unused.",
+      "difficulty": "high",
+      "mean_score": 4.0
+    },
+    {
+      "id": "B4",
+      "fact": "The model consistently fails to match the file extensions of the existing codebase, often writing SystemVerilog extensions for standard Verilog files.",
+      "difficulty": "medium",
+      "mean_score": 3.83
+    },
+    {
+      "id": "B5",
+      "fact": "The model demonstrates a critical knowledge gap regarding Verilog syntax, occasionally generating invalid backtick-prefixed module declarations that simulators reject.",
+      "difficulty": "high",
+      "mean_score": 3.83
+    },
+    {
+      "id": "B6",
+      "fact": "The model defaults to generic project layout assumptions (writing to rtl/ or data/) rather than using ls to discover actual directory structures \u2014 across multiple tasks, it writes to directories that don't exist in the project, particularly defaulting to rtl/ when files live in src/ or hardware/src/.",
+      "difficulty": "high",
+      "mean_score": 3.83
+    },
+    {
+      "id": "B7",
+      "fact": "On the AXI task, all three rollouts consistently wrote to a .sv extension when the actual file uses .v, meaning the wrong-extension error is systematic and deterministic rather than stochastic \u2014 the model has a fixed incorrect belief about the file format.",
+      "difficulty": "high",
+      "mean_score": 3.83
+    },
+    {
+      "id": "B8",
+      "fact": "Failures are split between two distinct bottlenecks rather than one smooth degradation: many trajectories never transition from exploration to editing, while a separate cluster reaches compilation and then stops before execution, leaving almost no middle ground of healthy iterative debugging.",
+      "difficulty": "medium",
+      "mean_score": 3.83
+    },
+    {
+      "id": "B9",
+      "fact": "Wrong-target edits are not limited to directories; the model also systematically mismatches file extensions, which causes it to create parallel files instead of overwriting the graded source and makes otherwise relevant edits invisible to verification.",
+      "difficulty": "high",
+      "mean_score": 3.83
+    },
+    {
+      "id": "B10",
+      "fact": "Some failures combine correct semantic targeting with incorrect tool invocation details: the model can identify the right source file yet still fail because it does not know how to compile that project correctly, especially around include-path handling.",
+      "difficulty": "high",
+      "mean_score": 3.83
+    },
+    {
+      "id": "B11",
+      "fact": "Early exits are not simply a consequence of running out of budget; many trajectories terminate with substantial unused capacity, so disengagement is a policy failure rather than a resource-limit failure.",
+      "difficulty": "medium",
+      "mean_score": 3.83
+    },
+    {
+      "id": "B12",
+      "fact": "Despite weaker overall performance, this model is not more prone to exhaustive search than stronger agents; in fact, stronger agents can show more step-heavy persistence, while this model more often abandons tasks before exploiting available interaction depth.",
+      "difficulty": "medium",
+      "mean_score": 3.83
+    },
+    {
+      "id": "B13",
+      "fact": "Roughly a quarter of rollouts exit early (using less than half the step budget), yet the model simultaneously shows almost no step exhaustion \u2014 it quits prematurely rather than running out of steps, indicating a behavioral tendency to disengage rather than a resource constraint.",
+      "difficulty": "medium",
+      "mean_score": 3.67
+    },
+    {
+      "id": "B14",
+      "fact": "The model generated an invalid constant literal (1'b2 \u2014 a one-bit binary value of 2, which is impossible) in a definitions file, indicating a fundamental misunderstanding of Verilog literal syntax, not just a surface formatting issue.",
+      "difficulty": "high",
+      "mean_score": 3.67
+    },
+    {
+      "id": "B15",
+      "fact": "Half of all rollouts never write a single file (zero echo calls), yet the model does use ls and cat extensively in those rollouts \u2014 it gets stuck in a read-only exploration mode and never transitions to the write phase of the agent workflow.",
+      "difficulty": "medium",
+      "mean_score": 3.67
+    },
+    {
+      "id": "B16",
+      "fact": "The behavioral pattern profile is almost perfectly complementary to the reference model: the weaker model shows high path thrashing, repeated reads, and early exit but low step exhaustion, while the reference shows zero path thrashing and zero early exit but high step exhaustion \u2014 they fail in opposite ways.",
+      "difficulty": "medium",
+      "mean_score": 3.67
+    },
+    {
+      "id": "B17",
+      "fact": "All three rollouts on the reckon task reference a non-existent testbench file (tb/spi_slave_tb.v), suggesting the model hallucinates standard testbench naming conventions rather than discovering actual test files through ls.",
+      "difficulty": "high",
+      "mean_score": 3.67
+    },
+    {
+      "id": "B18",
+      "fact": "The dominant navigation failure is not random confusion but repeated search over alternate path guesses for the same target, indicating the model forms a candidate filename hypothesis and then thrashes across directory variants instead of grounding on discovered structure.",
+      "difficulty": "high",
+      "mean_score": 3.67
+    },
+    {
+      "id": "B19",
+      "fact": "Path-not-found errors dominate the error surface far more than syntax failures, showing that codebase navigation and file targeting are a larger practical blocker than RTL correctness in this dataset.",
+      "difficulty": "medium",
+      "mean_score": 3.67
+    },
+    {
+      "id": "B20",
+      "fact": "Another recurring knowledge failure is misunderstanding how project-local dependencies are exposed to the compiler, causing repeated compile retries that vary flags and paths without converging on the correct include configuration.",
+      "difficulty": "high",
+      "mean_score": 3.67
+    },
+    {
+      "id": "B21",
+      "fact": "When faced with compilation errors related to missing include files, the model tends to perseverate, repeatedly attempting incorrect flag variations without success.",
+      "difficulty": "high",
+      "mean_score": 3.5
+    },
+    {
+      "id": "B22",
+      "fact": "The model frequently hallucinates the existence of testbench files, attempting to reference or run testbenches that do not exist in the sandbox.",
+      "difficulty": "high",
+      "mean_score": 3.5
+    },
+    {
+      "id": "B23",
+      "fact": "One rollout across the entire dataset produced literally zero function calls (a P0 failure), meaning the model sometimes completely fails to engage with the tool-use paradigm and produces only text output.",
+      "difficulty": "high",
+      "mean_score": 3.5
+    },
+    {
+      "id": "B24",
+      "fact": "The model never closes the compile-to-execute loop: compilation is treated as an endpoint rather than as a precursor to simulation, so trajectories that reach build feedback still fail to generate any behavioral validation signal.",
+      "difficulty": "medium",
+      "mean_score": 3.5
+    },
+    {
+      "id": "B25",
+      "fact": "A large share of file access failures comes from the model projecting generic hardware repository layouts onto projects that use different directory conventions, leading it to write into plausible but nonexistent or irrelevant locations.",
+      "difficulty": "high",
+      "mean_score": 3.5
+    }
+  ]
+}
