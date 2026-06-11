@@ -1,6 +1,6 @@
 # CVDP Agentic Heavy — Failure Analysis Report
 
-**Model:** Nemotron Super 49b
+**Model:** Nemotron 3 Super
 **Rollouts:** 18 (6 tasks)
 **pass@1:** 0.0%
 **pass@k:** 0.0%
@@ -23,7 +23,7 @@
 
 ### Comparison with Reference Model
 
-| Metric | Nemotron Super 49b | GPT-5 | Delta |
+| Metric | Nemotron 3 Super | GPT-5 | Delta |
 |--------|----------:|---------------:|------:|
 | pass@1 | 0.0% | 44.4% | -44.4% |
 | pass@k | 0.0% | 66.7% | -66.7% |
@@ -34,7 +34,7 @@
 
 ### Per-Task Pass Rate Comparison
 
-| Task ID | Nemotron Super 49b | GPT-5 | Delta |
+| Task ID | Nemotron 3 Super | GPT-5 | Delta |
 |---------|----------:|---------------:|------:|
 | cvdp_agentic_heavy_axi4_lite_0002 | 0% | 33% | -33% |
 | cvdp_agentic_heavy_enso_0007 | 0% | 100% | -100% |
@@ -47,7 +47,7 @@
 
 ### Phase Distribution Shift
 
-| Phase | Description | Nemotron Super 49b | GPT-5 |
+| Phase | Description | Nemotron 3 Super | GPT-5 |
 |-------|-------------|----------:|---------------:|
 | P0 | No tool usage | 1 (5.6%) | 0 (0.0%) |
 | P1 | Explore only (ls/cat/pwd) | 8 (44.4%) | 1 (5.6%) |
@@ -58,7 +58,7 @@
 
 ### Behavioral Pattern Shift
 
-| Pattern | Nemotron Super 49b | GPT-5 |
+| Pattern | Nemotron 3 Super | GPT-5 |
 |---------|----------:|---------------:|
 | B1:path_thrashing | 8 (44.4%) | 0 (0.0%) |
 | B2:repeated_reads | 7 (38.9%) | 0 (0.0%) |

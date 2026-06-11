@@ -1,6 +1,6 @@
 {
   "benchmark": "cvdp_agentic_heavy",
-  "model": "nemotron_super_49b",
+  "model": "nemotron_3_super",
   "extraction_models": [
     "extractor_model_a",
     "extractor_model_b",
