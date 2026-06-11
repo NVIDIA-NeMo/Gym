@@ -25,11 +25,15 @@ has all required BLADE deliverables.
 
 Do not load benchmark-specific examples by default. Load
 `references/cvdp-report-example.md` only when the user explicitly asks for a
-CVDP example, the original CVDP report layout, or this optional reference.
+CVDP example, the original CVDP report layout, or this optional reference, or
+when the agent is confused about the goal and needs one concrete example to
+re-anchor on what a BLADE-style report is supposed to look like.
 
 Nemotron-only golden analysis artifacts are available under
-`references/nemotron-analysis-artifacts/` for users who explicitly ask to study
-an example completed BLADE-style report. Do not load those files by default.
+`references/nemotron-analysis-artifacts/` as original-CVDP example artifacts.
+Load them only when the user explicitly asks to study an example completed
+BLADE-style report, asks for CVDP artifacts, or the agent is confused about the
+goal and needs a concrete completed example. Do not load those files by default.
 
 ## Inputs To Gather
 
