@@ -23,6 +23,7 @@ from pytest import MonkeyPatch, raises
 import nemo_gym.global_config
 import nemo_gym.server_utils
 from nemo_gym import CACHE_DIR, WORKING_DIR
+from nemo_gym.config_types import ConfigMissingValuesError
 from nemo_gym.global_config import (
     DEFAULT_HEAD_SERVER_PORT,
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
@@ -422,6 +423,55 @@ class TestGlobalConfig:
 
         with raises(AssertionError):
             get_global_config_dict()
+
+    def test_collect_missing_value_paths(self) -> None:
+        config = DictConfig(
+            {
+                "a": "???",
+                "b": {"c": "value", "d": "???"},
+                "e": ["ok", "???"],
+            }
+        )
+        missing = GlobalConfigDictParser().collect_missing_value_paths(config)
+        assert missing == ["a", "b.d", "e[1]"]
+
+    def test_get_global_config_dict_raises_on_missing_values(self, monkeypatch: MonkeyPatch) -> None:
+        # Clear any lingering env vars.
+        monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
+        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+
+        exists_mock = MagicMock()
+        exists_mock.return_value = False
+        monkeypatch.setattr(nemo_gym.global_config.Path, "exists", exists_mock)
+
+        hydra_main_mock = MagicMock()
+
+        # A model server that leaves a required value unset ('???') — as base configs do.
+        def hydra_main_wrapper(fn):
+            config_dict = DictConfig(
+                {
+                    "policy_model": {
+                        "responses_api_models": {
+                            "openai_model": {
+                                "entrypoint": "app.py",
+                                "openai_api_key": "???",
+                            }
+                        }
+                    },
+                }
+            )
+            return lambda: fn(config_dict)
+
+        hydra_main_mock.return_value = hydra_main_wrapper
+        monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
+
+        with raises(ConfigMissingValuesError) as exc_info:
+            get_global_config_dict()
+
+        message = str(exc_info.value)
+        # Names the full dotted path and shows how to override it.
+        assert "policy_model.responses_api_models.openai_model.openai_api_key" in message
+        assert "++policy_model.responses_api_models.openai_model.openai_api_key=<value>" in message
 
     def test_get_first_server_config_dict(self) -> None:
         global_config_dict = DictConfig(

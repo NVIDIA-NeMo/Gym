@@ -136,6 +136,10 @@ def is_server_ref(config_dict: DictConfig) -> Optional[ServerRef]:
         return None
 
 
+class ConfigMissingValuesError(ValueError):
+    """One or more required config values are still unset (OmegaConf '???') after merging."""
+
+
 ########################################
 # Dataset configs for handling and upload/download
 ########################################
