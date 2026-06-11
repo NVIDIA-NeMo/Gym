@@ -52,6 +52,59 @@ Keep a clear split between code and model judgment:
 | Root-cause labels | Analyst/LLM | Requires task-level judgment across repeats. |
 | Causal narrative | Analyst/LLM | Requires synthesis, counterfactuals, and examples. |
 
+## Advanced Diagnostic Rules
+
+Use these rules when adapting the methodology to a new benchmark. They keep the
+analysis diagnostic rather than merely descriptive.
+
+### Define A Benchmark-Specific Funnel
+
+Every benchmark should define ordered workflow phases with deterministic
+detection rules. The labels are benchmark-specific, but the pattern is generic:
+started, attempted the core action, reached the verifier, received feedback, and
+passed. Report both per-rollout phase counts and cumulative survival through the
+funnel so the largest drop-off is obvious.
+
+### Preserve Chronology
+
+Read events in timestamp or trajectory order before assigning blame. An error
+observed before the model edited a file, changed an answer, called a tool, or
+made another consequential action should not be attributed to that later action.
+Chronology mistakes often turn behavioral failures, such as not retrying after a
+change, into false knowledge-gap diagnoses.
+
+### Separate Self-Checks From Final Verification
+
+Many benchmarks expose intermediate checks that differ from the final reward
+verifier. A model may pass its own test, smoke check, linter, local assertion, or
+partial evaluator while still failing the benchmark verifier. Track both signals
+separately and avoid treating self-check success as final success.
+
+### Treat Sometimes-Pass Tasks As Primary Evidence
+
+When repeats exist, sometimes-pass tasks are usually the sharpest diagnostic
+slice. Compare passing and failing trajectories for the same task to find the
+decision point: different file reads, different tool order, different verifier
+feedback, different generated output, or different stopping behavior. Do not
+label all sometimes-pass tasks as unreliable knowledge; some are lucky passes,
+and some are behavioral variance.
+
+### Diagnose Mechanisms, Not Symptoms
+
+Phase labels and error codes describe where a rollout stopped. Root-cause labels
+must explain the mechanism: what knowledge was missing, what behavior broke the
+workflow, what verifier or task issue distorted the result, or what data artifact
+changed the evidence. A task that never passes is not automatically a knowledge
+gap, and an early failure is not automatically a behavioral issue.
+
+### Guard Against Shallow Reports
+
+Accurate tables are not enough. If a script emits most aggregate metrics, create
+a shallow baseline from those sections and ensure the golden report adds
+mechanistic examples, task-level root-cause labels, contrastive evidence, and an
+intervention plan. Shallow baselines are useful negative controls for judge
+calibration.
+
 ## D2: Rollout Data
 
 Use rollout data from at least two models, and preferably three, with meaningful

@@ -115,6 +115,11 @@ rename verifier outputs unless the report includes a mapping table.
 - Read trajectories in order. Avoid attributing an early failure to evidence
   that only appears later.
 - Distinguish self-test success from verifier success.
+- If an error appears before the model's consequential action, do not attribute
+  that error to the later action; diagnose whether the model failed to retry,
+  verify, or recover instead.
+- Treat sometimes-pass tasks as primary diagnostic evidence, but inspect whether
+  success came from real understanding, lucky output, or workflow variance.
 - Treat missing rows, timeouts, and malformed outputs as first-class outcomes.
 - Mark redacted or unavailable evidence explicitly.
 - Do not include private source code, private endpoints, credentials, user names,
