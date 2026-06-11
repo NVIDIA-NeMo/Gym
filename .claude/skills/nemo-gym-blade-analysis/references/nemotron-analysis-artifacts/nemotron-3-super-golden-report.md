@@ -1,6 +1,6 @@
 # CVDP Agentic Heavy — Failure Analysis Report
 
-**Model:** Nemotron Super 49b
+**Model:** Nemotron 3 Super
 **Rollouts:** 18 (6 tasks)
 **pass@1:** 0.0%
 **pass@k:** 0.0%
@@ -25,7 +25,7 @@ Across 18 rollouts on 6 tasks:
 
 ### Comparison with Reference Model
 
-| Metric | Nemotron Super 49b | GPT-5 | Delta |
+| Metric | Nemotron 3 Super | GPT-5 | Delta |
 |--------|----------:|---------------:|------:|
 | pass@1 | 0.0% | 44.4% | -44.4% |
 | pass@k | 0.0% | 66.7% | -66.7% |
@@ -36,7 +36,7 @@ Across 18 rollouts on 6 tasks:
 
 ### Per-Task Pass Rate Comparison
 
-| Task ID | Nemotron Super 49b | GPT-5 | Delta |
+| Task ID | Nemotron 3 Super | GPT-5 | Delta |
 |---------|----------:|---------------:|------:|
 | cvdp_agentic_heavy_axi4_lite_0002 | 0% | 33% | -33% |
 | cvdp_agentic_heavy_enso_0007 | 0% | 100% | -100% |
@@ -49,7 +49,7 @@ Across 18 rollouts on 6 tasks:
 
 ### Phase Distribution Shift
 
-| Phase | Description | Nemotron Super 49b | GPT-5 |
+| Phase | Description | Nemotron 3 Super | GPT-5 |
 |-------|-------------|----------:|---------------:|
 | P0 | No tool usage | 1 (5.6%) | 0 (0.0%) |
 | P1 | Explore only (ls/cat/pwd) | 8 (44.4%) | 1 (5.6%) |
@@ -60,7 +60,7 @@ Across 18 rollouts on 6 tasks:
 
 ### Behavioral Pattern Shift
 
-| Pattern | Nemotron Super 49b | GPT-5 |
+| Pattern | Nemotron 3 Super | GPT-5 |
 |---------|----------:|---------------:|
 | B1:path_thrashing | 8 (44.4%) | 0 (0.0%) |
 | B2:repeated_reads | 7 (38.9%) | 0 (0.0%) |
@@ -268,11 +268,11 @@ Cumulative survival through each workflow stage:
 
 ## 13. Diagnostic Summary
 
-**Nemotron Super 49b at 0.0% pass@1** represents a model with fundamental agentic workflow deficiencies. Unlike stronger models where failures are in RTL logic quality, Super 49b fails primarily because it can't execute the basic agent loop:
+**Nemotron 3 Super at 0.0% pass@1** represents a model with fundamental agentic workflow deficiencies. Unlike stronger models where failures are in RTL logic quality, Nemotron 3 Super fails primarily because it can't execute the basic agent loop:
 
 **Three dominant failure modes, in order of leverage:**
 
-1. **Early exit / no engagement (B6: 28%, plus 7/18 rollouts with zero echo calls)**: The model explores briefly and gives up. On enso_0007 (which Opus/GPT-5/Sonnet all solve 3/3), Super 49b reads 3-7 files then stops. This is purely behavioral and the single highest-leverage RL target.
+1. **Early exit / no engagement (B6: 28%, plus 7/18 rollouts with zero echo calls)**: The model explores briefly and gives up. On enso_0007 (which Opus/GPT-5/Sonnet all solve 3/3), Nemotron 3 Super reads 3-7 files then stops. This is purely behavioral and the single highest-leverage RL target.
 
 2. **Path thrashing (B1: 44%) and wrong file paths**: The model can't reliably navigate project directory structures. It writes to `rtl/` when the file is in `src/`, or uses `.sv` when the file is `.v`. On axi4_lite_0002, all 3 rollouts used the wrong extension. This is a knowledge gap about codebase navigation.
 
@@ -280,6 +280,6 @@ Cumulative survival through each workflow stage:
 
 **Causal chain**: Poor codebase navigation (B1) → wrong file paths → file not found errors (E1: 61% of errors) → model gives up early (B6) → no fix submitted → reward 0. Even when the model does write (50% file mod rate), it writes to wrong paths or with wrong syntax → compilation fails → never reaches vvp → no feedback → can't iterate.
 
-**Gap to GPT-5 (+44pp)**: The gap is almost entirely behavioral. GPT-5 has 89% file mod rate vs 50%, 94% compile rate vs 39%, 50% vvp rate vs 0%. If Super 49b could match GPT-5's workflow discipline (through RL), it would likely achieve a non-zero pass rate even with its current RTL knowledge.
+**Gap to GPT-5 (+44pp)**: The gap is almost entirely behavioral. GPT-5 has 89% file mod rate vs 50%, 94% compile rate vs 39%, 50% vvp rate vs 0%. If Nemotron 3 Super could match GPT-5's workflow discipline (through RL), it would likely achieve a non-zero pass rate even with its current RTL knowledge.
 
 **Gap to Opus (+72pp)**: Closing this gap requires both behavioral improvements (RL for workflow) and substantial knowledge improvements (SFT for correct Verilog syntax, file extension handling, include path resolution).

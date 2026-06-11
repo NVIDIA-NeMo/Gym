@@ -1,5 +1,5 @@
 {
-  "model": "Nemotron Super 49b",
+  "model": "Nemotron 3 Super",
   "num_rollouts": 18,
   "num_tasks": 6,
   "pass_at_1": 0.0,
