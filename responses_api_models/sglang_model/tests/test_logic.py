@@ -20,8 +20,10 @@ L6: tokenization-parity tests against the real diffusion-model tokenizer (needs 
 Run standalone:  python tests/test_logic.py
 Or via pytest:   pytest tests/test_logic.py
 """
+
 import os
 import sys
+
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 GYM_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(HERE)))
@@ -34,13 +36,57 @@ from responses_api_models.sglang_model._logic import (  # noqa: E402
     normalize_token_ids,
 )
 
+
 MODEL_PATH = os.environ.get("SGLANG_MODEL_PATH", "/linnanw/justGRPO/asset/Nemotron-Labs-Diffusion-3B")
+
+# L6 tokenization-parity tests need the real diffusion-model tokenizer (a local path) + transformers,
+# and the chat-template ones additionally need jinja2. None of those are guaranteed in CI, so L6 SKIPS
+# cleanly when unavailable (per Gym's test-skip-guard convention). L1 is pure and always runs. Point at
+# a model with SGLANG_MODEL_PATH to exercise L6 locally.
+_HAS_MODEL = os.path.isdir(MODEL_PATH)
+try:
+    import transformers  # noqa: F401
+
+    _HAS_TRANSFORMERS = True
+except Exception:
+    _HAS_TRANSFORMERS = False
+try:
+    import jinja2  # noqa: F401  (transformers.apply_chat_template requires it)
+
+    _HAS_JINJA2 = True
+except Exception:
+    _HAS_JINJA2 = False
+
+try:
+    import pytest
+except ImportError:  # allow standalone `python tests/test_logic.py`
+    pytest = None
+
+
+def _skip_unless(cond, reason):
+    """Skip a test when cond is False — works under both pytest and the standalone runner."""
+
+    def deco(fn):
+        if not cond:
+            fn._skip_reason = reason
+        return pytest.mark.skipif(not cond, reason=reason)(fn) if pytest is not None else fn
+
+    return deco
+
+
+requires_real_model = _skip_unless(
+    _HAS_MODEL and _HAS_TRANSFORMERS,
+    f"L6 needs real model (present={_HAS_MODEL}, SGLANG_MODEL_PATH) + transformers={_HAS_TRANSFORMERS}",
+)
+requires_chat_template = _skip_unless(
+    _HAS_MODEL and _HAS_TRANSFORMERS and _HAS_JINJA2,
+    f"L6 chat-template needs real model + transformers + jinja2 (jinja2={_HAS_JINJA2})",
+)
 
 
 # ----------------------------- L1: extract_generated_tokens_and_logprobs -----------------------------
 def test_extract_dict_form():
-    r = {"meta_info": {"output_token_logprobs": [
-        {"token_id": 5, "logprob": -0.1}, {"id": 7, "logprob": -0.2}]}}
+    r = {"meta_info": {"output_token_logprobs": [{"token_id": 5, "logprob": -0.1}, {"id": 7, "logprob": -0.2}]}}
     toks, lps = extract_generated_tokens_and_logprobs(r)
     assert toks == [5, 7] and lps == [-0.1, -0.2]
 
@@ -52,8 +98,7 @@ def test_extract_tuple_form():
 
 
 def test_extract_val_idx_fallback():
-    r = {"meta_info": {"output_token_logprobs_val": [-0.1, -0.2],
-                       "output_token_logprobs_idx": [3, 4]}}
+    r = {"meta_info": {"output_token_logprobs_val": [-0.1, -0.2], "output_token_logprobs_idx": [3, 4]}}
     toks, lps = extract_generated_tokens_and_logprobs(r)
     assert toks == [3, 4] and lps == [-0.1, -0.2]
 
@@ -117,6 +162,7 @@ def test_normalize_nested():
 def test_normalize_casts_to_int():
     class IntLike(int):
         pass
+
     out = normalize_token_ids([IntLike(1), IntLike(2)])
     assert out == [1, 2] and all(type(t) is int for t in out)
 
@@ -172,9 +218,11 @@ def test_cap_does_not_mutate_input():
 # ----------------------------- L6: tokenization parity (real tokenizer) -----------------------------
 def _load_tokenizer():
     from transformers import AutoTokenizer
+
     return AutoTokenizer.from_pretrained(MODEL_PATH, trust_remote_code=True)
 
 
+@requires_chat_template
 def test_l6_chat_template_parity():
     tok = _load_tokenizer()
     msgs = [{"role": "user", "content": "What is 2 + 2? Put the answer in \\boxed{}."}]
@@ -184,11 +232,10 @@ def test_l6_chat_template_parity():
     assert len(ids_tok) > 0 and all(isinstance(t, int) for t in ids_tok)
     text = tok.apply_chat_template(msgs, add_generation_prompt=True, tokenize=False)
     ids_txt = tok.encode(text, add_special_tokens=False)
-    assert ids_tok == ids_txt, (
-        f"template tokenize != encode(template text): {len(ids_tok)} vs {len(ids_txt)}"
-    )
+    assert ids_tok == ids_txt, f"template tokenize != encode(template text): {len(ids_tok)} vs {len(ids_txt)}"
 
 
+@requires_chat_template
 def test_l6_dict_return_normalization_real():
     tok = _load_tokenizer()
     msgs = [{"role": "user", "content": "hello"}]
@@ -199,6 +246,7 @@ def test_l6_dict_return_normalization_real():
     assert normalize_token_ids(as_dict) == flat  # normalizer handles the real dict/BatchEncoding
 
 
+@requires_real_model
 def test_l6_skip_special_tokens_strips():
     tok = _load_tokenizer()
     special_id = tok.eos_token_id
@@ -218,20 +266,27 @@ def test_l6_skip_special_tokens_strips():
 # ----------------------------- runner -----------------------------
 def _run():
     import traceback
+
     items = sorted(globals().items())
     l1 = [k for k, v in items if k.startswith("test_") and not k.startswith("test_l6") and callable(v)]
     l6 = [k for k, v in items if k.startswith("test_l6") and callable(v)]
-    npass = nfail = 0
+    npass = nfail = nskip = 0
     for name in l1 + l6:
+        fn = globals()[name]
+        reason = getattr(fn, "_skip_reason", None)
+        if reason:
+            print(f"  SKIP {name}: {reason}")
+            nskip += 1
+            continue
         try:
-            globals()[name]()
+            fn()
             print(f"  PASS {name}")
             npass += 1
         except Exception as e:
             print(f"  FAIL {name}: {type(e).__name__}: {e}")
             traceback.print_exc()
             nfail += 1
-    print(f"\n{npass} passed, {nfail} failed  (L1={len(l1)}, L6={len(l6)})")
+    print(f"\n{npass} passed, {nfail} failed, {nskip} skipped  (L1={len(l1)}, L6={len(l6)})")
     return nfail
 
 

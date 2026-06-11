@@ -29,14 +29,17 @@ runs surfaced:
 Importing this needs nemo_gym + transformers (the per-server venv); it is skipped cleanly
 otherwise. Pure-logic coverage lives in test_logic.py.
 """
+
 import asyncio
 import os
 import sys
 from types import SimpleNamespace
 
+
 try:
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
     from responses_api_models.sglang_model import app as sglang_app
+
     _IMPORT_ERR = None
 except Exception as e:  # nemo_gym / transformers / vllm_model not importable here
     _IMPORT_ERR = e
@@ -171,7 +174,7 @@ def test_chat_completions_happy_path_attaches_training_fields():
 def test_content_decoded_with_skip_special_tokens():
     # regression: structured_outputs broke because content ended in a literal special token.
     me = _make_self(decoded="{}")
-    rec = _patch_http(None, result={"meta_info": {"output_token_logprobs": [[-0.1, 10, "x"]]}})
+    _patch_http(None, result={"meta_info": {"output_token_logprobs": [[-0.1, 10, "x"]]}})
     _run(sglang_app.SGLangModel.chat_completions(me, SimpleNamespace(), _FakeBody()))
     assert me._tokenizer.decode_calls, "decode was not called"
     assert me._tokenizer.decode_calls[0]["skip_special_tokens"] is True
