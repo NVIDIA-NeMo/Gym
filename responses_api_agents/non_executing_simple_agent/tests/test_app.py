@@ -136,11 +136,14 @@ class TestApp:
             json={"responses_create_params": responses_create_params.model_dump()},
             cookies={},
         )
+        # `run` calls `_responses` in-process; call[1] is the model_server
+        # call that `_responses` makes.
         assert server.server_client.post.call_args_list[1] == call(
-            server_name="non_executing_agent",
+            server_name="model",
             url_path="/v1/responses",
-            json=responses_create_params,
-            cookies={"session": "seeded"},
+            json=NeMoGymResponseCreateParamsNonStreaming(
+                input=[NeMoGymEasyInputMessage(content="hello", role="user", type="message")]
+            ),
         )
         assert server.server_client.post.call_args_list[2].kwargs["server_name"] == "resource"
         assert server.server_client.post.call_args_list[2].kwargs["url_path"] == "/verify"

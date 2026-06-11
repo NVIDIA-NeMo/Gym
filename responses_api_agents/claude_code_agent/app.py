@@ -345,6 +345,13 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         request: Request,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
+        return await self._responses(body)
+
+    async def _responses(
+        self,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+    ) -> NeMoGymResponse:
+        """Implementation of `/v1/responses`; `run` invokes this in-process."""
         body = body.model_copy(deep=True)
         if isinstance(body.input, str):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
@@ -405,15 +412,8 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             await raise_for_status(seed_resp)
             cookies = seed_resp.cookies
 
-            agent_resp = await self.server_client.post(
-                server_name=self.config.name,
-                url_path="/v1/responses",
-                json=body.responses_create_params,
-                cookies=cookies,
-            )
-            await raise_for_status(agent_resp)
-            cookies = agent_resp.cookies
-            agent_resp_json = await get_response_json(agent_resp)
+            inproc_resp = await self._responses(body.responses_create_params)
+            agent_resp_json = inproc_resp.model_dump()
 
             verify_resp = await self.server_client.post(
                 server_name=self.config.resources_server.name,

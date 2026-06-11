@@ -20,7 +20,7 @@ import time
 import traceback
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Mapping, Optional, Tuple
 
 from fastapi import Request, Response
 from pydantic import ConfigDict, ValidationError
@@ -126,6 +126,17 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         response: Response,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
+        result, set_cookies = await self._responses(body, request.cookies)
+        for k, v in set_cookies.items():
+            response.set_cookie(k, v)
+        return result
+
+    async def _responses(
+        self,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        cookies: Optional[Mapping[str, str]] = None,
+    ) -> Tuple[NeMoGymResponse, dict]:
+        """Implementation of `/v1/responses`; `run` invokes this in-process."""
         body = body.model_copy(deep=True)
 
         if isinstance(body.input, str):
@@ -142,7 +153,9 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         step = 0
         num_tool_calls = 0
         model_server_cookies = None  # update the cookies on every model response
-        resources_server_cookies = request.cookies  # update the cookies on every resources server response
+        resources_server_cookies = (
+            dict(cookies) if cookies else {}
+        )  # update the cookies on every resources server response
 
         reset_threshold = 0
         reset_count = 0
@@ -636,8 +649,9 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             pass  # best-effort; a stale ckpt won't be re-read because the driver caches this sample
 
         # Propogate any extra cookies necessary for downstream verification
+        set_cookies: dict[str, str] = {}
         for k, v in (*resources_server_cookies.items(), *model_server_cookies.items()):
-            response.set_cookie(k, v)
+            set_cookies[k] = v
 
         print(
             f"{user_query[:20]}... | FINISHED | Step {step} | Time: {time.monotonic() - time_taken:.2f}s (model {time_taken_model_call:.2f}s, tool {time_taken_tool_call:.2f}s) | Max output tokens: {max_output_tokens} | Missing end thinks: {missing_end_think_count}"
@@ -648,7 +662,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         model_response.reset_count = reset_count
         model_response.num_tool_calls = num_tool_calls
         model_response.metadata = {"missing_end_think_count": str(missing_end_think_count)}
-        return model_response
+        return model_response, set_cookies
 
     async def run(self, request: Request, body: BrowsecompAgentRunRequest) -> BrowsecompAgentVerifyResponse:
         cookies = request.cookies
@@ -668,16 +682,9 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             body.responses_create_params.metadata["task_index"] = str(body._ng_task_index)
             body.responses_create_params.metadata["attempt"] = str(0)
 
-        response = await self.server_client.post(
-            server_name=self.config.name,
-            url_path="/v1/responses",
-            json=body.responses_create_params,
-            cookies=cookies,
-        )
-        await raise_for_status(response)
-        cookies = response.cookies
-
-        response_json = await get_response_json(response)
+        inproc_response, set_cookies = await self._responses(body.responses_create_params, cookies)
+        cookies = set_cookies
+        response_json = inproc_response.model_dump()
 
         verify_request = BrowsecompAgentVerifyRequest.model_validate(body.model_dump() | {"response": response_json})
 

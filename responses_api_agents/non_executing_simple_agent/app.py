@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+from typing import Mapping, Optional, Tuple
 
 from fastapi import Request, Response
 from pydantic import ConfigDict, ValidationError
@@ -64,6 +65,17 @@ class NonExecutingSimpleAgent(SimpleResponsesAPIAgent):
         response: Response,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
+        result, set_cookies = await self._responses(body, request.cookies)
+        for k, v in set_cookies.items():
+            response.set_cookie(k, v)
+        return result
+
+    async def _responses(
+        self,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        cookies: Optional[Mapping[str, str]] = None,
+    ) -> Tuple[NeMoGymResponse, dict]:
+        """Implementation of `/v1/responses`; `run` invokes this in-process."""
         body = body.model_copy(deep=True)
 
         if isinstance(body.input, str):
@@ -85,10 +97,14 @@ class NonExecutingSimpleAgent(SimpleResponsesAPIAgent):
             ) from e
 
         # Preserve session cookies for /run verification, but do not inspect or execute tool calls.
-        for k, v in (*request.cookies.items(), *model_response.cookies.items()):
-            response.set_cookie(k, v)
+        set_cookies: dict[str, str] = {}
+        if cookies:
+            for k, v in cookies.items():
+                set_cookies[k] = v
+        for k, v in model_response.cookies.items():
+            set_cookies[k] = v
 
-        return parsed_response
+        return parsed_response, set_cookies
 
     async def run(
         self,
@@ -106,17 +122,11 @@ class NonExecutingSimpleAgent(SimpleResponsesAPIAgent):
         await raise_for_status(seed_session_response)
         cookies = seed_session_response.cookies
 
-        response = await self.server_client.post(
-            server_name=self.config.name,
-            url_path="/v1/responses",
-            json=body.responses_create_params,
-            cookies=cookies,
-        )
-        await raise_for_status(response)
-        cookies = response.cookies
+        inproc_response, set_cookies = await self._responses(body.responses_create_params, cookies)
+        cookies = set_cookies
 
         verify_request = NonExecutingSimpleAgentVerifyRequest.model_validate(
-            body.model_dump() | {"response": await get_response_json(response)}
+            body.model_dump() | {"response": inproc_response.model_dump()}
         )
 
         verify_response = await self.server_client.post(
