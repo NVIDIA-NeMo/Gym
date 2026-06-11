@@ -28,7 +28,7 @@ import hydra
 import rich
 import wandb
 import wandb.util
-from omegaconf import DictConfig, ListConfig, OmegaConf, open_dict
+from omegaconf import MISSING, DictConfig, ListConfig, OmegaConf, open_dict
 from openai import __version__ as openai_version
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 from ray import __version__ as ray_version
@@ -36,6 +36,7 @@ from wandb import Run
 
 from nemo_gym import CACHE_DIR, PARENT_DIR, RESULTS_DIR, WORKING_DIR
 from nemo_gym.config_types import (
+    ConfigMissingValuesError,
     ServerInstanceConfig,
     ServerRefNotFoundError,
     WANDBConfig,
@@ -291,6 +292,55 @@ Duplicate config paths:
 
         return disallowed_ports
 
+    def collect_missing_value_paths(self, config: DictConfig) -> List[str]:
+        """Return the dotted paths of every unset (OmegaConf '???') leaf, without raising.
+
+        We convert to a plain container with `resolve=False, throw_on_missing=False` so that
+        neither MISSING values nor unresolved interpolations (`${...}`) cause an exception — then
+        walk the plain structure. Iterating or indexing the live DictConfig would raise.
+        """
+        container = OmegaConf.to_container(config, resolve=False, throw_on_missing=False)
+        return self._walk_missing_value_paths(container)
+
+    def _walk_missing_value_paths(self, node, prefix: str = "") -> List[str]:
+        missing_paths: List[str] = []
+        if isinstance(node, dict):
+            for key, value in node.items():
+                path = f"{prefix}.{key}" if prefix else str(key)
+                if value == MISSING:
+                    missing_paths.append(path)
+                else:
+                    missing_paths.extend(self._walk_missing_value_paths(value, path))
+        elif isinstance(node, list):
+            for i, value in enumerate(node):
+                path = f"{prefix}[{i}]"
+                if value == MISSING:
+                    missing_paths.append(path)
+                else:
+                    missing_paths.extend(self._walk_missing_value_paths(value, path))
+        return missing_paths
+
+    def raise_on_missing_values(self, global_config_dict: DictConfig) -> None:
+        """Fail fast with one actionable error listing every unset '???' value.
+
+        Without this, the first unset value surfaces deep in the run pipeline as an opaque
+        omegaconf MissingMandatoryValue, one field at a time and with no override guidance.
+        """
+        missing_paths = self.collect_missing_value_paths(global_config_dict)
+        if not missing_paths:
+            return
+
+        missing_list = "\n".join(f"  - {p}" for p in missing_paths)
+        override_examples = "\n".join(f"  ++{p}=<value>" for p in missing_paths[:3])
+        raise ConfigMissingValuesError(
+            f"""{len(missing_paths)} required config value(s) are unset (still '???') after merging:
+{missing_list}
+
+Provide each value via a CLI override, in env.yaml, or in a config you pass via config_paths.
+For example, on the command line:
+{override_examples}"""
+        )
+
     def _recursively_hide_secrets(self, dict_config: DictConfig) -> None:
         with open_dict(dict_config):
             self._recursively_hide_secrets_helper(dict_config)
@@ -435,6 +485,11 @@ Duplicate config paths:
         if config_paths:
             with open_dict(global_config_dict):
                 global_config_dict[CONFIG_PATHS_KEY_NAME] = config_paths
+
+        # Fail fast with one actionable error if any required value is still '???' after merging
+        # all sources (CLI + env.yaml + config_paths). Otherwise the first unset value surfaces as
+        # an opaque MissingMandatoryValue deep in the pipeline (e.g. while resolving inheritance).
+        self.raise_on_missing_values(global_config_dict)
 
         self._recursively_swap_keys(global_config_dict)
 
