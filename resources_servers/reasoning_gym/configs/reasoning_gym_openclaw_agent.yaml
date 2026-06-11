@@ -1,4 +1,3 @@
-# OpenClaw agent harness over reasoning_gym.
 reasoning_gym:
   resources_servers:
     reasoning_gym:
@@ -17,7 +16,6 @@ reasoning_gym_openclaw_agent:
         name: reasoning_gym
       concurrency: 8
       command: openclaw
-      # <provider>/<model-name>. Provider name must not prefix the model name (so "nvinf", not "nvidia").
       model: nvinf/nvidia/meta/llama-3.3-70b-instruct
       thinking: "off"
       timeout: 600
