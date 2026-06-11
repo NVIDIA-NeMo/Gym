@@ -2,9 +2,10 @@
 name: nemo-gym-blade-analysis
 description: >-
   Use when analyzing NeMo Gym benchmark rollouts for BLADE-style reports,
-  writing benchmark methodology notes, comparing model runs, or explaining why
-  a benchmark report passed, failed, or changed. Covers aggregate metrics,
-  rollout evidence, report structure, root-cause taxonomy, and improvement
+  writing benchmark methodology notes, checking whether a benchmark is
+  BLADE-ready, comparing model runs, or explaining why a benchmark report
+  passed, failed, or changed. Covers aggregate metrics, rollout evidence,
+  report structure, root-cause taxonomy, judge expectations, and improvement
   recommendations. For generic reward profiling commands, prefer
   nemo-gym-reward-profiling; for failed infrastructure jobs, prefer
   nemo-gym-debugging.
@@ -15,8 +16,12 @@ description: >-
 ## Invocation Check
 
 Use this skill when the user wants to turn NeMo Gym rollout outputs into an
-analysis report, benchmark card, model comparison, or benchmark-improvement
-recommendation.
+analysis report, benchmark card, model comparison, benchmark-improvement
+recommendation, or BLADE-ready benchmark package.
+
+Load `references/blade-benchmark-build-guide.md` when the user asks how to
+build, validate, submit, or review a BLADE benchmark or asks whether a benchmark
+has all required BLADE deliverables.
 
 Do not load benchmark-specific examples by default. Load
 `references/cvdp-report-example.md` only when the user explicitly asks for a
@@ -41,6 +46,11 @@ Start by identifying the artifact set:
 
 If artifacts are missing, state which claims cannot be supported rather than
 filling gaps from memory.
+
+If the task is benchmark construction rather than report analysis, first build
+an inventory of BLADE deliverables: analysis skill, rollout data, golden reports
+with metrics, and benchmark-specific judge. Missing deliverables are blocking
+work items, not footnotes.
 
 ## Analysis Workflow
 
