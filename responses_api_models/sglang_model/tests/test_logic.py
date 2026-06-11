@@ -195,7 +195,9 @@ def test_cap_no_change_when_short():
 
 def test_cap_truncates_long_prompt():
     ids, sp = cap_to_context(list(range(5000)), {"max_new_tokens": 100}, 4096)
-    assert len(ids) == 4095 and ids == list(range(4095))
+    # prompt alone exceeds ctx -> truncate to ctx-2, leaving room for >=1 gen token, total < ctx
+    assert len(ids) == 4094 and ids == list(range(4094))
+    assert len(ids) + sp["max_new_tokens"] < 4096
 
 
 def test_cap_shrinks_max_new():
@@ -205,8 +207,10 @@ def test_cap_shrinks_max_new():
 
 
 def test_cap_room_floor_at_one():
+    # prompt == ctx: truncate to ctx-2 and floor generation at 1 token, with input+gen still < ctx
     ids, sp = cap_to_context(list(range(4096)), {"max_new_tokens": 2048}, 4096)
-    assert len(ids) == 4095 and sp["max_new_tokens"] == 1  # max(1, 4096-4095-1)=max(1,0)=1
+    assert len(ids) == 4094 and sp["max_new_tokens"] == 1
+    assert len(ids) + sp["max_new_tokens"] == 4095 < 4096
 
 
 def test_cap_does_not_mutate_input():
