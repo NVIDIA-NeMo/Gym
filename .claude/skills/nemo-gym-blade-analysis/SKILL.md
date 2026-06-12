@@ -52,9 +52,11 @@ If artifacts are missing, state which claims cannot be supported rather than
 filling gaps from memory.
 
 If the task is benchmark construction rather than report analysis, first build
-an inventory of BLADE deliverables: analysis skill, rollout data, golden reports
-with metrics, and benchmark-specific judge. Missing deliverables are blocking
-work items, not footnotes.
+an inventory of BLADE deliverables: analysis skill, rollout data, and golden
+report packages with metrics and anchor facts. Current BLADE scoring is handled
+by the universal `blade-judge`; benchmark-local judge utilities are optional
+pre-checks, not required deliverables. Missing deliverables are blocking work
+items, not footnotes.
 
 ## Analysis Workflow
 

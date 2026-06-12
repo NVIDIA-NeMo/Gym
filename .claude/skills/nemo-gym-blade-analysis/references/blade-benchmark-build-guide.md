@@ -6,17 +6,54 @@ generic and should apply across NeMo Gym environments.
 
 ## Required Deliverables
 
-A BLADE-ready benchmark needs four deliverables:
+A BLADE-ready benchmark needs three deliverables:
 
 | ID | Deliverable | Purpose |
 |----|-------------|---------|
 | D1 | Analysis skill | Teaches an agent how to analyze the benchmark's rollout data. |
 | D2 | Rollout data | Provides comparable model runs for analysis and judge calibration. |
-| D3 | Golden reports | Establishes curated, evidence-backed analysis outputs. |
-| D4 | Benchmark-specific judge | Scores candidate analysis reports against deterministic facts and qualitative depth. |
+| D3 | Golden report package | Establishes curated analysis outputs, metrics sidecars, and anchor facts for `blade-judge`. |
 
-Do not call a benchmark BLADE-ready until all four deliverables exist and have
-been checked for consistency.
+Do not call a benchmark BLADE-ready until all D1-D3 deliverables exist and have
+been checked for consistency. Current BLADE scoring is handled by the universal
+`blade-judge`; a benchmark-local `judge/` directory is optional and should only
+hold deterministic pre-check utilities. It is not a required deliverable and
+does not replace the universal judge.
+
+## BLADE Tooling To Reference
+
+When working in the canonical BLADE submission repository, use these tools:
+
+- `.claude/skills/blade-contribute/scripts/validate_submission.py`: checks
+  benchmark deliverable presence and schema by phase.
+- `judge/anchor_facts_extractor.py`: extracts benchmark-specific anchor facts
+  from each golden report.
+- `tools/run_synthetic_calibration.sh`: compares golden-vs-self and
+  shallow-vs-golden to validate judge configuration and anchor quality.
+- `judge/blade_judge.py`: universal scorer. Benchmark-specific signal enters
+  through D3 artifacts, especially `_anchor_facts.json`, not through a required
+  benchmark-specific scorer.
+
+If those tools are not vendored in the target repository, reference the
+canonical BLADE tooling rather than inventing a benchmark-specific replacement
+judge.
+
+Typical command shapes:
+
+```bash
+python .claude/skills/blade-contribute/scripts/validate_submission.py \
+  --benchmark <benchmark_name> --phase all
+
+uv run python judge/anchor_facts_extractor.py extract \
+  --golden benchmarks/<benchmark_name>/golden_reports/<model>_golden_report.md \
+  --benchmark <benchmark_name> --model-name <model> \
+  --output benchmarks/<benchmark_name>/golden_reports/<model>_anchor_facts.json
+
+tools/run_synthetic_calibration.sh \
+  --golden-report benchmarks/<benchmark_name>/golden_reports/<model>_golden_report.md \
+  --anchor-facts benchmarks/<benchmark_name>/golden_reports/<model>_anchor_facts.json \
+  --shallow-report benchmarks/<benchmark_name>/golden_reports/<model>_shallow.md
+```
 
 ## D1: Analysis Skill
 
@@ -127,7 +164,7 @@ Do not include large raw rollouts inside a skill reference unless they are
 explicitly needed and appropriate for the target repository. Prefer pointers to
 existing in-repo example rollouts or external benchmark artifacts.
 
-## D3: Golden Reports
+## D3: Golden Reports, Metrics, And Anchor Facts
 
 Golden reports are curated analysis reports. They are not just script output.
 They should combine deterministic metrics with diagnostic reasoning.
@@ -161,15 +198,23 @@ Golden report metrics belong in a JSON sidecar. Include at least:
 Add benchmark-specific metrics such as pass@k, consistency, oracle ceiling,
 pipeline counts, error-pattern counts, per-category breakdowns, or token stats.
 
-Anchor facts are optional but useful for judge calibration. They should capture
-important findings with enough detail to verify whether a candidate report found
-the same pattern.
+Anchor facts are required for current BLADE scoring. Generate and verify one
+`_anchor_facts.json` for each golden report. Anchor facts should capture
+important, non-guessable findings with enough detail to verify whether a
+candidate report found the same pattern.
 
-## D4: Benchmark-Specific Judge
+A useful D3 package usually contains:
 
-The judge should combine deterministic checks and qualitative scoring.
+- `{model}_golden_report.md`: verified diagnostic analysis.
+- `{model}_golden_report_metrics.json`: structured metrics used by scoring and
+  validation.
+- `{model}_anchor_facts.json`: benchmark-specific Layer B criteria for the
+  universal `blade-judge`.
+- `{model}_shallow.md`: optional negative-control report for synthetic
+  calibration.
 
-Deterministic checks should validate facts such as:
+The universal judge combines deterministic checks and qualitative scoring. It
+should validate facts such as:
 
 - pass@1, pass@k, or benchmark-native metric values within tolerance
 - total tasks, rollout counts, and coverage
@@ -189,7 +234,7 @@ Qualitative scoring should reward:
 - cross-cutting insight across categories, domains, or model versions
 - non-obvious findings that cannot be derived from aggregate metrics alone
 
-The judge should also detect shortcut analysis:
+The scoring flow should also detect shortcut analysis:
 
 | Shortcut | Signal | Catch |
 |----------|--------|-------|
@@ -230,8 +275,13 @@ Use this checklist before marking a benchmark ready:
 - Metrics can be recomputed or verified from rollout data.
 - Golden reports contain causal diagnosis and concrete examples, not only
   aggregate tables.
-- Metrics JSON sidecars exist and parse.
-- Judge instructions define deterministic checks and qualitative rubric.
-- Judge catches template filling, fabricated evidence, and script-only reports.
+- Golden report metrics sidecars exist and parse.
+- Anchor facts exist for each golden report and target non-guessable findings.
+- Universal `blade-judge` calibration is documented or run with golden-vs-self
+  and shallow-vs-golden checks.
+- Optional benchmark-local judge utilities are clearly labeled as pre-checks,
+  not replacement scorers.
+- Scoring catches template filling, fabricated evidence, and script-only
+  reports.
 - Sanitization pass removes private source, endpoints, credentials, personal
   names, unreleased benchmark names, and raw data not cleared for sharing.
