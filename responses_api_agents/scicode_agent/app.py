@@ -28,9 +28,17 @@ Templated on responses_api_agents/proof_refinement_agent (the multi-turn run() s
 """
 
 import logging
+from typing import Dict, List
 
 from fastapi import Request, Response
 from pydantic import ConfigDict
+from step_utils import (
+    OUT_OF_CONTEXT,
+    PREFILLED_STEPS_CODE,
+    extract_python_script,
+    is_context_window_error,
+    process_problem_steps,
+)
 
 from nemo_gym.base_resources_server import BaseRunRequest
 from nemo_gym.base_responses_api_agent import (
@@ -44,6 +52,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.prompt import PromptConfig, load_prompt_config
 from nemo_gym.server_utils import raise_for_status
 
 
@@ -55,21 +64,27 @@ class ScicodeAgentConfig(BaseResponsesAPIAgentConfig):
 
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
-    # Include each sub-step's scientific background in the prompt (nemo-skills default).
+    # Per-sub-step user prompt template (PromptConfig YAML) the agent fills each step.
+    prompt_fpath: str
+    # Inject each sub-step's scientific background into the prompt context.
     with_background: bool = True
 
 
 class ScicodeAgentRunRequest(BaseRunRequest):
-    """extra verifier_metadata fields (problem_id, sub_steps,
-    required_dependencies) forward through to the resources server."""
-
+    # extra="allow" so passthrough fields (e.g. uuid) survive to the resources server.
     model_config = ConfigDict(extra="allow")
+    problem_id: str
+    sub_steps: List[dict]
+    required_dependencies: str
 
 
 class ScicodeAgent(SimpleResponsesAPIAgent):
     """Agent that drives the SciCode per-sub-step generation + code-accumulation loop."""
 
     config: ScicodeAgentConfig
+
+    def model_post_init(self, context):
+        self._prompt: PromptConfig = load_prompt_config(self.config.prompt_fpath)
 
     async def responses(
         self,
@@ -97,15 +112,64 @@ class ScicodeAgent(SimpleResponsesAPIAgent):
         return NeMoGymResponse.model_validate(model_response_json)
 
     async def run(self, request: Request, body: ScicodeAgentRunRequest):
-        """Execute the SciCode multi-step loop, then verify.
+        """Generate code for each sub-step (accumulating prior code as context), then verify."""
+        cookies = request.cookies
+        sub_steps = body.sub_steps
+        total = len(sub_steps)
+        previous_llm_code = [None] * total
+        solutions: Dict[str, str] = {}
+        out_of_context = False
 
-        TODO: for cur_step in range(len(sub_steps)):
-          - skip prefilled steps; mark remaining steps as out-of-context if the window overflows
-          - build the per-step prompt and post to self.config.name /v1/responses
-          - extract the Python code block and accumulate deps + previous code + this step
-        Then POST the accumulated solutions dict to the resources server /verify and return the result.
-        """
-        raise NotImplementedError("SciCode multi-step loop not yet implemented")
+        for cur_step in range(total):
+            # Prefilled steps provide context for later steps but are not scored (no solution entry).
+            if (body.problem_id, cur_step) in PREFILLED_STEPS_CODE:
+                previous_llm_code[cur_step] = PREFILLED_STEPS_CODE[(body.problem_id, cur_step)]
+                continue
+            if out_of_context:
+                solutions[f"{body.problem_id}.{cur_step + 1}"] = OUT_OF_CONTEXT
+                continue
+
+            problem_steps_str, next_step_str, previous_code_str = process_problem_steps(
+                sub_steps, cur_step, previous_llm_code, self.config.with_background
+            )
+            dependencies = body.required_dependencies
+            previous_code = f"{dependencies}\n{previous_code_str}\n" if previous_code_str else f"{dependencies}\n"
+            user_content = self._prompt.user.format(
+                problem_steps_str=problem_steps_str, next_step_str=next_step_str, dependencies=dependencies
+            )
+
+            try:
+                gen_response = await self.server_client.post(
+                    server_name=self.config.name,
+                    url_path="/v1/responses",
+                    json={"input": [{"role": "user", "content": user_content}]},
+                    cookies=cookies,
+                )
+                await raise_for_status(gen_response)
+            except Exception as error:
+                if is_context_window_error(error):
+                    LOG.warning("SciCode step %s: context window exceeded; failing remaining steps.", cur_step)
+                    out_of_context = True
+                    solutions[f"{body.problem_id}.{cur_step + 1}"] = OUT_OF_CONTEXT
+                    continue
+                raise
+
+            cookies = gen_response.cookies
+            generation = NeMoGymResponse.model_validate(await gen_response.json()).output_text
+            extracted = extract_python_script(generation)
+            previous_llm_code[cur_step] = extracted
+            solutions[f"{body.problem_id}.{cur_step + 1}"] = f"{previous_code}\n{extracted}"
+
+        verify_request_data = body.model_dump()
+        verify_request_data["solutions"] = solutions
+        verify_response = await self.server_client.post(
+            server_name=self.config.resources_server.name,
+            url_path="/verify",
+            json=verify_request_data,
+            cookies=cookies,
+        )
+        await raise_for_status(verify_response)
+        return await verify_response.json()
 
 
 if __name__ == "__main__":

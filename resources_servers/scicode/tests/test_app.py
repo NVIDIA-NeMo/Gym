@@ -130,9 +130,19 @@ class TestApp:
     async def test_verify_no_solutions_returns_zero(self):
         result = await _server().verify(_request(solutions=None))
         assert result.reward == 0.0
-        assert result.num_steps_total == 2
+        assert result.num_steps_total == 0
         assert result.num_steps_passed == 0
         assert result.problem_accuracy is False
+
+    @pytest.mark.asyncio
+    async def test_verify_excludes_steps_absent_from_solutions(self):
+        # Step 1.2 has no solution entry (prefilled) -> excluded from the denominator entirely.
+        with tempfile.NamedTemporaryFile(suffix=".h5") as h5, _mock_ray(passed=True):
+            result = await _server(h5.name).verify(_request(solutions={"1.1": "a"}, n_steps=2))
+        assert result.num_steps_total == 1
+        assert result.num_steps_passed == 1
+        assert result.reward == 1.0
+        assert result.problem_accuracy is True
 
     @pytest.mark.asyncio
     async def test_verify_unconfigured_test_data_raises(self):

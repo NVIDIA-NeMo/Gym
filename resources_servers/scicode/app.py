@@ -92,14 +92,17 @@ class ScicodeResourcesServer(SimpleResourcesServer):
 
     async def verify(self, body: ScicodeVerifyRequest) -> ScicodeVerifyResponse:
         solutions = body.solutions or {}
-        total = len(body.sub_steps)
-        if not solutions:
+        # Score only sub-steps the agent produced a solution for. Sub-steps absent from solutions
+        # (prefilled steps) are excluded from the denominator entirely; out-of-context sentinels
+        # are present and counted as failures.
+        scored = [i for i in range(len(body.sub_steps)) if f"{body.problem_id}.{i + 1}" in solutions]
+        if not scored:
             return ScicodeVerifyResponse(
                 **body.model_dump(),
                 reward=0.0,
                 step_results=[],
                 num_steps_passed=0,
-                num_steps_total=total,
+                num_steps_total=0,
                 problem_accuracy=False,
             )
 
@@ -108,26 +111,26 @@ class ScicodeResourcesServer(SimpleResourcesServer):
 
         async def _run_substep(i: int) -> bool:
             sub_step = body.sub_steps[i]
-            full_generation = solutions.get(f"{body.problem_id}.{i + 1}")
-            if not full_generation or full_generation == _OUT_OF_CONTEXT:
+            code = solutions[f"{body.problem_id}.{i + 1}"]
+            if not code or code == _OUT_OF_CONTEXT:
                 return False
             sanitized = [sanitize_test(tc) for tc in sub_step["test_cases"]]
-            program = build_test_program(full_generation, h5_path, sub_step["step_number"], sanitized)
+            program = build_test_program(code, h5_path, sub_step["step_number"], sanitized)
             async with self._semaphore:
                 future = run_substep_remote.remote(program, self.config.timeout_secs)
                 result = await loop.run_in_executor(None, ray.get, future)
             return bool(result["passed"])
 
-        step_results = list(await asyncio.gather(*[_run_substep(i) for i in range(total)]))
+        step_results = list(await asyncio.gather(*[_run_substep(i) for i in scored]))
         num_passed = sum(step_results)
-        all_passed = total > 0 and num_passed == total
+        all_passed = num_passed == len(scored)
 
         return ScicodeVerifyResponse(
             **body.model_dump(),
             reward=1.0 if all_passed else 0.0,
             step_results=step_results,
             num_steps_passed=num_passed,
-            num_steps_total=total,
+            num_steps_total=len(scored),
             problem_accuracy=all_passed,
         )
 
