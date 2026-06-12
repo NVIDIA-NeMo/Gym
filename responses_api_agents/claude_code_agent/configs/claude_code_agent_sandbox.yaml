@@ -1,0 +1,43 @@
+cvdp:
+  resources_servers:
+    cvdp:
+      entrypoint: app.py
+      domain: coding
+      verified: false
+      oss_sim_image: ghcr.io/hdl/sim/osvb
+      eda_sim_image: ""
+      container_timeout: 600
+      num_processes: 4
+      primary_service: direct
+      description: CVDP benchmark dataset for code generation
+      value: Evaluate RTL code generation capabilities
+
+claude_code_agent:
+  responses_api_agents:
+    claude_code_agent:
+      entrypoint: cvdp_app.py
+      resources_server:
+        type: resources_servers
+        name: cvdp
+      concurrency: 4
+      model: ${anthropic_model_name}
+      anthropic_api_key: ${anthropic_api_key}
+      anthropic_base_url: ${anthropic_base_url}
+      max_turns: 30
+      timeout: 900
+
+      # --- Apptainer agentic execution ---
+      # Runs claude inside the EDA sim container so it can edit files on disk and
+      # use iverilog/vvp. Leave sif_path unset to pull/convert sim_image to a
+      # cached .sif; claude_node_dir defaults to ./.claude_node (bind-mounted in).
+      sim_image: ghcr.io/hdl/sim/osvb
+      sif_path: null
+      sif_cache_dir: ""
+      claude_node_dir: ""
+      container_workdir: /code
+      harness_workspace_dir: ""
+
+      system_prompt: null
+      allowed_tools: null
+      disallowed_tools: null
+      claude_code_version: null
