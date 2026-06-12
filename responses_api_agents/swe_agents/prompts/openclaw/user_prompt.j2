@@ -1,0 +1,92 @@
+Implement the necessary changes to the repository ( {{ workspace_path }} ) so that the requirements specified in the <issue_details> are satisfied.
+The environment is already set up for you (i.e., all dependencies already installed), so you don't need to install other packages.
+
+{% set _lang = (repo_language | default('')) | trim %}
+{% set _lkey = _lang | lower %}
+{% set _repro = {
+  'python': 'python <filename.py>',
+  'go': 'go run <filename.go>',
+  'java': 'compile with javac <Class>.java then run java <Class>',
+  'c': 'gcc <file.c> -o repro && ./repro',
+  'c++': 'g++ -o repro repro.cpp && ./repro',
+  'cpp': 'g++ -o repro repro.cpp && ./repro',
+  'javascript': 'node <file.js>',
+  'typescript': 'ts-node <file.ts>',
+  'rust': 'cargo run',
+  'ruby': 'ruby <file.rb>',
+  'php': 'php <file.php>'
+} %}
+{% if _lang %}
+I've uploaded a {{ _lang }} repository in the directory {{ workspace_path }}.
+{% if _repro.get(_lkey) %}When you write a reproduction, run it with: {{ _repro.get(_lkey) }}.{% endif %}
+{% else %}
+I've uploaded a code repository in the directory {{ workspace_path }}.
+{% endif %}
+
+<issue_details>
+{{ instance.problem_statement }}
+</issue_details>
+
+<workspace_path>
+{{ workspace_path }}
+</workspace_path>
+
+<TASK>
+- Investigate first: read the relevant code and run the project tests before
+proposing a fix.
+- Locate the buggy code, then make a minimal, targeted edit. Do NOT refactor
+unrelated code.
+- Do NOT modify test files unless the problem statement specifically requires it.
+- Do NOT commit. Stop when done.
+</TASK>
+
+<PROBLEM_SOLVING_WORKFLOW>
+1. EXPLORATION: Thoroughly explore relevant files and understand the context
+before proposing solutions. Use grep / find / ls with filters rather than
+reading large files exhaustively.
+2. ANALYSIS: Consider multiple hypotheses for the root cause. Pick the most
+likely one before editing.
+3. REPRODUCTION: When practical, write a minimal reproduction (a small script
+or a single test invocation) that demonstrates the bug before fixing it.
+4. IMPLEMENTATION: Make focused, minimal changes. Edit the original file
+directly — never create `_fix` / `_v2` / `_new` variants of the same file.
+5. VERIFICATION: Re-run the reproduction and the relevant existing tests to
+confirm the fix works and doesn't regress unrelated behaviour.
+</PROBLEM_SOLVING_WORKFLOW>
+
+<FILE_SYSTEM_GUIDELINES>
+- Treat any path the problem statement gives as a hint, not a guarantee —
+verify it exists before editing.
+- Edit files in place. NEVER create variants like `file_test.py`,
+`file_fix.py`, `file_simple.py`. If you create a scratch file for
+debugging, delete it once you're done.
+- Do NOT add new documentation files explaining your changes.
+</FILE_SYSTEM_GUIDELINES>
+
+<CODE_QUALITY>
+- Write clean code with minimal comments. Don't repeat in a comment what the
+code already says.
+- Make the minimal change needed to solve the problem. If you find yourself
+adding many lines, reconsider whether you've understood the root cause.
+- Place imports at the top of the file unless the existing file has a reason
+not to (circular imports, lazy imports, etc.).
+</CODE_QUALITY>
+
+<EFFICIENCY>
+- Each tool call has real cost. Where possible, combine multiple operations
+into one (broader grep patterns, batched edits, single `bash -c` chains).
+- Prefer `grep` / `find` with filters over reading large files exhaustively.
+</EFFICIENCY>
+
+<TROUBLESHOOTING>
+- If repeated attempts fail, step back and list 5–7 alternative hypotheses
+for the root cause. Assess likelihood and address the most likely ones
+systematically rather than thrashing on the first idea.
+- Don't paper over symptoms — fix the underlying cause.
+</TROUBLESHOOTING>
+
+<PROCESS_MANAGEMENT>
+- When killing a process, identify it by exact PID (via `ps` or a pidfile).
+Do not use broad `pkill -f <keyword>` patterns that could match unrelated
+processes.
+</PROCESS_MANAGEMENT>
