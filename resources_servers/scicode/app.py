@@ -65,6 +65,9 @@ class ScicodeVerifyRequest(ScicodeRunRequest, BaseVerifyRequest):
 
 
 class ScicodeVerifyResponse(BaseVerifyResponse):
+    # Declared so it survives into the rollout output (identifies the problem); the request's
+    # sub_steps/solutions are intentionally not carried through to keep rollout rows small.
+    problem_id: str = ""
     step_results: List[bool] = []
     num_steps_passed: int = 0
     num_steps_total: int = 0

@@ -171,6 +171,7 @@ class TestApp:
         assert result.step_results == [True, True]
         assert result.num_steps_passed == 2
         assert result.problem_accuracy is True
+        assert result.problem_id == "1"  # preserved into the rollout output
 
     @pytest.mark.asyncio
     async def test_verify_all_fail(self):

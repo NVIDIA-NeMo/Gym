@@ -1,0 +1,53 @@
+{
+    "name": "scicode",
+    "type": "benchmark",
+    "jsonl_fpath": "benchmarks/scicode/data/scicode_benchmark.jsonl",
+    "prepare_script": "benchmarks/scicode/prepare.py",
+    "prompt_config": null,
+    "num_repeats": 3,
+    "Number of examples": 240,
+    "Number of tools": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 240,
+        "Average": 2.0,
+        "Min": 2.0,
+        "Max": 2.0,
+        "Standard deviation": 0.0
+    },
+    "Number of turns": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "problem_id": {
+        "unique_count": 80,
+        "total_count": 240
+    },
+    "problem_name": {
+        "unique_count": 80,
+        "total_count": 240
+    },
+    "required_dependencies": {
+        "unique_count": 40,
+        "total_count": 240
+    },
+    "uuid": {
+        "unique_count": 80,
+        "total_count": 240
+    }
+}

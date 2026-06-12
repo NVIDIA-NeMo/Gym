@@ -12,5 +12,10 @@ scicode_agent:
       prompt_fpath: benchmarks/scicode/prompts/default.yaml
       # Inject each sub-step's scientific background into the prompt context.
       with_background: true
-      # Populated by the benchmark config.
-      datasets: []
+      # Example smoke dataset; the benchmark config replaces this with the benchmark dataset.
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/scicode/data/example.jsonl
+          prompt_config: null
+          num_repeats: 1

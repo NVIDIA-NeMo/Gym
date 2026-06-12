@@ -3,3 +3,7 @@
 *train_prepare.jsonl
 *validation_prepare.jsonl
 *example_prepare.jsonl
+*_materialized_inputs.jsonl
+*_failures.jsonl
+*_aggregate_metrics.json
+preprocessed_datasets/
