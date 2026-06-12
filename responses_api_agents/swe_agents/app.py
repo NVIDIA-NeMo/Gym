@@ -20,12 +20,14 @@ import random
 import re
 import shlex
 import shutil
+import signal
 import sys
 import time
 import uuid
 from asyncio import Semaphore
 from asyncio.subprocess import Process
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from shutil import rmtree
 from subprocess import Popen
@@ -37,7 +39,7 @@ import ray
 import tomlkit
 from gprof2dot import main as gprof2dot_main
 from openai.types.responses.function_tool import FunctionTool
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 from pydot import graph_from_dot_file
 
 from nemo_gym import PARENT_DIR
@@ -51,12 +53,29 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef
-from nemo_gym.global_config import OmegaConf, get_global_config_dict
+from nemo_gym.global_config import OmegaConf, get_first_server_config_dict, get_global_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseInputItem,
+    NeMoGymResponseOutputItem,
 )
 from nemo_gym.profiling import Profiler
+from responses_api_agents.swe_agents.openclaw.config_templates import (
+    EXEC_APPROVALS,
+    PI_SETTINGS,
+    build_openclaw_json,
+)
+from responses_api_agents.swe_agents.openclaw.dataset_env import (
+    resolve_agent_env_bin,
+    resolve_dataset_type,
+    resolve_workspace_path,
+)
+from responses_api_agents.swe_agents.openclaw.trajectory_reconstruction import (
+    classify_openclaw_agent_error,
+    reconstruct_responses_items,
+    strip_token_ids_in_proxy_log,
+)
 from responses_api_models.vllm_model.app import VLLMConverter, split_responses_input_output_items
 
 
@@ -157,14 +176,27 @@ class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
         "If False (default), selection is deterministic per instance_id.",
     )
 
+    # Harness selection
+    harness: Literal["openhands", "openclaw"] = "openhands"
+
     openhands_should_log: bool = False
     debug: bool = False
+
+    openclaw_version: str = "2026.5.6"
+    openclaw_keep_token_ids_in_proxy_log: bool = False
+    openclaw_model_idle_timeout_seconds: int = Field(
+        default=1200,
+        description=(
+            "OpenClaw llm-idle-timeout watchdog (provider timeoutSeconds). Set generously "
+            "so slow turns are not preempted into a same-turn retry that duplicates the turn in the proxy log."
+        ),
+    )
 
 
 class SWEBenchWrapperServerConfig(BaseModel):
     ng_global_config_dict_str: str
     model_server_name: str
-    openhands_setup_dir: Path
+    openhands_setup_dir: Optional[Path] = None  # unset when harness="openclaw"
     swebench_setup_dir: Path
     r2e_gym_setup_dir: Path
     swe_rebench_setup_dir: Path
@@ -178,6 +210,7 @@ class ExecuteContainerCommandArgs(BaseModel):
     expected_file_pattern: str
     mode: Union[Literal["agent"], Literal["eval"]]
     timeout: int
+    env: Optional[Dict[str, str]] = None
 
 
 class SWEBenchWrapperInstanceConfig(SWEBenchWrapperServerConfig, SWEBenchWrapperConfig):
@@ -1252,6 +1285,126 @@ AGENT_FRAMEWORK_COMMIT={self.config.agent_framework_commit} \\
         )
 
 
+class OpenClawHarnessProcessor(BaseDatasetHarnessProcessor):
+    """Harness processor for the OpenClaw agent framework."""
+
+    def setup(self) -> Path:
+        """Run the one-time installer under the cross-node setup lock.
+        Idempotent — the installer skips if everything is already in place."""
+        setup_dir = self.parent_dir / "swe_openclaw_setup"
+
+        with self._setup_directory_lock(setup_dir, "OpenClaw"):
+            subprocess_run([str(self.parent_dir / "setup_scripts/openclaw.sh")], check=True)
+        return setup_dir
+
+    def get_run_command(self) -> ExecuteContainerCommandArgs:
+        cfg = self.config
+
+        model_server_config = get_first_server_config_dict(get_global_config_dict(), self.config.model_server.name)
+        upstream_base_url = f"http://{model_server_config['host']}:{model_server_config['port']}/v1"
+        upstream_api_key = model_server_config.get("api_key", "")
+        model_name = model_server_config.get("model", "")
+
+        cfg.body.model = model_name
+
+        persistent_dir = cfg.persistent_dir
+        # Resolve the agent's in-container workspace + Python-runtime env from the dataset
+        # name (mirrors OpenHands' DATASET_TYPE model; see openclaw/dataset_env.py).
+        dataset_name = cfg.problem_info.get("dataset_name")
+        raw = cfg.problem_info.get("instance_dict")
+        if isinstance(raw, str):
+            instance_dict = json.loads(raw)
+        elif isinstance(raw, dict):
+            instance_dict = raw
+        else:
+            instance_dict = {}
+        dataset_type = resolve_dataset_type(dataset_name)
+        workspace_path = resolve_workspace_path(dataset_type, instance_dict)
+        openclaw_home = os.path.join(persistent_dir, "openclaw_home")
+        os.makedirs(os.path.join(openclaw_home, "agents", "main", "agent"), exist_ok=True)
+
+        # openclaw.json — gateway + model config. build_openclaw_json takes temperature + max_output_tokens;
+        # top_p is routed via the shim (TOP_P env, set below), since the openai-responses transport can't carry it.
+        ip = cfg.inference_params or {}
+        oc_cfg = build_openclaw_json(
+            workspace_path=workspace_path,
+            model_name=model_name,
+            upstream_base_url=upstream_base_url,
+            upstream_api_key=upstream_api_key,
+            gateway_auth_token=str(uuid.uuid4()),
+            agent_env_bin=resolve_agent_env_bin(dataset_name),
+            temperature=ip.get("temperature"),
+            max_output_tokens=ip.get("tokens_to_generate"),
+            model_idle_timeout_seconds=cfg.openclaw_model_idle_timeout_seconds,
+        )
+        oc_json_path = os.path.join(openclaw_home, "openclaw.json")
+        with open(oc_json_path, "w") as f:
+            json.dump(oc_cfg, f, indent=2)
+        os.chmod(oc_json_path, 0o444)
+
+        # agents/main/agent/settings.json — Pi agent settings
+        pi_path = os.path.join(openclaw_home, "agents", "main", "agent", "settings.json")
+        with open(pi_path, "w") as f:
+            json.dump(PI_SETTINGS, f, indent=2)
+        os.chmod(pi_path, 0o444)
+
+        # exec-approvals.json — tool execution permissions
+        ea_path = os.path.join(openclaw_home, "exec-approvals.json")
+        with open(ea_path, "w") as f:
+            json.dump(EXEC_APPROVALS, f, indent=2)
+        os.chmod(ea_path, 0o444)
+
+        repo_language = cfg.problem_info.get("repo_language") or cfg.problem_info.get("language") or ""
+
+        # openclaw_instance.json — payload that run_openclaw.sh renders
+        # against /openclaw_setup/user_prompt.j2 inside the container.
+        payload_path = os.path.join(persistent_dir, "openclaw_instance.json")
+        with open(payload_path, "w") as f:
+            json.dump(
+                {
+                    "workspace_path": workspace_path,
+                    "repo_language": repo_language,
+                    "instance": instance_dict,
+                },
+                f,
+            )
+
+        env = {
+            "OPENCLAW_STATE_DIR": "/.openclaw",
+            "OPENCLAW_TRAJECTORY_DIR": "/trajectories_mount/openclaw_trajectory",
+            "OPENCLAW_TRAJECTORY": "1",
+            "OPENCLAW_SETUP_DIR": "/openclaw_setup",
+            "OPENCLAW_WORKSPACE": workspace_path,
+            # Dataset/language levers for run_openclaw.sh's dataset-gated blocks
+            # (mirror OpenHands' DATASET_TYPE model + per-instance repo_language).
+            "DATASET_TYPE": dataset_type,
+            "REPO_LANGUAGE": repo_language,
+            "AGENT_MAX_TURNS": str(cfg.agent_max_turns),
+            "AGENT_RUN_ID": cfg.agent_run_id,
+            "AGENT_TIMEOUT_SECONDS": str(cfg.swebench_agent_timeout),
+            "SWEBENCH_INSTANCE_ID": cfg.instance_id,
+            # Diff the patch against the base commit (parity with OpenHands'
+            # complete_runtime), so an agent `git commit` can't drop changes.
+            "SWEBENCH_BASE_COMMIT": instance_dict.get("base_commit", ""),
+            "VLLM_MODEL_BASE_URL": upstream_base_url,
+            # top_p → stream shim (openclaw.json can't carry it); empty = unset.
+            "TOP_P": str(ip["top_p"]) if ip.get("top_p") is not None else "",
+        }
+
+        # SWE-rebench Java tests need IPv6 disabled. _build_apptainer_command sets this for the eval
+        # container only; the OpenClaw agent phase bypasses that, so set it here too (gated to SWE-rebench).
+        if dataset_type in ("SWE-rebench", "SWE-rebench-V2"):
+            env["_JAVA_OPTIONS"] = "-Djava.net.preferIPv6Addresses=false"
+
+        return ExecuteContainerCommandArgs(
+            command="/openclaw_setup/run_openclaw.sh",
+            expected_file_pattern="",
+            mode="agent",
+            timeout=cfg.swebench_agent_timeout,
+            env=env,
+        )
+
+
 ########################################
 # START Ray worker logic
 ########################################
@@ -1261,7 +1414,7 @@ def _classify_agent_error(err: Optional[str]) -> Optional[str]:
     if not err:
         return None
     s = str(err)
-    if "maximum iteration" in s:
+    if "maximum iteration" in s or "max_iteration" in s:
         return "max_iteration"
     if "ContextWindow" in s or "context window" in s.lower():
         return "context_window"
@@ -1287,6 +1440,32 @@ def runner_ray_remote(params_dict: dict[str, Any]) -> Optional[Path]:
     report_file = asyncio.run(run_oh.process_single_datapoint())
 
     return report_file
+
+
+@dataclass
+class _OpenClawFinalArtifacts:
+    input_items: list
+    output_items: list
+    tools: list
+    agent_error_kind: str | None
+
+
+@ray.remote(
+    scheduling_strategy="SPREAD",
+    runtime_env={
+        "py_executable": sys.executable,
+    },
+    num_cpus=0.1,
+)
+def openclaw_runner_ray_remote(
+    params_dict: dict[str, Any],
+) -> tuple[Optional[Path], Optional[_OpenClawFinalArtifacts]]:
+    SWEBenchWrapperInstanceConfig.model_rebuild(force=True)
+    RunOpenClawAgent.model_rebuild(force=True)
+
+    params = SWEBenchWrapperInstanceConfig.model_validate(params_dict)
+    run_oc = RunOpenClawAgent(config=params)
+    return asyncio.run(run_oc.process_single_datapoint())
 
 
 def update_metrics(metrics_fpath: Path, update_dict: Dict[str, Any]) -> None:
@@ -1644,6 +1823,243 @@ class RunOpenHandsAgent(BaseModel):
         return report_file
 
 
+def _read_jsonl(path: str) -> list[dict]:
+    if not os.path.exists(path):
+        return []
+    out = []
+    with open(path, "r") as f:
+        for line in f:
+            line = line.rstrip("\n")
+            if line:
+                out.append(json.loads(line))
+    return out
+
+
+class RunOpenClawAgent(BaseModel):
+    config: Optional[SWEBenchWrapperInstanceConfig] = None
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    def _finalize_from_artifacts(
+        self,
+        *,
+        persistent_dir: str,
+        agent_timed_out: bool,
+        subprocess_exit_code: int,
+        agent_run_id: str,
+        keep_token_ids: bool = False,
+    ) -> _OpenClawFinalArtifacts:
+        proxy_log_path = os.path.join(persistent_dir, "openclaw_proxy.jsonl")
+        proxy_log = _read_jsonl(proxy_log_path)
+
+        trajectory_path = os.path.join(persistent_dir, "openclaw_trajectory", f"{agent_run_id}.jsonl")
+        trajectory_events = _read_jsonl(trajectory_path)
+
+        input_items, output_items, tools = reconstruct_responses_items(proxy_log)
+        agent_error_kind = classify_openclaw_agent_error(
+            proxy_log=proxy_log,
+            trajectory_events=trajectory_events,
+            subprocess_timed_out=agent_timed_out,
+            subprocess_exit_code=subprocess_exit_code,
+        )
+
+        if not keep_token_ids and os.path.exists(proxy_log_path):
+            strip_token_ids_in_proxy_log(proxy_log_path)
+
+        return _OpenClawFinalArtifacts(
+            input_items=input_items,
+            output_items=output_items,
+            tools=tools,
+            agent_error_kind=agent_error_kind,
+        )
+
+    async def _start_container_command(
+        self, command: ExecuteContainerCommandArgs, apptainer_cmd: str
+    ) -> ActiveContainerCommand:
+        # Stream output to log file as it appears
+        logs_dir = self.config.persistent_dir / "apptainer_logs"
+        logs_dir.mkdir(exist_ok=True)
+        log_file_path = logs_dir / f"{self.config.instance_id}_{command.mode}.log"
+        log_file = open(log_file_path, "w")
+
+        process = await asyncio.create_subprocess_shell(
+            apptainer_cmd, stdout=log_file, stderr=log_file, start_new_session=True
+        )
+
+        return ActiveContainerCommand(process=process, log_file=log_file, log_file_path=log_file_path)
+
+    async def _finish_container_command(
+        self, active_command: ActiveContainerCommand, command: ExecuteContainerCommandArgs
+    ) -> str:
+        try:
+            await asyncio.wait_for(active_command.process.communicate(), timeout=command.timeout)
+        except asyncio.TimeoutError:
+            if active_command.process.returncode is None:
+                active_command.process.kill()
+                await active_command.process.wait()
+            raise ValueError("Command timed out")
+        finally:
+            active_command.log_file.close()
+
+        if active_command.process.returncode != 0:
+            raise RuntimeError(
+                f"Command failed with return code {active_command.process.returncode}. "
+                f"Logs:\n{active_command.log_file_path.read_text(errors='replace')}"
+            )
+
+        pred_files = glob.glob(command.expected_file_pattern, recursive=True)
+        if len(pred_files) == 1:
+            return pred_files[0]
+        elif len(pred_files) > 1:
+            return max(pred_files, key=os.path.getmtime)
+        else:
+            raise ValueError(
+                f"Expected exactly one file matching {command.expected_file_pattern} for "
+                f"{self.config.instance_id}, found {len(pred_files)}."
+            )
+
+    async def _kill_active_command(self, active_command: ActiveContainerCommand) -> None:
+        proc = active_command.process
+        if proc.returncode is None:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                pass
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=10)
+            except asyncio.TimeoutError:
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+                await proc.wait()
+
+    async def process_single_datapoint(self) -> tuple[Optional[Path], Optional[_OpenClawFinalArtifacts]]:
+        instance_id = self.config.instance_id
+
+        metrics = SWEBenchMetrics(ray_queue_time=time.time() - self.config.ray_queue_timestamp)
+        metrics.openhands_run_time = -time.time()
+        metrics.final_eval_apptainer_spinup_time = metrics.openhands_run_time
+
+        # Spawn agent + eval concurrently.
+        agent_ac = await self._start_container_command(
+            self.config.agent_command, self.config.agent_apptainer_command_str
+        )
+        eval_ac = (
+            None
+            if self.config.skip_eval
+            else await self._start_container_command(self.config.eval_command, self.config.eval_apptainer_command_str)
+        )
+
+        # Wait for the agent with the agent-mode timeout.
+        agent_timed_out = False
+        try:
+            await asyncio.wait_for(agent_ac.process.wait(), timeout=self.config.swebench_agent_timeout)
+        except asyncio.TimeoutError:
+            agent_timed_out = True
+            await self._kill_active_command(agent_ac)
+        finally:
+            agent_ac.log_file.close()
+
+        metrics.openhands_run_time += time.time()
+        metrics.agent_timed_out = agent_timed_out
+
+        # Read exit code from openclaw_exit_code.txt (written by run_openclaw.sh).
+        exit_code_path = self.config.persistent_dir / "openclaw_exit_code.txt"
+        try:
+            subprocess_exit_code = int(exit_code_path.read_text().strip())
+        except (FileNotFoundError, ValueError):
+            subprocess_exit_code = agent_ac.process.returncode if agent_ac.process.returncode is not None else -1
+
+        patch_path = self.config.model_patch_path
+        patch = "" if not patch_path.exists() else patch_path.read_text(encoding="utf-8", errors="replace")
+        patch = patch + "\n" if patch and not patch.endswith("\n") else patch
+        metrics.model_patch = patch or None
+        metrics.patch_exists = bool(patch.strip())
+
+        # Write the patch to model_patch_path (eval container reads from there).
+        if patch.strip():
+            with open(self.config.model_patch_path, "w") as f:
+                f.write(patch)
+            # Write the prediction file. The eval container, spawned
+            # concurrently above, blocks on `until [ -f output_for_eval.jsonl ]`;
+            # the OpenHands runner writes this file and the OpenClaw runner must
+            # too, or eval hangs until its timeout.
+            self.config.output_for_eval_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.config.output_for_eval_path.open("w") as f:
+                f.write(
+                    json.dumps(
+                        {
+                            "model_name_or_path": self.config.body.model,
+                            "instance_id": instance_id,
+                            "model_patch": patch,
+                        }
+                    )
+                )
+
+        # If no patch, kill eval container and bail.
+        eval_timed_out = False
+        report_file: Optional[Path] = None
+        if not patch.strip():
+            if eval_ac is not None:
+                await self._kill_active_command(eval_ac)
+                eval_ac.log_file.close()
+            metrics.final_eval_apptainer_spinup_time = None
+            update_metrics(self.config.metrics_fpath, metrics.model_dump())
+            final = self._finalize_from_artifacts(
+                persistent_dir=str(self.config.persistent_dir),
+                agent_timed_out=agent_timed_out,
+                subprocess_exit_code=subprocess_exit_code,
+                agent_run_id=self.config.agent_run_id,
+                keep_token_ids=self.config.openclaw_keep_token_ids_in_proxy_log,
+            )
+            return None, final
+        elif self.config.skip_eval:
+            metrics.final_eval_apptainer_spinup_time = None
+            metrics.final_eval_time = None
+            update_metrics(self.config.metrics_fpath, metrics.model_dump())
+            return None, None
+        else:
+            # Wait for eval with the tests timeout.
+            metrics.final_eval_time = -time.time()
+            try:
+                report_file_str = await self._finish_container_command(eval_ac, self.config.eval_command)
+                report_file = Path(report_file_str)
+            except Exception as e:
+                print(f"Eval command failed for {instance_id}: {e}", flush=True)
+                metrics.final_eval_time += time.time()
+                eval_timed_out = (
+                    metrics.final_eval_time is not None
+                    and metrics.final_eval_time >= self.config.swebench_tests_timeout
+                )
+                metrics.eval_timed_out = eval_timed_out
+                update_metrics(self.config.metrics_fpath, metrics.model_dump())
+                final = self._finalize_from_artifacts(
+                    persistent_dir=str(self.config.persistent_dir),
+                    agent_timed_out=agent_timed_out,
+                    subprocess_exit_code=subprocess_exit_code,
+                    agent_run_id=self.config.agent_run_id,
+                    keep_token_ids=self.config.openclaw_keep_token_ids_in_proxy_log,
+                )
+                return None, final
+
+            final_eval_spinup_timestamp = float(self.config.final_eval_apptainer_spinup_timestamp_fpath.read_text())
+            metrics.final_eval_apptainer_spinup_time += final_eval_spinup_timestamp
+            metrics.final_eval_time += time.time()
+
+        # Finalize proxy-log artifacts + trajectory reconstruction.
+        final = self._finalize_from_artifacts(
+            persistent_dir=str(self.config.persistent_dir),
+            agent_timed_out=agent_timed_out,
+            subprocess_exit_code=subprocess_exit_code,
+            agent_run_id=self.config.agent_run_id,
+            keep_token_ids=self.config.openclaw_keep_token_ids_in_proxy_log,
+        )
+        metrics.agent_error_kind = final.agent_error_kind
+
+        update_metrics(self.config.metrics_fpath, metrics.model_dump())
+        return report_file, final
+
+
 ########################################
 # START Server logic
 ########################################
@@ -1665,12 +2081,19 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
     def model_post_init(self, context: Any) -> None:
         run_session_id = f"{int(time.time() * 1000)}_{str(uuid.uuid4())[:8]}"
         workspace_root = Path(__file__).parent
+
+        if self.config.harness == "openclaw":
+            OpenClawHarnessProcessor(config=self.config).setup()
+            openhands_setup_dir: Optional[Path] = None
+        else:
+            openhands_setup_dir = OpenHandsHarnessProcessor(config=self.config).setup()
+
         self._swe_bench_wrapper_server_config = SWEBenchWrapperServerConfig(
             run_session_id=run_session_id,
             base_results_dir=workspace_root / f"swebench_results_{run_session_id}",
             ng_global_config_dict_str=shlex.quote(OmegaConf.to_yaml(get_global_config_dict())),
             model_server_name=self.config.model_server.name,
-            openhands_setup_dir=OpenHandsHarnessProcessor(config=self.config).setup(),
+            openhands_setup_dir=openhands_setup_dir,
             swebench_setup_dir=SweBenchDatasetProcessor(config=self.config).setup(),
             swebench_multilingual_setup_dir=SweBenchMultilingualDatasetProcessor(config=self.config).setup(),
             r2e_gym_setup_dir=R2EGymDatasetProcessor(config=self.config).setup(),
@@ -1824,9 +2247,53 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             f"Searched in paths: {tried_paths}."
         )
 
+    def _build_openclaw_apptainer_command(
+        self, params: SWEBenchWrapperInstanceConfig, command: ExecuteContainerCommandArgs
+    ) -> str:
+        setup_dir = os.path.join(os.path.dirname(__file__), "swe_openclaw_setup")
+        openclaw_home = params.persistent_dir / "openclaw_home"
+
+        mount_args = [
+            f"--mount type=bind,src={setup_dir},dst=/openclaw_setup,ro",
+            f"--mount type=bind,src={setup_dir},dst={setup_dir},ro",
+            f"--mount type=bind,src={params.persistent_dir},dst=/trajectories_mount",
+            f"--mount type=bind,src={openclaw_home},dst=/.openclaw",
+            f"--mount type=bind,src={params.instance_dataset_path},dst=/root/dataset/data.jsonl,ro",
+        ]
+
+        script_dir = params.persistent_dir / "container_scripts"
+        script_dir.mkdir(parents=True, exist_ok=True)
+        script_path = script_dir / f"{command.mode}_script.sh"
+        script_path.write_text(command.command)
+        container_script_path = f"/container_scripts/{command.mode}_script.sh"
+        mount_args.append(f"--mount type=bind,src={script_path},dst={container_script_path},ro")
+
+        mount_str = " ".join(mount_args)
+
+        env_args = ""
+        if command.env:
+            env_args = " ".join(f"--env {k}={shlex.quote(v)}" for k, v in command.env.items()) + " "
+
+        apptainer_cmd = (
+            f"apptainer exec --writable-tmpfs --cleanenv --pid --no-mount home,tmp,bind-paths "
+            f"{env_args}"
+            f"{mount_str} "
+            f"{params.container} bash {container_script_path}"
+        )
+
+        memory_limit_mb = params.apptainer_memory_limit_mb
+        if memory_limit_mb is not None and memory_limit_mb > 0:
+            memory_limit_kb = int(memory_limit_mb) * 1024
+            apptainer_cmd = f"ulimit -v {memory_limit_kb} && {apptainer_cmd}"
+
+        return apptainer_cmd
+
     def _build_apptainer_command(
         self, params: SWEBenchWrapperInstanceConfig, command: ExecuteContainerCommandArgs
     ) -> str:
+        if self.config.harness == "openclaw" and command.mode == "agent":
+            return self._build_openclaw_apptainer_command(params, command)
+
         dataset_path_to_mount = str(params.instance_dataset_path)
         data_point = params.problem_info
 
@@ -1839,38 +2306,44 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             f"--mount type=bind,src={params.persistent_dir},dst=/trajectories_mount",
         ]
 
-        openhands_dir = f"{params.openhands_setup_dir}/OpenHands"
-        mount_args.extend(
-            [
-                # Read-only base mounts (parent first)
-                f"--mount type=bind,src={openhands_dir},dst=/openhands_setup/OpenHands,ro",
-                f"--mount type=bind,src={openhands_dir},dst={openhands_dir},ro",
-                f"--mount type=bind,src={openhands_dir}/.eval_sessions,dst=/openhands_setup/OpenHands/.eval_sessions",
-                f"--mount type=bind,src={openhands_dir}/.eval_sessions,dst={openhands_dir}/.eval_sessions",
-                f"--mount type=bind,src={openhands_dir}/logs,dst=/openhands_setup/OpenHands/logs",
-                f"--mount type=bind,src={openhands_dir}/logs,dst={openhands_dir}/logs",
-                f"--mount type=bind,src={openhands_dir}/evaluation/oh,dst=/openhands_setup/OpenHands/evaluation/oh",
-                f"--mount type=bind,src={openhands_dir}/evaluation/oh,dst={openhands_dir}/evaluation/oh",
-                # Data
-                f"--mount type=bind,src={dataset_path_to_mount},dst=/root/dataset/data.jsonl",
-            ]
-        )
-
-        if params.resolved_user_prompt_template:
-            mount_args.append(
-                f"--mount type=bind,src={params.resolved_user_prompt_template},dst=/openhands_setup/OpenHands/user_prompt.j2"
-            )
-        if params.resolved_system_prompt_template:
-            mount_args.append(
-                f"--mount type=bind,src={params.resolved_system_prompt_template},dst=/openhands_setup/OpenHands/system_prompt.j2"
-            )
-            mount_args.append(
-                f"--mount type=bind,src={params.resolved_system_prompt_template},dst=/openhands_setup/OpenHands/system_prompt_long_horizon.j2"
+        # OpenHands-specific mounts (repo, miniforge, prompt templates) are
+        # only needed for OpenHands agent generation. Eval uses the SWE-bench
+        # image's own toolchain — no openhands_setup_dir needed.
+        if command.mode == "agent":
+            openhands_dir = f"{params.openhands_setup_dir}/OpenHands"
+            mount_args.extend(
+                [
+                    # Read-only base mounts (parent first)
+                    f"--mount type=bind,src={openhands_dir},dst=/openhands_setup/OpenHands,ro",
+                    f"--mount type=bind,src={openhands_dir},dst={openhands_dir},ro",
+                    f"--mount type=bind,src={openhands_dir}/.eval_sessions,dst=/openhands_setup/OpenHands/.eval_sessions",
+                    f"--mount type=bind,src={openhands_dir}/.eval_sessions,dst={openhands_dir}/.eval_sessions",
+                    f"--mount type=bind,src={openhands_dir}/logs,dst=/openhands_setup/OpenHands/logs",
+                    f"--mount type=bind,src={openhands_dir}/logs,dst={openhands_dir}/logs",
+                    f"--mount type=bind,src={openhands_dir}/evaluation/oh,dst=/openhands_setup/OpenHands/evaluation/oh",
+                    f"--mount type=bind,src={openhands_dir}/evaluation/oh,dst={openhands_dir}/evaluation/oh",
+                ]
             )
 
-        miniforge3_path = Path(params.openhands_setup_dir) / "miniforge3"
-        mount_args.append(f"--mount type=bind,src={miniforge3_path},dst=/openhands_setup/miniforge3,ro")
-        mount_args.append(f"--mount type=bind,src={miniforge3_path},dst={miniforge3_path},ro")
+            if params.resolved_user_prompt_template:
+                mount_args.append(
+                    f"--mount type=bind,src={params.resolved_user_prompt_template},dst=/openhands_setup/OpenHands/user_prompt.j2"
+                )
+            if params.resolved_system_prompt_template:
+                mount_args.append(
+                    f"--mount type=bind,src={params.resolved_system_prompt_template},dst=/openhands_setup/OpenHands/system_prompt.j2"
+                )
+                mount_args.append(
+                    f"--mount type=bind,src={params.resolved_system_prompt_template},dst=/openhands_setup/OpenHands/system_prompt_long_horizon.j2"
+                )
+
+            miniforge3_path = Path(params.openhands_setup_dir) / "miniforge3"
+            mount_args.append(f"--mount type=bind,src={miniforge3_path},dst=/openhands_setup/miniforge3,ro")
+            mount_args.append(f"--mount type=bind,src={miniforge3_path},dst={miniforge3_path},ro")
+
+        # Dataset is needed for both agent (problem statement) and eval (test
+        # cases) modes.
+        mount_args.append(f"--mount type=bind,src={dataset_path_to_mount},dst=/root/dataset/data.jsonl")
 
         # Add SWE-bench setup directory mount if available (for evaluation)
         # swe-bench-ext and nv-internal-1 don't use the swebench harness
@@ -2099,9 +2572,16 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         params.eval_command = dataset_processor.get_run_command()
         params.eval_apptainer_command_str = self._build_apptainer_command(params, params.eval_command)
 
-        params.agent_command = OpenHandsHarnessProcessor(config=params).get_run_command()
+        if self.config.harness == "openclaw":
+            params.agent_command = OpenClawHarnessProcessor(config=params).get_run_command()
+        else:
+            params.agent_command = OpenHandsHarnessProcessor(config=params).get_run_command()
         params.agent_apptainer_command_str = self._build_apptainer_command(params, params.agent_command)
-        params.agent_script = params.agent_script_path.read_text()
+        # OpenHands' get_run_command writes the agent bash script to disk;
+        # OpenClaw uses a static run_openclaw.sh shipped with the setup dir
+        # and never writes per-instance scripts.
+        if self.config.harness != "openclaw":
+            params.agent_script = params.agent_script_path.read_text()
 
         return params, dataset_processor
 
@@ -2125,7 +2605,11 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
     async def _inner_responses(
         self, params: SWEBenchWrapperInstanceConfig, dataset_processor: BaseDatasetHarnessProcessor
     ) -> NeMoGymResponse:
-        maybe_report_file = await runner_ray_remote.remote(params.model_dump())
+        openclaw_final: Optional[_OpenClawFinalArtifacts] = None
+        if self.config.harness == "openclaw":
+            maybe_report_file, openclaw_final = await openclaw_runner_ray_remote.remote(params.model_dump())
+        else:
+            maybe_report_file = await runner_ray_remote.remote(params.model_dump())
         metrics_to_update = dict()
 
         if maybe_report_file:
@@ -2157,18 +2641,35 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         ):
             params.mask_sample = True
 
-        trajectories_dir = params.persistent_dir / "trajectories"
-        chat_completions_trajectory, chat_completions_tools = self.get_openhands_trajectory_from_completions(
-            trajectories_dir, params.instance_id
-        )
+        if self.config.harness == "openclaw":
+            # OpenClaw items arrive as plain dicts via the Ray return value (no sidecar file). Validate them
+            # into the same pydantic item types the OpenHands path yields so the shared response builder works uniformly.
+            raw_input = openclaw_final.input_items if openclaw_final else []
+            raw_output = openclaw_final.output_items if openclaw_final else []
+            raw_tools = openclaw_final.tools if openclaw_final else []
+            input_adapter = TypeAdapter[NeMoGymResponseInputItem](NeMoGymResponseInputItem)
+            output_adapter = TypeAdapter(NeMoGymResponseOutputItem)
+            input_items = [input_adapter.validate_python(d) for d in raw_input]
+            output_items = [output_adapter.validate_python(d) for d in raw_output]
+            tools = []
+            for tool in raw_tools:
+                try:
+                    tools.append(FunctionTool.model_validate(tool))
+                except Exception:
+                    tools.append(tool)
+        else:
+            trajectories_dir = params.persistent_dir / "trajectories"
+            chat_completions_trajectory, chat_completions_tools = self.get_openhands_trajectory_from_completions(
+                trajectories_dir, params.instance_id
+            )
 
-        tools = [
-            FunctionTool.model_validate(tool["function"] | {"type": "function"}) for tool in chat_completions_tools
-        ]
-        responses_items = self._vllm_converter.chat_completions_messages_to_responses_items(
-            chat_completions_trajectory
-        )
-        input_items, output_items = split_responses_input_output_items(responses_items)
+            tools = [
+                FunctionTool.model_validate(tool["function"] | {"type": "function"}) for tool in chat_completions_tools
+            ]
+            responses_items = self._vllm_converter.chat_completions_messages_to_responses_items(
+                chat_completions_trajectory
+            )
+            input_items, output_items = split_responses_input_output_items(responses_items)
 
         update_metrics(params.metrics_fpath, metrics_to_update)
 

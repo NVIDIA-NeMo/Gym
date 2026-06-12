@@ -1,0 +1,52 @@
+# SWE-bench wrapper configuration for OpenClaw
+swe_agents:
+  responses_api_agents:
+    swe_agents:
+      entrypoint: app.py
+      domain: coding
+      description: SWE-bench driven by the OpenClaw agent framework.
+      value: Eval software engineering capabilities on SWE-bench via OpenClaw.
+
+      # Agent framework configuration
+      harness: openclaw
+      openclaw_version: "2026.5.6"
+      openclaw_keep_token_ids_in_proxy_log: false
+      agent_max_turns: 100
+
+      # Container configuration
+      container_formatter: ???
+      container_folder_path: null
+      swebench_agent_timeout: 2700
+      swebench_tests_timeout: 1800
+      apptainer_memory_limit_mb: 32768
+
+      dataset_path: ???
+
+      # Optional model server reference
+      model_server:
+        name: policy_model
+        type: responses_api_models
+
+      datasets:
+        # Training dataset
+        - name: train
+          type: train
+          jsonl_fpath: responses_api_agents/swe_agents/data/swegym_for_sweagent_and_openhands.jsonl
+          gitlab_identifier:
+            dataset_name: swegym_for_sweagent_and_openhands
+            version: 0.0.2
+            artifact_fpath: swegym-converted.jsonl
+          license: Apache 2.0
+        # Validation dataset  
+        - name: validation
+          type: validation
+          jsonl_fpath: responses_api_agents/swe_agents/data/swebench_verified_for_sweagent_and_openhands.jsonl
+          gitlab_identifier:
+            dataset_name: swebench_verified_for_sweagent_and_openhands
+            version: 0.0.1
+            artifact_fpath: swebench_verified_for_sweagent_and_openhands.jsonl
+          license: TBD
+        # Example dataset for quick testing
+        - name: example
+          type: example
+          jsonl_fpath: responses_api_agents/swe_agents/data/example.jsonl
