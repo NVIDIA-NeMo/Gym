@@ -17,17 +17,30 @@ accumulated code and runs its test cases.
 ## Test data (required manual download)
 
 Scoring needs `test_data.h5` — the numeric ground-truth targets the test-case assertions compare
-against. It is **not** on HuggingFace and is **not** downloaded automatically. Download it from the
-official SciCode source and place it where the resources server reads it:
+against. It is **not** downloaded automatically. Stage it from the official SciCode source (a
+[Google Drive folder](https://drive.google.com/drive/folders/1W5GZW6_bdiDAiipuFMqdUhvUaHIj6-pR?usp=drive_link))
+and save it as `benchmarks/scicode/data/test_data.h5` (the path the resources server reads via its
+`test_data_fpath` config).
 
-1. Download the numeric test results from the SciCode
-   [Google Drive folder](https://drive.google.com/drive/folders/1W5GZW6_bdiDAiipuFMqdUhvUaHIj6-pR?usp=drive_link).
-2. Save the file as `benchmarks/scicode/data/test_data.h5` (the path the resources server reads via
-   its `test_data_fpath` config). On a cluster, place it on a filesystem visible to all workers.
+On a headless machine / cluster, download it with `gdown`:
 
-The file is ~1 GB (sha256 `48b0272a88b17dbd29777c217e1b4fb2b019b92e11cc2add847409db9541b890`).
-If it is missing, the resources server fails fast with a clear error rather than scoring everything
-as wrong.
+```bash
+uv pip install gdown
+gdown --folder "https://drive.google.com/drive/folders/1W5GZW6_bdiDAiipuFMqdUhvUaHIj6-pR" \
+    -O benchmarks/scicode/data
+# If it lands under a subdirectory or a different name, move it to:
+#   benchmarks/scicode/data/test_data.h5
+```
+
+Verify the download (~1 GB):
+
+```bash
+sha256sum benchmarks/scicode/data/test_data.h5
+# expect: 48b0272a88b17dbd29777c217e1b4fb2b019b92e11cc2add847409db9541b890
+```
+
+You can also point `test_data_fpath` at an absolute path via config override.
+If the file is missing, the resources server fails fast with a clear error rather than scoring everything as wrong.
 
 ## Prepare benchmark data
 
