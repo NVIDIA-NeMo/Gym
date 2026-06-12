@@ -1,0 +1,39 @@
+sc_bench_resources_server:
+  resources_servers:
+    sc_bench:
+      entrypoint: app.py
+      domain: agent
+      verified: true
+      description: SupChain-Bench supply chain order management tool-use tasks
+      value: Multi-step tool calling over trade, fulfillment, and warehouse orders
+      data_dir: resources_servers/sc_bench/data/csv
+sc_bench_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: sc_bench_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/sc_bench/data/example.jsonl
+      - name: train
+        type: train
+        jsonl_fpath: resources_servers/sc_bench/data/train.jsonl
+        gitlab_identifier:
+          dataset_name: sc_bench
+          version: 0.0.1
+          artifact_fpath: train.jsonl
+        license: Apache 2.0
+      - name: validation
+        type: validation
+        jsonl_fpath: resources_servers/sc_bench/data/validation.jsonl
+        gitlab_identifier:
+          dataset_name: sc_bench
+          version: 0.0.1
+          artifact_fpath: validation.jsonl
+        license: Apache 2.0
