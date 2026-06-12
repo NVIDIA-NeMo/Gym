@@ -1594,8 +1594,12 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
 
         agent_script_name = f"agent_script_{agent_run_id}.sh"
         agent_script_path = self.config.persistent_dir / agent_script_name
+        # set +e inside the trap so a failing log-copy (e.g. when $HOME != /root
+        # and /root/.local/share/opencode never gets created, as happens with
+        # SWE-rebench-V2 Python images) cannot override the script's real exit
+        # code under the outer `set -e`.
         opencode_log_trap = (
-            "trap '_rc=$?; "
+            "trap '_rc=$?; set +e; "
             "mkdir -p /trajectories_mount/opencode_logs 2>/dev/null; "
             "cp -r /root/.local/share/opencode /trajectories_mount/opencode_logs/xdg 2>/dev/null; "
             "for d in /tmp/bench-*; do "
