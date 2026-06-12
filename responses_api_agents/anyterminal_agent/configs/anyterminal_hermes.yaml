@@ -1,0 +1,38 @@
+anyterminal_hermes:
+  responses_api_agents:
+    anyterminal_agent:
+      entrypoint: app.py
+      domain: coding
+      description: Terminal Bench run by the Hermes agent inside the task container.
+      value: Evaluate terminal-task capabilities on Terminal Bench with any Gym agent.
+
+      agent_server_module: responses_api_agents.hermes_agent.app
+      agent_server_class: HermesAgent
+      agent_config_class: HermesAgentConfig
+      agent_kwargs:
+        max_turns: 30
+        temperature: 1.0
+        terminal_backend: local
+        enabled_toolsets: null
+        system_prompt: "You are an expert software engineer working inside a terminal environment. Read the task instructions carefully, use terminal commands to understand the environment, and complete the task as described. You MUST use terminal tools to explore, edit, and run commands — do not just describe what to do."
+
+      # Path to pre-built Apptainer SIF files produced by prepare.py --sif-dir.
+      # If omitted, Apptainer will pull docker:// images at runtime (requires internet).
+      tb_sif_dir: null
+
+      # Harbor tasks cache — populated by: harbor datasets download terminal-bench@2.0
+      tb_tasks_cache_dir: ~/.cache/harbor/tasks
+
+      tb_agent_timeout: 1800
+      tb_eval_timeout: 300
+      apptainer_memory_limit_mb: 32768
+      concurrency: 4
+
+      model_server:
+        name: policy_model
+        type: responses_api_models
+
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: responses_api_agents/anyterminal_agent/data/terminal_bench.jsonl
