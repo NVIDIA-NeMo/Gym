@@ -505,3 +505,7 @@ class TestApp:
         assert answer in judge_prompt
         assert cfg.msg_extraction_failure not in judge_prompt
         assert res.reward == approx(1.0)
+
+    def test_max_extracted_answer_chars_default_is_disabled(self) -> None:
+        """The cap is opt-in: disabled (None) by default."""
+        assert LLMJudgeResourcesServerConfig.model_fields["max_extracted_answer_chars"].default is None

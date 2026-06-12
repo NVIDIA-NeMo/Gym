@@ -78,12 +78,14 @@ class LLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
     response_extract_regex: Optional[str] = None
     msg_extraction_failure: str = "[NO VALID ANSWER EXTRACTED]"
 
-    # Cap on the number of characters of the extracted/returned answer that are
-    # sent to the judge. If the first-pass extracted answer exceeds this length,
-    # it is treated as a failed extraction (replaced with ``msg_extraction_failure``
-    # -> graded not-equal) so the judge input cannot overflow its context window
-    # on pathologically long generations. Set to None to disable the cap.
-    max_extracted_answer_chars: Optional[int] = 16000
+    # Optional cap on the number of characters of the extracted/returned answer
+    # sent to the judge. Disabled by default (None). When set to a positive int,
+    # a first-pass extracted answer longer than this is treated as a failed
+    # extraction (replaced with ``msg_extraction_failure`` -> graded not-equal)
+    # so the judge input cannot overflow its context window on pathologically
+    # long generations (e.g. a regex no-match that falls back to the full
+    # generation).
+    max_extracted_answer_chars: Optional[int] = None
 
     # Swap check: Run second judge pass with swapped expected/generated to detect positional bias
     check_twice_swap: bool = False
