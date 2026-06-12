@@ -31,7 +31,6 @@ from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,
-    get_global_config_dict,
 )
 
 
@@ -701,31 +700,3 @@ def compute_aggregate_metrics(
         agent_metrics=serialized_agent,
         key_metrics=key_metrics,
     )
-
-
-def reward_profile():  # pragma: no cover
-    config = RewardProfileConfig.model_validate(get_global_config_dict())
-
-    with open(config.materialized_inputs_jsonl_fpath) as f:
-        rows = list(map(orjson.loads, f))
-
-    with open(config.rollouts_jsonl_fpath) as f:
-        results = list(map(orjson.loads, f))
-
-    # Results may be out of order.
-    results.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
-
-    rp = RewardProfiler()
-    group_level_metrics, agent_level_metrics = rp.profile_from_data(
-        rows, results, allow_partial_rollouts=config.allow_partial_rollouts
-    )
-    completion_summary = rp.profile_completion_summary(rows, results)
-    reward_profiling_fpath, agent_level_metrics_fpath = rp.write_to_disk(
-        group_level_metrics, agent_level_metrics, Path(config.rollouts_jsonl_fpath)
-    )
-
-    print(f"""Profiling outputs:
-Reward profile completion: {completion_summary["completed_rollout_rows"]}/{completion_summary["expected_rollout_rows"]} rollout rows ({completion_summary["reward_profile_completion_pct"]:.2f}%)
-Input rows: {completion_summary["total_input_rows"]} total; {completion_summary["complete_input_rows"]} complete; {completion_summary["partial_input_rows"]} partial; {completion_summary["missing_input_rows"]} without rollouts dropped from output.
-Reward profiling outputs: {reward_profiling_fpath}
-Agent-level metrics: {agent_level_metrics_fpath}""")

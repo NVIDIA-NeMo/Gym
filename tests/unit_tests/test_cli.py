@@ -26,14 +26,14 @@ from pytest import MonkeyPatch, raises
 
 import nemo_gym.global_config
 from nemo_gym import PARENT_DIR
-from nemo_gym.cli import (
+from nemo_gym.cli.env import (
     _FORCE_KILL_REAP_TIMEOUT_SEC,
     _GRACEFUL_SHUTDOWN_TIMEOUT_SEC,
     RunConfig,
     RunHelper,
-    display_help,
     init_resources_server,
 )
+from nemo_gym.cli.general import display_help_legacy
 from nemo_gym.config_types import ResourcesServerInstanceConfig
 
 
@@ -76,7 +76,7 @@ class TestCLI:
             text_trap = StringIO()
             mp.setattr(sys, "stdout", text_trap)
 
-            display_help()
+            display_help_legacy()
 
             output = text_trap.getvalue()
             assert "ng_help" in output

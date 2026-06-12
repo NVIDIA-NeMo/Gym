@@ -40,7 +40,6 @@ from nemo_gym.gitlab_utils import download_jsonl_dataset
 from nemo_gym.global_config import (
     HF_TOKEN_KEY_NAME,
     GlobalConfigDictParser,
-    GlobalConfigDictParserConfig,
     get_global_config_dict,
 )
 from nemo_gym.hf_utils import (
@@ -823,14 +822,3 @@ def validate_backend_credentials(backend: str) -> tuple[bool, str]:
             )
 
     return True, ""
-
-
-def prepare_data():  # pragma: no cover
-    global_config_dict = get_global_config_dict(
-        global_config_dict_parser_config=GlobalConfigDictParserConfig(
-            initial_global_config_dict=GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
-        )
-    )
-
-    data_processor = TrainDataProcessor()
-    data_processor.run(global_config_dict)

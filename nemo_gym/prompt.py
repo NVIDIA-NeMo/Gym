@@ -29,7 +29,6 @@ from pydantic import BaseModel, Field
 
 from nemo_gym import PARENT_DIR
 from nemo_gym.config_types import BaseNeMoGymCLIConfig
-from nemo_gym.global_config import GlobalConfigDictParserConfig, get_global_config_dict
 
 
 class PromptConfig(BaseModel):
@@ -162,14 +161,3 @@ class MaterializePromptsConfig(BaseNeMoGymCLIConfig):
     input_jsonl_fpath: str = Field(description="Raw JSONL data (no responses_create_params.input).")
     prompt_config: str = Field(description="Path to prompt YAML file to apply.")
     output_jsonl_fpath: str = Field(description="Output path for materialized JSONL with populated prompts.")
-
-
-def materialize_prompts_cli() -> None:  # pragma: no cover
-    """CLI entry point for ng_materialize_prompts."""
-    global_config_dict = get_global_config_dict(
-        global_config_dict_parser_config=GlobalConfigDictParserConfig(
-            initial_global_config_dict=GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
-        )
-    )
-    config = MaterializePromptsConfig.model_validate(global_config_dict)
-    materialize_prompts(config.input_jsonl_fpath, config.prompt_config, config.output_jsonl_fpath)

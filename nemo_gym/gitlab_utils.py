@@ -74,12 +74,6 @@ ng_download_dataset_from_gitlab \\
 """)
 
 
-def upload_jsonl_dataset_cli() -> None:  # pragma: no cover
-    global_config = get_global_config_dict()
-    config = UploadJsonlDatasetGitlabConfig.model_validate(global_config)
-    upload_jsonl_dataset(config)
-
-
 def download_jsonl_dataset(
     config: DownloadJsonlDatasetGitlabConfig,
 ) -> None:  # pragma: no cover
@@ -98,12 +92,6 @@ def download_jsonl_dataset(
     )
     with open(config.output_fpath, "w") as f:
         f.write(response.content.decode())
-
-
-def download_jsonl_dataset_cli() -> None:  # pragma: no cover
-    global_config = get_global_config_dict()
-    config = DownloadJsonlDatasetGitlabConfig.model_validate(global_config)
-    download_jsonl_dataset(config)
 
 
 def is_model_in_gitlab(model_name: str) -> bool:  # pragma: no cover

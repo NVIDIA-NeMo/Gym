@@ -44,7 +44,6 @@ from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_pr
 from nemo_gym.server_utils import (
     GlobalAIOHTTPAsyncClientConfig,
     ServerClient,
-    get_global_config_dict,
     get_response_json,
     is_global_aiohttp_client_request_debug_enabled,
     is_global_aiohttp_client_setup,
@@ -617,13 +616,6 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
         return server_client
 
 
-def collect_rollouts():  # pragma: no cover
-    config = RolloutCollectionConfig.model_validate(get_global_config_dict())
-    rch = RolloutCollectionHelper()
-
-    asyncio.run(rch.run_from_config(config))
-
-
 class RolloutAggregationConfig(BaseNeMoGymCLIConfig):
     """
     Aggregate metrics across rollout shards produced by `ng_collect_rollouts +disable_aggregation=true`.
@@ -719,10 +711,3 @@ Merged rollouts: {output_fpath if config.merge_shards else "<not merged>"}
 Aggregate metrics: {aggregate_metrics_fpath}""")
 
         return aggregate_metrics_fpath
-
-
-def aggregate_rollouts():  # pragma: no cover
-    config = RolloutAggregationConfig.model_validate(get_global_config_dict())
-    rah = RolloutAggregationHelper()
-
-    asyncio.run(rah.run_from_config(config))
