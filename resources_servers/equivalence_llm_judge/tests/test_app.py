@@ -382,3 +382,130 @@ class TestApp:
         assert len(res.judge_evaluations) == 1
         # Verify only one judge call (no second pass due to length threshold)
         assert server_mock.post.call_count == 1
+
+    async def test_max_extracted_answer_chars_caps_long_generation(
+        self, config: LLMJudgeResourcesServerConfig
+    ) -> None:
+        """An extracted answer longer than the cap is replaced with the failure
+        sentinel (graded not-equal) so the judge input cannot overflow its context."""
+        server_mock = MagicMock(spec=ServerClient)
+        cfg = config.model_copy(deep=True)
+        # No regex -> `generated` is the full (long) assistant text.
+        cfg.use_per_record_regex = False
+        cfg.response_extract_regex = None
+        cfg.max_extracted_answer_chars = 50
+        cfg.msg_extraction_failure = "[CUSTOM EXTRACTION FAILURE]"
+        rs = LLMJudgeResourcesServer(config=cfg, server_client=server_mock)
+
+        post_mock = MagicMock()
+        post_mock.read = AsyncMock(return_value=self._create_response("f", self._msg("[[A!=B]]")))
+        server_mock.post = AsyncMock(return_value=post_mock)
+
+        long_generation = "The answer is 42. " * 100  # ~1800 chars, far over the 50-char cap
+        model_create_params = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Q?"}])
+        model_response = NeMoGymResponse(
+            id="resp",
+            created_at=0.0,
+            model="m",
+            object="response",
+            output=[self._msg(long_generation)],
+            parallel_tool_calls=False,
+            tool_choice="none",
+            tools=[],
+        )
+        req = LLMJudgeVerifyRequest(
+            responses_create_params=deepcopy(model_create_params),
+            response=model_response.model_copy(deep=True),
+            expected_answer="42",
+        )
+
+        res = await rs.verify(req)
+
+        judge_prompt = res.judge_evaluations[0].responses_create_params.input[-1].content
+        # The long generation is NOT forwarded to the judge; the sentinel is sent instead.
+        assert long_generation.strip() not in judge_prompt
+        assert cfg.msg_extraction_failure in judge_prompt
+        assert res.reward == approx(0.0)
+        assert server_mock.post.call_count == 1
+
+    async def test_max_extracted_answer_chars_none_disables_cap(self, config: LLMJudgeResourcesServerConfig) -> None:
+        """Setting max_extracted_answer_chars=None disables the cap: the full answer is forwarded."""
+        server_mock = MagicMock(spec=ServerClient)
+        cfg = config.model_copy(deep=True)
+        cfg.use_per_record_regex = False
+        cfg.response_extract_regex = None
+        cfg.max_extracted_answer_chars = None  # disabled
+        rs = LLMJudgeResourcesServer(config=cfg, server_client=server_mock)
+
+        post_mock = MagicMock()
+        post_mock.read = AsyncMock(return_value=self._create_response("f", self._msg("[[A=B]]")))
+        server_mock.post = AsyncMock(return_value=post_mock)
+
+        long_generation = "The answer is 42. " * 100
+        model_create_params = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Q?"}])
+        model_response = NeMoGymResponse(
+            id="resp",
+            created_at=0.0,
+            model="m",
+            object="response",
+            output=[self._msg(long_generation)],
+            parallel_tool_calls=False,
+            tool_choice="none",
+            tools=[],
+        )
+        req = LLMJudgeVerifyRequest(
+            responses_create_params=deepcopy(model_create_params),
+            response=model_response.model_copy(deep=True),
+            expected_answer="42",
+        )
+
+        res = await rs.verify(req)
+
+        judge_prompt = res.judge_evaluations[0].responses_create_params.input[-1].content
+        # With the cap disabled, the full (long) generation reaches the judge unchanged.
+        assert long_generation.strip() in judge_prompt
+        assert res.reward == approx(1.0)
+
+    async def test_max_extracted_answer_chars_under_cap_passthrough(
+        self, config: LLMJudgeResourcesServerConfig
+    ) -> None:
+        """A user-provided cap does not alter answers shorter than the cap."""
+        server_mock = MagicMock(spec=ServerClient)
+        cfg = config.model_copy(deep=True)
+        cfg.use_per_record_regex = False
+        cfg.response_extract_regex = None
+        cfg.max_extracted_answer_chars = 10_000  # user-provided cap; answer is well under it
+        rs = LLMJudgeResourcesServer(config=cfg, server_client=server_mock)
+
+        post_mock = MagicMock()
+        post_mock.read = AsyncMock(return_value=self._create_response("f", self._msg("[[A=B]]")))
+        server_mock.post = AsyncMock(return_value=post_mock)
+
+        answer = "The final answer is 2."
+        model_create_params = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Q?"}])
+        model_response = NeMoGymResponse(
+            id="resp",
+            created_at=0.0,
+            model="m",
+            object="response",
+            output=[self._msg(answer)],
+            parallel_tool_calls=False,
+            tool_choice="none",
+            tools=[],
+        )
+        req = LLMJudgeVerifyRequest(
+            responses_create_params=deepcopy(model_create_params),
+            response=model_response.model_copy(deep=True),
+            expected_answer="2",
+        )
+
+        res = await rs.verify(req)
+
+        judge_prompt = res.judge_evaluations[0].responses_create_params.input[-1].content
+        assert answer in judge_prompt
+        assert cfg.msg_extraction_failure not in judge_prompt
+        assert res.reward == approx(1.0)
+
+    def test_max_extracted_answer_chars_default_is_disabled(self) -> None:
+        """The cap is opt-in: disabled (None) by default."""
+        assert LLMJudgeResourcesServerConfig.model_fields["max_extracted_answer_chars"].default is None

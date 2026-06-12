@@ -17,6 +17,10 @@ lc_judge:
       question_extract_regex: ^QUESTION:\s*(.*)$|</text>\n\n(.*)$
       response_extract_regex: null
       msg_extraction_failure: ""
+      # Optional cap (chars) on the first-pass extracted answer sent to the judge;
+      # disabled by default (null). Set to a positive int (e.g. 16000) to treat
+      # over-long extractions as a failed extraction.
+      max_extracted_answer_chars: null
       domain: knowledge
       verified: false
 lc_judge_simple_agent:

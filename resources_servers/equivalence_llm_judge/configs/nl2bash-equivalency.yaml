@@ -83,6 +83,11 @@ equivalence_llm_judge:
       # Example: "^Answer:\\s*(.*)$"
       response_extract_regex: Answer:\s*```(?:\w+)?\s*([\s\S]*?)\s*```(?=[\s\S]*$)
       msg_extraction_failure: ""
+      # Optional cap (in characters) on the first-pass extracted answer sent to
+      # the judge. Disabled by default (null). Set to a positive int (e.g. 16000)
+      # to treat over-long extractions as a failed extraction (replaced with
+      # msg_extraction_failure) so the judge input cannot overflow its context.
+      max_extracted_answer_chars: null
 
       # Swap check: Run second judge pass with swapped expected/generated to detect positional bias
       check_twice_swap: true
