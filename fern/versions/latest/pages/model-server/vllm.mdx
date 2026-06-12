@@ -1,6 +1,6 @@
 ---
 title: "vLLM"
-description: ""
+description: "Wrapper for an existing, external vLLM server"
 position: 2
 ---
 [vLLM](https://docs.vllm.ai/) is a popular LLM inference engine. The NeMo Gym VLLMModel server wraps vLLM's Chat Completions endpoint and converts requests and responses to NeMo Gym's native format, the OpenAI [Responses API](https://platform.openai.com/docs/api-reference/responses) schema.
@@ -16,8 +16,14 @@ responses_api_models/vllm_model/configs/vllm_model.yaml"
 ng_run "+config_paths=[$config_paths]"
 ```
 
+<Note>
+VLLMModel connects NeMo Gym to a vLLM server that you start and manage yourself. If you would prefer NeMo Gym to launch and manage vLLM itself, use LocalVLLMModel instead. See [LocalVLLMModel](/model-server/local-vllm) to learn more.
+</Note>
+
 ## Use VLLMModel
 Below is an e2e example of how to spin up a NeMo Gym compatible vLLM Chat Completions OpenAI server and run rollout collection with it.
+This section walks through starting a vLLM server manually and connecting NeMo Gym to it through `responses_api_models/vllm_model`.
+If you want NeMo Gym to manage the vLLM server lifecycle for you instead, see [LocalVLLMModel](/model-server/local-vllm).
 
 ### Install vLLM
 Please run the steps below in a separate terminal than your NeMo Gym terminal! The installation will take a few minutes.

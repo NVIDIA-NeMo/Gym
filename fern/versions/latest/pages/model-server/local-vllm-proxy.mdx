@@ -1,0 +1,57 @@
+---
+title: "Local vLLM Proxy"
+description: "Expose one Local vLLM deployment as multiple model servers"
+position: 4
+---
+
+LocalVLLMModelProxy (in `responses_api_models/local_vllm_model_proxy`) is a lightweight model server that forwards requests to an existing [LocalVLLMModel](/model-server/local-vllm) instead of launching its own vLLM engine.
+It is a subclass of VLLMModel, so it accepts the same configuration fields, but it owns no GPUs.
+
+## When to use it
+
+Use a proxy when you need several model servers that share **one** vLLM deployment but differ in their request-time configuration.
+For example, one server with reasoning enabled and one with reasoning disabled through the request params, or servers with different sampling parameters.
+Without the proxy you would have to launch a separate vLLM engine (and duplicate GPUs) for each variation.
+
+At startup the proxy waits for its referenced LocalVLLMModel to come up, reads that server's inner vLLM endpoint (`base_url`, `api_key`, `model`), and routes all of its own requests there.
+
+If you are working with an existing vLLM endpoint that you manage outside of Gym, use [VLLMModel](/model-server/vllm) instead.
+
+## Configuration
+
+A proxy is a normal model server config that adds a `model_server` reference pointing at the LocalVLLMModel it should forward to:
+
+```yaml
+policy_model_reasoning_off:
+  responses_api_models:
+    local_vllm_model_proxy:
+      entrypoint: app.py
+
+      # Request-time settings that differ from the backing server
+      chat_template_kwargs:
+        enable_thinking: false
+
+      # Standard VLLMModel fields
+      return_token_id_information: false
+      uses_reasoning_parser: true
+
+      model_server:
+        type: responses_api_models
+        name: policy_model   # name of the LocalVLLMModel server to proxy to
+```
+
+Run it alongside the backing LocalVLLMModel by chaining both configs in `config_paths`:
+
+```bash
+config_paths="responses_api_models/local_vllm_model/configs/openai/gpt-oss-20b-reasoning-high.yaml,\
+responses_api_models/local_vllm_model_proxy/configs/local_vllm_model_proxy.yaml"
+ng_run "+config_paths=[${config_paths}]" \
+    ++policy_model_proxy.responses_api_models.local_vllm_model_proxy.model_server.name=gpt-oss-20b-reasoning-high
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `model_server` | `ModelServerRef` | — | **Required.** The LocalVLLMModel server to forward requests to, by `type` and `name`. |
+
+`base_url`, `api_key`, and `model` are populated automatically from the backing server and should **not** be set in your config.
+All other VLLMModel fields (`chat_template_kwargs`, `extra_body`, `return_token_id_information`, and so on) behave as documented in the [VLLMModel configuration reference](/model-server/vllm#vllmmodel-configuration-reference).

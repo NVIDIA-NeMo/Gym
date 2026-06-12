@@ -25,7 +25,7 @@ npm install -g fern-api
 
 # 2. Provision your Fern account + CLI auth (one-time per machine).
 #    Walks you through the dashboard sign-in step before running `fern login`.
-make docs-login
+make docs-login   # or `make docs-login-remote` when working on a headless remote machine
 
 # 3. Build the API library reference and start the local dev server
 make docs           # http://localhost:3000
@@ -88,7 +88,7 @@ make docs-publish           # trigger the `Publish Fern Docs` workflow on origin
 make docs-generate-library  # standalone library regeneration (rarely needed; `make docs` runs it)
 ```
 
-For first-time-on-this-machine setup, see the [Quickstart](#quickstart) above — `make docs-login` walks through dashboard provisioning + `fern login` together.
+For first-time-on-this-machine setup, see the [Quickstart](#quickstart) above — `make docs-login` / `make docs-login-remote` walks through dashboard provisioning + `fern login` together.
 
 `make docs` first runs `fern docs md generate`, which populates `fern/product-docs/` from the `nemo_gym` package source declared in the `libraries:` block of `docs.yml`. Without it, a cold `fern docs dev` will fail with `Folder not found: ./product-docs/...`. Re-run only when the upstream Python source changes — for prose-only iteration after the first generation, `cd fern && npm run dev` is enough.
 
