@@ -130,11 +130,23 @@ def stream_jsonl(path: Path):
 def validate_rollouts(benchmark_dir: Path) -> list[Finding]:
     findings: list[Finding] = []
     rollouts_dir = benchmark_dir / "rollouts"
-    if not rollouts_dir.exists():
-        return [Finding(False, "D2 rollouts missing: expected rollouts/*.jsonl")]
+    data_dir = benchmark_dir / "data"
 
-    files = sorted(rollouts_dir.glob("*.jsonl"))
+    if rollouts_dir.exists():
+        files = sorted(rollouts_dir.glob("*.jsonl"))
+        source_label = "rollouts/*.jsonl"
+    elif data_dir.exists():
+        files = sorted(
+            path
+            for path in data_dir.glob("*rollout*.jsonl")
+            if not any(skip in path.name.lower() for skip in ("materialized_inputs", "reward_profiling", "aggregate"))
+        )
+        source_label = "data/*rollout*.jsonl"
+    else:
+        return [Finding(False, "D2 rollouts missing: expected rollouts/*.jsonl or data/*rollout*.jsonl")]
+
     findings.append(Finding(bool(files), f"D2 rollout files found: {len(files)} JSONL files"))
+    findings.append(Finding(bool(files), f"D2 rollout source: {source_label}"))
     if not files:
         return findings
 
@@ -217,6 +229,7 @@ def validate_golden(benchmark_dir: Path, min_anchor_facts: int) -> list[Finding]
         metrics = next((p for p in metrics_candidates if p.exists()), metrics_candidates[0])
         anchors = next((p for p in anchor_candidates if p.exists()), anchor_candidates[0])
         shallow = next((p for p in shallow_candidates if p.exists()), shallow_candidates[0])
+        is_comparison_report = "_vs_" in prefix or "-vs-" in prefix
 
         report_text = read_text(report)
         findings.append(
@@ -231,9 +244,16 @@ def validate_golden(benchmark_dir: Path, min_anchor_facts: int) -> list[Finding]
                 metrics_obj = load_json(metrics)
                 findings.append(Finding(isinstance(metrics_obj, dict), f"{metrics.name}: metrics JSON parses"))
                 key_hits = sum(1 for k in ("model", "model_name", "benchmark", "pass_at_1", "num_tasks", "total_tasks") if k in metrics_obj)
-                findings.append(Finding(key_hits >= 3, f"{metrics.name}: contains common metric identity fields"))
+                findings.append(
+                    Finding(
+                        is_comparison_report or key_hits >= 3,
+                        f"{metrics.name}: contains common metric identity fields",
+                    )
+                )
             except Exception as exc:
                 findings.append(Finding(False, f"{metrics.name}: metrics JSON failed to parse ({exc})"))
+        elif is_comparison_report:
+            findings.append(Finding(True, f"{report.name}: comparison report metrics sidecar missing; optional"))
         else:
             findings.append(Finding(False, f"{report.name}: missing metrics sidecar {metrics.name}"))
 
@@ -254,6 +274,8 @@ def validate_golden(benchmark_dir: Path, min_anchor_facts: int) -> list[Finding]
                 findings.append(Finding(malformed == 0, f"{anchors.name}: {malformed} malformed anchor facts"))
             except Exception as exc:
                 findings.append(Finding(False, f"{anchors.name}: anchor facts JSON failed to parse ({exc})"))
+        elif is_comparison_report:
+            findings.append(Finding(True, f"{report.name}: comparison report anchor facts missing; optional"))
         else:
             findings.append(Finding(False, f"{report.name}: missing anchor facts {anchors.name}"))
 
@@ -483,8 +505,18 @@ def score_report(report_text: str, golden_text: str, anchors: list[dict]) -> dic
         anchor_hits.append({"id": rec.get("id"), "score": score, "met": score >= 0.35, "fact": fact})
     anchor_score = sum(1 for hit in anchor_hits if hit["met"]) / max(1, len(anchor_hits))
 
-    checklist = (structure + quantitative + evidence + anchor_score) / 4
-    holistic = (evidence + golden_overlap + anchor_score + table_score) / 4
+    checklist = (
+        0.20 * structure
+        + 0.20 * quantitative
+        + 0.20 * evidence
+        + 0.40 * anchor_score
+    )
+    holistic = (
+        0.20 * evidence
+        + 0.20 * golden_overlap
+        + 0.50 * anchor_score
+        + 0.10 * table_score
+    )
     final = (checklist + holistic) / 2
     return {
         "final_score": round(final, 4),
@@ -501,7 +533,7 @@ def score_report(report_text: str, golden_text: str, anchors: list[dict]) -> dic
             "table_score": round(table_score, 4),
         },
         "anchor_hits": anchor_hits,
-        "note": "Deterministic public proxy. Official BLADE scoring may differ.",
+        "note": "Deterministic public proxy emphasizing anchor coverage and evidence. Official BLADE scoring may differ.",
     }
 
 
@@ -588,7 +620,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--anchor-facts", required=True)
     p.add_argument("--shallow-report", required=True)
     p.add_argument("--output-dir")
-    p.add_argument("--min-spread", type=float, default=0.30)
+    p.add_argument("--min-spread", type=float, default=0.50)
     p.set_defaults(func=cmd_calibrate)
     return parser
 

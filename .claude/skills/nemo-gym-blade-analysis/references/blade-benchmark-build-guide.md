@@ -171,6 +171,10 @@ Do not include large raw rollouts inside a skill reference unless they are
 explicitly needed and appropriate for the target repository. Prefer pointers to
 existing in-repo example rollouts or external benchmark artifacts.
 
+The bundled validator expects standard BLADE packages to use `rollouts/*.jsonl`.
+For existing NeMo Gym examples, it also falls back to `data/*rollout*.jsonl` and
+ignores materialized-input, reward-profiling, and aggregate-metrics files.
+
 ## D3: Golden Reports, Metrics, And Anchor Facts
 
 Golden reports are curated analysis reports. They are not just script output.
@@ -219,6 +223,10 @@ A useful D3 package usually contains:
   universal `blade-judge`.
 - `{model}_shallow.md`: optional negative-control report for synthetic
   calibration.
+
+Model-vs-model comparison reports are useful supporting artifacts but are not
+single-model judge targets. They do not require anchor facts or shallow baselines
+unless the benchmark explicitly decides to score them.
 
 The universal judge combines deterministic checks and qualitative scoring. It
 should validate facts such as:
