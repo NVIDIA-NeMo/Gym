@@ -1,0 +1,25 @@
+compute_eval:
+  resources_servers:
+    compute_eval:
+      entrypoint: app.py
+      domain: coding
+      verified: false
+      description: Verifies model-generated CUDA / C / C++ / Python kernel solutions against NVIDIA's compute-eval hidden test suite.
+      value: Improve CUDA and accelerated-compute kernel coding capabilities.
+      num_processes: 8
+
+compute_eval_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: compute_eval
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/compute_eval/data/example.jsonl
+        license: Apache 2.0
