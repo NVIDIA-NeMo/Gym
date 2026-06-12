@@ -2008,3 +2008,18 @@ class TestLoadRebenchLogParsers:
 
             mod = _load_rebench_log_parsers(rebench_dir)
             assert "lib_test" in mod.NAME_TO_PARSER
+
+
+########################################
+# _classify_agent_error tests
+########################################
+
+
+class TestClassifyAgentError:
+    def test_classify_agent_error_handles_proxy_emitted_string(self) -> None:
+        # app._classify_agent_error matches both the spaced 'maximum iteration' and the underscore
+        # 'max_iteration' proxy-emitted forms.
+        from responses_api_agents.swe_agents.app import _classify_agent_error
+
+        assert _classify_agent_error("max_iteration") == "max_iteration"
+        assert _classify_agent_error("maximum iteration reached") == "max_iteration"
