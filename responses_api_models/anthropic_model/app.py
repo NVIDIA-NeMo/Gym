@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import base64
+import binascii
 import json
 from contextlib import nullcontext
 from time import time
@@ -44,6 +46,9 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
 from nemo_gym.server_utils import request as aiohttp_request
+
+
+SUPPORTED_ANTHROPIC_IMAGE_MEDIA_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
 
 
 class AnthropicModelConfig(BaseResponsesAPIModelConfig):
@@ -179,7 +184,7 @@ class AnthropicConverter:
                     ],
                 )
             else:
-                raise NotImplementedError(f"Unsupported Responses API item type for Claude: {item_type}")
+                raise NotImplementedError(f"Unsupported Responses API item type for Anthropic: {item_type}")
 
         if system_parts:
             anthropic_body["system"] = self._system_parts_to_anthropic_blocks(system_parts)
@@ -212,7 +217,7 @@ class AnthropicConverter:
         )
         if configured_sources > 1:
             raise ValueError(
-                "Configure Claude thinking in only one place: thinking, thinking_budget_tokens, or extra_body."
+                "Configure Anthropic thinking in only one place: thinking, thinking_budget_tokens, or extra_body."
             )
 
         if thinking is not None:
@@ -339,7 +344,7 @@ class AnthropicConverter:
             system_parts.append(self._content_to_text(content))
             return
         if role not in ("user", "assistant"):
-            raise NotImplementedError(f"Unsupported Responses API role for Claude: {role}")
+            raise NotImplementedError(f"Unsupported Responses API role for Anthropic: {role}")
         self._append_content(messages, role, self._content_to_anthropic_blocks(content, role))
 
     def _append_content(
@@ -361,11 +366,57 @@ class AnthropicConverter:
             part_type = part.get("type")
             if part_type in ("input_text", "output_text", "text"):
                 blocks.append({"type": "text", "text": part["text"]})
+            elif part_type == "input_image" and role == "user":
+                blocks.append(self._input_image_to_anthropic_block(part))
             elif part_type == "refusal" and role == "assistant":
                 blocks.append({"type": "text", "text": part["refusal"]})
             else:
-                raise NotImplementedError(f"Unsupported content part for Claude: {part_type}")
+                raise NotImplementedError(f"Unsupported content part for Anthropic: {part_type}")
         return blocks
+
+    def _input_image_to_anthropic_block(self, part: Dict[str, Any]) -> Dict[str, Any]:
+        image_url = part.get("image_url")
+        if isinstance(image_url, dict):
+            image_url = image_url.get("url")
+        if not isinstance(image_url, str):
+            raise ValueError("Responses input_image.image_url must be a base64 data URL string.")
+
+        media_type, data = self._parse_image_data_url(image_url)
+        return {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": media_type,
+                "data": data,
+            },
+        }
+
+    def _parse_image_data_url(self, image_url: str) -> tuple[str, str]:
+        if not image_url.startswith("data:"):
+            raise ValueError("Anthropic image inputs require base64 data URLs; remote image URLs are not supported.")
+
+        header, separator, data = image_url.partition(",")
+        if not separator or not data:
+            raise ValueError("Responses input_image.image_url must include base64 image data.")
+
+        metadata = header[len("data:") :].split(";")
+        media_type = metadata[0].lower()
+        if media_type == "image/jpg":
+            media_type = "image/jpeg"
+        if "base64" not in metadata[1:]:
+            raise ValueError("Responses input_image.image_url must be base64 encoded.")
+        if media_type not in SUPPORTED_ANTHROPIC_IMAGE_MEDIA_TYPES:
+            raise ValueError(
+                "Unsupported Anthropic image media type. Supported types: "
+                f"{sorted(SUPPORTED_ANTHROPIC_IMAGE_MEDIA_TYPES)}."
+            )
+
+        try:
+            base64.b64decode(data, validate=True)
+        except binascii.Error as exc:
+            raise ValueError("Responses input_image.image_url contains invalid base64 image data.") from exc
+
+        return media_type, data
 
     def _content_to_text(self, content: Any) -> str:
         if isinstance(content, str):
@@ -376,7 +427,7 @@ class AnthropicConverter:
             if part_type in ("input_text", "output_text", "text"):
                 texts.append(part["text"])
             else:
-                raise NotImplementedError(f"Unsupported system content part for Claude: {part_type}")
+                raise NotImplementedError(f"Unsupported system content part for Anthropic: {part_type}")
         return "\n".join(texts)
 
     def _system_parts_to_anthropic_blocks(self, system_parts: List[str]) -> List[Dict[str, str]]:
@@ -405,7 +456,7 @@ class AnthropicConverter:
     def _json_object_from_arguments(self, arguments: str) -> Dict[str, Any]:
         parsed = json.loads(arguments or "{}")
         if not isinstance(parsed, dict):
-            raise ValueError(f"Claude tool_use input must be a JSON object, got {type(parsed).__name__}")
+            raise ValueError(f"Anthropic tool_use input must be a JSON object, got {type(parsed).__name__}")
         return parsed
 
     def _copy_sampling_params(self, body_dict: Dict[str, Any], anthropic_body: Dict[str, Any]) -> None:
@@ -425,7 +476,7 @@ class AnthropicConverter:
         anthropic_tools = []
         for tool in tools:
             if tool.get("type") != "function":
-                raise NotImplementedError(f"Unsupported Responses API tool type for Claude: {tool.get('type')}")
+                raise NotImplementedError(f"Unsupported Responses API tool type for Anthropic: {tool.get('type')}")
             anthropic_tool = {
                 "name": tool["name"],
                 "input_schema": tool.get("parameters") or {"type": "object", "properties": {}},
@@ -445,11 +496,11 @@ class AnthropicConverter:
             elif tool_choice in ("auto", "none"):
                 anthropic_body["tool_choice"] = {"type": tool_choice}
             else:
-                raise NotImplementedError(f"Unsupported tool_choice for Claude: {tool_choice}")
+                raise NotImplementedError(f"Unsupported tool_choice for Anthropic: {tool_choice}")
         elif isinstance(tool_choice, dict) and tool_choice.get("type") == "function":
             anthropic_body["tool_choice"] = {"type": "tool", "name": tool_choice["name"]}
         else:
-            raise NotImplementedError(f"Unsupported tool_choice for Claude: {tool_choice}")
+            raise NotImplementedError(f"Unsupported tool_choice for Anthropic: {tool_choice}")
 
     def _flush_text_output(self, pending_text: List[str], output: List[Any]) -> None:
         if not pending_text:

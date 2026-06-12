@@ -2,7 +2,7 @@
 
 `anthropic_model` is a native Anthropic Messages API model server behind NeMo Gym's `/v1/responses` interface. It translates NeMo Gym Responses API requests to Anthropic `/v1/messages` payloads and maps Anthropic responses back to NeMo Gym Responses API objects.
 
-It supports text messages, system/developer prompt extraction, function tools, previous tool calls/results, thinking blocks, usage mapping, and optional request concurrency limiting. It uses `nemo_gym.server_utils.request()` for raw aiohttp transport instead of the Anthropic Python SDK.
+It supports text messages, base64 image inputs, system/developer prompt extraction, function tools, previous tool calls/results, thinking blocks, usage mapping, and optional request concurrency limiting. It uses `nemo_gym.server_utils.request()` for raw aiohttp transport instead of the Anthropic Python SDK.
 
 # Usage
 
@@ -55,6 +55,8 @@ ng_collect_rollouts \
 # Notes
 
 Provider-specific Anthropic fields that are not modeled as typed config can be passed through `extra_body`. Some options are model-specific: Claude Opus 4.7 and 4.8 reject configurable sampling parameters (`temperature`, `top_p`, `top_k`), so omit them and use prompting or adaptive thinking/effort controls instead.
+
+Responses `input_image` parts are supported when `image_url` is a base64 data URL. Supported media types are `image/jpeg`, `image/png`, `image/gif`, and `image/webp`; remote image URLs are rejected with a 400.
 
 Anthropic `stop_reason` values are mapped to Responses-compatible `incomplete_details` when possible. `max_tokens` and `model_context_window_exceeded` map to `max_output_tokens`; `refusal` maps to `content_filter`. Other stop reasons such as `end_turn`, `tool_use`, and `pause_turn` remain complete responses.
 

@@ -243,11 +243,112 @@ class TestAnthropicConverter:
 
         assert actual["thinking"] == {"type": "adaptive"}
 
+    def test_responses_to_anthropic_maps_input_image_data_url(self) -> None:
+        converter = AnthropicConverter()
+        body = NeMoGymResponseCreateParamsNonStreaming(
+            input=[
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "What is in this image?"},
+                        {
+                            "type": "input_image",
+                            "image_url": "data:image/png;base64,iVBORw0KGgo=",
+                            "detail": "high",
+                        },
+                    ],
+                }
+            ]
+        )
+
+        actual = converter.responses_to_anthropic(
+            body=body,
+            model="claude-sonnet-4-20250514",
+            max_tokens=1024,
+            thinking=None,
+            thinking_budget_tokens=None,
+            extra_body={},
+        )
+
+        assert actual["messages"] == [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "What is in this image?"},
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/png",
+                            "data": "iVBORw0KGgo=",
+                        },
+                    },
+                ],
+            }
+        ]
+
+    def test_responses_to_anthropic_rejects_remote_image_url(self) -> None:
+        converter = AnthropicConverter()
+        body = NeMoGymResponseCreateParamsNonStreaming(
+            input=[
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_image",
+                            "image_url": "https://example.com/image.png",
+                            "detail": "high",
+                        }
+                    ],
+                }
+            ]
+        )
+
+        with pytest.raises(ValueError, match="base64 data URLs"):
+            converter.responses_to_anthropic(
+                body=body,
+                model="claude-sonnet-4-20250514",
+                max_tokens=1024,
+                thinking=None,
+                thinking_budget_tokens=None,
+                extra_body={},
+            )
+
+    def test_responses_to_anthropic_rejects_invalid_image_data_url(self) -> None:
+        converter = AnthropicConverter()
+        body = NeMoGymResponseCreateParamsNonStreaming(
+            input=[
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_image",
+                            "image_url": "data:image/png;base64,not valid base64",
+                            "detail": "high",
+                        }
+                    ],
+                }
+            ]
+        )
+
+        with pytest.raises(ValueError, match="invalid base64"):
+            converter.responses_to_anthropic(
+                body=body,
+                model="claude-sonnet-4-20250514",
+                max_tokens=1024,
+                thinking=None,
+                thinking_budget_tokens=None,
+                extra_body={},
+            )
+
     def test_responses_to_anthropic_rejects_ambiguous_thinking_config(self) -> None:
         converter = AnthropicConverter()
         body = NeMoGymResponseCreateParamsNonStreaming(input="Hello")
 
-        with pytest.raises(ValueError, match="Configure Claude thinking in only one place"):
+        with pytest.raises(ValueError, match="Configure Anthropic thinking in only one place"):
             converter.responses_to_anthropic(
                 body=body,
                 model="claude-opus-4-8",
@@ -467,6 +568,33 @@ class TestAnthropicModel:
 
         assert response.status_code == 400
         assert "does not support configurable sampling" in response.json()["detail"]
+
+    def test_responses_endpoint_rejects_remote_image_url(self) -> None:
+        server = self._setup_server()
+        app = server.setup_webserver()
+        client = TestClient(app)
+
+        response = client.post(
+            "/v1/responses",
+            json={
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_image",
+                                "image_url": "https://example.com/image.png",
+                                "detail": "high",
+                            }
+                        ],
+                    }
+                ]
+            },
+        )
+
+        assert response.status_code == 400
+        assert "base64 data URLs" in response.json()["detail"]
 
     def test_semaphore_disabled_by_default(self) -> None:
         server = self._setup_server()
