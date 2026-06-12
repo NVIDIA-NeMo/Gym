@@ -25,6 +25,7 @@ from typing import (
     Union,
 )
 
+from openai.types import Completion
 from openai.types.chat import (
     ChatCompletion,
     ChatCompletionAssistantMessageParam,
@@ -52,6 +53,8 @@ from openai.types.chat.completion_create_params import (
     ResponseFormat,
     WebSearchOptions,
 )
+from openai.types.completion_choice import CompletionChoice
+from openai.types.completion_choice import Logprobs as CompletionLogprobs
 from openai.types.responses import (
     FunctionToolParam,
     Response,
@@ -454,6 +457,53 @@ class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
 
 
 ########################################
+# Text Completion API ( /v1/completions )
+########################################
+
+
+class NeMoGymCompletionLogprobs(CompletionLogprobs):
+    pass
+
+
+class NeMoGymCompletionChoice(CompletionChoice):
+    logprobs: Optional[NeMoGymCompletionLogprobs] = None
+
+
+class NeMoGymCompletion(Completion):
+    choices: List[NeMoGymCompletionChoice]
+
+
+class NeMoGymCompletionCreateParamsNonStreaming(BaseModel):
+    """
+    Mirror of openai.types.completion_create_params.CompletionCreateParamsNonStreaming
+    as a Pydantic model so it can be used for FastAPI request validation in the
+    same style as NeMoGymChatCompletionCreateParamsNonStreaming.
+
+    Used internally by VLLMModel's "completions" backend; not exposed as a server
+    endpoint. Only the subset of parameters that vLLM /v1/completions accepts is
+    declared here.
+    """
+
+    model: Optional[str] = None
+    prompt: Union[str, List[str], List[int], List[List[int]], None] = None
+    best_of: Optional[int] = None
+    echo: Optional[bool] = None
+    frequency_penalty: Optional[float] = None
+    logit_bias: Optional[Dict[str, int]] = None
+    logprobs: Optional[int] = None
+    max_tokens: Optional[int] = None
+    n: Optional[int] = None
+    presence_penalty: Optional[float] = None
+    seed: Optional[int] = None
+    stop: Union[Optional[str], List[str], None] = None
+    suffix: Optional[str] = None
+    temperature: Optional[float] = None
+    top_p: Optional[float] = None
+    user: Optional[str] = None
+    stream: Optional[Literal[False]] = None
+
+
+########################################
 # Clients
 ########################################
 
@@ -533,6 +583,16 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
     async def create_chat_completion(self, **kwargs):
         request_kwargs = dict(
             url=f"{self.base_url}/chat/completions",
+            json=kwargs,
+        )
+        response = await self._request(method="POST", **request_kwargs)
+
+        await self._raise_for_status(response, request_kwargs)
+        return await get_response_json(response)
+
+    async def create_completion(self, **kwargs):
+        request_kwargs = dict(
+            url=f"{self.base_url}/completions",
             json=kwargs,
         )
         response = await self._request(method="POST", **request_kwargs)

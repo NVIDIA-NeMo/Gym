@@ -44,6 +44,45 @@ class TestApp:
             vllm_serve_kwargs=dict(),
         )
 
+    def test_completions_api_fields_inherited_from_vllm_model_config(self) -> None:
+        """LocalVLLMModelConfig must inherit use_completions_api / render_chat_template /
+        tokenizer from VLLMModelConfig so the same YAML flag flips behavior for a
+        local-vLLM deployment."""
+        cfg = LocalVLLMModelConfig(
+            host="",
+            port=0,
+            entrypoint="",
+            name="test name",
+            model="test model",
+            return_token_id_information=False,
+            uses_reasoning_parser=False,
+            vllm_serve_env_vars=dict(),
+            vllm_serve_kwargs=dict(),
+        )
+        # Defaults match VLLMModelConfig's.
+        assert cfg.use_completions_api is False
+        assert cfg.render_chat_template is False
+        assert cfg.tokenizer is None
+
+        # All three fields are settable through the same constructor surface.
+        cfg = LocalVLLMModelConfig(
+            host="",
+            port=0,
+            entrypoint="",
+            name="test name",
+            model="test model",
+            return_token_id_information=False,
+            uses_reasoning_parser=False,
+            vllm_serve_env_vars=dict(),
+            vllm_serve_kwargs=dict(),
+            use_completions_api=True,
+            render_chat_template=True,
+            tokenizer="some-other-model",
+        )
+        assert cfg.use_completions_api is True
+        assert cfg.render_chat_template is True
+        assert cfg.tokenizer == "some-other-model"
+
     def test_sanity_start_vllm_server(self, monkeypatch) -> None:
         get_global_config_dict_mock = MagicMock()
         get_global_config_dict_mock.return_value = DictConfig({DISALLOWED_PORTS_KEY_NAME: []})
