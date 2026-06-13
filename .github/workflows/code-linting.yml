@@ -31,6 +31,6 @@ jobs:
 
       - name: Check lint
         run: |
-          pip install pre-commit==3.6.0
-          pre-commit install
-          pre-commit run --all-files --show-diff-on-failure --color=always
+          pip install uv
+          uv run --no-project --with pre-commit==3.6.0 pre-commit install
+          uv run --no-project --with pre-commit==3.6.0 pre-commit run --all-files --show-diff-on-failure --color=always
