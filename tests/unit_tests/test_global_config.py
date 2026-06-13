@@ -31,6 +31,7 @@ from nemo_gym.global_config import (
     find_open_port,
     get_first_server_config_dict,
     get_global_config_dict,
+    require_configured_servers,
 )
 from nemo_gym.server_utils import (
     DictConfig,
@@ -977,3 +978,47 @@ class TestGlobalConfig:
 
         # Without the help override, this will SystemExit.
         GlobalConfigDictParser.parse_global_config_dict_from_cli(None)
+
+    def test_load_extra_config_paths_missing_path_fails_fast(self, monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
+        # A mistyped / nonexistent config path should fail fast with a clear message
+        # instead of an opaque FileNotFoundError traceback from OmegaConf.load().
+        parser = GlobalConfigDictParser()
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(nemo_gym.global_config, "PARENT_DIR", tmp_path)
+
+        with raises(SystemExit) as exc_info:
+            parser.load_extra_config_paths(["does_not_exist/configs/nope.yaml"])
+
+        assert "Config file not found" in str(exc_info.value)
+
+    def test_parse_rejects_non_list_config_paths(self, monkeypatch: MonkeyPatch) -> None:
+        # A scalar instead of a list should explain the expected Hydra list syntax
+        # instead of surfacing a raw Pydantic ValidationError traceback.
+        parser = GlobalConfigDictParser()
+
+        with raises(SystemExit) as exc_info:
+            parser.parse(
+                GlobalConfigDictParserConfig(
+                    initial_global_config_dict=DictConfig({"config_paths": "a.yaml"}),
+                    skip_load_from_cli=True,
+                    skip_load_from_dotenv=True,
+                )
+            )
+
+        assert "config_paths" in str(exc_info.value)
+        assert "must be a list" in str(exc_info.value)
+
+    def test_require_configured_servers_raises_when_empty(self) -> None:
+        with raises(SystemExit) as exc_info:
+            require_configured_servers(DictConfig({}))
+        assert "No servers configured" in str(exc_info.value)
+
+    def test_require_configured_servers_raises_with_only_reserved_keys(self) -> None:
+        # Only reserved (non-server) keys present, e.g. an empty `+config_paths`.
+        with raises(SystemExit):
+            require_configured_servers(DictConfig({"config_paths": []}))
+
+    def test_require_configured_servers_passes_with_server(self) -> None:
+        # A configured server key present -> no error.
+        require_configured_servers(DictConfig({"config_paths": ["a.yaml"], "my_server": {"a": 1}}))
