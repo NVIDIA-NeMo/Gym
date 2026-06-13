@@ -13,7 +13,6 @@ import argparse
 import json
 import re
 import sys
-from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -243,7 +242,11 @@ def validate_golden(benchmark_dir: Path, min_anchor_facts: int) -> list[Finding]
             try:
                 metrics_obj = load_json(metrics)
                 findings.append(Finding(isinstance(metrics_obj, dict), f"{metrics.name}: metrics JSON parses"))
-                key_hits = sum(1 for k in ("model", "model_name", "benchmark", "pass_at_1", "num_tasks", "total_tasks") if k in metrics_obj)
+                key_hits = sum(
+                    1
+                    for k in ("model", "model_name", "benchmark", "pass_at_1", "num_tasks", "total_tasks")
+                    if k in metrics_obj
+                )
                 findings.append(
                     Finding(
                         is_comparison_report or key_hits >= 3,
@@ -261,7 +264,9 @@ def validate_golden(benchmark_dir: Path, min_anchor_facts: int) -> list[Finding]
             try:
                 anchors_obj = load_json(anchors)
                 records = anchor_records(anchors_obj)
-                findings.append(Finding(len(records) >= min_anchor_facts, f"{anchors.name}: {len(records)} anchor facts"))
+                findings.append(
+                    Finding(len(records) >= min_anchor_facts, f"{anchors.name}: {len(records)} anchor facts")
+                )
                 malformed = 0
                 for i, rec in enumerate(records):
                     if not isinstance(rec, dict):
@@ -282,7 +287,9 @@ def validate_golden(benchmark_dir: Path, min_anchor_facts: int) -> list[Finding]
         if shallow.exists():
             findings.append(Finding(True, f"{report.name}: optional shallow baseline exists"))
         else:
-            findings.append(Finding(True, f"{report.name}: optional shallow baseline missing; recommended for calibration"))
+            findings.append(
+                Finding(True, f"{report.name}: optional shallow baseline missing; recommended for calibration")
+            )
 
     return findings
 
@@ -318,7 +325,9 @@ def strip_markdown(line: str) -> str:
 
 def normalize_sentence(sentence: str) -> str:
     sentence = re.sub(r"\b\d+(?:\.\d+)?%", "a measured percentage", sentence)
-    sentence = re.sub(r"\b\d+(?:\.\d+)?\s*(?:pp|seconds|secs|tokens|rollouts|tasks|files|calls)\b", "a measured quantity", sentence)
+    sentence = re.sub(
+        r"\b\d+(?:\.\d+)?\s*(?:pp|seconds|secs|tokens|rollouts|tasks|files|calls)\b", "a measured quantity", sentence
+    )
     sentence = re.sub(r"\b\d{3,}\b", "a large count", sentence)
     sentence = re.sub(r"\s+", " ", sentence).strip()
     return sentence
@@ -492,11 +501,7 @@ def cmd_make_shallow(args) -> int:
 
 
 def tokens(text: str) -> set[str]:
-    return {
-        tok
-        for tok in re.findall(r"[a-zA-Z][a-zA-Z0-9_]{2,}", text.lower())
-        if tok not in STOPWORDS
-    }
+    return {tok for tok in re.findall(r"[a-zA-Z][a-zA-Z0-9_]{2,}", text.lower()) if tok not in STOPWORDS}
 
 
 def overlap_score(needle: str, haystack: str) -> float:
@@ -510,7 +515,9 @@ def overlap_score(needle: str, haystack: str) -> float:
 def score_report(report_text: str, golden_text: str, anchors: list[dict]) -> dict:
     headings = len(re.findall(r"^##\s+", report_text, re.MULTILINE))
     tables = len(re.findall(r"^\|", report_text, re.MULTILINE))
-    evidence_terms = len(re.findall(r"\b(task|rollout|trajectory|stderr|verifier|log|tool call|example)\b", report_text, re.I))
+    evidence_terms = len(
+        re.findall(r"\b(task|rollout|trajectory|stderr|verifier|log|tool call|example)\b", report_text, re.I)
+    )
     numbers = len(re.findall(r"\b\d+(?:\.\d+)?%?|\bpass@k\b|\bpass@1\b", report_text, re.I))
 
     structure = min(1.0, headings / 8)
@@ -526,18 +533,8 @@ def score_report(report_text: str, golden_text: str, anchors: list[dict]) -> dic
         anchor_hits.append({"id": rec.get("id"), "score": score, "met": score >= 0.35, "fact": fact})
     anchor_score = sum(1 for hit in anchor_hits if hit["met"]) / max(1, len(anchor_hits))
 
-    checklist = (
-        0.20 * structure
-        + 0.20 * quantitative
-        + 0.20 * evidence
-        + 0.40 * anchor_score
-    )
-    holistic = (
-        0.20 * evidence
-        + 0.20 * golden_overlap
-        + 0.50 * anchor_score
-        + 0.10 * table_score
-    )
+    checklist = 0.20 * structure + 0.20 * quantitative + 0.20 * evidence + 0.40 * anchor_score
+    holistic = 0.20 * evidence + 0.20 * golden_overlap + 0.50 * anchor_score + 0.10 * table_score
     final = (checklist + holistic) / 2
     return {
         "final_score": round(final, 4),
