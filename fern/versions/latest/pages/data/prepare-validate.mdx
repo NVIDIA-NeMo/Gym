@@ -224,6 +224,37 @@ This validates your data and adds the `agent_ref` field to each row, routing sam
 
 ---
 
+## Download Missing Remote Datasets
+
+If a dataset in your config has a remote identifier, `ng_prepare_data` can download it before validation. Use `+should_download=true` and select the matching `+data_source`.
+
+For configs that use `gitlab_identifier`, such as the SWE agents `swebench_openhands.yaml` validation dataset, use the GitLab registry backend:
+
+```bash
+config_paths="responses_api_agents/swe_agents/configs/swebench_openhands.yaml,\
+responses_api_models/vllm_model/configs/vllm_model.yaml"
+
+ng_prepare_data "+config_paths=[$config_paths]" \
+    +output_dirpath=data/swebench_openhands \
+    +mode=train_preparation \
+    +should_download=true \
+    +data_source=gitlab
+```
+
+The same dataset can also be downloaded directly:
+
+```bash
+ng_download_dataset_from_gitlab \
+    +dataset_name=swebench_verified_for_sweagent_and_openhands \
+    +version=0.0.1 \
+    +artifact_fpath=swebench_verified_for_sweagent_and_openhands.jsonl \
+    +output_fpath=responses_api_agents/swe_agents/data/swebench_verified_for_sweagent_and_openhands.jsonl
+```
+
+Use `ng_download_dataset_from_hf` only for configs that use `huggingface_identifier`. A 401 from the Hugging Face downloader usually means the command is pointing at the wrong registry or you need access to a gated/private Hugging Face repo.
+
+---
+
 ## Validation Modes
 
 | Mode | Purpose | Validates |
