@@ -24,7 +24,7 @@ Designed to execute each sub-step via a Ray subprocess worker (instead of a Dock
 
 import asyncio
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Optional
 
 import ray
 from pydantic import ConfigDict
@@ -140,18 +140,6 @@ class ScicodeResourcesServer(SimpleResourcesServer):
             num_steps_total=len(scored),
             problem_accuracy=all_passed,
         )
-
-    def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
-        """Headline SciCode metric: sub-step-weighted accuracy = total passed / total over all rollouts."""
-        passed = sum(r.get("num_steps_passed", 0) for task in tasks for r in task)
-        total = sum(r.get("num_steps_total", 0) for task in tasks for r in task)
-        return {"subtask_accuracy": passed / total if total else 0.0}
-
-    def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
-        key = {k: v for k, v in agent_metrics.items() if k.startswith("mean/")}
-        if "subtask_accuracy" in agent_metrics:
-            key["subtask_accuracy"] = agent_metrics["subtask_accuracy"]
-        return key
 
 
 if __name__ == "__main__":

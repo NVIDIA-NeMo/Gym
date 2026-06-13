@@ -246,3 +246,21 @@ class TestApp:
         agent.server_client.post = AsyncMock(side_effect=_post)
         with patch.object(app, "raise_for_status", AsyncMock()), pytest.raises(RuntimeError, match="boom"):
             await agent.run(_FakeRequest(), _run_request(problem_id="1", n_steps=1))
+
+    def test_compute_metrics_subtask_accuracy_is_substep_weighted(self):
+        # Two problems: 1/2 and 3/4 passed -> 4/6, NOT the mean of ratios (0.5, 0.75).
+        tasks = [
+            [{"num_steps_passed": 1, "num_steps_total": 2}],
+            [{"num_steps_passed": 3, "num_steps_total": 4}],
+        ]
+        assert _agent().compute_metrics(tasks) == {"subtask_accuracy": 4 / 6}
+
+    def test_compute_metrics_no_steps(self):
+        assert _agent().compute_metrics([]) == {"subtask_accuracy": 0.0}
+
+    def test_get_key_metrics_includes_subtask_accuracy(self):
+        agent_metrics = {"mean/reward": 0.1875, "max/reward": 1.0, "subtask_accuracy": 0.414}
+        key = _agent().get_key_metrics(agent_metrics)
+        assert key["subtask_accuracy"] == 0.414
+        assert key["mean/reward"] == 0.1875
+        assert "max/reward" not in key  # only mean/* + subtask_accuracy are headline

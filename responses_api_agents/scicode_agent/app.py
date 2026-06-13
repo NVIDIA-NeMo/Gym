@@ -28,7 +28,7 @@ Templated on responses_api_agents/proof_refinement_agent (the multi-turn run() s
 """
 
 import logging
-from typing import Dict, List
+from typing import Any, Dict, List
 
 from fastapi import Request, Response
 from pydantic import ConfigDict
@@ -188,6 +188,18 @@ class ScicodeAgent(SimpleResponsesAPIAgent):
         )
         await raise_for_status(verify_response)
         return await verify_response.json()
+
+    def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
+        """Headline SciCode metric: sub-step-weighted accuracy = total passed / total over all rollouts."""
+        passed = sum(r.get("num_steps_passed", 0) for task in tasks for r in task)
+        total = sum(r.get("num_steps_total", 0) for task in tasks for r in task)
+        return {"subtask_accuracy": passed / total if total else 0.0}
+
+    def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
+        key = {k: v for k, v in agent_metrics.items() if k.startswith("mean/")}
+        if "subtask_accuracy" in agent_metrics:
+            key["subtask_accuracy"] = agent_metrics["subtask_accuracy"]
+        return key
 
 
 if __name__ == "__main__":
