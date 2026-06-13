@@ -157,7 +157,7 @@ jobs:
           curl -LsSf "$UV_INSTALL_URL" | sh
           uv venv --python 3.12
           source .venv/bin/activate
-          uv sync --extra dev
+          uv sync --extra dev --extra sandbox
 
       - name: Test
         run: |

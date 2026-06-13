@@ -1,0 +1,302 @@
+# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Provider-neutral public sandbox API."""
+
+import asyncio
+import tempfile
+import threading
+from collections.abc import Awaitable, Callable, Mapping
+from concurrent.futures import Future
+from concurrent.futures import TimeoutError as FutureTimeoutError
+from pathlib import Path
+from typing import Any, TypeVar
+
+from nemo_gym.sandbox.providers import (
+    SandboxExecResult,
+    SandboxHandle,
+    SandboxProvider,
+    SandboxSpec,
+    SandboxStatus,
+    create_provider,
+)
+
+
+T = TypeVar("T")
+SYNC_OPERATION_TIMEOUT_S = 3600.0
+SYNC_LOOP_CLOSE_TIMEOUT_S = 5.0
+
+
+class AsyncSandbox:
+    """Async sandbox object backed by a runtime provider."""
+
+    def __init__(
+        self,
+        provider: Mapping[str, Any] | SandboxProvider,
+        spec: SandboxSpec | None = None,
+    ) -> None:
+        self._provider = create_provider(provider) if isinstance(provider, Mapping) else provider
+        self._spec = spec
+        self._handle: SandboxHandle | None = None
+        self._stopped = True
+        self._closed = False
+
+    def _require_handle(self) -> SandboxHandle:
+        if self._handle is None or self._stopped:
+            raise RuntimeError("Sandbox has not been started")
+        return self._handle
+
+    async def start(
+        self,
+        spec: SandboxSpec | None = None,
+    ) -> "AsyncSandbox":
+        if self._closed:
+            raise RuntimeError("Sandbox has been stopped")
+        if self._handle is not None and not self._stopped:
+            raise RuntimeError("Sandbox is already started")
+        requested_spec = spec if spec is not None else self._spec
+        if requested_spec is None:
+            raise ValueError("Sandbox.start() requires a SandboxSpec")
+
+        handle = await self._provider.create(requested_spec)
+        try:
+            if requested_spec.files:
+                with tempfile.TemporaryDirectory(prefix="nemo-gym-sandbox-upload-") as tmp_dir:
+                    tmp_path = Path(tmp_dir)
+                    for index, (target_path, contents) in enumerate(requested_spec.files.items()):
+                        source_path = tmp_path / f"file-{index}"
+                        source_path.write_text(contents, encoding="utf-8")
+                        await self._provider.upload_file(handle, source_path, target_path)
+        except Exception:
+            await self._provider.close(handle)
+            await self._provider.aclose()
+            self._closed = True
+            raise
+
+        self._spec = requested_spec
+        self._handle = handle
+        self._stopped = False
+        return self
+
+    async def exec(
+        self,
+        command: str,
+        *,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        timeout_s: int | float | None = 180,
+        user: str | int | None = None,
+    ) -> SandboxExecResult:
+        return await self._provider.exec(
+            self._require_handle(),
+            command,
+            cwd=cwd if cwd is not None else self._spec.workdir if self._spec is not None else None,
+            env=env,
+            timeout_s=timeout_s,
+            user=user,
+        )
+
+    async def upload(self, local_path: Path | str, remote_path: str) -> None:
+        await self._provider.upload_file(self._require_handle(), Path(local_path), remote_path)
+
+    async def download(self, remote_path: str, local_path: Path | str) -> None:
+        await self._provider.download_file(self._require_handle(), remote_path, Path(local_path))
+
+    async def status(self) -> SandboxStatus:
+        if self._handle is None:
+            return SandboxStatus.UNKNOWN
+        if self._stopped:
+            return SandboxStatus.STOPPED
+        return await self._provider.status(self._handle)
+
+    async def stop(self) -> None:
+        if self._closed:
+            return
+        try:
+            if self._handle is not None and not self._stopped:
+                self._stopped = True
+                await self._provider.close(self._handle)
+        finally:
+            await self._provider.aclose()
+            self._closed = True
+
+    async def __aenter__(self) -> "AsyncSandbox":
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        await self.stop()
+
+
+class _AsyncLoopRunner:
+    """Run async sandbox operations for sync callers."""
+
+    def __init__(
+        self,
+        *,
+        wait_timeout_s: float = SYNC_OPERATION_TIMEOUT_S,
+        close_timeout_s: float = SYNC_LOOP_CLOSE_TIMEOUT_S,
+    ) -> None:
+        self._wait_timeout_s = wait_timeout_s
+        self._close_timeout_s = close_timeout_s
+        self._loop = asyncio.new_event_loop()
+        self._ready = threading.Event()
+        self._closed = False
+        self._thread = threading.Thread(target=self._run_loop, name="nemo-gym-sandbox-sync-loop", daemon=True)
+        self._thread.start()
+        self._ready.wait()
+
+    def _run_loop(self) -> None:
+        asyncio.set_event_loop(self._loop)
+        self._ready.set()
+        self._loop.run_forever()
+
+    def _ensure_can_block(self, operation: str) -> None:
+        if self._closed or self._loop.is_closed():
+            raise RuntimeError("Sandbox sync loop is closed")
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        raise RuntimeError(f"Sandbox.{operation}() is blocking; use AsyncSandbox in async code instead.")
+
+    def _wait_for_result(self, operation: str, future: Future[T]) -> T:
+        try:
+            return future.result(timeout=self._wait_timeout_s)
+        except FutureTimeoutError as e:
+            future.cancel()
+            raise TimeoutError(
+                f"Sandbox.{operation}() timed out waiting for the sync loop after {self._wait_timeout_s:g}s"
+            ) from e
+
+    def call(self, operation: str, func: Callable[[], T]) -> T:
+        self._ensure_can_block(operation)
+        future: Future[T] = Future()
+
+        def invoke() -> None:
+            try:
+                result = func()
+            except BaseException as e:
+                if not future.cancelled():
+                    future.set_exception(e)
+            else:
+                if not future.cancelled():
+                    future.set_result(result)
+
+        self._loop.call_soon_threadsafe(invoke)
+        return self._wait_for_result(operation, future)
+
+    def run(self, operation: str, awaitable_factory: Callable[[], Awaitable[T]]) -> T:
+        self._ensure_can_block(operation)
+        future = asyncio.run_coroutine_threadsafe(awaitable_factory(), self._loop)
+        try:
+            return future.result(timeout=self._wait_timeout_s)
+        except FutureTimeoutError as e:
+            future.cancel()
+            raise TimeoutError(
+                f"Sandbox.{operation}() timed out waiting for the sync loop after {self._wait_timeout_s:g}s"
+            ) from e
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        if not self._loop.is_closed():
+            self._loop.call_soon_threadsafe(self._loop.stop)
+            self._thread.join(timeout=self._close_timeout_s)
+            if self._thread.is_alive():
+                return
+            self._loop.close()
+
+
+class Sandbox:
+    """Synchronous wrapper around ``AsyncSandbox``."""
+
+    def __init__(
+        self,
+        provider: Mapping[str, Any] | SandboxProvider,
+        spec: SandboxSpec | None = None,
+    ) -> None:
+        self._runner = _AsyncLoopRunner()
+        try:
+            self._async_sandbox = self._runner.call(
+                "__init__",
+                lambda: AsyncSandbox(provider, spec),
+            )
+        except BaseException:
+            self._runner.close()
+            raise
+        self._closed = False
+
+    def start(
+        self,
+        spec: SandboxSpec | None = None,
+    ) -> "Sandbox":
+        self._runner.run(
+            "start",
+            lambda: self._async_sandbox.start(spec),
+        )
+        return self
+
+    def exec(
+        self,
+        command: str,
+        *,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        timeout_s: int | float | None = 180,
+        user: str | int | None = None,
+    ) -> SandboxExecResult:
+        return self._runner.run(
+            "exec",
+            lambda: self._async_sandbox.exec(
+                command,
+                cwd=cwd,
+                env=env,
+                timeout_s=timeout_s,
+                user=user,
+            ),
+        )
+
+    def upload(self, local_path: Path | str, remote_path: str) -> None:
+        self._runner.run("upload", lambda: self._async_sandbox.upload(local_path, remote_path))
+
+    def download(self, remote_path: str, local_path: Path | str) -> None:
+        self._runner.run("download", lambda: self._async_sandbox.download(remote_path, local_path))
+
+    def status(self) -> SandboxStatus:
+        if self._closed:
+            return SandboxStatus.STOPPED
+        return self._runner.run("status", self._async_sandbox.status)
+
+    def stop(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self._runner.run("stop", self._async_sandbox.stop)
+        finally:
+            self._runner.close()
+
+    def __enter__(self) -> "Sandbox":
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        self.stop()
+
+    def __del__(self) -> None:  # pragma: no cover
+        if hasattr(self, "_closed") and not self._closed:
+            try:
+                self.stop()
+            except Exception:
+                pass
