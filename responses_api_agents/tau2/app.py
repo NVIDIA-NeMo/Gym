@@ -14,7 +14,7 @@
 # limitations under the License.
 
 from collections import defaultdict
-from os import environ
+from os import environ, getpid
 from pathlib import Path
 from subprocess import run
 from time import time
@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Literal, Optional
 
 
 DATA_DIR = Path(__file__).parent / "tau2_data"
+AGI_EVAL_OVERRIDE_DIR = Path(__file__).parent / "prompt_overrides" / "agi_eval"
 environ["TAU2_DATA_DIR"] = str(DATA_DIR)
 
 from fastapi import Body
@@ -48,6 +49,8 @@ from tau2.data_model.tasks import Task
 from tau2.evaluator.evaluator import EvaluationType
 from tau2.runner.batch import run_single_task
 from tau2.utils.llm_utils import to_litellm_messages
+from tau2.runner import build as tau2_build
+from tau2.user.user_simulator import UserSimulator as Tau2UserSimulator
 
 
 class Tau2Config(BaseResponsesAPIAgentConfig):
@@ -89,6 +92,89 @@ class Tau2VerifyResponse(Tau2RunRequest, BaseVerifyResponse):
     max_completion_tokens: Optional[float]
 
 
+_DOMAIN_USER_PROMPT_OVERRIDES: dict[str, str] = {}
+_USER_PROMPT_PATCHED = False
+
+
+def _verify_markers(path: Path, markers: list[str]):
+    text = path.read_text()
+    missing = [marker for marker in markers if marker not in text]
+    if missing:
+        raise RuntimeError(f"AGI-Eval tau2 override missing markers in {path}: {missing}")
+
+
+def _copy_override(src: Path, dst: Path, markers: list[str]):
+    if not src.exists():
+        raise RuntimeError(f"AGI-Eval tau2 override file not found: {src}")
+
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    contents = src.read_bytes()
+    tmp = dst.with_name(f".{dst.name}.{getpid()}.tmp")
+    tmp.write_bytes(contents)
+    tmp.replace(dst)
+    _verify_markers(dst, markers)
+
+
+def _patch_user_simulator_prompts(domain_prompts: dict[str, str]):
+    global _USER_PROMPT_PATCHED
+    _DOMAIN_USER_PROMPT_OVERRIDES.update(domain_prompts)
+    if _USER_PROMPT_PATCHED:
+        return
+
+    original_build_user = tau2_build.build_user
+    original_guidelines_fget = Tau2UserSimulator.global_simulation_guidelines.fget
+
+    @property
+    def global_simulation_guidelines(self):
+        override = getattr(self, "_nemo_gym_tau2_user_prompt_override", None)
+        if override is not None:
+            return override
+        return original_guidelines_fget(self)
+
+    def build_user_with_domain_prompt(user_name, environment, task, **kwargs):
+        user = original_build_user(user_name, environment, task, **kwargs)
+        domain = environment.get_domain_name()
+        prompt = _DOMAIN_USER_PROMPT_OVERRIDES.get(domain)
+        if prompt is not None and isinstance(user, Tau2UserSimulator) and getattr(user, "tools", None) is None:
+            setattr(user, "_nemo_gym_tau2_user_prompt_override", prompt)
+        return user
+
+    Tau2UserSimulator.global_simulation_guidelines = global_simulation_guidelines
+    tau2_build.build_user = build_user_with_domain_prompt
+    _USER_PROMPT_PATCHED = True
+
+
+def apply_agi_eval_tau2_revisions():
+    if not AGI_EVAL_OVERRIDE_DIR.exists():
+        return
+
+    airline_tasks_src = AGI_EVAL_OVERRIDE_DIR / "airline_tasks.json"
+    airline_prompt_src = AGI_EVAL_OVERRIDE_DIR / "simulation_guidelines_airline.md"
+    retail_prompt_src = AGI_EVAL_OVERRIDE_DIR / "simulation_guidelines_retail.md"
+    tools_prompt_src = AGI_EVAL_OVERRIDE_DIR / "simulation_guidelines_tools.md"
+
+    airline_tasks_dst = DATA_DIR / "tau2/domains/airline/tasks.json"
+    airline_prompt_dst = DATA_DIR / "tau2/user_simulator/simulation_guidelines_airline.md"
+    retail_prompt_dst = DATA_DIR / "tau2/user_simulator/simulation_guidelines_retail.md"
+    tools_prompt_dst = DATA_DIR / "tau2/user_simulator/simulation_guidelines_tools.md"
+
+    _copy_override(airline_tasks_src, airline_tasks_dst, ["$647", "By NO MEANS you will upgrade your cabin"])
+    logger.info("Applied AGI-Eval revised tau2 airline tasks")
+
+    _copy_override(airline_prompt_src, airline_prompt_dst, ["When NOT to finish the conversation", "actual completion"])
+    airline_prompt = airline_prompt_dst.read_text()
+    _patch_user_simulator_prompts({"airline": airline_prompt})
+    logger.info("Applied AGI-Eval revised tau2 airline user-simulator prompt")
+
+    _copy_override(retail_prompt_src, retail_prompt_dst, ["When NOT to finish the conversation", "completed all tasks"])
+    retail_prompt = retail_prompt_dst.read_text()
+    _patch_user_simulator_prompts({"retail": retail_prompt})
+    logger.info("Applied AGI-Eval revised tau2 retail user-simulator prompt")
+
+    _copy_override(tools_prompt_src, tools_prompt_dst, ["Transfer Handling - CRITICAL", "transfer_to_human_agents"])
+    logger.info("Applied AGI-Eval revised tau2 tools user-simulator prompt")
+
+
 class Tau2Agent(SimpleResponsesAPIAgent):
     config: Tau2Config
 
@@ -109,6 +195,8 @@ class Tau2Agent(SimpleResponsesAPIAgent):
                 check=True,
                 executable="/bin/bash",
             )
+
+        apply_agi_eval_tau2_revisions()
 
         if not self.config.debug:
             print("Removing loguru logging since `debug=False`")
