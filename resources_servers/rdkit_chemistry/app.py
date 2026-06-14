@@ -18,11 +18,11 @@ RDKit Chemistry — Nemo-Gym Resources Server
 Verifiable chemistry question answering with optional Python tool-use.
 
 The agent receives a natural-language chemistry question paired with a SMILES
-string and must respond with a single integer or binary 0/1 flag.
+string and must respond with a numeric value in the requested answer format.
 
 Questions are drawn from a stratified sample of the ChEMBL database and cover
 RDKit-computable molecular properties (ring counts, hydrogen bond
-donor/acceptor counts, fragment presence, etc.).
+donor/acceptor counts, fragment presence, continuous descriptors, etc.).
 
 Two question methods are supported (selected per-row via the ``method`` field):
 
@@ -37,8 +37,9 @@ delegates verification here.
 
 Reward signal
 -------------
-All property types use exact match:
+Discrete property types use rounded exact match:
 reward = 1.0 iff round(predicted) == round(actual), else 0.0.
+Float properties use tight numeric equality.
 When no numeric value can be extracted from the response, reward = 0.0.
 
 Dataset format (JSONL)
@@ -47,11 +48,12 @@ Each row carries:
   responses_create_params.input  — user message (prompt + format instruction)
   responses_create_params.tools  — [] for direct, [stateful_python_code_exec] for mcp-python
   expected_answer                — ground-truth numeric value
-  property_type                  — "count" | "bool" | "presence" | "fragment"
+  property_type                  — "count" | "bool" | "presence" | "fragment" | "float"
   property                       — RDKit property name, e.g. "NumValenceElectrons"
   chembl_id                      — ChEMBL molecule identifier
   smiles                         — canonical SMILES string
   method                         — "direct" | "mcp-python"
+  answer_format                  — optional answer-format key (fmt_00 through fmt_30)
 """
 
 from __future__ import annotations
@@ -80,11 +82,43 @@ from nemo_gym.global_config import get_first_server_config_dict
 # Constants
 # ---------------------------------------------------------------------------
 
-_SUPPORTED_PROPERTY_TYPES = {"count", "bool", "presence", "fragment"}
+_SUPPORTED_PROPERTY_TYPES = {"count", "bool", "presence", "fragment", "float"}
 
 _NUMBER_RE = re.compile(r"-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?")
-_BOXED_RE = re.compile(r"\\boxed\{([^}]+)\}")
-_DOUBLE_PAREN_RE = re.compile(r"\(\(([^)]+)\)\)")
+
+_ANSWER_FORMAT_REGEXES: dict[str, re.Pattern[str]] = {
+    "fmt_00": re.compile(r"\(\((.*?)\)\)", re.S),
+    "fmt_01": re.compile(r"\(Answer:\s*(.+?)\)", re.S),
+    "fmt_02": re.compile(r"Final answer:\s*\((.+?)\)", re.S),
+    "fmt_03": re.compile(r"Answer is\s*\[(.+?)\]", re.S),
+    "fmt_04": re.compile(r"\[Answer:\s*(.+?)\]", re.S),
+    "fmt_05": re.compile(r"\[\[(.+?)\]\]", re.S),
+    "fmt_06": re.compile(r"Correct Answer:\s*\[(.+?)\]", re.S),
+    "fmt_07": re.compile(r"\\boxed\{(.+?)\}", re.S),
+    "fmt_08": re.compile(r"\\boxed\{(.+?)\}", re.S),
+    "fmt_09": re.compile(r"\{\{(.+?)\}\}", re.S),
+    "fmt_10": re.compile(r"Answer Value:\s*\{(.+?)\}", re.S),
+    "fmt_11": re.compile(r"<<(.+?)>>", re.S),
+    "fmt_12": re.compile(r"<<(.+?)>>", re.S),
+    "fmt_13": re.compile(r"<(.+?)>", re.S),
+    "fmt_14": re.compile(r"<Answer:\s*(.+?)>", re.S),
+    "fmt_15": re.compile(r"<final_answer>\s*(.+?)\s*</final_answer>", re.S),
+    "fmt_16": re.compile(r"Final Answer:\s*\|\|(.+?)\|\|", re.S),
+    "fmt_17": re.compile(r"The answer is:\s*\|(.+?)\|", re.S),
+    "fmt_18": re.compile(r"\*\*Answer:\s*(.+?)\*\*", re.S),
+    "fmt_19": re.compile(r"\*\*Final answer is:\s*(.+?)\*\*", re.S),
+    "fmt_20": re.compile(r"Answer:\s*\*(.+?)\*", re.S),
+    "fmt_21": re.compile(r"## Answer:\s*(.+?)\s*##", re.S),
+    "fmt_22": re.compile(r"ANSWER IS\s*(.+)"),
+    "fmt_23": re.compile(r"Response:\s*(.+)"),
+    "fmt_24": re.compile(r"Final Answer\s*->\s*(.+)"),
+    "fmt_25": re.compile(r"Final value is:\s*(.+)"),
+    "fmt_26": re.compile(r"Correct Answer >>\s*(.+)"),
+    "fmt_27": re.compile(r"Answer Value:\s*(.+)"),
+    "fmt_28": re.compile(r"Final Answer\s*=\s*(.+)"),
+    "fmt_29": re.compile(r"Correct answer is\s*(.+)"),
+    "fmt_30": re.compile(r"Final Answer:\s*(.+)"),
+}
 
 
 # ---------------------------------------------------------------------------
@@ -119,6 +153,7 @@ class ChemistryRunRequest(BaseRunRequest):
     chembl_id: Optional[str] = None
     smiles: Optional[str] = None
     method: Optional[str] = None
+    answer_format: Optional[str] = None
     use_box_format: bool = False
 
 
@@ -133,6 +168,7 @@ class ChemistryVerifyResponse(BaseVerifyResponse):
     property_type: str = ""
     chembl_id: Optional[str] = None
     method: Optional[str] = None
+    answer_format: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -161,19 +197,14 @@ def _extract_last_assistant_text(body: BaseVerifyRequest) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _extract_from_boxed(text: str) -> Optional[float]:
-    """Extract a numeric value from the last ``\\boxed{...}`` in *text*.
-
-    Returns None if no boxed expression is found or the content is not numeric.
-    """
-    matches = _BOXED_RE.findall(text)
-    if not matches:
-        return None
-    inner = matches[-1].strip()
+def _parse_numeric_capture(inner: str) -> Optional[float]:
+    """Parse a numeric value from a regex capture."""
+    inner = inner.strip()
     try:
         return float(inner)
     except (ValueError, TypeError):
         pass
+
     nums = _NUMBER_RE.findall(inner)
     if nums:
         try:
@@ -183,46 +214,38 @@ def _extract_from_boxed(text: str) -> Optional[float]:
     return None
 
 
-def _extract_from_double_parens(text: str) -> Optional[float]:
-    """Extract a numeric value from the last ``((...))`` in *text*.
+def _extract_from_answer_format(text: str, answer_format: str) -> Optional[float]:
+    """Extract a numeric value using the requested answer-format regex."""
+    pattern = _ANSWER_FORMAT_REGEXES.get(answer_format)
+    if pattern is None:
+        raise ValueError(f"Unsupported answer_format={answer_format!r}")
 
-    Returns None if no double-parenthesised expression is found or the
-    content is not numeric.
-    """
-    matches = _DOUBLE_PAREN_RE.findall(text)
+    matches = pattern.findall(text)
     if not matches:
         return None
-    inner = matches[-1].strip()
-    try:
-        return float(inner)
-    except (ValueError, TypeError):
-        pass
-    nums = _NUMBER_RE.findall(inner)
-    if nums:
-        try:
-            return float(nums[-1])
-        except ValueError:
-            pass
-    return None
+
+    match = matches[-1]
+    if isinstance(match, tuple):
+        match = next((group for group in match if group), "")
+    return _parse_numeric_capture(match)
 
 
 def extract_predicted_value(
     response: str,
     property_type: str,
     *,
+    answer_format: Optional[str] = None,
     use_box_format: bool = False,
 ) -> Optional[float]:
     """
     Extract a predicted numeric value from the model's response text.
 
-    When *use_box_format* is True the answer **must** appear inside a
-    ``\\boxed{...}`` expression (as requested in the prompt).  Only the
-    content of the last ``\\boxed`` is considered; if none is found the
-    function returns None (→ reward 0).
+    When *answer_format* is present, the answer must match the corresponding
+    ``fmt_XX`` regex. Only the last match is considered. Unknown formats raise
+    ``ValueError`` so bad data fails loudly.
 
-    When *use_box_format* is False the answer **must** appear inside
-    double parentheses ``((...))``.  Only the content of the last ``((...))``
-    is considered; if none is found the function returns None (→ reward 0).
+    Legacy rows without *answer_format* still use *use_box_format*: boxed when
+    true, double parentheses when false.
 
     Returns None if no value can be extracted.
     """
@@ -230,11 +253,11 @@ def extract_predicted_value(
         return None
 
     text = response.strip()
+    if answer_format is not None:
+        return _extract_from_answer_format(text, answer_format)
 
-    if use_box_format:
-        return _extract_from_boxed(text)
-
-    return _extract_from_double_parens(text)
+    legacy_answer_format = "fmt_07" if use_box_format else "fmt_00"
+    return _extract_from_answer_format(text, legacy_answer_format)
 
 
 # ---------------------------------------------------------------------------
@@ -245,10 +268,13 @@ def extract_predicted_value(
 def compute_reward(
     predicted: Optional[float],
     actual: float,
+    property_type: str = "",
 ) -> float:
-    """Compute exact-match reward: 1.0 if round(predicted) == round(actual), else 0.0."""
+    """Compute reward for numeric RDKit properties."""
     if predicted is None or math.isnan(predicted):
         return 0.0
+    if property_type == "float":
+        return 1.0 if math.isclose(predicted, actual, rel_tol=1e-6, abs_tol=1e-6) else 0.0
     return 1.0 if round(predicted) == round(actual) else 0.0
 
 
@@ -339,9 +365,14 @@ class RDKitChemistryResourcesServer(SimpleResourcesServer):
             raise ValueError(f"Unsupported property_type={body.property_type!r}")
 
         text = _extract_last_assistant_text(body)
-        predicted = extract_predicted_value(text, body.property_type, use_box_format=body.use_box_format)
+        predicted = extract_predicted_value(
+            text,
+            body.property_type,
+            answer_format=body.answer_format,
+            use_box_format=body.use_box_format,
+        )
         actual = float(body.expected_answer)
-        reward = compute_reward(predicted, actual)
+        reward = compute_reward(predicted, actual, property_type=body.property_type)
         correct = reward == 1.0
 
         return ChemistryVerifyResponse(
