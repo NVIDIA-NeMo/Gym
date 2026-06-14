@@ -2937,19 +2937,11 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 "printf 'APT::Sandbox::User \"root\";\\nAcquire::Retries \"3\";\\n' "
                 "> /etc/apt/apt.conf.d/99tb-no-sandbox 2>/dev/null || true"
             )
-            # Service boot (oracle service-mode fix): for offline service tasks
-            # (allow_internet=false, which run in a private netns), start the image's boot
-            # services the way a real container CMD would, so fixtures relying on
-            # postgres/nginx/etc. running at boot are up before the agent works (matches
-            # real Terminal-Bench). Run the image runscript (= Docker CMD) backgrounded; a
-            # foreground daemon (nginx daemon-off / tail -f) just becomes the bg process.
-            # In single-exec mode the service persists through the eval phase. Best-effort.
-            if tb_idict.get("allow_internet", True) is False:
-                container_commands.append(
-                    "if [ -f /.singularity.d/runscript ]; then "
-                    "( bash /.singularity.d/runscript </dev/null >/tmp/tb_boot.log 2>&1 & ) ; "
-                    "sleep 5; fi; true"
-                )
+            # NOTE: a service-boot step (run the image runscript so postgres/nginx are up
+            # before the agent, real-TB parity) was tried alongside --network=none but is
+            # reverted here — it's only meaningful with the private-netns service path,
+            # which is disabled for rollout (see networking note below). The agent + the
+            # systemctl->service shim above handle service start in the shared netns.
 
         if command.mode == "agent" and "R2E-Gym" in data_point["dataset_name"]:
             # Remove R2E-Gym test-related files.
@@ -3027,18 +3019,13 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         if data_point.get("dataset_name") == "terminal-bench":
             overlay_img = params.persistent_dir / "agent_overlay.img"
             writable_overlay_flag = f"--overlay {shlex.quote(str(overlay_img))}"
-            # Networking (oracle service-mode fix): tasks that don't need runtime internet
-            # (allow_internet=false, set from oracle validation) run in a PRIVATE loopback
-            # netns so services can bind privileged ports (nginx :80, etc.) and parallel
-            # workers don't collide on shared ports; tasks needing internet keep the shared
-            # host netns. Only --network=none is permitted on these nodes (CNI/slirp need
-            # suid/admin). Default True => shared netns => unchanged for existing rollouts.
-            try:
-                _allow_net = json.loads(data_point["instance_dict"]).get("allow_internet", True)
-            except Exception:
-                _allow_net = True
-            if _allow_net is False:
-                net_flag = " --net --network=none"
+            # NOTE: `--net --network=none` (the oracle service-mode fix that lets services
+            # bind privileged ports / isolates parallel workers) is DISABLED for the agent
+            # rollout. The opencode agent must reach the policy model at host localhost:8000,
+            # and an isolated netns blocks that -> "connection refused" -> 0 solved (verified
+            # 2026-06-14, the 946-task re-run). It is valid only for the STANDALONE oracle
+            # check (solve.sh+tests, no model). To use it for rollout, first bridge the model
+            # into the private netns (e.g. socat over a bind-mounted unix socket on the host).
         else:
             writable_overlay_flag = "--writable-tmpfs"
         apptainer_cmd = (
