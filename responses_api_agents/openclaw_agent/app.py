@@ -255,7 +255,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
     """Runs the OpenClaw CLI (openclaw agent --local --json) as a NeMo Gym agent server.
 
     Each request runs `openclaw setup`, merges openclaw_config into the generated config, runs one
-    headless `openclaw agent`, and parses the trajectory into Gym output items. 
+    headless `openclaw agent`, and parses the trajectory into Gym output items.
     Eval-only for now (due to token ids).
     """
 

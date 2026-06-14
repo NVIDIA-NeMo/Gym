@@ -21,7 +21,7 @@ math_with_judge_openclaw_agent:
         name: math_with_judge
       concurrency: 8
       command: openclaw
-      model: nvinf/nvidia/meta/llama-3.3-70b-instruct
+      model: nvinf/nvidia/qwen/qwen3-next-80b-a3b-instruct
       thinking: "off"
       timeout: 600
       system_prompt: |
@@ -37,8 +37,8 @@ math_with_judge_openclaw_agent:
               baseUrl: ${policy_base_url}
               apiKey: ${policy_api_key}
               models:
-              - id: nvidia/meta/llama-3.3-70b-instruct
-                name: nvidia/meta/llama-3.3-70b-instruct
+              - id: nvidia/qwen/qwen3-next-80b-a3b-instruct
+                name: nvidia/qwen/qwen3-next-80b-a3b-instruct
                 api: openai-completions
       datasets:
       - name: example
