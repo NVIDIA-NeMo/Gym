@@ -121,6 +121,19 @@ class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
 
     swebench_agent_timeout: int = Field(default=45 * 60, description="Timeout for running the agent (seconds)")
 
+    tb_single_exec: bool = Field(
+        default=False,
+        description=(
+            "Terminal-Bench only: run the agent and eval in ONE apptainer exec (shared PID "
+            "namespace) so background services the agent starts (grpc/nginx/pypi/...) stay alive "
+            "for the test phase. Default False keeps the proven two-exec flow (e.g. afterquery). "
+            "apptainer `instance` would be cleaner but user namespaces are blocked on the nodes."
+        ),
+    )
+    tb_service_settle_sec: int = Field(
+        default=20, description="Terminal-Bench single-exec: seconds to let agent services settle before eval."
+    )
+
     apptainer_memory_limit_mb: int = Field(
         default=32 * 1024, description="Memory limit for the apptainer container (MB)"
     )
@@ -195,7 +208,7 @@ class SWEBenchWrapperServerConfig(BaseModel):
 class ExecuteContainerCommandArgs(BaseModel):
     command: str
     expected_file_pattern: str
-    mode: Union[Literal["agent"], Literal["eval"]]
+    mode: Union[Literal["agent"], Literal["eval"], Literal["agent_eval"]]
     timeout: int
 
 
@@ -238,6 +251,10 @@ class SWEBenchWrapperInstanceConfig(SWEBenchWrapperServerConfig, SWEBenchWrapper
     agent_command: Optional[ExecuteContainerCommandArgs] = None
     agent_apptainer_command_str: Optional[str] = None
     agent_script: Optional[str] = None
+    # tb_single_exec (terminal-bench): merged agent+eval command, built in _setup_params
+    # where _build_apptainer_command is available (it lives on the wrapper, not the runner).
+    merged_command: Optional[ExecuteContainerCommandArgs] = None
+    merged_apptainer_command_str: Optional[str] = None
 
     # GRPO related fields
     mask_sample: bool = False
@@ -1087,6 +1104,164 @@ printf '{{"_test_completed": true, "exit_code": %d}}\\n' $TEST_EXIT \
         report_path.write_text(json.dumps(report, indent=2))
 
 
+# Size of the per-instance ext3 overlay shared between the Terminal-Bench agent
+# and eval containers. Holds the agent's writes to the task filesystem so the
+# eval phase can grade live state. Tunable; tasks rarely write more than a few
+# hundred MB, but uv/pip caches inside run-tests.sh can be sizeable.
+TB_OVERLAY_SIZE_MB = 8192
+
+
+class TerminalBenchDatasetProcessor(BaseDatasetHarnessProcessor):
+    """Terminal-Bench (Harbor-style) tasks — Path 2 (shared-overlay, live-state).
+
+    Unlike the SWE-bench processors there is NO test patch and NO git-diff
+    reconstruction. The opencode agent runs under a persistent Apptainer overlay
+    (see `_build_apptainer_command` / `_process_single_datapoint_terminal_bench`);
+    this eval step runs *sequentially* in a second container that mounts the SAME
+    overlay, so it grades the agent's live filesystem. It reproduces the Harbor
+    verifier contract: the task's `tests/` bundle (staged host-side under
+    `persistent_dir/tb_tests`, mounted read-only at `/root/tb_tests` ONLY in the
+    eval container — never in the agent container) is copied to `tests_dir`
+    (default `/tests`); the entrypoint (default `test.sh`) is run with CWD =
+    `workspace_path` (default `/app`); reward is read from Harbor's
+    `/logs/verifier/reward.txt` (falling back to the entrypoint exit code), giving
+    a single all-or-nothing 0/1 `resolved`.
+
+    Required `instance_dict` fields:
+      - `test_files`: {relative-path-within-the-task-tests-dir: file-contents} —
+        the full hidden test bundle, INCLUDING the entrypoint (e.g. `test.sh`).
+    Optional:
+      - `workspace_path`: in-SIF task dir / CWD for the entrypoint (default `/app`).
+      - `tests_dir`: where the bundle is placed in-container (default `/tests`).
+      - `test_entrypoint`: script to run, relative to `tests_dir` (default `test.sh`).
+      - `verifier_timeout_sec`: eval timeout (default `swebench_tests_timeout`).
+    """
+
+    @property
+    def _tb_tests_host_dir(self) -> Path:
+        return self.config.persistent_dir / "tb_tests"
+
+    def setup(self) -> Path:
+        pass
+
+    def get_run_command(self) -> ExecuteContainerCommandArgs:
+        instance_dict = json.loads(self.config.problem_info["instance_dict"])
+        workspace_path = str(instance_dict.get("workspace_path") or "/app")
+        tests_dir = str(instance_dict.get("tests_dir") or "/tests")
+        test_entrypoint = str(instance_dict.get("test_entrypoint") or "test.sh")
+
+        test_files = instance_dict.get("test_files") or {}
+        if not isinstance(test_files, dict) or not test_files:
+            raise ValueError(
+                f"terminal-bench instance {self.config.instance_id} is missing "
+                "instance_dict['test_files'] (a dict of rel-path -> contents for the task's tests/ bundle)."
+            )
+        if test_entrypoint not in test_files:
+            raise ValueError(
+                f"terminal-bench instance {self.config.instance_id}: test_entrypoint "
+                f"'{test_entrypoint}' not present in instance_dict['test_files'] {sorted(test_files)}."
+            )
+
+        # Stage the authoritative test bundle on the host. Mounted read-only into
+        # the eval container at /root/tb_tests/bundle (see _build_apptainer_command).
+        tests_host_dir = self._tb_tests_host_dir
+        if tests_host_dir.exists():
+            shutil.rmtree(tests_host_dir, ignore_errors=True)
+        bundle_dir = tests_host_dir / "bundle"
+        bundle_dir.mkdir(parents=True, exist_ok=True)
+        for rel_path, contents in test_files.items():
+            dest = bundle_dir / rel_path
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(contents if isinstance(contents, str) else json.dumps(contents))
+
+        # Binary fixtures (reference images, archives, model weights, sqlite DBs,
+        # .pt/.npy/...) cannot be inlined as text; they ride in
+        # instance_dict['test_files_b64'] (rel-path -> base64) and are written
+        # byte-identically here so the staged bundle matches the task's real tests/
+        # dir. Gated on the key's presence -> zero impact on rows without it (e.g.
+        # the existing afterquery rollouts). Common in terminal tasks across sets.
+        test_files_b64 = instance_dict.get("test_files_b64") or {}
+        if isinstance(test_files_b64, dict):
+            for rel_path, b64 in test_files_b64.items():
+                dest = bundle_dir / rel_path
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(base64.b64decode(b64))
+
+        report_mounted = "/trajectories_mount/eval_results/report.json"
+        report_host = self.config.persistent_dir / "eval_results" / "report.json"
+        report_host.parent.mkdir(parents=True, exist_ok=True)
+
+        ws = shlex.quote(workspace_path)
+        td = shlex.quote(tests_dir)
+        ep = shlex.quote(test_entrypoint)
+        # Launched sequentially AFTER the agent finishes, so no sleep-until-
+        # predictions busy-wait — the overlay already holds the agent's work.
+        # No `set -e`: a failing test run is a valid (unresolved) outcome, not a
+        # container error, so the script must still exit 0 for _finish_container_command.
+        cmd = f"""#!/bin/bash
+set -uo pipefail
+
+date +"%s.%N" > {self.config.final_eval_apptainer_spinup_timestamp_mounted_fpath} 2>/dev/null || true
+
+mkdir -p /trajectories_mount/eval_results {td} /logs/verifier {ws}
+
+# Inject the authoritative hidden test bundle (Harbor mounts tests/ at /tests).
+cp -rf /root/tb_tests/bundle/. {td}/
+chmod +x {td}/{ep} 2>/dev/null || true
+
+# Reproduce the env the Harbor/terminal-bench verifier normally provides, and fix
+# apt inside the UNPRIVILEGED Apptainer container. Vendor test.sh scripts assume:
+#   - TEST_DIR / T_BENCH_TEST_DIR  -> the mounted tests dir (else `: ${{TEST_DIR:?}}` aborts)
+#   - T_BENCH_CONTAINER_LOGS_PATH  -> /logs (LOG_DIR for solution.log etc.)
+#   - HOME                         -> writable home for the `curl | sh` uv installer
+#   - working apt-get              -> ~57% `apt-get install -y curl` before uv; apt's
+#       _apt sandbox user cannot setgroups in an unprivileged container, giving
+#       "Could not switch group" / "Method http has died" -> APT::Sandbox::User root.
+mkdir -p /etc/apt/apt.conf.d 2>/dev/null && printf 'APT::Sandbox::User "root";\\nAcquire::Retries "3";\\n' > /etc/apt/apt.conf.d/99tb-no-sandbox 2>/dev/null || true
+export TEST_DIR={td}
+export T_BENCH_TEST_DIR={td}
+export T_BENCH_CONTAINER_LOGS_PATH=/logs
+export HOME="${{HOME:-/root}}"
+export DEBIAN_FRONTEND=noninteractive
+
+# Run the task's own verifier entrypoint (e.g. test.sh) with CWD = workspace.
+cd {ws}
+bash {td}/{ep} > /trajectories_mount/eval_results/pytest_stdout.log 2> /trajectories_mount/eval_results/pytest_stderr.log
+TB_EXIT=$?
+
+# Prefer Harbor's reward.txt; fall back to the entrypoint exit code.
+# All-or-nothing: reward 1 / exit 0 == resolved.
+REWARD=$(cat /logs/verifier/reward.txt 2>/dev/null | tr -dc '0-9' || echo "")
+cp -f /logs/verifier/reward.txt /trajectories_mount/eval_results/reward.txt 2>/dev/null || true
+if [ "$REWARD" = "1" ]; then RESOLVED=true
+elif [ "$REWARD" = "0" ]; then RESOLVED=false
+elif [ "$TB_EXIT" -eq 0 ]; then RESOLVED=true
+else RESOLVED=false; fi
+cat > {report_mounted} <<EOF
+{{"{self.config.instance_id}": {{"resolved": $RESOLVED, "exit_code": $TB_EXIT, "reward_txt": "$REWARD", "patch_exists": true}}}}
+EOF
+"""
+
+        return ExecuteContainerCommandArgs(
+            command=cmd,
+            expected_file_pattern=str(report_host),
+            mode="eval",
+            timeout=int(instance_dict.get("verifier_timeout_sec") or self.config.swebench_tests_timeout),
+        )
+
+    def postprocess_after_run(self, report_file: Path) -> None:
+        # The eval container already wrote {instance_id: {resolved, ...}}; just
+        # validate/normalize so _inner_responses can read ["resolved"] safely.
+        with open(report_file, "r+") as f:
+            report = json.loads(f.read())
+            entry = report.get(self.config.instance_id, {}) or {}
+            entry["resolved"] = bool(entry.get("resolved", False))
+            report[self.config.instance_id] = entry
+            f.seek(0)
+            f.truncate()
+            f.write(json.dumps(report, indent=2))
+
+
 class OpenHandsHarnessProcessor(BaseDatasetHarnessProcessor):
     def _sync_openhands_to_config_commit(self, openhands_dir: Path) -> None:
         """Ensure OpenHands checkout matches config.agent_framework_commit.
@@ -1400,6 +1575,11 @@ def _resolve_opencode_workspace_path(problem_info: Dict[str, Any]) -> str:
         repo = str(instance.get("repo", problem_info.get("repo", "")))
         repo_name = repo.split("/", 1)[1] if "/" in repo else repo
         return f"/{repo_name}"
+    if dataset_name == "terminal-bench":
+        # Terminal-Bench task images bake the task files at the Dockerfile
+        # WORKDIR (riship's tbench-*.sif use /workspace; Harbor v2 uses /app).
+        # The data prep sets workspace_path explicitly; default to /app.
+        return str(instance.get("workspace_path") or "/app")
     return "/testbed"
 
 
@@ -1839,9 +2019,186 @@ class RunOpenHandsAgent(BaseModel):
             await active_command.process.wait()
         active_command.log_file.close()
 
+    async def _create_overlay_image(self, overlay_img: Path) -> None:
+        """Create the persistent ext3 overlay image shared by the Terminal-Bench
+        agent and eval containers. Prefers `apptainer overlay create`; falls back
+        to a raw mkfs.ext3 image (apptainer creates the upper/work dirs on first
+        use). Runs on the Ray worker, so apptainer is on PATH."""
+        overlay_img.parent.mkdir(parents=True, exist_ok=True)
+        if overlay_img.exists():
+            overlay_img.unlink()
+
+        # Size the overlay from the task's declared storage budget
+        # (task.toml [environment] storage_mb, carried in instance_dict), + 2 GB fs
+        # headroom. Falls back to TB_OVERLAY_SIZE_MB. A fixed small overlay caused
+        # "No space left on device" on storage-heavy tasks (e.g. mteb model downloads).
+        size_mb = TB_OVERLAY_SIZE_MB
+        try:
+            _idict = json.loads(self.config.problem_info.get("instance_dict") or "{}")
+            _smb = int(_idict.get("storage_mb") or 0)
+            if _smb > 0:
+                size_mb = _smb + 2048
+        except Exception:
+            pass
+
+        create_cmd = f"apptainer overlay create --size {size_mb} {shlex.quote(str(overlay_img))}"
+        proc = await asyncio.create_subprocess_shell(
+            create_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT
+        )
+        stdout, _ = await proc.communicate()
+        if proc.returncode == 0 and overlay_img.exists():
+            return
+
+        print(
+            f"[terminal-bench] 'apptainer overlay create' failed (rc={proc.returncode}): "
+            f"{(stdout or b'').decode(errors='replace')[:500]}; falling back to mkfs.ext3",
+            flush=True,
+        )
+        fallback_cmd = (
+            f"dd if=/dev/zero of={shlex.quote(str(overlay_img))} bs=1M count={size_mb} status=none && "
+            f"mkfs.ext3 -F -q {shlex.quote(str(overlay_img))}"
+        )
+        proc2 = await asyncio.create_subprocess_shell(
+            fallback_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT
+        )
+        stdout2, _ = await proc2.communicate()
+        if proc2.returncode != 0 or not overlay_img.exists():
+            raise RuntimeError(
+                f"overlay image creation failed: {(stdout2 or b'').decode(errors='replace')[:500]}"
+            )
+
+    async def _process_single_datapoint_terminal_bench(self) -> Optional[Path]:
+        """Path 2 orchestration for Terminal-Bench tasks.
+
+        Sequential (NOT the SWE-bench concurrent-launch + busy-wait): run the
+        opencode agent under a persistent overlay, then run the eval container
+        against the SAME overlay so the task's tests grade the agent's live
+        filesystem. The hidden tests are never present in the agent container.
+        Unlike the SWE path, we do NOT bail on an empty git patch — terminal-bench
+        success can be non-git state.
+        """
+        instance_id = self.config.instance_id
+        metrics = SWEBenchMetrics(ray_queue_time=time.time() - self.config.ray_queue_timestamp)
+
+        # 1) Create the persistent overlay both containers share.
+        overlay_img = self.config.persistent_dir / "agent_overlay.img"
+        try:
+            await self._create_overlay_image(overlay_img)
+        except Exception as e:
+            print(f"[terminal-bench] overlay creation failed for {instance_id}: {e}", flush=True)
+            metrics.patch_exists = False
+            update_metrics(self.config.metrics_fpath, metrics.model_dump())
+            return None
+
+        # 1b) SINGLE-EXEC path (opt-in via tb_single_exec): run the agent AND the eval
+        # in ONE apptainer exec so background services the agent starts (grpc/nginx/
+        # pypi/...) stay alive for the test phase (shared PID namespace). The two-exec
+        # default kills them between execs. apptainer `instance` would be cleaner but
+        # user namespaces are blocked on the nodes. Isolation posture is unchanged vs
+        # the two-exec flow (the staged tests are already reachable via the
+        # /trajectories_mount bind in both; the opencode agent works in the workspace
+        # and never reads /root/tb_tests — empirically verified). Tests are still cp'd
+        # into /tests only in the eval phase, AFTER the agent command returns.
+        if self.config.tb_single_exec and self.config.merged_command is not None:
+            # The merged agent+eval command was built in _setup_params (the wrapper has
+            # _build_apptainer_command; this runner does not). Just use it here.
+            agent_cmd = self.config.agent_command
+            merged_cmd = self.config.merged_command
+            merged_apptainer = self.config.merged_apptainer_command_str
+            metrics.openhands_run_time = -time.time()
+            metrics.generation_apptainer_spinup_time = metrics.openhands_run_time
+            active = await self._start_container_command(merged_cmd, merged_apptainer)
+            try:
+                report_file = await self._finish_container_command(active, merged_cmd)
+            except Exception as e:
+                print(f"[terminal-bench single-exec] merged command failed for {instance_id}: {e}", flush=True)
+                metrics.openhands_run_time += time.time()
+                metrics.patch_exists = False
+                metrics.agent_timed_out = (
+                    metrics.openhands_run_time is not None
+                    and metrics.openhands_run_time >= self.config.swebench_agent_timeout
+                )
+                update_metrics(self.config.metrics_fpath, metrics.model_dump())
+                return None
+            metrics.openhands_run_time += time.time()
+            metrics.patch_exists = True
+            # best-effort agent metrics (patch / error) from the agent's output file
+            try:
+                agent_out = glob.glob(agent_cmd.expected_file_pattern, recursive=True)
+                if agent_out:
+                    out_file = self._openhands_dir_copy_from_host(output_file_path=agent_out[0])
+                    with open(out_file, "r") as f:
+                        out_dict = json.loads(f.read().strip())
+                    metrics.agent_error_kind = _classify_agent_error(out_dict.get("error"))
+                    patch = (out_dict.get("test_result") or {}).get("git_patch") or None
+                    metrics.model_patch = (patch + "\n") if patch and not patch.endswith("\n") else patch
+            except Exception as e:
+                print(f"[terminal-bench single-exec] agent-metrics read failed for {instance_id}: {e}", flush=True)
+            update_metrics(self.config.metrics_fpath, metrics.model_dump())
+            return report_file
+
+        # 2) Run the opencode agent (sequential; writes land in the overlay).
+        metrics.openhands_run_time = -time.time()
+        metrics.generation_apptainer_spinup_time = metrics.openhands_run_time
+        agent_active = await self._start_container_command(
+            self.config.agent_command, self.config.agent_apptainer_command_str
+        )
+        try:
+            out_file_in_eval = await self._finish_container_command(agent_active, self.config.agent_command)
+            out_file = self._openhands_dir_copy_from_host(output_file_path=out_file_in_eval)
+        except Exception as e:
+            print(f"[terminal-bench] agent command failed for {instance_id}: {e}", flush=True)
+            try:
+                self._openhands_dir_copy_from_host(output_file_path=None)
+            except Exception:
+                pass
+            metrics.openhands_run_time += time.time()
+            metrics.patch_exists = False
+            metrics.agent_timed_out = (
+                metrics.openhands_run_time is not None
+                and metrics.openhands_run_time >= self.config.swebench_agent_timeout
+            )
+            update_metrics(self.config.metrics_fpath, metrics.model_dump())
+            return None
+
+        metrics.openhands_run_time += time.time()
+        try:
+            with open(out_file, "r") as f:
+                out_dict = json.loads(f.read().strip())
+            metrics.agent_error_kind = _classify_agent_error(out_dict.get("error"))
+            patch = (out_dict.get("test_result") or {}).get("git_patch") or None
+            metrics.model_patch = (patch + "\n") if patch and not patch.endswith("\n") else patch
+        except Exception as e:
+            print(f"[terminal-bench] could not read agent output for {instance_id}: {e}", flush=True)
+
+        # 3) Run the eval container against the same overlay (sequential).
+        metrics.final_eval_time = -time.time()
+        eval_active = await self._start_container_command(
+            self.config.eval_command, self.config.eval_apptainer_command_str
+        )
+        try:
+            report_file = await self._finish_container_command(eval_active, self.config.eval_command)
+        except Exception as e:
+            print(f"[terminal-bench] eval command failed for {instance_id}: {e}", flush=True)
+            metrics.final_eval_time += time.time()
+            metrics.patch_exists = True
+            metrics.eval_timed_out = (
+                metrics.final_eval_time is not None and metrics.final_eval_time >= self.config.swebench_tests_timeout
+            )
+            update_metrics(self.config.metrics_fpath, metrics.model_dump())
+            return None
+
+        metrics.final_eval_time += time.time()
+        metrics.patch_exists = True
+        update_metrics(self.config.metrics_fpath, metrics.model_dump())
+        return report_file
+
     async def process_single_datapoint(self) -> Optional[Path]:
         if self.config.verify_golden_patch:
             return await self._run_golden_patch_verification()
+
+        if self.config.problem_info.get("dataset_name") == "terminal-bench":
+            return await self._process_single_datapoint_terminal_bench()
 
         instance_id = self.config.instance_id
         if self.config.debug:
@@ -2321,9 +2678,11 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         dataset_path_to_mount = str(params.instance_dataset_path)
         data_point = params.problem_info
 
-        # Fix localhost URLs not working sometimes
+        # Fix localhost URLs not working sometimes. Include the node hostname so that
+        # `sudo`/tools resolving $(hostname) don't fail with "unable to resolve host"
+        # (critical under --network=none, where there's no DNS / the hostname is unknown).
         container_commands = []
-        container_commands.append("echo '127.0.0.1 localhost' >/etc/hosts")
+        container_commands.append('echo "127.0.0.1 localhost $(hostname 2>/dev/null)" >/etc/hosts')
 
         # Apptainer uid namespacing makes the eval-image's `chmod` against
         # /var/run/postgresql fail with "Value too large for defined data
@@ -2408,7 +2767,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
         if params.agent_framework == "opencode" and command.mode == "eval":
             mount_args.append(f"--mount type=bind,src={dataset_path_to_mount},dst=/root/dataset/data.jsonl")
-        elif params.agent_framework == "opencode" and command.mode == "agent":
+        elif params.agent_framework == "opencode" and command.mode in ("agent", "agent_eval"):
             assert params.opencode_setup_dir is not None, "opencode_setup_dir not set"
             opencode_dir = f"{params.opencode_setup_dir}/opencode"
             bun_dir = f"{params.opencode_setup_dir}/bun"
@@ -2474,7 +2833,11 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
         # Add SWE-bench setup directory mount if available (for evaluation)
         # swe-bench-ext and nv-internal-1 don't use the swebench harness
-        if command.mode == "eval" and data_point["dataset_name"] not in ("nv-internal-1", "swe-bench-ext"):
+        if command.mode == "eval" and data_point["dataset_name"] not in (
+            "nv-internal-1",
+            "swe-bench-ext",
+            "terminal-bench",
+        ):
             # Mount the entire setup directory at both /swebench_setup and its original absolute path
             # This is needed because uv venv has hardcoded absolute paths
             mount_args.append(f"--mount type=bind,src={params.swebench_setup_dir},dst=/swebench_setup")
@@ -2535,6 +2898,58 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 params.model_patch_path.write_text("")
             mount_args.append(f"--mount type=bind,src={test_patch_path},dst=/root/test_patch.diff")
             mount_args.append(f"--mount type=bind,src={params.model_patch_path},dst=/root/patch.diff")
+
+        if command.mode in ("eval", "agent_eval") and data_point.get("dataset_name") == "terminal-bench":
+            # Authoritative hidden tests, staged on the host by
+            # TerminalBenchDatasetProcessor.get_run_command. Mounted at /root/tb_tests
+            # (the agent works in the workspace and never reads it; in agent_eval the
+            # eval phase cp's it into /tests only AFTER the agent command returns).
+            tb_tests_host_dir = params.persistent_dir / "tb_tests"
+            mount_args.append(f"--mount type=bind,src={tb_tests_host_dir},dst=/root/tb_tests,ro")
+
+        if command.mode in ("agent", "agent_eval") and data_point.get("dataset_name") == "terminal-bench":
+            # Defense-in-depth: if the task SIF baked the hidden tests in, delete
+            # them so the agent cannot read them. (Harbor builds the agent image
+            # from environment/ only, so normally there are none.) The canonical
+            # tests are injected solely in the eval container (mirrors the R2E-Gym
+            # test-hiding below).
+            tb_idict = json.loads(data_point["instance_dict"])
+            tb_ws_q = shlex.quote(str(tb_idict.get("workspace_path") or "/app"))
+            tb_td_q = shlex.quote(str(tb_idict.get("tests_dir") or "/tests"))
+            container_commands.append(
+                f"rm -rf {tb_td_q} {tb_ws_q}/tests {tb_ws_q}/test_outputs.py "
+                f"{tb_ws_q}/solution.sh /logs/verifier 2>/dev/null || true"
+            )
+            # systemctl shim (no systemd in the unprivileged container): map to
+            # `service` so tasks that do `systemctl restart nginx` (re)start the daemon.
+            container_commands.append(
+                "command -v systemctl >/dev/null 2>&1 || { "
+                "printf '#!/bin/bash\\ncase \"$1\" in start|stop|restart|reload|try-restart|force-reload|status) "
+                "service \"$2\" \"$1\" 2>/dev/null || /etc/init.d/\"$2\" \"$1\" 2>/dev/null || true;; *) true;; esac\\nexit 0\\n' "
+                "> /usr/local/bin/systemctl 2>/dev/null && chmod +x /usr/local/bin/systemctl 2>/dev/null; }; true"
+            )
+            # Let the AGENT run apt-get inside the unprivileged Apptainer container
+            # (else apt's _apt sandbox user cannot setgroups -> "Could not switch
+            # group"). Many tasks expect the agent to `apt-get install` tooling, as
+            # it could in the real (privileged) Terminal-Bench container.
+            container_commands.append(
+                "mkdir -p /etc/apt/apt.conf.d 2>/dev/null && "
+                "printf 'APT::Sandbox::User \"root\";\\nAcquire::Retries \"3\";\\n' "
+                "> /etc/apt/apt.conf.d/99tb-no-sandbox 2>/dev/null || true"
+            )
+            # Service boot (oracle service-mode fix): for offline service tasks
+            # (allow_internet=false, which run in a private netns), start the image's boot
+            # services the way a real container CMD would, so fixtures relying on
+            # postgres/nginx/etc. running at boot are up before the agent works (matches
+            # real Terminal-Bench). Run the image runscript (= Docker CMD) backgrounded; a
+            # foreground daemon (nginx daemon-off / tail -f) just becomes the bg process.
+            # In single-exec mode the service persists through the eval phase. Best-effort.
+            if tb_idict.get("allow_internet", True) is False:
+                container_commands.append(
+                    "if [ -f /.singularity.d/runscript ]; then "
+                    "( bash /.singularity.d/runscript </dev/null >/tmp/tb_boot.log 2>&1 & ) ; "
+                    "sleep 5; fi; true"
+                )
 
         if command.mode == "agent" and "R2E-Gym" in data_point["dataset_name"]:
             # Remove R2E-Gym test-related files.
@@ -2599,9 +3014,35 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         env_args += "--env CHROME_BIN=/tmp/chrome-wrapper.sh "
         env_args += "--env CHROMIUM_BIN=/tmp/chrome-wrapper.sh "
 
-        # Launch Apptainer container and execute the script file
+        # Launch Apptainer container and execute the script file.
+        #
+        # Terminal-Bench (Path 2): use a PERSISTENT per-instance overlay image
+        # instead of an ephemeral --writable-tmpfs, so the agent's writes to the
+        # task filesystem survive and the sequentially-launched eval container
+        # (which mounts the SAME overlay) grades the live state. The overlay image
+        # is created on the Ray worker before the agent launches (see
+        # _process_single_datapoint_terminal_bench). All other datasets keep the
+        # original ephemeral tmpfs overlay (each container fully isolated).
+        net_flag = ""
+        if data_point.get("dataset_name") == "terminal-bench":
+            overlay_img = params.persistent_dir / "agent_overlay.img"
+            writable_overlay_flag = f"--overlay {shlex.quote(str(overlay_img))}"
+            # Networking (oracle service-mode fix): tasks that don't need runtime internet
+            # (allow_internet=false, set from oracle validation) run in a PRIVATE loopback
+            # netns so services can bind privileged ports (nginx :80, etc.) and parallel
+            # workers don't collide on shared ports; tasks needing internet keep the shared
+            # host netns. Only --network=none is permitted on these nodes (CNI/slirp need
+            # suid/admin). Default True => shared netns => unchanged for existing rollouts.
+            try:
+                _allow_net = json.loads(data_point["instance_dict"]).get("allow_internet", True)
+            except Exception:
+                _allow_net = True
+            if _allow_net is False:
+                net_flag = " --net --network=none"
+        else:
+            writable_overlay_flag = "--writable-tmpfs"
         apptainer_cmd = (
-            f"apptainer exec --writable-tmpfs --cleanenv --pid --no-mount home,tmp,bind-paths "
+            f"apptainer exec {writable_overlay_flag}{net_flag} --cleanenv --pid --no-mount home,tmp,bind-paths "
             f"{env_args}"
             f"{mount_str} "
             f" {params.container} bash {container_script_path}"
@@ -2760,7 +3201,9 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             params.resolved_agent_cls = selected.agent_cls
             params.resolved_diversify_tool_names = selected.diversify_tool_names
 
-        if params.problem_info["dataset_name"] == "nv-internal-1":
+        if params.problem_info["dataset_name"] == "terminal-bench":
+            dataset_processor = TerminalBenchDatasetProcessor(config=params)
+        elif params.problem_info["dataset_name"] == "nv-internal-1":
             dataset_processor = NVInternalDatasetProcessor(config=params)
         elif params.problem_info["dataset_name"] == "swe-bench-ext":
             dataset_processor = SweBenchExtDatasetProcessor(config=params)
@@ -2782,6 +3225,27 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             params.agent_command = OpenHandsHarnessProcessor(config=params).get_run_command()
         params.agent_apptainer_command_str = self._build_apptainer_command(params, params.agent_command)
         params.agent_script = params.agent_script_path.read_text()
+
+        # tb_single_exec (terminal-bench): build the merged agent+eval command HERE,
+        # where the wrapper's _build_apptainer_command is available (RunOpenHandsAgent,
+        # which runs the datapoint, does NOT have that method). The merged exec runs the
+        # agent then the eval in ONE apptainer exec so the agent's services persist.
+        if params.tb_single_exec and params.problem_info.get("dataset_name") == "terminal-bench":
+            settle = int(params.tb_service_settle_sec)
+            merged_inner = (
+                "set +e\n( " + params.agent_command.command + "\n) || true\n"
+                f'echo "[tb_single_exec] agent phase done; settling services {settle}s"\n'
+                f"sleep {settle}\n" + params.eval_command.command
+            )
+            params.merged_command = ExecuteContainerCommandArgs(
+                command=merged_inner,
+                expected_file_pattern=params.eval_command.expected_file_pattern,
+                mode="agent_eval",
+                timeout=params.swebench_agent_timeout
+                + int(params.eval_command.timeout or params.swebench_tests_timeout)
+                + 120,
+            )
+            params.merged_apptainer_command_str = self._build_apptainer_command(params, params.merged_command)
 
         return params, dataset_processor
 

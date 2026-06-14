@@ -1,0 +1,48 @@
+# Unified Terminal-Bench rollout config (opencode, Path 2) covering ALL task sets'
+# SIF dirs, for the cross-set shorted-task top-up. container_formatter tries each
+# path; per-task <id>_arm64.sif resolves to whichever dir has it (afterquery ->
+# image-conversion-HSG; atcb-1/mercor-ots-1 -> tb_sifs_arm64; mercor-ots-2 -> OTS).
+swe_agents:
+  responses_api_agents:
+    swe_agents: &swe_agents_config
+      entrypoint: app.py
+      domain: coding
+      description: Unified multi-set Terminal-Bench rollouts via opencode (top-up).
+      value: Top up shorted tasks across afterquery/atcb/mercor to 8 trajs.
+
+      agent_framework: opencode
+      agent_max_turns: 300
+      agent_framework_repo: https://github.com/sdevare-nv/nv-opencode.git
+      agent_framework_commit: sdd/dev
+
+      container_formatter:
+        - /lustre/fs1/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/kbhardwaj/dev/image-conversion-HSG/{instance_id}_arm64.sif
+        - /lustre/fsw/portfolios/llmservice/users/charlwang/cluster/tb/data/tb_sifs_arm64/{instance_id}_arm64.sif
+        - /lustre/fs1/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/kbhardwaj/datasets/nvidia-ots-1000-batch-2/sifs_arm64/{instance_id}_arm64.sif
+      container_folder_path: null
+
+      swebench_agent_timeout: 7200
+      swebench_tests_timeout: 900
+      apptainer_memory_limit_mb: 32768
+      command_exec_timeout: 300
+
+      dataset_path: responses_api_agents/swe_agents/data/example_terminal.jsonl
+
+      model_server:
+        name: policy_model
+        type: responses_api_models
+
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: responses_api_agents/swe_agents/data/example_terminal.jsonl
+
+swe_agents_val:
+  responses_api_agents:
+    swe_agents:
+      <<: *swe_agents_config
+
+swe_agents_train:
+  responses_api_agents:
+    swe_agents:
+      <<: *swe_agents_config
