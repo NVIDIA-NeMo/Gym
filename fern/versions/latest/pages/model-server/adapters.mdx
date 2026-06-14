@@ -1,0 +1,68 @@
+---
+title: "Adapter Middleware"
+description: "Interceptor-based middleware framework for Model, Agent, and Resources servers."
+position: 3
+---
+
+Adapter middleware adds an interceptor chain to a server's request/response path. Each interceptor can observe or mutate the payload without the host server changing. Use it to inject system prompts, drop unsupported params, cache responses, count turns, normalize reasoning fields, log tokens, and so on.
+
+`adapters` is opt-in. It is declared on `BaseResponsesAPIModelConfig`, `BaseResponsesAPIAgentConfig`, and `BaseResourcesServerConfig`, so every in-tree server inheriting from `SimpleResponsesAPIModel` / `SimpleResponsesAPIAgent` / `SimpleResourcesServer` accepts an `adapters` block automatically. Omitting it leaves behavior identical to the base server.
+
+## Quickstart
+
+Add an `adapters` list to any server config:
+
+```yaml
+policy_model:
+  responses_api_models:
+    openai_model:
+      openai_base_url: https://api.openai.com/v1
+      openai_api_key: ...
+      openai_model: gpt-4.1
+      adapters:                       # ← toggle: omit or null = OFF
+        - {name: logging, config: {}}
+```
+
+This PR ships the **framework** (`AdapterPipeline`, `InterceptorRegistry`, `install_middleware`, `start_adapter_proxy`) plus two built-in interceptors:
+
+| Name | Stage | Purpose |
+|------|-------|---------|
+| `logging` | request + response | Log request body keys and response status/latency. Canonical "did the chain fire?" probe. |
+| `endpoint` | request → response | Drive the upstream HTTP call directly. **Only used by `start_adapter_proxy`** (standalone host mode); forbidden inside `install_middleware`. |
+
+Additional interceptor families (observability, caching, request rewriting) ship in follow-on PRs.
+
+## Host modes
+
+The same `AdapterPipeline` runs in either of two hosting modes:
+
+**Middleware mode** — `install_middleware(app, adapters)` attaches the pipeline to an existing FastAPI app via `app.middleware("http")`. The host server's own routing performs the upstream call via `call_next`. Used by every Model/Agent/Resources server when `adapters` is set on its config.
+
+**Proxy mode** — `start_adapter_proxy(upstream_url, adapters)` launches a localhost uvicorn that hosts the pipeline with its own forwarding logic. Used by agents that bring their own SDK client (e.g. `claude_code_agent` with `anthropic_base_url`); the agent points its SDK's `*_BASE_URL` at the proxy URL via the `adapter_proxy` field on `BaseResponsesAPIAgentConfig`.
+
+## Path-Based Session Scoping
+
+Posts to `/s/<hex-id>/<path>` have the prefix stripped before forwarding, and `<hex-id>` is recorded as `ctx.extra["session_id"]`. Follow-on interceptors that key per-session (e.g. `turn_counter`, `caching`) use this id.
+
+## Custom Interceptors
+
+Register a class at runtime via `InterceptorRegistry.register`:
+
+```python
+from nemo_gym.adapters import InterceptorRegistry
+
+InterceptorRegistry.register("my_interceptor", "myproject.adapters.my_interceptor")
+```
+
+The target module must expose a class named `Interceptor` that subclasses one of `RequestInterceptor`, `RequestToResponseInterceptor`, or `ResponseInterceptor` from `nemo_gym.adapters.types`. The class is instantiated with the YAML `config` dict as kwargs.
+
+## Configuration Reference
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `adapters` | `list[dict] \| null` | `null` | Ordered interceptor specs on each server config. Each entry is `{name: <str>, config: <dict>}`. `null` or `[]` disables the middleware. |
+| `adapter_proxy` | `AdapterProxyConfig \| null` | `null` | On `BaseResponsesAPIAgentConfig` only. Configures a localhost proxy in front of an external inference upstream. Fields: `upstream_url`, `adapters`, `host` (default `127.0.0.1`), `port` (default `0` → kernel-assigned), `request_timeout`, `unsafe_allow_remote`. |
+
+<Warning>
+`start_adapter_proxy` refuses any `host` other than `127.0.0.1`/`localhost` unless you pass `unsafe_allow_remote=True`. The proxy forwards the client's `Authorization` header verbatim to the upstream, so binding to `0.0.0.0` would leak the upstream API key to any caller on the network.
+</Warning>
