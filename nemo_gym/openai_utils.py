@@ -276,6 +276,14 @@ class NeMoGymResponseCreateParamsNonStreaming(BaseModel):
     stream: Optional[Literal[False]] = None
 
 
+class NeMoGymResponseCreateParamsStreaming(NeMoGymResponseCreateParamsNonStreaming):
+    """Responses create params for streaming clients. Allows stream=true, ignores unknown fields."""
+
+    model_config = ConfigDict(extra="ignore")
+    stream: Optional[bool] = None
+    tools: List[Any] = Field(default_factory=list)
+
+
 ########################################
 # Responses API outputs
 ########################################

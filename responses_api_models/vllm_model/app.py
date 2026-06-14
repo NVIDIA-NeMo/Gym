@@ -23,6 +23,7 @@ from uuid import uuid4
 
 from aiohttp.client_exceptions import ClientResponseError
 from fastapi import Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from nemo_gym.base_responses_api_model import (
@@ -52,6 +53,7 @@ from nemo_gym.openai_utils import (
     NeMoGymFunctionDefinition,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseCreateParamsStreaming,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseInputTokensDetails,
     NeMoGymResponseOutputItem,
@@ -132,8 +134,34 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         self._converter = self.get_converter()
 
-    async def responses(
-        self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
+    async def responses(self, request: Request, body: NeMoGymResponseCreateParamsStreaming = Body()) -> Any:
+        # streaming clients (e.g. codex) get the buffered response re-emitted as Responses SSE
+        params = self._narrow_to_non_streaming(body)
+        resp = await self._build_response(request, params)
+        if not body.stream:
+            return resp
+        return StreamingResponse(self._responses_sse(resp), media_type="text/event-stream")
+
+    @staticmethod
+    def _narrow_to_non_streaming(
+        body: NeMoGymResponseCreateParamsStreaming,
+    ) -> NeMoGymResponseCreateParamsNonStreaming:
+        data = body.model_dump(exclude_unset=True, include=set(NeMoGymResponseCreateParamsNonStreaming.model_fields))
+        data.pop("stream", None)
+        if isinstance(data.get("tools"), list):
+            data["tools"] = [t for t in data["tools"] if isinstance(t, dict) and t.get("type") == "function"]
+        return NeMoGymResponseCreateParamsNonStreaming.model_validate(data)
+
+    @staticmethod
+    async def _responses_sse(resp: NeMoGymResponse):
+        resp_dict = resp.model_dump(exclude_none=True)
+        yield f"data: {json.dumps({'type': 'response.created', 'response': {**resp_dict, 'output': []}})}\n\n"
+        for i, item in enumerate(resp_dict.get("output") or []):
+            yield f"data: {json.dumps({'type': 'response.output_item.done', 'output_index': i, 'item': item})}\n\n"
+        yield f"data: {json.dumps({'type': 'response.completed', 'response': resp_dict})}\n\n"
+
+    async def _build_response(
+        self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming
     ) -> NeMoGymResponse:
         if self.config.is_responses_native:
             return await self._responses_native(request, body)

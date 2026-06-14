@@ -1,0 +1,21 @@
+codex_agent:
+  responses_api_agents:
+    codex_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: ???
+      concurrency: 8
+      command: codex
+      model: nvidia/qwen/qwen3-next-80b-a3b-instruct
+      model_provider: nvinf
+      base_url: ${policy_base_url}
+      api_key_env: NVIDIA_API_KEY
+      wire_api: responses
+      env:
+        NVIDIA_API_KEY: ${policy_api_key}
+      workspace_root: outputs/codex_agent/workspaces
+      system_prompt: null
+      timeout: 900
+      extra_args: []
+      codex_version: null
