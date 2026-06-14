@@ -10,12 +10,11 @@ it does not use a Gym model server yet.
 
 ## Quick start
 
-OpenCode must be on PATH (auto-installed on first start, or `npm install -g opencode-ai`). And set
-`policy_base_url` / `policy_api_key` in `env.yaml`.
+OpenCode must be on PATH (auto-installed on first start, or `npm install -g opencode-ai`). Set
+`policy_base_url`, `policy_api_key`, and `policy_model_name` in `env.yaml`.
 
 ```bash
-ng_run "+config_paths=[resources_servers/math_with_judge/configs/math_with_judge_opencode_agent.yaml,responses_api_models/openai_model/configs/openai_model.yaml]" \
-  +policy_model_name=nvidia/meta/llama-3.3-70b-instruct
+ng_run "+config_paths=[resources_servers/math_with_judge/configs/math_with_judge_opencode_agent.yaml,responses_api_models/openai_model/configs/openai_model.yaml]"
 
 ng_collect_rollouts +agent_name=math_with_judge_opencode_agent \
   +input_jsonl_fpath=responses_api_agents/opencode_agent/data/example.jsonl \
