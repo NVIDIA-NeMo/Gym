@@ -57,7 +57,7 @@ LOG = logging.getLogger(__name__)
 
 
 def parse_opencode_session(db_path: Path) -> tuple[list[Any], dict[str, int]]:
-    """convert the sqlite session db into Gym format including tool calls."""
+    """convert the sqlite session db into Gym format including tool calls"""
     output_items: list[Any] = []
     input_tokens = 0
     output_tokens = 0
@@ -193,10 +193,7 @@ class OpenCodeAgentVerifyResponse(BaseVerifyResponse):
 
 
 class OpenCodeAgent(SimpleResponsesAPIAgent):
-    """Runs the CLI (opencode run --format=json).
-    Each request runs one headless `opencode run` and parses the jsonl trajectory into Gym
-    format. OpenCode runs its own tools internally. Not yet supported for training.
-    """
+    """Runs the CLI (opencode run --format=json)"""
 
     config: OpenCodeAgentConfig
     sem: Semaphore = None
