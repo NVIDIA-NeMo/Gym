@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import base64
 import glob
 import hashlib
 import json
@@ -80,13 +81,20 @@ def update_metrics(metrics_fpath: Path, update_dict: Dict[str, Any]) -> None:
 def _safe_config_json(params: "AnySweInstanceConfig", indent: Optional[int] = None) -> str:
     """Serialize config without secrets: redact secret-looking agent_kwargs and drop
     the rendered apptainer commands (which embed the agent env, including the key)."""
+
+    def redact(value: Any, key: str = "") -> Any:
+        if any(s in key.lower() for s in ("api_key", "apikey", "secret", "password", "token")):
+            return "***"
+        if isinstance(value, dict):
+            return {k: redact(v, k) for k, v in value.items()}
+        if isinstance(value, list):
+            return [redact(v) for v in value]
+        return value
+
     d = json.loads(params.model_dump_json())
     d.pop("agent_apptainer_command_str", None)
     d.pop("eval_apptainer_command_str", None)
-    d["agent_kwargs"] = {
-        k: ("***" if any(s in k.lower() for s in ("api_key", "secret", "password", "token")) else v)
-        for k, v in (d.get("agent_kwargs") or {}).items()
-    }
+    d["agent_kwargs"] = redact(d.get("agent_kwargs") or {})
     return json.dumps(d, indent=indent)
 
 
@@ -288,17 +296,23 @@ class R2EGymDatasetProcessor(BaseDatasetHarnessProcessor):
 
 _RUNNER_TEMPLATE = """\
 #!/usr/bin/env python3
-import asyncio, json, os, subprocess, sys
+import asyncio, base64, json, os, subprocess, sys
 from pathlib import Path
 
 sys.path.insert(0, "/nemo_gym_mount")
 os.environ["PATH"] = "/agent_deps_mount/bin:" + os.environ.get("PATH", "")
 
+def _json_env(name):
+    encoded = os.environ.get(name + "_B64")
+    if encoded:
+        return json.loads(base64.b64decode(encoded).decode())
+    return json.loads(os.environ.get(name, "{{}}"))
+
 MODEL_URL   = os.environ.get("NGSWE_MODEL_URL", "")
 MODEL_NAME  = os.environ["NGSWE_MODEL_NAME"]
 INSTRUCTION = Path("/trajectories_mount/instruction.txt").read_text()
-AGENT_KWARGS = json.loads(os.environ.get("NGSWE_AGENT_KWARGS", "{{}}"))
-SAMPLING = json.loads(os.environ.get("NGSWE_SAMPLING", "{{}}"))
+AGENT_KWARGS = _json_env("NGSWE_AGENT_KWARGS")
+SAMPLING = _json_env("NGSWE_SAMPLING")
 
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming, NeMoGymEasyInputMessage
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
@@ -445,17 +459,35 @@ class GymAgentHarnessProcessor(BaseModel):
             print(f"Agent deps already at {deps_dir}", flush=True)
             return deps_dir
 
-        if not script.exists():
-            print(f"No setup script for {self._agent_key}, skipping deps install", flush=True)
+        lock_path = deps_dir.parent / f".{deps_dir.name}.lockdir"
+        while True:
+            try:
+                lock_path.mkdir(exist_ok=False)
+                break
+            except FileExistsError:
+                if time.time() - lock_path.stat().st_mtime > 3600:
+                    shutil.rmtree(lock_path, ignore_errors=True)
+                    continue
+                time.sleep(5)
+
+        try:
+            if sentinel.exists() and sentinel.read_text().strip() == recipe:
+                print(f"Agent deps already at {deps_dir}", flush=True)
+                return deps_dir
+
+            if not script.exists():
+                print(f"No setup script for {self._agent_key}, skipping deps install", flush=True)
+                deps_dir.mkdir(parents=True, exist_ok=True)
+                sentinel.write_text(recipe)
+                return deps_dir
+
             deps_dir.mkdir(parents=True, exist_ok=True)
+            proc = Popen(f"DEPS_DIR={deps_dir} NEMO_GYM_ROOT={PARENT_DIR} bash {script}", shell=True)
+            assert proc.wait() == 0, f"Agent deps setup failed ({script})"
             sentinel.write_text(recipe)
             return deps_dir
-
-        deps_dir.mkdir(parents=True, exist_ok=True)
-        proc = Popen(f"DEPS_DIR={deps_dir} NEMO_GYM_ROOT={PARENT_DIR} bash {script}", shell=True)
-        assert proc.wait() == 0, f"Agent deps setup failed ({script})"
-        sentinel.write_text(recipe)
-        return deps_dir
+        finally:
+            shutil.rmtree(lock_path, ignore_errors=True)
 
     def get_run_command(self) -> ExecuteContainerCommandArgs:
         """Write the runner and command."""
@@ -537,6 +569,7 @@ class RunGymAgent(BaseModel):
 
         agent_ctr = await self._start(cfg.agent_command, cfg.agent_apptainer_command_str)
         eval_ctr = None if cfg.skip_eval else await self._start(cfg.eval_command, cfg.eval_apptainer_command_str)
+        agent_env_path = cfg.persistent_dir / "container_scripts" / "agent_env.env"
 
         try:
             await self._wait(agent_ctr, cfg.agent_command)
@@ -551,6 +584,8 @@ class RunGymAgent(BaseModel):
             )
             update_metrics(cfg.metrics_fpath, metrics.model_dump())
             return None
+        finally:
+            agent_env_path.unlink(missing_ok=True)
 
         metrics.generation_apptainer_spinup_time += float(cfg.generation_apptainer_spinup_timestamp_fpath.read_text())
         metrics.openhands_run_time += time.time()
@@ -637,9 +672,9 @@ class AnySweAgent(SimpleResponsesAPIAgent):
 
         agent_deps_dir = GymAgentHarnessProcessor(config=self.config).setup()
 
-        swebench_setup = SweBenchDatasetProcessor(config=self.config).setup()
-        multilingual_setup = SweBenchMultilingualDatasetProcessor(config=self.config).setup()
-        r2e_setup = R2EGymDatasetProcessor(config=self.config).setup()
+        swebench_setup = SweBenchDatasetProcessor(config=self.config).setup().resolve()
+        multilingual_setup = SweBenchMultilingualDatasetProcessor(config=self.config).setup().resolve()
+        r2e_setup = R2EGymDatasetProcessor(config=self.config).setup().resolve()
 
         session_id = f"{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}"
         workspace = Path(__file__).parent
@@ -721,17 +756,22 @@ class AnySweAgent(SimpleResponsesAPIAgent):
         }
         # External-API agents resolve their own endpoint/key.
         model_name = params.agent_kwargs.get("model") or params.body.model or "model"
-        env = (
-            (f"--env NGSWE_MODEL_URL={shlex.quote(params.model_server_url)} " if params.model_server_url else "")
-            + f"--env NGSWE_MODEL_NAME={shlex.quote(model_name)} "
-            + f"--env NGSWE_AGENT_KWARGS={shlex.quote(json.dumps(params.agent_kwargs))} "
-            + f"--env NGSWE_SAMPLING={shlex.quote(json.dumps(sampling))} "
-        )
         script_dir = params.persistent_dir / "container_scripts"
         script_dir.mkdir(parents=True, exist_ok=True)
+        env_path = script_dir / "agent_env.env"
+        env_lines = [f"NGSWE_MODEL_NAME={model_name}"]
+        if params.model_server_url:
+            env_lines.append(f"NGSWE_MODEL_URL={params.model_server_url}")
+        env_lines += [
+            "NGSWE_AGENT_KWARGS_B64=" + base64.b64encode(json.dumps(params.agent_kwargs).encode()).decode(),
+            "NGSWE_SAMPLING_B64=" + base64.b64encode(json.dumps(sampling).encode()).decode(),
+        ]
+        env_path.write_text("\n".join(env_lines) + "\n")
+        env_path.chmod(0o600)
         script_path = script_dir / "agent_script.sh"
         script_path.write_text(params.agent_command.command)
         mounts.append(f"--mount type=bind,src={script_path},dst=/container_scripts/agent_script.sh,ro")
+        env = f"--env-file {shlex.quote(str(env_path))} "
         return self._apptainer_exec(params, mounts, "bash /container_scripts/agent_script.sh", env=env)
 
     def _build_eval_apptainer_cmd(self, params: AnySweInstanceConfig) -> str:
