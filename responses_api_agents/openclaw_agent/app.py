@@ -119,7 +119,6 @@ def parse_openclaw_output(stdout: str) -> tuple[list[Any], dict[str, int]]:
 
 def parse_openclaw_session(session_text: str) -> list[Any]:
     """Convert an OpenClaw session .jsonl into Gym output items, including tool calls.
-
     The session file (meta.agentMeta.sessionFile) has the full trajectory with toolCall and
     toolResult messages, unlike the --json envelope which only has the final assistant text.
     """
@@ -224,7 +223,7 @@ class OpenClawAgentConfig(BaseResponsesAPIAgentConfig):
     command: str = "openclaw"
     model: str = "nvinf/nvidia/meta/llama-3.3-70b-instruct"
     node_bin_dir: Optional[str] = None
-    # extra env vars for the subprocess, e.g. provider API keys
+    # extra env vars for the subprocess e.g. API keys
     env: dict[str, str] = Field(default_factory=dict)
     workspace_root: str = "outputs/openclaw_agent/workspaces"
     openclaw_agent_id: str = "main"
@@ -252,11 +251,9 @@ class OpenClawAgentVerifyResponse(BaseVerifyResponse):
 
 
 class OpenClawAgent(SimpleResponsesAPIAgent):
-    """Runs the OpenClaw CLI (openclaw agent --local --json) as a NeMo Gym agent server.
-
+    """Runs the OpenClaw CLI (openclaw agent --local --json).
     Each request runs `openclaw setup`, merges openclaw_config into the generated config, runs one
     headless `openclaw agent`, and parses the trajectory into Gym output items.
-    Eval-only for now (due to token ids).
     """
 
     config: OpenClawAgentConfig
@@ -338,7 +335,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
     async def _run_openclaw(
         self, instruction: str, system_prompt: Optional[str]
     ) -> tuple[list[Any], dict[str, int], str]:
-        """Run setup then agent. Returns (output_items, usage, model_name)."""
+        """setup and run agent. returns (output_items, usage, model_name)."""
         prompt = instruction if not system_prompt else f"{system_prompt}\n\n{instruction}"
         work_dir = self._workspace_root()
         home = work_dir / ".openclaw-home"
@@ -346,7 +343,6 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         env = self._env(home)
 
         try:
-            # setup exits non-zero on the gateway health probe (unused by --local), so ignore it
             await self._run_exec(
                 [*self.config.command_parts, "setup", "--non-interactive", "--accept-risk", "--mode", "local"],
                 cwd=str(work_dir),
@@ -383,7 +379,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             envelope = _decode_last_json_dict_suffix(stdout)
             usage = parse_openclaw_output(stdout)[1]
 
-            # prefer the session file (has tool calls), fall back to the envelope's final text
+            # prefer the session file, try final text if not (shouldnt happen)
             output_items: list[Any] = []
             session_path = self._session_file(envelope)
             if session_path and session_path.is_file():
