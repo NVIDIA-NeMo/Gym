@@ -2678,11 +2678,9 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         dataset_path_to_mount = str(params.instance_dataset_path)
         data_point = params.problem_info
 
-        # Fix localhost URLs not working sometimes. Include the node hostname so that
-        # `sudo`/tools resolving $(hostname) don't fail with "unable to resolve host"
-        # (critical under --network=none, where there's no DNS / the hostname is unknown).
+        # Fix localhost URLs not working sometimes
         container_commands = []
-        container_commands.append('echo "127.0.0.1 localhost $(hostname 2>/dev/null)" >/etc/hosts')
+        container_commands.append("echo '127.0.0.1 localhost' >/etc/hosts")
 
         # Apptainer uid namespacing makes the eval-image's `chmod` against
         # /var/run/postgresql fail with "Value too large for defined data
@@ -2937,11 +2935,6 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 "printf 'APT::Sandbox::User \"root\";\\nAcquire::Retries \"3\";\\n' "
                 "> /etc/apt/apt.conf.d/99tb-no-sandbox 2>/dev/null || true"
             )
-            # NOTE: a service-boot step (run the image runscript so postgres/nginx are up
-            # before the agent, real-TB parity) was tried alongside --network=none but is
-            # reverted here — it's only meaningful with the private-netns service path,
-            # which is disabled for rollout (see networking note below). The agent + the
-            # systemctl->service shim above handle service start in the shared netns.
 
         if command.mode == "agent" and "R2E-Gym" in data_point["dataset_name"]:
             # Remove R2E-Gym test-related files.
@@ -3015,21 +3008,13 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         # is created on the Ray worker before the agent launches (see
         # _process_single_datapoint_terminal_bench). All other datasets keep the
         # original ephemeral tmpfs overlay (each container fully isolated).
-        net_flag = ""
         if data_point.get("dataset_name") == "terminal-bench":
             overlay_img = params.persistent_dir / "agent_overlay.img"
             writable_overlay_flag = f"--overlay {shlex.quote(str(overlay_img))}"
-            # NOTE: `--net --network=none` (the oracle service-mode fix that lets services
-            # bind privileged ports / isolates parallel workers) is DISABLED for the agent
-            # rollout. The opencode agent must reach the policy model at host localhost:8000,
-            # and an isolated netns blocks that -> "connection refused" -> 0 solved (verified
-            # 2026-06-14, the 946-task re-run). It is valid only for the STANDALONE oracle
-            # check (solve.sh+tests, no model). To use it for rollout, first bridge the model
-            # into the private netns (e.g. socat over a bind-mounted unix socket on the host).
         else:
             writable_overlay_flag = "--writable-tmpfs"
         apptainer_cmd = (
-            f"apptainer exec {writable_overlay_flag}{net_flag} --cleanenv --pid --no-mount home,tmp,bind-paths "
+            f"apptainer exec {writable_overlay_flag} --cleanenv --pid --no-mount home,tmp,bind-paths "
             f"{env_args}"
             f"{mount_str} "
             f" {params.container} bash {container_script_path}"
