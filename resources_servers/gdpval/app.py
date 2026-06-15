@@ -422,6 +422,13 @@ class GDPValResourcesServer(SimpleResourcesServer):
         # matchup for back-compat with the single-reference judge_response shape.
         per_reference: Dict[str, Dict[str, Any]] = {}
         per_ref_results: List[Dict[str, Any]] = []
+        # Per-reference judge failures (timeouts, upstream 5xx, oversize/context
+        # payloads). With multiple references a single failed matchup must NOT
+        # discard the whole rollout — we skip just that (ref × repeat) and keep
+        # every reference that judged successfully.
+        ref_errors: Dict[str, List[str]] = {}
+        attempted_matchups = 0
+        last_error: Optional[Exception] = None
         try:
             eval_submission = build_file_section(str(eval_task_dir), clean_up_list)
 
@@ -431,6 +438,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
             # averages over reference variance — see ``_iter_ref_repeat_dirs``.
             for ref_id, dirs in ref_dirs_by_id.items():
                 ref_wins = ref_losses = ref_ties = 0
+                ref_judged_repeats = 0
                 for ref_dir in dirs:
                     refs_subdir = ref_dir / "reference_files"
                     refs = build_file_section(
@@ -438,36 +446,60 @@ class GDPValResourcesServer(SimpleResourcesServer):
                         clean_up_list,
                     )
                     ref_submission = build_file_section(str(ref_dir), clean_up_list)
-                    result = await asyncio.to_thread(
-                        run_trials,
-                        client=client,
-                        model=judge_model_name,
-                        task_prompt=body.prompt or "",
-                        refs=refs,
-                        submission_a=ref_submission,
-                        submission_b=eval_submission,
-                        num_trials=self.config.num_comparison_trials,
-                        return_raw_responses=self.config.persist_raw_judge_responses,
-                    )
+                    attempted_matchups += 1
+                    try:
+                        result = await asyncio.to_thread(
+                            run_trials,
+                            client=client,
+                            model=judge_model_name,
+                            task_prompt=body.prompt or "",
+                            refs=refs,
+                            submission_a=ref_submission,
+                            submission_b=eval_submission,
+                            num_trials=self.config.num_comparison_trials,
+                            return_raw_responses=self.config.persist_raw_judge_responses,
+                        )
+                    except Exception as e:  # noqa: BLE001 — isolate per-matchup judge failures
+                        last_error = e
+                        ref_errors.setdefault(ref_id, []).append(f"{ref_dir.name}: {e!r}")
+                        print(
+                            f"[gdpval] judge failed for task {body.task_id} ref {ref_id}/{ref_dir.name}: {e!r}",
+                            flush=True,
+                        )
+                        continue
                     # ``run_trials`` casts submission_a=ref, submission_b=eval, so
                     # ``win_count_b`` is eval wins.
                     ref_wins += result["win_count_b"]
                     ref_losses += result["win_count_a"]
                     ref_ties += result["tie_count"]
+                    ref_judged_repeats += 1
                     per_ref_results.append({"ref_id": ref_id, "ref_repeat": ref_dir.name, **result})
 
-                per_reference[ref_id] = {
-                    "wins": ref_wins,
-                    "losses": ref_losses,
-                    "ties": ref_ties,
-                    "reference_elo": self._references[ref_id].elo,
-                    "ref_repeat_count": len(dirs),
-                }
-                total_wins += ref_wins
-                total_losses += ref_losses
-                total_ties += ref_ties
+                # Only record references that produced at least one valid matchup;
+                # a reference whose every repeat failed contributes no votes (and
+                # must not appear as a 0/0/0 battle in aggregate_metrics).
+                if ref_judged_repeats > 0:
+                    per_reference[ref_id] = {
+                        "wins": ref_wins,
+                        "losses": ref_losses,
+                        "ties": ref_ties,
+                        "reference_elo": self._references[ref_id].elo,
+                        "ref_repeat_count": ref_judged_repeats,
+                    }
+                    total_wins += ref_wins
+                    total_losses += ref_losses
+                    total_ties += ref_ties
         finally:
             clean_up_paths(clean_up_list)
+
+        # Every matchup failed → this rollout is genuinely unjudgeable. Surface
+        # it as a failure (matches pre-resilience behavior) rather than emitting
+        # a fake neutral reward that would pollute the metrics.
+        if attempted_matchups > 0 and not per_reference:
+            raise RuntimeError(
+                f"all {attempted_matchups} judge matchup(s) failed for task {body.task_id}; "
+                f"last error: {last_error!r}"
+            )
 
         total_judged = total_wins + total_losses + total_ties
         if total_wins > total_losses:
@@ -491,6 +523,9 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 "reference_count": len(per_reference),
                 # Back-compat: total matchups across all references × repeats.
                 "ref_repeat_count": len(per_ref_results),
+                # References (and their repeats) whose judge calls failed and
+                # were skipped. Empty when every matchup succeeded.
+                "ref_errors": ref_errors,
             },
             win=reward == 1.0,
             loss=reward == 0.0,
@@ -563,7 +598,9 @@ class GDPValResourcesServer(SimpleResourcesServer):
         # Per-reference win stats (always emitted when present).
         for ref_id, (rw, rl, rt, ref_elo) in per_ref_totals.items():
             r_judged = rw + rl + rt
-            r_win_rate = (rw + 0.5 * rt) / r_judged if r_judged else float("nan")
+            # Keep every emitted metric numeric (downstream coerces each metric
+            # into a float ``Score``): use 0.0 rather than NaN when unjudged.
+            r_win_rate = (rw + 0.5 * rt) / r_judged if r_judged else 0.0
             extra[f"comparison/ref/{ref_id}/wins"] = rw
             extra[f"comparison/ref/{ref_id}/losses"] = rl
             extra[f"comparison/ref/{ref_id}/ties"] = rt
@@ -585,8 +622,11 @@ class GDPValResourcesServer(SimpleResourcesServer):
             eval_elo, normalized_elo = mle
             extra["comparison/eval_elo"] = eval_elo
             extra["comparison/normalized_elo"] = normalized_elo
+            # Number of references the MLE was fit over (>1 ⇒ multi-reference
+            # Bradley-Terry). All metric values must stay numeric — downstream
+            # coerces each into a float ``Score`` — so we encode the method as a
+            # count rather than a descriptive string.
             extra["comparison/num_references"] = len(battles)
-            extra["comparison/elo_method"] = "bradley_terry_mle"
             # Predicted (model-implied) win rate vs each reference, useful to
             # eyeball MLE fit against the observed per-reference win rate.
             for ref_id, (rw, rl, rt, ref_elo) in per_ref_totals.items():
@@ -599,7 +639,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
             extra["comparison/eval_elo"] = eval_elo
             extra["comparison/normalized_elo"] = normalized_elo
             extra["comparison/reference_elo"] = self.config.reference_elo
-            extra["comparison/elo_method"] = "single_reference"
+            extra["comparison/num_references"] = 1
 
         merged_agent = {**base.agent_metrics, **extra}
         merged_key = {**base.key_metrics, **extra}
