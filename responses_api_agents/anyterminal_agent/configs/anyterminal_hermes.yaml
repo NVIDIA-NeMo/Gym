@@ -10,9 +10,12 @@ anyterminal_hermes:
       agent_server_class: HermesAgent
       agent_config_class: HermesAgentConfig
       agent_kwargs:
-        max_turns: 30
+        max_turns: 90
         temperature: 1.0
         terminal_backend: local
+        terminal_timeout: 180
+        compression_enabled: true
+        compression_threshold: 0.85
         enabled_toolsets: null
         system_prompt: "You are an expert software engineer working inside a terminal environment. Read the task instructions carefully, use terminal commands to understand the environment, and complete the task as described. You MUST use terminal tools to explore, edit, and run commands — do not just describe what to do."
 
