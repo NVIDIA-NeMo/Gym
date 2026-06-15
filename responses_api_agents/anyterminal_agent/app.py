@@ -14,8 +14,10 @@
 import asyncio
 import hashlib
 import json
+import os
 import shlex
 import shutil
+import signal
 import sys
 import time
 import uuid
@@ -302,7 +304,9 @@ class RunTerminalAgent(BaseModel):
         logs_dir.mkdir(exist_ok=True)
         log_path = logs_dir / f"{self.config.task_name}.log"
         log_file = open(log_path, "w")
-        proc = await asyncio.create_subprocess_shell(apptainer_cmd, stdout=log_file, stderr=log_file)
+        proc = await asyncio.create_subprocess_shell(
+            apptainer_cmd, stdout=log_file, stderr=log_file, start_new_session=True
+        )
         return ActiveContainerProcess(process=proc, log_file=log_file, log_file_path=log_path)
 
     async def _stage_tests(self, cfg: AnyTerminalInstanceConfig) -> None:
@@ -338,7 +342,10 @@ class RunTerminalAgent(BaseModel):
         except asyncio.TimeoutError:
             container_timed_out = True
             if ctr.process.returncode is None:
-                ctr.process.kill()
+                try:
+                    os.killpg(os.getpgid(ctr.process.pid), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
                 await ctr.process.wait()
             print(f"[{cfg.task_name}] container timed out after {total_timeout}s", flush=True)
         except Exception as e:
