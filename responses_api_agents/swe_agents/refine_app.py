@@ -27,6 +27,7 @@
 import copy
 import hashlib
 import json
+from pathlib import Path
 from typing import Any, Optional
 
 from pydantic import ConfigDict, Field
@@ -56,6 +57,14 @@ class SWEBenchRefineConfig(SWEBenchWrapperConfig):
             "If True, keep the workspace (accumulated patch) across attempts instead of "
             "git-resetting (true 'refine'). Requires the persistent-instance + "
             "SKIP_INITIAL_RESET change in the OpenHands runner; not yet wired."
+        ),
+    )
+    dump_dir: Optional[str] = Field(
+        default=None,
+        description=(
+            "If set, write each attempt's input prompt + output + metrics + carried "
+            "verify_feedback as readable JSON to <dump_dir>/<group_hash>/attempt_<k>.json, "
+            "for debugging the constructed refine context. Off (None) by default."
         ),
     )
 
@@ -112,8 +121,10 @@ class SWEBenchRefineWrapper(SWEBenchWrapper):
                         "response": response,
                         "metrics": metrics,
                         "instance_config": metadata["instance_config"],
+                        "verify_feedback": metadata.get("verify_feedback"),
                     }
                 )
+                self._dump_attempt(group_hash, k, attempts[-1])
 
                 if metrics.resolved:
                     break  # chain solved → stop early, pad the rest
@@ -158,8 +169,14 @@ class SWEBenchRefineWrapper(SWEBenchWrapper):
     ) -> BaseRunRequest:
         """Construct the BaseRunRequest for one attempt.
 
-        Attempt 0 is the original task. For attempt>0 the compressed seed from the
-        prior attempt(s) is injected as an extra user message.
+        Attempt 0 is the original task. For attempt>0 the seed (prior diff + test
+        failures) is injected by APPENDING it to the SWE instance's
+        ``problem_statement`` inside ``responses_create_params.metadata["instance_dict"]``.
+        That is the field the OpenHands runner renders into the agent's task prompt
+        (run_infer.py:get_instruction -> swe_default.j2 ``{{ instance.problem_statement }}``).
+        NOTE: appending to ``responses_create_params.input`` does NOT reach the
+        OpenHands SWE agent (it rebuilds the prompt from the instance), so the seed
+        must go through problem_statement.
 
         TODO(refine): when skip_reset_after_first is wired, the workspace already
         carries the accumulated patch; the seed should then describe *what changed
@@ -169,31 +186,96 @@ class SWEBenchRefineWrapper(SWEBenchWrapper):
             return body
 
         new_body = body.model_copy(deep=True)
-        params = new_body.responses_create_params
-        seed_msg = {"role": "user", "content": prior_summary}
-        if isinstance(params.input, str):
-            params.input = [{"role": "user", "content": params.input}, seed_msg]
-        else:
-            params.input = list(params.input) + [seed_msg]
+        metadata = new_body.responses_create_params.metadata or {}
+        instance_raw = metadata.get("instance_dict")
+        if not instance_raw:
+            print(
+                "[refine] WARNING: no instance_dict in metadata; refine seed NOT injected",
+                flush=True,
+            )
+            return new_body
+
+        instance = json.loads(instance_raw)
+        original = instance.get("problem_statement", "")
+        instance["problem_statement"] = (
+            f"{original}\n\n"
+            "=== Refinement feedback from your previous attempt ===\n"
+            f"{prior_summary}"
+        )
+        metadata["instance_dict"] = json.dumps(instance)
+        # Keep the top-level mirror (if present) consistent with the instance copy.
+        if "problem_statement" in metadata:
+            metadata["problem_statement"] = instance["problem_statement"]
+        new_body.responses_create_params.metadata = metadata
         return new_body
 
     def _summarize_prior(self, attempts: list[dict]) -> str:
         """Build the seed carried into the next attempt from prior attempt(s).
 
-        MVP: a minimal textual handoff (last patch + outcome). This is the seam for
-        the real compression strategy (strip history thinking + truncate tool outputs
-        to <= carry_over_token_budget, or a reasoning digest / SWE-Pruner line
-        selection). Keep deterministic and bounded.
+        Carries the prior attempt's diff plus the raw verify output (the failing
+        tests / tracebacks from the eval step), so the next attempt can fix the
+        actual failures instead of guessing. The verify log is already bounded
+        upstream (tail, see _inner_responses). Keep deterministic.
+
+        TODO(refine): when the workspace persists across attempts (skip_reset),
+        the seed should describe what changed and what still fails rather than
+        restate the whole diff; also consider stripping history thinking.
         """
         last = attempts[-1]
         metrics = last["metrics"]
         patch = (metrics.model_patch or "").strip()
-        # TODO(refine): compress to carry_over_token_budget; add failing-test feedback.
-        return (
-            "Your previous attempt did not resolve the issue. "
-            "Here is the diff you produced so far; continue refining it:\n\n"
-            f"```diff\n{patch}\n```\n"
-        )
+        verify_feedback = (last.get("verify_feedback") or "").strip()
+
+        parts = [
+            "Your previous attempt did not resolve the issue.",
+            "Here is the diff you produced so far:",
+            f"```diff\n{patch}\n```",
+        ]
+        if verify_feedback:
+            parts.append(
+                "Running the tests on that diff produced the following output. "
+                "Use the failures below to fix the patch:"
+            )
+            parts.append(f"```\n{verify_feedback}\n```")
+        parts.append("Continue refining the patch so the failing tests pass.")
+        return "\n\n".join(parts) + "\n"
+
+    def _dump_attempt(self, group_hash: str, attempt_idx: int, attempt: dict) -> None:
+        """Best-effort debug dump of one attempt's prompt/output to disk.
+
+        Writes <dump_dir>/<group_hash>/attempt_<k>.json (readable text) so the
+        constructed refine context can be inspected — in particular that attempt
+        k>0's input carries the prior diff + verify_feedback. No-op unless
+        config.dump_dir is set. Never raises (debug side-channel must not break
+        the rollout).
+        """
+        dump_dir = self.config.dump_dir
+        if not dump_dir:
+            return
+        try:
+            response = attempt["response"]
+            metrics = attempt["metrics"]
+            record = {
+                "group_hash": group_hash,
+                "turn_idx": attempt_idx,
+                "resolved": metrics.resolved,
+                "model_patch": metrics.model_patch,
+                # raw verify output produced by THIS attempt (fed into the next one)
+                "verify_feedback": attempt.get("verify_feedback") or "",
+                # the prompt this attempt actually ran on (for k>0 includes the
+                # diff + verify_feedback seed appended by _build_attempt_body)
+                "input": attempt["responses_create_params"].get("input"),
+                "output": [o.model_dump() for o in response.output]
+                if response.output
+                else [],
+            }
+            out_dir = Path(dump_dir) / group_hash
+            out_dir.mkdir(parents=True, exist_ok=True)
+            (out_dir / f"attempt_{attempt_idx}.json").write_text(
+                json.dumps(record, indent=2, ensure_ascii=False, default=str)
+            )
+        except Exception as e:  # best-effort debug dump; never break the rollout
+            print(f"[refine dump] failed for {group_hash} attempt {attempt_idx}: {e}", flush=True)
 
 
 if __name__ == "__main__":

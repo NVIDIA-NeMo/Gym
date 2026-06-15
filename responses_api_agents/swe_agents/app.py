@@ -616,6 +616,9 @@ python /root/parsing_script.py /root/stdout.log /root/stderr.log /root/output.js
 # Move outputs to the mounted directory
 mkdir -p /trajectories_mount/eval_results
 cp /root/output.json /trajectories_mount/eval_results/output.json
+# Also surface raw test logs to host so the refine agent can feed failures back.
+cp /root/stdout.log /trajectories_mount/eval_results/stdout.log 2>/dev/null || true
+cp /root/stderr.log /trajectories_mount/eval_results/stderr.log 2>/dev/null || true
 """
 
         search_path = os.path.join(
@@ -2100,6 +2103,11 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
     ) -> NeMoGymResponse:
         maybe_report_file = await runner_ray_remote.remote(params.model_dump())
         metrics_to_update = dict()
+        # Raw verify output (failing-test log tail) surfaced for the multi-turn
+        # refine agent to feed into the next attempt. Only populated when the
+        # attempt did not resolve; harness-agnostic (the bind-mounted test log).
+        # Must stay a str (NeMoGymResponse.metadata is dict[str, str]); "" = none.
+        verify_feedback: str = ""
 
         if maybe_report_file:
             dataset_processor.postprocess_after_run(maybe_report_file)
@@ -2110,6 +2118,24 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             )
             resolved = report[params.instance_id]["resolved"]
             metrics_to_update["resolved"] = resolved
+            if not resolved:
+                # Raw test failure output, harness-agnostic. Each harness writes the
+                # raw test stdout/stderr next to its report file under a different
+                # name: R2E-Gym -> test_output.txt (run_local_evaluation.py),
+                # SWE-rebench -> test_output.log, NVInternal -> stdout.log/stderr.log.
+                # Read whichever exist (report dir = maybe_report_file.parent),
+                # concatenate, tail-bounded.
+                feedback_max_chars = 8000
+                eval_dir = Path(maybe_report_file).parent
+                chunks: list[str] = []
+                for fname in ("test_output.txt", "test_output.log", "stdout.log", "stderr.log"):
+                    try:
+                        text = (eval_dir / fname).read_text(errors="replace").strip()
+                    except OSError:
+                        continue
+                    if text:
+                        chunks.append(f"--- {fname} ---\n{text}")
+                verify_feedback = "\n\n".join(chunks)[-feedback_max_chars:]
         else:
             metrics_to_update["resolved"] = False
 
@@ -2158,6 +2184,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 "input": json.dumps([i.model_dump() for i in input_items]),
                 "metrics": params.metrics_fpath.read_text(),
                 "instance_config": params.model_dump_json(),
+                "verify_feedback": verify_feedback,
             },
         )
 
