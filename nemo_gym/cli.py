@@ -810,17 +810,17 @@ def init_resources_server():  # pragma: no cover
   {server_type}:                              # server type: resources_servers | responses_api_agents | responses_api_models
     {server_type_name}:                        # implementation directory under {server_type}/
       entrypoint: app.py                        # server entry module
-      domain: other                             # capability under test; one of: math, coding, agent, knowledge,
+      domain: other                             # task domain; one of: math, coding, agent, knowledge,
                                                 #   instruction_following, long_context, safety, games, translation,
                                                 #   e2e, rlhf, other. Change 'other' to the closest fit.
       verified: false                           # set true once the benchmark has been baselined and reviewed
 
-# Agent pairing: connects the resources server above to a model via the built-in simple_agent.
+# Agent server config specifies the agent server to run and any additional components of the environment such as resources servers
 {server_type_name}_simple_agent:               # this agent instance's name — pass as +agent_name= to ng_collect_rollouts
   responses_api_agents:
     simple_agent:                               # built-in agent: runs the model with tool calls (up to max_steps); swap for your own agent dir
       entrypoint: app.py
-      resources_server:                         # the resources server this agent drives
+      resources_server:                         # the resources server this agent interacts with for tools, state and verification
         type: resources_servers
         name: {server_type_name}_resources_server
       model_server:                             # the model that answers; 'policy_model' is resolved from a model config
@@ -829,21 +829,14 @@ def init_resources_server():  # pragma: no cover
       datasets:                                 # one block per split: train | validation | example
       - name: train
         type: train
-        jsonl_fpath: resources_servers/{server_type_name}/data/train.jsonl   # local path / download destination
+        jsonl_fpath: resources_servers/{server_type_name}/data/train.jsonl   # local data file for this split
         num_repeats: 1                          # times to repeat each example (e.g. for pass@k / mean@k)
-        gitlab_identifier:                      # where to fetch this split — GitLab registry (or use huggingface_identifier for HF Hub)
-          dataset_name: {server_type_name}
-          version: 0.0.1
-          artifact_fpath: train.jsonl
         license: Apache 2.0                     # required for train/validation; must be an allowed license string
+        # to fetch this split from a registry instead, add gitlab_identifier: or huggingface_identifier:
       - name: validation
         type: validation
         jsonl_fpath: resources_servers/{server_type_name}/data/validation.jsonl
         num_repeats: 1
-        gitlab_identifier:
-          dataset_name: {server_type_name}
-          version: 0.0.1
-          artifact_fpath: validation.jsonl
         license: Apache 2.0
       - name: example                           # 5 rows committed to git for quick smoke tests
         type: example
