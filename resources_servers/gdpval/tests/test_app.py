@@ -595,6 +595,85 @@ class TestMultiReference:
         assert resp.total_losses == 2
         assert resp.judge_response["reference_count"] == 2
 
+    @staticmethod
+    def _two_ref_server_and_body(tmp_path):
+        eval_dir = tmp_path / "eval" / "task_task-1" / "repeat_0"
+        eval_dir.mkdir(parents=True)
+        (eval_dir / "finish_params.json").write_text("{}")
+        ref_roots = {}
+        for ref_id in ("kimi", "gpt5"):
+            root = tmp_path / ref_id
+            td = root / "task_task-1"
+            td.mkdir(parents=True)
+            (td / "finish_params.json").write_text("{}")
+            ref_roots[ref_id] = root
+        server = _server(
+            reward_mode="comparison",
+            reference_models={
+                "kimi": {"deliverables_dir": str(ref_roots["kimi"]), "elo": 1284.0},
+                "gpt5": {"deliverables_dir": str(ref_roots["gpt5"]), "elo": 1320.0},
+            },
+            preconvert_office_to_pdf=False,
+            num_comparison_trials=4,
+        )
+        return server, _verify_request(deliverables_dir=str(eval_dir))
+
+    @pytest.mark.asyncio
+    async def test_verify_skips_failed_reference_keeps_others(self, tmp_path) -> None:
+        """A judge failure on one reference is isolated: that reference is
+        skipped (recorded under ``ref_errors``) while the others still score."""
+        server, body = self._two_ref_server_and_body(tmp_path)
+
+        calls = {"n": 0}
+
+        def flaky_run_trials(**_kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                # First matchup (kimi) blows up the way a judge timeout would.
+                raise RuntimeError("openai.APITimeoutError: Request timed out.")
+            return {
+                "winner": "[[B]]",
+                "win_count_a": 1,
+                "win_count_b": 3,
+                "tie_count": 0,
+                "task_count": 4,
+            }
+
+        with (
+            patch("resources_servers.gdpval.comparison.run_trials", side_effect=flaky_run_trials),
+            patch("resources_servers.gdpval.app.get_server_url", return_value="http://localhost:9999"),
+            patch("resources_servers.gdpval.comparison.build_file_section", return_value=[]),
+            patch("openai.OpenAI", return_value=MagicMock()),
+        ):
+            resp = await server.verify(body)
+
+        # Only the surviving reference contributes votes.
+        assert set(resp.per_reference) == {"gpt5"}
+        assert resp.total_wins == 3
+        assert resp.total_losses == 1
+        assert resp.reward == 1.0
+        # The failed reference is recorded but does not abort the rollout.
+        assert "kimi" in resp.judge_response["ref_errors"]
+        assert resp.judge_response["reference_count"] == 1
+
+    @pytest.mark.asyncio
+    async def test_verify_all_references_fail_raises(self, tmp_path) -> None:
+        """When every matchup fails the rollout is genuinely unjudgeable and
+        verify raises (surfacing as a failure) rather than faking a reward."""
+        server, body = self._two_ref_server_and_body(tmp_path)
+
+        def always_fail(**_kwargs):
+            raise RuntimeError("500 Internal Server Error")
+
+        with (
+            patch("resources_servers.gdpval.comparison.run_trials", side_effect=always_fail),
+            patch("resources_servers.gdpval.app.get_server_url", return_value="http://localhost:9999"),
+            patch("resources_servers.gdpval.comparison.build_file_section", return_value=[]),
+            patch("openai.OpenAI", return_value=MagicMock()),
+        ):
+            with pytest.raises(RuntimeError, match="all .* judge matchup"):
+                await server.verify(body)
+
     def test_aggregate_metrics_mle_and_per_reference_stats(self) -> None:
         from nemo_gym.config_types import AggregateMetricsRequest
 
@@ -642,9 +721,11 @@ class TestMultiReference:
         assert m["comparison/ref/high/reference_elo"] == 1400.0
 
         # MLE ELO over both references.
-        assert m["comparison/elo_method"] == "bradley_terry_mle"
         assert m["comparison/num_references"] == 2
         assert abs(m["comparison/eval_elo"] - 1200.0) < 1.0
+        # Every emitted metric value must be numeric (downstream coerces each
+        # into a float Score — a string value fails parsing and fails the run).
+        assert all(isinstance(v, (int, float)) for v in m.values())
 
 
 class TestComparisonPayloadHardening:
