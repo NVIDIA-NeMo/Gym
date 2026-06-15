@@ -1,0 +1,80 @@
+{
+    "name": "example",
+    "type": "example",
+    "jsonl_fpath": "resources_servers/longmt_eval/data/example.jsonl",
+    "num_repeats": 1,
+    "gitlab_identifier": null,
+    "huggingface_identifier": null,
+    "license": "Apache 2.0",
+    "Number of examples": 5,
+    "Number of tools": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 5,
+        "Average": 3066.8,
+        "Min": 2423.0,
+        "Max": 3691.0,
+        "Standard deviation": 634.38
+    },
+    "Number of turns": {
+        "Total # non-null values": 5,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Standard deviation": 0.0
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "text": {
+        "unique_count": 4,
+        "total_count": 5
+    },
+    "source_language": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "target_language": {
+        "unique_count": 3,
+        "total_count": 5
+    },
+    "source_lang_name": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "target_lang_name": {
+        "unique_count": 3,
+        "total_count": 5
+    },
+    "doc_id": {
+        "unique_count": 4,
+        "total_count": 5
+    },
+    "seg_id": {
+        "Total # non-null values": 5,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Standard deviation": 0.0
+    },
+    "publication_date": {
+        "Total # non-null values": 5,
+        "Average": 1894.4,
+        "Min": 1886.0,
+        "Max": 1913.0,
+        "Standard deviation": 11.1
+    },
+    "url": {
+        "unique_count": 4,
+        "total_count": 5
+    }
+}

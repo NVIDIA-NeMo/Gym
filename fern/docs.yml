@@ -30,6 +30,10 @@ versions:
   - display-name: Main
     path: versions/main.yml
     slug: main
+  - display-name: "0.3.0"
+    path: versions/v0.3.0.yml
+    slug: v0.3.0
+    availability: stable
   - display-name: "0.2.1"
     path: versions/v0.2.1.yml
     slug: v0.2.1

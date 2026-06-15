@@ -23,10 +23,21 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+env:
+  # Number of parallel shards for the full server suite. Keep in sync with the matrix below.
+  NUM_SHARDS: "8"
+  # Pin uv: 0.11.20 has a resolver regression that silently drops pinned deps from
+  # `uv pip install -r requirements.txt`. 0.11.19 is the latest known-good version.
+  UV_INSTALL_URL: "https://astral.sh/uv/0.11.19/install.sh"
+
 jobs:
-  test:
-    name: Test
+  detect:
+    name: Detect changes
     runs-on: ubuntu-latest
+    outputs:
+      run_full: ${{ steps.changes.outputs.run_full }}
+      run_servers: ${{ steps.changes.outputs.run_servers }}
+      server_all_changed_files: ${{ steps.changed-files.outputs.server_all_changed_files }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -114,8 +125,20 @@ jobs:
           fi
           echo "============================================"
 
+  # Core library unit tests (run once on a full run) + the changed-servers path. The full
+  # server suite is sharded into the parallel `server-suite` matrix below.
+  test:
+    name: Test
+    needs: detect
+    if: needs.detect.outputs.run_full == 'true' || needs.detect.outputs.run_servers == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          submodules: 'recursive'
+
       - name: Cache uv dependencies
-        if: steps.changes.outputs.run_full == 'true' || steps.changes.outputs.run_servers == 'true'
         uses: actions/cache@v4
         with:
           path: ~/.cache/uv
@@ -124,7 +147,6 @@ jobs:
             uv-${{ runner.os }}-
 
       - name: Setup for test
-        if: steps.changes.outputs.run_full == 'true' || steps.changes.outputs.run_servers == 'true'
         run: |
           sudo apt-get update
           # Curl is required for setup_nvidia.sh to download uv
@@ -132,25 +154,24 @@ jobs:
           sudo apt-get install -y --no-install-recommends git curl ca-certificates
           # The flow below should be used and synced with any Docker or container related flows. There is no script here to keep it 100% explicit.
           # This is how we test and this is how you should use/consume.
-          curl -LsSf https://astral.sh/uv/install.sh | sh
+          curl -LsSf "$UV_INSTALL_URL" | sh
           uv venv --python 3.12
           source .venv/bin/activate
           uv sync --extra dev
 
       - name: Test
-        if: steps.changes.outputs.run_full == 'true' || steps.changes.outputs.run_servers == 'true'
         run: |
           source .venv/bin/activate
 
-          # Full suite: core library tests + all server tests
-          if [[ "${{ steps.changes.outputs.run_full }}" == "true" ]]; then
-            echo "Running full test suite"
+          # Full suite: core library unit tests run here once; all server tests run in the
+          # parallel `server-suite` matrix.
+          if [[ "${{ needs.detect.outputs.run_full }}" == "true" ]]; then
+            echo "Running core library unit tests (server suite runs in the sharded matrix)"
             ng_dev_test
-            ng_test_all +fail_on_total_and_test_mismatch=true +delete_venvs_after_each_test=true
 
-          # Server-only: test only the changed servers
-          elif [[ "${{ steps.changes.outputs.run_servers }}" == "true" ]]; then
-            CHANGED_SERVERS=$(echo "${{ steps.changed-files.outputs.server_all_changed_files }}" | \
+          # Server-only: test only the changed servers (typically a small set, no sharding needed)
+          elif [[ "${{ needs.detect.outputs.run_servers }}" == "true" ]]; then
+            CHANGED_SERVERS=$(echo "${{ needs.detect.outputs.server_all_changed_files }}" | \
               tr ' ' '\n' | cut -d'/' -f1-2 | sort -u)
 
             echo "Testing changed servers:"
@@ -174,8 +195,68 @@ jobs:
               echo "Some server tests failed"
               exit 1
             fi
-
-          # Docs-only: nothing to test
-          else
-            echo "No tests to run"
           fi
+
+  # Full server suite, split across NUM_SHARDS parallel runners. Only runs on a full run.
+  server-suite:
+    name: Server suite (shard ${{ matrix.shard }})
+    needs: detect
+    if: needs.detect.outputs.run_full == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          submodules: 'recursive'
+
+      - name: Cache uv dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/uv
+          key: uv-${{ runner.os }}-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            uv-${{ runner.os }}-
+
+      - name: Setup for test
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends git curl ca-certificates
+          curl -LsSf "$UV_INSTALL_URL" | sh
+          uv venv --python 3.12
+          source .venv/bin/activate
+          uv sync --extra dev
+
+      - name: Server tests (shard ${{ matrix.shard }}/${{ env.NUM_SHARDS }})
+        run: |
+          source .venv/bin/activate
+          ng_test_all \
+            +fail_on_total_and_test_mismatch=true \
+            +delete_venvs_after_each_test=true \
+            +num_shards=${{ env.NUM_SHARDS }} \
+            +shard_index=${{ matrix.shard }}
+
+  # Single aggregated gate for the sharded server suite — make this a required check
+  # (in addition to "Test") instead of the individual shard jobs. `always()` so it also
+  # produces a green result when the full suite isn't required for this change.
+  server-suite-result:
+    name: Server suite
+    needs: [detect, server-suite]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Aggregate shard results
+        run: |
+          if [[ "${{ needs.detect.outputs.run_full }}" != "true" ]]; then
+            echo "Full server suite not required for this change; nothing to aggregate."
+            exit 0
+          fi
+          if [[ "${{ needs.server-suite.result }}" == "success" ]]; then
+            echo "All server-suite shards passed."
+            exit 0
+          fi
+          echo "One or more server-suite shards failed (result: ${{ needs.server-suite.result }})."
+          exit 1
