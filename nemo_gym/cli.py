@@ -618,6 +618,31 @@ class TestAllConfig(BaseNeMoGymCLIConfig):
         default=False,
         description="Delete each server venv after its tests have been run (default: False).",
     )
+    num_shards: int = Field(
+        default=1,
+        ge=1,
+        description="Total number of shards to split the server suite across (default: 1 = no sharding). "
+        "Used to parallelize the suite across CI runners.",
+    )
+    shard_index: int = Field(
+        default=0,
+        ge=0,
+        description="Which shard (0-based) this invocation runs; must be < num_shards (default: 0).",
+    )
+
+
+def _select_shard(dir_paths: List[Path], shard_index: int, num_shards: int) -> List[Path]:
+    """Deterministically select this shard's subset of modules.
+
+    Round-robin (stride) over a sorted list spreads heavy modules across shards more evenly than
+    contiguous chunks, which balances wall-time when the suite is parallelized across CI runners.
+    """
+    if num_shards <= 1:
+        return dir_paths
+    assert 0 <= shard_index < num_shards, (
+        f"shard_index ({shard_index}) must be in [0, num_shards) for num_shards={num_shards}"
+    )
+    return sorted(dir_paths, key=str)[shard_index::num_shards]
 
 
 def test_all():  # pragma: no cover
@@ -634,6 +659,15 @@ def test_all():  # pragma: no cover
     dir_paths: List[Path] = list(map(Path, candidate_dir_paths))
     dir_paths = [p for p in dir_paths if (p / "README.md").exists()]
     print(f"Found {len(dir_paths)} modules to test:{_display_list_of_paths(dir_paths)}\n")
+
+    # Keep the full list for the total-vs-tested mismatch check below, then narrow to this shard.
+    full_dir_paths = dir_paths
+    dir_paths = _select_shard(dir_paths, test_all_config.shard_index, test_all_config.num_shards)
+    if test_all_config.num_shards > 1:
+        print(
+            f"Shard {test_all_config.shard_index + 1}/{test_all_config.num_shards}: "
+            f"testing {len(dir_paths)} of {len(full_dir_paths)} modules:{_display_list_of_paths(dir_paths)}\n"
+        )
 
     tests_passed: List[Path] = []
     tests_failed: List[Path] = []
@@ -710,10 +744,12 @@ ng_test +entrypoint={data_validation_failed[0]} +should_validate_data=true
 """)
 
     if test_all_config.fail_on_total_and_test_mismatch:
-        extra_candidates = [p for p in candidate_dir_paths if Path(p) not in dir_paths]
+        # Compare against the full (unsharded) module list — every module must be testable
+        # regardless of how many shards we split the run into.
+        extra_candidates = [p for p in candidate_dir_paths if Path(p) not in full_dir_paths]
         assert (
-            len(candidate_dir_paths) == len(dir_paths)
-        ), f"""Mismatch on the number of total modules found ({len(candidate_dir_paths)}) and the number of actual modules tested ({len(dir_paths)})!
+            len(candidate_dir_paths) == len(full_dir_paths)
+        ), f"""Mismatch on the number of total modules found ({len(candidate_dir_paths)}) and the number of actual modules tested ({len(full_dir_paths)})!
 
 Extra candidate paths:{_display_list_of_paths(extra_candidates)}"""
 
