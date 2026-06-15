@@ -815,10 +815,10 @@ def init_resources_server():  # pragma: no cover
                                                 #   e2e, rlhf, other. Change 'other' to the closest fit.
       verified: false                           # set true once the benchmark has been baselined and reviewed
 
-# Agent pairing: drives the resources server above with a model via the single-turn simple_agent.
-{server_type_name}_simple_agent:               # agent instance name (pass as +agent_name= to ng_collect_rollouts)
+# Agent pairing: connects the resources server above to a model via the built-in simple_agent.
+{server_type_name}_simple_agent:               # this agent instance's name — pass as +agent_name= to ng_collect_rollouts
   responses_api_agents:
-    simple_agent:                               # built-in single-turn agent; replace with your own agent dir if needed
+    simple_agent:                               # built-in agent: runs the model with tool calls (up to max_steps); swap for your own agent dir
       entrypoint: app.py
       resources_server:                         # the resources server this agent drives
         type: resources_servers
@@ -830,8 +830,8 @@ def init_resources_server():  # pragma: no cover
       - name: train
         type: train
         jsonl_fpath: resources_servers/{server_type_name}/data/train.jsonl   # local path / download destination
-        num_repeats: 1                          # rollouts per task (raise for pass@k / variance reduction)
-        gitlab_identifier:                      # where to fetch this split from the GitLab dataset registry
+        num_repeats: 1                          # times to repeat each example (e.g. for pass@k / mean@k)
+        gitlab_identifier:                      # where to fetch this split — GitLab registry (or use huggingface_identifier for HF Hub)
           dataset_name: {server_type_name}
           version: 0.0.1
           artifact_fpath: train.jsonl
