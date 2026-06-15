@@ -1,0 +1,56 @@
+benchflow_agent:
+  responses_api_agents:
+    benchflow_agent:
+      # Python module entrypoint loaded by NeMo Gym.
+      entrypoint: app.py
+      domain: agent
+      description: BenchFlow integration for running agentic benchmarks (e.g. SkillsBench).
+      value: Evaluate models on agentic benchmarks via BenchFlow + OpenHands in Singularity.
+      # Max concurrent /run requests handled by this agent server process.
+      concurrency: 10
+
+      # Local directory of BenchFlow task definitions (a benchmark's `tasks/` dir).
+      # Override this in the benchmark config (e.g. a cloned SkillsBench checkout).
+      tasks_dir: "responses_api_agents/benchflow_agent/data/tasks"
+
+      # BenchFlow agent harness installed and run inside the sandbox.
+      agent: openhands
+      # Sandbox user. "none" (or null) runs as root; matches `--sandbox-user none`.
+      sandbox_user: none
+      # Abort a rollout if the agent makes no tool call for this many seconds.
+      agent_idle_timeout: 1200
+      # Skills directory passed to BenchFlow ("auto" = use task-bundled skills).
+      skills_dir: auto
+      # BENCHFLOW_SKILL_NUDGE value (null disables it).
+      skill_nudge: name
+      # BenchFlow usage/cost telemetry mode: "auto" | "required" | "off".
+      # Quoted so YAML does not parse `off` as the boolean False.
+      usage_tracking: "off"
+      # API key forwarded to the agent for the model endpoint. A dummy is fine for a
+      # local vLLM server that ignores auth; OpenHands requires it to be non-empty.
+      provider_api_key: EMPTY
+      # BenchFlow per-task failure retries (distinct from NeMo Gym `num_repeats`).
+      max_retries: 2
+
+      # Directory of prebuilt Singularity .sif images. When set, each task's
+      # docker_image is overridden to "<images_dir>/<task>.sif". Leave null to use
+      # the docker_image declared in each task's task.toml.
+      images_dir: null
+
+      # Overrides deep-merged into each task's parsed task.toml before validation.
+      # Mirrors task.toml sections; extend freely. Example:
+      #   task_config_overrides:
+      #     environment:
+      #       memory_mb: 131072
+      #     agent:
+      #       timeout_sec: 1000000000.0
+      task_config_overrides: {}
+
+      # Base directory where BenchFlow writes per-run job artifacts/logs.
+      jobs_dir: "responses_api_agents/benchflow_agent/jobs"
+
+      # Model routing: points the in-container agent's LLM calls at the NeMo Gym
+      # model server alias (resolved to an OpenAI-compatible base URL).
+      model_server:
+        type: responses_api_models
+        name: policy_model

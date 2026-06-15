@@ -1,0 +1,4 @@
+-e nemo-gym[dev] @ ../../
+# Pin to the fork commit that includes the `task_config_overrides` change (Part 0).
+# Replace <FORK_COMMIT_SHA> with the SHA you create after committing that change.
+benchflow @ git+https://github.com/ludwig-n/benchflow@<FORK_COMMIT_SHA>

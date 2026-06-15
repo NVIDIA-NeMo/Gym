@@ -1,0 +1,36 @@
+# Chain to the BenchFlow agent base config.
+config_paths:
+  - responses_api_agents/benchflow_agent/configs/benchflow_agent.yaml
+
+# Inherit the base benchflow_agent server and specialize it for SkillsBench.
+# (The benchmark's agent instance name is the top-level key below; it is also the
+# `agent_ref.name` written into the dataset rows by prepare.py.)
+skillsbench_benchflow_agent:
+  _inherit_from: benchflow_agent
+  responses_api_agents:
+    benchflow_agent:
+      # SkillsBench task definitions, cloned by prepare.py (ng_prepare_benchmark).
+      tasks_dir: benchmarks/skillsbench/data/skillsbench_repo/tasks
+
+      # Directory of prebuilt per-task Singularity .sif images (named "<task>.sif").
+      # Set this to your build directory, or override at launch, e.g.:
+      #   ng_run "+config_paths=[benchmarks/skillsbench/config.yaml, <vllm>.yaml]" \
+      #     ++skillsbench_benchflow_agent.responses_api_agents.benchflow_agent.images_dir=/path/to/images
+      images_dir: "/path/to/skillsbench/sif_images"
+
+      # Deep-merged into every task's task.toml (mirrors the current modify-task-tomls.py:
+      # 128 GB memory + effectively-unbounded agent wall-clock). Extend with more fields
+      # (e.g. verifier.timeout_sec) as needed — no task.toml files are edited on disk.
+      task_config_overrides:
+        environment:
+          memory_mb: 131072
+        agent:
+          timeout_sec: 1000000000.0
+
+      datasets:
+      - name: skillsbench
+        type: benchmark
+        jsonl_fpath: benchmarks/skillsbench/data/skillsbench_benchmark.jsonl
+        prompt_config: null
+        prepare_script: benchmarks/skillsbench/prepare.py
+        num_repeats: 1
