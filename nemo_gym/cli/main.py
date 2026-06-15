@@ -16,10 +16,18 @@ import argparse
 import importlib
 import sys
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 VERSION_TARGET = "nemo_gym.cli.general:version"
+
+
+@dataclass(frozen=True)
+class Flag:
+    # Register this flag's argument(s) on a command's subparser.
+    register: Callable[[argparse.ArgumentParser], None]
+    # Turn the parsed value into leading Hydra override tokens (default: contributes nothing).
+    translate_to_hydra: Callable[[argparse.Namespace], list[str]] = lambda args: []
 
 
 @dataclass(frozen=True)
@@ -29,12 +37,8 @@ class Command:
     target: str | Callable[[argparse.Namespace, list[str]], None]
     # One-line help shown in the parent listing and atop this command's own --help.
     summary: str | None = None
-    # Hook to add this command's own flags to its subparser.
-    configure: Callable[[argparse.ArgumentParser], None] | None = None
-
-
-# Flags shared by all commands are added here once and attached via `parents=[COMMON]`.
-COMMON = argparse.ArgumentParser(add_help=False)
+    # Flags this command accepts; reusable ones (e.g. CONFIG) are shared across commands.
+    flags: tuple[Flag, ...] = field(default_factory=tuple)
 
 
 def dispatch(target: str, overrides: list[str]) -> None:
@@ -45,30 +49,52 @@ def dispatch(target: str, overrides: list[str]) -> None:
     func()
 
 
-def _toggle_command(flag: str, flag_help: str, *, off_command: str, on_command: str, summary: str) -> Command:
-    """Build a command whose target switches from `off` (default) to `on` when --<flag> is given."""
-    dest = flag.replace("-", "_")
+# Shared flag: load Gym config files. Reused by every command that reads server/benchmark configs.
+CONFIG = Flag(
+    register=lambda p: p.add_argument(
+        "--config",
+        action="append",
+        metavar="PATH",
+        help="Config file to load; repeatable. Maps to +config_paths=[...].",
+    ),
+    translate_to_hydra=lambda args: [f"+config_paths=[{','.join(args.config)}]"] if args.config else [],
+)
 
-    def configure(parser: argparse.ArgumentParser) -> None:
-        parser.add_argument(f"--{flag}", action="store_true", help=flag_help)
+# Command-specific flags read by the corresponding target callable below.
+NO_SERVE = Flag(
+    register=lambda p: p.add_argument(
+        "--no-serve",
+        action="store_true",
+        help="Collect against already-running servers instead of starting them.",
+    )
+)
 
-    def target(args: argparse.Namespace, overrides: list[str]) -> None:
-        dispatch(on_command if getattr(args, dest) else off_command, overrides)
+STORAGE = Flag(
+    register=lambda p: p.add_argument(
+        "--storage", choices=("hf", "gitlab"), default="hf", help="Storage backend (default: hf)."
+    )
+)
 
-    return Command(target=target, configure=configure, summary=summary)
+
+def _eval_run(args: argparse.Namespace, overrides: list[str]) -> None:
+    target = "nemo_gym.cli.eval:collect_rollouts" if args.no_serve else "nemo_gym.cli.eval:e2e_rollout_collection"
+    dispatch(target, overrides)
 
 
-def _choice_command(flag: str, flag_help: str, *, targets: dict[str, str], default: str, summary: str) -> Command:
-    """Build a command whose target is selected by --<flag> {choices} (default `default`)."""
-    dest = flag.replace("-", "_")
+def _dataset_upload(args: argparse.Namespace, overrides: list[str]) -> None:
+    targets = {
+        "hf": "nemo_gym.cli.dataset:upload_jsonl_dataset_to_hf_cli",
+        "gitlab": "nemo_gym.cli.dataset:upload_jsonl_dataset_cli",
+    }
+    dispatch(targets[args.storage], overrides)
 
-    def configure(parser: argparse.ArgumentParser) -> None:
-        parser.add_argument(f"--{flag}", choices=tuple(targets), default=default, help=flag_help)
 
-    def target(args: argparse.Namespace, overrides: list[str]) -> None:
-        dispatch(targets[getattr(args, dest)], overrides)
-
-    return Command(target=target, configure=configure, summary=summary)
+def _dataset_download(args: argparse.Namespace, overrides: list[str]) -> None:
+    targets = {
+        "hf": "nemo_gym.cli.dataset:download_jsonl_dataset_from_hf_cli",
+        "gitlab": "nemo_gym.cli.dataset:download_jsonl_dataset_cli",
+    }
+    dispatch(targets[args.storage], overrides)
 
 
 # One-line help for each command group, shown in `gym --help`.
@@ -82,25 +108,15 @@ GROUPS = {
 
 COMMANDS = {
     "list benchmarks": Command(target="nemo_gym.cli.eval:list_benchmarks", summary="List available benchmarks."),
-    "dataset upload": _choice_command(
-        "target",
-        "Destination backend (default: hf).",
-        targets={
-            "hf": "nemo_gym.cli.dataset:upload_jsonl_dataset_to_hf_cli",
-            "gitlab": "nemo_gym.cli.dataset:upload_jsonl_dataset_cli",
-        },
-        default="hf",
+    "dataset upload": Command(
+        target=_dataset_upload,
         summary="Upload a prepared dataset to HF (default) or GitLab.",
+        flags=(STORAGE,),
     ),
-    "dataset download": _choice_command(
-        "source",
-        "Source backend (default: hf).",
-        targets={
-            "hf": "nemo_gym.cli.dataset:download_jsonl_dataset_from_hf_cli",
-            "gitlab": "nemo_gym.cli.dataset:download_jsonl_dataset_cli",
-        },
-        default="hf",
+    "dataset download": Command(
+        target=_dataset_download,
         summary="Download a dataset from HF (default) or GitLab.",
+        flags=(STORAGE,),
     ),
     "dataset rm": Command(
         target="nemo_gym.cli.dataset:delete_jsonl_dataset_from_gitlab_cli",
@@ -117,6 +133,7 @@ COMMANDS = {
     "dataset collate": Command(
         target="nemo_gym.cli.dataset:prepare_data",
         summary="Validate and collate the dataset.",
+        flags=(CONFIG,),
     ),
     "env init": Command(
         target="nemo_gym.cli.env:init_resources_server",
@@ -125,28 +142,29 @@ COMMANDS = {
     "env resolve": Command(
         target="nemo_gym.cli.env:dump_config",
         summary="Resolve the final config from configs, flags, and overrides.",
+        flags=(CONFIG,),
     ),
     "env packages": Command(
         target="nemo_gym.cli.env:pip_list",
         summary="Print pip packages for the selected resource server.",
     ),
     "env test": Command(target="nemo_gym.cli.env:test", summary="Test the resource server(s)."),
-    "env run": Command(target="nemo_gym.cli.env:run", summary="Start the servers."),
+    "env run": Command(target="nemo_gym.cli.env:run", summary="Start the servers.", flags=(CONFIG,)),
     "env status": Command(target="nemo_gym.cli.env:status", summary="Print the server status."),
     "eval prepare": Command(
         target="nemo_gym.cli.eval:prepare_benchmark",
         summary="Prepare benchmark data and dump it to disk.",
+        flags=(CONFIG,),
     ),
-    "eval run": _toggle_command(
-        "no-serve",
-        "Collect against already-running servers instead of starting them.",
-        off_command="nemo_gym.cli.eval:e2e_rollout_collection",
-        on_command="nemo_gym.cli.eval:collect_rollouts",
+    "eval run": Command(
+        target=_eval_run,
         summary="Collate data, start servers, and collect rollouts.",
+        flags=(CONFIG, NO_SERVE),
     ),
     "eval aggregate": Command(
         target="nemo_gym.cli.eval:aggregate_rollouts",
         summary="Aggregate sharded rollout results.",
+        flags=(CONFIG,),
     ),
     "eval profile": Command(
         target="nemo_gym.cli.eval:reward_profile",
@@ -157,10 +175,10 @@ COMMANDS = {
 
 
 def _add_leaf(subparsers: argparse._SubParsersAction, name: str, command: Command) -> None:
-    leaf = subparsers.add_parser(name, parents=[COMMON], help=command.summary, description=command.summary)
+    leaf = subparsers.add_parser(name, help=command.summary, description=command.summary)
     leaf.set_defaults(_command=command)
-    if command.configure is not None:
-        command.configure(leaf)
+    for flag in command.flags:
+        flag.register(leaf)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -202,6 +220,7 @@ def main() -> None:
         args._parser.print_help()
         sys.exit(1)
 
+    overrides = [token for flag in command.flags for token in flag.translate_to_hydra(args)] + overrides
     if callable(command.target):
         command.target(args, overrides)
     else:
