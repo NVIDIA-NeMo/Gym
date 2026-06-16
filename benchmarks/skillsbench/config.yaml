@@ -3,8 +3,6 @@ config_paths:
   - responses_api_agents/benchflow_agent/configs/benchflow_agent.yaml
 
 # Inherit the base benchflow_agent server and specialize it for SkillsBench.
-# (The benchmark's agent instance name is the top-level key below; it is also the
-# `agent_ref.name` written into the dataset rows by prepare.py.)
 skillsbench_benchflow_agent:
   _inherit_from: benchflow_agent
   responses_api_agents:
