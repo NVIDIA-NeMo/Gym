@@ -10,7 +10,7 @@ skillsbench_benchflow_agent:
   responses_api_agents:
     benchflow_agent:
       # SkillsBench task definitions, cloned by prepare.py (ng_prepare_benchmark).
-      tasks_dir: benchmarks/skillsbench/data/skillsbench_repo/tasks
+      tasks_dir: ../../benchmarks/skillsbench/data/skillsbench_repo/tasks
 
       # Directory of prebuilt per-task Singularity .sif images. Files must be named "<task_name>.sif".
       images_dir: null
