@@ -21,7 +21,7 @@ Coverage targets:
   * ``verify`` cascade — symbolic-only short-circuit, judge invocation,
     judge skipped when ``should_use_judge=False``, judge prompt is
     rendered with the four UGPhysics placeholders.
-  * ``_verify_answer_with_library`` — symbolic match / miss / timeout.
+  * ``_verify_answer_with_library_async`` — symbolic match / miss.
   * ``compute_metrics`` — Tier-1 pass@k metrics + Tier-2 per-subject
     breakdown emit the expected keys for both ``judge_accuracy`` and
     ``symbolic_accuracy``.
@@ -35,7 +35,6 @@ from copy import deepcopy
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
-from math_verify.errors import TimeoutException
 from pytest import approx, fixture
 
 from nemo_gym.config_types import ModelServerRef
@@ -306,15 +305,14 @@ class TestServer:
         assert response.extracted_verdict == "FALSE"
         assert not server_mock.post.called
 
-    def test_verify_answer_with_library(self, server: UGPhysicsJudgeResourcesServer) -> None:
+    async def test_verify_answer_with_library_async(self, server: UGPhysicsJudgeResourcesServer) -> None:
         # Symbolic match.
-        assert server._verify_answer_with_library("8", "3+5=\\boxed{8}") == (approx(1.0), "8")
+        assert await server._verify_answer_with_library_async("8", "3+5=\\boxed{8}") == (approx(1.0), "8")
         # Symbolic miss (no boxed wrapper).
-        assert server._verify_answer_with_library("\\boxed{12}", "answer is 13") == (approx(0.0), "13")
-        # Timeout path.
-        timeout_mock = MagicMock(side_effect=TimeoutException())
-        server._library_verifier = timeout_mock
-        assert server._verify_answer_with_library("3", "3") == (approx(0.0), None)
+        assert await server._verify_answer_with_library_async("\\boxed{12}", "answer is 13") == (
+            approx(0.0),
+            "13",
+        )
 
     def test_score_fn_emits_both_scores(self) -> None:
         # Symbolic match → judge_accuracy reflects the final reward;

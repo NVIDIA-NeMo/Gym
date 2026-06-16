@@ -13,7 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import glob as glob_module
 import json
+import os
 from asyncio import Future, Semaphore
 from collections import Counter
 from contextlib import nullcontext
@@ -51,6 +53,63 @@ from nemo_gym.server_utils import (
 )
 
 
+# ---------------------------------------------------------------------------
+# Failure-routing sentinels (set by agent servers, read by the dispatcher).
+#
+# Background:
+#   The historical contract was "every dispatched task produces one row in
+#   the main rollouts jsonl, succeeded or failed." That contract broke
+#   resume-after-walltime: synthetic ``-failed`` rows written during a
+#   SIGTERM grace window look identical to real successes to the dedup in
+#   ``_load_from_cache`` (which keys only on (task_index, rollout_index)),
+#   so chain-hop 2 thinks failed tasks are done and never retries them.
+#
+# New contract:
+#   - Successes go to the main jsonl (``output_jsonl_fpath``).
+#   - Failures go to a sidecar (``<output_stem>_failures.jsonl``), one row
+#     per attempt, with ``_ng_failure_class`` set.
+#   - ``kill_shaped`` failures (Slurm SIGTERM, Ray actor died, OOM, ...) go
+#     NOWHERE: the absence of a row is the canonical signal. Resume's
+#     set-difference re-dispatches them naturally; per-task timeout bounds
+#     the chain-hop wallclock.
+#   - On resume, ``_load_from_cache`` reads BOTH files: main jsonl tells
+#     it what's permanently done, sidecar tells it how many attempts each
+#     non-success has consumed (capped at NEMO_GYM_MAX_ROLLOUT_ATTEMPTS,
+#     default 3). Rows flagged ``_ng_failure_terminal=True`` are never
+#     retried regardless of attempt count.
+# ---------------------------------------------------------------------------
+
+NG_FAILURE_CLASS_KEY = "_ng_failure_class"
+NG_NO_PERSIST_KEY = "_ng_no_persist"
+NG_TERMINAL_KEY = "_ng_failure_terminal"
+
+_DEFAULT_MAX_ROLLOUT_ATTEMPTS = 3
+
+
+def _get_max_rollout_attempts() -> int:
+    """Read ``NEMO_GYM_MAX_ROLLOUT_ATTEMPTS`` (positive int) or default to 3."""
+    raw = os.environ.get("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS")
+    if raw is None or raw == "":
+        return _DEFAULT_MAX_ROLLOUT_ATTEMPTS
+    try:
+        n = int(raw)
+        if n < 1:
+            raise ValueError(f"must be >= 1, got {n}")
+        return n
+    except (TypeError, ValueError) as e:
+        print(
+            f"WARNING: could not parse NEMO_GYM_MAX_ROLLOUT_ATTEMPTS={raw!r} ({e}); "
+            f"falling back to default {_DEFAULT_MAX_ROLLOUT_ATTEMPTS}.",
+            flush=True,
+        )
+        return _DEFAULT_MAX_ROLLOUT_ATTEMPTS
+
+
+def _failures_path_for(output_fpath: Path) -> Path:
+    """Sidecar path used by the dispatcher and ``_load_from_cache``."""
+    return output_fpath.with_name(output_fpath.stem + "_failures.jsonl")
+
+
 class SharedRolloutCollectionConfig(BaseNeMoGymCLIConfig):
     output_jsonl_fpath: str = Field(description="The output data jsonl file path.")
     num_samples_in_parallel: Optional[int] = Field(
@@ -63,6 +122,14 @@ class SharedRolloutCollectionConfig(BaseNeMoGymCLIConfig):
     upload_rollouts_to_wandb: bool = Field(
         default=True,
         description="Upload the rollouts to W&B. Sometimes this should be off because the rollouts are massive. Default: True",
+    )
+    disable_aggregation: bool = Field(
+        default=False,
+        description=(
+            "Skip the post-rollout aggregate-metrics computation and file write. "
+            "Used when sharding rollouts across multiple jobs that will be aggregated together "
+            "afterward by `ng_aggregate_rollouts`."
+        ),
     )
 
 
@@ -207,8 +274,12 @@ class RolloutCollectionHelper(BaseModel):
                 row[RESPONSES_CREATE_PARAMS_KEY_NAME] | responses_create_params_overrides
             )
 
-            # Resolve task index
-            row[TASK_INDEX_KEY_NAME] = row_to_task_idx.setdefault(row_str, len(row_to_task_idx))
+            # Resolve task index. Honor a caller-provided value when present (e.g. when an
+            # upstream slicer has stamped a globally-stable index across chunks so that
+            # subsequent /aggregate_metrics groupby unions chunks correctly); otherwise dedupe
+            # identical input rows to the same task index as before.
+            if TASK_INDEX_KEY_NAME not in row:
+                row[TASK_INDEX_KEY_NAME] = row_to_task_idx.setdefault(row_str, len(row_to_task_idx))
 
             for _ in range(num_repeats):
                 row = deepcopy(row)
@@ -243,8 +314,34 @@ class RolloutCollectionHelper(BaseModel):
 
         get_key = lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME])
 
-        seen_rows = set(map(get_key, results))
-        input_rows = [row for row in original_input_rows if get_key(row) not in seen_rows]
+        # Successes (and any legacy '-failed' rows written by pre-fix Gym
+        # builds) live in the main jsonl. They short-circuit dispatch.
+        successes_seen = set(map(get_key, results))
+
+        # Sidecar: one row per non-kill_shaped failure attempt. Count attempts
+        # per key + flag terminal rows so chain-hop 2 retries the right ones.
+        failures_fpath = _failures_path_for(Path(config.output_jsonl_fpath))
+        attempts_by_key: Counter = Counter()
+        terminal_keys: set = set()
+        if failures_fpath.exists():
+            with failures_fpath.open("rb") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    fr = orjson.loads(line)
+                    if TASK_INDEX_KEY_NAME not in fr or ROLLOUT_INDEX_KEY_NAME not in fr:
+                        continue
+                    k = (fr[TASK_INDEX_KEY_NAME], fr[ROLLOUT_INDEX_KEY_NAME])
+                    attempts_by_key[k] += 1
+                    if fr.get(NG_TERMINAL_KEY):
+                        terminal_keys.add(k)
+
+        max_attempts = _get_max_rollout_attempts()
+        maxed_out = {k for k, n in attempts_by_key.items() if n >= max_attempts}
+        gated = successes_seen | terminal_keys | maxed_out
+
+        input_rows = [row for row in original_input_rows if get_key(row) not in gated]
 
         key_to_row = dict(zip(map(get_key, original_input_rows), original_input_rows))
         rows = [key_to_row[get_key(result)] for result in results]
@@ -252,7 +349,10 @@ class RolloutCollectionHelper(BaseModel):
         print(
             f"""Resumed from cache. Found:
 - {len(original_input_rows)} original input rows
-- {len(rows)} rows that have already been run
+- {len(rows)} rows already done (in main jsonl)
+- {sum(attempts_by_key.values())} prior failure attempts ({len(attempts_by_key)} unique tasks) in sidecar
+- {len(terminal_keys)} sidecar-terminal (timeout_exceeded / skipped) → not retried
+- {len(maxed_out)} hit max_attempts={max_attempts} → not retried
 - {len(input_rows)} rows that still need to be run"""
         )
 
@@ -298,10 +398,12 @@ class RolloutCollectionHelper(BaseModel):
             semaphore = Semaphore(config.num_samples_in_parallel)
 
         output_fpath.parent.mkdir(exist_ok=True, parents=True)
+        failures_fpath = _failures_path_for(output_fpath)
 
         pcts_to_print = [20, 40, 60, 80, 90, 95, 98, 99, 100]
         counts_left = Counter(r[AGENT_REF_KEY_NAME]["name"] for r in input_rows)
         results_file = output_fpath.open("ab")
+        failures_file = failures_fpath.open("ab")
         for future in self.run_examples(input_rows, semaphore=semaphore):
             row, result = await future
 
@@ -309,11 +411,27 @@ class RolloutCollectionHelper(BaseModel):
             result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
             result[AGENT_REF_KEY_NAME] = row[AGENT_REF_KEY_NAME]
 
+            no_persist = bool(result.get(NG_NO_PERSIST_KEY))
+            failure_class = result.get(NG_FAILURE_CLASS_KEY)
+
             rows.append(row)
             results.append(result)
-            result_strs.append([orjson.dumps(result)])
-            results_file.write(result_strs[-1][0] + b"\n")
-            results_file.flush()
+            serialized = orjson.dumps(result)
+            result_strs.append([serialized])
+
+            if no_persist:
+                # kill_shaped: don't write anywhere. Set-difference on resume
+                # naturally re-dispatches; per-task timeout bounds wallclock.
+                pass
+            elif failure_class is not None:
+                # Non-kill_shaped failure → sidecar. The aggregator only reads
+                # the main jsonl, so this keeps win-rate uncontaminated.
+                failures_file.write(serialized + b"\n")
+                failures_file.flush()
+            else:
+                # Success → main jsonl.
+                results_file.write(serialized + b"\n")
+                results_file.flush()
 
             counts_left[row[AGENT_REF_KEY_NAME]["name"]] -= 1
             if counts_left[row[AGENT_REF_KEY_NAME]["name"]] <= 0:
@@ -331,6 +449,7 @@ class RolloutCollectionHelper(BaseModel):
                     tqdm.write(f"Examples left:\n{top_left_str}")
 
         results_file.close()
+        failures_file.close()
 
         if config.upload_rollouts_to_wandb and get_wandb_run():  # pragma: no cover
             print("Uploading rollouts to W&B. This may take a few minutes if your data is large.")
@@ -342,8 +461,15 @@ class RolloutCollectionHelper(BaseModel):
         results.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
 
         # Compute and write aggregate metrics via /aggregate_metrics on each agent server
-        print("Computing aggregate metrics")
-        aggregate_metrics_fpath = await self._call_aggregate_metrics(results, rows, output_fpath)
+        if config.disable_aggregation:
+            print(
+                "Skipping aggregate-metrics computation because disable_aggregation=True. "
+                "Run `ng_aggregate_rollouts` after all shards finish to compute the global metrics."
+            )
+            aggregate_metrics_fpath = None
+        else:
+            print("Computing aggregate metrics")
+            aggregate_metrics_fpath = await self._call_aggregate_metrics(results, rows, output_fpath)
 
         print(f"""Finished rollout collection! View results at:
 Fully materialized inputs: {config.materialized_jsonl_fpath}
@@ -496,3 +622,107 @@ def collect_rollouts():  # pragma: no cover
     rch = RolloutCollectionHelper()
 
     asyncio.run(rch.run_from_config(config))
+
+
+class RolloutAggregationConfig(BaseNeMoGymCLIConfig):
+    """
+    Aggregate metrics across rollout shards produced by `ng_collect_rollouts +disable_aggregation=true`.
+
+    Reads every JSONL file matching `input_glob`, computes aggregate metrics by POSTing to each
+    agent server's `/aggregate_metrics` endpoint over the global union of records, and writes a
+    single `<output_jsonl_fpath stem>_aggregate_metrics.json` next to the rollouts. By default
+    also concatenates all shards into `output_jsonl_fpath`.
+
+    Examples:
+
+    ```bash
+    ng_aggregate_rollouts \
+        "+config_paths=[benchmarks/aime24/config.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]" \
+        +input_glob='results/rollouts-rs*-chunk*.jsonl' \
+        +output_jsonl_fpath=results/rollouts.jsonl
+    ```
+    """
+
+    input_glob: str = Field(
+        description=(
+            "Glob pattern or comma-separated list of glob patterns matching the rollout shards "
+            "to aggregate (e.g. 'results/rollouts-rs*-chunk*.jsonl' or "
+            "'results/run1/rollouts.jsonl,results/run2/rollouts.jsonl'). Whitespace around "
+            "commas is stripped. Duplicate matches across patterns are deduplicated."
+        )
+    )
+    output_jsonl_fpath: str = Field(
+        description=(
+            "Path used to derive the aggregate-metrics output location "
+            "('<stem>_aggregate_metrics.json' next to this path) and, when merge_shards=True, "
+            "the merged-rollouts file."
+        ),
+    )
+    merge_shards: bool = Field(
+        default=True,
+        description="Concatenate the matched shard JSONLs into output_jsonl_fpath alongside the metrics file.",
+    )
+
+
+def _expand_input_glob(input_glob: str) -> List[str]:
+    """Expand a glob-or-comma-separated-globs string into a sorted, deduplicated list of paths.
+
+    Examples:
+      'results/rollouts.jsonl' -> ['results/rollouts.jsonl'] (if it exists)
+      'a/*.jsonl, b/*.jsonl'   -> matches of both patterns, deduplicated
+    """
+    patterns = [p.strip() for p in input_glob.split(",") if p.strip()]
+    seen: Dict[str, None] = {}  # preserve insertion order while deduping
+    for pattern in patterns:
+        for path in sorted(glob_module.glob(pattern)):
+            seen.setdefault(path, None)
+    return list(seen)
+
+
+class RolloutAggregationHelper(BaseModel):
+    async def run_from_config(self, config: RolloutAggregationConfig) -> Optional[Path]:
+        input_paths = _expand_input_glob(config.input_glob)
+        if not input_paths:
+            raise FileNotFoundError(f"No shards matched input_glob={config.input_glob!r}")
+        print(f"Aggregating {len(input_paths)} shard(s):")
+        for p in input_paths:
+            print(f"  - {p}")
+
+        results: List[Dict] = []
+        for shard_path in input_paths:
+            with open(shard_path, "rb") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    results.append(orjson.loads(line))
+        print(f"Loaded {len(results)} rollout record(s) from {len(input_paths)} shard(s)")
+
+        # Sort for deterministic aggregation ordering (matches run_from_config's post-collection sort)
+        results.sort(key=lambda r: (r.get(TASK_INDEX_KEY_NAME), r.get(ROLLOUT_INDEX_KEY_NAME)))
+
+        output_fpath = Path(config.output_jsonl_fpath)
+        output_fpath.parent.mkdir(parents=True, exist_ok=True)
+
+        if config.merge_shards:
+            print(f"Merging shards into {output_fpath}")
+            with output_fpath.open("wb") as out:
+                for r in results:
+                    out.write(orjson.dumps(r) + b"\n")
+
+        # `_call_aggregate_metrics` only inspects each row's AGENT_REF_KEY_NAME, which results already carry.
+        helper = RolloutCollectionHelper()
+        aggregate_metrics_fpath = await helper._call_aggregate_metrics(results, results, output_fpath)
+
+        print(f"""Finished rollout aggregation! View results at:
+Merged rollouts: {output_fpath if config.merge_shards else "<not merged>"}
+Aggregate metrics: {aggregate_metrics_fpath}""")
+
+        return aggregate_metrics_fpath
+
+
+def aggregate_rollouts():  # pragma: no cover
+    config = RolloutAggregationConfig.model_validate(get_global_config_dict())
+    rah = RolloutAggregationHelper()
+
+    asyncio.run(rah.run_from_config(config))

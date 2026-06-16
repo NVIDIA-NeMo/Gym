@@ -6,16 +6,13 @@ swe_agents:
   responses_api_agents:
     swe_agents: &swe_agents_config
       entrypoint: app.py
-      domain: coding
-      description: Software engineering tasks with OpenHands agent harness.
-      value: Improve agentic software engineering capabilities.
-
+      
       # Agent framework configuration
       agent_framework: openhands
       agent_config: responses_api_agents/swe_agents/configs/oh_config.toml
       agent_max_turns: 100
       agent_framework_repo: https://github.com/sdevare-nv/nv-OpenHands.git
-      agent_framework_commit: 87fbbca1402e6cbefe97df03e4cefce8a5ba378a  # pragma: allowlist secret
+      agent_framework_commit: 25bacbc60f7491e562022d6021e155af6b92fccb  # pragma: allowlist secret
       
       # Container configuration
       container_formatter: ???
@@ -148,11 +145,6 @@ swe_agents:
           jsonl_fpath: responses_api_agents/swe_agents/data/example.jsonl
 
 swe_agents_val:
-  responses_api_agents:
-    swe_agents:
-      <<: *swe_agents_config
-
-swe_agents_train:
   responses_api_agents:
     swe_agents:
       <<: *swe_agents_config

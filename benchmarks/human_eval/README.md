@@ -34,7 +34,7 @@ ng_run "+config_paths=[$config_paths]"
 ng_collect_rollouts \
     +agent_name=human_eval_evalplus_simple_agent \
     +input_jsonl_fpath=benchmarks/human_eval/data/human_eval_benchmark.jsonl \
-    +prompt_config=benchmarks/human_eval/prompts/default.yaml \
+    +prompt_config=benchmarks/prompts/generic/codegen.yaml \
     +output_jsonl_fpath=results/human_eval_rollouts.jsonl \
     +num_repeats=4
 ```

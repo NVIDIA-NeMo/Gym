@@ -16,5 +16,5 @@ hendrycks_math_math_with_judge_simple_agent:
       - name: hendrycks_math
         type: benchmark
         jsonl_fpath: benchmarks/hendrycks_math/data/hendrycks_math_benchmark.jsonl
-        prompt_config: benchmarks/prompts/generic_math.yaml
+        prompt_config: benchmarks/prompts/generic/math.yaml
         prepare_script: benchmarks/hendrycks_math/prepare.py
