@@ -83,7 +83,7 @@ To get the newest features and environments or to contribute, clone from git ins
 ```bash
 git clone git@github.com:NVIDIA-NeMo/Gym.git
 cd Gym
-uv venv --python 3.12 && source .venv/bin/activate
+uv venv && source .venv/bin/activate
 uv sync
 ```
 
