@@ -1,0 +1,20 @@
+config_paths:
+  - resources_servers/compute_eval/configs/compute_eval.yaml
+
+compute_eval_compute_eval_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: compute_eval
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: compute_eval
+        type: benchmark
+        jsonl_fpath: benchmarks/compute_eval/data/compute_eval_benchmark.jsonl
+        prompt_config: benchmarks/prompts/compute-eval/baseline.yaml
+        prepare_script: benchmarks/compute_eval/prepare.py
+        license: NVIDIA Compute Eval (open-source, gated HF distribution)

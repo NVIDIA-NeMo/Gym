@@ -1,0 +1,7 @@
+-e nemo-gym[dev] @ ../../
+compute-eval @ git+https://github.com/NVIDIA/compute-eval.git@e01a5d2
+# compute-eval pins tree-sitter-language-pack>=0.10.0; the latest (1.8.1) breaks
+# Parser.parse(bytes) -> "argument 'source': 'bytes' object is not an instance of
+# 'str'", which makes every verify() call raise. Pin to the newest version whose
+# parse(bytes) still works.
+tree-sitter-language-pack==1.4.0
