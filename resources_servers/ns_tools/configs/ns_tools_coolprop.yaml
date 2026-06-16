@@ -10,4 +10,3 @@ ns_tools_coolprop:
       verified: false
       description: NeMo Skills CoolProp thermophysical fluid property tool
       value: Enable fluid property lookup through NeMo Skills MCP tools
-
