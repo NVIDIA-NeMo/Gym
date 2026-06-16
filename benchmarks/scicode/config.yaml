@@ -28,3 +28,4 @@ scicode_benchmark_agent:
         # null: the agent builds per-sub-step prompts (prompt_fpath); no row-level materialization.
         prompt_config: null
         num_repeats: 3
+        license: Apache 2.0

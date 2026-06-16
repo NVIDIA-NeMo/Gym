@@ -28,3 +28,4 @@ scicode_agent:
           jsonl_fpath: resources_servers/scicode/data/example.jsonl
           prompt_config: null
           num_repeats: 1
+          license: Apache 2.0
