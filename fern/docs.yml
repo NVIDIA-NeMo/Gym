@@ -30,6 +30,10 @@ versions:
   - display-name: Main
     path: versions/main.yml
     slug: main
+  - display-name: "0.3.0"
+    path: versions/v0.3.0.yml
+    slug: v0.3.0
+    availability: stable
   - display-name: "0.2.1"
     path: versions/v0.2.1.yml
     slug: v0.2.1
@@ -47,7 +51,7 @@ redirects:
   - source: "/nemo/gym/about/concepts/configuration-system.html"
     destination: "/nemo/gym/about/concepts/configuration"
   - source: "/nemo/gym/about/concepts/core-abstractions.html"
-    destination: "/nemo/gym/about/core-components"
+    destination: "/nemo/gym/main/about/architecture"
   - source: "/nemo/gym/get-started/setup-installation.html"
     destination: "/nemo/gym/get-started/installation"
   - source: "/nemo/gym/how-to-faq.html"
@@ -99,7 +103,9 @@ redirects:
   - source: "/nemo/gym/main/get-started/rollout-collection"
     destination: "/nemo/gym/main/get-started/quickstart"
   - source: "/nemo/gym/latest/about/concepts/core-components"
-    destination: "/nemo/gym/main/about/core-components"
+    destination: "/nemo/gym/main/about/architecture"
+  - source: "/nemo/gym/main/about/core-components"
+    destination: "/nemo/gym/main/about/architecture"
   - source: "/nemo/gym/latest/about/concepts/architecture"
     destination: "/nemo/gym/main/infrastructure/engineering-notes/system-design"
   - source: "/nemo/gym/latest/about/concepts/task-verification"
