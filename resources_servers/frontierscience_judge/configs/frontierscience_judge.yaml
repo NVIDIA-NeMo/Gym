@@ -4,8 +4,8 @@ frontierscience_judge:
       entrypoint: app.py
       domain: other
       verified: false
-      description: FrontierScience science-olympiad answer grading via single-pass YES/NO LLM judge
-      value: Evaluate free-form chemistry/biology/physics olympiad answers with judge-graded equivalence
+      description: FrontierScience answer grading via single-pass LLM judge
+      value: Evaluate FrontierScience Olympiad short answers or Research rubric-scored answers
 
       judge_model_server:
         type: responses_api_models
@@ -13,6 +13,10 @@ frontierscience_judge:
       judge_responses_create_params:
         input: []
         max_output_tokens: 2048
+      judge_mode: olympiad
+      rubric_pass_score_threshold: 7.0
+      rubric_max_score: 10.0
+      judge_prompt_path: resources_servers/frontierscience_judge/prompts/judge.yaml
       use_chat_completions_for_judge: true
 
 frontierscience_judge_simple_agent:

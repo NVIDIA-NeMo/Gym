@@ -1,0 +1,33 @@
+# Source: https://openai.com/index/frontierscience/
+# FrontierScience-Research uses per-task rubrics totaling 10 points. A solution
+# is counted correct when it receives at least 7/10 rubric points.
+user: |-
+  You are grading an attempted answer to a FrontierScience research task.
+  You will be given the task, a grading rubric, and the attempted answer.
+
+  Grade strictly against the rubric. Award partial credit only when the
+  attempted answer satisfies the specific rubric item. Do not award credit for
+  vague or unsupported statements that merely gesture at the right concept.
+  The rubric totals 10 points. A solution is correct only if it receives at
+  least 7 out of 10 points.
+
+  ***
+  The task:
+  {question}
+  ***
+  The grading rubric:
+  {rubric}
+  ***
+  The attempted answer:
+  {generation}
+  ***
+
+  First, briefly explain the awarded points by rubric item. Then write the
+  total score on its own line as exactly:
+  Score: <number>/10
+
+  On the final line, write exactly one of:
+  Judgement: YES
+  Judgement: NO
+
+  Use Judgement: YES if and only if the score is at least 7/10.
