@@ -386,6 +386,7 @@ class RolloutCollectionHelper(BaseModel):
             input_rows = self._preprocess_rows_from_config(config)
             # Returned rows are sorted by (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME])
 
+            config.materialized_jsonl_fpath.parent.mkdir(exist_ok=True, parents=True)
             with config.materialized_jsonl_fpath.open("wb") as f:
                 for row in input_rows:
                     f.write(orjson.dumps(row) + b"\n")
