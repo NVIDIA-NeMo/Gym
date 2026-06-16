@@ -8,9 +8,17 @@ position: 2
 Python 3.12 is required. Refer to [Prerequisites](/get-started/prerequisites) for full system requirements.
 </Info>
 
-Clone from git to get the latest features and environments. If you intend to use NeMo Gym with NeMo RL, use the latest NGC container.
+Pip install for the latest stable release, or clone from git for the newest features and environments. If you intend to use NeMo Gym with NeMo RL, use the latest NGC container.
 
 <Tabs>
+<Tab title="Pip">
+
+```bash
+uv venv --python 3.12 && source .venv/bin/activate
+uv pip install nemo-gym
+```
+
+</Tab>
 <Tab title="Git">
 
 ```bash
