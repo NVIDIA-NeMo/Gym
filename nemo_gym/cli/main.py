@@ -75,10 +75,26 @@ STORAGE = Flag(
     )
 )
 
+ENTRYPOINT = Flag(
+    register=lambda p: p.add_argument(
+        "--resource_server", metavar="NAME", help="Name of the resource server to test. Tests all servers if omitted."
+    ),
+    translate_to_hydra=lambda args: (
+        [f"+entrypoint=resources_servers/{args.resource_server}"] if args.resource_server else []
+    ),
+)
+
 
 def _eval_run(args: argparse.Namespace, overrides: list[str]) -> None:
     target = "nemo_gym.cli.eval:collect_rollouts" if args.no_serve else "nemo_gym.cli.eval:e2e_rollout_collection"
     dispatch(target, overrides)
+
+
+def _env_test(args: argparse.Namespace, overrides: list[str]) -> None:
+    # Run a single server's tests if one was named (--resource_server is translated to +entrypoint above)
+    # or an +entrypoint override was passed directly; otherwise run the whole suite.
+    has_entrypoint = any(override.lstrip("+").split("=", 1)[0] == "entrypoint" for override in overrides)
+    dispatch("nemo_gym.cli.env:test" if has_entrypoint else "nemo_gym.cli.env:test_all", overrides)
 
 
 def _dataset_upload(args: argparse.Namespace, overrides: list[str]) -> None:
@@ -148,7 +164,11 @@ COMMANDS = {
         target="nemo_gym.cli.env:pip_list",
         summary="Print pip packages for the selected resource server.",
     ),
-    "env test": Command(target="nemo_gym.cli.env:test", summary="Test the resource server(s)."),
+    "env test": Command(
+        target=_env_test,
+        summary="Test the resource server(s); runs all if no resource server is given.",
+        flags=(ENTRYPOINT,),
+    ),
     "env run": Command(target="nemo_gym.cli.env:run", summary="Start the servers.", flags=(CONFIG,)),
     "env status": Command(target="nemo_gym.cli.env:status", summary="Print the server status."),
     "eval prepare": Command(
