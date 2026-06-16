@@ -66,9 +66,173 @@ class TestSanity:
         assert cfg.timeout == 300
         assert cfg.model == "claude-sonnet-4-6"
 
+    def test_runtime_capability_defaults(self) -> None:
+        cfg = _config()
+        assert cfg.bare is True
+        assert cfg.mcp_config is None
+        assert cfg.settings is None
+
     def test_semaphore_initialized(self) -> None:
         agent = _make_agent(concurrency=4)
         assert agent.sem._value == 4
+
+
+class TestBuildCommand:
+    def test_default_passes_bare(self) -> None:
+        agent = _make_agent()
+        cmd = agent._build_command("claude-sonnet-4-6", "do the thing")
+        assert "--bare" in cmd
+        assert "--mcp-config" not in cmd
+        # instruction is the final positional after the `--` separator
+        assert cmd[-2:] == ["--", "do the thing"]
+        assert cmd[:6] == [
+            "claude",
+            "-p",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--dangerously-skip-permissions",
+        ]
+
+    def test_bare_false_omits_flag(self) -> None:
+        agent = _make_agent(bare=False)
+        cmd = agent._build_command("m", "x")
+        assert "--bare" not in cmd
+
+    def test_mcp_config_passed_independently_of_bare(self) -> None:
+        agent = _make_agent(mcp_config="/path/to/mcp.json")
+        cmd = agent._build_command("m", "x")
+        # --mcp-config is explicit, so it coexists with the default --bare
+        assert "--bare" in cmd
+        assert cmd[cmd.index("--mcp-config") + 1] == "/path/to/mcp.json"
+
+    def test_optional_flags_threaded_through(self) -> None:
+        agent = _make_agent(
+            allowed_tools="Bash,Read",
+            disallowed_tools="Write",
+            thinking="enabled",
+            max_thinking_tokens=1024,
+            max_turns=7,
+        )
+        cmd = agent._build_command("m", "x", system_prompt="be terse")
+        assert cmd[cmd.index("--allowedTools") + 1] == "Bash,Read"
+        assert cmd[cmd.index("--disallowedTools") + 1] == "Write"
+        assert cmd[cmd.index("--thinking") + 1] == "enabled"
+        assert cmd[cmd.index("--max-thinking-tokens") + 1] == "1024"
+        assert cmd[cmd.index("--max-turns") + 1] == "7"
+        assert cmd[cmd.index("--append-system-prompt") + 1] == "be terse"
+
+
+class TestBuildSettings:
+    def test_default_disables_telemetry(self) -> None:
+        agent = _make_agent()
+        settings = agent._build_settings()
+        assert settings["env"]["CLAUDE_CODE_ENABLE_TELEMETRY"] == "0"
+        assert settings["env"]["CLAUDE_CODE_ATTRIBUTION_HEADER"] == "0"
+        assert set(settings.keys()) == {"env"}
+
+    def test_user_settings_merged_preserving_telemetry(self, tmp_path: Path) -> None:
+        settings_file = tmp_path / "settings.json"
+        settings_file.write_text(json.dumps({"env": {"FOO": "bar"}, "permissions": {"allow": ["Bash"]}}))
+        agent = _make_agent(settings=str(settings_file))
+        settings = agent._build_settings()
+        # user env layered on top of telemetry defaults
+        assert settings["env"]["FOO"] == "bar"
+        assert settings["env"]["CLAUDE_CODE_ENABLE_TELEMETRY"] == "0"
+        # non-env top-level keys passed through
+        assert settings["permissions"] == {"allow": ["Bash"]}
+
+    def test_user_settings_can_override_telemetry(self, tmp_path: Path) -> None:
+        settings_file = tmp_path / "settings.json"
+        settings_file.write_text(json.dumps({"env": {"CLAUDE_CODE_ENABLE_TELEMETRY": "1"}}))
+        agent = _make_agent(settings=str(settings_file))
+        settings = agent._build_settings()
+        assert settings["env"]["CLAUDE_CODE_ENABLE_TELEMETRY"] == "1"
+
+
+class TestSetupConfigDir:
+    def test_creates_dir_with_settings(self, tmp_path: Path) -> None:
+        agent = _make_agent()
+        with patch("responses_api_agents.claude_code_agent.app.Path.home", return_value=tmp_path):
+            config_dir = agent._setup_config_dir()
+        try:
+            settings_path = config_dir / "settings.json"
+            assert settings_path.is_file()
+            written = json.loads(settings_path.read_text())
+            assert written["env"]["CLAUDE_CODE_ENABLE_TELEMETRY"] == "0"
+        finally:
+            import shutil as _shutil
+
+            _shutil.rmtree(config_dir, ignore_errors=True)
+
+
+class TestRunClaudeCode:
+    def test_wires_command_env_and_cleans_up(self, tmp_path: Path) -> None:
+        agent = _make_agent(mcp_config="/path/to/mcp.json")
+        captured: dict = {}
+
+        class FakeProc:
+            returncode = 0
+
+            async def communicate(self):
+                return b'{"type":"result","usage":{"input_tokens":3,"output_tokens":4}}\n', b""
+
+        async def fake_exec(*cmd, **kwargs):
+            env = kwargs["env"]
+            config_dir = env["CLAUDE_CONFIG_DIR"]
+            captured["cmd"] = list(cmd)
+            captured["config_dir"] = config_dir
+            # the staged dir + settings must exist while the subprocess runs
+            captured["dir_exists_during_run"] = (Path(config_dir) / "settings.json").is_file()
+            captured["sandbox"] = env.get("IS_SANDBOX")
+            return FakeProc()
+
+        with (
+            patch("responses_api_agents.claude_code_agent.app.Path.home", return_value=tmp_path),
+            patch("responses_api_agents.claude_code_agent.app.asyncio.create_subprocess_exec", fake_exec),
+        ):
+            stdout, model = asyncio.run(agent._run_claude_code("hello", system_prompt="be terse"))
+
+        assert "claude" in captured["cmd"][0]
+        assert "--mcp-config" in captured["cmd"]
+        assert "be terse" in captured["cmd"]
+        assert captured["sandbox"] == "1"
+        assert captured["dir_exists_during_run"] is True
+        # config dir is removed after the run (no leakage between rollouts)
+        assert not Path(captured["config_dir"]).exists()
+        assert "result" in stdout
+        assert model == "claude-sonnet-4-6"
+
+    def test_timeout_returns_empty(self, tmp_path: Path) -> None:
+        agent = _make_agent(timeout=1)
+        killed = {"called": False}
+
+        class SlowProc:
+            returncode = None
+
+            def kill(self):
+                killed["called"] = True
+
+            async def communicate(self):
+                return b"", b""
+
+        async def fake_exec(*cmd, **kwargs):
+            return SlowProc()
+
+        async def fake_wait_for(coro, timeout):
+            coro.close()  # avoid un-awaited coroutine warning
+            raise asyncio.TimeoutError
+
+        with (
+            patch("responses_api_agents.claude_code_agent.app.Path.home", return_value=tmp_path),
+            patch("responses_api_agents.claude_code_agent.app.asyncio.create_subprocess_exec", fake_exec),
+            patch("responses_api_agents.claude_code_agent.app.asyncio.wait_for", fake_wait_for),
+        ):
+            stdout, model = asyncio.run(agent._run_claude_code("hello"))
+
+        assert stdout == ""
+        assert killed["called"] is True
+        assert model == "claude-sonnet-4-6"
 
 
 class TestExtractInstruction:

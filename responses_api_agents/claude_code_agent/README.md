@@ -48,7 +48,7 @@ The agent runs `claude -p` as an async subprocess for each request. Claude Code 
 
 Claude Code talks to the model via the Anthropic Messages API (`/v1/messages`). This means it can connect to Anthropic's API directly, or to any local endpoint that implements `/v1/messages` such as vLLM or Ollama. It does not go through a Gym model server, but that is the next step to extend this integration to training and additional features.
 
-The agent runs with `--bare`, which skips auto-discovery of hooks, skills, plugins, MCP servers, auto memory, and CLAUDE.md so each scripted call starts clean and fast; Claude still has access to Bash, file read, and file edit tools. To enable MCP servers or skills, remove `--bare` and add the relevant flags in `app.py`'s `_run_claude_code` command list.
+By default the agent runs with `--bare`, which skips auto-discovery of hooks, skills, plugins, MCP servers, auto memory, and CLAUDE.md so each scripted call starts clean and fast; Claude still has access to Bash, file read, and file edit tools. This isolation is the default because it keeps evals reproducible — a rollout depends only on the model, the task input, and the explicit config, not on ambient state of the host. The runtime is configurable via `bare`, `mcp_config`, and `settings` (see [Runtime capabilities](#runtime-capabilities)).
 
 Claude Code is auto-installed on first startup via npm or a local Node.js binary if not already on PATH.
 
@@ -74,6 +74,9 @@ claude_code_agent:
       claude_code_version: null
       thinking: null
       max_thinking_tokens: null
+      bare: true
+      mcp_config: null
+      settings: null
 ```
 
 - `concurrency`: max simultaneous `run()` calls
@@ -88,8 +91,22 @@ claude_code_agent:
 - `claude_code_version`: npm version to pin on auto-install (null means latest)
 - `thinking`: passed to `--thinking` (`disabled`, `adaptive`, or `enabled`)
 - `max_thinking_tokens`: passed to `--max-thinking-tokens` to cap thinking token usage
+- `bare`: when `true` (default), pass `--bare` to skip auto-discovery of skills, hooks, plugins, MCP servers, auto memory, and CLAUDE.md. Set to `false` to let Claude Code discover those from `CLAUDE_CONFIG_DIR` and the working directory
+- `mcp_config`: path to an MCP server config file, passed to `--mcp-config`. Explicit, so it works regardless of `bare`
+- `settings`: path to a settings JSON layered into the per-run `CLAUDE_CONFIG_DIR/settings.json`. Top-level keys override the defaults; the `env` block is shallow-merged so telemetry stays disabled unless you override it
 
 For the full set of Claude Code CLI flags see the [CLI reference](https://code.claude.com/docs/cli-reference).
+
+## Runtime capabilities
+
+The agent defaults to a fully isolated runtime for reproducibility, but each capability is a config knob — no `app.py` edits needed:
+
+- **Keep it isolated (default):** `bare: true`, `mcp_config: null`, `settings: null`. Identical to the original behavior.
+- **Add MCP servers:** set `mcp_config` to a config file path. `--mcp-config` is explicit, so it applies even with `bare: true`.
+- **Layer custom settings:** set `settings` to a JSON file path. It is merged into the per-run `CLAUDE_CONFIG_DIR/settings.json` (env shallow-merged onto the telemetry-disabling defaults).
+- **Enable auto-discovery (skills, hooks, plugins, memory, CLAUDE.md):** set `bare: false`. Claude Code then discovers these from `CLAUDE_CONFIG_DIR` and the working directory.
+
+The per-run `CLAUDE_CONFIG_DIR` is created fresh for each request and removed afterward, so opted-in content is staged per rollout and does not leak between runs. This is the staging seam reused by skills evaluation (placing skills under `CLAUDE_CONFIG_DIR/skills/`).
 
 ## Limitations
 

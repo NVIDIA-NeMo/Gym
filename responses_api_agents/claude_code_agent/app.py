@@ -221,6 +221,12 @@ class ClaudeCodeAgentConfig(BaseResponsesAPIAgentConfig):
     claude_code_version: Optional[str] = None
     thinking: Optional[str] = None
     max_thinking_tokens: Optional[int] = None
+    # Runtime capability knobs. The default (bare=True, no mcp_config/settings)
+    # reproduces the original isolated behavior: Claude Code skips auto-discovery
+    # of skills, hooks, plugins, MCP servers, auto memory, and CLAUDE.md.
+    bare: bool = True
+    mcp_config: Optional[str] = None
+    settings: Optional[str] = None
 
 
 class ClaudeCodeAgentRunRequest(BaseRunRequest):
@@ -256,6 +262,71 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             return self.server_client._build_server_base_url(cfg)
         return self.config.anthropic_base_url or ""
 
+    def _build_settings(self) -> dict[str, Any]:
+        """Settings written into the run's CLAUDE_CONFIG_DIR.
+
+        The base settings disable telemetry/attribution. When ``config.settings`` points at a
+        JSON file, its contents are layered on top: top-level keys override, and the ``env`` block
+        is shallow-merged so the telemetry defaults are preserved unless explicitly overridden.
+        """
+        settings: dict[str, Any] = {
+            "env": {
+                "CLAUDE_CODE_ATTRIBUTION_HEADER": "0",
+                "CLAUDE_CODE_ENABLE_TELEMETRY": "0",
+                "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+            }
+        }
+        if self.config.settings:
+            user_settings = json.loads(Path(self.config.settings).expanduser().read_text())
+            user_env = user_settings.get("env") or {}
+            settings = {**settings, **user_settings, "env": {**settings["env"], **user_env}}
+        return settings
+
+    def _setup_config_dir(self) -> Path:
+        """Create a per-run CLAUDE_CONFIG_DIR and stage settings into it.
+
+        The directory lives for the duration of a single ``_run_claude_code`` call and is the
+        staging seam for capabilities discovered from CLAUDE_CONFIG_DIR (e.g. skills under
+        ``<dir>/skills/``). The caller is responsible for removing it.
+        """
+        claude_config_dir = Path.home() / ".claude_code_agent" / uuid4().hex
+        claude_config_dir.mkdir(parents=True)
+        (claude_config_dir / "settings.json").write_text(json.dumps(self._build_settings()))
+        return claude_config_dir
+
+    def _build_command(self, model: str, instruction: str, system_prompt: Optional[str] = None) -> list[str]:
+        """Construct the ``claude`` CLI argv from config.
+
+        ``--bare`` is only passed when ``config.bare`` is True; it disables auto-discovery of
+        skills, hooks, plugins, MCP servers, auto memory, and CLAUDE.md. Explicit capabilities
+        like ``--mcp-config`` are passed regardless of ``--bare`` since they are not auto-discovered.
+        """
+        cmd = [
+            "claude",
+            "-p",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--dangerously-skip-permissions",
+        ]
+        if self.config.bare:
+            cmd.append("--bare")
+        cmd += ["--max-turns", str(self.config.max_turns), "--model", model]
+        if self.config.mcp_config:
+            cmd += ["--mcp-config", self.config.mcp_config]
+        if system_prompt:
+            cmd += ["--append-system-prompt", system_prompt]
+        if self.config.allowed_tools:
+            cmd += ["--allowedTools", self.config.allowed_tools]
+        if self.config.disallowed_tools:
+            cmd += ["--disallowedTools", self.config.disallowed_tools]
+        if self.config.thinking:
+            cmd += ["--thinking", self.config.thinking]
+        if self.config.max_thinking_tokens is not None:
+            cmd += ["--max-thinking-tokens", str(self.config.max_thinking_tokens)]
+        cmd += ["--", instruction]
+        return cmd
+
     async def _run_claude_code(self, instruction: str, system_prompt: Optional[str] = None) -> tuple[str, str]:
         """Run claude -p --output-format=stream-json and return (stdout, model_name)."""
         base_url = self._resolve_base_url()
@@ -263,21 +334,8 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         model = self.config.model if base_url else self.config.model.split("/")[-1]
         api_key = self.config.anthropic_api_key
 
-        claude_config_dir = Path.home() / ".claude_code_agent" / uuid4().hex
-        claude_config_dir.mkdir(parents=True)
+        claude_config_dir = self._setup_config_dir()
         try:
-            (claude_config_dir / "settings.json").write_text(
-                json.dumps(
-                    {
-                        "env": {
-                            "CLAUDE_CODE_ATTRIBUTION_HEADER": "0",
-                            "CLAUDE_CODE_ENABLE_TELEMETRY": "0",
-                            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
-                        }
-                    }
-                )
-            )
-
             env = {
                 **os.environ,
                 "ANTHROPIC_API_KEY": api_key,  # pragma: allowlist secret
@@ -293,30 +351,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 env["ANTHROPIC_BASE_URL"] = base_url
                 env["ANTHROPIC_AUTH_TOKEN"] = api_key or "local"
 
-            cmd = [
-                "claude",
-                "-p",
-                "--output-format",
-                "stream-json",
-                "--verbose",
-                "--dangerously-skip-permissions",
-                "--bare",
-                "--max-turns",
-                str(self.config.max_turns),
-                "--model",
-                model,
-            ]
-            if system_prompt:
-                cmd += ["--append-system-prompt", system_prompt]
-            if self.config.allowed_tools:
-                cmd += ["--allowedTools", self.config.allowed_tools]
-            if self.config.disallowed_tools:
-                cmd += ["--disallowedTools", self.config.disallowed_tools]
-            if self.config.thinking:
-                cmd += ["--thinking", self.config.thinking]
-            if self.config.max_thinking_tokens is not None:
-                cmd += ["--max-thinking-tokens", str(self.config.max_thinking_tokens)]
-            cmd += ["--", instruction]
+            cmd = self._build_command(model, instruction, system_prompt=system_prompt)
 
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
