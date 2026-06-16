@@ -1,0 +1,5 @@
+# The claude CLI is installed *inside the sandbox*
+# (npm i -g @anthropic-ai/claude-code) or baked into the task image.
+-e nemo-gym[sandbox,sandbox-ecs] @ ../../
+# Official SWE-bench harness for per-repo eval scripts + log parsing (grading).
+swebench==4.1.0

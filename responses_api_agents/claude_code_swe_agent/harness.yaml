@@ -1,0 +1,14 @@
+# Acceptance manifest — auto-discovered by tests/unit_tests/test_agent_harness_acceptance.py.
+name: claude_code_swe
+style: C  # A in-proc lib | B subprocess CLI | C sandbox+Ray
+tool: claude
+env_config: null
+agent_name: null
+supports_eval: true
+supports_rl_token_ids: true
+notes: >
+  Claude Code run INSIDE a Gym sandbox against ANY backend: ANTHROPIC_BASE_URL
+  points at a per-rollout capture proxy in translate_anthropic mode, which adapts
+  Anthropic /v1/messages to the OpenAI Chat Completions backend and records the
+  trajectory + token-ids. Result is the git diff; in-box SWE-bench verify reuses
+  the swe_agents parser. (Streaming/SSE is the remaining piece for full fidelity.)

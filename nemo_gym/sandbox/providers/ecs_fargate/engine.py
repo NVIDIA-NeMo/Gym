@@ -98,6 +98,31 @@ class VolumeMount:
 
 
 @dataclass
+class SidecarContainer:
+    """A co-located container in the task's network namespace.
+
+    Fargate task containers share one network namespace, so the main container
+    reaches the sidecar on ``localhost``. Used for the capture sidecar: the
+    real upstream key lives in *this* container's env (never the agent's), and
+    captures are written to a volume shared with the main container so the
+    harness can read them back after the run.
+    """
+
+    name: str
+    image: str
+    env: dict[str, str] = field(default_factory=dict)
+    command: list[str] | None = None
+    port: int | None = None
+    # An ephemeral task volume shared with the main container (capture handoff).
+    shared_volume_name: str | None = None
+    shared_volume_mount: str | None = None
+    # HTTP path for a localhost health check (gates main-container start).
+    health_path: str | None = None
+    # Grace before health checks count (raise it when the sidecar installs deps at startup).
+    health_start_period: int = 30
+
+
+@dataclass
 class SandboxSpec:
     """Per-problem sandbox requirements."""
 
@@ -108,6 +133,7 @@ class SandboxSpec:
     entrypoint: str | None = None
     volumes: list[VolumeMount] = field(default_factory=list)
     environment_dir: str | None = None
+    sidecars: list[SidecarContainer] = field(default_factory=list)
 
 
 logger = logging.getLogger(__name__)
@@ -746,6 +772,56 @@ def build_ssh_sidecar_container(
                 "awslogs-group": log_group,
                 "awslogs-region": log_region,
                 "awslogs-stream-prefix": f"{log_stream_prefix}-tunnel",
+                "awslogs-create-group": "true",
+            },
+        }
+    return container
+
+
+def build_sidecar_container(
+    sc: SidecarContainer,
+    *,
+    log_group: str | None = None,
+    log_region: str = "us-east-1",
+    log_stream_prefix: str = "ecs-sandbox",
+) -> dict[str, Any]:
+    """Container definition for a co-located :class:`SidecarContainer`.
+
+    Marked ``essential: False`` so a sidecar exit never kills the task; the main
+    container (the agent) defines task success. Its env (which may hold the real
+    upstream key) is isolated from the agent's container."""
+    container: dict[str, Any] = {
+        "name": sc.name,
+        "image": sc.image,
+        "essential": False,
+        "environment": [{"name": k, "value": v} for k, v in sorted(sc.env.items())],
+    }
+    if sc.command is not None:
+        container["command"] = sc.command
+    if sc.shared_volume_name and sc.shared_volume_mount:
+        container["mountPoints"] = [
+            {"sourceVolume": sc.shared_volume_name, "containerPath": sc.shared_volume_mount}
+        ]
+    if sc.health_path and sc.port:
+        # Use python (the sidecar always has it) rather than curl, which a stock image may lack.
+        probe = (
+            f"import urllib.request,sys; "
+            f"sys.exit(0 if urllib.request.urlopen('http://localhost:{sc.port}{sc.health_path}',timeout=2).status==200 else 1)"
+        )
+        container["healthCheck"] = {
+            "command": ["CMD-SHELL", f'python -c "{probe}" || exit 1'],
+            "interval": 5,
+            "timeout": 3,
+            "retries": 10,  # ECS max
+            "startPeriod": min(sc.health_start_period, 300),  # ECS max
+        }
+    if log_group:
+        container["logConfiguration"] = {
+            "logDriver": "awslogs",
+            "options": {
+                "awslogs-group": log_group,
+                "awslogs-region": log_region,
+                "awslogs-stream-prefix": f"{log_stream_prefix}-{sc.name}",
                 "awslogs-create-group": "true",
             },
         }
@@ -1883,14 +1959,17 @@ class EcsFargateSandbox:
             target["environment"] = [{"name": k, "value": v} for k, v in sorted(existing.items())]
         if log_cfg:
             target["logConfiguration"] = log_cfg
-        target["dependsOn"] = [{"containerName": "ssh-tunnel", "condition": "HEALTHY"}]
+        sidecar_containers, sidecar_volumes, sidecar_mounts, sidecar_depends = self._build_sidecars()
+        target["dependsOn"] = [{"containerName": "ssh-tunnel", "condition": "HEALTHY"}] + sidecar_depends
         containers = [c for c in containers if c.get("name") != "ssh-tunnel"]
         containers.append(sidecar_def)
+        containers.extend(sidecar_containers)
 
         task_volumes, mount_points = self._build_efs_volumes()
-        if mount_points:
+        all_mounts = (mount_points or []) + sidecar_mounts
+        if all_mounts:
             existing_mounts = target.get("mountPoints") or []
-            target["mountPoints"] = existing_mounts + mount_points
+            target["mountPoints"] = existing_mounts + all_mounts
 
         family = self._make_family_name()
         payload: dict[str, Any] = {
@@ -1909,9 +1988,10 @@ class EcsFargateSandbox:
         for k in ("taskRoleArn", "executionRoleArn", "runtimePlatform", "volumes"):
             if base.get(k) is not None:
                 payload[k] = base[k]
-        if task_volumes:
+        combined_extra_vols = (task_volumes or []) + sidecar_volumes
+        if combined_extra_vols:
             existing_vols = payload.get("volumes") or []
-            payload["volumes"] = existing_vols + task_volumes
+            payload["volumes"] = existing_vols + combined_extra_vols
         if cfg.execution_role_arn:
             payload["executionRoleArn"] = cfg.execution_role_arn
         if cfg.task_role_arn:
@@ -1924,10 +2004,11 @@ class EcsFargateSandbox:
         cfg = self._cfg
         if not cfg.execution_role_arn:
             raise RuntimeError("execution_role_arn required when no base task definition provided")
+        sidecar_containers, sidecar_volumes, sidecar_mounts, sidecar_depends = self._build_sidecars()
         container_def: dict[str, Any] = {
             "name": cfg.container_name,
             "essential": True,
-            "dependsOn": [{"containerName": "ssh-tunnel", "condition": "HEALTHY"}],
+            "dependsOn": [{"containerName": "ssh-tunnel", "condition": "HEALTHY"}] + sidecar_depends,
         }
         if image:
             container_def["image"] = image
@@ -1941,8 +2022,9 @@ class EcsFargateSandbox:
             container_def["logConfiguration"] = log_cfg
 
         task_volumes, mount_points = self._build_efs_volumes()
-        if mount_points:
-            container_def["mountPoints"] = mount_points
+        all_mounts = (mount_points or []) + sidecar_mounts
+        if all_mounts:
+            container_def["mountPoints"] = all_mounts
 
         payload: dict[str, Any] = {
             "family": self._make_family_name(),
@@ -1951,15 +2033,48 @@ class EcsFargateSandbox:
             "cpu": cfg.cpu,
             "memory": cfg.memory,
             "executionRoleArn": cfg.execution_role_arn,
-            "containerDefinitions": [container_def, sidecar_def],
+            "containerDefinitions": [container_def, sidecar_def] + sidecar_containers,
         }
-        if task_volumes:
-            payload["volumes"] = task_volumes
+        all_volumes = (task_volumes or []) + sidecar_volumes
+        if all_volumes:
+            payload["volumes"] = all_volumes
         if cfg.task_role_arn:
             payload["taskRoleArn"] = cfg.task_role_arn
         if cfg.ephemeral_storage_gib:
             payload["ephemeralStorage"] = {"sizeInGiB": cfg.ephemeral_storage_gib}
         return self._do_register(payload)
+
+    def _build_sidecars(
+        self,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+        """``(sidecar container defs, task volumes, main-container mount points,
+        main-container dependsOn entries)`` for ``spec.sidecars``."""
+        cfg = self._cfg
+        log_region = cfg.region or os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
+        containers: list[dict[str, Any]] = []
+        volumes: list[dict[str, Any]] = []
+        main_mounts: list[dict[str, Any]] = []
+        depends: list[dict[str, Any]] = []
+        for sc in self._spec.sidecars:
+            containers.append(
+                build_sidecar_container(
+                    sc,
+                    log_group=cfg.log_group,
+                    log_region=log_region,
+                    log_stream_prefix=cfg.log_stream_prefix or "ecs-sandbox",
+                )
+            )
+            depends.append(
+                {"containerName": sc.name, "condition": "HEALTHY" if (sc.health_path and sc.port) else "START"}
+            )
+            if sc.shared_volume_name and sc.shared_volume_mount:
+                volumes.append({"name": sc.shared_volume_name})
+                # Read-only in the agent container so the (untrusted) agent can read but cannot
+                # forge/delete its own captured trajectory; the sidecar mounts it read-write.
+                main_mounts.append(
+                    {"sourceVolume": sc.shared_volume_name, "containerPath": sc.shared_volume_mount, "readOnly": True}
+                )
+        return containers, volumes, main_mounts, depends
 
     def _build_efs_volumes(self) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         """Build EFS volume definitions and mount points from spec.volumes."""
@@ -2172,7 +2287,14 @@ class EcsFargateSandbox:
                 logger.info("ECS task RUNNING after %.0fs", elapsed)
                 return
             if status == "STOPPED":
-                raise RuntimeError(f"ECS task stopped: {tasks[0].get('stoppedReason')}")
+                # The task-level stoppedReason is generic ("Task failed to start"); the
+                # real cause (e.g. CannotPullContainerError) is per-container.
+                creasons = "; ".join(
+                    f"{c.get('name')}={c.get('reason') or c.get('lastStatus')}"
+                    for c in tasks[0].get("containers", [])
+                    if c.get("reason") or c.get("lastStatus") != "RUNNING"
+                )
+                raise RuntimeError(f"ECS task stopped: {tasks[0].get('stoppedReason')} [{creasons}]")
             if status != last_status:
                 logger.info("ECS task %s (%.0fs)", status, elapsed)
                 last_status = status

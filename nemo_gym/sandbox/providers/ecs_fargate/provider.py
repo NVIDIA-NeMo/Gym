@@ -62,6 +62,17 @@ def _volumes(spec: SandboxSpec) -> list[engine.VolumeMount]:
     return volumes
 
 
+def _sidecars(spec: SandboxSpec) -> list[engine.SidecarContainer]:
+    raw = spec.provider_options.get("sidecars") or []
+    sidecars = []
+    for item in raw:
+        if isinstance(item, engine.SidecarContainer):
+            sidecars.append(item)
+        else:
+            sidecars.append(engine.SidecarContainer(**item))
+    return sidecars
+
+
 def _engine_spec(spec: SandboxSpec) -> engine.SandboxSpec:
     if spec.image is None:
         raise SandboxCreateError("ECS Fargate sandbox requires SandboxSpec.image")
@@ -74,6 +85,7 @@ def _engine_spec(spec: SandboxSpec) -> engine.SandboxSpec:
         entrypoint=entrypoint,
         volumes=_volumes(spec),
         environment_dir=spec.provider_options.get("environment_dir"),
+        sidecars=_sidecars(spec),
     )
 
 

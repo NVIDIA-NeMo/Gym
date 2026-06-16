@@ -1,0 +1,4 @@
+# The agent's own CLI is installed in-box via the manifest install_command.
+-e nemo-gym[sandbox,sandbox-ecs] @ ../../
+# Official SWE-bench harness for per-repo eval scripts + log parsing (grading).
+swebench==4.1.0

@@ -370,3 +370,83 @@ def test_get_ecr_image_tag_is_content_addressed(tmp_path):
     assert tag1 == tag2 and tag1.startswith("env__")
     (tmp_path / "Dockerfile").write_text("FROM alpine")
     assert engine.ImageBuilder.get_ecr_image_tag(tmp_path, "env") != tag1
+
+
+# ── Capture sidecar container (RFC §6.3) ─────────────────────────────
+
+
+def _capture_sidecar_spec(real_key: str = "sk-REAL") -> engine.SidecarContainer:
+    return engine.SidecarContainer(
+        name="nemo-capture",
+        image="123.dkr.ecr.us-east-1.amazonaws.com/nemo-gym:latest",
+        env={"NEMO_GYM_SIDECAR_API_KEY": real_key, "NEMO_GYM_SIDECAR_PORT": "8917"},
+        command=["python", "-m", "nemo_gym.adapters.sidecar_main"],
+        port=8917,
+        shared_volume_name="nemo-capture",
+        shared_volume_mount="/nemo-capture",
+        health_path="/_proxy_health",
+    )
+
+
+def test_build_sidecar_container_is_non_essential_with_health_and_mount():
+    c = engine.build_sidecar_container(_capture_sidecar_spec())
+    assert c["name"] == "nemo-capture"
+    assert c["essential"] is False  # a sidecar exit must not kill the task
+    assert c["command"] == ["python", "-m", "nemo_gym.adapters.sidecar_main"]
+    assert c["mountPoints"] == [{"sourceVolume": "nemo-capture", "containerPath": "/nemo-capture"}]
+    # python-based probe (a stock image may lack curl); ECS-legal retries/startPeriod
+    assert "http://localhost:8917/_proxy_health" in c["healthCheck"]["command"][1]
+    assert c["healthCheck"]["retries"] == 10
+    assert c["healthCheck"]["startPeriod"] == 30
+
+
+def test_build_sidecar_container_clamps_start_period_to_ecs_max():
+    sc = engine.SidecarContainer(name="nemo-capture", image="i", port=8917, health_path="/_proxy_health", health_start_period=900)
+    assert engine.build_sidecar_container(sc)["healthCheck"]["startPeriod"] == 300  # ECS max
+
+
+def test_provider_parses_sidecars_from_provider_options():
+    from nemo_gym.sandbox.providers.ecs_fargate.provider import _sidecars
+
+    spec = SandboxSpec(image="x", provider_options={"sidecars": [{"name": "nemo-capture", "image": "i", "port": 8917}]})
+    out = _sidecars(spec)
+    assert len(out) == 1 and isinstance(out[0], engine.SidecarContainer)
+    assert out[0].name == "nemo-capture" and out[0].port == 8917
+
+
+def test_register_from_scratch_wires_sidecar_and_isolates_key():
+    cfg = engine.EcsFargateConfig(
+        region="us-east-1", execution_role_arn="arn:aws:iam::1234:role/exec", container_name="main"
+    )
+    spec = engine.SandboxSpec(image="img:latest", sidecars=[_capture_sidecar_spec("sk-REAL")])
+    sandbox = engine.EcsFargateSandbox(spec, ecs_config=cfg)
+    captured: dict = {}
+    sandbox._do_register = lambda payload: (captured.setdefault("payload", payload), "task-def-arn")[1]
+
+    sandbox._register_from_scratch(
+        image="img:latest",
+        command=None,
+        env={"OPENAI_API_KEY": "dummy"},  # the agent's box env — note: no real key here
+        sidecar_def={"name": "ssh-tunnel", "image": "alpine"},
+        log_cfg=None,
+    )
+    payload = captured["payload"]
+    by_name = {c["name"]: c for c in payload["containerDefinitions"]}
+    assert set(by_name) == {"main", "ssh-tunnel", "nemo-capture"}
+    # shared capture volume declared and mounted into the main (agent) container
+    assert {"name": "nemo-capture"} in payload["volumes"]
+    main = by_name["main"]
+    # mounted READ-ONLY in the agent container so the agent can't forge/delete its own trajectory;
+    # the sidecar mounts it read-write.
+    assert {"sourceVolume": "nemo-capture", "containerPath": "/nemo-capture", "readOnly": True} in main["mountPoints"]
+    assert {"containerName": "nemo-capture", "condition": "HEALTHY"} in main["dependsOn"]
+    cap_mounts = by_name["nemo-capture"]["mountPoints"]
+    assert {"sourceVolume": "nemo-capture", "containerPath": "/nemo-capture"} in cap_mounts  # rw (no readOnly)
+
+    # KEY ISOLATION (the whole point of B): the real key is ONLY in the sidecar
+    # container's env, never the agent container's.
+    main_env = {e["name"]: e["value"] for e in main.get("environment", [])}
+    assert "NEMO_GYM_SIDECAR_API_KEY" not in main_env
+    assert main_env.get("OPENAI_API_KEY") == "dummy"
+    cap_env = {e["name"]: e["value"] for e in by_name["nemo-capture"]["environment"]}
+    assert cap_env["NEMO_GYM_SIDECAR_API_KEY"] == "sk-REAL"

@@ -790,6 +790,12 @@ class OpenSandboxProvider:
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
         """Create one sandbox through the configured OpenSandbox path."""
+        if spec.provider_options.get("sidecars"):
+            raise NotImplementedError(
+                "opensandbox provider does not yet wire co-located sidecar containers "
+                "(the SDK's Sandbox.create() exposes no extra-containers param); use "
+                "capture_mode='proxy' (the default)."
+            )
         spec = self._with_default_image_pull_policy(_normalize_spec(spec))
         return await self._create_with_retries(spec)
 
