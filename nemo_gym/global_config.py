@@ -368,7 +368,11 @@ For example, on the command line:
     def _recursively_swap_keys_helper(
         self, dict_config: DictConfig, original_dict_config: DictConfig, frozen_dict_config: DictConfig
     ) -> None:
-        for k, v in list(dict_config.items()):
+        # items_ex(resolve=False) yields raw values: directive strings like "${inherit_from:...}"
+        # come back unresolved (so the swap detection below still matches), and a missing ('???')
+        # leaf is returned as-is instead of raising MissingMandatoryValue mid-swap. Any genuinely
+        # unset values are reported together by raise_on_missing_values, which runs after this pass.
+        for k, v in list(dict_config.items_ex(resolve=False)):
             is_delete_property = isinstance(v, DictConfig) and DELETE_KEY_KEY_NAME in v
 
             if is_delete_property:
@@ -486,12 +490,13 @@ For example, on the command line:
             with open_dict(global_config_dict):
                 global_config_dict[CONFIG_PATHS_KEY_NAME] = config_paths
 
-        # Fail fast with one actionable error if any required value is still '???' after merging
-        # all sources (CLI + env.yaml + config_paths). Otherwise the first unset value surfaces as
-        # an opaque MissingMandatoryValue deep in the pipeline (e.g. while resolving inheritance).
-        self.raise_on_missing_values(global_config_dict)
-
         self._recursively_swap_keys(global_config_dict)
+
+        # Fail fast with one actionable error if any required value is still '???'. Runs *after*
+        # _recursively_swap_keys so that _delete_key/_inherit_from/_copy have been applied first —
+        # a '???' in a deleted or overwritten branch is not reported. Otherwise the first unset
+        # value surfaces as an opaque MissingMandatoryValue deep in the pipeline.
+        self.raise_on_missing_values(global_config_dict)
 
         # TODO @bxyu-nvidia: We need a better way of handling dummy model configs
         with open_dict(global_config_dict):

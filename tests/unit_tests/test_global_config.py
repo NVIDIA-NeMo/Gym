@@ -494,6 +494,33 @@ class TestGlobalConfig:
         missing = GlobalConfigDictParser().collect_missing_value_paths(config)
         assert missing == ["a", "b.d", "e[1]"]
 
+    def test_missing_value_check_ignores_deleted_branch(self) -> None:
+        # A '???' inside a branch removed by _delete_key must not be reported as missing (the swap
+        # runs first and deletes it), while a genuinely-unset '???' elsewhere still is. Also exercises
+        # that _recursively_swap_keys no longer crashes when a live '???' is present.
+        parser = GlobalConfigDictParser()
+        config = DictConfig(
+            {
+                "policy_model": {
+                    "responses_api_models": {
+                        "_delete_key": "old_model",
+                        "old_model": {"entrypoint": "app.py", "model": "???"},
+                        "new_model": {"entrypoint": "app.py", "model": "actual-model"},
+                    }
+                },
+                "agent": {
+                    "responses_api_agents": {
+                        "simple_agent": {"entrypoint": "app.py", "container_formatter": "???"},
+                    }
+                },
+            }
+        )
+        parser._recursively_swap_keys(config)
+
+        assert "old_model" not in config.policy_model.responses_api_models
+        missing = parser.collect_missing_value_paths(config)
+        assert missing == ["agent.responses_api_agents.simple_agent.container_formatter"]
+
     def test_get_global_config_dict_raises_on_missing_values(self, monkeypatch: MonkeyPatch) -> None:
         # Clear any lingering env vars.
         monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
@@ -531,6 +558,50 @@ class TestGlobalConfig:
         # Names the full dotted path and shows how to override it.
         assert "policy_model.responses_api_models.openai_model.openai_api_key" in message
         assert "++policy_model.responses_api_models.openai_model.openai_api_key=<value>" in message
+
+    def test_get_global_config_dict_ignores_missing_in_deleted_branch(self, monkeypatch: MonkeyPatch) -> None:
+        # Regression: a '???' inside a branch removed by _delete_key must NOT raise
+        # ConfigMissingValuesError. The missing-value scan runs after _recursively_swap_keys, which
+        # deletes the branch first, so the only surviving config has no unset values. End-to-end
+        # guard through the full get_global_config_dict() parse path.
+        self._mock_versions_for_testing(monkeypatch)
+
+        monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
+        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+
+        exists_mock = MagicMock()
+        exists_mock.return_value = False
+        monkeypatch.setattr(nemo_gym.global_config.Path, "exists", exists_mock)
+
+        find_open_port_mock = MagicMock()
+        find_open_port_mock.return_value = 12345
+        monkeypatch.setattr(nemo_gym.global_config, "_find_open_port_using_range", find_open_port_mock)
+
+        hydra_main_mock = MagicMock()
+
+        def hydra_main_wrapper(fn):
+            config_dict = DictConfig(
+                {
+                    "policy_model": {
+                        "responses_api_models": {
+                            "_delete_key": "old_model",
+                            # old_model carries the only '???' and is removed before the scan.
+                            "old_model": {"entrypoint": "app.py", "openai_api_key": "???"},
+                            "new_model": {"entrypoint": "app.py"},
+                        }
+                    },
+                }
+            )
+            return lambda: fn(config_dict)
+
+        hydra_main_mock.return_value = hydra_main_wrapper
+        monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
+
+        # Must not raise — the only '???' lived in the deleted branch.
+        config = get_global_config_dict()
+        models = config["policy_model"]["responses_api_models"]
+        assert "old_model" not in models
+        assert "new_model" in models
 
     def test_get_first_server_config_dict(self) -> None:
         global_config_dict = DictConfig(
