@@ -5,6 +5,8 @@ critpt_resources_server:
       domain: other
       api_key: ${artificial_analysis_api_key}
       verified: false
+      description: Research-level physics problems scored by the Artificial Analysis API
+      value: Evaluate model performance on research-level physics reasoning
       fire_after: null  # smoke-test only; CLI override fires the batch after N real submissions
 
 critpt_agent:
@@ -24,3 +26,4 @@ critpt_agent:
           jsonl_fpath: resources_servers/critpt/data/example.jsonl
           prompt_config: benchmarks/critpt/prompts/turn1.yaml
           num_repeats: 1
+          license: Apache 2.0
