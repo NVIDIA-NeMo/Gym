@@ -66,6 +66,7 @@ jobs:
           HEAD_REF: ${{ steps.metadata.outputs.head_ref }}
         working-directory: ./fern
         run: |
+          npm run generate:library
           npx -y fern-api@latest generate --docs --preview --id "$HEAD_REF"
           # OUTPUT=$(npx -y fern-api@latest generate --docs --preview --id "$HEAD_REF" 2>&1)
           # echo "$OUTPUT"
