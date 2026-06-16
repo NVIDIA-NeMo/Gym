@@ -29,7 +29,6 @@ on:
     paths:
       - 'fern/**'
       - '.github/workflows/fern-docs-preview-build.yml'
-      - '.github/workflows/fern-docs-preview-comment.yml'
 
 permissions:
   contents: read
