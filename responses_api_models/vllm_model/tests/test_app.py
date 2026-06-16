@@ -17,7 +17,7 @@ from typing import Any, Union
 from unittest.mock import AsyncMock, MagicMock
 
 from fastapi.testclient import TestClient
-from pytest import MonkeyPatch, mark
+from pytest import MonkeyPatch, mark, raises
 
 import nemo_gym.server_utils
 from nemo_gym import PARENT_DIR
@@ -3617,3 +3617,165 @@ class TestAudioPathSplice:
                 assert "mutually exclusive" in str(e)
             else:
                 raise AssertionError(f"expected ValueError for metadata={metadata}")
+
+
+def _make_top_logprobs_model(return_token_id_information: bool) -> VLLMModel:
+    """A VLLMModel with the minimum config needed to exercise top_logprobs handling."""
+    config = VLLMModelConfig(
+        host="0.0.0.0",
+        port=8080,
+        entrypoint="",
+        name="vllm_model",
+        base_url="http://localhost:9999/v1",
+        api_key="dummy_key",  # pragma: allowlist secret
+        model="dummy_model",
+        return_token_id_information=return_token_id_information,
+        uses_reasoning_parser=False,
+        uses_interleaved_reasoning=False,
+    )
+    return VLLMModel(config=config, server_client=MagicMock(spec=ServerClient))
+
+
+class TestTopLogprobsHandling:
+    """With logprobs=True, vLLM treats top_logprobs=null as "no logprobs" but a missing
+    field as its default (0, the chosen token's logprob). A null commonly appears in
+    replayed rollout JSONL and empties the captured token ids, zeroing the training loss
+    mask. These tests cover how the model server defends against that.
+    """
+
+    def test_capture_path_pins_top_logprobs_to_zero(self) -> None:
+        """With return_token_id_information=True the server pins top_logprobs=0 regardless
+        of the inbound value, so no dataset value can defeat token-id capture."""
+        model = _make_top_logprobs_model(return_token_id_information=True)
+
+        # Inbound explicit null — the regression case.
+        result = model._preprocess_chat_completion_create_params(
+            MagicMock(),
+            {"model": "dummy_model", "messages": [{"role": "user", "content": "hi"}], "top_logprobs": None},
+        )
+        assert result["top_logprobs"] == 0
+        assert result["logprobs"] is True
+        assert result["return_tokens_as_token_ids"] is True
+
+        # Inbound non-zero value must also be overridden, not inherited.
+        result = model._preprocess_chat_completion_create_params(
+            MagicMock(),
+            {"model": "dummy_model", "messages": [{"role": "user", "content": "hi"}], "top_logprobs": 5},
+        )
+        assert result["top_logprobs"] == 0
+
+    def test_noncapture_path_strips_null_top_logprobs(self) -> None:
+        """On the non-capture path a null top_logprobs is dropped (letting vLLM apply its
+        default) rather than forwarded as null (which vLLM reads as "no logprobs")."""
+        model = _make_top_logprobs_model(return_token_id_information=False)
+
+        result = model._preprocess_chat_completion_create_params(
+            MagicMock(),
+            {
+                "model": "dummy_model",
+                "messages": [{"role": "user", "content": "hi"}],
+                "logprobs": True,
+                "top_logprobs": None,
+            },
+        )
+        assert "top_logprobs" not in result
+
+        # A genuine integer value must pass through untouched.
+        result = model._preprocess_chat_completion_create_params(
+            MagicMock(),
+            {
+                "model": "dummy_model",
+                "messages": [{"role": "user", "content": "hi"}],
+                "logprobs": True,
+                "top_logprobs": 3,
+            },
+        )
+        assert result["top_logprobs"] == 3
+
+        # An omitted field stays omitted.
+        result = model._preprocess_chat_completion_create_params(
+            MagicMock(),
+            {"model": "dummy_model", "messages": [{"role": "user", "content": "hi"}]},
+        )
+        assert "top_logprobs" not in result
+
+    def _capture_chat_completion_dict(self, logprobs: Union[dict, None]) -> dict:
+        return {
+            "id": "chtcmpl",
+            "object": "chat.completion",
+            "created": FIXED_TIME,
+            "model": "dummy_model",
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": "stop",
+                    "message": {"role": "assistant", "content": "hi", "tool_calls": None},
+                    "logprobs": logprobs,
+                }
+            ],
+        }
+
+    def test_capture_path_succeeds_with_inbound_null_top_logprobs(self) -> None:
+        """End-to-end regression: a request with top_logprobs=null no longer empties capture;
+        token ids and logprobs come back populated (and coerced to int)."""
+        model = _make_top_logprobs_model(return_token_id_information=True)
+        app = model.setup_webserver()
+
+        captured_kwargs: dict[str, Any] = {}
+
+        async def mock_create_chat_completion(**kwargs):
+            captured_kwargs.update(kwargs)
+            return self._capture_chat_completion_dict(
+                logprobs={
+                    "content": [
+                        {"token": "token_id:123", "logprob": -0.1, "bytes": None, "top_logprobs": []},
+                        {"token": "token_id:456", "logprob": -0.2, "bytes": None, "top_logprobs": []},
+                    ]
+                }
+            )
+
+        async def mock_create_tokenize(**kwargs):
+            return {"tokens": [10, 20, 30]}
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=mock_create_chat_completion)
+        mock_client.create_tokenize = AsyncMock(side_effect=mock_create_tokenize)
+        model._clients = [mock_client]
+
+        client = TestClient(app)
+        response = client.post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "hi"}], "top_logprobs": None},
+        )
+        assert response.status_code == 200
+
+        # The request forwarded to vLLM had top_logprobs pinned to 0, not the inbound null.
+        assert captured_kwargs["top_logprobs"] == 0
+
+        message = response.json()["choices"][0]["message"]
+        assert message["generation_token_ids"] == [123, 456]
+        assert message["generation_log_probs"] == [-0.1, -0.2]
+        assert message["prompt_token_ids"] == [10, 20, 30]
+
+    def test_capture_path_raises_when_logprobs_missing(self) -> None:
+        """If capture is on but vLLM returns no logprobs, fail loudly with an actionable
+        error instead of an opaque TypeError or silently empty training data."""
+        model = _make_top_logprobs_model(return_token_id_information=True)
+        app = model.setup_webserver()
+
+        async def mock_create_chat_completion(**kwargs):
+            return self._capture_chat_completion_dict(logprobs=None)
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=mock_create_chat_completion)
+        mock_client.create_tokenize = AsyncMock()
+        model._clients = [mock_client]
+
+        client = TestClient(app)
+        with raises(RuntimeError, match="Cannot extract token ids"):
+            client.post(
+                "/v1/chat/completions",
+                json={"messages": [{"role": "user", "content": "hi"}]},
+            )
+        # The tokenize endpoint must not be reached once the contract check fails.
+        mock_client.create_tokenize.assert_not_called()
