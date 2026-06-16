@@ -1,0 +1,21 @@
+custom_agent:
+  responses_api_agents:
+    custom_agent:
+      entrypoint: app.py
+      model_base_url: ${policy_base_url}
+      model: my-model
+      model_api: chat  # responses | chat | messages
+      model_api_key_env: NEMO_GYM_MODEL_API_KEY  # pragma: allowlist secret
+      sandbox:
+        ecs_fargate:
+          region: us-east-1
+      image: docker.io/org/my-agent:latest
+      workdir: /workspace
+      install_command: "pip install -U my-agent"
+      run_template: "my-agent solve --task {prompt} --base-url {base_url} --workdir {workdir}"
+      model_base_url_env: OPENAI_BASE_URL
+      api_key_env: OPENAI_API_KEY  # pragma: allowlist secret
+      capture_dir: outputs/custom_agent/captures
+      proxy_host: 0.0.0.0
+      return_token_ids: true
+      eval_command: null

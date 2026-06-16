@@ -1,0 +1,13 @@
+# Acceptance manifest — auto-discovered by tests/unit_tests/test_agent_harness_acceptance.py.
+name: codex_swe
+style: C  # A in-proc lib | B subprocess CLI | C sandbox+Ray
+tool: codex
+env_config: null
+agent_name: null
+supports_eval: true
+supports_rl_token_ids: true
+notes: >
+  codex exec --json run INSIDE a Gym sandbox (not a host subprocess); model
+  traffic is routed through a per-rollout sandbox-bound capture proxy that
+  records the trajectory and token-ids; result is the git diff; verify reuses
+  the swe_agents SWE-bench parser in-box.

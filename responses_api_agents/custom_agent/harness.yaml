@@ -1,0 +1,12 @@
+# Acceptance manifest — auto-discovered by tests/unit_tests/test_agent_harness_acceptance.py.
+name: custom
+style: C  # A in-proc lib | B subprocess CLI | C sandbox+Ray
+tool: null
+env_config: null
+agent_name: null
+supports_eval: true
+supports_rl_token_ids: true
+notes: >
+  Generic, manifest-driven sandbox CLI agent: declare image/install/run_template/
+  model_api in config and the shared SandboxCliAgent lifecycle runs it in a box
+  with the capture proxy. No per-agent Python — the YAML-only onboarding path.
