@@ -26,11 +26,9 @@
 name: "Preview Fern Docs: Comment"
 
 on:
-  pull_request:
-    paths:
-      - 'fern/**'
-      - '.github/workflows/fern-docs-preview-build.yml'
-      - '.github/workflows/fern-docs-preview-comment.yml'
+  workflow_run:
+    workflows: ["Preview Fern Docs: Build"]
+    types: [completed]
 
 permissions:
   pull-requests: write
