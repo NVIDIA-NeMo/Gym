@@ -215,6 +215,28 @@ docs = [
 ]
 
 [project.optional-dependencies]
+swe_bench_ext_deps_https = [
+    # SWE-bench-ext helper stack for running `swe-bench-ext` tasks.
+    # Install mode: GitHub HTTPS.
+    # Updated Mon Jun 15, 2026 with Mercor-Intelligence/benchmark-swe-bench-ext@latest and Mercor-Intelligence/lighthouse@latest
+    "benchmark-swe-bench-ext @ git+https://github.com/Mercor-Intelligence/benchmark-swe-bench-ext@latest",
+    "lighthouse @ git+https://github.com/Mercor-Intelligence/lighthouse@latest",
+]
+swe_bench_ext_deps_ssh = [
+    # SWE-bench-ext helper stack for running `swe-bench-ext` tasks.
+    # Install mode: GitHub SSH.
+    # Updated Mon Jun 15, 2026 with Mercor-Intelligence/benchmark-swe-bench-ext@latest and Mercor-Intelligence/lighthouse@latest
+    "benchmark-swe-bench-ext @ git+ssh://git@github.com/Mercor-Intelligence/benchmark-swe-bench-ext.git@latest",
+    "lighthouse @ git+ssh://git@github.com/Mercor-Intelligence/lighthouse.git@latest",
+]
+swe_bench_ext_deps_local = [
+    # SWE-bench-ext helper stack for running `swe-bench-ext` tasks.
+    # Install mode: local checkouts resolved by [tool.uv.sources].
+    # Updated Mon Jun 15, 2026 with local benchmark-swe-bench-ext and lighthouse checkouts
+    "benchmark-swe-bench-ext",
+    "lighthouse",
+]
+
 # We include dev dependencies as an extra since technically each server module is a consumer (which means we cannot use dependency groups, which are intended to be within a project).
 dev = [
     # Pre-commit: Used for pre-commit hooks.
@@ -261,6 +283,19 @@ build-backend = "setuptools.build_meta"
 [tool.uv]
 managed = true
 required-version = ">=0.9.30"
+conflicts = [
+    [
+        { extra = "swe_bench_ext_deps_https" },
+        { extra = "swe_bench_ext_deps_ssh" },
+        { extra = "swe_bench_ext_deps_local" },
+    ],
+]
+override-dependencies = [
+    # SWE-bench-ext pulls litellm, whose OpenAI lower bound is newer than
+    # NeMo-Gym's direct OpenAI cap. Keep the direct NeMo-Gym OpenAI bound as
+    # the resolver source of truth when optional SWE-bench-ext deps are used.
+    "openai<=2.7.2",
+]
 exclude-dependencies = [
     # Exclude unwanted dependencies from mlflow
     "alembic",
@@ -290,6 +325,10 @@ exclude-dependencies = [
     "werkzeug",
     "waitress",
 ]
+
+[tool.uv.sources]
+benchmark-swe-bench-ext = { path = "benchmark-swe-bench-ext", editable = true, extra = "swe_bench_ext_deps_local" }
+lighthouse = { path = "benchmark-swe-bench-ext/lighthouse", editable = true, extra = "swe_bench_ext_deps_local" }
 
 [tool.setuptools.package-data]
 nemo_gym = ["resources/*.py"]

@@ -38,12 +38,10 @@ from responses_api_agents.swe_agents.app import (
     NVInternalDatasetProcessor,
     OpenCodeHarnessProcessor,
     OpenHandsHarnessProcessor,
-    _extract_instance_dict,
-    _render_opencode_user_message,
-    _resolve_opencode_workspace_path,
     R2EGymDatasetProcessor,
     RunOpenHandsAgent,
     SweBenchDatasetProcessor,
+    SweBenchExtDatasetProcessor,
     SWEBenchMetrics,
     SweBenchMultilingualDatasetProcessor,
     SWEBenchVerifyResponse,
@@ -52,6 +50,9 @@ from responses_api_agents.swe_agents.app import (
     SWEBenchWrapperInstanceConfig,
     SWEBenchWrapperServerConfig,
     SWERebenchDatasetProcessor,
+    _extract_instance_dict,
+    _render_opencode_user_message,
+    _resolve_opencode_workspace_path,
     runner_ray_remote,
     update_metrics,
 )
@@ -313,6 +314,7 @@ class TestExecuteContainerCommandArgs:
         assert args.command == "echo hello"
         assert args.mode == "agent"
         assert args.timeout == 300
+        assert args.workdir is None
 
     def test_eval_mode(self) -> None:
         args = ExecuteContainerCommandArgs(
@@ -320,8 +322,10 @@ class TestExecuteContainerCommandArgs:
             expected_file_pattern="/tmp/report.json",
             mode="eval",
             timeout=600,
+            workdir="/workspace/repo",
         )
         assert args.mode == "eval"
+        assert args.workdir == "/workspace/repo"
 
 
 class TestSWEBenchWrapperInstanceConfig:
@@ -793,6 +797,165 @@ class TestSweBenchDatasetProcessor:
 
 
 ########################################
+# SweBenchExtDatasetProcessor tests
+########################################
+
+
+class TestSweBenchExtDatasetProcessor:
+    def _make_processor(self, tmpdir: str, instance_dict: dict) -> SweBenchExtDatasetProcessor:
+        config = _make_instance_config(
+            tmpdir,
+            problem_info={
+                "problem_statement": "Fix ext bug",
+                "instance_id": "owner__repo-1",
+                "base_commit": "abc123",
+                "dataset_name": "swe-bench-ext",
+                "split": "test",
+                "instance_dict": json.dumps(instance_dict),
+                "container_formatter": ["/containers/{instance_id}.sif"],
+            },
+        )
+        return SweBenchExtDatasetProcessor(config=config)
+
+    def test_builds_task_instance_from_raw_dataset_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            processor = self._make_processor(
+                tmpdir,
+                {
+                    "instance_id": "ext-task-1",
+                    "image_uri": "docker://custom/ext-task-1",
+                    "language": "python",
+                    "test_framework": "pytest",
+                    "test_command": "pytest tests/test_ext.py",
+                    "test_files": '["tests/test_ext.py"]',
+                    "FAIL_TO_PASS": '["tests/test_ext.py::test_fix"]',
+                    "PASS_TO_PASS": ["tests/test_ext.py::test_existing"],
+                    "base_commit": "def456",
+                    "problem_statement": "Fix from raw instance",
+                    "prompt_statement": "Prompt from raw instance",
+                    "rich_prompt_statement": "Rich prompt",
+                    "test_patch": "diff --git a/tests/test_ext.py b/tests/test_ext.py\n",
+                    "golden_patch": "diff --git a/pkg.py b/pkg.py\n",
+                    "requirements": ["pytest"],
+                    "interface": "cli",
+                    "knowledge_base": "kb",
+                },
+            )
+
+            task = processor._make_swe_bench_ext_task()
+            task_instance = task.task_instance
+
+            assert task_instance.id == "ext-task-1"
+            assert task_instance.image_uri == "docker://custom/ext-task-1"
+            assert task_instance.test_framework == "pytest"
+            assert task_instance.test_command == "pytest tests/test_ext.py"
+            assert task_instance.test_files == ["tests/test_ext.py"]
+            assert task_instance.fail_to_pass == ["tests/test_ext.py::test_fix"]
+            assert task_instance.pass_to_pass == ["tests/test_ext.py::test_existing"]
+            assert task_instance.base_commit == "def456"
+            assert task_instance.prompt_statement == "Prompt from raw instance"
+            assert task_instance.requirements == ["pytest"]
+
+    def test_get_run_command_uses_installed_swe_bench_ext_scripts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            processor = self._make_processor(
+                tmpdir,
+                {
+                    "test_framework": "go",
+                    "command_framework": "pytest",
+                    "parser_framework": "pytest",
+                    "test_command": "go test ./...",
+                    "test_patch": "diff --git a/tests/test_ext.py b/tests/test_ext.py\n",
+                    "FAIL_TO_PASS": ["tests/test_ext.py::test_fix"],
+                    "PASS_TO_PASS": [],
+                },
+            )
+
+            result = processor.get_run_command()
+            grading_script = (processor.config.persistent_dir / "swe_bench_ext_grading_setup.sh").read_text()
+            test_run_script = (processor.config.persistent_dir / "swe_bench_ext_test_run.sh").read_text()
+
+            assert isinstance(result, ExecuteContainerCommandArgs)
+            assert result.mode == "eval"
+            assert result.workdir == "/workspace/repo"
+            assert "swe_bench_ext_grading_setup.sh" in result.command
+            assert "swe_bench_ext_test_run.sh" in result.command
+            old_test_patch_apply = (
+                "git apply --reject --recount --ignore-space-change --ignore-whitespace /root/test_patch.diff"
+            )
+            assert old_test_patch_apply not in result.command
+            assert "=== Applying test patch ===" in grading_script
+            assert "SCRIPT_VERSION_CHECK_V2" in test_run_script
+            assert "(go test ./... -json) 2>&1" in test_run_script
+            assert not (processor.config.persistent_dir / "eval_meta" / "command_framework.txt").exists()
+            assert not (processor.config.persistent_dir / "eval_meta" / "parser_framework.txt").exists()
+
+    def test_postprocess_uses_installed_parser(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            processor = self._make_processor(
+                tmpdir,
+                {
+                    "test_framework": "pytest",
+                    "parser_framework": "go",
+                    "FAIL_TO_PASS": ["tests/test_ext.py::test_fix"],
+                    "PASS_TO_PASS": [],
+                },
+            )
+            eval_results = processor.config.persistent_dir / "eval_results"
+            eval_results.mkdir(parents=True)
+            report_file = eval_results / "report.json"
+            report_file.write_text("{}")
+            (eval_results / "test_output.log").write_text(
+                "<<<SWE_BENCH_EXT_TEST_OUTPUT_START>>>\n"
+                "tests/test_ext.py::test_fix PASSED\n"
+                "<<<SWE_BENCH_EXT_TEST_OUTPUT_END>>>\n"
+            )
+
+            processor.postprocess_after_run(report_file)
+            report = json.loads(report_file.read_text())
+            result = report["owner__repo-1"]
+
+            assert result["resolved"] is True
+            assert result["score"] == 1.0
+            assert result["framework"] == "pytest"
+            assert result["f2p_passed"] == 1
+            assert result["f2p_total"] == 1
+            assert result["test_statuses"]["tests::test_ext::test_fix"] == "pass"
+
+    def test_postprocess_setup_failure_is_unresolved(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            processor = self._make_processor(tmpdir, {"test_framework": "pytest"})
+            eval_results = processor.config.persistent_dir / "eval_results"
+            eval_results.mkdir(parents=True)
+            report_file = eval_results / "report.json"
+            report_file.write_text(json.dumps({"setup_exit_code": 2, "exit_code": 2}))
+            (eval_results / "test_output.log").write_text("SWE-bench-ext grading setup failed")
+
+            processor.postprocess_after_run(report_file)
+
+            result = json.loads(report_file.read_text())["owner__repo-1"]
+            assert result["resolved"] is False
+            assert result["patch_successfully_applied"] is False
+            assert "grading_setup_failed" in result["error"]
+
+    def test_postprocess_parse_error_is_unresolved(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            processor = self._make_processor(tmpdir, {"test_framework": "pytest"})
+            eval_results = processor.config.persistent_dir / "eval_results"
+            eval_results.mkdir(parents=True)
+            report_file = eval_results / "report.json"
+            report_file.write_text("{}")
+            (eval_results / "test_output.log").write_text("unparsed output")
+
+            with patch.object(processor, "_make_swe_bench_ext_task", side_effect=RuntimeError("boom")):
+                processor.postprocess_after_run(report_file)
+
+            result = json.loads(report_file.read_text())["owner__repo-1"]
+            assert result["resolved"] is False
+            assert "parse_error" in result["error"]
+
+
+########################################
 # SweBenchMultilingualDatasetProcessor tests
 ########################################
 
@@ -883,6 +1046,25 @@ class TestOpenHandsHarnessProcessor:
             processor = OpenHandsHarnessProcessor(config=config)
             processor.get_run_command()
             assert "cryptography" in self._read_agent_script(config)
+
+    def test_get_run_command_swe_bench_ext_sets_workdir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = _make_instance_config(
+                tmpdir,
+                problem_info={
+                    "problem_statement": "Fix",
+                    "instance_id": "owner__repo-1",
+                    "base_commit": "abc",
+                    "dataset_name": "swe-bench-ext",
+                    "split": "test",
+                    "instance_dict": "{}",
+                    "container_formatter": ["/containers/{instance_id}.sif"],
+                },
+            )
+            config.persistent_dir.mkdir(parents=True, exist_ok=True)
+            processor = OpenHandsHarnessProcessor(config=config)
+            result = processor.get_run_command()
+            assert result.workdir == "/workspace/repo"
 
     def test_get_run_command_swe_rebench(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1094,6 +1276,25 @@ class TestOpenCodeHarnessProcessor:
             assert config.problem_info["instance_id"] in script
             assert "--max-turns" not in script  # max_turns is positional
             assert str(config.agent_max_turns) in script
+
+    def test_get_run_command_swe_bench_ext_sets_workdir(self, _stub_model_server_lookup) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = self._opencode_config(
+                tmpdir,
+                problem_info={
+                    "problem_statement": "Fix",
+                    "instance_id": "owner__repo-1",
+                    "base_commit": "abc",
+                    "dataset_name": "swe-bench-ext",
+                    "split": "test",
+                    "instance_dict": "{}",
+                    "container_formatter": ["/containers/{instance_id}.sif"],
+                },
+            )
+            config.persistent_dir.mkdir(parents=True, exist_ok=True)
+            processor = OpenCodeHarnessProcessor(config=config)
+            result = processor.get_run_command()
+            assert result.workdir == "/workspace/repo"
 
     def test_get_run_command_subagents_disabled_by_default(self, _stub_model_server_lookup) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1884,7 +2085,38 @@ class TestSWEBenchWrapperBuildApptainerCommand:
             result = wrapper._build_apptainer_command(params, cmd_args)
             assert "apptainer exec" in result
             assert "--writable-tmpfs" in result
+            assert "--no-mount home,tmp,/etc/hosts,/etc/resolv.conf" in result
+            assert "bind-paths" not in result
+            assert " --cwd " not in result
+            assert "--env GRADLE_OPTS=-Dorg.gradle.daemon=false" in result
             assert params.container in result
+
+    def test_workdir_and_detected_cache_env_args(self, monkeypatch) -> None:
+        wrapper = _create_wrapper(monkeypatch)
+        probe = MagicMock(return_value=("/home/user/.m2", "/home/user/.gradle"))
+        monkeypatch.setattr(wrapper, "_probe_apptainer_cache_dirs", probe)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            params = _make_instance_config(tmpdir)
+            params.persistent_dir.mkdir(parents=True, exist_ok=True)
+
+            oh_dir = Path(params.openhands_setup_dir) / "OpenHands"
+            for subdir in [".eval_sessions", "logs", "evaluation/oh"]:
+                (oh_dir / subdir).mkdir(parents=True, exist_ok=True)
+            (Path(params.openhands_setup_dir) / "miniforge3").mkdir(parents=True, exist_ok=True)
+
+            cmd_args = ExecuteContainerCommandArgs(
+                command="echo hello",
+                expected_file_pattern="/tmp/*.json",
+                mode="agent",
+                timeout=300,
+                workdir="/workspace/repo",
+            )
+            result = wrapper._build_apptainer_command(params, cmd_args)
+
+            assert "--cwd /workspace/repo" in result
+            assert "--env GRADLE_USER_HOME=/home/user/.gradle" in result
+            assert "--env MAVEN_OPTS=-Dmaven.repo.local=/home/user/.m2/repository" in result
+            probe.assert_called_once_with(params, cmd_args)
 
     def test_eval_mode_swebench_mounts(self, monkeypatch) -> None:
         wrapper = _create_wrapper(monkeypatch)

@@ -105,7 +105,7 @@ Selection is driven by `problem_info["dataset_name"]` (set in the input JSONL). 
 | contains `SWE-bench_Multilingual`        | `SweBenchMultilingualDatasetProcessor`   | `setup_scripts/swebench_multilingual.sh` (Kipok fork) | Same harness as SWE-bench but built from the multilingual fork                                       |
 | contains `R2E-Gym`                       | `R2EGymDatasetProcessor`                 | `setup_scripts/r2e_gym.sh` (sdevare-nv fork)   | `r2egym.agenthub.run.run_local_evaluation`                                                                 |
 | contains `SWE-rebench`                   | `SWERebenchDatasetProcessor`             | `setup_scripts/swe_rebench.sh` (V2)            | In-container `git apply` + `test_cmd`; **host-side** parsing via SWE-rebench's `log_parsers`               |
-| `swe-bench-ext`                          | `SweBenchExtDatasetProcessor`            | none (uses `swe_bench_ext` helper module)      | Run framework-specific test command via `lighthouse`-style flags; host-side parsing via `parse_and_check_tests` |
+| `swe-bench-ext`                          | `SweBenchExtDatasetProcessor`            | none (uses installed `swe_bench_ext.task`)     | Grading setup, test run script, and host-side parsing are delegated to installed `SweBenchExtTask` |
 | `nv-internal-1`                          | `NVInternalDatasetProcessor`             | none                                            | Synthesizes an env+`run_script.sh`+`parsing_script.py` from the instance's docker `ENV` lines and `before_repo_set_cmd`; tests gated by `f2p ⊆ passed ∧ p2p ⊆ passed` |
 
 All harnesses are installed lazily on first use and locked across nodes with `mkdir`-based cross-node locks (`_setup_directory_lock`) — atomic on Lustre/NFS where `fcntl.flock` is not. Stale locks older than 1h are auto-broken.
@@ -373,6 +373,40 @@ apt install -y wget && cd /tmp && \
     apt install -y ./apptainer_1.4.1_amd64.deb
 apptainer --version
 ```
+
+### Prerequisites — SWE-bench-ext dependencies
+
+SWE-bench-ext tasks require the Mercor `benchmark-swe-bench-ext` and `lighthouse` packages in the NeMo-Gym environment. Install exactly one of the optional dependency bundles from the NeMo-Gym repo root:
+
+```bash
+# HTTPS mode
+uv pip install -e ".[swe_bench_ext_deps_https]"
+
+# SSH mode, if your GitHub SSH keys have access
+uv pip install -e ".[swe_bench_ext_deps_ssh]"
+
+# Local mode, for checkouts inside this Gym repo
+uv pip install -e ".[swe_bench_ext_deps_local]"
+```
+
+For local mode, the expected layout is:
+
+```text
+Gym/
+├── pyproject.toml
+└── benchmark-swe-bench-ext/
+    └── lighthouse/
+```
+
+From the Gym repo root:
+
+```bash
+git clone https://github.com/Mercor-Intelligence/benchmark-swe-bench-ext.git
+git clone https://github.com/Mercor-Intelligence/lighthouse.git benchmark-swe-bench-ext/lighthouse
+uv pip install -e ".[swe_bench_ext_deps_local]"
+```
+
+The local bundle is resolved through `pyproject.toml`'s `[tool.uv.sources]`, so use `uv pip install` for this mode rather than bare `pip install`.
 
 ### Step 1 — configure the model
 
