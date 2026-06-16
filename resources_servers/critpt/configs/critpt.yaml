@@ -1,0 +1,29 @@
+critpt_resources_server:
+  resources_servers:
+    critpt:
+      entrypoint: app.py
+      domain: other
+      api_key: ${artificial_analysis_api_key}
+      verified: false
+      description: Research-level physics problems scored by the Artificial Analysis API
+      value: Evaluate model performance on research-level physics reasoning
+      fire_after: null  # smoke-test only; CLI override fires the batch after N real submissions
+
+critpt_agent:
+  responses_api_agents:
+    critpt_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: critpt_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      turn2_prompt_fpath: benchmarks/critpt/prompts/turn2.yaml
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/critpt/data/example.jsonl
+          prompt_config: benchmarks/critpt/prompts/turn1.yaml
+          num_repeats: 1
+          license: Apache 2.0
