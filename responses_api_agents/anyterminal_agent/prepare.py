@@ -63,10 +63,12 @@ def _load_task_config(task_dir: Path) -> dict:
     with open(config_path, "rb") as f:
         config = tomllib.load(f)
 
-    docker_image = (config.get("environment") or {}).get("docker_image", "ubuntu:22.04")
+    env = config.get("environment") or {}
+    docker_image = env.get("docker_image", "ubuntu:22.04")
     problem_statement = instruction_path.read_text() if instruction_path.exists() else ""
     agent_timeout = (config.get("agent") or {}).get("timeout_sec", None)
     verifier_timeout = (config.get("verifier") or {}).get("timeout_sec", None)
+    resources = _parse_env_resources(env)
 
     # Parse last WORKDIR from Dockerfile (if present).
     workdir = None
@@ -82,6 +84,38 @@ def _load_task_config(task_dir: Path) -> dict:
         "agent_timeout_sec": agent_timeout,
         "verifier_timeout_sec": verifier_timeout,
         "workdir": workdir,
+        **resources,
+    }
+
+
+def _mem_to_mb(val) -> int | None:
+    """Normalize a memory/storage spec to MB. Accepts an int (already MB, e.g. ``memory_mb``)
+    or a string with a unit (``"2G"``, ``"512M"``, ``"10G"``)."""
+    if val is None:
+        return None
+    if isinstance(val, (int, float)):
+        return int(val)
+    s = str(val).strip().upper().rstrip("B")
+    units = {"K": 1 / 1024, "M": 1.0, "G": 1024.0, "T": 1024.0 * 1024}
+    if s and s[-1] in units:
+        return int(float(s[:-1]) * units[s[-1]])
+    return int(float(s))  # bare number → assume MB
+
+
+def _parse_env_resources(env: dict) -> dict:
+    """Pull cpu/memory/storage/gpu limits from a task.toml ``[environment]`` table, tolerating
+    both schema v1.0 (``memory = "2G"``) and v1.1 (``memory_mb = 2048``)."""
+    memory_mb = env.get("memory_mb")
+    if memory_mb is None:
+        memory_mb = _mem_to_mb(env.get("memory"))
+    storage_mb = env.get("storage_mb")
+    if storage_mb is None:
+        storage_mb = _mem_to_mb(env.get("storage"))
+    return {
+        "cpus": env.get("cpus"),
+        "memory_mb": memory_mb,
+        "storage_mb": storage_mb,
+        "gpus": env.get("gpus", 0),
     }
 
 
@@ -129,6 +163,10 @@ def _to_gym_row(task_dir: Path, task_cfg: dict) -> dict:
                 if task_cfg.get("verifier_timeout_sec") is not None
                 else None,
                 "workdir": task_cfg.get("workdir"),
+                "cpus": str(task_cfg["cpus"]) if task_cfg.get("cpus") is not None else None,
+                "memory_mb": str(task_cfg["memory_mb"]) if task_cfg.get("memory_mb") is not None else None,
+                "storage_mb": str(task_cfg["storage_mb"]) if task_cfg.get("storage_mb") is not None else None,
+                "gpus": str(task_cfg["gpus"]) if task_cfg.get("gpus") is not None else None,
             },
         },
     }

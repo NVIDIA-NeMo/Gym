@@ -273,7 +273,9 @@ class AnyTerminalAgentConfig(BaseResponsesAPIAgentConfig):
     )
     tb_agent_timeout: int = 1800
     tb_eval_timeout: int = 300
-    apptainer_memory_limit_mb: int = 32768
+    apptainer_memory_limit_mb: int = 32768  # fallback container memory cap when a task omits memory_mb
+    agent_overhead_mb: int = 2048  # extra container memory on top of the task's memory_mb for the
+    # in-container agent harness
     concurrency: int = 256
 
 
@@ -497,6 +499,13 @@ class AnyTerminalAgent(SimpleResponsesAPIAgent):
         env: str = "",
         workdir: Optional[str] = None,
     ) -> str:
+        # NOTE: we do NOT hard-enforce the task's cpu/memory envelope on the container. Apptainer
+        # cgroup flags (--cpus/--memory) are unusable here — rootless cgroups don't work under
+        # --fakeroot ("cannot use cgroups - rootless cgroups is not usable in fakeroot mode") — and
+        # per-task `ulimit -v` is unsafe (it caps virtual memory, which crashes torch/CUDA tasks at
+        # import). So the container keeps the generous global virtual-memory cap, and the task's
+        # cpu/memory footprint is only *reserved* in the Ray scheduler (_ray_resource_opts) to avoid
+        # host oversubscription — not enforced as a hard per-task limit.
         pwd_flag = f"--pwd {shlex.quote(workdir)} " if workdir else ""
         cmd = (
             f"apptainer exec --writable-tmpfs --fakeroot --cleanenv --pid --no-mount home,tmp,bind-paths "
@@ -619,8 +628,34 @@ class AnyTerminalAgent(SimpleResponsesAPIAgent):
             print(f"[{params.task_name}] exception: see {tb_path}", file=sys.stderr)
             raise
 
+    @staticmethod
+    def _ray_resource_opts(params: AnyTerminalInstanceConfig) -> dict:
+        """Reserve the container's cpu/memory footprint in the Ray scheduler so concurrent containers
+        don't oversubscribe the host — the main cause of the compute-starved "productive-but-timed-out"
+        runs. The launcher task mostly awaits the apptainer subprocess, so these reservations are a
+        proxy for the container's real resource use. Since rootless cgroups can't hard-cap the
+        container here, this scheduling reservation is our only resource-isolation lever. Memory
+        reserves the task's memory_mb + agent_overhead_mb (the in-container Hermes harness)."""
+
+        def _f(key):
+            v = params.problem_info.get(key)
+            try:
+                return float(v) if v is not None else None
+            except (TypeError, ValueError):
+                return None
+
+        cpus = _f("cpus")
+        mem_mb = _f("memory_mb")
+        opts: dict = {"num_cpus": cpus if (cpus and cpus > 0) else 1}
+        if mem_mb and mem_mb > 0:
+            opts["memory"] = (int(mem_mb) + params.agent_overhead_mb) * 1024 * 1024
+        gpus = _f("gpus") or 0
+        if gpus > 0:
+            opts["num_gpus"] = gpus
+        return opts
+
     async def _inner_responses(self, params: AnyTerminalInstanceConfig) -> NeMoGymResponse:
-        await _run_remote.remote(params.model_dump())
+        await _run_remote.options(**self._ray_resource_opts(params)).remote(params.model_dump())
 
         persisted = TerminalBenchMetrics.model_validate_json(params.metrics_fpath.read_text())
         mask_sample = bool(persisted.container_timed_out or persisted.agent_timed_out)
