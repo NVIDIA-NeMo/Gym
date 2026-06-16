@@ -12,15 +12,10 @@ skillsbench_benchflow_agent:
       # SkillsBench task definitions, cloned by prepare.py (ng_prepare_benchmark).
       tasks_dir: benchmarks/skillsbench/data/skillsbench_repo/tasks
 
-      # Directory of prebuilt per-task Singularity .sif images (named "<task>.sif").
-      # Set this to your build directory, or override at launch, e.g.:
-      #   ng_run "+config_paths=[benchmarks/skillsbench/config.yaml, <vllm>.yaml]" \
-      #     ++skillsbench_benchflow_agent.responses_api_agents.benchflow_agent.images_dir=/path/to/images
+      # Directory of prebuilt per-task Singularity .sif images. Files must be named "<task_name>.sif".
       images_dir: "/path/to/skillsbench/sif_images"
 
-      # Deep-merged into every task's task.toml (mirrors the current modify-task-tomls.py:
-      # 128 GB memory + effectively-unbounded agent wall-clock). Extend with more fields
-      # (e.g. verifier.timeout_sec) as needed — no task.toml files are edited on disk.
+      # Overrides for every task's task.toml.
       task_config_overrides:
         environment:
           memory_mb: 131072

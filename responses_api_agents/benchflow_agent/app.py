@@ -12,16 +12,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""NeMo Gym agent that runs a single BenchFlow task per `/run` request.
+"""
+NeMo Gym environment for BenchFlow: https://github.com/benchflow-ai/benchflow.
 
-BenchFlow does not implement its own agent — it installs an existing harness
-(e.g. OpenHands) into a sandbox and lets it drive the model. This server wraps
-BenchFlow's Python ``Evaluation`` API: each NeMo Gym ``/run`` call runs exactly
-one task (``include_tasks={task}``, ``concurrency=1``) in a Singularity sandbox,
-extracts the scalar reward, and returns a NeMo Gym response. Eval-only.
-
-``benchflow`` is imported lazily inside ``_run_benchflow_task()`` so this module
-stays importable (e.g. for unit tests that mock it) without the package installed.
+Each `/run` call runs exactly one task using BenchFlow's Python API,
+extracts the scalar reward, and returns a NeMo Gym response.
 """
 
 import re
@@ -54,24 +49,23 @@ from responses_api_agents.benchflow_agent.utils import BenchFlowAgentUtils
 
 
 class BenchFlowAgentConfig(BaseResponsesAPIAgentConfig):
-    # Max concurrent /run requests handled by this agent server process.
+    # Max number of concurrent `/run` requests handled by NeMo Gym.
     concurrency: int
 
-    # NeMo Gym model server reference used to resolve the OpenAI-compatible base URL
-    # that the in-container agent harness (e.g. OpenHands) calls back to.
+    # NeMo Gym model server reference.
     model_server: ModelServerRef
 
     # Local directory of BenchFlow task definitions (e.g. a SkillsBench `tasks/` dir).
     tasks_dir: str
 
-    # Base directory where BenchFlow writes per-run job artifacts/logs.
+    # Output directory for BenchFlow results/artifacts/logs.
     jobs_dir: str = "jobs"
 
     # BenchFlow agent harness to install and run in the sandbox.
     agent: str = "openhands"
 
-    # Extra environment variables forwarded to the agent harness. The provider base
-    # URL and API key are injected automatically at request time (see run()).
+    # Extra environment variables forwarded to the agent harness.
+    # The LLM server base URL and API key are passed automatically.
     agent_env: dict[str, str] = Field(default_factory=dict)
 
     # Sandbox user. None (or "none") runs as root; matches `--sandbox-user none`.
@@ -80,7 +74,7 @@ class BenchFlowAgentConfig(BaseResponsesAPIAgentConfig):
     # Abort a rollout if the agent makes no tool call for this many seconds.
     agent_idle_timeout: Optional[int] = 1200
 
-    # Skills directory passed to BenchFlow ("auto" = use task-bundled skills).
+    # Skills directory passed to BenchFlow ("auto" = use task-bundled skills, None = do not use skills).
     skills_dir: Optional[str] = "auto"
 
     # BENCHFLOW_SKILL_NUDGE value (None disables it). "name" matches the current eval.
@@ -89,22 +83,16 @@ class BenchFlowAgentConfig(BaseResponsesAPIAgentConfig):
     # BenchFlow usage/cost telemetry mode: "auto" | "required" | "off".
     usage_tracking: str = "off"
 
-    # API key forwarded to the agent for the model endpoint. A dummy value is fine for
-    # a local vLLM server that ignores auth; OpenHands requires it to be non-empty.
+    # API key for the LLM server.
     provider_api_key: str = "EMPTY"
 
-    # BenchFlow per-task failure retries (RetryConfig.max_retries). Distinct from NeMo
-    # Gym `num_repeats` (which samples for mean@k). Default matches BenchFlow's default.
+    # How many times BenchFlow should retry a task on error.
     max_retries: int = 2
 
-    # Overrides deep-merged into each task's parsed task.toml, mirroring task.toml
-    # sections, e.g. {"environment": {"memory_mb": 131072}, "agent": {"timeout_sec": ...}}.
-    # Requires a BenchFlow build with task_config_overrides support.
+    # Overrides to apply to every task's task.toml.
     task_config_overrides: dict[str, Any] = Field(default_factory=dict)
 
-    # Directory of prebuilt Singularity .sif images. When set, each task's docker_image
-    # is overridden to "<images_dir>/<task>.sif" (per-task — each /run handles one task).
-    # Takes precedence over any docker_image in task_config_overrides.
+    # Directory of prebuilt per-task Singularity .sif images. Files must be named "<task_name>.sif".
     images_dir: Optional[str] = None
 
 
@@ -179,12 +167,7 @@ class BenchFlowAgent(SimpleResponsesAPIAgent):
             )
 
     async def _run_benchflow_task(self, task_name: str, policy_model_name: str, base_url: str) -> Any:
-        """Run a single BenchFlow task in a Singularity sandbox; return its RolloutResult.
-
-        All ``benchflow`` imports and usage are confined to this method so the module
-        imports cleanly without benchflow installed and unit tests can patch it.
-        Returns the task's RolloutResult, or None if BenchFlow reported no result.
-        """
+        """Runs a single BenchFlow task. Returns its RolloutResult or None if unavailable."""
         from benchflow.evaluation import Evaluation, EvaluationConfig, RetryConfig
 
         eval_config = EvaluationConfig(
@@ -220,7 +203,7 @@ class BenchFlowAgent(SimpleResponsesAPIAgent):
         return captured.get("result")
 
     def _build_agent_env(self, base_url: str) -> dict[str, str]:
-        """Forward configured agent env plus the resolved provider endpoint + key."""
+        """Builds the environment variables to forward to the agent harness."""
         agent_env = dict(self.config.agent_env or {})
         agent_env["BENCHFLOW_PROVIDER_BASE_URL"] = base_url
         agent_env["BENCHFLOW_PROVIDER_API_KEY"] = self.config.provider_api_key
@@ -229,11 +212,7 @@ class BenchFlowAgent(SimpleResponsesAPIAgent):
         return agent_env
 
     def _build_task_config_overrides(self, task_name: str) -> dict[str, Any]:
-        """Merge the configured task.toml overrides with the per-task .sif image path.
-
-        Each /run handles a single task, so we can pin a concrete per-task image.
-        ``images_dir`` takes precedence over any docker_image in task_config_overrides.
-        """
+        """Adds the per-task .sif image paths to `task_config_overrides`."""
         overrides = deepcopy(self.config.task_config_overrides or {})
         if self.config.images_dir:
             sif_path = f"{self.config.images_dir.rstrip('/')}/{task_name}.sif"
@@ -246,7 +225,7 @@ class BenchFlowAgent(SimpleResponsesAPIAgent):
 
     @staticmethod
     def _parse_task_name(instance_id: str) -> str:
-        """Extract the task name from an instance id of form '<alias>::<task>' or '<task>'."""
+        """Extracts the task name from an instance id of form '<alias>::<task>' or '<task>'."""
         head, sep, tail = instance_id.partition("::")
         task_name = (tail if sep else head).strip()
         if not task_name:
@@ -255,12 +234,12 @@ class BenchFlowAgent(SimpleResponsesAPIAgent):
 
     @staticmethod
     def _sanitize_path_component(value: str) -> str:
-        """Sanitize a string for safe use as a single path component (job name)."""
+        """Sanitizes a string for safe use as a single path component (job name)."""
         sanitized = re.sub(r"[^A-Za-z0-9._-]", "_", value).strip("._")
         return sanitized or "task"
 
     def _resolve_model_base_url(self, global_config_dict: Any) -> str:
-        """Resolve the model server base URL from the required model_server reference."""
+        """Resolves the model server base URL from the required model_server reference."""
         server_name = self.config.model_server.name
         model_server_config = get_first_server_config_dict(
             global_config_dict,

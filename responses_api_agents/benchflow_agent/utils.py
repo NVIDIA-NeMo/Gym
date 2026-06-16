@@ -12,12 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Helpers for converting BenchFlow rollout results into NeMo Gym responses.
-
-This is an eval-only conversion: it extracts the scalar reward and a best-effort
-trajectory (no training token ids / logprobs). The full BenchFlow artifacts
-(trajectory, logs, verifier output) are written to the job directory on disk.
-"""
+"""Helpers for converting BenchFlow rollout results into NeMo Gym responses."""
 
 import json
 import time
@@ -37,7 +32,6 @@ from nemo_gym.openai_utils import (
 class BenchFlowAgentUtils:
     @staticmethod
     def get_default_response_object() -> Dict[str, Any]:
-        """Build a fully-populated NeMoGymResponse dict with sensible defaults."""
         return {
             "id": f"resp_{str(uuid4())}",
             "created_at": int(time.time()),
@@ -79,22 +73,16 @@ class BenchFlowAgentUtils:
 
     @staticmethod
     def extract_reward(rewards: Optional[Dict[str, Any]]) -> float:
-        """Extract the scalar reward from a BenchFlow ``RolloutResult.rewards`` dict.
-
-        BenchFlow rewards are typically ``{"reward": 0.0 or 1.0}`` (or a dict of
-        named rewards). Returns the ``"reward"`` value when present, otherwise the
-        first value, defaulting to ``0.0`` on a missing/empty/non-dict input.
         """
-        if not rewards or not isinstance(rewards, dict):
+        Extracts the scalar reward from a BenchFlow `RolloutResult.rewards` dict.
+        Returns 0.0 if the reward is missing or invalid.
+        """
+        if not isinstance(rewards, dict):
             return 0.0
-
-        if "reward" in rewards:
-            return float(rewards["reward"])
-
-        for value in rewards.values():
-            return float(value)
-
-        return 0.0
+        reward = rewards.get("reward")
+        if not isinstance(reward, (int, float)):
+            return 0.0
+        return float(reward)
 
     @staticmethod
     def extract_usage(result: Any) -> Dict[str, Any]:

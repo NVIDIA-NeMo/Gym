@@ -29,16 +29,13 @@ benchflow_agent:
       # API key forwarded to the agent for the model endpoint. A dummy is fine for a
       # local vLLM server that ignores auth; OpenHands requires it to be non-empty.
       provider_api_key: EMPTY
-      # BenchFlow per-task failure retries (distinct from NeMo Gym `num_repeats`).
+      # How many times BenchFlow should retry a task on error.
       max_retries: 2
 
-      # Directory of prebuilt Singularity .sif images. When set, each task's
-      # docker_image is overridden to "<images_dir>/<task>.sif". Leave null to use
-      # the docker_image declared in each task's task.toml.
+      # Directory of prebuilt per-task Singularity .sif images. Files must be named "<task_name>.sif".
       images_dir: null
 
-      # Overrides deep-merged into each task's parsed task.toml before validation.
-      # Mirrors task.toml sections; extend freely. Example:
+      # Overrides for every task's task.toml. Example:
       #   task_config_overrides:
       #     environment:
       #       memory_mb: 131072
