@@ -26,11 +26,23 @@ anthropic_base_url: http://localhost:8000
 
 ### Launch
 
-No model server is needed for basic eval. To extend this agent to training, a model server should be developed that handles messages endpoint. For evals with the current version, just pass the resources server config, which includes the agent server config, as is the current standard in NeMo Gym:
+For a quick eval against Anthropic's API (or any endpoint set via `anthropic_base_url`), pass the resources server config, which includes the agent server config:
 
 ```bash
 ng_run "+config_paths=[resources_servers/reasoning_gym/configs/reasoning_gym_claude_code_agent.yaml]"
 ```
+
+#### Against a Gym model server
+
+Every Gym model server now exposes `POST /v1/messages` (a default Messages ↔ Responses mapping on `SimpleResponsesAPIModel`), so Claude Code can run against any backend Gym serves — vLLM, OpenAI, an inference provider. Set the agent's `model_server` ref to that server (it takes precedence over `anthropic_base_url`); the harness resolves `ANTHROPIC_BASE_URL` to it and the CLI appends `/v1/messages`.
+
+`reasoning_gym_claude_code_agent_model_server.yaml` wires the agent's `model_server` ref to `policy_model`. Compose it with any model server (here a vLLM serving `policy_model`):
+
+```bash
+ng_run "+config_paths=[resources_servers/reasoning_gym/configs/reasoning_gym_claude_code_agent_model_server.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
+```
+
+This path needs only the model server's `policy_base_url`, `policy_api_key`, and `policy_model_name` (in `env.yaml` or as `+` overrides) — no `anthropic_*` vars.
 
 ### Run the agent
 
@@ -42,11 +54,13 @@ ng_collect_rollouts \
     +limit=1
 ```
 
+For the model-server config above, use `+agent_name=reasoning_gym_claude_code_agent_model_server`.
+
 ## Description
 
 The agent runs `claude -p` as an async subprocess for each request. Claude Code handles all tool execution (Bash, file read/write) internally. The agent parses the stream-json output into NeMoGym output items and forwards the response to a resources server for verification.
 
-Claude Code talks to the model via the Anthropic Messages API (`/v1/messages`). This means it can connect to Anthropic's API directly, or to any local endpoint that implements `/v1/messages` such as vLLM or Ollama. It does not go through a Gym model server, but that is the next step to extend this integration to training and additional features.
+Claude Code talks to the model via the Anthropic Messages API (`/v1/messages`). This means it can connect to Anthropic's API directly, to any local endpoint that implements `/v1/messages` (vLLM, Ollama), or — via the agent's `model_server` ref — to any NeMo Gym model server, since every Gym model server now serves `/v1/messages` by mapping Messages ↔ Responses around its own `responses()` backend.
 
 The agent runs with `--bare`, which skips auto-discovery of hooks, skills, plugins, MCP servers, auto memory, and CLAUDE.md so each scripted call starts clean and fast; Claude still has access to Bash, file read, and file edit tools. To enable MCP servers or skills, remove `--bare` and add the relevant flags in `app.py`'s `_run_claude_code` command list.
 
