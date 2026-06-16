@@ -59,7 +59,7 @@ class BenchFlowAgentConfig(BaseResponsesAPIAgentConfig):
     tasks_dir: str
 
     # Output directory for BenchFlow results/artifacts/logs.
-    jobs_dir: str = "jobs"
+    jobs_dir: str = "responses_api_agents/benchflow_agent/jobs"
 
     # BenchFlow agent harness.
     agent: str = "openhands"
