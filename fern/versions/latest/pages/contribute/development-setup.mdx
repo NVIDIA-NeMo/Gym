@@ -257,7 +257,7 @@ For larger changes, NeMo Gym uses [GitHub Stacked PRs](https://github.github.com
 
 #### Prerequisites
 
-The [GitHub CLI](https://cli.github.com/) (`gh`) v2.0+, the `gh stack` extension, and the agent skill:
+Install the [GitHub CLI](https://cli.github.com/) (`gh`) v2.0 or later, the `gh stack` extension, and the agent skill:
 
 ```bash
 gh extension install github/gh-stack
@@ -272,14 +272,14 @@ gh auth login   # GitHub.com → HTTPS → "Login with a web browser"
 ```
 </Warning>
 
-A stack is created in the repo you push to, and that repo must have the preview enabled — push your branches to the remote that points at `NVIDIA-NeMo/Gym`. With multiple remotes, set the target once (or pass `--remote <name>` on each command) and enable conflict memory so commands don't prompt:
+A stack is created in the repo you push to, and that repo must have the preview enabled — push your branches to the remote that points at `NVIDIA-NeMo/Gym`. With multiple remotes, set the target once (or pass `--remote <name>` on each command) and enable conflict memory so commands do not prompt:
 
 ```bash
 git config remote.pushDefault upstream   # the remote pointing at NVIDIA-NeMo/Gym
 git config rerere.enabled true
 ```
 
-#### Create a stack
+#### Create a Stack
 
 Build the stack bottom-up, one logical change per branch, where each branch depends on the one below it. Keep a contribution self-contained — land code together with its tests in a single PR — and stack genuinely dependent follow-ups (for example, documentation) on top.
 
@@ -303,7 +303,7 @@ gh stack view --json
 
 `submit` sets each PR's base to the branch below it and links them as a stack on GitHub. Run every `gh stack` command non-interactively: pass branch names to `init`/`add`/`checkout`, `--auto` to `submit`, and `--json` to `view`. Without these flags the commands prompt or open a TUI and hang.
 
-#### Update a stack
+#### Update a Stack
 
 Make a change on the branch it belongs to, then rebase the layers above it:
 
@@ -320,9 +320,9 @@ After a PR merges, sync to fast-forward the trunk and rebase the rest of the sta
 gh stack sync --prune      # fetch, rebase, push, drop merged branches
 ```
 
-On a rebase conflict (exit code 3), resolve the listed files, `git add` them, then `gh stack rebase --continue` (or `--abort`). Merging is done from the GitHub PR UI; CLI merge isn't supported yet.
+On a rebase conflict (exit code 3), resolve the listed files, `git add` them, then `gh stack rebase --continue` (or `--abort`). Merging is done from the GitHub PR UI; CLI merge is not supported yet.
 
-#### Command reference
+#### Command Reference
 
 The vendored skill (`.claude/skills/gh-stack/SKILL.md`) carries the full reference, exit codes, and non-interactive rules for agents.
 
@@ -330,7 +330,7 @@ The vendored skill (`.claude/skills/gh-stack/SKILL.md`) carries the full referen
 |------|---------|
 | Start a stack | `gh stack init -p <prefix> <branch>` |
 | Add a layer | `gh stack add <suffix>` |
-| Push + open PRs | `gh stack submit --auto` |
+| Push and open PRs | `gh stack submit --auto` |
 | Inspect state | `gh stack view --json` |
 | Navigate | `gh stack up` / `down` / `top` / `bottom` |
 | Rebase after a lower-layer edit | `gh stack rebase --upstack` |
