@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import base64
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -179,12 +180,29 @@ def _convert_office_to_pdf(fpath: Path) -> Path | None:
 
     Returns the path to the generated PDF, or None on failure.
     Uses a unique user profile to avoid lock conflicts in concurrent workers.
+
+    Whitespace in the input filename makes LibreOffice's batch-convert mode
+    silently drop the file (the URI it builds isn't percent-encoded), so we
+    stage the input to a tempdir with a sanitized basename and move the PDF
+    back to the original location.
     """
     profile_dir = Path(tempfile.mkdtemp(prefix="lo-profile-"))
     user_install = f"file://{profile_dir.as_posix()}"
     out_pdf = fpath.with_suffix(".pdf")
+    stage_dir: Path | None = None
+    input_path = fpath
+    has_whitespace = any(c.isspace() for c in fpath.name)
 
     try:
+        if has_whitespace:
+            stage_dir = Path(tempfile.mkdtemp(prefix="lo-stage-"))
+            safe_name = re.sub(r"\s+", "_", fpath.stem) + fpath.suffix
+            input_path = stage_dir / safe_name
+            shutil.copy2(fpath, input_path)
+            lo_outdir = str(stage_dir)
+        else:
+            lo_outdir = str(fpath.parent)
+
         cmd = [
             "libreoffice",
             "--headless",
@@ -196,10 +214,14 @@ def _convert_office_to_pdf(fpath: Path) -> Path | None:
             "--convert-to",
             "pdf",
             "--outdir",
-            str(fpath.parent),
-            str(fpath),
+            lo_outdir,
+            str(input_path),
         ]
         p = subprocess.run(cmd, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=120)
+        if stage_dir is not None:
+            staged_pdf = stage_dir / (input_path.stem + ".pdf")
+            if staged_pdf.exists():
+                shutil.move(str(staged_pdf), str(out_pdf))
         if p.returncode != 0 or not out_pdf.exists():
             print(f"[file_reader] LibreOffice conversion failed for {fpath.name}: {p.stderr[:200]}", flush=True)
             return None
@@ -209,6 +231,8 @@ def _convert_office_to_pdf(fpath: Path) -> Path | None:
         return None
     finally:
         shutil.rmtree(profile_dir, ignore_errors=True)
+        if stage_dir is not None:
+            shutil.rmtree(stage_dir, ignore_errors=True)
 
 
 def convert_deliverables_to_content_blocks(output_dir: str) -> list[dict[str, Any]]:
