@@ -7,7 +7,7 @@ sub-steps. Generated code is executed against the problem's test cases.
 
 - **Tasks**: 80 problems / 341 sub-steps (`validation` + `test` combined — the split nemo-skills calls `test_aai`)
 - **Reward**: binary per problem — `1.0` only if every sub-step passes its tests
-- **Metrics** (reported by the resources server): `subtask_accuracy` — the headline SciCode number,
+- **Metrics** (reported by the agent): `subtask_accuracy` — the headline SciCode number,
   total sub-steps passed divided by total sub-steps across all rollouts (matches nemo-skills'
   `pass@1[avg-of-3]/subtask_accuracy`) — and `problem_accuracy` (= `mean/reward`, the whole problem
   passing)
@@ -59,7 +59,7 @@ above.
 The resources server executes generated SciCode solutions in its own venv, so its
 `requirements.txt` pins `scipy<1.14` — the last range that keeps `scipy.integrate.simps` (used by
 some test cases, removed in scipy 1.14) while still providing Python 3.12 wheels — plus `numpy`,
-`matplotlib`, and `h5py`.
+`matplotlib`, `h5py`, and `sympy`.
 
 ## Running servers
 
@@ -74,16 +74,44 @@ overrides).
 
 ## Collect rollouts
 
+With the servers up, run the full benchmark:
+
 ```bash
 ng_collect_rollouts \
     +agent_name=scicode_benchmark_agent \
-    +input_jsonl_fpath=benchmarks/scicode/data/example.jsonl \
+    +input_jsonl_fpath=benchmarks/scicode/data/scicode_benchmark.jsonl \
     +output_jsonl_fpath=results/scicode_rollouts.jsonl \
-    +num_repeats=1
+    +num_repeats=3 \
+    "++responses_create_params={temperature: 0.0}"
 ```
 
-Use `benchmarks/scicode/data/scicode_benchmark.jsonl` for the full run; `example.jsonl` is a 5-problem
-smoke set.
+(For a quick smoke, point `+input_jsonl_fpath` at `resources_servers/scicode/data/example.jsonl`
+with `+num_repeats=1`.)
+
+### One-shot alternative
+
+Runs prepare + servers + rollout collection and tears the servers down afterwards — this is the
+full-benchmark run that produces the headline `subtask_accuracy`. Requires `test_data.h5` staged
+(see above).
+
+```bash
+config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
+benchmarks/scicode/config.yaml"
+
+ng_e2e_collect_rollouts \
+    "+config_paths=[${config_paths}]" \
+    ++split=benchmark \
+    ++output_jsonl_fpath=results/benchmarks/scicode.jsonl \
+    ++reuse_existing_data_preparation=true \
+    ++overwrite_metrics_conflicts=true \
+    ++policy_base_url=<your_endpoint> \
+    ++policy_api_key=<your_key> \
+    ++policy_model_name=<your_model> \
+    "++responses_create_params={temperature: 0.0}"
+```
+
+`num_repeats: 3` (from the dataset config) and `temperature: 0.0` match nemo-skills' SciCode eval
+(`pass@1[avg-of-3]`).
 
 ## Licensing
 
