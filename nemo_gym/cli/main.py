@@ -49,14 +49,25 @@ def dispatch(target: str, overrides: list[str]) -> None:
     func()
 
 
-def _value_flag(name: str, hydra_key: str, flag_help: str, *, aliases: tuple[str, ...] = ()) -> Flag:
+def _value_flag(
+    name: str, hydra_key: str, flag_help: str, *, aliases: tuple[str, ...] = (), choices: tuple[str, ...] | None = None
+) -> Flag:
     """A `--name VALUE` flag that maps to the Hydra override `+<hydra_key>=VALUE` (omitted when unset)."""
     dest = name.replace("-", "_")
     return Flag(
-        register=lambda p: p.add_argument(f"--{name}", *aliases, dest=dest, help=flag_help),
+        register=lambda p: p.add_argument(f"--{name}", *aliases, dest=dest, choices=choices, help=flag_help),
         translate_to_hydra=lambda args: (
             [f"+{hydra_key}={getattr(args, dest)}"] if getattr(args, dest) is not None else []
         ),
+    )
+
+
+def _bool_flag(name: str, hydra_key: str, flag_help: str) -> Flag:
+    """A `--name` store_true flag that maps to the Hydra override `+<hydra_key>=true` when set."""
+    dest = name.replace("-", "_")
+    return Flag(
+        register=lambda p: p.add_argument(f"--{name}", action="store_true", help=flag_help),
+        translate_to_hydra=lambda args: [f"+{hydra_key}=true"] if getattr(args, dest) else [],
     )
 
 
@@ -122,29 +133,78 @@ COMMANDS = {
     "dataset upload": Command(
         target=_dataset_upload,
         summary="Upload a prepared dataset to HF (default) or GitLab.",
-        flags=(STORAGE,),
+        flags=(
+            STORAGE,
+            _value_flag("input", "input_jsonl_fpath", "Local JSONL file to upload.", aliases=("-i",)),
+            _value_flag("name", "dataset_name", "Dataset name."),
+            # GitLab stores it as `version`, HF as `revision`; emit both and let each backend keep its own.
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--revision", dest="revision", help="Dataset revision (version) to download."
+                ),
+                translate_to_hydra=lambda args: (
+                    # we set both version and revision because GitLab and HF use different keys
+                    # and we extra="ignore" so it's safe to set both
+                    [f"+version={args.revision}", f"+revision={args.revision}"] if args.revision is not None else []
+                ),
+            ),
+            _value_flag("split", "split", "Dataset split (HF only)."),
+            _bool_flag("create-pr", "create_pr", "Open a pull request instead of committing directly (HF only)."),
+        ),
     ),
     "dataset download": Command(
         target=_dataset_download,
         summary="Download a dataset from HF (default) or GitLab.",
-        flags=(STORAGE,),
+        flags=(
+            STORAGE,
+            _value_flag("repo-id", "repo_id", "HF repo id, e.g. org/dataset (HF only)."),
+            _value_flag("name", "dataset_name", "Dataset name (GitLab only)."),
+            # NOTE(martas): HF download does not allow to specify revision
+            _value_flag("revision", "version", "Dataset version (GitLab only)."),
+            _value_flag(
+                "artifact", "artifact_fpath", "Remote file to fetch (GitLab: required; HF: optional raw file)."
+            ),
+            _value_flag("output", "output_fpath", "Local destination file.", aliases=("-o",)),
+            _value_flag(
+                "output-dir", "output_dirpath", "Local destination directory; needed for all splits (HF only)."
+            ),
+            _value_flag("split", "split", "Dataset split (HF only)."),
+        ),
     ),
     "dataset rm": Command(
         target="nemo_gym.cli.dataset:delete_jsonl_dataset_from_gitlab_cli",
         summary="Delete a dataset from GitLab.",
+        flags=(_value_flag("name", "dataset_name", "Name of the dataset to delete."),),
     ),
     "dataset migrate": Command(
         target="nemo_gym.cli.dataset:upload_jsonl_dataset_to_hf_and_delete_gitlab_cli",
         summary="Transfer a dataset from GitLab to HF.",
+        flags=(
+            _value_flag("input", "input_jsonl_fpath", "Local JSONL file to upload to HF.", aliases=("-i",)),
+            _value_flag("name", "dataset_name", "Dataset name."),
+            _value_flag("revision", "revision", "Dataset revision (HF)."),
+            _value_flag("split", "split", "Dataset split."),
+            _bool_flag("create-pr", "create_pr", "Open a pull request instead of committing directly."),
+        ),
     ),
     "dataset render": Command(
         target="nemo_gym.cli.dataset:materialize_prompts_cli",
         summary="Generate a dataset preview.",
+        flags=(
+            _value_flag("input", "input_jsonl_fpath", "Raw input JSONL file.", aliases=("-i",)),
+            _value_flag("prompt-config", "prompt_config", "Prompt template YAML to apply."),
+            _value_flag("output", "output_jsonl_fpath", "Output JSONL file.", aliases=("-o",)),
+        ),
     ),
     "dataset collate": Command(
         target="nemo_gym.cli.dataset:prepare_data",
         summary="Validate and collate the dataset.",
-        flags=(CONFIG,),
+        flags=(
+            CONFIG,
+            _value_flag("mode", "mode", "Data preparation mode.", choices=("train_preparation", "example_validation")),
+            _value_flag("output-dir", "output_dirpath", "Output directory for the prepared data."),
+            _bool_flag("download", "should_download", "Download source datasets before collating."),
+        ),
     ),
     "env init": Command(
         target="nemo_gym.cli.env:init_resources_server",
@@ -194,12 +254,7 @@ COMMANDS = {
                     help="Collect against already-running servers instead of starting them.",
                 )
             ),
-            Flag(
-                register=lambda p: p.add_argument(
-                    "--resume", action="store_true", help="Resume from cached rollouts instead of recollecting."
-                ),
-                translate_to_hydra=lambda args: ["+resume_from_cache=true"] if args.resume else [],
-            ),
+            _bool_flag("resume", "resume_from_cache", "Resume from cached rollouts instead of recollecting."),
             _value_flag("agent", "agent_name", "Agent to collect rollouts with.", aliases=("-a",)),
             _value_flag("input", "input_jsonl_fpath", "Input tasks JSONL file.", aliases=("-i",)),
             _value_flag("output", "output_jsonl_fpath", "Output rollouts JSONL file.", aliases=("-o",)),

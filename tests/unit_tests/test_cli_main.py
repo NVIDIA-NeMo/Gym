@@ -243,3 +243,153 @@ class TestEnvTestResourceServerFlag:
         target, overrides = _dispatch_for(monkeypatch, ["env", "test", "+entrypoint=resources_servers/gpqa"])
         assert target == "nemo_gym.cli.env:test"
         assert overrides == ["+entrypoint=resources_servers/gpqa"]
+
+
+class TestDatasetFlags:
+    def test_upload_hf_default(self, monkeypatch: MonkeyPatch) -> None:
+        target, overrides = _dispatch_for(
+            monkeypatch,
+            ["dataset", "upload", "-i", "data/train.jsonl", "--name", "my_ds", "--split", "train", "--create-pr"],
+        )
+        assert target == "nemo_gym.cli.dataset:upload_jsonl_dataset_to_hf_cli"
+        assert set(overrides) == {
+            "+input_jsonl_fpath=data/train.jsonl",
+            "+dataset_name=my_ds",
+            "+split=train",
+            "+create_pr=true",
+        }
+
+    def test_upload_gitlab(self, monkeypatch: MonkeyPatch) -> None:
+        target, overrides = _dispatch_for(
+            monkeypatch,
+            [
+                "dataset",
+                "upload",
+                "--storage",
+                "gitlab",
+                "-i",
+                "data/train.jsonl",
+                "--name",
+                "my_ds",
+                "--revision",
+                "0.0.1",
+            ],
+        )
+        assert target == "nemo_gym.cli.dataset:upload_jsonl_dataset_cli"
+        overrides.remove(
+            "+revision=0.0.1"
+        )  # we set both version and revision because GitLab and HF use different keys
+        assert set(overrides) == {
+            "+input_jsonl_fpath=data/train.jsonl",
+            "+dataset_name=my_ds",
+            "+version=0.0.1",
+        }
+
+    def test_download_hf_default(self, monkeypatch: MonkeyPatch) -> None:
+        target, overrides = _dispatch_for(
+            monkeypatch,
+            [
+                "dataset",
+                "download",
+                "--repo-id",
+                "org/my_ds",
+                "--artifact",
+                "train.jsonl",
+                "--output-dir",
+                "./data",
+                "--split",
+                "train",
+            ],
+        )
+        assert target == "nemo_gym.cli.dataset:download_jsonl_dataset_from_hf_cli"
+        assert set(overrides) == {
+            "+repo_id=org/my_ds",
+            "+artifact_fpath=train.jsonl",
+            "+output_dirpath=./data",
+            "+split=train",
+        }
+
+    def test_download_gitlab(self, monkeypatch: MonkeyPatch) -> None:
+        # On download, --revision is GitLab-only and maps to +version (HF download has no revision field).
+        target, overrides = _dispatch_for(
+            monkeypatch,
+            [
+                "dataset",
+                "download",
+                "--storage",
+                "gitlab",
+                "--name",
+                "my_ds",
+                "--revision",
+                "0.0.1",
+                "--artifact",
+                "train.jsonl",
+                "-o",
+                "./train.jsonl",
+            ],
+        )
+        assert target == "nemo_gym.cli.dataset:download_jsonl_dataset_cli"
+        assert set(overrides) == {
+            "+dataset_name=my_ds",
+            "+version=0.0.1",
+            "+artifact_fpath=train.jsonl",
+            "+output_fpath=./train.jsonl",
+        }
+
+    def test_rm(self, monkeypatch: MonkeyPatch) -> None:
+        target, overrides = _dispatch_for(monkeypatch, ["dataset", "rm", "--name", "my_ds"])
+        assert target == "nemo_gym.cli.dataset:delete_jsonl_dataset_from_gitlab_cli"
+        assert overrides == ["+dataset_name=my_ds"]
+
+    def test_migrate_revision_maps_to_hf_revision(self, monkeypatch: MonkeyPatch) -> None:
+        target, overrides = _dispatch_for(
+            monkeypatch,
+            ["dataset", "migrate", "-i", "data/train.jsonl", "--name", "my_ds", "--revision", "r1", "--create-pr"],
+        )
+        assert target == "nemo_gym.cli.dataset:upload_jsonl_dataset_to_hf_and_delete_gitlab_cli"
+        assert set(overrides) == {
+            "+input_jsonl_fpath=data/train.jsonl",
+            "+dataset_name=my_ds",
+            "+revision=r1",
+            "+create_pr=true",
+        }
+
+    def test_render(self, monkeypatch: MonkeyPatch) -> None:
+        target, overrides = _dispatch_for(
+            monkeypatch, ["dataset", "render", "-i", "raw.jsonl", "--prompt-config", "p.yaml", "-o", "out.jsonl"]
+        )
+        assert target == "nemo_gym.cli.dataset:materialize_prompts_cli"
+        assert overrides == ["+input_jsonl_fpath=raw.jsonl", "+prompt_config=p.yaml", "+output_jsonl_fpath=out.jsonl"]
+
+    def test_collate(self, monkeypatch: MonkeyPatch) -> None:
+        target, overrides = _dispatch_for(
+            monkeypatch,
+            [
+                "dataset",
+                "collate",
+                "--config",
+                "c.yaml",
+                "--mode",
+                "train_preparation",
+                "--output-dir",
+                "./prep",
+                "--download",
+            ],
+        )
+        assert target == "nemo_gym.cli.dataset:prepare_data"
+        assert set(overrides) == {
+            "+config_paths=[c.yaml]",
+            "+mode=train_preparation",
+            "+output_dirpath=./prep",
+            "+should_download=true",
+        }
+
+    def test_bool_flags_omitted_when_unset(self, monkeypatch: MonkeyPatch) -> None:
+        # --create-pr not passed -> no +create_pr override leaks in.
+        _, overrides = _dispatch_for(monkeypatch, ["dataset", "upload", "--name", "my_ds"])
+        assert overrides == ["+dataset_name=my_ds"]
+
+    def test_collate_mode_rejects_invalid_choice(self, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.setattr(sys, "argv", ["gym", "dataset", "collate", "--mode", "bogus"])
+        with pytest.raises(SystemExit):
+            main()
