@@ -805,41 +805,40 @@ def init_resources_server():  # pragma: no cover
 
     config_fpath = configs_dirpath / f"{server_type_name}.yaml"
     with open(config_fpath, "w") as f:
-        f.write(f"""{server_type_name}_resources_server:
-  {server_type}:
-    {server_type_name}:
-      entrypoint: app.py
-      domain: other
-{server_type_name}_simple_agent:
+        f.write(f"""# Resources server: owns this environment's task verification (verify()) and reward.
+{server_type_name}_resources_server:          # instance name — how agents/CLI refer to this server
+  {server_type}:                              # server type: resources_servers | responses_api_agents | responses_api_models
+    {server_type_name}:                        # implementation directory under {server_type}/
+      entrypoint: app.py                        # server entry module
+      domain: other                             # task domain; one of: math, coding, agent, knowledge,
+                                                #   instruction_following, long_context, safety, games, translation,
+                                                #   e2e, rlhf, other. Change 'other' to the closest fit.
+      verified: false                           # set true once the benchmark has been baselined and reviewed
+
+# Agent server config specifies the agent server to run and any additional components of the environment such as resources servers
+{server_type_name}_simple_agent:               # this agent instance's name — pass as +agent_name= to ng_collect_rollouts
   responses_api_agents:
-    simple_agent:
+    simple_agent:                               # built-in agent: runs the model with tool calls (up to max_steps); swap for your own agent dir
       entrypoint: app.py
-      resources_server:
+      resources_server:                         # the resources server this agent interacts with for tools, state and verification
         type: resources_servers
         name: {server_type_name}_resources_server
-      model_server:
+      model_server:                             # the model that answers; 'policy_model' is resolved from a model config
         type: responses_api_models
         name: policy_model
-      datasets:
+      datasets:                                 # one block per split: train | validation | example
       - name: train
         type: train
-        jsonl_fpath: resources_servers/{server_type_name}/data/train.jsonl
-        num_repeats: 1
-        gitlab_identifier:
-          dataset_name: {server_type_name}
-          version: 0.0.1
-          artifact_fpath: train.jsonl
-        license: Apache 2.0
+        jsonl_fpath: resources_servers/{server_type_name}/data/train.jsonl   # local data file for this split
+        num_repeats: 1                          # times to repeat each example (e.g. for pass@k / mean@k)
+        license: Apache 2.0                     # required for train/validation; must be an allowed license string
+        # to fetch this split from a registry instead, add gitlab_identifier: or huggingface_identifier:
       - name: validation
         type: validation
         jsonl_fpath: resources_servers/{server_type_name}/data/validation.jsonl
         num_repeats: 1
-        gitlab_identifier:
-          dataset_name: {server_type_name}
-          version: 0.0.1
-          artifact_fpath: validation.jsonl
         license: Apache 2.0
-      - name: example
+      - name: example                           # 5 rows committed to git for quick smoke tests
         type: example
         jsonl_fpath: resources_servers/{server_type_name}/data/example.jsonl
         num_repeats: 1
