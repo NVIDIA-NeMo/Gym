@@ -1,0 +1,22 @@
+config_paths:
+  - resources_servers/asr_with_pc/configs/asr_with_pc.yaml
+
+numb3rs_asr_with_pc_resources_server:
+  _inherit_from: asr_with_pc
+  resources_servers:
+    asr_with_pc:
+      task_type: ASR_LEADERBOARD
+
+numb3rs_asr_with_pc_simple_agent:
+  _inherit_from: asr_with_pc_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: numb3rs_asr_with_pc_resources_server
+      datasets:
+      - name: numb3rs
+        type: benchmark
+        jsonl_fpath: benchmarks/numb3rs/data/numb3rs_benchmark.jsonl
+        prompt_config: benchmarks/numb3rs/prompts/default.yaml
+        prepare_script: benchmarks/numb3rs/prepare.py
+        license: Creative Commons Attribution 4.0 International

@@ -2,9 +2,10 @@
 
 [LabBench2](https://huggingface.co/datasets/EdisonScientific/labbench2) is a
 scientific figure and table question answering benchmark for vision-language
-models. This config bundles all four subtasks (`figqa2-img`, `figqa2-pdf`,
-`tableqa2-img`, `tableqa2-pdf`) into a single benchmark run. Per-tag metrics
-are emitted alongside the overall score via `verifier_metadata.tag`.
+models, plus protocol troubleshooting (`protocolqa2`). This config bundles all
+subtasks (`figqa2-img`, `figqa2-pdf`, `tableqa2-img`, `tableqa2-pdf`,
+`protocolqa2`) into a single benchmark run. Per-tag metrics are emitted
+alongside the overall score via `verifier_metadata.tag`.
 
 ## Configuration
 
@@ -52,12 +53,46 @@ https://huggingface.co/settings/tokens, and set `hf_token` in `env.yaml`
 ng_prepare_benchmark "+config_paths=[benchmarks/labbench2_vlm/config.yaml]"
 ```
 
-Downloads the four subtask splits from HuggingFace and media files (images,
-PDFs) from a public GCS bucket into `resources_servers/labbench2_vlm/data/media/`
+Downloads the subtask splits from HuggingFace and media files (images,
+PDFs, protocol PDFs) from a public GCS bucket into `resources_servers/labbench2_vlm/data/media/`
 (gitignored), then writes a single combined JSONL to
 `benchmarks/labbench2_vlm/data/labbench2_vlm_benchmark.jsonl` (gitignored).
 First run is slow — hundreds of media files plus the dataset download.
 Re-runs are fast (HF cache + GCS "skip if exists").
+
+### Example smoke data
+
+The resource server also keeps a small committed smoke set at
+`resources_servers/labbench2_vlm/data/example.jsonl` with media copied under
+`resources_servers/labbench2_vlm/data/test_media/`. Regenerate it from the full
+LABBench2 source with:
+
+```bash
+.venv/bin/python resources_servers/labbench2_vlm/prepare_data.py \
+  --tags protocolqa2 figqa2-img figqa2-pdf tableqa2-img tableqa2-pdf \
+  --example
+```
+
+`--example` writes at most five rows. It takes two rows from the first selected
+tag, then one row from each subsequent tag until the five-row cap is reached. So
+with the tag order above, the smoke set contains two `protocolqa2` rows and one
+row each for `figqa2-img`, `figqa2-pdf`, and `tableqa2-img`; `tableqa2-pdf` is
+prepared in its validation JSONL but is not included in `example.jsonl`.
+
+After changing `example.jsonl`, regenerate its static validation metrics:
+
+```bash
+.venv/bin/ng_prepare_data \
+  "+config_paths=[resources_servers/labbench2_vlm/configs/labbench2_vlm.yaml,resources_servers/labbench2_vlm/configs/judge_model_openai.yaml,responses_api_models/openai_model/configs/openai_model.yaml]" \
+  +mode=example_validation \
+  +output_dirpath=/tmp/labbench2_vlm_example_validation \
+  +overwrite_metrics_conflicts=true
+```
+
+This updates `resources_servers/labbench2_vlm/data/example_metrics.json`.
+Use a temporary `+output_dirpath` so the collated validation artifacts do not
+overwrite source data. The full config chain is required because
+`labbench2_vlm.yaml` references both `policy_model` and `judge_model`.
 
 ## Usage
 
@@ -76,6 +111,16 @@ ng_collect_rollouts \
 `+agent_name` and `+input_jsonl_fpath` are both required — rows in the
 prepared JSONL don't carry an `agent_ref`, and `ng_collect_rollouts` doesn't
 read the path from the benchmark config.
+
+For **protocolqa2** as **extracted text** with a text-capable policy model, pass
+`+media_mode=text`. That setting applies **only** to rows whose tag is
+`protocolqa2`; figure/table rows in the same JSONL still use images. So you can
+use `+media_mode=text` with the combined benchmark JSONL or `example.jsonl` without
+breaking figqa2/tableqa2. Omit it (default `media_mode=image`) to render protocol
+PDFs as pages like other PDF tasks.
+
+(See `resources_servers/labbench2_vlm/run.sh` for a protocol-only rollout using
+`+media_mode=text`.)
 
 ### One-shot alternative
 

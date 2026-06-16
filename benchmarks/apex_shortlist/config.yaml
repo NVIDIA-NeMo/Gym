@@ -20,5 +20,5 @@ apex_shortlist_math_with_judge_simple_agent:
       - name: apex_shortlist
         type: benchmark
         jsonl_fpath: benchmarks/apex_shortlist/data/apex_shortlist_benchmark.jsonl
-        prompt_config: benchmarks/apex_shortlist/prompts/default.yaml
+        prompt_config: benchmarks/prompts/generic/math.yaml
         prepare_script: benchmarks/apex_shortlist/prepare.py

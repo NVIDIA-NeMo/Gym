@@ -26,5 +26,5 @@ ng_collect_rollouts \
     +agent_name=mmmlu_mcqa_simple_agent \
     +input_jsonl_fpath=benchmarks/mmmlu/data/mmmlu_benchmark.jsonl \
     +output_jsonl_fpath=results/mmmlu/rollouts.jsonl \
-    +prompt_config=benchmarks/prompts/generic_default.yaml
+    +prompt_config=benchmarks/prompts/generic/default.yaml
 ```

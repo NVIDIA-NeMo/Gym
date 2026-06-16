@@ -23,6 +23,7 @@ from pytest import MonkeyPatch, raises
 import nemo_gym.global_config
 import nemo_gym.server_utils
 from nemo_gym import CACHE_DIR, WORKING_DIR
+from nemo_gym.config_types import ServerRefNotFoundError
 from nemo_gym.global_config import (
     DEFAULT_HEAD_SERVER_PORT,
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
@@ -369,8 +370,14 @@ class TestGlobalConfig:
         hydra_main_mock.return_value = hydra_main_wrapper
         monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
 
-        with raises(AssertionError):
+        with raises(ServerRefNotFoundError) as exc_info:
             get_global_config_dict()
+
+        # The error should name the offending instance, the field, and the missing ref.
+        message = str(exc_info.value)
+        assert "agent_name" in message
+        assert "'d'" in message
+        assert "resources_servers/'resources_name'" in message
 
     def test_get_global_config_dict_server_refs_errors_on_wrong_type(self, monkeypatch: MonkeyPatch) -> None:
         # Clear any lingering env vars.
@@ -420,8 +427,61 @@ class TestGlobalConfig:
         hydra_main_mock.return_value = hydra_main_wrapper
         monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
 
-        with raises(AssertionError):
+        with raises(ServerRefNotFoundError):
             get_global_config_dict()
+
+    def test_get_global_config_dict_server_refs_suggests_close_match(self, monkeypatch: MonkeyPatch) -> None:
+        # Clear any lingering env vars.
+        monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
+        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+
+        exists_mock = MagicMock()
+        exists_mock.return_value = False
+        monkeypatch.setattr(nemo_gym.global_config.Path, "exists", exists_mock)
+
+        find_open_port_mock = MagicMock()
+        find_open_port_mock.return_value = 12345
+        monkeypatch.setattr(nemo_gym.global_config, "find_open_port", find_open_port_mock)
+
+        hydra_main_mock = MagicMock()
+
+        # The agent references "resource" but the defined resources server is "resources" — a typo.
+        def hydra_main_wrapper(fn):
+            config_dict = DictConfig(
+                {
+                    "agent_name": {
+                        "responses_api_agents": {
+                            "agent_type": {
+                                "entrypoint": "app.py",
+                                "resources_server": {
+                                    "type": "resources_servers",
+                                    "name": "resource",
+                                },
+                            }
+                        }
+                    },
+                    "resources": {
+                        "resources_servers": {
+                            "c": {
+                                "entrypoint": "app.py",
+                                "domain": "other",
+                            }
+                        }
+                    },
+                }
+            )
+            return lambda: fn(config_dict)
+
+        hydra_main_mock.return_value = hydra_main_wrapper
+        monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
+
+        with raises(ServerRefNotFoundError) as exc_info:
+            get_global_config_dict()
+
+        message = str(exc_info.value)
+        # Fuzzy match should suggest the correctly-spelled resources server, scoped to the same type.
+        assert "Did you mean" in message
+        assert "'resources'" in message
 
     def test_get_first_server_config_dict(self) -> None:
         global_config_dict = DictConfig(

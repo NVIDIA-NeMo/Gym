@@ -35,10 +35,15 @@ from resources_servers.labbench2_vlm.app import (
     _extract_generated_answer,
     _extract_question,
 )
-from resources_servers.labbench2_vlm.prepare_data import embed_media_into_row
+from resources_servers.labbench2_vlm.prepare_data import (
+    _files_to_text,
+    _pdf_to_text,
+    embed_media_into_row,
+)
 
 
 JUDGE_PROMPT_FPATH = str(Path(__file__).resolve().parents[1] / "prompt_templates/judge.txt")
+JUDGE_PROTOCOL_PROMPT_FPATH = str(Path(__file__).resolve().parents[1] / "prompt_templates/judge_protocol.txt")
 
 
 # ---------------------------------------------------------------------------
@@ -55,6 +60,7 @@ def config() -> LabbenchVLMConfig:
         judge_model_server=ModelServerRef(type="responses_api_models", name="judge"),
         judge_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
         judge_prompt_template_fpath=JUDGE_PROMPT_FPATH,
+        judge_prompt_template_protocol_fpath=JUDGE_PROTOCOL_PROMPT_FPATH,
     )
 
 
@@ -126,11 +132,15 @@ def _verify_request(
     ideal: str,
     vlm_answer: str,
     tag: str = "figqa2-img",
+    reference_passage: str = "",
 ) -> LabbenchVLMVerifyRequest:
+    meta: dict = {"ideal": ideal, "tag": tag, "id": "test-id"}
+    if reference_passage:
+        meta["reference_passage"] = reference_passage
     return LabbenchVLMVerifyRequest(
         responses_create_params=_multimodal_params(question),
         response=_model_response(vlm_answer),
-        verifier_metadata={"ideal": ideal, "tag": tag, "id": "test-id"},
+        verifier_metadata=meta,
     )
 
 
@@ -179,6 +189,20 @@ class TestExtractQuestion:
     def test_empty_input_returns_empty(self) -> None:
         params = NeMoGymResponseCreateParamsNonStreaming(input=[])
         assert _extract_question(params) == ""
+
+    def test_protocol_text_then_question_returns_question(self) -> None:
+        params = NeMoGymResponseCreateParamsNonStreaming(
+            input=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "FULL PROTOCOL TEXT\nstep 1..."},
+                        {"type": "input_text", "text": "What went wrong on Day 3?"},
+                    ],
+                }
+            ]
+        )
+        assert _extract_question(params) == "What went wrong on Day 3?"
 
 
 class TestExtractGeneratedAnswer:
@@ -370,6 +394,39 @@ class TestVerify:
         assert result.judge_evaluations[0].verdict_label is None
 
 
+class TestVerifyProtocol:
+    async def test_protocolqa2_judge_prompt_includes_reference_passage(
+        self, server: LabbenchVLMResourcesServer
+    ) -> None:
+        _mock_judge(server, "[[A=B]] they are equivalent")
+        req = _verify_request(
+            question="Why was there no blue precipitate?",
+            ideal="Wrong phase taken.",
+            vlm_answer="Wrong phase taken.",
+            tag="protocolqa2",
+            reference_passage="In step 29, transfer the aqueous (upper) phase.",
+        )
+
+        await server.verify(req)
+
+        call_kwargs = server.server_client.post.call_args
+        judge_input = call_kwargs[1]["json"].input[0].content
+        assert "Why was there no blue precipitate?" in judge_input
+        assert "In step 29, transfer the aqueous (upper) phase." in judge_input
+        assert "Wrong phase taken." in judge_input
+
+    async def test_non_protocol_omits_reference_passage_section_fields(
+        self, server: LabbenchVLMResourcesServer
+    ) -> None:
+        _mock_judge(server, "[[A=B]] they are equivalent")
+        req = _verify_request(question="Q?", ideal="A", vlm_answer="A", tag="figqa2-img")
+
+        await server.verify(req)
+
+        judge_input = server.server_client.post.call_args[1]["json"].input[0].content
+        assert "KEY PASSAGE:" not in judge_input
+
+
 class TestJudgeLabelOrdering:
     """Both verdict labels present in judge output — first occurrence wins."""
 
@@ -443,6 +500,12 @@ class TestComputeMetrics:
         assert metrics["figqa2-img/pass@1/accuracy"] == approx(100.0)
         assert "tableqa2-img/pass@1/accuracy" in metrics
         assert metrics["tableqa2-img/pass@1/accuracy"] == approx(0.0)
+
+    def test_per_tag_protocolqa2_subset(self, server: LabbenchVLMResourcesServer) -> None:
+        tasks = [[_rollout(1.0, "protocolqa2", "[[A=B]]")]]
+        metrics = server.compute_metrics(tasks)
+        assert "protocolqa2/pass@1/accuracy" in metrics
+        assert metrics["protocolqa2/pass@1/accuracy"] == approx(100.0)
 
     def test_no_tag_in_metadata_skipped_in_subsets(self, server: LabbenchVLMResourcesServer) -> None:
         tasks = [
@@ -553,3 +616,63 @@ class TestEmbedMediaIntoRow:
         b64_str = data_url.split(",", 1)[1]
         decoded = base64.standard_b64decode(b64_str)
         assert decoded == original_bytes
+
+    def test_pdf_text_mode_prepends_extracted_text(self, tmp_path: Path) -> None:
+        import fitz
+
+        pdf_dir = tmp_path / "media" / "protocols" / "u1"
+        pdf_dir.mkdir(parents=True)
+        doc = fitz.open()
+        page = doc.new_page()
+        page.insert_text((72, 72), "Protocol step one.")
+        doc.save(str(pdf_dir / "protocol.pdf"))
+        doc.close()
+
+        row = {
+            "responses_create_params": {
+                "input": [{"role": "user", "content": [{"type": "input_text", "text": "What error occurred?"}]}]
+            },
+            "verifier_metadata": {
+                "ideal": "x",
+                "tag": "protocolqa2",
+                "id": "p1",
+                "media_dir": "media/protocols/u1",
+            },
+        }
+
+        result = embed_media_into_row(row, tmp_path, media_mode="text")
+
+        content = result["responses_create_params"]["input"][0]["content"]
+        assert len(content) == 2
+        assert content[0]["type"] == "input_text"
+        assert "Protocol step one." in content[0]["text"]
+        assert content[1]["type"] == "input_text"
+        assert content[1]["text"] == "What error occurred?"
+
+
+class TestPdfTextExtraction:
+    def test_pdf_to_text_reads_inserted_text(self, tmp_path: Path) -> None:
+        import fitz
+
+        p = tmp_path / "t.pdf"
+        doc = fitz.open()
+        page = doc.new_page()
+        page.insert_text((72, 72), "Hello PDF text")
+        doc.save(str(p))
+        doc.close()
+
+        assert "Hello PDF text" in _pdf_to_text(p)
+
+    def test_files_to_text_concatenates_pdfs(self, tmp_path: Path) -> None:
+        import fitz
+
+        d = tmp_path / "pdfs"
+        d.mkdir()
+        for name, words in [("a.pdf", "Alpha"), ("b.pdf", "Beta")]:
+            doc = fitz.open()
+            doc.new_page().insert_text((72, 72), words)
+            doc.save(str(d / name))
+            doc.close()
+
+        out = _files_to_text(d)
+        assert "Alpha" in out and "Beta" in out

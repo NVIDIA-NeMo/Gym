@@ -43,7 +43,7 @@ ng_collect_rollouts \
     +input_jsonl_fpath=benchmarks/minif2f/data/minif2f_benchmark.jsonl \
     +output_jsonl_fpath=results/minif2f_rollouts.jsonl \
     +num_repeats=32 \
-    +prompt_config=benchmarks/prompts/lean4_formal_proof_deepseek_prover_v2.yaml \
+    +prompt_config=benchmarks/prompts/lean4/formal-proof-deepseek-prover-v2.yaml \
     "+responses_create_params={max_output_tokens: 16384, temperature: 1.0}"
 ```
 
