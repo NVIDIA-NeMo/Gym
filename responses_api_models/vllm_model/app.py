@@ -65,6 +65,14 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
 
+from .audio_utils import (
+    audio_duration_seconds,
+    chunk_audio_array,
+    encode_audio_chunk_to_data_uri,
+    load_audio_from_data_uri,
+    load_audio_from_path,
+)
+
 
 class VLLMModelConfig(BaseResponsesAPIModelConfig):
     base_url: Union[str, List[str]]
@@ -94,6 +102,18 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     # ``data:audio/<fmt>;base64,...`` URI at request time — keeps the JSONL
     # small without depending on vLLM's ``--allowed-local-media-path``.
     audio_root: Optional[str] = None
+
+    # Audio chunking: long single-clip audio (``metadata.audio_data`` or
+    # ``metadata.audio_path``) is split into fixed-duration windows and each
+    # window is run through chat completions independently; the textual
+    # outputs are space-joined and usage tokens summed. Mirrors NeMo Skills'
+    # ``VLLMMultimodalModel`` chunking so audio benchmarks ported from Skills
+    # don't fall off a cliff when the input exceeds the model's audio limit
+    # (e.g. Qwen2-Audio at 30s). ``audio_paths`` (multi-clip) is left alone
+    # because chunking semantics across clips are ambiguous.
+    enable_audio_chunking: bool = True
+    chunk_audio_threshold_sec: float = 30.0
+    min_audio_chunk_duration_sec: float = 0.5
 
     def model_post_init(self, context):
         if isinstance(self.base_url, str):
@@ -237,18 +257,14 @@ class VLLMModel(SimpleResponsesAPIModel):
         ".opus": "opus",
     }
 
-    def _resolve_audio_path_to_url(self, audio_path: str) -> str:
-        """Turn an ``audio_path`` reference into a ``data:audio/...;base64`` URI.
-
-        Reads the file and inlines it as a base64 data URI at request time
-        — same strategy NeMo Skills' ``VLLMMultimodalModel.content_text_to_list``
-        uses (read once per request, hand vLLM a self-contained content
-        block). Keeps the on-disk JSONL small without requiring any vLLM
-        server-side flag.
+    def _resolve_audio_path_to_absolute(self, audio_path: str) -> str:
+        """Resolve a possibly-relative ``audio_path`` to an existing absolute path.
 
         Relative paths are resolved against ``config.audio_root``; without
         it, relative paths raise so the failure mode is loud rather than
-        silently reading from the server CWD.
+        silently reading from the server CWD. Shared by the data-URI splice
+        path and the chunking path so both observe the same audio_root /
+        extension rules.
         """
         if os.path.isabs(audio_path):
             resolved = audio_path
@@ -264,11 +280,23 @@ class VLLMModel(SimpleResponsesAPIModel):
             raise FileNotFoundError(f"metadata.audio_path resolved to {resolved!r}, which does not exist.")
 
         ext = os.path.splitext(resolved)[1].lower()
-        mime = self._AUDIO_EXT_TO_MIME.get(ext)
-        if mime is None:
+        if ext not in self._AUDIO_EXT_TO_MIME:
             raise ValueError(
                 f"Unsupported audio extension {ext!r} for {resolved!r}. Supported: {sorted(self._AUDIO_EXT_TO_MIME)}."
             )
+        return resolved
+
+    def _resolve_audio_path_to_url(self, audio_path: str) -> str:
+        """Turn an ``audio_path`` reference into a ``data:audio/...;base64`` URI.
+
+        Reads the file and inlines it as a base64 data URI at request time
+        — same strategy NeMo Skills' ``VLLMMultimodalModel.content_text_to_list``
+        uses (read once per request, hand vLLM a self-contained content
+        block). Keeps the on-disk JSONL small without requiring any vLLM
+        server-side flag.
+        """
+        resolved = self._resolve_audio_path_to_absolute(audio_path)
+        mime = self._AUDIO_EXT_TO_MIME[os.path.splitext(resolved)[1].lower()]
         with open(resolved, "rb") as f:
             encoded = base64.b64encode(f.read()).decode("ascii")
         return f"data:audio/{mime};base64,{encoded}"
@@ -442,6 +470,21 @@ class VLLMModel(SimpleResponsesAPIModel):
         self, request: Request, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
     ) -> NeMoGymChatCompletion:
         body_dict = body.model_dump(exclude_unset=True)
+
+        chunked_bodies = self._maybe_chunk_audio_for_request(body_dict)
+        if chunked_bodies is not None:
+            return await self._run_chunked_chat_completion(request, chunked_bodies)
+
+        return await self._run_single_chat_completion(request, body_dict)
+
+    async def _run_single_chat_completion(self, request: Request, body_dict: Dict[str, Any]) -> NeMoGymChatCompletion:
+        """Run one chat completion call end-to-end on a pre-dump body dict.
+
+        Extracted so the chunked-audio fan-out can reuse the full preprocess
+        → vLLM → reasoning/token post-processing pipeline per chunk without
+        duplicating the request shape, error handling, or reasoning-parser
+        rewrites.
+        """
         body_dict = self._preprocess_chat_completion_create_params(request, body_dict)
 
         client = self._resolve_client(request)
@@ -547,6 +590,125 @@ class VLLMModel(SimpleResponsesAPIModel):
             # choice_dict.pop("token_ids")
 
         return NeMoGymChatCompletion.model_validate(chat_completion_dict)
+
+    # =====================
+    # Audio chunking
+    # =====================
+
+    def _maybe_chunk_audio_for_request(self, body_dict: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
+        """Return per-chunk body dicts if the request needs audio chunking, else ``None``.
+
+        Triggers when ``enable_audio_chunking`` is on, the request carries a
+        single-clip audio source (``metadata.audio_data`` or
+        ``metadata.audio_path``), and the audio duration exceeds
+        ``chunk_audio_threshold_sec``. ``metadata.audio_paths`` (multi-clip)
+        is left alone — chunking semantics across clips are ambiguous and no
+        current benchmark exercises long multi-clip audio.
+
+        Each returned body dict is a deep copy of ``body_dict`` with
+        ``metadata.audio_data`` replaced by that chunk's WAV data URI and
+        any other audio keys stripped, so the existing splice path in
+        ``_preprocess_chat_completion_create_params`` handles them as if
+        the JSONL had carried inline data-URIs.
+        """
+        if not self.config.enable_audio_chunking:
+            return None
+
+        metadata = body_dict.get("metadata") or {}
+
+        # ``audio_paths`` (multi-clip) is intentionally not chunked. The
+        # other two keys are mutually exclusive (enforced in the splice
+        # path), so the dispatch here is straightforward.
+        if metadata.get("audio_paths"):
+            return None
+
+        audio_data = metadata.get("audio_data")
+        audio_path = metadata.get("audio_path")
+        if not audio_data and not audio_path:
+            return None
+
+        if audio_data:
+            audio_array, sampling_rate = load_audio_from_data_uri(audio_data)
+        else:
+            resolved = self._resolve_audio_path_to_absolute(audio_path)
+            audio_array, sampling_rate = load_audio_from_path(resolved)
+
+        duration = audio_duration_seconds(audio_array, sampling_rate)
+        if duration <= self.config.chunk_audio_threshold_sec:
+            return None
+
+        # Token-ID training mode wants a single contiguous prompt/generation
+        # token stream — concatenating per-chunk token ids loses the
+        # alignment the trainer relies on, so refuse rather than silently
+        # produce a malformed training row.
+        if self.config.return_token_id_information:
+            raise ValueError(
+                "Audio chunking is incompatible with return_token_id_information=True; "
+                "per-chunk prompts have different token streams that cannot be aggregated. "
+                "Disable enable_audio_chunking or use shorter audio (≤ chunk_audio_threshold_sec)."
+            )
+
+        chunks = chunk_audio_array(
+            audio_array,
+            sampling_rate,
+            chunk_duration_sec=self.config.chunk_audio_threshold_sec,
+            min_chunk_duration_sec=self.config.min_audio_chunk_duration_sec,
+        )
+
+        chunked_bodies: List[Dict[str, Any]] = []
+        for chunk in chunks:
+            chunk_body = deepcopy(body_dict)
+            chunk_metadata = chunk_body.setdefault("metadata", {})
+            # Re-emit each chunk through the ``audio_data`` channel so the
+            # splice path doesn't need a special "I am a chunk" branch.
+            chunk_metadata.pop("audio_path", None)
+            chunk_metadata.pop("audio_paths", None)
+            chunk_metadata["audio_data"] = encode_audio_chunk_to_data_uri(chunk, sampling_rate)
+            chunked_bodies.append(chunk_body)
+
+        return chunked_bodies
+
+    async def _run_chunked_chat_completion(
+        self, request: Request, chunked_bodies: List[Dict[str, Any]]
+    ) -> NeMoGymChatCompletion:
+        """Run each per-chunk body through ``_run_single_chat_completion`` and aggregate.
+
+        Aggregation mirrors NeMo Skills' ``_generate_with_chunking``:
+        * ``message.content`` is the space-joined per-chunk content
+          (each chunk stripped of leading/trailing whitespace). ``None``
+          contents (e.g. an out-of-context chunk) are dropped from the join
+          rather than becoming the literal string "None".
+        * ``usage.prompt_tokens`` / ``completion_tokens`` / ``total_tokens``
+          are summed across chunks. Other usage fields take the last
+          chunk's value.
+        * ``finish_reason`` propagates ``"length"`` if any chunk truncated,
+          otherwise the last chunk's reason. ``"length"`` here means the
+          rollout hit a hard limit on at least one chunk — surfacing it
+          lets downstream code (e.g. the verifier) treat the aggregated
+          output as incomplete instead of complete.
+        """
+        sub_completions: List[NeMoGymChatCompletion] = []
+        for chunk_body in chunked_bodies:
+            sub_completions.append(await self._run_single_chat_completion(request, chunk_body))
+
+        aggregate = sub_completions[-1]
+
+        joined = " ".join(
+            (c.choices[0].message.content or "").strip() for c in sub_completions if c.choices[0].message.content
+        )
+        aggregate.choices[0].message.content = joined or None
+
+        if any(c.choices[0].finish_reason == "length" for c in sub_completions):
+            aggregate.choices[0].finish_reason = "length"
+
+        if all(c.usage is not None for c in sub_completions):
+            total_prompt = sum(c.usage.prompt_tokens for c in sub_completions)
+            total_completion = sum(c.usage.completion_tokens for c in sub_completions)
+            aggregate.usage.prompt_tokens = total_prompt
+            aggregate.usage.completion_tokens = total_completion
+            aggregate.usage.total_tokens = total_prompt + total_completion
+
+        return aggregate
 
     def _create_empty_chat_completion(self) -> NeMoGymChatCompletion:
         return NeMoGymChatCompletion(
