@@ -108,3 +108,138 @@ class TestStorageFlag:
         monkeypatch.setattr(sys, "argv", ["gym", "dataset", "upload", "--storage", "s3"])
         with pytest.raises(SystemExit):
             main()
+
+
+class TestEvalRunFlags:
+    @pytest.mark.parametrize(
+        "flag_argv, expected_override",
+        [
+            (["--agent", "my_agent"], "+agent_name=my_agent"),
+            (["-a", "my_agent"], "+agent_name=my_agent"),
+            (["--input", "in.jsonl"], "+input_jsonl_fpath=in.jsonl"),
+            (["-i", "in.jsonl"], "+input_jsonl_fpath=in.jsonl"),
+            (["--output", "out.jsonl"], "+output_jsonl_fpath=out.jsonl"),
+            (["-o", "out.jsonl"], "+output_jsonl_fpath=out.jsonl"),
+            (["--limit", "1024"], "+limit=1024"),
+            (["--num-repeats", "4"], "+num_repeats=4"),
+            (["--concurrency", "10"], "+num_samples_in_parallel=10"),
+            (["--prompt-config", "p.yaml"], "+prompt_config=p.yaml"),
+            (["--split", "benchmark"], "+split=benchmark"),
+            (["--model-name", "openai/gpt-oss-120b"], "+policy_model_name=openai/gpt-oss-120b"),
+            (["--model-url", "http://0.0.0.0:10240/v1"], "+policy_base_url=http://0.0.0.0:10240/v1"),
+            (["--model-api-key", "sk-your-api-key"], "+policy_api_key=sk-your-api-key"),
+            (["--temperature", "1.0"], "+responses_create_params.temperature=1.0"),
+            (["--top-p", "1.0"], "+responses_create_params.top_p=1.0"),
+            (["--max-output-tokens", "4096"], "+responses_create_params.max_output_tokens=4096"),
+            (["--resume"], "+resume_from_cache=true"),
+        ],
+    )
+    def test_flag_maps_to_single_override(self, monkeypatch: MonkeyPatch, flag_argv, expected_override) -> None:
+        _, overrides = _dispatch_for(monkeypatch, ["eval", "run", *flag_argv])
+        assert overrides == [expected_override]
+
+    def test_unset_flags_contribute_nothing(self, monkeypatch: MonkeyPatch) -> None:
+        _, overrides = _dispatch_for(monkeypatch, ["eval", "run", "--agent", "x"])
+        assert overrides == ["+agent_name=x"]
+
+    def test_default_dispatches_e2e(self, monkeypatch: MonkeyPatch) -> None:
+        target, _ = _dispatch_for(monkeypatch, ["eval", "run"])
+        assert target == "nemo_gym.cli.eval:e2e_rollout_collection"
+
+    def test_no_serve_dispatches_collect_without_override(self, monkeypatch: MonkeyPatch) -> None:
+        target, overrides = _dispatch_for(monkeypatch, ["eval", "run", "--no-serve"])
+        assert target == "nemo_gym.cli.eval:collect_rollouts"
+        assert overrides == []
+
+    def test_readme_collect_rollouts_example(self, monkeypatch: MonkeyPatch) -> None:
+        # From resources_servers/my_weather_tool README:
+        #   ng_collect_rollouts +agent_name=... +input_jsonl_fpath=... +output_jsonl_fpath=... +limit=1024 +num_repeats=1
+        target, overrides = _dispatch_for(
+            monkeypatch,
+            [
+                "eval",
+                "run",
+                "--no-serve",
+                "--agent",
+                "my_weather_tool_simple_agent",
+                "--input",
+                "resources_servers/my_weather_tool/data/example.jsonl",
+                "--output",
+                "resources_servers/my_weather_tool/data/example_rollouts.jsonl",
+                "--limit",
+                "1024",
+                "--num-repeats",
+                "1",
+            ],
+        )
+        assert target == "nemo_gym.cli.eval:collect_rollouts"
+        assert set(overrides) == {
+            "+agent_name=my_weather_tool_simple_agent",
+            "+input_jsonl_fpath=resources_servers/my_weather_tool/data/example.jsonl",
+            "+output_jsonl_fpath=resources_servers/my_weather_tool/data/example_rollouts.jsonl",
+            "+limit=1024",
+            "+num_repeats=1",
+        }
+
+    def test_readme_model_and_sampling_example(self, monkeypatch: MonkeyPatch) -> None:
+        # From the gpt-oss eval example: ++policy_* and ++responses_create_params.* overrides.
+        _, overrides = _dispatch_for(
+            monkeypatch,
+            [
+                "eval",
+                "run",
+                "--model-name",
+                "openai/gpt-oss-120b",
+                "--model-url",
+                "http://0.0.0.0:10240/v1",
+                "--model-api-key",
+                "dummy_key",
+                "--temperature",
+                "1.0",
+                "--top-p",
+                "1.0",
+            ],
+        )
+        assert set(overrides) == {
+            "+policy_model_name=openai/gpt-oss-120b",
+            "+policy_base_url=http://0.0.0.0:10240/v1",
+            "+policy_api_key=dummy_key",
+            "+responses_create_params.temperature=1.0",
+            "+responses_create_params.top_p=1.0",
+        }
+
+    def test_flags_compose_with_config_and_passthrough(self, monkeypatch: MonkeyPatch) -> None:
+        target, overrides = _dispatch_for(
+            monkeypatch,
+            [
+                "eval",
+                "run",
+                "--no-serve",
+                "--config",
+                "b.yaml",
+                "--agent",
+                "a",
+                "+responses_create_params.tool_choice=auto",
+            ],
+        )
+        assert target == "nemo_gym.cli.eval:collect_rollouts"
+        assert "+config_paths=[b.yaml]" in overrides
+        assert "+agent_name=a" in overrides
+        assert "+responses_create_params.tool_choice=auto" in overrides  # unknown +override passes through
+
+
+class TestEnvTestResourceServerFlag:
+    def test_no_resource_server_runs_all(self, monkeypatch: MonkeyPatch) -> None:
+        target, overrides = _dispatch_for(monkeypatch, ["env", "test"])
+        assert target == "nemo_gym.cli.env:test_all"
+        assert overrides == []
+
+    def test_resource_server_name_translates_to_entrypoint(self, monkeypatch: MonkeyPatch) -> None:
+        target, overrides = _dispatch_for(monkeypatch, ["env", "test", "--resource-server", "gpqa"])
+        assert target == "nemo_gym.cli.env:test"
+        assert overrides == ["+entrypoint=resources_servers/gpqa"]
+
+    def test_direct_entrypoint_override_also_runs_single(self, monkeypatch: MonkeyPatch) -> None:
+        target, overrides = _dispatch_for(monkeypatch, ["env", "test", "+entrypoint=resources_servers/gpqa"])
+        assert target == "nemo_gym.cli.env:test"
+        assert overrides == ["+entrypoint=resources_servers/gpqa"]

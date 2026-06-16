@@ -49,6 +49,17 @@ def dispatch(target: str, overrides: list[str]) -> None:
     func()
 
 
+def _value_flag(name: str, hydra_key: str, flag_help: str, *, aliases: tuple[str, ...] = ()) -> Flag:
+    """A `--name VALUE` flag that maps to the Hydra override `+<hydra_key>=VALUE` (omitted when unset)."""
+    dest = name.replace("-", "_")
+    return Flag(
+        register=lambda p: p.add_argument(f"--{name}", *aliases, dest=dest, help=flag_help),
+        translate_to_hydra=lambda args: (
+            [f"+{hydra_key}={getattr(args, dest)}"] if getattr(args, dest) is not None else []
+        ),
+    )
+
+
 # Shared flag: load Gym config files. Reused by every command that reads server/benchmark configs.
 CONFIG = Flag(
     register=lambda p: p.add_argument(
@@ -60,28 +71,11 @@ CONFIG = Flag(
     translate_to_hydra=lambda args: [f"+config_paths=[{','.join(args.config)}]"] if args.config else [],
 )
 
-# Command-specific flags read by the corresponding target callable below.
-NO_SERVE = Flag(
-    register=lambda p: p.add_argument(
-        "--no-serve",
-        action="store_true",
-        help="Collect against already-running servers instead of starting them.",
-    )
-)
-
+# Shared flag: select the storage backend. Reused by `dataset upload` and `dataset download`.
 STORAGE = Flag(
     register=lambda p: p.add_argument(
         "--storage", choices=("hf", "gitlab"), default="hf", help="Storage backend (default: hf)."
     )
-)
-
-ENTRYPOINT = Flag(
-    register=lambda p: p.add_argument(
-        "--resource_server", metavar="NAME", help="Name of the resource server to test. Tests all servers if omitted."
-    ),
-    translate_to_hydra=lambda args: (
-        [f"+entrypoint=resources_servers/{args.resource_server}"] if args.resource_server else []
-    ),
 )
 
 
@@ -91,8 +85,9 @@ def _eval_run(args: argparse.Namespace, overrides: list[str]) -> None:
 
 
 def _env_test(args: argparse.Namespace, overrides: list[str]) -> None:
-    # Run a single server's tests if one was named (--resource_server is translated to +entrypoint above)
-    # or an +entrypoint override was passed directly; otherwise run the whole suite.
+    # Run a single server's tests if +entrypoint was passed. No need to check for
+    # --resource-server because it is translated to +entrypoint in the flag definition.
+
     has_entrypoint = any(override.lstrip("+").split("=", 1)[0] == "entrypoint" for override in overrides)
     dispatch("nemo_gym.cli.env:test" if has_entrypoint else "nemo_gym.cli.env:test_all", overrides)
 
@@ -167,7 +162,18 @@ COMMANDS = {
     "env test": Command(
         target=_env_test,
         summary="Test the resource server(s); runs all if no resource server is given.",
-        flags=(ENTRYPOINT,),
+        flags=(
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--resource-server",
+                    metavar="NAME",
+                    help="Name of the resource server to test. Tests all servers if omitted.",
+                ),
+                translate_to_hydra=lambda args: (
+                    [f"+entrypoint=resources_servers/{args.resource_server}"] if args.resource_server else []
+                ),
+            ),
+        ),
     ),
     "env run": Command(target="nemo_gym.cli.env:run", summary="Start the servers.", flags=(CONFIG,)),
     "env status": Command(target="nemo_gym.cli.env:status", summary="Print the server status."),
@@ -179,7 +185,36 @@ COMMANDS = {
     "eval run": Command(
         target=_eval_run,
         summary="Collate data, start servers, and collect rollouts.",
-        flags=(CONFIG, NO_SERVE),
+        flags=(
+            CONFIG,
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--no-serve",
+                    action="store_true",
+                    help="Collect against already-running servers instead of starting them.",
+                )
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--resume", action="store_true", help="Resume from cached rollouts instead of recollecting."
+                ),
+                translate_to_hydra=lambda args: ["+resume_from_cache=true"] if args.resume else [],
+            ),
+            _value_flag("agent", "agent_name", "Agent to collect rollouts with.", aliases=("-a",)),
+            _value_flag("input", "input_jsonl_fpath", "Input tasks JSONL file.", aliases=("-i",)),
+            _value_flag("output", "output_jsonl_fpath", "Output rollouts JSONL file.", aliases=("-o",)),
+            _value_flag("limit", "limit", "Maximum number of tasks to run."),
+            _value_flag("num-repeats", "num_repeats", "Number of rollouts per task."),
+            _value_flag("prompt-config", "prompt_config", "Prompt template YAML to apply."),
+            _value_flag("concurrency", "num_samples_in_parallel", "Maximum number of concurrent samples."),
+            _value_flag("split", "split", "Dataset split to use (train, validation, or benchmark)."),
+            _value_flag("model-name", "policy_model_name", "Model name to evaluate."),
+            _value_flag("model-url", "policy_base_url", "Model server base URL."),
+            _value_flag("model-api-key", "policy_api_key", "Model server API key."),
+            _value_flag("temperature", "responses_create_params.temperature", "Sampling temperature."),
+            _value_flag("top-p", "responses_create_params.top_p", "Nucleus sampling top-p."),
+            _value_flag("max-output-tokens", "responses_create_params.max_output_tokens", "Maximum output tokens."),
+        ),
     ),
     "eval aggregate": Command(
         target="nemo_gym.cli.eval:aggregate_rollouts",
