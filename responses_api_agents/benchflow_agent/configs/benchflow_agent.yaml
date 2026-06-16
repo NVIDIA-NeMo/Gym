@@ -44,8 +44,10 @@ benchflow_agent:
       # Directory of prebuilt per-task Singularity .sif images. Files must be named "<task_name>.sif".
       images_dir: null
 
-      # Model routing: points the in-container agent's LLM calls at the NeMo Gym
-      # model server alias (resolved to an OpenAI-compatible base URL).
+      # List of datasets to evaluate on.
+      datasets: null
+
+      # Model routing: points agent LLM calls at the NeMo Gym model server alias.
       model_server:
         type: responses_api_models
         name: policy_model
