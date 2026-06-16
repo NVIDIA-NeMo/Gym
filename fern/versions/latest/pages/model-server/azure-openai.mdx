@@ -7,7 +7,7 @@ position: 3
 The `azure_openai_model` server connects NeMo Gym to models hosted on [Azure OpenAI](https://learn.microsoft.com/azure/ai-services/openai/). It calls Azure's Chat Completions endpoint and converts to and from NeMo Gym's native [Responses API](https://developers.openai.com/api/reference/resources/responses/methods/create) — so, like [Inference Providers](/model-server/inference-providers), it translates between the two formats (unlike [OpenAI](/model-server/openai), which forwards Responses requests natively). Azure also requires an explicit `api-version`.
 
 <Info>
-For **training** workloads that require token IDs and log probabilities, use [vLLM](/model-server/vllm) instead. Hosted endpoints don't expose the token-level information needed for RL training.
+For **training** workloads that require token IDs and log probabilities, use [vLLM](/model-server/vllm) instead. Hosted endpoints do not expose the token-level information needed for RL training.
 
 </Info>
 
@@ -37,7 +37,7 @@ Azure requires an API version (for example `2024-10-21`). Set it on the `default
 | `openai_base_url` | `str` | — | **Required.** Azure OpenAI endpoint. |
 | `openai_api_key` | `str` | — | **Required.** Azure API key. |
 | `openai_model` | `str` | — | **Required.** Azure deployment name. |
-| `default_query` | `dict` | — | **Required.** Must include `api-version` (e.g. `2024-10-21`). |
+| `default_query` | `dict` | — | **Required.** Must include `api-version` (for example, `2024-10-21`). |
 | `num_concurrent_requests` | `int` | — | **Required.** Maximum concurrent requests to Azure. |
 
 <Note>

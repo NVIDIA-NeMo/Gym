@@ -7,7 +7,7 @@ position: 4
 The `inference_provider` server connects NeMo Gym to any hosted inference provider. The server manages the conversion to and from the Responses API: it translates incoming Responses requests to Chat Completions for the provider and converts the reply back into a Responses object — so your agent code stays the same across backends.
 
 <Info>
-For **training** workloads that require token IDs and log probabilities, use [vLLM](/model-server/vllm) instead. Hosted providers don't expose the token-level information needed for RL training.
+For **training** workloads that require token IDs and log probabilities, use [vLLM](/model-server/vllm) instead. Hosted providers do not expose the token-level information needed for RL training.
 
 </Info>
 
@@ -41,7 +41,7 @@ policy_api_key: your-api-key
 policy_model_name: nvidia/Nemotron-3-Nano-30B-A3B
 ```
 
-If your provider isn't in the table above, also set the base URL:
+If your provider is not in the table above, also set the base URL:
 
 ```yaml
 # env.yaml
@@ -68,7 +68,7 @@ policy_base_url: https://your-provider.com/v1
 
 ### 1. Set model and environment config
 
-In this example we use Together.ai:
+In this example, we use Together.ai:
 
 ```bash
 environment_config="resources_servers/mcqa/configs/mcqa.yaml"
