@@ -89,6 +89,19 @@ STORAGE = Flag(
     )
 )
 
+# Shared model-server flags. Reused by commands that spin up / target a model server (`eval run`, `env run`).
+MODEL_NAME = _value_flag("model-name", "policy_model_name", "Model name.")
+MODEL_URL = _value_flag("model-url", "policy_base_url", "Model server base URL.")
+MODEL_API_KEY = _value_flag("model-api-key", "policy_api_key", "Model server API key.")
+
+# Shared flag: select a single resource server by name. Reused by `env test`, `env init`, and `env packages`.
+RESOURCE_SERVER = Flag(
+    register=lambda p: p.add_argument("--resource-server", metavar="NAME", help="Name of the resource server."),
+    translate_to_hydra=lambda args: (
+        [f"+entrypoint=resources_servers/{args.resource_server}"] if args.resource_server else []
+    ),
+)
+
 
 def _eval_run(args: argparse.Namespace, overrides: list[str]) -> None:
     target = "nemo_gym.cli.eval:collect_rollouts" if args.no_serve else "nemo_gym.cli.eval:e2e_rollout_collection"
@@ -209,6 +222,7 @@ COMMANDS = {
     "env init": Command(
         target="nemo_gym.cli.env:init_resources_server",
         summary="Scaffold config for a new server, benchmark, or agent.",
+        flags=(RESOURCE_SERVER,),
     ),
     "env resolve": Command(
         target="nemo_gym.cli.env:dump_config",
@@ -218,24 +232,21 @@ COMMANDS = {
     "env packages": Command(
         target="nemo_gym.cli.env:pip_list",
         summary="Print pip packages for the selected resource server.",
+        flags=(
+            RESOURCE_SERVER,
+            _bool_flag("outdated", "outdated", "List only outdated packages."),
+        ),
     ),
     "env test": Command(
         target=_env_test,
         summary="Test the resource server(s); runs all if no resource server is given.",
-        flags=(
-            Flag(
-                register=lambda p: p.add_argument(
-                    "--resource-server",
-                    metavar="NAME",
-                    help="Name of the resource server to test. Tests all servers if omitted.",
-                ),
-                translate_to_hydra=lambda args: (
-                    [f"+entrypoint=resources_servers/{args.resource_server}"] if args.resource_server else []
-                ),
-            ),
-        ),
+        flags=(RESOURCE_SERVER,),
     ),
-    "env run": Command(target="nemo_gym.cli.env:run", summary="Start the servers.", flags=(CONFIG,)),
+    "env run": Command(
+        target="nemo_gym.cli.env:run",
+        summary="Start the servers.",
+        flags=(CONFIG, MODEL_NAME, MODEL_URL, MODEL_API_KEY),
+    ),
     "env status": Command(target="nemo_gym.cli.env:status", summary="Print the server status."),
     "eval prepare": Command(
         target="nemo_gym.cli.eval:prepare_benchmark",
@@ -263,9 +274,9 @@ COMMANDS = {
             _value_flag("prompt-config", "prompt_config", "Prompt template YAML to apply."),
             _value_flag("concurrency", "num_samples_in_parallel", "Maximum number of concurrent samples."),
             _value_flag("split", "split", "Dataset split to use (train, validation, or benchmark)."),
-            _value_flag("model-name", "policy_model_name", "Model name to evaluate."),
-            _value_flag("model-url", "policy_base_url", "Model server base URL."),
-            _value_flag("model-api-key", "policy_api_key", "Model server API key."),
+            MODEL_NAME,
+            MODEL_URL,
+            MODEL_API_KEY,
             _value_flag("temperature", "responses_create_params.temperature", "Sampling temperature."),
             _value_flag("top-p", "responses_create_params.top_p", "Nucleus sampling top-p."),
             _value_flag("max-output-tokens", "responses_create_params.max_output_tokens", "Maximum output tokens."),

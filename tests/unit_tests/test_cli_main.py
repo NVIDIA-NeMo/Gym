@@ -419,3 +419,46 @@ class TestEvalProfileFlags:
         monkeypatch.setattr(sys, "argv", ["gym", "eval", "profile", "--config", "x.yaml"])
         with pytest.raises(SystemExit):
             main()
+
+
+class TestEnvRunFlags:
+    def test_model_flags(self, monkeypatch: MonkeyPatch) -> None:
+        target, overrides = _dispatch_for(
+            monkeypatch,
+            [
+                "env",
+                "run",
+                "--config",
+                "c.yaml",
+                "--model-name",
+                "gpt",
+                "--model-url",
+                "http://x",
+                "--model-api-key",
+                "k",
+            ],
+        )
+        assert target == "nemo_gym.cli.env:run"
+        assert set(overrides) == {
+            "+config_paths=[c.yaml]",
+            "+policy_model_name=gpt",
+            "+policy_base_url=http://x",
+            "+policy_api_key=k",
+        }
+
+
+class TestEnvInitFlags:
+    def test_resource_server_translates_to_entrypoint(self, monkeypatch: MonkeyPatch) -> None:
+        target, overrides = _dispatch_for(monkeypatch, ["env", "init", "--resource-server", "my_server"])
+        assert target == "nemo_gym.cli.env:init_resources_server"
+        assert overrides == ["+entrypoint=resources_servers/my_server"]
+
+
+class TestEnvPackagesFlags:
+    def test_flags(self, monkeypatch: MonkeyPatch) -> None:
+        target, overrides = _dispatch_for(monkeypatch, ["env", "packages", "--resource-server", "gpqa", "--outdated"])
+        assert target == "nemo_gym.cli.env:pip_list"
+        assert set(overrides) == {
+            "+entrypoint=resources_servers/gpqa",
+            "+outdated=true",
+        }
