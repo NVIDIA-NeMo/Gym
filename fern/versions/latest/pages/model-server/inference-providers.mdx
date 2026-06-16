@@ -1,15 +1,20 @@
 ---
 title: "Inference Providers"
 description: "Use hosted inference providers like Fireworks, Together.ai, OpenRouter, and more for eval workloads"
-position: 3
+position: 4
 ---
 
-The `inference_provider` server connects NeMo Gym to any hosted inference provider that exposes an OpenAI-compatible `/v1/chat/completions` endpoint.
+The `inference_provider` server connects NeMo Gym to any hosted inference provider. The server manages the conversion to and from the Responses API: it translates incoming Responses requests to Chat Completions for the provider and converts the reply back into a Responses object — so your agent code stays the same across backends.
 
 <Info>
 For **training** workloads that require token IDs and log probabilities, use [vLLM](/model-server/vllm) instead. Hosted providers don't expose the token-level information needed for RL training.
 
 </Info>
+
+## Supported APIs
+
+- **OpenAI Responses** — `/v1/responses`
+- **OpenAI Chat Completions** — `/v1/chat/completions`
 
 ## Supported Providers
 
@@ -53,6 +58,11 @@ policy_base_url: https://your-provider.com/v1
 | `uses_reasoning_parser` | `bool` | `false` | Parse `<think>` tags and `reasoning_content` fields from thinking models. |
 | `num_concurrent_requests` | `int` | `1000` | Maximum concurrent requests to the provider. Reduce if your provider has a lower rate limit. |
 | `extra_body` | `dict` | `{}` | Additional parameters merged into every request body. |
+
+<Note>
+**The model is fixed by configuration.** This server always sends the configured `model` (from `policy_model_name`) to the provider. If an incoming request carries its own `model` field — as standard OpenAI-compatible clients and SDKs do — that value is **overwritten**, so you cannot switch models on a per-request basis. To run a different model, change the config and start a new server.
+
+</Note>
 
 ## Usage Example
 
