@@ -65,6 +65,12 @@ from nemo_gym.server_utils import (
 from nemo_gym.train_data_utils import TrainDataProcessor
 
 
+# Grace period after SIGINT before escalating to SIGKILL. Kept short so Ctrl-C is responsive.
+_GRACEFUL_SHUTDOWN_TIMEOUT_SEC: int = 1
+# Grace period after SIGKILL for the kernel to reap the child and avoid <defunct> entries.
+_FORCE_KILL_REAP_TIMEOUT_SEC: int = 2
+
+
 class RunConfig(BaseNeMoGymCLIConfig):
     """
     Start NeMo Gym servers for agents, models, and resources.
@@ -304,7 +310,7 @@ Process `{process_name}` stderr:
             if len(successful_servers) != total_servers:
                 if poll_count % 10 == 0:  # Print every sleep_interval * poll_count = 3 * 10 = 30s
                     print(
-                        f"""Checking for HTTP server statuses (you should see some HTTP requests to `/` that may 404. This is expected.
+                        f"""Checking for HTTP server statuses.
 {len(successful_servers)} / {total_servers} servers ready. Waiting for servers to spin up: {waiting}"""
                     )
                 poll_count += 1
@@ -322,20 +328,32 @@ Process `{process_name}` stderr:
 
         print("Waiting for processes to finish...")
         killed_process_names: List[str] = []
+        unreaped_process_names: List[str] = []
         for process_name, process in self._processes.items():
             try:
-                process.wait(timeout=1)
+                process.wait(timeout=_GRACEFUL_SHUTDOWN_TIMEOUT_SEC)
             except TimeoutExpired:
                 process.kill()
                 killed_process_names.append(process_name)
+                # Reap the child after SIGKILL to avoid leaving a <defunct> entry.
+                try:
+                    process.wait(timeout=_FORCE_KILL_REAP_TIMEOUT_SEC)
+                except TimeoutExpired:
+                    unreaped_process_names.append(process_name)
 
         if killed_process_names:
             print(
-                f"""Some processes ({", ".join(killed_process_names)}) didn't shutdown within the 5s timeout, killing instead. You may see messages like:
+                f"""Some processes ({", ".join(killed_process_names)}) didn't shutdown within the {_GRACEFUL_SHUTDOWN_TIMEOUT_SEC}s timeout, killing instead. You may see messages like:
 ```bash
 rpc_client.h:203: Failed to connect to GCS within 60 seconds. GCS may have been killed. It's either GCS is terminated by `ray stop` or is killed unexpectedly. If it is killed unexpectedly, see the log file gcs_server.out. https://docs.ray.io/en/master/ray-observability/user-guides/configure-logging.html#logging-directory-structure. The program will terminate.
 ```
 """
+            )
+        if unreaped_process_names:
+            print(
+                f"WARNING: processes ({', '.join(unreaped_process_names)}) did not exit "
+                f"within {_FORCE_KILL_REAP_TIMEOUT_SEC}s after SIGKILL; "
+                "they may remain as zombies until this process exits."
             )
         self._processes = dict()
 
@@ -600,6 +618,31 @@ class TestAllConfig(BaseNeMoGymCLIConfig):
         default=False,
         description="Delete each server venv after its tests have been run (default: False).",
     )
+    num_shards: int = Field(
+        default=1,
+        ge=1,
+        description="Total number of shards to split the server suite across (default: 1 = no sharding). "
+        "Used to parallelize the suite across CI runners.",
+    )
+    shard_index: int = Field(
+        default=0,
+        ge=0,
+        description="Which shard (0-based) this invocation runs; must be < num_shards (default: 0).",
+    )
+
+
+def _select_shard(dir_paths: List[Path], shard_index: int, num_shards: int) -> List[Path]:
+    """Deterministically select this shard's subset of modules.
+
+    Round-robin (stride) over a sorted list spreads heavy modules across shards more evenly than
+    contiguous chunks, which balances wall-time when the suite is parallelized across CI runners.
+    """
+    if num_shards <= 1:
+        return dir_paths
+    assert 0 <= shard_index < num_shards, (
+        f"shard_index ({shard_index}) must be in [0, num_shards) for num_shards={num_shards}"
+    )
+    return sorted(dir_paths, key=str)[shard_index::num_shards]
 
 
 def test_all():  # pragma: no cover
@@ -616,6 +659,15 @@ def test_all():  # pragma: no cover
     dir_paths: List[Path] = list(map(Path, candidate_dir_paths))
     dir_paths = [p for p in dir_paths if (p / "README.md").exists()]
     print(f"Found {len(dir_paths)} modules to test:{_display_list_of_paths(dir_paths)}\n")
+
+    # Keep the full list for the total-vs-tested mismatch check below, then narrow to this shard.
+    full_dir_paths = dir_paths
+    dir_paths = _select_shard(dir_paths, test_all_config.shard_index, test_all_config.num_shards)
+    if test_all_config.num_shards > 1:
+        print(
+            f"Shard {test_all_config.shard_index + 1}/{test_all_config.num_shards}: "
+            f"testing {len(dir_paths)} of {len(full_dir_paths)} modules:{_display_list_of_paths(dir_paths)}\n"
+        )
 
     tests_passed: List[Path] = []
     tests_failed: List[Path] = []
@@ -692,10 +744,12 @@ ng_test +entrypoint={data_validation_failed[0]} +should_validate_data=true
 """)
 
     if test_all_config.fail_on_total_and_test_mismatch:
-        extra_candidates = [p for p in candidate_dir_paths if Path(p) not in dir_paths]
+        # Compare against the full (unsharded) module list — every module must be testable
+        # regardless of how many shards we split the run into.
+        extra_candidates = [p for p in candidate_dir_paths if Path(p) not in full_dir_paths]
         assert (
-            len(candidate_dir_paths) == len(dir_paths)
-        ), f"""Mismatch on the number of total modules found ({len(candidate_dir_paths)}) and the number of actual modules tested ({len(dir_paths)})!
+            len(candidate_dir_paths) == len(full_dir_paths)
+        ), f"""Mismatch on the number of total modules found ({len(candidate_dir_paths)}) and the number of actual modules tested ({len(full_dir_paths)})!
 
 Extra candidate paths:{_display_list_of_paths(extra_candidates)}"""
 
@@ -751,41 +805,40 @@ def init_resources_server():  # pragma: no cover
 
     config_fpath = configs_dirpath / f"{server_type_name}.yaml"
     with open(config_fpath, "w") as f:
-        f.write(f"""{server_type_name}_resources_server:
-  {server_type}:
-    {server_type_name}:
-      entrypoint: app.py
-      domain: other
-{server_type_name}_simple_agent:
+        f.write(f"""# Resources server: owns this environment's task verification (verify()) and reward.
+{server_type_name}_resources_server:          # instance name — how agents/CLI refer to this server
+  {server_type}:                              # server type: resources_servers | responses_api_agents | responses_api_models
+    {server_type_name}:                        # implementation directory under {server_type}/
+      entrypoint: app.py                        # server entry module
+      domain: other                             # task domain; one of: math, coding, agent, knowledge,
+                                                #   instruction_following, long_context, safety, games, translation,
+                                                #   e2e, rlhf, other. Change 'other' to the closest fit.
+      verified: false                           # set true once the benchmark has been baselined and reviewed
+
+# Agent server config specifies the agent server to run and any additional components of the environment such as resources servers
+{server_type_name}_simple_agent:               # this agent instance's name — pass as +agent_name= to ng_collect_rollouts
   responses_api_agents:
-    simple_agent:
+    simple_agent:                               # built-in agent: runs the model with tool calls (up to max_steps); swap for your own agent dir
       entrypoint: app.py
-      resources_server:
+      resources_server:                         # the resources server this agent interacts with for tools, state and verification
         type: resources_servers
         name: {server_type_name}_resources_server
-      model_server:
+      model_server:                             # the model that answers; 'policy_model' is resolved from a model config
         type: responses_api_models
         name: policy_model
-      datasets:
+      datasets:                                 # one block per split: train | validation | example
       - name: train
         type: train
-        jsonl_fpath: resources_servers/{server_type_name}/data/train.jsonl
-        num_repeats: 1
-        gitlab_identifier:
-          dataset_name: {server_type_name}
-          version: 0.0.1
-          artifact_fpath: train.jsonl
-        license: Apache 2.0
+        jsonl_fpath: resources_servers/{server_type_name}/data/train.jsonl   # local data file for this split
+        num_repeats: 1                          # times to repeat each example (e.g. for pass@k / mean@k)
+        license: Apache 2.0                     # required for train/validation; must be an allowed license string
+        # to fetch this split from a registry instead, add gitlab_identifier: or huggingface_identifier:
       - name: validation
         type: validation
         jsonl_fpath: resources_servers/{server_type_name}/data/validation.jsonl
         num_repeats: 1
-        gitlab_identifier:
-          dataset_name: {server_type_name}
-          version: 0.0.1
-          artifact_fpath: validation.jsonl
         license: Apache 2.0
-      - name: example
+      - name: example                           # 5 rows committed to git for quick smoke tests
         type: example
         jsonl_fpath: resources_servers/{server_type_name}/data/example.jsonl
         num_repeats: 1

@@ -377,6 +377,11 @@ class BaseServer(BaseModel):
 
         return server_config
 
+    def setup_liveness(self, app: FastAPI) -> None:
+        @app.get("/", include_in_schema=False)
+        async def _liveness():
+            return {"status": "ok"}
+
 
 class ProfilingMiddlewareInputConfig(BaseModel):
     # Relative to the Gym root dir.
@@ -626,6 +631,7 @@ repr(e): {repr(e)}"""
             return
 
         app = server.setup_webserver()
+        server.setup_liveness(app)
         server.set_ulimit()
         server.prefix_server_logs()
         server.setup_exception_middleware(app)
@@ -698,6 +704,7 @@ class HeadServer(BaseServer):
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
 
+        self.setup_liveness(app)
         app.get("/global_config_dict_yaml")(self.global_config_dict_yaml)
         app.get("/server_instances")(self.get_server_instances)
 
