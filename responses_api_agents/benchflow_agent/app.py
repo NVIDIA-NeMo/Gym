@@ -90,7 +90,7 @@ class BenchFlowAgentConfig(BaseResponsesAPIAgentConfig):
     max_retries: int = 2
 
     # Overrides to apply to every task's task.toml.
-    task_config_overrides: dict[str, Any] = Field(default_factory=dict)
+    task_config_overrides: Optional[dict[str, Any]] = None
 
     # Directory of prebuilt per-task Singularity .sif images. Files must be named "<task_name>.sif".
     images_dir: Optional[str] = None

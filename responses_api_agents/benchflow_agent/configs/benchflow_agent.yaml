@@ -39,7 +39,7 @@ benchflow_agent:
       #       memory_mb: 131072
       #     agent:
       #       timeout_sec: 1000000000.0
-      task_config_overrides: {}
+      task_config_overrides: null
 
       # Directory of prebuilt per-task Singularity .sif images. Files must be named "<task_name>.sif".
       images_dir: null
