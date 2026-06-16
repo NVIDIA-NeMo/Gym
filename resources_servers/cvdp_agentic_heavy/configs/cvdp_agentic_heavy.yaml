@@ -1,0 +1,44 @@
+cvdp_agentic_heavy:
+  resources_servers:
+    cvdp_agentic_heavy:
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      oss_sim_image: ghcr.io/hdl/sim/osvb
+      oss_pnr_image: ghcr.io/hdl/impl/pnr
+      execution_backend: apptainer
+      container_timeout: 600
+      tool_timeout: 120
+      num_processes: 4
+      sif_cache_dir: ""
+      harness_workspace_dir: ""
+      container_tmp_bind_path: ""
+      disable_network: false
+      description: CVDP agentic-heavy benchmark rollout environment
+      value: Evaluate long-context RTL agents on CVDP benchmark tasks
+
+cvdp_agentic_heavy_agent:
+  responses_api_agents:
+    cvdp_agentic_heavy_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: cvdp_agentic_heavy
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      max_steps: 30
+      context_limit_tokens: 120000
+      max_tool_output_chars: 30000
+      model_call_timeout: 300
+      tool_call_timeout: 180
+      datasets:
+      - name: validation
+        type: validation
+        jsonl_fpath: resources_servers/cvdp_agentic_heavy/data/gym_cvdp_v1.1.0_agentic_heavy_code_generation.jsonl
+        gitlab_identifier:
+          dataset_name: cvdp_agentic_heavy_code_generation
+          version: 1.1.0
+          artifact_fpath: gym_cvdp_v1.1.0_agentic_heavy_code_generation.jsonl
+        license: Apache 2.0
+        num_repeats: 5

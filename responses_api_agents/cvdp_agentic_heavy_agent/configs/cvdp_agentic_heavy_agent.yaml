@@ -1,0 +1,15 @@
+cvdp_agentic_heavy_agent:
+  responses_api_agents:
+    cvdp_agentic_heavy_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: cvdp_agentic_heavy
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      max_steps: 30
+      context_limit_tokens: 120000
+      max_tool_output_chars: 30000
+      model_call_timeout: 300
+      tool_call_timeout: 180
