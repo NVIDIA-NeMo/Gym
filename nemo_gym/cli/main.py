@@ -13,15 +13,38 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import argparse
+import difflib
 import importlib
+import re
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 
 from nemo_gym import WORKING_DIR
 
 
 VERSION_TARGET = "nemo_gym.cli.general:version"
+
+
+def _did_you_mean(value: str, candidates: Iterable[str]) -> str:
+    """A ` Did you mean \\`X\\`?` fragment for the closest candidate to `value`, or `""` if none is close enough."""
+    matches = difflib.get_close_matches(value, list(candidates), n=1)
+    return f" Did you mean `{matches[0]}`?" if matches else ""
+
+
+class _GymArgumentParser(argparse.ArgumentParser):
+    """ArgumentParser that appends a difflib "did you mean?" hint to invalid-choice errors.
+
+    Covers mistyped commands/groups and bad --flag choices (e.g. --storage), since argparse validates all of them
+    as choices against the registry baked into the parser.
+    """
+
+    def error(self, message: str) -> None:
+        match = re.search(r"invalid choice: '([^']+)' \(choose from (.+)\)", message)
+        if match:
+            typo, choices = match.group(1), re.findall(r"'([^']+)'", match.group(2))
+            message += _did_you_mean(typo, choices)
+        super().error(message)
 
 
 @dataclass(frozen=True)
@@ -129,12 +152,17 @@ def _asset_config_path(flag: str, value: str) -> str:
     if (WORKING_DIR / path).exists():
         return path
 
+    # Suggest the closest real name: a config flavor when the server exists, otherwise a server name.
     if (WORKING_DIR / parent / server_name).exists():
         available = f"{config_dir}/"
+        typo = config_flavor
+        candidates = [p.stem for p in (WORKING_DIR / config_dir).glob("*.yaml")]
     else:
         available = f"{parent}/"
+        typo = server_name
+        candidates = [child.name for child in (WORKING_DIR / parent).iterdir() if child.is_dir()]
     raise ValueError(
-        f"`--{flag} {value}` was specified which implies config `{path}`, which does not exist. "
+        f"`--{flag} {value}` was specified which implies config `{path}`, which does not exist.{_did_you_mean(typo, candidates)} "
         f"See available {flag} configs in `{available}`."
     )
 
@@ -388,14 +416,16 @@ COMMANDS = {
 
 def _add_leaf(subparsers: argparse._SubParsersAction, name: str, command: Command) -> None:
     leaf = subparsers.add_parser(name, help=command.summary, description=command.summary)
-    leaf.set_defaults(_command=command)
+    # `_parser=leaf` so error reporting (and flag "did you mean?" hints) uses this command's own options/prog.
+    leaf.set_defaults(_command=command, _parser=leaf)
     leaf.add_argument("-v", "--verbose", action="store_true", help="Set logging level to DEBUG.")
     for flag in command.flags:
         flag.register(leaf)
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="gym", add_help=True)
+    # _GymArgumentParser propagates to every subparser (argparse defaults parser_class to type(self)).
+    parser = _GymArgumentParser(prog="gym", add_help=True)
     parser.add_argument("--version", action="store_true", help="Show the NeMo Gym version and exit.")
     parser.add_argument("--json", action="store_true", help="With --version, output as JSON.")
     parser.set_defaults(_parser=parser)
@@ -428,7 +458,10 @@ def main() -> None:
     # Hydra overrides never start with "-" so we treat them as unknown flags.
     unknown_flags = [token for token in overrides if token.startswith("-")]
     if unknown_flags:
-        getattr(args, "_parser", parser).error(f"unrecognized arguments: {' '.join(unknown_flags)}")
+        error_parser = getattr(args, "_parser", parser)
+        known_options = [opt for action in error_parser._actions for opt in action.option_strings]
+        hints = "".join(_did_you_mean(flag.split("=", 1)[0], known_options) for flag in unknown_flags)
+        error_parser.error(f"unrecognized arguments: {' '.join(unknown_flags)}{hints}")
 
     if args.version:
         dispatch(VERSION_TARGET, ["+json=true", *overrides] if args.json else overrides)

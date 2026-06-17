@@ -724,3 +724,49 @@ class TestAssetSelectors:
         err = capsys.readouterr().err
         assert "resources_servers/mcqa/configs/nope.yaml" in err
         assert "resources_servers/mcqa/configs/" in err
+
+
+class TestDidYouMean:
+    """difflib-backed "did you mean?" hints for mistyped commands, flags, and component names (proposal UX 4)."""
+
+    def test_helper_suggests_close_match(self) -> None:
+        assert cli_main._did_you_mean("evl", ["list", "eval", "env"]) == " Did you mean `eval`?"
+
+    def test_helper_silent_when_nothing_close(self) -> None:
+        assert cli_main._did_you_mean("zzzzzz", ["list", "eval", "env"]) == ""
+
+    def _run_expecting_exit(self, monkeypatch: MonkeyPatch, capsys, argv: list[str]) -> str:
+        monkeypatch.setattr(cli_main, "dispatch", lambda target, overrides: None)
+        monkeypatch.setattr(sys, "argv", ["gym", *argv])
+        with pytest.raises(SystemExit):
+            main()
+        return capsys.readouterr().err
+
+    def test_mistyped_group(self, monkeypatch: MonkeyPatch, capsys) -> None:
+        err = self._run_expecting_exit(monkeypatch, capsys, ["evl"])
+        assert "invalid choice: 'evl'" in err
+        assert "Did you mean `eval`?" in err
+
+    def test_mistyped_action(self, monkeypatch: MonkeyPatch, capsys) -> None:
+        err = self._run_expecting_exit(monkeypatch, capsys, ["eval", "rnu"])
+        assert "Did you mean `run`?" in err
+
+    def test_mistyped_flag_choice(self, monkeypatch: MonkeyPatch, capsys) -> None:
+        # --storage validates choices, so the parser-level hint kicks in.
+        err = self._run_expecting_exit(monkeypatch, capsys, ["dataset", "upload", "--storage", "gitlb"])
+        assert "Did you mean `gitlab`?" in err
+
+    def test_misspelled_flag(self, monkeypatch: MonkeyPatch, capsys) -> None:
+        err = self._run_expecting_exit(monkeypatch, capsys, ["eval", "run", "--benchmrk", "aalcr"])
+        assert "unrecognized arguments: --benchmrk" in err
+        assert "Did you mean `--benchmark`?" in err
+
+    def test_misspelled_component_name(self, monkeypatch: MonkeyPatch, capsys) -> None:
+        err = self._run_expecting_exit(monkeypatch, capsys, ["eval", "prepare", "--benchmark", "aalcrr"])
+        assert "Did you mean `aalcr`?" in err
+
+    def test_misspelled_component_flavor(self, monkeypatch: MonkeyPatch, capsys) -> None:
+        err = self._run_expecting_exit(
+            monkeypatch, capsys, ["eval", "run", "--resource-server", "math_with_judge/dapo17"]
+        )
+        assert "Did you mean `dapo17k`?" in err
