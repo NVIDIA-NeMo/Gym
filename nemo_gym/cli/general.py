@@ -27,7 +27,7 @@ from pydantic import Field
 
 from nemo_gym import PARENT_DIR, __version__
 from nemo_gym.config_types import BaseNeMoGymCLIConfig
-from nemo_gym.global_config import get_global_config_dict
+from nemo_gym.global_config import JSON_OUTPUT_KEY_NAME, get_global_config_dict
 
 
 def display_help_legacy():
@@ -78,9 +78,8 @@ class VersionConfig(BaseNeMoGymCLIConfig):
 def version():  # pragma: no cover
     """Display gym version and system information."""
     global_config_dict = get_global_config_dict()
-    config = VersionConfig.model_validate(global_config_dict)
-
-    json_output = config.json_format
+    # Just here for help.
+    VersionConfig.model_validate(global_config_dict)
 
     version_info = {
         "nemo_gym": __version__,
@@ -111,8 +110,7 @@ def version():  # pragma: no cover
     mem = psutil.virtual_memory()
     version_info["system"]["memory_gb"] = round(mem.total / (1024**3), 2)
 
-    # Output
-    if json_output:
+    if global_config_dict.get(JSON_OUTPUT_KEY_NAME, False):
         print(json.dumps(version_info))
     else:
         output = f"""\

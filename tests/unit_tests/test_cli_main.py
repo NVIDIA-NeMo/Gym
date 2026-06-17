@@ -481,6 +481,41 @@ class TestEnvPackagesFlags:
         }
 
 
+class TestJsonFlag:
+    @pytest.mark.parametrize(
+        "argv, expected_target",
+        [
+            (["list", "benchmarks", "--json"], "nemo_gym.cli.eval:list_benchmarks"),
+            (["env", "status", "--json"], "nemo_gym.cli.env:status"),
+        ],
+    )
+    def test_json_becomes_config_override(self, monkeypatch: MonkeyPatch, argv, expected_target) -> None:
+        # Reporting commands surface --json as the reserved `json` config key, read centrally by cli.output.emit.
+        target, overrides = _dispatch_for(monkeypatch, argv)
+        assert target == expected_target
+        assert overrides == ["+json=true"]
+
+    def test_no_json_no_override(self, monkeypatch: MonkeyPatch) -> None:
+        _, overrides = _dispatch_for(monkeypatch, ["list", "benchmarks"])
+        assert overrides == []
+
+    def test_version_json_dispatches_with_override(self, monkeypatch: MonkeyPatch) -> None:
+        # `gym --version --json` is the top-level path; it still forwards +json=true to the version command.
+        target, overrides = _dispatch_for(monkeypatch, ["--version", "--json"])
+        assert target == "nemo_gym.cli.general:version"
+        assert overrides == ["+json=true"]
+
+    def test_env_packages_json_maps_to_uv_format(self, monkeypatch: MonkeyPatch) -> None:
+        # env packages delegates to `uv pip list`, so --json maps onto its own --format=json rather than +json=true.
+        target, overrides = _dispatch_for(monkeypatch, ["env", "packages", "--resource-server", "mcqa", "--json"])
+        assert target == "nemo_gym.cli.env:pip_list"
+        assert set(overrides) == {"+entrypoint=resources_servers/mcqa", "+format=json"}
+
+    def test_env_packages_without_json(self, monkeypatch: MonkeyPatch) -> None:
+        _, overrides = _dispatch_for(monkeypatch, ["env", "packages", "--resource-server", "mcqa"])
+        assert overrides == ["+entrypoint=resources_servers/mcqa"]
+
+
 class TestVerboseFlag:
     @pytest.mark.parametrize("flag", ["-v", "--verbose"])
     def test_verbose_injects_config_override(self, monkeypatch: MonkeyPatch, flag: str) -> None:

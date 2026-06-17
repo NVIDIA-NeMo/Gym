@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import logging
+import sys
 from argparse import ArgumentParser
 from collections import defaultdict
 from copy import deepcopy
@@ -70,6 +71,7 @@ COPY_KEY_NAME = "_copy"
 DELETE_KEY_KEY_NAME = "_delete_key"
 NEMO_GYM_LOG_DIR_KEY_NAME = "nemo_gym_log_dir"
 VERBOSE_KEY_NAME = "verbose"
+JSON_OUTPUT_KEY_NAME = "json"
 NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     CONFIG_PATHS_KEY_NAME,
     ENTRYPOINT_KEY_NAME,
@@ -93,6 +95,7 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     COPY_KEY_NAME,
     NEMO_GYM_LOG_DIR_KEY_NAME,
     VERBOSE_KEY_NAME,
+    JSON_OUTPUT_KEY_NAME,
 ]
 
 # Data keys
@@ -185,6 +188,12 @@ class GlobalConfigDictParser(BaseModel):
             config_list.append(cfg)
 
         inner_hydra_wrapper()
+
+        # Hydra installs a console log handler on stdout; move it to stderr so command stdout stays machine-readable
+        # (e.g. `gym ... --json`). Diagnostics belong on stderr; only the requested data goes to stdout.
+        for handler in logging.getLogger().handlers:
+            if isinstance(handler, logging.StreamHandler) and getattr(handler, "stream", None) is sys.stdout:
+                handler.setStream(sys.stderr)
 
         global_config_dict: DictConfig = config_list[0]
 

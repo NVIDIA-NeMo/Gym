@@ -15,6 +15,7 @@
 
 import asyncio
 import importlib
+import json
 from copy import deepcopy
 from glob import glob
 from multiprocessing import Pool
@@ -32,6 +33,7 @@ from nemo_gym.benchmarks import BENCHMARKS_DIR, BenchmarkConfig, _load_benchmark
 from nemo_gym.cli.env import RunHelper
 from nemo_gym.config_types import BaseNeMoGymCLIConfig, BenchmarkDatasetConfig
 from nemo_gym.global_config import (
+    JSON_OUTPUT_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,
     GlobalConfigDictParserConfig,
@@ -65,6 +67,14 @@ def list_benchmarks() -> None:
     config_paths = sorted(config_paths)
 
     benchmarks = _load_benchmarks_from_config_paths(config_paths)
+
+    if global_config_dict.get(JSON_OUTPUT_KEY_NAME, False):
+        payload = [
+            {"name": name, "agent_name": bench.agent_name, "num_repeats": bench.num_repeats}
+            for name, bench in benchmarks.items()
+        ]
+        print(json.dumps(payload))
+        return
 
     if not benchmarks:
         rich.print("[yellow]No benchmarks found.[/yellow]")

@@ -41,6 +41,7 @@ from nemo_gym.cli_setup_command import run_command, setup_env_command
 from nemo_gym.config_types import BaseNeMoGymCLIConfig
 from nemo_gym.global_config import (
     DRY_RUN_KEY_NAME,
+    JSON_OUTPUT_KEY_NAME,
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
     NEMO_GYM_RESERVED_TOP_LEVEL_KEYS,
@@ -805,6 +806,11 @@ def status():  # pragma: no cover
 
     status_cmd = StatusCommand()
     servers = status_cmd.discover_servers()
+
+    if global_config_dict.get(JSON_OUTPUT_KEY_NAME, False):
+        print(json.dumps([server.model_dump(mode="json") for server in servers]))
+        return
+
     status_cmd.display_status(servers)
 
 

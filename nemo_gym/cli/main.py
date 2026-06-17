@@ -104,6 +104,10 @@ RESOURCE_SERVER = Flag(
     ),
 )
 
+# Shared flag: emit machine-readable JSON instead of human output. Reused by reporting commands (version, list,
+# env status). The reserved `json` config key is read centrally via nemo_gym.cli.output.emit.
+JSON = _bool_flag("json", "json", "Output as JSON for programmatic use.")
+
 
 # Asset selector flag -> (parent dir, configs subdir, default config flavor). All accept `name` or `name/flavor`,
 # resolving to `<parent>/<server>/[<subdir>/]<flavor>.yaml`. A None default flavor falls back to the server name.
@@ -203,7 +207,9 @@ GROUPS = {
 }
 
 COMMANDS = {
-    "list benchmarks": Command(target="nemo_gym.cli.eval:list_benchmarks", summary="List available benchmarks."),
+    "list benchmarks": Command(
+        target="nemo_gym.cli.eval:list_benchmarks", summary="List available benchmarks.", flags=(JSON,)
+    ),
     "dataset upload": Command(
         target=_dataset_upload,
         summary="Upload a prepared dataset to HF (default) or GitLab.",
@@ -297,6 +303,12 @@ COMMANDS = {
         flags=(
             RESOURCE_SERVER,
             _bool_flag("outdated", "outdated", "List only outdated packages."),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--json", action="store_true", help="Output the package list as JSON."
+                ),
+                translate_to_hydra=lambda args: ["+format=json"] if args.json else [],
+            ),
         ),
     ),
     "env test": Command(
@@ -309,7 +321,7 @@ COMMANDS = {
         summary="Start the servers.",
         flags=(CONFIG, RESOURCE_SERVER_CONFIG, MODEL_TYPE, MODEL_NAME, MODEL_URL, MODEL_API_KEY),
     ),
-    "env status": Command(target="nemo_gym.cli.env:status", summary="Print the server status."),
+    "env status": Command(target="nemo_gym.cli.env:status", summary="Print the server status.", flags=(JSON,)),
     "eval prepare": Command(
         target="nemo_gym.cli.eval:prepare_benchmark",
         summary="Prepare benchmark data and dump it to disk.",
@@ -385,6 +397,7 @@ def _add_leaf(subparsers: argparse._SubParsersAction, name: str, command: Comman
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="gym", add_help=True)
     parser.add_argument("--version", action="store_true", help="Show the NeMo Gym version and exit.")
+    parser.add_argument("--json", action="store_true", help="With --version, output as JSON.")
     parser.set_defaults(_parser=parser)
 
     subparsers = parser.add_subparsers()
@@ -418,7 +431,7 @@ def main() -> None:
         getattr(args, "_parser", parser).error(f"unrecognized arguments: {' '.join(unknown_flags)}")
 
     if args.version:
-        dispatch(VERSION_TARGET, overrides)
+        dispatch(VERSION_TARGET, ["+json=true", *overrides] if args.json else overrides)
         return
 
     command = getattr(args, "_command", None)

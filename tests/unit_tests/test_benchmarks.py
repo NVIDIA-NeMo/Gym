@@ -41,6 +41,29 @@ class TestListBenchmarks:
             list_benchmarks()
         assert "No benchmarks found" in capsys.readouterr().out
 
+    def test_json_output(self, capsys) -> None:
+        import json
+
+        bench = MagicMock(agent_name="my_agent", num_repeats=4)
+        with (
+            patch("nemo_gym.cli.eval.get_global_config_dict", return_value=_mock_global_config({"json": True})),
+            patch("nemo_gym.cli.eval._load_benchmarks_from_config_paths", return_value={"my_bench": bench}),
+        ):
+            list_benchmarks()
+        assert json.loads(capsys.readouterr().out) == [
+            {"name": "my_bench", "agent_name": "my_agent", "num_repeats": 4}
+        ]
+
+    def test_json_output_empty(self, capsys) -> None:
+        import json
+
+        with (
+            patch("nemo_gym.cli.eval.get_global_config_dict", return_value=_mock_global_config({"json": True})),
+            patch("nemo_gym.cli.eval._load_benchmarks_from_config_paths", return_value={}),
+        ):
+            list_benchmarks()
+        assert json.loads(capsys.readouterr().out) == []
+
 
 class TestPrepareBenchmark:
     def _make_bench_dir(self, tmp_path: Path, name: str = "fake_bench") -> tuple[Path, Path]:
