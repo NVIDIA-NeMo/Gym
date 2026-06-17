@@ -108,6 +108,16 @@ CONFIG = Flag(
     translate_to_hydra=lambda args: [f"+config_paths=[{','.join(args.config)}]"] if args.config else [],
 )
 
+# Shared flag: select an environment by name (run-by-name). Resolved to its config via the registry
+# in `_env_run` rather than statically, then merged with any --config into a single +config_paths.
+ENV = Flag(
+    register=lambda p: p.add_argument(
+        "--env",
+        metavar="NAME",
+        help="Environment to run, by name (see `gym list environments`); combined with --config / --model-* for the model.",
+    ),
+)
+
 # Shared flag: select the storage backend. Reused by `dataset upload` and `dataset download`.
 STORAGE = Flag(
     register=lambda p: p.add_argument(
@@ -254,6 +264,28 @@ def _merge_config_paths(overrides: list[str]) -> list[str]:
 def _eval_run(args: argparse.Namespace, overrides: list[str]) -> None:
     target = "nemo_gym.cli.eval:collect_rollouts" if args.no_serve else "nemo_gym.cli.eval:e2e_rollout_collection"
     dispatch(target, overrides)
+
+
+def _env_run(args: argparse.Namespace, overrides: list[str]) -> None:
+    # Run an environment by name: resolve --env to its config via the registry and merge it with any
+    # --config files into a single +config_paths token (the env references its model server, so pair
+    # it with --config / --model-* for the model). Other overrides (model flags, passthrough) flow
+    # through unchanged.
+    config_paths: list[str] = []
+    if getattr(args, "env", None):
+        from nemo_gym.registry import EnvironmentNotFoundError, resolve_environment_config_paths
+
+        try:
+            config_paths += resolve_environment_config_paths(args.env)
+        except EnvironmentNotFoundError as error:
+            raise SystemExit(f"error: {error}")
+    if args.config:
+        config_paths += list(args.config)
+
+    # CONFIG already emitted its own +config_paths token; drop it and emit the merged list instead.
+    rest = [token for token in overrides if not token.startswith("+config_paths=")]
+    merged = ([f"+config_paths=[{','.join(config_paths)}]"] if config_paths else []) + rest
+    dispatch("nemo_gym.cli.env:run", merged)
 
 
 def _env_test(args: argparse.Namespace, overrides: list[str]) -> None:
@@ -409,9 +441,9 @@ COMMANDS = {
         flags=(RESOURCE_SERVER,),
     ),
     "env run": Command(
-        target="nemo_gym.cli.env:run",
-        summary="Start the servers.",
-        flags=(CONFIG, BENCHMARK, RESOURCE_SERVER_CONFIG, MODEL_TYPE, SEARCH_DIR, MODEL, MODEL_URL, MODEL_API_KEY),
+        target=_env_run,
+        summary="Start the servers (by --env name and/or --config).",
+        flags=(ENV, CONFIG, BENCHMARK, RESOURCE_SERVER_CONFIG, MODEL_TYPE, SEARCH_DIR, MODEL, MODEL_URL, MODEL_API_KEY),
     ),
     "env status": Command(target="nemo_gym.cli.env:status", summary="Print the server status.", flags=(JSON,)),
     "eval prepare": Command(

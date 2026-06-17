@@ -866,3 +866,50 @@ class TestListEnvironmentsRouting:
         target, overrides = _dispatch_for(monkeypatch, ["list", "environments"])
         assert target == "nemo_gym.cli.env:list_environments"
         assert overrides == []
+
+
+class TestEnvRunByName:
+    def _patch_resolve(self, monkeypatch: MonkeyPatch) -> None:
+        import nemo_gym.registry
+
+        monkeypatch.setattr(
+            nemo_gym.registry,
+            "resolve_environment_config_paths",
+            lambda name, *a, **k: [f"environments/{name}/config.yaml"],
+        )
+
+    def test_env_name_resolves_to_config_path(self, monkeypatch: MonkeyPatch) -> None:
+        self._patch_resolve(monkeypatch)
+        target, overrides = _dispatch_for(monkeypatch, ["env", "run", "--env", "alpha"])
+        assert target == "nemo_gym.cli.env:run"
+        assert overrides == ["+config_paths=[environments/alpha/config.yaml]"]
+
+    def test_env_and_config_merge_into_one_config_paths(self, monkeypatch: MonkeyPatch) -> None:
+        self._patch_resolve(monkeypatch)
+        _, overrides = _dispatch_for(monkeypatch, ["env", "run", "--env", "alpha", "--config", "model.yaml"])
+        config_paths = [o for o in overrides if o.startswith("+config_paths=")]
+        assert config_paths == ["+config_paths=[environments/alpha/config.yaml,model.yaml]"]
+
+    def test_model_flags_pass_through(self, monkeypatch: MonkeyPatch) -> None:
+        self._patch_resolve(monkeypatch)
+        _, overrides = _dispatch_for(monkeypatch, ["env", "run", "--env", "alpha", "--model-name", "gpt"])
+        assert "+config_paths=[environments/alpha/config.yaml]" in overrides
+        assert "+policy_model_name=gpt" in overrides
+
+    def test_config_only_is_unchanged(self, monkeypatch: MonkeyPatch) -> None:
+        target, overrides = _dispatch_for(monkeypatch, ["env", "run", "--config", "a.yaml"])
+        assert target == "nemo_gym.cli.env:run"
+        assert overrides == ["+config_paths=[a.yaml]"]
+
+    def test_unknown_env_exits_cleanly(self, monkeypatch: MonkeyPatch) -> None:
+        import nemo_gym.registry
+        from nemo_gym.registry import EnvironmentNotFoundError
+
+        def boom(name, *a, **k):
+            raise EnvironmentNotFoundError(f"No environment named '{name}'")
+
+        monkeypatch.setattr(nemo_gym.registry, "resolve_environment_config_paths", boom)
+        monkeypatch.setattr(cli_main, "dispatch", lambda target, overrides: None)
+        monkeypatch.setattr(sys, "argv", ["gym", "env", "run", "--env", "nope"])
+        with pytest.raises(SystemExit):
+            main()
