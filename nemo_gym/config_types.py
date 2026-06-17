@@ -12,10 +12,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import warnings
 from argparse import ArgumentParser
 from enum import Enum
 from pathlib import Path
-from typing import Any, ClassVar, Dict, List, Literal, Optional, Set, Tuple, Union
+from typing import Annotated, Any, ClassVar, Dict, List, Literal, Optional, Set, Tuple, Union
 
 import rich
 from omegaconf import DictConfig, OmegaConf
@@ -358,12 +359,37 @@ class DownloadJsonlDatasetHuggingFaceConfig(JsonlDatasetHuggingFaceIdentifer, Ba
 DatasetType = Union[Literal["train"], Literal["validation"], Literal["example"]]
 
 
+class GitlabDatasetSource(BaseModel):
+    """Unified ``source:`` for a dataset fetched from the GitLab model registry."""
+
+    type: Literal["gitlab"]
+    dataset_name: str
+    version: str
+    artifact_fpath: str
+
+
+class HuggingFaceDatasetSource(BaseModel):
+    """Unified ``source:`` for a dataset fetched from the HuggingFace Hub."""
+
+    type: Literal["huggingface"]
+    repo_id: str
+    artifact_fpath: Optional[str] = None
+
+
+# One discriminated `source:` block replaces the parallel gitlab_identifier / huggingface_identifier
+# fields; `type` selects the backend so it's unambiguous which fields apply.
+DatasetSource = Annotated[Union[GitlabDatasetSource, HuggingFaceDatasetSource], Field(discriminator="type")]
+
+
 class DatasetConfig(BaseModel):
     name: str
     type: DatasetType
     jsonl_fpath: str
 
     num_repeats: int = Field(default=1, ge=1)
+    # Unified, self-describing dataset source. Prefer this over the legacy *_identifier fields below.
+    source: Optional[DatasetSource] = None
+    # Deprecated: kept working (and back-filled from/into `source`) for backward compatibility.
     gitlab_identifier: Optional[JsonlDatasetGitlabIdentifer] = None
     huggingface_identifier: Optional[JsonlDatasetHuggingFaceIdentifer] = None
     license: Optional[
@@ -383,6 +409,54 @@ class DatasetConfig(BaseModel):
     def check_train_validation_sets(self) -> "DatasetConfig":
         if self.type in ["train", "validation"]:
             assert self.license is not None, f"A license is required for {self.name}"
+
+        return self
+
+    @model_validator(mode="after")
+    def normalize_dataset_source(self) -> "DatasetConfig":
+        """Reconcile the unified `source:` with the legacy `*_identifier` fields.
+
+        Exactly one source may be specified. A legacy identifier is accepted (with a deprecation
+        warning) and mirrored into `source`; conversely a `source:` is mirrored back into the
+        matching legacy field so existing consumers that read `gitlab_identifier`/
+        `huggingface_identifier` keep working.
+        """
+        specified = [
+            name
+            for name, value in (
+                ("source", self.source),
+                ("gitlab_identifier", self.gitlab_identifier),
+                ("huggingface_identifier", self.huggingface_identifier),
+            )
+            if value is not None
+        ]
+        if len(specified) > 1:
+            raise ValueError(
+                f"Specify a dataset source once for '{self.name}': set only one of {specified}. "
+                "Prefer the unified `source:` block."
+            )
+        if not specified:
+            return self
+
+        if self.source is None:
+            # Legacy identifier was used: mirror it into `source` and nudge toward the new field.
+            if self.gitlab_identifier is not None:
+                self.source = GitlabDatasetSource(type="gitlab", **self.gitlab_identifier.model_dump())
+            else:
+                self.source = HuggingFaceDatasetSource(type="huggingface", **self.huggingface_identifier.model_dump())
+            warnings.warn(
+                f"`{specified[0]}` is deprecated for dataset '{self.name}'; use the unified "
+                f"`source:` block (type: {self.source.type}).",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        else:
+            # `source:` was used: back-fill the matching legacy field for existing consumers.
+            fields = self.source.model_dump(exclude={"type"})
+            if isinstance(self.source, GitlabDatasetSource):
+                self.gitlab_identifier = JsonlDatasetGitlabIdentifer(**fields)
+            else:
+                self.huggingface_identifier = JsonlDatasetHuggingFaceIdentifer(**fields)
 
         return self
 
