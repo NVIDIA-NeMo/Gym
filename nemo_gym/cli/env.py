@@ -17,6 +17,8 @@ import asyncio
 import json
 import os
 import shlex
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from glob import glob
 from os import makedirs
 from os.path import exists
@@ -501,11 +503,13 @@ head -1 resources_servers/example_multi_step/data/example_rollouts.jsonl
     print(f"The data for {test_config.dir_path} has been successfully validated!")
 
 
-def _test_single(test_config: TestConfig, global_config_dict: DictConfig) -> Popen:  # pragma: no cover
+def _test_single(
+    test_config: TestConfig, global_config_dict: DictConfig, capture: bool = False
+) -> Popen:  # pragma: no cover
     # Eventually we may want more sophisticated testing here, but this is sufficient for now.
     prefix = test_config.entrypoint.replace("/", "\\/")
     command = f"""{setup_env_command(test_config.dir_path, global_config_dict, prefix)} && pytest"""
-    return run_command(command, test_config.dir_path)
+    return run_command(command, test_config.dir_path, capture=capture)
 
 
 def test():  # pragma: no cover
@@ -549,6 +553,71 @@ class TestAllConfig(BaseNeMoGymCLIConfig):
         default=False,
         description="Delete each server venv after its tests have been run (default: False).",
     )
+    max_concurrency: int = Field(
+        default=1,
+        ge=1,
+        description="How many module test suites to run concurrently (default: 1 = sequential). "
+        "Each module still runs in its own isolated subprocess/venv; raising this parallelizes the "
+        "suite on one machine (CI runner or local), bounded by available cores/IO.",
+    )
+
+
+@dataclass
+class _ModuleTestResult:
+    dir_path: Path
+    return_code: int
+    data_validation_failed: bool
+    elapsed_s: float
+    output: Optional[str]  # captured combined stdout/stderr when run concurrently, else None
+
+
+def _run_module_tests(
+    dir_path: Path, global_config_dict: DictConfig, delete_venv: bool, capture: bool
+) -> _ModuleTestResult:  # pragma: no cover
+    """Run one module's test suite (build venv -> pytest -> data validation -> optional cleanup).
+
+    Safe to call from multiple threads concurrently: each module builds its own venv and runs in
+    its own subprocess, and `_validate_data_single` only reads files. When `capture` is set, the
+    subprocess output is collected so the caller can print it without interleaving.
+    """
+    start_time = time()
+    test_config = TestConfig(entrypoint=str(dir_path), should_validate_data=True)
+    proc = _test_single(test_config, global_config_dict, capture=capture)
+
+    if capture:
+        output, _ = proc.communicate()
+        return_code = proc.returncode
+    else:
+        return_code = proc.wait()
+        output = None
+
+    data_validation_failed = False
+    try:
+        _validate_data_single(test_config)
+    except AssertionError:
+        data_validation_failed = True
+
+    if delete_venv:
+        rmtree(dir_path / ".venv", ignore_errors=True)
+
+    return _ModuleTestResult(dir_path, return_code, data_validation_failed, time() - start_time, output)
+
+
+def _run_module_tests_all(run_one, dir_paths: List[Path], max_concurrency: int) -> List[_ModuleTestResult]:
+    """Apply `run_one(dir_path)` over every module, up to `max_concurrency` at a time.
+
+    Returns results in completion order. With max_concurrency == 1 this is a plain sequential loop;
+    otherwise modules run concurrently in a thread pool (the heavy work happens in subprocesses).
+    """
+    if max_concurrency <= 1:
+        return [run_one(dir_path) for dir_path in tqdm(dir_paths, desc="Running tests")]
+
+    results: List[_ModuleTestResult] = []
+    with ThreadPoolExecutor(max_workers=max_concurrency) as executor:
+        futures = [executor.submit(run_one, dir_path) for dir_path in dir_paths]
+        for future in tqdm(as_completed(futures), total=len(dir_paths), desc="Running tests"):
+            results.append(future.result())
+    return results
 
 
 def test_all():  # pragma: no cover
@@ -566,22 +635,29 @@ def test_all():  # pragma: no cover
     dir_paths = [p for p in dir_paths if (p / "README.md").exists()]
     print(f"Found {len(dir_paths)} modules to test:{_display_list_of_paths(dir_paths)}\n")
 
+    max_concurrency = test_all_config.max_concurrency
+    capture = max_concurrency > 1
+    if capture:
+        print(f"Running up to {max_concurrency} module test suites concurrently.\n")
+
+    def run_one(dir_path: Path) -> _ModuleTestResult:
+        return _run_module_tests(dir_path, global_config_dict, test_all_config.delete_venvs_after_each_test, capture)
+
+    results = _run_module_tests_all(run_one, dir_paths, max_concurrency)
+
     tests_passed: List[Path] = []
     tests_failed: List[Path] = []
     tests_missing: List[Path] = []
     data_validation_failed: List[Path] = []
     times_taken: List[Tuple[float, Path]] = []
-    for dir_path in tqdm(dir_paths, desc="Running tests"):
-        start_time = time()
+    for result in results:
+        dir_path = result.dir_path
+        # When run concurrently each module's output was captured; print it atomically here so
+        # logs stay readable instead of interleaving across modules.
+        if result.output is not None:
+            print(f"\n===== {dir_path} =====\n{result.output}")
 
-        test_config = TestConfig(
-            entrypoint=str(dir_path),
-            should_validate_data=True,  # Test all always validates data.
-        )
-        proc = _test_single(test_config, global_config_dict)
-        return_code = proc.wait()
-
-        match return_code:
+        match result.return_code:
             case 0:
                 tests_passed.append(dir_path)
             case 1 | 2:
@@ -590,21 +666,14 @@ def test_all():  # pragma: no cover
                 tests_missing.append(dir_path)
             case _:
                 raise ValueError(
-                    f"""Hit unrecognized exit code {return_code} while running tests for {dir_path}.
+                    f"""Hit unrecognized exit code {result.return_code} while running tests for {dir_path}.
 You can rerun just these tests using `ng_test +entrypoint={dir_path}` or run detailed tests via `cd {dir_path} && source .venv/bin/activate && pytest`."""
                 )
 
-        try:
-            _validate_data_single(test_config)
-        except AssertionError:
+        if result.data_validation_failed:
             data_validation_failed.append(dir_path)
 
-        if test_all_config.delete_venvs_after_each_test:
-            venv_path = dir_path / ".venv"
-            print(f"Deleting {venv_path} since `delete_venvs_after_each_test=true`")
-            rmtree(venv_path, ignore_errors=True)
-
-        times_taken.append((time() - start_time, dir_path))
+        times_taken.append((result.elapsed_s, dir_path))
 
     times_taken.sort(reverse=True)
     table = Table(title="Times taken per test (sorted from highest to lowest)")

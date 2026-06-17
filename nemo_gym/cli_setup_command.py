@@ -16,7 +16,7 @@ import importlib.metadata
 import os
 from os import environ
 from pathlib import Path
-from subprocess import Popen
+from subprocess import PIPE, STDOUT, Popen
 from sys import stderr, stdout
 
 from omegaconf import DictConfig
@@ -172,7 +172,7 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
     return f"cd {dir_path} && {env_setup_cmd}"
 
 
-def run_command(command: str, working_dir_path: Path, server_name: str = "") -> Popen:
+def run_command(command: str, working_dir_path: Path, server_name: str = "", capture: bool = False) -> Popen:
     global_config_dict = get_global_config_dict()
 
     work_dir = f"{working_dir_path.absolute()}"
@@ -192,13 +192,24 @@ def run_command(command: str, working_dir_path: Path, server_name: str = "") -> 
         log_path.parent.mkdir(parents=True, exist_ok=True)
         command = f"set -o pipefail; ({command}) 2>&1 | tee -a {log_path}"
 
-    redirect_stdout = stdout
-    redirect_stderr = stderr
+    # When capturing, pipe stdout+stderr into the process (text mode) so callers (e.g. concurrent
+    # test runs) can collect each command's output and print it atomically instead of interleaving
+    # streams. Otherwise inherit the parent's streams exactly as before.
+    if capture:
+        return Popen(
+            command,
+            executable="/bin/bash",
+            shell=True,
+            env=custom_env,
+            stdout=PIPE,
+            stderr=STDOUT,
+            text=True,
+        )
     return Popen(
         command,
         executable="/bin/bash",
         shell=True,
         env=custom_env,
-        stdout=redirect_stdout,
-        stderr=redirect_stderr,
+        stdout=stdout,
+        stderr=stderr,
     )

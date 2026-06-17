@@ -26,7 +26,9 @@ concurrency:
 jobs:
   test:
     name: Test
-    runs-on: ubuntu-latest
+    # Runs on a standard runner by default. Set the `TEST_RUNNER` repo/org variable to a larger
+    # runner label (e.g. a multi-core runner) to give the concurrent server suite more cores.
+    runs-on: ${{ vars.TEST_RUNNER || 'ubuntu-latest' }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -139,6 +141,11 @@ jobs:
 
       - name: Test
         if: steps.changes.outputs.run_full == 'true' || steps.changes.outputs.run_servers == 'true'
+        env:
+          # How many module test suites to run concurrently. Each module still runs in its own
+          # isolated subprocess/venv. Defaults to 8; override via the `TEST_CONCURRENCY` repo/org
+          # variable (e.g. lower it if a runner hits memory pressure, raise it on a larger runner).
+          TEST_CONCURRENCY: ${{ vars.TEST_CONCURRENCY || '8' }}
         run: |
           source .venv/bin/activate
 
@@ -146,7 +153,7 @@ jobs:
           if [[ "${{ steps.changes.outputs.run_full }}" == "true" ]]; then
             echo "Running full test suite"
             ng_dev_test
-            ng_test_all +fail_on_total_and_test_mismatch=true +delete_venvs_after_each_test=true
+            ng_test_all +fail_on_total_and_test_mismatch=true +delete_venvs_after_each_test=true +max_concurrency=${TEST_CONCURRENCY}
 
           # Server-only: test only the changed servers
           elif [[ "${{ steps.changes.outputs.run_servers }}" == "true" ]]; then
