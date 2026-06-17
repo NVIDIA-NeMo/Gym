@@ -29,8 +29,9 @@ DATA_DIR = BENCHMARK_DIR / "data"
 REPO_DIR = DATA_DIR / "skillsbench_repo"
 OUTPUT_FPATH = DATA_DIR / "skillsbench_benchmark.jsonl"
 
+# SkillsBench v1.1: https://github.com/benchflow-ai/skillsbench/releases/tag/v1.1
 DEFAULT_REPO_URL = "https://github.com/benchflow-ai/skillsbench.git"
-DEFAULT_COMMIT = "312d07e15e5398f6eda32ee1bb86e492ab18edd1"  # pragma: allowlist secret
+DEFAULT_COMMIT = "b63b7b2850226b6aa4fb5929a8c1ac7bc4d9a6af"  # pragma: allowlist secret
 
 AGENT_NAME = "skillsbench_benchflow_agent"  # matches config.yaml
 
