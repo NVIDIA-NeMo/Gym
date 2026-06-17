@@ -440,8 +440,18 @@ For example, on the command line:
 
     def _recursive_index_dict_using_path(self, dict_config: DictConfig, path: List[str]) -> DictConfig:
         for k in path:
-            if k not in dict_config:
+            # Use _get_node so a referenced value that is unset ('???') can be detected without
+            # resolving it (indexing a MISSING leaf would raise an opaque error). A genuinely
+            # absent key still errors clearly.
+            node = dict_config._get_node(k) if isinstance(dict_config, DictConfig) else None
+            if node is None:
                 raise ValueError(f"Path specified does not exist in config: {path}")
+
+            # The referenced value (or an ancestor of it) is unset. Propagate MISSING so a swap/copy
+            # of it makes the target '???' too — then raise_on_missing_values reports it with an
+            # actionable message instead of surfacing an opaque interpolation error.
+            if OmegaConf.is_missing(dict_config, k):
+                return "???"
 
             dict_config = dict_config[k]
 

@@ -521,6 +521,35 @@ class TestGlobalConfig:
         missing = parser.collect_missing_value_paths(config)
         assert missing == ["agent.responses_api_agents.simple_agent.container_formatter"]
 
+    def test_missing_value_check_handles_copy_and_inherit(self) -> None:
+        # A '???' that flows through _copy / _inherit_from into a target is still reported (the swap
+        # propagates it), so missing values in copied/inherited branches are not silently lost.
+        parser = GlobalConfigDictParser()
+        config = DictConfig(
+            {
+                "base": {"a": "set", "b": "???"},
+                "viacopy": "${copy:base}",  # copies base, including b='???'
+                "viainherit": {"_inherit_from": "base"},  # inherits base (moves it), including b='???'
+            }
+        )
+        parser._recursively_swap_keys(config)
+
+        missing = parser.collect_missing_value_paths(config)
+        assert "viacopy.b" in missing
+        assert "viainherit.b" in missing
+
+    def test_copy_of_missing_leaf_is_reported_not_opaque_error(self) -> None:
+        # `${copy:source.model}` where source.model is unset must not raise an opaque "path does not
+        # exist" error; the copy propagates MISSING so both the target and source are reported.
+        parser = GlobalConfigDictParser()
+        config = DictConfig({"target": "${copy:source.model}", "source": {"model": "???"}})
+
+        parser._recursively_swap_keys(config)  # must not raise
+
+        missing = parser.collect_missing_value_paths(config)
+        assert "target" in missing
+        assert "source.model" in missing
+
     def test_get_global_config_dict_raises_on_missing_values(self, monkeypatch: MonkeyPatch) -> None:
         # Clear any lingering env vars.
         monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
@@ -602,6 +631,73 @@ class TestGlobalConfig:
         models = config["policy_model"]["responses_api_models"]
         assert "old_model" not in models
         assert "new_model" in models
+
+    def test_get_global_config_dict_aggregates_multiple_missing(self, monkeypatch: MonkeyPatch) -> None:
+        # End-to-end through get_global_config_dict() -> parse(): more than one unset '???' is
+        # collected into a single ConfigMissingValuesError listing every missing path.
+        monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
+        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+
+        exists_mock = MagicMock()
+        exists_mock.return_value = False
+        monkeypatch.setattr(nemo_gym.global_config.Path, "exists", exists_mock)
+
+        hydra_main_mock = MagicMock()
+
+        def hydra_main_wrapper(fn):
+            config_dict = DictConfig(
+                {
+                    "policy_model": {
+                        "responses_api_models": {
+                            "openai_model": {
+                                "entrypoint": "app.py",
+                                "openai_api_key": "???",
+                                "openai_model": "???",
+                            }
+                        }
+                    },
+                }
+            )
+            return lambda: fn(config_dict)
+
+        hydra_main_mock.return_value = hydra_main_wrapper
+        monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
+
+        with raises(ConfigMissingValuesError) as exc_info:
+            get_global_config_dict()
+
+        message = str(exc_info.value)
+        assert "2 required" in message
+        assert "policy_model.responses_api_models.openai_model.openai_api_key" in message
+        assert "policy_model.responses_api_models.openai_model.openai_model" in message
+
+    def test_plain_interpolation_resolves_through_parse(self, monkeypatch: MonkeyPatch) -> None:
+        # Regression: a plain OmegaConf interpolation `${a.b.c}` (not a swap directive) must still
+        # resolve through the full parse after _recursively_swap_keys was made missing-tolerant.
+        self._mock_versions_for_testing(monkeypatch)
+
+        monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
+        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+
+        exists_mock = MagicMock()
+        exists_mock.return_value = False
+        monkeypatch.setattr(nemo_gym.global_config.Path, "exists", exists_mock)
+
+        find_open_port_mock = MagicMock()
+        find_open_port_mock.return_value = 12345
+        monkeypatch.setattr(nemo_gym.global_config, "_find_open_port_using_range", find_open_port_mock)
+
+        hydra_main_mock = MagicMock()
+
+        def hydra_main_wrapper(fn):
+            config_dict = DictConfig({"a": {"b": {"c": 3}}, "x": "${a.b.c}"})
+            return lambda: fn(config_dict)
+
+        hydra_main_mock.return_value = hydra_main_wrapper
+        monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
+
+        config = get_global_config_dict()
+        assert config["x"] == 3
 
     def test_get_first_server_config_dict(self) -> None:
         global_config_dict = DictConfig(
