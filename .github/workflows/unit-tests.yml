@@ -134,7 +134,9 @@ jobs:
           sudo apt-get install -y --no-install-recommends git curl ca-certificates
           # The flow below should be used and synced with any Docker or container related flows. There is no script here to keep it 100% explicit.
           # This is how we test and this is how you should use/consume.
-          curl -LsSf https://astral.sh/uv/install.sh | sh
+          # Pin uv: 0.11.20 has a resolver regression that silently drops pinned deps from
+          # `uv pip install -r requirements.txt`. 0.11.19 is the latest known-good version.
+          curl -LsSf https://astral.sh/uv/0.11.19/install.sh | sh
           uv venv --python 3.12
           source .venv/bin/activate
           uv sync --extra dev
