@@ -550,6 +550,18 @@ class TestGlobalConfig:
         assert "target" in missing
         assert "source.model" in missing
 
+    def test_missing_value_in_list_is_reported_not_crash(self) -> None:
+        # A '???' as a list element (or inside a dict nested in a list) must not crash the swap; it is
+        # reported by collect_missing_value_paths with its indexed path.
+        parser = GlobalConfigDictParser()
+        config = DictConfig({"server": {"items": ["a", "???"], "nested": [{"k": "???"}]}})
+
+        parser._recursively_swap_keys(config)  # must not raise
+
+        missing = parser.collect_missing_value_paths(config)
+        assert "server.items[1]" in missing
+        assert "server.nested[0].k" in missing
+
     def test_get_global_config_dict_raises_on_missing_values(self, monkeypatch: MonkeyPatch) -> None:
         # Clear any lingering env vars.
         monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)

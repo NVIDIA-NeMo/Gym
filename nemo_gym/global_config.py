@@ -389,7 +389,12 @@ For example, on the command line:
             if isinstance(v, (DictConfig, dict)):
                 self._recursively_swap_keys_helper(v, original_dict_config, frozen_dict_config)
             elif isinstance(v, (ListConfig, list)):
-                for inner_v in v:
+                # Iterate without resolving so a missing ('???') element doesn't raise mid-swap (it's
+                # a scalar, so it's skipped here and reported later by raise_on_missing_values).
+                for i in range(len(v)):
+                    if isinstance(v, ListConfig) and OmegaConf.is_missing(v, i):
+                        continue
+                    inner_v = v[i]
                     if isinstance(inner_v, (DictConfig, dict)):
                         self._recursively_swap_keys_helper(inner_v, original_dict_config, frozen_dict_config)
 
