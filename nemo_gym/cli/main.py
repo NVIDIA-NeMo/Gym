@@ -312,6 +312,7 @@ COMMANDS = {
 def _add_leaf(subparsers: argparse._SubParsersAction, name: str, command: Command) -> None:
     leaf = subparsers.add_parser(name, help=command.summary, description=command.summary)
     leaf.set_defaults(_command=command)
+    leaf.add_argument("-v", "--verbose", action="store_true", help="Set logging level to DEBUG.")
     for flag in command.flags:
         flag.register(leaf)
 
@@ -361,6 +362,9 @@ def main() -> None:
         sys.exit(1)
 
     overrides = [token for flag in command.flags for token in flag.translate_to_hydra(args)] + overrides
+    # --verbose flows through the config (as +verbose=true) so it reaches spun-up servers, not just this process.
+    if getattr(args, "verbose", False):
+        overrides = ["+verbose=true", *overrides]
     if callable(command.target):
         command.target(args, overrides)
     else:

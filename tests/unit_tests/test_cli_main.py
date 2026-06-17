@@ -12,13 +12,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import logging
 import sys
 
 import pytest
 from pytest import MonkeyPatch
 
 import nemo_gym.cli.main as cli_main
+import nemo_gym.global_config as gc
 from nemo_gym.cli.main import main
+from nemo_gym.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME
 
 
 def _dispatch_for(monkeypatch: MonkeyPatch, argv: list[str]) -> tuple[str, list[str]]:
@@ -462,3 +465,46 @@ class TestEnvPackagesFlags:
             "+entrypoint=resources_servers/gpqa",
             "+outdated=true",
         }
+
+
+class TestVerboseFlag:
+    @pytest.mark.parametrize("flag", ["-v", "--verbose"])
+    def test_verbose_injects_config_override(self, monkeypatch: MonkeyPatch, flag: str) -> None:
+        # --verbose flows through the config (so it reaches servers), not just the local logger.
+        _, overrides = _dispatch_for(monkeypatch, ["env", "status", flag])
+        assert overrides == ["+verbose=true"]
+
+    def test_no_verbose_no_override(self, monkeypatch: MonkeyPatch) -> None:
+        _, overrides = _dispatch_for(monkeypatch, ["env", "status"])
+        assert overrides == []
+
+    def test_verbose_prepended_before_other_overrides(self, monkeypatch: MonkeyPatch) -> None:
+        _, overrides = _dispatch_for(monkeypatch, ["eval", "run", "--verbose", "--agent", "a", "+x=1"])
+        assert "+verbose=true" in overrides
+        assert "+agent_name=a" in overrides
+        assert "+x=1" in overrides
+
+    def test_config_verbose_sets_debug_on_load(self, monkeypatch: MonkeyPatch) -> None:
+        # The server-side path: a config carrying `verbose` (forwarded via env var) raises the log level.
+        monkeypatch.setattr(gc, "_GLOBAL_CONFIG_DICT", None)
+        monkeypatch.setenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, "verbose: true\nsome_server: {}\n")
+        root = logging.getLogger()
+        original = root.level
+        try:
+            root.setLevel(logging.WARNING)
+            gc.get_global_config_dict()
+            assert root.level == logging.DEBUG
+        finally:
+            root.setLevel(original)
+
+    def test_config_without_verbose_keeps_level(self, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.setattr(gc, "_GLOBAL_CONFIG_DICT", None)
+        monkeypatch.setenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, "some_server: {}\n")
+        root = logging.getLogger()
+        original = root.level
+        try:
+            root.setLevel(logging.WARNING)
+            gc.get_global_config_dict()
+            assert root.level == logging.WARNING
+        finally:
+            root.setLevel(original)

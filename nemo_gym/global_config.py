@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import logging
 from argparse import ArgumentParser
 from collections import defaultdict
 from copy import deepcopy
@@ -68,6 +69,7 @@ INHERIT_FROM_KEY_NAME = "_inherit_from"
 COPY_KEY_NAME = "_copy"
 DELETE_KEY_KEY_NAME = "_delete_key"
 NEMO_GYM_LOG_DIR_KEY_NAME = "nemo_gym_log_dir"
+VERBOSE_KEY_NAME = "verbose"
 NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     CONFIG_PATHS_KEY_NAME,
     ENTRYPOINT_KEY_NAME,
@@ -90,6 +92,7 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     INHERIT_FROM_KEY_NAME,
     COPY_KEY_NAME,
     NEMO_GYM_LOG_DIR_KEY_NAME,
+    VERBOSE_KEY_NAME,
 ]
 
 # Data keys
@@ -624,6 +627,7 @@ def get_global_config_dict(
 
         _GLOBAL_CONFIG_DICT = global_config_dict
 
+        _apply_verbosity(global_config_dict)
         return global_config_dict
 
     set_global_config_dict(
@@ -631,7 +635,16 @@ def get_global_config_dict(
         global_config_dict_parser_cls=global_config_dict_parser_cls,
     )
 
+    _apply_verbosity(_GLOBAL_CONFIG_DICT)
     return _GLOBAL_CONFIG_DICT
+
+
+def _apply_verbosity(global_config_dict: DictConfig) -> None:
+    """Set logging to DEBUG when `verbose` is in the config. Runs in the CLI process and, because the
+    config dict is forwarded to every spun-up server, in each server process too."""
+    if global_config_dict.get(VERBOSE_KEY_NAME):
+        logging.basicConfig(level=logging.DEBUG)
+        logging.getLogger().setLevel(logging.DEBUG)
 
 
 def set_global_config_dict(
