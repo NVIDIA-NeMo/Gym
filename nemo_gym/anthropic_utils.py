@@ -53,8 +53,9 @@ from anthropic.types import (
     Usage,
 )
 from anthropic.types.message_create_params import OutputConfigParam
+from anthropic.types.tool_result_block_param import Content as ToolResultContentBlockParam
 from pydantic import BaseModel, ConfigDict, Field
-from typing_extensions import Required, TypedDict
+from typing_extensions import NotRequired, Required, TypedDict
 
 from nemo_gym.openai_utils import (
     TokenIDLogProbMixin,
@@ -88,7 +89,10 @@ class NeMoGymAnthropicToolUseBlockParam(ToolUseBlockParam):
 
 
 class NeMoGymAnthropicToolResultBlockParam(ToolResultBlockParam):
-    pass
+    # Override the SDK's Iterable content annotation with List so Pydantic
+    # materializes it eagerly instead of leaving a lazy ValidatorIterator
+    # (same reason openai_utils overrides Iterable -> List throughout).
+    content: NotRequired[Union[str, List[ToolResultContentBlockParam]]]
 
 
 class NeMoGymAnthropicThinkingBlockParam(ThinkingBlockParam):
