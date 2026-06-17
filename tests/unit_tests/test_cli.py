@@ -31,6 +31,7 @@ from nemo_gym.cli.env import (
     _GRACEFUL_SHUTDOWN_TIMEOUT_SEC,
     RunConfig,
     RunHelper,
+    _run_module_tests_all,
     init_resources_server,
 )
 from nemo_gym.cli.general import display_help_legacy
@@ -211,3 +212,51 @@ class TestRunHelperShutdownReap:
         assert a.wait.call_count == 1
         assert b.wait.call_count == 1
         assert runner._processes == {}
+
+
+class TestRunModuleTestsAll:
+    def test_sequential_runs_all_in_order(self) -> None:
+        paths = [Path(f"resources_servers/s{i}") for i in range(5)]
+        seen: list[Path] = []
+
+        def run_one(p: Path) -> Path:
+            seen.append(p)
+            return p
+
+        results = _run_module_tests_all(run_one, paths, max_concurrency=1)
+        assert results == paths
+        assert seen == paths  # max_concurrency=1 preserves order
+
+    def test_concurrent_runs_every_module_exactly_once(self) -> None:
+        paths = [Path(f"resources_servers/s{i:02d}") for i in range(20)]
+
+        def run_one(p: Path) -> Path:
+            return p
+
+        results = _run_module_tests_all(run_one, paths, max_concurrency=8)
+        # Completion order is non-deterministic, but every module must run exactly once.
+        assert sorted(results, key=str) == sorted(paths, key=str)
+        assert len(results) == len(set(results)) == len(paths)
+
+    def test_concurrency_actually_overlaps(self) -> None:
+        import threading
+        from time import sleep
+
+        paths = [Path(f"resources_servers/s{i}") for i in range(8)]
+        lock = threading.Lock()
+        in_flight = 0
+        max_in_flight = 0
+
+        def run_one(p: Path) -> Path:
+            nonlocal in_flight, max_in_flight
+            with lock:
+                in_flight += 1
+                max_in_flight = max(max_in_flight, in_flight)
+            sleep(0.05)
+            with lock:
+                in_flight -= 1
+            return p
+
+        _run_module_tests_all(run_one, paths, max_concurrency=4)
+        # With a pool of 4, multiple modules must have been in flight simultaneously.
+        assert max_in_flight >= 2
