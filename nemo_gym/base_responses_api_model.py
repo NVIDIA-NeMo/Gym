@@ -14,8 +14,12 @@
 # limitations under the License.
 from abc import abstractmethod
 
-from fastapi import Body, FastAPI
+from fastapi import Body, FastAPI, HTTPException
 
+from nemo_gym.anthropic_utils import (
+    NeMoGymAnthropicMessage,
+    NeMoGymAnthropicMessageCreateParamsNonStreaming,
+)
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
@@ -43,6 +47,8 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
 
         app.post("/v1/responses")(self.responses)
 
+        app.post("/v1/messages")(self.messages)
+
         return app
 
     @abstractmethod
@@ -54,3 +60,15 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
     @abstractmethod
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         pass
+
+    async def messages(
+        self, body: NeMoGymAnthropicMessageCreateParamsNonStreaming = Body()
+    ) -> NeMoGymAnthropicMessage:
+        # Anthropic Messages API endpoint. Unlike chat_completions() and responses(),
+        # this is not abstract: existing model servers predate it and shouldn't be
+        # forced to implement it. Servers that support Anthropic-format inference
+        # override this method; the rest return 501.
+        raise HTTPException(
+            status_code=501,
+            detail=f"{type(self).__name__} does not implement the /v1/messages (Anthropic Messages API) endpoint.",
+        )

@@ -14,6 +14,10 @@
 # limitations under the License.
 from unittest.mock import MagicMock
 
+import pytest
+from fastapi import HTTPException
+
+from nemo_gym.anthropic_utils import NeMoGymAnthropicMessageCreateParamsNonStreaming
 from nemo_gym.base_responses_api_model import (
     BaseResponsesAPIModel,
     BaseResponsesAPIModelConfig,
@@ -46,3 +50,24 @@ class TestBaseResponsesAPIModel:
 
         model = TestSimpleResponsesAPIModel(config=config, server_client=MagicMock(spec=ServerClient))
         model.setup_webserver()
+
+    async def test_messages_default_returns_501(self) -> None:
+        """The /v1/messages endpoint is not abstract: servers that don't implement it return 501."""
+        config = BaseResponsesAPIModelConfig(host="", port=0, openai_api_key="123", entrypoint="", name="")
+
+        class TestSimpleResponsesAPIModel(SimpleResponsesAPIModel):
+            async def chat_completions(
+                self, request: NeMoGymResponseCreateParamsNonStreaming
+            ) -> NeMoGymChatCompletion:
+                raise NotImplementedError
+
+            async def responses(self, request: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:
+                raise NotImplementedError
+
+        model = TestSimpleResponsesAPIModel(config=config, server_client=MagicMock(spec=ServerClient))
+        body = NeMoGymAnthropicMessageCreateParamsNonStreaming(
+            max_tokens=16, messages=[{"role": "user", "content": "hi"}]
+        )
+        with pytest.raises(HTTPException) as exc_info:
+            await model.messages(body)
+        assert exc_info.value.status_code == 501

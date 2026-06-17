@@ -88,6 +88,12 @@ dependencies = [
     # License: Apache 2.0 https://github.com/openai/openai-python/blob/a8258744cbecf51321587fc870e8920bd2c07809/LICENSE
     "openai<=2.7.2",
 
+    # Anthropic: We leverage the Anthropic Messages API schemas for Nemo Gym abstractions (the /v1/messages endpoint). It may also be used to directly query endpoints.
+    # We upper bound this Anthropic dependency since the version bumps frequently, mirroring how we pin openai.
+    # Updated Mon Jun 16, 2026 with anthropic<=0.109.2
+    # License: MIT https://github.com/anthropics/anthropic-sdk-python/blob/v0.109.2/LICENSE
+    "anthropic<=0.109.2",
+
     # tqdm: Used for progress tracking on batch operations.
     # Updated Fri Jul 25, 2025 with tqdm==4.67.1
     # License: MIT https://github.com/tqdm/tqdm/blob/0ed5d7f18fa3153834cbac0aa57e8092b217cc16/LICENCE
