@@ -15,6 +15,7 @@
 import shutil
 import sys
 import tomllib
+import warnings
 from importlib import import_module
 from io import StringIO
 from pathlib import Path
@@ -35,7 +36,7 @@ from nemo_gym.cli.env import (
     init_resources_server,
 )
 from nemo_gym.cli.general import display_help_legacy
-from nemo_gym.config_types import ResourcesServerInstanceConfig
+from nemo_gym.config_types import DatasetConfig, ResourcesServerInstanceConfig
 
 
 # TODO: Eventually we want to add more tests to ensure that the CLI flows do not break
@@ -122,6 +123,23 @@ class TestCLI:
                 # This should not raise an assertion error about missing domain
                 instance_config = ResourcesServerInstanceConfig.model_validate(full_config_dict)
                 assert instance_config is not None
+
+                # The generated config carries inline field documentation (friction #7).
+                config_text = config_file.read_text()
+                assert "# Task category" in config_text
+                assert "policy_model" in config_text and "magic name" in config_text
+
+                # The scaffold emits the canonical `source:` block, not the deprecated
+                # `gitlab_identifier`, so a fresh server starts on the recommended schema.
+                datasets = config_dict[f"{server_name}_simple_agent"]["responses_api_agents"]["simple_agent"][
+                    "datasets"
+                ]
+                train = next(d for d in datasets if d["name"] == "train")
+                assert "gitlab_identifier" not in train
+                assert train["source"]["type"] == "gitlab"
+                with warnings.catch_warnings():
+                    warnings.simplefilter("error", DeprecationWarning)
+                    DatasetConfig.model_validate(OmegaConf.to_container(train, resolve=True))
         finally:
             # Clean up the test server directory
             if server_path.exists():

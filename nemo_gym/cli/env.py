@@ -751,36 +751,48 @@ def init_resources_server():  # pragma: no cover
 
     config_fpath = configs_dirpath / f"{server_type_name}.yaml"
     with open(config_fpath, "w") as f:
-        f.write(f"""{server_type_name}_resources_server:
+        f.write(f"""# Resources server: implements verification and any task-specific tools/state.
+{server_type_name}_resources_server:
   {server_type}:
     {server_type_name}:
+      # Module (relative to this server dir) that defines the FastAPI app.
       entrypoint: app.py
+      # Task category, used by `gym list environments`. See the Domain enum for valid values.
       domain: other
+# Agent server: drives the model and talks to the resources server above.
 {server_type_name}_simple_agent:
   responses_api_agents:
     simple_agent:
       entrypoint: app.py
+      # The resources server this agent uses for tools + verification.
       resources_server:
         type: resources_servers
         name: {server_type_name}_resources_server
+      # The model the agent drives. `policy_model` is a magic name resolved at run time
+      # from your --model-name/--model-url flags (or a model-server config).
       model_server:
         type: responses_api_models
         name: policy_model
+      # One entry per dataset split. `source:` declares where the JSONL is fetched from;
+      # `type` selects the backend (gitlab | huggingface). Omit `source` for a purely local file.
       datasets:
       - name: train
         type: train
         jsonl_fpath: resources_servers/{server_type_name}/data/train.jsonl
         num_repeats: 1
-        gitlab_identifier:
+        source:
+          type: gitlab
           dataset_name: {server_type_name}
           version: 0.0.1
           artifact_fpath: train.jsonl
+        # A license is required for train/validation splits.
         license: Apache 2.0
       - name: validation
         type: validation
         jsonl_fpath: resources_servers/{server_type_name}/data/validation.jsonl
         num_repeats: 1
-        gitlab_identifier:
+        source:
+          type: gitlab
           dataset_name: {server_type_name}
           version: 0.0.1
           artifact_fpath: validation.jsonl
