@@ -203,7 +203,7 @@ class BenchFlowAgent(SimpleResponsesAPIAgent):
         agent_env = dict(self.config.agent_env or {})
         global_config_dict = get_global_config_dict()
         agent_env["BENCHFLOW_PROVIDER_BASE_URL"] = self._resolve_model_base_url(global_config_dict)
-        agent_env["BENCHFLOW_PROVIDER_API_KEY"] = global_config_dict["policy_api_key"]
+        agent_env["BENCHFLOW_PROVIDER_API_KEY"] = global_config_dict.get("policy_api_key", "EMPTY")
         return agent_env
 
     def _build_task_config_overrides(self, task_name: str) -> dict[str, Any]:
