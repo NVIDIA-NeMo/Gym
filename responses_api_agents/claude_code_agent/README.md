@@ -44,6 +44,8 @@ ng_run "+config_paths=[resources_servers/reasoning_gym/configs/reasoning_gym_cla
 
 This path needs only the model server's `policy_base_url`, `policy_api_key`, and `policy_model_name` (in `env.yaml` or as `+` overrides) — no `anthropic_*` vars.
 
+Use `vllm_model` for OpenAI-compatible **chat** endpoints (vLLM, NVIDIA build, most providers) — it forwards to `/chat/completions`. `openai_model` forwards to the OpenAI **Responses** API (`/responses`), which only OpenAI/Azure implement, so it 404s against chat-only providers.
+
 ### Run the agent
 
 ```bash
@@ -55,6 +57,24 @@ ng_collect_rollouts \
 ```
 
 For the model-server config above, use `+agent_name=reasoning_gym_claude_code_agent_model_server`.
+
+### Smoke test
+
+Check the `/v1/messages` proxy and the real-CLI seam without a full rollout. Launch a model server, then take its URL from the `ng_run` log (`'url': 'http://127.0.0.1:<port>'`):
+
+```bash
+ng_run "+config_paths=[responses_api_models/vllm_model/configs/vllm_model.yaml]" \
+  +policy_base_url=https://integrate.api.nvidia.com/v1 \
+  '+policy_api_key=${oc.env:NVIDIA_API_KEY}' +policy_model_name=meta/llama-3.1-8b-instruct
+
+# 1. proxy speaks Anthropic Messages (add "stream": true for the SSE path):
+curl $URL/v1/messages -H 'content-type: application/json' \
+  -d '{"model":"x","max_tokens":64,"messages":[{"role":"user","content":"2+2?"}]}'
+
+# 2. the real Claude Code CLI runs against it:
+ANTHROPIC_BASE_URL=$URL ANTHROPIC_AUTH_TOKEN=local \
+  claude -p --output-format stream-json --max-turns 2 --model meta/llama-3.1-8b-instruct -- "What is 2+2?"
+```
 
 ## Description
 
