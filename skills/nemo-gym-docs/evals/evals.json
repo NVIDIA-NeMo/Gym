@@ -1,0 +1,60 @@
+[
+  {
+    "id": "nemo-gym-docs-positive-001",
+    "question": "Add a how-to page for collecting rollouts under the Get Started section of the NeMo Gym docs.",
+    "expected_skill": "nemo-gym-docs",
+    "ground_truth": "The agent loads the nemo-gym-docs skill, creates fern/versions/latest/pages/get-started/rollout-collection.mdx with the required frontmatter (title, description, position), and confirms the folder uses title-source: frontmatter so no main.yml edit is needed.",
+    "expected_behavior": [
+      "The agent read nemo-gym-docs/SKILL.md before acting",
+      "The agent created the new page under fern/versions/latest/pages/get-started/ (the bleeding-edge tree), not under v0.2.1/",
+      "The agent added the required frontmatter (title, description) to the MDX",
+      "The agent did not mirror the change into a frozen GA snapshot folder"
+    ]
+  },
+  {
+    "id": "nemo-gym-docs-positive-002",
+    "question": "Rename /main/get-started/setup to /main/get-started/detailed-setup and make sure the old URL still works.",
+    "expected_skill": "nemo-gym-docs",
+    "ground_truth": "The agent loads the nemo-gym-docs skill, runs git mv on the MDX file under fern/versions/latest/pages/get-started/, adds a redirect entry in fern/docs.yml, and updates incoming links inside fern/versions/latest/.",
+    "expected_behavior": [
+      "The agent read nemo-gym-docs/SKILL.md before acting",
+      "The agent used git mv on the MDX file under fern/versions/latest/pages/",
+      "The agent added a redirect entry to fern/docs.yml for the old URL",
+      "The agent searched for and updated incoming links"
+    ]
+  },
+  {
+    "id": "nemo-gym-docs-positive-003",
+    "question": "Publish the Gym docs to docs.nvidia.com as a new versioned release. What tag do I push?",
+    "expected_skill": "nemo-gym-docs",
+    "ground_truth": "The agent loads the nemo-gym-docs skill and explains that a tag matching docs/v<MAJOR>.<MINOR>.<PATCH> pushed to origin triggers publish-fern-docs.yml, and reminds the user not to push the tag without explicit user approval.",
+    "expected_behavior": [
+      "The agent read nemo-gym-docs/SKILL.md before acting",
+      "The agent gave the docs/v<MAJOR>.<MINOR>.<PATCH> tag format",
+      "The agent referenced publish-fern-docs.yml as the workflow that publishes",
+      "The agent did not push the tag without explicit user confirmation"
+    ]
+  },
+  {
+    "id": "nemo-gym-docs-negative-001",
+    "question": "Implement the verify() function for a new code-generation benchmark resources server.",
+    "expected_skill": null,
+    "should_trigger": false,
+    "ground_truth": "The agent should not activate the nemo-gym-docs skill for benchmark implementation. It should use the add-benchmark skill instead.",
+    "expected_behavior": [
+      "The agent did not read or activate nemo-gym-docs/SKILL.md",
+      "The agent recognized this as a benchmark integration task"
+    ]
+  },
+  {
+    "id": "nemo-gym-docs-negative-002",
+    "question": "My Slurm job for ng_collect_rollouts is failing with OOM mid-run. Help me debug it.",
+    "expected_skill": null,
+    "should_trigger": false,
+    "ground_truth": "The agent should not activate the nemo-gym-docs skill for a job-debugging task. It should use the nemo-gym-debugging skill instead.",
+    "expected_behavior": [
+      "The agent did not read or activate nemo-gym-docs/SKILL.md",
+      "The agent recognized this as a job-debugging task"
+    ]
+  }
+]
