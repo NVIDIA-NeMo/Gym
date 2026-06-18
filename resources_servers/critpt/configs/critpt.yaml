@@ -3,7 +3,7 @@ critpt_resources_server:
     critpt:
       entrypoint: app.py
       domain: other
-      api_key: ${artificial_analysis_api_key}
+      api_key: ${oc.select:artificial_analysis_api_key,null}
       verified: false
       description: Research-level physics problems scored by the Artificial Analysis API
       value: Evaluate model performance on research-level physics reasoning
