@@ -1,6 +1,6 @@
 ---
 title: "Agent Server"
-description: ""
+description: "The NeMo Gym Agent server orchestrates rollouts: it runs the agent loop, calls the Model server, routes tool calls to Resources, and collects the final reward."
 position: 1
 ---
 The Agent server is the central component of environment design. It defines whether a rollout is single-step or multi-step, single-turn or multi-turn, and orchestrates all interaction logic — calling the model, executing tool calls through resources, and collecting the final reward. The Agent server does not run an LLM itself, it is orchestration code that delegates all text generation to the Model server.

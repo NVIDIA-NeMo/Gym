@@ -1,6 +1,6 @@
 ---
 title: "aiohttp vs httpx"
-description: ""
+description: "Why NeMo Gym swapped its async HTTP backend from httpx to aiohttp: httpcore's O(n^2) connection pooling hung a 16,000-concurrent-request rollout run."
 ---
 TL;DR: httpx is O(n^2) runtime where n is the number of queued requests (that is, for each request, we check all other queued requests). This is terribly inefficient and results in major slowdowns.
 

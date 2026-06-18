@@ -1,6 +1,6 @@
 ---
 title: "Integrate external libraries"
-description: ""
+description: "Wrap a third-party benchmark, agent, or training library inside a NeMo Gym agent server's /run endpoint, with token ID passthrough for training."
 position: 6
 ---
 Fundamentally, a training environment in NeMo Gym is some Python logic that performs a sequence or graph of model calls and tool calls. For native NeMo Gym environments, all of the model and tool calls are present within an agent server like [`simple_agent`](https://github.com/NVIDIA-NeMo/Gym/blob/main/responses_api_agents/simple_agent/app.py). For environments that we consider "external", the orchestration of model and tool calls is offloaded to a third-party library rather than implemented within NeMo Gym itself.

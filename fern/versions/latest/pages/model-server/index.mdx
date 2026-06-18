@@ -1,6 +1,6 @@
 ---
 title: "Model Server"
-description: ""
+description: "Model servers are stateless LLM inference endpoints in NeMo Gym that return the next output and expose OpenAI Responses and Chat Completions endpoints."
 position: 1
 ---
 Model servers are stateless LLM inference endpoints. They receive a conversation and return the model's next output (text, tool calls, or code) with no memory or orchestration logic. During training, you will typically have at least one active Model server: the "policy" model being trained.

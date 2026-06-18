@@ -1,6 +1,6 @@
 ---
 title: "Aggregate Metrics"
-description: ""
+description: "Compute aggregate metrics across rollouts per agent in NeMo Gym, write per-agent stats to an _aggregate_metrics.json file, and add custom metrics like pass@k."
 position: 9
 ---
 After rollout collection, NeMo Gym computes **aggregate metrics** for each agent by calling the `/aggregate_metrics` endpoint on the agent server. The results are written to a single `_aggregate_metrics.json` file.
