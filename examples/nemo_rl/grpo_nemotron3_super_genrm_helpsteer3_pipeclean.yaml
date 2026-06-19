@@ -309,7 +309,13 @@ policy:
         enable_auto_tools: true
         tool_parser: qwen3_coder
         reasoning_parser: nano_v3
-        reasoning_parser_plugin: nemo_rl/utils/nano_v3_reasoning_parser.py
+        # vLLM resolves this plugin path against the generation worker's CWD (the Ray
+        # workdir), NOT the repo root, so a bare relative path fails at load_model() with
+        # "reasoning_parser_name='nano_v3' has not been registered". Pass an ABSOLUTE path
+        # at launch, e.g.:
+        #   ++policy.generation.vllm_cfg.reasoning_parser_plugin=$(find "$PWD" -name nano_v3_reasoning_parser.py | head -1)
+        # (current nemo_rl ships it under nemo_rl/models/generation/vllm/reasoning_parsers/)
+        reasoning_parser_plugin: nemo_rl/models/generation/vllm/reasoning_parsers/nano_v3_reasoning_parser.py
 
     vllm_kwargs:
       attention_backend: FLASH_ATTN
@@ -333,6 +339,9 @@ data:
   max_input_seq_length: 16384
   shuffle: false
   num_workers: 1
+  # Required by current NeMo RL: grpo.py `setup()` reads data["use_multiple_dataloader"];
+  # omitting it raises `KeyError: 'use_multiple_dataloader'` before training starts.
+  use_multiple_dataloader: false
   train:
     data_path: null
   validation:
@@ -366,6 +375,16 @@ env:
       - responses_api_models/vllm_model/configs/vllm_model_for_training.yaml
       - resources_servers/genrm_compare/configs/genrm_compare.yaml
       - responses_api_models/genrm_model/configs/genrm_model.yaml
+
+    # genrm_compare.yaml ships a `genrm_simple_agent_reasoning_off` agent that references an
+    # undefined `policy_model_reasoning_off` model server. Without this repoint, NeMo Gym
+    # config validation aborts with "Could not find ... name='policy_model_reasoning_off'".
+    # This agent is unused for GRPO (the dataset rows use genrm_simple_agent → policy_model).
+    genrm_simple_agent_reasoning_off:
+      responses_api_agents:
+        simple_agent:
+          model_server:
+            name: policy_model
 
     genrm_compare_resources_server:
       resources_servers:

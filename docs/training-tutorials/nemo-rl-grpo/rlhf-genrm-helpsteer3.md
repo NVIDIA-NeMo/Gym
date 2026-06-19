@@ -146,6 +146,45 @@ It sets **`policy.model_name`** to the Hugging Face checkpoint [`nvidia/NVIDIA-N
 
 **Nemotron 3 Nano:** Swap in [`nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16`](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16) for `policy.model_name` and **resize** Megatron/vLLM parallel sizes to your Nano recipe—do not reuse the Super MoE EP/TP numbers without checking the NeMo RL Nano launch config.
 
+### Validated 2-node H100 smoke setup (Nano-30B policy + 235B GenRM)
+
+The pipeclean recipe targets a large B200 cluster. The following **2× 8×H100** layout was run
+end-to-end (5/5 NeMo Gym servers up → rollouts → GenRM pairwise judging → GRPO steps) and
+surfaced the gotchas below — fold these into your config/launcher:
+
+- **The NeMo RL container must include the `nemo_gym` extra.** The stock container does not ship
+  it; build it in (`uv sync --extra nemo_gym`) so the `NemoGym` Ray actor can `import nemo_gym`
+  on every node — otherwise spin-up fails with `ModuleNotFoundError: nemo_gym`.
+- **`data.use_multiple_dataloader: false`** is required by current NeMo RL (see fix above).
+- **`reasoning_parser_plugin` must be an absolute path.** vLLM resolves it against the Ray
+  generation worker's CWD, not the repo root, so a relative path fails at `load_model()` with
+  `reasoning_parser_name='nano_v3' has not been registered`. Override at launch with
+  `++policy.generation.vllm_cfg.reasoning_parser_plugin=$(find "$PWD" -name nano_v3_reasoning_parser.py | head -1)`.
+- **Repoint `genrm_simple_agent_reasoning_off` → `policy_model`** (see fix above), or NeMo Gym
+  config validation aborts on the undefined `policy_model_reasoning_off`.
+- **Cap the GenRM `vllm_serve_kwargs.max_model_len`** (e.g. `40960`). At `tensor_parallel_size: 4`
+  on 80 GB GPUs the model default (`262144`) needs more KV cache than is free after weights and the
+  server won't start (`ValueError: ... KV cache ... larger than available`).
+- **GPU layout / node count.** Policy ran on node 1 (Megatron `TP4/EP8/PP1/CP2` + colocated vLLM,
+  `cluster.num_nodes: 1`); the GenRM model server needs its **own** GPUs, so allocate **one extra
+  Slurm node beyond `cluster.num_nodes`** (`NUM_SLURM_NODES > NUM_ACTOR_NODES` in
+  `launch_nemo_gym_multinode_training.sh`) — the GenRM vLLM lands on the spare node.
+- **Prefer loading only `genrm_compare.yaml` + setting `genrm_model_name`.** It already contains a
+  `genrm_model` block; also loading `genrm_model.yaml` produces an inconsistently merged block
+  (`data_parallel_size_local` from one file, `data_parallel_size` from the other). If you load both
+  (as this recipe does), fully specify the merged `vllm_serve_kwargs`.
+
+:::{warning}
+**Known blocker — GenRM returns HTTP 500, rewards collapse to `default_score`.** On some container
+vLLM builds the GenRM model server raises on **every** `/v1/chat/completions`:
+`AttributeError: '_IncludedRouter' object has no attribute 'path'` inside
+`prometheus_fastapi_instrumentator`. `genrm_compare` retries, then falls back to `default_score`,
+so training "runs" but `reward_mean` is **constant** (no learning signal). Fix by pinning a newer
+`prometheus-fastapi-instrumentator` (or disabling metrics instrumentation) in the GenRM model
+server's environment and rebuilding the container. Always confirm `reward_mean` varies before
+trusting a run.
+:::
+
 ---
 
 ## 4. Evaluation: Arena-Hard v2
@@ -173,6 +212,11 @@ This is the same class of evaluation HelpSteer3’s authors report for instructi
 | Hangs or partial cohorts | `num_rollouts_per_prompt` ≠ `num_generations_per_prompt`. |
 | Invalid template errors | Policy or GenRM chat template mismatch; Nemotron-3 models need their matching tokenizer / template flags in NeMo RL. |
 | Empty JSONL after conversion | Rows whose `context` does not contain a **user** turn after trimming are skipped; try another subset or inspect raw rows. |
+| `KeyError: 'use_multiple_dataloader'` at startup | Add `data.use_multiple_dataloader: false` (required by current NeMo RL). |
+| `reasoning_parser_name='nano_v3' has not been registered` | `reasoning_parser_plugin` is relative; pass an **absolute** path (vLLM resolves it against the worker CWD). |
+| `Could not find ... name='policy_model_reasoning_off'` | Repoint `genrm_simple_agent_reasoning_off.model_server.name` to `policy_model`. |
+| GenRM model server won't start (KV-cache `ValueError`) | Set the GenRM `vllm_serve_kwargs.max_model_len` (model default 262144 may exceed free KV at TP4 on 80 GB GPUs). |
+| Constant `reward_mean` ≈ `default_score` despite "training" | GenRM `/v1/chat/completions` returning HTTP 500 (e.g. `prometheus_fastapi_instrumentator` `_IncludedRouter` crash) → all comparisons default. Inspect the `genrm_model` server log for tracebacks. |
 
 ---
 
