@@ -70,6 +70,35 @@ class LocalVLLMModelConfig(VLLMModelConfig):
 def _vllm_asyncio_task(server_args: Namespace):
     from vllm.entrypoints.openai.api_server import run_server
 
+    # vLLM instruments its in-process OpenAI API server with
+    # prometheus-fastapi-instrumentator, whose get_route_name() does `route.path` and
+    # raises AttributeError on routes that lack it (e.g. vLLM's `_IncludedRouter`),
+    # which turns EVERY request (incl. GenRM /v1/chat/completions) into an HTTP 500.
+    # The middleware already falls back to request.url.path when route-name resolution
+    # returns None, so make it defensive. Patch here (in the server thread, right before
+    # run_server) so it is active when vLLM instruments the app. No-op if the lib is absent.
+    try:
+        from prometheus_fastapi_instrumentator import routing as _pfi_routing
+
+        _pfi_orig_get_route_name = _pfi_routing.get_route_name
+
+        def _pfi_safe_get_route_name(request):  # type: ignore[no-untyped-def]
+            try:
+                return _pfi_orig_get_route_name(request)
+            except AttributeError:
+                return None
+
+        _pfi_routing.get_route_name = _pfi_safe_get_route_name
+        try:
+            from prometheus_fastapi_instrumentator import middleware as _pfi_mw
+
+            if hasattr(_pfi_mw, "get_route_name"):
+                _pfi_mw.get_route_name = _pfi_safe_get_route_name
+        except Exception:
+            pass
+    except Exception:
+        pass
+
     asyncio.run(run_server(server_args))
 
 

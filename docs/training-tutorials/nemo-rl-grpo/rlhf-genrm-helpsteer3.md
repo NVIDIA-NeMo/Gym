@@ -173,16 +173,28 @@ surfaced the gotchas below — fold these into your config/launcher:
   `genrm_model` block; also loading `genrm_model.yaml` produces an inconsistently merged block
   (`data_parallel_size_local` from one file, `data_parallel_size` from the other). If you load both
   (as this recipe does), fully specify the merged `vllm_serve_kwargs`.
+- **Put the GenRM server venv on shared storage for multi-node.** NeMo Gym builds each model-server
+  venv under a node-local dir by default, so the GenRM venv is missing on the worker node and its
+  Ray actor fails (`.../genrm_model/.venv/bin/python: No such file` → `ActorUnschedulable`). Set
+  `NEMO_GYM_VENV_DIR` to a path on shared storage (e.g. lustre) so every node sees the same venv.
+- **Offload the Megatron optimizer to CPU if the policy OOMs.** On 8×80 GB the policy memory is
+  dominated by optimizer states (the distributed optimizer can't shard at DP=1), so trimming
+  sequence length / batch barely helps — set `policy.megatron_cfg.optimizer.optimizer_cpu_offload:
+  true` (with `optimizer_offload_fraction: 1.0`).
+- **Use a fresh `checkpointing.checkpoint_dir` when you change batch/step config.** NeMo RL
+  auto-resumes from an existing checkpoint and aborts on a scheduler mismatch
+  (`OptimizerParamScheduler ... warmup iterations do not match`).
 
-:::{warning}
-**Known blocker — GenRM returns HTTP 500, rewards collapse to `default_score`.** On some container
-vLLM builds the GenRM model server raises on **every** `/v1/chat/completions`:
-`AttributeError: '_IncludedRouter' object has no attribute 'path'` inside
-`prometheus_fastapi_instrumentator`. `genrm_compare` retries, then falls back to `default_score`,
-so training "runs" but `reward_mean` is **constant** (no learning signal). Fix by pinning a newer
-`prometheus-fastapi-instrumentator` (or disabling metrics instrumentation) in the GenRM model
-server's environment and rebuilding the container. Always confirm `reward_mean` varies before
-trusting a run.
+:::{note}
+**GenRM HTTP 500 → flat reward (fixed in this PR).** vLLM's in-process OpenAI API server is
+instrumented with `prometheus-fastapi-instrumentator`, whose `get_route_name()` does `route.path`
+and raises `AttributeError` on routes that lack it (e.g. vLLM's `_IncludedRouter`) — turning every
+GenRM `/v1/chat/completions` into an HTTP 500, so `genrm_compare` falls back to `default_score` and
+`reward_mean` stays constant. `responses_api_models/local_vllm_model/` now wraps
+`routing.get_route_name` defensively (the middleware already falls back to `request.url.path`), so
+the GenRM serves normally. Still sanity-check that `reward_mean` varies before trusting a run —
+validated end-to-end on 2×8×H100 (Nano-30B policy + 235B GenRM): 0 server 500s, reward varied
+across steps.
 :::
 
 ---
