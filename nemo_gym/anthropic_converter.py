@@ -48,11 +48,11 @@ from uuid import uuid4
 
 # Types only — never the `anthropic` client. The client uses httpx (O(n^2) connection
 # pooling at high concurrency); all transport in Gym stays on aiohttp via server_utils.
-# MessageCreateParams (request) is a TypedDict used purely as a hint; Message (response)
-# is a BaseModel used to validate what we emit.
-from anthropic.types import Message
+# MessageCreateParams (request) is a TypedDict used purely as a hint; NeMoGymAnthropicMessage
+# (response) is the BaseModel used to validate what we emit.
 from anthropic.types.message_create_params import MessageCreateParams
 
+from nemo_gym.anthropic_utils import NeMoGymAnthropicMessage
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -472,8 +472,9 @@ class AnthropicConverter:
         object (non-streaming shape). Token-id / logprob fields are intentionally dropped here;
         they are carried out-of-band by the ingress server's side channel.
 
-        The assembled object is validated by constructing the Anthropic SDK's ``Message`` model
-        (catches malformed blocks / bad stop_reason / missing fields at the boundary), then
+        The assembled object is validated by constructing ``NeMoGymAnthropicMessage`` (a thin
+        subclass of the Anthropic SDK's ``Message``) — catching malformed blocks / bad
+        stop_reason / missing fields at the boundary — then
         returned as a JSON dict for the SSE synthesizer and the non-streaming JSON response.
         ``exclude_none`` keeps the lean Anthropic shape (drops null SDK-only fields).
         """
@@ -492,7 +493,7 @@ class AnthropicConverter:
                 raise NotImplementedError(f"Unsupported Responses output item for Anthropic response: {item_type}")
 
         usage = response.usage.model_dump() if response.usage is not None else None
-        message = Message.model_validate(
+        message = NeMoGymAnthropicMessage.model_validate(
             {
                 "id": f"msg_{uuid4().hex}",
                 "type": "message",
