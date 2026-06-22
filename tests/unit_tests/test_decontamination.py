@@ -292,7 +292,10 @@ def test_run_decontamination_accepts_dict_and_reads_global_api_key(tmp_path: Pat
 
     monkeypatch.setattr("nemo_gym.decontamination.NeMoGymAsyncOpenAI", fake_client)
     # judge_api_key unset -> resolved from global config.
-    monkeypatch.setattr("nemo_gym.global_config.get_global_config_dict", lambda: {"openai_api_key": "from-global"})
+    monkeypatch.setattr(
+        "nemo_gym.global_config.get_global_config_dict",
+        lambda: {"openai_api_key": "from-global"},  # pragma: allowlist secret
+    )
 
     test_path = tmp_path / "test.jsonl"
     test_path.write_text(json.dumps({"problem": "alpha"}) + "\n")
