@@ -145,6 +145,41 @@ class TestCLI:
             if server_path.exists():
                 shutil.rmtree(server_path)
 
+    def test_init_resources_server_judge_template(self) -> None:
+        """`+template=judge` scaffolds an auxiliary-model verifier (config + judge app/tests)."""
+
+        server_name = "test_cli_judge_server"
+        entrypoint = f"resources_servers/{server_name}"
+        server_path = Path(entrypoint).resolve()
+
+        if server_path.exists():
+            shutil.rmtree(server_path)
+
+        try:
+            with MonkeyPatch.context() as mp:
+                mp.setattr(
+                    nemo_gym.global_config,
+                    "_GLOBAL_CONFIG_DICT",
+                    OmegaConf.create({"entrypoint": entrypoint, "template": "judge"}),
+                )
+
+                init_resources_server()
+
+                config_dict = OmegaConf.load(server_path / "configs" / f"{server_name}.yaml")
+                server_config = config_dict[f"{server_name}_resources_server"]["resources_servers"][server_name]
+                # The judge template wires the auxiliary model into the resources server block.
+                assert server_config["judge_model_server"]["name"] == "judge_model"
+                assert "judge_responses_create_params" in server_config
+
+                # The judge app + its matching test template are scaffolded (not the basic ones).
+                app_text = (server_path / "app.py").read_text()
+                assert "judge_model_server" in app_text and "_score_with_judge" in app_text
+                test_text = (server_path / "tests" / "test_app.py").read_text()
+                assert "judge_responses_create_params" in test_text
+        finally:
+            if server_path.exists():
+                shutil.rmtree(server_path)
+
     def test_run_helper_prefers_cwd_server_over_install(self, tmp_path: Path) -> None:
         """ng_run should use a local CWD server dir instead of the installed one."""
         # Create a fake local server dir in tmp_path (simulates user's own resources_servers/)

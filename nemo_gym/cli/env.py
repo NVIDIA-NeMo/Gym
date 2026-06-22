@@ -725,10 +725,15 @@ def init_resources_server():  # pragma: no cover
     """
     Initialize a new resources server with template files and directory structure.
 
+    Pass `+template=judge` to scaffold an LLM-as-judge / auxiliary-model verifier (a server that
+    calls another model — judge, reward model, or subagent — from `verify()`) instead of the
+    default basic verifier.
+
     Examples:
 
     ```bash
     ng_init_resources_server +entrypoint=resources_servers/my_server
+    ng_init_resources_server +entrypoint=resources_servers/my_judge +template=judge
     ```
     """
     config_dict = get_global_config_dict()
@@ -749,16 +754,42 @@ def init_resources_server():  # pragma: no cover
     configs_dirpath = dirpath / "configs"
     makedirs(configs_dirpath)
 
+    template = str(config_dict.get("template", "basic"))
+    if template not in ("basic", "judge"):
+        print(f"Unknown template '{template}'. Choose one of: basic, judge.")
+        exit()
+
+    # The resources-server config block, and which app/test templates to scaffold, vary by template.
+    resources_server_body = """      # Module (relative to this server dir) that defines the FastAPI app.
+      entrypoint: app.py
+      # Task category, used by `gym list environments`. See the Domain enum for valid values.
+      domain: other"""
+    app_template_fname = "resources_server_template.py"
+    test_template_fname = "resources_server_test_template.py"
+    if template == "judge":
+        # LLM-as-judge / auxiliary-model verifier: the resources server calls another model
+        # (judge, reward model, or subagent) from verify(). See the judge app template.
+        resources_server_body += """
+      # The auxiliary model (judge / reward model / subagent) this verifier calls. Wire `name`
+      # to a model server you pass at run time, like `policy_model` is for the agent.
+      judge_model_server:
+        type: responses_api_models
+        name: judge_model
+      # Base Responses API params for the judge; `input` is filled in per task by the server.
+      judge_responses_create_params:
+        model: judge_model
+        input: []
+        max_output_tokens: 1024"""
+        app_template_fname = "judge_resources_server_template.py"
+        test_template_fname = "judge_resources_server_test_template.py"
+
     config_fpath = configs_dirpath / f"{server_type_name}.yaml"
     with open(config_fpath, "w") as f:
         f.write(f"""# Resources server: implements verification and any task-specific tools/state.
 {server_type_name}_resources_server:
   {server_type}:
     {server_type_name}:
-      # Module (relative to this server dir) that defines the FastAPI app.
-      entrypoint: app.py
-      # Task category, used by `gym list environments`. See the Domain enum for valid values.
-      domain: other
+{resources_server_body}
 # Agent server: drives the model and talks to the resources server above.
 {server_type_name}_simple_agent:
   responses_api_agents:
@@ -804,7 +835,7 @@ def init_resources_server():  # pragma: no cover
 """)
 
     app_fpath = dirpath / "app.py"
-    with open(ROOT_DIR / "resources/resources_server_template.py") as f:
+    with open(ROOT_DIR / f"resources/{app_template_fname}") as f:
         app_template = f.read()
     app_content = app_template.replace("ExampleMultiStep", server_type_title)
     with open(app_fpath, "w") as f:
@@ -814,7 +845,7 @@ def init_resources_server():  # pragma: no cover
     makedirs(tests_dirpath)
 
     tests_fpath = tests_dirpath / "test_app.py"
-    with open(ROOT_DIR / "resources/resources_server_test_template.py") as f:
+    with open(ROOT_DIR / f"resources/{test_template_fname}") as f:
         tests_template = f.read()
     tests_content = tests_template.replace("ExampleMultiStep", server_type_title)
     tests_content = tests_content.replace("from app", f"from resources_servers.{server_type_name}.app")
