@@ -3,9 +3,6 @@
 # the pandas==2.2.3 conflict (pandas requires numpy>=1.26.0).
 segale @ git+https://github.com/kajalj22/SEGALE.git@a7c9a1a9a327e181d82ef01cc6aae96d6840862a
 # Bumped torch 2.5.0 → 2.12.0 on Sun Jun 22, 2026 for CVE remediation.
-# torch 2.12.0 has cu126/cu130/cu132 wheels at the pytorch index; PyPI ships
-# CPU-only wheels. No CUDA variant pinned here — select via UV_EXTRA_INDEX_URL
-# or a uv sources override in the deployment environment.
 # torchmetrics imports pkg_resources which setuptools 81 removed; pin <81.
 setuptools>=70,<81
 torch==2.12.0
