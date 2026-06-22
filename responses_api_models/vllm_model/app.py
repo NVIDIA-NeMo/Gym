@@ -66,6 +66,16 @@ from nemo_gym.openai_utils import (
 from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
 
 
+CONTEXT_LENGTH_ERROR_SUBSTRINGS = (
+    "context length",
+    "max_model_len",
+    "max model len",
+    "max_tokens",
+    "maximum context length",
+    "no room for output tokens",
+)
+
+
 class VLLMModelConfig(BaseResponsesAPIModelConfig):
     base_url: Union[str, List[str]]
     api_key: str
@@ -438,6 +448,22 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         return body_dict
 
+    @staticmethod
+    def _is_context_length_error(error: ClientResponseError) -> bool:
+        if error.status != 400:
+            return False
+
+        response_content = getattr(error, "response_content", b"")
+        if isinstance(response_content, bytes):
+            response_content_text = response_content.decode(errors="replace")
+        elif response_content is None:
+            response_content_text = ""
+        else:
+            response_content_text = str(response_content)
+
+        error_text = f"{error.message} {response_content_text}".lower()
+        return any(substring in error_text for substring in CONTEXT_LENGTH_ERROR_SUBSTRINGS)
+
     async def chat_completions(
         self, request: Request, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
     ) -> NeMoGymChatCompletion:
@@ -467,12 +493,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             3. https://github.com/vllm-project/vllm/blob/685c99ee77b4818dcdd15b30fe0e0eff0d5d22ec/vllm/entrypoints/openai/serving_engine.py#L948
             4. https://github.com/vllm-project/vllm/blob/685c99ee77b4818dcdd15b30fe0e0eff0d5d22ec/vllm/sampling_params.py#L463
             """
-            result_content_str = e.response_content.decode()
-
-            is_out_of_context_length = e.status == 400 and (
-                "context length" in result_content_str or "max_tokens" in result_content_str
-            )
-            if is_out_of_context_length:
+            if self._is_context_length_error(e):
                 res = self._create_empty_chat_completion()
                 res.choices[0].finish_reason = "length"
                 return res
@@ -523,7 +544,14 @@ class VLLMModel(SimpleResponsesAPIModel):
                     tokenize_body_dict[key] = body_dict[key]
 
             # The base url has /v1 at the end but vLLM's tokenize endpoint does not have v1, hence the ..
-            tokenize_response = await client.create_tokenize(**tokenize_body_dict)
+            try:
+                tokenize_response = await client.create_tokenize(**tokenize_body_dict)
+            except ClientResponseError as e:
+                if self._is_context_length_error(e):
+                    res = self._create_empty_chat_completion()
+                    res.choices[0].finish_reason = "length"
+                    return res
+                raise
             """
             END
             """
