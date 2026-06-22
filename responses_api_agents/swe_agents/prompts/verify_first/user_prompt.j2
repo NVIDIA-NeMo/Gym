@@ -1,0 +1,11 @@
+{% set language = instance.repo_language | default('python') %}
+{{ language }} repository at {{ workspace_path }}.
+
+Issue to fix:
+
+{{ instance.problem_statement }}
+
+Instructions:
+  1. First, reproduce the problem described above so you can see the failure yourself.
+  2. Then trace the cause and implement the minimal fix in non-test files only.
+  3. Finally, re-run your reproduction to confirm the fix works.

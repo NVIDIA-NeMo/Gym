@@ -14,9 +14,11 @@
 # limitations under the License.
 from __future__ import annotations
 
+import math
+import re
 from collections import Counter, defaultdict
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import orjson
 from pandas import DataFrame, Series, notna
@@ -24,7 +26,7 @@ from pandas.core.groupby.generic import DataFrameGroupBy
 from pydantic import Field
 from wandb import Histogram
 
-from nemo_gym.config_types import BaseNeMoGymCLIConfig
+from nemo_gym.config_types import AggregateMetrics, BaseNeMoGymCLIConfig
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
@@ -33,18 +35,130 @@ from nemo_gym.global_config import (
 )
 
 
-if TYPE_CHECKING:
-    from nemo_gym.base_resources_server import AggregateMetrics
-
-
 class RewardProfileConfig(BaseNeMoGymCLIConfig):
     materialized_inputs_jsonl_fpath: str = Field(
         description="The file path of the materialized inputs as output by ng_collect_rollouts."
     )
     rollouts_jsonl_fpath: str = Field(description="The file path of the rollouts as output by ng_collect_rollouts.")
+    allow_partial_rollouts: bool = Field(
+        default=False,
+        description="Allow reward profiling from partial rollout outputs by dropping input rows with no completed rollouts.",
+    )
+
+
+def _rollout_key(row: Dict[str, Any]) -> Tuple[int, int]:
+    return row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME]
 
 
 class RewardProfiler:
+    def _index_by_rollout_key(self, rows: List[Dict[str, Any]], name: str) -> Dict[Tuple[int, int], Dict[str, Any]]:
+        indexed: Dict[Tuple[int, int], Dict[str, Any]] = {}
+        for row in rows:
+            key = _rollout_key(row)
+            if key in indexed:
+                raise ValueError(f"Duplicate {name} row for rollout key {key}")
+            indexed[key] = row
+        return indexed
+
+    def align_rows_and_results(
+        self,
+        rows: List[Dict[str, Any]],
+        results: List[Dict[str, Any]],
+        allow_partial_rollouts: bool = False,
+    ) -> List[Tuple[Dict[str, Any], Dict[str, Any]]]:
+        rows_by_key = self._index_by_rollout_key(rows, "materialized input")
+        results_by_key = self._index_by_rollout_key(results, "result")
+
+        missing_results = sorted(rows_by_key.keys() - results_by_key.keys())
+        missing_rows = sorted(results_by_key.keys() - rows_by_key.keys())
+
+        if missing_rows:
+            raise ValueError(
+                "Rollout results contain rows with no matching materialized input rows. "
+                f"Found {len(missing_rows)} extra rollout rows. Extra rollout keys: {missing_rows[:10]}"
+            )
+
+        if missing_results and not allow_partial_rollouts:
+            raise ValueError(
+                "Materialized input rows and rollout results do not have matching rollout keys. "
+                f"Missing rollout results for {len(missing_results)} materialized input rows. "
+                f"Missing rollout keys: {missing_results[:10]}.\n\n"
+                "Use ++allow_partial_rollouts=True to profile completed rollouts from a partial collection."
+            )
+
+        matched_keys = rows_by_key.keys() & results_by_key.keys()
+        return [(rows_by_key[key], results_by_key[key]) for key in sorted(matched_keys)]
+
+    def profile_completion_summary(
+        self,
+        rows: List[Dict[str, Any]],
+        results: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        rows_by_key = self._index_by_rollout_key(rows, "materialized input")
+        results_by_key = self._index_by_rollout_key(results, "result")
+        matched_keys = rows_by_key.keys() & results_by_key.keys()
+
+        expected_by_task = Counter(task_idx for task_idx, _ in rows_by_key)
+        completed_by_task = Counter(task_idx for task_idx, _ in matched_keys)
+
+        complete_input_rows = 0
+        partial_input_rows = 0
+        missing_input_rows = 0
+        for task_idx, expected_count in expected_by_task.items():
+            completed_count = completed_by_task[task_idx]
+            if completed_count == expected_count:
+                complete_input_rows += 1
+            elif completed_count > 0:
+                partial_input_rows += 1
+            else:
+                missing_input_rows += 1
+
+        expected_rollout_rows = len(rows_by_key)
+        completed_rollout_rows = len(matched_keys)
+        completion_pct = (
+            100.0 if expected_rollout_rows == 0 else 100.0 * completed_rollout_rows / expected_rollout_rows
+        )
+
+        return {
+            "expected_rollout_rows": expected_rollout_rows,
+            "completed_rollout_rows": completed_rollout_rows,
+            "missing_rollout_rows": expected_rollout_rows - completed_rollout_rows,
+            "extra_rollout_rows": len(results_by_key.keys() - rows_by_key.keys()),
+            "reward_profile_completion_pct": completion_pct,
+            "total_input_rows": len(expected_by_task),
+            "complete_input_rows": complete_input_rows,
+            "partial_input_rows": partial_input_rows,
+            "missing_input_rows": missing_input_rows,
+        }
+
+    def rollout_info_from_result(self, result: Dict[str, Any]) -> Dict[str, Any]:
+        task_idx, rollout_idx = _rollout_key(result)
+        rollout_info: Dict[str, Any] = {
+            "rollout_id": f"{task_idx}:{rollout_idx}",
+            TASK_INDEX_KEY_NAME: task_idx,
+            ROLLOUT_INDEX_KEY_NAME: rollout_idx,
+        }
+
+        if "reward" in result:
+            rollout_info["reward"] = result.get("reward")
+
+        usage = (result.get("response") or {}).get("usage") or {}
+        for k, v in usage.items():
+            if isinstance(v, bool):
+                rollout_info[k] = int(v)
+            elif isinstance(v, (int, float)):
+                rollout_info[k] = v
+
+        for k, v in result.items():
+            if k in {TASK_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, "reward", "response"}:
+                continue
+            if isinstance(v, bool):
+                rollout_info[k] = int(v)
+            elif isinstance(v, (int, float)):
+                rollout_info[k] = v
+
+        return rollout_info
+
     def histogram(self, data: Series) -> Optional[Histogram]:
         # W&B doesn't accept empty histograms
         data = data.dropna()
@@ -90,15 +204,29 @@ class RewardProfiler:
         self,
         rows: List[Dict[str, Any]],
         results: List[Dict[str, Any]],
+        allow_partial_rollouts: bool = False,
     ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        aligned_rows_and_results = self.align_rows_and_results(
+            rows, results, allow_partial_rollouts=allow_partial_rollouts
+        )
+
         filtered_results: List[Dict] = []
         task_idx_to_row: Dict[int, Dict] = dict()
-        for row, result in zip(rows, results):
+        task_idx_to_rollout_infos: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+        expected_rollouts_by_task = Counter(row[TASK_INDEX_KEY_NAME] for row in rows)
+        for row, result in aligned_rows_and_results:
+            task_idx, rollout_idx = _rollout_key(row)
+            task_idx_to_rollout_infos[task_idx].append(self.rollout_info_from_result(result))
+
             # Add additional helpful information
             result = result | (result["response"].get("usage") or {})
 
             # agent_name is a temporary column used for aggregations below
-            numeric_result = {"agent_name": row["agent_ref"]["name"]}
+            numeric_result = {
+                "agent_name": row["agent_ref"]["name"],
+                TASK_INDEX_KEY_NAME: task_idx,
+                ROLLOUT_INDEX_KEY_NAME: rollout_idx,
+            }
             for k, v in result.items():
                 if isinstance(v, bool):
                     numeric_result[k] = int(v)
@@ -106,22 +234,36 @@ class RewardProfiler:
                     numeric_result[k] = v
 
             filtered_results.append(numeric_result)
-            task_idx_to_row.setdefault(row[TASK_INDEX_KEY_NAME], row)
+            task_idx_to_row.setdefault(task_idx, row)
+
+        if not filtered_results:
+            return [], []
 
         df = DataFrame.from_records(filtered_results)
 
         group_level_df = df.drop(columns=[ROLLOUT_INDEX_KEY_NAME, "agent_name"]).groupby(TASK_INDEX_KEY_NAME)
         group_level_metrics = self.calculate_metrics_single_df(group_level_df)
         for group_metrics in group_level_metrics:
-            row = task_idx_to_row[group_metrics[TASK_INDEX_KEY_NAME]]
+            task_idx = group_metrics[TASK_INDEX_KEY_NAME]
+            row = task_idx_to_row[task_idx]
 
             row = row.copy()
             row.pop(TASK_INDEX_KEY_NAME)
             row.pop(ROLLOUT_INDEX_KEY_NAME)
 
             group_metrics["sample"] = row
-
-            group_metrics.pop(TASK_INDEX_KEY_NAME)
+            num_rollouts = len(task_idx_to_rollout_infos[task_idx])
+            expected_num_rollouts = expected_rollouts_by_task[task_idx]
+            group_metrics["num_rollouts"] = num_rollouts
+            group_metrics["expected_num_rollouts"] = expected_num_rollouts
+            group_metrics["missing_num_rollouts"] = expected_num_rollouts - num_rollouts
+            group_metrics["reward_profile_completion_pct"] = (
+                100.0 if expected_num_rollouts == 0 else 100.0 * num_rollouts / expected_num_rollouts
+            )
+            group_metrics["rollout_infos"] = sorted(
+                task_idx_to_rollout_infos[task_idx],
+                key=lambda r: r[ROLLOUT_INDEX_KEY_NAME],
+            )
 
         agent_level_df = df.drop(columns=[ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME]).groupby("agent_name")
         agent_level_metrics = self.calculate_metrics_single_df(agent_level_df)
@@ -170,7 +312,7 @@ def compute_pass_majority_metrics(
     tasks: List[List[Dict[str, Any]]],
     score_fn: Optional[Any] = None,
     answer_key: Optional[str] = None,
-) -> Dict[str, Any]:
+) -> Tuple[Dict[str, Any], List[List[Dict[str, float]]], List[str], int]:
     """Compute pass@k, majority@k, no_answer, and variance statistics from grouped task results.
 
     Shared utility for any resource server's compute_metrics() override.
@@ -183,6 +325,7 @@ def compute_pass_majority_metrics(
             If None, majority@k and no_answer are skipped.
 
     Returns:
+        Metrics, all_score_dicts, score_names, max_k
         Flat dict of metrics keyed as ``{agg_mode}/{score_name}``:
         - ``pass@{k}/{name}``: combinatorial pass@k (binary) or max-of-k (continuous)
         - ``pass@1[avg-of-{k}]/{name}``: mean score across first k rollouts, averaged across tasks
@@ -192,10 +335,9 @@ def compute_pass_majority_metrics(
 
         All accuracy values are percentages (0-100).
     """
-    import math as _math
 
     if not tasks:
-        return {}
+        return {}, [], [], 0
 
     if score_fn is None:
         score_fn = lambda r: {"accuracy": r["reward"]}  # noqa: E731
@@ -241,7 +383,7 @@ def compute_pass_majority_metrics(
                     if n_incorrect < k:
                         pass_values.append(1.0)
                     else:
-                        pass_values.append(1.0 - _math.comb(n_incorrect, k) / _math.comb(n_total, k))
+                        pass_values.append(1.0 - math.comb(n_incorrect, k) / math.comb(n_total, k))
                 else:
                     pass_values.append(max(vals[:k]))
 
@@ -304,12 +446,139 @@ def compute_pass_majority_metrics(
                 if len(run_averages) >= 2:
                     mean_val = sum(run_averages) / len(run_averages)
                     variance = sum((x - mean_val) ** 2 for x in run_averages) / (len(run_averages) - 1)
-                    std_dev = _math.sqrt(variance)
-                    std_err = std_dev / _math.sqrt(len(run_averages))
+                    std_dev = math.sqrt(variance)
+                    std_err = std_dev / math.sqrt(len(run_averages))
                     metrics[f"pass@1[avg-of-{k}]/{name}/std_dev_across_runs"] = std_dev
                     metrics[f"pass@1[avg-of-{k}]/{name}/std_err_across_runs"] = std_err
 
+    return metrics, all_score_dicts, score_names, max_k
+
+
+def add_avg_sample_std_dev(
+    metrics: Dict[str, Any],
+    all_score_dicts: List[List[Dict[str, float]]],
+    score_names: list,
+    max_k: int,
+) -> None:
+    """Add avg_sample_std_dev statistics to an existing metrics dict.
+
+    Computes the average of per-task standard deviations across k rollouts — a measure of
+    within-task variance that complements the across-run variance (std_dev_across_runs).
+
+    Modifies ``metrics`` in place.
+    """
+    if max_k <= 1:
+        return
+
+    for k in range(2, max_k + 1):
+        for name in score_names:
+            sample_std_devs = []
+            for task_scores in all_score_dicts:
+                vals = [s.get(name) for s in task_scores[:k] if name in s]
+                if len(vals) >= 2:
+                    task_mean = sum(vals) / len(vals)
+                    task_var = sum((v - task_mean) ** 2 for v in vals) / (len(vals) - 1)
+                    sample_std_devs.append(math.sqrt(task_var))
+            if sample_std_devs:
+                metrics[f"pass@1[avg-of-{k}]/{name}/avg_sample_std_dev"] = sum(sample_std_devs) / len(sample_std_devs)
+
+
+def compute_subset_metrics(
+    tasks: List[List[Dict[str, Any]]],
+    subset_key: str,
+    score_fn: Optional[Any] = None,
+    answer_key: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Group tasks by a field and compute pass@k metrics per subset.
+
+    Returns flat dict with subset-prefixed keys, e.g. ``"easy/pass@1/accuracy"``.
+    Skips the ``per_sample_aggregate`` key from each subset's metrics.
+
+    Args:
+        tasks: tasks[i] is a list of rollout dicts for task i.
+        subset_key: Field name in rollout dicts to group by (e.g. ``"difficulty"``).
+        score_fn: Passed through to ``compute_pass_majority_metrics``.
+        answer_key: Passed through to ``compute_pass_majority_metrics``.
+    """
+    subsets: Dict[str, List[List[Dict[str, Any]]]] = {}
+    for task_rollouts in tasks:
+        value = task_rollouts[0].get(subset_key) if task_rollouts else None
+        if value:
+            subsets.setdefault(value, []).append(task_rollouts)
+
+    metrics: Dict[str, Any] = {}
+    for subset_name, subset_tasks in subsets.items():
+        subset_metrics, _, _, _ = compute_pass_majority_metrics(subset_tasks, score_fn=score_fn, answer_key=answer_key)
+        for key, value in subset_metrics.items():
+            if key == "per_sample_aggregate":
+                continue
+            metrics[f"{subset_name}/{key}"] = value
+
     return metrics
+
+
+def highest_k_metrics(
+    agent_metrics: Dict[str, Any],
+    pattern: str,
+    score_names: Optional[List[str]] = None,
+    exclude_names: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """Select the highest-k entries matching a metric pattern.
+
+    Finds all keys matching ``pattern`` (with ``{k}`` as the k placeholder), determines the
+    highest k value, and returns all entries at that k.
+
+    Args:
+        agent_metrics: Full agent metrics dict.
+        pattern: Pattern with ``{k}`` placeholder, e.g. ``"pass@{k}"`` or ``"pass@1[avg-of-{k}]"``.
+        score_names: If provided, only return entries whose score name (after the last ``/``)
+            is in this list. Stat suffixes (std_dev, std_err, avg_sample) are always excluded.
+        exclude_names: Score names to exclude (e.g. ``["no_answer"]``). Applied after score_names.
+
+    Returns:
+        Dict of matching metrics at the highest k, e.g. ``{"pass@32/accuracy": 95.0}``.
+
+    Example::
+
+        # Get highest-k pass@k for accuracy only
+        highest_k_metrics(am, "pass@{k}", score_names=["accuracy"])
+        # → {"pass@32/accuracy": 95.0}
+
+        # Get highest-k pass@1[avg-of-k] for all scores except no_answer, without stats
+        highest_k_metrics(am, "pass@1[avg-of-{k}]", exclude_names=["no_answer"])
+        # → {"pass@1[avg-of-32]/accuracy": 94.5, "pass@1[avg-of-32]/symbolic_accuracy": 93.2}
+    """
+    stat_suffixes = {"std_dev_across_runs", "std_err_across_runs", "avg_sample_std_dev"}
+
+    # Build regex from pattern: "pass@{k}" → r"^pass@(\d+)/(.+)$"
+    escaped = re.escape(pattern).replace(r"\{k\}", r"(\d+)")
+    regex = re.compile(f"^{escaped}/(.+)$")
+
+    # Find all matching keys and their k values
+    matches = []
+    for key in agent_metrics:
+        m = regex.match(key)
+        if not m:
+            continue
+        k_val = int(m.group(1))
+        score_name = m.group(2)
+
+        # Skip stat suffixes
+        if any(score_name.endswith(s) for s in stat_suffixes):
+            continue
+
+        if score_names is not None and score_name not in score_names:
+            continue
+        if exclude_names is not None and score_name in exclude_names:
+            continue
+
+        matches.append((k_val, key))
+
+    if not matches:
+        return {}
+
+    max_k = max(k for k, _ in matches)
+    return {key: agent_metrics[key] for k, key in matches if k == max_k}
 
 
 class AggregateMetricsMixin:
@@ -368,9 +637,6 @@ def compute_aggregate_metrics(
         intervals, cross-task statistics, pass@k). Returned dict is merged into agent_metrics.
       - get_key_metrics_fn: select headline metrics from agent_metrics
     """
-    # Import here to avoid circular dependency (AggregateMetrics is defined in base_resources_server)
-    from nemo_gym.base_resources_server import AggregateMetrics
-
     if not verify_responses:
         return AggregateMetrics()
 
@@ -399,8 +665,7 @@ def compute_aggregate_metrics(
 
     serialized_group = rp.prepare_for_serialization(group_level_metrics)
 
-    # Re-add task index (RewardProfiler pops it during profiling, but groups are
-    # returned in sorted task index order from the pandas groupby)
+    # Keep task index explicit in aggregate metrics for downstream per-task joins.
     sorted_task_indices = sorted({vr.get(TASK_INDEX_KEY_NAME, 0) for vr in verify_responses})
     for group, task_idx in zip(serialized_group, sorted_task_indices):
         group[TASK_INDEX_KEY_NAME] = task_idx
@@ -451,11 +716,16 @@ def reward_profile():  # pragma: no cover
     results.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
 
     rp = RewardProfiler()
-    group_level_metrics, agent_level_metrics = rp.profile_from_data(rows, results)
+    group_level_metrics, agent_level_metrics = rp.profile_from_data(
+        rows, results, allow_partial_rollouts=config.allow_partial_rollouts
+    )
+    completion_summary = rp.profile_completion_summary(rows, results)
     reward_profiling_fpath, agent_level_metrics_fpath = rp.write_to_disk(
         group_level_metrics, agent_level_metrics, Path(config.rollouts_jsonl_fpath)
     )
 
     print(f"""Profiling outputs:
+Reward profile completion: {completion_summary["completed_rollout_rows"]}/{completion_summary["expected_rollout_rows"]} rollout rows ({completion_summary["reward_profile_completion_pct"]:.2f}%)
+Input rows: {completion_summary["total_input_rows"]} total; {completion_summary["complete_input_rows"]} complete; {completion_summary["partial_input_rows"]} partial; {completion_summary["missing_input_rows"]} without rollouts dropped from output.
 Reward profiling outputs: {reward_profiling_fpath}
 Agent-level metrics: {agent_level_metrics_fpath}""")

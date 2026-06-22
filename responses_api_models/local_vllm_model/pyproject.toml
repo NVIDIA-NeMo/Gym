@@ -29,3 +29,6 @@ include = ["local_vllm_model"]
 
 [tool.uv.sources]
 nemo-gym = { path = "../..", editable = true }
+
+[tool.uv.pip]
+torch-backend = "auto"

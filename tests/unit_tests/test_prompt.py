@@ -18,6 +18,7 @@ import json
 import pytest
 import yaml
 
+from nemo_gym import PARENT_DIR
 from nemo_gym.prompt import (
     PromptConfig,
     _resolve_path,
@@ -80,8 +81,6 @@ class TestResolvePath:
 
     def test_relative_path_resolves_to_parent_dir(self, tmp_path):
         # Create a file relative to PARENT_DIR to test resolution
-        from nemo_gym import PARENT_DIR
-
         test_file = PARENT_DIR / "test_resolve_path_temp.yaml"
         test_file.write_text("user: '{q}'")
         try:

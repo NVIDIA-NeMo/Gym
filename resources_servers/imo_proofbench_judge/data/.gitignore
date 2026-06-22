@@ -1,0 +1,8 @@
+*train.jsonl
+*validation.jsonl
+*train_prepare.jsonl
+*validation_prepare.jsonl
+*example_prepare.jsonl
+# ng_collect_rollouts side artefacts — only example_rollouts.jsonl is tracked.
+*_rollouts_materialized_inputs.jsonl
+*_rollouts_aggregate_metrics.json

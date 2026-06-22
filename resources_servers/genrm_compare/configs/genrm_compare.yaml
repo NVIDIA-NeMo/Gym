@@ -26,7 +26,7 @@ genrm_compare_resources_server:
         name: genrm_model
       
       # Cohort-based verify (Difference 1): number of rollouts per prompt before running comparison.
-      # When > 1, verify() buffers by prompt and returns relative rewards when cohort is full.
+      # When > 1, verify() buffers by task/prompt identity and returns relative rewards when a cohort is full.
       # Ensure rollout data has this many rows per prompt (e.g. num_repeats in rollout collection).
       num_rollouts_per_prompt: 16
       
@@ -60,6 +60,9 @@ genrm_compare_resources_server:
       # Shorter responses get bonus, longer get penalty (mean-centered)
       group_reasoning_length_penalty_coeff: 0.0
       group_answer_length_penalty_coeff: 0.0
+      # Group-relative style penalty coefficient
+      # Lower formatting density (headers, lists, bold, emoji) gets bonus
+      group_style_penalty_coeff: 0.0
       
       # Default scores when parsing fails
       default_score: 3.0
@@ -100,7 +103,7 @@ genrm_model:
         gpu_memory_utilization: 0.9
       debug: false
 
-genrm_compare_agent:
+genrm_simple_agent:
   responses_api_agents:
     simple_agent:
       entrypoint: app.py
@@ -114,10 +117,18 @@ genrm_compare_agent:
       - name: example
         type: example
         jsonl_fpath: resources_servers/genrm_compare/data/example.jsonl
-      - name: train
-        type: train
-        jsonl_fpath: resources_servers/genrm_compare/data/Nemotron-RL-Identity-Following-v1_train.jsonl
-        huggingface_identifier:
-          repo_id: nvidia/Nemotron-RL-Identity-Following-v1
-          artifact_fpath: train.jsonl
-        license: Creative Commons Attribution 4.0 International
+
+genrm_simple_agent_reasoning_off:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: genrm_compare_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model_reasoning_off
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/genrm_compare/data/example.jsonl

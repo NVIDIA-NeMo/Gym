@@ -34,6 +34,7 @@ import re
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
+from pydantic import BaseModel
 
 
 logger = logging.getLogger(__name__)
@@ -73,7 +74,18 @@ class GenRMOutputParseError(ValueError):
 # =============================================================================
 
 
-def get_prompt_key_from_input(input_messages: List[Dict], principle: Optional[str] = None) -> str:
+def _to_jsonable_data(value: Any) -> Any:
+    """Recursively convert request payloads into JSON-serializable data."""
+    if isinstance(value, BaseModel):
+        return value.model_dump(mode="json")
+    if isinstance(value, dict):
+        return {str(k): _to_jsonable_data(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_to_jsonable_data(item) for item in value]
+    return value
+
+
+def get_prompt_key_from_input(input_messages: List[Any], principle: Optional[str] = None) -> str:
     """Stable key for grouping rollouts by prompt and principle.
 
     Used by cohort-based verify to group N rollouts per prompt.
@@ -85,7 +97,7 @@ def get_prompt_key_from_input(input_messages: List[Dict], principle: Optional[st
     Returns:
         A stable string key for the prompt + principle combination
     """
-    key_data = {"input": input_messages, "principle": principle}
+    key_data = {"input": _to_jsonable_data(input_messages), "principle": principle}
     return hashlib.sha256(json.dumps(key_data, sort_keys=True).encode()).hexdigest()
 
 
@@ -210,6 +222,10 @@ def parse_genrm_output(
         if not isinstance(parsed, dict):
             return None
 
+        # Handle nested format: {"rubric_evaluations": [...], "overall": {...}}
+        if "overall" in parsed and isinstance(parsed["overall"], dict):
+            parsed = parsed["overall"]
+
         # Must have at least one expected key
         if not any(k in parsed for k in ("score_1", "score_2", "ranking")):
             return None
@@ -222,20 +238,55 @@ def parse_genrm_output(
         except (TypeError, ValueError):
             return None
 
-    try:
-        # Strategy 1: Look for fenced JSON blocks (```json {...} ```)
-        for match in re.finditer(r"```json\s*(\{[\s\S]*?\})\s*```", output, flags=re.IGNORECASE):
-            result = _try_parse(match.group(1))
-            if result is not None:
-                return result
+    def _find_json_objects(text: str) -> List[str]:
+        """Find top-level JSON objects in text using brace counting."""
+        results = []
+        i = 0
+        while i < len(text):
+            if text[i] == "{":
+                depth = 0
+                start = i
+                in_string = False
+                escape_next = False
+                for j in range(i, len(text)):
+                    ch = text[j]
+                    if escape_next:
+                        escape_next = False
+                        continue
+                    if ch == "\\" and in_string:
+                        escape_next = True
+                        continue
+                    if ch == '"' and not escape_next:
+                        in_string = not in_string
+                        continue
+                    if in_string:
+                        continue
+                    if ch == "{":
+                        depth += 1
+                    elif ch == "}":
+                        depth -= 1
+                        if depth == 0:
+                            results.append(text[start : j + 1])
+                            i = j
+                            break
+            i += 1
+        return results
 
-        # Strategy 2: Find all {...} and take the last valid one.
+    try:
+        # Strategy 1: Look for fenced JSON blocks (```json ... ```)
+        for match in re.finditer(r"```json\s*([\s\S]*?)\s*```", output, flags=re.IGNORECASE):
+            for json_str in _find_json_objects(match.group(1)):
+                result = _try_parse(json_str)
+                if result is not None:
+                    return result
+
+        # Strategy 2: Find all top-level {...} and take the last valid one.
         #
         # Note: We keep this intentionally permissive because model outputs can include
         # extra prose around a JSON blob, and the JSON may be pretty-printed across lines.
         last_valid: Optional[Tuple[float, float, float]] = None
-        for match in re.finditer(r"(\{[\s\S]*?\})", output):
-            result = _try_parse(match.group(1))
+        for json_str in _find_json_objects(output):
+            result = _try_parse(json_str)
             if result is not None:
                 last_valid = result
 
@@ -328,6 +379,184 @@ def extract_output_text(response_obj: Dict[str, Any]) -> str:
         return EMPTY_OUTPUT_PLACEHOLDER
 
     return output
+
+
+# =============================================================================
+# Style Element Counting (Arena-Hard style + emoji)
+# =============================================================================
+
+# Regex pattern to match code blocks (excluded from style counting)
+# NOTE: Non-greedy, matches across newlines, and tolerates backticks inside code.
+_CODE_BLOCK_PATTERN = re.compile(r"```[\s\S]*?```", re.MULTILINE)
+
+# Emoji detection pattern - covers most common emoji ranges
+_EMOJI_CHAR_PATTERN = re.compile(
+    "["
+    "\U0001f600-\U0001f64f"  # emoticons
+    "\U0001f300-\U0001f5ff"  # symbols & pictographs
+    "\U0001f680-\U0001f6ff"  # transport & map symbols
+    "\U0001f1e0-\U0001f1ff"  # flags
+    "\U00002702-\U000027b0"  # dingbats
+    "\U000024c2-\U0001f251"  # enclosed characters
+    "\U0001f900-\U0001f9ff"  # supplemental symbols
+    "\U0001fa00-\U0001fa6f"  # chess symbols
+    "\U0001fa70-\U0001faff"  # symbols and pictographs extended-A
+    "\U00002600-\U000026ff"  # misc symbols
+    "\U00002700-\U000027bf"  # dingbats
+    "]",
+    re.UNICODE,
+)
+
+
+def count_style_elements(text: str) -> Dict[str, int]:
+    """Count style elements in text (Arena-Hard style + emoji).
+
+    Counts markdown formatting elements and emojis, excluding code blocks.
+
+    Args:
+        text: Text to analyze
+
+    Returns:
+        Dictionary with counts for each style element type:
+        - header_count: Total headers (h1-h6)
+        - list_count: Total list items (ordered + unordered)
+        - bold_count: Total bold text occurrences
+        - emoji_count: Total emoji occurrences
+    """
+    # Remove code blocks before counting (same as Arena-Hard)
+    text_no_code = _CODE_BLOCK_PATTERN.sub("", text)
+
+    # Count headers (h1-h6)
+    header_count = len(re.findall(r"^#{1,6}\s", text_no_code, re.MULTILINE))
+
+    # Count lists (ordered + unordered)
+    ordered_list = len(re.findall(r"^\s*\d+\.\s", text_no_code, re.MULTILINE))
+    unordered_list = len(re.findall(r"^\s*[-*+]\s", text_no_code, re.MULTILINE))
+    list_count = ordered_list + unordered_list
+
+    # Count bold text
+    bold_asterisk = len(re.findall(r"\*\*[^*\n]+\*\*", text_no_code))
+    bold_underscore = len(re.findall(r"__[^_\n]+__", text_no_code))
+    bold_count = bold_asterisk + bold_underscore
+
+    # Count emojis
+    # NOTE: this counts individual emoji codepoints in common emoji ranges.
+    # It will *not* perfectly count grapheme clusters for ZWJ sequences, but it
+    # avoids undercounting when multiple emojis appear back-to-back.
+    emoji_count = len(_EMOJI_CHAR_PATTERN.findall(text_no_code))
+
+    return {
+        "header_count": header_count,
+        "list_count": list_count,
+        "bold_count": bold_count,
+        "emoji_count": emoji_count,
+    }
+
+
+def compute_style_density(text: str) -> float:
+    """Compute style density (total style elements / text length).
+
+    Args:
+        text: Text to analyze
+
+    Returns:
+        Style density value (elements per character). Returns 0 if text is empty.
+    """
+    # Keep numerator/denominator consistent: exclude code blocks from both.
+    text_no_code = _CODE_BLOCK_PATTERN.sub("", text)
+    text_len = len(text_no_code.strip())
+    if text_len <= 0:
+        return 0.0
+
+    counts = count_style_elements(text_no_code)
+    total_elements = sum(counts.values())
+
+    return total_elements / text_len
+
+
+def _compute_style_density_weights(densities: List[float]) -> List[float]:
+    """Compute zero-centered weights where lower density = higher weight.
+
+    Similar to _compute_length_weights but for style density.
+    Lower style density (less formatting) gets positive weight (bonus).
+    Higher style density (more formatting) gets negative weight (penalty).
+
+    Args:
+        densities: List of style density values
+
+    Returns:
+        List of weights, zero-centered (sum to ~0)
+    """
+    max_density = max(densities)
+    min_density = min(densities)
+
+    if max_density == min_density:
+        return [0.0] * len(densities)
+
+    span = max_density - min_density
+    # Lower density = weight closer to 1, higher density = weight closer to 0
+    raw_weights = [1.0 - ((density - min_density) / span) for density in densities]
+    # Zero-center
+    mean_weight = sum(raw_weights) / len(raw_weights)
+    return [w - mean_weight for w in raw_weights]
+
+
+def apply_style_penalties(
+    scores: List[float],
+    response_objs: List[Dict[str, Any]],
+    group_style_penalty_coeff: float,
+) -> Tuple[List[float], List[float]]:
+    """Apply style-based penalties to scores.
+
+    Penalizes responses with higher style density (more formatting elements
+    relative to text length). This controls for "style hacking" where models
+    produce verbose formatting to appear more helpful.
+
+    Style elements counted (following Arena-Hard):
+    - Headers (h1-h6)
+    - Lists (ordered and unordered)
+    - Bold text
+    - Emojis (extension beyond Arena-Hard)
+
+    Args:
+        scores: Base scores to adjust (modified in place)
+        response_objs: Response API objects to extract text from
+        group_style_penalty_coeff: Coefficient for style density penalty.
+            Higher values penalize formatting more heavily.
+
+    Returns:
+        Tuple of (adjusted_scores, style_adjustments_per_response)
+    """
+    num_responses = len(response_objs)
+
+    if num_responses < 2 or group_style_penalty_coeff <= 0:
+        return scores, [0.0] * len(scores)
+
+    # Compute style density for each response
+    style_adjustments = [0.0] * num_responses
+    answer_densities: List[float] = []
+
+    for obj in response_objs:
+        _, answer = extract_from_response_obj(obj)
+        density = compute_style_density(answer)
+        answer_densities.append(density)
+
+    logger.info(f"[StyleControl] Densities: {[f'{d:.6f}' for d in answer_densities]}")
+    logger.info(f"[StyleControl] Scores before: {[f'{s:.4f}' for s in scores]}")
+
+    # Compute zero-centered weights (lower density = higher/positive weight)
+    style_weights = _compute_style_density_weights(answer_densities)
+
+    for idx in range(num_responses):
+        adjustment = style_weights[idx] * group_style_penalty_coeff
+        if adjustment != 0:
+            scores[idx] += adjustment
+            style_adjustments[idx] = adjustment
+
+    logger.info(f"[StyleControl] Scores after: {[f'{s:.4f}' for s in scores]}")
+    logger.info(f"[StyleControl] Adjustments: {[f'{a:+.4f}' for a in style_adjustments]}")
+
+    return scores, style_adjustments
 
 
 # =============================================================================
@@ -464,6 +693,7 @@ def aggregate_scores(
     top_percentile: float,
     group_reasoning_length_penalty_coeff: float,
     group_answer_length_penalty_coeff: float,
+    group_style_penalty_coeff: float = 0.0,
 ) -> Tuple[List[float], Dict[str, float], List[float], List[float]]:
     """Aggregate pairwise comparison results into per-response rewards.
 
@@ -483,13 +713,16 @@ def aggregate_scores(
         top_percentile: Percentile threshold for length bonuses
         group_reasoning_length_penalty_coeff: Coefficient for reasoning length penalty
         group_answer_length_penalty_coeff: Coefficient for answer length penalty
+        group_style_penalty_coeff: Coefficient for style density penalty.
+            Penalizes responses with higher density of formatting elements
+            (headers, lists, bold, emojis) relative to text length.
 
     Returns:
         Tuple of:
         - final_scores: Per-response rewards after all adjustments
         - metrics: Aggregation statistics (mean, std, tiebreak rate)
-        - base_scores: Scores before length bonuses
-        - bonuses: Length bonus applied to each response
+        - base_scores: Scores before length/style bonuses
+        - bonuses: Length and style adjustments applied to each response
 
     Raises:
         ValueError: If aggregator_method is not supported
@@ -533,7 +766,7 @@ def aggregate_scores(
         for idx in range(num_responses)
     ]
 
-    # Store base scores before length adjustments
+    # Store base scores before length/style adjustments
     base_scores = list(final_scores)
     bonuses = [0.0] * num_responses
 
@@ -546,7 +779,7 @@ def aggregate_scores(
             group_answer_length_penalty_coeff > 0,
         ]
     ):
-        final_scores, bonuses = apply_length_bonuses(
+        final_scores, length_bonuses = apply_length_bonuses(
             scores=final_scores,
             response_objs=response_objs,
             reasoning_bonus=reasoning_bonus,
@@ -555,6 +788,16 @@ def aggregate_scores(
             group_reasoning_length_penalty_coeff=group_reasoning_length_penalty_coeff,
             group_answer_length_penalty_coeff=group_answer_length_penalty_coeff,
         )
+        bonuses = [b + lb for b, lb in zip(bonuses, length_bonuses)]
+
+    # Apply style penalties if configured
+    if group_style_penalty_coeff > 0:
+        final_scores, style_adjustments = apply_style_penalties(
+            scores=final_scores,
+            response_objs=response_objs,
+            group_style_penalty_coeff=group_style_penalty_coeff,
+        )
+        bonuses = [b + sa for b, sa in zip(bonuses, style_adjustments)]
 
     # Compute metrics
     metrics: Dict[str, float] = {}

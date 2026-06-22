@@ -1,0 +1,62 @@
+{
+    "name": "example",
+    "type": "example",
+    "jsonl_fpath": "resources_servers/equivalence_rule/data/example.jsonl",
+    "num_repeats": 1,
+    "gitlab_identifier": null,
+    "huggingface_identifier": null,
+    "license": null,
+    "Number of examples": 5,
+    "Number of tools": {
+        "Total # non-null values": 5,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 5,
+        "Average": 1518.4,
+        "Min": 1037.0,
+        "Max": 1902.0,
+        "Standard deviation": 405.66
+    },
+    "Number of turns": {
+        "Total # non-null values": 5,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Standard deviation": 0.0
+    },
+    "Temperature": {
+        "Total # non-null values": 5,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Standard deviation": 0.0
+    },
+    "expected_answer": {
+        "unique_count": 4,
+        "total_count": 5
+    },
+    "question": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "dataset": {
+        "unique_count": 2,
+        "total_count": 5
+    },
+    "source": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "hashid": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "context_length": {
+        "unique_count": 5,
+        "total_count": 5
+    }
+}

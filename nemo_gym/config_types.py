@@ -14,6 +14,7 @@
 # limitations under the License.
 from argparse import ArgumentParser
 from enum import Enum
+from pathlib import Path
 from typing import Any, ClassVar, Dict, List, Literal, Optional, Set, Tuple, Union
 
 import rich
@@ -133,6 +134,10 @@ def is_server_ref(config_dict: DictConfig) -> Optional[ServerRef]:
         return ServerRefTypeAdapter.validate_python(config_dict)
     except ValidationError:
         return None
+
+
+class ServerRefNotFoundError(ValueError):
+    """A server cross-reference points to an instance that is not defined in the merged config."""
 
 
 ########################################
@@ -372,6 +377,7 @@ class DatasetConfig(BaseModel):
             Literal["Creative Commons Attribution 4.0 International"],
             Literal["Creative Commons Attribution-ShareAlike 4.0 International"],
             Literal["NVIDIA Internal Use Only, Do Not Distribute"],
+            Literal["NVIDIA Evaluation Dataset License Agreement"],
             Literal["TBD"],
             Literal["GNU General Public License v3.0"],
         ]
@@ -383,6 +389,15 @@ class DatasetConfig(BaseModel):
             assert self.license is not None, f"A license is required for {self.name}"
 
         return self
+
+
+class BenchmarkDatasetConfig(BaseModel):
+    name: str
+    type: Literal["benchmark"]
+    jsonl_fpath: Path
+    prepare_script: Path
+    prompt_config: Optional[Path]
+    num_repeats: int = Field(default=1, ge=1)
 
 
 ########################################
@@ -431,7 +446,7 @@ class BaseRunServerTypeConfig(BaseRunServerConfig):
     host: Optional[str] = None
     port: Optional[int] = None
 
-    datasets: Optional[List[DatasetConfig]] = None
+    datasets: Optional[List[Union[DatasetConfig, BenchmarkDatasetConfig]]] = None
 
 
 class BaseServerTypeConfig(BaseModel):
@@ -503,7 +518,7 @@ class BaseServerInstanceConfig(BaseServerTypeConfig):
         return list(getattr(self, self.SERVER_TYPE).values())[0]
 
     @property
-    def datasets(self) -> Optional[List[DatasetConfig]]:
+    def datasets(self) -> Optional[List[Union[DatasetConfig, BenchmarkDatasetConfig]]]:
         return self.get_inner_run_server_config().datasets
 
 
@@ -593,3 +608,39 @@ class WANDBConfig(BaseModel):
     def is_available(self) -> bool:
         # If global_config recursively hide secrets is called, the api key will be set to ****
         return self.wandb_project and self.wandb_name and self.wandb_api_key and self.wandb_api_key != "****"
+
+
+########################################
+# Weights and Biases
+########################################
+
+
+class AggregateMetricsRequest(BaseModel):
+    """POST body for /aggregate_metrics.
+
+    Each item is a stripped verify response dict containing at minimum:
+    - TASK_INDEX_KEY_NAME: int
+    - "reward": float
+    """
+
+    verify_responses: List[Dict[str, Any]]
+
+
+class AggregateMetrics(BaseModel):
+    """Response from /aggregate_metrics.
+
+    Flat string keys for direct logging to W&B/MLflow.
+    """
+
+    group_level_metrics: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="Per-task metrics (one dict per task) from RewardProfiler baseline stats.",
+    )
+    agent_metrics: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Overall metrics across all rollouts (RewardProfiler baseline + compute_metrics).",
+    )
+    key_metrics: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Headline metrics for this benchmark. Subset of agent_metrics.",
+    )

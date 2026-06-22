@@ -5,9 +5,8 @@
 #
 # Placeholders: {question}, {expected_answer}, {generated_answer}
 #
-# To override from NVFlow, create an overlay YAML that sets
-# finance_sec_search_resources_server.resources_servers.finance_sec_search.judge_prompt_template
-# as an inline string in nemo_gym_config_paths. The inline value takes priority.
+# To override, set judge_prompt_template_fpath to a custom file, or set
+# judge_prompt_template as an inline string (inline takes priority over file).
 
 judge_prompt_template: |-
   You are a meticulous financial analyst grader evaluating answers to questions about SEC filings (10-K, 10-Q). Compare a candidate answer to a GOLD reference and rate the response strictly.

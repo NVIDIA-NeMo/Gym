@@ -34,7 +34,7 @@ class SWEJudgeRunRequest(BaseRunRequest):
     instance_id: Optional[str] = None
     dataset_name: Optional[str] = None
     dataset_split: Optional[str] = None
-    expected_answer: Optional[str] = None
+    expected_answer: Optional[str | list[str]] = None
     options: Optional[list[dict[str, str]]] = None
     metadata: Optional[dict[str, Any]] = None
     grading_mode: Literal["lenient", "strict"] = "lenient"
@@ -45,7 +45,7 @@ class SWEJudgeVerifyRequest(SWEJudgeRunRequest, BaseVerifyRequest):
 
 
 class SWEJudgeVerifyResponse(BaseVerifyResponse):
-    expected_answer: str
+    expected_answer: str | list[str]
     extracted_answer: Optional[str]
 
 
@@ -70,10 +70,44 @@ def _extract_last_assistant_text(body: BaseVerifyRequest) -> str:
     return "\n".join(texts).strip()
 
 
-def _extract_options_and_expected(
+def _normalize_expected_answers(
+    *,
+    expected_answer: Optional[str | list[str]],
+) -> list[str]:
+    def _coerce_to_str_list(v: Any) -> list[str]:
+        if v is None:
+            return []
+        if isinstance(v, str):
+            return [v]
+        if isinstance(v, list) or isinstance(v, tuple):
+            return [x for x in v if isinstance(x, str)]
+        return []
+
+    out: list[str] = []
+    seen: set[str] = set()
+
+    raw: list[str] = []
+    raw.extend(_coerce_to_str_list(expected_answer))
+
+    for x in raw:
+        s = x.strip().upper()
+        if len(s) != 1 or (not s.isalpha()):
+            continue
+        if s not in seen:
+            seen.add(s)
+            out.append(s)
+    return out
+
+
+def _extract_options_and_expected_answers(
     body: SWEJudgeRunRequest,
-) -> tuple[Optional[list[dict[str, str]]], Optional[str]]:
-    return body.options, body.expected_answer
+) -> tuple[Optional[list[dict[str, str]]], list[str]]:
+    return (
+        body.options,
+        _normalize_expected_answers(
+            expected_answer=body.expected_answer,
+        ),
+    )
 
 
 def _get_allowed_letters_from_options(
@@ -143,7 +177,7 @@ class SWEJudgeResourcesServer(SimpleResourcesServer):
         # Extract the raw assistant text from the NeMo Gym response.
         text = _extract_last_assistant_text(body)
         # Pull options/expected_answer from dataset-style metadata if available
-        options, expected_answer = _extract_options_and_expected(body)
+        options, expected_answers = _extract_options_and_expected_answers(body)
         # Derive allowed letters from option keys
         allowed_letters = _get_allowed_letters_from_options(options)
         # Parse the model's choice from the <solution>...</solution> block.
@@ -155,15 +189,15 @@ class SWEJudgeResourcesServer(SimpleResourcesServer):
             raise ValueError(f"Invalid grading mode: {body.grading_mode}")
 
         # Normalize the gold choice: required for grading.
-        gold = (expected_answer or "").strip().upper()
+        golds = [g for g in expected_answers if (not allowed_letters) or (g in allowed_letters)]
 
-        is_correct = bool(pred_choice is not None and gold and pred_choice == gold)
+        is_correct = bool(pred_choice is not None and pred_choice in golds)
         reward = 1.0 if is_correct else 0.0
 
         return SWEJudgeVerifyResponse(
             **body.model_dump(exclude={"expected_answer", "extracted_answer"}),
             reward=reward,
-            expected_answer=gold,
+            expected_answer=(golds[0] if len(golds) == 1 else golds),
             extracted_answer=pred_choice,
         )
 

@@ -1,0 +1,5 @@
+-e nemo-gym[dev] @ ../../
+# Skills' MathEvaluator uses these for sympy-based math equivalence
+# (mirrored as ``math_equal`` in app.py to populate ``symbolic_correct``).
+math-verify==0.8.0
+latex2sympy2_extended

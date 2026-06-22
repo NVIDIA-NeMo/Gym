@@ -1,0 +1,21 @@
+config_paths:
+  - resources_servers/imo_gradingbench/configs/imo_gradingbench.yaml
+
+imo_gradingbench_imo_gradingbench_resources_server:
+  _inherit_from: imo_gradingbench
+  resources_servers:
+    imo_gradingbench: {}
+
+imo_gradingbench_imo_gradingbench_simple_agent:
+  _inherit_from: imo_gradingbench_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: imo_gradingbench_imo_gradingbench_resources_server
+      datasets:
+        - name: imo_gradingbench
+          type: benchmark
+          jsonl_fpath: benchmarks/imo_gradingbench/data/imo_gradingbench_benchmark.jsonl
+          prompt_config: benchmarks/imo_gradingbench/prompts/default.yaml
+          prepare_script: benchmarks/imo_gradingbench/prepare.py
+          license: Apache 2.0

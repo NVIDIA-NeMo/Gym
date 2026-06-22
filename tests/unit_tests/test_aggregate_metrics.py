@@ -22,8 +22,15 @@ from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
     SimpleResourcesServer,
 )
+from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
-from nemo_gym.reward_profile import compute_pass_majority_metrics
+from nemo_gym.reward_profile import (
+    add_avg_sample_std_dev,
+    compute_aggregate_metrics,
+    compute_pass_majority_metrics,
+    compute_subset_metrics,
+    highest_k_metrics,
+)
 from nemo_gym.server_utils import ServerClient
 
 
@@ -206,7 +213,7 @@ class TestComputePassMajorityMetrics:
             [{"reward": 0.0}, {"reward": 0.0}, {"reward": 0.0}, {"reward": 0.0}],
             [{"reward": 1.0}, {"reward": 0.0}, {"reward": 1.0}, {"reward": 0.0}],
         ]
-        m = compute_pass_majority_metrics(tasks)
+        m, _, _, _ = compute_pass_majority_metrics(tasks)
 
         assert m["pass@1/accuracy"] == pytest.approx(50.0)
         assert m["pass@4/accuracy"] == pytest.approx(200.0 / 3.0, abs=0.01)
@@ -218,7 +225,7 @@ class TestComputePassMajorityMetrics:
             [{"reward": 0.0}, {"reward": 1.0}],
             [{"reward": 1.0}, {"reward": 1.0}],
         ]
-        m = compute_pass_majority_metrics(tasks)
+        m, _, _, _ = compute_pass_majority_metrics(tasks)
 
         assert m["pass@1[avg-of-2]/accuracy"] == pytest.approx(200.0 / 3.0, abs=0.01)
 
@@ -236,7 +243,7 @@ class TestComputePassMajorityMetrics:
                 {"reward": 1.0, "extracted_answer": "D"},
             ],
         ]
-        m = compute_pass_majority_metrics(tasks, answer_key="extracted_answer")
+        m, _, _, _ = compute_pass_majority_metrics(tasks, answer_key="extracted_answer")
 
         assert m["majority@3/accuracy"] == pytest.approx(50.0)
 
@@ -246,7 +253,7 @@ class TestComputePassMajorityMetrics:
             [{"reward": 1.0, "extracted_answer": "A"}, {"reward": 0.0, "extracted_answer": "B"}],
             [{"reward": 0.0, "extracted_answer": None}, {"reward": 0.0, "extracted_answer": None}],
         ]
-        m = compute_pass_majority_metrics(tasks, answer_key="extracted_answer")
+        m, _, _, _ = compute_pass_majority_metrics(tasks, answer_key="extracted_answer")
 
         # no_answer is a binary score: Task 0 has 0/2, Task 1 has 2/2
         # pass@1[avg-of-2]/no_answer: Task 0: avg(0,0)=0, Task 1: avg(1,1)=1. Mean = 50%
@@ -259,20 +266,20 @@ class TestComputePassMajorityMetrics:
             [{"reward": 0.0}, {"reward": 0.0}],
             [{"reward": 1.0}, {"reward": 1.0}],
         ]
-        m = compute_pass_majority_metrics(tasks)
+        m, _, _, _ = compute_pass_majority_metrics(tasks)
 
         assert m["pass@1[avg-of-2]/accuracy/std_dev_across_runs"] > 0
         assert m["pass@1[avg-of-2]/accuracy/std_err_across_runs"] > 0
 
     def test_empty_input(self) -> None:
-        assert compute_pass_majority_metrics([]) == {}
+        assert compute_pass_majority_metrics([])[0] == {}
 
     def test_no_answer_key_skips_majority(self) -> None:
         """Without answer_key, majority@k and no_answer are not computed."""
         tasks = [
             [{"reward": 1.0, "extracted_answer": "A"}, {"reward": 0.0, "extracted_answer": "B"}],
         ]
-        m = compute_pass_majority_metrics(tasks)
+        m, _, _, _ = compute_pass_majority_metrics(tasks)
 
         assert not any(k.startswith("majority@") for k in m)
         assert not any("no_answer" in k for k in m)
@@ -287,7 +294,7 @@ class TestComputePassMajorityMetrics:
         def score_fn(r):
             return {"accuracy": r["reward"], "symbolic_accuracy": r["library_reward"]}
 
-        m = compute_pass_majority_metrics(tasks, score_fn=score_fn)
+        m, _, _, _ = compute_pass_majority_metrics(tasks, score_fn=score_fn)
 
         assert "pass@1/accuracy" in m
         assert "pass@1/symbolic_accuracy" in m
@@ -299,7 +306,6 @@ class TestDefaultAgentAggregateMetrics:
     @pytest.mark.asyncio
     async def test_default_fallback(self) -> None:
         """Base agent uses the same RewardProfiler logic as the resources server."""
-        from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 
         class TestAgent(SimpleResponsesAPIAgent):
             async def responses(self, body=None):
@@ -323,8 +329,6 @@ class TestDefaultAgentAggregateMetrics:
 
 class TestTaskIndexInGroupMetrics:
     def test_task_index_preserved(self) -> None:
-        from nemo_gym.reward_profile import compute_aggregate_metrics
-
         responses = [
             {TASK_INDEX_KEY_NAME: 5, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0, "response": {}},
             {TASK_INDEX_KEY_NAME: 5, ROLLOUT_INDEX_KEY_NAME: 1, "reward": 0.0, "response": {}},
@@ -338,8 +342,6 @@ class TestTaskIndexInGroupMetrics:
         assert indices == [5, 10]
 
     def test_non_sequential_indices(self) -> None:
-        from nemo_gym.reward_profile import compute_aggregate_metrics
-
         responses = [
             {TASK_INDEX_KEY_NAME: 100, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0, "response": {}},
             {TASK_INDEX_KEY_NAME: 200, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 0.0, "response": {}},
@@ -361,7 +363,7 @@ class TestMajorityNoAnswerCounting:
             # Task 1: no answers at all
             [{"reward": 0.0, "extracted_answer": None}, {"reward": 0.0, "extracted_answer": None}],
         ]
-        m = compute_pass_majority_metrics(tasks, answer_key="extracted_answer")
+        m, _, _, _ = compute_pass_majority_metrics(tasks, answer_key="extracted_answer")
         # Task 0 correct (100), Task 1 no-answer should be 0 → average = 50
         assert m["majority@2/accuracy"] == pytest.approx(50.0)
 
@@ -370,7 +372,7 @@ class TestMajorityNoAnswerCounting:
             [{"reward": 0.0, "extracted_answer": None}, {"reward": 0.0, "extracted_answer": None}],
             [{"reward": 0.0, "extracted_answer": None}, {"reward": 0.0, "extracted_answer": None}],
         ]
-        m = compute_pass_majority_metrics(tasks, answer_key="extracted_answer")
+        m, _, _, _ = compute_pass_majority_metrics(tasks, answer_key="extracted_answer")
         assert m["majority@2/accuracy"] == pytest.approx(0.0)
 
 
@@ -378,9 +380,6 @@ class TestComputeAggregateMetricsPerTask:
     """Test that compute_aggregate_metrics merges per_task_metrics from compute_metrics_fn."""
 
     def test_per_task_metrics_merged(self) -> None:
-        from nemo_gym.global_config import TASK_INDEX_KEY_NAME
-        from nemo_gym.reward_profile import compute_aggregate_metrics
-
         responses = [
             {TASK_INDEX_KEY_NAME: 0, "_ng_rollout_index": 0, "reward": 1.0, "response": {}},
             {TASK_INDEX_KEY_NAME: 1, "_ng_rollout_index": 0, "reward": 0.0, "response": {}},
@@ -401,3 +400,77 @@ class TestComputeAggregateMetricsPerTask:
         groups_by_idx = {g[TASK_INDEX_KEY_NAME]: g for g in result.group_level_metrics}
         assert groups_by_idx[0]["difficulty"] == "easy"
         assert groups_by_idx[1]["difficulty"] == "hard"
+
+
+class TestHighestKMetrics:
+    def test_basic(self) -> None:
+        am = {
+            "pass@1/accuracy": 50.0,
+            "pass@2/accuracy": 75.0,
+            "pass@4/accuracy": 90.0,
+            "pass@4/no_answer": 5.0,
+            "pass@1[avg-of-4]/accuracy/std_dev_across_runs": 1.5,
+        }
+        result = highest_k_metrics(am, "pass@{k}", score_names=["accuracy"])
+        assert result == {"pass@4/accuracy": 90.0}
+
+    def test_exclude_names(self) -> None:
+        am = {"majority@2/accuracy": 80.0, "majority@2/no_answer": 3.0}
+        result = highest_k_metrics(am, "majority@{k}", exclude_names=["no_answer"])
+        assert result == {"majority@2/accuracy": 80.0}
+
+    def test_avg_of_k(self) -> None:
+        am = {
+            "pass@1[avg-of-2]/accuracy": 60.0,
+            "pass@1[avg-of-4]/accuracy": 65.0,
+            "pass@1[avg-of-4]/no_answer": 1.0,
+            "pass@1[avg-of-4]/accuracy/std_dev_across_runs": 2.0,
+        }
+        result = highest_k_metrics(am, "pass@1[avg-of-{k}]")
+        assert "pass@1[avg-of-4]/accuracy" in result
+        assert "pass@1[avg-of-4]/no_answer" in result
+        assert "pass@1[avg-of-4]/accuracy/std_dev_across_runs" not in result
+
+    def test_empty(self) -> None:
+        assert highest_k_metrics({}, "pass@{k}") == {}
+        assert highest_k_metrics({"unrelated": 1.0}, "pass@{k}") == {}
+
+
+class TestComputeSubsetMetrics:
+    def test_groups_by_field(self) -> None:
+        tasks = [
+            [{"reward": 1.0, "difficulty": "easy"}, {"reward": 1.0, "difficulty": "easy"}],
+            [{"reward": 0.0, "difficulty": "hard"}, {"reward": 0.0, "difficulty": "hard"}],
+            [{"reward": 1.0, "difficulty": "easy"}, {"reward": 0.0, "difficulty": "easy"}],
+        ]
+        m = compute_subset_metrics(tasks, "difficulty")
+        assert "easy/pass@1/accuracy" in m
+        assert "hard/pass@1/accuracy" in m
+        assert m["easy/pass@1/accuracy"] > m["hard/pass@1/accuracy"]
+        assert "per_sample_aggregate" not in m
+
+    def test_no_subset_field(self) -> None:
+        tasks = [[{"reward": 1.0}, {"reward": 0.0}]]
+        m = compute_subset_metrics(tasks, "nonexistent")
+        assert m == {}
+
+
+class TestAddAvgSampleStdDev:
+    def test_adds_stats(self) -> None:
+        tasks = [
+            [{"reward": 1.0}, {"reward": 0.0}],
+            [{"reward": 0.0}, {"reward": 0.0}],
+            [{"reward": 1.0}, {"reward": 1.0}],
+        ]
+        metrics, all_score_dicts, score_names, max_k = compute_pass_majority_metrics(tasks)
+        assert "pass@1[avg-of-2]/accuracy/avg_sample_std_dev" not in metrics
+        add_avg_sample_std_dev(metrics, all_score_dicts, score_names, max_k)
+        assert "pass@1[avg-of-2]/accuracy/avg_sample_std_dev" in metrics
+        assert metrics["pass@1[avg-of-2]/accuracy/avg_sample_std_dev"] > 0
+
+    def test_noop_for_k1(self) -> None:
+        tasks = [[{"reward": 1.0}], [{"reward": 0.0}]]
+        metrics, all_score_dicts, score_names, max_k = compute_pass_majority_metrics(tasks)
+        before = dict(metrics)
+        add_avg_sample_std_dev(metrics, all_score_dicts, score_names, max_k)
+        assert metrics == before

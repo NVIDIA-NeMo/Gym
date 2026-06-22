@@ -54,6 +54,15 @@ Each data sample should include:
 - `metadata.harness`: Either `"terminus_1"` or `"terminus_2"` to specify the schema format
 - `threshold`: threshold for string similarity to calculate the reward
 
+## Dataset Availability
+
+The train and validation datasets for this environment are not yet publicly released.
+
+**What is available:**
+- 5 example tasks committed to this repository at `data/example.jsonl`. These cover both `terminus_1` and `terminus_2` schema variants and work with the setup instructions above.
+
+The examples in `data/example.jsonl`, the descriptions here, and the environment implementation are the best starting point for understanding the format and creating new tasks.
+
 # Licensing information
 
 Code: Apache 2.0<br>

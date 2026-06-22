@@ -9,6 +9,7 @@ It runs Harbor agents (e.g., `terminus-2`) in Harbor-managed environments and re
   - [Custom agents](#custom-agents)
   - [Custom environments](#custom-environments)
 - [Quick Start](#quick-start)
+- [Daytona execution path](#daytona-execution-path)
 - [NeMo RL Training](#nemo-rl-training)
   - [Required patches to Gym](#required-patches-to-gym)
   - [Recommended settings](#recommended-settings)
@@ -229,6 +230,139 @@ ng_collect_rollouts +agent_name=harbor_agent \
 ```bash
 ng_viewer +jsonl_fpath=responses_api_agents/harbor_agent/example/example_output.jsonl
 ```
+
+## Daytona execution path
+
+Harbor's pinned dependency already includes a Daytona environment. To use it from
+NeMo Gym, set `harbor_environment_type: "daytona"` and clear
+`harbor_environment_import_path`. The import path takes precedence when it is set,
+so changing only `harbor_environment_type` on top of the default Singularity
+config is not enough.
+
+Use `configs/harbor_agent_daytona.yaml` as the starting point:
+
+```yaml
+harbor_datasets:
+  terminal_bench:
+    dataset_name: "terminal-bench"
+    dataset_version: "2.0"
+harbor_environment_type: "daytona"
+harbor_environment_import_path: null
+harbor_environment_kwargs:
+  network_block_all: false
+```
+
+The same config keeps the training-oriented `harbor_agent_kwargs` from the
+Singularity example:
+
+```yaml
+harbor_agent_kwargs:
+  max_turns: 20
+  interleaved_thinking: true
+  enable_summarize: false
+  collect_rollout_details: true
+  trajectory_config:
+    raw_content: true
+  model_info:
+    max_input_tokens: 49152
+    max_output_tokens: 49152
+    input_cost_per_token: 0.0
+    output_cost_per_token: 0.0
+```
+
+Before running, export Daytona credentials:
+
+```bash
+export DAYTONA_API_KEY=<your-daytona-api-key>
+```
+
+Then add the policy model server settings to repo-root `env.yaml`, using the
+same keys consumed by `responses_api_models/vllm_model/configs/vllm_model.yaml`:
+
+```yaml
+policy_base_url: <openai-compatible-base-url>
+policy_api_key: <policy-api-key>
+policy_model_name: <served-model-name>
+```
+
+Then follow the same Harbor-agent workflow with the Daytona config:
+
+```bash
+config_paths="responses_api_agents/harbor_agent/configs/harbor_agent_daytona.yaml,\
+responses_api_models/vllm_model/configs/vllm_model.yaml"
+ng_run "+config_paths=[${config_paths}]"
+```
+
+Alternatively, pass those values as CLI overrides:
+
+```bash
+ng_run "+config_paths=[${config_paths}]" \
+  +policy_base_url=<openai-compatible-base-url> \
+  +policy_api_key=<policy-api-key> \
+  +policy_model_name=<served-model-name>
+```
+
+For five Terminal-Bench rollout inputs, use the checked-in input file:
+
+```bash
+ng_collect_rollouts +agent_name=harbor_agent \
+  +input_jsonl_fpath=responses_api_agents/harbor_agent/example/terminal_bench_daytona_input.jsonl \
+  +output_jsonl_fpath=/tmp/harbor_daytona_terminal_bench_output.jsonl
+```
+
+Inspect the rollout and Harbor job directory:
+
+```bash
+ng_viewer +jsonl_fpath=/tmp/harbor_daytona_terminal_bench_output.jsonl
+find responses_api_agents/harbor_agent/jobs -name result.json | tail
+```
+
+Daytona uses the Docker image declared by each Harbor task. If a task does not
+declare `docker_image`, Harbor builds from that task's `environment/Dockerfile`.
+
+### Terminal-Bench 2.0 example rollouts
+
+The checked-in file
+`example/terminal_bench_daytona_output.jsonl` contains five Daytona-backed
+Terminal-Bench 2.0 rollout rows from Harbor's Oracle agent. The run completed
+with five trials, zero errors, and mean reward `1.000`.
+
+To regenerate the Harbor-side smoke evidence:
+
+```bash
+export DAYTONA_API_KEY=<your-daytona-api-key>
+
+harbor run --dataset terminal-bench@2.0 \
+  --n-tasks 5 \
+  --agent oracle \
+  --env daytona \
+  --n-concurrent 1 \
+  --jobs-dir responses_api_agents/harbor_agent/jobs/daytona-terminal-bench-examples \
+  --job-name oracle-daytona-terminal-bench-5 \
+  --quiet
+```
+
+### Terminal-Bench 2.0 smoke
+
+For an environment-only smoke that does not require a model provider key, run the
+Terminal-Bench 2.0 `fix-git` task through Harbor's Oracle agent on Daytona:
+
+```bash
+export DAYTONA_API_KEY=<your-daytona-api-key>
+
+harbor run --dataset terminal-bench@2.0 \
+  --task-name fix-git \
+  --agent oracle \
+  --env daytona \
+  --n-concurrent 1 \
+  --jobs-dir responses_api_agents/harbor_agent/jobs/daytona-terminal-bench-smoke \
+  --job-name oracle-daytona-fix-git \
+  --quiet
+```
+
+Expected result: one trial, zero errors, and `Mean: 1.000`. This validates the
+Harbor registry path, Daytona sandbox creation, agent execution, and verifier
+without involving NeMo Gym's model-server routing.
 
 ## NeMo RL Training
 

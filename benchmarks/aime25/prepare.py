@@ -26,7 +26,7 @@ from datasets import load_dataset
 
 BENCHMARK_DIR = Path(__file__).parent
 DATA_DIR = BENCHMARK_DIR / "data"
-OUTPUT_FPATH = DATA_DIR / "aime25_validation.jsonl"
+OUTPUT_FPATH = DATA_DIR / "aime25_benchmark.jsonl"
 
 # HuggingFace dataset for AIME 2025
 HF_REPO_ID = "MathArena/aime_2025"

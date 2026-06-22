@@ -476,17 +476,25 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         description="Set this to true if this particular client is only used to call internal NeMo Gym servers.",
     )
 
+    default_headers: Dict[str, str] = Field(
+        default_factory=dict,
+        description="Extra headers to include in every request.",
+    )
+
     async def _request(self, **request_kwargs: Dict) -> ClientResponse:
         request_kwargs = request_kwargs | {
-            "headers": {
+            "headers": self.default_headers
+            | {
                 "Authorization": f"Bearer {self.api_key}",
             },
             "_internal": self.internal,
         }
+        return await self._request_with_retry(**request_kwargs)
 
+    async def _request_with_retry(self, **request_kwargs: Dict) -> ClientResponse:
         max_num_tries = MAX_NUM_TRIES
         tries = 0
-        while tries < MAX_NUM_TRIES:
+        while tries < max_num_tries:
             tries += 1
             response = await request(**request_kwargs)
 
@@ -496,8 +504,10 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
                     max_num_tries += 1
 
                 content = (await response.content.read()).decode()
+                kind = "rate_limit" if response.status in RATE_LIMIT_ERROR_CODES else "server_error"
                 print(
-                    f"Hit a {response.status} trying to query an OpenAI endpoint (try {tries}). Sleeping 0.5s. Error message: {content}"
+                    f"[model_retry url={request_kwargs.get('url')} status={response.status} kind={kind} try={tries} max_tries={max_num_tries} error_msg={content[:200]}]",
+                    flush=True,
                 )
                 await sleep(0.5)
                 continue

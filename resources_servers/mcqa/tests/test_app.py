@@ -293,6 +293,82 @@ class TestApp:
         assert result.reward == 1.0
         assert result.extracted_answer == "B"
 
+    async def test_template_metadata_regex_list(self) -> None:
+        """Test that template_metadata can try a list of regexes in order."""
+        server = MCQAResourcesServer(
+            config=MCQAResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name=""),
+            server_client=MagicMock(spec=ServerClient),
+        )
+
+        response = NeMoGymResponse(
+            id="resp_test",
+            created_at=0.0,
+            model="dummy",
+            object="response",
+            output=[
+                {
+                    "id": "msg_test",
+                    "content": [{"annotations": [], "text": "Antwort: B", "type": "output_text"}],
+                    "role": "assistant",
+                    "status": "completed",
+                    "type": "message",
+                }
+            ],
+            parallel_tool_calls=True,
+            tool_choice="auto",
+            tools=[],
+        )
+
+        verify_request = MCQAVerifyRequest(
+            responses_create_params={"input": [{"role": "user", "content": "Question?"}]},
+            response=response,
+            options=[{"A": "optA"}, {"B": "optB"}],
+            expected_answer="B",
+            template_metadata={"output_regex": [r"Answer\s*:\s*([A-Za-z])", r"Antwort\s*:\s*([A-Za-z])"]},
+        )
+
+        result = await server.verify(verify_request)
+        assert result.reward == 1.0
+        assert result.extracted_answer == "B"
+
+    async def test_template_metadata_multilingual_letter_normalization(self) -> None:
+        """Test MMMLU-style localized answer letters normalize to A-D."""
+        server = MCQAResourcesServer(
+            config=MCQAResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name=""),
+            server_client=MagicMock(spec=ServerClient),
+        )
+
+        response = NeMoGymResponse(
+            id="resp_test",
+            created_at=0.0,
+            model="dummy",
+            object="response",
+            output=[
+                {
+                    "id": "msg_test",
+                    "content": [{"annotations": [], "text": "الإجابة: ب", "type": "output_text"}],
+                    "role": "assistant",
+                    "status": "completed",
+                    "type": "message",
+                }
+            ],
+            parallel_tool_calls=True,
+            tool_choice="auto",
+            tools=[],
+        )
+
+        verify_request = MCQAVerifyRequest(
+            responses_create_params={"input": [{"role": "user", "content": "Question?"}]},
+            response=response,
+            options=[{"A": "optA"}, {"B": "optB"}],
+            expected_answer="B",
+            template_metadata={"output_regex": [r"الإجابة:\s*([أ-د])"]},
+        )
+
+        result = await server.verify(verify_request)
+        assert result.reward == 1.0
+        assert result.extracted_answer == "B"
+
     async def test_template_metadata_rightmost_match(self) -> None:
         """Test that rightmost (last) match is used when multiple matches exist"""
         server = MCQAResourcesServer(

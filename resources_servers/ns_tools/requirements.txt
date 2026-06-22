@@ -1,2 +1,3 @@
 -e nemo-gym[dev] @ ../../
-nemo-skills @ git+https://github.com/NVIDIA-NeMo/Skills.git@georgea/super-rl-02062026
+## NeMo-Skills tools subpackage as of April 8, 2026
+nemo-skills-tools @ git+https://github.com/NVIDIA-NeMo/Skills.git@0596dd20cf9ce338a9a4f1e0010fd67ceb1bb4e6#subdirectory=tools

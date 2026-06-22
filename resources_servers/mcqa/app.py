@@ -24,7 +24,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.reward_profile import compute_pass_majority_metrics
+from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
 
 
 class MCQAResourcesServerConfig(BaseResourcesServerConfig):
@@ -65,24 +65,6 @@ class MCQAVerifyRequest(MCQARunRequest, BaseVerifyRequest):
 class MCQAVerifyResponse(BaseVerifyResponse):
     expected_answer: str
     extracted_answer: Optional[str]
-
-
-def _extract_last_assistant_text(body: BaseVerifyRequest) -> str:
-    # body.response.output is a list of union types; we only want assistant message texts
-    # TODO: @fsoares should we just assume we are always receiving the last message only? Not sure if this is always true.
-    texts: list[str] = []
-    for o in body.response.output:
-        if getattr(o, "type", None) == "message" and getattr(o, "role", None) == "assistant":
-            # Each message has content which can be text parts; normalize to string
-            content = getattr(o, "content", None)
-            if isinstance(content, list):
-                for c in content:
-                    t = getattr(c, "text", None)
-                    if isinstance(t, str):
-                        texts.append(t)
-            elif isinstance(content, str):
-                texts.append(content)
-    return "\n".join(texts).strip()
 
 
 def _extract_options_and_expected(
@@ -164,6 +146,24 @@ def _match_option_text(text: str, options: list[dict[str, str]], allowed_letters
     return None
 
 
+def _normalize_extracted_answer(text: str) -> str:
+    return (
+        text.replace("أ", " A")
+        .replace("ب", " B")
+        .replace("ج", " C")
+        .replace("د", " D")
+        .replace("অ", " A")
+        .replace("ব", " B")
+        .replace("ড", " C")
+        .replace("ঢ", " D")
+        .replace("Ａ", " A")
+        .replace("Ｂ", " B")
+        .replace("Ｃ", " C")
+        .replace("Ｄ", " D")
+        .strip()
+    )
+
+
 def _parse_answer_with_custom_regex(
     text: str, regex_pattern: str, allowed_letters: set[str], options: Optional[list[dict[str, str]]]
 ) -> Optional[str]:
@@ -182,7 +182,7 @@ def _parse_answer_with_custom_regex(
             return None
 
         # Take the LAST match (rightmost)
-        captured = matches[-1].strip().upper()
+        captured = _normalize_extracted_answer(matches[-1].strip()).upper()
 
         # Try direct letter match first
         if len(captured) == 1 and captured.isalpha():
@@ -212,6 +212,19 @@ def _parse_answer_with_custom_regex(
         return None
 
 
+def _parse_answer_with_custom_regexes(
+    text: str, regex_patterns: str | list[str], allowed_letters: set[str], options: Optional[list[dict[str, str]]]
+) -> Optional[str]:
+    if isinstance(regex_patterns, str):
+        return _parse_answer_with_custom_regex(text, regex_patterns, allowed_letters, options)
+
+    for regex_pattern in regex_patterns:
+        pred = _parse_answer_with_custom_regex(text, regex_pattern, allowed_letters, options)
+        if pred is not None:
+            return pred
+    return None
+
+
 class MCQAResourcesServer(SimpleResourcesServer):
     config: MCQAResourcesServerConfig
 
@@ -224,30 +237,23 @@ class MCQAResourcesServer(SimpleResourcesServer):
             tasks,
             score_fn=lambda r: {"accuracy": r["reward"]},
             answer_key="extracted_answer",
-        )
+        )[0]
 
     def get_key_metrics(self, agent_metrics):
-        import re
-
-        # Find max k from pass@{k}/accuracy keys
-        max_k = max(
-            (int(m.group(1)) for k in agent_metrics if (m := re.match(r"^pass@(\d+)/accuracy$", k))),
-            default=1,
-        )
-        keys = [
-            "pass@1/accuracy",
-            f"pass@1[avg-of-{max_k}]/accuracy",
-            f"pass@1[avg-of-{max_k}]/no_answer",
-            f"majority@{max_k}/accuracy",
-            f"pass@{max_k}/no_answer",
-            "mean/reward",
-        ]
-        return {k: agent_metrics[k] for k in keys if k in agent_metrics}
+        key = {}
+        if "mean/reward" in agent_metrics:
+            key["mean/reward"] = agent_metrics["mean/reward"]
+        key.update(highest_k_metrics(agent_metrics, "pass@1[avg-of-{k}]", score_names=["accuracy", "no_answer"]))
+        key.update(highest_k_metrics(agent_metrics, "pass@{k}", score_names=["no_answer"]))
+        key.update(highest_k_metrics(agent_metrics, "majority@{k}", score_names=["accuracy"]))
+        if "pass@1/accuracy" in agent_metrics:
+            key["pass@1/accuracy"] = agent_metrics["pass@1/accuracy"]
+        return key
 
     async def verify(self, body: MCQAVerifyRequest) -> MCQAVerifyResponse:
-        text = _extract_last_assistant_text(body)
         # Pull options/expected_answer from dataset-style metadata if available
         options, expected_answer = _extract_options_and_expected(body)
+        gold = (expected_answer or "").strip().upper()
         # Derive allowed letters from option keys
         allowed_letters = _get_allowed_letters_from_options(options)
 
@@ -255,10 +261,19 @@ class MCQAResourcesServer(SimpleResourcesServer):
 
         pred: Optional[str] = None
 
+        text = body.response.output_text.strip()
+        if not text:
+            return MCQAVerifyResponse(
+                **body.model_dump(exclude={"expected_answer", "extracted_answer"}),
+                reward=0.0,
+                expected_answer=gold,
+                extracted_answer=None,
+            )
+
         # Check for template_metadata first (highest priority)
         if body.template_metadata and "output_regex" in body.template_metadata:
-            regex_pattern = body.template_metadata["output_regex"]
-            pred = _parse_answer_with_custom_regex(text, regex_pattern, allowed_letters, options)
+            regex_patterns = body.template_metadata["output_regex"]
+            pred = _parse_answer_with_custom_regexes(text, regex_patterns, allowed_letters, options)
 
         # Fallback to existing grading_mode logic if template_metadata didn't work
         if pred is None:
@@ -301,7 +316,6 @@ class MCQAResourcesServer(SimpleResourcesServer):
                     if letter_up in allowed_letters:
                         pred = letter_up
 
-        gold = (expected_answer or "").strip().upper()
         is_correct = (pred == gold) if (pred is not None and gold) else False
         reward = 1.0 if is_correct else 0.0
 

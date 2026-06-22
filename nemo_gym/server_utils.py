@@ -17,6 +17,7 @@ import atexit
 import json
 import resource
 import sys
+import time
 from abc import abstractmethod
 from contextlib import asynccontextmanager
 from logging import Filter as LoggingFilter
@@ -33,6 +34,7 @@ import ray
 import requests
 import uvicorn
 from aiohttp import (
+    ClientOSError,
     ClientResponse,
     ClientResponseError,
     ClientSession,
@@ -51,7 +53,7 @@ from pydantic import BaseModel, ConfigDict
 from requests.exceptions import ConnectionError
 from starlette.middleware.sessions import SessionMiddleware
 
-from nemo_gym import PARENT_DIR
+from nemo_gym import WORKING_DIR
 from nemo_gym.config_types import (
     BaseRunServerInstanceConfig,
     BaseServerConfig,
@@ -103,10 +105,11 @@ def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSess
         "There is already a global aiohttp client setup. Please refactor your code or call `global_aiohttp_client_exit` if you want to explicitly re-make the client!"
     )
 
+    num_workers = get_nemo_gym_fastapi_num_workers()
     client_session = ClientSession(
         connector=TCPConnector(
-            limit=cfg.global_aiohttp_connector_limit,
-            limit_per_host=cfg.global_aiohttp_connector_limit_per_host,
+            limit=cfg.global_aiohttp_connector_limit // num_workers,
+            limit_per_host=cfg.global_aiohttp_connector_limit_per_host // num_workers,
         ),
         timeout=ClientTimeout(),
         cookie_jar=DummyCookieJar(),
@@ -125,6 +128,10 @@ def is_global_aiohttp_client_setup() -> bool:  # pragma: no cover
     return _GLOBAL_AIOHTTP_CLIENT is not None
 
 
+def is_global_aiohttp_client_request_debug_enabled() -> bool:
+    return _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG
+
+
 def global_aiohttp_client_exit():  # pragma: no cover
     if not is_global_aiohttp_client_setup():
         return
@@ -141,6 +148,17 @@ atexit.register(global_aiohttp_client_exit)
 # This is not intended to be changed. If you want to increase this, we should probably figure out how to improve server-side robustness.
 MAX_NUM_TRIES = 3
 
+_NUM_SERVER_DISCONNECTED_ERROR: int = 0
+_NUM_CLIENT_OS_ERROR: int = 0
+DISCONNECTED_CLIENT_OS_PRINT_INTERVAL: int = 100
+DISCONNECTED_CLIENT_OS_HELP_TEXT = """We've run into this issue in two different scenarios previously:
+1. Too many open connections and not enough sockets due to the file descriptor limit being hit.
+    - Increase ulimit.
+    - Bash example: https://github.com/NVIDIA-NeMo/RL/blob/de55be7777bbf034c04e41c40382c44725e8aa4b/ray.sub#L81
+    - Python example: https://github.com/NVIDIA-NeMo/Gym/blob/c74ffddb3d8190cd717508b0830916b19a26e6cd/nemo_gym/server_utils.py#L495
+2. Depending on the serving framework and config, the server may be overloaded and is dropping connections.
+    - Increase adapter server replicas."""
+
 
 async def request(
     method: str, url: str, _internal: bool = False, **kwargs: Unpack[_RequestOptions]
@@ -153,10 +171,34 @@ async def request(
 
     client = get_global_aiohttp_client()
     num_tries = 1
+    retries = 0
+    retry_start = time.monotonic()
     while True:
         try:
             return await client.request(method=method, url=url, **kwargs)
         except ServerDisconnectedError:
+            global _NUM_SERVER_DISCONNECTED_ERROR
+            _NUM_SERVER_DISCONNECTED_ERROR += 1
+            retries += 1
+            if _NUM_SERVER_DISCONNECTED_ERROR % DISCONNECTED_CLIENT_OS_PRINT_INTERVAL == 0:
+                print(
+                    f"[request_retry url={url} error=ServerDisconnectedError retry={retries} elapsed_s={time.monotonic() - retry_start:.1f}] "
+                    f"Hit {_NUM_SERVER_DISCONNECTED_ERROR} global `ServerDisconnectedError` while querying {url}.\n{DISCONNECTED_CLIENT_OS_HELP_TEXT}",
+                    flush=True,
+                )
+
+            await asyncio.sleep(0.5)
+        except ClientOSError:
+            global _NUM_CLIENT_OS_ERROR
+            _NUM_CLIENT_OS_ERROR += 1
+            retries += 1
+            if _NUM_CLIENT_OS_ERROR % DISCONNECTED_CLIENT_OS_PRINT_INTERVAL == 0:
+                print(
+                    f"[request_retry url={url} error=ClientOSError retry={retries} elapsed_s={time.monotonic() - retry_start:.1f}] "
+                    f"Hit {_NUM_CLIENT_OS_ERROR} global `ClientOSError` while querying {url}.\n{DISCONNECTED_CLIENT_OS_HELP_TEXT}",
+                    flush=True,
+                )
+
             await asyncio.sleep(0.5)
         except Exception as e:
             if _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:
@@ -335,6 +377,11 @@ class BaseServer(BaseModel):
 
         return server_config
 
+    def setup_liveness(self, app: FastAPI) -> None:
+        @app.get("/", include_in_schema=False)
+        async def _liveness():
+            return {"status": "ok"}
+
 
 class ProfilingMiddlewareInputConfig(BaseModel):
     # Relative to the Gym root dir.
@@ -399,16 +446,35 @@ def maybe_ray_cluster_exit():  # pragma: no cover
 
 atexit.register(maybe_ray_cluster_exit)
 
-
+# These environment variables are the ONLY environment variables that Gym uses. Please do not set these, they are only used here to pass information
+# from main proc to child procs under FastAPI/uvicorn parallelism
 IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME = "IS_NEMO_GYM_FASTAPI_WORKER"
+IS_NEMO_GYM_FASTAPI_ENTRYPOINT_KEY_NAME = "IS_NEMO_GYM_FASTAPI_ENTRYPOINT"
+NEMO_GYM_FASTAPI_NUM_WORKERS = "NEMO_GYM_FASTAPI_NUM_WORKERS"
 
 
-def is_nemo_gym_fastapi_worker() -> bool:
+def is_nemo_gym_fastapi_worker() -> bool:  # pragma: no cover
     return getenv(IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME) == "1"
 
 
-def set_is_nemo_gym_fastapi_worker() -> None:
+def set_is_nemo_gym_fastapi_worker() -> None:  # pragma: no cover
     environ[IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME] = "1"
+
+
+def is_nemo_gym_fastapi_entrypoint(file: str) -> bool:  # pragma: no cover
+    return is_nemo_gym_fastapi_worker() and file.endswith(getenv(IS_NEMO_GYM_FASTAPI_ENTRYPOINT_KEY_NAME))
+
+
+def set_is_nemo_gym_fastapi_entrypoint(file: str) -> None:  # pragma: no cover
+    environ[IS_NEMO_GYM_FASTAPI_ENTRYPOINT_KEY_NAME] = file
+
+
+def get_nemo_gym_fastapi_num_workers() -> int:  # pragma: no cover
+    return int(getenv(NEMO_GYM_FASTAPI_NUM_WORKERS, "1"))
+
+
+def set_nemo_gym_fastapi_num_workers(num_workers: int) -> None:  # pragma: no cover
+    environ[NEMO_GYM_FASTAPI_NUM_WORKERS] = str(num_workers)
 
 
 class SimpleServer(BaseServer):
@@ -432,9 +498,8 @@ class SimpleServer(BaseServer):
 
         @app.middleware("http")
         async def add_session_id(request: Request, call_next):  # pragma: no cover
-            # If session_id not present, assign one
-            if SESSION_ID_KEY not in request.session:
-                request.session[SESSION_ID_KEY] = str(uuid4())
+            # Always assign so Starlette 1.0+ marks session.modified=True and re-sends Set-Cookie.
+            request.session[SESSION_ID_KEY] = request.session.get(SESSION_ID_KEY, str(uuid4()))
 
             response: Response = await call_next(request)
             return response
@@ -472,7 +537,7 @@ repr(e): {repr(e)}"""
                 return JSONResponse(content="An unknown error occurred", status_code=500)
 
     def setup_profiling(self, app: FastAPI, profiling_config: ProfilingMiddlewareConfig) -> None:  # pragma: no cover
-        base_profile_dir = PARENT_DIR / profiling_config.profiling_results_dirpath / self.get_session_middleware_key()
+        base_profile_dir = WORKING_DIR / profiling_config.profiling_results_dirpath / self.get_session_middleware_key()
         profiler = Profiler(name=self.config.name, base_profile_dir=base_profile_dir)
 
         main_app_lifespan = app.router.lifespan_context
@@ -566,6 +631,7 @@ repr(e): {repr(e)}"""
             return
 
         app = server.setup_webserver()
+        server.setup_liveness(app)
         server.set_ulimit()
         server.prefix_server_logs()
         server.setup_exception_middleware(app)
@@ -604,17 +670,21 @@ Full body: {json.dumps(exc.body, indent=4)}
             port=server.config.port,
             # We add a very small graceful shutdown timeout so when we shutdown we cancel all inflight requests and there are no lingering requests (requests are cancelled)
             timeout_graceful_shutdown=0.5,
+            # Some workers may take a while for imports and setup_webserver.
+            timeout_worker_healthcheck=30,
         )
 
         if server.config.num_workers and server.config.num_workers > 1:
-            set_is_nemo_gym_fastapi_worker()
-
             # TODO this is very dirty. We need a cleaner way to populate this information in the configs data structures.
             server_instance_config_dict = global_config_dict[server.config.name]
             first_level_key = list(server_instance_config_dict.keys())[0]
             second_level_key = list(server_instance_config_dict[first_level_key].keys())[0]
             relative_fpath = f"{first_level_key}/{second_level_key}/{server.config.entrypoint}"
             module_import_str = relative_fpath.replace(".py", "").replace("/", ".")
+
+            set_is_nemo_gym_fastapi_worker()
+            set_is_nemo_gym_fastapi_entrypoint(str(relative_fpath))
+            set_nemo_gym_fastapi_num_workers(server.config.num_workers)
 
             uvicorn_kwargs["app"] = f"{module_import_str}:app"
             uvicorn_kwargs["workers"] = server.config.num_workers
@@ -634,6 +704,7 @@ class HeadServer(BaseServer):
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
 
+        self.setup_liveness(app)
         app.get("/global_config_dict_yaml")(self.global_config_dict_yaml)
         app.get("/server_instances")(self.get_server_instances)
 

@@ -1,0 +1,30 @@
+# Chain to existing agent config
+config_paths:
+  - responses_api_agents/tau2/configs/tau2_agent.yaml
+  - responses_api_models/openai_model/configs/OpenAI/gpt-5.2-2025-12-11.yaml
+
+# You must fill in this key to run
+gpt-5_2-2025-12-11:
+  responses_api_models:
+    openai_model:
+      openai_api_key: ??
+
+# We use `_inherit_from` directives to inherit from and not use the generic config above to ensure this benchmark config is isolated.
+tau2_benchmark_agent:
+  _inherit_from: tau2_agent
+  responses_api_agents:
+    tau2:
+      user_model_server:
+        type: responses_api_models
+        name: gpt-5_2-2025-12-11
+      # Tau2 has some pretty hefty data processing operations to execute tool calls
+      num_workers: 16
+      print_step_counts: true
+      datasets:
+      # TODO eventually we may want to split up the domains so we can configure num repeats for each individual domain
+      - name: tau2
+        type: benchmark
+        jsonl_fpath: benchmarks/tau2/data/tau2_benchmark.jsonl
+        prompt_config: null
+        prepare_script: benchmarks/tau2/prepare.py
+        num_repeats: 8

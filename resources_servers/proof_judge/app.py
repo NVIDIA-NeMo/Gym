@@ -15,12 +15,14 @@ import logging
 import os
 import socket
 import time
+from asyncio import Event
+from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
 import yaml
-from pydantic import PrivateAttr
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -190,11 +192,25 @@ class ProofWithJudgeResourcesServerConfig(BaseResourcesServerConfig):
     temperature: float = 0.6
     top_p: float = 0.95
     max_tokens: int = 100000
+    zero_reward_incorrect_groups: bool = False
+    expected_group_size: int = -1
     assert_think_end: bool = False
+
+    def model_post_init(self, __context: Any) -> None:
+        if self.zero_reward_incorrect_groups and self.expected_group_size <= 0:
+            raise ValueError("expected_group_size must be > 0 when zero_reward_incorrect_groups is enabled")
 
 
 class ProofWithJudgeVerifyRequest(BaseVerifyRequest):
     problem: str = ""
+
+
+class IncorrectGroupCoordinator(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    verifier_rewards: list[float] = Field(default_factory=list)
+    zero_out_group_reward: Optional[bool] = None
+    event: Event = Field(default_factory=Event)
 
 
 class ProofWithJudgeResourcesServer(SimpleResourcesServer):
@@ -205,14 +221,20 @@ class ProofWithJudgeResourcesServer(SimpleResourcesServer):
     _ext_rr_counter: int = PrivateAttr(default=0)
     _ext_init_lock: Optional[asyncio.Lock] = PrivateAttr(default=None)
     _log_lock: Optional[asyncio.Lock] = PrivateAttr(default=None)
+    _incorrect_group_coordinators: dict[str, IncorrectGroupCoordinator] = PrivateAttr(
+        default_factory=lambda: defaultdict(IncorrectGroupCoordinator)
+    )
 
     async def verify(self, body: ProofWithJudgeVerifyRequest) -> BaseVerifyResponse:
         problem = getattr(body, "problem", "") or (body.model_dump().get("problem") or "")
         full_response = self._extract_assistant_text(body.response)
         if not full_response:
-            return BaseVerifyResponse(**body.model_dump(), reward=0.0)
-
-        reward, details = await self._judge_single(problem, full_response)
+            reward, details = 0.0, {"r_format": 0.0, "reason": "empty_response", "judge_generated_tokens": 0}
+        else:
+            reward, details = await self._judge_single(problem, full_response)
+        reward, details = await self._maybe_zero_incorrect_group_reward(
+            problem=problem, reward=reward, details=details
+        )
         if LOG_JSONL_PATH:
             await self._append_log_jsonl(
                 log_path=LOG_JSONL_PATH,
@@ -247,6 +269,35 @@ class ProofWithJudgeResourcesServer(SimpleResourcesServer):
                     f.write(json.dumps(record, ensure_ascii=False) + "\n")
         except Exception as e:
             LOG.warning("[proof_judge] Failed to append log_jsonl %s: %s", log_path, e)
+
+    async def _maybe_zero_incorrect_group_reward(
+        self, *, problem: str, reward: float, details: dict[str, Any]
+    ) -> tuple[float, dict[str, Any]]:
+        if not self.config.zero_reward_incorrect_groups:
+            return reward, details
+        if not problem:
+            raise ValueError("problem must be set when zero_reward_incorrect_groups is enabled")
+
+        verifier_reward = float(details["r_y"]) if "r_y" in details else 0.0
+        coordinator = self._incorrect_group_coordinators[problem]
+        coordinator.verifier_rewards.append(verifier_reward)
+
+        if len(coordinator.verifier_rewards) == self.config.expected_group_size:
+            coordinator.zero_out_group_reward = all(r_y == 0.0 for r_y in coordinator.verifier_rewards)
+            self._incorrect_group_coordinators.pop(problem)
+            coordinator.event.set()
+        else:
+            await coordinator.event.wait()
+
+        assert coordinator.zero_out_group_reward is not None
+        if not coordinator.zero_out_group_reward:
+            return reward, {**details, "group_all_r_y_zero": False}
+
+        return 0.0, {
+            **details,
+            "original_reward": reward,
+            "group_all_r_y_zero": True,
+        }
 
     def _extract_assistant_text(self, response: Any) -> str:
         if not response or not getattr(response, "output", None):

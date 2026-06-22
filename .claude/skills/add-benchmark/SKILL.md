@@ -240,6 +240,7 @@ git checkout -- resources_servers/other_server/
 ## Constraints
 
 - Use NeMo Gym's OpenAI client (`nemo_gym/openai_utils.py`), not LiteLLM/Anthropic/other
+- **Use aiohttp, not httpx, for async HTTP.** All async HTTP calls must go through `nemo_gym.server_utils.request()` (aiohttp). httpx has O(n^2) connection pooling that hangs at high concurrency. When wrapping external libraries that use httpx internally, replace their HTTP transport with an aiohttp adapter — see `resources_servers/tavily_search/app.py` (`TavilySearchAIOHTTPClient`) for the pattern and `docs/infrastructure/engineering-notes/aiohttp-vs-httpx.md` for the rationale.
 - Pass configuration through Gym config (YAML), not environment variables
 - Code must run on Linux
 - `/run` endpoint must be async
