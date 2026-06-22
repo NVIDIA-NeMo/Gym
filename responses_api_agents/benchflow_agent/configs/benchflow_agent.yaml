@@ -16,7 +16,7 @@ benchflow_agent:
         name: policy_model
 
       # Local directory of BenchFlow task definitions (e.g. a SkillsBench `tasks/` dir).
-      tasks_dir: ???
+      tasks_dir: null
       # Output directory for BenchFlow results/artifacts/logs.
       jobs_dir: "jobs"
 
