@@ -455,6 +455,9 @@ omit = [
     "/tmp/*",
     "benchmarks/*",
     "environments/*/prepare.py",
+    # Scaffolding templates copied verbatim into generated servers; exercised by the bundled
+    # test template inside a scaffolded server, not imported in-process.
+    "nemo_gym/resources/*_template.py",
 ]
 data_file = "results/.coverage"
 concurrency = ["thread", "multiprocessing"]
