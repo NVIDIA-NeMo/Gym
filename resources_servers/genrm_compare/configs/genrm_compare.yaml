@@ -60,6 +60,9 @@ genrm_compare_resources_server:
       # Shorter responses get bonus, longer get penalty (mean-centered)
       group_reasoning_length_penalty_coeff: 0.0
       group_answer_length_penalty_coeff: 0.0
+      # Group-relative style penalty coefficient
+      # Lower formatting density (headers, lists, bold, emoji) gets bonus
+      group_style_penalty_coeff: 0.0
       
       # Default scores when parsing fails
       default_score: 3.0
