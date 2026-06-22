@@ -6,7 +6,7 @@
 [![CI](https://github.com/NVIDIA-NeMo/Gym/actions/workflows/unit-tests.yml/badge.svg)](https://github.com/NVIDIA-NeMo/Gym/actions/workflows/unit-tests.yml)
 [![Docs](https://img.shields.io/badge/docs-NVIDIA-brightgreen)](https://docs.nvidia.com/nemo/gym/main/about/)
 
-**[Requirements](#-requirements)** • **[Quick Start](#-quick-start)** • **[Available Environments](#-available-environments)** • **[Documentation & Resources](#-documentation--resources)** • **[Community & Support](#-community--support)** • **[Citations](#-citations)**
+**[Requirements](#-requirements)** • **[Quick Start](#-quick-start)** • **[Environment Tutorials](#-environment-tutorials)** • **[Available Environments](#-available-environments)** • **[Documentation & Resources](#-documentation--resources)** • **[Community & Support](#-community--support)** • **[Citations](#-citations)**
 
 NeMo Gym is a library for evaluating and improving models and agents using environments. NeMo Gym provides infrastructure to develop environments, scalably run evaluation and training, and a collection of popular benchmarks and training environments.
 
@@ -155,27 +155,21 @@ For per-task pass rates, see the [`ng_reward_profile`](https://docs.nvidia.com/n
 - **[Training](https://docs.nvidia.com/nemo/gym/main/training-tutorials)** — Improve your agent or model with RL or fine-tuning.
 - **[Build Custom Environments](https://docs.nvidia.com/nemo/gym/main/environment-tutorials)** — Create your own evaluation or training environments.
 
+## 🧭 Environment Tutorials
+
+Learn how to build custom environments through hands-on tutorials. Here are popular starting points:
+
+| Name | Demonstrates |
+| ---- | ------------ |
+| [Single Step](https://docs.nvidia.com/nemo/gym/main/environment-tutorials/single-step-environment) | Basic single-step tool calling |
+| [Multi Step](https://docs.nvidia.com/nemo/gym/main/environment-tutorials/multi-step-environment) | Multi-step tool calling |
+| [Session State](https://docs.nvidia.com/nemo/gym/main/environment-tutorials/stateful-environment) | Session state management (in-memory) |
+
+See all [environment tutorials](https://docs.nvidia.com/nemo/gym/main/environment-tutorials) for additional patterns and advanced topics.
+
 ## 📦 Available Environments
 
-NeMo Gym includes a curated collection of environments for training and evaluation across multiple domains:
-
-### Example Environment Patterns
-
-Purpose: Demonstrate NeMo Gym patterns and concepts.
-
-<!-- START_EXAMPLE_ONLY_SERVERS_TABLE -->
-| Name                  | Demonstrates                                                                                              | Config                                                                                                                                      | README                                                                         |
-| --------------------- | --------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
-| Multi Step            | Multi-step tool calling                                                                                   | <a href='resources_servers/example_multi_step/configs/example_multi_step.yaml'>example_multi_step.yaml</a>                                  | <a href='resources_servers/example_multi_step/README.md'>README</a>            |
-| Multi Turn Gymnasium  | Example multi-turn environment using Gymnasium                                                            | <a href='resources_servers/example_multi_turn_gymnasium/configs/example_multi_turn_gymnasium.yaml'>example_multi_turn_gymnasium.yaml</a>    | <a href='resources_servers/example_multi_turn_gymnasium/README.md'>README</a>  |
-| Session State Mgmt    | Session state management (in-memory)                                                                      | <a href='resources_servers/example_session_state_mgmt/configs/example_session_state_mgmt.yaml'>example_session_state_mgmt.yaml</a>          | <a href='resources_servers/example_session_state_mgmt/README.md'>README</a>    |
-| Single Tool Call      | Basic single-step tool calling                                                                            | <a href='resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml'>example_single_tool_call.yaml</a>                | <a href='resources_servers/example_single_tool_call/README.md'>README</a>      |
-| Tool Call Multireward | Single tool call scored on decoupled correctness / schema_valid / format rewards (multi-reward, for GDPO) | <a href='resources_servers/example_tool_call_multireward/configs/example_tool_call_multireward.yaml'>example_tool_call_multireward.yaml</a> | <a href='resources_servers/example_tool_call_multireward/README.md'>README</a> |
-<!-- END_EXAMPLE_ONLY_SERVERS_TABLE -->
-
-### Environments for Training & Evaluation
-
-Purpose: Training-ready environments with curated datasets.
+Environments for training and evaluation.
 
 Each resources server includes example data, configuration files, and tests. See each server's README for details.
 
@@ -320,6 +314,7 @@ The Dataset column links to publicly available datasets (e.g., on HuggingFace). 
 ## 📖 Documentation & Resources
 
 - **[Documentation](https://docs.nvidia.com/nemo/gym/main)** - Technical reference docs
+- **[Environment Tutorials](https://docs.nvidia.com/nemo/gym/main/environment-tutorials)** - Build custom environments
 - **[Training Tutorials](https://docs.nvidia.com/nemo/gym/main/training-tutorials)** - Train with NeMo Gym environments
 - **[API Reference](https://docs.nvidia.com/nemo/gym/main/api/reference/api-reference)** - Complete class and function reference
  
