@@ -7,13 +7,13 @@ benchflow_agent:
       description: BenchFlow integration for running agentic benchmarks (e.g. SkillsBench).
       value: Evaluate models on agentic benchmarks via BenchFlow.
 
-      # Max number of concurrent `/run` requests handled by the NeMo Gym agent server process.
-      concurrency: 256
-
       # NeMo Gym model server reference.
       model_server:
         type: responses_api_models
         name: policy_model
+
+      # Max number of concurrent `/run` requests handled by the NeMo Gym agent server process.
+      concurrency: 256
 
       # Local directory of BenchFlow task definitions (e.g. a SkillsBench `tasks/` dir).
       tasks_dir: null
@@ -34,12 +34,10 @@ benchflow_agent:
       agent_idle_timeout: 1200
       # Skill mode: "with-skill" | "no-skill" | "self-gen".
       skill_mode: with-skill
-      # Skills directory ("auto" = use task-bundled skills, None = do not use skills).
-      skills_dir: auto
       # How many times BenchFlow should retry a task when an error occurs.
       max_retries: 2
 
-      # Overrides to apply to every task's task.md. Example:
+      # Custom config overrides to apply to every task's task.md. Example:
       #   task_config_overrides:
       #     environment:
       #       memory_mb: 131072

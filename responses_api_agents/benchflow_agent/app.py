@@ -52,11 +52,11 @@ from responses_api_agents.benchflow_agent.utils import BenchFlowAgentUtils
 
 
 class BenchFlowAgentConfig(BaseResponsesAPIAgentConfig):
-    # Max number of concurrent `/run` requests handled by the NeMo Gym agent server process.
-    concurrency: int = 256
-
     # NeMo Gym model server reference.
     model_server: ModelServerRef
+
+    # Max number of concurrent `/run` requests handled by the NeMo Gym agent server process.
+    concurrency: int = 256
 
     # Local directory of BenchFlow task definitions (e.g. a SkillsBench `tasks/` dir).
     tasks_dir: str
@@ -83,13 +83,10 @@ class BenchFlowAgentConfig(BaseResponsesAPIAgentConfig):
     # Skill mode: "with-skill" | "no-skill" | "self-gen".
     skill_mode: str = "with-skill"
 
-    # Skills directory ("auto" = use task-bundled skills, None = do not use skills).
-    skills_dir: Optional[str] = "auto"
-
     # How many times BenchFlow should retry a task when an error occurs.
     max_retries: int = 2
 
-    # Overrides to apply to every task's task.md.
+    # Custom config overrides to apply to every task's task.md.
     task_config_overrides: Optional[dict[str, Any]] = None
 
     # Directory of prebuilt per-task Singularity .sif images. Files inside must be named "<task_name>.sif".
@@ -191,7 +188,6 @@ class BenchFlowAgent(SimpleResponsesAPIAgent):
             sandbox_user=self.config.sandbox_user,
             agent_idle_timeout=self.config.agent_idle_timeout,
             skill_mode=self.config.skill_mode,
-            skills_dir=self.config.skills_dir,
             include_tasks={task_name},
             retry=RetryConfig(max_retries=self.config.max_retries),
         )
