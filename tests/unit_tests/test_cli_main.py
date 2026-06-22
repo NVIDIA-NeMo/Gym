@@ -139,7 +139,8 @@ class TestEvalRunFlags:
             (["--concurrency", "10"], "+num_samples_in_parallel=10"),
             (["--prompt-config", "p.yaml"], "+prompt_config=p.yaml"),
             (["--split", "benchmark"], "+split=benchmark"),
-            (["--model-name", "openai/gpt-oss-120b"], "+policy_model_name=openai/gpt-oss-120b"),
+            (["--model", "openai/gpt-oss-120b"], "+policy_model_name=openai/gpt-oss-120b"),
+            (["-m", "openai/gpt-oss-120b"], "+policy_model_name=openai/gpt-oss-120b"),
             (["--model-url", "http://0.0.0.0:10240/v1"], "+policy_base_url=http://0.0.0.0:10240/v1"),
             (["--model-api-key", "sk-your-api-key"], "+policy_api_key=sk-your-api-key"),
             (["--temperature", "1.0"], "+responses_create_params.temperature=1.0"),
@@ -202,7 +203,7 @@ class TestEvalRunFlags:
             [
                 "eval",
                 "run",
-                "--model-name",
+                "--model",
                 "openai/gpt-oss-120b",
                 "--model-url",
                 "http://0.0.0.0:10240/v1",
@@ -448,7 +449,7 @@ class TestEnvRunFlags:
                 "run",
                 "--config",
                 "c.yaml",
-                "--model-name",
+                "--model",
                 "gpt",
                 "--model-url",
                 "http://x",
@@ -465,26 +466,22 @@ class TestEnvRunFlags:
         }
 
 
-class TestModelCheckpointFlag:
-    def test_sets_served_model_for_eval_run(self, monkeypatch: MonkeyPatch) -> None:
-        # --model-checkpoint sets the served model (policy_model_name); the local vLLM config is selected separately.
-        target, overrides = _dispatch_for(monkeypatch, ["eval", "run", "--model-checkpoint", "Qwen/Qwen3-8B"])
-        assert target == "nemo_gym.cli.eval:e2e_rollout_collection"
-        assert overrides == ["+policy_model_name=Qwen/Qwen3-8B"]
-
-    def test_available_on_env_run(self, monkeypatch: MonkeyPatch) -> None:
-        _, overrides = _dispatch_for(monkeypatch, ["env", "run", "--model-checkpoint", "/ckpt/path"])
-        assert overrides == ["+policy_model_name=/ckpt/path"]
+class TestModelFlag:
+    """`--model` is the single served-model identifier (name, HF id, or local checkpoint path) for any backend."""
 
     def test_local_vllm_deployment_flow(self, monkeypatch: MonkeyPatch) -> None:
-        # The intended deployment invocation: select the local vLLM server type and pass the checkpoint to serve.
+        # The deployment invocation: select the local vLLM server type and pass the checkpoint to serve via --model.
         _, overrides = _dispatch_for(
             monkeypatch,
-            ["eval", "run", "--model-type", "local_vllm_model", "--model-checkpoint", "Qwen/Qwen3-8B"],
+            ["eval", "run", "--model-type", "local_vllm_model", "--model", "Qwen/Qwen3-8B"],
         )
         paths, others = _split_overrides(overrides)
         assert paths == {str(WORKING_DIR / "responses_api_models/local_vllm_model/configs/local_vllm_model.yaml")}
         assert others == {"+policy_model_name=Qwen/Qwen3-8B"}
+
+    def test_short_alias_on_env_run(self, monkeypatch: MonkeyPatch) -> None:
+        _, overrides = _dispatch_for(monkeypatch, ["env", "run", "-m", "/ckpt/path"])
+        assert overrides == ["+policy_model_name=/ckpt/path"]
 
 
 class TestEnvInitFlags:

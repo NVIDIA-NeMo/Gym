@@ -116,17 +116,16 @@ STORAGE = Flag(
 )
 
 # Shared model-server flags. Reused by commands that spin up / target a model server (`eval run`, `env run`).
-MODEL_NAME = _value_flag("model-name", "policy_model_name", "Model name.")
+# --model is the served model identifier across all backends: an API model name, an HF id, or a local checkpoint
+# path, interpreted per --model-type (e.g. a path/HF id to serve with local_vllm_model).
+MODEL = _value_flag(
+    "model",
+    "policy_model_name",
+    "Model name, HF id, or local checkpoint path (interpreted per --model-type).",
+    aliases=("-m",),
+)
 MODEL_URL = _value_flag("model-url", "policy_base_url", "Model server base URL.")
 MODEL_API_KEY = _value_flag("model-api-key", "policy_api_key", "Model server API key.")
-
-# Shared flag: checkpoint (HF id or path) to serve with a local vLLM deployment. Pair with `--model-type
-# local_vllm_model`; sets the served model via `policy_model_name`. Reused by model-server commands.
-MODEL_CHECKPOINT = _value_flag(
-    "model-checkpoint",
-    "policy_model_name",
-    "HF id or checkpoint path to serve locally (use with --model-type local_vllm_model).",
-)
 
 # Shared flag: select a single resource server by name. Reused by `env test`, `env init`, and `env packages`.
 RESOURCE_SERVER = Flag(
@@ -409,16 +408,7 @@ COMMANDS = {
     "env run": Command(
         target="nemo_gym.cli.env:run",
         summary="Start the servers.",
-        flags=(
-            CONFIG,
-            RESOURCE_SERVER_CONFIG,
-            MODEL_TYPE,
-            SEARCH_DIR,
-            MODEL_NAME,
-            MODEL_URL,
-            MODEL_API_KEY,
-            MODEL_CHECKPOINT,
-        ),
+        flags=(CONFIG, RESOURCE_SERVER_CONFIG, MODEL_TYPE, SEARCH_DIR, MODEL, MODEL_URL, MODEL_API_KEY),
     ),
     "env status": Command(target="nemo_gym.cli.env:status", summary="Print the server status.", flags=(JSON,)),
     "eval prepare": Command(
@@ -451,10 +441,9 @@ COMMANDS = {
             _value_flag("prompt-config", "prompt_config", "Prompt template YAML to apply."),
             _value_flag("concurrency", "num_samples_in_parallel", "Maximum number of concurrent samples."),
             _value_flag("split", "split", "Dataset split to use (train, validation, or benchmark)."),
-            MODEL_NAME,
+            MODEL,
             MODEL_URL,
             MODEL_API_KEY,
-            MODEL_CHECKPOINT,
             _value_flag("temperature", "responses_create_params.temperature", "Sampling temperature."),
             _value_flag("top-p", "responses_create_params.top_p", "Nucleus sampling top-p."),
             _value_flag("max-output-tokens", "responses_create_params.max_output_tokens", "Maximum output tokens."),

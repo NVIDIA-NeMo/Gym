@@ -1,8 +1,8 @@
-# Generic local vLLM deployment. Serves the checkpoint passed via `--model-checkpoint <HF id or path>`
+# Generic local vLLM deployment. Serves the checkpoint passed via `--model <HF id or path>`
 # (i.e. `policy_model_name`). Set parallelism to match your node before running.
 #
 # Example:
-#   gym eval run --benchmark aime24 --model-type local_vllm_model --model-checkpoint Qwen/Qwen3-30B-A3B-Instruct-2507
+#   gym eval run --benchmark aime24 --model-type local_vllm_model --model Qwen/Qwen3-30B-A3B-Instruct-2507
 policy_model:
   responses_api_models:
     local_vllm_model:
