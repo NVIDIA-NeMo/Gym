@@ -178,7 +178,32 @@ class HermesAgentVerifyResponse(BaseVerifyResponse):
 class HermesAgent(SimpleResponsesAPIAgent):
     config: HermesAgentConfig
     sem: Semaphore = None
+    # Set of agents currently running run_conversation, plus a flag tracking whether the single
+    # shared SIGTERM dispatcher has been installed on the event loop. See _ensure_sigterm_handler.
+    active_agents: set = None
+    sigterm_installed: bool = False
     model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    def _ensure_sigterm_handler(self) -> None:
+        """Install exactly one SIGTERM handler on the event loop that interrupts *every* in-flight
+        agent. Registering a fresh per-call handler is unsafe under concurrency: add_signal_handler
+        replaces the previous handler, so concurrent responses() calls clobber each other and the
+        first to finish removes the only remaining handler — leaving later SIGTERMs unhandled and
+        their trajectories lost. A single dispatcher over `active_agents` avoids that race."""
+        if self.sigterm_installed:
+            return
+        import signal
+
+        def _dispatch():
+            for ag in list(self.active_agents):
+                if hasattr(ag, "interrupt"):
+                    ag.interrupt("timeout")
+
+        try:
+            asyncio.get_event_loop().add_signal_handler(signal.SIGTERM, _dispatch)
+            self.sigterm_installed = True
+        except (NotImplementedError, OSError):
+            pass  # not supported on this platform (e.g. Windows, non-main thread)
 
     def _build_config(self) -> str:
         import yaml
@@ -211,6 +236,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
 
     def model_post_init(self, __context: Any) -> None:
         self.sem = Semaphore(self.config.concurrency)
+        self.active_agents = set()
         # hermes-agent reads these from env (cli.py / batch_runner.py); env vars are
         # process-global, so multiple HermesAgent instances in one process share them
         os.environ["TERMINAL_ENV"] = self.config.terminal_backend
@@ -275,21 +301,11 @@ class HermesAgent(SimpleResponsesAPIAgent):
 
         agent._build_api_kwargs = _patched_build_api_kwargs
 
-        # Install a SIGTERM handler that interrupts the agent cleanly so that
-        # run_conversation returns with partial messages instead of being killed
-        # mid-turn (which would leave response.json unwritten).
-        import signal
-
-        _loop = asyncio.get_event_loop()
-
-        def _sigterm_handler():
-            if hasattr(agent, "interrupt"):
-                agent.interrupt("timeout")
-
-        try:
-            _loop.add_signal_handler(signal.SIGTERM, _sigterm_handler)
-        except (NotImplementedError, OSError):
-            pass  # not supported on this platform (e.g. Windows, non-main thread)
+        # Interrupt the agent cleanly on SIGTERM so run_conversation returns with partial messages
+        # instead of being killed mid-turn (which would leave response.json unwritten). A single
+        # shared dispatcher interrupts every in-flight agent; we just register this one in the set.
+        self._ensure_sigterm_handler()
+        self.active_agents.add(agent)
 
         try:
             result = await asyncio.to_thread(
@@ -299,10 +315,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
                 history,
             )
         finally:
-            try:
-                _loop.remove_signal_handler(signal.SIGTERM)
-            except (NotImplementedError, OSError):
-                pass
+            self.active_agents.discard(agent)
 
         messages = result.get("messages") or []
         # aiagent omits system from returned messages
