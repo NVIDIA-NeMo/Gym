@@ -29,17 +29,17 @@ anthropic_base_url: http://localhost:8000
 No model server is needed for basic eval. To extend this agent to training, a model server should be developed that handles messages endpoint. For evals with the current version, just pass the resources server config, which includes the agent server config, as is the current standard in NeMo Gym:
 
 ```bash
-ng_run "+config_paths=[resources_servers/reasoning_gym/configs/reasoning_gym_claude_code_agent.yaml]"
+gym env run --resource-server reasoning_gym/reasoning_gym_claude_code_agent
 ```
 
 ### Run the agent
 
 ```bash
-ng_collect_rollouts \
-    +agent_name=reasoning_gym_claude_code_agent \
-    +input_jsonl_fpath=resources_servers/reasoning_gym/data/example.jsonl \
-    +output_jsonl_fpath=claude_code_rollout.jsonl \
-    +limit=1
+gym eval run --no-serve \
+    --agent reasoning_gym_claude_code_agent \
+    --input resources_servers/reasoning_gym/data/example.jsonl \
+    --output claude_code_rollout.jsonl \
+    --limit 1
 ```
 
 ## Description

@@ -14,8 +14,8 @@ Apply YAML-based prompt templates at rollout time to build `responses_create_par
 **In this guide, you will**:
 
 1. Write a prompt config YAML file
-2. Apply it during rollout collection with `ng_collect_rollouts`
-3. Optionally materialize prompts into JSONL with `ng_materialize_prompts`
+2. Apply it during rollout collection with `gym eval run --no-serve`
+3. Optionally materialize prompts into JSONL with `gym dataset render`
 
 </Info>
 
@@ -73,31 +73,32 @@ Literal braces must be doubled (`{{` / `}}`). For example, `\\boxed{{}}` produce
 
 ### At rollout time
 
-Pass `+prompt_config=<path>` to `ng_collect_rollouts`:
+Pass `--prompt-config <path>` to `gym eval run --no-serve`:
 
 ```bash
-ng_collect_rollouts \
-    +agent_name=my_agent \
-    +input_jsonl_fpath=data/raw_problems.jsonl \
-    +output_jsonl_fpath=results/rollouts.jsonl \
-    +prompt_config=/path/to/my_prompt.yaml \
-    +num_repeats=5 \
-    "+responses_create_params={max_output_tokens: 16384, temperature: 1.0}"
+gym eval run --no-serve \
+    --agent my_agent \
+    --input data/raw_problems.jsonl \
+    --output results/rollouts.jsonl \
+    --prompt-config /path/to/my_prompt.yaml \
+    --num-repeats 5 \
+    --max-output-tokens 16384 \
+    --temperature 1.0
 ```
 
-The `+prompt_config` path must be either an absolute path or a path relative to the Gym repository root.
+The `--prompt-config` path must be either an absolute path or a path relative to the Gym repository root.
 
 The input JSONL should contain raw fields (e.g. `question`, `expected_answer`) **without** `responses_create_params.input`. The prompt config builds the input messages during rollout collection.
 
 ### Standalone materialization
 
-Use `ng_materialize_prompts` to write a prompt template into JSONL without running rollouts:
+Use `gym dataset render` to write a prompt template into JSONL without running rollouts:
 
 ```bash
-ng_materialize_prompts \
-    +input_jsonl_fpath=data/raw_problems.jsonl \
-    +prompt_config=/path/to/my_prompt.yaml \
-    +output_jsonl_fpath=data/materialized.jsonl
+gym dataset render \
+    --input data/raw_problems.jsonl \
+    --prompt-config /path/to/my_prompt.yaml \
+    --output data/materialized.jsonl
 ```
 
 This produces a new JSONL file with `responses_create_params.input` populated from the template. This is useful for inspection or passing to other tools that expect pre-populated input.
@@ -119,21 +120,21 @@ Other fields in `responses_create_params` (such as `tools` and `temperature`) ar
 
 ## CLI Parameters
 
-### `ng_collect_rollouts`
+### `gym eval run --no-serve`
 
 | Parameter | Required | Description |
 |-----------|----------|-------------|
-| `+prompt_config` | No | Path to a prompt YAML file. Mutually exclusive with pre-populated `responses_create_params.input` in the JSONL data. |
+| `--prompt-config` | No | Path to a prompt YAML file. Mutually exclusive with pre-populated `responses_create_params.input` in the JSONL data. |
 
-See [CLI Commands](/reference/cli-commands) for the full list of `ng_collect_rollouts` parameters.
+See [CLI Commands](/reference/cli-commands) for the full list of `gym eval run --no-serve` parameters.
 
-### `ng_materialize_prompts`
+### `gym dataset render`
 
 | Parameter | Required | Description |
 |-----------|----------|-------------|
-| `+input_jsonl_fpath` | Yes | Raw JSONL data (no `responses_create_params.input`). |
-| `+prompt_config` | Yes | Path to prompt YAML file to apply. |
-| `+output_jsonl_fpath` | Yes | Output path for materialized JSONL with populated prompts. |
+| `--input` | Yes | Raw JSONL data (no `responses_create_params.input`). |
+| `--prompt-config` | Yes | Path to prompt YAML file to apply. |
+| `--output` | Yes | Output path for materialized JSONL with populated prompts. |
 
 ---
 
