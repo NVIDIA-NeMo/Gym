@@ -13,8 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import json
 import logging
 import re
+import time
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 from fastapi import FastAPI
@@ -36,6 +39,25 @@ LOG = logging.getLogger(__name__)
 _ALL_PROBLEM_IDS = [f"Challenge_{n}_main" for n in range(1, 71)]
 
 
+class CritPtRateLimitExceeded(RuntimeError):
+    """Raised when the AA scoring API returns HTTP 429 (quota exhausted).
+
+    Carries the structured retry signals AA emits so callers (verify() in this
+    file, and the standalone `replay.py` tool) can distinguish "wait and retry"
+    from a programmer error and surface a clean, machine-greppable log line
+    instead of a generic stack trace.
+    """
+
+    def __init__(self, retry_after_seconds: int, reset_unix: int, body: str):
+        self.retry_after_seconds = retry_after_seconds
+        self.reset_unix = reset_unix
+        self.body = body
+        super().__init__(
+            f"CritPt AA quota exhausted (retry_after={retry_after_seconds}s, "
+            f"reset_unix={reset_unix}); body={body!r}"
+        )
+
+
 class CritPtResourcesServerConfig(BaseResourcesServerConfig):
     api_url: str = "https://artificialanalysis.ai/api/v2/critpt/evaluate"
     api_key: str
@@ -51,6 +73,15 @@ class CritPtResourcesServerConfig(BaseResourcesServerConfig):
     # Max time a single verify() will wait for its batch to fill (and the AA call to
     # finish) to prevent hang.
     verify_timeout_seconds: float = 9000.0  # (2.5h)
+    # When set, the server persists every arriving submission and every successful
+    # AA response under this directory. Enables partial-scoring visibility during a
+    # live run (writes update incrementally, not only at the end) and judge-only
+    # replay via `replay.py` after the AA quota resets. Files written:
+    #   submissions.jsonl    one line per submission seen at verify()
+    #   aa_responses.jsonl   one line per AA call that returned 2xx
+    #   partial_metrics.json aggregate accuracy over scored submissions
+    # Leaving this None preserves the prior behavior (no on-disk state).
+    cache_dir: Optional[Path] = None
 
 
 class CritPtRunRequest(BaseRunRequest):
@@ -79,10 +110,18 @@ class CritPtResourcesServer(SimpleResourcesServer):
         self._batches: list[dict] = []
         # Monotonic counter surfaced in per-verify log lines for inline progress tracking.
         self._total_verify_calls: int = 0
+        # Stable, atomic-w.r.t.-the-asyncio-loop ids assigned to each submission/batch
+        # as we persist them. Used by replay.py to detect which submissions already
+        # have an AA score and skip re-shipping them.
+        self._submission_counter: int = 0
+        self._batch_counter: int = 0
+        if self.config.cache_dir is not None:
+            self.config.cache_dir.mkdir(parents=True, exist_ok=True)
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
         app.get("/status")(self.status)
+        app.add_event_handler("shutdown", self._on_shutdown)
         return app
 
     async def status(self) -> dict:
@@ -100,6 +139,10 @@ class CritPtResourcesServer(SimpleResourcesServer):
             "model": "unknown",
             "generation_config": {},
         }
+        # Persist before any await so on-disk state captures every submission that
+        # reached verify(), even if an asyncio cancellation lands before the batch
+        # fires (common when a sibling rollout fails and Gym cancels the cohort).
+        submission_id = self._record_submission(submission)
 
         async with self._lock:
             # Find the first pending batch that doesn't already contain this problem_id.
@@ -112,10 +155,12 @@ class CritPtResourcesServer(SimpleResourcesServer):
                 target_batch = {
                     "future": asyncio.get_running_loop().create_future(),
                     "submissions": {},
+                    "submission_ids": {},
                 }
                 self._batches.append(target_batch)
 
             target_batch["submissions"][body.problem_id] = submission
+            target_batch["submission_ids"][body.problem_id] = submission_id
             future = target_batch["future"]
             self._total_verify_calls += 1
             LOG.warning(
@@ -130,9 +175,10 @@ class CritPtResourcesServer(SimpleResourcesServer):
             ready_to_fire = len(target_batch["submissions"]) >= (self.config.fire_after or self.config.batch_size)
             if ready_to_fire:
                 submissions_snapshot = list(target_batch["submissions"].values())
+                submission_ids_snapshot = list(target_batch["submission_ids"].values())
                 self._batches.remove(target_batch)
                 # Smoke-mode padding: top up to batch_size with empty dummies for missing
-                # problem_ids. In production (full batch arrives naturally), this is a no-op.
+                # problem_ids. Padded entries are synthetic so they get no submission_id.
                 if len(submissions_snapshot) < self.config.batch_size:
                     existing = {s["problem_id"] for s in submissions_snapshot}
                     for pid in _ALL_PROBLEM_IDS:
@@ -149,6 +195,7 @@ class CritPtResourcesServer(SimpleResourcesServer):
                             )
             else:
                 submissions_snapshot = None
+                submission_ids_snapshot = None
 
         if ready_to_fire:
             LOG.warning("CritPt batch full (%d submissions); firing AA API.", len(submissions_snapshot))
@@ -165,7 +212,21 @@ class CritPtResourcesServer(SimpleResourcesServer):
                         ),
                         timeout=self.config.api_timeout_seconds,
                     )
+                self._record_aa_response(submission_ids_snapshot, result)
+                self._refresh_partial_metrics()
                 future.set_result(result)
+            except CritPtRateLimitExceeded as e:
+                LOG.error(
+                    "CritPt AA quota exhausted (retry_after=%ds, reset_unix=%d); "
+                    "failing %d waiters in this batch. Submissions cached at %s; "
+                    "run `python -m resources_servers.critpt.replay --cache-dir <that_path>` "
+                    "after the quota resets to score the remaining batches without rerunning inference.",
+                    e.retry_after_seconds,
+                    e.reset_unix,
+                    len(submissions_snapshot),
+                    self.config.cache_dir,
+                )
+                future.set_exception(e)
             except Exception as e:
                 LOG.exception("CritPt AA API call failed; failing all %d waiters: %s", len(submissions_snapshot), e)
                 future.set_exception(e)
@@ -221,6 +282,113 @@ class CritPtResourcesServer(SimpleResourcesServer):
 
         return key
 
+    # ──────────────────────────────────────────────────────────
+    # Persistence helpers (cache_dir-gated; no-op when unset)
+    # ──────────────────────────────────────────────────────────
+
+    def _record_submission(self, submission: Dict[str, Any]) -> int:
+        """Assign a monotonic submission_id and append the submission to disk.
+
+        Synchronous on purpose: there must be no asyncio await between
+        constructing `submission` in verify() and committing it here, so
+        cancellation cannot land between "model produced an answer" and
+        "answer is on disk".
+        """
+        sid = self._submission_counter
+        self._submission_counter += 1
+        if self.config.cache_dir is None:
+            return sid
+        path = self.config.cache_dir / "submissions.jsonl"
+        with path.open("a") as fh:
+            fh.write(
+                json.dumps(
+                    {
+                        "submission_id": sid,
+                        "submission": submission,
+                        "ts": time.time(),
+                    }
+                )
+                + "\n"
+            )
+        return sid
+
+    def _record_aa_response(self, submission_ids: List[int], response: Dict[str, Any]) -> int:
+        """Append a successful AA batch response to aa_responses.jsonl.
+
+        Replay reads this file to skip batches that already have an AA score,
+        so a partial-quota run never wastes future quota re-scoring submissions
+        that succeeded the first time.
+        """
+        bid = self._batch_counter
+        self._batch_counter += 1
+        if self.config.cache_dir is None:
+            return bid
+        path = self.config.cache_dir / "aa_responses.jsonl"
+        with path.open("a") as fh:
+            fh.write(
+                json.dumps(
+                    {
+                        "batch_id": bid,
+                        "submission_ids": submission_ids,
+                        "response": response,
+                        "ts": time.time(),
+                    }
+                )
+                + "\n"
+            )
+        return bid
+
+    def _refresh_partial_metrics(self) -> None:
+        """Recompute partial_metrics.json from the on-disk caches.
+
+        Called after every successful AA call and on server shutdown, so the
+        file always reflects current state. Cheap: bounded by the number of
+        batches the server has seen (≤ 5 for a standard CritPt run).
+        """
+        if self.config.cache_dir is None:
+            return
+        responses_path = self.config.cache_dir / "aa_responses.jsonl"
+        submissions_path = self.config.cache_dir / "submissions.jsonl"
+        scored = 0
+        accuracy_sum = 0.0
+        timeout_rate_sum = 0.0
+        n_batches = 0
+        if responses_path.exists():
+            with responses_path.open("r") as fh:
+                for raw in fh:
+                    line = raw.strip()
+                    if not line:
+                        continue
+                    rec = json.loads(line)
+                    n = len(rec["submission_ids"])
+                    response = rec["response"]
+                    scored += n
+                    accuracy_sum += float(response.get("accuracy", 0.0)) * n
+                    timeout_rate_sum += float(response.get("timeout_rate", 0.0)) * n
+                    n_batches += 1
+        n_submissions = 0
+        if submissions_path.exists():
+            with submissions_path.open("r") as fh:
+                for raw in fh:
+                    if raw.strip():
+                        n_submissions += 1
+        partial = {
+            "scored_submissions": scored,
+            "total_submissions_seen": n_submissions,
+            "pending_submissions": max(0, n_submissions - scored),
+            "scored_batches": n_batches,
+            "mean_accuracy_over_scored": (accuracy_sum / scored) if scored else None,
+            "mean_timeout_rate_over_scored": (timeout_rate_sum / scored) if scored else None,
+            "ts": time.time(),
+        }
+        out_path = self.config.cache_dir / "partial_metrics.json"
+        with out_path.open("w") as fh:
+            json.dump(partial, fh, indent=2)
+
+    async def _on_shutdown(self) -> None:
+        """FastAPI shutdown hook: flush partial metrics one last time."""
+        self._refresh_partial_metrics()
+
 
 def _extract_output_text(body: CritPtVerifyRequest) -> str:
     parts = []
@@ -264,8 +432,27 @@ async def _call_api(
             return await response.json()
 
         body = (await response.text())[:2000]
-        # Retry only on 5xx (transient AA server errors). 4xx means a bad request/payload
-        # that won't succeed on retry, so fail fast with the response body for debugging.
+        # 429: quota exhausted. AA emits Retry-After (seconds until allowed) and
+        # X-Ratelimit-Reset (unix timestamp). Raise a typed exception so verify()
+        # and replay.py can surface a clean signal instead of a generic stack
+        # trace; do not retry in-pipeline (real Retry-After is ~24h on free tier).
+        if response.status == 429:
+            try:
+                retry_after = int(response.headers.get("Retry-After") or "0")
+            except (TypeError, ValueError):
+                retry_after = 0
+            try:
+                reset_unix = int(response.headers.get("X-Ratelimit-Reset") or "0")
+            except (TypeError, ValueError):
+                reset_unix = 0
+            raise CritPtRateLimitExceeded(
+                retry_after_seconds=retry_after,
+                reset_unix=reset_unix,
+                body=body,
+            )
+        # Retry only on 5xx (transient AA server errors). Non-429 4xx means a bad
+        # request/payload that won't succeed on retry, so fail fast with the
+        # response body for debugging.
         if response.status >= 500 and attempt < max_retries:
             wait = backoff_seconds * (2 ** (attempt - 1))
             LOG.warning(
