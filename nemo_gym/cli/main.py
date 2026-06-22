@@ -132,6 +132,12 @@ RESOURCE_SERVER = Flag(
 # env status). The reserved `json` config key is read centrally via nemo_gym.cli.output.emit.
 JSON = _bool_flag("json", "json", "Output as JSON for programmatic use.")
 
+# Positional search query for `gym search`; surfaced to the listing command as the `query` config key.
+QUERY = Flag(
+    register=lambda p: p.add_argument("query", metavar="QUERY", help="Substring to match against component names."),
+    translate_to_hydra=lambda args: [f"+query={args.query}"] if getattr(args, "query", None) else [],
+)
+
 
 # Asset selector flag -> (parent dir, configs subdir, default config flavor). All accept `name` or `name/flavor`,
 # resolving to `<parent>/<server>/[<subdir>/]<flavor>.yaml`. A None default flavor falls back to the server name.
@@ -279,6 +285,11 @@ GROUPS = {
 COMMANDS = {
     "list benchmarks": Command(
         target="nemo_gym.cli.eval:list_benchmarks", summary="List available benchmarks.", flags=(JSON,)
+    ),
+    "search": Command(
+        target="nemo_gym.cli.eval:list_benchmarks",
+        summary="Search available components (currently benchmarks) by name; like `list` filtered to a query.",
+        flags=(QUERY, JSON),
     ),
     "dataset upload": Command(
         target=_dataset_upload,

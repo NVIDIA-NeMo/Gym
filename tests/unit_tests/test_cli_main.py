@@ -500,6 +500,18 @@ class TestJsonFlag:
         _, overrides = _dispatch_for(monkeypatch, ["list", "benchmarks"])
         assert overrides == []
 
+
+class TestSearch:
+    def test_search_routes_to_list_with_query(self, monkeypatch: MonkeyPatch) -> None:
+        # `gym search <query>` reuses the benchmarks listing, passing the query as the `query` config key.
+        target, overrides = _dispatch_for(monkeypatch, ["search", "math"])
+        assert target == "nemo_gym.cli.eval:list_benchmarks"
+        assert overrides == ["+query=math"]
+
+    def test_search_json(self, monkeypatch: MonkeyPatch) -> None:
+        _, overrides = _dispatch_for(monkeypatch, ["search", "math", "--json"])
+        assert set(overrides) == {"+query=math", "+json=true"}
+
     def test_version_json_dispatches_with_override(self, monkeypatch: MonkeyPatch) -> None:
         # `gym --version --json` is the top-level path; it still forwards +json=true to the version command.
         target, overrides = _dispatch_for(monkeypatch, ["--version", "--json"])

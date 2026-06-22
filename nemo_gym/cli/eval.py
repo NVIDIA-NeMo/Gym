@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import asyncio
+import difflib
 import importlib
 import json
 from copy import deepcopy
@@ -34,8 +35,10 @@ from nemo_gym.cli.env import RunHelper
 from nemo_gym.config_types import BaseNeMoGymCLIConfig, BenchmarkDatasetConfig
 from nemo_gym.global_config import (
     JSON_OUTPUT_KEY_NAME,
+    POLICY_MODEL_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,
+    GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
     get_first_server_config_dict,
     get_global_config_dict,
@@ -51,8 +54,66 @@ from nemo_gym.rollout_collection import (
 from nemo_gym.train_data_utils import TrainDataProcessor
 
 
+def _fuzzy_matches(query: str, *fields: str) -> bool:
+    """Whether `query` fuzzily matches any of `fields`: a substring or a close difflib match (token-aware)."""
+    needle = query.lower()
+    for field in fields:
+        if not field:
+            continue
+        haystack = field.lower()
+        if needle in haystack:
+            return True
+        tokens = haystack.replace("_", " ").replace("-", " ").split()
+        if difflib.get_close_matches(needle, [haystack, *tokens], n=1, cutoff=0.6):
+            return True
+    return False
+
+
+def _benchmark_extras(bench: BenchmarkConfig) -> tuple[str, list[str]]:
+    """Resolve a benchmark's config to its `(domain, extra search terms)`.
+
+    `BenchmarkConfig` flattens away the resource server name, the resource server `domain`, and the
+    dataset names. We re-resolve the config with the same parser `BenchmarkConfig` uses (so chained
+    `config_paths` / `_inherit_from` are applied) and read those fields back out for the domain column
+    and richer `gym search` matching.
+    """
+    initial_config_dict = OmegaConf.load(bench.path)
+    if POLICY_MODEL_KEY_NAME not in initial_config_dict:
+        initial_config_dict = OmegaConf.merge(
+            initial_config_dict, GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT
+        )
+    resolved = GlobalConfigDictParser().parse_no_environment(initial_global_config_dict=initial_config_dict)
+
+    domain = ""
+    terms: list[str] = []
+    for instance_name in resolved:
+        instance = resolved[instance_name]
+        if not isinstance(instance, (dict, DictConfig)):
+            continue
+
+        resource_servers = instance.get("resources_servers")
+        if resource_servers:
+            terms.append(instance_name)  # e.g. aime24_math_with_judge_resources_server
+            for rs_name, rs_config in resource_servers.items():
+                terms.append(rs_name)  # e.g. math_with_judge
+                found_domain = (rs_config or {}).get("domain")
+                if found_domain:
+                    domain = str(found_domain)
+
+        agents = instance.get("responses_api_agents")
+        if agents:
+            for agent_config in agents.values():
+                for dataset in (agent_config or {}).get("datasets") or []:
+                    if (dataset or {}).get("name"):
+                        terms.append(dataset["name"])
+
+    if domain:
+        terms.append(domain)
+    return domain, terms
+
+
 def list_benchmarks() -> None:
-    """CLI command: list available benchmarks."""
+    """CLI command: list available benchmarks, optionally filtered by a `query` (the `gym search` entry point)."""
     global_config_dict = get_global_config_dict(
         global_config_dict_parser_config=GlobalConfigDictParserConfig(
             initial_global_config_dict=GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
@@ -68,26 +129,53 @@ def list_benchmarks() -> None:
 
     benchmarks = _load_benchmarks_from_config_paths(config_paths)
 
+    # Resolve the domain + richer search terms once per benchmark, for the domain column and `gym search`.
+    extras = {name: _benchmark_extras(bench) for name, bench in benchmarks.items()}
+
+    # `gym search <query>` reuses this command, narrowing the listing to fuzzy matches across the
+    # benchmark name, agent name, resource server name, dataset names, and domain.
+    query = global_config_dict.get("query")
+    if query:
+        benchmarks = {
+            name: bench
+            for name, bench in benchmarks.items()
+            if _fuzzy_matches(query, name, bench.agent_name, *extras[name][1])
+        }
+
     if global_config_dict.get(JSON_OUTPUT_KEY_NAME, False):
         payload = [
-            {"name": name, "agent_name": bench.agent_name, "num_repeats": bench.num_repeats}
+            {
+                "name": name,
+                "agent_name": bench.agent_name,
+                "domain": extras[name][0],
+                "num_repeats": bench.num_repeats,
+            }
             for name, bench in benchmarks.items()
         ]
         print(json.dumps(payload))
         return
 
     if not benchmarks:
+        if query:
+            rich.print(f"[yellow]No benchmarks match '{query}'.[/yellow]")
+            return
         rich.print("[yellow]No benchmarks found.[/yellow]")
         rich.print(f"Expected benchmarks directory: {BENCHMARKS_DIR}")
         return
 
-    table = Table(title=f"Available benchmarks in NeMo Gym ({len(benchmarks)})")
+    title = (
+        f"Benchmarks matching '{query}' ({len(benchmarks)})"
+        if query
+        else f"Available benchmarks in NeMo Gym ({len(benchmarks)})"
+    )
+    table = Table(title=title)
     table.add_column("Benchmark name")
+    table.add_column("Domain")
     table.add_column("Agent name")
     table.add_column("Num repeats")
 
     for name, bench in benchmarks.items():
-        table.add_row(name, bench.agent_name, str(bench.num_repeats))
+        table.add_row(name, extras[name][0], bench.agent_name, str(bench.num_repeats))
 
     rich.print(table)
 
