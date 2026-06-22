@@ -465,6 +465,28 @@ class TestEnvRunFlags:
         }
 
 
+class TestModelCheckpointFlag:
+    def test_sets_served_model_for_eval_run(self, monkeypatch: MonkeyPatch) -> None:
+        # --model-checkpoint sets the served model (policy_model_name); the local vLLM config is selected separately.
+        target, overrides = _dispatch_for(monkeypatch, ["eval", "run", "--model-checkpoint", "Qwen/Qwen3-8B"])
+        assert target == "nemo_gym.cli.eval:e2e_rollout_collection"
+        assert overrides == ["+policy_model_name=Qwen/Qwen3-8B"]
+
+    def test_available_on_env_run(self, monkeypatch: MonkeyPatch) -> None:
+        _, overrides = _dispatch_for(monkeypatch, ["env", "run", "--model-checkpoint", "/ckpt/path"])
+        assert overrides == ["+policy_model_name=/ckpt/path"]
+
+    def test_local_vllm_deployment_flow(self, monkeypatch: MonkeyPatch) -> None:
+        # The intended deployment invocation: select the local vLLM server type and pass the checkpoint to serve.
+        _, overrides = _dispatch_for(
+            monkeypatch,
+            ["eval", "run", "--model-type", "local_vllm_model", "--model-checkpoint", "Qwen/Qwen3-8B"],
+        )
+        paths, others = _split_overrides(overrides)
+        assert paths == {str(WORKING_DIR / "responses_api_models/local_vllm_model/configs/local_vllm_model.yaml")}
+        assert others == {"+policy_model_name=Qwen/Qwen3-8B"}
+
+
 class TestEnvInitFlags:
     def test_resource_server_translates_to_entrypoint(self, monkeypatch: MonkeyPatch) -> None:
         target, overrides = _dispatch_for(monkeypatch, ["env", "init", "--resource-server", "my_server"])

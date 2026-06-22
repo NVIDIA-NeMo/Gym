@@ -120,6 +120,14 @@ MODEL_NAME = _value_flag("model-name", "policy_model_name", "Model name.")
 MODEL_URL = _value_flag("model-url", "policy_base_url", "Model server base URL.")
 MODEL_API_KEY = _value_flag("model-api-key", "policy_api_key", "Model server API key.")
 
+# Shared flag: checkpoint (HF id or path) to serve with a local vLLM deployment. Pair with `--model-type
+# local_vllm_model`; sets the served model via `policy_model_name`. Reused by model-server commands.
+MODEL_CHECKPOINT = _value_flag(
+    "model-checkpoint",
+    "policy_model_name",
+    "HF id or checkpoint path to serve locally (use with --model-type local_vllm_model).",
+)
+
 # Shared flag: select a single resource server by name. Reused by `env test`, `env init`, and `env packages`.
 RESOURCE_SERVER = Flag(
     register=lambda p: p.add_argument("--resource-server", metavar="NAME", help="Name of the resource server."),
@@ -401,7 +409,16 @@ COMMANDS = {
     "env run": Command(
         target="nemo_gym.cli.env:run",
         summary="Start the servers.",
-        flags=(CONFIG, RESOURCE_SERVER_CONFIG, MODEL_TYPE, SEARCH_DIR, MODEL_NAME, MODEL_URL, MODEL_API_KEY),
+        flags=(
+            CONFIG,
+            RESOURCE_SERVER_CONFIG,
+            MODEL_TYPE,
+            SEARCH_DIR,
+            MODEL_NAME,
+            MODEL_URL,
+            MODEL_API_KEY,
+            MODEL_CHECKPOINT,
+        ),
     ),
     "env status": Command(target="nemo_gym.cli.env:status", summary="Print the server status.", flags=(JSON,)),
     "eval prepare": Command(
@@ -437,6 +454,7 @@ COMMANDS = {
             MODEL_NAME,
             MODEL_URL,
             MODEL_API_KEY,
+            MODEL_CHECKPOINT,
             _value_flag("temperature", "responses_create_params.temperature", "Sampling temperature."),
             _value_flag("top-p", "responses_create_params.top_p", "Nucleus sampling top-p."),
             _value_flag("max-output-tokens", "responses_create_params.max_output_tokens", "Maximum output tokens."),
