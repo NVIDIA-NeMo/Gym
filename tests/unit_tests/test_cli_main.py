@@ -605,6 +605,8 @@ class TestAssetSelectors:
             (["eval", "prepare", "--benchmark", "gsm8k"], "benchmarks/gsm8k/config.yaml"),
             # benchmarks/aime25-x/README.md: ng_prepare_benchmark "+config_paths=[benchmarks/aime25-x/config.yaml]"
             (["eval", "prepare", "--benchmark", "aime25-x"], "benchmarks/aime25-x/config.yaml"),
+            # benchmarks/gpqa/README.md: ng_run "+config_paths=[benchmarks/gpqa/config.yaml]" (start a benchmark's servers)
+            (["env", "run", "--benchmark", "gpqa"], "benchmarks/gpqa/config.yaml"),
             # README.md / quickstart.mdx: resources_servers/mcqa/configs/mcqa.yaml
             (["env", "run", "--resource-server", "mcqa"], "resources_servers/mcqa/configs/mcqa.yaml"),
             # model-server/vllm.mdx: resources_servers/example_multi_step/configs/example_multi_step.yaml

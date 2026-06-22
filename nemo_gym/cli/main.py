@@ -408,7 +408,7 @@ COMMANDS = {
     "env run": Command(
         target="nemo_gym.cli.env:run",
         summary="Start the servers.",
-        flags=(CONFIG, RESOURCE_SERVER_CONFIG, MODEL_TYPE, SEARCH_DIR, MODEL, MODEL_URL, MODEL_API_KEY),
+        flags=(CONFIG, BENCHMARK, RESOURCE_SERVER_CONFIG, MODEL_TYPE, SEARCH_DIR, MODEL, MODEL_URL, MODEL_API_KEY),
     ),
     "env status": Command(target="nemo_gym.cli.env:status", summary="Print the server status.", flags=(JSON,)),
     "eval prepare": Command(
