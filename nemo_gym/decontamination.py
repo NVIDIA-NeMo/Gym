@@ -188,7 +188,7 @@ def _read_problem_texts(file_paths: List[str], problem_text_key: str) -> List[st
     return list(seen.keys())
 
 
-def _embed_texts(texts: List[str], config: DecontaminationConfig) -> "Any":
+def _embed_texts(texts: List[str], config: DecontaminationConfig) -> "Any":  # pragma: no cover
     """Embed texts with a transformers model using mean pooling + L2 normalization.
 
     This mirrors how sentence-transformers computes embeddings for MiniLM-style models,
@@ -220,7 +220,7 @@ def _embed_texts(texts: List[str], config: DecontaminationConfig) -> "Any":
     return torch.cat(all_embeddings, dim=0)
 
 
-def _retrieve_similar(
+def _retrieve_similar(  # pragma: no cover
     train_texts: List[str], test_texts: List[str], config: DecontaminationConfig
 ) -> List[Dict[str, Any]]:
     """For each training problem, retrieve the top-k most similar test problems.

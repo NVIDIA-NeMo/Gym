@@ -15,6 +15,7 @@
 import asyncio
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 from pytest import raises
 
@@ -25,6 +26,7 @@ from nemo_gym.decontamination import (
     _filter_split,
     _read_problem_texts,
     extract_problem_text,
+    run_decontamination,
 )
 
 
@@ -69,6 +71,12 @@ def test_extract_problem_text_returns_none_when_missing():
     assert extract_problem_text({"responses_create_params": {"input": []}}) is None
 
 
+def test_extract_problem_text_non_user_message_fallback():
+    # No user message, but a developer message with content -> use it.
+    row = {"responses_create_params": {"input": [{"role": "developer", "content": "system-ish text"}]}}
+    assert extract_problem_text(row) == "system-ish text"
+
+
 def test_content_to_text_variants():
     assert _content_to_text("hello") == "hello"
     assert _content_to_text([{"type": "input_text", "text": "a"}, {"text": "b"}]) == "a\nb"
@@ -97,7 +105,8 @@ def test_filter_split_removes_contaminated(tmp_path: Path):
         {"responses_create_params": {"input": "Remove ME"}},  # case-insensitive match
         {"problem": "also keep"},
     ]
-    f.write_text("".join(f"{json.dumps(r)}\n" for r in rows))
+    # Trailing blank line exercises the empty-line skip in _filter_split.
+    f.write_text("".join(f"{json.dumps(r)}\n" for r in rows) + "\n")
 
     kept, removed = _filter_split(f, {"remove me"}, "problem")
 
@@ -161,3 +170,149 @@ def test_check_contamination_llm_verdict(monkeypatch):
     assert results[0]["contaminated"] is True
     assert results[1]["contaminated"] is False
     assert fake.calls == 2
+
+
+def test_check_contamination_check_both_ways_doubles_queries(monkeypatch):
+    fake = _FakeClient(verdict_for="never")
+    monkeypatch.setattr("nemo_gym.decontamination.NeMoGymAsyncOpenAI", lambda **kw: fake)
+
+    candidates = [{"problem": "q", "similar_items": ["a", "b"], "similarity_scores": [0.5, 0.4]}]
+    cfg = DecontaminationConfig(test_set_jsonls=["a.jsonl"], check_both_ways=True)
+    results = asyncio.run(_check_contamination_async(candidates, cfg, "key"))
+
+    assert results[0]["contaminated"] is False
+    # 2 similar items x both directions = 4 judge calls.
+    assert fake.calls == 4
+
+
+def _patch_retrieve_all_pairs(monkeypatch):
+    """Make _retrieve_similar pair every train problem with every test problem (no torch)."""
+
+    def fake_retrieve(train_texts, test_texts, config):
+        return [
+            {"problem": t, "similar_items": list(test_texts), "similarity_scores": [1.0] * len(test_texts)}
+            for t in train_texts
+        ]
+
+    monkeypatch.setattr("nemo_gym.decontamination._retrieve_similar", fake_retrieve)
+
+
+def test_run_decontamination_noop_when_none():
+    # Should return immediately without touching anything.
+    run_decontamination(SimpleNamespace(decontamination=None), Path("/nonexistent"))
+
+
+def test_run_decontamination_no_test_problems(tmp_path: Path):
+    empty = tmp_path / "test.jsonl"
+    empty.write_text("")
+    cfg = SimpleNamespace(decontamination=DecontaminationConfig(test_set_jsonls=[str(empty)], judge_api_key="k"))
+    # No test problems -> early return, no error even though train.jsonl is absent.
+    run_decontamination(cfg, tmp_path)
+
+
+def test_run_decontamination_missing_and_empty_splits(tmp_path: Path, monkeypatch):
+    _patch_retrieve_all_pairs(monkeypatch)
+    monkeypatch.setattr("nemo_gym.decontamination.NeMoGymAsyncOpenAI", lambda **kw: _FakeClient("zzz"))
+
+    test_path = tmp_path / "test.jsonl"
+    test_path.write_text(json.dumps({"problem": "leaked"}) + "\n")
+
+    # 'train' split is absent; 'validation' split exists but has only a blank line.
+    (tmp_path / "validation.jsonl").write_text("\n")
+
+    cfg = SimpleNamespace(
+        decontamination=DecontaminationConfig(
+            test_set_jsonls=[str(test_path)],
+            decontaminate_types=["train", "validation"],
+            judge_api_key="k",
+        )
+    )
+    run_decontamination(cfg, tmp_path)  # both splits skipped, no error
+
+
+def test_run_decontamination_end_to_end_filters_and_reports(tmp_path: Path, monkeypatch):
+    _patch_retrieve_all_pairs(monkeypatch)
+    # Judge always says False; the contaminated row is caught by the exact-match short-circuit.
+    monkeypatch.setattr("nemo_gym.decontamination.NeMoGymAsyncOpenAI", lambda **kw: _FakeClient("zzz"))
+
+    test_path = tmp_path / "test.jsonl"
+    test_path.write_text(json.dumps({"problem": "alpha"}) + "\n")
+
+    train_path = tmp_path / "train.jsonl"
+    train_path.write_text(
+        json.dumps({"responses_create_params": {"input": "alpha"}})
+        + "\n"  # exact dup -> removed
+        + json.dumps({"responses_create_params": {"input": "beta"}})
+        + "\n"  # clean -> kept
+    )
+
+    cfg = SimpleNamespace(
+        decontamination=DecontaminationConfig(
+            test_set_jsonls=[str(test_path)],
+            judge_api_key="k",
+            report_dirpath=str(tmp_path),
+        )
+    )
+    run_decontamination(cfg, tmp_path)
+
+    remaining = [extract_problem_text(json.loads(line)) for line in train_path.read_text().splitlines()]
+    assert remaining == ["beta"]
+
+    report = [json.loads(line) for line in (tmp_path / "train_contamination.jsonl").read_text().splitlines()]
+    flagged = {r["problem"] for r in report if r["contaminated"]}
+    assert flagged == {"alpha"}
+
+
+def test_run_decontamination_dry_run_keeps_rows(tmp_path: Path, monkeypatch):
+    _patch_retrieve_all_pairs(monkeypatch)
+    monkeypatch.setattr("nemo_gym.decontamination.NeMoGymAsyncOpenAI", lambda **kw: _FakeClient("zzz"))
+
+    test_path = tmp_path / "test.jsonl"
+    test_path.write_text(json.dumps({"problem": "alpha"}) + "\n")
+    train_path = tmp_path / "train.jsonl"
+    train_path.write_text(json.dumps({"problem": "alpha"}) + "\n")
+
+    cfg = SimpleNamespace(
+        decontamination=DecontaminationConfig(test_set_jsonls=[str(test_path)], judge_api_key="k", dry_run=True)
+    )
+    run_decontamination(cfg, tmp_path)
+
+    # dry_run: row is reported but NOT removed.
+    assert [json.loads(line) for line in train_path.read_text().splitlines()] == [{"problem": "alpha"}]
+    assert (tmp_path / "train_contamination.jsonl").exists()
+
+
+def test_run_decontamination_accepts_dict_and_reads_global_api_key(tmp_path: Path, monkeypatch):
+    _patch_retrieve_all_pairs(monkeypatch)
+    captured = {}
+
+    def fake_client(**kwargs):
+        captured.update(kwargs)
+        return _FakeClient("zzz")
+
+    monkeypatch.setattr("nemo_gym.decontamination.NeMoGymAsyncOpenAI", fake_client)
+    # judge_api_key unset -> resolved from global config.
+    monkeypatch.setattr("nemo_gym.global_config.get_global_config_dict", lambda: {"openai_api_key": "from-global"})
+
+    test_path = tmp_path / "test.jsonl"
+    test_path.write_text(json.dumps({"problem": "alpha"}) + "\n")
+    (tmp_path / "train.jsonl").write_text(json.dumps({"problem": "beta"}) + "\n")
+
+    # Pass decontamination as a plain dict to exercise model_validate coercion.
+    cfg = SimpleNamespace(decontamination={"test_set_jsonls": [str(test_path)], "report_dirpath": str(tmp_path)})
+    run_decontamination(cfg, tmp_path)
+
+    assert captured["api_key"] == "from-global"
+
+
+def test_run_decontamination_warns_when_no_api_key(tmp_path: Path, monkeypatch):
+    _patch_retrieve_all_pairs(monkeypatch)
+    monkeypatch.setattr("nemo_gym.decontamination.NeMoGymAsyncOpenAI", lambda **kw: _FakeClient("zzz"))
+    monkeypatch.setattr("nemo_gym.global_config.get_global_config_dict", lambda: {})
+
+    test_path = tmp_path / "test.jsonl"
+    test_path.write_text(json.dumps({"problem": "alpha"}) + "\n")
+    (tmp_path / "train.jsonl").write_text(json.dumps({"problem": "beta"}) + "\n")
+
+    cfg = SimpleNamespace(decontamination=DecontaminationConfig(test_set_jsonls=[str(test_path)]))
+    run_decontamination(cfg, tmp_path)  # no key anywhere -> warns but proceeds
