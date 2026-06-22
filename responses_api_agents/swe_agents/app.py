@@ -32,7 +32,7 @@ from shutil import rmtree
 from subprocess import Popen
 from subprocess import run as subprocess_run
 from traceback import format_exc
-from typing import Any, Dict, Literal, Optional, Tuple, Union
+from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
 import ray
 import tomlkit
@@ -274,6 +274,7 @@ class SWEBenchMetrics(BaseModel):
 
 class SWEBenchVerifyResponse(SWEBenchMetrics, BaseVerifyResponse):
     instance_config: SWEBenchWrapperInstanceConfig
+    subagent_trajectories: Optional[List[Dict[str, Any]]] = None
 
 
 ########################################
@@ -1087,6 +1088,138 @@ printf '{{"_test_completed": true, "exit_code": %d}}\\n' $TEST_EXIT \
         report_path.write_text(json.dumps(report, indent=2))
 
 
+class DeepSWEDatasetProcessor(BaseDatasetHarnessProcessor):
+    """Eval harness for DeepSWE tasks (Harbor task format).
+
+    DeepSWE images clone the target repo into ``/app`` at the task's base commit.
+    The verifier artifacts travel inside ``instance_dict``:
+      - ``test_sh``    : the Harbor verifier entry point (``tests/test.sh``)
+      - ``test_patch`` : hidden test additions applied at grading time
+      - ``patch``      : the reference (golden) patch, used by verify_golden_patch
+
+    At grade time we spin up a fresh image (clean ``/app`` at base commit), apply
+    the model patch (``/root/patch.diff``), then run the Harbor verifier. The
+    verifier resets the test-patch files, applies ``/tests/test.patch``, runs the
+    ``base`` (regression) and ``new`` (challenge) suites, and writes a ``1``/``0``
+    reward to ``/logs/verifier/reward.txt`` — which we read back on the host.
+    """
+
+    def _get_instance_dict(self) -> dict:
+        raw = self.config.problem_info.get("instance_dict", "{}")
+        if isinstance(raw, str):
+            return json.loads(raw)
+        return raw
+
+    def get_run_command(self) -> ExecuteContainerCommandArgs:
+        inst = self._get_instance_dict()
+        base_commit = inst.get("base_commit", "")
+        test_patch = inst.get("test_patch", "")
+        test_sh = inst.get("test_sh", "")
+        # Optional environment-repair command run before the verifier. Some mirror
+        # images were built with newer deps than the repo pins, breaking the
+        # pre-existing (base) suite regardless of the patch ("broken baseline").
+        # Restoring the pinned version greens it (needs host network — eval has it).
+        baseline_fix = inst.get("baseline_fix", "")
+
+        # Materialize the verifier artifacts on the host; _build_apptainer_command
+        # binds them into the eval container at the absolute paths test.sh expects
+        # (/tests/test.sh, /tests/test.patch).
+        test_patch_path = self.config.persistent_dir / "test.patch"
+        test_patch_path.write_text(test_patch)
+        test_sh_path = self.config.persistent_dir / "test.sh"
+        test_sh_path.write_text(test_sh)
+
+        reset_cmd = f"git reset --hard {base_commit}" if base_commit else "git reset --hard HEAD"
+        # Brace group (not a subshell) so env changes — e.g. `unset LD_LIBRARY_PATH`
+        # to let deno spawn subprocesses — persist to the verifier that follows.
+        baseline_fix_block = (
+            f"{{ {baseline_fix} ; }} > /trajectories_mount/eval_results/baseline_fix.log 2>&1 || true"
+            if baseline_fix
+            else ":"
+        )
+
+        # No `set -e`: every step is independently tolerant so report.json is
+        # always written. pipefail makes the reward `cat | tr` reflect a missing
+        # file, but we never abort on it.
+        cmd = f"""#!/bin/bash
+set -o pipefail
+
+date +\"%s.%N\" > {self.config.final_eval_apptainer_spinup_timestamp_mounted_fpath}
+
+{self._get_command_sleep_until_predictions_file()}
+
+cd /app || exit 1
+git config --global --add safe.directory /app 2>/dev/null || true
+
+# Start from a clean base checkout, then lay the model patch on top. Try a
+# strict atomic apply first (matches DeepSWE's solve.sh, so a correct golden /
+# model patch lands in full); fall back to 3-way, then to a lenient partial
+# apply only as a last resort for malformed agent patches.
+{reset_cmd} 2>/dev/null || git reset --hard HEAD 2>/dev/null || true
+git apply --whitespace=nowarn /root/patch.diff \
+  || git apply -3 --whitespace=nowarn /root/patch.diff \
+  || git apply --reject --recount --ignore-space-change --whitespace=nowarn /root/patch.diff \
+  || true
+
+# The Harbor verifier writes 1/0 to /logs/verifier/reward.txt and the captured
+# model diff to /logs/artifacts/model.patch; create both dirs first.
+mkdir -p /logs/verifier /logs/artifacts /trajectories_mount/eval_results
+chmod +x /tests/test.sh 2>/dev/null || true
+
+# Optional baseline repair (restore repo-pinned deps the image drifted from).
+{baseline_fix_block}
+
+bash /tests/test.sh > /trajectories_mount/eval_results/verifier_output.log 2>&1
+VERIFIER_EXIT=$?
+
+REWARD=$(cat /logs/verifier/reward.txt 2>/dev/null | tr -dc '0-9')
+cp /logs/verifier/reward.txt /trajectories_mount/eval_results/reward.txt 2>/dev/null || true
+printf '{{"_test_completed": true, "verifier_exit": %d, "reward": "%s"}}\\n' "$VERIFIER_EXIT" "${{REWARD:-}}" \
+  > /trajectories_mount/eval_results/report.json
+"""
+
+        search_path = os.path.join(
+            self.config.persistent_dir,
+            "eval_results",
+            "report.json",
+        )
+
+        return ExecuteContainerCommandArgs(
+            command=cmd,
+            expected_file_pattern=search_path,
+            mode="eval",
+            timeout=self.config.swebench_tests_timeout,
+        )
+
+    def postprocess_after_run(self, report_file: Path) -> None:
+        """Resolved iff the Harbor verifier wrote reward == 1."""
+        report_path = Path(report_file)
+        instance_id = self.config.instance_id
+
+        raw: dict[str, Any] = {}
+        try:
+            raw = json.loads(report_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            pass
+
+        reward_path = report_path.parent / "reward.txt"
+        if reward_path.exists():
+            reward_txt = reward_path.read_text(errors="replace").strip()
+        else:
+            reward_txt = str(raw.get("reward", "")).strip()
+
+        report = {
+            instance_id: {
+                "resolved": reward_txt == "1",
+                "patch_exists": True,
+                "patch_successfully_applied": True,
+                "verifier_reward": reward_txt,
+                "verifier_exit": raw.get("verifier_exit"),
+            }
+        }
+        report_path.write_text(json.dumps(report, indent=2))
+
+
 class OpenHandsHarnessProcessor(BaseDatasetHarnessProcessor):
     def _sync_openhands_to_config_commit(self, openhands_dir: Path) -> None:
         """Ensure OpenHands checkout matches config.agent_framework_commit.
@@ -1276,6 +1409,13 @@ AGENT_FRAMEWORK_COMMIT={self.config.agent_framework_commit} \\
 
         workspace_check_cmd = ""
 
+        # Run the same baseline dependency/env repair the eval uses (if any), in a
+        # brace group so env changes (e.g. `unset LD_LIBRARY_PATH`) persist into
+        # run_infer.sh and the agent's own test runs — keeping the agent's env
+        # consistent with the graded eval env. Best-effort; needs network.
+        baseline_fix = _extract_instance_dict(data_point).get("baseline_fix", "")
+        baseline_fix_cmd = f"{{ {baseline_fix} >/tmp/baseline_fix.log 2>&1 || true; }} && " if baseline_fix else ""
+
         agent_main_cmd = (
             f"{workspace_check_cmd}"
             # Add miniforge bin to PATH (for tmux, node, poetry, etc.)
@@ -1311,6 +1451,7 @@ AGENT_FRAMEWORK_COMMIT={self.config.agent_framework_commit} \\
             f"{diversify_tool_names_cmd}"
             f"{camel_case_tool_names_cmd}"
             f"echo {shlex.quote(config_str)} >{config_file_path} && "
+            f"{baseline_fix_cmd}"
             # f" export EVAL_OUTPUT_DIR={eval_dir_in_openhands} && "
             f"./evaluation/benchmarks/swe_bench/scripts/run_infer.sh "
             f"    llm.model "  # name of llm config section in config.toml
@@ -1393,6 +1534,8 @@ def _resolve_opencode_workspace_path(problem_info: Dict[str, Any]) -> str:
     instance = _extract_instance_dict(problem_info)
 
     if dataset_name == "nv-internal-1":
+        return "/app"
+    if dataset_name == "deepswe":
         return "/app"
     if dataset_name == "swe-bench-ext":
         return "/workspace/repo"
@@ -1559,6 +1702,14 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
                 "fi && "
             )
 
+        # Run the same baseline dependency repair the eval uses (if any), so the
+        # agent develops against the SAME environment it is graded in (avoids a
+        # train/eval mismatch). Best-effort; needs the agent container's network.
+        # Brace group (not a subshell) so env changes (e.g. `unset LD_LIBRARY_PATH`)
+        # persist into run_infer.sh and the agent's own test runs.
+        baseline_fix = _extract_instance_dict(data_point).get("baseline_fix", "")
+        baseline_fix_cmd = f"{{ {baseline_fix} >/tmp/baseline_fix.log 2>&1 || true; }} && " if baseline_fix else ""
+
         agent_main_cmd = (
             "mkdir -p /tmp/ && "
             "export PATH=/opencode_setup/bun/bin:$PATH && "
@@ -1575,6 +1726,7 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
             "echo '{}' >/root/.cache/opencode/models.json && "
             f"echo {shlex.quote(config_str)} >{config_file_path} && "
             f"{conda_activate_cmd}"
+            f"{baseline_fix_cmd}"
             "./evaluation/benchmarks/swe_bench/scripts/run_infer.sh "
             f"    {self.config.agent_framework_commit} "  # $1: opencode commit
             f"    {self.config.resolved_agent_cls} "  # $2: agent class (informational)
@@ -1994,12 +2146,17 @@ class RunOpenHandsAgent(BaseModel):
     async def _run_golden_patch_verification(self) -> Optional[Path]:
         instance_id = self.config.instance_id
         dataset_name = self.config.problem_info.get("dataset_name") or ""
-        supported = dataset_name == "swe-bench-ext" or "SWE-bench" in dataset_name or "SWE-rebench" in dataset_name
+        supported = (
+            dataset_name == "swe-bench-ext"
+            or dataset_name == "deepswe"
+            or "SWE-bench" in dataset_name
+            or "SWE-rebench" in dataset_name
+        )
         if not supported:
             raise NotImplementedError(
-                "verify_golden_patch is only supported for dataset_name=='swe-bench-ext' "
-                "or the SWE-bench / SWE-bench_Multilingual families "
-                f"(got {dataset_name!r})."
+                "verify_golden_patch is only supported for dataset_name in "
+                "{'swe-bench-ext', 'deepswe'} or the SWE-bench / SWE-bench_Multilingual "
+                f"/ SWE-rebench families (got {dataset_name!r})."
             )
 
         raw_instance_dict = self.config.problem_info["instance_dict"]
@@ -2473,8 +2630,8 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             mount_args.append(f"--mount type=bind,src={miniforge3_path},dst={miniforge3_path},ro")
 
         # Add SWE-bench setup directory mount if available (for evaluation)
-        # swe-bench-ext and nv-internal-1 don't use the swebench harness
-        if command.mode == "eval" and data_point["dataset_name"] not in ("nv-internal-1", "swe-bench-ext"):
+        # swe-bench-ext, nv-internal-1, and deepswe don't use the swebench harness
+        if command.mode == "eval" and data_point["dataset_name"] not in ("nv-internal-1", "swe-bench-ext", "deepswe"):
             # Mount the entire setup directory at both /swebench_setup and its original absolute path
             # This is needed because uv venv has hardcoded absolute paths
             mount_args.append(f"--mount type=bind,src={params.swebench_setup_dir},dst=/swebench_setup")
@@ -2534,6 +2691,18 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             if not params.model_patch_path.exists():
                 params.model_patch_path.write_text("")
             mount_args.append(f"--mount type=bind,src={test_patch_path},dst=/root/test_patch.diff")
+            mount_args.append(f"--mount type=bind,src={params.model_patch_path},dst=/root/patch.diff")
+
+        if command.mode == "eval" and data_point.get("dataset_name") == "deepswe":
+            # DeepSWEDatasetProcessor.get_run_command() wrote these to persistent_dir.
+            test_sh_path = params.persistent_dir / "test.sh"
+            test_patch_path = params.persistent_dir / "test.patch"
+            # Placeholder needed: eval container starts before the agent writes the
+            # patch (golden-patch path writes it before launch).
+            if not params.model_patch_path.exists():
+                params.model_patch_path.write_text("")
+            mount_args.append(f"--mount type=bind,src={test_sh_path},dst=/tests/test.sh,ro")
+            mount_args.append(f"--mount type=bind,src={test_patch_path},dst=/tests/test.patch,ro")
             mount_args.append(f"--mount type=bind,src={params.model_patch_path},dst=/root/patch.diff")
 
         if command.mode == "agent" and "R2E-Gym" in data_point["dataset_name"]:
@@ -2762,6 +2931,8 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
         if params.problem_info["dataset_name"] == "nv-internal-1":
             dataset_processor = NVInternalDatasetProcessor(config=params)
+        elif params.problem_info["dataset_name"] == "deepswe":
+            dataset_processor = DeepSWEDatasetProcessor(config=params)
         elif params.problem_info["dataset_name"] == "swe-bench-ext":
             dataset_processor = SweBenchExtDatasetProcessor(config=params)
         elif "SWE-rebench" in params.problem_info["dataset_name"]:
@@ -2901,6 +3072,21 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         # body.model can be None (replay JSONLs omit it; the openai_model proxy
         # picks the backend). NeMoGymResponse.model is a required non-None string,
         # so fall back to the agent's configured model server name.
+        metadata: dict[str, str] = {
+            "input": json.dumps([i.model_dump() for i in input_items]),
+            "metrics": params.metrics_fpath.read_text(),
+            "instance_config": params.model_dump_json(),
+        }
+        if params.opencode_subagents_enabled:
+            subagent_trajectories = [
+                entry
+                for entry in self.get_all_session_trajectories_from_completions(
+                    trajectories_dir, params.instance_id
+                )
+                if entry.get("parent_session_id")
+            ]
+            metadata["subagent_trajectories"] = json.dumps(subagent_trajectories)
+
         return NeMoGymResponse(
             id=f"swebench-{params.instance_id}",
             created_at=int(time.time()),
@@ -2910,11 +3096,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             parallel_tool_calls=params.body.parallel_tool_calls,
             tool_choice=params.body.tool_choice,
             tools=tools,
-            metadata={
-                "input": json.dumps([i.model_dump() for i in input_items]),
-                "metrics": params.metrics_fpath.read_text(),
-                "instance_config": params.model_dump_json(),
-            },
+            metadata=metadata,
         )
 
     async def run(self, body: BaseRunRequest) -> SWEBenchVerifyResponse:
@@ -2930,6 +3112,9 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 "tools": [t.model_dump() for t in response.tools] if response.tools else [],
             }
             metrics = SWEBenchMetrics.model_validate_json(metadata["metrics"])
+            subagent_trajectories = None
+            if "subagent_trajectories" in metadata:
+                subagent_trajectories = json.loads(metadata["subagent_trajectories"])
 
             return SWEBenchVerifyResponse(
                 responses_create_params=responses_create_params,
@@ -2939,6 +3124,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 instance_config=SWEBenchWrapperInstanceConfig.model_validate_json(
                     metadata["instance_config"]
                 ).model_dump(),
+                subagent_trajectories=subagent_trajectories,
             )
 
 

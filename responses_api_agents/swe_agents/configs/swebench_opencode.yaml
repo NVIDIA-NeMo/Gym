@@ -21,6 +21,7 @@ swe_agents:
       swebench_tests_timeout: 900
       apptainer_memory_limit_mb: 32768
       command_exec_timeout: 300
+      opencode_subagents_enabled: true
 
       dataset_path: ???
 
