@@ -274,6 +274,29 @@ class TestCLISetupCommandRunCommand:
         actual_args = Popen_mock.call_args
         assert expected_args == actual_args
 
+    def test_capture_pipes_combined_output(self, monkeypatch: MonkeyPatch) -> None:
+        from subprocess import PIPE, STDOUT
+
+        Popen_mock, _ = self._setup(monkeypatch)
+
+        run_command(
+            command="my command",
+            working_dir_path=Path("/my path"),
+            capture=True,
+        )
+
+        # capture=True pipes stdout+stderr together in text mode so callers can collect output.
+        expected_args = call(
+            "my command",
+            executable="/bin/bash",
+            shell=True,
+            env={"PYTHONPATH": "/my path", "UV_CACHE_DIR": "default uv cache dir"},
+            stdout=PIPE,
+            stderr=STDOUT,
+            text=True,
+        )
+        assert Popen_mock.call_args == expected_args
+
     def test_custom_pythonpath(self, monkeypatch: MonkeyPatch) -> None:
         Popen_mock, get_global_config_dict_mock = self._setup(monkeypatch)
         monkeypatch.setattr(nemo_gym.cli_setup_command, "environ", {"PYTHONPATH": "existing pythonpath"})
