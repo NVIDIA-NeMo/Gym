@@ -14,36 +14,27 @@
 # limitations under the License.
 
 repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.4.0
+    hooks:
+    - id: end-of-file-fixer
+      # only include python files
+      files: \.py$
+    - id: trailing-whitespace
+      # only include python files
+      files: \.py$
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: "v0.9.9" # Use the appropriate version
+    hooks:
+    - id: ruff
+      args: ["--fix"]
+    - id: ruff
+      args: ["check", "--select", "I", "--fix"]
+    - id: ruff-format
+
   - repo: local
     hooks:
-      - id: python-end-of-file-fixer
-        name: Fix Python end-of-file newlines
-        language: system
-        entry: uv run --no-project python scripts/precommit_python_fixes.py --end-of-file
-        files: \.py$
-      - id: python-trailing-whitespace
-        name: Trim Python trailing whitespace
-        language: system
-        entry: uv run --no-project python scripts/precommit_python_fixes.py --trailing-whitespace
-        files: \.py$
-      - id: ruff
-        name: ruff
-        language: system
-        entry: uv run --no-project --with ruff==0.9.9 ruff
-        args: ["check", "--force-exclude", "--fix"]
-        types_or: [python, pyi, jupyter]
-      - id: ruff-imports
-        name: ruff import sorting
-        language: system
-        entry: uv run --no-project --with ruff==0.9.9 ruff
-        args: ["check", "--force-exclude", "--select", "I", "--fix"]
-        types_or: [python, pyi, jupyter]
-      - id: ruff-format
-        name: ruff format
-        language: system
-        entry: uv run --no-project --with ruff==0.9.9 ruff
-        args: ["format", "--force-exclude"]
-        types_or: [python, pyi, jupyter]
       - id: no-underscore-md
         name: "Disallow '_' in Markdown filenames"
         language: system
