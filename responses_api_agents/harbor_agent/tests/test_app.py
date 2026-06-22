@@ -436,6 +436,30 @@ class TestApp:
         assert config["datasets"][0]["version"] == "2.0"
         assert config["datasets"][0]["task_names"] == ["fix-git"]
 
+    def test_build_job_config_harbor_no_delete(self) -> None:
+        pytest.importorskip("harbor")
+        server = _make_server(harbor_no_delete=True, harbor_environment_type="docker")
+        config = server._build_job_config(
+            dataset_alias="scientific",
+            task_name="test_task_123",
+            model_name="test_model",
+            api_base="http://policy-host:9000/v1",
+            job_name="test_job",
+            jobs_dir=Path("/tmp/harbor_jobs"),
+        )
+        assert config["environment"]["delete"] is False
+
+        server = _make_server(harbor_no_delete=False, harbor_environment_type="docker")
+        config = server._build_job_config(
+            dataset_alias="scientific",
+            task_name="test_task_123",
+            model_name="test_model",
+            api_base="http://policy-host:9000/v1",
+            job_name="test_job",
+            jobs_dir=Path("/tmp/harbor_jobs"),
+        )
+        assert config["environment"]["delete"] is True
+
     @pytest.mark.parametrize(
         "instance_id, expected_alias, expected_task",
         [

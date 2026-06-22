@@ -103,6 +103,9 @@ class HarborAgentConfig(BaseResponsesAPIAgentConfig):
     # Directory where Harbor writes job results and trial artifacts.
     harbor_jobs_dir: str = "jobs"
 
+    # Keep Docker runtime images between trials (maps to EnvironmentConfig.delete=False).
+    harbor_no_delete: bool = True
+
     # --- Model routing ---
     # NeMo Gym model server reference used to resolve Harbor model base URL.
     model_server: ModelServerRef
@@ -456,6 +459,7 @@ class HarborAgent(SimpleResponsesAPIAgent):
         environment_config = EnvironmentConfig(
             type=self.config.harbor_environment_type if not self.config.harbor_environment_import_path else None,
             import_path=self.config.harbor_environment_import_path,
+            delete=not self.config.harbor_no_delete,
             kwargs=environment_kwargs,
         )
 

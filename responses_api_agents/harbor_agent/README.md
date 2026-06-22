@@ -9,6 +9,7 @@ It runs Harbor agents (e.g., `terminus-2`) in Harbor-managed environments and re
   - [Custom agents](#custom-agents)
   - [Custom environments](#custom-environments)
 - [Quick Start](#quick-start)
+- [BiomniBench-DA](#biomnibench-da)
 - [Daytona execution path](#daytona-execution-path)
 - [NeMo RL Training](#nemo-rl-training)
   - [Required patches to Gym](#required-patches-to-gym)
@@ -230,6 +231,50 @@ ng_collect_rollouts +agent_name=harbor_agent \
 ```bash
 ng_viewer +jsonl_fpath=responses_api_agents/harbor_agent/example/example_output.jsonl
 ```
+
+## BiomniBench-DA
+
+BiomniBench-DA runs through the same Harbor agent flow as Nemotron Terminal, with
+materialized task trees under `data/biomnibench_da/` (gitignored). Use Gym's venv
+from the repo root:
+
+```bash
+cd /path/to/Gym
+source .venv/bin/activate
+
+# Download HF data + materialize smoke tasks (docker + singularity profiles)
+python responses_api_agents/harbor_agent/scripts/prepare_biomnibench_da.py --smoke
+
+# Build shared runtime image (required for docker bind mode)
+responses_api_agents/harbor_agent/docker/build_biomnibench_runtime_image.sh
+```
+
+Export judge credentials before rollouts (substituted into each task's verifier env):
+
+```bash
+export JUDGE_API_KEY=...
+export JUDGE_BASE_URL=...
+export JUDGE_MODEL=...
+```
+
+Smoke rollouts (Docker profile + token-aware vLLM):
+
+```bash
+CONFIG_PATHS="responses_api_agents/harbor_agent/configs/harbor_agent_biomnibench_da_docker.yaml,\
+responses_api_models/vllm_model/configs/vllm_model_for_training.yaml"
+
+ng_run "+config_paths=[${CONFIG_PATHS}]" &
+./scripts/wait_for_servers.sh $!
+
+ng_collect_rollouts +agent_name=harbor_agent \
+  +input_jsonl_fpath=responses_api_agents/harbor_agent/example/biomnibench_da_smoke_input.jsonl \
+  +output_jsonl_fpath=/tmp/biomnibench_da_smoke_rollouts.jsonl
+```
+
+Rollout JSONL uses `instance_id` in the form `biomnibench_da::<task_name>` (for
+example `biomnibench_da::da-1-3-r001`). For HPC/Singularity, switch to
+`configs/harbor_agent_biomnibench_da_singularity.yaml` and the
+`tasks_smoke_singularity` dataset path.
 
 ## Daytona execution path
 
