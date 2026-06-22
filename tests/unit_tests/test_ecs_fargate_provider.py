@@ -47,8 +47,8 @@ def _provider_config(**overrides):
         task_role_arn="arn:aws:iam::1234:role/ecsTask",
         ssh_sidecar={
             "sshd_port": 2222,
-            "public_key_secret_arn": "arn:aws:secretsmanager:us-east-1:1234:secret:pub",
-            "private_key_secret_arn": "arn:aws:secretsmanager:us-east-1:1234:secret:priv",
+            "public_key_secret_arn": "arn:aws:secretsmanager:us-east-1:1234:secret:pub",  # pragma: allowlist secret
+            "private_key_secret_arn": "arn:aws:secretsmanager:us-east-1:1234:secret:priv",  # pragma: allowlist secret
             "exec_server_port": 5000,
         },
     )
@@ -118,8 +118,8 @@ def test_config_ssm_autodiscovery_merges_and_yaml_wins():
         "security_groups": ["sg-ssm"],
         "execution_role_arn": "arn:ssm:exec",
         "ssh_sidecar": {
-            "public_key_secret_arn": "arn:ssm:pub",
-            "private_key_secret_arn": "arn:ssm:priv",
+            "public_key_secret_arn": "arn:ssm:pub",  # pragma: allowlist secret
+            "private_key_secret_arn": "arn:ssm:priv",  # pragma: allowlist secret
             "sshd_port": 52222,
         },
     }
@@ -131,7 +131,7 @@ def test_config_ssm_autodiscovery_merges_and_yaml_wins():
     assert cfg.cluster == "ssm-cluster"  # filled from SSM
     assert cfg.subnets == ["subnet-override"]  # explicit YAML wins
     assert cfg.execution_role_arn == "arn:ssm:exec"
-    assert cfg.ssh_sidecar.public_key_secret_arn == "arn:ssm:pub"
+    assert cfg.ssh_sidecar.public_key_secret_arn == "arn:ssm:pub"  # pragma: allowlist secret
     assert cfg.ssh_sidecar.sshd_port == 52222
 
 
@@ -270,8 +270,13 @@ def _resolve_image_for(image, **cfg_overrides):
 def test_resolve_image_routes_bare_name_to_ecr_mirror():
     # Bare/public names are mirrored to the ECR tag, never pulled directly.
     ecr = "463701203462.dkr.ecr.us-east-1.amazonaws.com/harbor-us-east-1"
-    resolved = _resolve_image_for("docker.io/swebench/sweb.eval.x86_64.astropy_1776_astropy-12907:latest", ecr_repository=ecr)
-    assert resolved == f"{ecr}:{engine._sanitize_id('docker.io/swebench/sweb.eval.x86_64.astropy_1776_astropy-12907:latest')}"
+    resolved = _resolve_image_for(
+        "docker.io/swebench/sweb.eval.x86_64.astropy_1776_astropy-12907:latest", ecr_repository=ecr
+    )
+    assert (
+        resolved
+        == f"{ecr}:{engine._sanitize_id('docker.io/swebench/sweb.eval.x86_64.astropy_1776_astropy-12907:latest')}"
+    )
     assert "docker.io" not in resolved.split(":", 1)[1]  # origin registry not used for the pull
 
 
@@ -285,9 +290,7 @@ def test_resolve_image_passes_through_existing_ecr_ref():
 
 def test_resolve_image_template_takes_precedence():
     ecr = "463701203462.dkr.ecr.us-east-1.amazonaws.com/harbor-us-east-1"
-    resolved = _resolve_image_for(
-        "anything", ecr_repository=ecr, image_template="{task_id}-built"
-    )
+    resolved = _resolve_image_for("anything", ecr_repository=ecr, image_template="{task_id}-built")
     assert resolved == "anything-built"
 
 
@@ -301,7 +304,7 @@ def test_generate_mirror_buildspec_pulls_tags_and_pushes():
     cfg = engine.EcsFargateConfig(
         region="us-east-1",
         ecr_repository="123.dkr.ecr.us-east-1.amazonaws.com/mirror",
-        dockerhub_secret_arn="arn:aws:secretsmanager:us-east-1:123:secret:dh",
+        dockerhub_secret_arn="arn:aws:secretsmanager:us-east-1:123:secret:dh",  # pragma: allowlist secret
     )
     src = "docker.io/swebench/sweb.eval.x86_64.astropy_1776_astropy-12907:latest"
     ecr_url = f"{cfg.ecr_repository}:{engine._sanitize_id(src)}"
