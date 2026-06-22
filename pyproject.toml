@@ -136,10 +136,10 @@ dependencies = [
 
     # mlflow-skinny: used for interacting with the Gitlab model registry. We use the "skinny" version that does not have unnecessary dependencies.
     # mlflow dependency is necessary for importing. However, all of mlflow's dependencies that don't overlap with mlflow-skinny are excluded below.
-    # Updated Mon May 19, 2026 with mlflow>=3.12.0 (CVE remediation)
+    # Updated Sun Jun 22, 2026 with mlflow>=3.14.0 (CVE remediation)
     # License: Apache 2.0 https://github.com/mlflow/mlflow/blob/c6ce84e817897e1a0461632f8a06d4e5e4ac3726/LICENSE.txt
-    "mlflow-skinny>=3.12.0",
-    "mlflow>=3.12.0",
+    "mlflow-skinny>=3.14.0",
+    "mlflow>=3.14.0",
 
     # aiohttp: async http backend
     # Updated Mon Feb 10, 2026 with aiohttp>=3.13.3
@@ -266,6 +266,12 @@ build-backend = "setuptools.build_meta"
 [tool.uv]
 managed = true
 required-version = ">=0.9.30"
+# grpcio is a transitive dependency of ray. Pin the lower bound here to
+# ensure uv selects a CVE-safe version across all resolver paths.
+# Updated Sun Jun 22, 2026 (CVE remediation)
+constraint-dependencies = [
+    "grpcio>=1.81.0rc1",
+]
 exclude-dependencies = [
     # Exclude unwanted dependencies from mlflow
     "alembic",
