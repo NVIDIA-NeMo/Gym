@@ -259,6 +259,23 @@ dev = [
     "requests-mock",
 ]
 
+# Decontamination: optional extra for `ng_prepare_data` data decontamination
+# (semantic similarity retrieval). Kept out of the base install since it pulls in
+# torch; only needed when running with `+decontamination.test_set_jsonls=[...]`.
+# NOTE: we use transformers (not sentence-transformers) for embeddings because
+# sentence-transformers hard-imports scikit-learn/scipy, which this repo deliberately
+# excludes from resolution (see [tool.uv] exclude-dependencies) to keep mlflow slim.
+decontamination = [
+    # transformers: loads the embedding model used for nearest-neighbor contamination
+    # retrieval (mean-pooled token embeddings). Pulls in torch.
+    # Pinned <5 because transformers 5.x imports scikit-learn unconditionally, and
+    # scikit-learn/scipy are excluded from resolution (see [tool.uv] exclude-dependencies)
+    # to keep the base mlflow install slim. transformers 4.x guards the sklearn import.
+    # License: Apache 2.0 https://github.com/huggingface/transformers/blob/main/LICENSE
+    "transformers<5",
+    "torch",
+]
+
 [build-system]
 requires = ["setuptools>=61", "setuptools-scm"]
 build-backend = "setuptools.build_meta"
