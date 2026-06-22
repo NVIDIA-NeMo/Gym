@@ -20,6 +20,7 @@ from pytest import MonkeyPatch
 
 import nemo_gym.cli.main as cli_main
 import nemo_gym.global_config as gc
+from nemo_gym import WORKING_DIR
 from nemo_gym.cli.main import main
 from nemo_gym.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME
 
@@ -591,7 +592,7 @@ class TestAssetSelectors:
     )
     def test_name_resolves_to_config_path(self, monkeypatch: MonkeyPatch, argv, expected_config) -> None:
         _, overrides = _dispatch_for(monkeypatch, argv)
-        assert overrides == [f"+config_paths=[{expected_config}]"]
+        assert overrides == [f"+config_paths=[{WORKING_DIR / (expected_config)}]"]
 
     def test_quickstart_resource_server_plus_model(self, monkeypatch: MonkeyPatch) -> None:
         # README.md / quickstart.mdx:
@@ -603,8 +604,8 @@ class TestAssetSelectors:
         assert target == "nemo_gym.cli.env:run"
         paths, others = _split_overrides(overrides)
         assert paths == {
-            "resources_servers/mcqa/configs/mcqa.yaml",
-            "responses_api_models/openai_model/configs/openai_model.yaml",
+            str(WORKING_DIR / "resources_servers/mcqa/configs/mcqa.yaml"),
+            str(WORKING_DIR / "responses_api_models/openai_model/configs/openai_model.yaml"),
         }
         assert others == set()
 
@@ -614,8 +615,8 @@ class TestAssetSelectors:
         _, overrides = _dispatch_for(monkeypatch, ["eval", "run", "--benchmark", "gpqa", "--model-type", "vllm_model"])
         paths, others = _split_overrides(overrides)
         assert paths == {
-            "benchmarks/gpqa/config.yaml",
-            "responses_api_models/vllm_model/configs/vllm_model.yaml",
+            str(WORKING_DIR / "benchmarks/gpqa/config.yaml"),
+            str(WORKING_DIR / "responses_api_models/vllm_model/configs/vllm_model.yaml"),
         }
         assert others == set()
 
@@ -643,8 +644,8 @@ class TestAssetSelectors:
         assert target == "nemo_gym.cli.eval:e2e_rollout_collection"
         paths, others = _split_overrides(overrides)
         assert paths == {
-            "resources_servers/math_with_judge/configs/math_with_judge.yaml",
-            "responses_api_models/openai_model/configs/openai_model.yaml",
+            str(WORKING_DIR / "resources_servers/math_with_judge/configs/math_with_judge.yaml"),
+            str(WORKING_DIR / "responses_api_models/openai_model/configs/openai_model.yaml"),
         }
         assert others == {
             "+output_jsonl_fpath=results/test_e2e_rollout_collection/aime24.jsonl",
@@ -670,7 +671,7 @@ class TestAssetSelectors:
         )
         assert target == "nemo_gym.cli.dataset:prepare_data"
         paths, others = _split_overrides(overrides)
-        assert paths == {"resources_servers/example_multi_step/configs/example_multi_step.yaml"}
+        assert paths == {str(WORKING_DIR / "resources_servers/example_multi_step/configs/example_multi_step.yaml")}
         assert others == {
             "+mode=example_validation",
             "+output_dirpath=data/example_multi_step",
@@ -680,7 +681,9 @@ class TestAssetSelectors:
         # `<server>/<flavor>` picks a named config inside the server's configs/ dir; math_with_judge ships several
         # flavoured configs (see reference/faq.mdx, which pairs a math_with_judge dataset flavour for profiling).
         _, overrides = _dispatch_for(monkeypatch, ["eval", "run", "--resource-server", "math_with_judge/dapo17k"])
-        assert overrides == ["+config_paths=[resources_servers/math_with_judge/configs/dapo17k.yaml]"]
+        assert overrides == [
+            f"+config_paths=[{WORKING_DIR / 'resources_servers/math_with_judge/configs/dapo17k.yaml'}]"
+        ]
 
     def test_benchmark_flavor_syntax(self, monkeypatch: MonkeyPatch) -> None:
         # Benchmarks are flavoured too: flavor is a sibling `<flavor>.yaml` (no configs/ dir), default `config`.
@@ -688,7 +691,7 @@ class TestAssetSelectors:
         _, overrides = _dispatch_for(
             monkeypatch, ["eval", "prepare", "--benchmark", "finance_sec_search/config_web_search"]
         )
-        assert overrides == ["+config_paths=[benchmarks/finance_sec_search/config_web_search.yaml]"]
+        assert overrides == [f"+config_paths=[{WORKING_DIR / 'benchmarks/finance_sec_search/config_web_search.yaml'}]"]
 
     def test_selectors_merge_into_single_config_paths(self, monkeypatch: MonkeyPatch) -> None:
         # --config and multiple asset selectors all feed one +config_paths list (Hydra rejects duplicates).
@@ -699,9 +702,9 @@ class TestAssetSelectors:
         )
         paths, others = _split_overrides(overrides)
         assert paths == {
-            "extra.yaml",
-            "resources_servers/mcqa/configs/mcqa.yaml",
-            "responses_api_models/openai_model/configs/openai_model.yaml",
+            "extra.yaml",  # raw --config value passes through verbatim; only name selectors get rooted
+            str(WORKING_DIR / "resources_servers/mcqa/configs/mcqa.yaml"),
+            str(WORKING_DIR / "responses_api_models/openai_model/configs/openai_model.yaml"),
         }
         assert others == set()
 
@@ -770,3 +773,56 @@ class TestDidYouMean:
             monkeypatch, capsys, ["eval", "run", "--resource-server", "math_with_judge/dapo17"]
         )
         assert "Did you mean `dapo17k`?" in err
+
+
+class TestSearchDir:
+    """--search-dir registers extra roots that the name->config selectors also search (REQ 5)."""
+
+    def _make_user_benchmark(self, tmp_path, name: str = "mybench") -> None:
+        bench_dir = tmp_path / "benchmarks" / name
+        bench_dir.mkdir(parents=True)
+        (bench_dir / "config.yaml").write_text("{}\n")
+
+    def test_resolves_component_from_user_dir(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        self._make_user_benchmark(tmp_path)
+        _, overrides = _dispatch_for(
+            monkeypatch, ["eval", "prepare", "--benchmark", "mybench", "--search-dir", str(tmp_path)]
+        )
+        # User-dir matches are returned rooted so Hydra can resolve them.
+        assert overrides == [f"+config_paths=[{tmp_path / 'benchmarks' / 'mybench' / 'config.yaml'}]"]
+
+    def test_builtin_resolves_when_search_dir_lacks_it(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        # A built-in still resolves under WORKING_DIR when a --search-dir is provided that does not shadow it.
+        _, overrides = _dispatch_for(
+            monkeypatch, ["eval", "prepare", "--benchmark", "gsm8k", "--search-dir", str(tmp_path)]
+        )
+        assert overrides == [f"+config_paths=[{WORKING_DIR / 'benchmarks/gsm8k/config.yaml'}]"]
+
+    def test_ambiguous_match_errors(self, monkeypatch: MonkeyPatch, tmp_path, capsys) -> None:
+        # A built-in name also present in a --search-dir is ambiguous; the user must disambiguate with --config.
+        self._make_user_benchmark(tmp_path, name="gsm8k")  # gsm8k also exists under WORKING_DIR
+        monkeypatch.setattr(cli_main, "dispatch", lambda target, overrides: None)
+        monkeypatch.setattr(
+            sys, "argv", ["gym", "eval", "prepare", "--benchmark", "gsm8k", "--search-dir", str(tmp_path)]
+        )
+        with pytest.raises(SystemExit):
+            main()
+        err = capsys.readouterr().err
+        assert "ambiguous" in err
+        assert str(WORKING_DIR / "benchmarks" / "gsm8k" / "config.yaml") in err
+        assert str(tmp_path / "benchmarks" / "gsm8k" / "config.yaml") in err
+
+    def test_search_dir_alone_emits_nothing(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        # --search-dir is consumed by the selectors; on its own it is not a Hydra override.
+        _, overrides = _dispatch_for(monkeypatch, ["eval", "prepare", "--search-dir", str(tmp_path)])
+        assert overrides == []
+
+    def test_did_you_mean_spans_user_dir(self, monkeypatch: MonkeyPatch, tmp_path, capsys) -> None:
+        self._make_user_benchmark(tmp_path)
+        monkeypatch.setattr(cli_main, "dispatch", lambda target, overrides: None)
+        monkeypatch.setattr(
+            sys, "argv", ["gym", "eval", "prepare", "--benchmark", "mybnch", "--search-dir", str(tmp_path)]
+        )
+        with pytest.raises(SystemExit):
+            main()
+        assert "Did you mean `mybench`?" in capsys.readouterr().err

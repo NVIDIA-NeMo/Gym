@@ -19,6 +19,7 @@ import re
 import sys
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from nemo_gym import WORKING_DIR
 
@@ -141,29 +142,55 @@ _ASSETS = {
 }
 
 
-def _asset_config_path(flag: str, value: str) -> str:
-    """Map a named asset (`name` or `name/flavor`) to its config path, verifying the file exists under WORKING_DIR."""
+def _asset_config_path(flag: str, value: str, search_dirs: tuple[str, ...] = ()) -> str:
+    """Map a named asset (`name` or `name/flavor`) to its config path.
+
+    Searches WORKING_DIR (built-ins) first, then any user-registered --search-dir roots.
+    """
     parent, subdir, default_flavor = _ASSETS[flag]
     server_name, _, config_flavor = value.partition("/")
     config_flavor = config_flavor or default_flavor or server_name
     config_dir = f"{parent}/{server_name}/{subdir}".rstrip("/")
     path = f"{config_dir}/{config_flavor}.yaml"
 
-    if (WORKING_DIR / path).exists():
-        return path
+    # Match in WORKING_DIR (built-ins) and every --search-dir root; dedupe roots that resolve to the same file.
+    roots = [WORKING_DIR, *(Path(d) for d in search_dirs)]
+    matches: list[Path] = []
 
-    # Suggest the closest real name: a config flavor when the server exists, otherwise a server name.
-    if (WORKING_DIR / parent / server_name).exists():
-        available = f"{config_dir}/"
-        typo = config_flavor
-        candidates = [p.stem for p in (WORKING_DIR / config_dir).glob("*.yaml")]
-    else:
-        available = f"{parent}/"
+    for root in roots:
+        candidate = root / path
+        if candidate.exists():
+            matches.append(candidate.resolve())
+
+    if len(matches) > 1:
+        matches_str = ", ".join(f"`{m}`" for m in matches)
+        raise ValueError(
+            f"`--{flag} {value}` is ambiguous: it matches multiple configs ({matches_str}). "
+            f"Pass the intended config directly with `--config <path>` instead."
+        )
+    if matches:
+        return str(matches[0])
+
+    # No match: suggest the closest real name across all roots (a config flavor when the server exists, else a
+    # server name) and report the full paths that were searched.
+    available = ", ".join(set(f"`{(root / config_dir).resolve()}`" for root in roots if (root / config_dir).is_dir()))
+    typo = config_flavor
+    candidates = [p.stem for root in roots for p in (root / config_dir).glob("*.yaml")]
+
+    if len(candidates) == 0:
+        available = ", ".join(set(f"`{(root / parent).resolve()}`" for root in roots if (root / parent).is_dir()))
         typo = server_name
-        candidates = [child.name for child in (WORKING_DIR / parent).iterdir() if child.is_dir()]
+        candidates = [
+            child.name
+            for root in roots
+            if (root / parent).is_dir()
+            for child in (root / parent).iterdir()
+            if child.is_dir()
+        ]
+
     raise ValueError(
         f"`--{flag} {value}` was specified which implies config `{path}`, which does not exist.{_did_you_mean(typo, candidates)} "
-        f"See available {flag} configs in `{available}`."
+        f"See available {flag} configs in {available}."
     )
 
 
@@ -173,7 +200,11 @@ def _asset_selector(flag: str) -> Flag:
     return Flag(
         register=lambda p: p.add_argument(f"--{flag}", metavar="NAME", help=f"Load the named {flag} config."),
         translate_to_hydra=lambda args: (
-            [f"+config_paths=[{_asset_config_path(flag, getattr(args, dest))}]"] if getattr(args, dest) else []
+            [
+                f"+config_paths=[{_asset_config_path(flag, getattr(args, dest), tuple(getattr(args, 'search_dir', None) or ()))}]"
+            ]
+            if getattr(args, dest)
+            else []
         ),
     )
 
@@ -181,6 +212,17 @@ def _asset_selector(flag: str) -> Flag:
 BENCHMARK = _asset_selector("benchmark")
 RESOURCE_SERVER_CONFIG = _asset_selector("resource-server")
 MODEL_TYPE = _asset_selector("model-type")
+
+# Shared flag: register extra root dirs to search for named components. Consumed by the asset selectors above
+# (not emitted as a Hydra override). Reused by every command that accepts a --<component type> NAME selector.
+SEARCH_DIR = Flag(
+    register=lambda p: p.add_argument(
+        "--search-dir",
+        action="append",
+        metavar="DIR",
+        help="Extra root directory to search for named components; repeatable.",
+    ),
+)
 
 
 def _merge_config_paths(overrides: list[str]) -> list[str]:
@@ -310,6 +352,7 @@ COMMANDS = {
         flags=(
             CONFIG,
             RESOURCE_SERVER_CONFIG,
+            SEARCH_DIR,
             _value_flag("mode", "mode", "Data preparation mode.", choices=("train_preparation", "example_validation")),
             _value_flag("output-dir", "output_dirpath", "Output directory for the prepared data."),
             _bool_flag("download", "should_download", "Download source datasets before collating."),
@@ -347,13 +390,13 @@ COMMANDS = {
     "env run": Command(
         target="nemo_gym.cli.env:run",
         summary="Start the servers.",
-        flags=(CONFIG, RESOURCE_SERVER_CONFIG, MODEL_TYPE, MODEL_NAME, MODEL_URL, MODEL_API_KEY),
+        flags=(CONFIG, RESOURCE_SERVER_CONFIG, MODEL_TYPE, SEARCH_DIR, MODEL_NAME, MODEL_URL, MODEL_API_KEY),
     ),
     "env status": Command(target="nemo_gym.cli.env:status", summary="Print the server status.", flags=(JSON,)),
     "eval prepare": Command(
         target="nemo_gym.cli.eval:prepare_benchmark",
         summary="Prepare benchmark data and dump it to disk.",
-        flags=(CONFIG, BENCHMARK),
+        flags=(CONFIG, BENCHMARK, SEARCH_DIR),
     ),
     "eval run": Command(
         target=_eval_run,
@@ -363,6 +406,7 @@ COMMANDS = {
             BENCHMARK,
             RESOURCE_SERVER_CONFIG,
             MODEL_TYPE,
+            SEARCH_DIR,
             Flag(
                 register=lambda p: p.add_argument(
                     "--no-serve",
