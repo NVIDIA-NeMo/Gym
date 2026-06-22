@@ -1,0 +1,49 @@
+# Stand-alone stirrup_agent config. The canonical entry point for GDPVal is
+# ``benchmarks/gdpval/config.yaml`` which composes this agent with the GDPVal
+# resources server and supports ``ng_prepare_benchmark`` +
+# ``ng_e2e_collect_rollouts``.
+#
+# To add a new task (e.g. "my_bench"), create a TaskStrategy subclass in
+# responses_api_agents/stirrup_agent/tasks/my_bench.py, register it in
+# stirrup_agent/app.py:_load_task_registry(), and set task: my_bench below.
+stirrup_agent:
+  responses_api_agents:
+    stirrup_agent:
+      entrypoint: app.py
+
+      # Which task strategy to use
+      task: gdpval
+
+      # Stirrup agent configuration
+      agent_max_turns: 100
+      concurrency: 32
+      temperature: 1.0
+
+      # Prompt templates (set via --export in sbatch or CLI override)
+      system_prompt_template: ???
+      user_prompt_template: ???
+
+      # Apptainer container for isolated code execution (optional).
+      # Set to path of GDPVal .sif to enable containerized execution.
+      # When null, uses local sandbox (default for dev/testing).
+      gdpval_container_path: null
+
+      # Where the agent persists deliverables for the resources server to score.
+      # When null, deliverables are not persisted and the resources server
+      # falls back to ``response.output_text``.
+      persist_deliverables_dir: null
+
+      # Resources server reference (scores deliverables via /verify).
+      resources_server:
+        type: resources_servers
+        name: gdpval_resources_server
+
+      # Model server reference (the policy model the Stirrup agent drives).
+      model_server:
+        name: policy_model
+        type: responses_api_models
+
+      datasets:
+        - name: gdpval_gold
+          type: example
+          jsonl_fpath: responses_api_agents/stirrup_agent/data/gdpval.jsonl

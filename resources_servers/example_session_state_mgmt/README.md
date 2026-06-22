@@ -7,7 +7,7 @@ python create_examples.py
 
 ## Tutorial
 
-For an annotated walkthrough of per-episode session state and `SESSION_ID_KEY`, see the [Stateful Environment](https://docs.nvidia.com/nemo/gym/latest/environment-tutorials/stateful-environment.html) tutorial.
+For an annotated walkthrough of per-episode session state and `SESSION_ID_KEY`, see the [Stateful Environment](https://docs.nvidia.com/nemo/gym/main/environment-tutorials/stateful-environment) tutorial.
 
 # Licensing information
 Code: Apache 2.0

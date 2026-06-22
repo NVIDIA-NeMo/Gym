@@ -73,6 +73,10 @@ def prepare() -> Path:
         row = {
             "question": example["Question"],
             "options_text": options_text,
+            # `problem` mirrors the field name NeMo Skills' MCQ prompts use
+            # (eval/aai/mcq-Nchoices), so the shared prompt yaml can reference
+            # the canonical `{problem}` placeholder without per-benchmark drift.
+            "problem": f"{example['Question']}\n{options_text}",
             "options": options,
             "expected_answer": correct_letter,
             "uuid": str(uuid.uuid5(uuid.NAMESPACE_URL, example["Question"])),

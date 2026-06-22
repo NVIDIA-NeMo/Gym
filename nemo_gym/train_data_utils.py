@@ -410,10 +410,10 @@ class TrainDataProcessor(BaseModel):
             server_names_list_str += f"{server_str}{datasets_str}"
         print(f"In scope dataset types for `{config.mode}` mode: {in_scope_dataset_types}")
         print(
-            f"Found {len(agent_configs_with_data)} agent server instance configs with in-scope datasets:{server_names_list_str}"
+            f"Found {len(agent_configs_with_in_scope_datasets)} agent server instance configs with in-scope datasets:{server_names_list_str}"
         )
 
-        return agent_configs_with_data
+        return agent_configs_with_in_scope_datasets
 
     def load_datasets(
         self,

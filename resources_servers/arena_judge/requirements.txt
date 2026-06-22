@@ -1,0 +1,11 @@
+-e nemo-gym[dev] @ ../../
+# Arena-Elo (MLE + bootstrap) scoring in compute_metrics().
+# scipy / joblib / threadpoolctl are sklearn's runtime deps — pinned
+# explicitly because uv pip install -r requirements.txt doesn't always
+# pull them as transitives in this server's venv.
+numpy
+scipy
+joblib
+threadpoolctl
+pandas
+scikit-learn

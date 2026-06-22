@@ -1,0 +1,66 @@
+# GDPVal benchmark — Stirrup agent + GDPVal resources server.
+#
+# Run:
+#   ng_prepare_benchmark "+config_paths=[benchmarks/gdpval/config.yaml]"
+#   ng_e2e_collect_rollouts \
+#     "+config_paths=[responses_api_models/vllm_model/configs/vllm_model.yaml,benchmarks/gdpval/config.yaml]" \
+#     ++split=benchmark \
+#     ++output_jsonl_fpath=results/gdpval.jsonl
+#
+# Comparison mode (pairwise ELO vs a reference model's deliverables):
+#   ++gdpval_resources_server.resources_servers.gdpval.reward_mode=comparison \
+#   ++gdpval_resources_server.resources_servers.gdpval.reference_deliverables_dir=/path/to/fork
+
+# Judge model — proxy to NVIDIA inference API for Gemini 3.1 Pro.
+gdpval_judge_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${oc.env:JUDGE_BASE_URL,https://inference-api.nvidia.com/v1}
+      openai_api_key: ${oc.env:JUDGE_API_KEY,dummy}
+      openai_model: ${oc.env:JUDGE_MODEL_NAME,gcp/google/gemini-3.1-pro-preview}
+
+# GDPVal resources server (rubric scoring by default; switch to comparison via override).
+gdpval_resources_server:
+  resources_servers:
+    gdpval:
+      entrypoint: app.py
+      domain: other
+      verified: false
+      reward_mode: rubric
+      reference_deliverables_dir: null
+      num_comparison_trials: 4
+      reference_elo: 1000.0
+      preconvert_office_to_pdf: true
+      preconvert_max_concurrent: 1
+      judge_model_server:
+        type: responses_api_models
+        name: gdpval_judge_model
+      judge_responses_create_params_overrides: {}
+
+# Stirrup agent paired with the resources server above.
+gdpval_stirrup_agent:
+  responses_api_agents:
+    stirrup_agent:
+      entrypoint: app.py
+      task: gdpval
+      agent_max_turns: 100
+      concurrency: 32
+      temperature: 1.0
+      system_prompt_template: ${oc.env:SYSTEM_PROMPT_TEMPLATE,null}
+      user_prompt_template: ${oc.env:USER_PROMPT_TEMPLATE,null}
+      gdpval_container_path: ${oc.env:GDPVAL_CONTAINER_PATH,null}
+      persist_deliverables_dir: ${oc.env:PERSIST_DELIVERABLES_DIR,output/gdpval/deliverables}
+      resources_server:
+        type: resources_servers
+        name: gdpval_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+        - name: gdpval
+          type: benchmark
+          jsonl_fpath: benchmarks/gdpval/data/gdpval_benchmark.jsonl
+          prompt_config: null
+          prepare_script: benchmarks/gdpval/prepare.py
+          num_repeats: 2

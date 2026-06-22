@@ -15,6 +15,7 @@
 from argparse import ArgumentParser
 from collections import defaultdict
 from copy import deepcopy
+from difflib import get_close_matches
 from importlib import import_module
 from os import environ, getenv
 from pathlib import Path
@@ -33,9 +34,10 @@ from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 from ray import __version__ as ray_version
 from wandb import Run
 
-from nemo_gym import CACHE_DIR, PARENT_DIR, RESULTS_DIR
+from nemo_gym import CACHE_DIR, PARENT_DIR, RESULTS_DIR, WORKING_DIR
 from nemo_gym.config_types import (
     ServerInstanceConfig,
+    ServerRefNotFoundError,
     WANDBConfig,
     is_almost_server,
     is_server_ref,
@@ -118,7 +120,7 @@ def get_wandb_run() -> Optional[Run]:
 
 
 # HuggingFace
-def get_hf_token() -> Optional[str]:
+def get_hf_token() -> Optional[str]:  # pragma: no cover
     return get_global_config_dict().get(HF_TOKEN_KEY_NAME)
 
 
@@ -253,14 +255,23 @@ Duplicate config paths:
             run_server_config_dict = server_instance_config.get_inner_run_server_config_dict()
 
             # Check server refs
-            for v in run_server_config_dict.values():
+            for field_name, v in run_server_config_dict.items():
                 maybe_server_ref = is_server_ref(v)
                 if not maybe_server_ref:
                     continue
 
-                assert maybe_server_ref in server_refs, (
-                    f"Could not find {maybe_server_ref} in the list of available servers: {server_refs}"
-                )
+                if maybe_server_ref not in server_refs:
+                    same_type_names = [ref.name for ref in server_refs if ref.type == maybe_server_ref.type]
+                    suggestions = get_close_matches(maybe_server_ref.name, same_type_names, n=3, cutoff=0.6)
+                    if suggestions:
+                        hint = "Did you mean: " + ", ".join(repr(s) for s in suggestions) + "?"
+                    else:
+                        available = ", ".join(repr(n) for n in sorted(same_type_names)) or "(none)"
+                        hint = f"Available {maybe_server_ref.type}: {available}"
+                    raise ServerRefNotFoundError(
+                        f"""In server instance '{server_instance_config.name}', field '{field_name}' references {maybe_server_ref.type}/'{maybe_server_ref.name}', which is not defined in the merged config.
+{hint}"""
+                    )
 
             # Populate the host and port values if they are not present in the config.
             with open_dict(run_server_config_dict):
@@ -425,6 +436,8 @@ Duplicate config paths:
             with open_dict(global_config_dict):
                 global_config_dict[CONFIG_PATHS_KEY_NAME] = config_paths
 
+        self._recursively_swap_keys(global_config_dict)
+
         # TODO @bxyu-nvidia: We need a better way of handling dummy model configs
         with open_dict(global_config_dict):
             for top_level_value in global_config_dict.values():
@@ -437,9 +450,11 @@ Duplicate config paths:
                 ):
                     continue
 
-                top_level_value["responses_api_models"].pop("dummy_model")
-
-        self._recursively_swap_keys(global_config_dict)
+                dummy_value = top_level_value["responses_api_models"].pop("dummy_model")
+                actual_key = next(iter(top_level_value["responses_api_models"]))
+                top_level_value["responses_api_models"][actual_key] = OmegaConf.merge(
+                    dummy_value, top_level_value["responses_api_models"][actual_key]
+                )
 
         # Almost-server detection and reporting
         almost_servers = self.detect_and_report_almost_servers(global_config_dict)
@@ -527,10 +542,10 @@ Found global config dict yaml:
             # Set the appropriate environment variable here, and matche the config
             environ["UV_CACHE_DIR"] = global_config_dict[UV_CACHE_DIR_KEY_NAME]
             # By default, build the directories in their individual folders using the root repository
-            # e.g. PARENT_DIR/responses_api_models/my_server
-            global_config_dict.setdefault(UV_VENV_DIR_KEY_NAME, str(PARENT_DIR))
+            # e.g. WORKING_DIR/responses_api_models/my_server
+            global_config_dict.setdefault(UV_VENV_DIR_KEY_NAME, str(WORKING_DIR))
 
-        if parse_config.hide_secrets:
+        if parse_config.hide_secrets:  # pragma: no cover
             self._recursively_hide_secrets(global_config_dict)
 
         # Set up W&B and log config. This must happen at the very last step.
@@ -716,7 +731,7 @@ def format_almost_server_warning(server_name: str, error: ValidationError) -> st
             break
 
     # Fallback: if all errors are "missing", check the input dict for the actual server type.
-    if not actual_server_type:
+    if not actual_server_type:  # pragma: no cover
         for err in errors:
             if "input" in err and isinstance(err["input"], dict):
                 for key in server_type_keys:

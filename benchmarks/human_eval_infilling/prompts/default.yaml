@@ -1,0 +1,28 @@
+user: |-
+  ### Instruction:
+
+  You are given an incomplete code snippet, consisting of a prefix (the code before the missing part) and a suffix (the code after the missing part). Your task is to generate only the missing segment of the code such that the complete code (prefix + missing_segment + suffix) is valid and logically consistent.
+
+  <GUIDELINES>
+  - Do not repeat the prefix or suffix in your answer.
+  - Output only the missing code segment.
+  - Keep proper indentation consistent with the given prefix and suffix.
+  </GUIDELINES>
+
+  ### Prefix
+
+  ```{language}
+  {prefix}
+  ```
+
+  ### Suffix
+
+  ```{language}
+  {suffix}
+  ```
+
+  ### Answer
+
+  ```{language}
+  {comment_delimiter} missing code here
+  ```

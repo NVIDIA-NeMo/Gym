@@ -1,0 +1,60 @@
+{
+    "name": "example",
+    "type": "example",
+    "jsonl_fpath": "resources_servers/mrcr/data/example.jsonl",
+    "num_repeats": 1,
+    "gitlab_identifier": null,
+    "huggingface_identifier": null,
+    "license": null,
+    "Number of examples": 5,
+    "Number of tools": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 5,
+        "Average": 113.4,
+        "Min": 71.0,
+        "Max": 151.0,
+        "Standard deviation": 34.62
+    },
+    "Number of turns": {
+        "Total # non-null values": 5,
+        "Average": 4.8,
+        "Min": 3.0,
+        "Max": 7.0,
+        "Standard deviation": 1.48
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "expected_answer": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "random_string_to_prepend": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "n_needles": {
+        "Total # non-null values": 5,
+        "Average": 2.4,
+        "Min": 2.0,
+        "Max": 4.0,
+        "Standard deviation": 0.894
+    },
+    "n_tokens": {
+        "Total # non-null values": 5,
+        "Average": 254.0,
+        "Min": 180.0,
+        "Max": 320.0,
+        "Standard deviation": 55.5
+    }
+}

@@ -6,7 +6,7 @@ This is a demonstration example of a multi-step extraction agent. The LLM will b
 
 ## Tutorial
 
-For an annotated walkthrough of this server's tools and verification logic, see the [Multi-Step Environment](https://docs.nvidia.com/nemo/gym/latest/environment-tutorials/multi-step-environment.html) tutorial.
+For an annotated walkthrough of this server's tools and verification logic, see the [Multi-Step Environment](https://docs.nvidia.com/nemo/gym/main/environment-tutorials/multi-step-environment) tutorial.
 
 # Licensing information
 Code: Apache 2.0

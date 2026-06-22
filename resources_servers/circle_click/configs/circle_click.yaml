@@ -4,6 +4,7 @@ circle_click:
       entrypoint: app.py
       domain: other
       description: Click on circles in images
+      value: Improve visual grounding and spatial reasoning
       verified: false
 circle_click_simple_agent:
   responses_api_agents:

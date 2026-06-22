@@ -136,10 +136,10 @@ dependencies = [
 
     # mlflow-skinny: used for interacting with the Gitlab model registry. We use the "skinny" version that does not have unnecessary dependencies.
     # mlflow dependency is necessary for importing. However, all of mlflow's dependencies that don't overlap with mlflow-skinny are excluded below.
-    # Updated Tue Feb 17, 2026 with mlflow-skinny==3.9.0
+    # Updated Mon May 19, 2026 with mlflow>=3.12.0 (CVE remediation)
     # License: Apache 2.0 https://github.com/mlflow/mlflow/blob/c6ce84e817897e1a0461632f8a06d4e5e4ac3726/LICENSE.txt
-    "mlflow-skinny",
-    "mlflow",
+    "mlflow-skinny>=3.12.0",
+    "mlflow>=3.12.0",
 
     # aiohttp: async http backend
     # Updated Mon Feb 10, 2026 with aiohttp>=3.13.3
@@ -152,10 +152,10 @@ dependencies = [
     "yappi",
 
     # Ray: Used for distributed processing
-    # Updated Mon Feb 10, 2026 with ray[default]==2.52.1 in uv.lock
-    # Security: Requires ray>=2.52.0 (currently resolves to 2.52.1 naturally)
+    # Updated Mon May 19, 2026 with ray[default]>=2.55.1
+    # Security: Requires ray>=2.55.1 (CVE remediation)
     # License: Apache 2.0 https://github.com/ray-project/ray/blob/master/LICENSE
-    "ray[default]",
+    "ray[default]>=2.55.1",
 
     # psutil: Cross-platform process and system utilities
     # Updated: Fri Nov 07, 2025 with psutil==6.1.1
@@ -173,9 +173,9 @@ dependencies = [
     "orjson",
 
     # urllib3: HTTP client library (transitive dependency, pinned for security)
-    # Updated: Mon Feb 10, 2026 with urllib3>=2.6.3
+    # Updated: Mon May 19, 2026 with urllib3>=2.7.0
     # License: MIT https://github.com/urllib3/urllib3/blob/main/LICENSE.txt
-    "urllib3>=2.6.3",
+    "urllib3>=2.7.0",
 
     # fonttools: Library to manipulate font files (transitive dependency, pinned for security)
     # Updated: Mon Feb 10, 2026 with fonttools>=4.60.2
@@ -188,9 +188,14 @@ dependencies = [
     "python-multipart>=0.0.22",
 
     # wandb: E2E rollout collection data and metrics upload
-    # Updated: Tue Feb 17, 2026 with wandb==0.25.0
+    # Updated: Mon May 19, 2026 with wandb==0.27.0
     # License: MIT https://github.com/wandb/wandb/blob/f8acf479342b6aa8217dd0833bb32190b11c14bc/LICENSE
     "wandb",
+
+    # GitPython: Git interaction library (transitive dependency of wandb, pinned for security)
+    # Updated: Mon May 19, 2026 with GitPython>=3.1.50
+    # License: BSD 3-Clause https://github.com/gitpython-developers/GitPython/blob/main/LICENSE
+    "GitPython>=3.1.50",
 
     # gprof2dot and pydot: Used for outputting dot graphs for profiling.
     # Updated: Wed Feb 25, 2026 with gprof2dot==2025.4.14 and pydot==4.0.1
@@ -291,6 +296,9 @@ exclude-dependencies = [
     "waitress",
 ]
 
+[tool.setuptools.package-data]
+nemo_gym = ["resources/*.py"]
+
 [tool.setuptools.dynamic]
 version = {attr = "nemo_gym.__version__"}
 readme = {file = "README.md", content-type = "text/markdown"}
@@ -328,6 +336,8 @@ nemo_gym_collect_rollouts = "nemo_gym.rollout_collection:collect_rollouts"
 ng_collect_rollouts = "nemo_gym.rollout_collection:collect_rollouts"
 nemo_gym_e2e_collect_rollouts = "nemo_gym.cli:e2e_rollout_collection"
 ng_e2e_collect_rollouts = "nemo_gym.cli:e2e_rollout_collection"
+nemo_gym_aggregate_rollouts = "nemo_gym.rollout_collection:aggregate_rollouts"
+ng_aggregate_rollouts = "nemo_gym.rollout_collection:aggregate_rollouts"
 
 # Prompt materialization
 nemo_gym_materialize_prompts = "nemo_gym.prompt:materialize_prompts_cli"
@@ -438,6 +448,7 @@ omit = [
     "results/*",
     "/tmp/*",
     "benchmarks/*",
+    "environments/*/prepare.py",
 ]
 data_file = "results/.coverage"
 concurrency = ["thread", "multiprocessing"]

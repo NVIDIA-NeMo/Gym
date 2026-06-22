@@ -1,0 +1,14 @@
+config_paths:
+  - resources_servers/mcqa/configs/mcqa.yaml
+
+longbench_v2_mcqa_simple_agent:
+  _inherit_from: mcqa_simple_agent
+  responses_api_agents:
+    simple_agent:
+      datasets:
+      - name: longbench_v2
+        type: benchmark
+        jsonl_fpath: benchmarks/longbench_v2/data/longbench_v2_benchmark.jsonl
+        prompt_config: benchmarks/longbench_v2/prompts/default.yaml
+        prepare_script: benchmarks/longbench_v2/prepare.py
+        license: Apache 2.0

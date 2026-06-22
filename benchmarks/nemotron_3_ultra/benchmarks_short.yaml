@@ -5,3 +5,4 @@ config_paths:
   - benchmarks/nemotron_3_ultra/benchmarks_no_external.yaml
   - benchmarks/aalcr/config.yaml
   - benchmarks/xstest/config.yaml
+  - benchmarks/tau2/config.yaml

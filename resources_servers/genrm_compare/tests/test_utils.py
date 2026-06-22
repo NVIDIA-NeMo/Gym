@@ -19,13 +19,25 @@ from nemo_gym.openai_utils import NeMoGymEasyInputMessage
 from resources_servers.genrm_compare.utils import (
     EMPTY_OUTPUT_PLACEHOLDER,
     GenRMOutputParseError,
+    _compute_style_density_weights,
     aggregate_scores,
+    apply_style_penalties,
+    compute_style_density,
+    count_style_elements,
     extract_from_response_obj,
     extract_output_text,
     generate_comparison_pairs,
     get_prompt_key_from_input,
     parse_genrm_output,
 )
+
+
+def _response_obj(text: str, reasoning: str = "") -> dict:
+    output = []
+    if reasoning:
+        output.append({"type": "reasoning", "summary": [{"type": "summary_text", "text": reasoning}]})
+    output.append({"type": "message", "content": [{"type": "output_text", "text": text}]})
+    return {"output": output}
 
 
 class TestGenerateComparisonPairs:
@@ -163,6 +175,125 @@ class TestExtractFromResponseObj:
         assert output == EMPTY_OUTPUT_PLACEHOLDER
 
 
+class TestStyleControl:
+    """Tests for style-control helper functions."""
+
+    def test_count_style_elements_counts_supported_types(self) -> None:
+        text = "\n".join(
+            [
+                "# Title",
+                "### Subsection",
+                "1. Ordered",
+                "- Dash",
+                "* Star",
+                "+ Plus",
+                "**bold** and __also bold__",
+                "Nice \U0001f600\u2705",
+            ]
+        )
+
+        counts = count_style_elements(text)
+
+        assert counts == {
+            "header_count": 2,
+            "list_count": 4,
+            "bold_count": 2,
+            "emoji_count": 2,
+        }
+
+    def test_count_style_elements_excludes_code_blocks(self) -> None:
+        text = "\n".join(
+            [
+                "```markdown",
+                "# Ignored",
+                "- ignored",
+                "**ignored** \U0001f600",
+                "```",
+                "# Counted",
+                "- counted",
+                "**counted** \U0001f600",
+            ]
+        )
+
+        counts = count_style_elements(text)
+
+        assert counts == {
+            "header_count": 1,
+            "list_count": 1,
+            "bold_count": 1,
+            "emoji_count": 1,
+        }
+
+    def test_count_style_elements_ignores_non_matching_edge_cases(self) -> None:
+        text = "\n".join(
+            [
+                "####### h7 should not count",
+                "inline # header should not count",
+                "1.not a list",
+                "-not a list",
+                "**bold",
+            ]
+        )
+
+        counts = count_style_elements(text)
+
+        assert counts == {
+            "header_count": 0,
+            "list_count": 0,
+            "bold_count": 0,
+            "emoji_count": 0,
+        }
+
+    @pytest.mark.parametrize("text", ["", "   ", "```python\n# ignored\n- ignored\n```"])
+    def test_compute_style_density_empty_or_code_only(self, text: str) -> None:
+        assert compute_style_density(text) == approx(0.0)
+
+    def test_compute_style_density_normal_text(self) -> None:
+        text = "# Title\nPlain answer"
+
+        assert compute_style_density(text) == approx(1 / len(text))
+
+    def test_compute_style_density_weights_uniform(self) -> None:
+        assert _compute_style_density_weights([0.2, 0.2, 0.2]) == [0.0, 0.0, 0.0]
+
+    def test_compute_style_density_weights_spread(self) -> None:
+        weights = _compute_style_density_weights([0.0, 0.5, 1.0])
+
+        assert weights == approx([0.5, 0.0, -0.5])
+
+    def test_apply_style_penalties_coeff_zero_returns_zero_adjustments(self) -> None:
+        scores = [1.0, 2.0]
+
+        adjusted_scores, adjustments = apply_style_penalties(
+            scores=scores,
+            response_objs=[_response_obj("plain"), _response_obj("# styled")],
+            group_style_penalty_coeff=0.0,
+        )
+
+        assert adjusted_scores == approx([1.0, 2.0])
+        assert adjustments == approx([0.0, 0.0])
+
+    def test_apply_style_penalties_single_response_returns_zero_adjustments(self) -> None:
+        adjusted_scores, adjustments = apply_style_penalties(
+            scores=[3.0],
+            response_objs=[_response_obj("# styled")],
+            group_style_penalty_coeff=1.0,
+        )
+
+        assert adjusted_scores == approx([3.0])
+        assert adjustments == approx([0.0])
+
+    def test_apply_style_penalties_rewards_lower_density(self) -> None:
+        adjusted_scores, adjustments = apply_style_penalties(
+            scores=[3.0, 3.0],
+            response_objs=[_response_obj("plain answer"), _response_obj("# Title\n- item\n**bold**")],
+            group_style_penalty_coeff=1.0,
+        )
+
+        assert adjusted_scores == approx([3.5, 2.5])
+        assert adjustments == approx([0.5, -0.5])
+
+
 class TestAggregateScores:
     """Tests for aggregate_scores function."""
 
@@ -250,3 +381,28 @@ class TestAggregateScores:
         assert rewards[0] == approx(4.0)
         assert rewards[1] == approx(2.5)
         assert rewards[2] == approx(4.0)
+
+    def test_style_penalty_integration(self) -> None:
+        """Style penalty adjusts aggregate scores and returned bonuses."""
+        comparison_results = [(3.0, 3.0, 3.5)]
+        comparison_metadata = [(0, 1, 0)]
+        response_objs = [_response_obj("plain answer"), _response_obj("# Title\n- item\n**bold**")]
+
+        rewards, metrics, base_rewards, bonuses = aggregate_scores(
+            comparison_results=comparison_results,
+            comparison_metadata=comparison_metadata,
+            response_objs=response_objs,
+            aggregator_method="simple_tiebreaker",
+            default_score=3.0,
+            reasoning_bonus=0.0,
+            answer_bonus=0.0,
+            top_percentile=0.2,
+            group_reasoning_length_penalty_coeff=0.0,
+            group_answer_length_penalty_coeff=0.0,
+            group_style_penalty_coeff=1.0,
+        )
+
+        assert rewards == approx([3.5, 2.5])
+        assert base_rewards == approx([3.0, 3.0])
+        assert bonuses == approx([0.5, -0.5])
+        assert metrics["tiebreak_usage_rate"] == approx(1.0)

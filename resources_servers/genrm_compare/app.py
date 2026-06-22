@@ -31,10 +31,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import defaultdict
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import FastAPI
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -43,6 +44,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -61,7 +63,8 @@ logger = logging.getLogger(__name__)
 
 # Cohort state for verify(): buffer by prompt_key until num_rollouts_per_prompt received (Difference 1)
 _cohort_lock: asyncio.Lock = asyncio.Lock()
-_cohort_buffers: Dict[str, List[Tuple[Any, asyncio.Future]]] = {}
+_cohort_buffers: Dict[str, List[Tuple[Any, asyncio.Future]]] = defaultdict(list)
+_cohort_jit_buffers: Dict[str, Tuple[List[float, float, float], List[int, int, int]]] = defaultdict(lambda: ([], []))
 
 
 class GenRMCompareConfig(BaseResourcesServerConfig):
@@ -78,6 +81,7 @@ class GenRMCompareConfig(BaseResourcesServerConfig):
         top_percentile: Percentile threshold for applying bonuses
         group_reasoning_length_penalty_coeff: Coefficient for reasoning length penalty
         group_answer_length_penalty_coeff: Coefficient for answer length penalty
+        group_style_penalty_coeff: Coefficient for style density penalty
         default_score: Default neutral score when parsing fails
         default_ranking: Default neutral ranking when parsing fails
         debug_logging: Enable verbose logging for debugging
@@ -126,6 +130,7 @@ class GenRMCompareConfig(BaseResourcesServerConfig):
     top_percentile: float = 0.2
     group_reasoning_length_penalty_coeff: float = 0.0
     group_answer_length_penalty_coeff: float = 0.0
+    group_style_penalty_coeff: float = 0.0
 
     # Default neutral scores when parsing fails
     default_score: float = 3.0
@@ -142,7 +147,12 @@ class GenRMCompareConfig(BaseResourcesServerConfig):
 class GenRMCompareVerifyRequest(BaseVerifyRequest):
     """Verify request with optional principle for cohort-based GenRM comparison."""
 
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
     principle: Optional[str] = None  # Principle for principle-based GenRM; forwarded by agent when provided
+    task_index: Optional[int] = Field(default=None, alias=TASK_INDEX_KEY_NAME)
+    rollout_index: Optional[int] = Field(default=None, alias=ROLLOUT_INDEX_KEY_NAME)
+    prompt_id: Optional[str] = None  # Optional stable prompt identifier from the caller
 
 
 class GenRMCompareRequest(BaseModel):
@@ -206,41 +216,63 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
             )
 
         input_messages = getattr(body.responses_create_params, "input", None) or []
-        prompt_key = get_prompt_key_from_input(
+        prompt_key = self._get_verify_cohort_key(
+            body,
             input_messages if isinstance(input_messages, list) else list(input_messages),
             principle,
         )
         future: asyncio.Future[float] = asyncio.get_running_loop().create_future()
 
-        async with _cohort_lock:
-            if prompt_key not in _cohort_buffers:
-                _cohort_buffers[prompt_key] = []
-            _cohort_buffers[prompt_key].append((body, future))
-            buf = _cohort_buffers[prompt_key]
-            if len(buf) < cfg.num_rollouts_per_prompt:
-                pass  # release lock and await below
-            else:
-                # Cohort complete: run comparison and resolve all futures
-                assert len(buf) == cfg.num_rollouts_per_prompt
-                first_params = buf[0][0].responses_create_params
-                conversation_history = _input_to_conversation_history(getattr(first_params, "input", []) or [])
-                response_objs = [
-                    (b.response.model_dump() if hasattr(b.response, "model_dump") else b.response) for b, _ in buf
-                ]
-                principle_val = getattr(buf[0][0], "principle", None) or principle
-                try:
-                    rewards, _metrics, _, _ = await self._run_compare(
-                        conversation_history, response_objs, principle=principle_val
-                    )
-                    for i, (_, f) in enumerate(buf):
-                        if not f.done():
-                            f.set_result(rewards[i])
-                except Exception as e:
-                    logger.exception("[GenRM] Cohort compare failed: %s", e)
-                    for _, f in buf:
-                        if not f.done():
-                            f.set_result(cfg.default_score)
-                del _cohort_buffers[prompt_key]
+        _cohort_buffers[prompt_key].append((body, future))
+
+        conversation_history = _input_to_conversation_history(getattr(body.responses_create_params, "input", []) or [])
+        buf = _cohort_buffers[prompt_key]
+        response_objs = [
+            (b.response.model_dump() if hasattr(b.response, "model_dump") else b.response) for b, _ in buf
+        ]
+        principle_val = getattr(body, "principle", None) or principle
+
+        existing_results, existing_metadata = _cohort_jit_buffers[prompt_key]
+        new_results, new_metadata = await self._run_jit_compare_using_most_recent_response_obj(
+            conversation_history, response_objs, existing_metadata, principle_val
+        )
+        existing_results.extend(new_results)
+        existing_metadata.extend(new_metadata)
+
+        cohort_ready = False
+        if len(response_objs) >= cfg.num_rollouts_per_prompt:
+            assert len(response_objs) == cfg.num_rollouts_per_prompt
+            cohort_ready = True
+
+        # Only run for the final response
+        if cohort_ready:
+            existing_results, existing_metadata = _cohort_jit_buffers.pop(prompt_key)
+
+            # Sort to match the ordering of the original `_run_compare` logic
+            existing_results, existing_metadata = zip(
+                *sorted(
+                    zip(existing_results, existing_metadata), key=lambda pair: (pair[1][2], pair[1][0], pair[1][1])
+                )
+            )
+
+            rewards, _, _, _ = aggregate_scores(
+                comparison_results=existing_results,
+                comparison_metadata=existing_metadata,
+                response_objs=response_objs,
+                aggregator_method=cfg.aggregator_method,
+                default_score=cfg.default_score,
+                reasoning_bonus=cfg.reasoning_bonus,
+                answer_bonus=cfg.answer_bonus,
+                top_percentile=cfg.top_percentile,
+                group_reasoning_length_penalty_coeff=cfg.group_reasoning_length_penalty_coeff,
+                group_answer_length_penalty_coeff=cfg.group_answer_length_penalty_coeff,
+                group_style_penalty_coeff=cfg.group_style_penalty_coeff,
+            )
+
+            cohort_buf = _cohort_buffers.pop(prompt_key)
+            for i, (_, f) in enumerate(cohort_buf):
+                if not f.done():
+                    f.set_result(rewards[i])
 
         reward = await future
         return BaseVerifyResponse(
@@ -253,6 +285,68 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         app = super().setup_webserver()
         app.post("/compare")(self.compare)
         return app
+
+    def _get_verify_cohort_key(
+        self,
+        body: GenRMCompareVerifyRequest,
+        input_messages: List[Any],
+        principle: Optional[str] = None,
+    ) -> str:
+        """Prefer task-scoped keys when available so identical prompt text from different tasks does not collide."""
+        prompt_key = get_prompt_key_from_input(input_messages, principle)
+        if body.task_index is not None:
+            return f"task_idx::{body.task_index}::{prompt_key}"
+        if body.prompt_id is not None:
+            return f"prompt_id::{body.prompt_id}::{prompt_key}"
+        return prompt_key
+
+    async def _run_jit_compare_using_most_recent_response_obj(
+        self,
+        conversation_history: List[Dict[str, str]],
+        response_objs: List[Dict[str, Any]],
+        seen_comparison_metadata: List[Tuple[int, int, int]],
+        principle: Optional[str] = None,
+    ) -> Tuple[List[Tuple[float, float, float]], List[Tuple[int, int, int]]]:
+        # Cannot run comparison with only 1 result
+        if len(response_objs) == 1:
+            return [], []
+
+        cfg = self.config
+        this_response_idx = len(response_objs) - 1
+
+        comparison_pairs = generate_comparison_pairs(cfg.comparison_strategy, cfg.num_rollouts_per_prompt)
+        comparison_tasks = []
+        comparison_metadata: List[Tuple[int, int, int]] = []
+        for judge_idx in range(cfg.num_judges_per_comparison):
+            for i, j in comparison_pairs:
+                # If one of the indices has not yet been run, continue
+                if not (i < len(response_objs) and j < len(response_objs)):
+                    continue
+
+                # At least one of the indices must be this index
+                if i != this_response_idx and j != this_response_idx:
+                    continue
+
+                this_comparison_metadata = (i, j, judge_idx)
+
+                # Don't double count since this will trigger when both i and j are finished.
+                if this_comparison_metadata in seen_comparison_metadata:
+                    continue
+
+                comparison_tasks.append(
+                    self._run_single_comparison(
+                        conversation_history,
+                        response_objs[i],
+                        response_objs[j],
+                        pair_idx=(i, j),
+                        principle=principle,
+                    )
+                )
+                comparison_metadata.append(this_comparison_metadata)
+
+        comparison_results = await asyncio.gather(*comparison_tasks)
+
+        return comparison_results, comparison_metadata
 
     async def _run_compare(
         self,
@@ -293,6 +387,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
             top_percentile=cfg.top_percentile,
             group_reasoning_length_penalty_coeff=cfg.group_reasoning_length_penalty_coeff,
             group_answer_length_penalty_coeff=cfg.group_answer_length_penalty_coeff,
+            group_style_penalty_coeff=cfg.group_style_penalty_coeff,
         )
         return rewards, metrics, list(comparison_results), comparison_metadata
 

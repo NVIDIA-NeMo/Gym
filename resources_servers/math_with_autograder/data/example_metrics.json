@@ -1,0 +1,62 @@
+{
+    "name": "example",
+    "type": "example",
+    "jsonl_fpath": "resources_servers/math_with_autograder/data/example.jsonl",
+    "num_repeats": 1,
+    "gitlab_identifier": null,
+    "huggingface_identifier": null,
+    "license": null,
+    "Number of examples": 5,
+    "Number of tools": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 5,
+        "Average": 63.8,
+        "Min": 48.0,
+        "Max": 84.0,
+        "Standard deviation": 12.97
+    },
+    "Number of turns": {
+        "Total # non-null values": 5,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Standard deviation": 0.0
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "question": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "expected_answer": {
+        "unique_count": 4,
+        "total_count": 5
+    },
+    "problem_id": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "category": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "subcategory": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "source": {
+        "unique_count": 3,
+        "total_count": 4
+    }
+}

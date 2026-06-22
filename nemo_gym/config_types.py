@@ -136,6 +136,10 @@ def is_server_ref(config_dict: DictConfig) -> Optional[ServerRef]:
         return None
 
 
+class ServerRefNotFoundError(ValueError):
+    """A server cross-reference points to an instance that is not defined in the merged config."""
+
+
 ########################################
 # Dataset configs for handling and upload/download
 ########################################
@@ -373,6 +377,7 @@ class DatasetConfig(BaseModel):
             Literal["Creative Commons Attribution 4.0 International"],
             Literal["Creative Commons Attribution-ShareAlike 4.0 International"],
             Literal["NVIDIA Internal Use Only, Do Not Distribute"],
+            Literal["NVIDIA Evaluation Dataset License Agreement"],
             Literal["TBD"],
             Literal["GNU General Public License v3.0"],
         ]
