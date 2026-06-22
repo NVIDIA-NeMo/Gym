@@ -573,7 +573,7 @@ class AnyTerminalAgent(SimpleResponsesAPIAgent):
     # Per-instance setup
 
     def _setup_params(self, body: NeMoGymResponseCreateParamsNonStreaming) -> AnyTerminalInstanceConfig:
-        problem_info = dict(body.metadata)
+        problem_info = dict(body.metadata or {})
         task_name = problem_info.get("task_name", problem_info.get("instance_id", "unknown"))
 
         # Fill in workdir and timeouts from task.toml/Dockerfile if not in JSONL metadata.
