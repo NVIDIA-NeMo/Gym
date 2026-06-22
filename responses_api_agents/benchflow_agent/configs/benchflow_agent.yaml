@@ -7,40 +7,7 @@ benchflow_agent:
       description: BenchFlow integration for running agentic benchmarks (e.g. SkillsBench).
       value: Evaluate models on agentic benchmarks via BenchFlow.
 
-      # Max number of concurrent `/run` requests handled by the NeMo Gym agent server process.
-      concurrency: 10
-
-      # Local directory of BenchFlow task definitions (e.g. a SkillsBench `tasks/` dir).
-      tasks_dir: "data/tasks"
-      # Output directory for BenchFlow results/artifacts/logs.
-      jobs_dir: "jobs"
-
-      # BenchFlow agent harness.
-      agent: openhands
-      # BenchFlow sandbox/environment type.
-      environment: singularity
-      # Sandbox user. null = root.
-      sandbox_user: null
-      # Skill mode: "with-skill" | "no-skill" | "self-gen".
-      skill_mode: with-skill
-      # Skills directory passed to BenchFlow ("auto" = use task-bundled skills, null = do not use skills).
-      skills_dir: auto
-
-      # Overrides to apply to every task's task.md. Example:
-      #   task_config_overrides:
-      #     environment:
-      #       memory_mb: 131072
-      #     agent:
-      #       timeout_sec: 1000000000.0
-      task_config_overrides: null
-
-      # Directory of prebuilt per-task Singularity .sif images. Files inside must be named "<task_name>.sif".
-      singularity_images_dir: null
-
-      # List of datasets to evaluate on.
-      datasets: null
-
-      # Model routing: points agent LLM calls at the NeMo Gym model server alias.
+      # NeMo Gym model server reference.
       model_server:
         type: responses_api_models
         name: policy_model

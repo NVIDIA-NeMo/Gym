@@ -52,9 +52,6 @@ from responses_api_agents.benchflow_agent.utils import BenchFlowAgentUtils
 
 
 class BenchFlowAgentConfig(BaseResponsesAPIAgentConfig):
-    # Max number of concurrent `/run` requests handled by the NeMo Gym agent server process.
-    concurrency: int
-
     # NeMo Gym model server reference.
     model_server: ModelServerRef
 
@@ -94,6 +91,9 @@ class BenchFlowAgentConfig(BaseResponsesAPIAgentConfig):
 
     # Directory of prebuilt per-task Singularity .sif images. Files inside must be named "<task_name>.sif".
     singularity_images_dir: Optional[str] = None
+
+    # Max number of concurrent `/run` requests handled by the NeMo Gym agent server process.
+    concurrency: int = 256
 
 
 class BenchFlowRunRequest(BaseRunRequest):
