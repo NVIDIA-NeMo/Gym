@@ -1,0 +1,13 @@
+ns_tools_arxiv:
+  resources_servers:
+    ns_tools_arxiv:
+      entrypoint: app.py
+      default_verifier: math_with_judge
+      verifiers: {}
+      nemo_skills_tools:
+        - nemo_skills.mcp.servers.arxiv_tool.ArxivSearchTool
+      domain: agent
+      verified: false
+      description: NeMo Skills ArXiv paper search and retrieval tool
+      value: Enable scientific paper lookup and retrieval through NeMo Skills MCP tools
+

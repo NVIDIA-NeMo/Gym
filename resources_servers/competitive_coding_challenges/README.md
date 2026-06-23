@@ -74,5 +74,6 @@ ng_collect_rollouts +agent_name=simple_agent \
 
 ## Additional Information
 
+- The data necessary for this environment is currently not available and a future release of it is TBD.
 - Example reward profiling done with Qwen3-32B can be found at ![Reward Profile](data/pass_rate_histogram.png)
 - The default settings for `test_batch_size`, `num_parallel_requests` and `time_scale` should work well but if you notice many `"run_stderr": "Time limit exceeded` in your `ccc_verify.jsonl` file then its worth increasing this to remove false negatives. Conversely, lowering `time_scale` will speed up training.
