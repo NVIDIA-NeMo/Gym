@@ -53,9 +53,21 @@ hf_token: "hf_..."
 
 ### 2) Build the GDPVal Docker image
 
+To build a standard Docker image:
+
 ```bash
 docker build -t gdpval-agent -f responses_api_agents/gdpval_agent/Dockerfile .
 ```
+
+To build an `aarch64` image and export it as a `.sqsh` file (for Slurm/HPC environments), use the
+provided script — it handles building, exporting, and packing in one step:
+
+```bash
+bash responses_api_agents/gdpval_agent/build_sqsh.sh
+```
+
+Prerequisites: Docker Desktop running, `mksquashfs` installed (`brew install squashfs`).
+Output: `responses_api_agents/gdpval_agent/gdpval-agent-aarch64.sqsh`
 
 ### 3) Run a shell in the container (repo mounted at `/workspace`)
 
