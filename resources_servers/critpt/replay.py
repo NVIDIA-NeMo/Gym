@@ -18,6 +18,22 @@ rerunning model inference.
 
 Batches that the live run already scored successfully are skipped, so partial
 quota is never wasted re-scoring submissions that already have a verdict.
+
+By default the tool authenticates with a single key from
+$ARTIFICIAL_ANALYSIS_API_KEY. Pass --api-key-file (one key per line) to load
+multiple keys, then combine with --rotate-on-rate-limit to fail over on
+HTTP 429. When every configured key is rate-limited the tool exits cleanly
+with exit code 3; already-scored batches stay in aa_responses.jsonl, so
+simply rerun the tool after the AA daily quota resets.
+
+Examples:
+    ARTIFICIAL_ANALYSIS_API_KEY=... python -m resources_servers.critpt.replay \\
+        --cache-dir /path/to/critpt_cache
+
+    python -m resources_servers.critpt.replay \\
+        --cache-dir /path/to/critpt_cache \\
+        --api-key-file ~/.aa_keys \\
+        --rotate-on-rate-limit
 """
 import argparse
 import asyncio
@@ -26,12 +42,79 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 from resources_servers.critpt.app import (
     CritPtRateLimitExceeded,
     _call_api,
 )
+
+
+AA_API_KEY_ENV_VAR = "ARTIFICIAL_ANALYSIS_API_KEY"
+
+
+def _load_api_keys(args: argparse.Namespace) -> List[str]:
+    """Resolve AA API keys.
+
+    If --api-key-file is given, every non-empty, non-`#`-comment line is taken
+    as one key (preserving order, deduped). Otherwise fall back to a single
+    key read from $ARTIFICIAL_ANALYSIS_API_KEY. Returns [] if neither yields a
+    key; the caller is responsible for surfacing that.
+    """
+    if args.api_key_file:
+        keys: List[str] = []
+        with args.api_key_file.open("r") as fh:
+            for line in fh:
+                stripped = line.strip()
+                if stripped and not stripped.startswith("#") and stripped not in keys:
+                    keys.append(stripped)
+        return keys
+    value = os.environ.get(AA_API_KEY_ENV_VAR)
+    return [value] if value else []
+
+
+async def _call_api_with_rotation(
+    api_keys: List[str],
+    api_url: str,
+    submissions: List[Dict],
+    max_retries: int,
+    backoff_seconds: float,
+    rotate_on_rate_limit: bool,
+    key_index_in: int,
+) -> Tuple[Dict, int]:
+    """Call AA with key-rotation on HTTP 429.
+
+    On a 429: if rotation is enabled and >1 keys are configured, advance to
+    the next key and retry immediately. Once all keys have cycled back to the
+    starting index (i.e. every key was rate-limited this round) re-raise so
+    the caller fails fast — AA's daily quota means waiting in-process is not
+    productive, just rerun after the quota resets.
+
+    Returns (response, new_key_index). The caller threads the returned index
+    back in so successive successful batches round-robin across keys.
+    """
+    key_index = key_index_in
+    while True:
+        api_key = api_keys[key_index % len(api_keys)]
+        try:
+            response = await _call_api(
+                api_url=api_url,
+                api_key=api_key,
+                submissions=submissions,
+                max_retries=max_retries,
+                backoff_seconds=backoff_seconds,
+            )
+            return response, key_index + 1
+        except CritPtRateLimitExceeded:
+            if not (rotate_on_rate_limit and len(api_keys) > 1):
+                raise
+            key_index += 1
+            if key_index % len(api_keys) == 0:
+                raise
+            print(
+                f"  rate-limited on key idx={(key_index - 1) % len(api_keys)}; "
+                f"rotating to key idx={key_index % len(api_keys)}"
+            )
 
 
 def _load_jsonl(path: Path) -> List[Dict]:
@@ -69,7 +152,7 @@ def _pack_into_batches(submissions: List[Dict], batch_size: int) -> List[List[Di
     return batches
 
 
-async def main_async(args: argparse.Namespace) -> int:
+async def main_async(args: argparse.Namespace, api_keys: List[str]) -> int:
     cache_dir: Path = args.cache_dir
     submissions_path = cache_dir / "submissions.jsonl"
     aa_responses_path = cache_dir / "aa_responses.jsonl"
@@ -92,6 +175,7 @@ async def main_async(args: argparse.Namespace) -> int:
     print(f"submissions on disk: {len(submissions)}")
     print(f"already scored:      {len(scored_ids)}")
     print(f"pending replay:      {len(pending)}")
+    print(f"AA keys configured:  {len(api_keys)}")
 
     if not pending:
         print("Nothing to replay.")
@@ -107,22 +191,27 @@ async def main_async(args: argparse.Namespace) -> int:
     )
 
     rejudged = 0
+    key_index = 0
     for batch in full_batches:
         sub_ids = [b["submission_id"] for b in batch]
         sub_payload = [b["submission"] for b in batch]
         print(f"shipping batch of {len(sub_payload)} submissions ...")
         try:
-            response = await _call_api(
+            response, key_index = await _call_api_with_rotation(
+                api_keys=api_keys,
                 api_url=args.api_url,
-                api_key=args.api_key,
                 submissions=sub_payload,
                 max_retries=args.max_retries,
                 backoff_seconds=args.backoff_seconds,
+                rotate_on_rate_limit=args.rotate_on_rate_limit,
+                key_index_in=key_index,
             )
         except CritPtRateLimitExceeded as e:
             print(
-                f"AA quota exhausted: retry_after={e.retry_after_seconds}s, "
-                f"reset_unix={e.reset_unix}. Rerun this tool after that time.",
+                f"AA quota exhausted on all {len(api_keys)} key(s): "
+                f"retry_after={e.retry_after_seconds}s, reset_unix={e.reset_unix}. "
+                f"Already-scored batches remain in aa_responses.jsonl; rerun this "
+                f"tool after the quota resets.",
                 file=sys.stderr,
             )
             return 3
@@ -168,10 +257,18 @@ def parse_args(argv=None) -> argparse.Namespace:
         "matching the `cache_dir` set on the resource server config.",
     )
     p.add_argument(
-        "--api-key",
-        type=str,
-        default=os.environ.get("ARTIFICIAL_ANALYSIS_API_KEY"),
-        help="AA API key (defaults to $ARTIFICIAL_ANALYSIS_API_KEY).",
+        "--api-key-file",
+        type=Path,
+        default=None,
+        help=f"Optional file with one AA API key per line (blank lines and '#' "
+        f"comments ignored). When omitted, falls back to a single key from "
+        f"${AA_API_KEY_ENV_VAR}.",
+    )
+    p.add_argument(
+        "--rotate-on-rate-limit",
+        action="store_true",
+        help="On HTTP 429, advance to the next configured AA key and retry immediately. "
+        "No-op when only one key is configured.",
     )
     p.add_argument(
         "--api-url",
@@ -186,13 +283,14 @@ def parse_args(argv=None) -> argparse.Namespace:
 
 def main(argv=None) -> int:
     args = parse_args(argv)
-    if not args.api_key:
+    api_keys = _load_api_keys(args)
+    if not api_keys:
         print(
-            "AA API key required: pass --api-key or set $ARTIFICIAL_ANALYSIS_API_KEY.",
+            f"No AA API key resolved: set ${AA_API_KEY_ENV_VAR} or pass --api-key-file.",
             file=sys.stderr,
         )
         return 2
-    return asyncio.run(main_async(args))
+    return asyncio.run(main_async(args, api_keys))
 
 
 if __name__ == "__main__":
