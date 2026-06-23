@@ -45,7 +45,7 @@ The dataset can be found at https://huggingface.co/datasets/nvidia/Nemotron-RL-i
 ```
 
 ### Usage
-
+Create an `env.yaml` file in the Gym root directory to specifying `policy_base_url`, `policy_model_name`, and `policy_api_key`. See [documentation](https://docs.nvidia.com/nemo/gym/reference/configuration#local-configuration-envyaml) for details.
 ```bash
 ng_run "+config_paths=[environments/instruction_following/config.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
 
