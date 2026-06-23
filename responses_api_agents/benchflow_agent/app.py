@@ -116,7 +116,6 @@ class BenchFlowAgent(SimpleResponsesAPIAgent):
     async def run(self, body: BenchFlowRunRequest) -> BenchFlowVerifyResponse:
         async with self.sem:
             task_name = self._parse_task_name(body.instance_id)
-            params = body.responses_create_params.model_dump(exclude_unset=True, exclude_none=True)
 
             result = None
             error_message = None
@@ -126,37 +125,34 @@ class BenchFlowAgent(SimpleResponsesAPIAgent):
                 error_message = f"{type(e).__name__}: {e}"
                 print(f"Error running BenchFlow evaluation for task {task_name!r}: {error_message}")
 
-            if result is not None:
-                reward = BenchFlowAgentUtils.extract_reward(getattr(result, "rewards", None))
-                output_items = BenchFlowAgentUtils.trajectory_to_output(getattr(result, "trajectory", None))
-                usage = BenchFlowAgentUtils.extract_usage(result)
-            else:
-                reward = 0.0
-                output_items = []
-                usage = None
-
             response = BenchFlowAgentUtils.get_default_response_object()
             response["model"] = get_global_config_dict()["policy_model_name"]
-            response["temperature"] = params.get("temperature")
-            response["top_p"] = params.get("top_p")
-            response["output"] = output_items
-            if usage:
-                response["usage"] = usage
+            metadata = {"task_name": task_name}
+
+            if result is not None:
+                reward = BenchFlowAgentUtils.extract_reward(result.rewards)
+
+                response["usage"] = BenchFlowAgentUtils.extract_usage(result)
+
+                rollout_dir = Path(self.config.jobs_dir) / result.rollout_name
+                trajectory_file = rollout_dir / "trajectory" / "llm_trajectory.jsonl"
+                response["output"] = BenchFlowAgentUtils.get_output_trajectory(trajectory_file)
+
+                metadata["rollout_dir"] = str(rollout_dir)
+                for key in [
+                    "agent", "rewards", "error", "error_category", "verifier_error", "verifier_error_category",
+                    "n_tool_calls", "n_skill_invocations", "n_prompts", "started_at", "finished_at",
+                ]:
+                    metadata[key] = getattr(result, key, None)
+            else:
+                reward = 0.0
+                metadata["global_error"] = error_message
 
             return BenchFlowVerifyResponse(
                 responses_create_params=body.responses_create_params,
                 reward=reward,
                 response=response,
-                instance_id=body.instance_id,
-                metadata={
-                    "task_name": task_name,
-                    "jobs_dir": self.config.jobs_dir,
-                    "rewards": getattr(result, "rewards", None) if result is not None else None,
-                    "error": getattr(result, "error", None) if result is not None else error_message,
-                    "error_category": getattr(result, "error_category", None) if result is not None else None,
-                    "verifier_error": getattr(result, "verifier_error", None) if result is not None else None,
-                    "n_tool_calls": getattr(result, "n_tool_calls", None) if result is not None else None,
-                },
+                metadata=metadata,
             )
 
     async def _run_benchflow_task(self, task_name: str) -> Any:
