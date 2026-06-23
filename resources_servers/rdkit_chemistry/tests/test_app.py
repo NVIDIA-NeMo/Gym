@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Unit tests for the rdkit_chemistry resources server."""
 
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).parents[3]))  # repo root
 from nemo_gym.server_utils import ServerClient
 from resources_servers.rdkit_chemistry import sandbox_launcher
 from resources_servers.rdkit_chemistry.app import (
+    _ANSWER_FORMAT_REGEXES,
     _SUPPORTED_PROPERTY_TYPES,
     RDKitChemistryConfig,
     RDKitChemistryResourcesServer,
@@ -143,6 +145,49 @@ class TestExtractPredictedValueDoubleParens:
         assert extract_predicted_value("42", "count") is None
 
 
+class TestExtractPredictedValueAnswerFormat:
+    def test_all_policy_formats_are_registered(self):
+        assert set(_ANSWER_FORMAT_REGEXES) == {f"fmt_{i:02d}" for i in range(31)}
+
+    @pytest.mark.parametrize(
+        ("answer_format", "text"),
+        [
+            ("fmt_00", "The answer is ((42))"),
+            ("fmt_07", r"The answer is \boxed{42}"),
+            ("fmt_09", "The answer is {{42}}"),
+            ("fmt_15", "<final_answer>42</final_answer>"),
+            ("fmt_18", "**Answer: 42**"),
+            ("fmt_21", "## Answer: 42 ##"),
+            ("fmt_28", "Final Answer = 42"),
+            ("fmt_30", "Final Answer: 42"),
+        ],
+    )
+    def test_representative_answer_formats(self, answer_format, text):
+        assert extract_predicted_value(text, "count", answer_format=answer_format) == 42.0
+
+    def test_answer_format_last_occurrence_wins(self):
+        text = "First attempt: Final Answer = 1\nCorrection: Final Answer = 3"
+        assert extract_predicted_value(text, "count", answer_format="fmt_28") == 3.0
+
+    def test_label_only_answer_format_stops_at_line_boundary(self):
+        text = "Answer Value: not numeric\nUnrelated later number: 42"
+        assert extract_predicted_value(text, "count", answer_format="fmt_27") is None
+
+    def test_answer_format_uses_numeric_token_inside_capture(self):
+        assert extract_predicted_value("Final value is: about 12.5 g/mol", "float", answer_format="fmt_25") == 12.5
+
+    def test_answer_format_rejects_bare_number(self):
+        assert extract_predicted_value("The answer is 42", "count", answer_format="fmt_28") is None
+
+    def test_unknown_answer_format_raises(self):
+        with pytest.raises(ValueError, match="Unsupported answer_format='fmt_99'"):
+            extract_predicted_value("Final Answer = 42", "count", answer_format="fmt_99")
+
+    def test_answer_format_overrides_legacy_use_box_format(self):
+        text = r"Ignore the old boxed value \boxed{7}. Final Answer = 42"
+        assert extract_predicted_value(text, "count", answer_format="fmt_28", use_box_format=True) == 42.0
+
+
 # ---------------------------------------------------------------------------
 # compute_reward — exact-match
 # ---------------------------------------------------------------------------
@@ -173,13 +218,19 @@ class TestComputeReward:
     def test_nan_prediction(self):
         assert compute_reward(float("nan"), 5.0) == 0.0
 
+    def test_float_correct(self):
+        assert compute_reward(857.833, 857.833, property_type="float") == 1.0
+
+    def test_float_wrong(self):
+        assert compute_reward(857.834, 857.833, property_type="float") == 0.0
+
 
 class TestUnsupportedPropertyType:
-    def test_float_not_supported(self):
-        assert "float" not in _SUPPORTED_PROPERTY_TYPES
+    def test_float_supported(self):
+        assert "float" in _SUPPORTED_PROPERTY_TYPES
 
     def test_supported_types(self):
-        assert _SUPPORTED_PROPERTY_TYPES == {"count", "bool", "presence", "fragment"}
+        assert _SUPPORTED_PROPERTY_TYPES == {"count", "bool", "presence", "fragment", "float"}
 
 
 class TestLocalNSToolsColocation:
@@ -403,3 +454,63 @@ class TestSandboxStartupProbe:
 
         with pytest.raises(RuntimeError, match="Sandbox startup probe failed"):
             sandbox_launcher._run_startup_probe(6001, timeout_s=9.0)
+
+
+class TestStopSandboxReap:
+    """_stop_sandbox must reap the sandbox subprocess on every exit path."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_sandbox_proc(self):
+        original = sandbox_launcher._sandbox_proc
+        try:
+            yield
+        finally:
+            sandbox_launcher._sandbox_proc = original
+
+    def test_kill_is_followed_by_reap_wait(self, monkeypatch):
+        proc = MagicMock(spec=subprocess.Popen)
+        proc.pid = 9999
+        proc.wait.side_effect = [subprocess.TimeoutExpired(cmd="sandbox", timeout=10), 0]
+        monkeypatch.setattr(sandbox_launcher, "_sandbox_proc", proc)
+
+        sandbox_launcher._stop_sandbox()
+
+        proc.terminate.assert_called_once()
+        proc.kill.assert_called_once()
+        assert proc.wait.call_count == 2
+        assert sandbox_launcher._sandbox_proc is None
+
+    def test_unreaped_child_after_sigkill_is_logged(self, monkeypatch):
+        proc = MagicMock(spec=subprocess.Popen)
+        proc.pid = 9999
+        proc.wait.side_effect = subprocess.TimeoutExpired(cmd="sandbox", timeout=10)
+        monkeypatch.setattr(sandbox_launcher, "_sandbox_proc", proc)
+
+        mock_logger = MagicMock()
+        monkeypatch.setattr(sandbox_launcher, "logger", mock_logger)
+
+        sandbox_launcher._stop_sandbox()
+
+        proc.kill.assert_called_once()
+        assert proc.wait.call_count == 2
+        mock_logger.error.assert_called_once()
+        assert 9999 in mock_logger.error.call_args[0]
+        assert sandbox_launcher._sandbox_proc is None
+
+    def test_graceful_termination_does_not_kill(self, monkeypatch):
+        proc = MagicMock(spec=subprocess.Popen)
+        proc.pid = 9999
+        proc.wait.return_value = 0
+        monkeypatch.setattr(sandbox_launcher, "_sandbox_proc", proc)
+
+        sandbox_launcher._stop_sandbox()
+
+        proc.terminate.assert_called_once()
+        proc.kill.assert_not_called()
+        proc.wait.assert_called_once_with(timeout=10)
+        assert sandbox_launcher._sandbox_proc is None
+
+    def test_noop_when_no_sandbox_running(self, monkeypatch):
+        monkeypatch.setattr(sandbox_launcher, "_sandbox_proc", None)
+        sandbox_launcher._stop_sandbox()
+        assert sandbox_launcher._sandbox_proc is None
