@@ -33,6 +33,12 @@ stirrup_agent:
       # falls back to ``response.output_text``.
       persist_deliverables_dir: null
 
+      # Task-only execution mode. When true, runs each task and caches deliverables
+      # to persist_deliverables_dir but skips the resources server /verify judge
+      # call and aggregate_metrics proxy (no judgement is made or sent, no reward).
+      # Requires persist_deliverables_dir to be set to an absolute path.
+      execute_only: false
+
       # Resources server reference (scores deliverables via /verify).
       resources_server:
         type: resources_servers
