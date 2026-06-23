@@ -28,7 +28,7 @@ mini_swe_agent_2:
             retries: 4
             retry_delay_s: 1.0
             retry_max_delay_s: 45.0
-            command_retries: 2
+            command_retries: 0
             close_timeout_s: 60
             file_timeout_s: 1800
           batch:
@@ -54,7 +54,7 @@ mini_swe_agent_2:
         activate_conda: true
         user: root
       run_golden: false
-      step_timeout: 1200
+      step_timeout: 1500
       eval_timeout: 1800
       skip_if_exists: false
       step_limit: 250

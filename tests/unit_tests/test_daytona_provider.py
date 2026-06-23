@@ -720,12 +720,14 @@ async def test_create_retries_retryable_verification_failures(monkeypatch: pytes
     provider = daytona_provider.DaytonaProvider(create={"retries": 1, "retry_delay_s": 0}, probe={"command": None})
     calls = 0
     names: list[str | None] = []
+    labels: list[str | None] = []
     sleeps: list[float] = []
 
     async def create_once(spec: SandboxSpec) -> SandboxHandle:
         nonlocal calls
         calls += 1
         names.append(daytona_provider._extension_value(spec, "name"))
+        labels.append(spec.metadata.get("sandbox_id"))
         if calls == 1:
             raise daytona_provider.DaytonaCreateVerificationError("probe failed")
         return SandboxHandle("sandbox-created", "daytona", raw=object())
@@ -738,8 +740,9 @@ async def test_create_retries_retryable_verification_failures(monkeypatch: pytes
 
     assert (await provider.create(SandboxSpec(image="python:3.12"))).sandbox_id == "sandbox-created"
     assert calls == 2
-    assert names[0] == names[1]
-    assert names[0] is not None and names[0].startswith("nemo-gym-")
+    assert names[0] != names[1]
+    assert labels == names
+    assert all(name is not None and name.startswith("nemo-gym-") for name in names)
     assert sleeps == [0]
 
 
