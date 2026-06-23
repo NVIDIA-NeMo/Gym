@@ -975,6 +975,13 @@ class SweBenchExtDatasetProcessor(BaseDatasetHarnessProcessor):
 
     def _make_swe_bench_ext_task(self) -> Any:
         try:
+            # Force lighthouse.core to fully initialize before importing task_source.local_folder.
+            # lighthouse has a latent circular import (core/runner.py imports local_folder at module
+            # top-level, and local_folder imports back from lighthouse.core). It only resolves when
+            # core is imported first; without this line, an unsafe import order raises
+            # "ImportError: cannot import name 'LocalFolderTaskSource' from partially initialized module".
+            import lighthouse.core  # noqa: F401
+
             from lighthouse.task_source.local_folder import LocalFolderTaskSource
             from swe_bench_ext.task import SweBenchExtTask, SweBenchExtTaskInstance
         except ImportError as e:
