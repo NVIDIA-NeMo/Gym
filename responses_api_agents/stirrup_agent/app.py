@@ -723,6 +723,15 @@ class StirrupAgentWrapperConfig(BaseResponsesAPIAgentConfig):
         "When set, each task's artifacts land in <dir>/task_<task_id>/; the resources server "
         "reads deliverables_dir from the verify request to score them.",
     )
+    judge_only: bool = Field(
+        default=False,
+        description="Judge-only mode. When True, the Stirrup agent task is NOT executed; instead "
+        "the resources server scores pre-existing cached deliverables found under "
+        "persist_deliverables_dir/task_<task_id>/repeat_<rollout_index>/ via /verify. Requires "
+        "persist_deliverables_dir to be set and the cached deliverables to already exist (a task "
+        "with no cached deliverable directory is reported as skipped). Use this to (re)score a "
+        "deliverable set produced by an earlier run without paying the rollout cost again.",
+    )
     model_id: Optional[str] = Field(
         default=None,
         description="HuggingFace model ID (or local checkpoint path) used to load a tokenizer "
@@ -821,6 +830,19 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
                 f"persist_deliverables_dir must be an absolute path "
                 f"(got {self.config.persist_deliverables_dir!r}). Relative paths "
                 f"resolve differently in the agent vs. the resources server."
+            )
+        # Judge-only mode scores cached deliverables in place, so it needs a
+        # populated persist_deliverables_dir to read them from.
+        if self.config.judge_only and not self.config.persist_deliverables_dir:
+            raise ValueError(
+                "judge_only=True requires persist_deliverables_dir to be set — it is the source "
+                "of the cached deliverables to score (no task is executed in judge-only mode)."
+            )
+        if self.config.judge_only:
+            print(
+                "Stirrup agent running in judge_only mode: tasks will NOT be executed; the resources "
+                f"server will score cached deliverables under {self.config.persist_deliverables_dir!r}.",
+                flush=True,
             )
         print(f"Stirrup agent initialized with task={self.config.task!r}", flush=True)
 
@@ -993,29 +1015,6 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
             except Exception as exc:
                 print(f"[stirrup] seed_session failed (non-fatal): {exc}", flush=True)
 
-            # Run the Stirrup agent
-            try:
-                response = await self.responses(fixed_params)
-            except Exception as exc:
-                task_info = self.task_strategy.extract_task_info(existing_metadata)
-                failure_class = _classify_rollout_failure(exc)
-                instance_hint = task_info.get("instance_id", task_info.get("task_id", "unknown"))
-                print(
-                    f"[stirrup-{failure_class}] {instance_hint}: {type(exc).__name__}: {exc}",
-                    flush=True,
-                )
-                return self._build_failed_run_payload(
-                    body_dict=body_dict,
-                    fixed_params=fixed_params,
-                    task_info=task_info,
-                    reason=f"{type(exc).__name__}: {exc}",
-                    skipped=(failure_class == "skipped"),
-                    error_class=failure_class,
-                )
-
-            response_clean = response.model_copy(update={"metadata": None})
-            response_metadata = response.metadata or {}
-
             # Locate the persisted deliverables dir for this task. Unset if
             # persist_deliverables_dir is null or task_id is missing (the
             # resources server will fall back to response.output_text).
@@ -1027,6 +1026,54 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
                 deliverables_dir = str(
                     (Path(self.config.persist_deliverables_dir) / f"task_{task_id}" / repeat_name).absolute()
                 )
+
+            if self.config.judge_only:
+                # Judge-only mode: do NOT run the agent. Score the pre-existing
+                # cached deliverables at ``deliverables_dir``. A task whose
+                # deliverable directory is missing can't be scored — report it
+                # as skipped (terminal; re-dispatch won't create the files).
+                if deliverables_dir is None or not Path(deliverables_dir).is_dir():
+                    task_info = self.task_strategy.extract_task_info(existing_metadata)
+                    reason = (
+                        f"judge_only: no cached deliverables at {deliverables_dir}"
+                        if deliverables_dir
+                        else "judge_only: persist_deliverables_dir or task_id unavailable"
+                    )
+                    instance_hint = task_info.get("instance_id", task_info.get("task_id", "unknown"))
+                    print(f"[stirrup-judge_only-missing] {instance_hint}: {reason}", flush=True)
+                    return self._build_failed_run_payload(
+                        body_dict=body_dict,
+                        fixed_params=fixed_params,
+                        task_info=task_info,
+                        reason=reason,
+                        skipped=True,
+                        error_class="skipped",
+                    )
+                response_clean = self._build_judge_only_response(existing_metadata, fixed_params.model)
+                response_metadata = {}
+            else:
+                # Run the Stirrup agent
+                try:
+                    response = await self.responses(fixed_params)
+                except Exception as exc:
+                    task_info = self.task_strategy.extract_task_info(existing_metadata)
+                    failure_class = _classify_rollout_failure(exc)
+                    instance_hint = task_info.get("instance_id", task_info.get("task_id", "unknown"))
+                    print(
+                        f"[stirrup-{failure_class}] {instance_hint}: {type(exc).__name__}: {exc}",
+                        flush=True,
+                    )
+                    return self._build_failed_run_payload(
+                        body_dict=body_dict,
+                        fixed_params=fixed_params,
+                        task_info=task_info,
+                        reason=f"{type(exc).__name__}: {exc}",
+                        skipped=(failure_class == "skipped"),
+                        error_class=failure_class,
+                    )
+
+                response_clean = response.model_copy(update={"metadata": None})
+                response_metadata = response.metadata or {}
 
             verify_request_body = dict(body_dict)
             verify_request_body["response"] = response_clean.model_dump(mode="json")
@@ -1060,6 +1107,46 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
                     skipped=False,
                     error_class=failure_class,
                 )
+
+    def _build_judge_only_response(
+        self,
+        metadata: Dict[str, Any],
+        model_name: Optional[str],
+    ) -> NeMoGymResponse:
+        """Build a placeholder response for judge-only mode.
+
+        No agent ran, so there is no fresh model output. The resources server
+        scores the cached deliverable files read from ``deliverables_dir``; the
+        response text is only the fallback the rubric judge uses when no
+        deliverable files are found. This placeholder keeps the rollout row
+        well-formed for downstream parsing.
+        """
+        task_info = self.task_strategy.extract_task_info(metadata)
+        return NeMoGymResponse(
+            id=self.task_strategy.response_id(task_info),
+            created_at=int(time.time()),
+            model=model_name or "judge_only",
+            object="response",
+            output=[
+                NeMoGymResponseOutputMessage(
+                    id=self.task_strategy.fallback_message_id(task_info),
+                    content=[
+                        NeMoGymResponseOutputText(
+                            type="output_text",
+                            text="Judge-only mode: scoring pre-existing cached deliverables.",
+                            annotations=[],
+                        )
+                    ],
+                    role="assistant",
+                    status="completed",
+                    type="message",
+                )
+            ],
+            parallel_tool_calls=False,
+            tool_choice="none",
+            tools=[],
+            metadata=None,
+        )
 
     def _build_failed_run_payload(
         self,
