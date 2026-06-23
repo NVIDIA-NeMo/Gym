@@ -2165,14 +2165,20 @@ def runner_ray_remote(params_dict: dict[str, Any]) -> Optional[Path]:
 
 
 def update_metrics(metrics_fpath: Path, update_dict: Dict[str, Any]) -> None:
-    with metrics_fpath.open() as f:
-        existing_dict = json.loads(f.read())
+    try:
+        existing_dict = json.loads(metrics_fpath.read_text() or "{}")
+    except (json.JSONDecodeError, FileNotFoundError):
+        existing_dict = {}
 
     existing_dict = {k: v for k, v in existing_dict.items() if v is not None}
     update_dict = {k: v for k, v in update_dict.items() if v is not None}
+    merged = existing_dict | update_dict
 
-    with metrics_fpath.open("w") as f:
-        json.dump(existing_dict | update_dict, f)
+    # Write to a temp file and swap it to reduce chance of reading a partially written file.
+    tmp_file = metrics_fpath.with_suffix(f".tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}")
+    tmp_file.write_text(json.dumps(merged))
+    os.replace(tmp_file, metrics_fpath)
+
 
 
 # _TOOL_PARAM_BOOL_FIELDS_DEFAULT_FALSE = ("defer_loading",)
