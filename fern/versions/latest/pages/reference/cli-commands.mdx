@@ -147,7 +147,7 @@ ng_collect_rollouts \
 
 #### Generation Parameters
 
-Sampling parameters such as `temperature`, `max_output_tokens`, and `top_p` are not standalone CLI flags — they are passed as overrides inside `responses_create_params` using Hydra's nested dot syntax. Each override is merged into every input row's existing `responses_create_params`:
+Sampling parameters such as `temperature`, `max_output_tokens`, and `top_p` are not standalone CLI flags — they are passed as overrides inside `responses_create_params` using Hydra's nested dot syntax. Overrides are merged into each input row's existing `responses_create_params` with a **shallow** merge (top-level keys only):
 
 ```bash
 ng_collect_rollouts \
@@ -159,7 +159,7 @@ ng_collect_rollouts \
     ++responses_create_params.max_output_tokens=4096
 ```
 
-The same syntax works for `ng_e2e_collect_rollouts`. Any field accepted by the Responses API create params can be set this way (for example, `++responses_create_params.reasoning.effort=low`).
+The same syntax works for `ng_e2e_collect_rollouts`. Top-level fields such as `temperature` and `max_output_tokens` are straightforward. For nested objects (for example, `++responses_create_params.reasoning.effort=low`), the entire nested dict replaces the row's existing value at that key — other fields under the same nested object are not preserved.
 
 #### Resume Interrupted Runs
 
