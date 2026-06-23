@@ -1,4 +1,4 @@
-anyterminal_claude:
+anyterminal_claude_code:
   responses_api_agents:
     anyterminal_agent:
       entrypoint: app.py
