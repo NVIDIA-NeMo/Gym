@@ -54,7 +54,6 @@ mini_swe_agent_2:
         conda_env: testbed
         activate_conda: true
         user: root
-        delete: true
       run_golden: false
       step_timeout: 600
       eval_timeout: 1800
