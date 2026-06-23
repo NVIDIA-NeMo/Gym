@@ -56,6 +56,41 @@ from responses_api_agents.claude_code_agent.setup_claude_code import ensure_clau
 
 LOG = logging.getLogger(__name__)
 
+# Source files the agent may legitimately create or modify, captured for grading.
+# Scoped so we don't sweep in iverilog/vvp build artifacts (.out, .vcd, .cache, ...)
+# or the on-disk claude config.
+_HDL_EXTENSIONS = (".sv", ".svh", ".v", ".vh")
+_AGENT_SOURCE_DIRS = ("rtl", "verif")
+
+
+def _safe_workspace_path(base: Path, rel: str) -> Optional[Path]:
+    """Resolve a workspace-relative path, rejecting absolute paths, ``..``
+    traversal, and symlink escapes. Returns the absolute path inside ``base``, or
+    None if the path would escape the workspace."""
+    if not rel:
+        return None
+    try:
+        candidate = (base / rel).resolve()
+        base_resolved = base.resolve()
+    except (OSError, ValueError, RuntimeError):
+        return None
+    if candidate == base_resolved or base_resolved in candidate.parents:
+        return candidate
+    return None
+
+
+def _is_harness_path(rel: str) -> bool:
+    """True for paths that belong to the hidden grading harness and must never be
+    seeded into the agent workspace (the test scripts in ``src/`` and the compose
+    file)."""
+    norm = rel.replace("\\", "/").strip("/")
+    return (
+        norm == "src"
+        or norm.startswith("src/")
+        or norm == "docker-compose.yml"
+        or norm.endswith("/docker-compose.yml")
+    )
+
 
 def _extract_text(content: list[Any]) -> str:
     return "".join(b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text")
@@ -69,6 +104,47 @@ def _extract_thinking(content: list[Any]) -> str:
         if b.get("type") in ("thinking", "reasoning"):
             parts.append(b.get("thinking") or b.get("text") or "")
     return "\n".join(p for p in parts if p)
+
+
+def _summarize_claude_failure(stdout: str) -> str:
+    """Best-effort one-line reason for a non-zero claude exit, pulled from its
+    stream-json stdout. Claude reports API problems as ``api_retry`` events and a
+    terminal ``result`` line (errors go to stdout, not stderr), so we collect the
+    HTTP statuses it retried on plus the final result's error fields."""
+    retry_statuses: list[str] = []
+    result_summary = ""
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            obj = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if obj.get("type") == "system" and obj.get("subtype") == "api_retry":
+            status = obj.get("error_status")
+            err = obj.get("error")
+            retry_statuses.append(f"{status}/{err}" if err else str(status))
+        elif obj.get("type") == "result":
+            parts = []
+            if obj.get("subtype"):
+                parts.append(f"subtype={obj['subtype']}")
+            if obj.get("is_error") is not None:
+                parts.append(f"is_error={obj['is_error']}")
+            if obj.get("api_error_status"):
+                parts.append(f"api_error_status={obj['api_error_status']}")
+            if obj.get("result"):
+                parts.append(f"result={str(obj['result'])[:200]}")
+            result_summary = " ".join(parts)
+    bits = []
+    if retry_statuses:
+        from collections import Counter
+
+        counts = Counter(retry_statuses)
+        bits.append("api_retry=" + ", ".join(f"{k} x{v}" for k, v in counts.items()))
+    if result_summary:
+        bits.append(f"result_line[{result_summary}]")
+    return "; ".join(bits)
 
 
 def parse_stream_json(stdout: str) -> tuple[list[Any], dict]:
@@ -218,15 +294,24 @@ class ClaudeCodeAgentConfig(BaseResponsesAPIAgentConfig):
     max_turns: int = 30
     timeout: int = 300
 
+    # Context window Claude Code should assume for the active model. Claude only
+    # auto-detects the window for first-party (api.anthropic.com) base URLs; when
+    # routing through anthropic_base_url it falls back to a 200K default, which
+    # triggers premature auto-compaction on large-window models. Setting this
+    # exports CLAUDE_CODE_MAX_CONTEXT_TOKENS (+ DISABLE_AUTO_COMPACT, required for
+    # the override to take effect). None leaves Claude's default behavior. Defaults
+    # to 1M for Nemotron-class models.
+    max_context_tokens: Optional[int] = 1_000_000
+
     # --- Apptainer execution ---
     # For tasks with target files, run() executes claude inside an Apptainer
     # container built from `sim_image` (or an explicit `sif_path`). The agent owns
     # a per-rollout workspace seeded with the task's `context_files` ONLY (docs +
-    # companion RTL — never the hidden harness/tests); claude may read those files
-    # and self-test with the in-container EDA tools (iverilog/vvp), then returns
-    # its solution as text per the system prompt. That response text is sent to
-    # /verify, where the resources server extracts the RTL (no on-disk readback),
-    # keeping fidelity with the original CVDP benchmark.
+    # companion RTL — never the hidden harness/tests); claude edits the target
+    # file(s) on disk and may self-test with the in-container EDA tools
+    # (iverilog/vvp). The produced files are read back and passed to /verify as
+    # `rtl_files`, so the resources server scores the actual on-disk artifact in a
+    # fresh, isolated workspace that contains the hidden harness.
     #
     # `claude` itself is not in the EDA image, so the host's self-contained
     # `.claude_node` (Node + Claude Code, created by setup_claude_code) is bind
@@ -324,19 +409,81 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             return self.config.sif_path
         return await self._ensure_sif(self.config.sim_image)
 
-    def _seed_workspace(self, workdir: Path, context_files: Dict[str, str]) -> None:
-        """Create the CVDP workspace layout and write context files only (no harness/tests)."""
+    def _seed_workspace(
+        self,
+        workdir: Path,
+        context_files: Dict[str, str],
+        harness_files: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Create the CVDP workspace layout and write context files only (no harness/tests).
+
+        Defends the hidden-test guarantee: any context path that is also a declared
+        harness file, or that looks like harness (``src/**`` or a compose file), is
+        skipped. Paths that escape the workspace (absolute or ``..``) are rejected."""
         for d in ("rtl", "verif", "docs", "src", "rundir"):
             (workdir / d).mkdir(parents=True, exist_ok=True)
+        forbidden = set(harness_files or {})
         for filepath, content in (context_files or {}).items():
             if content is None:
                 continue
-            dest = workdir / filepath
+            if filepath in forbidden or _is_harness_path(filepath):
+                LOG.warning("skipping harness-like context file %s", filepath)
+                continue
+            dest = _safe_workspace_path(workdir, filepath)
+            if dest is None:
+                LOG.warning("skipping unsafe context file path %s", filepath)
+                continue
             dest.parent.mkdir(parents=True, exist_ok=True)
             try:
                 dest.write_text(content, encoding="utf-8")
             except Exception:
                 LOG.warning("failed to seed context file %s", filepath)
+
+    def _collect_produced_files(
+        self, workdir: Path, context_files: Dict[str, str], target_files: list
+    ) -> Dict[str, str]:
+        """Capture every HDL source the agent created or modified, mirroring the
+        reference's before/after diff of the agent's mounted tree.
+
+        Returns {relpath: content} for files under the source dirs (``rtl``,
+        ``verif``) with an HDL extension that are new or differ from what we seeded,
+        plus any declared target files present on disk. Build artifacts and unchanged
+        context files are skipped."""
+        produced: Dict[str, str] = {}
+
+        for src_dir in _AGENT_SOURCE_DIRS:
+            base = workdir / src_dir
+            if not base.is_dir():
+                continue
+            for fpath in base.rglob("*"):
+                if not fpath.is_file() or fpath.suffix.lower() not in _HDL_EXTENSIONS:
+                    continue
+                rel = fpath.relative_to(workdir).as_posix()
+                try:
+                    content = fpath.read_text(encoding="utf-8")
+                except Exception:
+                    LOG.warning("could not read produced file %s", rel)
+                    continue
+                # New file, or modified relative to what we seeded.
+                if context_files.get(rel) != content:
+                    produced[rel] = content
+
+        # Always include declared target files that exist (even if unchanged or
+        # written outside the scanned source dirs).
+        for tf in target_files:
+            if tf in produced:
+                continue
+            fpath = _safe_workspace_path(workdir, tf)
+            if fpath is None:
+                LOG.warning("skipping unsafe target file path %s", tf)
+                continue
+            if fpath.is_file():
+                try:
+                    produced[tf] = fpath.read_text(encoding="utf-8")
+                except Exception:
+                    LOG.warning("could not read produced target file %s", tf)
+
+        return produced
 
     def _resolve_base_url(self) -> str:
         if self.config.model_server:
@@ -396,6 +543,10 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 "CLAUDE_CODE_SUBAGENT_MODEL": model,
                 "IS_SANDBOX": "1",
             }
+            if self.config.max_context_tokens is not None:
+                # CLAUDE_CODE_MAX_CONTEXT_TOKENS only applies when compaction is off.
+                env_pairs["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = str(self.config.max_context_tokens)
+                env_pairs["DISABLE_AUTO_COMPACT"] = "1"
             if base_url:
                 env_pairs["ANTHROPIC_BASE_URL"] = base_url
                 env_pairs["ANTHROPIC_AUTH_TOKEN"] = api_key or "local"
@@ -422,15 +573,16 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 claude_args += ["--thinking", self.config.thinking]
             if self.config.max_thinking_tokens is not None:
                 claude_args += ["--max-thinking-tokens", str(self.config.max_thinking_tokens)]
-            claude_args += ["--", instruction]
+            # The prompt is fed via stdin (not argv): CVDP prompts inline the spec +
+            # RTL and can exceed the kernel's per-arg limit (MAX_ARG_STRLEN, 128KB),
+            # which would fail execve with E2BIG ("Argument list too long").
 
             if sandbox:
                 wd = self.config.container_workdir
                 sif_path = await self._resolve_sif()
                 container_env = dict(env_pairs)
-                # --cleanenv is intentionally not used: we set HOME/PATH/CLAUDE_CONFIG_DIR
-                # plus the ANTHROPIC_* vars explicitly via --env below.
-                container_env["HOME"] = wd
+                # HOME is set via apptainer's --home flag (below), not --env: apptainer
+                # rejects APPTAINERENV_HOME ("Overriding HOME ... is not permitted").
                 container_env["CLAUDE_CONFIG_DIR"] = f"{wd}/.claude_config"
                 container_env["PATH"] = (
                     "/opt/claude_node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -442,12 +594,11 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                     "apptainer",
                     "exec",
                     "--writable-tmpfs",
-                    "--no-mount",
-                    "home",
+                    # Mounts the workspace at <wd> AND sets HOME=<wd> inside the container.
+                    "--home",
+                    f"{workdir}:{wd}",
                     "--pwd",
                     wd,
-                    "--bind",
-                    f"{workdir}:{wd}",
                     "--bind",
                     f"{self._node_bind_dir}:/opt/claude_node:ro",
                     *env_args,
@@ -462,13 +613,16 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
 
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
+                stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=run_env,
                 start_new_session=sandbox,  # own process group so we can kill apptainer + children
             )
             try:
-                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=self.config.timeout)
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(input=instruction.encode()), timeout=self.config.timeout
+                )
             except asyncio.TimeoutError:
                 if sandbox:
                     try:
@@ -482,7 +636,17 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 return "", model
 
             if proc.returncode not in (0, None):
-                LOG.warning("claude-code exited %s: %s", proc.returncode, stderr.decode(errors="replace")[:800])
+                # claude in stream-json mode reports API failures on stdout (not stderr),
+                # so surface the real reason: any api_retry error_status it hit plus the
+                # final result line, falling back to stderr / a stdout tail.
+                stdout_text = stdout.decode(errors="replace")
+                reason = _summarize_claude_failure(stdout_text)
+                LOG.warning(
+                    "claude-code exited %s: %s (stderr=%r)",
+                    proc.returncode,
+                    reason or stdout_text[-800:],
+                    stderr.decode(errors="replace")[:400],
+                )
 
             LOG.debug("claude-code stdout (%d chars): %s", len(stdout), stdout[:2000].decode(errors="replace"))
             return stdout.decode(errors="replace"), model
@@ -602,10 +766,11 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
     ) -> ClaudeCodeAgentVerifyResponse:
         """Agent-owned sandbox flow: seed a workspace with context files only and
         run claude inside the container so it can read the spec / companion RTL and
-        self-test with the in-container EDA tools (iverilog/vvp). Grading stays
-        faithful to the original CVDP benchmark: claude returns its solution as
-        text per the system prompt, and that text is sent to /verify, where the
-        resources server extracts the RTL from the response (no on-disk readback)."""
+        self-test with the in-container EDA tools (iverilog/vvp). Claude edits the
+        target file(s) directly on disk; we read those produced files back and pass
+        them to /verify as ``rtl_files`` (so the resources server scores the actual
+        on-disk artifact rather than parsing RTL out of the model's text response,
+        which the dataset prompt asks to be a patch)."""
         cookies = request.cookies
         context_files = meta.get("context_files") or {}
 
@@ -622,30 +787,28 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             os.makedirs(tmp_root, exist_ok=True)
         workdir = tempfile.mkdtemp(prefix="cvdp_agent_", dir=tmp_root or None)
         try:
-            self._seed_workspace(Path(workdir), context_files)
+            self._seed_workspace(Path(workdir), context_files, meta.get("harness_files"))
 
             stdout, model_name = await self._run_claude_code(
                 user_message, system_prompt=system_prompt, workdir=workdir
             )
             output_items, usage = parse_stream_json(stdout)
-
-            assistant_msgs = [
-                it
+            turns = sum(
+                1
                 for it in output_items
                 if getattr(it, "type", None) == "message" and getattr(it, "role", None) == "assistant"
-            ]
-            turns = len(assistant_msgs)
-            naturally = bool(assistant_msgs)
-            if not assistant_msgs:
-                LOG.warning("claude-code produced no assistant message; padding empty output")
-                output_items.append(
-                    NeMoGymResponseOutputMessage(
-                        id=f"msg_{uuid4().hex}",
-                        content=[NeMoGymResponseOutputText(type="output_text", text="", annotations=[])],
-                        role="assistant",
-                        status="completed",
-                        type="message",
-                    )
+            )
+
+            # Capture every HDL source claude created or modified on disk (not just
+            # the declared target files); these are graded directly.
+            rtl_files = self._collect_produced_files(Path(workdir), context_files, target_files)
+            produced_targets = [tf for tf in target_files if (Path(workdir) / tf).is_file()]
+            naturally = bool(target_files) and len(produced_targets) == len(target_files)
+            if not rtl_files:
+                LOG.warning(
+                    "claude-code produced no HDL files on disk (targets %s); "
+                    "falling back to text extraction from the response",
+                    target_files,
                 )
 
             input_tokens = usage.get("input_tokens", 0)
@@ -669,10 +832,16 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             )
             agent_resp_json = response.model_dump()
 
+            # Only send rtl_files when claude actually wrote files; otherwise omit it
+            # so the resources server falls back to parsing RTL from the response text.
+            verify_payload = body.model_dump() | {"response": agent_resp_json}
+            if rtl_files:
+                verify_payload["rtl_files"] = rtl_files
+
             verify_resp = await self.server_client.post(
                 server_name=self.config.resources_server.name,
                 url_path="/verify",
-                json=body.model_dump() | {"response": agent_resp_json},
+                json=verify_payload,
                 cookies=cookies,
             )
             await raise_for_status(verify_resp)

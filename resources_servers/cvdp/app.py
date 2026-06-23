@@ -49,6 +49,22 @@ from nemo_gym.base_resources_server import (
 _helpers = ModelHelpers()
 
 
+def _safe_workspace_path(base: Path, rel: str) -> Optional[Path]:
+    """Resolve a workspace-relative path, rejecting absolute paths, ``..``
+    traversal, and symlink escapes. Returns the absolute path inside ``base``, or
+    None if the path would escape the workspace."""
+    if not rel:
+        return None
+    try:
+        candidate = (base / rel).resolve()
+        base_resolved = base.resolve()
+    except (OSError, ValueError, RuntimeError):
+        return None
+    if candidate == base_resolved or base_resolved in candidate.parents:
+        return candidate
+    return None
+
+
 # ----------------------------
 # Config
 # ----------------------------
@@ -86,6 +102,9 @@ class CVDPRunRequest(BaseRunRequest):
 
 class CVDPVerifyRequest(CVDPRunRequest, BaseVerifyRequest):
     verifier_metadata: Dict[str, Any]
+    # Pre-extracted target files (e.g. produced by a sandboxed agent that edits
+    # files on disk). When provided, RTL extraction from the response is skipped.
+    rtl_files: Optional[Dict[str, str]] = None
 
 
 class CVDPVerifyResponse(BaseVerifyResponse):
@@ -417,7 +436,13 @@ class CVDPResourcesServer(SimpleResourcesServer):
                         break
 
         has_model_output = bool(model_out and model_out.strip())
-        if not has_model_output:
+        # In the sandboxed agent flow the deliverable is the RTL the agent wrote to
+        # disk (passed as body.rtl_files), not its final chat message. Only treat an
+        # empty text response as an automatic failure when there are no on-disk files
+        # to grade -- otherwise a rollout that wrote valid RTL but ended without a
+        # closing message (e.g. cut off by max_turns) would be scored a false 0
+        # without the harness ever compiling/testing the files.
+        if not has_model_output and not body.rtl_files:
             return CVDPVerifyResponse(
                 **body.model_dump(),
                 reward=0.0,
@@ -504,7 +529,12 @@ class CVDPResourcesServer(SimpleResourcesServer):
         """
         Objective scoring for code-generation categories via docker-compose harness.
         """
-        rtl_files = _parse_model_response(model_out, meta.target_files)
+        # Prefer files supplied directly by the caller (sandboxed agent that wrote
+        # files on disk); otherwise extract them from the model's text response.
+        if body.rtl_files is not None:
+            rtl_files = body.rtl_files or None
+        else:
+            rtl_files = _parse_model_response(model_out, meta.target_files)
 
         # If model produced output but parsing failed, signal parse_failed so the
         # agent can retry with a fresh model completion — mirrors CVDP's
@@ -589,7 +619,10 @@ class CVDPResourcesServer(SimpleResourcesServer):
                 content = _apply_substitutions(content, self.config)
                 if filepath.endswith("docker-compose.yml"):
                     compose_content = content
-                dest = workdir_path / filepath
+                dest = _safe_workspace_path(workdir_path, filepath)
+                if dest is None:
+                    print(f"Skipping unsafe harness file path: {filepath}")
+                    continue
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 try:
                     with open(str(dest), "w+", encoding="utf-8") as f:
@@ -604,7 +637,10 @@ class CVDPResourcesServer(SimpleResourcesServer):
             # repository.restore_files(self.context). Preserves the full
             # target path (e.g. verif/tb_foo.sv -> workdir/verif/tb_foo.sv).
             for filepath, code in context_files.items():
-                dest = workdir_path / filepath
+                dest = _safe_workspace_path(workdir_path, filepath)
+                if dest is None:
+                    print(f"Skipping unsafe context file path: {filepath}")
+                    continue
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 try:
                     with open(str(dest), "w+", encoding="utf-8") as f:
@@ -615,7 +651,10 @@ class CVDPResourcesServer(SimpleResourcesServer):
             # Write model-generated files (overwrites context files for target slots).
             # Preserves the full target path, matching CVDP's restore_files().
             for filepath, code in rtl_files.items():
-                dest = workdir_path / filepath
+                dest = _safe_workspace_path(workdir_path, filepath)
+                if dest is None:
+                    print(f"Skipping unsafe model-generated file path: {filepath}")
+                    continue
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 try:
                     with open(str(dest), "w+", encoding="utf-8") as f:

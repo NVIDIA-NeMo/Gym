@@ -4,7 +4,7 @@ cvdp:
       entrypoint: app.py
       domain: coding
       verified: false
-      oss_sim_image: ghcr.io/hdl/sim/osvb
+      oss_sim_image: nvidia/cvdp-sim:v1.0.0
       eda_sim_image: ""
       container_timeout: 600
       num_processes: 4
@@ -30,7 +30,7 @@ claude_code_agent:
       # Runs claude inside the EDA sim container so it can edit files on disk and
       # use iverilog/vvp. Leave sif_path unset to pull/convert sim_image to a
       # cached .sif; claude_node_dir defaults to ./.claude_node (bind-mounted in).
-      sim_image: ghcr.io/hdl/sim/osvb
+      sim_image: nvidia/cvdp-sim:v1.0.0
       sif_path: null
       sif_cache_dir: ""
       claude_node_dir: ""

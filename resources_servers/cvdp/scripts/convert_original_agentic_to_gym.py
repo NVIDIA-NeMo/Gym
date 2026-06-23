@@ -83,11 +83,12 @@ def _subjective_reference(row: dict[str, Any]) -> str | None:
 
 
 def _user_prompt(row: dict[str, Any], target_files: list[str], include_output_hints: bool) -> str:
+    # NOTE: context files are seeded into the agent's workspace on disk (see
+    # verifier_metadata["context_files"]); the agent reads them with ls/cat. We do
+    # NOT inline their contents into the prompt -- that would defeat the agentic
+    # exploration the original CVDP benchmark intends and can blow past the model's
+    # context window (e.g. tasks that ship a multi-hundred-KB lookup-table file).
     parts: list[str] = []
-    context = row.get("context") or {}
-    if isinstance(context, dict):
-        for filepath, content in context.items():
-            parts.append(f"\nConsider the following content for the file {filepath}:\n```\n{content}\n```")
 
     prompt = row.get("prompt") or ""
     if prompt:
