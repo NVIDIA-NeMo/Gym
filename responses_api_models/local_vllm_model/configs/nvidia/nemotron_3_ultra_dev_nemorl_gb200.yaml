@@ -47,9 +47,10 @@ nemotron_3_ultra_dev:
 
         # MTP
         mamba_cache_mode: align
-        speculative_config:
-          method: mtp
-          num_speculative_tokens: 5
+        # Disable MTP since we observe MTP + prefix caching cache hit rate issues
+        # speculative_config:
+        #   method: mtp
+        #   num_speculative_tokens: 5
 
         # Params that may affect accuracy
         kv_cache_dtype: fp8
@@ -64,6 +65,7 @@ nemotron_3_ultra_dev:
         model_loader_extra_config:
           enable_multithread_load: true
           num_threads: 96
+        load_format: instanttensor
 
         # Misc
         trust_remote_code: true
