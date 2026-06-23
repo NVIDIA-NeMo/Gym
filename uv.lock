@@ -1414,6 +1414,10 @@ dev = [
     { name = "requests-mock" },
     { name = "ruff" },
 ]
+sandbox = [
+    { name = "opensandbox" },
+    { name = "tenacity" },
+]
 
 [package.dev-dependencies]
 docs = [
@@ -1446,6 +1450,7 @@ requires-dist = [
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.8.0" },
     { name = "omegaconf" },
     { name = "openai", specifier = "<=2.7.2" },
+    { name = "opensandbox", marker = "extra == 'sandbox'", specifier = ">=0.1.9" },
     { name = "orjson" },
     { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=3.6.0" },
     { name = "psutil" },
@@ -1461,6 +1466,7 @@ requires-dist = [
     { name = "requests-mock", marker = "extra == 'dev'" },
     { name = "rich" },
     { name = "ruff", marker = "extra == 'dev'" },
+    { name = "tenacity", marker = "extra == 'sandbox'", specifier = ">=9.1.4" },
     { name = "tqdm" },
     { name = "urllib3", specifier = ">=2.7.0" },
     { name = "uvicorn" },
@@ -1468,7 +1474,7 @@ requires-dist = [
     { name = "wandb" },
     { name = "yappi" },
 ]
-provides-extras = ["dev"]
+provides-extras = ["sandbox", "dev"]
 
 [package.metadata.requires-dev]
 docs = [
@@ -1621,6 +1627,21 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/4c/96/3b6f638f6275a8abbd45e582448723bffa29c1fb426721dedb5c72f7d056/opencensus-context-0.1.3.tar.gz", hash = "sha256:a03108c3c10d8c80bb5ddf5c8a1f033161fa61972a9917f9b9b3a18517f0088c", size = 4066, upload-time = "2022-08-03T22:20:22.359Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/10/68/162c97ea78c957d68ecf78a5c5041d2e25bd5562bdf5d89a6cbf7f8429bf/opencensus_context-0.1.3-py2.py3-none-any.whl", hash = "sha256:073bb0590007af276853009fac7e4bab1d523c3f03baf4cb4511ca38967c6039", size = 5060, upload-time = "2022-08-03T22:20:20.352Z" },
+]
+
+[[package]]
+name = "opensandbox"
+version = "0.1.9"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "attrs" },
+    { name = "httpx" },
+    { name = "pydantic" },
+    { name = "python-dateutil" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/5a/2a/ab3cc141e041f71a373c97fcda8749dba9328f1b9bf80401378c0611556f/opensandbox-0.1.9.tar.gz", hash = "sha256:670fbf292c498f8467963d21e91ade9ea8b8f63f4ef18d18fff9581e0952ec03", size = 160034, upload-time = "2026-05-12T12:27:20.692Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/4e/9b/553f8d7a30eddb12785711b2a1c682386878e2bb95450acd806f9fa62930/opensandbox-0.1.9-py3-none-any.whl", hash = "sha256:17faed35b60a982fee5a643fed8e4e12f041e5432d5ea0665d2828d1f2082759", size = 360945, upload-time = "2026-05-12T12:27:19.465Z" },
 ]
 
 [[package]]
@@ -2775,6 +2796,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/5b/b3/84bc7d8af6b50e6c365f1593fe4a01245f4bfb2178040261c6429db0b46b/swagger_plugin_for_sphinx-6.0.0.tar.gz", hash = "sha256:70366c610648cede5ef482922c9c97c86c99746b9edf33e4ec13fab23d820251", size = 16026, upload-time = "2025-10-16T06:26:09.95Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/51/f0/1098f6628bbe04b086ce59692d09b116ec751286eb7d33e88c5bf0c2e210/swagger_plugin_for_sphinx-6.0.0-py3-none-any.whl", hash = "sha256:35dc646d759a44ce78aefde2fe34f54e7b8c3439d0a52541a6a8b9924a711832", size = 11253, upload-time = "2025-10-16T06:26:08.504Z" },
+]
+
+[[package]]
+name = "tenacity"
+version = "9.1.4"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/47/c6/ee486fd809e357697ee8a44d3d69222b344920433d3b6666ccd9b374630c/tenacity-9.1.4.tar.gz", hash = "sha256:adb31d4c263f2bd041081ab33b498309a57c77f9acf2db65aadf0898179cf93a", size = 49413, upload-time = "2026-02-07T10:45:33.841Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d7/c1/eb8f9debc45d3b7918a32ab756658a0904732f75e555402972246b0b8e71/tenacity-9.1.4-py3-none-any.whl", hash = "sha256:6095a360c919085f28c6527de529e76a06ad89b23659fa881ae0649b867a9d55", size = 28926, upload-time = "2026-02-07T10:45:32.24Z" },
 ]
 
 [[package]]
