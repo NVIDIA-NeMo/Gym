@@ -53,3 +53,15 @@ class TestLegacyDeprecation:
         legacy.main()
 
         assert "deprecated" in capsys.readouterr().err
+
+    def test_unknown_alias_exits_nonzero(self, monkeypatch: MonkeyPatch, capsys) -> None:
+        # An alias with no LEGACY mapping (stale script or user typo) must fail loudly, not KeyError.
+        monkeypatch.setattr(legacy, "gym_main", lambda: None)
+        monkeypatch.setattr(legacy, "dispatch", lambda *a, **k: None)
+        monkeypatch.setattr(sys, "argv", ["ng_does_not_exist"])
+
+        with pytest.raises(SystemExit) as exc_info:
+            legacy.main()
+
+        assert exc_info.value.code == 1
+        assert "no known `gym` equivalent" in capsys.readouterr().err

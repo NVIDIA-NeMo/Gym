@@ -69,7 +69,17 @@ def main() -> None:
         dispatch("nemo_gym.cli.general:reinstall", sys.argv[1:])
         return
 
-    tokens = LEGACY[key]
+    tokens = LEGACY.get(key)
+    if tokens is None:
+        # Reached only if a new `ng_*` / `nemo_gym_*` console script is wired to `legacy:main`
+        # without a matching `LEGACY` entry (a packaging bug, caught by tests), or a user invokes
+        # an alias that no longer exists. Fail loudly with a non-zero exit code.
+        print(
+            f"⚠  `{alias}` has no known `gym` equivalent. Run `gym --help` to see available commands.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     print(
         f"⚠  `{alias}` is deprecated and will be removed in a future release; use `gym {' '.join(tokens)}` instead.",
         file=sys.stderr,
