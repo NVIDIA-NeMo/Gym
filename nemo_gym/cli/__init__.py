@@ -12,3 +12,23 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+from typing import Any
+
+
+# NOTE: The cli module was re-structured but NeMo-RL relies on these two imports.
+# They resolve lazily so importing this package (which happens on every `gym` invocation)
+# doesn't eagerly pull in hydra, wandb and ray at startup.
+_LEGACY_EXPORTS = {
+    "RunHelper": "nemo_gym.cli.env",
+    "GlobalConfigDictParserConfig": "nemo_gym.global_config",
+}
+
+
+def __getattr__(name: str) -> Any:
+    module_path = _LEGACY_EXPORTS.get(name)
+    if module_path is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    import importlib
+
+    return getattr(importlib.import_module(module_path), name)
