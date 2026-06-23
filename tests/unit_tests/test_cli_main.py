@@ -901,6 +901,18 @@ class TestEnvRunByName:
         assert target == "nemo_gym.cli.env:run"
         assert overrides == ["+config_paths=[a.yaml]"]
 
+    def test_existing_config_paths_token_is_preserved(self, monkeypatch: MonkeyPatch) -> None:
+        # An asset-selector name (or passthrough) reaches _env_run as a +config_paths token with no
+        # --env/--config; it must survive rather than be stripped.
+        target, overrides = _dispatch_for(monkeypatch, ["env", "run", "+config_paths=[foo.yaml]"])
+        assert target == "nemo_gym.cli.env:run"
+        assert overrides == ["+config_paths=[foo.yaml]"]
+
+    def test_env_merges_with_existing_config_paths_token(self, monkeypatch: MonkeyPatch) -> None:
+        self._patch_resolve(monkeypatch)
+        _, overrides = _dispatch_for(monkeypatch, ["env", "run", "--env", "alpha", "+config_paths=[foo.yaml]"])
+        assert overrides == ["+config_paths=[environments/alpha/config.yaml,foo.yaml]"]
+
     def test_unknown_env_exits_cleanly(self, monkeypatch: MonkeyPatch) -> None:
         import nemo_gym.registry
         from nemo_gym.registry import EnvironmentNotFoundError

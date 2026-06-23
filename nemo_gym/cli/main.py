@@ -279,11 +279,17 @@ def _env_run(args: argparse.Namespace, overrides: list[str]) -> None:
             config_paths += resolve_environment_config_paths(args.env)
         except EnvironmentNotFoundError as error:
             raise SystemExit(f"error: {error}")
-    if args.config:
-        config_paths += list(args.config)
+    # Merge --env's resolved config(s) with any +config_paths the router already emitted — from
+    # --config or from an asset-selector name (e.g. `gym env run mcqa`) — into a single token,
+    # preserving order. Pulling paths out of the existing token (rather than re-reading args.config)
+    # means asset-selector resolution is not discarded.
+    rest: list[str] = []
+    for token in overrides:
+        if token.startswith("+config_paths=[") and token.endswith("]"):
+            config_paths += [path for path in token[len("+config_paths=[") : -1].split(",") if path]
+        else:
+            rest.append(token)
 
-    # CONFIG already emitted its own +config_paths token; drop it and emit the merged list instead.
-    rest = [token for token in overrides if not token.startswith("+config_paths=")]
     merged = ([f"+config_paths=[{','.join(config_paths)}]"] if config_paths else []) + rest
     dispatch("nemo_gym.cli.env:run", merged)
 
