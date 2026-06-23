@@ -25,9 +25,17 @@ try:
 except ModuleNotFoundError:
 
     class Submitted(Exception):
-        """Compatibility shim for local mini-swe-agent versions before v2."""
+        """Signals that the agent has submitted its final output, carrying the submission messages.
+
+        Used when the installed mini-swe-agent does not provide its own ``Submitted`` exception.
+        """
 
         def __init__(self, *messages: dict[str, Any]) -> None:
+            """Store the submission messages on the exception.
+
+            Args:
+                *messages: The message dicts describing the submission.
+            """
             self.messages = messages
             super().__init__()
 
@@ -69,6 +77,18 @@ class MiniSWESandboxEnvironment:
         config_class: type = MiniSWESandboxEnvironmentConfig,
         **kwargs: Any,
     ) -> None:
+        """Build the environment config and start the backing sandbox.
+
+        Resolves the image (with rewrites), assembles the environment variables and resources from
+        the spec and config, and starts a sandbox for the task.
+
+        Args:
+            config_class: The dataclass used to construct the environment config from ``kwargs``.
+            **kwargs: Fields forwarded to ``config_class`` (image, cwd, env, provider, spec, etc.).
+
+        Raises:
+            ValueError: If no sandbox provider is configured.
+        """
         self.config = config_class(**kwargs)
         if not self.config.provider:
             raise ValueError("MiniSWESandboxEnvironment requires provider")
@@ -108,9 +128,22 @@ class MiniSWESandboxEnvironment:
         )
 
     def get_template_vars(self, **kwargs: Any) -> dict[str, Any]:
+        """Return the variables available for prompt/command templating.
+
+        Args:
+            **kwargs: Extra variables to merge over the config fields.
+
+        Returns:
+            A dict combining the config fields with the provided overrides.
+        """
         return {**self.config.__dict__, **kwargs}
 
     def serialize(self) -> dict[str, Any]:
+        """Serialize the environment configuration for trajectory records.
+
+        Returns:
+            A nested dict describing the environment config and its fully qualified type name.
+        """
         return {
             "info": {
                 "config": {
@@ -121,6 +154,15 @@ class MiniSWESandboxEnvironment:
         }
 
     def _command(self, command: str) -> str:
+        """Wrap a command to activate the configured conda env when enabled.
+
+        Args:
+            command: The shell command to run.
+
+        Returns:
+            The command prefixed with conda activation, or the unchanged command when conda
+            activation is disabled or no env is configured.
+        """
         if not self.config.activate_conda or not self.config.conda_env:
             return command
         quoted_env = shlex.quote(self.config.conda_env)
@@ -133,6 +175,21 @@ class MiniSWESandboxEnvironment:
         is_eval: bool = False,
         timeout: int | None = None,
     ) -> dict[str, Any]:
+        """Execute a command in the sandbox and return its combined output and return code.
+
+        Args:
+            action: The command to run, either a string or a dict with a ``command`` key.
+            cwd: The working directory; defaults to the configured cwd when empty.
+            is_eval: Whether this is an eval command, which selects the eval timeout.
+            timeout: An explicit timeout in seconds; overrides the step/eval default when set.
+
+        Returns:
+            A dict with ``output`` (merged stdout and stderr), ``returncode``, and ``exception_info``.
+
+        Raises:
+            RuntimeError: If the sandbox is not available.
+            Submitted: If the command output signals a final submission.
+        """
         command = action.get("command", "") if isinstance(action, dict) else action
         timeout_s = timeout or (self.config.eval_timeout if is_eval else self.config.step_timeout)
         exec_cwd = cwd or self.config.cwd
@@ -155,7 +212,14 @@ class MiniSWESandboxEnvironment:
         return response
 
     def _check_finished(self, output: dict[str, Any]) -> None:
-        """Match mini-swe-agent's submit sentinel handling for sandbox-backed runs."""
+        """Raise ``Submitted`` when the command output begins with the submit sentinel.
+
+        Args:
+            output: The execute-result dict whose ``output`` and ``returncode`` are inspected.
+
+        Raises:
+            Submitted: If the first output line is the submit sentinel and the return code is zero.
+        """
         lines = output.get("output", "").lstrip().splitlines(keepends=True)
         if lines and lines[0].strip() == "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT" and output["returncode"] == 0:
             submission = "".join(lines[1:])
@@ -168,6 +232,10 @@ class MiniSWESandboxEnvironment:
             )
 
     def cleanup(self) -> None:
+        """Stop the backing sandbox and mark the environment closed.
+
+        Idempotent: subsequent calls return immediately once the environment is closed.
+        """
         if self._closed:
             return
         self._closed = True

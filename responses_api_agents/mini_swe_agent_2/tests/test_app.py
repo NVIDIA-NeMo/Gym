@@ -12,12 +12,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Tests for the mini SWE agent app: parameter helpers, trajectory splitting, sandbox runs, and metric aggregation."""
+
 import json
 import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any, Dict, Optional
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import yaml
@@ -134,6 +136,16 @@ def create_test_config(
     port: int = 8080,
     model_name: str = "test_model",
 ) -> MiniSWEAgentConfig:
+    """Build a MiniSWEAgentConfig populated with defaults suitable for tests.
+
+    Args:
+        host (str): Host the agent server binds to.
+        port (int): Port the agent server binds to.
+        model_name (str): Name of the referenced model server.
+
+    Returns:
+        MiniSWEAgentConfig: A configuration wired to use the sandbox environment.
+    """
     return MiniSWEAgentConfig(
         name="mini_swe_agent_2",
         host=host,
@@ -151,6 +163,12 @@ def create_test_config(
 
 
 def setup_server_client_mocks(mock_load_from_global_config, mock_get_first_server_config_dict):
+    """Configure server-client and server-config mocks with default return values.
+
+    Args:
+        mock_load_from_global_config: Mock for ServerClient.load_from_global_config.
+        mock_get_first_server_config_dict: Mock for the first-server config lookup.
+    """
     mock_server_client_instance = MagicMock()
     mock_server_client_instance.global_config_dict = {"policy_model_name": "test_model"}
     mock_load_from_global_config.return_value = mock_server_client_instance
@@ -162,6 +180,12 @@ def setup_server_client_mocks(mock_load_from_global_config, mock_get_first_serve
 
 
 def setup_config_path_mock(mock_get_config_path, config_yaml: str = DEFAULT_CONFIG_YAML):
+    """Configure the config-path mock to return a path whose text is the given YAML.
+
+    Args:
+        mock_get_config_path: Mock for the get_config_path lookup.
+        config_yaml (str): YAML content the mocked config path returns from read_text.
+    """
     mock_config_path = MagicMock()
     mock_config_path.read_text.return_value = config_yaml
     mock_get_config_path.return_value = mock_config_path
@@ -172,16 +196,22 @@ def setup_run_mini_swe_mock(
     mock_runner_ray_remote,
     run_mini_swe_result: Dict[str, Any] = None,
 ):
-    """Setup mock for Ray-based run_mini_swe execution"""
+    """Configure mocks so the Ray-based run_mini_swe execution returns a fixed result.
+
+    Args:
+        mock_to_thread: Mock for asyncio.to_thread, which drives ray.get.
+        mock_runner_ray_remote: Mock for the Ray remote runner function.
+        run_mini_swe_result (Dict[str, Any]): Result to return; defaults to DEFAULT_RUN_MINI_SWE_RESULT when None.
+    """
     if run_mini_swe_result is None:
         run_mini_swe_result = DEFAULT_RUN_MINI_SWE_RESULT
 
-    # Mock the Ray remote function to return a future-like object
+    # Make the Ray remote function return a future-like object.
     mock_future = MagicMock()
     mock_runner_ray_remote.remote.return_value = mock_future
     mock_runner_ray_remote.options.return_value.remote.return_value = mock_future
 
-    # Mock asyncio.to_thread (which calls ray.get) to return the result
+    # asyncio.to_thread drives ray.get; have it return the result directly.
     mock_to_thread.return_value = run_mini_swe_result
 
 
@@ -195,7 +225,21 @@ def create_run_request(
     split: str = "train",
     input_data: list = None,
 ) -> MiniSWEAgentRunRequest:
-    """Create a test run request with default values."""
+    """Create a run request with default values for use in tests.
+
+    Args:
+        instance_id (str): Identifier of the task instance.
+        temperature (float): Sampling temperature for the model.
+        top_p (float): Nucleus sampling probability for the model.
+        max_output_tokens (int | None): Optional cap on generated tokens.
+        metadata (dict[str, Any] | None): Optional metadata passed in the responses params.
+        subset (str): Dataset subset name.
+        split (str): Dataset split name.
+        input_data (list): Input messages; defaults to an empty list when None.
+
+    Returns:
+        MiniSWEAgentRunRequest: The assembled run request.
+    """
     if input_data is None:
         input_data = []
 
@@ -219,6 +263,17 @@ def create_chat_completion_request(
     temperature: float = 0.7,
     max_tokens: Optional[int] = None,
 ) -> NeMoGymChatCompletionCreateParamsNonStreaming:
+    """Create chat-completion request params with default values for use in tests.
+
+    Args:
+        model (str): Model name to request.
+        messages (list): Chat messages; defaults to a single user greeting when None.
+        temperature (float): Sampling temperature for the model.
+        max_tokens (Optional[int]): Optional cap on generated tokens, included only when set.
+
+    Returns:
+        NeMoGymChatCompletionCreateParamsNonStreaming: The assembled request params.
+    """
     if messages is None:
         messages = [{"role": "user", "content": "Hello!"}]
 
@@ -236,6 +291,15 @@ def assert_run_response(
     expected_top_p: float = 0.8,
     expected_input_length: int = 2,
 ):
+    """Assert that a run response matches the expected reward, sampling params, and input shape.
+
+    Args:
+        response (MiniSWEAgentVerifyResponse): The response returned by the agent run.
+        expected_reward (float): Reward value the response is expected to carry.
+        expected_temperature (float): Expected sampling temperature in the response params.
+        expected_top_p (float): Expected nucleus sampling probability in the response params.
+        expected_input_length (int): Expected number of input messages in the response params.
+    """
     assert isinstance(response, MiniSWEAgentVerifyResponse)
     assert response.reward == expected_reward
     assert response.responses_create_params.temperature == expected_temperature
@@ -253,6 +317,14 @@ def assert_run_mini_swe_called(
     split: str = "train",
     instance_id: str = "test_instance_123",
 ):
+    """Assert that the run_mini_swe execution was invoked exactly once with positional args.
+
+    Args:
+        mock_to_thread: Mock for asyncio.to_thread used to dispatch the run.
+        subset (str): Dataset subset name expected for the run.
+        split (str): Dataset split name expected for the run.
+        instance_id (str): Task instance identifier expected for the run.
+    """
     mock_to_thread.assert_called_once()
     call_args = mock_to_thread.call_args
     args = call_args[0]
@@ -260,11 +332,15 @@ def assert_run_mini_swe_called(
 
 
 class TestApp:
+    """Tests for the MiniSWEAgent server: helpers, sandbox runs, endpoints, and metrics."""
+
     def test_sanity(self) -> None:
+        """Construct a MiniSWEAgent with an empty model name to confirm it instantiates."""
         config = create_test_config(model_name="")
         MiniSWEAgent(config=config, server_client=MagicMock(spec=ServerClient))
 
     def test_response_param_helpers_cover_metadata_and_tool_choice_modes(self) -> None:
+        """Verify metadata parsing and tool-choice normalization in the param helpers."""
         assert _json_dict_from_metadata(None, field_name="extra_body") == {}
         assert _json_dict_from_metadata({"top_k": 20}, field_name="extra_body") == {"top_k": 20}
 
@@ -303,6 +379,7 @@ class TestApp:
             _json_dict_from_metadata("[]", field_name="extra_body")
 
     def test_sandbox_resource_profiles_override_static_resources(self) -> None:
+        """Verify resource profiles take precedence over static resources in the sandbox spec."""
         spec = _sandbox_spec_for_instance(
             {"resources": {"cpu": 1, "memory_mib": 8192, "disk_gib": 20}},
             resource_profiles=[
@@ -319,6 +396,7 @@ class TestApp:
         assert _sandbox_spec_for_instance(None, resource_profiles=None, instance_id="task") == {}
 
     def test_sandbox_provider_config_dump_strips_api_key(self) -> None:
+        """Verify the config dump removes the API key while the runtime env still carries it."""
         provider = {
             "opensandbox": {
                 "connection": {
@@ -336,6 +414,7 @@ class TestApp:
         }
 
     def test_split_trajectory_and_resolution_helpers_cover_edge_cases(self) -> None:
+        """Verify trajectory splitting into input/output/raw items and resolution detection on edge cases."""
         input_messages, output_items, raw_responses = _split_trajectory_for_responses(
             [
                 {"role": "system", "content": "sys"},
@@ -375,6 +454,12 @@ class TestApp:
         )
 
     def test_misc_mini_swe_helpers(self, monkeypatch, tmp_path) -> None:
+        """Verify image-name resolution, message-content flattening, and config-path discovery helpers.
+
+        Args:
+            monkeypatch: Pytest fixture for patching module attributes.
+            tmp_path: Pytest fixture providing a temporary directory.
+        """
         assert _swebench_image_name({"instance_id": "django__django-1"}, "verified") == (
             "docker.io/swebench/sweb.eval.x86_64.django_1776_django-1:latest"
         )
@@ -396,6 +481,11 @@ class TestApp:
         assert _swebench_config_path() == tmp_path / "missing" / "extra" / "swebench.yaml"
 
     def test_run_mini_swe_records_completion_and_errors(self, monkeypatch) -> None:
+        """Verify run_mini_swe_with_sandbox passes through results and propagates runner errors.
+
+        Args:
+            monkeypatch: Pytest fixture for patching the underlying runner.
+        """
         monkeypatch.setattr(
             mini_swe_app_module,
             "_run_mini_swe_v2",
@@ -432,16 +522,41 @@ class TestApp:
         assert run_mini_swe_with_sandbox(env="sandbox", instance_id="task-1") == {"task-1": "bad"}
 
     def test_run_mini_swe_v2_success_and_golden_paths(self, monkeypatch, tmp_path) -> None:
+        """Verify _run_mini_swe_v2 across the agent-run, golden-patch, string-instance, and error paths.
+
+        Args:
+            monkeypatch: Pytest fixture for patching modules and environment.
+            tmp_path: Pytest fixture providing a temporary directory for config and output.
+        """
         holder: dict[str, Any] = {}
 
         class FakeLogger:
+            """Minimal logger stub whose info method discards messages."""
+
             def info(self, _message: str) -> None:
                 return None
 
         def setup_logger(_instance_id: str, _log_file: Path) -> FakeLogger:
+            """Return a FakeLogger, ignoring the instance id and log file arguments.
+
+            Args:
+                _instance_id (str): Task instance identifier (unused).
+                _log_file (Path): Destination log path (unused).
+
+            Returns:
+                FakeLogger: A throwaway logger.
+            """
             return FakeLogger()
 
         def make_test_spec(instance: dict[str, Any]) -> SimpleNamespace:
+            """Build a stand-in test spec exposing an instance id and eval script.
+
+            Args:
+                instance (dict[str, Any]): Instance dict supplying the instance id.
+
+            Returns:
+                SimpleNamespace: Object with instance_id and eval_script attributes.
+            """
             return SimpleNamespace(
                 instance_id=instance["instance_id"],
                 eval_script="#!/bin/bash\npytest -q",
@@ -454,34 +569,88 @@ class TestApp:
             test_log_path: str,
             **_kwargs: Any,
         ):
+            """Return a stub eval report after confirming the test log path exists.
+
+            Args:
+                test_spec (SimpleNamespace): Spec supplying the instance id.
+                prediction (dict[str, Any]): Prediction payload echoed into the report.
+                test_log_path (str): Path to the test log; asserted to exist.
+                **_kwargs (Any): Additional keyword arguments (unused).
+
+            Returns:
+                dict: Report keyed by instance id marking the task resolved.
+            """
             assert Path(test_log_path).exists()
             return {test_spec.instance_id: {"resolved": True, "prediction": prediction}}
 
         class FakeEnv:
+            """Stand-in sandbox environment recording executed commands and cleanup state."""
+
             def __init__(self, config: dict[str, Any]) -> None:
+                """Store the config and initialize command tracking and cleanup flag.
+
+                Args:
+                    config (dict[str, Any]): Environment configuration dict.
+                """
                 self.config = config
                 self.commands: list[tuple[str, bool]] = []
                 self.cleaned = False
 
             def execute(self, command: str, is_eval: bool = False) -> dict[str, Any]:
+                """Record a command and return a successful fake result.
+
+                Args:
+                    command (str): Command to record.
+                    is_eval (bool): Whether the command is an evaluation step.
+
+                Returns:
+                    dict[str, Any]: Fake output with a zero return code.
+                """
                 self.commands.append((command, is_eval))
                 return {"output": "tests passed", "returncode": 0}
 
             def cleanup(self) -> None:
+                """Mark the environment as cleaned up."""
                 self.cleaned = True
 
         class FakeAgent:
+            """Stand-in agent that records its config and returns a fixed trajectory."""
+
             def __init__(self, model: Any, env: FakeEnv, **agent_config: Any) -> None:
+                """Store the model, environment, and agent config.
+
+                Args:
+                    model (Any): Model object handed to the agent.
+                    env (FakeEnv): Sandbox environment the agent runs against.
+                    **agent_config (Any): Remaining agent configuration, also recorded in the holder.
+                """
                 self.model = model
                 self.env = env
                 self.agent_config = agent_config
                 holder["agent_config"] = agent_config
 
             def run(self, problem_statement: str) -> dict[str, Any]:
+                """Return a fixed submitted result after asserting the problem statement.
+
+                Args:
+                    problem_statement (str): Task description; asserted to equal the fixture value.
+
+                Returns:
+                    dict[str, Any]: Result with a submitted status and a submission diff.
+                """
                 assert problem_statement == "Fix the bug"
                 return {"exit_status": "submitted", "submission": "diff --git a/file b/file"}
 
             def save(self, path: Path | None, metadata: dict[str, Any]) -> dict[str, Any]:
+                """Record save inputs, optionally write the trajectory file, and return fixed messages.
+
+                Args:
+                    path (Path | None): Destination path; written with placeholder content when set.
+                    metadata (dict[str, Any]): Save metadata recorded in the holder.
+
+                Returns:
+                    dict[str, Any]: A fixed messages trajectory for the run.
+                """
                 holder["save_path"] = path
                 holder["save_metadata"] = metadata
                 if path is not None:
@@ -520,11 +689,27 @@ class TestApp:
                 }
 
         def get_environment(config: dict[str, Any]) -> FakeEnv:
+            """Build a FakeEnv from the config and record it in the holder.
+
+            Args:
+                config (dict[str, Any]): Environment configuration dict.
+
+            Returns:
+                FakeEnv: The constructed fake environment.
+            """
             env = FakeEnv(config)
             holder["env"] = env
             return env
 
         def get_model(config: dict[str, Any]) -> SimpleNamespace:
+            """Record the model config and return a namespace wrapping it.
+
+            Args:
+                config (dict[str, Any]): Model configuration dict.
+
+            Returns:
+                SimpleNamespace: Object exposing the config as an attribute.
+            """
             holder["model_config"] = config
             return SimpleNamespace(config=config)
 
@@ -716,6 +901,17 @@ class TestApp:
         tmp_path,
         monkeypatch,
     ) -> None:
+        """Verify run writes sampling params and tool choice into the generated config and runtime env.
+
+        Args:
+            mock_to_thread: Mock for asyncio.to_thread.
+            mock_runner_ray_remote: Mock for the Ray remote runner.
+            mock_get_config_path: Mock for the config-path lookup.
+            mock_get_first_server_config_dict: Mock for the first-server config lookup.
+            mock_load_from_global_config: Mock for ServerClient.load_from_global_config.
+            tmp_path: Pytest fixture providing a temporary directory.
+            monkeypatch: Pytest fixture used to change the working directory.
+        """
         monkeypatch.chdir(tmp_path)
         config = create_test_config()
         config.tool_choice = "bash"
@@ -788,11 +984,11 @@ class TestApp:
         setup_server_client_mocks(mock_load_from_global_config, mock_get_first_server_config_dict)
         setup_config_path_mock(mock_get_config_path)
 
-        # Mock Ray remote function
+        # Provide a fake Ray remote future.
         mock_future = MagicMock()
         mock_runner_ray_remote.remote.return_value = mock_future
 
-        # Mock asyncio.to_thread (ray.get) to raise an exception
+        # Make the dispatched run raise a generic exception.
         mock_to_thread.side_effect = Exception("run_mini_swe failed")
 
         run_request = create_run_request(instance_id="test_instance_456", temperature=0.3, top_p=0.95)
@@ -822,6 +1018,15 @@ class TestApp:
         mock_get_first_server_config_dict,
         mock_load_from_global_config,
     ) -> None:
+        """Verify run returns a zero-reward response when the runner raises FileNotFoundError.
+
+        Args:
+            mock_to_thread: Mock for asyncio.to_thread.
+            mock_runner_ray_remote: Mock for the Ray remote runner.
+            mock_get_config_path: Mock for the config-path lookup.
+            mock_get_first_server_config_dict: Mock for the first-server config lookup.
+            mock_load_from_global_config: Mock for ServerClient.load_from_global_config.
+        """
         config = create_test_config()
         mock_server_client = MagicMock(spec=ServerClient)
         server = MiniSWEAgent(config=config, server_client=mock_server_client)
@@ -829,11 +1034,11 @@ class TestApp:
         setup_server_client_mocks(mock_load_from_global_config, mock_get_first_server_config_dict)
         setup_config_path_mock(mock_get_config_path)
 
-        # Mock Ray remote function
+        # Provide a fake Ray remote future.
         mock_future = MagicMock()
         mock_runner_ray_remote.remote.return_value = mock_future
 
-        # Mock asyncio.to_thread (ray.get) to raise FileNotFoundError
+        # Make the dispatched run raise FileNotFoundError.
         mock_to_thread.side_effect = FileNotFoundError("run_mini_swe not found")
 
         run_request = create_run_request(instance_id="test_instance_789", temperature=0.2, top_p=1.0)
@@ -851,6 +1056,7 @@ class TestApp:
         assert_run_mini_swe_called(mock_to_thread, instance_id="test_instance_789")
 
     async def test_responses_not_implemented(self) -> None:
+        """Verify the responses endpoint raises NotImplementedError."""
         config = create_test_config()
         mock_server_client = MagicMock(spec=ServerClient)
         server = MiniSWEAgent(config=config, server_client=mock_server_client)
@@ -861,6 +1067,7 @@ class TestApp:
             await server.responses(request_body)
 
     async def test_aggregate_metrics_includes_eval_results(self) -> None:
+        """Verify aggregate_metrics reports pass@k, resolution, test status, and per-group eval results."""
         config = create_test_config()
         mock_server_client = MagicMock(spec=ServerClient)
         server = MiniSWEAgent(config=config, server_client=mock_server_client)
@@ -936,6 +1143,7 @@ class TestApp:
         assert groups[1]["eval_error_rollout_count"] == 2
 
     def test_endpoints_registration(self) -> None:
+        """Verify the responses, run, and aggregate_metrics endpoints are registered and reachable."""
         config = create_test_config()
         mock_server_client = MagicMock(spec=ServerClient)
         server = MiniSWEAgent(config=config, server_client=mock_server_client)
@@ -951,3 +1159,235 @@ class TestApp:
 
         aggregate_response = client.post("/aggregate_metrics", json={"verify_responses": []})
         assert aggregate_response.status_code == 200
+
+
+def _create_verifier_run_request(
+    instance_id: str = "psf__requests-2317",
+    subset: str = "verified",
+    split: str = "test",
+) -> MiniSWEAgentRunRequest:
+    """Build a run request carrying the extra SWE-bench instance fields the verifier metadata reads.
+
+    Args:
+        instance_id (str): Task instance identifier.
+        subset (str): Dataset subset name.
+        split (str): Dataset split name.
+
+    Returns:
+        MiniSWEAgentRunRequest: A run request populated with base commit, test patch, and test node ids.
+    """
+    return MiniSWEAgentRunRequest(
+        instance_id=instance_id,
+        subset=subset,
+        split=split,
+        base_commit="abc123",
+        test_patch="TP",
+        FAIL_TO_PASS=["test_x.py::test_a"],
+        PASS_TO_PASS=["test_x.py::test_b"],
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+            input=[],
+            temperature=0.5,
+            top_p=0.8,
+        ),
+    )
+
+
+class TestCrossAgentVerifierReuse:
+    """Tests for opt-in scoring of the agent's patch via the shared SWE environment verifier."""
+
+    def _server(self, eval_via_verifier: bool = True) -> MiniSWEAgent:
+        """Construct a MiniSWEAgent configured to score patches through the shared verifier.
+
+        Args:
+            eval_via_verifier (bool): Whether to route scoring through the verifier server.
+
+        Returns:
+            MiniSWEAgent: An agent wired to the verifier server with a mocked server client.
+        """
+        config = create_test_config()
+        config.eval_via_verifier = eval_via_verifier
+        config.verifier_server_name = "swe_verifier"
+        config.sandbox_provider = {"opensandbox": {}}
+        return MiniSWEAgent(config=config, server_client=MagicMock(spec=ServerClient))
+
+    def test_config_defaults_keep_legacy_path(self) -> None:
+        """Verify verifier-based scoring is disabled by default in the config."""
+        config = create_test_config()
+        assert config.eval_via_verifier is False
+        assert config.verifier_server_name is None
+
+    async def test_verify_patch_via_server_builds_request_and_parses_subset(self, monkeypatch) -> None:
+        """Verify _verify_patch_via_server builds the verifier request and parses the returned subset.
+
+        Args:
+            monkeypatch: Pytest fixture for patching HTTP helpers in the app module.
+        """
+        server = self._server()
+        monkeypatch.setattr(mini_swe_app_module, "raise_for_status", AsyncMock(return_value=None))
+        monkeypatch.setattr(
+            mini_swe_app_module,
+            "get_response_json",
+            AsyncMock(return_value={"resolved": True, "error_kind": None, "patch_exists": True, "reward": 1.0}),
+        )
+        server.server_client.post = AsyncMock(return_value=MagicMock())
+
+        body = _create_verifier_run_request()
+        subset = await server._verify_patch_via_server(
+            instance=body.model_dump(),
+            patch="<<DIFF>>",
+            instance_id="psf__requests-2317",
+            subset="verified",
+            split="test",
+            responses_create_params=body.responses_create_params,
+        )
+
+        assert subset["resolved"] is True
+        call = server.server_client.post.call_args
+        # The request POSTs to the shared verifier via the server client.
+        assert call.kwargs["server_name"] == "swe_verifier"
+        assert call.kwargs["url_path"] == "/verify"
+        req = call.kwargs["json"]
+        # The patch travels in response.metadata.model_patch, the field the verifier reads.
+        assert req["response"]["metadata"]["model_patch"] == "<<DIFF>>"
+        md = req["responses_create_params"]["metadata"]
+        assert md["instance_id"] == "psf__requests-2317"
+        # The image is resolved from the instance id and subset, munging __ to _1776_ for verified.
+        assert md["image"] == "docker.io/swebench/sweb.eval.x86_64.psf_1776_requests-2317:latest"
+        # The instance ships no test_command, so the conda+pytest default carrying the
+        # fail-to-pass and pass-to-pass node ids is used.
+        assert "conda activate testbed" in md["test_command"]
+        assert "test_x.py::test_a" in md["test_command"]
+        assert "test_x.py::test_b" in md["test_command"]
+        # With no per-row framework, an empty value is forwarded so the verifier auto-detects.
+        assert md["test_framework"] == ""
+        assert md["fail_to_pass"] == ["test_x.py::test_a"]
+        assert md["pass_to_pass"] == ["test_x.py::test_b"]
+        assert md["base_commit"] == "abc123"
+        assert md["test_patch"] == "TP"
+        assert md["repo_workdir"] == "/testbed"
+        assert md["split"] == "test"
+        # The benchmark is the registered harness key the test_command targets, not the subset.
+        assert md["benchmark"] == "swe-bench-ext"
+
+    async def test_verify_patch_via_server_infra_error_is_masked_not_raised(self, monkeypatch) -> None:
+        """Verify an infrastructure error during verification is masked into a present, unresolved subset.
+
+        Args:
+            monkeypatch: Pytest fixture (unused but kept for signature consistency).
+        """
+        server = self._server()
+        server.server_client.post = AsyncMock(side_effect=RuntimeError("connreset"))
+
+        body = _create_verifier_run_request()
+        subset = await server._verify_patch_via_server(
+            instance=body.model_dump(),
+            patch="<<DIFF>>",
+            instance_id="psf__requests-2317",
+            subset="verified",
+            split="test",
+            responses_create_params=body.responses_create_params,
+        )
+
+        # The call never raises; it returns a masked subset so the agent still emits a present row.
+        assert subset["resolved"] is False
+        assert subset["error_kind"] == "sandbox"
+        assert subset["patch_exists"] is True
+
+    async def test_verify_patch_via_server_forwards_instance_test_command_and_framework(self, monkeypatch) -> None:
+        """Verify a row carrying its own test_command and test_framework is forwarded verbatim.
+
+        A row supplying a per-framework test command (e.g. cargo, go, npm) is forwarded unchanged so
+        non-pytest rows are graded with their own command rather than the conda+pytest default.
+
+        Args:
+            monkeypatch: Pytest fixture for patching HTTP helpers in the app module.
+        """
+        server = self._server()
+        monkeypatch.setattr(mini_swe_app_module, "raise_for_status", AsyncMock(return_value=None))
+        monkeypatch.setattr(
+            mini_swe_app_module,
+            "get_response_json",
+            AsyncMock(return_value={"resolved": True, "error_kind": None, "patch_exists": True}),
+        )
+        server.server_client.post = AsyncMock(return_value=MagicMock())
+
+        body = _create_verifier_run_request()
+        instance = body.model_dump()
+        instance["test_command"] = "go test ./..."
+        instance["test_framework"] = "go"
+        await server._verify_patch_via_server(
+            instance=instance,
+            patch="<<DIFF>>",
+            instance_id="psf__requests-2317",
+            subset="verified",
+            split="test",
+            responses_create_params=body.responses_create_params,
+        )
+
+        md = server.server_client.post.call_args.kwargs["json"]["responses_create_params"]["metadata"]
+        # The row's command is forwarded verbatim; the conda+pytest default does not override it.
+        assert md["test_command"] == "go test ./..."
+        assert md["test_framework"] == "go"
+        assert "conda activate testbed" not in md["test_command"]
+
+    @patch("responses_api_agents.mini_swe_agent_2.app.ServerClient.load_from_global_config")
+    @patch("responses_api_agents.mini_swe_agent_2.app.get_first_server_config_dict")
+    @patch("responses_api_agents.mini_swe_agent_2.app.get_config_path")
+    @patch("responses_api_agents.mini_swe_agent_2.app.runner_ray_remote")
+    @patch("asyncio.to_thread")
+    async def test_run_scores_via_verifier_instead_of_in_process_eval(
+        self,
+        mock_to_thread,
+        mock_runner_ray_remote,
+        mock_get_config_path,
+        mock_get_first_server_config_dict,
+        mock_load_from_global_config,
+        monkeypatch,
+    ) -> None:
+        """Verify run scores via the verifier and skips in-process evaluation on the verifier path.
+
+        Args:
+            mock_to_thread: Mock for asyncio.to_thread.
+            mock_runner_ray_remote: Mock for the Ray remote runner.
+            mock_get_config_path: Mock for the config-path lookup.
+            mock_get_first_server_config_dict: Mock for the first-server config lookup.
+            mock_load_from_global_config: Mock for ServerClient.load_from_global_config.
+            monkeypatch: Pytest fixture for patching app-module attributes.
+        """
+        server = self._server()
+        setup_server_client_mocks(mock_load_from_global_config, mock_get_first_server_config_dict)
+        setup_config_path_mock(mock_get_config_path)
+        # In-worker eval is skipped; the worker returns only the trajectory and patch.
+        worker_result = {
+            "test_instance_123": {
+                "input_messages": [
+                    {"type": "message", "role": "system", "content": "sys"},
+                    {"type": "message", "role": "user", "content": "Fix this bug."},
+                ],
+                "response_output": [],
+                "responses": [],
+                "eval_report": {"instance_id": "test_instance_123", "model_patch": "<<DIFF>>"},
+            }
+        }
+        setup_run_mini_swe_mock(mock_to_thread, mock_runner_ray_remote, run_mini_swe_result=worker_result)
+
+        # _is_resolved must not be consulted on the verifier path; the verifier is authoritative.
+        monkeypatch.setattr(
+            mini_swe_app_module,
+            "_is_resolved",
+            lambda *_a, **_k: pytest.fail("the in-process _is_resolved must not run on the verifier path"),
+        )
+        verify_mock = AsyncMock(
+            return_value={"resolved": True, "error_kind": None, "patch_exists": True, "reward": 1.0}
+        )
+        monkeypatch.setattr(MiniSWEAgent, "_verify_patch_via_server", verify_mock)
+
+        response = await server.run(create_run_request())
+
+        # The reward comes from the verifier subset, and the patch was forwarded to it.
+        assert response.reward == 1.0
+        assert verify_mock.await_args.kwargs["patch"] == "<<DIFF>>"
+        assert verify_mock.await_args.kwargs["instance_id"] == "test_instance_123"
+        # The worker was told to skip in-process eval.
+        worker_params = mock_runner_ray_remote.remote.call_args.args[1]
+        assert worker_params["eval_via_verifier"] is True

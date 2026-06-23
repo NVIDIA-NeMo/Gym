@@ -12,6 +12,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Agent server that runs mini-swe-agent against SWE-bench tasks inside a sandbox.
+
+Each task is executed in an isolated sandbox via a Ray remote worker: the agent produces a code
+patch, which is then graded either in-process with the swebench harness or by POSTing it to a
+shared swe_env verifier. The server converts mini-swe-agent trajectories into Gym Responses API
+rows and aggregates pass/resolution metrics across rollouts.
+"""
+
 import asyncio
 import hashlib
 import json
@@ -29,7 +37,7 @@ import ray
 import yaml
 from fastapi import Body, FastAPI
 from minisweagent.config import builtin_config_dir, get_config_path
-from pydantic import ConfigDict
+from pydantic import ConfigDict, Field
 
 from nemo_gym.base_resources_server import (
     BaseRunRequest,
@@ -50,6 +58,8 @@ from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_met
 from nemo_gym.server_utils import (
     ServerClient,
     get_first_server_config_dict,
+    get_response_json,
+    raise_for_status,
 )
 
 
@@ -72,6 +82,23 @@ class MiniSWEAgentConfig(BaseResponsesAPIAgentConfig):
     tool_choice: Optional[str | dict[str, Any]] = None
     sandbox_resource_profiles: Optional[list[dict[str, str]]] = None
 
+    # Opt-in: score the patch via the shared swe_env verifier instead of grading in-process.
+    eval_via_verifier: bool = Field(
+        default=False,
+        description=(
+            "If True, score the agent's patch by POSTing it to the shared swe_env verifier "
+            "(verifier_server_name) instead of grading it in-process. Default False grades "
+            "in-process; setting it True reuses the same swe_env verifier other agents use."
+        ),
+    )
+    verifier_server_name: Optional[str] = Field(
+        default=None,
+        description=(
+            "Name of the resources_servers/swe_env verifier to POST /verify to when "
+            "eval_via_verifier=True. Required when eval_via_verifier is True."
+        ),
+    )
+
 
 class MiniSWEAgentRunRequest(BaseRunRequest):
     model_config = ConfigDict(extra="allow")
@@ -92,10 +119,31 @@ class MiniSWEAgentVerifyResponse(BaseVerifyResponse):
     },
 )
 def runner_ray_remote(runner: Callable, params: dict[str, Any]) -> Any:
+    """Invoke a runner callable inside a Ray remote task.
+
+    Args:
+        runner: The callable to execute on the worker.
+        params: Keyword arguments to pass to ``runner``.
+
+    Returns:
+        The value returned by ``runner``.
+    """
     return runner(**params)
 
 
 def _json_dict_from_metadata(value: Any, *, field_name: str) -> dict[str, Any]:
+    """Coerce a metadata value into a dict, parsing JSON strings as needed.
+
+    Args:
+        value: The metadata value to coerce; may be None, a dict, or a JSON-encoded string.
+        field_name: The metadata field name, used only for the error message.
+
+    Returns:
+        The value as a dict; an empty dict when ``value`` is None.
+
+    Raises:
+        ValueError: If the value is not None, a dict, or a JSON string decoding to an object.
+    """
     if value is None:
         return {}
     if isinstance(value, dict):
@@ -112,7 +160,17 @@ def _responses_create_params_to_model_kwargs(
     *,
     default_tool_choice: Any = None,
 ) -> dict[str, Any]:
-    """Convert Gym Responses API rollout params into mini-swe-agent chat-completions kwargs."""
+    """Convert Gym Responses API rollout params into mini-swe-agent chat-completions kwargs.
+
+    Args:
+        params: The Responses API create params (temperature, top_p, max_output_tokens, metadata,
+            tool_choice, etc.).
+        default_tool_choice: A tool choice that overrides ``params["tool_choice"]`` when provided.
+
+    Returns:
+        A dict of chat-completions kwargs (e.g. temperature, max_tokens, extra_body, tool_choice)
+        containing only the fields that were set.
+    """
     model_kwargs: dict[str, Any] = {}
     for key in ("temperature", "top_p", "top_logprobs", "parallel_tool_calls"):
         value = params.get(key)
@@ -144,6 +202,14 @@ def _responses_create_params_to_model_kwargs(
 
 
 def _opensandbox_connection(provider: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Extract the opensandbox connection dict from a sandbox provider config.
+
+    Args:
+        provider: The sandbox provider config mapping, or None.
+
+    Returns:
+        The nested opensandbox connection dict, or None if it is absent or malformed.
+    """
     if provider is None:
         return None
     provider_config = provider.get(OPENSANDBOX_PROVIDER_NAME)
@@ -156,6 +222,14 @@ def _opensandbox_connection(provider: dict[str, Any] | None) -> dict[str, Any] |
 
 
 def _sandbox_provider_for_config_dump(provider: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of the provider config safe to write to disk, with the API key removed.
+
+    Args:
+        provider: The sandbox provider config mapping.
+
+    Returns:
+        A deep copy of ``provider`` with any opensandbox connection ``api_key`` stripped.
+    """
     provider_for_disk = deepcopy(provider)
     connection = _opensandbox_connection(provider_for_disk)
     if connection is not None:
@@ -164,6 +238,15 @@ def _sandbox_provider_for_config_dump(provider: dict[str, Any]) -> dict[str, Any
 
 
 def _sandbox_runtime_env(provider: dict[str, Any] | None) -> dict[str, Any]:
+    """Build the Ray runtime env for the sandbox worker, injecting the API key when available.
+
+    Args:
+        provider: The sandbox provider config mapping, or None.
+
+    Returns:
+        A runtime env dict with ``py_executable`` set, and ``env_vars`` carrying the opensandbox
+        API key when the provider supplies one.
+    """
     runtime_env: dict[str, Any] = {"py_executable": sys.executable}
     connection = _opensandbox_connection(provider)
     if connection is None:
@@ -175,6 +258,14 @@ def _sandbox_runtime_env(provider: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def _restore_sandbox_provider_secrets(config: dict[str, Any]) -> None:
+    """Repopulate the opensandbox API key in a loaded config from the environment.
+
+    Mutates ``config`` in place so the provider connection has an ``api_key`` again after the key
+    was stripped for on-disk storage, reading it from the environment variable.
+
+    Args:
+        config: The loaded agent config dict to mutate.
+    """
     provider = config.get("environment", {}).get("provider")
     connection = _opensandbox_connection(provider if isinstance(provider, dict) else None)
     if connection is None or connection.get("api_key"):
@@ -185,6 +276,11 @@ def _restore_sandbox_provider_secrets(config: dict[str, Any]) -> None:
 
 
 def _bash_tool_choice() -> dict[str, Any]:
+    """Build the tool-choice payload that forces the model to call the ``bash`` function.
+
+    Returns:
+        A tool-choice dict selecting the ``bash`` function.
+    """
     return {"type": "function", "function": {"name": "bash"}}
 
 
@@ -194,6 +290,17 @@ def _sandbox_spec_for_instance(
     resource_profiles: list[dict[str, Any]] | None,
     instance_id: str,
 ) -> dict[str, Any]:
+    """Build the per-instance sandbox spec, applying a deterministically chosen resource profile.
+
+    Args:
+        spec: The base sandbox spec mapping, or None.
+        resource_profiles: Candidate resource profile mappings to choose from, or None to skip.
+        instance_id: The instance identifier, hashed to pick a profile deterministically.
+
+    Returns:
+        A copy of the spec with the selected resource profile merged into its ``resources``, or the
+        plain spec copy when no profiles are provided.
+    """
     instance_spec = dict(spec or {})
     if not resource_profiles:
         return instance_spec
@@ -207,6 +314,11 @@ def _sandbox_spec_for_instance(
 
 
 def _swebench_config_path() -> Path:
+    """Locate the bundled mini-swe-agent SWE-bench config file.
+
+    Returns:
+        The path to the first existing candidate config, falling back to the canonical location.
+    """
     for candidate in (
         builtin_config_dir / "extra" / "swebench.yaml",
         builtin_config_dir / "benchmarks" / "swebench.yaml",
@@ -217,6 +329,18 @@ def _swebench_config_path() -> Path:
 
 
 def _swebench_image_name(instance: dict[str, Any], subset: str) -> str:
+    """Resolve the Docker image name for a SWE-bench instance.
+
+    Uses the instance's explicit ``image_name`` when present; otherwise derives the conventional
+    image reference from the instance id and subset.
+
+    Args:
+        instance: The task instance dict; may carry ``image_name`` and must carry ``instance_id``.
+        subset: The dataset subset (e.g. "verified"), which selects the image naming scheme.
+
+    Returns:
+        The fully qualified Docker image name, lowercased.
+    """
     image_name = instance.get("image_name")
     if image_name:
         return str(image_name)
@@ -231,6 +355,14 @@ def _swebench_image_name(instance: dict[str, Any], subset: str) -> str:
 
 
 def _message_content_to_text(content: Any) -> str:
+    """Flatten a message ``content`` field into a single text string.
+
+    Args:
+        content: A message content value: a string, a list of content parts, None, or other.
+
+    Returns:
+        The concatenated text; an empty string when ``content`` is None.
+    """
     if isinstance(content, str):
         return content
     if isinstance(content, list):
@@ -245,6 +377,14 @@ def _message_content_to_text(content: Any) -> str:
 
 
 def _strip_extra(item: Any) -> dict[str, Any]:
+    """Normalize a trajectory item to a dict and drop its ``extra`` key.
+
+    Args:
+        item: A pydantic model, a dict, or any other value to normalize.
+
+    Returns:
+        A dict without the ``extra`` key; non-dict, non-model values are wrapped as a user message.
+    """
     if hasattr(item, "model_dump"):
         item = item.model_dump()
     if not isinstance(item, dict):
@@ -255,6 +395,17 @@ def _strip_extra(item: Any) -> dict[str, Any]:
 def _split_trajectory_for_responses(
     messages: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Split a mini-swe-agent message trajectory into Responses API input, output, and responses.
+
+    The leading system/user messages become input messages; subsequent assistant turns, tool calls,
+    tool outputs, and raw response objects become output items.
+
+    Args:
+        messages: The ordered list of trajectory messages from the agent run.
+
+    Returns:
+        A tuple ``(input_messages, output_items, raw_responses)`` in Responses API form.
+    """
     input_messages: list[dict[str, Any]] = []
     output_items: list[dict[str, Any]] = []
     raw_responses: list[dict[str, Any]] = []
@@ -311,6 +462,11 @@ def _split_trajectory_for_responses(
 
 
 def _default_response_object() -> dict[str, Any]:
+    """Build a fully populated default Responses API response object.
+
+    Returns:
+        A dict with a fresh id, current timestamp, and default values for every Responses API field.
+    """
     return {
         "id": f"resp_{str(uuid4())}",
         "created_at": int(time.time()),
@@ -352,6 +508,18 @@ def _default_response_object() -> dict[str, Any]:
 
 
 def _is_resolved(instance_id: str, eval_report: dict[str, Any]) -> bool:
+    """Determine whether an instance was resolved according to its eval report.
+
+    An instance counts as resolved only when the harness marked it resolved and reported at least
+    one test outcome.
+
+    Args:
+        instance_id: The instance identifier to look up in the report.
+        eval_report: The eval report dict produced by the swebench harness.
+
+    Returns:
+        True if the instance is resolved with reported test results; False otherwise or on any error.
+    """
     try:
         if not eval_report:
             return False
@@ -376,16 +544,43 @@ def _is_resolved(instance_id: str, eval_report: dict[str, Any]) -> bool:
 
 
 def _metadata_dict(verify_response: dict[str, Any]) -> dict[str, Any]:
+    """Extract the ``metadata`` mapping from a verify/rollout response.
+
+    Args:
+        verify_response: The verify or rollout response dict.
+
+    Returns:
+        The metadata dict, or an empty dict when absent or not a dict.
+    """
     metadata = verify_response.get("metadata") or {}
     return metadata if isinstance(metadata, dict) else {}
 
 
 def _eval_report_map(verify_response: dict[str, Any]) -> dict[str, Any]:
+    """Extract the per-instance eval report map from a verify/rollout response.
+
+    Args:
+        verify_response: The verify or rollout response dict.
+
+    Returns:
+        The ``eval_report`` mapping keyed by instance id, or an empty dict when absent.
+    """
     report = _metadata_dict(verify_response).get("eval_report") or {}
     return report if isinstance(report, dict) else {}
 
 
 def _eval_instance_report(verify_response: dict[str, Any]) -> dict[str, Any]:
+    """Find the single instance's eval report within a verify/rollout response.
+
+    Looks up the report by instance id, falling back to the first report entry that carries a
+    ``resolved`` flag.
+
+    Args:
+        verify_response: The verify or rollout response dict.
+
+    Returns:
+        The matching per-instance report dict, or an empty dict when none is found.
+    """
     report_map = _eval_report_map(verify_response)
     instance_id = verify_response.get("instance_id") or _metadata_dict(verify_response).get("instance_id")
     if instance_id is not None:
@@ -400,6 +595,15 @@ def _eval_instance_report(verify_response: dict[str, Any]) -> dict[str, Any]:
 
 
 def _test_status_counts(verify_response: dict[str, Any]) -> dict[str, int]:
+    """Count per-suite test successes and failures from a verify/rollout response.
+
+    Args:
+        verify_response: The verify or rollout response dict.
+
+    Returns:
+        A dict mapping ``<suite>_success`` and ``<suite>_failure`` keys to their counts; empty when
+        no test status is present.
+    """
     report = _eval_instance_report(verify_response)
     tests_status = report.get("tests_status") if isinstance(report, dict) else None
     if not isinstance(tests_status, dict):
@@ -424,6 +628,22 @@ def _run_eval_v2(
     run_id: str,
     is_golden: bool,
 ) -> dict[str, Any]:
+    """Grade a patch in-process with the swebench harness inside the task's sandbox.
+
+    Writes the patch, runs the harness eval script in the sandbox, captures test output, and builds
+    the eval report. When grading a golden patch, applies the patch to the repo first.
+
+    Args:
+        instance: The SWE-bench instance dict.
+        env: The sandbox environment used to execute the eval script.
+        model_patch: The patch diff to grade.
+        instance_dir: The directory where logs, patch, output, and report files are written.
+        run_id: A unique identifier for this eval run, used in output filenames.
+        is_golden: Whether ``model_patch`` is the golden patch and should be applied before eval.
+
+    Returns:
+        A dict with ``instance_id``, ``model_patch``, and the harness ``eval_report``.
+    """
     from swebench.harness.constants import SWEbenchInstance
     from swebench.harness.docker_build import setup_logger
     from swebench.harness.grading import get_eval_report
@@ -476,6 +696,20 @@ def _run_eval_v2(
 
 
 def _run_mini_swe_v2(**params: Any) -> dict[str, Any]:
+    """Run a single mini-swe-agent task in a sandbox and return its trajectory and eval report.
+
+    Builds the agent config, starts the sandbox environment, runs the agent (or applies the golden
+    patch), optionally grades the patch in-process, and converts the trajectory to Responses API form.
+
+    Args:
+        **params: Run parameters including ``instance_dict``, ``instance_id``, ``output``, ``config``,
+            ``model``, ``api_key``, ``base_url``, ``subset``, ``step_timeout``, ``eval_timeout``,
+            ``step_limit``, ``run_golden``, and ``eval_via_verifier``.
+
+    Returns:
+        A dict keyed by instance id whose value holds ``input_messages``, ``response_output``,
+        ``responses``, ``eval_report``, and ``exit_status``.
+    """
     from minisweagent.agents.default import DefaultAgent
     from minisweagent.environments import get_environment
     from minisweagent.models import get_model
@@ -549,16 +783,22 @@ def _run_mini_swe_v2(**params: Any) -> dict[str, Any]:
                 {"instance_id": instance_id},
             )
 
-        print(f"[EVAL]{instance_id} Running eval", flush=True)
-        eval_report = _run_eval_v2(
-            instance=instance,
-            env=env,
-            model_patch=model_patch,
-            instance_dir=instance_dir,
-            run_id=run_id,
-            is_golden=params["run_golden"],
-        )
-        print(f"[EVAL]{instance_id} Eval completed", flush=True)
+        if params.get("eval_via_verifier"):
+            # Skip the in-worker swebench harness; the patch is graded out-of-band by the shared
+            # swe_env verifier. Carry the patch forward so the caller can POST it.
+            print(f"[EVAL]{instance_id} Skipping in-worker eval (eval_via_verifier)", flush=True)
+            eval_report = {"instance_id": instance_id, "model_patch": model_patch}
+        else:
+            print(f"[EVAL]{instance_id} Running eval", flush=True)
+            eval_report = _run_eval_v2(
+                instance=instance,
+                env=env,
+                model_patch=model_patch,
+                instance_dir=instance_dir,
+                run_id=run_id,
+                is_golden=params["run_golden"],
+            )
+            print(f"[EVAL]{instance_id} Eval completed", flush=True)
 
         input_messages, response_output, responses = _split_trajectory_for_responses(data.get("messages", []))
 
@@ -577,18 +817,42 @@ def _run_mini_swe_v2(**params: Any) -> dict[str, Any]:
 
 
 def run_mini_swe_with_sandbox(**params: Any) -> Any:
+    """Run a mini-swe-agent task in a sandbox.
+
+    Args:
+        **params: The run parameters forwarded to the sandbox runner.
+
+    Returns:
+        The per-instance result dict produced by the sandbox runner.
+    """
     return _run_mini_swe_v2(**params)
 
 
 class MiniSWEAgent(SimpleResponsesAPIAgent):
+    """Responses API agent that runs mini-swe-agent on SWE-bench tasks and scores the patches.
+
+    Bounds concurrency with a semaphore, dispatches each task to a Ray sandbox worker, grades the
+    resulting patch (in-process or via a shared verifier), and exposes rollout-level metrics.
+    """
+
     config: MiniSWEAgentConfig
     sem: Semaphore = None
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def model_post_init(self, __context: Any) -> None:
+        """Initialize the concurrency semaphore from the configured concurrency limit.
+
+        Args:
+            __context: The pydantic post-init context (unused).
+        """
         self.sem = Semaphore(self.config.concurrency)
 
     def setup_webserver(self) -> FastAPI:
+        """Build the FastAPI app and register the agent's HTTP routes.
+
+        Returns:
+            The configured FastAPI application.
+        """
         app = FastAPI()
         self.setup_session_middleware(app)
         app.post("/v1/responses")(self.responses)
@@ -597,6 +861,15 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
         return app
 
     def compute_metrics(self, tasks: list[list[dict[str, Any]]]) -> dict[str, Any]:
+        """Aggregate pass/resolution, eval-error, and test-status metrics across all rollouts.
+
+        Args:
+            tasks: A list of tasks, each a list of rollout dicts for that task.
+
+        Returns:
+            A dict of aggregate metrics, including pass@k, resolved counts and rates, eval error and
+            report rates, patch-applied rates, per-task metrics, and per-suite test status totals.
+        """
         metrics, _, _, max_k = compute_pass_majority_metrics(tasks)
         metrics.pop("per_sample_aggregate", None)
 
@@ -638,6 +911,15 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
         return metrics
 
     def _compute_per_task_eval_metrics(self, tasks: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
+        """Compute per-task eval metrics from each task's rollouts.
+
+        Args:
+            tasks: A list of tasks, each a list of rollout dicts for that task.
+
+        Returns:
+            A list of per-task metric dicts (task index, instance id, rollout/resolved/error counts,
+            and per-suite test status totals), skipping tasks with no rollouts.
+        """
         per_task_metrics: list[dict[str, Any]] = []
         for fallback_idx, rollouts in enumerate(tasks):
             if not rollouts:
@@ -676,6 +958,15 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
         return per_task_metrics
 
     def get_key_metrics(self, agent_metrics: dict[str, Any]) -> dict[str, Any]:
+        """Select the headline metrics to surface from the full aggregate metrics.
+
+        Args:
+            agent_metrics: The full metrics dict produced by ``compute_metrics``.
+
+        Returns:
+            A dict containing the highest-k pass metrics plus selected reward, resolution, and error
+            rate metrics that are present in ``agent_metrics``.
+        """
         key_metrics: dict[str, Any] = {}
         key_metrics.update(highest_k_metrics(agent_metrics, "pass@{k}", score_names=["accuracy"]))
         key_metrics.update(highest_k_metrics(agent_metrics, "pass@1[avg-of-{k}]", score_names=["accuracy"]))
@@ -691,10 +982,133 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
                 key_metrics[key] = agent_metrics[key]
         return key_metrics
 
+    async def _verify_patch_via_server(
+        self,
+        *,
+        instance: dict[str, Any],
+        patch: str,
+        instance_id: str,
+        subset: str,
+        split: str,
+        responses_create_params: NeMoGymResponseCreateParamsNonStreaming,
+    ) -> dict[str, Any]:
+        """POST the agent's patch to the shared swe_env verifier and return its eval subset.
+
+        Builds a verify request carrying the per-task metadata the verifier reads (instance_id, image,
+        base_commit, repo_workdir, test_command, test_framework, test_patch, fail_to_pass, pass_to_pass,
+        benchmark, split) plus the patch in ``response.metadata.model_patch``, and POSTs it to the
+        configured verifier server via the server client. On any transport failure it returns a masked
+        subset (``resolved=False``, ``error_kind='sandbox'``) rather than raising, so the agent always
+        emits a present (masked) row instead of dropping the rollout.
+
+        Args:
+            instance: The task instance dict holding fields such as FAIL_TO_PASS, PASS_TO_PASS,
+                base_commit, test_command, test_framework, and test_patch.
+            patch: The model-produced diff to grade.
+            instance_id: The SWE-bench instance identifier.
+            subset: The dataset subset (e.g. "verified"), used to resolve the Docker image name.
+            split: The dataset split passed through to the verifier.
+            responses_create_params: The Responses API params used to build the verify request.
+
+        Returns:
+            The verifier's eval subset as a dict; on failure, a masked dict with ``resolved=False``,
+            ``error_kind='sandbox'``, and ``patch_exists`` reflecting whether a patch was present.
+        """
+
+        def _as_list(value: Any) -> list[str]:
+            if isinstance(value, str):
+                try:
+                    return json.loads(value)
+                except json.JSONDecodeError:
+                    return [value]
+            return value or []
+
+        f2p = _as_list(instance.get("FAIL_TO_PASS"))
+        p2p = _as_list(instance.get("PASS_TO_PASS"))
+        # Forward the instance's own per-framework eval command and framework when present. Fall back
+        # to the conda+pytest default only when the row ships no test_command. This supports both
+        # SWE-bench-Verified (no per-row command) and multi-framework rows (cargo/go/npm/...) that
+        # carry their own command and framework.
+        test_framework = instance.get("test_framework", "") or ""
+        test_command = instance.get("test_command", "") or ""
+        if not test_command:
+            nodeids = " ".join("'" + n + "'" for n in f2p + p2p)
+            test_command = (
+                "source /opt/miniconda3/etc/profile.d/conda.sh && conda activate testbed && "
+                f"python -m pytest -rA {nodeids}"
+            )
+        task_metadata = {
+            "instance_id": instance_id,
+            "image": _swebench_image_name(instance, subset),
+            "base_commit": instance.get("base_commit", "") or "",
+            "repo_workdir": "/testbed",
+            "test_command": test_command,
+            "test_framework": test_framework,
+            "test_patch": instance.get("test_patch", "") or "",
+            "fail_to_pass": f2p,
+            "pass_to_pass": p2p,
+            # "swe-bench-ext" is the flat host-graded harness the conda/pytest test_command above
+            # targets; it is the registered swe_env harness key, not the dataset subset.
+            "benchmark": "swe-bench-ext",
+            "split": split,
+        }
+        verify_request = {
+            "responses_create_params": responses_create_params.model_dump(exclude_none=True)
+            | {"metadata": task_metadata},
+            "response": {
+                "id": f"mini-swe-{instance_id}",
+                "created_at": int(time.time()),
+                "model": responses_create_params.model,
+                "object": "response",
+                "output": [],
+                "metadata": {"model_patch": patch},
+            },
+        }
+
+        async def _do_verify() -> dict[str, Any]:
+            verify_response = await self.server_client.post(
+                server_name=self.config.verifier_server_name,
+                url_path="/verify",
+                json=verify_request,
+            )
+            await raise_for_status(verify_response)
+            return await get_response_json(verify_response)
+
+        # Bound the whole call (including ServerClient's unbounded disconnect-retry loop) so a
+        # hung or retried verify cannot pin a rollout slot forever.
+        verify_timeout_s = float(getattr(self.config, "eval_timeout", None) or 900) + 900
+        try:
+            return await asyncio.wait_for(_do_verify(), timeout=verify_timeout_s)
+        except Exception as e:  # noqa: BLE001  (incl. asyncio.TimeoutError -> masked, never pins a slot)
+            print(f"Verifier POST failed for {instance_id}: {e}", flush=True)
+            return {"resolved": False, "error_kind": "sandbox", "patch_exists": bool(patch)}
+
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
+        """Responses endpoint placeholder; this agent drives generation through its own run loop.
+
+        Args:
+            body: The Responses API create params.
+
+        Raises:
+            NotImplementedError: Always, since this agent does not serve standalone responses.
+        """
         raise NotImplementedError
 
     async def run(self, body: MiniSWEAgentRunRequest) -> MiniSWEAgentVerifyResponse:
+        """Run a single SWE-bench task end to end and return a scored verify response.
+
+        Resolves the model server, builds the mini-swe-agent config, dispatches the task to a Ray
+        sandbox worker, scores the resulting patch (via the shared verifier or the in-worker harness),
+        assembles the Responses API response, persists the result, and returns it.
+
+        Args:
+            body: The run request carrying the instance, dataset subset/split, and Responses API
+                create params.
+
+        Returns:
+            A verify response with the reward, the assembled response object, the instance id, and the
+            eval report metadata.
+        """
         async with self.sem:
             model_server_name = self.config.model_server.name
             global_config_dict = ServerClient.load_from_global_config().global_config_dict
@@ -789,6 +1203,7 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
                     step_timeout=step_timeout,
                     eval_timeout=eval_timeout,
                     step_limit=step_limit,
+                    eval_via_verifier=self.config.eval_via_verifier,
                 )
                 runner = runner_ray_remote
                 runtime_env = _sandbox_runtime_env(self.config.sandbox_provider)
@@ -800,7 +1215,25 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
                 input_messages = result["input_messages"]
                 response_output = result["response_output"]
                 responses = result["responses"]
-                reward = 1.0 if _is_resolved(instance_id, result["eval_report"]) else 0.0
+
+                if self.config.eval_via_verifier:
+                    # Score the patch by POSTing to the shared swe_env verifier instead of grading via
+                    # the in-worker swebench harness. The Ray worker still produced the trajectory and
+                    # patch; the verifier is the authoritative grader here.
+                    in_worker_report = result.get("eval_report") or {}
+                    patch = in_worker_report.get("model_patch", "") or ""
+                    eval_subset = await self._verify_patch_via_server(
+                        instance=body.model_dump(),
+                        patch=patch,
+                        instance_id=instance_id,
+                        subset=subset,
+                        split=split,
+                        responses_create_params=body.responses_create_params,
+                    )
+                    reward = 1.0 if eval_subset.get("resolved") else 0.0
+                    result["eval_report"] = eval_subset
+                else:
+                    reward = 1.0 if _is_resolved(instance_id, result["eval_report"]) else 0.0
 
             except Exception as e:
                 error_info = {"error": str(e), "traceback": traceback.format_exc()}
