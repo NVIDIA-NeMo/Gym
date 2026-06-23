@@ -11,7 +11,7 @@ The assistant must:
 The conversations in the dataset are generated using personas from the [nvidia/Nemotron-Personas-USA dataset](https://huggingface.co/datasets/nvidia/Nemotron-Personas-USA) on Hugging Face.
 
 # Example usage
-
+Create an `env.yaml` file in the Gym root directory to specifying `policy_base_url`, `policy_model_name`, and `policy_api_key`. See [documentation](https://docs.nvidia.com/nemo/gym/reference/configuration#local-configuration-envyaml) for details.
 ## Running servers
 The following is an example command for running this resources server along with an OpenAI model:
 
