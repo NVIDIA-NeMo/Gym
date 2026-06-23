@@ -1,0 +1,14 @@
++ cd /testbed
++ git apply -v /tmp/patch.diff
+Applied patch sphinx/ext/autodoc/__init__.py cleanly.
+>>>>> Applied Patch
++ git apply -v /tmp/test_patch.diff
+Applied patch tests/test_ext_autodoc.py cleanly.
+>>>>> Start Test Output
+============================= test session starts ==============================
+collected 3 items
+>>>>> End Test Output
+PASSED tests/test_ext_autodoc.py::test_format_signature
+PASSED tests/test_ext_autodoc.py::test_autodoc_inherited
+PASSED tests/test_ext_autodoc.py::test_autodoc_exclude_members
+=================== 3 passed in 1.92s =========================================

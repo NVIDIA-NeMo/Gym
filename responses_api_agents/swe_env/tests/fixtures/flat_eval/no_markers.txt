@@ -1,0 +1,11 @@
++ cd /testbed
++ git apply -v /tmp/patch.diff
+Applied patch sphinx/ext/autodoc/__init__.py cleanly.
+>>>>> Applied Patch
++ git checkout abc123 tests/test_ext_autodoc.py
+Updated 1 path from the index
++ git apply -v /tmp/test_patch.diff
+error: patch failed: tests/test_ext_autodoc.py:1
+error: tests/test_ext_autodoc.py: patch does not apply
++ python -m pytest tests/test_ext_autodoc.py
+ERROR: file or directory not found: tests/test_ext_autodoc.py

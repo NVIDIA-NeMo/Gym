@@ -1,0 +1,33 @@
+# SWE environment verifier (#1249) — the required, fresh-sandbox, provider-neutral
+# verification entry point. A config "trio": the verifier resources server, an
+# agent that points at it, and a 5-row swe-bench-ext example dataset.
+#
+# NOTE: the committed data/example_rollouts.jsonl are synthetic gold-patch-injecting
+# placeholders so the ng_test_all data gate passes; regenerate them from a real
+# `ng_collect_rollouts` run before flipping `verified: true` (see SWE_ENV_DECOUPLE_STATUS.md).
+swe_env_resources_server:
+  resources_servers:
+    swe_env:
+      entrypoint: app.py
+      domain: software_engineering
+      verified: false
+      description: SWE environment verifier (fresh sandbox, provider-neutral; decouples #1249)
+      # Single-key provider mapping. 'docker' runs locally; 'apptainer' for on-prem .sif;
+      # 'opensandbox' for the #1377 k8s provider (flat families only).
+      sandbox_provider:
+        docker: {}
+
+swe_env_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: swe_env_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/swe_env/data/example.jsonl

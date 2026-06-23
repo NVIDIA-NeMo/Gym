@@ -1,0 +1,17 @@
+{
+  "name": "example",
+  "type": "example",
+  "jsonl_fpath": "resources_servers/swe_env/data/example.jsonl",
+  "num_repeats": 1,
+  "gitlab_identifier": null,
+  "huggingface_identifier": null,
+  "license": null,
+  "Number of examples": 5,
+  "Number of turns": {
+    "Total # non-null values": 5,
+    "Average": 1.0,
+    "Min": 1.0,
+    "Max": 1.0,
+    "Standard deviation": 0.0
+  }
+}

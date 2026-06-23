@@ -1,0 +1,15 @@
+============================= test session starts ==============================
+platform linux -- Python 3.12.0, pytest-8.0.0
+collected 3 items
+
+src/pkg/tests/test_widget.py::test_alpha PASSED                          [ 33%]
+src/pkg/tests/test_widget.py::test_beta PASSED                           [ 66%]
+src/pkg/tests/test_widget.py::test_gamma FAILED                          [100%]
+
+=================================== FAILURES ===================================
+________________________________ test_gamma ___________________________________
+    assert 1 == 2
+E   assert 1 == 2
+=========================== short test summary info ============================
+FAILED src/pkg/tests/test_widget.py::test_gamma - assert 1 == 2
+========================= 2 passed, 1 failed in 0.12s ==========================
