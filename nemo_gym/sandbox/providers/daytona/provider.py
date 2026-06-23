@@ -60,6 +60,7 @@ DAYTONA_EXTENSION_PREFIX = "daytona."
 PROVIDER_OPTION_EXTENSIONS = "extensions"
 PROVIDER_OPTION_SNAPSHOT_ID = "snapshot_id"
 PROVIDER_OPTION_VOLUMES = "volumes"
+SANDBOX_ID_LABEL = "sandbox_id"
 
 
 class DaytonaCreateError(SandboxCreateError):
@@ -670,14 +671,17 @@ class DaytonaProvider:
             return SnapshotParams(**kwargs)
         return SnapshotParams(**kwargs) if kwargs else None
 
-    def _with_retry_stable_name(self, spec: SandboxSpec) -> SandboxSpec:
+    def _with_generated_sandbox_id(self, spec: SandboxSpec) -> SandboxSpec:
         if _extension_value(spec, "name") is not None:
             return spec
+        sandbox_id = f"nemo-gym-{uuid.uuid4().hex}"
+        metadata = dict(spec.metadata)
+        metadata.setdefault(SANDBOX_ID_LABEL, sandbox_id)
         provider_options = dict(spec.provider_options)
         extensions = _spec_extensions(spec)
-        extensions[f"{DAYTONA_EXTENSION_PREFIX}name"] = f"nemo-gym-{uuid.uuid4().hex}"
+        extensions[f"{DAYTONA_EXTENSION_PREFIX}name"] = sandbox_id
         provider_options[PROVIDER_OPTION_EXTENSIONS] = extensions
-        return replace(spec, provider_options=provider_options)
+        return replace(spec, metadata=metadata, provider_options=provider_options)
 
     async def _verify_created_handle(self, handle: SandboxHandle) -> None:
         if self._probe.command is None:
@@ -746,13 +750,12 @@ class DaytonaProvider:
         )
         async for attempt in retry_policy:
             with attempt:
-                return await self._create_once(spec)
+                return await self._create_once(self._with_generated_sandbox_id(spec))
 
         raise RuntimeError("Daytona create retry loop did not run")
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
-        spec = self._with_retry_stable_name(_normalize_spec(spec))
-        return await self._create_with_retries(spec)
+        return await self._create_with_retries(_normalize_spec(spec))
 
     async def create_batch(self, spec: SandboxSpec, count: int, *, allow_partial: bool = False) -> list[SandboxHandle]:
         if count < 1:
