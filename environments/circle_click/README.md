@@ -19,7 +19,7 @@ ng_collect_rollouts +agent_name=circle_click_simple_agent +input_jsonl_fpath=env
 # Generating Data
 All data is synthetically generated using `prepare.py`.
 
-The generate data script can be modified to arbitrarily control the task complexity and curriculum, including number and size of circles, size of images, or other modifications.
+The data generation script can be modified to arbitrarily control the task complexity and curriculum, including number and size of circles, size of images, or other modifications.
 ```bash
 python3 environments/circle_click/prepare.py --n 1000 --out environments/circle_click/data/train.jsonl
 ```
