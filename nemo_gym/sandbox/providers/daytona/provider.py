@@ -100,6 +100,18 @@ def _require_daytona_sdk() -> tuple[Any, Any, Any, Any, Any, Any]:
     )
 
 
+def _require_tenacity() -> tuple[Any, Any, Any, Any]:
+    try:
+        from tenacity import AsyncRetrying, retry_if_exception, stop_after_attempt, wait_random_exponential
+    except ModuleNotFoundError as e:
+        raise ModuleNotFoundError(
+            "tenacity is required for Daytona retry handling. Install nemo-gym[sandbox] before using "
+            "env.sandbox.provider.name=daytona."
+        ) from e
+
+    return AsyncRetrying, retry_if_exception, stop_after_attempt, wait_random_exponential
+
+
 def _daytona_error_types() -> dict[str, type[BaseException]]:
     try:
         from daytona import (
@@ -224,6 +236,28 @@ def _is_missing_sandbox_delete_error(exception: BaseException) -> bool:
         return True
     message = str(exception).lower()
     return "sandbox" in message and "not found" in message
+
+
+def _log_create_retry(retry_state: Any) -> None:
+    exception = retry_state.outcome.exception() if retry_state.outcome else None
+    sleep_s = retry_state.next_action.sleep if retry_state.next_action else None
+    LOGGER.warning(
+        "Retrying Daytona sandbox create after attempt %s; next_sleep_s=%s; error=%r",
+        retry_state.attempt_number,
+        sleep_s,
+        exception,
+    )
+
+
+def _log_operation_retry(retry_state: Any) -> None:
+    exception = retry_state.outcome.exception() if retry_state.outcome else None
+    sleep_s = retry_state.next_action.sleep if retry_state.next_action else None
+    LOGGER.warning(
+        "Retrying Daytona operation after attempt %s; next_sleep_s=%s; error=%r",
+        retry_state.attempt_number,
+        sleep_s,
+        exception,
+    )
 
 
 def _coerce_config(value: Any, config_cls: type[Any]) -> Any:
@@ -546,25 +580,6 @@ class DaytonaProvider:
         self._daytona = None
         await daytona.close()
 
-    @staticmethod
-    def _retry_sleep_s(attempt_number: int, delay_s: float, max_delay_s: float) -> float:
-        return min(max_delay_s, delay_s * (2 ** max(attempt_number - 1, 0)))
-
-    async def _await_call(
-        self,
-        awaitable: Awaitable[Any],
-        *,
-        operation: str,
-        sandbox_id: str,
-        timeout_s: float | None,
-    ) -> Any:
-        if timeout_s is None or timeout_s == 0:
-            return await awaitable
-        try:
-            return await asyncio.wait_for(awaitable, timeout=timeout_s)
-        except asyncio.TimeoutError as e:
-            raise TimeoutError(f"Timed out during Daytona {operation}; sandbox_id={sandbox_id!r}") from e
-
     async def _await_operation(
         self,
         operation_factory: Callable[[], Awaitable[Any]],
@@ -574,29 +589,30 @@ class DaytonaProvider:
         timeout_s: float | None,
         retries: int | None = None,
     ) -> Any:
-        max_attempts = (self._operations.retries if retries is None else retries) + 1
-        for attempt_number in range(1, max_attempts + 1):
-            try:
-                return await self._await_call(
-                    operation_factory(),
-                    operation=operation,
-                    sandbox_id=sandbox_id,
-                    timeout_s=timeout_s,
-                )
-            except Exception as e:
-                if attempt_number >= max_attempts or not _is_retryable_operation_error(e):
-                    raise
-                sleep_s = self._retry_sleep_s(
-                    attempt_number, self._operations.retry_delay_s, self._operations.retry_max_delay_s
-                )
-                LOGGER.warning(
-                    "Retrying Daytona operation after attempt %s; operation=%s; sandbox_id=%s; error=%r",
-                    attempt_number,
-                    operation,
-                    sandbox_id,
-                    e,
-                )
-                await asyncio.sleep(sleep_s)
+        AsyncRetrying, retry_if_exception, stop_after_attempt, wait_random_exponential = _require_tenacity()
+        retry_count = self._operations.retries if retries is None else retries
+        max_attempts = retry_count + 1
+
+        retry_policy = AsyncRetrying(
+            retry=retry_if_exception(_is_retryable_operation_error),
+            stop=stop_after_attempt(max_attempts),
+            wait=wait_random_exponential(
+                multiplier=self._operations.retry_delay_s,
+                max=self._operations.retry_max_delay_s,
+            ),
+            before_sleep=_log_operation_retry,
+            reraise=True,
+        )
+        async for attempt in retry_policy:
+            with attempt:
+                awaitable = operation_factory()
+                if timeout_s is None or timeout_s == 0:
+                    return await awaitable
+                try:
+                    return await asyncio.wait_for(awaitable, timeout=timeout_s)
+                except asyncio.TimeoutError as e:
+                    raise TimeoutError(f"Timed out during Daytona {operation}; sandbox_id={sandbox_id!r}") from e
+
         raise RuntimeError("Daytona operation retry loop did not run")
 
     def _base_create_kwargs(self, spec: SandboxSpec) -> dict[str, Any]:
@@ -697,11 +713,12 @@ class DaytonaProvider:
         params = self._to_create_params(spec)
         timeout_s = float(spec.ready_timeout_s if spec.ready_timeout_s is not None else self._create.timeout_s)
         try:
-            sandbox = await self._await_call(
-                self._client().create(params, timeout=timeout_s),
+            sandbox = await self._await_operation(
+                lambda: self._client().create(params, timeout=timeout_s),
                 operation="create",
                 sandbox_id="<pending>",
                 timeout_s=timeout_s + 5.0 if timeout_s > 0 else None,
+                retries=0,
             )
         except TimeoutError as e:
             raise DaytonaCreateTimeoutError(
@@ -715,19 +732,27 @@ class DaytonaProvider:
             raise
         return handle
 
+    async def _create_with_retries(self, spec: SandboxSpec) -> SandboxHandle:
+        AsyncRetrying, retry_if_exception, stop_after_attempt, wait_random_exponential = _require_tenacity()
+        retry_policy = AsyncRetrying(
+            retry=retry_if_exception(_is_retryable_create_error),
+            stop=stop_after_attempt(self._create.retries + 1),
+            wait=wait_random_exponential(
+                multiplier=self._create.retry_delay_s,
+                max=self._create.retry_max_delay_s,
+            ),
+            before_sleep=_log_create_retry,
+            reraise=True,
+        )
+        async for attempt in retry_policy:
+            with attempt:
+                return await self._create_once(spec)
+
+        raise RuntimeError("Daytona create retry loop did not run")
+
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
         spec = self._with_retry_stable_name(_normalize_spec(spec))
-        max_attempts = self._create.retries + 1
-        for attempt_number in range(1, max_attempts + 1):
-            try:
-                return await self._create_once(spec)
-            except Exception as e:
-                if attempt_number >= max_attempts or not _is_retryable_create_error(e):
-                    raise
-                await asyncio.sleep(
-                    self._retry_sleep_s(attempt_number, self._create.retry_delay_s, self._create.retry_max_delay_s)
-                )
-        raise RuntimeError("Daytona create retry loop did not run")
+        return await self._create_with_retries(spec)
 
     async def create_batch(self, spec: SandboxSpec, count: int, *, allow_partial: bool = False) -> list[SandboxHandle]:
         if count < 1:

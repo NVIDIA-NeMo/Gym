@@ -15,6 +15,7 @@
 
 import asyncio
 import builtins
+import importlib.util
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -26,7 +27,13 @@ from nemo_gym.sandbox.providers.base import SandboxHandle, SandboxSpec, SandboxS
 from nemo_gym.sandbox.providers.daytona import provider as daytona_provider
 
 
-pytestmark = pytest.mark.anyio
+pytestmark = [
+    pytest.mark.anyio,
+    pytest.mark.skipif(
+        importlib.util.find_spec("tenacity") is None,
+        reason="tenacity optional sandbox dependency is not installed",
+    ),
+]
 
 
 @pytest.fixture
@@ -117,6 +124,7 @@ def test_sdk_import_helpers_and_retry_classification(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     assert len(daytona_provider._require_daytona_sdk()) == 6
+    assert len(daytona_provider._require_tenacity()) == 4
     error_types = daytona_provider._daytona_error_types()
     assert set(error_types) == {
         "authentication",
@@ -183,12 +191,17 @@ def test_sdk_import_helpers_and_retry_classification(
     ) -> Any:
         if name == "daytona":
             raise ImportError("daytona missing")
+        if name == "tenacity":
+            raise ModuleNotFoundError("tenacity missing")
         return real_import(name, globals_, locals_, fromlist, level)
 
     monkeypatch.delitem(sys.modules, "daytona", raising=False)
+    monkeypatch.delitem(sys.modules, "tenacity", raising=False)
     monkeypatch.setattr(builtins, "__import__", fake_import)
     with pytest.raises(ModuleNotFoundError, match="Daytona SDK is required"):
         daytona_provider._require_daytona_sdk()
+    with pytest.raises(ModuleNotFoundError, match="tenacity is required"):
+        daytona_provider._require_tenacity()
     assert daytona_provider._daytona_error_types() == {}
 
 
@@ -422,17 +435,38 @@ async def test_status_uses_daytona_refresh_data() -> None:
 
 async def test_await_operation_retry_and_timeout_paths(monkeypatch: pytest.MonkeyPatch) -> None:
     provider = daytona_provider.DaytonaProvider(operations={"retries": 1, "retry_delay_s": 0, "retry_max_delay_s": 0})
-    assert daytona_provider.DaytonaProvider._retry_sleep_s(3, 1.0, 3.0) == 3.0
     assert (
-        await provider._await_call(_return_value("ok"), operation="op", sandbox_id="sandbox-1", timeout_s=None) == "ok"
+        await provider._await_operation(
+            lambda: _return_value("ok"),
+            operation="op",
+            sandbox_id="sandbox-1",
+            timeout_s=None,
+            retries=0,
+        )
+        == "ok"
     )
-    assert await provider._await_call(_return_value("ok"), operation="op", sandbox_id="sandbox-1", timeout_s=0) == "ok"
+    assert (
+        await provider._await_operation(
+            lambda: _return_value("ok"),
+            operation="op",
+            sandbox_id="sandbox-1",
+            timeout_s=0,
+            retries=0,
+        )
+        == "ok"
+    )
 
     async def never() -> None:
         await asyncio.get_running_loop().create_future()
 
     with pytest.raises(TimeoutError, match="Timed out during Daytona op"):
-        await provider._await_call(never(), operation="op", sandbox_id="sandbox-1", timeout_s=0.01)
+        await provider._await_operation(
+            never,
+            operation="op",
+            sandbox_id="sandbox-1",
+            timeout_s=0.01,
+            retries=0,
+        )
 
     sleeps: list[float] = []
 
@@ -467,16 +501,6 @@ async def test_await_operation_retry_and_timeout_paths(monkeypatch: pytest.Monke
             operation="exec",
             sandbox_id="sandbox-1",
             timeout_s=None,
-        )
-
-    provider = daytona_provider.DaytonaProvider(operations={"retries": 0})
-    with pytest.raises(RuntimeError, match="retry loop"):
-        await provider._await_operation(
-            lambda: _return_value("never"),
-            operation="exec",
-            sandbox_id="sandbox-1",
-            timeout_s=None,
-            retries=-1,
         )
 
 
