@@ -16,8 +16,7 @@ import warnings
 
 
 warnings.warn(
-    "responses_api_models.local_vllm_model is renamed to responses_api_models.vllm_server; "
-    "update your imports.",
+    "responses_api_models.local_vllm_model is renamed to responses_api_models.vllm_server; update your imports.",
     DeprecationWarning,
     stacklevel=2,
 )

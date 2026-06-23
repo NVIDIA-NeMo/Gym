@@ -618,7 +618,10 @@ class TestAssetSelectors:
                 "responses_api_models/openai_model/configs/openai_model.yaml",
             ),
             # model-server/vllm.mdx: responses_api_models/vllm_endpoint/configs/vllm_endpoint.yaml
-            (["env", "run", "--model-type", "vllm_endpoint"], "responses_api_models/vllm_endpoint/configs/vllm_endpoint.yaml"),
+            (
+                ["env", "run", "--model-type", "vllm_endpoint"],
+                "responses_api_models/vllm_endpoint/configs/vllm_endpoint.yaml",
+            ),
         ],
     )
     def test_name_resolves_to_config_path(self, monkeypatch: MonkeyPatch, argv, expected_config) -> None:
@@ -643,7 +646,9 @@ class TestAssetSelectors:
     def test_gpqa_benchmark_plus_model(self, monkeypatch: MonkeyPatch) -> None:
         # benchmarks/gpqa/README.md:
         #   ng_run "+config_paths=[benchmarks/gpqa/config.yaml,responses_api_models/vllm_endpoint/configs/vllm_endpoint.yaml]"
-        _, overrides = _dispatch_for(monkeypatch, ["eval", "run", "--benchmark", "gpqa", "--model-type", "vllm_endpoint"])
+        _, overrides = _dispatch_for(
+            monkeypatch, ["eval", "run", "--benchmark", "gpqa", "--model-type", "vllm_endpoint"]
+        )
         paths, others = _split_overrides(overrides)
         assert paths == {
             str(WORKING_DIR / "benchmarks/gpqa/config.yaml"),
