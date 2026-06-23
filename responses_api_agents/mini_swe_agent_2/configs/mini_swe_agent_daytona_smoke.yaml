@@ -54,7 +54,7 @@ mini_swe_agent_2:
         activate_conda: true
         user: root
       run_golden: false
-      step_timeout: 600
+      step_timeout: 1200
       eval_timeout: 1800
       skip_if_exists: false
       step_limit: 250
