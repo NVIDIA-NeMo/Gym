@@ -29,7 +29,7 @@ Rollouts can be collected using the example dataset as follows:
 ng_collect_rollouts \
     +agent_name=calendar_simple_agent \
     +input_jsonl_fpath=data/example.jsonl \
-    +output_jsonl_fpath=results/example_rollouts.jsonl \
+    +output_jsonl_fpath=environments/calendar_v2/data/example.jsonl \
     +limit=5
 ```
 
