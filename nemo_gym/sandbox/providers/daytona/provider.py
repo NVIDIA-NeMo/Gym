@@ -18,6 +18,7 @@ import asyncio
 import logging
 import math
 import re
+import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, fields, replace
 from pathlib import Path
@@ -653,6 +654,15 @@ class DaytonaProvider:
             return SnapshotParams(**kwargs)
         return SnapshotParams(**kwargs) if kwargs else None
 
+    def _with_retry_stable_name(self, spec: SandboxSpec) -> SandboxSpec:
+        if _extension_value(spec, "name") is not None:
+            return spec
+        provider_options = dict(spec.provider_options)
+        extensions = _spec_extensions(spec)
+        extensions[f"{DAYTONA_EXTENSION_PREFIX}name"] = f"nemo-gym-{uuid.uuid4().hex}"
+        provider_options[PROVIDER_OPTION_EXTENSIONS] = extensions
+        return replace(spec, provider_options=provider_options)
+
     async def _verify_created_handle(self, handle: SandboxHandle) -> None:
         if self._probe.command is None:
             return
@@ -706,7 +716,7 @@ class DaytonaProvider:
         return handle
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
-        spec = _normalize_spec(spec)
+        spec = self._with_retry_stable_name(_normalize_spec(spec))
         max_attempts = self._create.retries + 1
         for attempt_number in range(1, max_attempts + 1):
             try:
@@ -887,8 +897,13 @@ class DaytonaProvider:
             timeout_s=float(timeout_s) if timeout_s is not None else None,
         )
 
-    async def close(self, handle: SandboxHandle, *, delete: bool) -> None:
+    async def close(self, handle: SandboxHandle, *, delete: bool = True) -> None:
         if not delete:
+            LOGGER.warning(
+                "Retaining Daytona sandbox %r because close(delete=False) was requested; "
+                "the remote sandbox remains active until Daytona lifecycle policies stop or delete it.",
+                handle.sandbox_id,
+            )
             return
         try:
             await self._await_operation(
