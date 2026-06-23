@@ -39,6 +39,14 @@ class TestCLISetupCommandSetupEnvCommand:
 
         return server_dir.absolute()
 
+    def _setup_swe_agents_server_dir(self, tmp_path: Path) -> Path:
+        server_dir = tmp_path / "responses_api_agents" / "swe_agents"
+        server_dir.mkdir(parents=True)
+        (server_dir / "requirements.txt").write_text("-e nemo-gym[dev] @ ../../\ntomlkit\n")
+        (tmp_path / "pyproject.toml").write_text("")
+
+        return server_dir.absolute()
+
     def _debug_global_config_dict(self, tmp_path: Path) -> dict:
         return _TestGlobalConfig._default_global_config_dict_values.fget(None) | {UV_VENV_DIR_KEY_NAME: str(tmp_path)}
 
@@ -96,6 +104,47 @@ class TestCLISetupCommandSetupEnvCommand:
         )
         expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python test python version {server_dir}/.venv > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2) && source {server_dir}/.venv/bin/activate && uv pip install -r requirements.txt dep 1 dep 2 > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2)"
         assert expected_command == actual_command
+
+    def test_swe_agents_installs_optional_swe_bench_ext_bundle(self, tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+        server_dir = self._setup_swe_agents_server_dir(tmp_path)
+        monkeypatch.delenv("NEMO_GYM_SWEBENCH_EXT_DEPS_EXTRA", raising=False)
+
+        actual_command = setup_env_command(
+            dir_path=server_dir,
+            global_config_dict=self._debug_global_config_dict(tmp_path),
+            prefix="my server name",
+        )
+
+        assert "uv pip install -r requirements.txt ray[default]==test ray version openai==test openai version" in (
+            actual_command
+        )
+        assert "uv pip install '-e ../../[swe_bench_ext_deps_https]'" in actual_command
+        assert "|| echo" in actual_command
+        assert "optional SWE-bench-ext/lighthouse dependency bundle" in actual_command
+
+    def test_swe_agents_optional_bundle_respects_env(self, tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+        server_dir = self._setup_swe_agents_server_dir(tmp_path)
+        monkeypatch.setenv("NEMO_GYM_SWEBENCH_EXT_DEPS_EXTRA", "swe_bench_ext_deps_local")
+
+        actual_command = setup_env_command(
+            dir_path=server_dir,
+            global_config_dict=self._debug_global_config_dict(tmp_path),
+            prefix="my server name",
+        )
+
+        assert "uv pip install '-e ../../[swe_bench_ext_deps_local]'" in actual_command
+
+    def test_swe_agents_optional_bundle_can_be_disabled(self, tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+        server_dir = self._setup_swe_agents_server_dir(tmp_path)
+        monkeypatch.setenv("NEMO_GYM_SWEBENCH_EXT_DEPS_EXTRA", "none")
+
+        actual_command = setup_env_command(
+            dir_path=server_dir,
+            global_config_dict=self._debug_global_config_dict(tmp_path),
+            prefix="my server name",
+        )
+
+        assert "swe_bench_ext_deps" not in actual_command
 
     def test_python_version(self, tmp_path: Path) -> None:
         server_dir = self._setup_server_dir(tmp_path)

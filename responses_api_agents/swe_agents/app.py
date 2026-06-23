@@ -197,6 +197,7 @@ class ExecuteContainerCommandArgs(BaseModel):
     expected_file_pattern: str
     mode: Union[Literal["agent"], Literal["eval"]]
     timeout: int
+    workdir: Optional[str] = None
 
 
 class SWEBenchWrapperInstanceConfig(SWEBenchWrapperServerConfig, SWEBenchWrapperConfig):
@@ -934,70 +935,109 @@ class SweBenchExtDatasetProcessor(BaseDatasetHarnessProcessor):
         raw = self.config.problem_info.get("instance_dict", "{}")
         if isinstance(raw, str):
             return json.loads(raw)
-        return raw
+        return raw or {}
 
-    def get_run_command(self) -> ExecuteContainerCommandArgs:
-        from responses_api_agents.swe_agents.swe_bench_ext.frameworks import (
-            get_framework_config,
-            get_test_command_with_output,
-        )
+    @staticmethod
+    def _coerce_str(value: Any, default: str = "") -> str:
+        if value is None:
+            return default
+        return str(value)
+
+    @classmethod
+    def _coerce_list(cls, value: Any) -> list[str]:
+        if value is None or value == "":
+            return []
+        if isinstance(value, str):
+            try:
+                return cls._coerce_list(json.loads(value))
+            except json.JSONDecodeError:
+                return [value]
+        if isinstance(value, dict):
+            return [json.dumps(value, sort_keys=True)]
+        if isinstance(value, (list, tuple, set)):
+            coerced = []
+            for item in value:
+                if item is None:
+                    continue
+                if isinstance(item, str):
+                    coerced.append(item)
+                elif isinstance(item, (dict, list, tuple, set)):
+                    coerced.append(json.dumps(item, sort_keys=True))
+                else:
+                    coerced.append(str(item))
+            return coerced
+        return [str(value)]
+
+    @staticmethod
+    def _swe_bench_ext_script_text(script: Union[str, list[str]]) -> str:
+        if isinstance(script, list):
+            return "\n".join(script)
+        return script
+
+    def _make_swe_bench_ext_task(self) -> Any:
+        try:
+            # Force lighthouse.core to fully initialize before importing task_source.local_folder.
+            # lighthouse has a latent circular import (core/runner.py imports local_folder at module
+            # top-level, and local_folder imports back from lighthouse.core). It only resolves when
+            # core is imported first; without this line, an unsafe import order raises
+            # "ImportError: cannot import name 'LocalFolderTaskSource' from partially initialized module".
+            import lighthouse.core  # noqa: F401
+
+            from lighthouse.task_source.local_folder import LocalFolderTaskSource
+            from swe_bench_ext.task import SweBenchExtTask, SweBenchExtTaskInstance
+        except ImportError as e:
+            raise RuntimeError(
+                "SWE-bench-ext evaluation requires the installed swe_bench_ext and lighthouse packages."
+            ) from e
 
         inst = self._get_instance_dict()
+        problem_statement = self._coerce_str(
+            inst.get("problem_statement") or self.config.problem_info.get("problem_statement")
+        )
+        instance_id = self._coerce_str(inst.get("instance_id") or inst.get("id") or self.config.instance_id)
 
-        base_command = inst.get("test_command", "")
-        base_commit = inst.get("base_commit", "")
-        test_patch = inst.get("test_patch", "")
-        test_framework = inst.get("test_framework", "")
+        task_instance = SweBenchExtTaskInstance(
+            id=instance_id,
+            image_uri=self._coerce_str(inst.get("image_uri")),
+            language=self._coerce_str(inst.get("language") or inst.get("repo_language"), "python"),
+            test_framework=self._coerce_str(inst.get("test_framework"), "pytest"),
+            test_command=self._coerce_str(inst.get("test_command")),
+            test_files=self._coerce_list(inst.get("test_files")),
+            fail_to_pass=self._coerce_list(inst.get("FAIL_TO_PASS", inst.get("fail_to_pass"))),
+            pass_to_pass=self._coerce_list(inst.get("PASS_TO_PASS", inst.get("pass_to_pass"))),
+            base_commit=self._coerce_str(inst.get("base_commit") or self.config.problem_info.get("base_commit")),
+            problem_statement=problem_statement,
+            prompt_statement=self._coerce_str(inst.get("prompt_statement") or problem_statement),
+            rich_prompt_statement=self._coerce_str(inst.get("rich_prompt_statement")),
+            test_patch=self._coerce_str(inst.get("test_patch")),
+            golden_patch=self._coerce_str(inst.get("golden_patch") or inst.get("patch")),
+            requirements=self._coerce_list(inst.get("requirements")),
+            interface=self._coerce_str(inst.get("interface")),
+            knowledge_base=self._coerce_str(inst.get("knowledge_base")),
+        )
+        task_source = LocalFolderTaskSource(str(self.config.persistent_dir), build_image_if_not_exists=False)
+        return SweBenchExtTask(task_instance=task_instance, task_source=task_source)
 
-        # Write test patch to persistent_dir (mounted into container)
+    def get_run_command(self) -> ExecuteContainerCommandArgs:
+        inst = self._get_instance_dict()
+
+        test_patch = self._coerce_str(inst.get("test_patch"))
+
+        # Keep the mounted test patch file for compatibility with the apptainer
+        # mount layout, but let swe_bench_ext.task generate the setup script.
         test_patch_path = self.config.persistent_dir / "test_patch.diff"
         test_patch_path.write_text(test_patch)
 
-        # Write eval metadata for host-side postprocessing
-        fail_to_pass = inst.get("FAIL_TO_PASS", inst.get("fail_to_pass", []))
-        pass_to_pass = inst.get("PASS_TO_PASS", inst.get("pass_to_pass", []))
-        if isinstance(fail_to_pass, str):
-            fail_to_pass = json.loads(fail_to_pass)
-        if isinstance(pass_to_pass, str):
-            pass_to_pass = json.loads(pass_to_pass)
+        task = self._make_swe_bench_ext_task()
+        grading_script = self._swe_bench_ext_script_text(
+            task.generate_grading_setup_script(apply_golden_patch=False)
+        )
+        test_run_script = self._swe_bench_ext_script_text(task.generate_test_run_script())
 
-        eval_meta_dir = self.config.persistent_dir / "eval_meta"
-        eval_meta_dir.mkdir(parents=True, exist_ok=True)
-        (eval_meta_dir / "fail_to_pass.json").write_text(json.dumps(fail_to_pass))
-        (eval_meta_dir / "pass_to_pass.json").write_text(json.dumps(pass_to_pass))
-        (eval_meta_dir / "test_framework.txt").write_text(test_framework)
-
-        reset_cmd = f"git reset --hard {base_commit}" if base_commit else ""
-
-        # Use lighthouse to add structured output flags (--json, --junitxml, etc.)
-        # This is the same transformation swe_bench_ext_agent/task.py applies.
-        test_cmd = get_test_command_with_output(base_command, test_framework)
-        config = get_framework_config(test_framework, base_command)
-        result_file = config.get("result_file")
-
-        # Build the result file dump block (mirrors task.py's generate_test_run_script)
-        result_file_block = ""
-        if result_file:
-            if "*" in result_file:
-                result_file_block = f"""
-echo "<<<SWE_BENCH_EXT_RESULT_FILE_START>>>"
-for f in {result_file}; do
-    if [ -f "$f" ]; then
-        echo "=== FILE: $f ==="
-        cat "$f"
-        echo ""
-    fi
-done 2>/dev/null || true
-echo "<<<SWE_BENCH_EXT_RESULT_FILE_END>>>"
-"""
-            else:
-                result_file_block = f"""
-echo "<<<SWE_BENCH_EXT_RESULT_FILE_START>>>"
-if [ -f "{result_file}" ]; then
-    cat "{result_file}"
-fi
-echo "<<<SWE_BENCH_EXT_RESULT_FILE_END>>>"
-"""
+        grading_setup_path = self.config.persistent_dir / "swe_bench_ext_grading_setup.sh"
+        test_run_path = self.config.persistent_dir / "swe_bench_ext_test_run.sh"
+        grading_setup_path.write_text(grading_script)
+        test_run_path.write_text(test_run_script)
 
         cmd = f"""#!/bin/bash
 set -o pipefail
@@ -1007,33 +1047,36 @@ date +\"%s.%N\" > {self.config.final_eval_apptainer_spinup_timestamp_mounted_fpa
 {self._get_command_sleep_until_predictions_file()}
 
 # Try common repo locations in the container
-cd /testbed 2>/dev/null || cd /workspace/repo 2>/dev/null || cd /app 2>/dev/null || true
-
-# Reset to base commit if specified
-{reset_cmd}
+cd /workspace/repo 2>/dev/null || cd /testbed 2>/dev/null || cd /app 2>/dev/null || true
+git config --global --add safe.directory /workspace/repo || true
+git config --global --add safe.directory "$PWD" || true
 
 # Apply model patch (agent output or golden patch)
 git apply --reject --recount --ignore-space-change --ignore-whitespace /root/patch.diff || true
 
-# Apply test patch (adds/modifies test files)
-git apply --reject --recount --ignore-space-change --ignore-whitespace /root/test_patch.diff || true
-
-# Run tests with structured output and capture to log
 mkdir -p /trajectories_mount/eval_results /workspace/test-results
 set +e
-(
-echo "<<<SWE_BENCH_EXT_TEST_OUTPUT_START>>>"
-{test_cmd}
-test_exit_code=$?
-{result_file_block}
-echo "<<<SWE_BENCH_EXT_TEST_OUTPUT_END>>>"
-exit $test_exit_code
-) > /trajectories_mount/eval_results/test_output.log 2>&1
-TEST_EXIT=$?
+bash /trajectories_mount/swe_bench_ext_grading_setup.sh \
+  > /trajectories_mount/eval_results/grading_setup.log 2>&1
+SETUP_EXIT=$?
+if [ "$SETUP_EXIT" -eq 0 ]; then
+  bash /trajectories_mount/swe_bench_ext_test_run.sh \
+    > /trajectories_mount/eval_results/test_run.log 2>&1
+  TEST_EXIT=$?
+else
+  echo "SWE-bench-ext grading setup failed; skipping test run." \
+    > /trajectories_mount/eval_results/test_run.log
+  TEST_EXIT=$SETUP_EXIT
+fi
+cat /trajectories_mount/eval_results/grading_setup.log \
+  /trajectories_mount/eval_results/test_run.log \
+  > /trajectories_mount/eval_results/test_output.log
 set -e
 
-printf '{{"_test_completed": true, "exit_code": %d}}\\n' $TEST_EXIT \
+printf '{{"_test_completed": true, "setup_exit_code": %d, "exit_code": %d}}\\n' $SETUP_EXIT $TEST_EXIT \
   > /trajectories_mount/eval_results/report.json
+
+exit 0
 """
 
         search_path = os.path.join(
@@ -1047,12 +1090,11 @@ printf '{{"_test_completed": true, "exit_code": %d}}\\n' $TEST_EXIT \
             expected_file_pattern=search_path,
             mode="eval",
             timeout=self.config.swebench_tests_timeout,
+            workdir=task.workdir,
         )
 
     def postprocess_after_run(self, report_file: Path) -> None:
-        """Parse test output on the host using lighthouse's parsing library."""
-        from responses_api_agents.swe_agents.swe_bench_ext.utils import parse_and_check_tests
-
+        """Parse SWE-bench-ext output on the host using the installed package."""
         report_path = Path(report_file)
         test_output_path = report_path.parent / "test_output.log"
         instance_id = self.config.instance_id
@@ -1069,20 +1111,72 @@ printf '{{"_test_completed": true, "exit_code": %d}}\\n' $TEST_EXIT \
             report_path.write_text(json.dumps(report, indent=2))
             return
 
-        eval_meta_dir = self.config.persistent_dir / "eval_meta"
-        fail_to_pass = json.loads((eval_meta_dir / "fail_to_pass.json").read_text())
-        pass_to_pass = json.loads((eval_meta_dir / "pass_to_pass.json").read_text())
-        test_framework = (eval_meta_dir / "test_framework.txt").read_text().strip()
-
+        inst = self._get_instance_dict()
         test_output = test_output_path.read_text(errors="replace")
+        try:
+            container_report = json.loads(report_path.read_text())
+            if not isinstance(container_report, dict):
+                container_report = {}
+        except json.JSONDecodeError:
+            container_report = {}
 
-        result = parse_and_check_tests(
-            test_output=test_output,
-            test_framework=test_framework,
-            fail_to_pass=fail_to_pass,
-            pass_to_pass=pass_to_pass,
-            instance_id=instance_id,
-        )
+        setup_exit_code = container_report.get("setup_exit_code")
+        try:
+            setup_failed = setup_exit_code is not None and int(setup_exit_code) != 0
+        except (TypeError, ValueError):
+            setup_failed = True
+        if setup_failed:
+            report = {
+                instance_id: {
+                    "resolved": False,
+                    "patch_exists": True,
+                    "patch_successfully_applied": False,
+                    "error": f"grading_setup_failed: exit_code={setup_exit_code!r}",
+                }
+            }
+            report_path.write_text(json.dumps(report, indent=2))
+            return
+
+        try:
+            task = self._make_swe_bench_ext_task()
+            summary = task.parse_test_results(test_output)
+            metadata = summary.metadata or {}
+            result = {
+                "resolved": summary.score == 1.0,
+                "patch_exists": True,
+                "patch_successfully_applied": True,
+                "score": summary.score,
+                "fail_to_pass_results": metadata.get("fail_to_pass_results", {}),
+                "pass_to_pass_results": metadata.get("pass_to_pass_results", {}),
+                "f2p_passed": metadata.get("f2p_passed", 0),
+                "f2p_total": metadata.get("f2p_total", 0),
+                "p2p_passed": metadata.get("p2p_passed", 0),
+                "p2p_total": metadata.get("p2p_total", 0),
+                "parsed_count": len(summary.test_statuses),
+                "framework": task.task_instance.test_framework,
+                "test_statuses": {
+                    test_id: getattr(status, "value", str(status))
+                    for test_id, status in summary.test_statuses.items()
+                },
+            }
+        except Exception as e:
+            # A parser raising must not crash the /run request. Otherwise a single
+            # task's failure returns HTTP 500, which aborts the entire
+            # ng_collect_rollouts batch and tears down the run. Record a graceful
+            # reward-0 result so the remaining tasks still finish. (Parser
+            # robustness itself is addressed separately.)
+            print(
+                f"Test-output parsing failed for {instance_id} "
+                f"(framework={self._coerce_str(inst.get('test_framework'), 'pytest')!r}): "
+                f"{e!r}. Recording as unresolved.",
+                flush=True,
+            )
+            result = {
+                "resolved": False,
+                "patch_exists": True,
+                "patch_successfully_applied": True,
+                "error": f"parse_error: {e!r}",
+            }
 
         report = {instance_id: result}
         report_path.write_text(json.dumps(report, indent=2))
@@ -1513,6 +1607,7 @@ AGENT_FRAMEWORK_COMMIT={self.config.agent_framework_commit} \\
             expected_file_pattern=search_path,
             mode="agent",
             timeout=self.config.swebench_agent_timeout + 60,
+            workdir="/workspace/repo" if data_point.get("dataset_name") == "swe-bench-ext" else None,
         )
 
 
@@ -1784,6 +1879,7 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
             expected_file_pattern=search_path,
             mode="agent",
             timeout=self.config.swebench_agent_timeout + 60,
+            workdir="/workspace/repo" if data_point.get("dataset_name") == "swe-bench-ext" else None,
         )
 
 
@@ -2472,6 +2568,63 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             f"Searched in paths: {tried_paths}."
         )
 
+    @staticmethod
+    def _apptainer_no_mounts() -> str:
+        return "home,tmp,/etc/hosts,/etc/resolv.conf"
+
+    @staticmethod
+    def _apptainer_env_arg(key: str, value: str) -> str:
+        return f"--env {key}={shlex.quote(value)} "
+
+    def _probe_apptainer_cache_dirs(
+        self, params: SWEBenchWrapperInstanceConfig, command: ExecuteContainerCommandArgs
+    ) -> tuple[Optional[str], Optional[str]]:
+        if not params.container or not Path(params.container).exists():
+            return None, None
+
+        probe_cmd = [
+            "apptainer",
+            "exec",
+            "--writable-tmpfs",
+            "--cleanenv",
+            "--pid",
+            "--no-mount",
+            self._apptainer_no_mounts(),
+        ]
+        if command.workdir:
+            probe_cmd.extend(["--cwd", command.workdir])
+
+        probe_script = (
+            'printf "M2=%s\\n" "$(find /root /home -maxdepth 3 -name .m2 -type d 2>/dev/null | head -1)"; '
+            'printf "GRADLE=%s\\n" "$(find /root /home -maxdepth 3 -name .gradle -type d 2>/dev/null | head -1)"'
+        )
+        probe_cmd.extend([params.container, "bash", "-lc", probe_script])
+
+        try:
+            result = subprocess_run(probe_cmd, check=False, capture_output=True, text=True, timeout=30)
+        except Exception as e:
+            if params.debug:
+                print(f"Apptainer cache-dir probe failed before execution: {e!r}", flush=True)
+            return None, None
+
+        if result.returncode != 0:
+            if params.debug:
+                print(
+                    f"Apptainer cache-dir probe failed with code {result.returncode}: "
+                    f"{result.stderr or result.stdout}",
+                    flush=True,
+                )
+            return None, None
+
+        detected_m2_dir: Optional[str] = None
+        detected_gradle_dir: Optional[str] = None
+        for line in result.stdout.splitlines():
+            if line.startswith("M2=") and line[3:].strip():
+                detected_m2_dir = line[3:].strip()
+            elif line.startswith("GRADLE=") and line[7:].strip():
+                detected_gradle_dir = line[7:].strip()
+        return detected_m2_dir, detected_gradle_dir
+
     def _build_apptainer_command(
         self, params: SWEBenchWrapperInstanceConfig, command: ExecuteContainerCommandArgs
     ) -> str:
@@ -2740,6 +2893,9 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             "-Drobolectric.dependency.repo.url=https://maven-central.storage-download.googleapis.com/maven2/"
         )
         env_args = f"--env _JAVA_OPTIONS='{java_options}' "
+        env_args += self._apptainer_env_arg("GRADLE_OPTS", "-Dorg.gradle.daemon=false")
+
+        detected_m2_dir, detected_gradle_dir = self._probe_apptainer_cache_dirs(params, command)
 
         # Force Gradle to read init.d from /root/.gradle regardless of the
         # container image's default user. We use the tmpfs path (not the
@@ -2748,7 +2904,10 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         # operator's Lustre inode quota when run across many parallel
         # containers. The init.gradle script is fan-written to multiple
         # candidate home paths a few lines below.
-        env_args += "--env GRADLE_USER_HOME=/root/.gradle "
+        env_args += self._apptainer_env_arg("GRADLE_USER_HOME", detected_gradle_dir or "/root/.gradle")
+
+        if detected_m2_dir:
+            env_args += self._apptainer_env_arg("MAVEN_OPTS", f"-Dmaven.repo.local={detected_m2_dir}/repository")
 
         # Cap CoreCLR heap reservation to 8 GiB so .NET / PowerShell-Pester
         # tests survive the apptainer-imposed `ulimit -v` virtual-memory
@@ -2768,9 +2927,12 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         env_args += "--env CHROME_BIN=/tmp/chrome-wrapper.sh "
         env_args += "--env CHROMIUM_BIN=/tmp/chrome-wrapper.sh "
 
+        cwd_arg = f"--cwd {shlex.quote(command.workdir)} " if command.workdir else ""
+
         # Launch Apptainer container and execute the script file
         apptainer_cmd = (
-            f"apptainer exec --writable-tmpfs --cleanenv --pid --no-mount home,tmp,bind-paths "
+            f"apptainer exec --writable-tmpfs --cleanenv --pid --no-mount {self._apptainer_no_mounts()} "
+            f"{cwd_arg}"
             f"{env_args}"
             f"{mount_str} "
             f" {params.container} bash {container_script_path}"

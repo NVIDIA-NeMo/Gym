@@ -14,6 +14,7 @@
 # limitations under the License.
 import importlib.metadata
 import os
+import shlex
 from os import environ
 from pathlib import Path
 from subprocess import Popen
@@ -33,6 +34,16 @@ from nemo_gym.global_config import (
     UV_VENV_DIR_KEY_NAME,
     get_global_config_dict,
 )
+
+
+_SWE_AGENTS_ENTRYPOINT_PARTS = ("responses_api_agents", "swe_agents")
+_SWE_BENCH_EXT_BUNDLE_ENV = "NEMO_GYM_SWEBENCH_EXT_DEPS_EXTRA"
+_SWE_BENCH_EXT_DEFAULT_BUNDLE = "swe_bench_ext_deps_https"
+_SWE_BENCH_EXT_ALLOWED_BUNDLES = {
+    "swe_bench_ext_deps_https",
+    "swe_bench_ext_deps_ssh",
+    "swe_bench_ext_deps_local",
+}
 
 
 def _get_nemo_gym_install_flags() -> str:
@@ -100,6 +111,48 @@ def _get_nemo_gym_version_spec(is_editable_install: bool) -> str:
         return ""
 
 
+def _is_swe_agents_server_dir(dir_path: Path) -> bool:
+    parts = dir_path.resolve().parts
+    return len(parts) >= 2 and tuple(parts[-2:]) == _SWE_AGENTS_ENTRYPOINT_PARTS
+
+
+def _get_optional_swe_bench_ext_bundle() -> str | None:
+    bundle = os.getenv(_SWE_BENCH_EXT_BUNDLE_ENV, _SWE_BENCH_EXT_DEFAULT_BUNDLE).strip()
+    if bundle.lower() in {"", "0", "false", "none", "off"}:
+        return None
+    if bundle not in _SWE_BENCH_EXT_ALLOWED_BUNDLES:
+        return _SWE_BENCH_EXT_DEFAULT_BUNDLE
+    return bundle
+
+
+def _with_optional_swe_bench_ext_bundle_install(
+    install_cmd: str,
+    dir_path: Path,
+    verbose_flag: str,
+    uv_pip_python_flag: str,
+    is_editable_install: bool,
+) -> str:
+    if not _is_swe_agents_server_dir(dir_path):
+        return install_cmd
+
+    bundle = _get_optional_swe_bench_ext_bundle()
+    if bundle is None:
+        return install_cmd
+
+    if is_editable_install:
+        bundle_install_cmd = f"uv pip install {verbose_flag}{uv_pip_python_flag}'-e ../../[{bundle}]'"
+    else:
+        install_flags = _get_nemo_gym_install_flags()
+        version_spec = _get_nemo_gym_version_spec(is_editable_install)
+        bundle_install_cmd = f"uv pip install {verbose_flag}{uv_pip_python_flag}{install_flags}nemo-gym[{bundle}]{version_spec}"
+
+    warning = (
+        f"WARNING: optional SWE-bench-ext/lighthouse dependency bundle {bundle!r} failed to install; "
+        "continuing without it. SWE-bench-ext tasks may fail until swe_bench_ext and lighthouse are installed."
+    )
+    return f"{install_cmd} && ({bundle_install_cmd} || echo {shlex.quote(warning)} >&2)"
+
+
 def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: str) -> str:
     head_server_deps = global_config_dict[HEAD_SERVER_DEPS_KEY_NAME]
 
@@ -165,6 +218,14 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
             raise RuntimeError(
                 f"Missing pyproject.toml or requirements.txt for uv venv setup in server dir: {dir_path}"
             )
+
+        install_cmd = _with_optional_swe_bench_ext_bundle_install(
+            install_cmd=install_cmd,
+            dir_path=dir_path,
+            verbose_flag=verbose_flag,
+            uv_pip_python_flag=uv_pip_python_flag,
+            is_editable_install=is_editable_install,
+        )
 
         prefix_cmd = f" > >(sed 's/^/({prefix}) /') 2> >(sed 's/^/({prefix}) /' >&2)"
         env_setup_cmd = f"{uv_venv_cmd}{prefix_cmd} && source {venv_activate_fpath} && {install_cmd}{prefix_cmd}"

@@ -237,3 +237,6 @@ env.yaml
 
 # Backup files
 *.backup
+
+**/benchmark-swe-bench-ext/
+**/lighthouse/
