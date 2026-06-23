@@ -24,7 +24,7 @@ ng_collect_rollouts +agent_name=circle_count_simple_agent +input_jsonl_fpath=env
 ```
 
 # Generating Data
-All data is synthetically generated using `generate_data.py`.
+All data is synthetically generated using `prepare.py`.
 
 The script controls task complexity including number of circles, their size, image size, and color distribution.
 
