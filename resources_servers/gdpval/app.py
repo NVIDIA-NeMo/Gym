@@ -497,8 +497,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
         # a fake neutral reward that would pollute the metrics.
         if attempted_matchups > 0 and not per_reference:
             raise RuntimeError(
-                f"all {attempted_matchups} judge matchup(s) failed for task {body.task_id}; "
-                f"last error: {last_error!r}"
+                f"all {attempted_matchups} judge matchup(s) failed for task {body.task_id}; last error: {last_error!r}"
             )
 
         total_judged = total_wins + total_losses + total_ties
@@ -631,9 +630,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
             # eyeball MLE fit against the observed per-reference win rate.
             for ref_id, (rw, rl, rt, ref_elo) in per_ref_totals.items():
                 if ref_elo is not None:
-                    extra[f"comparison/ref/{ref_id}/predicted_win_rate"] = predict_win_rate(
-                        eval_elo, float(ref_elo)
-                    )
+                    extra[f"comparison/ref/{ref_id}/predicted_win_rate"] = predict_win_rate(eval_elo, float(ref_elo))
         else:
             eval_elo, normalized_elo = calculate_elo(win_rate, self.config.reference_elo)
             extra["comparison/eval_elo"] = eval_elo
