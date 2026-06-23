@@ -14,13 +14,17 @@
 # limitations under the License.
 import logging
 import re
+from contextlib import asynccontextmanager
 from typing import Any, Dict
+
+from fastapi import FastAPI
 
 from nemo_gym.base_responses_api_model import Body
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.server_utils import request
 from responses_api_models.openai_model.app import SimpleModelServer, SimpleModelServerConfig
 
 
@@ -108,12 +112,55 @@ def _normalize_to_response(data: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+# Versions with credential-harvesting malware (supply chain incident, March 2026).
+# https://docs.litellm.ai/blog/security-update-march-2026
+_COMPROMISED_VERSIONS = frozenset({"1.82.7", "1.82.8"})
+_MIN_SAFE_VERSION = "1.83.0"
+
+
 class LiteLLMModelServerConfig(SimpleModelServerConfig):
     pass
 
 
 class LiteLLMModelServer(SimpleModelServer):
     config: LiteLLMModelServerConfig
+
+    async def _check_proxy_version(self) -> None:
+        """Verify the LiteLLM proxy is not running a known-compromised version."""
+        base_url = re.sub(r"/v1/?$", "", self.config.openai_base_url.rstrip("/"))
+        health_url = f"{base_url}/health"
+        try:
+            resp = await request("GET", health_url, _internal=True)
+            data = await resp.json(content_type=None)
+            version = data.get("litellm_version", "")
+        except Exception as e:
+            logger.warning("Could not verify LiteLLM proxy version at %s: %s", health_url, e)
+            return
+
+        if version in _COMPROMISED_VERSIONS:
+            raise RuntimeError(
+                f"LiteLLM proxy is running a compromised version ({version}). "
+                f"Versions {sorted(_COMPROMISED_VERSIONS)} contain credential-harvesting malware "
+                f"(supply chain incident, March 2026 — see https://docs.litellm.ai/blog/security-update-march-2026). "
+                f"Upgrade the proxy to >= {_MIN_SAFE_VERSION}."
+            )
+
+        logger.info("LiteLLM proxy version check passed (version=%s)", version or "unknown")
+
+    def setup_webserver(self) -> FastAPI:
+        app = super().setup_webserver()
+
+        main_lifespan = app.router.lifespan_context
+        server = self
+
+        @asynccontextmanager
+        async def lifespan_with_version_check(app):
+            await server._check_proxy_version()
+            async with main_lifespan(app) as state:
+                yield state
+
+        app.router.lifespan_context = lifespan_with_version_check
+        return app
 
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         body_dict = self.config.extra_body | body.model_dump(exclude_unset=True)
