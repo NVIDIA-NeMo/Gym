@@ -228,11 +228,13 @@ def prepare_benchmark() -> None:
     prepare_benchmark_config = PrepareBenchmarkConfig.model_validate(global_config_dict)
 
     benchmarks_dict: Dict[str, BenchmarkConfig] = dict()
+    inspected_server_instances: List[str] = []
     for server_instance_name in global_config_dict:
         server_config = global_config_dict[server_instance_name]
         if not isinstance(server_config, (dict, DictConfig)) or "responses_api_agents" not in server_config:
             continue
 
+        inspected_server_instances.append(server_instance_name)
         inner_server_config = get_first_server_config_dict(global_config_dict, server_instance_name)
 
         datasets: List[BenchmarkDatasetConfig] = []
@@ -246,7 +248,9 @@ def prepare_benchmark() -> None:
             continue
 
         assert len(datasets) == 1, (
-            f"Expected 1 benchmark dataset for `{server_instance_name}`, but found {len(datasets)}!"
+            f"Expected exactly 1 benchmark dataset for server instance `{server_instance_name}`, "
+            f"but found {len(datasets)}: {[d.name for d in datasets]}. "
+            "A benchmark config must define a single benchmark dataset."
         )
 
         dataset = datasets[0]
@@ -260,7 +264,13 @@ def prepare_benchmark() -> None:
         )
 
     assert benchmarks_dict, (
-        'No benchmark config found in config_paths. Pass a benchmark config, e.g.: "+config_paths=[benchmarks/aime24/config.yaml]"'
+        "No benchmark config found. "
+        + (
+            f"Inspected server instances {inspected_server_instances}, but none declared a `benchmark` dataset."
+            if inspected_server_instances
+            else "No server instances with `responses_api_agents` were found in the resolved config."
+        )
+        + " Pass a benchmark with `gym eval prepare --benchmark <name>` (e.g. `--benchmark aime24`)."
     )
 
     # Validate all benchmarks before preparing any

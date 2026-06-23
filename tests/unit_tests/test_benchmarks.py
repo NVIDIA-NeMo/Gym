@@ -230,7 +230,24 @@ class TestPrepareBenchmark:
             ),
             patch("nemo_gym.cli.eval._load_benchmarks_from_config_paths", return_value={}),
         ):
-            with pytest.raises(AssertionError, match="No benchmark config found in config_paths"):
+            with pytest.raises(AssertionError, match="No benchmark config found"):
+                prepare_benchmark()
+
+    def test_no_benchmark_dataset_reports_inspected_instances(self, tmp_path: Path) -> None:
+        # A server instance is present but declares no `benchmark` dataset; the error should name it
+        # so the user can see what was inspected.
+        config = {
+            "config_paths": ["benchmarks/dummy/config.yaml"],
+            "dummy_agent": {
+                "responses_api_agents": {
+                    "simple_agent": {
+                        "datasets": [{"name": "not_a_benchmark", "type": "train", "jsonl_fpath": str(tmp_path)}]
+                    }
+                }
+            },
+        }
+        with patch("nemo_gym.cli.eval.get_global_config_dict", return_value=_mock_global_config(config)):
+            with pytest.raises(AssertionError, match=r"Inspected server instances \['dummy_agent'\]"):
                 prepare_benchmark()
 
     def test_caching_sanity(self, tmp_path: Path) -> None:
