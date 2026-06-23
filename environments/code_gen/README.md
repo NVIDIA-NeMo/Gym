@@ -8,10 +8,10 @@ The dataset is in preparation and the example data can be found in `data/example
 ### Input schema
 - `responses_create_params`: OpenAI Responses create params
   - Use only a user message with the problem statement and instructions (e.g., "You are an expert competitive programmer...").
-  - `verifier_metadata` (required):
-    - `unit_tests` (required): dict with `inputs` and `outputs` arrays containing test cases.
-      - `inputs`: list of strings representing stdin input for each test case
-      - `outputs`: list of strings representing expected stdout output for each test case
+- `verifier_metadata` (required):
+  - `unit_tests` (required): dict with `inputs` and `outputs` arrays containing test cases.
+    - `inputs`: list of strings representing stdin input for each test case
+    - `outputs`: list of strings representing expected stdout output for each test case
 
 **Notes**
 - All test cases must pass for a solution to receive a reward of 1.0
@@ -21,7 +21,7 @@ The dataset is in preparation and the example data can be found in `data/example
 We use the LiveCodeBench execution code.
 
 ### Example of rollouts and usage
-
+Create an `env.yaml` file in the Gym root directory to specify the model endpoint and credentials. See [documentation](https://docs.nvidia.com/nemo/gym/reference/configuration#local-configuration-envyaml) for details.
 ```bash
 # Running the server
 config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
