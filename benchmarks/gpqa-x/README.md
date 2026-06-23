@@ -37,7 +37,7 @@ python benchmarks/gpqa-x/prepare.py --prompt_language en
 ## Quickstart
 
 ```bash
-ng_run "+config_paths=[benchmarks/gpqa-x/config.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
+ng_run "+config_paths=[benchmarks/gpqa-x/config.yaml,responses_api_models/vllm_endpoint/configs/vllm_endpoint.yaml]"
 ```
 
 Then in another shell:

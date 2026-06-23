@@ -189,7 +189,7 @@ server (`resources_servers/gdpval`). Drive it from the benchmark config:
 
 ```bash
 ng_e2e_collect_rollouts \
-  "+config_paths=[responses_api_models/vllm_model/configs/vllm_model.yaml,benchmarks/gdpval/config.yaml]" \
+  "+config_paths=[responses_api_models/vllm_endpoint/configs/vllm_endpoint.yaml,benchmarks/gdpval/config.yaml]" \
   ++split=benchmark \
   ++output_jsonl_fpath=results/gdpval_compare.jsonl \
   ++gdpval_resources_server.resources_servers.gdpval.reward_mode=comparison \

@@ -30,7 +30,7 @@ judge_model_name: Qwen/Qwen3-235B-A22B-Instruct-2507
 ```bash
 # If you want to run with browsecomp benchmark instead of the example samples, need to change the datasets part to the one like `benchmarks/browsecomp/config.yaml` in `resources_servers/browsecomp_advanced_harness/configs/browsecomp_advanced_harness.yaml`
 config_paths="resources_servers/browsecomp_advanced_harness/configs/browsecomp_advanced_harness.yaml,\
-responses_api_models/vllm_model/configs/vllm_model.yaml"
+responses_api_models/vllm_endpoint/configs/vllm_endpoint.yaml"
 
 ng_run "+config_paths=[${config_paths}]"
 ```

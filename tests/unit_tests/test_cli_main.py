@@ -473,10 +473,10 @@ class TestModelFlag:
         # The deployment invocation: select the local vLLM server type and pass the checkpoint to serve via --model.
         _, overrides = _dispatch_for(
             monkeypatch,
-            ["eval", "run", "--model-type", "local_vllm_model", "--model", "Qwen/Qwen3-8B"],
+            ["eval", "run", "--model-type", "vllm_server", "--model", "Qwen/Qwen3-8B"],
         )
         paths, others = _split_overrides(overrides)
-        assert paths == {str(WORKING_DIR / "responses_api_models/local_vllm_model/configs/local_vllm_model.yaml")}
+        assert paths == {str(WORKING_DIR / "responses_api_models/vllm_server/configs/vllm_server.yaml")}
         assert others == {"+policy_model_name=Qwen/Qwen3-8B"}
 
     def test_short_alias_on_env_run(self, monkeypatch: MonkeyPatch) -> None:
@@ -617,8 +617,11 @@ class TestAssetSelectors:
                 ["env", "run", "--model-type", "openai_model"],
                 "responses_api_models/openai_model/configs/openai_model.yaml",
             ),
-            # model-server/vllm.mdx: responses_api_models/vllm_model/configs/vllm_model.yaml
-            (["env", "run", "--model-type", "vllm_model"], "responses_api_models/vllm_model/configs/vllm_model.yaml"),
+            # model-server/vllm.mdx: responses_api_models/vllm_endpoint/configs/vllm_endpoint.yaml
+            (
+                ["env", "run", "--model-type", "vllm_endpoint"],
+                "responses_api_models/vllm_endpoint/configs/vllm_endpoint.yaml",
+            ),
         ],
     )
     def test_name_resolves_to_config_path(self, monkeypatch: MonkeyPatch, argv, expected_config) -> None:
@@ -642,12 +645,14 @@ class TestAssetSelectors:
 
     def test_gpqa_benchmark_plus_model(self, monkeypatch: MonkeyPatch) -> None:
         # benchmarks/gpqa/README.md:
-        #   ng_run "+config_paths=[benchmarks/gpqa/config.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
-        _, overrides = _dispatch_for(monkeypatch, ["eval", "run", "--benchmark", "gpqa", "--model-type", "vllm_model"])
+        #   ng_run "+config_paths=[benchmarks/gpqa/config.yaml,responses_api_models/vllm_endpoint/configs/vllm_endpoint.yaml]"
+        _, overrides = _dispatch_for(
+            monkeypatch, ["eval", "run", "--benchmark", "gpqa", "--model-type", "vllm_endpoint"]
+        )
         paths, others = _split_overrides(overrides)
         assert paths == {
             str(WORKING_DIR / "benchmarks/gpqa/config.yaml"),
-            str(WORKING_DIR / "responses_api_models/vllm_model/configs/vllm_model.yaml"),
+            str(WORKING_DIR / "responses_api_models/vllm_endpoint/configs/vllm_endpoint.yaml"),
         }
         assert others == set()
 

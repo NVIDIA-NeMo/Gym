@@ -19,7 +19,7 @@ ng_prepare_benchmark "+config_paths=[benchmarks/gdpval/config.yaml]"
 Each deliverable is scored 0–1 against the task rubric.
 
 ```bash
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
+config_paths="responses_api_models/vllm_endpoint/configs/vllm_endpoint.yaml,\
 benchmarks/gdpval/config.yaml"
 ng_e2e_collect_rollouts \
     "+config_paths=[${config_paths}]" \

@@ -47,7 +47,7 @@ python benchmarks/graphwalks/prepare.py \
 ## Start environment
 
 ```bash
-ng_run "+config_paths=[benchmarks/graphwalks/config.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
+ng_run "+config_paths=[benchmarks/graphwalks/config.yaml,responses_api_models/vllm_endpoint/configs/vllm_endpoint.yaml]"
 ```
 
 ## Collect rollouts

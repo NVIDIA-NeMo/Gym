@@ -82,7 +82,7 @@ uv venv && uv sync --extra dev --group docs
 pre-commit install
 
 # Run servers
-ng_run "+config_paths=[resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
+ng_run "+config_paths=[resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml,responses_api_models/vllm_endpoint/configs/vllm_endpoint.yaml]"
 
 # Run tests for a specific server (creates .venv per server, installs deps, runs pytest)
 # First run is slow. Use skip_venv_if_present config or place a .venv to skip venv creation.

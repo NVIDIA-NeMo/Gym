@@ -35,7 +35,7 @@ existing math_with_judge consumers.
 ## Run servers
 
 ```bash
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,resources_servers/math_with_autograder/configs/math_with_autograder.yaml,resources_servers/math_with_autograder/configs/judge_gptoss20b.yaml"
+config_paths="responses_api_models/vllm_endpoint/configs/vllm_endpoint.yaml,resources_servers/math_with_autograder/configs/math_with_autograder.yaml,resources_servers/math_with_autograder/configs/judge_gptoss20b.yaml"
 ng_run "+config_paths=[$config_paths]"
 ```
 

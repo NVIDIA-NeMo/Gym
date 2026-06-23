@@ -51,7 +51,7 @@ uv sync
 
 ### Start ARC-AGI environment (we can reuse the same one for ARC-AGI-1 and 2):
 ```bash
-ng_run "+config_paths=[resources_servers/arc_agi/configs/arc_agi.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
+ng_run "+config_paths=[resources_servers/arc_agi/configs/arc_agi.yaml,responses_api_models/vllm_endpoint/configs/vllm_endpoint.yaml]"
 ```
 
 

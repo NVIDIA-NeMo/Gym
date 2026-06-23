@@ -26,7 +26,7 @@ few-shots).
 Start vLLM with the `--reasoning-parser` that matches your model
 (e.g. `deepseek_r1` for models with a `<think>…</think>` convention;
 the parser name is declared in
-`responses_api_models/local_vllm_model/configs/nvidia/*.yaml`). Without
+`responses_api_models/vllm_server/configs/nvidia/*.yaml`). Without
 one, `math_with_judge` may extract intermediate expressions from
 truncated rollouts, and Skills' `parse_reasoning=True` default diverges
 on the same inputs.
@@ -38,7 +38,7 @@ on the same inputs.
 ng_prepare_benchmark "+config_paths=[benchmarks/hmmt_nov25/config.yaml]"
 
 # Running servers
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
+config_paths="responses_api_models/vllm_endpoint/configs/vllm_endpoint.yaml,\
 benchmarks/hmmt_nov25/config.yaml"
 ng_run "+config_paths=[$config_paths]"
 

@@ -28,7 +28,7 @@ tavily_search_resources_server:
       exclude_domains_file_path: ???
 Qwen3-235B-A22B-Instruct-2507-FP8:
   responses_api_models:
-    vllm_model:
+    vllm_endpoint:
       model: ???  # The actual judge model needs to be Qwen/Qwen3-235B-A22B-Instruct-2507-FP8, but the name will probably differ based on endpoint.
       base_url: ???
       api_key: ???

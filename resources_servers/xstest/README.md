@@ -100,7 +100,7 @@ contrast_privacy
 ### Example usage
 ```bash
 # For chat completions endpoints (vLLM, NIM, etc.):
-ng_run "+config_paths=[resources_servers/xstest/configs/xstest.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
+ng_run "+config_paths=[resources_servers/xstest/configs/xstest.yaml,responses_api_models/vllm_endpoint/configs/vllm_endpoint.yaml]"
 
 # For OpenAI Responses API endpoints:
 # ng_run "+config_paths=[resources_servers/xstest/configs/xstest.yaml,responses_api_models/openai_model/configs/openai_model.yaml]"

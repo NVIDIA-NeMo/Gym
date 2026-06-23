@@ -9,7 +9,7 @@ Evaluates model responses on the **MultiChallenge** benchmark using an LLM judge
 ng_test +entrypoint=resources_servers/multichallenge
 
 # 2. Start servers (in terminal 1)
-config_paths="resources_servers/multichallenge/configs/multichallenge.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml"
+config_paths="resources_servers/multichallenge/configs/multichallenge.yaml,responses_api_models/vllm_endpoint/configs/vllm_endpoint.yaml"
 ng_run "+config_paths=[${config_paths}]"
 
 # 3. Collect rollouts on example data (in terminal 2)
@@ -105,7 +105,7 @@ Tests cover:
 
 1. **Start servers**:
    ```bash
-   config_paths="resources_servers/multichallenge/configs/multichallenge.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml"
+   config_paths="resources_servers/multichallenge/configs/multichallenge.yaml,responses_api_models/vllm_endpoint/configs/vllm_endpoint.yaml"
    ng_run "+config_paths=[${config_paths}]"
    ```
 

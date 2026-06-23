@@ -16,7 +16,7 @@ the `full` split (~1140 problems) is `bigcode/bigcodebench@v0.1.4`.
 ng_prepare_benchmark "+config_paths=[benchmarks/bigcodebench/config.yaml]"
 
 # Running servers
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
+config_paths="responses_api_models/vllm_endpoint/configs/vllm_endpoint.yaml,\
 benchmarks/bigcodebench/config.yaml"
 ng_run "+config_paths=[$config_paths]"
 

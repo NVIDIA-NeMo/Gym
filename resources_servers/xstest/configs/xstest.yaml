@@ -18,7 +18,7 @@ xstest_resources_server:
       judge_output_format: wildguard
 allenai_wildguard_model_server:
   responses_api_models:
-    local_vllm_model:
+    vllm_server:
       entrypoint: app.py
       model: allenai/wildguard
       return_token_id_information: false

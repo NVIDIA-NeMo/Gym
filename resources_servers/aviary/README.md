@@ -23,7 +23,7 @@ Run the GSM8K Aviary resources server together with a model config:
 
 ```bash
 config_paths="resources_servers/aviary/configs/gsm8k_aviary.yaml,\
-responses_api_models/vllm_model/configs/vllm_model.yaml"
+responses_api_models/vllm_endpoint/configs/vllm_endpoint.yaml"
 ng_run "+config_paths=[$config_paths]"
 ```
 
@@ -49,7 +49,7 @@ Once the dataset server is running and is accessible at a specific URL, update y
 
 ```bash
 config_paths="resources_servers/aviary/configs/bbh_remote.yaml,\
-responses_api_models/vllm_model/configs/vllm_model.yaml"
+responses_api_models/vllm_endpoint/configs/vllm_endpoint.yaml"
 ng_run "+config_paths=[$config_paths]"
 ```
 
@@ -74,7 +74,7 @@ env:
   nemo_gym:  # This is passed into NeMo-Gym as the initial_global_config_dict
     is_trajectory_collection: false  # Set this to true to enable trajectory collection (no training). You may also want to increase `policy.generation.vllm_cfg.gpu_memory_utilization`
     config_paths:
-    - responses_api_models/vllm_model/configs/vllm_model_for_training.yaml  # Required! And it must be *for_training
+    - responses_api_models/vllm_endpoint/configs/vllm_model_for_training.yaml  # Required! And it must be *for_training
     - resources_servers/aviary/configs/bbh_remote.yaml 
 ```
 
@@ -99,7 +99,7 @@ cd /path/to/gym/directory
 And then bring up NeMo-Gym:
 ```bash
 config_paths="resources_servers/aviary/configs/bbh_bundled.yaml,\
-responses_api_models/vllm_model/configs/vllm_model.yaml"
+responses_api_models/vllm_endpoint/configs/vllm_endpoint.yaml"
 ng_run "+config_paths=[$config_paths]"
 ```
 ```bash
@@ -160,7 +160,7 @@ env:
   nemo_gym:  # This is passed into NeMo-Gym as the initial_global_config_dict
     is_trajectory_collection: false  # Set this to true to enable trajectory collection (no training). You may also want to increase `policy.generation.vllm_cfg.gpu_memory_utilization`
     config_paths:
-    - responses_api_models/vllm_model/configs/vllm_model_for_training.yaml  # Required! And it must be *for_training
+    - responses_api_models/vllm_endpoint/configs/vllm_model_for_training.yaml  # Required! And it must be *for_training
     - resources_servers/aviary/configs/bbh_bundled.yaml 
 ```
 Following this, you can export `SETUP_COMMAND` to a snippet installing enroot prior to launching your `ray.sub` command:

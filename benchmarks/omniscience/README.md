@@ -14,7 +14,7 @@ ng_prepare_data +benchmark=omniscience
 
 # Run benchmark
 ng_collect_rollouts +benchmark=omniscience \
-    "+config_paths=[responses_api_models/vllm_model/configs/vllm_model.yaml]" \
+    "+config_paths=[responses_api_models/vllm_endpoint/configs/vllm_endpoint.yaml]" \
     +output_jsonl_fpath=results/omniscience_rollouts.jsonl
 ```
 

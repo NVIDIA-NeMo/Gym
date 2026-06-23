@@ -13,7 +13,7 @@ Example override from NeMo RL:
 
 ```bash
 uv run python examples/nemo_gym/run_grpo_nemo_gym.py --config path/to/grpo.yaml \
-  env.nemo_gym.config_paths='[responses_api_models/vllm_model/configs/vllm_model_for_training.yaml,resources_servers/competitive_coding_challenges/configs/competitive_coding_challenges.yaml,responses_api_agents/simple_agent/configs/simple_agent.yaml]'
+  env.nemo_gym.config_paths='[responses_api_models/vllm_endpoint/configs/vllm_model_for_training.yaml,resources_servers/competitive_coding_challenges/configs/competitive_coding_challenges.yaml,responses_api_agents/simple_agent/configs/simple_agent.yaml]'
 ```
 
 Please see the resource server yaml for settings that can be modified such as:

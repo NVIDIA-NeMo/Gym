@@ -46,7 +46,7 @@ compute pass@k for each separately.
 
 ```bash
 # Running servers
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
+config_paths="responses_api_models/vllm_endpoint/configs/vllm_endpoint.yaml,\
 resources_servers/evalplus/configs/evalplus.yaml"
 ng_run "+config_paths=[$config_paths]"
 

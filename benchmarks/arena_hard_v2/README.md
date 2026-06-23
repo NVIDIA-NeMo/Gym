@@ -34,7 +34,7 @@ repo, joins by `uid`, and emits one row per question with `question`,
 ng_prepare_benchmark "+config_paths=[benchmarks/arena_hard_v2/config.yaml]"
 
 # Running servers
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
+config_paths="responses_api_models/vllm_endpoint/configs/vllm_endpoint.yaml,\
 benchmarks/arena_hard_v2/config.yaml"
 ng_run "+config_paths=[$config_paths]"
 

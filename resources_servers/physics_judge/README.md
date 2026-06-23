@@ -32,7 +32,7 @@ existing math_with_judge consumers (`aime24`, `aime25`, `gsm8k`,
 ## Running servers
 
 ```bash
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
+config_paths="responses_api_models/vllm_endpoint/configs/vllm_endpoint.yaml,\
 resources_servers/physics_judge/configs/physics_judge.yaml,\
 resources_servers/physics_judge/configs/judge_openai.yaml"
 ng_run "+config_paths=[$config_paths]"

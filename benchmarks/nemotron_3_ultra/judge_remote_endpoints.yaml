@@ -1,8 +1,8 @@
-# Refer to the params in responses_api_models/local_vllm_model/configs/Qwen/Qwen3-235B-A22B-Instruct-2507-FP8.yaml
+# Refer to the params in responses_api_models/vllm_server/configs/Qwen/Qwen3-235B-A22B-Instruct-2507-FP8.yaml
 # Used in browsecomp
 Qwen3-235B-A22B-Instruct-2507-FP8:
   responses_api_models:
-    vllm_model:
+    vllm_endpoint:
       entrypoint: app.py
       model: ???
       base_url: ???
@@ -14,8 +14,8 @@ Qwen3-235B-A22B-Instruct-2507-FP8:
 # Used in XSTest
 allenai_wildguard_model_server:
   responses_api_models:
-    _delete_key: local_vllm_model
-    vllm_model:
+    _delete_key: vllm_server
+    vllm_endpoint:
       entrypoint: app.py
       model: ???
       base_url: ???

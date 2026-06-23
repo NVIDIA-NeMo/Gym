@@ -40,7 +40,7 @@ holds only the dataset definition + prompt + prepare script.
 ng_prepare_benchmark "+config_paths=[benchmarks/human_eval_infilling/config.yaml]"
 
 # Running servers
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
+config_paths="responses_api_models/vllm_endpoint/configs/vllm_endpoint.yaml,\
 benchmarks/human_eval_infilling/config.yaml"
 ng_run "+config_paths=[$config_paths]"
 

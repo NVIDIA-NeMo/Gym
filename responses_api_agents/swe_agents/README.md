@@ -253,11 +253,11 @@ policy_model_name: Qwen/Qwen3-Coder-30B-A3B-Instruct
 ```bash
 # OpenHands single-prompt
 config_paths="responses_api_agents/swe_agents/configs/swebench_openhands.yaml,\
-responses_api_models/vllm_model/configs/vllm_model.yaml"
+responses_api_models/vllm_endpoint/configs/vllm_endpoint.yaml"
 
 # Or full prompt × agent-class × tool-name diversity
 config_paths="responses_api_agents/swe_agents/configs/swebench_multi_tools.yaml,\
-responses_api_models/vllm_model/configs/vllm_model.yaml"
+responses_api_models/vllm_endpoint/configs/vllm_endpoint.yaml"
 
 ng_run "+config_paths=[$config_paths]" \
     +swe_agents.responses_api_agents.swe_agents.container_formatter=/lustre/xxx/images/swe-bench/swebench_sweb.eval.x86_64.\{instance_id\}.sif \

@@ -45,7 +45,7 @@ ng_prepare_benchmark "+config_paths=[benchmarks/mrcr/config_n3_1m.yaml]"
 ## Start environment
 
 ```bash
-ng_run "+config_paths=[benchmarks/mrcr/config.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
+ng_run "+config_paths=[benchmarks/mrcr/config.yaml,responses_api_models/vllm_endpoint/configs/vllm_endpoint.yaml]"
 ```
 
 ## Collect rollouts

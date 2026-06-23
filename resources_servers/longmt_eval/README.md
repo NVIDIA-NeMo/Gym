@@ -158,7 +158,7 @@ rollouts file.
 
 ```bash
 # Start servers (smoke-test mode — no GPU needed for the verifier)
-ng_run "+config_paths=[resources_servers/longmt_eval/configs/longmt_eval.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]" \
+ng_run "+config_paths=[resources_servers/longmt_eval/configs/longmt_eval.yaml,responses_api_models/vllm_endpoint/configs/vllm_endpoint.yaml]" \
     "++longmt_eval.resources_servers.longmt_eval.compute_segale=false" &
 
 # Collect rollouts — also writes results/longmt_eval_rollouts_materialized_inputs.jsonl

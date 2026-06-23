@@ -1,6 +1,6 @@
 safety_judge_model:
   responses_api_models:
-    vllm_model:
+    vllm_endpoint:
       entrypoint: app.py
       base_url: http://<host_url>:<port>/v1
       api_key: <api_key>

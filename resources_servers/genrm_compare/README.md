@@ -288,7 +288,7 @@ See `examples/genrm_grpo_example.yaml` for complete configuration.
 
 - **GenRM Model**: `responses_api_models/genrm_model/` - Response API model with custom roles (`response_1`, `response_2`, `principle`); default config uses server name `genrm_model` (local vLLM)
 - **Comparison Strategies**: `comparison_strategies.py` (in this package) - Strategy infrastructure
-- **Base VLLM Model**: `responses_api_models/vllm_model/` - Generic model (unchanged)
+- **Base VLLM Model**: `responses_api_models/vllm_endpoint/` - Generic model (unchanged)
 - **Type Definitions**: `nemo_gym/openai_utils.py` - Custom role type support
 - **Rollout Collection**: `nemo_gym/rollout_collection.py` - Integrates comparison strategies
 - **Design Doc**: `docs/design_notes/genrm_reward_model_refactoring.md`

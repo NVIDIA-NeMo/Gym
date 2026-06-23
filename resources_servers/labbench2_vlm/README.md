@@ -154,7 +154,7 @@ python3 resources_servers/labbench2_vlm/prepare_data.py --example  # also popula
 The judge model lives in a separate config (`configs/judge_model_openai.yaml`)
 so a user who wants a non-OpenAI judge (e.g. a local vLLM) can drop that file
 and supply their own `responses_api_models` instance named `judge_model` (see
-`responses_api_models/vllm_model/configs/vllm_model.yaml` for the vLLM form).
+`responses_api_models/vllm_endpoint/configs/vllm_endpoint.yaml` for the vLLM form).
 
 Credentials go in `env.yaml` at the **repository root** (the parser loads
 `$CWD/env.yaml` first, then falls back to `$PARENT_DIR/env.yaml`). The file

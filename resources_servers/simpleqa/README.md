@@ -39,7 +39,7 @@ the reasoning trace is split off before the response reaches this server.
 ## Running servers
 
 ```bash
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
+config_paths="responses_api_models/vllm_endpoint/configs/vllm_endpoint.yaml,\
 resources_servers/simpleqa/configs/simpleqa.yaml"
 ng_run "+config_paths=[$config_paths]" \
     +simpleqa.resources_servers.simpleqa.judge_model_server.name=policy_model

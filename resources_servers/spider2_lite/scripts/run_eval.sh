@@ -39,7 +39,7 @@ fi
 ROLLOUTS_OUT="results/${SLUG}_${LABEL}.jsonl"
 MATERIALIZED_OUT="results/${SLUG}_${LABEL}_materialized_inputs.jsonl"
 PROFILED_OUT="results/${SLUG}_${LABEL}_reward_profiling.jsonl"
-CONFIGS="resources_servers/spider2_lite/configs/spider2_lite.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml"
+CONFIGS="resources_servers/spider2_lite/configs/spider2_lite.yaml,responses_api_models/vllm_endpoint/configs/vllm_endpoint.yaml"
 
 mkdir -p results
 

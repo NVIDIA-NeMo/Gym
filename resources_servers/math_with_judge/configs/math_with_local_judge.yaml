@@ -11,7 +11,7 @@ math_with_judge:
       domain: math
 qwen3_30ba3b_instruct_2507_model_server:
   responses_api_models:
-    local_vllm_model:
+    vllm_server:
       entrypoint: app.py
       model: Qwen/Qwen3-30B-A3B-Instruct-2507
       return_token_id_information: false

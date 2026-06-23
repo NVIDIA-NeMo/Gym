@@ -12,7 +12,7 @@ that compatibility choice explicitly in the generated data.
 The v4 rows are intended to test tool-call behavior against the serving stack
 we actually run. If the data contains tool schemas that vanilla vLLM/Outlines
 cannot compile, rollout collection fails before the model can generate. Hiding
-that in `responses_api_models/vllm_model/app.py` would make the shared wrapper
+that in `responses_api_models/vllm_endpoint/app.py` would make the shared wrapper
 behave differently from vanilla vLLM and would affect unrelated environments.
 
 Some schemas can be valid JSON Schema, and even reasonable OpenAPI-style

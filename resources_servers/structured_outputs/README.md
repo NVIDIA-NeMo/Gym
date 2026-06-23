@@ -74,7 +74,7 @@ For v4 tool-call structured outputs, use `structured_outputs_v4.yaml` and the
 v4 simple agent. The config routes through a non-executing agent because the
 emitted function call is the final answer, not an action to execute:
 ```bash
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
+config_paths="responses_api_models/vllm_endpoint/configs/vllm_endpoint.yaml,\
 resources_servers/structured_outputs/configs/structured_outputs_v4.yaml"
 ng_run "+config_paths=[${config_paths}]"
 ```
@@ -108,7 +108,7 @@ ng_prepare_data "+config_paths=[${config_paths}]" \
 ### Version 2 [260310] (JSON, YAML, XML)
 ```bash
 # prepare
-config_paths="responses_api_models/vllm_model/configs/vllm_model_for_training.yaml,\
+config_paths="responses_api_models/vllm_endpoint/configs/vllm_model_for_training.yaml,\
 resources_servers/structured_outputs/configs/structured_outputs_json_yaml_xml_v1.yaml"
 ng_prepare_data "+config_paths=[${config_paths}]" \
     +output_dirpath=data/structured_outputs/ \
@@ -118,7 +118,7 @@ ng_prepare_data "+config_paths=[${config_paths}]" \
 
 ### Version 3 [260409] (JSON, YAML, XML, TOML, CSV)
 ```bash
-config_paths="responses_api_models/vllm_model/configs/vllm_model_for_training.yaml,\
+config_paths="responses_api_models/vllm_endpoint/configs/vllm_model_for_training.yaml,\
 resources_servers/structured_outputs/configs/structured_outputs_v3.yaml"
 ng_prepare_data "+config_paths=[${config_paths}]" \
     +output_dirpath=data/structured_outputs_v3/ \
@@ -139,7 +139,7 @@ The uploaded GitLab dataset is:
 
 Prepare the v4 training data with:
 ```bash
-config_paths="responses_api_models/vllm_model/configs/vllm_model_for_training.yaml,\
+config_paths="responses_api_models/vllm_endpoint/configs/vllm_model_for_training.yaml,\
 resources_servers/structured_outputs/configs/structured_outputs_v4.yaml"
 ng_prepare_data "+config_paths=[${config_paths}]" \
     +output_dirpath=data/structured_outputs_v4_tool_call/ \

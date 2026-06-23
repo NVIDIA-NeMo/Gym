@@ -41,7 +41,7 @@ only advertised on multi-node SLURM deployments via NeMo-Skills'
 override and rely on corpus-BLEU only:
 
 ```bash
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
+config_paths="responses_api_models/vllm_endpoint/configs/vllm_endpoint.yaml,\
 benchmarks/flores200/config.yaml"
 ng_run "+config_paths=[$config_paths]" \
     "++flores200_wmt_translation_resources_server.resources_servers.wmt_translation.compute_comet=false"
@@ -102,7 +102,7 @@ ns nemo_gym_rollouts \
     --server_nodes 2 \
     --server_args "--tensor-parallel-size 8 --data-parallel-size 1 --data-parallel-size-local 1 --data-parallel-backend ray --distributed-executor-backend ray --api-server-count 1 --reasoning-parser deepseek_r1 --trust-remote-code --dtype auto --enforce-eager" \
     --model "$MODEL" \
-    --config_paths "benchmarks/flores200/config.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml" \
+    --config_paths "benchmarks/flores200/config.yaml,responses_api_models/vllm_endpoint/configs/vllm_endpoint.yaml" \
     --input_file benchmarks/flores200/data/flores200_devtest_benchmark.jsonl \
     --output_dir /workspace/flores200_smoke \
     --expname flores200_smoke \
