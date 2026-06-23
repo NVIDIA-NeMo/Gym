@@ -38,9 +38,8 @@ mini_swe_agent_2:
         ready_timeout_s: 1200
         resources:
           cpu: "2"
-          memory: "1"
-          ephemeral-storage: 20Gi
-          disk: "9"
+          memory_mib: 1024
+          disk_gib: 9
         provider_options:
           platform:
             os: linux
