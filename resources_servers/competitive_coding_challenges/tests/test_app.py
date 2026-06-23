@@ -49,12 +49,13 @@ from resources_servers.competitive_coding_challenges.app import (
 )
 
 
-def _make_server() -> CompetitiveCodingChallengesResourcesServer:
+def _make_server(**config_overrides) -> CompetitiveCodingChallengesResourcesServer:
     config = CompetitiveCodingChallengesResourcesServerConfig(
         host="0.0.0.0",
         port=8080,
         entrypoint="",
         name="competitive_coding_challenges",
+        **config_overrides,
     )
     return CompetitiveCodingChallengesResourcesServer(
         config=config,
@@ -124,6 +125,7 @@ def test_setup_webserver_initializes_evaluator(server: CompetitiveCodingChalleng
             "test_batch_size": server.config.test_batch_size,
             "time_scale": server.config.time_scale,
             "shared_dir": server.config.shared_dir,
+            "run_all_tests": False,
         },
         num_parallel_requests=server.config.num_parallel_requests,
     )
@@ -239,6 +241,45 @@ async def test_verify_full_problem_reward_requires_all_subtasks() -> None:
     response = await server.verify(request)
 
     assert response.reward == 0.0
+
+
+def test_setup_webserver_fraction_reward_runs_all_tests() -> None:
+    server = _make_server(reward_mode="fraction")
+    with patch("resources_servers.competitive_coding_challenges.app.CCCEvaluator") as evaluator_cls:
+        server.setup_webserver()
+
+    assert evaluator_cls.call_args.kwargs["config"]["run_all_tests"] is True
+
+
+@pytest.mark.asyncio
+async def test_verify_fraction_reward_counts_unique_passed_tests() -> None:
+    server = _make_server(reward_mode="fraction")
+    request = _make_verify_request(subtask=None)
+    evaluator = MagicMock()
+    evaluator.eval_single = AsyncMock(
+        return_value={
+            "test_case_results": {
+                "sub1": {
+                    "score": 0.0,
+                    "outputs": [
+                        {"score": 1.0, "test_name": "t1"},
+                        {"score": 0.0, "test_name": "t2"},
+                    ],
+                },
+                "sub2": {
+                    "score": 0.0,
+                    "outputs": [
+                        {"score": 1.0, "test_name": "t1"},
+                    ],
+                },
+            }
+        }
+    )
+    server._evaluator = evaluator
+
+    response = await server.verify(request)
+
+    assert response.reward == 0.5
 
 
 @pytest.mark.asyncio

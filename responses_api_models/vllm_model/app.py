@@ -111,6 +111,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         """
         return VLLMConverter(
             return_token_id_information=self.config.return_token_id_information,
+            uses_reasoning_parser=self.config.uses_reasoning_parser,
         )
 
     def model_post_init(self, context):
@@ -319,6 +320,11 @@ class VLLMModel(SimpleResponsesAPIModel):
         if self.config.return_token_id_information:
             body_dict |= dict(
                 logprobs=True,
+                # Pin top_logprobs=0: capture only needs the chosen token's logprob and id.
+                # vLLM computes `logprobs = top_logprobs if logprobs else None`.
+                # So an inbound top_logprobs=null yields no logprobs and empties the token ids.
+                # Overriding it here makes capture independent of the request.
+                top_logprobs=0,
                 # Typically passed via OpenAI client extra_body.
                 return_tokens_as_token_ids=True,
                 # TODO add this when NeMo RL upgrades to vLLM 0.10.2 support for prompt token ids
@@ -364,6 +370,12 @@ class VLLMModel(SimpleResponsesAPIModel):
                     pass
                 else:
                     raise NotImplementedError
+
+        # Drop a null top_logprobs on the non-capture path (caller-supplied logprobs=True).
+        # vLLM treats null as "no logprobs" but a missing field as its default (0), so forwarding null is never useful.
+        # The capture path above already set it to 0 and is unaffected.
+        if body_dict.get("top_logprobs") is None:
+            body_dict.pop("top_logprobs", None)
 
         if extra_body:
             body_dict = extra_body | body_dict
@@ -500,7 +512,19 @@ class VLLMModel(SimpleResponsesAPIModel):
             )
 
         if self.config.return_token_id_information and "prompt_token_ids" not in choice_dict["message"]:
-            log_probs = choice_dict["logprobs"]["content"]
+            # Check vLLM honored the logprobs request.
+            # It returns choice.logprobs=None when it computed none.
+            # That happens when a null top_logprobs reached it, or the contract changed across versions.
+            # Without this check the code below raises a TypeError or emits empty token ids that zero the loss mask.
+            # An empty content list is a valid zero-token generation and passes through.
+            logprobs_block = choice_dict.get("logprobs")
+            if not logprobs_block or logprobs_block.get("content") is None:
+                raise RuntimeError(
+                    f"`{self.config.name}` requested per-token logprobs from vLLM "
+                    f"(return_token_id_information=True, logprobs=True, top_logprobs=0), but the response "
+                    f"had none (choice.logprobs={logprobs_block!r}). Cannot extract token ids or logprobs."
+                )
+            log_probs = logprobs_block["content"]
             generation_log_probs = [log_prob["logprob"] for log_prob in log_probs]
 
             """
@@ -618,6 +642,7 @@ class VLLMConverterResponsesToChatCompletionsState(BaseModel):
 
 class VLLMConverter(BaseModel):
     return_token_id_information: bool
+    uses_reasoning_parser: bool = True
 
     # =======================================================
     # Reasoning handling. This may change across models and model families
@@ -704,7 +729,7 @@ class VLLMConverter(BaseModel):
             responses_create_params["max_tokens"] = max_output_tokens
 
         tools = responses_create_params.pop("tools", None)
-        if tools is not None:
+        if tools:
             responses_create_params["tools"] = []
             for tool_dict in tools:
                 tool_dict = tool_dict.copy()
@@ -851,7 +876,10 @@ class VLLMConverter(BaseModel):
         response_output = []
 
         content = message_dict.get("content") or ""
-        reasoning_matches, content = self._extract_reasoning_from_content(content)
+        if self.uses_reasoning_parser:
+            reasoning_matches, content = self._extract_reasoning_from_content(content)
+        else:
+            reasoning_matches = []
         if reasoning_matches:
             reasoning_item = NeMoGymResponseReasoningItem(
                 id=f"rs_{uuid4().hex}",
