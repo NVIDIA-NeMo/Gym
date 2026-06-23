@@ -19,14 +19,14 @@ calendar_simple_agent:
       datasets:
       - name: train
         type: train
-        jsonl_fpath: environments/calendar_v2/data/Nemotron-RL-Instruction-Following-Calendar-v2_train.jsonl
+        jsonl_fpath: environments/calendar_v2/data/train.jsonl
         huggingface_identifier:
           repo_id: nvidia/Nemotron-RL-Instruction-Following-Calendar-v2
           artifact_fpath: train.jsonl
         license: Creative Commons Attribution 4.0 International
       - name: validation
         type: validation
-        jsonl_fpath: environments/calendar_v2/data/Nemotron-RL-Instruction-Following-Calendar-v2_validation.jsonl
+        jsonl_fpath: environments/calendar_v2/data/validation.jsonl
         huggingface_identifier:
           repo_id: nvidia/Nemotron-RL-Instruction-Following-Calendar-v2
           artifact_fpath: validation.jsonl

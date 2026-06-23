@@ -1,5 +1,5 @@
 # Description
-This is a resources server for training and evaluating calendar scheduling assistants. The server verifies whether an assistant correctly schedules events with time constraints in a conversational multi-turn setting.
+This is an environment for training and evaluating calendar scheduling assistants. The server verifies whether an assistant correctly schedules events with time constraints in a conversational multi-turn setting.
 
 The assistant must:
 - Parse user requests to add events to a calendar
@@ -22,7 +22,7 @@ ng_run "+config_paths=[$config_paths]"
 ```
 
 ## Collecting rollouts
-
+Create an `env.yaml` file in the Gym root directory to specifying `policy_base_url`, `policy_model_name`, and `policy_api_key`. See [documentation](https://docs.nvidia.com/nemo/gym/reference/configuration#local-configuration-envyaml) for details.
 Rollouts can be collected using the example dataset as follows:
 
 ```bash

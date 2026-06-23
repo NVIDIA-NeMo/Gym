@@ -1,5 +1,5 @@
 # Description
-This is a resources server for training and evaluating calendar scheduling assistants. The server verifies whether an assistant correctly schedules events with time constraints in a conversational multi-turn setting.
+This is an environment for training and evaluating calendar scheduling assistants. The server verifies whether an assistant correctly schedules events with time constraints in a conversational multi-turn setting.
 
 The assistant must:
 - Parse user requests to add events to a calendar
