@@ -27,6 +27,9 @@ navigation:
       - folder: ./latest/pages/data
         title: "Data"
         title-source: frontmatter
+      - folder: ./latest/pages/evaluation
+        title: "Evaluation"
+        title-source: frontmatter
       - folder: ./latest/pages/environment-tutorials
         title: "Environment Tutorials"
         title-source: frontmatter

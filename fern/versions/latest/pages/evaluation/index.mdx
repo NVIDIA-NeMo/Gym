@@ -1,0 +1,220 @@
+---
+title: "Evaluation"
+description: "Run repeatable model and agent evaluations with NeMo Gym environments."
+position: 1
+---
+
+Evaluation in NeMo Gym measures how a model or agent performs in an environment, then turns the resulting rollouts into metrics and improvement decisions. A useful evaluation keeps the task set, resources server, harness, model, sampling settings, and repeat count explicit so every score can be traced back to the component that changed.
+
+NeMo Gym evaluation is environment-native: the same dataset, resources server, verifier, and rollout machinery can support model comparison, harness comparison, benchmark development, ablation studies, and training-data analysis.
+
+<Info>
+
+For the underlying concepts, read [Evaluation](/about/concepts/evaluation) and [Environments](/about/concepts/environments). For server-level architecture, read [Architecture](/about/architecture).
+
+</Info>
+
+## Evaluation Loop
+
+Use the same loop whether you are evaluating a public benchmark, a custom environment, or a candidate training task set:
+
+1. Choose a task set and resources server.
+2. Choose the model server and agent harness.
+3. Collect rollouts with fixed sampling settings and an explicit repeat count.
+4. Verify each rollout and compute aggregate metrics.
+5. Compare against a baseline or ablation.
+6. Inspect failures, sometimes-pass tasks, and missing rows.
+7. Decide whether the next action is model training, harness work, verifier repair, benchmark cleanup, or data filtering.
+
+The most important rule is to vary one thing at a time when you want a causal comparison. If you change the model, harness, prompt, verifier, and dataset together, the score can still be useful as a release gate, but it cannot tell you what caused the difference.
+
+## Models
+
+Model evaluation asks: *with the same environment and harness, which model performs better?*
+
+Hold these fixed:
+
+- Dataset and task split
+- Resources server and verifier version
+- Agent harness
+- Prompt configuration
+- Sampling settings, max tokens, and tool budget
+- Repeat count
+
+Then vary the model server. This can compare hosted models, self-hosted vLLM models, local development checkpoints, or a policy model before and after training.
+
+For model comparisons, record more than the headline reward. Capture token usage, latency, timeout rate, malformed outputs, tool-call validity, and verifier messages when available. A model that gains accuracy by tripling cost or timing out on harder tasks may not be the better deployment choice.
+
+<Tip>
+
+Use the [Model Server](/model-server) docs to keep model-provider differences behind the Responses API boundary.
+
+</Tip>
+
+## Harnesses
+
+Harness evaluation asks: *with the same model and environment, which agent loop performs better?*
+
+Hold the model fixed, then vary the agent server implementation, system prompt, tool policy, context management, retry logic, planning strategy, or stop criteria. This isolates orchestration quality from raw model capability.
+
+Harness changes often affect metrics beyond reward:
+
+- Steps or turns per task
+- Tool calls per successful task
+- Retry and recovery behavior
+- Context length growth
+- Sandbox/runtime failures
+- Token and latency cost
+
+NeMo Gym treats an agent as model plus harness. The model server stays stateless; the agent server owns the loop that calls the model, routes tool calls, manages conversation state, and asks the resources server to verify the final attempt.
+
+<Cards>
+
+<Card title="Agent Server" href="/agent-server">
+Understand how harnesses orchestrate rollouts.
+</Card>
+
+<Card title="Architecture" href="/about/architecture">
+Review how model, agent, and resources servers fit together.
+</Card>
+
+</Cards>
+
+## Skills
+
+Skills are reusable analysis instructions that help agents interpret evaluation artifacts consistently. They are not part of the benchmark runtime. They sit after rollout collection and help turn metrics, traces, and reports into evidence-backed diagnoses.
+
+Use skills when the evaluation question requires more than a metric table:
+
+- Explain why a benchmark score changed.
+- Compare model runs with task-level evidence.
+- Classify failure modes across rollouts.
+- Prepare benchmark reports or review packages.
+- Recommend interventions for data, prompts, harness logic, verifier behavior, or training.
+
+The BLADE analysis skill is the current example. It is designed to turn NeMo Gym rollout artifacts into BLADE-style benchmark reports, model comparisons, and benchmark-improvement recommendations. Its workflow starts from rollout JSONL, aggregate metrics, reward profiles, configs, model names, repeat counts, and sampling settings. It then computes pass@1/pass@k, separates always-pass, sometimes-pass, never-pass, and missing rows, reads trajectories in order, assigns root-cause labels, and maps findings to concrete interventions.
+
+BLADE-ready benchmark packages use three deliverables:
+
+| Deliverable | Purpose |
+|---|---|
+| Analysis skill | Teaches an agent how to analyze the benchmark's rollout data. |
+| Rollout data | Provides comparable runs for analysis and calibration. |
+| Golden report package | Provides curated reports, metric sidecars, and anchor facts for review. |
+
+For public Gym users, the in-repo BLADE helper provides local validation and calibration utilities when external BLADE infrastructure is unavailable:
+
+```bash
+uv run python .codex/skills/nemo-gym-blade-analysis/scripts/blade_toolkit.py validate \
+  --benchmark-dir benchmarks/<benchmark_name> --phase all
+```
+
+## Benchmarks
+
+A benchmark is an environment configured for repeatable comparison. It needs a task set, resources server, verifier, expected runtime, documented dependencies, and known metrics. Public benchmarks are useful for community comparison; custom benchmarks are usually better for product-specific behavior.
+
+When choosing or building a benchmark, check:
+
+- **Task fit**: Does the task distribution match the capability you care about?
+- **Verifier fidelity**: Does reward measure the behavior you want, or just a proxy?
+- **Model compatibility**: Can the model endpoint support the required input/output mode, tool calls, images, long context, or structured output?
+- **Harness fit**: Does the harness expose the tools and interaction pattern required by the benchmark?
+- **Variance**: Are repeats stable enough to distinguish real changes from noise?
+- **Reproducibility**: Can another run use the same data, code, config, and model reference?
+
+For integrated external benchmarks, first reproduce the original benchmark's reported numbers outside Gym when possible. Then integrate it into Gym and rerun against the same model set. This separates benchmark reproduction issues from Gym integration issues.
+
+<Cards>
+
+<Card title="Browse Environments" href="https://github.com/NVIDIA-NeMo/Gym#-available-environments">
+Find available benchmark and training environments.
+</Card>
+
+<Card title="Add a Benchmark" href="/environment-tutorials/adding-a-benchmark">
+Use the benchmark contribution checklist.
+</Card>
+
+</Cards>
+
+## Ablations And Iterations
+
+Evaluation is most useful when it drives a controlled iteration loop. Treat each proposed improvement as an ablation:
+
+| Question | Hold Constant | Vary |
+|---|---|---|
+| Did a new checkpoint improve capability? | Harness, data, verifier, sampling | Model server |
+| Did a harness change help? | Model, data, verifier, sampling | Agent server or prompt |
+| Did verifier repair change the metric? | Model, harness, data | Resources server verifier |
+| Did data filtering help training? | Model family, harness, verifier | Training data slice |
+| Did a new tool help enough to justify cost? | Model, task set, verifier | Harness tool policy |
+
+Use multiple repeats for stochastic or multi-step tasks. The highest-signal rows are often sometimes-pass tasks, where the same task succeeds in some rollouts and fails in others. They reveal whether the failure is a knowledge gap, unreliable behavior, harness issue, verifier issue, infrastructure problem, or data artifact.
+
+Keep the iteration record with the artifacts:
+
+- Git SHAs for environment, agent, and model-server code
+- Config files and prompt configs
+- Model IDs or checkpoint references
+- Sampling settings and repeat count
+- Rollout JSONL paths
+- Aggregate metrics and reward profiles
+- Notes on missing rows, timeouts, or known flaky infrastructure
+
+## Aggregate Metrics
+
+After rollout collection, NeMo Gym computes aggregate metrics for each agent and writes a single `_aggregate_metrics.json` file. Aggregate metrics provide the top-level scorecard for evaluation runs, including overall numeric statistics, key metrics, and per-task group metrics.
+
+Use aggregate metrics for:
+
+- pass@1 and pass@k summaries
+- mean, max, min, median, and standard deviation over reward or custom numeric fields
+- per-task breakdowns across repeats
+- headline metrics selected by the environment
+- quick comparison across models, harnesses, and ablations
+
+Aggregate metrics are necessary but not sufficient. They tell you what changed; rollout inspection and skills such as BLADE explain why it changed.
+
+<Cards>
+
+<Card title="Aggregate Metrics" href="/evaluation/aggregate-metrics">
+Understand the `_aggregate_metrics.json` format and customization hooks.
+</Card>
+
+</Cards>
+
+## Outputs To Preserve
+
+For every evaluation run, preserve the artifacts needed to reproduce and interpret the score:
+
+| Artifact | Why It Matters |
+|---|---|
+| Rollout JSONL | Source of task-level outputs, rewards, verifier messages, and traces. |
+| Aggregate metrics JSON | Scorecard for headline and per-task metrics. |
+| Reward profile JSONL | Task difficulty and variance analysis for repeated rollouts. |
+| Config files | Model, harness, resources server, sampling, and data references. |
+| Logs | Infrastructure failures, timeouts, and debugging evidence. |
+| Analysis report | Human-readable explanation of what changed and what to do next. |
+
+Do not collapse the evaluation to a single score unless the decision truly only needs a score. Most useful evaluation work comes from connecting aggregate metrics back to task-level evidence.
+
+## Next Steps
+
+<Cards>
+
+<Card title="Quickstart" href="/get-started/quickstart">
+Run a small evaluation and inspect the generated outputs.
+</Card>
+
+<Card title="Aggregate Metrics" href="/evaluation/aggregate-metrics">
+Customize metrics and key metrics for an environment.
+</Card>
+
+<Card title="Reward Profiling" href="/reference/cli-commands">
+Compute per-task pass rates and variance from repeated rollouts.
+</Card>
+
+<Card title="Training" href="/training-tutorials">
+Use evaluation results to drive post-training.
+</Card>
+
+</Cards>
