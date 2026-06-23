@@ -103,7 +103,7 @@ async def score_with_rubric(
 
     *create_overrides* is merged into the kwargs passed to
     ``client.chat.completions.create``; user-supplied keys win over defaults.
-    Use it to bump ``max_tokens`` (default 8192), tweak ``temperature``, etc.
+    Use it to bump ``max_tokens`` (default 65535), tweak ``temperature``, etc.
     """
     from openai import AsyncOpenAI
 
@@ -135,7 +135,7 @@ async def score_with_rubric(
                         {"role": "user", "content": judge_prompt},
                     ],
                     "temperature": 0.1,
-                    "max_tokens": 8192,
+                    "max_tokens": 65535,
                 }
                 if create_overrides:
                     create_kwargs.update(create_overrides)
@@ -242,7 +242,7 @@ async def score_with_rubric_visual(
 
     *create_overrides* is merged into the kwargs passed to
     ``client.chat.completions.create``; user-supplied keys win over defaults.
-    Use it to bump ``max_tokens`` (default 8192), tweak ``temperature``, etc.
+    Use it to bump ``max_tokens`` (default 65535), tweak ``temperature``, etc.
 
     Returns ``(score, judge_response)`` — same contract as ``score_with_rubric``.
     """
@@ -280,7 +280,7 @@ async def score_with_rubric_visual(
                         {"role": "user", "content": content},
                     ],
                     "temperature": 0.1,
-                    "max_tokens": 8192,
+                    "max_tokens": 65535,
                 }
                 if create_overrides:
                     create_kwargs.update(create_overrides)

@@ -349,8 +349,9 @@ class GDPValResourcesServer(SimpleResourcesServer):
         clean_up_list: List[Path] = []
         overrides = dict(self.config.judge_responses_create_params_overrides or {})
         judge_base_url = get_server_url(self.config.judge_model_server.name) + "/v1"
-        judge_model_name = overrides.get("model", "judge")
-        judge_api_key = overrides.get("api_key", "dummy")
+        judge_model_name = overrides.pop("model", "judge")
+        judge_api_key = overrides.pop("api_key", "dummy")
+        judge_create_overrides = overrides or None
         client = OpenAI(
             base_url=judge_base_url,
             api_key=judge_api_key,
@@ -384,6 +385,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
                     submission_b=eval_submission,
                     num_trials=self.config.num_comparison_trials,
                     return_raw_responses=self.config.persist_raw_judge_responses,
+                    create_overrides=judge_create_overrides,
                 )
                 # ``run_trials`` casts submission_a=ref, submission_b=eval, so
                 # ``win_count_b`` is eval wins.
