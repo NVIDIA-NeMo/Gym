@@ -499,13 +499,11 @@ class AnyTerminalAgent(SimpleResponsesAPIAgent):
         env: str = "",
         workdir: Optional[str] = None,
     ) -> str:
-        # NOTE: we do NOT hard-enforce the task's cpu/memory envelope on the container. Apptainer
-        # cgroup flags (--cpus/--memory) are unusable here — rootless cgroups don't work under
-        # --fakeroot ("cannot use cgroups - rootless cgroups is not usable in fakeroot mode") — and
-        # per-task `ulimit -v` is unsafe (it caps virtual memory, which crashes torch/CUDA tasks at
-        # import). So the container keeps the generous global virtual-memory cap, and the task's
-        # cpu/memory footprint is only *reserved* in the Ray scheduler (_ray_resource_opts) to avoid
-        # host oversubscription — not enforced as a hard per-task limit.
+        # NOTE: Apptainer cgroup flags (--cpus/--memory) are unusable here — rootless cgroups don't
+        # work under --fakeroot ("cannot use cgroups - rootless cgroups is not usable in fakeroot
+        # mode"). Instead we apply `ulimit -v` as a generous virtual-memory ceiling (default 32 GB)
+        # to prevent runaway tasks from exhausting the host. The task's cpu/memory footprint is also
+        # *reserved* in the Ray scheduler (_ray_resource_opts) to avoid host oversubscription.
         pwd_flag = f"--pwd {shlex.quote(workdir)} " if workdir else ""
         cmd = (
             f"apptainer exec --writable-tmpfs --fakeroot --cleanenv --pid --no-mount home,tmp,bind-paths "
