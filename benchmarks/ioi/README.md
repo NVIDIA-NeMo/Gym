@@ -51,7 +51,7 @@ ng_prepare_data +config_paths=[benchmarks/ioi/config.yaml] \
   +output_dirpath=benchmarks/ioi/data \
   +mode=benchmark_preparation
 
-ng_run +config_paths=[benchmarks/ioi/config.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]
+ng_run +config_paths=[benchmarks/ioi/config.yaml,responses_api_models/vllm_endpoint/configs/vllm_endpoint.yaml]
 
 ng_collect_rollouts +agent_name=ioi_simple_agent \
   +input_jsonl_fpath=benchmarks/ioi/data/ioi24_benchmark.jsonl \

@@ -38,7 +38,7 @@ from nemo_gym.global_config import (
     get_global_config_dict,
     get_hf_token,
 )
-from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
+from responses_api_models.vllm_endpoint.app import VLLMModel, VLLMModelConfig
 from responses_api_models.vllm_server.local_vllm_model_actor import LocalVLLMModelActor
 
 

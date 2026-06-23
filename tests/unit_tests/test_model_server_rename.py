@@ -43,6 +43,13 @@ class TestRenameReferences:
         assert "    vllm_server:" in out
         assert "local_vllm_model:" not in out
 
+    def test_rewrites_delete_key_directive_under_responses_api_models(self) -> None:
+        text = "k:\n  responses_api_models:\n    _delete_key: local_vllm_model\n    vllm_server:\n      x: 1\n"
+        out, count = rename_references(text, OLD, NEW)
+        assert "    _delete_key: vllm_server" in out
+        assert "_delete_key: local_vllm_model" not in out
+        assert count == 1
+
     def test_does_not_rewrite_same_name_key_elsewhere(self) -> None:
         # A key named like the server but NOT under responses_api_models: must be left alone.
         text = "some_block:\n  local_vllm_model:\n    foo: bar\n"

@@ -22,7 +22,7 @@ Use ``benchmarks/imo_proofbench/`` for the IMO-ProofBench dataset.
 ## Running servers
 
 ```bash
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
+config_paths="responses_api_models/vllm_endpoint/configs/vllm_endpoint.yaml,\
 resources_servers/imo_proofbench_judge/configs/imo_proofbench_judge.yaml"
 ng_run "+config_paths=[$config_paths]" \
     +judge_base_url=https://generativelanguage.googleapis.com/v1beta/openai \

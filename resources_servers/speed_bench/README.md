@@ -86,7 +86,7 @@ records `spec_decode_unavailable: true` on every row and
 
 A ready-to-use demo config that bakes ngram speculative decoding into a
 `local_vllm_model` lives at
-[`responses_api_models/local_vllm_model/configs/Qwen/Qwen3-30B-A3B-Instruct-2507-ngram-specdec.yaml`](../../responses_api_models/local_vllm_model/configs/Qwen/Qwen3-30B-A3B-Instruct-2507-ngram-specdec.yaml).
+[`responses_api_models/vllm_server/configs/Qwen/Qwen3-30B-A3B-Instruct-2507-ngram-specdec.yaml`](../../responses_api_models/vllm_server/configs/Qwen/Qwen3-30B-A3B-Instruct-2507-ngram-specdec.yaml).
 The relevant block to copy into your own model config is:
 
 ```yaml
@@ -107,7 +107,7 @@ For an EAGLE3 / MTP setup with a paired draft model, see
 ```bash
 # Running servers — uses the demo local_vllm_model config above (drop in
 # your own model config to swap targets; just keep the speculative_config block).
-config_paths="responses_api_models/local_vllm_model/configs/Qwen/Qwen3-30B-A3B-Instruct-2507-ngram-specdec.yaml,\
+config_paths="responses_api_models/vllm_server/configs/Qwen/Qwen3-30B-A3B-Instruct-2507-ngram-specdec.yaml,\
 resources_servers/speed_bench/configs/speed_bench.yaml,\
 responses_api_agents/speed_bench_agent/configs/speed_bench_agent.yaml"
 ng_run "+config_paths=[$config_paths]" \

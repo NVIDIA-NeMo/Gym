@@ -91,7 +91,7 @@ vllm serve \
 
 ### Launch servers
 ```bash
-config_paths="resources_servers/newton_bench/configs/newton_bench.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml"
+config_paths="resources_servers/newton_bench/configs/newton_bench.yaml,responses_api_models/vllm_endpoint/configs/vllm_endpoint.yaml"
 ng_run "+config_paths=[${config_paths}]"
 ```
 

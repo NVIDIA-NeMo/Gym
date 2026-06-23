@@ -19,7 +19,7 @@ the agent.
 The benchmark chains in `resources_servers/labbench2_vlm/configs/judge_model_openai.yaml`,
 which targets an OpenAI-compatible hosted endpoint. To use a different judge
 (e.g. a local vLLM), drop that chain and supply your own `responses_api_models`
-instance named `judge_model` — see `responses_api_models/vllm_model/configs/vllm_model.yaml`
+instance named `judge_model` — see `responses_api_models/vllm_endpoint/configs/vllm_endpoint.yaml`
 for the vLLM form.
 
 Credentials go in `env.yaml` at the **repository root** (the parser loads

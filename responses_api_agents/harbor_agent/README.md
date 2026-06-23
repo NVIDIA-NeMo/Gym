@@ -161,7 +161,7 @@ Training config example:
 ```yaml
 policy_model:
   responses_api_models:
-    vllm_model:
+    vllm_endpoint:
       entrypoint: app.py
       base_url: ${policy_base_url}
       api_key: ${policy_api_key}
@@ -201,7 +201,7 @@ Then start NeMo Gym:
 
 ```bash
 config_paths="responses_api_agents/harbor_agent/configs/harbor_agent.yaml,\
-responses_api_models/vllm_model/configs/vllm_model_for_training.yaml"
+responses_api_models/vllm_endpoint/configs/vllm_model_for_training.yaml"
 ng_run "+config_paths=[${config_paths}]"
 ```
 
@@ -277,7 +277,7 @@ export DAYTONA_API_KEY=<your-daytona-api-key>
 ```
 
 Then add the policy model server settings to repo-root `env.yaml`, using the
-same keys consumed by `responses_api_models/vllm_model/configs/vllm_model.yaml`:
+same keys consumed by `responses_api_models/vllm_endpoint/configs/vllm_endpoint.yaml`:
 
 ```yaml
 policy_base_url: <openai-compatible-base-url>
@@ -289,7 +289,7 @@ Then follow the same Harbor-agent workflow with the Daytona config:
 
 ```bash
 config_paths="responses_api_agents/harbor_agent/configs/harbor_agent_daytona.yaml,\
-responses_api_models/vllm_model/configs/vllm_model.yaml"
+responses_api_models/vllm_endpoint/configs/vllm_endpoint.yaml"
 ng_run "+config_paths=[${config_paths}]"
 ```
 
@@ -370,7 +370,7 @@ without involving NeMo Gym's model-server routing.
 
 Pass `chat_template_kwargs` to the tokenize endpoint.
 
-**`Gym/responses_api_models/vllm_model/app.py`** — the `/tokenize` endpoint must
+**`Gym/responses_api_models/vllm_endpoint/app.py`** — the `/tokenize` endpoint must
 receive `chat_template_kwargs` (e.g., `truncate_history_thinking: false`) to match
 the tokenization used during chat completion. Without this, the tokenize call uses
 the template's default `truncate_history_thinking=True`, which strips reasoning from

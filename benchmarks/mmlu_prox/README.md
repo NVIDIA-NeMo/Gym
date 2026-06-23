@@ -16,10 +16,10 @@ This benchmark uses the `mcqa` resource server with the `mcqa_simple_agent`.
 ng_prepare_benchmark "+config_paths=[benchmarks/mmlu_prox/config.yaml]"
 
 # Start servers
-ng_run "+config_paths=[benchmarks/mmlu_prox/config.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
+ng_run "+config_paths=[benchmarks/mmlu_prox/config.yaml,responses_api_models/vllm_endpoint/configs/vllm_endpoint.yaml]"
 
 # Collect rollouts
 ng_collect_rollouts \
-    "+config_paths=[benchmarks/mmlu_prox/config.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]" \
+    "+config_paths=[benchmarks/mmlu_prox/config.yaml,responses_api_models/vllm_endpoint/configs/vllm_endpoint.yaml]" \
     +output_jsonl_fpath=results/mmlu_prox.jsonl
 ```

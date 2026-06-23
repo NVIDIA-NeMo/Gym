@@ -62,7 +62,7 @@ ng_collect_rollouts \
 
 ### Freeform Formatting
 ```bash
-config_paths="responses_api_models/vllm_model/configs/vllm_model_for_training.yaml,\
+config_paths="responses_api_models/vllm_endpoint/configs/vllm_model_for_training.yaml,\
 resources_servers/format_verification/configs/freeform_formatting.yaml"
 ng_prepare_data "+config_paths=[${config_paths}]" \
     +output_dirpath=data/format_verification_freeform/ \
@@ -72,7 +72,7 @@ ng_prepare_data "+config_paths=[${config_paths}]" \
 
 ### Citation Format
 ```bash
-config_paths="responses_api_models/vllm_model/configs/vllm_model_for_training.yaml,\
+config_paths="responses_api_models/vllm_endpoint/configs/vllm_model_for_training.yaml,\
 resources_servers/format_verification/configs/citation_format.yaml"
 ng_prepare_data "+config_paths=[${config_paths}]" \
     +output_dirpath=data/format_verification_citation/ \

@@ -40,7 +40,7 @@ ng_download_dataset_from_gitlab \
     +output_fpath=resources_servers/tavily_search/data/sft_samples/sft_samples_validation.jsonl
 
 config_paths="resources_servers/tavily_search/configs/tavily_search_judge_vllm_model.yaml,\
-responses_api_models/vllm_model/configs/vllm_model.yaml"
+responses_api_models/vllm_endpoint/configs/vllm_endpoint.yaml"
 
 ng_run "+config_paths=[${config_paths}]"
 ```

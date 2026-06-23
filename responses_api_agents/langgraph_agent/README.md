@@ -9,7 +9,7 @@ Please note that agents such as parallel thinking which produce non-monotonicall
 ## Quick Start
 
 ```bash
-ng_run "+config_paths=[resources_servers/reasoning_gym/configs/reflection_agent.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
+ng_run "+config_paths=[resources_servers/reasoning_gym/configs/reflection_agent.yaml,responses_api_models/vllm_endpoint/configs/vllm_endpoint.yaml]"
 ```
 
 ```bash

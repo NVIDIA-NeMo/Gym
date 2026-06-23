@@ -36,5 +36,5 @@ pytest tests/
 
 ## Related
 
-- Base local vLLM: `responses_api_models/local_vllm_model/`
+- Base local vLLM: `responses_api_models/vllm_server/`
 - GenRM Compare server: `resources_servers/genrm_compare/`

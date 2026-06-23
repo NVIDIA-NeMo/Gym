@@ -27,7 +27,7 @@ Start servers and collect rollouts
 ```bash
 # start vllm and nemo gym servers
 vllm serve futurehouse/ether0 & 
-ng_run "+config_paths=[resources_servers/ether0/configs/ether0.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]" &
+ng_run "+config_paths=[resources_servers/ether0/configs/ether0.yaml,responses_api_models/vllm_endpoint/configs/vllm_endpoint.yaml]" &
 
 # wait for above to be ready
 ng_collect_rollouts \

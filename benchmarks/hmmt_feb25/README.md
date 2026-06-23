@@ -37,7 +37,7 @@ Start the benchmark's servers (inherits `math_with_judge` in symbolic-only mode
 plus a vLLM model server — adjust the model config to match your deployment):
 
 ```
-ng_run "+config_paths=[benchmarks/hmmt_feb25/config.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
+ng_run "+config_paths=[benchmarks/hmmt_feb25/config.yaml,responses_api_models/vllm_endpoint/configs/vllm_endpoint.yaml]"
 ```
 
 In a separate shell, collect rollouts against the full 30-problem set. `num_repeats`

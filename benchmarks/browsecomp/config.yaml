@@ -1,7 +1,7 @@
 # Refer to the params in responses_api_models/vllm_server/configs/Qwen/Qwen3-235B-A22B-Instruct-2507-FP8.yaml
 Qwen3-235B-A22B-Instruct-2507-FP8:
   responses_api_models:
-    vllm_model:
+    vllm_endpoint:
       entrypoint: app.py
       model: Qwen3-235B-A22B-Instruct-2507-FP8
       replace_developer_role_with_system: true
@@ -11,7 +11,7 @@ Qwen3-235B-A22B-Instruct-2507-FP8:
 policy_model_no_interleaved_reasoning:
   _copy: policy_model
   responses_api_models:
-    vllm_model:
+    vllm_endpoint:
       uses_interleaved_reasoning: false
 
 browsecomp_benchmark_resources_server:

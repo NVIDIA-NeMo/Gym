@@ -21,7 +21,7 @@ policy_model_name: "Qwen/Qwen3-4B-Instruct-2507"
 
 ```
 # start nemo gym servers
-ng_run "+config_paths=[responses_api_agents/verifiers_agent/configs/acereason-math.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
+ng_run "+config_paths=[responses_api_agents/verifiers_agent/configs/acereason-math.yaml,responses_api_models/vllm_endpoint/configs/vllm_endpoint.yaml]"
 
 # generate a rollout
 ng_collect_rollouts \
@@ -98,7 +98,7 @@ deactivate
 source .venv/bin/activate
 
 # start nemo gym servers
-ng_run "+config_paths=[responses_api_agents/verifiers_agent/configs/ascii-tree.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
+ng_run "+config_paths=[responses_api_agents/verifiers_agent/configs/ascii-tree.yaml,responses_api_models/vllm_endpoint/configs/vllm_endpoint.yaml]"
 
 # generate a rollout
 ng_collect_rollouts \

@@ -25,7 +25,7 @@ from typing import Any, Dict
 
 from fastapi import Request
 
-from responses_api_models.vllm_model.app import VLLMConverter
+from responses_api_models.vllm_endpoint.app import VLLMConverter
 from responses_api_models.vllm_server.app import (
     LocalVLLMModel,
     LocalVLLMModelConfig,

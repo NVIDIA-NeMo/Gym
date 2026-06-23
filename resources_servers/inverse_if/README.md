@@ -9,7 +9,7 @@ Evaluates model responses on the **Inverse IF** (Instruction Following) benchmar
 ng_test +entrypoint=resources_servers/inverse_if
 
 # 2. Start servers (in terminal 1)
-config_paths="resources_servers/inverse_if/configs/inverse_if.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml"
+config_paths="resources_servers/inverse_if/configs/inverse_if.yaml,responses_api_models/vllm_endpoint/configs/vllm_endpoint.yaml"
 ng_run "+config_paths=[${config_paths}]"
 
 # 3. Collect rollouts on example data (in terminal 2)
@@ -117,7 +117,7 @@ Tests cover:
 
 1. **Start servers**:
    ```bash
-   config_paths="resources_servers/inverse_if/configs/inverse_if.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml"
+   config_paths="resources_servers/inverse_if/configs/inverse_if.yaml,responses_api_models/vllm_endpoint/configs/vllm_endpoint.yaml"
    ng_run "+config_paths=[${config_paths}]"
    ```
 

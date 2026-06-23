@@ -18,7 +18,7 @@ browsecomp_advanced_harness_resources_server:
 
 judge_model:
   responses_api_models:
-    vllm_model:
+    vllm_endpoint:
       entrypoint: app.py
       base_url: ${search_judge_model_base_url}
       api_key: ${search_judge_model_api_key}

@@ -1,13 +1,9 @@
 policy_model:
   responses_api_models:
-    vllm_model:
+    vllm_endpoint:
       entrypoint: app.py
       base_url: ${policy_base_url}
       api_key: ${policy_api_key}
       model: ${policy_model_name}
-      return_token_id_information: false
+      return_token_id_information: true
       uses_reasoning_parser: true
-      uses_interleaved_reasoning: true
-      chat_template_kwargs: null
-      extra_body: null
-      default_headers: {}

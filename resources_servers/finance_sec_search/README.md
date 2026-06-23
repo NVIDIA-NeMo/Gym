@@ -194,7 +194,7 @@ Launch a vLLM-compatible model server (e.g. Qwen3-30B-A3B) so the policy and jud
 With a local vLLM model server:
 
 ```bash
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,resources_servers/finance_sec_search/configs/finance_sec_search.yaml"
+config_paths="responses_api_models/vllm_endpoint/configs/vllm_endpoint.yaml,resources_servers/finance_sec_search/configs/finance_sec_search.yaml"
 ng_run "+config_paths=[$config_paths]"
 ```
 

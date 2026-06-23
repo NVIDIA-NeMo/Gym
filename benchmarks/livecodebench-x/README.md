@@ -64,7 +64,7 @@ python benchmarks/livecodebench-x/prepare.py --prompt_language en
 ## Quickstart
 
 ```bash
-ng_run "+config_paths=[benchmarks/livecodebench-x/config.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
+ng_run "+config_paths=[benchmarks/livecodebench-x/config.yaml,responses_api_models/vllm_endpoint/configs/vllm_endpoint.yaml]"
 ```
 
 Then in another shell:
@@ -72,7 +72,7 @@ Then in another shell:
 ```bash
 mkdir -p results/livecodebench-x
 ng_collect_rollouts \
-    "+config_paths=[benchmarks/livecodebench-x/config.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]" \
+    "+config_paths=[benchmarks/livecodebench-x/config.yaml,responses_api_models/vllm_endpoint/configs/vllm_endpoint.yaml]" \
     +agent_name=livecodebench-x_code_gen_simple_agent \
     +input_jsonl_fpath=benchmarks/livecodebench-x/data/livecodebench-x_benchmark.jsonl \
     +output_jsonl_fpath=results/livecodebench-x/rollouts.jsonl \

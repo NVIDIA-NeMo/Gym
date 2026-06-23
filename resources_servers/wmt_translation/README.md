@@ -70,7 +70,7 @@ For an end-to-end SLURM run with COMET enabled, see the
 
 ```bash
 # Running servers (BLEU-only locally; flip compute_comet=true on cluster)
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
+config_paths="responses_api_models/vllm_endpoint/configs/vllm_endpoint.yaml,\
 resources_servers/wmt_translation/configs/wmt_translation.yaml"
 ng_run "+config_paths=[$config_paths]" \
     "++wmt_translation.resources_servers.wmt_translation.compute_comet=false"

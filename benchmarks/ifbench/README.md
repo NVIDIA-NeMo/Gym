@@ -21,7 +21,7 @@ ng_prepare_benchmark "+config_paths=[benchmarks/ifbench/config.yaml]"
 
 ```bash
 ng_e2e_collect_rollouts \
-    "+config_paths=[benchmarks/ifbench/config.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]" \
+    "+config_paths=[benchmarks/ifbench/config.yaml,responses_api_models/vllm_endpoint/configs/vllm_endpoint.yaml]" \
     ++output_jsonl_fpath=results/benchmarks/ifbench.jsonl \
     ++overwrite_metrics_conflicts=true \
     ++split=benchmark \

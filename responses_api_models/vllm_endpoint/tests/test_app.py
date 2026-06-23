@@ -53,7 +53,7 @@ from nemo_gym.openai_utils import (
     NeMoGymSummary,
 )
 from nemo_gym.server_utils import ServerClient
-from responses_api_models.vllm_model.app import (
+from responses_api_models.vllm_endpoint.app import (
     VLLMConverter,
     VLLMModel,
     VLLMModelConfig,
@@ -820,8 +820,8 @@ class TestApp:
             mock_method,
         )
 
-        monkeypatch.setattr("responses_api_models.vllm_model.app.time", lambda: FIXED_TIME)
-        monkeypatch.setattr("responses_api_models.vllm_model.app.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("responses_api_models.vllm_endpoint.app.time", lambda: FIXED_TIME)
+        monkeypatch.setattr("responses_api_models.vllm_endpoint.app.uuid4", lambda: FakeUUID())
 
         request_body = NeMoGymResponseCreateParamsNonStreaming(
             input=input_messages,
@@ -977,8 +977,8 @@ class TestApp:
             "chat_completions",
             mock_method,
         )
-        monkeypatch.setattr("responses_api_models.vllm_model.app.time", lambda: FIXED_TIME)
-        monkeypatch.setattr("responses_api_models.vllm_model.app.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("responses_api_models.vllm_endpoint.app.time", lambda: FIXED_TIME)
+        monkeypatch.setattr("responses_api_models.vllm_endpoint.app.uuid4", lambda: FakeUUID())
 
         request_body = NeMoGymResponseCreateParamsNonStreaming(
             input=input_messages,
@@ -1233,8 +1233,8 @@ class TestApp:
             "chat_completions",
             mock_method,
         )
-        monkeypatch.setattr("responses_api_models.vllm_model.app.time", lambda: FIXED_TIME)
-        monkeypatch.setattr("responses_api_models.vllm_model.app.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("responses_api_models.vllm_endpoint.app.time", lambda: FIXED_TIME)
+        monkeypatch.setattr("responses_api_models.vllm_endpoint.app.uuid4", lambda: FakeUUID())
 
         request_body = NeMoGymResponseCreateParamsNonStreaming(
             input=input_messages,
@@ -1378,8 +1378,8 @@ class TestApp:
         app = server.setup_webserver()
         client = TestClient(app)
 
-        monkeypatch.setattr("responses_api_models.vllm_model.app.uuid4", lambda: FakeUUID())
-        monkeypatch.setattr("responses_api_models.vllm_model.app.time", lambda: FIXED_TIME)
+        monkeypatch.setattr("responses_api_models.vllm_endpoint.app.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("responses_api_models.vllm_endpoint.app.time", lambda: FIXED_TIME)
 
         responses_create_params = NeMoGymResponseCreateParamsNonStreaming(input=single_input)
 
@@ -1762,8 +1762,8 @@ class TestApp:
             mock_method,
         )
 
-        monkeypatch.setattr("responses_api_models.vllm_model.app.time", lambda: FIXED_TIME)
-        monkeypatch.setattr("responses_api_models.vllm_model.app.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("responses_api_models.vllm_endpoint.app.time", lambda: FIXED_TIME)
+        monkeypatch.setattr("responses_api_models.vllm_endpoint.app.uuid4", lambda: FakeUUID())
 
         request_body = NeMoGymResponseCreateParamsNonStreaming(
             input=input_messages,
@@ -2220,8 +2220,8 @@ class TestApp:
             mock_method,
         )
 
-        monkeypatch.setattr("responses_api_models.vllm_model.app.time", lambda: FIXED_TIME)
-        monkeypatch.setattr("responses_api_models.vllm_model.app.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("responses_api_models.vllm_endpoint.app.time", lambda: FIXED_TIME)
+        monkeypatch.setattr("responses_api_models.vllm_endpoint.app.uuid4", lambda: FakeUUID())
 
         request_body = NeMoGymResponseCreateParamsNonStreaming(
             input=input_messages,
@@ -2554,8 +2554,8 @@ class TestApp:
             tools=[],
         )
 
-        monkeypatch.setattr("responses_api_models.vllm_model.app.time", lambda: FIXED_TIME)
-        monkeypatch.setattr("responses_api_models.vllm_model.app.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("responses_api_models.vllm_endpoint.app.time", lambda: FIXED_TIME)
+        monkeypatch.setattr("responses_api_models.vllm_endpoint.app.uuid4", lambda: FakeUUID())
 
         response = client.post(
             "/v1/responses",
@@ -2693,9 +2693,9 @@ class TestVLLMConverter:
         ChatCompletion output -> Response output
         """
 
-        monkeypatch.setattr("responses_api_models.vllm_model.app.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("responses_api_models.vllm_endpoint.app.uuid4", lambda: FakeUUID())
 
-        monkeypatch.setattr("responses_api_models.vllm_model.app.time", lambda: FIXED_TIME)
+        monkeypatch.setattr("responses_api_models.vllm_endpoint.app.time", lambda: FIXED_TIME)
 
         choice = mock_chat_completion.choices[0]
 
@@ -2723,8 +2723,8 @@ class TestVLLMConverter:
         assert main_content_none == "Just plain content here."
 
     def test_postprocess_chat_response_multiple_reasoning_items(self, monkeypatch: MonkeyPatch):
-        monkeypatch.setattr("responses_api_models.vllm_model.app.uuid4", lambda: FakeUUID())
-        monkeypatch.setattr("responses_api_models.vllm_model.app.time", lambda: FIXED_TIME)
+        monkeypatch.setattr("responses_api_models.vllm_endpoint.app.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("responses_api_models.vllm_endpoint.app.time", lambda: FIXED_TIME)
 
         raw_model_response = (
             "<think>I need to check the user's order ID.</think>"
@@ -3016,7 +3016,7 @@ class TestVLLMConverter:
         assert expected_output == chat_completion_create_params.model_dump()
 
     def test_whitespace_round_trip_chat_completions(self, monkeypatch: MonkeyPatch) -> None:
-        monkeypatch.setattr("responses_api_models.vllm_model.app.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("responses_api_models.vllm_endpoint.app.uuid4", lambda: FakeUUID())
 
         message = NeMoGymChatCompletionMessage(
             content="<think> \n \n I'm thinking \n \n </think> \n \n I'm chatting! \n \n ",

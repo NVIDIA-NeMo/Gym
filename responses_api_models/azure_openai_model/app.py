@@ -30,7 +30,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from responses_api_models.vllm_model.app import VLLMConverter
+from responses_api_models.vllm_endpoint.app import VLLMConverter
 
 
 class AzureOpenAIModelServerConfig(BaseResponsesAPIModelConfig):

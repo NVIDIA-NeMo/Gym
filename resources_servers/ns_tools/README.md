@@ -10,7 +10,7 @@ The following are example commands for running this resources server with the si
 ```bash
 config_paths="resources_servers/ns_tools/configs/ns_tools.yaml, \
 resources_servers/math_with_judge/configs/math_with_judge.yaml, \
-responses_api_models/vllm_model/configs/vllm_model.yaml"
+responses_api_models/vllm_endpoint/configs/vllm_endpoint.yaml"
 ng_run "+config_paths=[$config_paths]" \
     +policy_base_url="http://localhost:8000/v1" \
     +policy_model_name="Qwen/Qwen3-8B" \

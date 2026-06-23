@@ -42,7 +42,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.server_utils import get_server_url, is_nemo_gym_fastapi_entrypoint
-from responses_api_models.vllm_model.app import VLLMConverter, split_responses_input_output_items
+from responses_api_models.vllm_endpoint.app import VLLMConverter, split_responses_input_output_items
 from tau2.data_model.simulation import SimulationRun, TextRunConfig
 from tau2.data_model.tasks import Task
 from tau2.evaluator.evaluator import EvaluationType

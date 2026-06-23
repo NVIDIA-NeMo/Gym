@@ -1,5 +1,5 @@
 config_paths:
-- responses_api_models/vllm_model/configs/vllm_model.yaml
+- responses_api_models/vllm_endpoint/configs/vllm_endpoint.yaml
 
 # We bump up the connector per host limit since this is a larger benchmark suite
 global_aiohttp_connector_limit_per_host: 16384
@@ -7,7 +7,7 @@ global_aiohttp_connector_limit_per_host: 16384
 # We bump up the number of workers since we need higher concurrency for this larger benchmark suite
 policy_model:
   responses_api_models:
-    vllm_model:
+    vllm_endpoint:
       num_workers: 4
       sequential_reasoning_allowed: false
 
@@ -15,6 +15,6 @@ policy_model:
 policy_model_reasoning_off:
   _copy: policy_model
   responses_api_models:
-    vllm_model:
+    vllm_endpoint:
       chat_template_kwargs:
         enable_thinking: false

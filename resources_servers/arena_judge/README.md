@@ -47,7 +47,7 @@ Each JSONL row must carry the following top-level fields (pydantic
 
 ```bash
 # Running servers
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
+config_paths="responses_api_models/vllm_endpoint/configs/vllm_endpoint.yaml,\
 resources_servers/arena_judge/configs/arena_judge.yaml"
 ng_run "+config_paths=[$config_paths]"
 

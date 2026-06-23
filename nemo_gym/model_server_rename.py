@@ -52,6 +52,9 @@ def rename_references(text: str, old: str, new: str) -> Tuple[str, int]:
     out_lines: List[str] = []
     parent_indent: int = -1  # indent of the most recent `responses_api_models:` line, else -1
     key_pattern = re.compile(rf"^(?P<indent>\s*){re.escape(old)}:\s*$")
+    # `_delete_key: <old>` removes an inherited server block by name (the key == the dir name), so it
+    # tracks the rename. Only rewritten when scoped directly under a `responses_api_models:` block.
+    delete_key_pattern = re.compile(rf"^(?P<indent>\s*)_delete_key:\s*{re.escape(old)}\s*$")
 
     for line in text.split("\n"):
         new_line, n = path_pattern.subn(rf"\1{new}", line)
@@ -60,8 +63,12 @@ def rename_references(text: str, old: str, new: str) -> Tuple[str, int]:
         stripped = new_line.strip()
         indent = len(new_line) - len(new_line.lstrip())
         key_match = key_pattern.match(new_line)
+        delete_match = delete_key_pattern.match(new_line)
         if key_match is not None and parent_indent >= 0 and indent == parent_indent + 2:
             new_line = f"{key_match.group('indent')}{new}:"
+            count += 1
+        elif delete_match is not None and parent_indent >= 0 and indent == parent_indent + 2:
+            new_line = f"{delete_match.group('indent')}_delete_key: {new}"
             count += 1
 
         # Track whether we're directly under a `responses_api_models:` block.

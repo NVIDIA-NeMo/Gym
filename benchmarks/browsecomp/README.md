@@ -8,7 +8,7 @@ browsecomp_benchmark_resources_server:
       exclude_domains_file_path: ???
 Qwen3-235B-A22B-Instruct-2507-FP8:
   responses_api_models:
-    vllm_model:
+    vllm_endpoint:
       base_url: ???
       api_key: ???
 ```
@@ -23,7 +23,7 @@ ng_prepare_benchmark "+config_paths=[$config_paths]"
 ```bash
 WANDB_PROJECT=
 EXPERIMENT_NAME=
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
+config_paths="responses_api_models/vllm_endpoint/configs/vllm_endpoint.yaml,\
 benchmarks/browsecomp/config.yaml"
 ng_e2e_collect_rollouts \
     "+config_paths=[${config_paths}]" \

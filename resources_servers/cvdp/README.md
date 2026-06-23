@@ -123,7 +123,7 @@ apt install -y ./apptainer_1.3.1_amd64.deb
 ### Step 1 — Start servers
 
 ```bash
-ng_run "+config_paths=[resources_servers/cvdp/configs/cvdp.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
+ng_run "+config_paths=[resources_servers/cvdp/configs/cvdp.yaml,responses_api_models/vllm_endpoint/configs/vllm_endpoint.yaml]"
 ```
 
 ### Step 2 — Run rollout collection
@@ -138,7 +138,7 @@ ng_collect_rollouts \
     +num_repeats=5 \
     +num_samples_in_parallel=4 \
     "+responses_create_params={max_output_tokens: 4096, temperature: 0.2, top_p: 0.7}" \
-    "+config_paths=[resources_servers/cvdp/configs/cvdp.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
+    "+config_paths=[resources_servers/cvdp/configs/cvdp.yaml,responses_api_models/vllm_endpoint/configs/vllm_endpoint.yaml]"
     "+resume_from_cache=True"
 ```
 

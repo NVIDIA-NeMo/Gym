@@ -27,7 +27,7 @@ always fails.
 ## Start environment
 
 ```bash
-ng_run "+config_paths=[resources_servers/mrcr/configs/mrcr.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
+ng_run "+config_paths=[resources_servers/mrcr/configs/mrcr.yaml,responses_api_models/vllm_endpoint/configs/vllm_endpoint.yaml]"
 ```
 
 ## Collect example rollouts

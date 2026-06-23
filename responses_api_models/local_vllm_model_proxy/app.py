@@ -24,7 +24,7 @@ from pydantic import Field
 
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.global_config import get_first_server_config_dict
-from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
+from responses_api_models.vllm_endpoint.app import VLLMModel, VLLMModelConfig
 
 
 class LocalVLLMModelProxyServerConfig(VLLMModelConfig):

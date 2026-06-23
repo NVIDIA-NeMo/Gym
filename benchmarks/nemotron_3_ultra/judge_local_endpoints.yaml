@@ -5,7 +5,7 @@ config_paths:
 # Used in browsecomp
 Qwen3-235B-A22B-Instruct-2507-FP8:
   responses_api_models:
-    _delete_key: vllm_model
+    _delete_key: vllm_endpoint
     vllm_server:
       vllm_serve_kwargs:
         data_parallel_size: 2
