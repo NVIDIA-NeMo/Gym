@@ -158,6 +158,21 @@ class TestCLI:
                 assert "domain" in server_config, "Domain field missing from resources server config"
                 assert server_config["domain"] == "other", f"Expected domain 'other', got '{server_config['domain']}'"
 
+                # Generated config ships `verified: false` so the add-verified-flag pre-commit hook
+                # is a no-op and does not rewrite (and strip the comments from) the file on commit.
+                assert server_config["verified"] is False
+
+                # The generated config is documented with inline comments (friction #7).
+                config_text = config_file.read_text()
+                assert "# Resources server:" in config_text
+                assert config_text.count("#") >= 10, "expected inline field documentation comments"
+
+                # The add-verified-flag hook must NOT modify the generated config (would strip comments).
+                from scripts.add_verified_flag import ensure_verified_flag
+
+                assert ensure_verified_flag(config_file) is False
+                assert config_file.read_text() == config_text, "verified-flag hook altered the generated config"
+
                 # Verify that the config can be validated (this would have failed before the fix)
                 full_config_dict = OmegaConf.create(
                     {
