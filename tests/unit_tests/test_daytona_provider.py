@@ -639,6 +639,7 @@ async def test_probe_create_connect_file_and_close_paths(
     close_provider = daytona_provider.DaytonaProvider(operations={"close_timeout_s": 5})
     monkeypatch.setattr(close_provider, "_client", lambda: client)
     await close_provider.close(SandboxHandle("sandbox-retained", "daytona", raw=FakeSandbox("retained")), delete=False)
+    await close_provider.close(SandboxHandle("sandbox-default-delete", "daytona", raw=FakeSandbox("default-delete")))
     await close_provider.close(SandboxHandle("sandbox-delete", "daytona", raw=FakeSandbox("delete-me")), delete=True)
     await close_provider.close(SandboxHandle("sandbox-missing", "daytona", raw="missing"), delete=True)
     with pytest.raises(RuntimeError, match="delete failed"):
@@ -694,11 +695,13 @@ async def test_create_timeout_is_not_retried() -> None:
 async def test_create_retries_retryable_verification_failures(monkeypatch: pytest.MonkeyPatch) -> None:
     provider = daytona_provider.DaytonaProvider(create={"retries": 1, "retry_delay_s": 0}, probe={"command": None})
     calls = 0
+    names: list[str | None] = []
     sleeps: list[float] = []
 
-    async def create_once(_spec: SandboxSpec) -> SandboxHandle:
+    async def create_once(spec: SandboxSpec) -> SandboxHandle:
         nonlocal calls
         calls += 1
+        names.append(daytona_provider._extension_value(spec, "name"))
         if calls == 1:
             raise daytona_provider.DaytonaCreateVerificationError("probe failed")
         return SandboxHandle("sandbox-created", "daytona", raw=object())
@@ -711,7 +714,33 @@ async def test_create_retries_retryable_verification_failures(monkeypatch: pytes
 
     assert (await provider.create(SandboxSpec(image="python:3.12"))).sandbox_id == "sandbox-created"
     assert calls == 2
+    assert names[0] == names[1]
+    assert names[0] is not None and names[0].startswith("nemo-gym-")
     assert sleeps == [0]
+
+
+async def test_create_retries_preserve_explicit_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = daytona_provider.DaytonaProvider(create={"retries": 1, "retry_delay_s": 0}, probe={"command": None})
+    names: list[str | None] = []
+
+    async def create_once(spec: SandboxSpec) -> SandboxHandle:
+        names.append(daytona_provider._extension_value(spec, "name"))
+        if len(names) == 1:
+            raise daytona_provider.DaytonaCreateVerificationError("probe failed")
+        return SandboxHandle("sandbox-created", "daytona", raw=object())
+
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(daytona_provider.asyncio, "sleep", no_sleep)
+    provider._create_once = create_once  # type: ignore[method-assign]
+
+    spec = SandboxSpec(
+        image="python:3.12",
+        provider_options={"extensions": {"daytona.name": "custom-sandbox"}},
+    )
+    assert (await provider.create(spec)).sandbox_id == "sandbox-created"
+    assert names == ["custom-sandbox", "custom-sandbox"]
 
 
 async def test_create_batch_returns_all_partial_successes_and_aggregates_cleanup_errors() -> None:
