@@ -37,11 +37,6 @@ from nemo_gym.server_utils import request
 
 def _cache_dir_from_env() -> Optional[Path]:
     """Read CRITPT_CACHE_DIR at server-construction time, or None if unset.
-
-    Sourced from an env var rather than a Hydra config field to avoid having to
-    declare a new key in upstream Gym's struct-locked `critpt.yaml` schema for
-    every new field we want callers to be able to configure. Callers (the
-    eval-factory YAML) inject this via `evaluation.env_vars`.
     """
     raw = os.environ.get("CRITPT_CACHE_DIR")
     return Path(raw) if raw else None
@@ -95,8 +90,6 @@ class CritPtResourcesServerConfig(BaseResourcesServerConfig):
     #   aa_responses.jsonl   one line per AA call that returned 2xx
     #   partial_metrics.json aggregate accuracy over scored submissions
     # Leaving this None (or unset) preserves the prior behavior (no on-disk state).
-    # Sourced from $CRITPT_CACHE_DIR rather than a Hydra config field so callers
-    # don't have to extend Gym's struct-locked YAML schema to enable it.
     cache_dir: Optional[Path] = Field(default_factory=_cache_dir_from_env)
 
 
@@ -137,7 +130,6 @@ class CritPtResourcesServer(SimpleResourcesServer):
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
         app.get("/status")(self.status)
-        app.add_event_handler("shutdown", self._on_shutdown)
         return app
 
     async def status(self) -> dict:
@@ -357,9 +349,8 @@ class CritPtResourcesServer(SimpleResourcesServer):
     def _refresh_partial_metrics(self) -> None:
         """Recompute partial_metrics.json from the on-disk caches.
 
-        Called after every successful AA call and on server shutdown, so the
-        file always reflects current state. Cheap: bounded by the number of
-        batches the server has seen (≤ 5 for a standard CritPt run).
+        Called after every successful AA call so the file always reflects
+        current state.
         """
         if self.config.cache_dir is None:
             return
@@ -400,10 +391,6 @@ class CritPtResourcesServer(SimpleResourcesServer):
         out_path = self.config.cache_dir / "partial_metrics.json"
         with out_path.open("w") as fh:
             json.dump(partial, fh, indent=2)
-
-    async def _on_shutdown(self) -> None:
-        """FastAPI shutdown hook: flush partial metrics one last time."""
-        self._refresh_partial_metrics()
 
 
 def _extract_output_text(body: CritPtVerifyRequest) -> str:
