@@ -21,6 +21,7 @@ from uuid import uuid4
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, PrivateAttr
 from starlette.datastructures import Headers
+from starlette.routing import Route
 
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.openai_utils import (
@@ -163,7 +164,18 @@ class MCPResourcesServer(SimpleResourcesServer):
                     yield maybe_state
 
         app.router.lifespan_context = lifespan_wrapper
-        app.mount(self.mcp_url_path, _MCPHeaderSessionMiddleware(mcp.streamable_http_app()))
+        mcp_app = mcp.streamable_http_app()
+        streamable_http_route = next(route for route in mcp_app.routes if getattr(route, "path", None) == "/")
+
+        # Mounting serves the slash-suffixed path; this exact route avoids relying on client redirects.
+        app.router.routes.append(
+            Route(
+                self.mcp_url_path,
+                _MCPHeaderSessionMiddleware(streamable_http_route.endpoint),
+                include_in_schema=False,
+            )
+        )
+        app.mount(self.mcp_url_path, _MCPHeaderSessionMiddleware(mcp_app))
         return app
 
     @abstractmethod

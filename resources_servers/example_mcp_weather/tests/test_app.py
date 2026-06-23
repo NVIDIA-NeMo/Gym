@@ -16,6 +16,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from fastapi import HTTPException, Request
+from fastapi.testclient import TestClient
 
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -149,3 +150,43 @@ def test_mcp_tool_requires_valid_session_token() -> None:
         _MCP_SESSION_TOKEN.reset(context_token)
 
     assert exc_info.value.status_code == 401
+
+
+def test_streamable_http_mcp_endpoint_records_same_session() -> None:
+    pytest.importorskip("mcp")
+    server = _server()
+    app = server.setup_webserver()
+    rpc_headers = {
+        "Accept": "application/json, text/event-stream",
+        "Content-Type": "application/json",
+    }
+
+    with TestClient(app, base_url="http://127.0.0.1:8000") as client:
+        seed_response = client.post("/seed_session", json={"expected_city": "Paris"})
+        assert seed_response.status_code == 200
+        token = seed_response.json()["mcp"]["headers"]["X-NeMo-Gym-Session-Token"]
+
+        tool_response = client.post(
+            "/mcp",
+            headers={**rpc_headers, "X-NeMo-Gym-Session-Token": token},
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "get_weather", "arguments": {"city": "Paris"}},
+            },
+            follow_redirects=False,
+        )
+
+        assert tool_response.status_code == 200
+        assert tool_response.json()["result"]["structuredContent"]["result"] == (
+            "The weather in Paris is sunny and 72 F."
+        )
+
+        verify_response = client.post(
+            "/verify",
+            json=_verify_request("Paris", "The weather in Paris is sunny and 72 F.").model_dump(mode="json"),
+        )
+        assert verify_response.status_code == 200
+        assert verify_response.json()["reward"] == 1.0
+        assert verify_response.json()["tool_call_seen"] is True

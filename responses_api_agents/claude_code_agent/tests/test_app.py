@@ -19,6 +19,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import yaml
+from fastapi import Request
 
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -39,12 +40,12 @@ from responses_api_agents.claude_code_agent.app import (
 
 
 def _config(**kwargs) -> ClaudeCodeAgentConfig:
+    kwargs.setdefault("resources_server", ResourcesServerRef(type="resources_servers", name=""))
     return ClaudeCodeAgentConfig(
         host="0.0.0.0",
         port=8080,
         entrypoint="",
         name="",
-        resources_server=ResourcesServerRef(type="resources_servers", name=""),
         **kwargs,
     )
 
