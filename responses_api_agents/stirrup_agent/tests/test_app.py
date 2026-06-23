@@ -13,16 +13,20 @@
 # limitations under the License.
 import json
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from stirrup.core.models import AssistantMessage, TokenUsage, ToolCall
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.openai_utils import (
+    NeMoGymResponseCreateParamsNonStreaming,
+)
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.stirrup_agent.app import (
     StirrupAgentWrapper,
     StirrupAgentWrapperConfig,
+    StirrupRunRequest,
     _load_task_registry,
     get_task_strategy,
 )
@@ -32,6 +36,20 @@ from responses_api_agents.stirrup_agent.task_strategy import TaskStrategy
 
 
 STIRRUP_AGENT_DIR = Path(__file__).resolve().parent.parent
+
+
+def _make_config(*, judge_only: bool = False, persist_deliverables_dir=None) -> StirrupAgentWrapperConfig:
+    return StirrupAgentWrapperConfig(
+        host="0.0.0.0",
+        port=8080,
+        entrypoint="",
+        name="stirrup_agent",
+        task="gdpval",
+        model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
+        resources_server=ResourcesServerRef(type="resources_servers", name="gdpval_resources_server"),
+        judge_only=judge_only,
+        persist_deliverables_dir=persist_deliverables_dir,
+    )
 
 
 class TestTaskRegistry:
@@ -90,6 +108,82 @@ class TestApp:
         assert output_items[1].type == "function_call_output"
         assert output_items[1].call_id == "call_1"
         assert output_items[1].output == "ok"
+
+
+class TestJudgeOnlyMode:
+    def test_judge_only_requires_persist_dir(self) -> None:
+        """judge_only without a persist dir has no cached deliverables to score."""
+        config = _make_config(judge_only=True, persist_deliverables_dir=None)
+        with pytest.raises(ValueError, match="judge_only=True requires persist_deliverables_dir"):
+            StirrupAgentWrapper(config=config, server_client=MagicMock(spec=ServerClient))
+
+    @pytest.mark.asyncio
+    async def test_run_judge_only_scores_cached_deliverables(self, tmp_path) -> None:
+        """When cached deliverables exist, run() must NOT execute the agent and
+        must POST /verify with the cached deliverables_dir."""
+        deliverables_root = tmp_path / "task_task-1" / "repeat_0"
+        deliverables_root.mkdir(parents=True)
+        (deliverables_root / "answer.txt").write_text("cached deliverable")
+
+        config = _make_config(judge_only=True, persist_deliverables_dir=str(tmp_path))
+        server_client = MagicMock(spec=ServerClient)
+        server_client.post = AsyncMock(return_value=MagicMock())
+        wrapper = StirrupAgentWrapper(config=config, server_client=server_client)
+
+        params = NeMoGymResponseCreateParamsNonStreaming(
+            input="ignored",
+            metadata={"task_id": "task-1", "prompt": "do the thing", "_ng_rollout_index": "0"},
+        )
+        body = StirrupRunRequest(responses_create_params=params, task_id="task-1", prompt="do the thing")
+        request = MagicMock()
+        request.cookies = {}
+
+        responses_mock = AsyncMock()
+        with patch.object(StirrupAgentWrapper, "responses", responses_mock), patch(
+            "responses_api_agents.stirrup_agent.app.raise_for_status", AsyncMock()
+        ), patch(
+            "responses_api_agents.stirrup_agent.app.get_response_json",
+            AsyncMock(return_value={"reward": 0.9, "judge_response": "ok"}),
+        ):
+            result = await wrapper.run(request, body)
+
+        # The agent task must never run in judge-only mode.
+        responses_mock.assert_not_awaited()
+
+        verify_calls = [c for c in server_client.post.await_args_list if c.kwargs.get("url_path") == "/verify"]
+        assert len(verify_calls) == 1
+        verify_json = verify_calls[0].kwargs["json"]
+        assert verify_json["deliverables_dir"].endswith(str(Path("task_task-1") / "repeat_0"))
+        assert result == {"reward": 0.9, "judge_response": "ok"}
+
+    @pytest.mark.asyncio
+    async def test_run_judge_only_missing_deliverables_is_skipped(self, tmp_path) -> None:
+        """A task with no cached deliverable dir is reported skipped and never
+        reaches /verify."""
+        config = _make_config(judge_only=True, persist_deliverables_dir=str(tmp_path))
+        server_client = MagicMock(spec=ServerClient)
+        server_client.post = AsyncMock(return_value=MagicMock())
+        wrapper = StirrupAgentWrapper(config=config, server_client=server_client)
+
+        params = NeMoGymResponseCreateParamsNonStreaming(
+            input="ignored",
+            metadata={"task_id": "missing-task", "prompt": "do the thing", "_ng_rollout_index": "0"},
+        )
+        body = StirrupRunRequest(responses_create_params=params, task_id="missing-task", prompt="do the thing")
+        request = MagicMock()
+        request.cookies = {}
+
+        responses_mock = AsyncMock()
+        with patch.object(StirrupAgentWrapper, "responses", responses_mock), patch(
+            "responses_api_agents.stirrup_agent.app.raise_for_status", AsyncMock()
+        ):
+            result = await wrapper.run(request, body)
+
+        responses_mock.assert_not_awaited()
+        verify_calls = [c for c in server_client.post.await_args_list if c.kwargs.get("url_path") == "/verify"]
+        assert verify_calls == []
+        assert result["skipped"] is True
+        assert result["reward"] == 0.0
 
 
 class TestExampleDataset:
