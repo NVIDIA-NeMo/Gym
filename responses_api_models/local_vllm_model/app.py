@@ -150,9 +150,7 @@ class LocalVLLMModel(VLLMModel):
         validate_parsed_serve_args(final_args)
 
         # @bxyu-nvidia: TODO remove, specific to Nemotron 3 Ultra vLLM version.
-        # The Nemotron 3 Ultra build expects `return_routed_experts`, whereas upstream vLLM
-        # (verified on 0.20.0, engine/arg_utils.py) only exposes `enable_return_routed_experts`,
-        # so we alias the parsed arg across.
+        # Upstream vLLM only exposes `enable_return_routed_experts`, so alias it across.
         final_args.return_routed_experts = final_args.enable_return_routed_experts
 
         if self.config.debug:
