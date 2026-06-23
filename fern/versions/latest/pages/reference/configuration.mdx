@@ -127,9 +127,20 @@ my_config_paths:
   - responses_api_models/openai_model/configs/openai_model.yaml
   - resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml
 
+# Optional: multi-node setups
+use_absolute_ip: true           # Bind servers to the host's IP instead of 127.0.0.1 (default: false)
+
 # Optional: validation behavior
 error_on_almost_servers: true   # Exit on invalid configs (default: true)
 ```
+
+### Multi-Node Configuration
+
+**`use_absolute_ip`** — Controls the default host servers bind to.
+
+- **Default:** `false` — servers use `127.0.0.1` (localhost).
+- **When to use:** Set to `true` for multi-node setups (e.g. multi-node Ray clusters) where servers must communicate across machines.
+- **Effect:** Resolves and uses the host's IP address (`gethostbyname(gethostname())`) instead of localhost.
 
 ---
 
