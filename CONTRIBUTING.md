@@ -47,3 +47,5 @@ pre-commit install
 ```bash
 git commit -s -m "Your commit message"
 ```
+
+If DCO checks fail after you have already pushed, see the [Development Setup Guide](https://docs.nvidia.com/nemo/gym/main/contribute/development-setup#dco-and-commit-signing) — force-pushing to PR branches is not allowed.

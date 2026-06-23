@@ -10,12 +10,12 @@
 
 NeMo Gym is a library for evaluating and improving models and agents using environments. NeMo Gym provides infrastructure to develop environments, scalably run evaluation and training, and a collection of popular benchmarks and training environments.
 
-An environment is the complete system an agent interacts with to complete a task. It consists of a dataset (tasks to solve), an agent harness (how the model interacts with the world), a verifier (task completion scoring), and state (per-task execution context).
+An environment is the complete system an agent interacts with to complete a task. It consists of a dataset (tasks to solve), an agent harness (how the model interacts with the world), verification logic (task completion scoring), and state (per-task execution context).
 
 ## 🎯 When to Use NeMo Gym
 
 - You need to **evaluate models or agents** in stateful environments (e.g. code execution, tool calling, sandboxes)
-- You want **reproducible evaluation** across teams using shared environments and verifiers
+- You want **reproducible evaluation** across teams using shared environments and verification logic
 - You need to use environments **at scale** — multiple repeats per task, or thousands of concurrent requests for training
 - You want to **seamlessly transition** between evaluation, agent optimization, and training
 
@@ -23,7 +23,7 @@ If you're scoring model outputs with a stateless check and don't need scale or t
 
 ## 🏆 What NeMo Gym Provides
 
-- Modular, extensible interfaces for agents, environments, tasks, and verifiers
+- Modular, extensible interfaces for agents, environments, tasks, and verification logic
 - Environment hub of popular benchmarks and training environments
 - Use your own agents or choose from built-in harnesses
 - Scale to thousands of concurrent environments
@@ -47,6 +47,21 @@ NeMo Gym is a component of [NVIDIA NeMo](https://docs.nvidia.com/nemo/gym/main/a
 
 > [!IMPORTANT]
 > NeMo Gym is currently in early development. You should expect evolving APIs, incomplete documentation, and occasional bugs. We welcome contributions and feedback - for any changes, please open an issue first to kick off discussion!
+
+## 📣 News
+
+* [06/04/2026] [Release v0.3.0!](https://github.com/NVIDIA-NeMo/Gym/releases/tag/v0.3.0) — 70+ new environments, Nemotron 3 Ultra training datasets, VeRL integration, and out-of-the-box harnesses including Claude Code and Hermes.
+* [06/04/2026] NeMo Gym v0.3.0 is available on [PyPI](https://pypi.org/project/nemo-gym/).
+* [04/15/2026] [Release v0.2.1](https://github.com/NVIDIA-NeMo/Gym/releases/tag/v0.2.1) — bug fixes and documentation improvements.
+
+<details>
+<summary>Previous News</summary>
+
+* [03/11/2026] [Release v0.2.0!](https://github.com/NVIDIA-NeMo/Gym/releases/tag/v0.2.0) — expanded environment hub, rollout collection improvements, and Fern docs migration.
+* [12/15/2025] [Release v0.1.1](https://github.com/NVIDIA-NeMo/Gym/releases/tag/v0.1.1)
+* [11/15/2025] [Release v0.1.0](https://github.com/NVIDIA-NeMo/Gym/releases/tag/v0.1.0) — initial public release.
+
+</details>
 
 ## 📋 Requirements
 
