@@ -136,6 +136,10 @@ def is_server_ref(config_dict: DictConfig) -> Optional[ServerRef]:
         return None
 
 
+class ServerRefNotFoundError(ValueError):
+    """A server cross-reference points to an instance that is not defined in the merged config."""
+
+
 ########################################
 # Dataset configs for handling and upload/download
 ########################################

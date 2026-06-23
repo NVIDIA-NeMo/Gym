@@ -151,6 +151,7 @@ class CCCEvaluatorConfig(BaseEvaluatorConfig):
     time_scale: float = 2.0
     overwrite: bool = False
     shared_dir: str = "/tmp"
+    run_all_tests: bool = False
 
 
 _precompile_loop_tls = threading.local()
@@ -319,6 +320,21 @@ def _load_metadata_file(path: str):
     return metadata_by_competition, dict(problem_index)
 
 
+def _patch_run_sh(run_code: str) -> str:
+    # Some problem-specific run.sh scripts hold FIFOs open via `exec N<>fifo`.
+    # Insert a kill before `wait "$user_pid"` that isn't already preceded by one.
+    import re
+
+    def _add_kill(m: re.Match) -> str:
+        preceding = m.string[max(0, m.start() - 60) : m.start()]
+        if "kill" in preceding:
+            return m.group(0)
+        indent = m.group(1)
+        return f'{indent}kill "$user_pid" 2>/dev/null || true\n{m.group(0)}'
+
+    return re.sub(r'([ \t]*)wait "\$user_pid"', _add_kill, run_code)
+
+
 def _precompile_problem(
     problem_key: str,
     problem_id: str,
@@ -344,7 +360,7 @@ def _precompile_problem(
         with open(target_path, "w", encoding="utf-8") as f:
             f.write(content)
 
-    for script_name, script_content in (("compile.sh", compile_code), ("run.sh", run_code)):
+    for script_name, script_content in (("compile.sh", compile_code), ("run.sh", _patch_run_sh(run_code))):
         script_path = os.path.join(pre_dir, script_name)
         with open(script_path, "w", encoding="utf-8") as f:
             f.write(script_content)
@@ -392,7 +408,7 @@ def run_test_case(task_args: dict, worker_id: int) -> dict:
         if not result["compile_success"]:
             return result
 
-        run_timeout = max(1, int(120 * float(task_args.get("time_scale", 1.0))))
+        run_timeout = max(30, int(30 * float(task_args.get("time_scale", 1.0))))
         run_start = time.monotonic()
         run_result = _exec_sync(
             _test_loop_tls,
@@ -596,6 +612,7 @@ class CCCEvaluator(BaseEvaluator):
             )
         cache_key = self._cache_key(problem_id, competition_id)
         pre_dir = await asyncio.to_thread(self._get_precompiled_dir, cache_key, problem_id, problem_metadata)
+        time_scale = self.eval_cfg.time_scale * (0.5 if float(entry.get("total_time") or 0.0) > 300.0 else 1.0)
 
         subtask_state = {
             subtask_name: {
@@ -611,6 +628,10 @@ class CCCEvaluator(BaseEvaluator):
                 test_to_subtasks.setdefault(test_name, []).append(subtask_name)
 
         all_test_items = list(problem_metadata["all_tests"].items())
+        target_subtask = entry.get("subtask")
+        if target_subtask and target_subtask in problem_metadata["subtasks"]:
+            target_tests = set(problem_metadata["subtasks"][target_subtask]["test_names"])
+            all_test_items = [(name, data) for name, data in all_test_items if name in target_tests]
         batch_size = self.eval_cfg.test_batch_size
         all_run_times: list[float] = []
         for i in range(0, len(all_test_items), batch_size):
@@ -619,16 +640,19 @@ class CCCEvaluator(BaseEvaluator):
             tasks = []
             for test_name, test_data in candidate_batch:
                 subtasks = test_to_subtasks.get(test_name, [])
-                should_run = False
-                for subtask_name in subtasks:
-                    state = subtask_state[subtask_name]
-                    if state["aggregation"] == "sum_tests" or not state["failed"]:
-                        should_run = True
-                        break
+                should_run = self.eval_cfg.run_all_tests
+                if not should_run:
+                    for subtask_name in subtasks:
+                        state = subtask_state[subtask_name]
+                        if state["aggregation"] == "sum_tests" or not state["failed"]:
+                            should_run = True
+                            break
                 if not should_run:
                     continue
                 batch.append((test_name, test_data))
-                tasks.append(self._build_test_task(problem_id, pre_dir, completion, test_data, task_type=task_type))
+                task = self._build_test_task(problem_id, pre_dir, completion, test_data, task_type=task_type)
+                task["time_scale"] = time_scale
+                tasks.append(task)
             if not batch:
                 continue
             loop = asyncio.get_running_loop()
@@ -643,10 +667,10 @@ class CCCEvaluator(BaseEvaluator):
                     result["test_group"] = test_group
                 for subtask_name in test_to_subtasks.get(test_name, []):
                     state = subtask_state[subtask_name]
-                    if state["aggregation"] == "min" and state["failed"]:
+                    if not self.eval_cfg.run_all_tests and state["aggregation"] == "min" and state["failed"]:
                         continue
                     state["outputs"].append(dict(result))
-                    if state["aggregation"] == "min" and float(result.get("score", 0.0)) == 0.0:
+                    if state["aggregation"] == "min" and float(result.get("score", 0.0)) < 1.0:
                         state["failed"] = True
 
         test_case_results = {}
