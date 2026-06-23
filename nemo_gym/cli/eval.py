@@ -36,6 +36,7 @@ from nemo_gym.config_types import BaseNeMoGymCLIConfig, BenchmarkDatasetConfig
 from nemo_gym.global_config import (
     JSON_OUTPUT_KEY_NAME,
     POLICY_MODEL_KEY_NAME,
+    QUERY_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,
     GlobalConfigDictParser,
@@ -134,7 +135,7 @@ def list_benchmarks() -> None:
 
     # `gym search <query>` reuses this command, narrowing the listing to fuzzy matches across the
     # benchmark name, agent name, resource server name, dataset names, and domain.
-    query = global_config_dict.get("query")
+    query = global_config_dict.get(QUERY_KEY_NAME)
     if query:
         benchmarks = {
             name: bench
