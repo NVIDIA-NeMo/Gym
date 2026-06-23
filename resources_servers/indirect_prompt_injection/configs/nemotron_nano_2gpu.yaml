@@ -1,6 +1,6 @@
 policy_model:
   responses_api_models:
-    local_vllm_model:
+    vllm_server:
       entrypoint: app.py
       model: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
       return_token_id_information: false

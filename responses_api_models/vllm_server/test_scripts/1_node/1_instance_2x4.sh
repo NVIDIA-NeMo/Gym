@@ -12,4 +12,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from responses_api_models.vllm_server.local_vllm_model_actor import *  # noqa: F401,F403
+
+config_paths="responses_api_models/vllm_server/configs/openai/gpt-oss-20b-reasoning-high.yaml"
+ng_run "+config_paths=[${config_paths}]" \
+    ++gpt-oss-20b-reasoning-high.responses_api_models.local_vllm_model.vllm_serve_kwargs.data_parallel_size=2 \
+    ++gpt-oss-20b-reasoning-high.responses_api_models.local_vllm_model.vllm_serve_kwargs.tensor_parallel_size=4

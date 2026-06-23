@@ -1,5 +1,5 @@
 config_paths:
-- responses_api_models/local_vllm_model/configs/nvidia/nemotron_3_ultra_dev_nemorl_gb200.yaml
+- responses_api_models/vllm_server/configs/nvidia/nemotron_3_ultra_dev_nemorl_gb200.yaml
 
 # We bump up the connector per host limit since this is a larger benchmark suite
 global_aiohttp_connector_limit_per_host: 16384

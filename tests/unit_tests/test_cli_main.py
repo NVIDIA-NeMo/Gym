@@ -473,10 +473,10 @@ class TestModelFlag:
         # The deployment invocation: select the local vLLM server type and pass the checkpoint to serve via --model.
         _, overrides = _dispatch_for(
             monkeypatch,
-            ["eval", "run", "--model-type", "local_vllm_model", "--model", "Qwen/Qwen3-8B"],
+            ["eval", "run", "--model-type", "vllm_server/local_vllm_model", "--model", "Qwen/Qwen3-8B"],
         )
         paths, others = _split_overrides(overrides)
-        assert paths == {str(WORKING_DIR / "responses_api_models/local_vllm_model/configs/local_vllm_model.yaml")}
+        assert paths == {str(WORKING_DIR / "responses_api_models/vllm_server/configs/local_vllm_model.yaml")}
         assert others == {"+policy_model_name=Qwen/Qwen3-8B"}
 
     def test_short_alias_on_env_run(self, monkeypatch: MonkeyPatch) -> None:

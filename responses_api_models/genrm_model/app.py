@@ -25,11 +25,11 @@ from typing import Any, Dict
 
 from fastapi import Request
 
-from responses_api_models.local_vllm_model.app import (
+from responses_api_models.vllm_model.app import VLLMConverter
+from responses_api_models.vllm_server.app import (
     LocalVLLMModel,
     LocalVLLMModelConfig,
 )
-from responses_api_models.vllm_model.app import VLLMConverter
 
 
 class GenRMModelMixin:
