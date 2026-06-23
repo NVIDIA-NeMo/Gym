@@ -53,6 +53,7 @@ from nemo_gym.adapters.types import (
     GracefulError,
     RequestInterceptor,
     RequestToResponseInterceptor,
+    get_context,
 )
 
 
@@ -102,6 +103,14 @@ class _GracefulRaiser(RequestInterceptor):
         raise GracefulError("turns up")
 
 
+class _BoomRaiser(RequestInterceptor):
+    """Raises a generic (non-graceful) exception to exercise the middleware's
+    500 arm."""
+
+    async def intercept_request(self, req: AdapterRequest) -> AdapterRequest:
+        raise RuntimeError("kaboom")
+
+
 def _install_helper_interceptors() -> None:
     """Make the helpers above resolvable via the registry."""
     mod = types.ModuleType("nemo_gym.adapters.interceptors._test_header_capture")
@@ -118,6 +127,11 @@ def _install_helper_interceptors() -> None:
     mod3.Interceptor = _CapturingEcho
     sys.modules[mod3.__name__] = mod3
     InterceptorRegistry.register("_test_capturing_echo", mod3.__name__)
+
+    mod4 = types.ModuleType("nemo_gym.adapters.interceptors._test_boom_raiser")
+    mod4.Interceptor = _BoomRaiser
+    sys.modules[mod4.__name__] = mod4
+    InterceptorRegistry.register("_test_boom_raiser", mod4.__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -214,6 +228,37 @@ def test_no_session_id_for_plain_path() -> None:
     assert _CapturingEcho.last_req.path == "/v1/chat/completions"
 
 
+def test_session_prefixed_post_routes_to_real_route() -> None:
+    """A session-prefixed ``POST /s/<hex>/v1/chat/completions`` must route to the
+    real ``/v1/chat/completions`` handler — not 404.
+
+    The middleware rewrites ``request.scope['path']`` / ``raw_path`` to the
+    prefix-stripped path before ``call_next`` so the FastAPI router can match
+    it. The session id is still parsed onto the request ctx, which the routed
+    handler observes via the shared ``get_context()``.
+    """
+    captured: dict[str, Any] = {}
+    app = FastAPI()
+
+    @app.post("/v1/chat/completions")
+    async def _chat(body: dict):
+        captured["session_id"] = get_context().extra.get("session_id")
+        return JSONResponse(_route_handler_default(body))
+
+    install_middleware(app, [{"name": "logging"}])
+
+    with TestClient(app) as client:
+        resp = client.post(
+            "/s/deadbeef/v1/chat/completions",
+            json={"model": "test", "messages": []},
+        )
+    # Routed to the real handler (not a 404 from the unstripped /s/... path).
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["id"] == "chatcmpl-route"
+    # The session id was parsed off the prefix and is visible to the handler.
+    assert captured["session_id"] == "deadbeef"
+
+
 # ---------------------------------------------------------------------------
 # Hop-by-hop header filtering
 # ---------------------------------------------------------------------------
@@ -255,6 +300,21 @@ def test_graceful_error_returns_429() -> None:
     body = resp.json()
     assert body["error"]["code"] == "session_budget_exhausted"
     assert "turns up" in body["error"]["message"]
+
+
+# ---------------------------------------------------------------------------
+# Generic pipeline error → 500
+# ---------------------------------------------------------------------------
+
+
+def test_generic_pipeline_exception_returns_500() -> None:
+    """A non-graceful exception raised inside the pipeline is caught by the
+    middleware and surfaced as HTTP 500 (not propagated to the ASGI server)."""
+    app = _build_test_app([{"name": "_test_boom_raiser"}])
+    with TestClient(app, raise_server_exceptions=False) as client:
+        resp = client.post("/v1/chat/completions", json={"model": "test", "messages": []})
+    assert resp.status_code == 500
+    assert resp.json()["error"]["type"] == "server_error"
 
 
 # ---------------------------------------------------------------------------

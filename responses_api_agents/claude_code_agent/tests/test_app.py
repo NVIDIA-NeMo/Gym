@@ -15,6 +15,7 @@
 
 import asyncio
 import json
+import types
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -50,12 +51,49 @@ def _config(**kwargs) -> ClaudeCodeAgentConfig:
 def _make_agent(**kwargs) -> ClaudeCodeAgent:
     with patch("responses_api_agents.claude_code_agent.app.ClaudeCodeAgent.model_post_init"):
         agent = ClaudeCodeAgent(config=_config(**kwargs), server_client=MagicMock(spec=ServerClient))
+    # Patching model_post_init also skips Pydantic's private-attr initialization,
+    # leaving __pydantic_private__ as None; restore declared private slots (e.g.
+    # _proxy_handle) to their defaults so agent methods can read them.
+    object.__setattr__(
+        agent,
+        "__pydantic_private__",
+        {name: pa.get_default() for name, pa in type(agent).__private_attributes__.items()},
+    )
     agent.sem = asyncio.Semaphore(agent.config.concurrency)
     return agent
 
 
 def _event(type_: str, **kwargs) -> str:
     return json.dumps({"type": type_, **kwargs})
+
+
+def _run_claude_code_capturing(agent: ClaudeCodeAgent, tmp_path: Path) -> tuple[str, str, dict]:
+    """Run ``_run_claude_code`` with the subprocess stubbed out, capturing the
+    child process ``env`` and ``argv`` so env-threading / model-name handling
+    can be asserted. Mirrors the ``TestRunClaudeCode`` fixtures."""
+    captured: dict = {}
+
+    class FakeProc:
+        returncode = 0
+
+        async def communicate(self):
+            return b'{"type":"result","usage":{"input_tokens":1,"output_tokens":1}}\n', b""
+
+    async def fake_exec(*cmd, **kwargs):
+        captured["cmd"] = list(cmd)
+        captured["env"] = kwargs["env"]
+        return FakeProc()
+
+    # Clear the ambient environment so absence assertions (e.g. no
+    # ANTHROPIC_BASE_URL in plain mode) are deterministic regardless of the
+    # developer's/CI shell. The subprocess is mocked, so env is never spawned.
+    with (
+        patch.dict("responses_api_agents.claude_code_agent.app.os.environ", {}, clear=True),
+        patch("responses_api_agents.claude_code_agent.app.Path.home", return_value=tmp_path),
+        patch("responses_api_agents.claude_code_agent.app.asyncio.create_subprocess_exec", fake_exec),
+    ):
+        stdout, model = asyncio.run(agent._run_claude_code("hello"))
+    return stdout, model, captured
 
 
 class TestSanity:
@@ -233,6 +271,59 @@ class TestRunClaudeCode:
         assert stdout == ""
         assert killed["called"] is True
         assert model == "claude-sonnet-4-6"
+
+    def test_proxy_mode_threads_base_url_and_preserves_full_model(self, tmp_path: Path) -> None:
+        # A running adapter proxy in front of the model server: the SDK is
+        # pointed at the proxy URL and the full (provider-prefixed) model name
+        # is preserved for the custom upstream.
+        agent = _make_agent(
+            model="anthropic/claude-sonnet-4-6",
+            anthropic_api_key="sk-test",  # pragma: allowlist secret
+        )
+        agent._proxy_handle = types.SimpleNamespace(url="http://127.0.0.1:9999")
+
+        _stdout, model, captured = _run_claude_code_capturing(agent, tmp_path)
+        env = captured["env"]
+
+        assert env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:9999"
+        assert env["ANTHROPIC_AUTH_TOKEN"] == "sk-test"  # pragma: allowlist secret
+        # Full model name (provider prefix kept) for a custom upstream.
+        assert model == "anthropic/claude-sonnet-4-6"
+        assert env["ANTHROPIC_MODEL"] == "anthropic/claude-sonnet-4-6"
+        assert captured["cmd"][captured["cmd"].index("--model") + 1] == "anthropic/claude-sonnet-4-6"
+
+    def test_explicit_base_url_preserves_full_model(self, tmp_path: Path) -> None:
+        # A direct non-Anthropic endpoint via anthropic_base_url (no proxy):
+        # base url is threaded through and the full model name is preserved.
+        agent = _make_agent(
+            model="anthropic/claude-sonnet-4-6",
+            anthropic_base_url="https://my-endpoint.example/v1",
+            anthropic_api_key="sk-direct",  # pragma: allowlist secret
+        )
+        assert agent._proxy_handle is None
+
+        _stdout, model, captured = _run_claude_code_capturing(agent, tmp_path)
+        env = captured["env"]
+
+        assert env["ANTHROPIC_BASE_URL"] == "https://my-endpoint.example/v1"
+        assert env["ANTHROPIC_AUTH_TOKEN"] == "sk-direct"  # pragma: allowlist secret
+        assert model == "anthropic/claude-sonnet-4-6"
+        assert env["ANTHROPIC_MODEL"] == "anthropic/claude-sonnet-4-6"
+
+    def test_plain_anthropic_mode_strips_provider_prefix(self, tmp_path: Path) -> None:
+        # Plain Anthropic API mode (no proxy, no base url): the provider prefix
+        # is stripped and no base-url/auth-token env is injected.
+        agent = _make_agent(model="anthropic/claude-sonnet-4-6")
+        assert agent._proxy_handle is None
+
+        _stdout, model, captured = _run_claude_code_capturing(agent, tmp_path)
+        env = captured["env"]
+
+        assert "ANTHROPIC_BASE_URL" not in env
+        assert "ANTHROPIC_AUTH_TOKEN" not in env
+        assert model == "claude-sonnet-4-6"
+        assert env["ANTHROPIC_MODEL"] == "claude-sonnet-4-6"
+        assert captured["cmd"][captured["cmd"].index("--model") + 1] == "claude-sonnet-4-6"
 
 
 class TestExtractInstruction:

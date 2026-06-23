@@ -198,6 +198,10 @@ def install_middleware(
         async def _upstream(req: AdapterRequest) -> AdapterResponse:
             new_body = json.dumps(req.body).encode("utf-8")
             _override_request_body(request, new_body)
+            # Re-point the ASGI scope at the prefix-stripped path so the router
+            # can match it (the /s/<hex>/ session prefix is middleware-only).
+            request.scope["path"] = req.path
+            request.scope["raw_path"] = req.path.encode("latin-1")
             starlette_resp = await call_next(request)
             return await _starlette_response_to_adapter(starlette_resp, req.ctx)
 

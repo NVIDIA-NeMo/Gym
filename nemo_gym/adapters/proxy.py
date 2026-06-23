@@ -41,7 +41,7 @@ from fastapi import FastAPI, Request
 from starlette.responses import JSONResponse, Response
 
 from nemo_gym.adapters.pipeline import AdapterPipeline
-from nemo_gym.adapters.types import AdapterRequest, AdapterResponse, InterceptorContext
+from nemo_gym.adapters.types import AdapterRequest, AdapterResponse, GracefulError, InterceptorContext
 
 
 logger = logging.getLogger(__name__)
@@ -212,6 +212,8 @@ async def _run_pipeline(request: Request, path: str) -> Response:
 
     async def _upstream(req: AdapterRequest) -> AdapterResponse:
         target = f"{upstream_url}{req.path}"
+        if request.url.query:
+            target = f"{target}?{request.url.query}"
         fwd_headers = {k: v for k, v in req.headers.items() if k.lower() not in ("host", "content-length")}
         import json as _json
 
@@ -228,12 +230,6 @@ async def _run_pipeline(request: Request, path: str) -> Response:
             except (ValueError, UnicodeDecodeError):
                 parsed = raw
 
-            if isinstance(parsed, dict):
-                for choice in parsed.get("choices", []):
-                    msg = choice.get("message") or choice.get("delta") or {}
-                    if isinstance(msg, dict) and msg.get("content") is None and "content" in msg:
-                        msg["content"] = ""
-
             return AdapterResponse(
                 status_code=resp.status,
                 headers=resp_headers,
@@ -244,6 +240,18 @@ async def _run_pipeline(request: Request, path: str) -> Response:
 
     try:
         resp = await pipeline.process(adapter_req, upstream_call=_upstream)
+    except GracefulError as exc:
+        # Mirror middleware mode: budget/control-flow termination -> 429 (not 500).
+        return JSONResponse(
+            {
+                "error": {
+                    "message": str(exc),
+                    "type": "invalid_request_error",
+                    "code": "session_budget_exhausted",
+                },
+            },
+            status_code=429,
+        )
     except Exception:
         logger.exception("adapter proxy pipeline error")
         return JSONResponse(

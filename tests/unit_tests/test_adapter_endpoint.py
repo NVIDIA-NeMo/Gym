@@ -63,27 +63,15 @@ def _req(body: dict | None = None, path: str = "/v1/chat/completions") -> Adapte
 
 
 def test_upstream_url_known_suffixes_stripped():
+    # API suffixes AND a trailing /v1 are stripped so the /v1/... prefix already
+    # carried on req.path does not double up.
     for suffix in ("/chat/completions", "/completions", "/embeddings"):
         ic = Interceptor(upstream_url=f"https://api.example.com/v1{suffix}/")
-        assert ic._upstream_url == "https://api.example.com/v1"
-    # A non-API suffix is left intact.
-    assert Interceptor(upstream_url="http://up/v1")._upstream_url == "http://up/v1"
-
-
-def test_normalize_content_replaces_none_only():
-    body = {
-        "choices": [
-            {"message": {"content": None}},
-            {"delta": {"content": None}},
-            {"message": {"content": "keep"}},
-            {"message": {}},  # no content key -> untouched
-        ]
-    }
-    Interceptor._normalize_content(body)
-    assert body["choices"][0]["message"]["content"] == ""
-    assert body["choices"][1]["delta"]["content"] == ""
-    assert body["choices"][2]["message"]["content"] == "keep"
-    assert "content" not in body["choices"][3]["message"]
+        assert ic._upstream_url == "https://api.example.com"
+    # A bare /v1 base is stripped to the host root.
+    assert Interceptor(upstream_url="http://up/v1")._upstream_url == "http://up"
+    # A host with no /v1 is left intact.
+    assert Interceptor(upstream_url="http://up")._upstream_url == "http://up"
 
 
 async def test_intercept_request_success_merges_body_and_headers():
@@ -107,9 +95,9 @@ async def test_intercept_request_success_merges_body_and_headers():
     assert kwargs["headers"]["Content-Type"] == "application/json"
     assert "Host" not in kwargs["headers"] and "Content-Length" not in kwargs["headers"]
     assert kwargs["headers"]["X-Keep"] == "1"
-    assert kwargs["url"] == "http://up/v1/v1/chat/completions"
-    # None content normalized to ""
-    assert resp.body["choices"][0]["message"]["content"] == ""
+    assert kwargs["url"] == "http://up/v1/chat/completions"
+    # content:null passes through unchanged (no proxy-side normalization)
+    assert resp.body["choices"][0]["message"]["content"] is None
     # response headers preserved (original case) as latin-1 byte tuples
     assert (b"Content-Type", b"application/json") in resp.headers
 
@@ -125,6 +113,26 @@ async def test_intercept_request_retries_on_status_then_succeeds():
     assert resp.status_code == 200
     assert resp.body == {"ok": True}
     sleep.assert_awaited()  # Retry-After honored
+
+
+async def test_intercept_request_http_date_retry_after_falls_back_to_backoff():
+    """An HTTP-date ``Retry-After`` (RFC 7231 allows it) is not a float, so the
+    parse must fall back to exponential backoff instead of crashing the retry
+    loop. The request must still retry and eventually succeed."""
+    ic = Interceptor(upstream_url="http://up/v1", max_retries=1, retry_on_status=[503])
+    seq = [
+        _FakeResp(503, {"Retry-After": "Wed, 21 Oct 2099 07:28:00 GMT"}),
+        _FakeResp(200, {}, {"ok": True}),
+    ]
+    with (
+        patch(f"{_ENDPOINT}.global_request", new=AsyncMock(side_effect=seq)),
+        patch(f"{_ENDPOINT}.asyncio.sleep", new=AsyncMock()) as sleep,
+    ):
+        resp = await ic.intercept_request(_req())
+    assert resp.status_code == 200
+    assert resp.body == {"ok": True}
+    # Backoff path was taken (date header could not be parsed as a delay).
+    sleep.assert_awaited_once_with(1)
 
 
 async def test_intercept_request_non_json_response_passed_through_as_bytes():

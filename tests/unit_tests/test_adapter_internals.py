@@ -108,6 +108,18 @@ async def test_starlette_to_adapter_non_json_content_type_kept_as_bytes():
     assert out.body == b"raw"
 
 
+async def test_starlette_to_adapter_str_body_without_iterator_is_encoded():
+    # No ``body_iterator`` and a ``str`` body exercises the non-streaming
+    # str->bytes encode branch.
+    class _StrBodyResp:
+        status_code = 200
+        raw_headers: list = []
+        body = "plain-str-body"
+
+    out = await mw._starlette_response_to_adapter(_StrBodyResp(), InterceptorContext())
+    assert out.body == b"plain-str-body"
+
+
 def test_adapter_response_to_starlette_bytes_body():
     out = mw._adapter_response_to_starlette(AdapterResponse(status_code=200, headers={"X-A": "1"}, body=b"raw-bytes"))
     assert isinstance(out, Response)

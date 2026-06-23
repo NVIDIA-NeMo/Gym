@@ -50,6 +50,10 @@ class Interceptor(RequestToResponseInterceptor):
             if clean.endswith(suffix):
                 clean = clean[: -len(suffix)]
                 break
+        # ``req.path`` already carries the ``/v1/...`` prefix, so strip a trailing
+        # ``/v1`` from the base to avoid ``.../v1/v1/...`` double-prefixing.
+        if clean.endswith("/v1"):
+            clean = clean[: -len("/v1")]
         self._upstream_url = clean
         self._api_key = api_key
         self._extra_body = extra_body or {}
@@ -60,13 +64,6 @@ class Interceptor(RequestToResponseInterceptor):
         # ``max_concurrent`` is config-shape compatibility only; connector
         # limits live on the global aiohttp client.
         self._max_concurrent = max_concurrent
-
-    @staticmethod
-    def _normalize_content(body: dict[str, Any]) -> None:
-        for choice in body.get("choices", []):
-            msg = choice.get("message") or choice.get("delta") or {}
-            if "content" in msg and msg["content"] is None:
-                msg["content"] = ""
 
     async def intercept_request(
         self,
@@ -105,7 +102,11 @@ class Interceptor(RequestToResponseInterceptor):
 
                     if status in self._retry_on_status and attempt < self._max_retries:
                         retry_after = resp.headers.get("Retry-After")
-                        delay = float(retry_after) if retry_after else min(2**attempt, 60)
+                        try:
+                            # RFC 7231 allows an HTTP-date here; fall back on parse failure.
+                            delay = float(retry_after) if retry_after else min(2**attempt, 60)
+                        except ValueError:
+                            delay = min(2**attempt, 60)
                         logger.warning(
                             "endpoint: %s returned %d, retry %d/%d in %.1fs",
                             url,
@@ -122,9 +123,6 @@ class Interceptor(RequestToResponseInterceptor):
                         parsed = json.loads(raw)
                     except (json.JSONDecodeError, UnicodeDecodeError):
                         parsed = raw
-
-                    if isinstance(parsed, dict):
-                        self._normalize_content(parsed)
 
                     return AdapterResponse(
                         status_code=status,

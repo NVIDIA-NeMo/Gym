@@ -30,8 +30,10 @@ from __future__ import annotations
 
 import json
 import logging
+import sys
 import threading
 import time
+import types
 import urllib.error
 import urllib.request
 from typing import Any
@@ -42,6 +44,14 @@ from fastapi import FastAPI, Request
 from starlette.responses import JSONResponse, Response
 
 from nemo_gym.adapters import start_adapter_proxy
+from nemo_gym.adapters.registry import InterceptorRegistry
+from nemo_gym.adapters.types import (
+    AdapterRequest,
+    AdapterResponse,
+    GracefulError,
+    RequestInterceptor,
+    ResponseInterceptor,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -70,7 +80,13 @@ class _StubUpstream:
             except Exception:
                 body = None
             with self._lock:
-                self.received.append({"method": request.method, "path": "/" + path, "body": body})
+                self.received.append(
+                    {"method": request.method, "path": "/" + path, "body": body, "query": request.url.query}
+                )
+            # A sentinel model lets a test force a non-JSON (bytes) upstream body
+            # so the proxy's bytes-passthrough arm is exercised.
+            if request.method == "POST" and isinstance(body, dict) and body.get("model") == "_raw_bytes_":
+                return Response(content=b"raw-not-json-bytes", media_type="application/octet-stream")
             # Default: OpenAI-compat success
             if request.method == "POST":
                 resp_body = {
@@ -156,6 +172,76 @@ def _get(url: str) -> tuple[int, bytes]:
             return r.status, r.read()
     except urllib.error.HTTPError as e:
         return e.code, e.read()
+
+
+def _post_raw(url: str, data: bytes) -> tuple[int, bytes]:
+    """POST arbitrary (possibly malformed) bytes with a JSON content-type."""
+    req = urllib.request.Request(
+        url,
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return r.status, r.read()
+    except urllib.error.HTTPError as e:
+        return e.code, e.read()
+
+
+# ---------------------------------------------------------------------------
+# Helper interceptors (registered via the registry so they can be named in an
+# ``adapters`` chain). These drive the pipeline's control-flow arms inside the
+# real proxy thread.
+# ---------------------------------------------------------------------------
+
+
+class _GracefulRaiser(RequestInterceptor):
+    """Raises ``GracefulError`` to exercise the proxy's 429 (budget) arm."""
+
+    async def intercept_request(self, req: AdapterRequest) -> AdapterRequest:
+        raise GracefulError("proxy budget exhausted")
+
+
+class _BoomRaiser(RequestInterceptor):
+    """Raises a generic exception to exercise the proxy's 500 arm."""
+
+    async def intercept_request(self, req: AdapterRequest) -> AdapterRequest:
+        raise RuntimeError("kaboom")
+
+
+class _DictHeaderBytesResponse(ResponseInterceptor):
+    """Replaces the response with dict-shaped headers + a bytes body.
+
+    The proxy's upstream closure always produces *list* headers, so the
+    dict-header forwarding branch is only reachable when an interceptor swaps
+    them in. A bogus ``content-length`` verifies the framing header is dropped
+    and recomputed from the actual body.
+    """
+
+    async def intercept_response(self, resp: AdapterResponse) -> AdapterResponse:
+        return AdapterResponse(
+            status_code=200,
+            headers={"x-proxy-marker": "kept", "content-length": "999"},
+            body=b"raw-bytes-body",
+            ctx=resp.ctx,
+        )
+
+
+def _register_proxy_test_interceptors() -> None:
+    for short, cls in (
+        ("_proxy_test_graceful", _GracefulRaiser),
+        ("_proxy_test_boom", _BoomRaiser),
+        ("_proxy_test_dict_bytes", _DictHeaderBytesResponse),
+    ):
+        mod_name = f"nemo_gym.adapters.interceptors.{short}"
+        mod = types.ModuleType(mod_name)
+        mod.Interceptor = cls
+        sys.modules[mod_name] = mod
+        InterceptorRegistry.register(short, mod_name)
+
+
+_register_proxy_test_interceptors()
 
 
 # ---------------------------------------------------------------------------
@@ -248,3 +334,86 @@ def test_proxy_handle_context_manager(upstream) -> None:
     # After context exit, the server should be stopped — port should reject
     # connections after a brief moment. We don't strictly assert this since
     # uvicorn shutdown is async, but the context manager should have called stop().
+
+
+def test_proxy_invalid_json_body_returns_400(upstream) -> None:
+    """A non-JSON body on an adapted POST route is rejected with 400 before the
+    pipeline runs (proxy.py invalid-JSON arm)."""
+    proxy = start_adapter_proxy(upstream_url=upstream.url, adapters=[{"name": "logging"}])
+    try:
+        status, body = _post_raw(f"{proxy.url}/v1/chat/completions", b"not-json")
+        assert status == 400, body
+        assert json.loads(body)["error"]["type"] == "invalid_request_error"
+    finally:
+        proxy.stop()
+
+
+def test_proxy_graceful_error_returns_429(upstream) -> None:
+    """A ``GracefulError`` from an interceptor maps to HTTP 429 with the
+    documented ``session_budget_exhausted`` body (mirrors middleware mode)."""
+    proxy = start_adapter_proxy(upstream_url=upstream.url, adapters=[{"name": "_proxy_test_graceful"}])
+    try:
+        status, body, _ = _post_json(f"{proxy.url}/v1/chat/completions", {"model": "stub", "messages": []})
+        assert status == 429, body
+        err = json.loads(body)["error"]
+        assert err["code"] == "session_budget_exhausted"
+        assert err["type"] == "invalid_request_error"
+        assert "proxy budget exhausted" in err["message"]
+    finally:
+        proxy.stop()
+
+
+def test_proxy_generic_exception_returns_500(upstream) -> None:
+    """A non-graceful exception from an interceptor falls into the generic
+    handler and returns HTTP 500."""
+    proxy = start_adapter_proxy(upstream_url=upstream.url, adapters=[{"name": "_proxy_test_boom"}])
+    try:
+        status, body, _ = _post_json(f"{proxy.url}/v1/chat/completions", {"model": "stub", "messages": []})
+        assert status == 500, body
+        assert json.loads(body)["error"]["type"] == "server_error"
+    finally:
+        proxy.stop()
+
+
+def test_proxy_non_json_upstream_body_passed_through_as_bytes(upstream) -> None:
+    """When the upstream returns a non-JSON (bytes) body, the proxy forwards it
+    unchanged as bytes rather than trying to JSON-encode it."""
+    proxy = start_adapter_proxy(upstream_url=upstream.url, adapters=[{"name": "logging"}])
+    try:
+        status, body, _ = _post_json(f"{proxy.url}/v1/chat/completions", {"model": "_raw_bytes_", "messages": []})
+        assert status == 200, body
+        assert body == b"raw-not-json-bytes"
+    finally:
+        proxy.stop()
+
+
+def test_proxy_forwards_query_string_to_upstream(upstream) -> None:
+    """A query string on the inbound request is preserved on the upstream call."""
+    proxy = start_adapter_proxy(upstream_url=upstream.url, adapters=[{"name": "logging"}])
+    try:
+        status, body, _ = _post_json(
+            f"{proxy.url}/v1/chat/completions?api-version=2024-08-01",
+            {"model": "stub", "messages": []},
+        )
+        assert status == 200, body
+        assert any(r.get("query") == "api-version=2024-08-01" for r in upstream.received), upstream.received
+    finally:
+        proxy.stop()
+
+
+def test_proxy_dict_headers_and_bytes_body_response_forwarded(upstream) -> None:
+    """A response carrying dict-shaped headers + a bytes body is forwarded with
+    correct framing: the bogus content-length is dropped and recomputed, custom
+    headers survive, and the bytes body is returned verbatim."""
+    proxy = start_adapter_proxy(upstream_url=upstream.url, adapters=[{"name": "_proxy_test_dict_bytes"}])
+    try:
+        status, body, headers = _post_json(f"{proxy.url}/v1/chat/completions", {"model": "stub", "messages": []})
+        assert status == 200, body
+        assert body == b"raw-bytes-body"
+        hdrs = {k.lower(): v for k, v in headers}
+        assert hdrs.get("x-proxy-marker") == "kept"
+        # The interceptor's bogus content-length=999 must be dropped; framing
+        # reflects the real body length.
+        assert hdrs.get("content-length") == str(len(b"raw-bytes-body"))
+    finally:
+        proxy.stop()

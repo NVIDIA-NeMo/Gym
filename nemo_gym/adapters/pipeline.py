@@ -23,7 +23,7 @@ from nemo_gym.adapters.registry import InterceptorRegistry
 from nemo_gym.adapters.types import (
     AdapterRequest,
     AdapterResponse,
-    InterceptorContext,
+    GracefulError,
     RequestInterceptor,
     RequestToResponseInterceptor,
     ResponseInterceptor,
@@ -100,8 +100,9 @@ class AdapterPipeline:
         is invoked with the (possibly mutated) request. Response interceptors
         then run in reverse order.
         """
-        ctx = InterceptorContext(request_id=request.ctx.request_id)
-        set_context(ctx)
+        # Reuse the request's own context so interceptors reading the global
+        # get_context() observe the same ctx.extra (e.g. session_id) as req.ctx.
+        set_context(request.ctx)
 
         current: AdapterRequest | AdapterResponse = request
 
@@ -113,6 +114,9 @@ class AdapterPipeline:
                 try:
                     result = await interceptor.intercept_request(current)  # type: ignore[arg-type]
                     current = result
+                except GracefulError:
+                    # Control-flow signal (-> 429); never swallowed by best_effort.
+                    raise
                 except Exception:
                     if getattr(interceptor, "best_effort", False):
                         logger.warning(
@@ -133,6 +137,8 @@ class AdapterPipeline:
         for interceptor in response_interceptors:
             try:
                 response = await interceptor.intercept_response(response)
+            except GracefulError:
+                raise
             except Exception:
                 if getattr(interceptor, "best_effort", False):
                     logger.warning(

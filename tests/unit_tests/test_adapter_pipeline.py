@@ -27,10 +27,12 @@ from nemo_gym.adapters.pipeline import AdapterPipeline
 from nemo_gym.adapters.types import (
     AdapterRequest,
     AdapterResponse,
+    GracefulError,
     InterceptorContext,
     RequestInterceptor,
     RequestToResponseInterceptor,
     ResponseInterceptor,
+    get_context,
 )
 
 
@@ -306,3 +308,63 @@ async def test_library_import_request_stage_mutation_reaches_short_circuit():
     assert endpoint.last_request.headers["x-test"] == "1"
     assert resp.status_code == 200
     assert resp.body == {"result": "ok"}
+
+
+# ===========================================================================
+# Context sharing — ``process()`` reuses the request's own ``ctx`` so the
+# global ``get_context()`` observed by interceptors sees the same ``ctx.extra``
+# (e.g. a middleware-parsed ``session_id``) as ``request.ctx``.
+# ===========================================================================
+
+
+async def test_process_exposes_request_ctx_via_get_context():
+    """After ``process()``, ``get_context()`` returns the request's own ctx —
+    including any ``ctx.extra`` the caller populated (e.g. a session id)."""
+    req = _req()
+    req.ctx.extra["session_id"] = "sess-xyz"
+    pipeline = AdapterPipeline([FixedEndpoint()])
+
+    await pipeline.process(req)
+
+    ctx = get_context()
+    # Same object, not a fresh context — so extra (session_id etc.) is shared.
+    assert ctx is req.ctx
+    assert ctx.extra == req.ctx.extra
+    assert ctx.extra.get("session_id") == "sess-xyz"
+
+
+# ===========================================================================
+# GracefulError is a control-flow signal: it must propagate even from a
+# ``best_effort=True`` interceptor (which otherwise swallows exceptions),
+# in both the request phase and the response phase.
+# ===========================================================================
+
+
+class _BestEffortGracefulRequest(RequestInterceptor):
+    best_effort = True
+
+    async def intercept_request(self, req: AdapterRequest) -> AdapterRequest:
+        raise GracefulError("budget exhausted (request)")
+
+
+class _BestEffortGracefulResponse(ResponseInterceptor):
+    best_effort = True
+
+    async def intercept_response(self, resp: AdapterResponse) -> AdapterResponse:
+        raise GracefulError("budget exhausted (response)")
+
+
+async def test_graceful_error_propagates_from_best_effort_request_interceptor():
+    """A ``best_effort=True`` request interceptor that raises ``GracefulError``
+    must NOT have it swallowed — the control-flow signal propagates."""
+    pipeline = AdapterPipeline([_BestEffortGracefulRequest(), FixedEndpoint()])
+    with pytest.raises(GracefulError, match="request"):
+        await pipeline.process(_req())
+
+
+async def test_graceful_error_propagates_from_best_effort_response_interceptor():
+    """A ``best_effort=True`` response interceptor that raises ``GracefulError``
+    must NOT have it swallowed — the control-flow signal propagates."""
+    pipeline = AdapterPipeline([FixedEndpoint(), _BestEffortGracefulResponse()])
+    with pytest.raises(GracefulError, match="response"):
+        await pipeline.process(_req())
