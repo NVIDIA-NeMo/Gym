@@ -15,12 +15,14 @@
 import asyncio
 import json
 import logging
+import os
 import re
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 from fastapi import FastAPI
+from pydantic import Field
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -31,6 +33,18 @@ from nemo_gym.base_resources_server import (
 )
 from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
 from nemo_gym.server_utils import request
+
+
+def _cache_dir_from_env() -> Optional[Path]:
+    """Read CRITPT_CACHE_DIR at server-construction time, or None if unset.
+
+    Sourced from an env var rather than a Hydra config field to avoid having to
+    declare a new key in upstream Gym's struct-locked `critpt.yaml` schema for
+    every new field we want callers to be able to configure. Callers (the
+    eval-factory YAML) inject this via `evaluation.env_vars`.
+    """
+    raw = os.environ.get("CRITPT_CACHE_DIR")
+    return Path(raw) if raw else None
 
 
 LOG = logging.getLogger(__name__)
@@ -80,8 +94,10 @@ class CritPtResourcesServerConfig(BaseResourcesServerConfig):
     #   submissions.jsonl    one line per submission seen at verify()
     #   aa_responses.jsonl   one line per AA call that returned 2xx
     #   partial_metrics.json aggregate accuracy over scored submissions
-    # Leaving this None preserves the prior behavior (no on-disk state).
-    cache_dir: Optional[Path] = None
+    # Leaving this None (or unset) preserves the prior behavior (no on-disk state).
+    # Sourced from $CRITPT_CACHE_DIR rather than a Hydra config field so callers
+    # don't have to extend Gym's struct-locked YAML schema to enable it.
+    cache_dir: Optional[Path] = Field(default_factory=_cache_dir_from_env)
 
 
 class CritPtRunRequest(BaseRunRequest):
