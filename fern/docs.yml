@@ -12,6 +12,10 @@ global-theme: nvidia
 logo:
   right-text: NeMo Gym
 
+navbar-links:
+  - type: github
+    value: https://github.com/NVIDIA-NeMo/Gym
+
 libraries:
   nemo-gym:
     input:
