@@ -123,3 +123,46 @@ class TestMCPResourcesServer:
             _MCP_SESSION_TOKEN.reset(context_token)
 
         assert exc_info.value.status_code == 401
+
+    def test_mcp_endpoint_accepts_non_loopback_host(self) -> None:
+        """Regression: the MCP SDK's default DNS-rebinding protection returns HTTP 421 for any
+        non-loopback Host header, which breaks multi-node/absolute-IP deployments. MCPResourcesServer
+        must disable it so server-to-server MCP calls keep working off-loopback."""
+        pytest.importorskip("mcp")
+        from fastapi.testclient import TestClient
+
+        config = BaseResourcesServerConfig(host="", port=0, entrypoint="", name="test_mcp_resources_server")
+
+        class TestMCPServer(MCPResourcesServer):
+            def register_mcp_tools(self, mcp):
+                @mcp.tool()
+                def ping() -> str:
+                    return "pong"
+
+            async def verify(self, body):
+                pass
+
+        server = TestMCPServer(config=config, server_client=MagicMock(spec=ServerClient))
+        app = server.setup_webserver()
+
+        with TestClient(app, base_url="http://127.0.0.1:8000") as client:
+            resp = client.post(
+                "/mcp",
+                headers={
+                    "Accept": "application/json, text/event-stream",
+                    "Content-Type": "application/json",
+                    # A routable, non-loopback host as seen on a multi-node deployment.
+                    "Host": "10.20.30.40:8000",
+                },
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {"name": "ping", "arguments": {}},
+                },
+                follow_redirects=False,
+            )
+
+        assert resp.status_code != 421, "MCP endpoint rejected a non-loopback Host (DNS-rebinding protection)"
+        assert resp.status_code == 200
+        assert resp.json()["result"]["structuredContent"]["result"] == "pong"

@@ -142,6 +142,7 @@ class MCPResourcesServer(SimpleResourcesServer):
 
         try:
             from mcp.server.fastmcp import FastMCP
+            from mcp.server.transport_security import TransportSecuritySettings
         except ImportError as exc:  # pragma: no cover - exercised only without the optional runtime dependency
             raise RuntimeError(
                 "MCPResourcesServer requires the official MCP Python SDK. Install the 'mcp' package."
@@ -152,6 +153,13 @@ class MCPResourcesServer(SimpleResourcesServer):
             stateless_http=True,
             json_response=True,
             streamable_http_path="/",
+            # The MCP SDK enables DNS-rebinding protection by default, which only accepts loopback
+            # Host headers and returns HTTP 421 for anything else. Gym mounts this endpoint for
+            # server-to-server access: the agent reaches it via the resources server's resolved host,
+            # which is a routable IP/hostname when use_absolute_ip=True (required for multi-node runs).
+            # The endpoint is already gated by the per-rollout X-NeMo-Gym-Session-Token, so we disable
+            # Host/Origin validation to keep MCP tool calls working off-loopback.
+            transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
         )
         self.register_mcp_tools(mcp)
 
