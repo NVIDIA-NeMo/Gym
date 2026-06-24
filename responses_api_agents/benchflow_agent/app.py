@@ -177,7 +177,7 @@ class BenchFlowAgent(SimpleResponsesAPIAgent):
 
         eval_config = EvaluationConfig(
             agent=self.config.agent,
-            model=f"hosted_vllm/{get_global_config_dict()['policy_model_name']}",
+            model=f"vllm/{get_global_config_dict()['policy_model_name']}",
             environment=self.config.environment,
             concurrency=1,
             agent_env=self._build_agent_env(),
@@ -208,11 +208,9 @@ class BenchFlowAgent(SimpleResponsesAPIAgent):
     def _build_agent_env(self) -> dict[str, str]:
         """Builds the environment variables to forward to the agent harness."""
         global_config_dict = get_global_config_dict()
-        api_key = global_config_dict.get("policy_api_key", "EMPTY")
         agent_env = {
             "BENCHFLOW_PROVIDER_BASE_URL": self._resolve_model_base_url(global_config_dict),
-            "BENCHFLOW_PROVIDER_API_KEY": api_key,
-            "OPENAI_API_KEY": api_key,
+            "BENCHFLOW_PROVIDER_API_KEY": global_config_dict.get("policy_api_key", "EMPTY"),
         }
         if self.config.agent_env:
             agent_env.update(self.config.agent_env)
