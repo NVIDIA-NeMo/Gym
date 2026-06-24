@@ -152,6 +152,12 @@ class TestCLI:
                 # This should not raise an assertion error about missing domain
                 instance_config = ResourcesServerInstanceConfig.model_validate(full_config_dict)
                 assert instance_config is not None
+
+                # The generated config points users at the unified `source:` identifier, not the
+                # deprecated gitlab_identifier/huggingface_identifier.
+                assert "source:" in config_text
+                assert "gitlab_identifier" not in config_text
+                assert "huggingface_identifier" not in config_text
         finally:
             # Clean up the test server directory
             if server_path.exists():
