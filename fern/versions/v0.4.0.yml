@@ -15,15 +15,13 @@ navigation:
       - folder: ./latest/pages/get-started
         title: "Get Started"
         title-source: frontmatter
-      - folder: ./latest/pages/agent-server
-        title: "Agent Server"
-        title-source: frontmatter
       - folder: ./latest/pages/model-server
         title: "Model Server"
         title-source: frontmatter
-      - folder: ./latest/pages/resources-server
-        title: "Resources Server"
-        title-source: frontmatter
+      - page: "Resources Server"
+        path: ./latest/pages/resources-server/index.mdx
+      - page: "Agent Server"
+        path: ./latest/pages/agent-server/index.mdx
       - folder: ./latest/pages/data
         title: "Data"
         title-source: frontmatter
