@@ -700,3 +700,16 @@ def compute_aggregate_metrics(
         agent_metrics=serialized_agent,
         key_metrics=key_metrics,
     )
+
+
+# Backward-compatibility shim (CLI refactor): this CLI entry point moved to `nemo_gym.cli.eval`.
+# Re-exported lazily to avoid a circular import; accessing it emits a DeprecationWarning.
+from nemo_gym.cli._compat import moved_attr_getter  # noqa: E402
+
+
+__getattr__ = moved_attr_getter(
+    __name__,
+    {
+        "reward_profile": "nemo_gym.cli.eval",
+    },
+)

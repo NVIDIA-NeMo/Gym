@@ -53,3 +53,19 @@ def upload_jsonl_dataset_to_hf_maybe_delete(
 
     if delete_from_gitlab:
         delete_jsonl_dataset_from_gitlab(gitlab_model_name)
+
+
+# Backward-compatibility shims (CLI refactor): these CLI entry points moved to `nemo_gym.cli.dataset`.
+# Re-exported lazily to avoid a circular import; accessing them emits a DeprecationWarning.
+from nemo_gym.cli._compat import moved_attr_getter  # noqa: E402
+
+
+__getattr__ = moved_attr_getter(
+    __name__,
+    {
+        "upload_jsonl_dataset_to_hf_cli": "nemo_gym.cli.dataset",
+        "upload_jsonl_dataset_to_hf_and_delete_gitlab_cli": "nemo_gym.cli.dataset",
+        "download_jsonl_dataset_from_hf_cli": "nemo_gym.cli.dataset",
+        "delete_jsonl_dataset_from_gitlab_cli": "nemo_gym.cli.dataset",
+    },
+)

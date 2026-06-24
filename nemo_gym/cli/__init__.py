@@ -13,22 +13,35 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Any
+from nemo_gym.cli._compat import moved_attr_getter
 
 
-# NOTE: The cli module was re-structured but NeMo-RL relies on these two imports.
-# They resolve lazily so importing this package (which happens on every `gym` invocation)
-# doesn't eagerly pull in hydra, wandb and ray at startup.
-_LEGACY_EXPORTS = {
-    "RunHelper": "nemo_gym.cli.env",
-    "GlobalConfigDictParserConfig": "nemo_gym.global_config",
-}
-
-
-def __getattr__(name: str) -> Any:
-    module_path = _LEGACY_EXPORTS.get(name)
-    if module_path is None:
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    import importlib
-
-    return getattr(importlib.import_module(module_path), name)
+# The single `nemo_gym/cli.py` module was split into the `nemo_gym.cli` package. Its public
+# surface is re-exported lazily from the new submodules so existing `from nemo_gym.cli import X`
+# imports (e.g. NeMo-RL's `RunHelper` / `GlobalConfigDictParserConfig`) keep working. Lazy
+# resolution keeps `import nemo_gym.cli` cheap — it doesn't eagerly pull in hydra, wandb or ray —
+# and avoids circular imports. Each access emits a DeprecationWarning pointing at the new path.
+__getattr__ = moved_attr_getter(
+    __name__,
+    {
+        # Server orchestration + run/test entry points (old `nemo_gym/cli.py`)
+        "RunHelper": "nemo_gym.cli.env",
+        "RunConfig": "nemo_gym.cli.env",
+        "TestConfig": "nemo_gym.cli.env",
+        "TestAllConfig": "nemo_gym.cli.env",
+        "PipListConfig": "nemo_gym.cli.env",
+        "run": "nemo_gym.cli.env",
+        "test": "nemo_gym.cli.env",
+        "test_all": "nemo_gym.cli.env",
+        "init_resources_server": "nemo_gym.cli.env",
+        "dump_config": "nemo_gym.cli.env",
+        "status": "nemo_gym.cli.env",
+        "pip_list": "nemo_gym.cli.env",
+        "e2e_rollout_collection": "nemo_gym.cli.eval",
+        "dev_test": "nemo_gym.cli.dev",
+        "VersionConfig": "nemo_gym.cli.general",
+        "version": "nemo_gym.cli.general",
+        # Never actually lived in cli; reachable via the old module's top-level import.
+        "GlobalConfigDictParserConfig": "nemo_gym.global_config",
+    },
+)

@@ -161,3 +161,16 @@ class MaterializePromptsConfig(BaseNeMoGymCLIConfig):
     input_jsonl_fpath: str = Field(description="Raw JSONL data (no responses_create_params.input).")
     prompt_config: str = Field(description="Path to prompt YAML file to apply.")
     output_jsonl_fpath: str = Field(description="Output path for materialized JSONL with populated prompts.")
+
+
+# Backward-compatibility shim (CLI refactor): this CLI entry point moved to `nemo_gym.cli.dataset`.
+# Re-exported lazily to avoid a circular import; accessing it emits a DeprecationWarning.
+from nemo_gym.cli._compat import moved_attr_getter  # noqa: E402
+
+
+__getattr__ = moved_attr_getter(
+    __name__,
+    {
+        "materialize_prompts_cli": "nemo_gym.cli.dataset",
+    },
+)

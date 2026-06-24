@@ -711,3 +711,17 @@ Merged rollouts: {output_fpath if config.merge_shards else "<not merged>"}
 Aggregate metrics: {aggregate_metrics_fpath}""")
 
         return aggregate_metrics_fpath
+
+
+# Backward-compatibility shims (CLI refactor): these CLI entry points moved to `nemo_gym.cli.eval`.
+# Re-exported lazily to avoid a circular import; accessing them emits a DeprecationWarning.
+from nemo_gym.cli._compat import moved_attr_getter  # noqa: E402
+
+
+__getattr__ = moved_attr_getter(
+    __name__,
+    {
+        "collect_rollouts": "nemo_gym.cli.eval",
+        "aggregate_rollouts": "nemo_gym.cli.eval",
+    },
+)

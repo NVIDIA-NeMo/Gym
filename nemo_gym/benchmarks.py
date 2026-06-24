@@ -98,3 +98,18 @@ def _load_benchmarks_from_config_paths(config_paths: List[Path]) -> Dict[str, Be
         benchmarks_dict[maybe_bc.name] = maybe_bc
 
     return benchmarks_dict
+
+
+# Backward-compatibility shims (CLI refactor): these symbols moved to `nemo_gym.cli.eval`.
+# Re-exported lazily to avoid a circular import; accessing them emits a DeprecationWarning.
+from nemo_gym.cli._compat import moved_attr_getter  # noqa: E402
+
+
+__getattr__ = moved_attr_getter(
+    __name__,
+    {
+        "list_benchmarks": "nemo_gym.cli.eval",
+        "PrepareBenchmarkConfig": "nemo_gym.cli.eval",
+        "prepare_benchmark": "nemo_gym.cli.eval",
+    },
+)
