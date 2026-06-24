@@ -34,6 +34,9 @@ class RunnerSpec:
 DEFAULT_RUNNER_NAME = "gym_pyautogui"
 
 
+_PROMPT_AGENT = "mm_agents.agent.PromptAgent"
+
+
 RUNNER_REGISTRY: Dict[str, RunnerSpec] = {
     # Backward-compatible path used by the current Gym integration. It keeps
     # Gym in charge of prompt construction and model calls.
@@ -45,20 +48,63 @@ RUNNER_REGISTRY: Dict[str, RunnerSpec] = {
     ),
     # Native OSWorld PromptAgent path. We patch PromptAgent.call_llm to route
     # its already-constructed messages to the Gym policy model, but keep
-    # PromptAgent's prompt/action parsing behavior.
+    # PromptAgent's prompt/action parsing behavior. The unqualified
+    # "prompt_agent" entry mirrors OSWorld's upstream PromptAgent defaults.
     "prompt_agent": RunnerSpec(
         name="prompt_agent",
         kind="prompt_agent",
+        action_space="computer_13",
+        observation_type="screenshot_a11y_tree",
+        agent_class_path=_PROMPT_AGENT,
+    ),
+    "prompt_agent_screenshot_pyautogui": RunnerSpec(
+        name="prompt_agent_screenshot_pyautogui",
+        kind="prompt_agent",
         action_space="pyautogui",
         observation_type="screenshot",
-        agent_class_path="mm_agents.agent.PromptAgent",
+        agent_class_path=_PROMPT_AGENT,
     ),
     "prompt_agent_computer_13": RunnerSpec(
         name="prompt_agent_computer_13",
         kind="prompt_agent",
         action_space="computer_13",
         observation_type="screenshot",
-        agent_class_path="mm_agents.agent.PromptAgent",
+        agent_class_path=_PROMPT_AGENT,
+    ),
+    "prompt_agent_a11y_tree_pyautogui": RunnerSpec(
+        name="prompt_agent_a11y_tree_pyautogui",
+        kind="prompt_agent",
+        action_space="pyautogui",
+        observation_type="a11y_tree",
+        agent_class_path=_PROMPT_AGENT,
+    ),
+    "prompt_agent_a11y_tree_computer_13": RunnerSpec(
+        name="prompt_agent_a11y_tree_computer_13",
+        kind="prompt_agent",
+        action_space="computer_13",
+        observation_type="a11y_tree",
+        agent_class_path=_PROMPT_AGENT,
+    ),
+    "prompt_agent_screenshot_a11y_tree_pyautogui": RunnerSpec(
+        name="prompt_agent_screenshot_a11y_tree_pyautogui",
+        kind="prompt_agent",
+        action_space="pyautogui",
+        observation_type="screenshot_a11y_tree",
+        agent_class_path=_PROMPT_AGENT,
+    ),
+    "prompt_agent_screenshot_a11y_tree_computer_13": RunnerSpec(
+        name="prompt_agent_screenshot_a11y_tree_computer_13",
+        kind="prompt_agent",
+        action_space="computer_13",
+        observation_type="screenshot_a11y_tree",
+        agent_class_path=_PROMPT_AGENT,
+    ),
+    "prompt_agent_som_pyautogui": RunnerSpec(
+        name="prompt_agent_som_pyautogui",
+        kind="prompt_agent",
+        action_space="pyautogui",
+        observation_type="som",
+        agent_class_path=_PROMPT_AGENT,
     ),
 }
 

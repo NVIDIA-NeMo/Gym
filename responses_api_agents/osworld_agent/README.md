@@ -34,10 +34,17 @@ The shape mirrors `mini_swe_agent`: there is no paired
 `DesktopEnv.evaluate()`. Each rollout is dispatched to a Ray worker so
 many tasks can run concurrently against the same model server.
 
-Action space is **pyautogui** (matches OSWorld's `PromptAgent` default):
-the model returns ```python``` code blocks, plus the sentinel tokens
-`WAIT`, `DONE`, `FAIL`. `<think>` / `<thinking>` blocks are stripped
-before parsing so reasoning models work out of the box.
+By default this wrapper keeps the existing Gym-built prompt path:
+`gym_pyautogui` asks the model for ```python```/pyautogui code blocks,
+plus the sentinel tokens `WAIT`, `DONE`, `FAIL`. For closer parity with
+OSWorld's own harness, set `runner_name=prompt_agent` or one of the
+explicit `prompt_agent_*` runners. That path instantiates upstream
+`mm_agents.agent.PromptAgent`, lets it build prompts and parse actions,
+and only routes its model call to the configured Gym policy endpoint.
+The unqualified `prompt_agent` mirrors OSWorld's default
+`screenshot_a11y_tree` observation mode with `computer_13` actions.
+`<think>` / `<thinking>` blocks are stripped before execution so
+reasoning models work out of the box.
 
 ### What happens under the hood per rollout
 
@@ -59,8 +66,8 @@ ng_collect_rollouts
 │                                                          │
 │   2. env.reset(task_config)                              │
 │   3. Loop k ≤ max_steps:                                 │
-│        GET /screenshot ──► policy model /v1/responses    │
-│        ──► pyautogui code ──► POST /execute              │
+│        observe screenshot/a11y ─► policy model           │
+│        ──► pyautogui code or computer_13 action ─► step  │
 │        parse for DONE / FAIL / WAIT                      │
 │   4. env.evaluate()  → float in [0, 1]                   │
 │   5. env.close() (instance / container teardown)         │
@@ -461,6 +468,12 @@ that wires the agent to a model server and the datasets. Key fields
 | `concurrency`            | 4       | `asyncio.Semaphore` bound on concurrent `/run` calls                             |
 | `max_tokens`             | 1500    | Model max-tokens override (request value wins if present)                        |
 | `temperature` / `top_p`  | 1.0 / 0.9 | Same — request value wins                                                      |
+| `runner_name`            | gym_pyautogui | Runner contract. `gym_pyautogui` preserves the Gym-built prompt path; `prompt_agent` uses OSWorld's native `PromptAgent` defaults; explicit `prompt_agent_*` names select concrete observation/action combinations |
+| `action_space`           | null    | Optional override for compatible runners (`pyautogui` / `computer_13`)           |
+| `observation_type`       | null    | Optional override for compatible runners (`screenshot` / `a11y_tree` / `screenshot_a11y_tree` / `som`) |
+| `env_class_path`         | null    | Optional Python import path for a custom OSWorld environment class                |
+| `agent_class_path`       | null    | Optional Python import path for a custom native OSWorld agent class               |
+| `agent_kwargs`           | `{}`    | Extra kwargs merged into the native agent constructor                             |
 | `mem_limit_mb`           | 16384   | VM cgroup memory cap in MB (~16 GB; passed to provider)                          |
 | `step_timeout`           | 60      | Per-action subprocess timeout (advisory; provider-dependent)                     |
 | `task_timeout`           | 1800    | Whole-rollout wall-clock cap in seconds; trips `mask_sample=True` if exceeded    |
@@ -473,21 +486,21 @@ samples so unreliable zero rewards don't pollute the policy update.
 ### Observation modes
 
 OSWorld evaluates agents under four observation modes (cf. the original
-paper, Table 5). Select them with `require_a11y_tree` plus the
-`OSWORLD_OMIT_SCREENSHOT_IN_OBS` environment variable:
+paper, Table 5). For the native `PromptAgent` path, choose a runner name:
 
-| Mode | `require_a11y_tree` | `OSWORLD_OMIT_SCREENSHOT_IN_OBS` |
-| ---- | ------------------- | -------------------------------- |
-| Screenshot only | `false` | unset |
-| Screenshot + Accessibility tree | `true` | unset |
-| Accessibility tree only | `true` | `1` |
-| Set-of-Mark (SoM) | — | not yet supported (needs an annotation pipeline) |
+| Mode | Native runner examples |
+| ---- | ---------------------- |
+| Screenshot only | `prompt_agent_screenshot_pyautogui`, `prompt_agent_computer_13` |
+| Accessibility tree only | `prompt_agent_a11y_tree_pyautogui`, `prompt_agent_a11y_tree_computer_13` |
+| Screenshot + accessibility tree | `prompt_agent`, `prompt_agent_screenshot_a11y_tree_pyautogui`, `prompt_agent_screenshot_a11y_tree_computer_13` |
+| Set-of-Mark (SoM) | `prompt_agent_som_pyautogui` |
 
-When `OSWORLD_OMIT_SCREENSHOT_IN_OBS` is set, the screenshot is blanked
-from the observation sent to the model, leaving only the accessibility
-tree — this is the paper's "a11y only" setting (e.g. its GPT-4 12.24%
-headline). It is an env var rather than a YAML key because it toggles a
-single field in the per-step observation payload.
+Runners that need accessibility data automatically construct
+`DesktopEnv(require_a11y_tree=True)`. The default `gym_pyautogui` path
+also supports a lightweight a11y-only diagnostic mode via
+`require_a11y_tree=true` plus `OSWORLD_OMIT_SCREENSHOT_IN_OBS=1`; that
+mode blanks the screenshot from the Gym-built prompt but does not use
+OSWorld's native `PromptAgent` prompt templates.
 
 ### Override priority
 

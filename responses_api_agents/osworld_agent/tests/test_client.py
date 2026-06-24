@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
+import pytest
+
 from responses_api_agents.osworld_agent import client as osworld_client
 
 
@@ -154,3 +156,29 @@ def test_prompt_agent_runner_routes_native_agent_messages_to_policy_model(monkey
     assert calls[0]["payload"]["max_tokens"] == 123
     assert calls[0]["payload"]["temperature"] == 0.4
     assert calls[0]["payload"]["top_p"] is None
+
+
+@pytest.mark.parametrize(
+    "runner_name",
+    [
+        "prompt_agent",
+        "prompt_agent_a11y_tree_pyautogui",
+        "prompt_agent_som_pyautogui",
+    ],
+)
+def test_prompt_agent_runners_requiring_a11y_enable_env_a11y_tree(monkeypatch, runner_name: str) -> None:
+    _patch_client_for_fake_runtime(monkeypatch)
+
+    result = osworld_client.run_osworld_task(
+        {"id": "task-a11y", "instruction": "Use native PromptAgent with richer observations."},
+        model_fn=lambda *_args: "unused",
+        runner_name=runner_name,
+        env_class_path="fake.FakeEnv",
+        agent_class_path="fake.FakePromptAgent",
+        messages_model_fn=lambda _messages, _payload: "native response",
+        sleep_after_execution=0,
+        task_timeout=10,
+    )
+
+    assert result.reward == 1.0
+    assert FakeEnv.instances[0].kwargs["require_a11y_tree"] is True
