@@ -6,7 +6,7 @@ position: 2
 
 EvalPlus evaluates Python function-completion ability. NeMo Gym's `evalplus` resources server sends HumanEval+ or MBPP+ prompts to an agent, extracts the model's Python code, runs EvalPlus base and plus tests, and returns reward and verdict fields for each task.
 
-Use this tutorial when you want a small, reproducible coding evaluation before scaling to a larger benchmark run.
+Use this tutorial for a small, reproducible coding evaluation before scaling to a larger benchmark run.
 
 ## What This Tutorial Runs
 
@@ -27,11 +27,11 @@ The config currently selects `dataset: humaneval`. The same resources server als
 
 Complete [Installation](/get-started/installation) and configure a model endpoint as shown in [Quickstart](/get-started/quickstart).
 
-EvalPlus executes generated Python code in the verifier. Run this tutorial in an environment where code execution is expected and isolated according to your team's policy.
+EvalPlus executes generated Python code in the verifier. Run this tutorial in an environment where code execution is expected and isolated per the team's policy.
 
 <Note>
 
-If you use a thinking model with vLLM, start vLLM with the appropriate reasoning parser so `<think>...</think>` text is stripped before EvalPlus extracts code.
+When using a thinking model with vLLM, start vLLM with the appropriate reasoning parser so `<think>...</think>` text is stripped before EvalPlus extracts code.
 
 </Note>
 

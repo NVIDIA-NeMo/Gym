@@ -4,13 +4,9 @@ description: "Run repeatable model and agent evaluations with NeMo Gym environme
 position: 1
 ---
 
-Evaluation in NeMo Gym measures how a model or agent performs in an environment, then turns the resulting rollouts into metrics and improvement decisions. A useful evaluation keeps the task set, resources server, harness, model, sampling settings, and repeat count explicit so every score can be traced back to the component that changed.
-
-NeMo Gym evaluation is environment-native: the same dataset, resources server, verifier, and rollout machinery can support model comparison, harness comparison, benchmark development, ablation studies, and training-data analysis.
-
 <Warning>
 
-Evaluation workflows were previously supported in [NeMo Evaluator](https://docs.nvidia.com/nemo/evaluator/latest/). NeMo Evaluator will be deprecated; ongoing evaluation support will live in NeMo Gym.
+Evaluation workflows were previously supported in [NeMo Evaluator](https://github.com/NVIDIA-NeMo/Evaluator/). NeMo Evaluator will be deprecated; ongoing evaluation support will live in NeMo Gym.
 
 </Warning>
 
@@ -20,9 +16,9 @@ For the underlying concepts, read [Evaluation](/about/concepts/evaluation) and [
 
 </Info>
 
-## Evaluation Loop
+NeMo Gym evaluation is environment-native: the same dataset, resources server, verifier, and rollout machinery can support model comparison, harness comparison, benchmark development, ablation studies, and training-data analysis.
 
-Use the same loop whether you are evaluating a public benchmark, a custom environment, or a candidate training task set:
+## Gym Evaluation Loop
 
 1. Choose a task set and resources server.
 2. Choose the model server and agent harness.
@@ -32,7 +28,7 @@ Use the same loop whether you are evaluating a public benchmark, a custom enviro
 6. Inspect failures, sometimes-pass tasks, and missing rows.
 7. Decide whether the next action is model training, harness work, verifier repair, benchmark cleanup, or data filtering.
 
-The most important rule is to vary one thing at a time when you want a causal comparison. If you change the model, harness, prompt, verifier, and dataset together, the score can still be useful as a release gate, but it cannot tell you what caused the difference.
+The most important rule is to vary one thing at a time for causal comparison. Changing the model, harness, prompt, verifier, and dataset together can still produce a useful score as a release gate, but it cannot explain what caused the difference.
 
 ## Models
 
@@ -86,17 +82,6 @@ Review how model, agent, and resources servers fit together.
 
 </Cards>
 
-## Skills
-
-Skills are reusable analysis instructions that help agents interpret evaluation artifacts consistently. They are not part of the benchmark runtime; they sit after rollout collection and help turn metrics, traces, and reports into evidence-backed diagnoses.
-
-<Cards>
-
-<Card title="Skills" href="/evaluation/skills">
-Use BLADE-style analysis skills to explain score changes and failure modes.
-</Card>
-
-</Cards>
 
 ## Benchmarks
 
@@ -104,8 +89,8 @@ A benchmark is an environment configured for repeatable comparison. It needs a t
 
 When choosing or building a benchmark, check:
 
-- **Task fit**: Does the task distribution match the capability you care about?
-- **Verifier fidelity**: Does reward measure the behavior you want, or just a proxy?
+- **Task fit**: Does the task distribution match the target capability?
+- **Verifier fidelity**: Does reward measure the target behavior, or just a proxy?
 - **Model compatibility**: Can the model endpoint support the required input/output mode, tool calls, images, long context, or structured output?
 - **Harness fit**: Does the harness expose the tools and interaction pattern required by the benchmark?
 - **Variance**: Are repeats stable enough to distinguish real changes from noise?
@@ -149,42 +134,6 @@ Keep the iteration record with the artifacts:
 - Aggregate metrics and reward profiles
 - Notes on missing rows, timeouts, or known flaky infrastructure
 
-## Aggregate Metrics
-
-After rollout collection, NeMo Gym computes aggregate metrics for each agent and writes a single `_aggregate_metrics.json` file. Aggregate metrics provide the top-level scorecard for evaluation runs, including overall numeric statistics, key metrics, and per-task group metrics.
-
-Use aggregate metrics for:
-
-- pass@1 and pass@k summaries
-- mean, max, min, median, and standard deviation over reward or custom numeric fields
-- per-task breakdowns across repeats
-- headline metrics selected by the environment
-- quick comparison across models, harnesses, and ablations
-
-Aggregate metrics are necessary but not sufficient. They tell you what changed; rollout inspection and [skills](/evaluation/skills) such as BLADE explain why it changed.
-
-<Cards>
-
-<Card title="Aggregate Metrics" href="/evaluation/aggregate-metrics">
-Understand the `_aggregate_metrics.json` format and customization hooks.
-</Card>
-
-</Cards>
-
-## Outputs To Preserve
-
-For every evaluation run, preserve the artifacts needed to reproduce and interpret the score:
-
-| Artifact | Why It Matters |
-|---|---|
-| Rollout JSONL | Source of task-level outputs, rewards, verifier messages, and traces. |
-| Aggregate metrics JSON | Scorecard for headline and per-task metrics. |
-| Reward profile JSONL | Task difficulty and variance analysis for repeated rollouts. |
-| Config files | Model, harness, resources server, sampling, and data references. |
-| Logs | Infrastructure failures, timeouts, and debugging evidence. |
-| Analysis report | Human-readable explanation of what changed and what to do next. |
-
-Do not collapse the evaluation to a single score unless the decision truly only needs a score. Most useful evaluation work comes from connecting aggregate metrics back to task-level evidence.
 
 ## Next Steps
 

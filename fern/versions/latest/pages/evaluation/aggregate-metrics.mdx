@@ -5,6 +5,7 @@ position: 2
 ---
 
 After rollout collection, NeMo Gym computes **aggregate metrics** for each agent by calling the `/aggregate_metrics` endpoint on the agent server. The results are written to a single `_aggregate_metrics.json` file.
+Aggregate metrics are necessary but not sufficient. They show what changed; rollout inspection and [skills](/evaluation/skills) such as BLADE explain why it changed.
 
 ---
 
