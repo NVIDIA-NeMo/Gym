@@ -68,11 +68,24 @@ These options are shared across many commands.
 The `--benchmark`, `--resources-server`, and `--model-type` selectors resolve a component name to its config file for you, so you do not need to know the project's directory layout. If you mistype a name, the CLI suggests the closest match. To point at a config file directly, use `--config <path>` instead.
 </Tip>
 
+
+### Selecting the model server
+
+Commands that need a model (`gym env start`, `gym eval run`) configure it through four flags:
+
+| Flag | Description |
+| --- | --- |
+| `--model-type NAME` | The model server type to load (such as `openai_model`, `vllm_model`, or `local_vllm_model`). |
+| `--model`, `-m` | The served model identifier: an API model name, an HF id, or a local checkpoint path. Interpreted per `--model-type`. Maps to `policy_model_name`. |
+| `--model-url` | Base URL of an existing model server endpoint. Maps to `policy_base_url`. |
+| `--model-api-key` | API key for the model server. Maps to `policy_api_key`. |
+
+
 ### Hydra overrides (escape hatch)
 
-The `gym` CLI is a thin wrapper over Gym's Hydra config system. Standard flags (`--flag value`) cover the common inputs. Anything not covered by a flag can still be passed as a raw Hydra override using `+key=value` (add a new key) or `++key=value` (override an existing key). Unknown overrides are forwarded to Hydra untouched, so advanced config composition keeps working.
+The `gym` CLI is a thin wrapper over Gym's Hydra config system. Standard flags (`--flag value`) cover the common inputs. Anything not covered by a flag can still be passed as a raw Hydra override using `+key=value` (add a new key) or `++key=value` (add or override an existing key). Unknown overrides are forwarded to Hydra untouched, so advanced config composition is fully functional.
 
-When a command needs overrides for keys that have no dedicated flag, prefer keeping the whole command in Hydra form (config paths included) rather than mixing `--flag` and `+key=value` styles in one invocation:
+When a command needs overrides for keys that have no dedicated flag, you can keep the whole command in Hydra form (config paths included) or mix `--flag` and `+key=value` styles in one invocation:
 
 ```bash
 gym eval run \
@@ -82,26 +95,13 @@ gym eval run \
     +wandb_project=gym-dev
 ```
 
-Unknown `--flags` (note the leading dashes) are treated as typos and rejected with a "did you mean?" hint, since Hydra overrides never start with `-`.
-
-### Selecting the model server
-
-Commands that need a model (`gym env start`, `gym eval run`) configure it through four flags:
-
-| Flag | Description |
-| --- | --- |
-| `--model-type NAME` | The model server type to load (such as `openai_model`, `vllm_model`, or `local_vllm_model`). Derives the correct server implementation. |
-| `--model`, `-m` | The served model identifier: an API model name, an HF id, or a local checkpoint path. Interpreted per `--model-type`. Maps to `policy_model_name`. |
-| `--model-url` | Base URL of an existing model server endpoint. Maps to `policy_base_url`. |
-| `--model-api-key` | API key for the model server. Maps to `policy_api_key`. |
-
 ---
 
 ## General
 
 ### `gym --help`
 
-List all command groups. Replaces `ng_help`.
+List all command groups and their descriptions.
 
 ```bash
 gym --help
@@ -109,7 +109,7 @@ gym --help
 
 ### `gym --version`
 
-Print the NeMo Gym version along with Python, key dependency, and system information. Replaces `ng_version`.
+Print the NeMo Gym version along with Python, key dependency, and system information.
 
 | Option | Description |
 | --- | --- |
@@ -145,11 +145,11 @@ gym list benchmarks --json | jq '.[].name'
 
 ### `gym search`
 
-List benchmarks filtered to those whose name, agent, resources server, dataset, or domain fuzzily matches a query. Equivalent to `gym list benchmarks` narrowed to a query.
+List benchmarks whose name, agent, resources server, dataset, or domain matches a query.
 
 | Argument / Option | Description |
 | --- | --- |
-| `QUERY` | Substring to match against component names (positional, required). |
+| `QUERY` | Query to match against component names (positional, required). |
 | `--json` | Output matches as JSON. |
 
 ```bash
@@ -161,11 +161,11 @@ gym search aime --json
 
 ## Datasets
 
-Commands for preparing, previewing, and managing datasets. By default dataset transfer commands use HuggingFace; pass `--storage gitlab` to target the GitLab Model Registry.
+Commands for preparing, previewing, and managing datasets. By default dataset transfer commands use HuggingFace; pass `--storage gitlab` to target the GitLab Registry.
 
 ### `gym dataset upload`
 
-Upload a prepared local JSONL dataset to HuggingFace (default) or GitLab. Replaces `ng_upload_dataset_to_hf` and `ng_upload_dataset_to_gitlab`.
+Upload a prepared local JSONL dataset to HuggingFace (default) or GitLab.
 
 | Option | Description |
 | --- | --- |
@@ -174,7 +174,7 @@ Upload a prepared local JSONL dataset to HuggingFace (default) or GitLab. Replac
 | `--name` | Dataset name. |
 | `--revision` | Dataset revision (version). |
 | `--split` | Dataset split (HF only). |
-| `--create-pr` | Open a pull request instead of committing directly (HF only). |
+| `--create-pr` | Open a pull request with your changes (HF only). |
 
 ```bash
 # Upload to HuggingFace
@@ -193,7 +193,7 @@ gym dataset upload \
 
 ### `gym dataset download`
 
-Download a dataset from HuggingFace (default) or GitLab. Replaces `ng_download_dataset_from_hf` and `ng_download_dataset_from_gitlab`.
+Download a dataset from HuggingFace (default) or GitLab.
 
 | Option | Description |
 | --- | --- |
@@ -223,7 +223,7 @@ gym dataset download \
 
 ### `gym dataset rm`
 
-Delete a dataset from the GitLab Model Registry. Prompts for confirmation. Replaces `ng_delete_dataset_from_gitlab`.
+Delete a dataset from the GitLab Registry. Prompts for confirmation.
 
 | Option | Description |
 | --- | --- |
@@ -235,7 +235,7 @@ gym dataset rm --name old_dataset
 
 ### `gym dataset migrate`
 
-Upload a local JSONL dataset to HuggingFace and delete it from GitLab afterward. Use `gym dataset upload` if you want optional rather than automatic GitLab deletion. Replaces `ng_gitlab_to_hf_dataset`.
+Migrate a JSONL dataset to HuggingFace from GitLab. Use `gym dataset upload` if you do not want automatic GitLab deletion.
 
 | Option | Description |
 | --- | --- |
@@ -243,7 +243,7 @@ Upload a local JSONL dataset to HuggingFace and delete it from GitLab afterward.
 | `--name` | Dataset name. |
 | `--revision` | Dataset revision (HF). |
 | `--split` | Dataset split. |
-| `--create-pr` | Open a pull request instead of committing directly. |
+| `--create-pr` | Open a pull request to HF dataset with your changes. |
 
 ```bash
 gym dataset migrate \
@@ -254,7 +254,7 @@ gym dataset migrate \
 
 ### `gym dataset render`
 
-Generate a dataset preview by materializing prompts from a raw input file and a prompt template. Replaces `ng_materialize_prompts`.
+Generate a dataset preview by materializing prompts from a raw input file and a prompt template.
 
 | Option | Description |
 | --- | --- |
@@ -271,21 +271,20 @@ gym dataset render \
 
 ### `gym dataset collate`
 
-Validate and collate a dataset, generating metrics and statistics. Replaces `ng_prepare_data`.
+Validate and collate a dataset, generating metrics and statistics.
 
 | Option | Description |
 | --- | --- |
 | `--config PATH` | Config file to load. Repeatable. |
 | `--resources-server NAME` | Load the named resources server config. |
 | `--search-dir DIR` | Extra root directory to search for named components. Repeatable. |
-| `--mode {train_preparation,example_validation}` | Use `train_preparation` to prepare train/validation datasets, or `example_validation` to validate example data for PR submission. |
+| `--mode {train_preparation,example_validation}` | Use `train_preparation` to prepare train/validation datasets, or `example_validation` to validate example data. |
 | `--output-dir` | Output directory for the prepared data. |
 | `--download` | Download source datasets before collating. |
 
 ```bash
 gym dataset collate \
     --resources-server example_multi_step \
-    --config responses_api_models/openai_model/configs/openai_model.yaml \
     --output-dir data/example_multi_step \
     --mode example_validation
 ```
@@ -298,7 +297,7 @@ Commands for developing, running, and inspecting environments (a dataset + agent
 
 ### `gym env init`
 
-Scaffold a new resources server with template files (config, app, tests, README, data directory). Replaces `ng_init_resources_server`.
+Scaffold a new resources server with template files (config, app, tests, README, data directory).
 
 | Option | Description |
 | --- | --- |
@@ -310,19 +309,23 @@ gym env init --resources-server my_server
 
 ### `gym env resolve`
 
-Resolve the configs, flags, and overrides into a final merged config and print it. Useful for debugging configuration. Secrets are hidden. Replaces `ng_dump_config`.
+Resolve the configs, flags, and overrides into a final merged config and print it. Useful for debugging configuration. Secrets are hidden.
 
 | Option | Description |
 | --- | --- |
 | `--config PATH` | Config file to load. Repeatable. |
 
 ```bash
-gym env resolve --config resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml
+# Merge a resources-server config with a model config, apply an override, and print the result
+gym env resolve \
+    --config resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml \
+    --config responses_api_models/openai_model/configs/openai_model.yaml \
+    ++responses_create_params.temperature=0.6
 ```
 
 ### `gym env packages`
 
-Each server has its own isolated virtual environment. List the packages installed in a server's environment. Replaces `ng_pip_list`.
+Each server has its own isolated virtual environment. List the packages installed in a server's environment.
 
 | Option | Description |
 | --- | --- |
@@ -341,7 +344,7 @@ gym env packages \
 
 ### `gym env test`
 
-Test resource server(s) by running their pytest suite. If no resources server is given, all of them are tested. Replaces `ng_test` and `ng_test_all`.
+Test resource server(s) by running their pytest suite. If no resources server is given, all of them are tested.
 
 | Option | Description |
 | --- | --- |
@@ -357,7 +360,7 @@ gym env test
 
 ### `gym env start`
 
-Start the NeMo Gym servers (agents, models, resources) defined by the provided configs. Reads configuration from YAML files and runs each configured server in its own environment. Replaces `ng_run`.
+Start the NeMo Gym servers (agents, models, resources) defined by the provided configs. Reads configuration from YAML files and runs each configured server in its own environment.
 
 | Option | Description |
 | --- | --- |
@@ -383,7 +386,7 @@ gym env start \
 
 ### `gym env status`
 
-Show all currently running NeMo Gym servers and their health. Replaces `ng_status`.
+Show all currently running NeMo Gym servers and their health.
 
 | Option | Description |
 | --- | --- |
@@ -413,11 +416,11 @@ NeMo Gym Server Status:
 
 ## Evaluation
 
-Commands for running evaluations end to end: prepare data, collect rollouts, aggregate, and profile.
+Commands for running evaluations end to end: prepare data, collect rollouts, aggregate for sharded runs, and profile.
 
 ### `gym eval prepare`
 
-Prepare a benchmark's data by running its `prepare.py` script and dump the result to disk. Replaces `ng_prepare_benchmark`.
+Prepare a benchmark's data by running its `prepare.py` script and dump the result to disk.
 
 | Option | Description |
 | --- | --- |
@@ -431,7 +434,7 @@ gym eval prepare --benchmark aime24
 
 ### `gym eval run`
 
-Collate data, start the servers, and collect rollouts. This is the main evaluation command. By default it spins up all required servers (the former `ng_e2e_collect_rollouts`). Pass `--no-serve` to collect against servers you already started with `gym env start` (the former `ng_collect_rollouts`). Replaces `ng_e2e_collect_rollouts` and `ng_collect_rollouts`.
+Collate data, start the servers, and collect rollouts. This is the main evaluation command. By default it spins up all required servers. Pass `--no-serve` to collect against servers you already started with `gym env start`.
 
 | Option | Description |
 | --- | --- |
@@ -480,7 +483,7 @@ gym eval run --no-serve \
 
 ### `gym eval aggregate`
 
-Merge sharded rollout results into a single rollouts file with aggregate metrics. Replaces `ng_aggregate_rollouts`.
+Merge sharded rollout results into a single rollouts file with aggregate metrics.
 
 | Option | Description |
 | --- | --- |
@@ -493,7 +496,7 @@ gym eval aggregate --output results/merged.jsonl
 
 ### `gym eval profile`
 
-Compute a reward profile from collected rollouts. Outputs per-task statistics such as average reward, standard deviation, min/max, and pass rate, useful for filtering tasks before training by difficulty or variance. Requires rollouts collected with `--num-repeats` greater than 1. Replaces `ng_reward_profile`.
+Compute a reward profile from collected rollouts. Outputs per-task statistics such as average reward, standard deviation, min/max, and pass rate, useful for filtering tasks before training by difficulty or variance. Requires rollouts collected with `--num-repeats` greater than 1.
 
 | Option | Description |
 | --- | --- |
@@ -512,7 +515,7 @@ gym eval profile \
 
 ### `gym dev test`
 
-Run NeMo Gym's core unit tests with coverage reporting. Replaces `ng_dev_test`.
+Run NeMo Gym's core unit tests with coverage reporting.
 
 ```bash
 gym dev test
@@ -522,7 +525,8 @@ gym dev test
 
 ## Migrating from the legacy commands
 
-The legacy `ng_*` and `nemo_gym_*` console scripts are deprecated but still functional. Each prints a one-time deprecation notice that names its `gym` replacement, then forwards your arguments (including any Hydra overrides) to the new command. Scripts, CI pipelines, and muscle memory keep working during the deprecation period; update them to the `gym` syntax when convenient.
+The legacy `ng_*` and `nemo_gym_*` are deprecated and will be removed in the future release.
+Use the tables below to find their `gym` replacement and update your scripts and workflows.
 
 ### Command mapping
 
@@ -556,7 +560,7 @@ The legacy `ng_*` and `nemo_gym_*` console scripts are deprecated but still func
 
 ### Replacing Hydra overrides with flags
 
-The most common Hydra overrides now have dedicated flags. Prefer flags; fall back to `+key=value` / `++key=value` for anything without one.
+The most common Hydra overrides now have dedicated flags:
 
 | Legacy Hydra override | New flag |
 | --- | --- |
@@ -577,6 +581,15 @@ The most common Hydra overrides now have dedicated flags. Prefer flags; fall bac
 | `+mode=...` | `--mode` |
 | `+output_dirpath=...` | `--output-dir` |
 | `+should_download=true` | `--download` |
+| `+prompt_config=...` | `--prompt-config` |
+| `+resume_from_cache=true` | `--resume` |
+| `+dataset_name=...` | `--name` |
+| `+repo_id=...` | `--repo-id` |
+| `+revision=...` / `+version=...` | `--revision` |
+| `+artifact_fpath=...` | `--artifact` |
+| `+output_fpath=...` | `--output`, `-o` |
+| `+create_pr=true` | `--create-pr` |
+| `+outdated=true` | `--outdated` |
 
 ### Common workflows, before and after
 
