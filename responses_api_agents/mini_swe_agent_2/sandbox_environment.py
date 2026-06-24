@@ -124,10 +124,11 @@ class MiniSWESandboxEnvironment:
         if not self.config.activate_conda or not self.config.conda_env:
             return command
         quoted_env = shlex.quote(self.config.conda_env)
-        # Resolve conda from common install roots before activating: the ECS exec shell
-        # is non-login, so `conda` isn't on PATH and `conda info --base` can't be relied
-        # on. The grouped loop (not an `&&` chain) keeps a missing root from aborting the
-        # command; cwd is handled by exec(cwd=...), so we don't `cd` here.
+        # Resolve conda from common install roots before activating. The sandbox exec
+        # shell is non-login (apptainer/docker/ECS alike), so `conda` may not be on PATH
+        # and `conda info --base` can't be relied on. The grouped loop (not an `&&` chain)
+        # keeps a missing root from aborting the command; cwd is handled by exec(cwd=...),
+        # so we don't `cd` here.
         return (
             '{ for __base in /opt/miniconda3 /opt/conda "$HOME/miniconda3" '
             '"$(command -v conda >/dev/null 2>&1 && conda info --base 2>/dev/null)"; do '
