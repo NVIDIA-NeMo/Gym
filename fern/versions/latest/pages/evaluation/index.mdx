@@ -70,10 +70,14 @@ For integrated external benchmarks, first reproduce the original benchmark's rep
 <Cards>
 
 <<<<<<< HEAD
+<<<<<<< HEAD
 <Card title="Browse Enviromnments" href="/evaluation/environment-list">
 =======
 <Card title="Environment List" href="/evaluation/environments">
 >>>>>>> 54e1b5de (docs(fern): add evaluation tutorial section)
+=======
+<Card title="Environment List" href="/evaluation/environment-list">
+>>>>>>> f0c31679 (docs(fern): split evaluation skills page)
 Browse built-in benchmark and training environments.
 </Card>
 
@@ -83,6 +87,69 @@ Use the benchmark contribution checklist.
 
 </Cards>
 
+<<<<<<< HEAD
+=======
+## Ablations And Iterations
+
+Evaluation is most useful when it drives a controlled iteration loop. Treat each proposed improvement as an ablation:
+
+| Question | Hold Constant | Vary |
+|---|---|---|
+| Did a new checkpoint improve capability? | Harness, data, verifier, sampling | Model server |
+| Did a harness change help? | Model, data, verifier, sampling | Agent server or prompt |
+| Did verifier repair change the metric? | Model, harness, data | Resources server verifier |
+| Did data filtering help training? | Model family, harness, verifier | Training data slice |
+| Did a new tool help enough to justify cost? | Model, task set, verifier | Harness tool policy |
+
+Use multiple repeats for stochastic or multi-step tasks. The highest-signal rows are often sometimes-pass tasks, where the same task succeeds in some rollouts and fails in others. They reveal whether the failure is a knowledge gap, unreliable behavior, harness issue, verifier issue, infrastructure problem, or data artifact.
+
+Keep the iteration record with the artifacts:
+
+- Git SHAs for environment, agent, and model-server code
+- Config files and prompt configs
+- Model IDs or checkpoint references
+- Sampling settings and repeat count
+- Rollout JSONL paths
+- Aggregate metrics and reward profiles
+- Notes on missing rows, timeouts, or known flaky infrastructure
+
+## Aggregate Metrics
+
+After rollout collection, NeMo Gym computes aggregate metrics for each agent and writes a single `_aggregate_metrics.json` file. Aggregate metrics provide the top-level scorecard for evaluation runs, including overall numeric statistics, key metrics, and per-task group metrics.
+
+Use aggregate metrics for:
+
+- pass@1 and pass@k summaries
+- mean, max, min, median, and standard deviation over reward or custom numeric fields
+- per-task breakdowns across repeats
+- headline metrics selected by the environment
+- quick comparison across models, harnesses, and ablations
+
+Aggregate metrics are necessary but not sufficient. They tell you what changed; rollout inspection and [skills](/evaluation/skills) such as BLADE explain why it changed.
+
+<Cards>
+
+<Card title="Aggregate Metrics" href="/evaluation/aggregate-metrics">
+Understand the `_aggregate_metrics.json` format and customization hooks.
+</Card>
+
+</Cards>
+
+## Outputs To Preserve
+
+For every evaluation run, preserve the artifacts needed to reproduce and interpret the score:
+
+| Artifact | Why It Matters |
+|---|---|
+| Rollout JSONL | Source of task-level outputs, rewards, verifier messages, and traces. |
+| Aggregate metrics JSON | Scorecard for headline and per-task metrics. |
+| Reward profile JSONL | Task difficulty and variance analysis for repeated rollouts. |
+| Config files | Model, harness, resources server, sampling, and data references. |
+| Logs | Infrastructure failures, timeouts, and debugging evidence. |
+| Analysis report | Human-readable explanation of what changed and what to do next. |
+
+Do not collapse the evaluation to a single score unless the decision truly only needs a score. Most useful evaluation work comes from connecting aggregate metrics back to task-level evidence.
+>>>>>>> f0c31679 (docs(fern): split evaluation skills page)
 
 ## Next Steps
 
