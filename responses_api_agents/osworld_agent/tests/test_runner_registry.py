@@ -31,6 +31,40 @@ def test_prompt_agent_computer_13_runner_uses_native_prompt_agent() -> None:
     assert spec.observation_type == "screenshot"
 
 
+def test_prompt_agent_default_matches_upstream_osworld_defaults() -> None:
+    spec = resolve_runner_spec("prompt_agent")
+
+    assert spec.kind == "prompt_agent"
+    assert spec.agent_class_path == "mm_agents.agent.PromptAgent"
+    assert spec.action_space == "computer_13"
+    assert spec.observation_type == "screenshot_a11y_tree"
+
+
+@pytest.mark.parametrize(
+    ("runner_name", "action_space", "observation_type"),
+    [
+        ("prompt_agent_screenshot_pyautogui", "pyautogui", "screenshot"),
+        ("prompt_agent_computer_13", "computer_13", "screenshot"),
+        ("prompt_agent_a11y_tree_pyautogui", "pyautogui", "a11y_tree"),
+        ("prompt_agent_a11y_tree_computer_13", "computer_13", "a11y_tree"),
+        ("prompt_agent_screenshot_a11y_tree_pyautogui", "pyautogui", "screenshot_a11y_tree"),
+        ("prompt_agent_screenshot_a11y_tree_computer_13", "computer_13", "screenshot_a11y_tree"),
+        ("prompt_agent_som_pyautogui", "pyautogui", "som"),
+    ],
+)
+def test_native_prompt_agent_runner_matrix(
+    runner_name: str,
+    action_space: str,
+    observation_type: str,
+) -> None:
+    spec = resolve_runner_spec(runner_name)
+
+    assert spec.kind == "prompt_agent"
+    assert spec.agent_class_path == "mm_agents.agent.PromptAgent"
+    assert spec.action_space == action_space
+    assert spec.observation_type == observation_type
+
+
 def test_runner_overrides_are_applied() -> None:
     spec = resolve_runner_spec(
         "prompt_agent",
