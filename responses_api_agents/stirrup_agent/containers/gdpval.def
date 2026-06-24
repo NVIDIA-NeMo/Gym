@@ -53,6 +53,15 @@ From: python:3.12-bookworm
         ghostscript \
         ffmpeg \
         graphviz \
+        texlive-latex-base \
+        texlive-latex-recommended \
+        texlive-latex-extra \
+        texlive-fonts-recommended \
+        texlive-fonts-extra \
+        texlive-xetex \
+        texlive-luatex \
+        texlive-lang-european \
+        latexmk \
         curl \
         wget
     rm -rf /var/lib/apt/lists/*
@@ -64,6 +73,9 @@ From: python:3.12-bookworm
     command -v gs
     command -v ffmpeg
     command -v dot
+    command -v pdflatex
+    command -v xelatex
+    command -v latexmk
 
     # Python packages matching GDPVal deliverable + agent needs.
     pip install --no-cache-dir \
