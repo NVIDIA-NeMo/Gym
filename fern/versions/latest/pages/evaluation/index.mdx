@@ -20,53 +20,29 @@ NeMo Gym evaluation is environment-native: the same dataset, resources server, v
 
 ## Gym Evaluation Loop
 
-1. Choose a task set and resources server.
-2. Choose the model server and agent harness.
+1. Choose a dataset and environment to measure performance.
+2. Choose the model and agent harness.
 3. Collect rollouts with fixed sampling settings and an explicit repeat count.
-4. Verify each rollout and compute aggregate metrics.
-5. Compare against a baseline or ablation.
+4. Verify each rollout and compute metrics.
+5. Compare against the verifier.
 6. Inspect failures, sometimes-pass tasks, and missing rows.
-7. Decide whether the next action is model training, harness work, verifier repair, benchmark cleanup, or data filtering.
+7. Use this information to decide whether the next action is model training, harness work, verifier repair, etc.
 
-The most important rule is to vary one thing at a time for causal comparison. Changing the model, harness, prompt, verifier, and dataset together can still produce a useful score as a release gate, but it cannot explain what caused the difference.
+Evaluation involves many components, and the most important rule is to vary one thing at a time for causal comparison. Changing the model, harness, prompt, verifier, and dataset together can still produce a useful score as a release gate, but it cannot explain what caused the difference.
 
 ## Models
 
-Model evaluation asks: *with the same environment and harness, which model performs better?*
+In this document, a model is an LLM endpoint that can be interacted with via an HTTP request. In NeMo Gym, models are accessed through the model server. The model server keeps provider-specific details behind the Responses API boundary, so the same evaluation can compare hosted models, self-hosted vLLM models, local checkpoints, or models before and after training.
 
-Hold these fixed:
+Setting up a model for evaluation requires considering its specific parameters that can influence the result, such as temperature, top-p, max tokens, and seed.
 
-- Dataset and task split
-- Resources server and verifier version
-- Agent harness
-- Prompt configuration
-- Sampling settings, max tokens, and tool budget
-- Repeat count
+## Agent Harnesses
 
-Then vary the model server. This can compare hosted models, self-hosted vLLM models, local development checkpoints, or a policy model before and after training.
+An agent harness is the orchestration layer that turns a model into an agent. The model produces responses, but the harness decides how those responses are used: it builds prompts, manages conversation state, routes tool calls, executes retries, handles observations from the environment, and decides when the task is complete.
 
-For model comparisons, record more than the headline reward. Capture token usage, latency, timeout rate, malformed outputs, tool-call validity, and verifier messages when available. A model that gains accuracy by tripling cost or timing out on harder tasks may not be the better deployment choice.
+In NeMo Gym, the harness usually lives behind the agent server. The agent server owns the rollout loop, while the model server performs stateless inference and the resources server owns the environment, state, and verifier.
 
-<Tip>
-
-Use the [Model Server](/model-server) docs to keep model-provider differences behind the Responses API boundary.
-
-</Tip>
-
-## Harnesses
-
-Harness evaluation asks: *with the same model and environment, which agent loop performs better?*
-
-Hold the model fixed, then vary the agent server implementation, system prompt, tool policy, context management, retry logic, planning strategy, or stop criteria. This isolates orchestration quality from raw model capability.
-
-Harness changes often affect metrics beyond reward:
-
-- Steps or turns per task
-- Tool calls per successful task
-- Retry and recovery behavior
-- Context length growth
-- Sandbox/runtime failures
-- Token and latency cost
+Harness changes often affect metrics, and some models are better tuned to use specific harnesses due to their training data.
 
 NeMo Gym treats an agent as model plus harness. The model server stays stateless; the agent server owns the loop that calls the model, routes tool calls, manages conversation state, and asks the resources server to verify the final attempt.
 
@@ -82,10 +58,9 @@ Review how model, agent, and resources servers fit together.
 
 </Cards>
 
-
 ## Benchmarks
 
-A benchmark is an environment configured for repeatable comparison. It needs a task set, resources server, verifier, expected runtime, documented dependencies, and known metrics. Public benchmarks are useful for community comparison; custom benchmarks are usually better for product-specific behavior.
+A benchmark is an environment configured for repeatable comparison. It needs a dataset, resources server, verifier, expected runtime, documented dependencies, and known metrics. 
 
 When choosing or building a benchmark, check:
 
@@ -109,30 +84,6 @@ Use the benchmark contribution checklist.
 </Card>
 
 </Cards>
-
-## Ablations And Iterations
-
-Evaluation is most useful when it drives a controlled iteration loop. Treat each proposed improvement as an ablation:
-
-| Question | Hold Constant | Vary |
-|---|---|---|
-| Did a new checkpoint improve capability? | Harness, data, verifier, sampling | Model server |
-| Did a harness change help? | Model, data, verifier, sampling | Agent server or prompt |
-| Did verifier repair change the metric? | Model, harness, data | Resources server verifier |
-| Did data filtering help training? | Model family, harness, verifier | Training data slice |
-| Did a new tool help enough to justify cost? | Model, task set, verifier | Harness tool policy |
-
-Use multiple repeats for stochastic or multi-step tasks. The highest-signal rows are often sometimes-pass tasks, where the same task succeeds in some rollouts and fails in others. They reveal whether the failure is a knowledge gap, unreliable behavior, harness issue, verifier issue, infrastructure problem, or data artifact.
-
-Keep the iteration record with the artifacts:
-
-- Git SHAs for environment, agent, and model-server code
-- Config files and prompt configs
-- Model IDs or checkpoint references
-- Sampling settings and repeat count
-- Rollout JSONL paths
-- Aggregate metrics and reward profiles
-- Notes on missing rows, timeouts, or known flaky infrastructure
 
 
 ## Next Steps
