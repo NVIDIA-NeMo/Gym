@@ -28,8 +28,8 @@ BENCHMARK_DIR = Path(__file__).parent
 DATA_DIR = BENCHMARK_DIR / "data"
 
 
-def prepare(output_name: str, model: str, length: int, **kwargs) -> Path:
-    return prepare_helper(output_name=output_name, model=model, length=length, **kwargs)
+def prepare(model: str, length: int, **kwargs) -> Path:
+    return prepare_helper(output_name="ruler.jsonl", model=model, length=length, **kwargs)
 
 
 def prepare_helper(output_name: str, model: str, length: int) -> Path:
