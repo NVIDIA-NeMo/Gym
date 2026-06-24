@@ -745,7 +745,7 @@ def init_resources_server():  # pragma: no cover
         jsonl_fpath: resources_servers/{server_type_name}/data/train.jsonl   # local data file for this split
         num_repeats: 1                          # times to repeat each example (e.g. for pass@k / mean@k)
         license: Apache 2.0                     # required for train/validation; must be an allowed license string
-        # to fetch this split from a registry instead, add gitlab_identifier: or huggingface_identifier:
+        # to fetch this split from a registry instead, add a source: block (type: gitlab | huggingface)
       - name: validation
         type: validation
         jsonl_fpath: resources_servers/{server_type_name}/data/validation.jsonl
