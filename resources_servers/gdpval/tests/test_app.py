@@ -176,9 +176,11 @@ class TestApp:
     async def test_verify_rubric_passes_create_overrides_through(self) -> None:
         """``judge_responses_create_params_overrides`` must reach the scoring fn.
 
-        ``model`` and ``api_key`` are pulled out as their own kwargs; everything
-        else (e.g. ``max_tokens``, ``temperature``) flows through as
-        ``create_overrides`` and gets merged into ``client.chat.completions.create``.
+        With no ``judge_panel`` the server resolves a single judge from
+        ``judge_model_server`` + the legacy overrides: ``model`` and ``api_key``
+        become the judge's own fields; everything else (``max_tokens``,
+        ``temperature``, …) is its ``create_overrides``, merged into
+        ``client.chat.completions.create``.
         """
         server = _server(
             reward_mode="rubric",
@@ -204,9 +206,54 @@ class TestApp:
         ):
             await server.verify(body)
 
-        assert captured["model_name"] == "custom-judge"
-        assert captured["api_key"] == "sk-custom"  # pragma: allowlist secret
-        assert captured["create_overrides"] == {"max_tokens": 16384, "temperature": 0.0}
+        judges = captured["judges"]
+        assert len(judges) == 1
+        judge = judges[0]
+        assert judge.model == "custom-judge"
+        assert judge.api_key == "sk-custom"  # pragma: allowlist secret
+        assert judge.base_url == "http://localhost:9999/v1"
+        assert judge.create_overrides == {"max_tokens": 16384, "temperature": 0.0}
+
+    @pytest.mark.asyncio
+    async def test_verify_rubric_panel_resolves_members(self) -> None:
+        """A configured ``judge_panel`` reaches the scoring fn as resolved judges
+        carrying each member's model + reasoning overrides."""
+        server = _server(
+            reward_mode="rubric",
+            judge_panel=[
+                {"name": "gpt-5.5", "model": "openai/gpt-5.5",
+                 "create_params_overrides": {"reasoning_effort": "medium"}},
+                {"name": "gemini-3.1-pro", "model": "gcp/google/gemini-3.1-pro-preview",
+                 "create_params_overrides": {"extra_body": {"reasoning_effort": "high"}}},
+                {"name": "claude-opus-4.8", "model": "anthropic/claude-opus-4.8"},
+            ],
+        )
+
+        captured: dict = {}
+
+        async def fake_score_with_rubric(**kwargs):
+            captured.update(kwargs)
+            return 0.5, {"overall_score": 0.5}
+
+        body = _verify_request(rubric_json=[{"criterion": "clarity", "score": 1}])
+
+        with (
+            patch("resources_servers.gdpval.scoring.score_with_rubric", side_effect=fake_score_with_rubric),
+            patch("resources_servers.gdpval.app.get_server_url", return_value="http://localhost:9999"),
+        ):
+            await server.verify(body)
+
+        judges = captured["judges"]
+        assert [j.name for j in judges] == ["gpt-5.5", "gemini-3.1-pro", "claude-opus-4.8"]
+        assert [j.model for j in judges] == [
+            "openai/gpt-5.5",
+            "gcp/google/gemini-3.1-pro-preview",
+            "anthropic/claude-opus-4.8",
+        ]
+        assert judges[0].create_overrides == {"reasoning_effort": "medium"}
+        assert judges[1].create_overrides == {"extra_body": {"reasoning_effort": "high"}}
+        # A seeded RNG must be threaded through for reproducible sampling.
+        assert captured["rng"] is not None
 
     @pytest.mark.asyncio
     async def test_verify_comparison_missing_reference(self, tmp_path) -> None:
@@ -484,6 +531,126 @@ class TestApp:
         assert result.agent_metrics["comparison/judged"] == 24
         # win_rate = (12 + 0.5*2) / 24 = 13/24 ≈ 0.5417
         assert abs(result.agent_metrics["comparison/win_rate"] - (13.0 / 24.0)) < 1e-6
+
+
+class _FakeOpenAIClient:
+    """Minimal stand-in for an OpenAI client that records the model used and
+    returns a fixed BOXED verdict so run_trials can be exercised offline."""
+
+    def __init__(self, verdict: str, record: list) -> None:
+        self._verdict = verdict
+        self._record = record
+
+        outer = self
+
+        class _Completions:
+            def create(self, **kwargs):
+                outer._record.append(kwargs["model"])
+
+                class _Msg:
+                    content = outer._verdict
+
+                class _Choice:
+                    message = _Msg()
+
+                class _Resp:
+                    choices = [_Choice()]
+
+                return _Resp()
+
+        class _Chat:
+            completions = _Completions()
+
+        self.chat = _Chat()
+
+
+class TestJudgePanel:
+    def test_make_rng_is_deterministic(self) -> None:
+        from resources_servers.gdpval.judge_panel import make_rng
+
+        a = make_rng(7, "task-1", "repeat_0")
+        b = make_rng(7, "task-1", "repeat_0")
+        c = make_rng(7, "task-1", "repeat_1")
+        seq_a = [a.random() for _ in range(5)]
+        seq_b = [b.random() for _ in range(5)]
+        seq_c = [c.random() for _ in range(5)]
+        assert seq_a == seq_b
+        assert seq_a != seq_c
+
+    def test_sample_judge_respects_weight(self) -> None:
+        from resources_servers.gdpval.judge_panel import ResolvedJudge, make_rng, sample_judge
+
+        heavy = ResolvedJudge(name="heavy", base_url="u", model="m", weight=9.0)
+        light = ResolvedJudge(name="light", base_url="u", model="m", weight=1.0)
+        rng = make_rng(0, "x")
+        picks = [sample_judge([heavy, light], rng).name for _ in range(200)]
+        assert picks.count("heavy") > picks.count("light")
+        # Single-member panel always returns that member.
+        only = ResolvedJudge(name="solo", base_url="u", model="m")
+        assert sample_judge([only], rng).name == "solo"
+
+    def test_merge_create_kwargs_drops_none(self) -> None:
+        from resources_servers.gdpval.judge_panel import merge_create_kwargs
+
+        merged = merge_create_kwargs(
+            {"model": "m", "temperature": 1.0, "max_tokens": 10},
+            {"temperature": None, "reasoning_effort": "high"},
+        )
+        assert "temperature" not in merged
+        assert merged["reasoning_effort"] == "high"
+        assert merged["max_tokens"] == 10
+
+    def test_run_trials_samples_panel_and_tallies_per_judge(self) -> None:
+        from resources_servers.gdpval.comparison import Judge, run_trials
+        from resources_servers.gdpval.judge_panel import make_rng
+
+        used_models: list = []
+        judges = [
+            Judge(name="gpt-5.5", client=_FakeOpenAIClient("BOXED[B]", used_models), model="openai/gpt-5.5"),
+            Judge(name="gemini", client=_FakeOpenAIClient("BOXED[B]", used_models), model="gcp/gemini"),
+            Judge(name="claude", client=_FakeOpenAIClient("BOXED[B]", used_models), model="anthropic/claude"),
+        ]
+        result = run_trials(
+            judges=judges,
+            task_prompt="t",
+            refs=[],
+            submission_a=[{"type": "text", "text": "ref"}],
+            submission_b=[{"type": "text", "text": "eval"}],
+            num_trials=6,
+            return_raw_responses=False,
+            rng=make_rng(123, "task-1", "repeat_0"),
+        )
+        # Per-trial grader is documented even when raw responses are NOT kept.
+        assert "trial_judges" in result
+        assert "raw_responses" not in result
+        assert len(result["trial_judges"]) == 6
+        assert all(name in {"gpt-5.5", "gemini", "claude"} for name in result["trial_judges"])
+        # Every trial graded; per_judge trial counts sum to num_trials.
+        assert sum(j["trials"] for j in result["per_judge"].values()) == 6
+        assert len(used_models) == 6
+        # Vote counts are internally consistent (a + b + tie == trials). A
+        # constant verdict nets to a tie under position-swap debiasing — the
+        # point of this test is panel sampling + per-judge accounting, not the
+        # winner.
+        assert result["win_count_a"] + result["win_count_b"] + result["tie_count"] == 6
+        # More than one panel member was sampled across 6 trials.
+        assert len(result["per_judge"]) >= 2
+
+    def test_run_trials_judge_sampling_is_reproducible(self) -> None:
+        from resources_servers.gdpval.comparison import Judge, run_trials
+        from resources_servers.gdpval.judge_panel import make_rng
+
+        def _judges():
+            rec: list = []
+            return [
+                Judge(name="a", client=_FakeOpenAIClient("BOXED[TIE]", rec), model="a"),
+                Judge(name="b", client=_FakeOpenAIClient("BOXED[TIE]", rec), model="b"),
+            ]
+
+        kwargs = dict(task_prompt="t", refs=[], submission_a=[], submission_b=[], num_trials=8)
+        r1 = run_trials(judges=_judges(), rng=make_rng(42, "task-1"), return_raw_responses=True, **kwargs)
+        r2 = run_trials(judges=_judges(), rng=make_rng(42, "task-1"), return_raw_responses=True, **kwargs)
+        assert r1["trial_judges"] == r2["trial_judges"]
 
 
 class TestComparisonPayloadHardening:
