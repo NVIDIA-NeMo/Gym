@@ -18,6 +18,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GYM_ROOT="${GYM_ROOT:-$(cd "${SCRIPT_DIR}/../../.." && pwd)}"
 cd "${GYM_ROOT}"
 
+if [[ -f ".colossus-runtime.env" ]]; then
+    # shellcheck disable=SC1091
+    source ".colossus-runtime.env"
+fi
+
 AGENT_NAME="${AGENT_NAME:-osworld_simple_agent}"
 RUNNER_NAME="${RUNNER_NAME:-prompt_agent}"
 INPUT_JSONL="${INPUT_JSONL:-responses_api_agents/osworld_agent/data/example.jsonl}"
@@ -45,7 +50,7 @@ echo
 ng_run_cmd=(
     ng_run
     "+config_paths=[${CONFIG_PATHS}]"
-    "osworld_simple_agent.responses_api_agents.osworld_agent.runner_name=${RUNNER_NAME}"
+    "++osworld_simple_agent.responses_api_agents.osworld_agent.runner_name=${RUNNER_NAME}"
 )
 
 collect_cmd=(

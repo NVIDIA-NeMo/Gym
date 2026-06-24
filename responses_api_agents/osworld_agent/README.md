@@ -34,9 +34,6 @@ The shape mirrors `mini_swe_agent`: there is no paired
 `DesktopEnv.evaluate()`. Each rollout is dispatched to a Ray worker so
 many tasks can run concurrently against the same model server.
 
-For implementation details and design constraints, see
-[`DESIGN.md`](DESIGN.md).
-
 By default this wrapper keeps the existing Gym-built prompt path:
 `gym_pyautogui` asks the model for ```python```/pyautogui code blocks,
 plus the sentinel tokens `WAIT`, `DONE`, `FAIL`. For closer parity with
