@@ -102,7 +102,7 @@ class BenchFlowAgentUtils:
         }
 
     @staticmethod
-    def get_output_trajectory(trajectory_file: Path) -> List[Dict[str, Any]]:
+    def extract_trajectory(trajectory_file: Path) -> List[Dict[str, Any]]:
         """Gets BenchFlow's captured LLM trajectory and converts it into NeMo Gym output items."""
         if not trajectory_file.is_file():
             return []

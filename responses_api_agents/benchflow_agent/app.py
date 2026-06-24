@@ -24,6 +24,7 @@ import shutil
 import tempfile
 from asyncio import Semaphore
 from copy import deepcopy
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 from uuid import uuid4
@@ -118,14 +119,15 @@ class BenchFlowAgent(SimpleResponsesAPIAgent):
     async def run(self, body: BenchFlowRunRequest) -> BenchFlowVerifyResponse:
         async with self.sem:
             task_name = self._parse_task_name(body.instance_id)
+            job_name = f"{task_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:8]}"
 
             result = None
             error_message = None
             try:
-                result = await self._run_benchflow_task(task_name)
+                result = await self._run_benchflow_task(task_name, job_name)
             except Exception as e:
                 error_message = f"{type(e).__name__}: {e}"
-                print(f"Error running BenchFlow evaluation for task {task_name!r}: {error_message}")
+                print(f"Error running BenchFlow evaluation for task {task_name}: {error_message}")
 
             response = BenchFlowAgentUtils.get_default_response_object()
             response["model"] = get_global_config_dict()["policy_model_name"]
@@ -136,9 +138,14 @@ class BenchFlowAgent(SimpleResponsesAPIAgent):
 
                 response["usage"] = BenchFlowAgentUtils.extract_usage(result)
 
-                rollout_dir = Path(self.config.jobs_dir) / result.rollout_name
+                rollout_dir = Path(self.config.jobs_dir) / job_name / result.rollout_name
                 trajectory_file = rollout_dir / "trajectory" / "llm_trajectory.jsonl"
-                response["output"] = BenchFlowAgentUtils.get_output_trajectory(trajectory_file)
+                try:
+                    response["output"] = BenchFlowAgentUtils.extract_trajectory(trajectory_file)
+                except Exception as e:
+                    error_message = f"{type(e).__name__}: {e}"
+                    print(f"Error extracting trajectory for task {task_name}: {error_message}")
+                    response["output"] = []
 
                 metadata["rollout_dir"] = str(rollout_dir)
                 for key in [
@@ -157,24 +164,24 @@ class BenchFlowAgent(SimpleResponsesAPIAgent):
                 metadata=metadata,
             )
 
-    async def _run_benchflow_task(self, task_name: str) -> Any:
+    async def _run_benchflow_task(self, task_name: str, job_name: str) -> Any:
         """
         Runs a single BenchFlow task. Returns its RolloutResult or None if unavailable.
-        If any config overrides are passed, they are applied on a temporary copy of the task folder.
+        If any config overrides are passed, a temporary copy of the task folder is created to apply them.
         """
         overrides = self._build_task_config_overrides(task_name)
         if not overrides:
-            return await self._run_evaluation(task_name, self.config.tasks_dir)
+            return await self._run_evaluation(task_name, job_name, self.config.tasks_dir)
 
         with tempfile.TemporaryDirectory(prefix="benchflow-task-") as tmp_dir:
             src = Path(self.config.tasks_dir) / task_name
             dst = Path(tmp_dir) / task_name
             shutil.copytree(src, dst)
             BenchFlowAgentUtils.apply_task_config_overrides(dst, overrides)
-            return await self._run_evaluation(task_name, tmp_dir)
+            return await self._run_evaluation(task_name, job_name, tmp_dir)
 
-    async def _run_evaluation(self, task_name: str, tasks_dir: str) -> Any:
-        """Builds and runs a single-task BenchFlow Evaluation against `tasks_dir`."""
+    async def _run_evaluation(self, task_name: str, job_name: str, tasks_dir: str) -> Any:
+        """Runs a single BenchFlow task from the given tasks_dir. Returns its RolloutResult or None if unavailable."""
         from benchflow.evaluation import Evaluation, EvaluationConfig, RetryConfig
 
         eval_config = EvaluationConfig(
@@ -190,8 +197,6 @@ class BenchFlowAgent(SimpleResponsesAPIAgent):
             retry=RetryConfig(max_retries=self.config.max_retries),
         )
 
-        # Each /run runs exactly one task; capture its single RolloutResult via on_result.
-        job_name = f"{self._sanitize_path_component(task_name)}_{uuid4().hex[:8]}"
         captured: dict[str, Any] = {}
 
         def _on_result(name: str, result: Any) -> None:
@@ -241,12 +246,6 @@ class BenchFlowAgent(SimpleResponsesAPIAgent):
         if not task_name:
             raise ValueError(f"instance_id must contain a task name (got: {instance_id!r})")
         return task_name
-
-    @staticmethod
-    def _sanitize_path_component(value: str) -> str:
-        """Sanitizes a string for safe use as a single path component (job name)."""
-        sanitized = re.sub(r"[^A-Za-z0-9._-]", "_", value).strip("._")
-        return sanitized or "task"
 
     def _resolve_model_base_url(self, global_config_dict: Any) -> str:
         """Resolves the model server base URL from the required model_server reference."""
