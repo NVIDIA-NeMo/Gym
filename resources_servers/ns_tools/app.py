@@ -29,6 +29,7 @@ import subprocess
 import sys
 import time
 import uuid
+from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -101,10 +102,6 @@ class NSToolsRunRequest(BaseRunRequest):
     # Per-sample verifier selection (optional, falls back to default_verifier)
     verifier_type: Optional[str] = None
 
-    # Fields for math_with_judge verifier
-    question: Optional[str] = None
-    expected_answer: Optional[str] = None
-
 
 class NSToolsVerifyRequest(NSToolsRunRequest, BaseVerifyRequest):
     pass
@@ -138,6 +135,22 @@ class NSToolsResourcesServer(SimpleResourcesServer):
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
+
+        # Wire shutdown() into the lifespan so a normal server stop reaps the
+        # python_tool sidecar and ToolManager. The base runner only starts
+        # Uvicorn and never calls it, otherwise leaving the sidecar bound to
+        # its fixed port.
+        main_app_lifespan = app.router.lifespan_context
+
+        @asynccontextmanager
+        async def lifespan_wrapper(app):
+            try:
+                async with main_app_lifespan(app) as maybe_state:
+                    yield maybe_state
+            finally:
+                await self.shutdown()
+
+        app.router.lifespan_context = lifespan_wrapper
 
         # Initialize nemo_skills ToolManager if tools are configured
         if self.config.nemo_skills_tools:
@@ -450,13 +463,19 @@ class NSToolsResourcesServer(SimpleResourcesServer):
 
         # Terminate the python_tool subprocess if one was started.
         if self._python_tool_process:
-            logger.info(f"Terminating python_tool server (PID: {self._python_tool_process.pid})")
+            pid: int = self._python_tool_process.pid
+            logger.info(f"Terminating python_tool server (PID: {pid})")
             self._python_tool_process.terminate()
             try:
                 self._python_tool_process.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 logger.warning("python_tool server did not terminate gracefully, killing...")
                 self._python_tool_process.kill()
+                # Reap the child after SIGKILL so it doesn't linger as <defunct>.
+                try:
+                    self._python_tool_process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    logger.error(f"python_tool server (PID: {pid}) did not exit after SIGKILL; may leak as a zombie")
             self._python_tool_process = None
 
 
