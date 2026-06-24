@@ -147,6 +147,7 @@ The spec is provider-neutral; the Apptainer provider uses these fields:
 | `workdir` | Default working directory for `exec` (applied as `--pwd`). |
 | `files` | Seed files written into the sandbox at `start()` (handled by the sandbox API via `upload`). |
 | `resources` | Mapped to cgroup flags (see below). |
+| `provider_options` | `binds`: a `"src:dst[:opts]"` string or list of them — extra per-sandbox `--bind` mounts added at instance start (on top of the staging mount and `exec.default_binds`). |
 | `ttl_s` | **Not supported** — ignored with a warning. Tear down via `stop()`/`close()` instead. |
 
 ## How it works
