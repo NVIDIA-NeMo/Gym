@@ -206,4 +206,4 @@ def test_domain_enum_documents_every_value() -> None:
 
     doc = Domain.__doc__ or ""
     for member in Domain:
-        assert f"``{member.value}``" in doc, f"Domain.{member.name} ('{member.value}') is undocumented"
+        assert f"`{member.value}`" in doc, f"Domain.{member.name} ('{member.value}') is undocumented"

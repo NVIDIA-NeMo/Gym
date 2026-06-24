@@ -409,22 +409,22 @@ class Domain(str, Enum):
     """The capability a resources server primarily evaluates or trains.
 
     Pick the single domain that best fits the task. If several seem to apply, choose the most
-    specific one (e.g. prefer ``math`` or ``coding`` over ``agent``); use ``other`` only when none
+    specific one (e.g. prefer `math` or `coding` over `agent`); use `other` only when none
     of the specific values fit. The values:
 
-    - ``math``                  — mathematical problem solving (e.g. AIME, MATH, GSM8K).
-    - ``coding``                — code generation, repair, or execution (e.g. SWE-bench, LiveCodeBench).
-    - ``agent``                 — multi-step, tool-using / environment-interacting tasks (e.g. tau2,
+    - `math`                  — mathematical problem solving (e.g. AIME, MATH, GSM8K).
+    - `coding`                — code generation, repair, or execution (e.g. SWE-bench, LiveCodeBench).
+    - `agent`                 — multi-step, tool-using / environment-interacting tasks (e.g. tau2,
       workplace_assistant). Prefer a more specific value when the task is really math/coding/etc.
-    - ``knowledge``             — factual or domain-knowledge question answering (e.g. GPQA, MMLU).
-    - ``instruction_following`` — adherence to explicit formatting/constraints (e.g. IFEval).
-    - ``long_context``          — reasoning over long inputs (e.g. RULER, long-document QA).
-    - ``safety``                — refusing harmful content / resisting jailbreaks & prompt injection.
-    - ``games``                 — interactive game environments (e.g. blackjack, tetris).
-    - ``translation``           — machine translation quality (e.g. WMT).
-    - ``e2e``                   — end-to-end pipelines spanning multiple capabilities at once.
-    - ``rlhf``                  — preference / reward-model / LLM-as-judge evaluations.
-    - ``other``                 — catch-all when no specific domain above applies.
+    - `knowledge`             — factual or domain-knowledge question answering (e.g. GPQA, MMLU).
+    - `instruction_following` — adherence to explicit formatting/constraints (e.g. IFEval).
+    - `long_context`          — reasoning over long inputs (e.g. RULER, long-document QA).
+    - `safety`                — refusing harmful content / resisting jailbreaks & prompt injection.
+    - `games`                 — interactive game environments (e.g. blackjack, tetris).
+    - `translation`           — machine translation quality (e.g. WMT).
+    - `e2e`                   — end-to-end pipelines spanning multiple capabilities at once.
+    - `rlhf`                  — preference / reward-model / LLM-as-judge evaluations.
+    - `other`                 — catch-all when no specific domain above applies.
     """
 
     MATH = "math"
