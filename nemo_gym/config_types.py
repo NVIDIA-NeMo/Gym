@@ -392,7 +392,6 @@ class BenchmarkDatasetConfig(BaseModel):
     type: Literal["benchmark"]
     jsonl_fpath: Path
     prepare_script: Path
-    prepare_args: dict = Field(default_factory=dict)
     prompt_config: Optional[Path]
     num_repeats: int = Field(default=1, ge=1)
 

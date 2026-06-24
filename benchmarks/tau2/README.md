@@ -23,14 +23,11 @@ Gym config files live under `benchmarks/tau2/configs/`:
 - `banking_terminal_use.yaml`: Tau3 `banking_knowledge` with `terminal_use`.
 - `banking_alltools.yaml`: Tau3 `banking_knowledge` with `alltools`.
 
-The banking configs use the same `prepare.py` as Tau2 and opt into Tau3 with
-dataset-level `prepare_args`:
+The banking configs keep Gym's existing no-argument `prepare()` contract by
+pointing at small wrapper modules under `prepare_utils/`:
 
 ```yaml
-prepare_script: benchmarks/tau2/prepare.py
-prepare_args:
-  dataset: banking_knowledge
-  retrieval_config: terminal_use
+prepare_script: benchmarks/tau2/prepare_utils/banking_terminal_use.py
 ```
 
 Prepare implementation details are under `benchmarks/tau2/prepare_utils/`.

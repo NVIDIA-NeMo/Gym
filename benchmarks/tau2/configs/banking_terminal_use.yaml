@@ -23,8 +23,5 @@ tau2_banking_knowledge_terminal_use_agent:
         type: benchmark
         jsonl_fpath: benchmarks/tau2/data/tau2_banking_knowledge_terminal_use.jsonl
         prompt_config: null
-        prepare_script: benchmarks/tau2/prepare.py
-        prepare_args:
-          dataset: banking_knowledge
-          retrieval_config: terminal_use
+        prepare_script: benchmarks/tau2/prepare_utils/banking_terminal_use.py
         num_repeats: 8

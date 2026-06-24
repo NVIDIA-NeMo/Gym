@@ -27,8 +27,8 @@ def prepare(
 ) -> Path:
     """Prepare a Tau dataset and return the generated JSONL path.
 
-    Gym calls this with keyword arguments from the benchmark YAML
-    ``prepare_args`` field. Direct CLI calls use the same argument names.
+    Gym calls this without arguments for the default Tau2 benchmark. Direct CLI
+    calls can opt into Tau3 banking variants with the same argument names.
     """
 
     if dataset == "tau2":
