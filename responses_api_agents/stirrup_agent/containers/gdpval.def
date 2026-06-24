@@ -56,6 +56,17 @@ From: python:3.13-bookworm
         imagemagick \
         texlive-full \
         latexmk \
+        default-jre-headless \
+        gdal-bin \
+        proj-bin \
+        libgl1 \
+        libglib2.0-0 \
+        libsndfile1 \
+        espeak-ng \
+        libzbar0 \
+        wkhtmltopdf \
+        unar \
+        libgraphviz-dev \
         curl \
         wget
     rm -rf /var/lib/apt/lists/*
@@ -71,21 +82,47 @@ From: python:3.13-bookworm
     command -v pdflatex
     command -v xelatex
     command -v latexmk
+    command -v java
+    command -v gdalinfo
 
-    # Python packages matching GDPVal deliverable + agent needs.
+    python -m pip install --no-cache-dir --upgrade pip
+
+    # CPU-only PyTorch stack (avoids pulling multi-GB CUDA wheels).
+    pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu \
+        torch torchvision torchaudio
+
+    # Everything advertised to the agent in prompts/gdpval_user_prompt.txt.
+    # Versions left unpinned so the resolver picks Python 3.13-compatible
+    # wheels; the prompt's version numbers are illustrative of the v1 snapshot.
     pip install --no-cache-dir \
-        python-docx fpdf2 reportlab weasyprint PyPDF2 beautifulsoup4 \
-        seaborn python-pptx markdown2 pdfminer.six openpyxl lxml Pillow \
-        numpy scipy pandas matplotlib plotly bokeh \
-        scikit-learn scikit-image statsmodels \
+        jupyterlab notebook nbclassic jupyter-server \
+        aiohttp hypercorn fastapi websockets pydantic gradio \
+        numpy numpy-financial scipy pandas matplotlib matplotlib-venn seaborn plotly plotnine bokeh \
+        statsmodels scikit-learn scikit-image xgboost catboost lightgbm imbalanced-learn shap \
         nltk gensim spacy textblob \
-        opencv-python-headless \
-        sympy h5py \
-        networkx pydot graphviz svgwrite \
-        shapely geopandas geopy \
-        requests httpx aiohttp \
-        tqdm tabulate faker \
-        pytest
+        keras jax \
+        opencv-python Pillow pytesseract qrcode pyzbar imgkit \
+        ffmpeg-python pydub moviepy av soundfile librosa mutagen gtts pyttsx3 pedalboard pyloudnorm mne \
+        python-docx python-pptx openpyxl xlrd pymupdf pdf2image pdfplumber pdfkit pypandoc docx2txt odfpy pyxlsb tabula-py camelot-py \
+        fpdf2 reportlab weasyprint pdfrw PyPDF2 pdfminer.six \
+        graphviz pydot networkx svgwrite trimesh wordcloud folium \
+        shapely fiona geopandas geopy rasterio \
+        sympy pymc h5py tables \
+        rdkit biopython \
+        xml-python markdownify anytree rarfile chardet srt \
+        tqdm tabulate faker loguru fuzzywuzzy rapidfuzz einops pycountry countryinfo pronouncing exchange-calendars \
+        pyprover nashpy rdflib \
+        cryptography pyopenssl requests httpx \
+        snowflake-connector-python databricks-sql-connector \
+        pytest pytest-cov pytest-json-report coverage pytest-asyncio ddtrace datadog \
+        markdown2 beautifulsoup4 lxml typing-extensions
+
+    # Architecture-specific / fragile extras the prompt marks "not available on
+    # aarch64" or that need heavy native builds. Best-effort: never fail the
+    # build if a target-platform wheel is missing.
+    pip install --no-cache-dir \
+        pygraphviz svglib cairosvg cadquery cadquery-ocp aspose-words dlib mtcnn kerykeion pylog pyth3 \
+        || echo "[gdpval.def] some architecture-specific extras were skipped"
 
     mkdir -p /workspace
 
@@ -93,6 +130,7 @@ From: python:3.13-bookworm
     export HOME=/root
     export PATH=/usr/local/bin:$PATH
     export DEBIAN_FRONTEND=noninteractive
+    export KERAS_BACKEND=torch
 
 %runscript
     exec /bin/bash "$@"

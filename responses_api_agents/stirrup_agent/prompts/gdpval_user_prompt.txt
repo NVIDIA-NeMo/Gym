@@ -114,7 +114,7 @@ Your environment comes preinstalled with a comprehensive set of Python packages 
 - ImageMagick (image conversion and manipulation via `convert`)
 - Graphviz (graph visualization with DOT language)
 - TeX Live (full LaTeX toolchain: pdflatex, xelatex, lualatex, latexmk)
-- OpenJDK 21 JRE (Java runtime for Tabula and other Java-based tools)
+- OpenJDK JRE (Java runtime for Tabula and other Java-based tools)
 - GDAL/GEOS/Proj (geospatial data libraries and utilities)
 - Build tools: gcc, g++, cmake, pkg-config, make
 
