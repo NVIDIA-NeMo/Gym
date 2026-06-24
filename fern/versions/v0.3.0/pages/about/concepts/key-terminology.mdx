@@ -57,6 +57,18 @@ Training data format for DPO consisting of the same prompt with two different re
 
 The primary LLM being trained or evaluated - the "decision-making brain" you want to improve.
 
+**Resources Server**
+
+The FastAPI service (one directory per environment under `resources_servers/`) that *is* the environment: it holds per-task state, exposes the environment's tools, and implements `verify()` to score a rollout into a reward. If the name "Resources Server" feels abstract, read it as "the environment + verifier service." Every benchmark or training environment has exactly one.
+
+**Agent Server (Responses API Agent)**
+
+The FastAPI service (under `responses_api_agents/`) that drives the model through a task - the harness that runs the multi-step / tool-calling loop against a resources server. `simple_agent` is the built-in default; bring your own for custom control flow.
+
+**Model Server (Responses API Model)**
+
+The FastAPI service (under `responses_api_models/`) that wraps an LLM endpoint (vLLM, OpenAI, etc.) behind NeMo Gym's Responses API and manages the token IDs needed for training. Agents refer to it by name (commonly `policy_model`).
+
 **Orchestration**
 
 Coordination logic that manages when to call models, which tools to use, and how to sequence multi-step operations.
