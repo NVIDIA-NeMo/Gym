@@ -28,7 +28,7 @@ import hydra
 import rich
 import wandb
 import wandb.util
-from omegaconf import DictConfig, ListConfig, OmegaConf, open_dict
+from omegaconf import MISSING, DictConfig, ListConfig, OmegaConf, open_dict
 from openai import __version__ as openai_version
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 from ray import __version__ as ray_version
@@ -36,6 +36,7 @@ from wandb import Run
 
 from nemo_gym import CACHE_DIR, PARENT_DIR, RESULTS_DIR, WORKING_DIR
 from nemo_gym.config_types import (
+    ConfigMissingValuesError,
     ServerInstanceConfig,
     ServerRefNotFoundError,
     WANDBConfig,
@@ -69,6 +70,11 @@ UV_VENV_DIR_KEY_NAME = "uv_venv_dir"
 INHERIT_FROM_KEY_NAME = "_inherit_from"
 COPY_KEY_NAME = "_copy"
 DELETE_KEY_KEY_NAME = "_delete_key"
+
+# Sentinel returned by _recursive_index_dict_using_path when a referenced swap/copy/inherit path is
+# unset (a '???' leaf or ancestor). Distinct object so callers can branch on it without mistaking a
+# real config value (e.g. a literal "???" or a DictConfig) for "missing".
+_MISSING_REF = object()
 NEMO_GYM_LOG_DIR_KEY_NAME = "nemo_gym_log_dir"
 NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     CONFIG_PATHS_KEY_NAME,
@@ -291,6 +297,55 @@ Duplicate config paths:
 
         return disallowed_ports
 
+    def collect_missing_value_paths(self, config: DictConfig) -> List[str]:
+        """Return the dotted paths of every unset (OmegaConf '???') leaf, without raising.
+
+        We convert to a plain container with `resolve=False, throw_on_missing=False` so that
+        neither MISSING values nor unresolved interpolations (`${...}`) cause an exception — then
+        walk the plain structure. Iterating or indexing the live DictConfig would raise.
+        """
+        container = OmegaConf.to_container(config, resolve=False, throw_on_missing=False)
+        return self._walk_missing_value_paths(container)
+
+    def _walk_missing_value_paths(self, node, prefix: str = "") -> List[str]:
+        missing_paths: List[str] = []
+        if isinstance(node, dict):
+            for key, value in node.items():
+                path = f"{prefix}.{key}" if prefix else str(key)
+                if value == MISSING:
+                    missing_paths.append(path)
+                else:
+                    missing_paths.extend(self._walk_missing_value_paths(value, path))
+        elif isinstance(node, list):
+            for i, value in enumerate(node):
+                path = f"{prefix}[{i}]"
+                if value == MISSING:
+                    missing_paths.append(path)
+                else:
+                    missing_paths.extend(self._walk_missing_value_paths(value, path))
+        return missing_paths
+
+    def raise_on_missing_values(self, global_config_dict: DictConfig) -> None:
+        """Fail fast with one actionable error listing every unset '???' value.
+
+        Without this, the first unset value surfaces deep in the run pipeline as an opaque
+        omegaconf MissingMandatoryValue, one field at a time and with no override guidance.
+        """
+        missing_paths = self.collect_missing_value_paths(global_config_dict)
+        if not missing_paths:
+            return
+
+        missing_list = "\n".join(f"  - {p}" for p in missing_paths)
+        override_examples = "\n".join(f"  ++{p}=<value>" for p in missing_paths[:3])
+        raise ConfigMissingValuesError(
+            f"""{len(missing_paths)} required config value(s) are unset (still '???') after merging:
+{missing_list}
+
+Provide each value via a CLI override, in env.yaml, or in a config you pass via config_paths.
+For example, on the command line:
+{override_examples}"""
+        )
+
     def _recursively_hide_secrets(self, dict_config: DictConfig) -> None:
         with open_dict(dict_config):
             self._recursively_hide_secrets_helper(dict_config)
@@ -318,7 +373,11 @@ Duplicate config paths:
     def _recursively_swap_keys_helper(
         self, dict_config: DictConfig, original_dict_config: DictConfig, frozen_dict_config: DictConfig
     ) -> None:
-        for k, v in list(dict_config.items()):
+        # items_ex(resolve=False) yields raw values: directive strings like "${inherit_from:...}"
+        # come back unresolved (so the swap detection below still matches), and a missing ('???')
+        # leaf is returned as-is instead of raising MissingMandatoryValue mid-swap. Any genuinely
+        # unset values are reported together by raise_on_missing_values, which runs after this pass.
+        for k, v in list(dict_config.items_ex(resolve=False)):
             is_delete_property = isinstance(v, DictConfig) and DELETE_KEY_KEY_NAME in v
 
             if is_delete_property:
@@ -335,7 +394,12 @@ Duplicate config paths:
             if isinstance(v, (DictConfig, dict)):
                 self._recursively_swap_keys_helper(v, original_dict_config, frozen_dict_config)
             elif isinstance(v, (ListConfig, list)):
-                for inner_v in v:
+                # Iterate without resolving so a missing ('???') element doesn't raise mid-swap (it's
+                # a scalar, so it's skipped here and reported later by raise_on_missing_values).
+                for i in range(len(v)):
+                    if isinstance(v, ListConfig) and OmegaConf.is_missing(v, i):
+                        continue
+                    inner_v = v[i]
                     if isinstance(inner_v, (DictConfig, dict)):
                         self._recursively_swap_keys_helper(inner_v, original_dict_config, frozen_dict_config)
 
@@ -362,16 +426,24 @@ Duplicate config paths:
 
             path_to_swap = path_to_swap.split(".")
 
-            # Pop the swapped value
+            # Pop the swapped value. A '???' leaf or ancestor on the source path comes back as the
+            # _MISSING_REF sentinel (not a dict/str), so guard the .pop()/.merge() that would crash on it.
             dict_containing_key_to_swap = self._recursive_index_dict_using_path(
                 original_dict_config, path_to_swap[:-1]
             )
-            if is_swap:
+            if is_swap and dict_containing_key_to_swap is not _MISSING_REF:
                 # Pop with a default since multiple configs may refer to the same path
                 # We don't want to pop if it's just a copy
                 dict_containing_key_to_swap.pop(path_to_swap[-1], None)
 
             swapped_value = self._recursive_index_dict_using_path(frozen_dict_config, path_to_swap)
+
+            # If the source (leaf or an ancestor) is unset, the target inherits MISSING; skip the
+            # property-merge and _delete_key handling and let raise_on_missing_values report it.
+            if dict_containing_key_to_swap is _MISSING_REF or swapped_value is _MISSING_REF:
+                dict_config[k] = "???"
+                continue
+
             if is_swap_property or is_copy_property:
                 swapped_value = OmegaConf.merge(swapped_value, v)
 
@@ -384,10 +456,21 @@ Duplicate config paths:
                 for key in keys_to_delete:
                     dict_config[k].pop(key)
 
-    def _recursive_index_dict_using_path(self, dict_config: DictConfig, path: List[str]) -> DictConfig:
+    def _recursive_index_dict_using_path(self, dict_config: DictConfig, path: List[str]) -> "DictConfig | object":
         for k in path:
-            if k not in dict_config:
+            # Use _get_node so a referenced value that is unset ('???') can be detected without
+            # resolving it (indexing a MISSING leaf would raise an opaque error). A genuinely
+            # absent key still errors clearly.
+            node = dict_config._get_node(k) if isinstance(dict_config, DictConfig) else None
+            if node is None:
                 raise ValueError(f"Path specified does not exist in config: {path}")
+
+            # The referenced value (or an ancestor of it) is unset. Return the _MISSING_REF sentinel
+            # so the caller makes the swap/copy/inherit target '???' too (instead of calling .pop()/
+            # OmegaConf.merge() on a bare string and crashing); raise_on_missing_values then reports
+            # it with an actionable message instead of an opaque interpolation error.
+            if OmegaConf.is_missing(dict_config, k):
+                return _MISSING_REF
 
             dict_config = dict_config[k]
 
@@ -437,6 +520,12 @@ Duplicate config paths:
                 global_config_dict[CONFIG_PATHS_KEY_NAME] = config_paths
 
         self._recursively_swap_keys(global_config_dict)
+
+        # Fail fast with one actionable error if any required value is still '???'. Runs *after*
+        # _recursively_swap_keys so that _delete_key/_inherit_from/_copy have been applied first —
+        # a '???' in a deleted or overwritten branch is not reported. Otherwise the first unset
+        # value surfaces as an opaque MissingMandatoryValue deep in the pipeline.
+        self.raise_on_missing_values(global_config_dict)
 
         # TODO @bxyu-nvidia: We need a better way of handling dummy model configs
         with open_dict(global_config_dict):

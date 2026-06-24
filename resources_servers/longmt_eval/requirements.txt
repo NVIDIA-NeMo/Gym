@@ -1,13 +1,12 @@
 -e nemo-gym[dev] @ ../../
 # SEGALE: forked from bc19b2b with numpy==1.23.5 → >=1.23.5 to resolve
 # the pandas==2.2.3 conflict (pandas requires numpy>=1.26.0).
-segale @ git+https://github.com/jeffwillette/SEGALE.git@c89cd75a7aaba17ba52bbd0c971cb690cb178753
-# Match segale's torch==2.5.0 pin to avoid uv resolution conflict.
-# torch 2.5.x targets CUDA 12 (not 13), same concern as wmt_translation.
+segale @ git+https://github.com/kajalj22/SEGALE.git@a7c9a1a9a327e181d82ef01cc6aae96d6840862a
+# Bumped torch 2.5.0 → 2.12.0 on Sun Jun 22, 2026 for CVE remediation.
 # torchmetrics imports pkg_resources which setuptools 81 removed; pin <81.
 setuptools>=70,<81
-torch==2.5.0
-torchvision==0.20.0
+torch==2.12.0
+torchvision==0.27.0
 # Cython lets pyximport JIT-compile vecalign/dp_core.pyx for Python 3.12.
 # The bundled .so in the SEGALE repo is cpython-310 only; pyximport writes
 # a cpython-312 .so into the installed package dir on first import and caches
