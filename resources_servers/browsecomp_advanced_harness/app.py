@@ -47,8 +47,6 @@ from nemo_gym.server_utils import SESSION_ID_KEY, raise_for_status, request
 from resources_servers.browsecomp_advanced_harness.judge_prompt import JUDGE_PROMPT_TEMPLATE
 
 
-TAVILY_CLIENT_SOURCE = "2d66a5d16bd643d2"
-
 
 class TavilySearchResourcesServerConfig(BaseResourcesServerConfig):
     tavily_api_key: str | List[str]
@@ -563,3 +561,4 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     TavilySearchResourcesServer.run_webserver()
+                                           
