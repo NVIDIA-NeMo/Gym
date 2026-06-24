@@ -431,6 +431,16 @@ async def _run_stirrup_agent(
     }
     if system_prompt:
         agent_kwargs["system_prompt"] = system_prompt
+    if is_gdpval:
+        # GDPval-AA v2 early-exit: expose a second finish tool the model can call
+        # instead of ``finish`` when it cannot complete the task (no files).
+        # Requires stirrup >= 0.1.9 (multiple finish tools, PR #49).
+        from responses_api_agents.stirrup_agent.finish_tool_coercing import (
+            ABANDON_FINISH_TOOL,
+            COERCING_FINISH_TOOL,
+        )
+
+        agent_kwargs["finish_tool"] = [COERCING_FINISH_TOOL, ABANDON_FINISH_TOOL]
     agent = NeMoAgent(**agent_kwargs)
 
     start_time = time.time()

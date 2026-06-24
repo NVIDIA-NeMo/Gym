@@ -53,7 +53,7 @@ from typing import Annotated
 
 from pydantic import BaseModel, Field, field_validator
 from stirrup.constants import FINISH_TOOL_NAME
-from stirrup.core.models import Tool, ToolUseCountMetadata
+from stirrup.core.models import Tool, ToolResult, ToolUseCountMetadata
 from stirrup.tools.finish import _validating_finish_executor
 
 
@@ -97,4 +97,36 @@ COERCING_FINISH_TOOL: Tool[CoercingFinishParams, ToolUseCountMetadata] = Tool[
     ),
     parameters=CoercingFinishParams,
     executor=_validating_finish_executor,
+)
+
+
+ABANDON_FINISH_TOOL_NAME = "abandon_task_finish"
+
+
+class AbandonFinishParams(BaseModel):
+    """Early-exit finish tool: abandon the task without submitting deliverables."""
+
+    reason: Annotated[str, Field(description="Brief reason the task cannot be completed.")]
+
+
+async def _abandon_finish_executor(params: AbandonFinishParams) -> ToolResult[ToolUseCountMetadata]:
+    return ToolResult(content=params.reason, metadata=ToolUseCountMetadata(), success=True)
+
+
+# Second finish tool (GDPval-AA v2 early-exit). Stirrup >= 0.1.9 accepts a list
+# of finish tools (PR #49); the agent may call this instead of ``finish`` when
+# it genuinely cannot complete the task, submitting no files.
+ABANDON_FINISH_TOOL: Tool[AbandonFinishParams, ToolUseCountMetadata] = Tool[
+    AbandonFinishParams, ToolUseCountMetadata
+](
+    name=ABANDON_FINISH_TOOL_NAME,
+    description=(
+        "Signal that you do not believe the task can be completed, with a "
+        "brief reason, instead of submitting files. Use only when required "
+        "inputs are missing, a hard dependency is unavailable, or the request "
+        "is incoherent. Do not use it to escape difficulty. Note that you will "
+        "need a separate turn to finish."
+    ),
+    parameters=AbandonFinishParams,
+    executor=_abandon_finish_executor,
 )
