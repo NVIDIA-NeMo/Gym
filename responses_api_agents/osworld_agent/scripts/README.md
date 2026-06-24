@@ -13,7 +13,9 @@ The host-prep scripts stop short of cloning the repo, running `uv sync`, or
 prestaging `Ubuntu.qcow2`. For Colossus runs, clone this repo first, keep
 `env.yaml` under `~/osworld-run/private/`, keep `Ubuntu.qcow2` under
 `~/osworld-run/osworld-vm-data/`, then run `setup_colossus_runtime.sh` from the
-git checkout.
+git checkout. The setup script runs `uv sync --extra dev` by default and adds
+the checkout's `.venv/bin` to `.colossus-runtime.env`, so the normal Gym CLI
+commands are available without wrapping them in `uv run`.
 
 ## Colossus git-checkout flow
 
@@ -29,10 +31,6 @@ bash responses_api_agents/osworld_agent/scripts/setup_colossus_runtime.sh
 DRY_RUN=1 bash responses_api_agents/osworld_agent/scripts/run_native_prompt_agent_smoke.sh
 bash responses_api_agents/osworld_agent/scripts/run_native_prompt_agent_smoke.sh
 ```
-
-The smoke script uses `uv run` by default, so a fresh Colossus checkout can
-build its `.venv` locally without activating it. Set `USE_UV_RUN=0` only when
-`ng_run` and `ng_collect_rollouts` are already on `PATH`.
 
 ## Mode A flow (using `bringup_local_host.sh`)
 

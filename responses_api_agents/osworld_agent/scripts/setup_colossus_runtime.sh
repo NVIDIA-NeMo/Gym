@@ -24,6 +24,8 @@ UV_CACHE_DIR="${UV_CACHE_DIR:-${RUN_ROOT}/uv-cache}"
 ENV_YAML="${OSWORLD_ENV_YAML:-${PRIVATE_DIR}/env.yaml}"
 QCOW2="${OSWORLD_QCOW2:-${VM_DATA_DIR}/Ubuntu.qcow2}"
 INSTALL_HOST_DEPS="${INSTALL_HOST_DEPS:-0}"
+SYNC_VENV="${SYNC_VENV:-1}"
+UV_SYNC_ARGS="${UV_SYNC_ARGS:---extra dev}"
 PULL_DOCKER_IMAGE="${PULL_DOCKER_IMAGE:-0}"
 DOCKER_IMAGE="${OSWORLD_DOCKER_IMAGE:-happysixd/osworld-docker:latest}"
 
@@ -80,6 +82,17 @@ if [[ "${INSTALL_HOST_DEPS}" == "1" ]]; then
     echo
 fi
 
+if [[ "${SYNC_VENV}" == "1" ]]; then
+    note "top-level Gym venv"
+    if [[ -n "${UV_SYNC_ARGS}" ]]; then
+        read -r -a uv_sync_args <<< "${UV_SYNC_ARGS}"
+        uv sync "${uv_sync_args[@]}"
+    else
+        uv sync
+    fi
+    echo
+fi
+
 note "runtime directories"
 mkdir -p "${PRIVATE_DIR}" "${VM_DATA_DIR}" "${UV_CACHE_DIR}" "${GYM_ROOT}/results" "${GYM_ROOT}/cache" "${GYM_ROOT}/docker_vm_data"
 echo "created/verified runtime dirs"
@@ -106,7 +119,7 @@ export OSWORLD_VM_DATA_DIR="${VM_DATA_DIR}"
 export OSWORLD_ENV_YAML="${ENV_YAML}"
 export OSWORLD_QCOW2="${QCOW2}"
 export UV_CACHE_DIR="${UV_CACHE_DIR}"
-export PATH="\${HOME}/.local/bin:\${PATH}"
+export PATH="${GYM_ROOT}/.venv/bin:\${HOME}/.local/bin:\${PATH}"
 EOF
 chmod 600 "${GYM_ROOT}/.colossus-runtime.env"
 echo "wrote ${GYM_ROOT}/.colossus-runtime.env"
@@ -123,6 +136,8 @@ else
 fi
 
 command -v uv >/dev/null 2>&1 && check "uv" "$(uv --version)" ok || { check "uv" "MISSING" fail || true; fail=$((fail + 1)); }
+[[ -x "${GYM_ROOT}/.venv/bin/ng_run" ]] && check "ng_run" "${GYM_ROOT}/.venv/bin/ng_run" ok || { check "ng_run" "missing; run uv sync" fail || true; fail=$((fail + 1)); }
+[[ -x "${GYM_ROOT}/.venv/bin/ng_collect_rollouts" ]] && check "ng_collect_rollouts" "${GYM_ROOT}/.venv/bin/ng_collect_rollouts" ok || { check "ng_collect_rollouts" "missing; run uv sync" fail || true; fail=$((fail + 1)); }
 command -v docker >/dev/null 2>&1 && check "docker" "$(docker --version)" ok || { check "docker" "MISSING" fail || true; fail=$((fail + 1)); }
 docker info >/dev/null 2>&1 && check "docker daemon" "OK" ok || { check "docker daemon" "not responding" fail || true; fail=$((fail + 1)); }
 [[ -c /dev/kvm ]] && check "kvm" "PRESENT" ok || check "kvm" "MISSING; qemu will use slow TCG fallback" ok
