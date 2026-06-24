@@ -429,27 +429,42 @@ def select_tasks(
 
 
 # --------------------------------------------------------------------------- #
-# Patched LLM judge — endpoint swap only (Gemini SDK -> OpenAI-compatible)
+# Patched LLM judge — upstream-faithful rubric scoring, OpenAI-compatible endpoint
 # --------------------------------------------------------------------------- #
 def patched_judge_source() -> str:
     return r'''#!/usr/bin/env python3
-"""BiomniBench-DA LLM judge — OpenAI-compatible endpoint.
+"""BiomniBench-DA LLM judge — upstream-faithful, OpenAI-compatible endpoint.
 
-Drop-in replacement for the upstream Gemini-based llm_judge.py.
-Reads the rubric, agent trajectory, and instruction, then calls an
-OpenAI-compatible chat completions endpoint to score the trajectory.
+Verbatim port of the upstream judge (phylobio/BiomniBench-DA da-*/tests/llm_judge.py):
+same rubric-level parsing, same prompt, same A/B/C -> points scoring (total 0-100), and
+the same reward.json ({"score": <int>}) + evaluation.json outputs. The judge reads the
+agent-authored `/logs/verifier/trace.md` and `/logs/verifier/answer.txt` (copied from
+/app by test.sh), exactly as the agent is instructed to produce in instruction.md.
+
+Deviations from upstream are confined to integration plumbing:
+  (1) the model call goes through an OpenAI-compatible chat completions endpoint
+      instead of the Anthropic SDK, wrapped with retry/backoff on transient errors;
+  (2) a `reward.txt` is written with the score normalized to 0.0-1.0 so Harbor (which
+      prefers reward.txt over reward.json) surfaces a properly-scaled NeMo Gym reward;
+  (3) gold metadata is folded into evaluation.json for downstream rollout analysis.
+The rubric scoring math itself (level letters -> rubric-defined points -> integer sum)
+is byte-for-byte the upstream algorithm.
 
 Environment variables (set in [verifier.env] of task.toml):
   OPENAI_API_KEY   — API key for the judge endpoint
   OPENAI_BASE_URL  — base URL (e.g. https://inference-api.nvidia.com/v1)
-  JUDGE_MODEL      — model name (e.g. openai/openai/gpt-5.5)
+  JUDGE_MODEL      — judge model name
+Optional: JUDGE_MAX_TOKENS (default 8192), JUDGE_TIMEOUT_SEC, and retry knobs
+  JUDGE_MAX_RETRIES / JUDGE_RETRY_BASE_SEC / JUDGE_RETRY_MAX_SEC.
 """
 from __future__ import annotations
 
 import json
 import os
+import random
 import re
 import sys
+import time
 import traceback
 from pathlib import Path
 from typing import Any
@@ -469,37 +484,142 @@ def read_json(path: Path) -> dict[str, Any]:
         return {}
 
 
-def truncate(text: str, limit: int = 60000) -> str:
-    if len(text) <= limit:
-        return text
-    return text[: limit - 30].rstrip() + "\n...[truncated]"
+def _int_env(name: str, default: int) -> int:
+    """Read an int env var, tolerating unset/empty/garbage values.
+
+    JUDGE_MAX_TOKENS is passed through from task.toml as "${JUDGE_MAX_TOKENS}";
+    when that shell var is unset the substitution can yield "" (or junk), which
+    would crash a bare int(). Fall back to the default in that case.
+    """
+    raw = (os.environ.get(name) or "").strip()
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return default
 
 
-def format_trajectory(trajectory: dict[str, Any]) -> str:
-    steps = trajectory.get("steps") or []
-    parts: list[str] = []
-    for i, step in enumerate(steps):
-        source = step.get("source", "unknown")
-        msg = str(step.get("message") or "").strip()
-        tool_calls = step.get("tool_calls") or []
-        if msg:
-            parts.append(f"[Step {i+1} | {source}]\n{truncate(msg, 8000)}")
-        for tc in tool_calls:
-            name = tc.get("name") or tc.get("tool") or "unknown_tool"
-            args_str = json.dumps(tc.get("arguments") or tc.get("args") or {}, ensure_ascii=False)
-            result = str(tc.get("result") or tc.get("output") or "")
-            parts.append(f"[Tool call: {name}]\nArgs: {truncate(args_str, 2000)}\nResult: {truncate(result, 4000)}")
-    return "\n\n".join(parts) if parts else "(no trajectory steps found)"
+def parse_rubric_levels(rubric_text: str) -> dict[str, dict[str, int]]:
+    """Parse the rubric into {criterion_<N>: {"A": pts, "B": pts, "C": pts}}.
+
+    Supports the current rubric format (single `Levels: A=X B=Y C=0` header per
+    criterion) and the legacy format (per-line `[A] (X points): ...`).
+    """
+    out: dict[str, dict[str, int]] = {}
+    parts = re.split(r"^Criterion\s+(\d+)\s*:", rubric_text, flags=re.MULTILINE)
+    for i in range(1, len(parts), 2):
+        n = parts[i].strip()
+        body = parts[i + 1] if i + 1 < len(parts) else ""
+        levels: dict[str, int] = {}
+        # Current format: single "Levels: A=X B=Y C=0" header (supports negatives)
+        m = re.search(
+            r"Levels:\s*((?:[A-Z]=-?\d+\s*)+)",
+            body,
+        )
+        if m:
+            for lm in re.finditer(r"([A-Z])=(-?\d+)", m.group(1)):
+                levels[lm.group(1).upper()] = int(lm.group(2))
+        # Legacy fallback: per-line "[A] (N points)"
+        if not levels:
+            for lm in re.finditer(r"\[([A-Z])\]\s*\(\s*(-?\d+)\s*points?\s*\)", body):
+                levels[lm.group(1).upper()] = int(lm.group(2))
+        if levels:
+            out[f"criterion_{n}"] = levels
+    return out
 
 
-def extract_answer_file_content() -> str:
-    for candidate in [Path("/app/answer.txt"), Path("/app/output.txt"), Path("/app/results.txt")]:
-        if candidate.exists():
-            return read_text(candidate)
-    return ""
+_RETRYABLE_STATUS = {408, 409, 425, 429, 500, 502, 503, 504}
 
 
-def call_judge(rubric: str, instruction: str, trajectory_text: str, answer: str) -> dict[str, Any]:
+def _retryable_exception_types() -> tuple[type, ...]:
+    """Transient OpenAI SDK exception types available in the installed version."""
+    try:
+        import openai
+    except ImportError:
+        return tuple()
+    types: list[type] = []
+    for name in (
+        "RateLimitError",
+        "APITimeoutError",
+        "APIConnectionError",
+        "InternalServerError",
+    ):
+        exc_type = getattr(openai, name, None)
+        if isinstance(exc_type, type):
+            types.append(exc_type)
+    return tuple(types)
+
+
+def _is_retryable(exc: Exception, retryable_types: tuple[type, ...]) -> bool:
+    if retryable_types and isinstance(exc, retryable_types):
+        return True
+    # Some OpenAI-compatible gateways surface 429/5xx as a generic APIStatusError.
+    status = getattr(exc, "status_code", None)
+    if status is None:
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+    return status in _RETRYABLE_STATUS
+
+
+def _retry_after_seconds(exc: Exception) -> float | None:
+    """Honor a server-provided Retry-After header (seconds) if present."""
+    resp = getattr(exc, "response", None)
+    headers = getattr(resp, "headers", None)
+    if not headers:
+        return None
+    try:
+        value = headers.get("retry-after")
+    except Exception:
+        return None
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _create_with_retry(client, **kwargs):
+    """chat.completions.create with backoff on rate-limit / transient errors.
+
+    The judge runs once per trial under high concurrency, so a single 429 from the
+    gateway otherwise marks the trial judge-unavailable. Tunable via verifier env
+    (set in task.toml [verifier.env]):
+      JUDGE_MAX_RETRIES    extra attempts after the first (default 6)
+      JUDGE_RETRY_BASE_SEC base backoff seconds, doubled each attempt (default 2.0)
+      JUDGE_RETRY_MAX_SEC  per-wait backoff cap in seconds (default 60.0)
+    """
+    max_retries = int(os.environ.get("JUDGE_MAX_RETRIES", "6"))
+    base = float(os.environ.get("JUDGE_RETRY_BASE_SEC", "2.0"))
+    cap = float(os.environ.get("JUDGE_RETRY_MAX_SEC", "60.0"))
+    retryable_types = _retryable_exception_types()
+
+    attempt = 0
+    while True:
+        try:
+            return client.chat.completions.create(**kwargs)
+        except Exception as exc:
+            if attempt >= max_retries or not _is_retryable(exc, retryable_types):
+                raise
+            delay = _retry_after_seconds(exc)
+            if delay is None:
+                delay = min(cap, base * (2 ** attempt))
+            delay += random.uniform(0.0, base)  # jitter to avoid thundering herd
+            attempt += 1
+            print(
+                f"[judge] transient error ({type(exc).__name__}: {exc}); "
+                f"retry {attempt}/{max_retries} in {delay:.1f}s",
+                file=sys.stderr,
+            )
+            time.sleep(delay)
+
+
+def call_judge(prompt: str) -> str:
+    """Send the upstream judge prompt to an OpenAI-compatible endpoint; return text.
+
+    This is the ONLY upstream deviation in the model call: it goes through an
+    OpenAI-compatible chat completions endpoint (OPENAI_API_KEY / OPENAI_BASE_URL /
+    JUDGE_MODEL) instead of the Anthropic SDK, and is wrapped in retry/backoff.
+    Prompt construction, JSON parsing, and rubric scoring stay upstream-verbatim.
+    """
     try:
         from openai import OpenAI
     except ImportError:
@@ -507,166 +627,230 @@ def call_judge(rubric: str, instruction: str, trajectory_text: str, answer: str)
 
     api_key = os.environ.get("OPENAI_API_KEY", "")
     base_url = os.environ.get("OPENAI_BASE_URL", "")
-    model = os.environ.get("JUDGE_MODEL", "")
+    model = os.environ.get("JUDGE_MODEL", "") or os.environ.get("MODEL_NAME", "")
     if not api_key:
         raise SystemExit("OPENAI_API_KEY not set.")
     if not model:
         raise SystemExit("JUDGE_MODEL not set.")
 
-    client = OpenAI(api_key=api_key, base_url=base_url or None)
-
-    system_prompt = """You are an expert biomedical research evaluator. You will be given:
-1. A research TASK (the instruction given to an AI agent)
-2. A RUBRIC with specific criteria for evaluating the agent's work
-3. The agent's TRAJECTORY (its step-by-step analytical process)
-4. The agent's FINAL ANSWER (if any)
-
-Score the agent's work against each rubric criterion. Then provide an overall score from 0.0 to 1.0.
-
-You MUST respond with valid JSON in exactly this format:
-{
-  "dimension_scores": {
-    "<dimension_name>": {"score": <float 0-1>, "rationale": "<brief explanation>"}
-  },
-  "overall_score": <float 0-1>,
-  "overall_rationale": "<summary of strengths and weaknesses>"
-}"""
-
-    user_prompt = f"""## TASK
-
-{truncate(instruction, 8000)}
-
-## RUBRIC
-
-{truncate(rubric, 16000)}
-
-## AGENT TRAJECTORY
-
-{truncate(trajectory_text, 40000)}
-
-## FINAL ANSWER
-
-{truncate(answer, 8000)}
-
-Score the agent's analytical trajectory against the rubric. Respond with JSON only."""
-
-    response = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        max_tokens=4096,
+    # max_retries=0: our _create_with_retry loop owns retry/backoff so the SDK's
+    # built-in retries don't compound the wait. timeout caps a single attempt.
+    client = OpenAI(
+        api_key=api_key,
+        base_url=base_url or None,
+        max_retries=0,
+        timeout=float(os.environ.get("JUDGE_TIMEOUT_SEC", "120")),
     )
 
-    content = response.choices[0].message.content or ""
-    json_match = re.search(r"\{.*\}", content, re.S)
-    if not json_match:
-        return {
-            "overall_score": 0.0,
-            "overall_rationale": f"Could not parse judge response as JSON: {content[:500]}",
-            "dimension_scores": {},
-            "raw_response": content[:2000],
-        }
-    try:
-        parsed = json.loads(json_match.group(0))
-    except json.JSONDecodeError:
-        return {
-            "overall_score": 0.0,
-            "overall_rationale": f"Invalid JSON in judge response: {content[:500]}",
-            "dimension_scores": {},
-            "raw_response": content[:2000],
-        }
-    if "overall_score" not in parsed:
-        scores = [
-            v.get("score", 0.0) if isinstance(v, dict) else 0.0
-            for v in (parsed.get("dimension_scores") or {}).values()
-        ]
-        parsed["overall_score"] = sum(scores) / len(scores) if scores else 0.0
-    return parsed
-
-
-def process_metrics(trajectory: dict[str, Any]) -> dict[str, Any]:
-    steps = trajectory.get("steps") or []
-    names: list[str] = []
-    for step in steps:
-        for tc in step.get("tool_calls") or []:
-            name = tc.get("name") or tc.get("tool") or ""
-            if name and name not in {"text", "message", "assistant", "user"}:
-                names.append(name)
-    breakdown: dict[str, int] = {}
-    for name in names:
-        breakdown[name] = breakdown.get(name, 0) + 1
-    return {
-        "trajectory_available": True,
-        "tool_call_count": sum(breakdown.values()),
-        "mcp_tool_call_count": sum(
-            v for k, v in breakdown.items() if k.startswith("mcp__") or k.startswith("tooluniverse_")
-        ),
-        "tool_call_breakdown": dict(sorted(breakdown.items())),
-    }
+    response = _create_with_retry(
+        client,
+        model=model,
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=_int_env("JUDGE_MAX_TOKENS", 8192),
+    )
+    return response.choices[0].message.content or ""
 
 
 def main() -> None:
     logs_dir = Path("/logs/verifier")
     logs_dir.mkdir(parents=True, exist_ok=True)
 
-    rubric = read_text(Path("/tests/rubric.txt"))
-    instruction = read_text(Path("/app/instruction.md"))
-    if not instruction:
-        instruction = read_text(Path("/tests/instruction.md"))
-
-    trajectory_path = Path("/logs/agent/trajectory.json")
-    trajectory: dict[str, Any] = {}
-    if trajectory_path.exists():
-        trajectory = read_json(trajectory_path)
-    trajectory_text = format_trajectory(trajectory)
-
-    answer = extract_answer_file_content()
+    # Read rubric from tests directory
+    rubric_path = Path("/tests/rubric.txt")
+    if rubric_path.exists():
+        rubric = rubric_path.read_text()
+    else:
+        print("ERROR: rubric.txt not found in /tests/")
+        (logs_dir / "reward.json").write_text(json.dumps({"score": 0}, indent=2))
+        (logs_dir / "reward.txt").write_text("0.0\n")
+        return
 
     gold = read_json(Path("/tests/gold_metadata.json"))
 
-    score = 0.0
-    judge_result = "incorrect"
-    judge_rationale = ""
-    judge_error = None
-    dimension_scores: dict[str, Any] = {}
+    # Read agent outputs (copied to /logs/verifier/ by test.sh)
+    trace_path = logs_dir / "trace.md"
+    answer_path = logs_dir / "answer.txt"
 
-    if not rubric:
-        judge_rationale = "No rubric found at /tests/rubric.txt."
-        judge_error = "missing_rubric"
+    trace_content = ""
+    answer_content = ""
+
+    if trace_path.exists():
+        trace_content = trace_path.read_text()
     else:
+        print("Warning: trace.md not found")
+
+    if answer_path.exists():
+        answer_content = answer_path.read_text()
+    else:
+        print("Warning: answer.txt not found")
+
+    # If no output files exist, score is 0
+    if not trace_content and not answer_content:
+        print("No output files found. Score: 0")
+        (logs_dir / "reward.json").write_text(json.dumps({"score": 0}, indent=2))
+        (logs_dir / "reward.txt").write_text("0.0\n")
+        (logs_dir / "evaluation.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": "biomnibench_da_reward.v1",
+                    "total_score": 0,
+                    "reward": 0.0,
+                    "scoring_method": "llm_rubric_levels_openai",
+                    "criteria": {},
+                    "reasoning": "No trace.md or answer.txt produced by the agent.",
+                    "judge_model": os.environ.get("JUDGE_MODEL"),
+                    "answer_source": "none",
+                    **{k: gold.get(k) for k in gold},
+                },
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
+        return
+
+    prompt = f"""You are an expert evaluator for a data analysis task.
+
+Evaluate the agent's work using the following rubric:
+
+{rubric}
+
+Here is the agent's analysis trace:
+
+<trace>
+{trace_content if trace_content else "[No trace file provided]"}
+</trace>
+
+Here is the agent's final answer:
+
+<answer>
+{answer_content if answer_content else "[No answer file provided]"}
+</answer>
+
+For each criterion in the rubric, choose ONE level: A, B, or C — based purely on which level description best describes the agent's work. Do not output numerical points; the score for each level is computed automatically from the rubric.
+
+You MUST respond with a JSON object in exactly this format:
+{{
+  "criteria": {{
+    "criterion_1": {{"level": "A", "reason": "<one-sentence explanation>"}},
+    "criterion_2": {{"level": "B", "reason": "<one-sentence explanation>"}},
+    ...
+  }},
+  "overall_reasoning": "<short summary>"
+}}
+
+Each "level" value must be exactly the single character "A", "B", or "C". Only output the JSON object, nothing else."""
+
+    # The ONLY upstream deviation: OpenAI-compatible endpoint + retry (see call_judge).
+    response_text = call_judge(prompt)
+    print(f"Raw response (first 1000 chars): {response_text[:1000]}...")
+
+    # Parse JSON from response
+    try:
+        # Try to find JSON object in response: opening brace -> matching close brace
+        start_idx = response_text.find('{')
+        if start_idx != -1:
+            brace_count = 0
+            end_idx = start_idx
+            for i, char in enumerate(response_text[start_idx:], start_idx):
+                if char == '{':
+                    brace_count += 1
+                elif char == '}':
+                    brace_count -= 1
+                    if brace_count == 0:
+                        end_idx = i + 1
+                        break
+            json_str = response_text[start_idx:end_idx]
+            result = json.loads(json_str)
+        else:
+            result = json.loads(response_text)
+
+        criteria = result.get("criteria", {})
+        reasoning = result.get("overall_reasoning", result.get("reasoning", "No reasoning provided"))
+
+        # The LLM produces only level letters (A / B / C). Map each letter to
+        # its rubric-defined point value programmatically. This eliminates
+        # judge arithmetic noise entirely.
         try:
-            result = call_judge(rubric, instruction, trajectory_text, answer)
-            score = float(result.get("overall_score", 0.0))
-            score = max(0.0, min(1.0, score))
-            judge_rationale = str(result.get("overall_rationale", ""))
-            dimension_scores = result.get("dimension_scores", {})
-        except Exception as exc:
-            judge_error = str(exc)
-            judge_rationale = f"Judge call failed: {exc}"
-            traceback.print_exc()
+            criterion_levels = parse_rubric_levels(rubric)  # {criterion_n: {"A": pts, ...}}
+        except Exception as parse_err:
+            print(f"NOTE: failed to parse rubric levels: {parse_err}")
+            criterion_levels = {}
 
-    if score >= 0.8:
-        judge_result = "correct"
-    elif score >= 0.4:
-        judge_result = "partial"
-    else:
-        judge_result = "incorrect"
+        for k, c in list(criteria.items()):
+            if not isinstance(c, dict):
+                continue
+            allowed = criterion_levels.get(k) or {}
+            level = (c.get("level") or "").strip().upper()
+            if level in allowed:
+                c["score"] = allowed[level]
+            elif "score" in c:
+                # Legacy fallback: LLM gave a numeric score; snap to nearest allowed
+                try:
+                    stated = int(c.get("score", 0))
+                except (TypeError, ValueError):
+                    stated = 0
+                if allowed:
+                    target = min(allowed.values(), key=lambda v: abs(v - stated))
+                    c["score"] = target
+            else:
+                c["score"] = 0  # missing level + missing score -> no credit
 
-    reward_data = {
+        # Total = sum of programmatically-derived per-criterion scores.
+        if criteria:
+            criterion_sum = 0
+            for c in criteria.values():
+                if not isinstance(c, dict):
+                    continue
+                try:
+                    criterion_sum += int(c.get("score", 0))
+                except (TypeError, ValueError):
+                    pass
+            total_score = criterion_sum
+        else:
+            total_score = int(result.get("total_score", result.get("score", 0)))
+
+    except (json.JSONDecodeError, ValueError) as e:
+        print(f"Failed to parse JSON: {e}")
+        print(f"Response was: {response_text}")
+
+        # Try to extract total score from text
+        score_match = re.search(r'"total_score"\s*:\s*(\d+)', response_text)
+        if not score_match:
+            score_match = re.search(r'"score"\s*:\s*(\d+)', response_text)
+
+        if score_match:
+            total_score = int(score_match.group(1))
+        else:
+            total_score = 0
+
+        criteria = {}
+        reasoning = f"Failed to parse full response: {str(e)}"
+
+    # Clamp score to valid range (upstream 0-100 integer scale)
+    total_score = max(0, min(100, total_score))
+    # Normalized 0.0-1.0 reward for NeMo Gym / Harbor (reward.txt takes precedence).
+    normalized_reward = total_score / 100.0
+
+    print(f"Total Score: {total_score}/100  (reward={normalized_reward:.3f})")
+    print(f"Criteria: {json.dumps(criteria, indent=2)}")
+    print(f"Reasoning: {reasoning}")
+
+    # reward.txt: normalized 0-1 scalar. Harbor reads this in preference to
+    # reward.json, so the Gym `reward` is correctly scaled to [0, 1].
+    (logs_dir / "reward.txt").write_text(f"{normalized_reward}\n", encoding="utf-8")
+    # reward.json: upstream-faithful single integer key (0-100) as an artifact.
+    (logs_dir / "reward.json").write_text(json.dumps({"score": total_score}, indent=2))
+
+    # Rich evaluation artifact (not parsed by Harbor) for rollout analysis.
+    evaluation_data = {
         "schema_version": "biomnibench_da_reward.v1",
-        "reward": score,
-        "score": score,
-        "judge_result": judge_result,
-        "judge_rationale": judge_rationale,
-        "judge_available": judge_error is None,
+        "total_score": total_score,
+        "reward": normalized_reward,
+        "scoring_method": "llm_rubric_levels_openai",
+        "criteria": criteria,
+        "reasoning": reasoning,
         "judge_model": os.environ.get("JUDGE_MODEL"),
-        "judge_error": judge_error,
-        "scoring_method": "llm_rubric_openai",
-        "dimension_scores": dimension_scores,
-        "answer": truncate(answer, 2000),
-        "answer_source": "file" if answer else "none",
+        "answer_source": "file" if answer_content else ("trace" if trace_content else "none"),
         "question_group_key": gold.get("question_group_key", ""),
         "partition": gold.get("partition", ""),
         "repeat_index": gold.get("repeat_index"),
@@ -676,17 +860,10 @@ def main() -> None:
         "biomnibench_task_type": gold.get("biomnibench_task_type", ""),
         "biomnibench_category": gold.get("biomnibench_category", ""),
         "biomnibench_difficulty": gold.get("biomnibench_difficulty", ""),
-        "process_metrics": process_metrics(trajectory) if trajectory else {"trajectory_available": False},
     }
-
-    (logs_dir / "reward.json").write_text(
-        json.dumps(reward_data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    (logs_dir / "evaluation.json").write_text(
+        json.dumps(evaluation_data, indent=2, ensure_ascii=False)
     )
-    (logs_dir / "reward.txt").write_text(f"{score}\n", encoding="utf-8")
-    print(f"Reward: {score:.3f}")
-    print(f"Judge result: {judge_result}")
-    if judge_rationale:
-        print(judge_rationale[:500])
 
 
 if __name__ == "__main__":
@@ -699,6 +876,9 @@ def patched_test_sh() -> str:
         "#!/bin/sh\n"
         "set -eu\n"
         "mkdir -p /logs/verifier\n"
+        "# Copy agent outputs into the verifier dir for evaluation (upstream behavior).\n"
+        "cp /app/trace.md /logs/verifier/trace.md 2>/dev/null || echo 'Warning: trace.md not found'\n"
+        "cp /app/answer.txt /logs/verifier/answer.txt 2>/dev/null || echo 'Warning: answer.txt not found'\n"
         "# openai is pre-installed in biomnibench-da-runtime; pip fallback for copy-mode Dockerfiles\n"
         "if ! python3 -c 'import openai' 2>/dev/null; then\n"
         "  python3 -m pip install --break-system-packages -q openai\n"
