@@ -197,3 +197,13 @@ class TestHelpOutput:
         # Validate parameters section
         assert "param" in parsed["parameters"]
         assert "[required]" in parsed["parameters"]["param"]
+
+
+def test_domain_enum_documents_every_value() -> None:
+    # Each Domain value must be documented in the enum docstring, so newly-added domains can't
+    # ship without guidance (the docstring is the source of truth surfaced in IDEs / on hover).
+    from nemo_gym.config_types import Domain
+
+    doc = Domain.__doc__ or ""
+    for member in Domain:
+        assert f"``{member.value}``" in doc, f"Domain.{member.name} ('{member.value}') is undocumented"
