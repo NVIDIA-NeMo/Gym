@@ -207,10 +207,15 @@ class BenchFlowAgent(SimpleResponsesAPIAgent):
 
     def _build_agent_env(self) -> dict[str, str]:
         """Builds the environment variables to forward to the agent harness."""
-        agent_env = dict(self.config.agent_env or {})
         global_config_dict = get_global_config_dict()
-        agent_env["BENCHFLOW_PROVIDER_BASE_URL"] = self._resolve_model_base_url(global_config_dict)
-        agent_env["BENCHFLOW_PROVIDER_API_KEY"] = global_config_dict.get("policy_api_key", "EMPTY")
+        api_key = global_config_dict.get("policy_api_key", "EMPTY")
+        agent_env = {
+            "BENCHFLOW_PROVIDER_BASE_URL": self._resolve_model_base_url(global_config_dict),
+            "BENCHFLOW_PROVIDER_API_KEY": api_key,
+            "OPENAI_API_KEY": api_key,
+        }
+        if self.config.agent_env:
+            agent_env.update(self.config.agent_env)
         return agent_env
 
     def _build_task_config_overrides(self, task_name: str) -> dict[str, Any]:
