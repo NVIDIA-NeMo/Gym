@@ -19,6 +19,7 @@ from types import SimpleNamespace
 
 from pytest import raises
 
+import nemo_gym.decontamination as decon
 from nemo_gym.decontamination import (
     DecontaminationConfig,
     _check_contamination_async,
@@ -118,15 +119,87 @@ def test_filter_split_removes_contaminated(tmp_path: Path):
 
 def test_config_defaults():
     cfg = DecontaminationConfig(test_set_jsonls=["a.jsonl"])
+    assert cfg.method == "ngram"  # lightweight, dependency-free default
     assert cfg.decontaminate_types == ["train"]
     assert cfg.top_k == 5
     assert cfg.judge_model == "gpt-4o-mini"
     assert cfg.check_both_ways is False
+    assert cfg.ngram_size == 13
+    assert cfg.ngram_threshold == 0.6
 
 
 def test_config_requires_test_set_jsonls():
     with raises(Exception):
         DecontaminationConfig()
+
+
+def test_config_rejects_unknown_method():
+    with raises(Exception):
+        DecontaminationConfig(test_set_jsonls=["a.jsonl"], method="bogus")
+
+
+# ---------------------------------------------------------------------------
+# N-gram method
+# ---------------------------------------------------------------------------
+
+
+def test_tokenize_lowercases_and_splits_on_words():
+    assert decon._tokenize("Find X, given Y=2!") == ["find", "x", "given", "y", "2"]
+
+
+def test_ngram_set_short_text_is_single_whole_gram():
+    assert decon._ngram_set(["a", "b"], 13) == {("a", "b")}
+    assert decon._ngram_set([], 3) == set()
+
+
+def test_ngram_set_sliding_windows():
+    assert decon._ngram_set(["a", "b", "c", "d"], 2) == {("a", "b"), ("b", "c"), ("c", "d")}
+
+
+def test_decontaminate_ngram_exact_and_overlap_and_clean():
+    test_texts = ["the quick brown fox jumps over the lazy dog"]
+    train_texts = [
+        "The quick brown fox jumps over the lazy dog",  # exact (normalized) -> 1.0
+        "the quick brown fox jumps over the lazy cat",  # 1-word edit -> high overlap
+        "completely unrelated sentence about something else entirely",  # clean
+    ]
+    cfg = DecontaminationConfig(test_set_jsonls=["a.jsonl"], method="ngram", ngram_size=3, ngram_threshold=0.5)
+    decisions = decon._decontaminate_ngram(train_texts, test_texts, cfg)
+
+    assert decisions[0]["contaminated"] is True
+    assert decisions[0]["similarity_scores"] == [1.0]
+    assert decisions[1]["contaminated"] is True  # high n-gram overlap
+    assert decisions[2]["contaminated"] is False
+    assert decisions[2]["similar_items"] == []  # no shared n-grams at all
+
+
+def test_run_decontamination_ngram_end_to_end(tmp_path: Path):
+    # No monkeypatching / no torch / no LLM - the ngram method is fully self-contained.
+    test_path = tmp_path / "test.jsonl"
+    test_path.write_text(json.dumps({"problem": "the quick brown fox jumps over the lazy dog"}) + "\n")
+
+    train_path = tmp_path / "train.jsonl"
+    train_path.write_text(
+        json.dumps({"responses_create_params": {"input": "the quick brown fox jumps over the lazy dog"}})
+        + "\n"
+        + json.dumps({"responses_create_params": {"input": "an entirely different unrelated problem here"}})
+        + "\n"
+    )
+
+    cfg = SimpleNamespace(
+        decontamination=DecontaminationConfig(
+            test_set_jsonls=[str(test_path)],
+            method="ngram",
+            ngram_size=3,
+            ngram_threshold=0.5,
+            report_dirpath=str(tmp_path),
+        )
+    )
+    run_decontamination(cfg, tmp_path)
+
+    remaining = [extract_problem_text(json.loads(line)) for line in train_path.read_text().splitlines()]
+    assert remaining == ["an entirely different unrelated problem here"]
+    assert (tmp_path / "train_contamination.jsonl").exists()
 
 
 class _FakeClient:
@@ -223,6 +296,7 @@ def test_run_decontamination_missing_and_empty_splits(tmp_path: Path, monkeypatc
     cfg = SimpleNamespace(
         decontamination=DecontaminationConfig(
             test_set_jsonls=[str(test_path)],
+            method="embedding",
             decontaminate_types=["train", "validation"],
             judge_api_key="k",
         )
@@ -249,6 +323,7 @@ def test_run_decontamination_end_to_end_filters_and_reports(tmp_path: Path, monk
     cfg = SimpleNamespace(
         decontamination=DecontaminationConfig(
             test_set_jsonls=[str(test_path)],
+            method="embedding",
             judge_api_key="k",
             report_dirpath=str(tmp_path),
         )
@@ -273,7 +348,9 @@ def test_run_decontamination_dry_run_keeps_rows(tmp_path: Path, monkeypatch):
     train_path.write_text(json.dumps({"problem": "alpha"}) + "\n")
 
     cfg = SimpleNamespace(
-        decontamination=DecontaminationConfig(test_set_jsonls=[str(test_path)], judge_api_key="k", dry_run=True)
+        decontamination=DecontaminationConfig(
+            test_set_jsonls=[str(test_path)], method="embedding", judge_api_key="k", dry_run=True
+        )
     )
     run_decontamination(cfg, tmp_path)
 
@@ -299,7 +376,9 @@ def test_run_decontamination_accepts_dict_and_reads_global_api_key(tmp_path: Pat
     (tmp_path / "train.jsonl").write_text(json.dumps({"problem": "beta"}) + "\n")
 
     # Pass decontamination as a plain dict to exercise model_validate coercion.
-    cfg = SimpleNamespace(decontamination={"test_set_jsonls": [str(test_path)], "report_dirpath": str(tmp_path)})
+    cfg = SimpleNamespace(
+        decontamination={"test_set_jsonls": [str(test_path)], "method": "embedding", "report_dirpath": str(tmp_path)}
+    )
     run_decontamination(cfg, tmp_path)
 
     assert captured["api_key"] == "k"
@@ -314,5 +393,5 @@ def test_run_decontamination_warns_when_no_api_key(tmp_path: Path, monkeypatch):
     test_path.write_text(json.dumps({"problem": "alpha"}) + "\n")
     (tmp_path / "train.jsonl").write_text(json.dumps({"problem": "beta"}) + "\n")
 
-    cfg = SimpleNamespace(decontamination=DecontaminationConfig(test_set_jsonls=[str(test_path)]))
+    cfg = SimpleNamespace(decontamination=DecontaminationConfig(test_set_jsonls=[str(test_path)], method="embedding"))
     run_decontamination(cfg, tmp_path)  # no key anywhere -> warns but proceeds

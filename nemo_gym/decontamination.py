@@ -15,21 +15,29 @@
 
 # Decontamination of training data against evaluation/test sets.
 #
-# This is a port of the two-stage LLM decontamination pipeline from NeMo-Skills
-# (https://github.com/NVIDIA-NeMo/Skills), which itself follows the lmsys
-# methodology (https://lmsys.org/blog/2023-11-14-llm-decontaminator/):
+# Two methods are available via `DecontaminationConfig.method`:
 #
-#   1. Semantic retrieval: for every prepared training problem, find the top-k
-#      most similar problems in the provided test sets using sentence-transformer
-#      embeddings + cosine similarity.
-#   2. LLM verification: ask an LLM judge whether each (train, test) candidate
-#      pair is in fact the same problem.
-#   3. Filtering: drop training rows confirmed to overlap a test problem.
+#   "ngram" (default) - lightweight, dependency-free. Flags a training problem as
+#       contaminated when its word n-grams overlap a test problem above a threshold
+#       (Jaccard), plus an exact-match short-circuit. Catches verbatim / lightly-edited
+#       leakage. This is the GPT-3/Llama-style approach and needs no model or LLM.
 #
-# The heavy dependencies (torch, transformers) are NOT declared as NeMo Gym
-# dependencies - they are imported lazily inside `_embed_texts` so that importing
-# this module, and running `ng_prepare_data` without decontamination enabled, incurs
-# zero additional cost. To use decontamination, install them yourself, e.g.:
+#   "embedding" - a port of the two-stage LLM decontaminator from NeMo-Skills
+#       (https://github.com/NVIDIA-NeMo/Skills), following the lmsys methodology
+#       (https://lmsys.org/blog/2023-11-14-llm-decontaminator/):
+#         1. embed problems (sentence-transformer style) and retrieve top-k nearest
+#            test problems by cosine similarity;
+#         2. ask an LLM judge whether each (train, test) pair is the same problem.
+#       This also catches paraphrases / semantic duplicates that n-grams miss, at the
+#       cost of a model + LLM calls.
+#
+# Both methods then drop training rows confirmed to overlap a test problem.
+#
+# The "embedding" method's heavy dependencies (torch, transformers) are NOT declared
+# as NeMo Gym dependencies - they are imported lazily inside `_embed_texts` so that
+# importing this module, running `ng_prepare_data` without decontamination, or using
+# the "ngram" method, incurs zero additional cost. To use the "embedding" method,
+# install them yourself, e.g.:
 #     pip install "transformers<5" torch
 # (transformers is pinned <5 because 5.x imports scikit-learn unconditionally, which
 # this repo excludes from resolution to keep the base install slim).
@@ -37,8 +45,10 @@
 import asyncio
 import json
 import logging
+import re
+from collections import defaultdict
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Set, Tuple
 
 from pydantic import BaseModel, Field
 from tqdm.auto import tqdm
@@ -71,6 +81,12 @@ class DecontaminationConfig(BaseModel):
         description="JSONL file paths of the evaluation/test sets to decontaminate against. "
         "Rows may be in NeMo Gym responses format or carry a flat `problem_text_key`."
     )
+    method: Literal["ngram", "embedding"] = Field(
+        default="ngram",
+        description="Decontamination method. 'ngram' (default) is lightweight and dependency-free "
+        "(word n-gram overlap + exact match). 'embedding' uses transformer embeddings + an LLM judge "
+        "to also catch paraphrases (requires `transformers`/`torch`; see module docstring).",
+    )
     decontaminate_types: List[str] = Field(
         default_factory=lambda: ["train"],
         description="Which collated splits (by dataset type) to decontaminate, e.g. ['train', 'validation']. "
@@ -81,7 +97,17 @@ class DecontaminationConfig(BaseModel):
         description="Fallback flat key to read the problem text from when a row is not in responses format.",
     )
 
-    # Embedding-based retrieval.
+    # N-gram method parameters (method='ngram').
+    ngram_size: int = Field(
+        default=13,
+        description="Word n-gram size for the 'ngram' method. Problems shorter than this are compared whole.",
+    )
+    ngram_threshold: float = Field(
+        default=0.6,
+        description="Jaccard n-gram overlap in [0, 1] at or above which a pair is flagged (method='ngram').",
+    )
+
+    # Embedding-based retrieval (method='embedding').
     embedding_model: str = Field(
         default="sentence-transformers/multi-qa-MiniLM-L6-cos-v1",
         description="HF transformers model id used to embed problems (mean-pooled) for similarity retrieval.",
@@ -190,6 +216,87 @@ def _read_problem_texts(file_paths: List[str], problem_text_key: str) -> List[st
                 if text:
                     seen.setdefault(text, None)
     return list(seen.keys())
+
+
+########################################
+# Method 1: n-gram overlap (dependency-free)
+########################################
+
+
+def _tokenize(text: str) -> List[str]:
+    """Lowercase word tokenization for n-gram comparison."""
+    return re.findall(r"\w+", text.lower())
+
+
+def _ngram_set(tokens: List[str], n: int) -> Set[Tuple[str, ...]]:
+    """Set of word n-grams; texts shorter than n contribute a single whole-text gram."""
+    if not tokens:
+        return set()
+    if len(tokens) < n:
+        return {tuple(tokens)}
+    return {tuple(tokens[i : i + n]) for i in range(len(tokens) - n + 1)}
+
+
+def _decontaminate_ngram(
+    train_texts: List[str], test_texts: List[str], config: DecontaminationConfig
+) -> List[Dict[str, Any]]:
+    """Flag training problems whose word n-grams overlap a test problem above threshold.
+
+    Uses an inverted index (n-gram -> test indices) so each training problem is only
+    scored against test problems that share at least one n-gram. Pure Python, no deps.
+    """
+    n = config.ngram_size
+    threshold = config.ngram_threshold
+
+    test_ngrams = [_ngram_set(_tokenize(t), n) for t in test_texts]
+    index: Dict[Tuple[str, ...], Set[int]] = defaultdict(set)
+    for test_idx, grams in enumerate(test_ngrams):
+        for gram in grams:
+            index[gram].add(test_idx)
+    # Map normalized test text -> index for the exact-match short-circuit.
+    norm_test = {t.strip().lower(): i for i, t in enumerate(test_texts)}
+
+    decisions: List[Dict[str, Any]] = []
+    for train in tqdm(train_texts, desc="N-gram matching"):
+        if train.strip().lower() in norm_test:
+            test_idx = norm_test[train.strip().lower()]
+            decisions.append(
+                {
+                    "problem": train,
+                    "similar_items": [test_texts[test_idx]],
+                    "similarity_scores": [1.0],
+                    "contaminated": True,
+                }
+            )
+            continue
+
+        train_grams = _ngram_set(_tokenize(train), n)
+        candidate_test_idxs: Set[int] = set()
+        for gram in train_grams:
+            candidate_test_idxs |= index.get(gram, set())
+
+        best_score, best_idx = 0.0, None
+        for test_idx in candidate_test_idxs:
+            test_gram_set = test_ngrams[test_idx]
+            union = len(train_grams | test_gram_set)
+            score = len(train_grams & test_gram_set) / union if union else 0.0
+            if score > best_score:
+                best_score, best_idx = score, test_idx
+
+        decisions.append(
+            {
+                "problem": train,
+                "similar_items": [test_texts[best_idx]] if best_idx is not None else [],
+                "similarity_scores": [round(best_score, 4)] if best_idx is not None else [],
+                "contaminated": best_score >= threshold,
+            }
+        )
+    return decisions
+
+
+########################################
+# Method 2: embeddings + LLM judge
+########################################
 
 
 def _embed_texts(texts: List[str], config: DecontaminationConfig) -> "Any":  # pragma: no cover
@@ -362,19 +469,21 @@ def run_decontamination(config: "Any", output_dir: Path) -> None:
     if not isinstance(dconf, DecontaminationConfig):
         dconf = DecontaminationConfig.model_validate(dconf)
 
-    # Resolve the judge API key from the global config if not provided explicitly.
-    api_key = dconf.judge_api_key
-    if not api_key:
-        from nemo_gym.global_config import get_global_config_dict
+    # The judge API key is only needed for the embedding method's LLM step.
+    api_key = ""
+    if dconf.method == "embedding":
+        api_key = dconf.judge_api_key
+        if not api_key:
+            from nemo_gym.global_config import get_global_config_dict
 
-        global_config = get_global_config_dict()
-        api_key = global_config.get(dconf.judge_api_key_name, "")
-    if not api_key:
-        LOG.warning(
-            "No judge API key found (set `decontamination.judge_api_key` or `%s` in env). "
-            "Proceeding - this will only work for endpoints that do not require auth.",
-            dconf.judge_api_key_name,
-        )
+            global_config = get_global_config_dict()
+            api_key = global_config.get(dconf.judge_api_key_name, "")
+        if not api_key:
+            LOG.warning(
+                "No judge API key found (set `decontamination.judge_api_key` or `%s` in env). "
+                "Proceeding - this will only work for endpoints that do not require auth.",
+                dconf.judge_api_key_name,
+            )
 
     test_texts = _read_problem_texts(dconf.test_set_jsonls, dconf.problem_text_key)
     LOG.info("Loaded %d unique problems from %d test set file(s).", len(test_texts), len(dconf.test_set_jsonls))
@@ -396,8 +505,11 @@ def run_decontamination(config: "Any", output_dir: Path) -> None:
             LOG.warning("No problems extracted from %s; skipping.", data_path)
             continue
 
-        candidates = _retrieve_similar(train_texts, test_texts, dconf)
-        decisions = asyncio.run(_check_contamination_async(candidates, dconf, api_key))
+        if dconf.method == "ngram":
+            decisions = _decontaminate_ngram(train_texts, test_texts, dconf)
+        else:
+            candidates = _retrieve_similar(train_texts, test_texts, dconf)
+            decisions = asyncio.run(_check_contamination_async(candidates, dconf, api_key))
 
         report_path = report_dir / f"{dtype}_contamination.jsonl"
         with open(report_path, "wt", encoding="utf-8") as f:
