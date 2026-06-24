@@ -17,13 +17,19 @@ navigation:
         title-source: frontmatter
       - section: "Agent Server"
         path: ./latest/pages/agent-server/index.mdx
-        contents: []
+        contents:
+          - page: Overview
+            path: ./latest/pages/agent-server/index.mdx
+            hidden: true
       - folder: ./latest/pages/model-server
         title: "Model Server"
         title-source: frontmatter
       - section: "Resources Server"
         path: ./latest/pages/resources-server/index.mdx
-        contents: []
+        contents:
+          - page: Overview
+            path: ./latest/pages/resources-server/index.mdx
+            hidden: true
       - folder: ./latest/pages/data
         title: "Data"
         title-source: frontmatter
