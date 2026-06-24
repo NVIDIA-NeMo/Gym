@@ -19,7 +19,7 @@ import logging
 import re
 import shlex
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -92,10 +92,6 @@ METADATA_VALUE_RE = re.compile(r"[^A-Za-z0-9_.-]+")
 DEFAULT_IMAGE_PULL_POLICY = "IfNotPresent"
 IMAGE_PULL_POLICY_EXTENSION_KEY = "imagePullPolicy"
 IMAGE_PULL_POLICY_ANNOTATION_EXTENSION_KEY = "opensandbox.extensions.image-pull-policy"
-PROVIDER_OPTION_PLATFORM = "platform"
-PROVIDER_OPTION_SKIP_HEALTH_CHECK = "skip_health_check"
-PROVIDER_OPTION_SNAPSHOT_ID = "snapshot_id"
-PROVIDER_OPTION_VOLUMES = "volumes"
 VALID_IMAGE_PULL_POLICIES = {"Always", "IfNotPresent", "Never"}
 STATUS_CODE_RE = re.compile(r"(?:status code|http)\D+(\d{3})", re.IGNORECASE)
 
@@ -323,26 +319,6 @@ def _to_volumes(volumes: list[Mapping[str, Any]]) -> list[Any]:
     return [Volume(**dict(volume)) for volume in volumes]
 
 
-def _spec_volumes(spec: SandboxSpec) -> list[Mapping[str, Any]] | None:
-    return spec.provider_options.get(PROVIDER_OPTION_VOLUMES)
-
-
-def _spec_extensions(spec: SandboxSpec) -> dict[str, str]:
-    value = spec.provider_options.get("extensions", {})
-    if not isinstance(value, Mapping):
-        raise TypeError("OpenSandbox provider option 'extensions' must be a mapping")
-    return _string_map(dict(value))
-
-
-def _provider_option_bool(provider_options: dict[str, Any], key: str) -> bool | None:
-    value = provider_options.get(key)
-    if value is None:
-        return None
-    if not isinstance(value, bool):
-        raise TypeError(f"OpenSandbox provider option {key!r} must be a bool")
-    return value
-
-
 def _to_sandbox_status(state: Any) -> SandboxStatus:
     normalized = str(state or "").lower()
     if normalized in {"active", "ready", "running"}:
@@ -453,6 +429,60 @@ def _coerce_config(value: Any, config_cls: type[Any]) -> Any:
     raise TypeError(f"{config_cls.__name__} must be a mapping or {config_cls.__name__} instance")
 
 
+@dataclass(frozen=True)
+class OpenSandboxProviderOptions:
+    """Recognized per-sandbox create options read from ``SandboxSpec.provider_options``.
+
+    ``platform`` and ``volumes`` entries are passed through to the OpenSandbox SDK,
+    so their inner fields are validated by the SDK rather than here.
+    """
+
+    platform: Mapping[str, Any] | None = None
+    snapshot_id: str | None = None
+    volumes: tuple[Mapping[str, Any], ...] = ()
+    skip_health_check: bool | None = None
+    extensions: Mapping[str, str] = field(default_factory=dict)
+
+    @classmethod
+    def from_mapping(cls, options: Mapping[str, Any] | None) -> "OpenSandboxProviderOptions":
+        if options is None:
+            return cls()
+        if not isinstance(options, Mapping):
+            raise TypeError("OpenSandbox provider_options must be a mapping")
+
+        allowed = set(cls.__dataclass_fields__)
+        unknown = set(options) - allowed
+        if unknown:
+            raise ValueError(
+                f"Unknown OpenSandbox provider option(s): {', '.join(sorted(unknown))}. "
+                f"Supported: {', '.join(sorted(allowed))}"
+            )
+
+        platform = options.get("platform")
+        if platform is not None and not isinstance(platform, Mapping):
+            raise TypeError("OpenSandbox provider option 'platform' must be a mapping")
+        snapshot_id = options.get("snapshot_id")
+        if snapshot_id is not None and not isinstance(snapshot_id, str):
+            raise TypeError("OpenSandbox provider option 'snapshot_id' must be a string")
+        volumes = options.get("volumes") or ()
+        if not isinstance(volumes, (list, tuple)) or not all(isinstance(volume, Mapping) for volume in volumes):
+            raise TypeError("OpenSandbox provider option 'volumes' must be a list of mappings")
+        skip_health_check = options.get("skip_health_check")
+        if skip_health_check is not None and not isinstance(skip_health_check, bool):
+            raise TypeError("OpenSandbox provider option 'skip_health_check' must be a bool")
+        extensions = options.get("extensions", {})
+        if not isinstance(extensions, Mapping):
+            raise TypeError("OpenSandbox provider option 'extensions' must be a mapping")
+
+        return cls(
+            platform=dict(platform) if platform is not None else None,
+            snapshot_id=snapshot_id,
+            volumes=tuple(dict(volume) for volume in volumes),
+            skip_health_check=skip_health_check,
+            extensions=_string_map(dict(extensions)),
+        )
+
+
 class OpenSandboxProvider:
     """Provider backed by the OpenSandbox SDK/server API."""
 
@@ -471,23 +501,21 @@ class OpenSandboxProvider:
         self._probe = _coerce_config(probe, OpenSandboxProbeConfig)
         self._operations = _coerce_config(operations, OpenSandboxOperationConfig)
 
-    def _with_default_image_pull_policy(self, spec: SandboxSpec) -> SandboxSpec:
-        """Ensure SDK create requests carry the desired image pull policy."""
+    def _resolve_extensions(self, extensions: Mapping[str, str]) -> dict[str, str]:
+        """Add the configured default image pull policy to SDK create extensions."""
+        resolved = dict(extensions)
         if self._create.image_pull_policy is None:
-            return spec
+            return resolved
 
-        provider_options = dict(spec.provider_options)
-        extensions = _spec_extensions(spec)
-        image_pull_policy = extensions.get(IMAGE_PULL_POLICY_EXTENSION_KEY) or extensions.get(
-            IMAGE_PULL_POLICY_ANNOTATION_EXTENSION_KEY
+        image_pull_policy = (
+            resolved.get(IMAGE_PULL_POLICY_EXTENSION_KEY)
+            or resolved.get(IMAGE_PULL_POLICY_ANNOTATION_EXTENSION_KEY)
+            or self._create.image_pull_policy
         )
-        if image_pull_policy is None:
-            image_pull_policy = self._create.image_pull_policy
         image_pull_policy = validate_image_pull_policy(image_pull_policy)
-        extensions.setdefault(IMAGE_PULL_POLICY_EXTENSION_KEY, image_pull_policy)
-        extensions.setdefault(IMAGE_PULL_POLICY_ANNOTATION_EXTENSION_KEY, image_pull_policy)
-        provider_options["extensions"] = extensions
-        return replace(spec, provider_options=provider_options)
+        resolved.setdefault(IMAGE_PULL_POLICY_EXTENSION_KEY, image_pull_policy)
+        resolved.setdefault(IMAGE_PULL_POLICY_ANNOTATION_EXTENSION_KEY, image_pull_policy)
+        return resolved
 
     def _connection_config(
         self,
@@ -694,37 +722,33 @@ class OpenSandboxProvider:
     async def _create_once(self, spec: SandboxSpec) -> SandboxHandle:
         """Create a sandbox through ``opensandbox.Sandbox.create``."""
         Sandbox, _, _, _, _ = _require_opensandbox_sdk()
+        options = OpenSandboxProviderOptions.from_mapping(spec.provider_options)
 
         kwargs: dict[str, Any] = {
             "env": spec.env,
             "metadata": spec.metadata,
             "resource": _resource_map(spec.resources),
-            "extensions": _spec_extensions(spec),
+            "extensions": self._resolve_extensions(options.extensions),
             "connection_config": self._connection_config(request_timeout_s=self._create.request_timeout_s),
         }
         if spec.image is not None:
             kwargs["image"] = spec.image
-        snapshot_id = spec.provider_options.get(PROVIDER_OPTION_SNAPSHOT_ID)
-        if snapshot_id is not None:
-            kwargs["snapshot_id"] = snapshot_id
+        if options.snapshot_id is not None:
+            kwargs["snapshot_id"] = options.snapshot_id
         if spec.ttl_s is not None:
             kwargs["timeout"] = timedelta(seconds=spec.ttl_s)
         if spec.ready_timeout_s is not None:
             kwargs["ready_timeout"] = timedelta(seconds=spec.ready_timeout_s)
         if spec.entrypoint is not None:
             kwargs["entrypoint"] = spec.entrypoint
-        platform = spec.provider_options.get(PROVIDER_OPTION_PLATFORM)
-        volumes = _spec_volumes(spec)
-        if platform is not None:
-            kwargs["platform"] = _to_platform_spec(platform)
-        if volumes is not None:
-            kwargs["volumes"] = _to_volumes(volumes)
+        if options.platform is not None:
+            kwargs["platform"] = _to_platform_spec(options.platform)
+        if options.volumes:
+            kwargs["volumes"] = _to_volumes(list(options.volumes))
         if self._create.skip_health_check:
             kwargs["skip_health_check"] = True
-        else:
-            skip_health_check = _provider_option_bool(spec.provider_options, PROVIDER_OPTION_SKIP_HEALTH_CHECK)
-            if skip_health_check is not None:
-                kwargs["skip_health_check"] = skip_health_check
+        elif options.skip_health_check is not None:
+            kwargs["skip_health_check"] = options.skip_health_check
 
         timeout_s = self._create.timeout_s
         if timeout_s is None and self._connection.request_timeout_s is not None:
@@ -790,8 +814,7 @@ class OpenSandboxProvider:
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
         """Create one sandbox through the configured OpenSandbox path."""
-        spec = self._with_default_image_pull_policy(_normalize_spec(spec))
-        return await self._create_with_retries(spec)
+        return await self._create_with_retries(_normalize_spec(spec))
 
     async def status(self, handle: SandboxHandle) -> SandboxStatus:
         """Return the current OpenSandbox lifecycle status."""
