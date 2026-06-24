@@ -54,7 +54,14 @@ From: python:3.13-bookworm
         ffmpeg \
         graphviz \
         imagemagick \
-        texlive-full \
+        texlive-latex-base \
+        texlive-latex-recommended \
+        texlive-latex-extra \
+        texlive-fonts-recommended \
+        texlive-fonts-extra \
+        texlive-xetex \
+        texlive-luatex \
+        texlive-lang-european \
         latexmk \
         default-jre-headless \
         gdal-bin \
