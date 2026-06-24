@@ -420,47 +420,55 @@ class DatasetConfig(BaseModel):
     def normalize_dataset_source(self) -> "DatasetConfig":
         """Reconcile the unified `source:` with the legacy `*_identifier` fields.
 
-        Exactly one source may be specified. A legacy identifier is accepted (with a deprecation
-        warning) and mirrored into `source`; conversely a `source:` is mirrored back into the
-        matching legacy field so existing consumers that read `gitlab_identifier`/
-        `huggingface_identifier` keep working.
+        The unified `source:` block is mutually exclusive with the legacy identifiers. The two
+        legacy identifiers may still be set together (a gitlab-primary / huggingface-fallback pair
+        selected at download time by `config.data_source`) for backward compatibility. A legacy
+        identifier emits a deprecation warning and, when a single backend is given, is mirrored into
+        `source`; conversely a `source:` is mirrored back into the matching legacy field so existing
+        consumers that read `gitlab_identifier`/`huggingface_identifier` keep working.
         """
-        specified = [
+        legacy_specified = [
             name
             for name, value in (
-                ("source", self.source),
                 ("gitlab_identifier", self.gitlab_identifier),
                 ("huggingface_identifier", self.huggingface_identifier),
             )
             if value is not None
         ]
-        if len(specified) > 1:
+        if self.source is not None and legacy_specified:
             raise ValueError(
-                f"Specify a dataset source once for '{self.name}': set only one of {specified}. "
+                f"Specify a dataset source once for '{self.name}': set only one of "
+                f"['source', {', '.join(repr(name) for name in legacy_specified)}]. "
                 "Prefer the unified `source:` block."
             )
-        if not specified:
-            return self
 
-        if self.source is None:
-            # Legacy identifier was used: mirror it into `source` and nudge toward the new field.
-            if self.gitlab_identifier is not None:
-                self.source = GitlabDatasetSource(type="gitlab", **self.gitlab_identifier.model_dump())
-            else:
-                self.source = HuggingFaceDatasetSource(type="huggingface", **self.huggingface_identifier.model_dump())
-            warnings.warn(
-                f"`{specified[0]}` is deprecated for dataset '{self.name}'; use the unified "
-                f"`source:` block (type: {self.source.type}).",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-        else:
+        if self.source is not None:
             # `source:` was used: back-fill the matching legacy field for existing consumers.
             fields = self.source.model_dump(exclude={"type"})
             if isinstance(self.source, GitlabDatasetSource):
                 self.gitlab_identifier = JsonlDatasetGitlabIdentifer(**fields)
             else:
                 self.huggingface_identifier = JsonlDatasetHuggingFaceIdentifer(**fields)
+            return self
+
+        if not legacy_specified:
+            return self
+
+        warnings.warn(
+            f"{' and '.join(f'`{name}`' for name in legacy_specified)} "
+            f"{'is' if len(legacy_specified) == 1 else 'are'} deprecated for dataset "
+            f"'{self.name}'; prefer the unified `source:` block.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        # Mirror a single legacy identifier into `source`. When both are set (primary + fallback),
+        # the single discriminated `source:` can't represent both, so leave it unset and keep the
+        # legacy fields as the source of truth.
+        if len(legacy_specified) == 1:
+            if self.gitlab_identifier is not None:
+                self.source = GitlabDatasetSource(type="gitlab", **self.gitlab_identifier.model_dump())
+            else:
+                self.source = HuggingFaceDatasetSource(type="huggingface", **self.huggingface_identifier.model_dump())
 
         return self
 
