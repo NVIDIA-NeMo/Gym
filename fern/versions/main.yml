@@ -15,21 +15,15 @@ navigation:
       - folder: ./latest/pages/get-started
         title: "Get Started"
         title-source: frontmatter
-      - section: "Agent Server"
-        slug: agent-server
-        contents:
-          - page: Rollout Lifecycle
-            path: ./latest/pages/agent-server/index.mdx
-            slug: ""
+      - folder: ./latest/pages/agent-server
+        title: "Agent Server"
+        title-source: frontmatter
       - folder: ./latest/pages/model-server
         title: "Model Server"
         title-source: frontmatter
-      - section: "Resources Server"
-        slug: resources-server
-        contents:
-          - page: Example Resources Servers
-            path: ./latest/pages/resources-server/index.mdx
-            slug: ""
+      - folder: ./latest/pages/resources-server
+        title: "Resources Server"
+        title-source: frontmatter
       - folder: ./latest/pages/data
         title: "Data"
         title-source: frontmatter
