@@ -231,14 +231,27 @@ class ApptainerProvider:
         *,
         timeout_s: float | None,
         stdin: bytes | None = None,
+        daemonize: bool = False,
     ) -> tuple[int, str, str]:
         """Run an apptainer CLI command. Returns (return_code, stdout, stderr).
 
         Enforces timeout via asyncio.wait_for and kills the whole process group
         on timeout so child processes do not linger. Bounds concurrency with a
         shared semaphore. Decodes output with errors="replace".
+
+        Set ``daemonize=True`` for commands that fork a long-lived background
+        process (``apptainer instance start``). Such commands hand the started
+        instance a copy of the child's stdout/stderr, so reading those pipes to
+        EOF (``communicate()``) blocks until the *instance* exits — i.e. the call
+        appears to hang until ``timeout_s`` even though the foreground process
+        finished in under a second. In that mode we capture output to temp files
+        (which the instance may inherit harmlessly) and only wait for the
+        foreground process to exit.
         """
         async with self._semaphore:
+            if daemonize:
+                return await self._run_daemonizing(argv, timeout_s=timeout_s)
+
             proc = await asyncio.create_subprocess_exec(
                 *argv,
                 stdin=asyncio.subprocess.PIPE if stdin is not None else None,
@@ -260,6 +273,38 @@ class ApptainerProvider:
 
             return_code = proc.returncode if proc.returncode is not None else SANDBOX_RUNTIME_RETURN_CODE
             return return_code, stdout_b.decode(errors="replace"), stderr_b.decode(errors="replace")
+
+    async def _run_daemonizing(self, argv: list[str], *, timeout_s: float | None) -> tuple[int, str, str]:
+        """Run a command that daemonizes a child (e.g. ``apptainer instance start``).
+
+        Captures stdout/stderr to temp files instead of pipes so the long-lived
+        instance inheriting those descriptors cannot wedge the read, then waits
+        only for the foreground process to exit.
+        """
+        with tempfile.TemporaryFile() as out_f, tempfile.TemporaryFile() as err_f:
+            proc = await asyncio.create_subprocess_exec(
+                *argv,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=out_f,
+                stderr=err_f,
+                start_new_session=True,
+            )
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=timeout_s)
+            except asyncio.TimeoutError as e:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                with contextlib.suppress(Exception):
+                    await proc.wait()
+                raise TimeoutError(f"apptainer command timed out after {timeout_s:g}s: {argv}") from e
+
+            out_f.seek(0)
+            err_f.seek(0)
+            stdout_b = out_f.read()
+            stderr_b = err_f.read()
+
+        return_code = proc.returncode if proc.returncode is not None else SANDBOX_RUNTIME_RETURN_CODE
+        return return_code, stdout_b.decode(errors="replace"), stderr_b.decode(errors="replace")
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
         """Start an apptainer instance and return a ready handle.
@@ -317,7 +362,7 @@ class ApptainerProvider:
 
         # start the instance; clean up the staging dir on any failure.
         try:
-            code, _out, err = await self._run(argv, timeout_s=self._create_config.start_timeout_s)
+            code, _out, err = await self._run(argv, timeout_s=self._create_config.start_timeout_s, daemonize=True)
         except TimeoutError as e:
             shutil.rmtree(staging_dir, ignore_errors=True)
             raise ApptainerCreateError(f"apptainer instance start timed out for image={image!r}: {e}") from e

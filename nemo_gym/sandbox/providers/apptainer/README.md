@@ -164,6 +164,26 @@ The spec is provider-neutral; the Apptainer provider uses these fields:
 Instances are named `nemo-gym-<uuid>` and persist across `exec` calls, so state written
 by one command is visible to the next — agents rely on this.
 
+### Why `create` runs `instance start` in "daemonize" mode
+
+`apptainer instance start` is different from every other command the provider runs: it
+**launches a long-lived background instance**, then the foreground process returns. The
+started instance inherits the foreground process's stdout/stderr. If we captured output
+the normal way (`communicate()`, which reads the pipes until they close), the call would
+block until the *instance* exits — i.e. it would appear to hang for the full
+`start_timeout_s` (default 600s) even though the container came up in ~1s.
+
+To avoid this, `_run` takes a `daemonize` flag:
+
+| `daemonize` | Used by | Behavior |
+|---|---|---|
+| `False` (default) | `exec`, `status`, `close`, file copies | Pipe-captures stdout/stderr and waits for the command to finish. Supports `stdin`. |
+| `True` | `create` (`instance start`) only | Captures stdout/stderr to temp files (which the lingering instance may inherit harmlessly) and waits only for the **foreground** process to exit. No `stdin`. |
+
+`daemonize=True` is **not** a general default — it intentionally drops `stdin` support (a
+background launcher has nothing to read), which commands like `exec` need to pipe in large
+prompts. Only flip it on for a command that spawns a process which outlives the call.
+
 ### File transfer: a shared bind-mounted directory
 
 On create, the provider makes a temporary host directory and bind-mounts it into the
