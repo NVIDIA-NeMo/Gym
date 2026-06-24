@@ -114,6 +114,12 @@ class BenchFlowAgentUtils:
         messages = last_exchange["request"]["body"]["messages"]
         messages.append(last_exchange["response"]["body"]["choices"][0]["message"])
 
+        for message in messages:
+            if isinstance(message.get("content"), list) and message.get("role") in ("user", "system", "developer"):
+                for elem in message["content"]:
+                    if elem["type"] == "text":
+                        elem["type"] = "input_text"
+
         converter = VLLMConverter(return_token_id_information=False)
         items = converter.chat_completions_messages_to_responses_items(messages)
         _, output_items = split_responses_input_output_items(items)
