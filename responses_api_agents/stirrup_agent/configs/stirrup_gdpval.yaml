@@ -15,7 +15,7 @@ stirrup_agent:
       task: gdpval
 
       # Stirrup agent configuration
-      agent_max_turns: 100
+      agent_max_turns: 250
       concurrency: 32
       temperature: 1.0
 
