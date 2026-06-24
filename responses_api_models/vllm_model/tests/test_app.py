@@ -3709,7 +3709,12 @@ class TestTopLogprobsHandling:
         )
         assert "top_logprobs" not in result
 
-    def _capture_chat_completion_dict(self, logprobs: Union[dict, None]) -> dict:
+    def _capture_chat_completion_dict(
+        self, logprobs: Union[dict, None], message_extra: Union[dict, None] = None
+    ) -> dict:
+        message = {"role": "assistant", "content": "hi", "tool_calls": None}
+        if message_extra:
+            message.update(message_extra)
         return {
             "id": "chtcmpl",
             "object": "chat.completion",
@@ -3719,7 +3724,7 @@ class TestTopLogprobsHandling:
                 {
                     "index": 0,
                     "finish_reason": "stop",
-                    "message": {"role": "assistant", "content": "hi", "tool_calls": None},
+                    "message": message,
                     "logprobs": logprobs,
                 }
             ],
@@ -3766,6 +3771,43 @@ class TestTopLogprobsHandling:
         assert message["generation_token_ids"] == [123, 456]
         assert message["generation_log_probs"] == [-0.1, -0.2]
         assert message["prompt_token_ids"] == [10, 20, 30]
+
+    def test_capture_path_preserves_routed_experts(self) -> None:
+        model = _make_top_logprobs_model(return_token_id_information=True)
+        app = model.setup_webserver()
+        routed_experts = [
+            [[0, 1]],
+            [[2, 3]],
+            [[4, 5]],
+        ]
+
+        async def mock_create_chat_completion(**kwargs):
+            return self._capture_chat_completion_dict(
+                logprobs={
+                    "content": [
+                        {"token": "token_id:123", "logprob": -0.1, "bytes": None, "top_logprobs": []},
+                    ]
+                },
+                message_extra={"routed_experts": routed_experts},
+            )
+
+        async def mock_create_tokenize(**kwargs):
+            return {"tokens": [10, 20]}
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=mock_create_chat_completion)
+        mock_client.create_tokenize = AsyncMock(side_effect=mock_create_tokenize)
+        model._clients = [mock_client]
+
+        client = TestClient(app)
+        response = client.post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "hi"}]},
+        )
+
+        assert response.status_code == 200
+        message = response.json()["choices"][0]["message"]
+        assert message["routed_experts"] == routed_experts
 
     def test_capture_path_raises_when_logprobs_missing(self) -> None:
         """If capture is on but vLLM returns no logprobs, fail loudly with an actionable

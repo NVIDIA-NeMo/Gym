@@ -71,6 +71,7 @@ def _trajectory_to_output_items(messages, n_input):
                     prompt_token_ids=item.get("prompt_token_ids") or [],
                     generation_token_ids=item.get("generation_token_ids") or [],
                     generation_log_probs=item.get("generation_log_probs") or [],
+                    routed_experts=item.get("routed_experts"),
                 )
             )
             for tc in item.get("tool_calls") or []:
