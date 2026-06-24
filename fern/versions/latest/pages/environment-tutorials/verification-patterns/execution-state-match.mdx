@@ -1,0 +1,105 @@
+---
+title: "Execution and State Match"
+description: "Execute the agent's actions and verify the output or resulting state."
+position: 3
+---
+
+Use execution-and-state match when the artifact produced by the agent (code, SQL, a proof, a tool call) must be run to determine correctness. The reward comes from whether execution succeeds and the resulting state matches what is expected.
+
+## When to Use
+
+| Situation | Use execution match |
+|---|---|
+| Code generation (function, script, patch) | Yes — run tests against the output |
+| Text-to-SQL | Yes — compare query result sets |
+| Formal proof (Lean, Coq) | Yes — let the compiler verify |
+| Free-form explanation | No — use [LLM-as-Judge](/environment-tutorials/verification-patterns/llm-as-judge) |
+| Short factual answer | No — use [Equivalence Match](/environment-tutorials/verification-patterns/equivalence-match) |
+
+## Variants
+
+### Code Execution
+
+Extract code from the model response, run it against a test suite, and reward based on pass/fail. [`bigcodebench`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/bigcodebench) shows the full pattern:
+
+```python
+async def verify(self, body: BigCodeBenchVerifyRequest) -> BigCodeBenchVerifyResponse:
+    extracted = preprocess_code_completion(body.response.output_text)
+    if not extracted:
+        return BigCodeBenchVerifyResponse(**body.model_dump(), reward=0.0, status="no_code_block")
+
+    # Prepend the function signature from verifier_metadata
+    code = body.verifier_metadata["code_prompt"] + "\n    pass\n" + extracted
+
+    async with self._semaphore:
+        result = await self._run_in_venv(
+            code=code,
+            test_code=body.verifier_metadata["test"],
+            entry_point=body.verifier_metadata["entry_point"],
+        )
+
+    return BigCodeBenchVerifyResponse(
+        **body.model_dump(),
+        reward=1.0 if result["status"] == "pass" else 0.0,
+        status=result["status"],
+    )
+```
+
+Key points:
+- Use `asyncio.Semaphore` to bound concurrent subprocess executions and avoid resource exhaustion.
+- Run each test in an isolated venv or sandbox to prevent side effects between tasks.
+- Return `reward=0.0` for all extraction failures rather than raising — `verify()` must not crash.
+
+[`evalplus`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/evalplus) follows the same pattern but uses a Ray remote task (`check_correctness_remote`) to run tests in parallel across workers. [`swerl_gen`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/swerl_gen) extends this to full SWE-style patch generation with sandboxed pytest runs.
+
+### SQL Result-Set Equality
+
+Execute both the gold query and the model-generated query against the same database, then compare result sets. [`bird_sql`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/bird_sql) and [`spider2_lite`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/spider2_lite) use this approach:
+
+```python
+async def verify(self, body: BirdSqlVerifyRequest) -> BirdSqlVerifyResponse:
+    extracted_sql = extract_sql_from_response(body.response.output_text)
+
+    match, _gold_result, _pred_result, err = await execute_and_compare(
+        db_path=self._db_path(body.db_id),
+        gold_sql=body.gt_sql,
+        pred_sql=extracted_sql,
+        semaphore=self._semaphore,
+        timeout_s=self.config.sql_execution_timeout_s,
+    )
+
+    return BirdSqlVerifyResponse(
+        **body.model_dump(),
+        reward=1.0 if match else 0.0,
+        failure_reason=FailureCode.NONE if match else FailureCode.EXECUTION_ERROR,
+    )
+```
+
+`execute_and_compare` runs both queries, converts results to sets (unordered), and returns `True` if they are equal. Handle all SQL execution errors explicitly — an invalid query should return `reward=0.0`, not raise an exception.
+
+### Compiler / Proof Verifier
+
+For formal verification tasks, the compiler or proof checker is the oracle. [`math_formal_lean`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/math_formal_lean) submits Lean4 proofs to the Lean compiler and rewards only proofs that fully type-check. The verification call is asynchronous — Lean compilation can take seconds per proof — so the server uses a semaphore and auto-installs Lean on startup (see [External Tool Auto-Install](/about/architecture)).
+
+The same pattern applies to any environment where the artifact must satisfy an external checker: a Lean proof, a hardware simulation (`cvdp`), or a scientific computation test suite (`scicode`).
+
+## Isolation
+
+Execution-based verifiers run untrusted code. Guard them:
+
+- **Semaphore**: limit concurrent subprocess invocations (`asyncio.Semaphore(N)` in `model_post_init`).
+- **Timeout**: set a per-execution timeout and treat timeouts as `reward=0.0`.
+- **Isolated environment**: run in a venv, Docker container, or sandbox — not the server's own Python process.
+- **Error decoding**: decode subprocess output with `errors="replace"` to handle non-UTF-8.
+
+<Cards>
+
+<Card title="Equivalence Match" href="/environment-tutorials/verification-patterns/equivalence-match">
+Verify by comparing output to a reference answer without execution.
+</Card>
+
+<Card title="LLM-as-Judge" href="/environment-tutorials/verification-patterns/llm-as-judge">
+Use an LLM when execution or exact match is not practical.
+</Card>
+
+</Cards>

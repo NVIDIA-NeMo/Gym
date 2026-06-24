@@ -1,0 +1,117 @@
+---
+title: "Equivalence Match"
+description: "Compare the agent's output to a known reference answer."
+position: 1
+---
+
+Use equivalence match when the correct answer is known at dataset-creation time and can be checked deterministically. It is the fastest and most stable verification method — no external calls, no latency, and fully reproducible.
+
+## When to Use
+
+| Situation | Use equivalence match |
+|---|---|
+| MCQ, fill-in-the-blank, short factual answer | Yes — the answer set is finite |
+| Math result with a numeric or symbolic answer | Yes — with normalization and numeric tolerance |
+| Free-form explanation or rubric-based quality | No — use [LLM-as-Judge](/environment-tutorials/verification-patterns/llm-as-judge) |
+| Multiple valid phrasings of the same answer | No — or use substring / SequenceMatcher with threshold |
+
+## Variants
+
+### String Normalization
+
+The simplest form: normalize both the expected and actual strings, then compare. [`equivalence_rule`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/equivalence_rule) shows three grading rules built on this pattern:
+
+```python
+def _normalize(text: str) -> str:
+    return " ".join(text.lower().strip().split())
+
+def _grade(response_text: str, expected: str, rule: GradingRule) -> float:
+    norm_actual = _normalize(response_text)
+    norm_expected = _normalize(expected)
+
+    if rule == GradingRule.EXACT:
+        return 1.0 if norm_actual == norm_expected else 0.0
+
+    ratio = SequenceMatcher(None, norm_actual, norm_expected).ratio()
+
+    if rule == GradingRule.SEQ_MATCH:
+        return ratio
+
+    if rule == GradingRule.WEIGHTED_SEQ_MATCH:
+        # Bonus for matching the start of the answer
+        prefix_ratio = SequenceMatcher(
+            None, norm_actual[:10], norm_expected[:10]
+        ).ratio()
+        return 0.85 * ratio + 0.15 * prefix_ratio
+```
+
+Choose `EXACT` for deterministic binary reward. Use `SEQ_MATCH` or `WEIGHTED_SEQ_MATCH` when partial credit is appropriate (e.g. answers with minor phrasing variation).
+
+### Math / Boxed Answer
+
+For math problems, extract the answer from `\boxed{...}` notation, then compare with an exact match followed by a numeric fallback. [`math_with_code`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/math_with_code) uses this pattern:
+
+```python
+def _answers_match(actual: Optional[str], expected: str) -> bool:
+    if actual is None:
+        return False
+
+    norm_actual = _normalize_answer(actual)
+    norm_expected = _normalize_answer(expected)
+
+    if norm_actual == norm_expected:
+        return True
+
+    # Numeric fallback: handles "42" vs "42.0", "0.5" vs ".5", etc.
+    try:
+        fa, fe = float(norm_actual), float(norm_expected)
+        return abs(fa - fe) < 1e-6 * max(1.0, abs(fe))
+    except (ValueError, OverflowError):
+        return False
+```
+
+The extractor searches the assistant message (and tool stdout as a fallback) for `\boxed{...}`:
+
+```python
+# In verify():
+actual = _extract_boxed_answer(assistant_text)
+if actual is None:
+    actual = _extract_boxed_answer(tool_stdout)
+
+reward = 1.0 if _answers_match(actual, body.expected_result) else 0.0
+```
+
+For harder math where symbolic expressions can collapse to degenerate forms under normalization, consider the hybrid approach in [`math_with_autograder`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/math_with_autograder): try math-verify first, fall back to an LLM autograder only when the library fails.
+
+### Multiple Choice
+
+For MCQ tasks, extract the chosen letter and compare directly. [`mcqa`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/mcqa) and [`gpqa_diamond`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/gpqa_diamond) follow this pattern:
+
+```python
+import re
+
+def _extract_choice(text: str) -> Optional[str]:
+    # Look for a standalone A/B/C/D near the end of the response
+    match = re.search(r'\b([A-D])\b(?!.*\b[A-D]\b)', text, re.IGNORECASE)
+    return match.group(1).upper() if match else None
+
+# In verify():
+choice = _extract_choice(response_text)
+reward = 1.0 if choice == body.correct_choice else 0.0
+```
+
+## Hybrid: LLM Judge as Fallback
+
+When a rule-based check fails to extract a parseable answer (extraction returns `None`, or the answer is a complex symbolic form), fall back to an LLM judge rather than assigning `0.0`. [`equivalence_llm_judge`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/equivalence_llm_judge) implements this as a full LLM-based equivalence check with an optional swap pass to detect positional bias.
+
+<Cards>
+
+<Card title="LLM-as-Judge" href="/environment-tutorials/verification-patterns/llm-as-judge">
+Use an LLM for rubric-based or semantic equivalence checking.
+</Card>
+
+<Card title="Resources Server" href="/resources-server">
+How verify() fits into the resources server lifecycle.
+</Card>
+
+</Cards>

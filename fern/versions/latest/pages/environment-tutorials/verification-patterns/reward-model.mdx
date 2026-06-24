@@ -1,0 +1,102 @@
+---
+title: "Reward Model"
+description: "Use an LLM trained on human preferences to score outputs for alignment."
+position: 4
+---
+
+Use a reward model when you want to score outputs against learned human preferences rather than writing a rubric or executing code. The model is a separate, trained scorer — not a prompted judge.
+
+## When to Use
+
+| Situation | Use reward model |
+|---|---|
+| Preference alignment (helpfulness, harmlessness, honesty) | Yes |
+| Pairwise response comparison across a rollout batch | Yes |
+| Tasks with a known correct answer | No — use [Equivalence Match](/environment-tutorials/verification-patterns/equivalence-match) |
+| Rubric-based quality without a trained scorer | No — use [LLM-as-Judge](/environment-tutorials/verification-patterns/llm-as-judge) |
+
+## Reward Model vs LLM-as-Judge
+
+| | Reward Model | LLM-as-Judge |
+|---|---|---|
+| How it scores | Trained on preference data; outputs a scalar | Prompted at runtime; parses a verdict label |
+| Setup | Requires a deployed reward model endpoint | Requires a judge prompt and a label schema |
+| Cost | One forward pass per response | One generation per response |
+| Stability | Fixed (frozen weights) | Varies with prompt and temperature |
+| Best for | Preference alignment, RLHF | Semantic equivalence, rubric grading |
+
+## Example: GenRM Pairwise Comparison
+
+[`genrm_compare`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/genrm_compare) uses a GenRM (Generative Reward Model) to compare multiple candidate responses from the same prompt. The server buffers responses by prompt until a full cohort arrives, then runs pairwise comparisons and returns relative rewards.
+
+```yaml
+genrm_compare:
+  resources_servers:
+    genrm_compare:
+      genrm_model_server:
+        type: responses_api_models
+        name: genrm_model          # separate model server entry in your config
+      genrm_responses_create_params:
+        input: []
+        temperature: 0.0
+        max_output_tokens: 1024
+      num_rollouts_per_prompt: 8   # cohort size before comparison runs
+      comparison_strategy: all_pairs
+      aggregator_method: elo
+```
+
+The GenRM model receives pairs of responses formatted with special `response_1` / `response_2` roles and outputs a preference score. The server aggregates pairwise scores (Elo, win-count, or similar) into per-response rewards.
+
+```python
+async def verify(self, body: GenRMCompareVerifyRequest) -> BaseVerifyResponse:
+    # Buffer this response until the cohort is full
+    prompt_key = self._get_verify_cohort_key(body)
+    async with _cohort_lock:
+        _cohort_buffers[prompt_key].append((body, asyncio.get_event_loop().create_future()))
+
+    if len(_cohort_buffers[prompt_key]) >= self.config.num_rollouts_per_prompt:
+        # All responses in cohort — run pairwise GenRM comparisons
+        await self._run_cohort_comparison(prompt_key)
+
+    # Block until cohort comparison completes and future is resolved
+    return await future
+```
+
+<Info>
+The cohort-based design means `verify()` blocks until all responses for a prompt have arrived and been compared. This is intentional: relative rewards require seeing all candidates. Ensure `num_rollouts_per_prompt` matches the repeat count you pass to `ng_collect_rollouts`.
+</Info>
+
+## Config Pattern
+
+Like [LLM-as-Judge](/environment-tutorials/verification-patterns/llm-as-judge), the reward model is declared as a separate model server and referenced by name:
+
+```yaml
+# Declare the reward model server
+genrm_model:
+  responses_api_models:
+    your_genrm:
+      entrypoint: app.py
+      openai_base_url: ${genrm_base_url}
+      openai_api_key: ${genrm_api_key}
+      openai_model: ${genrm_model_name}
+
+# Reference it from the resources server config
+genrm_compare:
+  resources_servers:
+    genrm_compare:
+      genrm_model_server:
+        type: responses_api_models
+        name: genrm_model
+```
+
+<Cards>
+
+<Card title="LLM-as-Judge" href="/environment-tutorials/verification-patterns/llm-as-judge">
+Prompt an LLM to evaluate output against rubrics or reference answers.
+</Card>
+
+<Card title="Resources Server" href="/resources-server">
+How verify() fits into the resources server lifecycle.
+</Card>
+
+</Cards>
