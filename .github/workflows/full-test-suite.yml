@@ -46,7 +46,10 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends git curl ca-certificates
-          curl -LsSf https://astral.sh/uv/install.sh | sh
+          # Pin uv: 0.11.20 has a resolver regression that silently drops pinned deps from
+          # `uv pip install -r requirements.txt` (e.g. matplotlib/scipy/Pillow), breaking
+          # per-server test venvs. 0.11.19 is the latest known-good version.
+          curl -LsSf https://astral.sh/uv/0.11.19/install.sh | sh
           uv venv --python 3.12
           source .venv/bin/activate
           uv sync --extra dev
@@ -78,7 +81,10 @@ jobs:
 
       - name: Setup
         run: |
-          curl -LsSf https://astral.sh/uv/install.sh | sh
+          # Pin uv: 0.11.20 has a resolver regression that silently drops pinned deps from
+          # `uv pip install -r requirements.txt` (e.g. matplotlib/scipy/Pillow), breaking
+          # per-server test venvs. 0.11.19 is the latest known-good version.
+          curl -LsSf https://astral.sh/uv/0.11.19/install.sh | sh
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
       - name: Build wheel and serve as local PyPI index
