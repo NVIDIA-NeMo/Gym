@@ -13,10 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import shutil
-import sys
 import tomllib
 from importlib import import_module
-from io import StringIO
 from pathlib import Path
 from subprocess import TimeoutExpired
 from unittest.mock import MagicMock, patch
@@ -34,7 +32,6 @@ from nemo_gym.cli.env import (
     _select_shard,
     init_resources_server,
 )
-from nemo_gym.cli.general import display_help_legacy
 from nemo_gym.config_types import ResourcesServerInstanceConfig
 
 
@@ -85,20 +82,6 @@ class TestCLI:
             module, fn = import_path.split(":")
             target = getattr(import_module(module), fn)
             assert callable(target), f"{script_name} -> {import_path} is not callable"
-
-    def test_display_help_discovers_scripts(self) -> None:
-        with MonkeyPatch.context() as mp:
-            mp.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", OmegaConf.create({}))
-
-            text_trap = StringIO()
-            mp.setattr(sys, "stdout", text_trap)
-
-            display_help_legacy()
-
-            output = text_trap.getvalue()
-            assert "ng_help" in output
-            assert "ng_run" in output
-            assert "ng_collect_rollouts" in output
 
     def test_init_resources_server_includes_domain(self) -> None:
         """Test that init_resources_server creates a config with the required domain field."""

@@ -17,44 +17,15 @@ import json
 import os
 import platform
 import sys
-from importlib.metadata import entry_points
 from importlib.metadata import version as md_version
 from subprocess import Popen
 
 import psutil
-import rich
 from pydantic import Field
 
 from nemo_gym import PARENT_DIR, __version__
 from nemo_gym.config_types import BaseNeMoGymCLIConfig
 from nemo_gym.global_config import JSON_OUTPUT_KEY_NAME, get_global_config_dict
-
-
-def display_help_legacy():
-    """
-    Display a list of available NeMo Gym CLI commands.
-
-    Examples:
-
-    ```bash
-    ng_help
-    ```
-    """
-    global_config_dict = get_global_config_dict()
-    # Just here for help
-    BaseNeMoGymCLIConfig.model_validate(global_config_dict)
-
-    eps = entry_points().select(group="console_scripts")
-    project_scripts = {ep.name: ep.value for ep in eps if ep.name.startswith(("nemo_gym_", "ng_"))}
-    rich.print("""Run a command with `+h=true` or `+help=true` to see more detailed information!
-
-[bold]Available CLI scripts[/bold]
------------------""")
-    for script in project_scripts:
-        if not script.startswith("ng_"):
-            continue
-
-        print(script)
 
 
 class VersionConfig(BaseNeMoGymCLIConfig):
