@@ -229,15 +229,14 @@ class GlobalConfigDictParser(BaseModel):
             if not config_path.is_absolute():
                 cwd_path = Path.cwd() / config_path
                 install_path = PARENT_DIR / config_path
-                searched_locations = [cwd_path, install_path]
+                # cwd and the install root coincide when run from the repo; list each location once.
+                searched_locations = [cwd_path] if cwd_path == install_path else [cwd_path, install_path]
                 config_path = cwd_path if cwd_path.exists() else install_path
 
             try:
                 extra_config = OmegaConf.load(config_path)
             except FileNotFoundError as e:
-                # Dedupe while preserving order (cwd and install root coincide when run from the repo).
-                unique_locations = list(dict.fromkeys(str(p) for p in searched_locations))
-                searched = "\n".join(f"  - {p}" for p in unique_locations)
+                searched = "\n".join(f"  - {p}" for p in searched_locations)
                 raise ConfigPathNotFoundError(
                     f"""config_paths entry '{original_entry}' was not found. Looked in:
 {searched}
@@ -287,8 +286,8 @@ Duplicate config paths:
             return
 
         raise NoServerInstancesError(
-            """No server instances are configured, so there is nothing to run. Pass one or more configs via config_paths, e.g.:
-  ng_run "+config_paths=[resources_servers/<env>/configs/<env>.yaml,responses_api_models/<model>/configs/<model>.yaml]\""""
+            """No server instances are configured, so there is nothing to run. Pass one or more configs, e.g.:
+  gym env start --config resources_servers/<env>/configs/<env>.yaml --config responses_api_models/<model>/configs/<model>.yaml"""
         )
 
     def validate_and_populate_defaults(
@@ -554,8 +553,8 @@ For example, on the command line:
         except ValidationError as e:
             raise MalformedConfigPathsError(
                 f"""'{CONFIG_PATHS_KEY_NAME}' must be a list of paths. Got: {config_paths!r}.
-Pass it as a Hydra list, e.g.:
-  ng_run "+{CONFIG_PATHS_KEY_NAME}=[resources_servers/<env>/configs/<env>.yaml]\""""
+Pass each config with --config (it builds the list for you), e.g.:
+  gym env start --config resources_servers/<env>/configs/<env>.yaml"""
             ) from e
 
         config_paths, extra_configs = self.load_extra_config_paths(config_paths)

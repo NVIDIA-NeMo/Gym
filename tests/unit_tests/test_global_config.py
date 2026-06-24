@@ -1370,7 +1370,7 @@ class TestConfigLoadErrors:
         config = DictConfig({"config_paths": [], "head_server": {"port": 11000}})
         with raises(NoServerInstancesError) as exc_info:
             parser.raise_on_no_server_instances(config)
-        assert "config_paths" in str(exc_info.value)
+        assert "gym env start" in str(exc_info.value)
 
     def test_raise_on_no_server_instances_passes_with_a_server(self) -> None:
         parser = GlobalConfigDictParser()

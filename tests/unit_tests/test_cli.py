@@ -264,11 +264,15 @@ class TestExitCleanlyOnConfigError:
         assert exc_info.value.code == 1
 
     def test_non_config_error_propagates(self) -> None:
+        # The decorator must catch ONLY ConfigError. A non-ConfigError propagates unchanged — same
+        # type and message, as a normal traceback — and is NOT converted to SystemExit (contrast
+        # with test_config_error_becomes_clean_exit); requiring RuntimeError here, not SystemExit,
+        # is what asserts the error type is left untouched.
         @exit_cleanly_on_config_error
         def boom():
             raise RuntimeError("unexpected")
 
-        with raises(RuntimeError):
+        with raises(RuntimeError, match="unexpected"):
             boom()
 
     def test_success_passes_through(self) -> None:
