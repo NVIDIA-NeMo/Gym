@@ -24,6 +24,7 @@ from unittest.mock import MagicMock, patch
 from omegaconf import OmegaConf
 from pytest import MonkeyPatch, raises
 
+import nemo_gym.cli.env
 import nemo_gym.global_config
 from nemo_gym import PARENT_DIR
 from nemo_gym.cli.env import (
@@ -33,9 +34,11 @@ from nemo_gym.cli.env import (
     RunHelper,
     _select_shard,
     init_resources_server,
+    list_environments,
 )
 from nemo_gym.cli.general import display_help_legacy
 from nemo_gym.config_types import ResourcesServerInstanceConfig
+from nemo_gym.registry import EnvironmentEntry
 
 
 class TestSelectShard:
@@ -259,3 +262,28 @@ class TestRunHelperShutdownReap:
         assert a.wait.call_count == 1
         assert b.wait.call_count == 1
         assert runner._processes == {}
+
+
+class TestListEnvironments:
+    def test_lists_discovered_environments(self, monkeypatch: MonkeyPatch, capsys) -> None:
+        entry = EnvironmentEntry(
+            name="alpha",
+            config_path=Path("environments/alpha/config.yaml"),
+            path=Path("environments/alpha"),
+            description="Alpha env",
+            domain="agent",
+        )
+        monkeypatch.setattr(nemo_gym.cli.env, "discover_environments", lambda *a, **k: {"alpha": entry})
+
+        list_environments()
+
+        out = capsys.readouterr().out
+        assert "alpha" in out
+        assert "agent" in out
+
+    def test_no_environments(self, monkeypatch: MonkeyPatch, capsys) -> None:
+        monkeypatch.setattr(nemo_gym.cli.env, "discover_environments", lambda *a, **k: {})
+
+        list_environments()
+
+        assert "No environments found" in capsys.readouterr().out

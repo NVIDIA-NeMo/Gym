@@ -859,3 +859,10 @@ class TestSearchDir:
         with pytest.raises(SystemExit):
             main()
         assert "Did you mean `mybench`?" in capsys.readouterr().err
+
+
+class TestListEnvironmentsRouting:
+    def test_list_environments_dispatches(self, monkeypatch: MonkeyPatch) -> None:
+        target, overrides = _dispatch_for(monkeypatch, ["list", "environments"])
+        assert target == "nemo_gym.cli.env:list_environments"
+        assert overrides == []
