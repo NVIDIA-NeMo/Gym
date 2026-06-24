@@ -45,9 +45,9 @@ class RunRecorder:
         self._responder = responder
 
     async def __call__(
-        self, argv: list[str], *, timeout_s: float | None, stdin: bytes | None = None
+        self, argv: list[str], *, timeout_s: float | None, stdin: bytes | None = None, daemonize: bool = False
     ) -> tuple[int, str, str]:
-        self.calls.append({"argv": list(argv), "timeout_s": timeout_s, "stdin": stdin})
+        self.calls.append({"argv": list(argv), "timeout_s": timeout_s, "stdin": stdin, "daemonize": daemonize})
         return self._responder(list(argv))
 
 
@@ -715,3 +715,41 @@ async def test_run_real_timeout(fake_binary: str) -> None:
     provider = apptainer_provider.ApptainerProvider()
     with pytest.raises(TimeoutError):
         await provider._run([shutil.which("sleep"), "5"], timeout_s=0.1)
+
+
+@pytest.mark.skipif(shutil.which("sh") is None, reason="sh not available")
+async def test_run_daemonizing_returns_despite_lingering_child(fake_binary: str) -> None:
+    """Regression: a backgrounded child inheriting stdout must not wedge the read.
+
+    Mirrors ``apptainer instance start``, which forks a long-lived instance that
+    keeps the child's stdout/stderr open. The pipe-based path would block on EOF
+    until timeout; the daemonizing path waits only for the foreground process.
+    """
+    provider = apptainer_provider.ApptainerProvider()
+    # Foreground prints and exits immediately; the backgrounded `sleep` holds the
+    # inherited stdout fd open well past the (generous) timeout.
+    argv = [shutil.which("sh"), "-c", "sleep 30 & printf started"]
+    code, out, _err = await provider._run(argv, timeout_s=10, daemonize=True)
+    assert code == 0
+    assert out == "started"
+
+
+async def test_create_uses_daemonize_for_instance_start(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    staging = tmp_path / "staging"
+    monkeypatch.setattr(apptainer_provider.tempfile, "mkdtemp", lambda prefix: str(staging.mkdir() or staging))
+
+    def responder(argv: list[str]) -> tuple[int, str, str]:
+        if "exec" in argv:
+            return (0, apptainer_provider.READY_PROBE_EXPECTED, "")
+        return (0, "", "")
+
+    provider, rec = _make_provider(monkeypatch, responder)
+    await provider.create(SandboxSpec(image="docker://ubuntu:22.04"))
+
+    start_call = next(c for c in rec.calls if "start" in c["argv"])
+    assert start_call["daemonize"] is True
+    # The readiness probe (exec) must NOT use the daemonizing path.
+    exec_calls = [c for c in rec.calls if "exec" in c["argv"]]
+    assert exec_calls and all(c["daemonize"] is False for c in exec_calls)
