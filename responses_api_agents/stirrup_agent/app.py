@@ -399,6 +399,19 @@ async def _run_stirrup_agent(
         mod = importlib.import_module(module_path)
         provider_cls = getattr(mod, class_name)
         exec_provider = provider_cls(**(exec_provider_kwargs or {}))
+    elif is_gdpval:
+        # GDPval must execute inside the Apptainer sandbox (see
+        # GDPValTask.get_exec_provider). The local backend runs on the
+        # evaluation container, which intentionally does NOT carry the heavy
+        # GDPval sandbox dependencies (TeX Live, the full data/ML/document
+        # stack, CPU torch, ...) — installing them here would bloat the eval
+        # image by many GB. Refuse rather than run tasks in a crippled env.
+        raise RuntimeError(
+            "GDPval requires the Apptainer sandbox but no exec provider was configured; "
+            "set `gdpval_container_path` to a .sif built from containers/gdpval.def. The "
+            "local backend is rejected because the sandbox dependencies are not installed "
+            "in the evaluation container."
+        )
     else:
         exec_provider = _SandboxTolerantExecProvider()
 
