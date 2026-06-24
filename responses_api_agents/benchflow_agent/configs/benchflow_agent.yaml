@@ -45,8 +45,10 @@ benchflow_agent:
       #       timeout_sec: 3600.0
       task_config_overrides: null
 
-      # Directory of prebuilt per-task Singularity .sif images. Files inside must be named "<task_name>.sif".
-      singularity_images_dir: null
+      # Path to prebuilt per-task containers (e.g. .sif files) containing a {task_name} placeholder.
+      # Will override the environment.docker_image field in each task's task.md.
+      # Example: "/path/to/containers/{task_name}.sif"
+      container_formatter: null
 
       # List of datasets to evaluate on.
       datasets: null

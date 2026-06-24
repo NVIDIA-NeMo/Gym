@@ -89,8 +89,10 @@ class BenchFlowAgentConfig(BaseResponsesAPIAgentConfig):
     # Custom config overrides to apply to every task's task.md.
     task_config_overrides: Optional[dict[str, Any]] = None
 
-    # Directory of prebuilt per-task Singularity .sif images. Files inside must be named "<task_name>.sif".
-    singularity_images_dir: Optional[str] = None
+    # Path to prebuilt per-task containers (e.g. .sif files) containing a {task_name} placeholder.
+    # Will override the environment.docker_image field in each task's task.md.
+    # Example: "/path/to/containers/{task_name}.sif"
+    container_formatter: Optional[str] = None
 
 
 class BenchFlowRunRequest(BaseRunRequest):
@@ -219,16 +221,16 @@ class BenchFlowAgent(SimpleResponsesAPIAgent):
     def _build_task_config_overrides(self, task_name: str) -> dict[str, Any]:
         """
         Builds the task config overrides dict,
-        adding the task-specific .sif image path if `singularity_images_dir` is set.
+        adding the task-specific docker_image override if `container_formatter` is set.
         """
         overrides = deepcopy(self.config.task_config_overrides or {})
-        if self.config.singularity_images_dir:
-            sif_path = f"{self.config.singularity_images_dir.rstrip('/')}/{task_name}.sif"
+        if self.config.container_formatter:
+            task_container = self.config.container_formatter.format(task_name=task_name)
             environment = overrides.get("environment")
             if not isinstance(environment, dict):
                 environment = {}
                 overrides["environment"] = environment
-            environment["docker_image"] = sif_path
+            environment["docker_image"] = task_container
         return overrides
 
     @staticmethod
