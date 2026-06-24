@@ -1,0 +1,42 @@
+---
+title: "Rollout Lifecycle"
+description: "Follow the agent rollout flow from episode initialization through model calls, tool execution, and reward collection."
+position: 2
+---
+
+The following pseudocode illustrates a typical agent rollout in three phases: initialize the episode, run the agent loop, and grade the result. During the agent loop, the agent sends the conversation to the model, gets back a response, and if the model makes any tool calls, it routes them to the Resources server and feeds the results back to the model. The loop repeats until stop criteria are met, such as model max sequence length or the agent reaching a defined max steps or turns. Once the loop completes, the agent calls the Resources server to verify the result and collect a reward.
+
+```python
+# Agent Server - pseudocode
+class Agent:
+    async def run(self, task_data):
+        # 1. Initialize episode
+        resources_server.seed_session(task_data)
+
+        # 2. Run the agent loop
+        response = self.responses(task_data.prompt, task_data.tools)
+
+        # 3. Grade the result
+        reward = resources_server.verify(response, task_data.ground_truth)
+        return response, reward
+
+    async def responses(self, prompt, tools):
+        conversation = prompt
+        step = 0
+
+        # Agent loop
+        while step < max_steps:
+            model_output = model_server.responses(conversation, tools)
+            conversation.append(model_output)
+
+            if model_output is text:
+                break # model is done, no more tool calls
+
+            for tool_call in model_output.function_calls:
+                result = resources_server.post(f"/{tool_call.name}", tool_call.arguments)
+                conversation.append(result)
+
+            step += 1
+
+        return conversation
+```
