@@ -10,6 +10,10 @@ position: 1.6
 
 **Read first**: [Environments](/about/concepts/environments) — what an environment is and how it decomposes into dataset, agent harness, verifier, and state.
 
+This page covers the basics. For the practical workflow, artifacts, and metrics used in NeMo Gym runs, read the full [Evaluation](/evaluation) section next.
+
+**Read next**: [Evaluation](/evaluation) — how to run repeatable evaluations and interpret the outputs.
+
 </Info>
 
 ## What is Evaluation?
@@ -22,6 +26,14 @@ For example: you want to know how accurate your coding agent is at fixing bugs. 
 - A set of real bugs to test against (**dataset**)
 - A sandbox with the code repository for the agent to work in (**state**)
 - A test suite to check if the fix actually works (**verifier**)
+
+## Environments vs Benchmarks
+
+An **environment** is the executable task interface: the dataset, agent harness, verifier, and state that let an agent attempt a task and receive a score. It defines how the agent interacts with the task and how each attempt is measured.
+
+A **benchmark** is the evaluation target and reporting frame built around one or more environments: the task set, scoring rules, run settings, and aggregate metrics used to compare models or agents. For example, EvalPlus is a benchmark for code generation, while the EvalPlus environment is the concrete NeMo Gym integration that runs tasks and scores attempts.
+
+Use environments when you are talking about runtime behavior and task execution. Use benchmarks when you are talking about comparative results, leaderboards, or the named eval suite being reported.
 
 ## How to Evaluate Agents and Models
 
