@@ -28,11 +28,14 @@ from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.reward_profile import compute_aggregate_metrics
 from nemo_gym.rollout_collection import (
     _DEFAULT_MAX_ROLLOUT_ATTEMPTS,
+    NG_FAILURE_CLASS_KEY,
+    NG_VERIFY_FAILED_KEY,
     RolloutAggregationConfig,
     RolloutAggregationHelper,
     RolloutCollectionConfig,
     RolloutCollectionHelper,
     _expand_input_glob,
+    _failures_path_for,
     _get_max_rollout_attempts,
     _rollout_request_debug_summary,
 )
@@ -563,6 +566,60 @@ class TestRolloutCollection:
         )
 
         assert expected_results == actual_returned_results
+
+    def test_load_verify_failed_from_cache(self, tmp_path: Path, monkeypatch) -> None:
+        input_jsonl_fpath = tmp_path / "input.jsonl"
+        materialized_inputs_jsonl_fpath = tmp_path / "output_materialized_inputs.jsonl"
+
+        materialized_inputs = [
+            {"_ng_task_index": 0, "_ng_rollout_index": 0, "input": True},
+            {"_ng_task_index": 0, "_ng_rollout_index": 1, "input": True},
+            {"_ng_task_index": 1, "_ng_rollout_index": 0, "input": True},
+            {"_ng_task_index": 1, "_ng_rollout_index": 1, "input": True},
+            {"_ng_task_index": 2, "_ng_rollout_index": 0, "input": True},
+        ]
+        materialized_inputs_jsonl_fpath.write_bytes(b"\n".join(map(orjson.dumps, materialized_inputs)) + b"\n")
+
+        # Prior successes: (0,0) and (1,1). (1,1) failed verify once then passed.
+        outputs = [
+            {"_ng_task_index": 0, "_ng_rollout_index": 0, "output": True},
+            {"_ng_task_index": 1, "_ng_rollout_index": 1, "output": True},
+        ]
+        output_jsonl_fpath = tmp_path / "output.jsonl"
+        output_jsonl_fpath.write_bytes(b"\n".join(map(orjson.dumps, outputs)) + b"\n")
+
+        # Failures sidecar: verify_failed for (0,1) once, (1,0) three times
+        # (maxed out — must still be redone), (1,1) once (later succeeded —
+        # skip), and a non-verify 'legitimate' rollout failure for (2,0) (skip).
+        vf = {NG_FAILURE_CLASS_KEY: "verify_failed", NG_VERIFY_FAILED_KEY: True}
+        failures = [
+            {"_ng_task_index": 0, "_ng_rollout_index": 1, **vf},
+            {"_ng_task_index": 1, "_ng_rollout_index": 0, **vf},
+            {"_ng_task_index": 1, "_ng_rollout_index": 0, **vf},
+            {"_ng_task_index": 1, "_ng_rollout_index": 0, **vf},
+            {"_ng_task_index": 1, "_ng_rollout_index": 1, **vf},
+            {"_ng_task_index": 2, "_ng_rollout_index": 0, NG_FAILURE_CLASS_KEY: "legitimate"},
+        ]
+        _failures_path_for(output_jsonl_fpath).write_bytes(b"\n".join(map(orjson.dumps, failures)) + b"\n")
+
+        # Even with the attempt cap at 1, the maxed-out (1,0) must be redone.
+        monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "1")
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_jsonl_fpath),
+            output_jsonl_fpath=str(output_jsonl_fpath),
+            reverify_failed_from_cache=True,
+        )
+
+        input_rows, rows, results, result_strs = RolloutCollectionHelper()._load_verify_failed_from_cache(config)
+
+        get_key = lambda r: (r["_ng_task_index"], r["_ng_rollout_index"])
+        # Only verify_failed-and-not-yet-succeeded tasks are redone.
+        assert sorted(map(get_key, input_rows)) == [(0, 1), (1, 0)]
+        # Prior successes are preserved untouched.
+        assert sorted(map(get_key, rows)) == [(0, 0), (1, 1)]
+        assert results == outputs
+        assert result_strs == [[orjson.dumps(o)] for o in outputs]
 
     async def test_call_aggregate_metrics(self, tmp_path: Path) -> None:
         """Test _call_aggregate_metrics with a mocked server client."""

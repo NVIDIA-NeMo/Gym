@@ -201,6 +201,33 @@ or as a Hydra override:
 ++gdpval_stirrup_agent.responses_api_agents.stirrup_agent.judge_only=true
 ```
 
+#### Redoing only the judgements that failed
+
+A normal run records every `/verify` failure in the failures sidecar
+(`<output_stem>_failures.jsonl`) with the `_ng_verify_failed=true` flag and the
+`deliverables_dir` of the (already-cached) deliverable. Because the deliverables
+are persisted *before* `/verify`, a judge failure always leaves a re-verifiable
+artifact on disk.
+
+To re-judge **only** those failed-judgement tasks — without re-executing
+anything and without being blocked by the per-task attempt cap — combine
+judge-only mode with the dispatcher's general `reverify_failed_from_cache`:
+
+```bash
+ng_e2e_collect_rollouts ... \
+  ++output_jsonl_fpath=/prior/run/evaluator_rollouts.jsonl \
+  ++reverify_failed_from_cache=true \
+  ++gdpval_stirrup_agent.responses_api_agents.stirrup_agent.judge_only=true
+```
+
+`reverify_failed_from_cache` reads the prior run's `*_materialized_inputs.jsonl`
+and `*_failures.jsonl`, selects exactly the `_ng_verify_failed` tasks that did **not**
+later succeed, and re-dispatches just those (ignoring
+`NEMO_GYM_MAX_ROLLOUT_ATTEMPTS`). Prior successes in the main jsonl are kept as-is.
+`PERSIST_DELIVERABLES_DIR` must point at the same cache the prior run wrote.
+Re-judgements that pass move to the main jsonl; ones that fail again append a new
+sidecar attempt, so the pass is idempotent and repeatable.
+
 ### Apptainer Sandboxing
 
 Some GDPVal tasks ask the model to install packages or run untrusted code. By default the

@@ -112,12 +112,16 @@ def _log_timeout_once(timeout_s: float) -> None:
 #   timeout_exceeded  TaskPerAttemptTimeoutError. Sidecar entry with
 #                     _ng_failure_terminal=True so chain-hop 2 does NOT retry.
 #   skipped           TaskSampleSkipError. Sidecar entry with terminal=True.
-#   transient         verify-side ClientResponseError 5xx / connection /
-#                     asyncio.TimeoutError. Sidecar entry per attempt; retry
-#                     up to max_attempts.
-#   legitimate        Everything else (real Python exception with user code
-#                     in the traceback). Sidecar entry per attempt; retry
-#                     up to max_attempts.
+#   verify_failed     Any verify-side (/verify) failure. The rollout succeeded
+#                     and (with persist_deliverables_dir) its deliverables are
+#                     cached, so only verification failed. Sidecar entry per
+#                     attempt; retried up to max_attempts on a normal resume.
+#                     The row also carries the _ng_verify_failed boolean
+#                     sentinel: the dispatcher routes reverify_failed_from_cache
+#                     on that flag, not on this (agent-internal) class name.
+#   legitimate        Rollout-side Python exception with user code in the
+#                     traceback. Sidecar entry per attempt; retry up to
+#                     max_attempts.
 # ---------------------------------------------------------------------------
 
 # Sentinel keys the dispatcher (nemo_gym.rollout_collection) reads to route a
@@ -125,6 +129,7 @@ def _log_timeout_once(timeout_s: float) -> None:
 NG_FAILURE_CLASS_KEY = "_ng_failure_class"  # str: one of the 5 class names
 NG_NO_PERSIST_KEY = "_ng_no_persist"  # bool: don't write anywhere
 NG_TERMINAL_KEY = "_ng_failure_terminal"  # bool: never retry on resume
+NG_VERIFY_FAILED_KEY = "_ng_verify_failed"  # bool: rollout ok, only /verify failed; reverifiable from cache
 
 _USER_CODE_PATH_SUBSTRINGS = (
     "responses_api_agents/",
@@ -204,22 +209,52 @@ def _classify_rollout_failure(exc: BaseException) -> str:
 
 
 def _classify_verify_failure(exc: BaseException) -> str:
-    """Classify an exception raised by the ``/verify`` POST. Verify-side
-    failures are never ``kill_shaped`` (we had a rollout response in hand)
-    and never ``timeout_exceeded`` (that's a rollout-side class).
+    """Classify an exception raised by the ``/verify`` POST.
+
+    Every verify-side failure is a ``verify_failed``: the rollout itself
+    succeeded (we had a response in hand and, when ``persist_deliverables_dir``
+    is set, the deliverables are already on disk) — only the verification step
+    failed. This is an agent-internal label; the dispatcher never reads it.
+    What the dispatcher routes on is the ``_ng_verify_failed`` boolean sentinel
+    that ``_build_failed_run_payload`` sets for this class, which lets
+    ``reverify_failed_from_cache`` (in ``nemo_gym.rollout_collection``) re-verify
+    just these tasks from the cached deliverables without re-executing the agent.
+
+    A ``verify_failed`` is written to the failures sidecar, one row per attempt,
+    and retried up to ``max_attempts`` on a normal chain resume.
+
+    This is the *routing* class. For triage of *why* the verify failed (e.g. a
+    flaky judge endpoint vs. a deterministic bad request) see the companion
+    :func:`_verify_failure_kind`, whose label is surfaced in the log line and
+    the failed-row ``error_message``.
+    """
+    return "verify_failed"
+
+
+def _verify_failure_kind(exc: BaseException) -> str:
+    """Best-effort sub-classification of a ``/verify`` failure, for triage only.
+
+    Routing always treats verify failures as ``verify_failed`` (see
+    :func:`_classify_verify_failure`); this label is purely diagnostic. It
+    names the exception that caused the judge call to fail so a later reader
+    can tell an overloaded/flaky judge endpoint (5xx response, dropped
+    connection, timeout — usually worth retrying) apart from a deterministic
+    failure (4xx response / a bug in our request — retrying won't help). For
+    HTTP errors the response status is appended (e.g. ``503`` ⇒ 5xx ⇒ flaky,
+    ``400`` ⇒ 4xx ⇒ deterministic).
     """
     try:
         import aiohttp
 
         if isinstance(exc, aiohttp.ClientResponseError):
-            return "transient" if 500 <= exc.status < 600 else "legitimate"
+            return f"client_response_error_http_{exc.status}"
         if isinstance(exc, aiohttp.ClientConnectionError):
-            return "transient"
+            return "client_connection_error"
     except ImportError:
         pass
     if isinstance(exc, asyncio.TimeoutError):
-        return "transient"
-    return "legitimate"
+        return "timeout_error"
+    return f"other_{type(exc).__name__}"
 
 
 # ---------------------------------------------------------------------------
@@ -1094,18 +1129,21 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
             except Exception as exc:
                 task_info = self.task_strategy.extract_task_info(existing_metadata)
                 failure_class = _classify_verify_failure(exc)
+                failure_kind = _verify_failure_kind(exc)
                 instance_hint = task_info.get("instance_id", task_info.get("task_id", "unknown"))
                 print(
-                    f"[stirrup-verify-{failure_class}] {instance_hint}: {type(exc).__name__}: {exc}",
+                    f"[stirrup-verify-{failure_class}: {failure_kind}] {instance_hint}: "
+                    f"{type(exc).__name__}: {exc}",
                     flush=True,
                 )
                 return self._build_failed_run_payload(
                     body_dict=body_dict,
                     fixed_params=fixed_params,
                     task_info=task_info,
-                    reason=f"verify failed: {type(exc).__name__}: {exc}",
+                    reason=f"verify failed ({failure_kind}): {type(exc).__name__}: {exc}",
                     skipped=False,
                     error_class=failure_class,
+                    deliverables_dir=deliverables_dir,
                 )
 
     def _build_judge_only_response(
@@ -1157,6 +1195,7 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
         reason: str,
         skipped: bool,
         error_class: Optional[str] = None,
+        deliverables_dir: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Return a verify-response-shaped dict for runs that never produced a deliverable.
 
@@ -1167,8 +1206,15 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
           resume's set-difference on the main jsonl re-dispatches the task.
         - ``_ng_failure_terminal=True`` for ``timeout_exceeded`` / ``skipped``:
           one sidecar entry, never retried.
-        - Otherwise (``legitimate``, ``transient``): sidecar entry per attempt;
-          retried up to ``NEMO_GYM_MAX_ROLLOUT_ATTEMPTS`` on chain resume.
+        - Otherwise (``legitimate``, ``verify_failed``): sidecar entry per
+          attempt; retried up to ``NEMO_GYM_MAX_ROLLOUT_ATTEMPTS`` on chain
+          resume.
+
+        For ``verify_failed`` (a verify-side failure), the rollout's deliverables
+        are already cached, so the row records ``deliverables_dir`` and the
+        ``_ng_verify_failed=True`` boolean sentinel. ``reverify_failed_from_cache``
+        selects rows with that flag to re-verify just those tasks from disk
+        without re-executing.
         """
         if error_class == "timeout_exceeded":
             suffix = "timeout"
@@ -1211,6 +1257,15 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
         payload["reward"] = 0.0
         payload["skipped"] = skipped
         payload["error_message"] = reason
+        # Record the cached deliverables location for verify-side failures so a
+        # later reverify-from-cache pass knows where to read without re-running.
+        if deliverables_dir is not None:
+            payload["deliverables_dir"] = deliverables_dir
+        if error_class == "verify_failed":
+            # The rollout itself succeeded; only /verify failed. Flag the cached
+            # sidecar row with the boolean sentinel the dispatcher routes on so
+            # reverify_failed_from_cache can re-verify it without re-executing.
+            payload[NG_VERIFY_FAILED_KEY] = True
         if error_class is not None:
             payload["error_class"] = error_class
             payload[NG_FAILURE_CLASS_KEY] = error_class

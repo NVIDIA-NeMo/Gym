@@ -77,11 +77,27 @@ from nemo_gym.server_utils import (
 #     non-success has consumed (capped at NEMO_GYM_MAX_ROLLOUT_ATTEMPTS,
 #     default 3). Rows flagged ``_ng_failure_terminal=True`` are never
 #     retried regardless of attempt count.
+#   - ``_ng_verify_failed=True`` (NG_VERIFY_FAILED_KEY) additionally marks a
+#     sidecar row whose rollout succeeded but whose verification/scoring step
+#     failed, so the rollout output is cached on disk. The row still routes to
+#     the sidecar as a normal retryable failure; ``reverify_failed_from_cache``
+#     selects rows carrying this flag to re-verify from cache without
+#     re-executing. Like the other sentinels here this is a boolean KEY — the
+#     dispatcher never inspects specific ``_ng_failure_class`` *values*.
 # ---------------------------------------------------------------------------
 
-NG_FAILURE_CLASS_KEY = "_ng_failure_class"
-NG_NO_PERSIST_KEY = "_ng_no_persist"
-NG_TERMINAL_KEY = "_ng_failure_terminal"
+# Sentinel KEY names (set by agent servers, read by the dispatcher). The
+# dispatcher routes purely on these keys: it treats ``_ng_failure_class`` as an
+# opaque label (its presence ⇒ sidecar) and never matches specific class values.
+NG_FAILURE_CLASS_KEY = "_ng_failure_class"  # str: opaque failure label
+NG_NO_PERSIST_KEY = "_ng_no_persist"  # bool: don't write anywhere
+NG_TERMINAL_KEY = "_ng_failure_terminal"  # bool: never retry on resume
+# bool: rollout succeeded but its verification/scoring step failed, so the
+# rollout output is cached and can be re-verified from disk. Set alongside
+# ``_ng_failure_class`` (the row still routes to the sidecar as a normal
+# retryable failure); ``reverify_failed_from_cache`` selects rows with this flag
+# to re-verify without re-executing.
+NG_VERIFY_FAILED_KEY = "_ng_verify_failed"
 
 _DEFAULT_MAX_ROLLOUT_ATTEMPTS = 3
 
@@ -188,6 +204,17 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
     resume_from_cache: bool = Field(
         default=False,
         description="If the same command is run multiple times, check the materialized inputs and current outputs and remove the inputs that have already been run",
+    )
+    reverify_failed_from_cache: bool = Field(
+        default=False,
+        description="Redo only the tasks whose verification/scoring step failed in a prior run. "
+        "Instead of the normal resume set-difference, dispatch exactly the failures-sidecar rows "
+        f"flagged '{NG_VERIFY_FAILED_KEY}' (minus any that later succeeded), ignoring the "
+        "NEMO_GYM_MAX_ROLLOUT_ATTEMPTS cap so a deliberate redo is never blocked by prior "
+        "attempts. Pair with an agent running in a verify-only mode (one that re-verifies its "
+        "cached rollout output instead of re-executing) so the rollout is not re-run. Requires the "
+        "prior run's materialized inputs + failures sidecar; reuses its main jsonl to skip tasks "
+        "that already succeeded.",
     )
     prompt_config: Optional[str] = Field(
         default=None,
@@ -358,10 +385,87 @@ class RolloutCollectionHelper(BaseModel):
 
         return input_rows, rows, results, result_strs
 
+    def _load_verify_failed_from_cache(
+        self, config: RolloutCollectionConfig
+    ) -> Tuple[List[Dict], List[Dict], List[Dict], List[List[str]]]:
+        """Select only the tasks whose verification step failed previously.
+
+        Unlike :meth:`_load_from_cache` (which re-dispatches everything not
+        gated), this re-dispatches exactly the failures-sidecar rows flagged
+        ``_ng_verify_failed`` that did not later succeed — ignoring the
+        ``max_attempts`` cap. The existing main-jsonl successes are preserved
+        (returned as already-done rows so the final output keeps them).
+        """
+        with config.materialized_jsonl_fpath.open() as f:
+            original_input_rows = list(map(orjson.loads, f))
+
+        get_key = lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME])
+
+        # Preserve prior successes (main jsonl) and gate them out of the redo set.
+        output_fpath = Path(config.output_jsonl_fpath)
+        results: List[Dict] = []
+        result_strs: List[List[str]] = []
+        successes_seen: set = set()
+        if output_fpath.exists():
+            with output_fpath.open("rb") as f:
+                result_strs = [[line.strip()] for line in f if line.strip()]
+            results = [orjson.loads(p[0]) for p in result_strs]
+            successes_seen = set(map(get_key, results))
+
+        # Collect the verify-failed tasks from the failures sidecar.
+        failures_fpath = _failures_path_for(output_fpath)
+        verify_failed_keys: set = set()
+        total_verify_failed_rows = 0
+        if failures_fpath.exists():
+            with failures_fpath.open("rb") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    fr = orjson.loads(line)
+                    if TASK_INDEX_KEY_NAME not in fr or ROLLOUT_INDEX_KEY_NAME not in fr:
+                        continue
+                    if bool(fr.get(NG_VERIFY_FAILED_KEY)):
+                        total_verify_failed_rows += 1
+                        verify_failed_keys.add((fr[TASK_INDEX_KEY_NAME], fr[ROLLOUT_INDEX_KEY_NAME]))
+
+        # Don't redo ones that later succeeded; ignore attempt-count gating.
+        to_redo = verify_failed_keys - successes_seen
+        key_to_row = {get_key(r): r for r in original_input_rows}
+        input_rows = [key_to_row[k] for k in to_redo if k in key_to_row]
+        rows = [key_to_row[get_key(result)] for result in results if get_key(result) in key_to_row]
+
+        print(
+            f"""Re-verify-failed-from-cache. Found:
+- {len(original_input_rows)} original input rows
+- {len(results)} prior successes (in main jsonl) → kept, not redone
+- {total_verify_failed_rows} '{NG_VERIFY_FAILED_KEY}' sidecar attempts ({len(verify_failed_keys)} unique tasks)
+- {len(verify_failed_keys & successes_seen)} of those later succeeded → skipped
+- {len(input_rows)} tasks to re-verify (attempt cap ignored)"""
+        )
+
+        return input_rows, rows, results, result_strs
+
     async def run_from_config(self, config: RolloutCollectionConfig) -> Tuple[List[Dict]]:
         output_fpath = Path(config.output_jsonl_fpath)
 
-        if config.resume_from_cache and config.materialized_jsonl_fpath.exists() and output_fpath.exists():
+        if config.reverify_failed_from_cache and not config.materialized_jsonl_fpath.exists():
+            # Fail loud rather than silently clearing the output and re-running
+            # the whole benchmark from scratch (which would re-execute rollouts).
+            raise FileNotFoundError(
+                f"reverify_failed_from_cache=True but the prior run's materialized inputs were not "
+                f"found at {config.materialized_jsonl_fpath}. Point output_jsonl_fpath at the prior "
+                f"run (so its *_materialized_inputs.jsonl and *_failures.jsonl are reused)."
+            )
+
+        if config.reverify_failed_from_cache and config.materialized_jsonl_fpath.exists():
+            (
+                input_rows,
+                rows,
+                results,
+                result_strs,
+            ) = self._load_verify_failed_from_cache(config)
+        elif config.resume_from_cache and config.materialized_jsonl_fpath.exists() and output_fpath.exists():
             (
                 input_rows,
                 rows,
