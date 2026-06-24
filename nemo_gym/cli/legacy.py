@@ -28,7 +28,7 @@ from nemo_gym.cli.main import main as gym_main
 
 # Legacy command (ng_/nemo_gym_ prefix stripped) -> equivalent `gym` subcommand tokens.
 LEGACY = {
-    "run": ["env", "run"],
+    "run": ["env", "start"],
     "test": ["env", "test"],
     "test_all": ["env", "test"],
     "dev_test": ["dev", "test"],

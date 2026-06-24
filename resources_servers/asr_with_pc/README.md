@@ -50,7 +50,7 @@ workaround until the schema is extended.
 ## Running servers
 
 ```bash
-gym env run \
+gym env start \
     --model-type vllm_model \
     --resources-server asr_with_pc
 ```

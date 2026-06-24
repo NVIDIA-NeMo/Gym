@@ -51,7 +51,7 @@ uv sync
 
 ### Start ARC-AGI environment (we can reuse the same one for ARC-AGI-1 and 2):
 ```bash
-gym env run --environment arc_agi --model-type vllm_model
+gym env start --environment arc_agi --model-type vllm_model
 ```
 
 

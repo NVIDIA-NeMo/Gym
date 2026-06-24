@@ -11,7 +11,7 @@ on Hugging Face.
 ## Running servers
 The following are example commands for running this resources server, along with the simple agent and an OpenAI model:
 ```bash
-gym env run \
+gym env start \
     --model-type openai_model \
     --resources-server math_with_judge \
     +math_with_judge.resources_servers.math_with_judge.judge_model_server.name=policy_model

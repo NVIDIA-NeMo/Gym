@@ -46,7 +46,7 @@ compute pass@k for each separately.
 
 ```bash
 # Running servers
-gym env run \
+gym env start \
     --model-type vllm_model \
     --resources-server evalplus
 

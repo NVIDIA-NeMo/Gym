@@ -94,7 +94,7 @@ The resources server config points the judge at the policy model — `judge_mode
 <Info>
 The config file ships with a `judge_model` block that starts a dedicated judge server. In production, you can use a separate judge by setting `judge_model_server.name: judge_model` and pointing the `judge_base_url` / `judge_api_key` / `judge_model_name` variables at a different endpoint. This lets you use a different model, provider, or quota for the judge.
 
-Since this walkthrough reuses `policy_model` as the judge, **comment out the `judge_model` block** as shown below — otherwise `gym env run` will start an unused server that still needs its variables to resolve.
+Since this walkthrough reuses `policy_model` as the judge, **comment out the `judge_model` block** as shown below — otherwise `gym env start` will start an unused server that still needs its variables to resolve.
 
 Be sure to **set `judge_model_server.name` to `policy_model`** as well.
 
@@ -200,7 +200,7 @@ If you are building your own LLM-judge server, you will write similar code — t
 Start the servers:
 
 ```bash
-gym env run \
+gym env start \
     --resources-server over_refusal_detection \
     --model-type openai_model
 ```
@@ -350,7 +350,7 @@ Other servers apply the same pattern with domain-specific variations. For exampl
 2. Add or reuse a **model server** for the judge; reference it from `judge_model_server`.
 3. Design **prompts and parseable verdicts**; handle judge failures gracefully.
 4. Set **temperature / max tokens** and **concurrency** for your SLA and budget.
-5. Smoke-test with `gym env run` and your resources server's **`data/example.jsonl`**, then scale with `gym eval run --no-serve`.
+5. Smoke-test with `gym env start` and your resources server's **`data/example.jsonl`**, then scale with `gym eval run --no-serve`.
 
 Done looks like:
 

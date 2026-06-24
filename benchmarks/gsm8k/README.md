@@ -16,7 +16,7 @@ the expected answer is integer-valued), then renames `problem` ->
 gym eval prepare --benchmark gsm8k
 
 # Running servers
-gym env run \
+gym env start \
     --model-type vllm_model \
     --benchmark gsm8k
 

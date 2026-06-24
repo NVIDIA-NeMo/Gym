@@ -13,7 +13,7 @@ gym eval prepare --benchmark imo_proofbench
 ## Run servers
 
 ```bash
-gym env run \
+gym env start \
     --model-type vllm_model \
     --benchmark imo_proofbench \
     +judge_base_url=https://generativelanguage.googleapis.com/v1beta/openai \

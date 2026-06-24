@@ -15,7 +15,7 @@ policy_model_name: gpt-5-nano
 ### Running the server
 Set the API version. It usually looks something like "2024-10-21".
 ```bash
-gym env run \
+gym env start \
     --model-type azure_openai_model \
     --resources-server equivalence_llm_judge \
     +policy_model.responses_api_models.azure_openai_model.default_query.api-version=<api_version>

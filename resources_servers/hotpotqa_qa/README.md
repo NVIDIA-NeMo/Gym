@@ -30,7 +30,7 @@ pass@k for each channel.
 ## Running servers
 
 ```bash
-gym env run \
+gym env start \
     --model-type openai_model \
     --resources-server hotpotqa_qa
 ```

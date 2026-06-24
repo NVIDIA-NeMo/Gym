@@ -32,7 +32,7 @@ For each verification request, the agent's JSON output is validated through mult
 The following command can be used to run this resources server, along with the simple agent and a policy model:
 
 ```bash
-gym env run \
+gym env start \
   --resources-server terminus_judge \
   --model-type openai_model \
   +terminus_judge_resources_server.resources_servers.terminus_judge.judge_responses_create_params.max_output_tokens=512

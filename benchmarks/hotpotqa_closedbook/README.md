@@ -25,7 +25,7 @@ gym eval prepare --benchmark hotpotqa_closedbook
 ## Run servers
 
 ```bash
-gym env run \
+gym env start \
     --model-type vllm_model \
     --benchmark hotpotqa_closedbook
 ```

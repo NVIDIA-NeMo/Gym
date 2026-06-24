@@ -38,7 +38,7 @@ on the same inputs.
 gym eval prepare --benchmark hmmt_nov25
 
 # Running servers
-gym env run \
+gym env start \
     --model-type vllm_model \
     --benchmark hmmt_nov25
 

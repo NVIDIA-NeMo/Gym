@@ -36,7 +36,7 @@ python benchmarks/aime24-x/prepare.py --prompt_language en
 ## Quickstart
 
 ```bash
-gym env run \
+gym env start \
     --benchmark aime24-x \
     --model-type vllm_model
 ```

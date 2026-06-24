@@ -42,7 +42,7 @@ gym eval prepare --benchmark longcodebench
 gym eval prepare --benchmark longcodebench/config_n3_1m
 
 # Running servers
-gym env run \
+gym env start \
     --model-type vllm_model \
     --benchmark longcodebench
 

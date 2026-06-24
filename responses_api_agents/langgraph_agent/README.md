@@ -9,7 +9,7 @@ Please note that agents such as parallel thinking which produce non-monotonicall
 ## Quick Start
 
 ```bash
-gym env run \
+gym env start \
     --resources-server reasoning_gym/reflection_agent \
     --model-type vllm_model
 ```

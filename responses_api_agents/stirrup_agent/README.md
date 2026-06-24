@@ -174,7 +174,7 @@ apptainer build gdpval.sif responses_api_agents/stirrup_agent/containers/gdpval.
 Then:
 
 ```yaml
-# env.yaml or gym env run override
+# env.yaml or gym env start override
 stirrup_agent:
   responses_api_agents:
     stirrup_agent:

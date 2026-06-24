@@ -31,7 +31,7 @@ to pick the standard judge prompt.
 gym eval prepare --benchmark arena_hard
 
 # Running servers
-gym env run \
+gym env start \
     --model-type vllm_model \
     --benchmark arena_hard
 

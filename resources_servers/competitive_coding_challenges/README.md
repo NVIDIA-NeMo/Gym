@@ -61,7 +61,7 @@ elsewhere. Cluster/SLURM users can co-launch the sandbox via Skills'
 
 The following allows users to launch the environment followed by the request for generating and collecting rollouts.
 ```bash
-gym env run \
+gym env start \
   --config "$config_paths" \
   +simple_agent.responses_api_agents.simple_agent.resources_server.name=competitive_coding_challenges_resources_server
 

@@ -25,14 +25,14 @@ Verification runs in the `evalplus` resource server (shared with
 gym eval prepare --benchmark mbpp
 
 # Running servers
-gym env run \
+gym env start \
     --model-type vllm_model \
     --benchmark mbpp
 
 # Collecting rollouts. The +prompt_config= override is required because
 # the prepared JSONL stores raw `question` rows (no `responses_create_params.input`);
 # gym eval run --no-serve does not pick up the `prompt_config:` field on the dataset
-# entry in config.yaml the way gym env run does.
+# entry in config.yaml the way gym env start does.
 gym eval run --no-serve \
     --agent mbpp_evalplus_simple_agent \
     --input benchmarks/mbpp/data/mbpp_benchmark.jsonl \

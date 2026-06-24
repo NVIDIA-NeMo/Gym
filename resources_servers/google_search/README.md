@@ -98,7 +98,7 @@ tools=[
 
 ### Running the Server
 ```bash
-gym env run \
+gym env start \
     --model-type openai_model \
     --resources-server google_search
 

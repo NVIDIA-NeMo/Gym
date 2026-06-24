@@ -18,7 +18,7 @@ Migrates NeMo Skills' `mmlu-redux` benchmark to Gym on top of the shared
 gym eval prepare --benchmark mmlu-redux
 
 # Running servers
-gym env run \
+gym env start \
     --model-type vllm_model \
     --benchmark mmlu-redux
 

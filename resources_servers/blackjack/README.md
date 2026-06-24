@@ -9,7 +9,7 @@ Example data provided in `data/example.jsonl` (system prompt only, no verifier_m
 ## Run
 
 ```bash
-gym env run \
+gym env start \
     --resources-server blackjack \
     --model-type vllm_model
 ```

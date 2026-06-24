@@ -8,7 +8,7 @@ It integrates with the NeMo Skills ToolManager to dynamically load and execute t
 ## Running servers
 The following are example commands for running this resources server with the simple agent and a vLLM model:
 ```bash
-gym env run \
+gym env start \
     --resources-server ns_tools \
     --resources-server math_with_judge \
     --model-type vllm_model \

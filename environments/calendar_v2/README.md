@@ -16,7 +16,7 @@ The conversations in the dataset are generated using personas from the [nvidia/N
 The following is an example command for running this resources server along with an OpenAI model:
 
 ```bash
-gym env run --environment calendar_v2 --model-type openai_model
+gym env start --environment calendar_v2 --model-type openai_model
 ```
 
 ## Collecting rollouts

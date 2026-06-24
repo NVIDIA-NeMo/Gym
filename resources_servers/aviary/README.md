@@ -22,7 +22,7 @@ This resources server adapts [Aviary environments](https://github.com/Future-Hou
 Run the GSM8K Aviary resources server together with a model config:
 
 ```bash
-gym env run \
+gym env start \
     --resources-server aviary/gsm8k_aviary \
     --model-type vllm_model
 ```
@@ -49,7 +49,7 @@ Then, prepare your Gym data with the task_idx values of the problems you would l
 Once the dataset server is running and is accessible at a specific URL, update your config based on [configs/bbh_remote.yaml](configs/bbh_remote.yaml) with the server URL and api key, and launch NeMo-Gym as follows:
 
 ```bash
-gym env run \
+gym env start \
     --resources-server aviary/bbh_remote \
     --model-type vllm_model
 ```
@@ -100,7 +100,7 @@ cd /path/to/gym/directory
 ```
 And then bring up NeMo-Gym:
 ```bash
-gym env run \
+gym env start \
     --resources-server aviary/bbh_bundled \
     --model-type vllm_model
 ```

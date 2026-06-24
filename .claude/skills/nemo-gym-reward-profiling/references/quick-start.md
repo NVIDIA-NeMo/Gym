@@ -17,7 +17,7 @@ AGENT_NAME="your_agent_name"
 NUM_REPEATS=2
 NUM_SAMPLES_IN_PARALLEL=8
 
-gym env run \
+gym env start \
     --config your_model_config_paths \
     --config your_env_config_paths \
     --model "$POLICY_MODEL_NAME" \

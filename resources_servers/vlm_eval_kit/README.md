@@ -54,7 +54,7 @@ python run.py --verbose \
 ### Prepare data
 First run the VLMEvalKit server to install dependencies.
 ```bash
-gym env run \
+gym env start \
     --resources-server vlm_eval_kit \
     --model-type openai_model
 ```

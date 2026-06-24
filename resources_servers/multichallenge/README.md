@@ -9,7 +9,7 @@ Evaluates model responses on the **MultiChallenge** benchmark using an LLM judge
 gym env test --resources-server multichallenge
 
 # 2. Start servers (in terminal 1)
-gym env run \
+gym env start \
   --resources-server multichallenge \
   --model-type vllm_model
 
@@ -106,7 +106,7 @@ Tests cover:
 
 1. **Start servers**:
    ```bash
-   gym env run \
+   gym env start \
      --resources-server multichallenge \
      --model-type vllm_model
    ```

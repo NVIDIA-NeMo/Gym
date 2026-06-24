@@ -55,7 +55,7 @@ text-output and tool-call variants is in
 The following command runs the text-output JSON config with the simple agent and
 an OpenAI model:
 ```bash
-gym env run \
+gym env start \
     --model-type openai_model \
     --resources-server structured_outputs/structured_outputs_json
 ```
@@ -74,7 +74,7 @@ For v4 tool-call structured outputs, use `structured_outputs_v4.yaml` and the
 v4 simple agent. The config routes through a non-executing agent because the
 emitted function call is the final answer, not an action to execute:
 ```bash
-gym env run \
+gym env start \
     --model-type vllm_model \
     --resources-server structured_outputs/structured_outputs_v4
 ```

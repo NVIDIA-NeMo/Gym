@@ -20,7 +20,7 @@ Adds the `proof-arena-judge` benchmark to Gym.
 gym eval prepare --benchmark proof-arena-judge
 
 # Running servers
-gym env run \
+gym env start \
     --model-type vllm_model \
     --benchmark proof-arena-judge
 

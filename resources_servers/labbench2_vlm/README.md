@@ -178,7 +178,7 @@ putting them in `env.yaml`.
 Start the servers:
 
 ```bash
-gym env run \
+gym env start \
   --resources-server labbench2_vlm \
   --resources-server labbench2_vlm/judge_model_openai \
   --model-type openai_model
@@ -224,7 +224,7 @@ rollout output). Regenerate it locally with the command above.
 ### One-shot alternative
 
 `gym eval run` starts the server stack, preprocesses, and collects
-rollouts in a single command (don't run `gym env run` separately). Input path and
+rollouts in a single command (don't run `gym env start` separately). Input path and
 agent ref are auto-derived from the dataset entry in the chained config
 (`--split` picks which one):
 

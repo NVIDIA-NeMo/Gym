@@ -18,7 +18,7 @@ resource server.
 gym eval prepare --benchmark math-500
 
 # Running servers
-gym env run \
+gym env start \
     --model-type vllm_model \
     --benchmark math-500
 

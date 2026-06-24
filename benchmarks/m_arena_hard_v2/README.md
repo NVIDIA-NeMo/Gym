@@ -58,7 +58,7 @@ python benchmarks/m_arena_hard_v2/prepare.py \
 gym eval prepare --benchmark m_arena_hard_v2
 
 # Running servers
-gym env run \
+gym env start \
     --model-type vllm_model \
     --benchmark m_arena_hard_v2
 

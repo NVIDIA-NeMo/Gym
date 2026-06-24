@@ -11,7 +11,7 @@ Commands -
 Spin up server:
 
 ```
-gym env run \
+gym env start \
     --model-type openai_model \
     --resources-server workplace_assistant
 ```

@@ -30,7 +30,7 @@ PolyMath additions are at the metric-aggregation layer:
 ## Running servers
 
 ```bash
-gym env run \
+gym env start \
     --model-type vllm_model \
     --resources-server polymath
 ```

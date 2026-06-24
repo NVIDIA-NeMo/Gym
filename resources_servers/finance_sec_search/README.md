@@ -152,7 +152,7 @@ public benchmark lives in `benchmarks/finance_sec_search/`. It downloads the
 `public.csv` dataset from GitHub and converts it to Gym format:
 
 ```bash
-# Prepare via Gym CLI (recommended — used by gym env run with benchmark configs):
+# Prepare via Gym CLI (recommended — used by gym env start with benchmark configs):
 gym eval prepare --benchmark finance_sec_search/config_no_web_search
 
 # Or run the script directly:
@@ -194,7 +194,7 @@ Launch a vLLM-compatible model server (e.g. Qwen3-30B-A3B) so the policy and jud
 With a local vLLM model server:
 
 ```bash
-gym env run \
+gym env start \
   --model-type vllm_model \
   --resources-server finance_sec_search
 ```
@@ -202,7 +202,7 @@ gym env run \
 Or with an OpenAI-compatible API (e.g. OpenAI, Azure, NIM):
 
 ```bash
-gym env run \
+gym env start \
   --model-type openai_model \
   --resources-server finance_sec_search
 ```

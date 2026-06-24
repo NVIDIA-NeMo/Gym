@@ -45,7 +45,7 @@ gym eval prepare --benchmark mrcr/config_n3_1m
 ## Start environment
 
 ```bash
-gym env run \
+gym env start \
     --benchmark mrcr \
     --model-type vllm_model
 ```

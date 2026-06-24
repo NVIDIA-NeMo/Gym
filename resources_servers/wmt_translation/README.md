@@ -70,7 +70,7 @@ For an end-to-end SLURM run with COMET enabled, see the
 
 ```bash
 # Running servers (BLEU-only locally; flip compute_comet=true on cluster)
-gym env run \
+gym env start \
     --model-type vllm_model \
     --resources-server wmt_translation \
     ++wmt_translation.resources_servers.wmt_translation.compute_comet=false

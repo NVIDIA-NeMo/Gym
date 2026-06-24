@@ -158,7 +158,7 @@ rollouts file.
 
 ```bash
 # Start servers (smoke-test mode — no GPU needed for the verifier)
-gym env run \
+gym env start \
     --resources-server longmt_eval \
     --model-type vllm_model & \
     ++longmt_eval.resources_servers.longmt_eval.compute_segale=false

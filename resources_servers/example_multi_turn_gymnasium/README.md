@@ -15,7 +15,7 @@ Example data provided in `data/example.jsonl`.
 ## Run
 
 ```bash
-gym env run \
+gym env start \
     --resources-server example_multi_turn_gymnasium \
     --model-type vllm_model
 ```

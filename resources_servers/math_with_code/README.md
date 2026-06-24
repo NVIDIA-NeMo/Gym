@@ -105,7 +105,7 @@ gym dataset download --storage gitlab \
 
 Start server 
 ```
-gym env run \
+gym env start \
     --config responses_api_agents/simple_agent/configs/simple_agent.yaml \
     --model-type openai_model \
     --resources-server math_with_code \

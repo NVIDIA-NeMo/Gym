@@ -40,7 +40,7 @@ gym eval prepare --benchmark simpleqa
 ## Running servers
 
 ```bash
-gym env run \
+gym env start \
     --model-type vllm_model \
     --benchmark simpleqa
 ```

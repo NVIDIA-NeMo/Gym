@@ -100,7 +100,7 @@ overwrite source data. The full config chain is required because
 
 ```bash
 # Start servers
-gym env run \
+gym env start \
     --benchmark labbench2_vlm \
     --model-type openai_model
 
@@ -130,7 +130,7 @@ PDFs as pages like other PDF tasks.
 ### One-shot alternative
 
 `gym eval run` starts the server stack, preprocesses, and
-collects rollouts in a single command (don't run `gym env run` separately).
+collects rollouts in a single command (don't run `gym env start` separately).
 Input path and agent ref are auto-derived from the `type: benchmark`
 dataset entry in the chained config:
 

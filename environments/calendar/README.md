@@ -16,7 +16,7 @@ Create an `env.yaml` file in the Gym root directory to specifying `policy_base_u
 The following is an example command for running this resources server along with an OpenAI model:
 
 ```bash
-gym env run --environment calendar --model-type openai_model
+gym env start --environment calendar --model-type openai_model
 ```
 
 ## Collecting rollouts

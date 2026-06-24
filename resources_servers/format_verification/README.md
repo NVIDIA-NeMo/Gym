@@ -26,7 +26,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for system diagrams and detailed field ma
 
 ### Freeform Formatting
 ```bash
-gym env run \
+gym env start \
     --model-type openai_model \
     --resources-server format_verification/freeform_formatting
 ```
@@ -43,7 +43,7 @@ gym eval run --no-serve \
 
 ### Citation Format
 ```bash
-gym env run \
+gym env start \
     --model-type openai_model \
     --resources-server format_verification/citation_format
 ```

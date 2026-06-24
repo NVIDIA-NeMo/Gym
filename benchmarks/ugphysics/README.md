@@ -64,7 +64,7 @@ message.
 gym eval prepare --benchmark ugphysics
 
 # Running servers
-gym env run \
+gym env start \
     --model-type vllm_model \
     --benchmark ugphysics
 

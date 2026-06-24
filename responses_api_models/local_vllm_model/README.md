@@ -5,7 +5,7 @@
 Run this on a single GPU node! Set tensor_parallel_size * data_parallel_size to the number of GPUs on your node. For this single node config, data_parallel_size_local is equal to data_parallel_size
 
 ```bash
-gym env run \
+gym env start \
     --resources-server example_single_tool_call \
     --config responses_api_models/local_vllm_model/configs/nano_v3_single_node.yaml &> temp.log & \
     ++policy_model.responses_api_models.local_vllm_model.vllm_serve_kwargs.tensor_parallel_size=4 \

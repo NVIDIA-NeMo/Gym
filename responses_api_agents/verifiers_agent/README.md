@@ -21,7 +21,7 @@ policy_model_name: "Qwen/Qwen3-4B-Instruct-2507"
 
 ```
 # start nemo gym servers
-gym env run \
+gym env start \
     --config responses_api_agents/verifiers_agent/configs/acereason-math.yaml \
     --model-type vllm_model
 
@@ -100,7 +100,7 @@ deactivate
 source .venv/bin/activate
 
 # start nemo gym servers
-gym env run \
+gym env start \
     --config responses_api_agents/verifiers_agent/configs/ascii-tree.yaml \
     --model-type vllm_model
 
@@ -116,7 +116,7 @@ gym eval run --no-serve \
 
 The patch to include prompt and generation token ids for preventing retokenization error when training with NeMo RL has been upstreamed into verifiers' `NeMoRLChatCompletionsClient`. We currently track verifiers `main` (`git+https://github.com/PrimeIntellect-ai/verifiers.git@main`) for this support; once verifiers `0.1.13` is released, the requirements pin will move to that tagged version.
 
-For installing new prime environments and generating datasets, use a separate venv (outside of Gym) to avoid dependency conflicts with the `exclude-dependencies` section of Gym `pyproject.toml` and the server's pinned verifiers version. After generating your dataset, deactivate the separate venv and return to the Gym venv for running servers. Make sure to restart NeMo Gym servers with `gym env run` after any environment changes to ensure the pinned version of verifiers is used.
+For installing new prime environments and generating datasets, use a separate venv (outside of Gym) to avoid dependency conflicts with the `exclude-dependencies` section of Gym `pyproject.toml` and the server's pinned verifiers version. After generating your dataset, deactivate the separate venv and return to the Gym venv for running servers. Make sure to restart NeMo Gym servers with `gym env start` after any environment changes to ensure the pinned version of verifiers is used.
 
 # Licensing information
 Code: Apache 2.0

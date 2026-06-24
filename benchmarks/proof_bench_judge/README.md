@@ -37,7 +37,7 @@ details.
 gym eval prepare --benchmark proof_bench_judge
 
 # Running servers
-gym env run \
+gym env start \
     --model-type vllm_model \
     --benchmark proof_bench_judge
 

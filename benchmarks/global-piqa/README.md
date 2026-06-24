@@ -19,7 +19,7 @@ server.
 gym eval prepare --benchmark global-piqa
 
 # Running servers
-gym env run \
+gym env start \
     --model-type vllm_model \
     --benchmark global-piqa
 

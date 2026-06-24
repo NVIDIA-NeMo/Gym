@@ -64,7 +64,7 @@ python benchmarks/livecodebench-x/prepare.py --prompt_language en
 ## Quickstart
 
 ```bash
-gym env run \
+gym env start \
     --benchmark livecodebench-x \
     --model-type vllm_model
 ```
@@ -89,7 +89,7 @@ gym eval run --no-serve \
 
 `--config` and `+prompt_config` are required: the prepared JSONL ships
 raw benchmark rows (no `responses_create_params.input` baked in), and the
-agent's dataset-level `prompt_config` is metadata for `gym env run` only — the
+agent's dataset-level `prompt_config` is metadata for `gym env start` only — the
 rollout CLI needs `+prompt_config=...` directly to apply the prompt template
 before merging `responses_create_params` overrides. `mkdir -p` is needed
 because `gym eval run --no-serve` does not create parent directories.

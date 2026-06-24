@@ -35,7 +35,7 @@ judge's full text), and in research mode `rubric_score` plus
 
 ```bash
 # Running servers
-gym env run \
+gym env start \
     --model-type vllm_model \
     --resources-server frontierscience_judge
 

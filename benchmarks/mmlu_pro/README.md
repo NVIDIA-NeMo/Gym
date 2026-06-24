@@ -16,7 +16,7 @@ This benchmark uses the `mcqa` resource server with the `mcqa_simple_agent`.
 gym eval prepare --benchmark mmlu_pro
 
 # Start servers
-gym env run \
+gym env start \
     --benchmark mmlu_pro \
     --model-type vllm_model
 

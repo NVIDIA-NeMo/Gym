@@ -22,7 +22,7 @@ Use ``benchmarks/imo_proofbench/`` for the IMO-ProofBench dataset.
 ## Running servers
 
 ```bash
-gym env run \
+gym env start \
     --model-type vllm_model \
     --resources-server imo_proofbench_judge \
     +judge_base_url=https://generativelanguage.googleapis.com/v1beta/openai \

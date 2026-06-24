@@ -178,7 +178,7 @@ Test coverage must be >= 95%. Write tests for: verify pass, verify fail (wrong o
 
 ```bash
 # Start servers
-gym env run \
+gym env start \
     --config resources_servers/my_benchmark/configs/my_benchmark.yaml \
     --model-type openai_model
 

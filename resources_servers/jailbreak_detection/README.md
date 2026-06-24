@@ -27,7 +27,7 @@ The example dataset includes various jailbreak attack patterns:
 
 1. Start the servers:
 ```bash
-gym env run \
+gym env start \
     --resources-server jailbreak_detection/jailbreak_detection_nemotron_combined_reward_tp8 \
     --model-type openai_model \
     --resources-server jailbreak_detection/safety_judge_model

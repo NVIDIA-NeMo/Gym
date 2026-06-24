@@ -41,7 +41,7 @@ only advertised on multi-node SLURM deployments via NeMo-Skills'
 override and rely on corpus-BLEU only:
 
 ```bash
-gym env run \
+gym env start \
     --model-type vllm_model \
     --benchmark flores200 \
     "++flores200_wmt_translation_resources_server.resources_servers.wmt_translation.compute_comet=false"

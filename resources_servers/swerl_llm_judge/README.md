@@ -55,7 +55,7 @@ Notes:
 
 **Standard format (with `grading_mode`):**
 ```bash
-gym env run \
+gym env start \
     --config responses_api_agents/simple_agent/configs/simple_agent.yaml \
     --model-type openai_model \
     --resources-server swerl_llm_judge

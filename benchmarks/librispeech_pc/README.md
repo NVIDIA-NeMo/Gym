@@ -43,7 +43,7 @@ and writes the JSONL into `benchmarks/librispeech_pc/data/`.
 ## Running servers
 
 ```bash
-gym env run \
+gym env start \
     --model-type vllm_model \
     --benchmark librispeech_pc
 ```

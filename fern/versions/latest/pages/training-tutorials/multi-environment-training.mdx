@@ -13,21 +13,21 @@ Suppose you want to use both the example_single_tool_call and example_multi_step
 
 For example_single_tool_call:
 ```bash
-gym env run \
+gym env start \
     --model-type openai_model \
     --resources-server example_single_tool_call
 ```
 
 For example_multi_step:
 ```bash
-gym env run \
+gym env start \
     --model-type openai_model \
     --resources-server example_multi_step
 ```
 
 To use both environments, add the YAML configs together as follows:
 ```bash
-gym env run \
+gym env start \
     --model-type openai_model \
     --resources-server example_single_tool_call \
     --resources-server example_multi_step

@@ -23,14 +23,14 @@ holds the dataset definition + prompt + prepare script.
 gym eval prepare --benchmark human_eval
 
 # Running servers
-gym env run \
+gym env start \
     --model-type vllm_model \
     --benchmark human_eval
 
 # Collecting rollouts. The +prompt_config= override is required because
 # the prepared JSONL stores raw `question` rows (no `responses_create_params.input`);
 # gym eval run --no-serve does not pick up the `prompt_config:` field on the dataset
-# entry in config.yaml the way gym env run does.
+# entry in config.yaml the way gym env start does.
 gym eval run --no-serve \
     --agent human_eval_evalplus_simple_agent \
     --input benchmarks/human_eval/data/human_eval_benchmark.jsonl \

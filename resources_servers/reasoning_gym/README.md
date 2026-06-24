@@ -82,7 +82,7 @@ policy_model_name: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
 ## Launch nemo gym servers
 
 ```bash
-gym env run \
+gym env start \
     --resources-server reasoning_gym \
     --model-type vllm_model
 ```

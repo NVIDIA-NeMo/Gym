@@ -24,7 +24,7 @@ We use the LiveCodeBench execution code.
 
 ```bash
 # Running the server
-gym env run \
+gym env start \
     --model-type openai_model \
     --resources-server code_gen
 

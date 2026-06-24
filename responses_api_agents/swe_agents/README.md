@@ -254,7 +254,7 @@ policy_model_name: Qwen/Qwen3-Coder-30B-A3B-Instruct
 # OpenHands single-prompt (swap to
 # responses_api_agents/swe_agents/configs/swebench_multi_tools.yaml for full
 # prompt × agent-class × tool-name diversity)
-gym env run \
+gym env start \
     --config responses_api_agents/swe_agents/configs/swebench_openhands.yaml \
     --model-type vllm_model \
     +swe_agents.responses_api_agents.swe_agents.container_formatter=/lustre/xxx/images/swe-bench/swebench_sweb.eval.x86_64.\{instance_id\}.sif \

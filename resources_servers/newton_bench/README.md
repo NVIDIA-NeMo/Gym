@@ -91,7 +91,7 @@ vllm serve \
 
 ### Launch servers
 ```bash
-gym env run \
+gym env start \
     --resources-server newton_bench \
     --model-type vllm_model
 ```

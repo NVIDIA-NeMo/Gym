@@ -12,7 +12,7 @@ policy_model_name: Qwen/Qwen3-VL-8B-Instruct
 
 ```bash
 vllm serve Qwen/Qwen3-VL-8B-Instruct -tp 8 --enable-auto-tool-choice --tool-call-parser hermes &
-gym env run \
+gym env start \
     --resources-server circle_click \
     --model-type vllm_model &
 gym eval run --no-serve \

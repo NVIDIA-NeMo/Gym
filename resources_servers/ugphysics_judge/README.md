@@ -58,7 +58,7 @@ swap it for any other `responses_api_models/*` config that exposes a
 
 ```bash
 # Running servers
-gym env run \
+gym env start \
     --model-type vllm_model \
     --resources-server ugphysics_judge \
     --config benchmarks/ugphysics/judge_gptoss20b.yaml

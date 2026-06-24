@@ -77,7 +77,7 @@ server.
 Using a local Nemotron 3 model with `local_vllm_model`:
 
 ```bash
-gym env run \
+gym env start \
     --config responses_api_agents/simple_agent/configs/simple_agent.yaml \
     --model-type local_vllm_model/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 \
     --resources-server gpqa_diamond \
@@ -90,7 +90,7 @@ gym env run \
 Generic example with `openai_model`:
 
 ```bash
-gym env run \
+gym env start \
     --config responses_api_agents/simple_agent/configs/simple_agent.yaml \
     --model-type openai_model \
     --resources-server gpqa_diamond \

@@ -32,7 +32,7 @@ Downloads the 8 ESB subsets (~tens of GB of FLAC) and writes
 ## Running servers
 
 ```bash
-gym env run \
+gym env start \
     --model-type vllm_model \
     --benchmark asr_leaderboard
 ```

@@ -31,7 +31,7 @@ policy_model_name: gpt-5-2025-08-07  # or gpt-4.1-2025-04-14
 ```bash
 cd /path/to/Gym
 source .venv/bin/activate
-gym env run \
+gym env start \
     --resources-server verifif \
     --model-type openai_model
 ```
@@ -245,7 +245,7 @@ For high-throughput training:
 
 View server logs:
 ```bash
-# Check terminal output from gym env run
+# Check terminal output from gym env start
 # Or view Ray dashboard at http://127.0.0.1:8265
 ```
 

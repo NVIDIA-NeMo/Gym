@@ -50,7 +50,7 @@ Start the servers (inherits the `polymath` resources server in
 symbolic-only mode plus a vLLM model server):
 
 ```
-gym env run \
+gym env start \
     --model-type vllm_model \
     --benchmark polymath
 ```

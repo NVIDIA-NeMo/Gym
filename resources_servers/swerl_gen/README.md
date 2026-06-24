@@ -60,7 +60,7 @@ You need to have singularity installed. Image having singularity:
 `/lustre/fsw/portfolios/llmservice/users/asohrabizade/codegen/sqsh/nvidian+nemo+verl_v2_enroot0.8.5.sqsh`
 
 ```bash
-gym env run \
+gym env start \
     --config responses_api_agents/simple_agent/configs/simple_agent.yaml \
     --model-type openai_model \
     --resources-server swerl_gen

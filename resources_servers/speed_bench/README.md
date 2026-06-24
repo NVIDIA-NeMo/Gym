@@ -107,7 +107,7 @@ For an EAGLE3 / MTP setup with a paired draft model, see
 ```bash
 # Running servers — uses the demo local_vllm_model config above (drop in
 # your own model config to swap targets; just keep the speculative_config block).
-gym env run \
+gym env start \
     --model-type local_vllm_model/Qwen/Qwen3-30B-A3B-Instruct-2507-ngram-specdec \
     --resources-server speed_bench \
     --config responses_api_agents/speed_bench_agent/configs/speed_bench_agent.yaml \

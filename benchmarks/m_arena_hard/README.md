@@ -51,7 +51,7 @@ gym eval prepare --benchmark m_arena_hard
 python benchmarks/m_arena_hard/prepare.py --baseline-file path/to/baselines.jsonl
 
 # Running servers
-gym env run \
+gym env start \
     --model-type vllm_model \
     --benchmark m_arena_hard
 

@@ -27,7 +27,7 @@ always fails.
 ## Start environment
 
 ```bash
-gym env run \
+gym env start \
     --resources-server mrcr \
     --model-type vllm_model
 ```

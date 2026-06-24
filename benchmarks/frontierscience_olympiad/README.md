@@ -39,7 +39,7 @@ example, the original Skills configuration uses `o3-mini-2025-01-31` via
 gym eval prepare --benchmark frontierscience_olympiad
 
 # Running servers
-gym env run \
+gym env start \
     --model-type vllm_model \
     --benchmark frontierscience_olympiad
 

@@ -16,7 +16,7 @@ here is the same deterministic `Judgement: Yes/No` parsing used by Skills'
 gym eval prepare --benchmark answer-judge
 
 # Running servers
-gym env run \
+gym env start \
     --model-type vllm_model \
     --benchmark answer-judge
 

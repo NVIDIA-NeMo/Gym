@@ -9,7 +9,7 @@ python resources_servers/xlam_fc/generate_dataset.py
 ```
 
 ```bash
-gym env run \
+gym env start \
     --model-type vllm_model \
     --resources-server xlam_fc
 ```

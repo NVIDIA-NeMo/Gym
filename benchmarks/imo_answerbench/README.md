@@ -13,7 +13,7 @@ gym eval prepare --benchmark imo_answerbench
 ## Run servers
 
 ```bash
-gym env run \
+gym env start \
     --model-type vllm_model \
     --benchmark imo_answerbench
 ```

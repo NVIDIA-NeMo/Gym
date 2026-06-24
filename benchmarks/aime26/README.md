@@ -11,7 +11,7 @@ gym eval prepare --benchmark aime26
 ## Run servers
 
 ```bash
-gym env run \
+gym env start \
     --model-type vllm_model \
     --benchmark aime26
 ```

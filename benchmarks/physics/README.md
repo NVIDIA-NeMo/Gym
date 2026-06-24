@@ -24,7 +24,7 @@ transformation Skills uses for the multi-part answers, and writes
 ## Running servers
 
 ```bash
-gym env run \
+gym env start \
     --model-type vllm_model \
     --benchmark physics
 ```

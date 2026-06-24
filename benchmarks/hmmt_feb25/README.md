@@ -37,7 +37,7 @@ Start the benchmark's servers (inherits `math_with_judge` in symbolic-only mode
 plus a vLLM model server — adjust the model config to match your deployment):
 
 ```
-gym env run \
+gym env start \
     --benchmark hmmt_feb25 \
     --model-type vllm_model
 ```

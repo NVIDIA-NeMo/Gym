@@ -36,7 +36,7 @@ gym env init                  # scaffold a new resources server
 gym env resolve               # resolve and print the final merged config
 gym env packages              # list packages in a server's virtual environment
 gym env test                  # test resources server(s); all of them if none is given
-gym env run                   # start the servers
+gym env start                   # start the servers
 gym env status                # show running servers
 
 # Evaluation
@@ -86,7 +86,7 @@ Unknown `--flags` (note the leading dashes) are treated as typos and rejected wi
 
 ### Selecting the model server
 
-Commands that need a model (`gym env run`, `gym eval run`) configure it through four flags:
+Commands that need a model (`gym env start`, `gym eval run`) configure it through four flags:
 
 | Flag | Description |
 | --- | --- |
@@ -355,7 +355,7 @@ gym env test --resources-server example_single_tool_call
 gym env test
 ```
 
-### `gym env run`
+### `gym env start`
 
 Start the NeMo Gym servers (agents, models, resources) defined by the provided configs. Reads configuration from YAML files and runs each configured server in its own environment. Replaces `ng_run`.
 
@@ -371,12 +371,12 @@ Start the NeMo Gym servers (agents, models, resources) defined by the provided c
 | `--model-api-key` | Model server API key. |
 
 ```bash
-gym env run \
+gym env start \
     --resources-server example_single_tool_call \
     --model-type openai_model
 
 # Start a benchmark's servers
-gym env run \
+gym env start \
     --benchmark gpqa \
     --model-type vllm_model
 ```
@@ -431,7 +431,7 @@ gym eval prepare --benchmark aime24
 
 ### `gym eval run`
 
-Collate data, start the servers, and collect rollouts. This is the main evaluation command. By default it spins up all required servers (the former `ng_e2e_collect_rollouts`). Pass `--no-serve` to collect against servers you already started with `gym env run` (the former `ng_collect_rollouts`). Replaces `ng_e2e_collect_rollouts` and `ng_collect_rollouts`.
+Collate data, start the servers, and collect rollouts. This is the main evaluation command. By default it spins up all required servers (the former `ng_e2e_collect_rollouts`). Pass `--no-serve` to collect against servers you already started with `gym env start` (the former `ng_collect_rollouts`). Replaces `ng_e2e_collect_rollouts` and `ng_collect_rollouts`.
 
 | Option | Description |
 | --- | --- |
@@ -531,7 +531,7 @@ The legacy `ng_*` and `nemo_gym_*` console scripts are deprecated but still func
 | `ng_help` | `gym --help` |
 | `ng_version` | `gym --version` |
 | `ng_list_benchmarks` | `gym list benchmarks` |
-| `ng_run` | `gym env run` |
+| `ng_run` | `gym env start` |
 | `ng_status` | `gym env status` |
 | `ng_dump_config` | `gym env resolve` |
 | `ng_pip_list` | `gym env packages` |
@@ -585,7 +585,7 @@ The most common Hydra overrides now have dedicated flags. Prefer flags; fall bac
 # Before:
 ng_run "+config_paths=[resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml,responses_api_models/openai_model/configs/openai_model.yaml]"
 # After:
-gym env run \
+gym env start \
     --resources-server example_single_tool_call \
     --model-type openai_model
 

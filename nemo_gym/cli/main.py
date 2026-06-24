@@ -115,7 +115,7 @@ STORAGE = Flag(
     )
 )
 
-# Shared model-server flags. Reused by commands that spin up / target a model server (`eval run`, `env run`).
+# Shared model-server flags. Reused by commands that spin up / target a model server (`eval run`, `env start`).
 # --model is the served model identifier across all backends: an API model name, an HF id, or a local checkpoint
 # path, interpreted per --model-type (e.g. a path/HF id to serve with local_vllm_model).
 MODEL = _value_flag(
@@ -407,7 +407,7 @@ COMMANDS = {
         summary="Test the resources server(s); runs all if no resources server is given.",
         flags=(RESOURCES_SERVER,),
     ),
-    "env run": Command(
+    "env start": Command(
         target="nemo_gym.cli.env:run",
         summary="Start the servers.",
         flags=(

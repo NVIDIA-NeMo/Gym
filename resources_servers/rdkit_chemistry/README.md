@@ -65,7 +65,7 @@ takes precedence over `use_box_format`.
 ## Example Usage
 
 ```bash
-gym env run \
+gym env start \
     --resources-server rdkit_chemistry \
     --model-type openai_model
 

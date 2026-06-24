@@ -13,7 +13,7 @@ policy_model_name: gpt-4o
 ## Launch nemo gym servers
 
 ```bash
-gym env run \
+gym env start \
     --resources-server math_with_judge/math_with_judge_hermes_agent \
     --model-type openai_model
 ```

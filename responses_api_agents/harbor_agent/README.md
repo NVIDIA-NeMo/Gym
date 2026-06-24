@@ -200,7 +200,7 @@ export APPTAINER_DOCKER_PASSWORD=<registry-password-or-token>
 Then start NeMo Gym:
 
 ```bash
-gym env run \
+gym env start \
   --config responses_api_agents/harbor_agent/configs/harbor_agent.yaml \
   --model-type vllm_model/vllm_model_for_training
 ```
@@ -289,7 +289,7 @@ policy_model_name: <served-model-name>
 Then follow the same Harbor-agent workflow with the Daytona config:
 
 ```bash
-gym env run \
+gym env start \
   --config responses_api_agents/harbor_agent/configs/harbor_agent_daytona.yaml \
   --model-type vllm_model
 ```
@@ -297,7 +297,7 @@ gym env run \
 Alternatively, pass those values as CLI overrides:
 
 ```bash
-gym env run \
+gym env start \
   --config responses_api_agents/harbor_agent/configs/harbor_agent_daytona.yaml \
   --model-type vllm_model \
   --model-url <openai-compatible-base-url> \

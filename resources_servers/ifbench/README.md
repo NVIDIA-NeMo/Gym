@@ -45,7 +45,7 @@ This clones the repo, applies patches, and writes the `.installed` marker. On su
 ## Example Usage
 
 ```bash
-gym env run \
+gym env start \
     --benchmark ifbench \
     --model-type openai_model
 

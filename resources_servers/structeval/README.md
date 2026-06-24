@@ -28,7 +28,7 @@ reward = 0.2 * render_score + 0.8 * key_validation_score
 
 ### Running servers
 ```bash
-gym env run \
+gym env start \
     --model-type vllm_model \
     --resources-server structeval/structeval_nonrenderable
 ```

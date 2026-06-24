@@ -3,7 +3,7 @@ title: "Configuration Errors"
 description: ""
 position: 1
 ---
-These errors appear when running `gym env run` or `gym eval run --no-serve`. NeMo Gym validates configuration at startup before launching servers.
+These errors appear when running `gym env start` or `gym eval run --no-serve`. NeMo Gym validates configuration at startup before launching servers.
 
 <Note>
 See the [Configuration reference](/reference/configuration) for complete configuration syntax and options.
@@ -33,7 +33,7 @@ policy_api_key: sk-your-api-key
 Or pass via command line:
 
 ```bash
-gym env run \
+gym env start \
     --config config.yaml \
     --model-api-key sk-your-api-key
 ```
@@ -57,7 +57,7 @@ in the list of available servers: [ResourcesServerRef(...), ...]
 2. Ensure all required config files are passed with `--config`:
 
 ```bash
-gym env run \
+gym env start \
     --config model.yaml \
     --config resource.yaml \
     --config agent.yaml
@@ -102,7 +102,7 @@ error_on_almost_servers: false
 
 ```bash
 # Or via command line
-gym env run \
+gym env start \
     --config config.yaml \
     +error_on_almost_servers=false
 ```

@@ -34,7 +34,7 @@ Downloads `cais/hle`, filters to text-only questions, and writes
 ## Running servers
 
 ```bash
-gym env run \
+gym env start \
     --model-type vllm_model \
     --benchmark hle
 ```

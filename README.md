@@ -100,7 +100,7 @@ Run your agent on a set of tasks and score the results. This example uses a simp
 NeMo Gym uses local servers to coordinate your model, agent, and task verification. Start them first:
 
 ```bash
-gym env run \
+gym env start \
     --resources-server mcqa \
     --model-type openai_model
 ```

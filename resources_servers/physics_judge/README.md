@@ -32,7 +32,7 @@ existing math_with_judge consumers (`aime24`, `aime25`, `gsm8k`,
 ## Running servers
 
 ```bash
-gym env run \
+gym env start \
     --model-type vllm_model \
     --resources-server physics_judge \
     --resources-server physics_judge/judge_openai

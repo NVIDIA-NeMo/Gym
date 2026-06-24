@@ -78,7 +78,7 @@ class StatusCommand:
 
         except (requests.RequestException, ConnectionError) as e:
             logger.warning(
-                "Could not connect to head server: %s. Is the head server running? Start it with: `gym env run`",
+                "Could not connect to head server: %s. Is the head server running? Start it with: `gym env start`",
                 e,
             )
             return []

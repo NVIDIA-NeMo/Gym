@@ -17,7 +17,7 @@ server.
 gym eval prepare --benchmark supergpqa
 
 # Running servers
-gym env run \
+gym env start \
     --model-type vllm_model \
     --benchmark supergpqa
 

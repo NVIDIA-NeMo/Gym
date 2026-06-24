@@ -37,7 +37,7 @@ python benchmarks/gpqa-x/prepare.py --prompt_language en
 ## Quickstart
 
 ```bash
-gym env run \
+gym env start \
     --benchmark gpqa-x \
     --model-type vllm_model
 ```

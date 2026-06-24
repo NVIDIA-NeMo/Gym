@@ -25,7 +25,7 @@ https://github.com/NVIDIA-NeMo/Skills/blob/main/nemo_skills/evaluation/evaluator
 ## Start environment
 
 ```bash
-gym env run \
+gym env start \
     --resources-server graphwalks \
     --model-type vllm_model
 ```

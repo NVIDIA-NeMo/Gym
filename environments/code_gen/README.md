@@ -24,7 +24,7 @@ We use the LiveCodeBench execution code.
 Create an `env.yaml` file in the Gym root directory to specify the model endpoint and credentials. See [documentation](https://docs.nvidia.com/nemo/gym/reference/configuration#local-configuration-envyaml) for details.
 ```bash
 # Running the server
-gym env run --environment code_gen --model-type openai_model
+gym env start --environment code_gen --model-type openai_model
 
 # Collect rollouts from example problems
 gym eval run --no-serve --agent code_gen_simple_agent \

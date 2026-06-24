@@ -51,7 +51,7 @@ gym dataset collate --config benchmarks/ioi/config.yaml \
   --output-dir benchmarks/ioi/data \
   --mode benchmark_preparation
 
-gym env run \
+gym env start \
     --benchmark ioi \
     --model-type vllm_model
 

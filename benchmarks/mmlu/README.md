@@ -17,7 +17,7 @@ resource server.
 gym eval prepare --benchmark mmlu
 
 # Running servers
-gym env run \
+gym env start \
     --model-type vllm_model \
     --benchmark mmlu
 

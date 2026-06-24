@@ -47,7 +47,7 @@ python benchmarks/graphwalks/prepare.py \
 ## Start environment
 
 ```bash
-gym env run \
+gym env start \
     --benchmark graphwalks \
     --model-type vllm_model
 ```

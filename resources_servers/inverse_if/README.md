@@ -9,7 +9,7 @@ Evaluates model responses on the **Inverse IF** (Instruction Following) benchmar
 gym env test --resources-server inverse_if
 
 # 2. Start servers (in terminal 1)
-gym env run \
+gym env start \
     --resources-server inverse_if \
     --model-type vllm_model
 
@@ -118,7 +118,7 @@ Tests cover:
 
 1. **Start servers**:
    ```bash
-   gym env run \
+   gym env start \
        --resources-server inverse_if \
        --model-type vllm_model
    ```

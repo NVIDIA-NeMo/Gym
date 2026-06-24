@@ -35,7 +35,7 @@ Writes `data/apex_shortlist_benchmark.jsonl` with one row per problem:
 ## Running servers
 
 ```bash
-gym env run \
+gym env start \
     --model-type vllm_model \
     --benchmark apex_shortlist
 ```

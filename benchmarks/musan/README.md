@@ -53,7 +53,7 @@ points at `/data/musan/<cat>/audio/musan_<cat>_NNNNNN.wav` by default
 ## Running servers
 
 ```bash
-gym env run \
+gym env start \
     --model-type vllm_model \
     --benchmark musan
 ```

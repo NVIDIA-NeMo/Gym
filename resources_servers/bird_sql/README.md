@@ -34,7 +34,7 @@ ensure_bird_sql()
 ### Running servers
 
 ```bash
-gym env run \
+gym env start \
     --model-type vllm_model \
     --resources-server bird_sql
 ```

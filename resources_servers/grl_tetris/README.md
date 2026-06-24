@@ -12,7 +12,7 @@ GRL Tetris environment in Gymnasium style. The model emits one or more `<action>
 Start NeMo Gym servers
 
 ```bash
-gym env run \
+gym env start \
     --model-type openai_model \
     --config responses_api_agents/gymnasium_agent/configs/gymnasium_agent.yaml \
     --resources-server grl_tetris

@@ -87,7 +87,7 @@ policy_model_name: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
 ## Launch nemo gym servers
 
 ```bash
-gym env run --environment reasoning_gym --model-type vllm_model
+gym env start --environment reasoning_gym --model-type vllm_model
 ```
 
 ## Collect rollouts

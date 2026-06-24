@@ -19,7 +19,7 @@ policy_model_name: Qwen/Qwen3-VL-8B-Instruct
 
 ```bash
 vllm serve Qwen/Qwen3-VL-8B-Instruct -tp 8 --enable-auto-tool-choice --tool-call-parser hermes &
-gym env run --environment circle_count --model-type vllm_model &
+gym env start --environment circle_count --model-type vllm_model &
 gym eval run --no-serve --agent circle_count_simple_agent --input environments/circle_count/data/example.jsonl --output environments/circle_count/data/example_rollouts.jsonl --limit 1
 ```
 

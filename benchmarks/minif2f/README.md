@@ -30,7 +30,7 @@ and set `NEMO_SKILLS_SANDBOX_HOST` / `NEMO_SKILLS_SANDBOX_PORT` before starting
 the server.
 
 ```bash
-gym env run \
+gym env start \
     --model-type vllm_model \
     --benchmark minif2f
 ```

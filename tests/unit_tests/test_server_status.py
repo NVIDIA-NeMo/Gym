@@ -227,4 +227,4 @@ class TestServerStatus:
         # The warning goes through logging (stderr), keeping stdout machine-readable for `--json`.
         assert capsys.readouterr().out == ""
         assert "Could not connect to head server" in caplog.text
-        assert "gym env run" in caplog.text
+        assert "gym env start" in caplog.text

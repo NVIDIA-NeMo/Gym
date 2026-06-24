@@ -123,7 +123,7 @@ apt install -y ./apptainer_1.3.1_amd64.deb
 ### Step 1 — Start servers
 
 ```bash
-gym env run \
+gym env start \
     --resources-server cvdp \
     --model-type vllm_model
 ```

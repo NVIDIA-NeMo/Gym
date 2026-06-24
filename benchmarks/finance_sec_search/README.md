@@ -47,7 +47,7 @@ JSONL to `data/`.
 ## Running servers
 
 ```bash
-gym env run \
+gym env start \
     --model-type vllm_model \
     --benchmark finance_sec_search/config_no_web_search
 ```

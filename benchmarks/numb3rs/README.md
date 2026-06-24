@@ -64,7 +64,7 @@ combined `benchmarks/numb3rs/data/numb3rs_benchmark.jsonl`.
 ## Running servers
 
 ```bash
-gym env run \
+gym env start \
     --model-type vllm_model \
     --benchmark numb3rs
 ```

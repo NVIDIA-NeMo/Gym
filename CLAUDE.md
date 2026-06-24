@@ -82,7 +82,7 @@ uv venv && uv sync --extra dev --group docs
 pre-commit install
 
 # Run servers
-gym env run \
+gym env start \
     --resources-server example_single_tool_call \
     --model-type vllm_model
 

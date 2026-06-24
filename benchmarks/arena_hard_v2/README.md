@@ -34,7 +34,7 @@ repo, joins by `uid`, and emits one row per question with `question`,
 gym eval prepare --benchmark arena_hard_v2
 
 # Running servers
-gym env run \
+gym env start \
     --model-type vllm_model \
     --benchmark arena_hard_v2
 

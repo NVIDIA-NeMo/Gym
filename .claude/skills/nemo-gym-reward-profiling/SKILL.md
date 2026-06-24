@@ -2,7 +2,7 @@
 name: nemo-gym-reward-profiling
 description: >-
   Use to help users get started with Nemo Gym reward profiling. Covers the basic
-  gym env run, gym eval run, and gym eval profile workflow, repeated rollouts,
+  gym env start, gym eval run, and gym eval profile workflow, repeated rollouts,
   materialized inputs, rollout JSONL artifacts, task and rollout identity, output
   inspection, partial profiling, and rollout_infos. For failed jobs, prefer
   nemo-gym-debugging.
@@ -14,14 +14,14 @@ description: >-
 
 Use this skill when the user wants to run, understand, or lightly modify Nemo Gym reward profiling. Keep the answer oriented around the normal workflow:
 
-`gym env run` starts model/resources servers, `gym eval run --no-serve` writes rollout artifacts, and `gym eval profile` generates profiling output from those artifacts.
+`gym env start` starts model/resources servers, `gym eval run --no-serve` writes rollout artifacts, and `gym eval profile` generates profiling output from those artifacts.
 
 If the user is primarily debugging a failed job or stack trace, use the `nemo-gym-debugging` skill first.
 
 ## Basic Workflow
 
 1. Identify the environment config paths and input JSONL.
-2. Start Gym servers with `gym env run`.
+2. Start Gym servers with `gym env start`.
 3. Collect rollouts with `gym eval run --no-serve`; this writes `rollouts.jsonl` and `*_materialized_inputs.jsonl`.
 4. Run `gym eval profile` on the materialized inputs and rollout JSONL to generate `*_reward_profiling.jsonl`.
 5. Inspect line counts and profile rows.

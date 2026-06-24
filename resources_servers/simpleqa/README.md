@@ -39,7 +39,7 @@ the reasoning trace is split off before the response reaches this server.
 ## Running servers
 
 ```bash
-gym env run \
+gym env start \
     --model-type vllm_model \
     --resources-server simpleqa \
     +simpleqa.resources_servers.simpleqa.judge_model_server.name=policy_model

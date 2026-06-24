@@ -58,7 +58,7 @@ the reward; pass@k / majority@k are computed by the metrics layer.
 
 ```bash
 # Running servers
-gym env run \
+gym env start \
     --model-type vllm_model \
     --resources-server code_fim
 

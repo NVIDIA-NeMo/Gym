@@ -22,7 +22,7 @@ and writes `data/birdbench_benchmark.jsonl`. Each row has
 ## Running servers
 
 ```bash
-gym env run \
+gym env start \
     --model-type vllm_model \
     --benchmark birdbench
 ```

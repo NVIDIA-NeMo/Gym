@@ -35,7 +35,7 @@ existing math_with_judge consumers.
 ## Run servers
 
 ```bash
-gym env run \
+gym env start \
     --model-type vllm_model \
     --resources-server math_with_autograder \
     --resources-server math_with_autograder/judge_gptoss20b

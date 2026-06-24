@@ -66,7 +66,7 @@ parser name that matches your model's reasoning tokens (see `vllm serve
 
 ```bash
 # Running servers
-gym env run \
+gym env start \
     --model-type vllm_model \
     --resources-server math_proof_judgement
 

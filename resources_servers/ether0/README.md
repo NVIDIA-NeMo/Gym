@@ -27,7 +27,7 @@ Start servers and collect rollouts
 ```bash
 # start vllm and nemo gym servers
 vllm serve futurehouse/ether0 & 
-gym env run \
+gym env start \
     --resources-server ether0 \
     --model-type vllm_model &
 

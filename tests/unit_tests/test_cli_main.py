@@ -51,7 +51,7 @@ def _split_overrides(overrides: list[str]) -> tuple[set[str], set[str]]:
 
 # `gym <command>` -> the legacy ng_<command> function it dispatches to, for the config-accepting commands.
 CONFIG_COMMANDS = [
-    (["env", "run"], "nemo_gym.cli.env:run"),
+    (["env", "start"], "nemo_gym.cli.env:run"),
     (["env", "resolve"], "nemo_gym.cli.env:dump_config"),
     (["eval", "prepare"], "nemo_gym.cli.eval:prepare_benchmark"),
     (["eval", "aggregate"], "nemo_gym.cli.eval:aggregate_rollouts"),
@@ -69,7 +69,7 @@ class TestConfigFlag:
         assert overrides == ["+config_paths=[my.yaml]"]
 
     def test_repeated_config_joined_into_one_list(self, monkeypatch: MonkeyPatch) -> None:
-        _, overrides = _dispatch_for(monkeypatch, ["env", "run", "--config", "a.yaml", "--config", "b.yaml"])
+        _, overrides = _dispatch_for(monkeypatch, ["env", "start", "--config", "a.yaml", "--config", "b.yaml"])
 
         # We have this set of asserts to avoid asserting configs order in the string
         assert len(overrides) == 1
@@ -80,13 +80,13 @@ class TestConfigFlag:
         assert "b.yaml" in override
 
     def test_config_is_prepended_before_passthrough_overrides(self, monkeypatch: MonkeyPatch) -> None:
-        _, overrides = _dispatch_for(monkeypatch, ["env", "run", "--config", "a.yaml", "+foo=bar"])
+        _, overrides = _dispatch_for(monkeypatch, ["env", "start", "--config", "a.yaml", "+foo=bar"])
         assert len(overrides) == 2
         assert "+config_paths=[a.yaml]" in overrides
         assert "+foo=bar" in overrides
 
     def test_without_config_no_config_paths_added(self, monkeypatch: MonkeyPatch) -> None:
-        _, overrides = _dispatch_for(monkeypatch, ["env", "run", "+foo=bar"])
+        _, overrides = _dispatch_for(monkeypatch, ["env", "start", "+foo=bar"])
         assert overrides == ["+foo=bar"]
 
     def test_config_rejected_on_non_config_command(self, monkeypatch: MonkeyPatch) -> None:
@@ -446,7 +446,7 @@ class TestEnvRunFlags:
             monkeypatch,
             [
                 "env",
-                "run",
+                "start",
                 "--config",
                 "c.yaml",
                 "--model",
@@ -480,7 +480,7 @@ class TestModelFlag:
         assert others == {"+policy_model_name=Qwen/Qwen3-8B"}
 
     def test_short_alias_on_env_run(self, monkeypatch: MonkeyPatch) -> None:
-        _, overrides = _dispatch_for(monkeypatch, ["env", "run", "-m", "/ckpt/path"])
+        _, overrides = _dispatch_for(monkeypatch, ["env", "start", "-m", "/ckpt/path"])
         assert overrides == ["+policy_model_name=/ckpt/path"]
 
 
@@ -606,21 +606,24 @@ class TestAssetSelectors:
             # benchmarks/aime25-x/README.md: ng_prepare_benchmark "+config_paths=[benchmarks/aime25-x/config.yaml]"
             (["eval", "prepare", "--benchmark", "aime25-x"], "benchmarks/aime25-x/config.yaml"),
             # benchmarks/gpqa/README.md: ng_run "+config_paths=[benchmarks/gpqa/config.yaml]" (start a benchmark's servers)
-            (["env", "run", "--benchmark", "gpqa"], "benchmarks/gpqa/config.yaml"),
+            (["env", "start", "--benchmark", "gpqa"], "benchmarks/gpqa/config.yaml"),
             # README.md / quickstart.mdx: resources_servers/mcqa/configs/mcqa.yaml
-            (["env", "run", "--resources-server", "mcqa"], "resources_servers/mcqa/configs/mcqa.yaml"),
+            (["env", "start", "--resources-server", "mcqa"], "resources_servers/mcqa/configs/mcqa.yaml"),
             # model-server/vllm.mdx: resources_servers/example_multi_step/configs/example_multi_step.yaml
             (
-                ["env", "run", "--resources-server", "example_multi_step"],
+                ["env", "start", "--resources-server", "example_multi_step"],
                 "resources_servers/example_multi_step/configs/example_multi_step.yaml",
             ),
             # README.md / quickstart.mdx: responses_api_models/openai_model/configs/openai_model.yaml
             (
-                ["env", "run", "--model-type", "openai_model"],
+                ["env", "start", "--model-type", "openai_model"],
                 "responses_api_models/openai_model/configs/openai_model.yaml",
             ),
             # model-server/vllm.mdx: responses_api_models/vllm_model/configs/vllm_model.yaml
-            (["env", "run", "--model-type", "vllm_model"], "responses_api_models/vllm_model/configs/vllm_model.yaml"),
+            (
+                ["env", "start", "--model-type", "vllm_model"],
+                "responses_api_models/vllm_model/configs/vllm_model.yaml",
+            ),
         ],
     )
     def test_name_resolves_to_config_path(self, monkeypatch: MonkeyPatch, argv, expected_config) -> None:
@@ -632,7 +635,7 @@ class TestAssetSelectors:
         #   ng_run "+config_paths=[resources_servers/mcqa/configs/mcqa.yaml,
         #                          responses_api_models/openai_model/configs/openai_model.yaml]"
         target, overrides = _dispatch_for(
-            monkeypatch, ["env", "run", "--resources-server", "mcqa", "--model-type", "openai_model"]
+            monkeypatch, ["env", "start", "--resources-server", "mcqa", "--model-type", "openai_model"]
         )
         assert target == "nemo_gym.cli.env:run"
         paths, others = _split_overrides(overrides)
@@ -728,8 +731,8 @@ class TestAssetSelectors:
 
     def test_environment_selector_resolves_to_config(self, monkeypatch: MonkeyPatch) -> None:
         # Environments mirror benchmarks: `--environment <name>` loads `environments/<name>/config.yaml`.
-        # Used by `gym env run` / `gym eval run` for environments/ (see environments/*/README.md).
-        _, overrides = _dispatch_for(monkeypatch, ["env", "run", "--environment", "circle_count"])
+        # Used by `gym env start` / `gym eval run` for environments/ (see environments/*/README.md).
+        _, overrides = _dispatch_for(monkeypatch, ["env", "start", "--environment", "circle_count"])
         assert overrides == [f"+config_paths=[{WORKING_DIR / 'environments/circle_count/config.yaml'}]"]
 
     def test_selectors_merge_into_single_config_paths(self, monkeypatch: MonkeyPatch) -> None:
@@ -760,7 +763,7 @@ class TestAssetSelectors:
     def test_unknown_flavor_error_points_at_configs_dir(self, monkeypatch: MonkeyPatch, capsys) -> None:
         # For a known server with an unknown flavor, the hint should point at that server's configs/ dir.
         monkeypatch.setattr(cli_main, "dispatch", lambda target, overrides: None)
-        monkeypatch.setattr(sys, "argv", ["gym", "env", "run", "--resources-server", "mcqa/nope"])
+        monkeypatch.setattr(sys, "argv", ["gym", "env", "start", "--resources-server", "mcqa/nope"])
         with pytest.raises(SystemExit):
             main()
         err = capsys.readouterr().err

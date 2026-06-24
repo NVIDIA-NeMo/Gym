@@ -29,7 +29,7 @@ anthropic_base_url: http://localhost:8000
 No model server is needed for basic eval. To extend this agent to training, a model server should be developed that handles messages endpoint. For evals with the current version, just pass the resources server config, which includes the agent server config, as is the current standard in NeMo Gym:
 
 ```bash
-gym env run --resources-server reasoning_gym/reasoning_gym_claude_code_agent
+gym env start --resources-server reasoning_gym/reasoning_gym_claude_code_agent
 ```
 
 ### Run the agent

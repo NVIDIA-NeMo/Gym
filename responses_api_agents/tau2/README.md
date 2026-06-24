@@ -1,6 +1,6 @@
 # Description
 ```bash
-gym env run \
+gym env start \
     --benchmark tau2 \
     --model-type openai_model \
     ++nemo_gym_log_dir=results/tau2 \

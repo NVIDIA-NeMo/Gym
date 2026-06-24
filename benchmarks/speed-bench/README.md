@@ -57,7 +57,7 @@ gym eval prepare --benchmark speed-bench/config_qualitative
 # ngram speculative decoding into vllm_serve_kwargs.speculative_config.
 # To use a different target model, swap this for any local_vllm_model
 # config that includes a `speculative_config:` block.
-gym env run \
+gym env start \
     --model-type local_vllm_model/Qwen/Qwen3-30B-A3B-Instruct-2507-ngram-specdec \
     --benchmark speed-bench/config_qualitative \
     +policy_model=Qwen3-30B-A3B-Instruct-2507-ngram-specdec

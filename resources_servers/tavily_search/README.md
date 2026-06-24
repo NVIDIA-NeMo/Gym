@@ -39,7 +39,7 @@ gym dataset download --storage gitlab \
     --artifact sft_samples_validation.jsonl \
     --output resources_servers/tavily_search/data/sft_samples/sft_samples_validation.jsonl
 
-gym env run \
+gym env start \
     --resources-server tavily_search/tavily_search_judge_vllm_model \
     --model-type vllm_model
 ```

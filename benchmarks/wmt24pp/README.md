@@ -32,7 +32,7 @@ runs disable COMET via Hydra override and rely on corpus-BLEU only;
 xCOMET scoring still works end-to-end on the cluster path:
 
 ```bash
-gym env run \
+gym env start \
     --model-type vllm_model \
     --benchmark wmt24pp \
     "++wmt24pp_wmt_translation_resources_server.resources_servers.wmt_translation.compute_comet=false"

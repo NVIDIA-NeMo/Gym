@@ -47,7 +47,7 @@ The dataset can be found at https://huggingface.co/datasets/nvidia/Nemotron-RL-i
 ### Usage
 
 ```bash
-gym env run \
+gym env start \
     --config responses_api_agents/simple_agent/configs/simple_agent.yaml \
     --model-type openai_model \
     --resources-server instruction_following \

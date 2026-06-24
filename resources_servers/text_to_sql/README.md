@@ -68,7 +68,7 @@ Each data sample should include:
 ### Running Servers
 
 ```bash
-gym env run \
+gym env start \
   --resources-server text_to_sql \
   --model-type openai_model \
   +text_to_sql_resources_server.resources_servers.text_to_sql.judge_responses_create_params.max_output_tokens=512

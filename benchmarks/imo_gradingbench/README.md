@@ -36,7 +36,7 @@ details.
 gym eval prepare --benchmark imo_gradingbench
 
 # Running servers
-gym env run \
+gym env start \
     --model-type vllm_model \
     --benchmark imo_gradingbench
 

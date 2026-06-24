@@ -16,7 +16,7 @@ the `full` split (~1140 problems) is `bigcode/bigcodebench@v0.1.4`.
 gym eval prepare --benchmark bigcodebench
 
 # Running servers
-gym env run \
+gym env start \
     --model-type vllm_model \
     --benchmark bigcodebench
 

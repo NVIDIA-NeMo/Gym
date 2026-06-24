@@ -15,7 +15,7 @@ The dataset used is [HotPotQA](https://hotpotqa.github.io/) (fullwiki split).
 ## Running servers
 
 ```bash
-gym env run \
+gym env start \
     --environment abstention \
     --model-type openai_model \
     +abstention.resources_servers.abstention.judge_model_server.name=policy_model

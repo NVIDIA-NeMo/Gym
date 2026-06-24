@@ -15,7 +15,7 @@ applies Skills' renames (`answer` -> `expected_answer`, `question` ->
 gym eval prepare --benchmark hendrycks_math
 
 # Running servers
-gym env run \
+gym env start \
     --model-type vllm_model \
     --benchmark hendrycks_math
 

@@ -413,12 +413,12 @@ pytest -v
 Start the servers:
 
 ```bash
-gym env run \
+gym env start \
     --model-type openai_model \
     --resources-server my_weather_tool
 ```
 
-`gym env run` reads the config files and starts all three components from the architecture diagram:
+`gym env start` reads the config files and starts all three components from the architecture diagram:
 
 1. **Agent Server** (`my_weather_tool_simple_agent`) — the `simple_agent` that orchestrates the seed → model → tool → verify loop
 2. **Model Server** (`openai_model`) — proxies LLM inference requests to the OpenAI API
@@ -662,4 +662,4 @@ source .venv/bin/activate
 python app.py
 ```
 
-Server logs appear in the terminal where `gym env run` was executed.
+Server logs appear in the terminal where `gym env start` was executed.
