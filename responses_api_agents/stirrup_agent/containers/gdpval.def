@@ -53,6 +53,7 @@ From: python:3.12-bookworm
         ghostscript \
         ffmpeg \
         graphviz \
+        imagemagick \
         texlive-latex-base \
         texlive-latex-recommended \
         texlive-latex-extra \
@@ -73,6 +74,7 @@ From: python:3.12-bookworm
     command -v gs
     command -v ffmpeg
     command -v dot
+    command -v convert
     command -v pdflatex
     command -v xelatex
     command -v latexmk
