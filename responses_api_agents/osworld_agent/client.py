@@ -212,7 +212,7 @@ def run_osworld_task(
             )
 
             def _call_llm(payload: Dict[str, Any]) -> str:
-                return messages_model_fn(payload["messages"], payload)
+                return strip_thinking(messages_model_fn(payload["messages"], payload) or "")
 
             native_agent.call_llm = _call_llm
             try:
