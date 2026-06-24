@@ -871,9 +871,28 @@ def list_environments() -> None:
 
     ```bash
     gym list environments
+    gym list environments --json
     ```
     """
+    global_config_dict = get_global_config_dict(
+        global_config_dict_parser_config=GlobalConfigDictParserConfig(
+            initial_global_config_dict=GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+        )
+    )
+    BaseNeMoGymCLIConfig.model_validate(global_config_dict)
+
     environments = discover_environments()
+
+    if global_config_dict.get(JSON_OUTPUT_KEY_NAME, False):
+        print(
+            json.dumps(
+                [
+                    {"name": name, "domain": env.domain, "description": env.description}
+                    for name, env in environments.items()
+                ]
+            )
+        )
+        return
 
     if not environments:
         rich.print("[yellow]No environments found.[/yellow]")

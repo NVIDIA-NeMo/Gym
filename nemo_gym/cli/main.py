@@ -297,7 +297,7 @@ COMMANDS = {
         target="nemo_gym.cli.eval:list_benchmarks", summary="List available benchmarks.", flags=(JSON,)
     ),
     "list environments": Command(
-        target="nemo_gym.cli.env:list_environments", summary="List available environments by name."
+        target="nemo_gym.cli.env:list_environments", summary="List available environments by name.", flags=(JSON,)
     ),
     "search": Command(
         target="nemo_gym.cli.eval:list_benchmarks",

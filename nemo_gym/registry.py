@@ -16,17 +16,17 @@
 
 An *environment* is a directory ``environments/<name>/`` whose ``config.yaml`` wires together a
 resources server, an agent, and datasets (and references a model server). This module maps an
-environment's short ``<name>`` to its config so it can be referenced by name instead of an internal
-``config_paths`` path — the foundation for ``gym list`` (enumerate environments) and run-by-name.
+environment's short ``<name>`` to its config so it can be enumerated by name — the foundation for
+``gym list environments``. Resolving a name to a config path for *running* is handled by the CLI's
+generic ``--environment`` asset selector, so this module is intentionally discovery-only.
 
 Discovery only reads config files; it never resolves interpolations or starts servers, so it is
 safe to call even when secrets/API keys referenced by a config are not set in the environment.
 """
 
 from dataclasses import dataclass
-from difflib import get_close_matches
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 from omegaconf import OmegaConf
 
@@ -35,10 +35,6 @@ from nemo_gym import PARENT_DIR
 
 ENVIRONMENTS_DIR = PARENT_DIR / "environments"
 ENVIRONMENT_CONFIG_FILENAME = "config.yaml"
-
-
-class EnvironmentNotFoundError(ValueError):
-    """An environment was referenced by a name that is not registered under ``environments/``."""
 
 
 @dataclass(frozen=True)
@@ -107,24 +103,3 @@ def discover_environments(environments_dir: Path = ENVIRONMENTS_DIR) -> Dict[str
         )
 
     return environments
-
-
-def resolve_environment_config_paths(name: str, environments_dir: Path = ENVIRONMENTS_DIR) -> List[str]:
-    """Return the ``config_paths`` entries to load to run environment ``name``.
-
-    This is the run-by-name primitive: a caller pairs the returned environment config with a model
-    config (the environment references its model server by name). Raises
-    :class:`EnvironmentNotFoundError` with a "did you mean?" suggestion if ``name`` is unknown.
-    """
-    environments = discover_environments(environments_dir)
-    entry = environments.get(name)
-    if entry is not None:
-        return [str(entry.config_path)]
-
-    available = sorted(environments)
-    suggestions = get_close_matches(name, available, n=3, cutoff=0.6)
-    if suggestions:
-        hint = "Did you mean: " + ", ".join(repr(s) for s in suggestions) + "?"
-    else:
-        hint = "Available environments: " + (", ".join(repr(n) for n in available) or "(none)")
-    raise EnvironmentNotFoundError(f"No environment named '{name}' under {environments_dir}.\n{hint}")

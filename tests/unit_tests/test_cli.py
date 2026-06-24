@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
 import shutil
 import tomllib
 from importlib import import_module
@@ -290,15 +291,17 @@ class TestExitCleanlyOnConfigError:
 
 
 class TestListEnvironments:
+    _ALPHA = EnvironmentEntry(
+        name="alpha",
+        config_path=Path("environments/alpha/config.yaml"),
+        path=Path("environments/alpha"),
+        description="Alpha env",
+        domain="agent",
+    )
+
     def test_lists_discovered_environments(self, monkeypatch: MonkeyPatch, capsys) -> None:
-        entry = EnvironmentEntry(
-            name="alpha",
-            config_path=Path("environments/alpha/config.yaml"),
-            path=Path("environments/alpha"),
-            description="Alpha env",
-            domain="agent",
-        )
-        monkeypatch.setattr(nemo_gym.cli.env, "discover_environments", lambda *a, **k: {"alpha": entry})
+        monkeypatch.setattr(nemo_gym.cli.env, "get_global_config_dict", lambda **k: OmegaConf.create({}))
+        monkeypatch.setattr(nemo_gym.cli.env, "discover_environments", lambda *a, **k: {"alpha": self._ALPHA})
 
         list_environments()
 
@@ -307,8 +310,19 @@ class TestListEnvironments:
         assert "agent" in out
 
     def test_no_environments(self, monkeypatch: MonkeyPatch, capsys) -> None:
+        monkeypatch.setattr(nemo_gym.cli.env, "get_global_config_dict", lambda **k: OmegaConf.create({}))
         monkeypatch.setattr(nemo_gym.cli.env, "discover_environments", lambda *a, **k: {})
 
         list_environments()
 
         assert "No environments found" in capsys.readouterr().out
+
+    def test_json_output(self, monkeypatch: MonkeyPatch, capsys) -> None:
+        monkeypatch.setattr(nemo_gym.cli.env, "get_global_config_dict", lambda **k: OmegaConf.create({"json": True}))
+        monkeypatch.setattr(nemo_gym.cli.env, "discover_environments", lambda *a, **k: {"alpha": self._ALPHA})
+
+        list_environments()
+
+        assert json.loads(capsys.readouterr().out) == [
+            {"name": "alpha", "domain": "agent", "description": "Alpha env"}
+        ]

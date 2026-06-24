@@ -14,13 +14,7 @@
 # limitations under the License.
 from pathlib import Path
 
-from pytest import raises
-
-from nemo_gym.registry import (
-    EnvironmentNotFoundError,
-    discover_environments,
-    resolve_environment_config_paths,
-)
+from nemo_gym.registry import discover_environments
 
 
 def _make_env(environments_dir: Path, name: str, config_body: str) -> Path:
@@ -111,37 +105,6 @@ class TestDiscoverEnvironments:
         environments = discover_environments(envs_dir)
         assert "needs_key" in environments
         assert environments["needs_key"].domain == "other"
-
-
-class TestResolveEnvironmentConfigPaths:
-    def test_resolves_known_environment(self, tmp_path: Path) -> None:
-        envs_dir = tmp_path / "environments"
-        config_path = _make_env(envs_dir, "alpha", _ENV_CONFIG.format(name="alpha"))
-
-        assert resolve_environment_config_paths("alpha", envs_dir) == [str(config_path)]
-
-    def test_unknown_name_suggests_close_match(self, tmp_path: Path) -> None:
-        envs_dir = tmp_path / "environments"
-        _make_env(envs_dir, "workplace_assistant", _ENV_CONFIG.format(name="workplace_assistant"))
-
-        with raises(EnvironmentNotFoundError) as exc_info:
-            resolve_environment_config_paths("workplace_assitant", envs_dir)  # typo
-
-        message = str(exc_info.value)
-        assert "workplace_assitant" in message
-        assert "Did you mean" in message
-        assert "'workplace_assistant'" in message
-
-    def test_unknown_name_no_close_match_lists_available(self, tmp_path: Path) -> None:
-        envs_dir = tmp_path / "environments"
-        _make_env(envs_dir, "alpha", _ENV_CONFIG.format(name="alpha"))
-
-        with raises(EnvironmentNotFoundError) as exc_info:
-            resolve_environment_config_paths("zzz_totally_different", envs_dir)
-
-        message = str(exc_info.value)
-        assert "Available environments" in message
-        assert "'alpha'" in message
 
 
 class TestRealEnvironments:
