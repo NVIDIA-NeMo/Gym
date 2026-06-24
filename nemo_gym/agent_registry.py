@@ -14,17 +14,21 @@
 # limitations under the License.
 """Registry of agent harnesses under ``responses_api_agents/<name>/``.
 
-An *agent* is a directory ``responses_api_agents/<name>/`` providing an agent harness, with zero or
-more ``configs/*.yaml`` variants. This module maps an agent's short ``<name>`` (the directory name)
-to its config variant(s) so it can be referenced by name — the foundation for ``gym run --agent
-<name>`` (run-by-name) — and classifies whether the agent is freely *composable* with an arbitrary
-environment.
+An agent harness is one *component* of an environment (an environment = dataset + agent harness +
+resources server [verifier and state] + model). This module maps an agent's short ``<name>`` (the
+directory name) to its config variant(s) so it can be referenced by name — the foundation for
+``gym run --agent <name>`` (run-by-name) — and records whether the harness bundles its own
+environment or references a separate resources server.
 
-- **Composable (Pattern A):** the agent references a *separate* resources server
-  (``responses_api_agents.<type>.resources_server``), so it can be paired with any environment.
-- **Not composable (Pattern B):** the agent is self-contained — it declares an ``agent_framework``
-  or bakes in its own environment/external LLM harness (e.g. ``swe_agents``, ``harbor_agent``,
-  ``verifiers_agent``, ``claude_code_agent``) — and cannot be dropped onto an arbitrary environment.
+- **References a separate resources server (Pattern A):** the config sets
+  ``responses_api_agents.<type>.resources_server``, so the harness is reusable and must be wired to a
+  *compatible* resources server + dataset (e.g. the ``simple_agent`` tool-use pattern, the
+  ``gymnasium`` pattern). Harnesses compose *within* a pattern, not across it; which
+  harness↔resources-server pairings are actually compatible is decided by the config composer's
+  compatibility guard, NOT by this registry.
+- **Self-contained (Pattern B):** the harness bundles its own environment/framework or external LLM
+  loop (``agent_framework``; e.g. ``swe_agents``, ``harbor_agent``, ``verifiers_agent``,
+  ``claude_code_agent``) and runs with its own config rather than wired to a separate environment.
 
 Discovery only reads config files; it never resolves interpolations or missing values and never
 starts servers, so it is safe to call when secrets/API keys referenced by a config are unset.
@@ -53,17 +57,19 @@ class AgentVariantError(ValueError):
 
 
 class AgentNotComposableError(ValueError):
-    """A self-contained (Pattern B) agent was requested for free composition with an environment."""
+    """A self-contained (Pattern B) agent was requested for wiring into a separate environment."""
 
 
 @dataclass(frozen=True)
 class AgentEntry:
-    """A discovered agent: its name, where it lives, its config variants, and composability."""
+    """A discovered agent: its name, where it lives, its config variants, and how it's wired."""
 
     name: str
     path: Path
     config_paths: Tuple[Path, ...]  # variant config files, sorted; empty for "zero-config" agents
-    composable: bool
+    # True  = bundles its own environment/framework (Pattern B; run standalone).
+    # False = references a separate resources server (Pattern A; wire to a compatible environment).
+    self_contained: bool
     description: Optional[str] = None
 
     @property
@@ -101,12 +107,13 @@ def _is_agent_config(config_path: Path) -> bool:
 
 
 def _classify(config_paths: Tuple[Path, ...]) -> Tuple[bool, Optional[str]]:
-    """Return ``(composable, description)`` for an agent from its config variants.
+    """Return ``(self_contained, description)`` for an agent from its config variants.
 
-    Composable iff some variant references a separate resources server, none declares an
-    ``agent_framework``, and none drives an external LLM harness (e.g. its own Anthropic key).
-    Agents with no parseable config default to composable (their wiring lives in a paired
-    benchmark/resources-server config).
+    A harness is NOT self-contained (Pattern A) when some variant references a separate resources
+    server, none declares an ``agent_framework``, and none drives an external LLM loop (e.g. its own
+    Anthropic key) — it must be wired to a compatible resources server. Otherwise it is
+    self-contained (Pattern B). Agents with no parseable config are treated as Pattern A (their
+    wiring lives in a paired benchmark/resources-server config).
     """
     has_resources_server = False
     has_agent_framework = False
@@ -127,9 +134,9 @@ def _classify(config_paths: Tuple[Path, ...]) -> Tuple[bool, Optional[str]]:
                 description = block["description"]
 
     if not saw_block:
-        return True, description
-    composable = has_resources_server and not has_agent_framework and not drives_external_harness
-    return composable, description
+        return False, description
+    references_resources_server = has_resources_server and not has_agent_framework and not drives_external_harness
+    return not references_resources_server, description
 
 
 def discover_agents(agents_dir: Path = AGENTS_DIR) -> Dict[str, AgentEntry]:
@@ -151,12 +158,12 @@ def discover_agents(agents_dir: Path = AGENTS_DIR) -> Dict[str, AgentEntry]:
         if not (child / "app.py").is_file() and not agent_configs:
             continue
 
-        composable, description = _classify(agent_configs)
+        self_contained, description = _classify(agent_configs)
         agents[child.name] = AgentEntry(
             name=child.name,
             path=child,
             config_paths=agent_configs,
-            composable=composable,
+            self_contained=self_contained,
             description=description,
         )
 
@@ -191,10 +198,10 @@ def resolve_agent_config_path(
             f"No agent named '{name}' under {agents_dir}.\n{_did_you_mean(name, sorted(agents), 'agents')}"
         )
 
-    if require_composable and not entry.composable:
+    if require_composable and entry.self_contained:
         raise AgentNotComposableError(
-            f"Agent '{name}' is self-contained (it bakes in its own environment/framework) and cannot "
-            "be freely composed with an arbitrary environment; run it with its own config instead."
+            f"Agent '{name}' is self-contained (it bundles its own environment/framework) and cannot "
+            "be wired into a separate environment; run it with its own config instead."
         )
 
     variants = entry.variants

@@ -65,14 +65,14 @@ class TestDiscoverAgents:
 
         assert set(agents) == {"simple_agent"}
         entry = agents["simple_agent"]
-        assert entry.composable is True
+        assert entry.self_contained is False
         assert entry.description == "A composable agent"
         assert list(entry.variants) == ["simple_agent"]
 
     def test_classifies_pattern_b_as_not_composable(self, tmp_path: Path) -> None:
         _make_agent(tmp_path, "swe_agents", configs={"swebench": _pattern_b()})
 
-        assert discover_agents(tmp_path)["swe_agents"].composable is False
+        assert discover_agents(tmp_path)["swe_agents"].self_contained is True
 
     def test_external_harness_agent_is_not_composable(self, tmp_path: Path) -> None:
         body = (
@@ -82,14 +82,14 @@ class TestDiscoverAgents:
         _make_agent(tmp_path, "claude_code_agent", configs={"claude_code_agent": body})
 
         # Has a resources_server but drives an external LLM harness -> not composable.
-        assert discover_agents(tmp_path)["claude_code_agent"].composable is False
+        assert discover_agents(tmp_path)["claude_code_agent"].self_contained is True
 
     def test_zero_config_agent_is_discovered_and_defaults_composable(self, tmp_path: Path) -> None:
         _make_agent(tmp_path, "aviary_agent", configs=None)  # app.py only, no configs
 
         entry = discover_agents(tmp_path)["aviary_agent"]
         assert entry.config_paths == ()
-        assert entry.composable is True
+        assert entry.self_contained is False
 
     def test_multiple_variants_are_all_recorded(self, tmp_path: Path) -> None:
         _make_agent(
@@ -218,9 +218,9 @@ class TestRealAgents:
         agents = discover_agents()
         # The repo ships a `simple_agent`; it pairs with a separate resources server.
         if "simple_agent" in agents:
-            assert agents["simple_agent"].composable is True
+            assert agents["simple_agent"].self_contained is False
 
     def test_agent_entry_is_hashable(self) -> None:
-        entry = AgentEntry(name="a", path=Path("a"), config_paths=(Path("a/configs/a.yaml"),), composable=True)
+        entry = AgentEntry(name="a", path=Path("a"), config_paths=(Path("a/configs/a.yaml"),), self_contained=True)
         assert {entry: 1}[entry] == 1
         assert entry.path == AGENTS_DIR / "a" or True  # AGENTS_DIR import exercised
