@@ -150,6 +150,7 @@ QUERY = Flag(
 # resolving to `<parent>/<server>/[<subdir>/]<flavor>.yaml`. A None default flavor falls back to the server name.
 _ASSETS = {
     "benchmark": ("benchmarks", "", "config"),
+    "environment": ("environments", "", "config"),
     "resources-server": ("resources_servers", "configs", None),
     "model-type": ("responses_api_models", "configs", None),
 }
@@ -223,6 +224,7 @@ def _asset_selector(flag: str) -> Flag:
 
 
 BENCHMARK = _asset_selector("benchmark")
+ENVIRONMENT = _asset_selector("environment")
 RESOURCES_SERVER_CONFIG = _asset_selector("resources-server")
 MODEL_TYPE = _asset_selector("model-type")
 
@@ -408,7 +410,17 @@ COMMANDS = {
     "env run": Command(
         target="nemo_gym.cli.env:run",
         summary="Start the servers.",
-        flags=(CONFIG, BENCHMARK, RESOURCES_SERVER_CONFIG, MODEL_TYPE, SEARCH_DIR, MODEL, MODEL_URL, MODEL_API_KEY),
+        flags=(
+            CONFIG,
+            BENCHMARK,
+            ENVIRONMENT,
+            RESOURCES_SERVER_CONFIG,
+            MODEL_TYPE,
+            SEARCH_DIR,
+            MODEL,
+            MODEL_URL,
+            MODEL_API_KEY,
+        ),
     ),
     "env status": Command(target="nemo_gym.cli.env:status", summary="Print the server status.", flags=(JSON,)),
     "eval prepare": Command(
@@ -422,6 +434,7 @@ COMMANDS = {
         flags=(
             CONFIG,
             BENCHMARK,
+            ENVIRONMENT,
             RESOURCES_SERVER_CONFIG,
             MODEL_TYPE,
             SEARCH_DIR,
