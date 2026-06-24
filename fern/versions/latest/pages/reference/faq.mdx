@@ -286,7 +286,7 @@ In one terminal, start your agent, model, and resources servers, with profiling 
 - `profiling_results_dirpath` (str): The directory to save all server profiling results in. Previous logs for the same will be overwritten in the same directory.
 ```bash
 config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
-resources_servers/math_with_judge/configs/bytedtsinghua_dapo17k.yaml"
+resources_servers/math_with_judge/configs/math_with_judge.yaml"
 ng_run "+config_paths=[${config_paths}]" \
     +profiling_enabled=true \
     +profiling_results_dirpath=results/profiling/math_with_judge
@@ -303,9 +303,9 @@ ng_collect_rollouts +agent_name=math_with_judge_simple_agent \
 
 After `ng_collect_rollouts` finishes, ctrl+c to quit your servers. You should see profiling shutdown output in the terminal like the following:
 ```text
-🛑 Stopping profiler for math_with_judge. Check results/profiling/math_with_judge/math_with_judge for the metrics!
-🛑 Stopping profiler for math_with_judge_simple_agent. Check results/profiling/math_with_judge/math_with_judge_simple_agent for the metrics!
-🛑 Stopping profiler for policy_model. Check results/profiling/math_with_judge/policy_model for the metrics!
+🛑 Stopping profiler for math_with_judge. Check results/profiling/math_with_judge/LibraryJudgeMathResourcesServer___math_with_judge for the metrics!
+🛑 Stopping profiler for math_with_judge_simple_agent. Check results/profiling/math_with_judge/SimpleAgent___math_with_judge_simple_agent for the metrics!
+🛑 Stopping profiler for policy_model. Check results/profiling/math_with_judge/SimpleModelServer___policy_model for the metrics!
 ```
 
 The log file content for a server will look something like the following:

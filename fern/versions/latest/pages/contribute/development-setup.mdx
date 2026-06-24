@@ -192,7 +192,7 @@ git rebase --signoff HEAD~3  # Adjust number as needed
 
 **If you already pushed to your PR branch:**
 
-This repo disallows force-pushing to PR branches. Do not use `git push --force` or `git push --force-with-lease`.
+Force-pushing is disallowed on branches in the upstream `NVIDIA-NeMo/Gym` repo. If you are working from a fork, you may be able to force-push to your own branch after re-signing commits locally (for example with `git rebase --signoff` followed by `git push --force-with-lease`).
 
 ```bash
 # Option 1: Re-sign commits locally, then push to a new branch and update your PR
@@ -204,6 +204,10 @@ git checkout -b your-feature-dco-fix origin/main
 git merge --squash your-feature-branch
 git commit -s -m "Your commit message"
 git push -u origin your-feature-dco-fix
+
+# Option 3 (forks only): Re-sign and force-push to the same branch
+git rebase --signoff origin/main
+git push --force-with-lease
 ```
 
 **Tip:** Always use `git commit -s` when creating commits to avoid this issue.
