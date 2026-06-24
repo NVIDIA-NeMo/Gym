@@ -24,14 +24,21 @@ Providers can be made available three ways, in lookup precedence order:
 
        [project.entry-points."nemo_gym.sandbox_providers"]
        my_provider = "my_pkg.provider:MyProvider"
+
+On name collisions: two entry points sharing a name raise (selection would be
+nondeterministic); an entry point shadowed by a higher-precedence built-in or
+registered provider is warned and ignored.
 """
 
+import logging
 from collections.abc import Callable, Mapping
-from importlib.metadata import entry_points
+from importlib.metadata import EntryPoint, entry_points
 from typing import Any, TypeAlias
 
 from nemo_gym.sandbox.providers.base import SandboxProvider
 
+
+LOGGER = logging.getLogger(__name__)
 
 ProviderClass: TypeAlias = type[SandboxProvider]
 ProviderLoader: TypeAlias = Callable[[], ProviderClass]
@@ -43,11 +50,37 @@ _BUILTIN_PROVIDER_LOADERS: dict[str, ProviderLoader] = {}
 _ENTRY_POINT_LOADERS: dict[str, ProviderLoader] | None = None
 
 
+def _entry_point_dist_name(ep: EntryPoint) -> str:
+    dist = getattr(ep, "dist", None)
+    return getattr(dist, "name", None) or "<unknown distribution>"
+
+
 def _entry_point_loaders() -> dict[str, ProviderLoader]:
-    """Discover provider loaders from installed entry points (cached)."""
+    """Discover provider loaders from installed entry points (cached).
+
+    Raises if two distributions publish the same provider name, since lookup
+    would otherwise pick one nondeterministically. Warns when an entry point is
+    shadowed by a built-in or explicitly registered provider of the same name.
+    """
     global _ENTRY_POINT_LOADERS
     if _ENTRY_POINT_LOADERS is None:
-        _ENTRY_POINT_LOADERS = {ep.name: ep.load for ep in entry_points(group=ENTRY_POINT_GROUP)}
+        loaders: dict[str, ProviderLoader] = {}
+        dist_by_name: dict[str, str] = {}
+        for ep in entry_points(group=ENTRY_POINT_GROUP):
+            dist_name = _entry_point_dist_name(ep)
+            if ep.name in loaders:
+                raise ValueError(
+                    f"Duplicate sandbox provider entry point {ep.name!r} published by "
+                    f"{dist_by_name[ep.name]!r} and {dist_name!r}. Rename one of them."
+                )
+            if ep.name in _BUILTIN_PROVIDER_LOADERS or ep.name in _PROVIDER_REGISTRY:
+                LOGGER.warning(
+                    f"Sandbox provider entry point {ep.name!r} from {dist_name!r} is shadowed by a "
+                    f"built-in or registered provider of the same name and will not be used."
+                )
+            loaders[ep.name] = ep.load
+            dist_by_name[ep.name] = dist_name
+        _ENTRY_POINT_LOADERS = loaders
     return _ENTRY_POINT_LOADERS
 
 

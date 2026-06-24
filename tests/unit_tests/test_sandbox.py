@@ -386,6 +386,10 @@ def test_provider_registry_validation_and_listing(monkeypatch: pytest.MonkeyPatc
     assert builtin_name in list_providers()
 
 
+def _fake_entry_point(name: str, provider: type, dist_name: str) -> SimpleNamespace:
+    return SimpleNamespace(name=name, load=lambda: provider, dist=SimpleNamespace(name=dist_name))
+
+
 def test_provider_entry_point_discovery(monkeypatch: pytest.MonkeyPatch) -> None:
     ep_name = f"ep-{uuid4().hex}"
 
@@ -394,7 +398,7 @@ def test_provider_entry_point_discovery(monkeypatch: pytest.MonkeyPatch) -> None
 
     def fake_entry_points(*, group: str) -> list[SimpleNamespace]:
         assert group == provider_registry.ENTRY_POINT_GROUP
-        return [SimpleNamespace(name=ep_name, load=lambda: EntryPointProvider)]
+        return [_fake_entry_point(ep_name, EntryPointProvider, "pkg-a")]
 
     monkeypatch.setattr(provider_registry, "entry_points", fake_entry_points)
     monkeypatch.setattr(provider_registry, "_ENTRY_POINT_LOADERS", None)
@@ -402,13 +406,36 @@ def test_provider_entry_point_discovery(monkeypatch: pytest.MonkeyPatch) -> None
     assert ep_name in list_providers()
     assert get_provider_class(ep_name) is EntryPointProvider
 
-    # Built-in providers take precedence over an entry point with the same name.
+
+def test_provider_entry_point_collisions(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    class EntryPointProvider(FakeSandboxProvider):
+        pass
+
+    # Two distributions publishing the same name raise, naming both packages.
+    dup_name = f"ep-{uuid4().hex}"
     monkeypatch.setattr(provider_registry, "_ENTRY_POINT_LOADERS", None)
     monkeypatch.setattr(
         provider_registry,
         "entry_points",
-        lambda *, group: [SimpleNamespace(name="opensandbox", load=lambda: EntryPointProvider)],
+        lambda *, group: [
+            _fake_entry_point(dup_name, EntryPointProvider, "pkg-a"),
+            _fake_entry_point(dup_name, EntryPointProvider, "pkg-b"),
+        ],
     )
+    with pytest.raises(ValueError, match=r"Duplicate sandbox provider entry point.*pkg-a.*pkg-b"):
+        list_providers()
+
+    # An entry point shadowed by a built-in is warned (at discovery) and ignored.
+    monkeypatch.setattr(provider_registry, "_ENTRY_POINT_LOADERS", None)
+    monkeypatch.setattr(
+        provider_registry,
+        "entry_points",
+        lambda *, group: [_fake_entry_point("opensandbox", EntryPointProvider, "pkg-a")],
+    )
+    with caplog.at_level("WARNING", logger=provider_registry.__name__):
+        list_providers()
+    assert any("shadowed" in message for message in caplog.messages)
+    # Built-in still wins on lookup.
     assert get_provider_class("opensandbox").__name__ == "OpenSandboxProvider"
 
 
