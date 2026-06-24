@@ -34,6 +34,9 @@ The shape mirrors `mini_swe_agent`: there is no paired
 `DesktopEnv.evaluate()`. Each rollout is dispatched to a Ray worker so
 many tasks can run concurrently against the same model server.
 
+For implementation details and design constraints, see
+[`DESIGN.md`](DESIGN.md).
+
 By default this wrapper keeps the existing Gym-built prompt path:
 `gym_pyautogui` asks the model for ```python```/pyautogui code blocks,
 plus the sentinel tokens `WAIT`, `DONE`, `FAIL`. For closer parity with
@@ -320,6 +323,38 @@ The first rollout takes longer than subsequent ones — see [First-Run
 Cache Acquisition](#first-run-cache-acquisition) for what happens and
 how to pre-stage.
 
+### Native OSWorld PromptAgent smoke
+
+The default quickstart uses `gym_pyautogui`, which keeps Gym in charge of
+prompt construction. To smoke-test OSWorld's upstream
+`mm_agents.agent.PromptAgent` path, add the native overlay when starting
+`ng_run`:
+
+```bash
+ng_run "+config_paths=[\
+responses_api_agents/osworld_agent/configs/osworld_agent.yaml,\
+responses_api_agents/osworld_agent/configs/osworld_agent_native_prompt_agent.yaml,\
+responses_api_models/openai_model/configs/openai_model.yaml]" &
+
+ng_collect_rollouts \
+  +agent_name=osworld_simple_agent \
+  +input_jsonl_fpath=responses_api_agents/osworld_agent/data/example.jsonl \
+  +output_jsonl_fpath=results/osworld_native_prompt_agent_example.jsonl \
+  +limit=1 \
+  +num_repeats=1 \
+  +num_samples_in_parallel=1
+```
+
+The helper script wraps the same flow and prints a compact summary:
+
+```bash
+bash responses_api_agents/osworld_agent/scripts/run_native_prompt_agent_smoke.sh
+```
+
+Set `RUNNER_NAME=prompt_agent_computer_13` or another explicit
+`prompt_agent_*` runner to exercise a specific observation/action
+combination.
+
 ## First-Run Cache Acquisition
 
 The first time a rollout runs on a given worker node, the agent populates
@@ -428,13 +463,14 @@ ng_reward_profile \
 
 See [Deployment Modes](#deployment-modes) for the comparison of
 `docker` (single-machine, recommended for first run) and `remote_docker`
-(controller and VM host on different machines). Switch via Hydra
-override on the CLI:
+(controller and VM host on different machines). Provider and runner
+settings are agent-server configuration, so set them when launching
+`ng_run`:
 
 ```bash
-ng_collect_rollouts +agent_name=osworld_simple_agent \
-    +input_jsonl_fpath=... \
-    +output_jsonl_fpath=... \
+ng_run "+config_paths=[\
+responses_api_agents/osworld_agent/configs/osworld_agent.yaml,\
+responses_api_models/openai_model/configs/openai_model.yaml]" \
     'osworld_simple_agent.responses_api_agents.osworld_agent.provider_name=docker'
 ```
 

@@ -1,14 +1,12 @@
 # osworld_agent / scripts
 
-Two one-shot host-prep helpers. Both are idempotent (re-runs are safe).
-They cover the parts of OSWorld setup that aren't fixable in the repo
-itself: OS-level package install, uv toolchain, and Mode-B-specific
-SSH + qcow2 staging.
+Host-prep helpers plus a native `PromptAgent` smoke runner.
 
 | Script | When to use it | What it does |
 |---|---|---|
 | [`bringup_local_host.sh`](bringup_local_host.sh) | **Mode A** — `ng_run` and the docker VM host are the **same** machine | apt-installs docker / git / curl / unzip / ffmpeg / xvfb / tigervnc-viewer · enables the docker daemon · adds `$USER` to the `docker` group · installs `uv` · symlinks `uv` into `/usr/local/bin` (so `ng_run`'s non-interactive `bash -c "uv run …"` subshells can find it) · pre-flight verify (docker daemon up, `/dev/kvm` present, uv visible to `bash -c`) |
 | [`bringup_remote_host.sh`](bringup_remote_host.sh) | **Mode B** — controller runs locally, but the docker VM host is a **separate** machine reached via SSH | passwordless-SSH check · same apt installs over SSH · stages `Ubuntu.qcow2` via rsync · `docker pull happysixd/osworld-docker` on the remote · pre-flight verify (kvm + image + ports free on the remote) |
+| [`run_native_prompt_agent_smoke.sh`](run_native_prompt_agent_smoke.sh) | Quick functional smoke for OSWorld's native `mm_agents.agent.PromptAgent` path | starts `ng_run` with `osworld_agent_native_prompt_agent.yaml`, collects one rollout from `data/example.jsonl`, and prints a compact reward/step/error summary |
 
 Both scripts stop short of cloning the repo, running `uv sync`, or
 prestaging `Ubuntu.qcow2` to `docker_vm_data/` — those steps are
@@ -57,6 +55,35 @@ ng_collect_rollouts \
   +input_jsonl_fpath=responses_api_agents/osworld_agent/data/example.jsonl \
   +output_jsonl_fpath=results/osworld_example.jsonl \
   +num_repeats=1
+```
+
+## Native PromptAgent smoke
+
+After the normal repo setup, `env.yaml`, and cache prestage are done:
+
+```bash
+bash responses_api_agents/osworld_agent/scripts/run_native_prompt_agent_smoke.sh
+```
+
+Useful variants:
+
+```bash
+# Use another explicit native runner.
+RUNNER_NAME=prompt_agent_computer_13 \
+  bash responses_api_agents/osworld_agent/scripts/run_native_prompt_agent_smoke.sh
+
+# Reuse an already-running ng_run. It must have been started with the same
+# native PromptAgent config and runner_name.
+START_NG_RUN=0 \
+  bash responses_api_agents/osworld_agent/scripts/run_native_prompt_agent_smoke.sh
+
+# Run the full 5-row example dataset instead of the default 1-row smoke.
+LIMIT=null \
+  bash responses_api_agents/osworld_agent/scripts/run_native_prompt_agent_smoke.sh
+
+# Print the ng_run and ng_collect_rollouts commands without starting servers.
+DRY_RUN=1 \
+  bash responses_api_agents/osworld_agent/scripts/run_native_prompt_agent_smoke.sh
 ```
 
 ## Mode B flow (using `bringup_remote_host.sh`)
