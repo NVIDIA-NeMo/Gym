@@ -27,6 +27,11 @@ INSTALL_HOST_DEPS="${INSTALL_HOST_DEPS:-0}"
 PULL_DOCKER_IMAGE="${PULL_DOCKER_IMAGE:-0}"
 DOCKER_IMAGE="${OSWORLD_DOCKER_IMAGE:-happysixd/osworld-docker:latest}"
 
+# uv's installer writes to ~/.local/bin. Non-interactive SSH shells often do
+# not source shell rc files, so make that path visible for this script and for
+# commands that source .colossus-runtime.env later.
+export PATH="${HOME}/.local/bin:${PATH}"
+
 die() {
     echo "ERROR: $*" >&2
     exit 1
@@ -101,6 +106,7 @@ export OSWORLD_VM_DATA_DIR="${VM_DATA_DIR}"
 export OSWORLD_ENV_YAML="${ENV_YAML}"
 export OSWORLD_QCOW2="${QCOW2}"
 export UV_CACHE_DIR="${UV_CACHE_DIR}"
+export PATH="\${HOME}/.local/bin:\${PATH}"
 EOF
 chmod 600 "${GYM_ROOT}/.colossus-runtime.env"
 echo "wrote ${GYM_ROOT}/.colossus-runtime.env"
