@@ -82,32 +82,15 @@ Review how model, agent, and resources servers fit together.
 
 ## Skills
 
-Skills are reusable analysis instructions that help agents interpret evaluation artifacts consistently. They are not part of the benchmark runtime. They sit after rollout collection and help turn metrics, traces, and reports into evidence-backed diagnoses.
+Skills are reusable analysis instructions that help agents interpret evaluation artifacts consistently. They are not part of the benchmark runtime; they sit after rollout collection and help turn metrics, traces, and reports into evidence-backed diagnoses.
 
-Use skills when the evaluation question requires more than a metric table:
+<Cards>
 
-- Explain why a benchmark score changed.
-- Compare model runs with task-level evidence.
-- Classify failure modes across rollouts.
-- Prepare benchmark reports or review packages.
-- Recommend interventions for data, prompts, harness logic, verifier behavior, or training.
+<Card title="Skills" href="/evaluation/skills">
+Use BLADE-style analysis skills to explain score changes and failure modes.
+</Card>
 
-The BLADE analysis skill is the current example. It is designed to turn NeMo Gym rollout artifacts into BLADE-style benchmark reports, model comparisons, and benchmark-improvement recommendations. Its workflow starts from rollout JSONL, aggregate metrics, reward profiles, configs, model names, repeat counts, and sampling settings. It then computes pass@1/pass@k, separates always-pass, sometimes-pass, never-pass, and missing rows, reads trajectories in order, assigns root-cause labels, and maps findings to concrete interventions.
-
-BLADE-ready benchmark packages use three deliverables:
-
-| Deliverable | Purpose |
-|---|---|
-| Analysis skill | Teaches an agent how to analyze the benchmark's rollout data. |
-| Rollout data | Provides comparable runs for analysis and calibration. |
-| Golden report package | Provides curated reports, metric sidecars, and anchor facts for review. |
-
-For public Gym users, the in-repo BLADE helper provides local validation and calibration utilities when external BLADE infrastructure is unavailable:
-
-```bash
-uv run python .codex/skills/nemo-gym-blade-analysis/scripts/blade_toolkit.py validate \
-  --benchmark-dir benchmarks/<benchmark_name> --phase all
-```
+</Cards>
 
 ## Benchmarks
 
@@ -126,7 +109,7 @@ For integrated external benchmarks, first reproduce the original benchmark's rep
 
 <Cards>
 
-<Card title="Environment List" href="/evaluation/environments">
+<Card title="Environment List" href="/evaluation/environment-list">
 Browse built-in benchmark and training environments.
 </Card>
 
@@ -172,7 +155,7 @@ Use aggregate metrics for:
 - headline metrics selected by the environment
 - quick comparison across models, harnesses, and ablations
 
-Aggregate metrics are necessary but not sufficient. They tell you what changed; rollout inspection and skills such as BLADE explain why it changed.
+Aggregate metrics are necessary but not sufficient. They tell you what changed; rollout inspection and [skills](/evaluation/skills) such as BLADE explain why it changed.
 
 <Cards>
 
