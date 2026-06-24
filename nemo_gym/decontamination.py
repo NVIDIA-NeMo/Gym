@@ -26,9 +26,13 @@
 #      pair is in fact the same problem.
 #   3. Filtering: drop training rows confirmed to overlap a test problem.
 #
-# The heavy dependencies (torch, transformers) are imported lazily inside
-# `_embed_texts` so that importing this module - and running `ng_prepare_data`
-# without decontamination enabled - incurs zero additional cost.
+# The heavy dependencies (torch, transformers) are NOT declared as NeMo Gym
+# dependencies - they are imported lazily inside `_embed_texts` so that importing
+# this module, and running `ng_prepare_data` without decontamination enabled, incurs
+# zero additional cost. To use decontamination, install them yourself, e.g.:
+#     pip install "transformers<5" torch
+# (transformers is pinned <5 because 5.x imports scikit-learn unconditionally, which
+# this repo excludes from resolution to keep the base install slim).
 
 import asyncio
 import json
@@ -194,9 +198,18 @@ def _embed_texts(texts: List[str], config: DecontaminationConfig) -> "Any":  # p
     This mirrors how sentence-transformers computes embeddings for MiniLM-style models,
     but depends only on `transformers` + `torch` (not sentence-transformers, which pulls
     in scikit-learn/scipy - excluded from this repo to keep the base install slim).
+
+    `transformers` and `torch` are not NeMo Gym dependencies; install them to use
+    decontamination (see the note at the top of this module).
     """
-    import torch
-    from transformers import AutoModel, AutoTokenizer
+    try:
+        import torch
+        from transformers import AutoModel, AutoTokenizer
+    except ImportError as e:
+        raise ImportError(
+            "Decontamination requires `transformers` and `torch`, which are not installed "
+            'by default. Install them with: pip install "transformers<5" torch'
+        ) from e
 
     tokenizer = AutoTokenizer.from_pretrained(config.embedding_model)
     model = AutoModel.from_pretrained(config.embedding_model)
