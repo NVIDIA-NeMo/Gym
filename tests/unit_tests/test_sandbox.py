@@ -17,6 +17,7 @@ import importlib.util
 import threading
 from datetime import timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
@@ -383,6 +384,32 @@ def test_provider_registry_validation_and_listing(monkeypatch: pytest.MonkeyPatc
     register_provider(builtin_name, PlainSandboxProvider, override=True)
     assert get_provider_class(builtin_name) is PlainSandboxProvider
     assert builtin_name in list_providers()
+
+
+def test_provider_entry_point_discovery(monkeypatch: pytest.MonkeyPatch) -> None:
+    ep_name = f"ep-{uuid4().hex}"
+
+    class EntryPointProvider(FakeSandboxProvider):
+        pass
+
+    def fake_entry_points(*, group: str) -> list[SimpleNamespace]:
+        assert group == provider_registry.ENTRY_POINT_GROUP
+        return [SimpleNamespace(name=ep_name, load=lambda: EntryPointProvider)]
+
+    monkeypatch.setattr(provider_registry, "entry_points", fake_entry_points)
+    monkeypatch.setattr(provider_registry, "_ENTRY_POINT_LOADERS", None)
+
+    assert ep_name in list_providers()
+    assert get_provider_class(ep_name) is EntryPointProvider
+
+    # Built-in providers take precedence over an entry point with the same name.
+    monkeypatch.setattr(provider_registry, "_ENTRY_POINT_LOADERS", None)
+    monkeypatch.setattr(
+        provider_registry,
+        "entry_points",
+        lambda *, group: [SimpleNamespace(name="opensandbox", load=lambda: EntryPointProvider)],
+    )
+    assert get_provider_class("opensandbox").__name__ == "OpenSandboxProvider"
 
 
 def test_create_provider_validation_and_constructor_cleanup() -> None:

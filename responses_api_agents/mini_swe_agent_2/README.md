@@ -235,6 +235,14 @@ merged into each sandbox's spec metadata (`SandboxSpec.metadata`); the agent's o
 tags (e.g. `sandbox-api: opensandbox-sdk`) with the provider rather than in the
 agent config.
 
+To ship a custom provider class from a separate package, register it under the
+`nemo_gym.sandbox_providers` entry point group so it is available on install:
+
+```toml
+[project.entry-points."nemo_gym.sandbox_providers"]
+my_provider = "my_pkg.provider:MyProvider"
+```
+
 Optional `sandbox_resource_profiles` can be configured as a list of resource
 maps. When present, the agent hashes `instance_id` and deterministically merges
 one profile into `sandbox_spec.resources`. This is useful for spreading
