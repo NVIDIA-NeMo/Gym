@@ -184,6 +184,21 @@ The neutral `user` argument to `exec` maps onto Apptainer like this:
 | `"root"` or `0` | Add `--fakeroot` (gated by `exec.fakeroot_for_root`). |
 | other name / uid | Add `--fakeroot` and wrap the command in `su -s /bin/sh -c '<cmd>' <user>`. |
 
+### Piping input via `stdin`
+
+`exec` accepts an optional `stdin: bytes | None` argument (an apptainer-provider
+extension beyond the neutral `SandboxProvider` protocol). When set, the bytes are piped
+to the command's standard input:
+
+```python
+await provider.exec(handle, "cat > /work/out.txt", stdin=b"large payload")
+```
+
+This is the right way to pass inputs that would exceed the kernel's per-argument size
+limit (`MAX_ARG_STRLEN`, ~128KB) — e.g. a long prompt — which would otherwise fail with
+`E2BIG` if passed as a command-line argument. It defaults to `None`, so existing callers
+are unaffected.
+
 ### Resource limits
 
 `SandboxResources` is translated to cgroup flags on `instance start`:

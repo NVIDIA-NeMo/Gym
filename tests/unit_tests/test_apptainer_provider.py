@@ -336,6 +336,12 @@ async def test_exec_user_mapping(
         assert argv[-1] == "whoami"
 
 
+async def test_exec_passes_stdin(fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    provider, rec = _make_provider(monkeypatch, lambda argv: (0, "ok", ""))
+    await provider.exec(_make_handle(tmp_path), "cat", stdin=b"prompt-bytes")
+    assert rec.calls[0]["stdin"] == b"prompt-bytes"
+
+
 async def test_exec_timeout(fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     def responder(argv: list[str]) -> tuple[int, str, str]:
         raise TimeoutError("too slow")
