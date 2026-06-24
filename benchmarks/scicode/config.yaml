@@ -1,0 +1,31 @@
+config_paths:
+  - resources_servers/scicode/configs/scicode.yaml
+
+scicode_benchmark_resources_server:
+  _inherit_from: scicode
+  resources_servers:
+    scicode:
+      # Manually staged SciCode test_data.h5 (see benchmarks/scicode/README.md).
+      test_data_fpath: benchmarks/scicode/data/test_data.h5
+
+scicode_benchmark_agent:
+  _inherit_from: scicode_agent
+  responses_api_agents:
+    scicode_agent:
+      resources_server:
+        type: resources_servers
+        name: scicode_benchmark_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      prompt_fpath: benchmarks/scicode/prompts/default.yaml
+      with_background: true
+      datasets:
+      - name: scicode
+        type: benchmark
+        jsonl_fpath: benchmarks/scicode/data/scicode_benchmark.jsonl
+        prepare_script: benchmarks/scicode/prepare.py
+        # null: the agent builds per-sub-step prompts (prompt_fpath); no row-level materialization.
+        prompt_config: null
+        num_repeats: 3
+        license: Apache 2.0

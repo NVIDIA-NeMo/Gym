@@ -1,0 +1,30 @@
+config_paths:
+  - resources_servers/frontierscience_judge/configs/frontierscience_judge.yaml
+
+frontierscience_research_frontierscience_judge_resources_server:
+  _inherit_from: frontierscience_judge
+  resources_servers:
+    frontierscience_judge:
+      description: FrontierScience research rubric grading via single-pass LLM judge
+      value: Evaluate open-ended FrontierScience research tasks with 10-point rubric scoring
+      judge_mode: research
+      rubric_pass_score_threshold: 7.0
+      rubric_max_score: 10.0
+      judge_prompt_path: resources_servers/frontierscience_judge/prompts/research_judge.yaml
+      judge_responses_create_params:
+        input: []
+        max_output_tokens: 4096
+
+frontierscience_research_frontierscience_judge_simple_agent:
+  _inherit_from: frontierscience_judge_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: frontierscience_research_frontierscience_judge_resources_server
+      datasets:
+      - name: frontierscience_research
+        type: benchmark
+        jsonl_fpath: benchmarks/frontierscience_research/data/frontierscience_research_benchmark.jsonl
+        prompt_config: benchmarks/prompts/generic/default.yaml
+        prepare_script: benchmarks/frontierscience_research/prepare.py
+        license: Apache 2.0

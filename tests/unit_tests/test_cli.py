@@ -31,10 +31,43 @@ from nemo_gym.cli import (
     _GRACEFUL_SHUTDOWN_TIMEOUT_SEC,
     RunConfig,
     RunHelper,
+    _select_shard,
     display_help,
     init_resources_server,
 )
 from nemo_gym.config_types import ResourcesServerInstanceConfig
+
+
+class TestSelectShard:
+    def test_no_sharding_returns_all(self) -> None:
+        paths = [Path(f"resources_servers/s{i}") for i in range(5)]
+        assert _select_shard(paths, shard_index=0, num_shards=1) == paths
+
+    def test_round_robin_partition_is_complete_and_disjoint(self) -> None:
+        paths = [Path(f"resources_servers/s{i:02d}") for i in range(10)]
+        num_shards = 4
+        shards = [_select_shard(paths, i, num_shards) for i in range(num_shards)]
+        # Every module appears in exactly one shard, and the union is the full sorted set.
+        flattened = [p for shard in shards for p in shard]
+        assert sorted(flattened, key=str) == sorted(paths, key=str)
+        assert len(flattened) == len(set(flattened)) == len(paths)
+        # Round-robin stride: shard 0 gets indices 0,4,8 of the sorted list.
+        assert shards[0] == [
+            Path("resources_servers/s00"),
+            Path("resources_servers/s04"),
+            Path("resources_servers/s08"),
+        ]
+
+    def test_balanced_sizes(self) -> None:
+        paths = [Path(f"resources_servers/s{i:02d}") for i in range(10)]
+        sizes = sorted(len(_select_shard(paths, i, 4)) for i in range(4))
+        # 10 across 4 shards -> sizes differ by at most 1.
+        assert sizes[-1] - sizes[0] <= 1
+
+    def test_shard_index_out_of_range_raises(self) -> None:
+        paths = [Path("resources_servers/s0")]
+        with raises(AssertionError):
+            _select_shard(paths, shard_index=4, num_shards=4)
 
 
 # TODO: Eventually we want to add more tests to ensure that the CLI flows do not break
@@ -124,6 +157,21 @@ class TestCLI:
                 server_config = resources_config["resources_servers"][server_name]
                 assert "domain" in server_config, "Domain field missing from resources server config"
                 assert server_config["domain"] == "other", f"Expected domain 'other', got '{server_config['domain']}'"
+
+                # Generated config ships `verified: false` so the add-verified-flag pre-commit hook
+                # is a no-op and does not rewrite (and strip the comments from) the file on commit.
+                assert server_config["verified"] is False
+
+                # The generated config is documented with inline comments (friction #7).
+                config_text = config_file.read_text()
+                assert "# Resources server:" in config_text
+                assert config_text.count("#") >= 10, "expected inline field documentation comments"
+
+                # The add-verified-flag hook must NOT modify the generated config (would strip comments).
+                from scripts.add_verified_flag import ensure_verified_flag
+
+                assert ensure_verified_flag(config_file) is False
+                assert config_file.read_text() == config_text, "verified-flag hook altered the generated config"
 
                 # Verify that the config can be validated (this would have failed before the fix)
                 full_config_dict = OmegaConf.create(
