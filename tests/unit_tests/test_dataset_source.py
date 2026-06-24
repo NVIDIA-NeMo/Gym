@@ -104,6 +104,25 @@ class TestDatasetSource:
                 )
             )
 
+    def test_both_legacy_identifiers_together_is_allowed(self) -> None:
+        # A gitlab-primary / huggingface-fallback pair (backend chosen at download time) must stay
+        # valid; the single discriminated `source:` can't represent both, so it is left unset.
+        with warns(DeprecationWarning, match="gitlab_identifier"):
+            cfg = DatasetConfig.model_validate(
+                _dataset(
+                    gitlab_identifier={
+                        "dataset_name": "my_dataset",
+                        "version": "0.0.1",
+                        "artifact_fpath": "train.jsonl",
+                    },
+                    huggingface_identifier={"repo_id": "org/dataset"},
+                )
+            )
+
+        assert cfg.source is None
+        assert cfg.gitlab_identifier is not None
+        assert cfg.huggingface_identifier is not None
+
     def test_no_source_is_allowed(self) -> None:
         cfg = DatasetConfig.model_validate(_dataset())
 
