@@ -5,6 +5,7 @@
 #   - LIMIT=1 keeps the smoke short.
 #   - num_samples_in_parallel=1 avoids launching multiple VMs at once.
 #   - START_NG_RUN=1 starts a matching agent/model server config.
+#   - ng_status is used to wait for server readiness before collecting.
 #
 # Examples:
 #   bash responses_api_agents/osworld_agent/scripts/run_native_prompt_agent_smoke.sh
@@ -34,7 +35,10 @@ START_NG_RUN="${START_NG_RUN:-1}"
 DRY_RUN="${DRY_RUN:-0}"
 NG_RUN_BIN="${NG_RUN_BIN:-ng_run}"
 NG_COLLECT_BIN="${NG_COLLECT_BIN:-ng_collect_rollouts}"
-NG_RUN_WAIT_SECONDS="${NG_RUN_WAIT_SECONDS:-30}"
+NG_STATUS_BIN="${NG_STATUS_BIN:-ng_status}"
+NG_RUN_WAIT_RETRIES="${NG_RUN_WAIT_RETRIES:-60}"
+NG_RUN_WAIT_INTERVAL_SECONDS="${NG_RUN_WAIT_INTERVAL_SECONDS:-3}"
+EXPECTED_SERVERS="${EXPECTED_SERVERS:-3}"
 MAX_OUTPUT_TOKENS="${MAX_OUTPUT_TOKENS:-16384}"
 TEMPERATURE="${TEMPERATURE:-1.0}"
 CONFIG_PATHS="${CONFIG_PATHS:-responses_api_agents/osworld_agent/configs/osworld_agent.yaml,responses_api_agents/osworld_agent/configs/osworld_agent_native_prompt_agent.yaml,responses_api_models/openai_model/configs/openai_model.yaml}"
@@ -49,6 +53,7 @@ echo "output: ${OUTPUT_JSONL}"
 echo "limit: ${LIMIT}"
 echo "ng_run bin: ${NG_RUN_BIN}"
 echo "ng_collect bin: ${NG_COLLECT_BIN}"
+echo "ng_status bin: ${NG_STATUS_BIN}"
 echo
 
 ng_run_cmd=(
@@ -82,6 +87,35 @@ if [[ "${DRY_RUN}" == "1" ]]; then
     exit 0
 fi
 
+wait_for_servers_ready() {
+    local expected_line="${EXPECTED_SERVERS} servers found (${EXPECTED_SERVERS} healthy, 0 unhealthy)"
+    local status_output=""
+
+    echo "waiting for ${EXPECTED_SERVERS} healthy servers via ${NG_STATUS_BIN}"
+    for attempt in $(seq 1 "${NG_RUN_WAIT_RETRIES}"); do
+        if [[ -n "${ng_run_pid}" ]] && ! kill -0 "${ng_run_pid}" >/dev/null 2>&1; then
+            echo "ng_run exited before servers became ready"
+            return 1
+        fi
+
+        status_output="$("${NG_STATUS_BIN}" 2>&1 || true)"
+        if grep -Fq "${expected_line}" <<< "${status_output}"; then
+            echo "servers ready: ${expected_line}"
+            return 0
+        fi
+
+        if [[ "${attempt}" == "1" || $((attempt % 5)) -eq 0 ]]; then
+            echo "server readiness attempt ${attempt}/${NG_RUN_WAIT_RETRIES}"
+            sed 's/^/  /' <<< "${status_output}"
+        fi
+        sleep "${NG_RUN_WAIT_INTERVAL_SECONDS}"
+    done
+
+    echo "servers did not become ready after ${NG_RUN_WAIT_RETRIES} attempts"
+    sed 's/^/  /' <<< "${status_output}"
+    return 1
+}
+
 ng_run_pid=""
 cleanup() {
     if [[ -n "${ng_run_pid}" ]]; then
@@ -98,8 +132,7 @@ if [[ "${START_NG_RUN}" == "1" ]]; then
     "${ng_run_cmd[@]}" &
     ng_run_pid="$!"
     echo "ng_run pid: ${ng_run_pid}"
-    echo "waiting ${NG_RUN_WAIT_SECONDS}s for servers to come up"
-    sleep "${NG_RUN_WAIT_SECONDS}"
+    wait_for_servers_ready
 else
     echo "--- using existing ng_run ---"
     echo "Expected running config:"
