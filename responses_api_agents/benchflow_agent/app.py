@@ -19,7 +19,6 @@ Each `/run` call runs exactly one task using BenchFlow's Python API,
 extracts the scalar reward, and returns a NeMo Gym response.
 """
 
-import re
 import shutil
 import tempfile
 from asyncio import Semaphore
