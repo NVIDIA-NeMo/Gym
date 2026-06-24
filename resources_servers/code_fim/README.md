@@ -60,7 +60,7 @@ the reward; pass@k / majority@k are computed by the metrics layer.
 # Running servers
 gym env run \
     --model-type vllm_model \
-    --resource-server code_fim
+    --resources-server code_fim
 
 # Collecting rollouts (5-example smoke test)
 gym eval run --no-serve \

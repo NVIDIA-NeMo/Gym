@@ -23,7 +23,7 @@ Run the GSM8K Aviary resources server together with a model config:
 
 ```bash
 gym env run \
-    --resource-server aviary/gsm8k_aviary \
+    --resources-server aviary/gsm8k_aviary \
     --model-type vllm_model
 ```
 
@@ -50,7 +50,7 @@ Once the dataset server is running and is accessible at a specific URL, update y
 
 ```bash
 gym env run \
-    --resource-server aviary/bbh_remote \
+    --resources-server aviary/bbh_remote \
     --model-type vllm_model
 ```
 
@@ -101,7 +101,7 @@ cd /path/to/gym/directory
 And then bring up NeMo-Gym:
 ```bash
 gym env run \
-    --resource-server aviary/bbh_bundled \
+    --resources-server aviary/bbh_bundled \
     --model-type vllm_model
 ```
 ```bash

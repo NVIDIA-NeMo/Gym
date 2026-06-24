@@ -92,7 +92,7 @@ class TestBenchmarkExtras:
         domain, terms = _benchmark_extras(bench)
 
         assert domain == "math"
-        # The resource server's inner name and the dataset name are recovered for search.
+        # The resources server's inner name and the dataset name are recovered for search.
         assert "math_with_judge" in terms
         assert "aime24" in terms
 
@@ -134,7 +134,7 @@ class TestSearchBenchmarks:
         assert "aime24" not in out
 
     def test_query_matches_resource_server(self, capsys) -> None:
-        # "judge" only appears via aime24's resource server name.
+        # "judge" only appears via aime24's resources server name.
         out = self._run("judge", self._benchmarks(), capsys)
         assert "aime24" in out
         assert "gpqa_diamond" not in out

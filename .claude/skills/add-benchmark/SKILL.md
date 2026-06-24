@@ -35,7 +35,7 @@ Before starting, determine which type of benchmark you're adding:
 Run `gym env init` to generate the directory structure:
 
 ```bash
-gym env init --resource-server my_benchmark
+gym env init --resources-server my_benchmark
 ```
 
 This creates:
@@ -166,7 +166,7 @@ Both fields must coexist: `jsonl_fpath` is the local download destination, `gitl
 
 ```bash
 # Run server tests (creates isolated .venv, slow on first run)
-gym env test --resource-server my_benchmark
+gym env test --resources-server my_benchmark
 
 # Run core library tests to check nothing broke
 pytest tests/unit_tests/ -x

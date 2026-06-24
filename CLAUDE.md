@@ -83,12 +83,12 @@ pre-commit install
 
 # Run servers
 gym env run \
-    --resource-server example_single_tool_call \
+    --resources-server example_single_tool_call \
     --model-type vllm_model
 
 # Run tests for a specific server (creates .venv per server, installs deps, runs pytest)
 # First run is slow. Use skip_venv_if_present config or place a .venv to skip venv creation.
-gym env test --resource-server example_single_tool_call
+gym env test --resources-server example_single_tool_call
 
 # Run all server tests
 gym env test

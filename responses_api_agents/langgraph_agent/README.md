@@ -10,7 +10,7 @@ Please note that agents such as parallel thinking which produce non-monotonicall
 
 ```bash
 gym env run \
-    --resource-server reasoning_gym/reflection_agent \
+    --resources-server reasoning_gym/reflection_agent \
     --model-type vllm_model
 ```
 

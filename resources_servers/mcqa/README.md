@@ -114,7 +114,7 @@ For datasets with custom prompt formats, you can optionally use `template_metada
 gym env run \
     --config responses_api_agents/simple_agent/configs/simple_agent.yaml \
     --model-type openai_model \
-    --resource-server mcqa \
+    --resources-server mcqa \
     +simple_agent.responses_api_agents.simple_agent.resources_server.name=mcqa
 
 gym eval run --no-serve \

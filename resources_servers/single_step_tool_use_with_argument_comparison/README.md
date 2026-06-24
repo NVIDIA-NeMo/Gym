@@ -9,7 +9,7 @@ Data links: ?
 The following command can be used to run this resources server, along with the tool simulation agent and an OpenAI model:
 ```bash
 gym env run \
-    --resource-server single_step_tool_use_with_argument_comparison \
+    --resources-server single_step_tool_use_with_argument_comparison \
     --model-type openai_model
 ```
 

@@ -179,8 +179,8 @@ Start the servers:
 
 ```bash
 gym env run \
-  --resource-server labbench2_vlm \
-  --resource-server labbench2_vlm/judge_model_openai \
+  --resources-server labbench2_vlm \
+  --resources-server labbench2_vlm/judge_model_openai \
   --model-type openai_model
 ```
 
@@ -188,8 +188,8 @@ Collect rollouts:
 
 ```bash
 gym eval run --no-serve \
-  --resource-server labbench2_vlm \
-  --resource-server labbench2_vlm/judge_model_openai \
+  --resources-server labbench2_vlm \
+  --resources-server labbench2_vlm/judge_model_openai \
   --model-type openai_model \
   --agent labbench2_vlm_simple_agent \
   --input resources_servers/labbench2_vlm/data/figqa2_img_validation.jsonl \
@@ -208,8 +208,8 @@ because `data/test_media/` and `data/example.jsonl` are committed):
 
 ```bash
 gym eval run --no-serve \
-  --resource-server labbench2_vlm \
-  --resource-server labbench2_vlm/judge_model_openai \
+  --resources-server labbench2_vlm \
+  --resources-server labbench2_vlm/judge_model_openai \
   --model-type openai_model \
   --agent labbench2_vlm_simple_agent \
   --input resources_servers/labbench2_vlm/data/example.jsonl \
@@ -230,8 +230,8 @@ agent ref are auto-derived from the dataset entry in the chained config
 
 ```bash
 gym eval run \
-  --resource-server labbench2_vlm \
-  --resource-server labbench2_vlm/judge_model_openai \
+  --resources-server labbench2_vlm \
+  --resources-server labbench2_vlm/judge_model_openai \
   --model-type openai_model \
   --split validation \
   --output results/labbench2_vlm_validation.jsonl \

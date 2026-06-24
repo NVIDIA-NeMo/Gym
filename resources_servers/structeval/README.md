@@ -30,7 +30,7 @@ reward = 0.2 * render_score + 0.8 * key_validation_score
 ```bash
 gym env run \
     --model-type vllm_model \
-    --resource-server structeval/structeval_nonrenderable
+    --resources-server structeval/structeval_nonrenderable
 ```
 
 ### Collecting rollouts
@@ -56,7 +56,7 @@ python resources_servers/structeval/misc/prepare_data.py \
 
 ## Testing
 ```bash
-gym env test --resource-server structeval
+gym env test --resources-server structeval
 ```
 
 ## Licensing

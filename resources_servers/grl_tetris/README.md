@@ -15,7 +15,7 @@ Start NeMo Gym servers
 gym env run \
     --model-type openai_model \
     --config responses_api_agents/gymnasium_agent/configs/gymnasium_agent.yaml \
-    --resource-server grl_tetris
+    --resources-server grl_tetris
 ```
 
 Collect trajectories:

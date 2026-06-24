@@ -66,7 +66,7 @@ takes precedence over `use_box_format`.
 
 ```bash
 gym env run \
-    --resource-server rdkit_chemistry \
+    --resources-server rdkit_chemistry \
     --model-type openai_model
 
 gym eval run --no-serve \

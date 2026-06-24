@@ -49,7 +49,7 @@ Each JSONL row must carry the following top-level fields (pydantic
 # Running servers
 gym env run \
     --model-type vllm_model \
-    --resource-server arena_judge
+    --resources-server arena_judge
 
 # Collecting rollouts (5-example smoke test)
 gym eval run --no-serve \

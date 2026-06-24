@@ -69,7 +69,7 @@ Each data sample should include:
 
 ```bash
 gym env run \
-  --resource-server text_to_sql \
+  --resources-server text_to_sql \
   --model-type openai_model \
   +text_to_sql_resources_server.resources_servers.text_to_sql.judge_responses_create_params.max_output_tokens=512
 ```

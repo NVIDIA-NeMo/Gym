@@ -101,11 +101,11 @@ contrast_privacy
 ```bash
 # For chat completions endpoints (vLLM, NIM, etc.):
 gym env run \
-    --resource-server xstest \
+    --resources-server xstest \
     --model-type vllm_model
 
 # For OpenAI Responses API endpoints:
-# gym env run --resource-server xstest --model-type openai_model
+# gym env run --resources-server xstest --model-type openai_model
 
 gym eval run --no-serve \
     --agent xstest_simple_agent \

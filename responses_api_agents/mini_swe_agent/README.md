@@ -108,7 +108,7 @@ gym dataset download --storage gitlab \
 
 # Start server
 gym env run \
-        --resource-server mini_swe_agent \
+        --resources-server mini_swe_agent \
         --model-type openai_model & \
         '+mini_swe_simple_agent.responses_api_agents.mini_swe_agent.cache_dir_template=/path/to/images/xingyaoww_sweb.eval.x86_64.\{instance_id\}.sif' \
         +mini_swe_simple_agent.responses_api_agents.mini_swe_agent.run_golden=False \

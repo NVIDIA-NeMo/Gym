@@ -36,7 +36,7 @@ policy_model_name: <your-model-name>
 
 Running an environment is a **two-step process**:
 
-1. **Start the servers** with `gym env run` — this launches the resource server, agent server, and model server. Wait until you see `All 3 / 3 servers ready!`.
+1. **Start the servers** with `gym env run` — this launches the resources server, agent server, and model server. Wait until you see `All 3 / 3 servers ready!`.
 2. **Collect rollouts** with `gym eval run --no-serve` in a **separate terminal** — this sends the JSONL prompts through the agent, which calls the LLM and environment in a loop, and writes trajectories with rewards to an output file.
 
 #### Echo
@@ -45,7 +45,7 @@ Running an environment is a **two-step process**:
 # Terminal 1: Start servers
 source .venv/bin/activate
 gym env run \
-    --resource-server openenv/openenv_echo \
+    --resources-server openenv/openenv_echo \
     --model-type openai_model
 
 # Terminal 2: Collect rollouts (after "All 3 / 3 servers ready!")
@@ -63,7 +63,7 @@ gym eval run --no-serve \
 # Terminal 1: Start servers
 source .venv/bin/activate
 gym env run \
-    --resource-server openenv/openenv_coding \
+    --resources-server openenv/openenv_coding \
     --model-type openai_model
 
 # Terminal 2: Collect rollouts
@@ -81,7 +81,7 @@ gym eval run --no-serve \
 # Terminal 1: Start servers
 source .venv/bin/activate
 gym env run \
-    --resource-server openenv/openenv_maze \
+    --resources-server openenv/openenv_maze \
     --model-type openai_model
 
 # Terminal 2: Collect rollouts

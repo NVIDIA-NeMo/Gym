@@ -13,7 +13,7 @@ The following are example commands for running this resources server, along with
 ```bash
 gym env run \
     --model-type openai_model \
-    --resource-server math_with_judge \
+    --resources-server math_with_judge \
     +math_with_judge.resources_servers.math_with_judge.judge_model_server.name=policy_model
 ```
 

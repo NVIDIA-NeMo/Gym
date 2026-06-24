@@ -28,7 +28,7 @@ always fails.
 
 ```bash
 gym env run \
-    --resource-server mrcr \
+    --resources-server mrcr \
     --model-type vllm_model
 ```
 

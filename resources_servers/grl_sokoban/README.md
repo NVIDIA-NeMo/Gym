@@ -14,7 +14,7 @@ Spin up the server alongside a compatible agent:
 gym env run \
     --model-type openai_model \
     --config responses_api_agents/gymnasium_agent/configs/gymnasium_agent.yaml \
-    --resource-server grl_sokoban
+    --resources-server grl_sokoban
 ```
 
 Collect trajectories:

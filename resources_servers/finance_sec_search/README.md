@@ -196,7 +196,7 @@ With a local vLLM model server:
 ```bash
 gym env run \
   --model-type vllm_model \
-  --resource-server finance_sec_search
+  --resources-server finance_sec_search
 ```
 
 Or with an OpenAI-compatible API (e.g. OpenAI, Azure, NIM):
@@ -204,7 +204,7 @@ Or with an OpenAI-compatible API (e.g. OpenAI, Azure, NIM):
 ```bash
 gym env run \
   --model-type openai_model \
-  --resource-server finance_sec_search
+  --resources-server finance_sec_search
 ```
 
 ### 4. Collect rollouts
@@ -229,7 +229,7 @@ gym eval run --no-serve \
 ### Run tests
 
 ```bash
-gym env test --resource-server finance_sec_search
+gym env test --resources-server finance_sec_search
 ```
 
 ## Verification

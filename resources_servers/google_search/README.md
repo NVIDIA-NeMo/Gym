@@ -100,7 +100,7 @@ tools=[
 ```bash
 gym env run \
     --model-type openai_model \
-    --resource-server google_search
+    --resources-server google_search
 
 gym eval run --no-serve \
     --agent simple_agent \

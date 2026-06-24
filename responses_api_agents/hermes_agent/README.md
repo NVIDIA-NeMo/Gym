@@ -14,7 +14,7 @@ policy_model_name: gpt-4o
 
 ```bash
 gym env run \
-    --resource-server math_with_judge/math_with_judge_hermes_agent \
+    --resources-server math_with_judge/math_with_judge_hermes_agent \
     --model-type openai_model
 ```
 

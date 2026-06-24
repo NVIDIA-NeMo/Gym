@@ -60,7 +60,7 @@ swap it for any other `responses_api_models/*` config that exposes a
 # Running servers
 gym env run \
     --model-type vllm_model \
-    --resource-server ugphysics_judge \
+    --resources-server ugphysics_judge \
     --config benchmarks/ugphysics/judge_gptoss20b.yaml
 
 # Collecting rollouts (5-example smoke test)

@@ -33,7 +33,7 @@ The following command can be used to run this resources server, along with the s
 
 ```bash
 gym env run \
-  --resource-server terminus_judge \
+  --resources-server terminus_judge \
   --model-type openai_model \
   +terminus_judge_resources_server.resources_servers.terminus_judge.judge_responses_create_params.max_output_tokens=512
 ```

@@ -10,7 +10,7 @@ Spin up server:
 ```
 gym env run \
     --model-type openai_model \
-    --resource-server math_advanced_calculations
+    --resources-server math_advanced_calculations
 ```
 
 Collect trajectories:

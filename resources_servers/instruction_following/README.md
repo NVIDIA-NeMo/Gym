@@ -50,7 +50,7 @@ The dataset can be found at https://huggingface.co/datasets/nvidia/Nemotron-RL-i
 gym env run \
     --config responses_api_agents/simple_agent/configs/simple_agent.yaml \
     --model-type openai_model \
-    --resource-server instruction_following \
+    --resources-server instruction_following \
     +simple_agent.responses_api_agents.simple_agent.resources_server.name=instruction_following
 
 gym dataset download --storage gitlab \
@@ -83,7 +83,7 @@ We run reward profiling with Qwen/Qwen3-30B-A3B-Instruct-2507. We evaluate the m
 ## Testing
 
 ```bash
-gym env test --resource-server instruction_following
+gym env test --resources-server instruction_following
 ```
 
 

@@ -27,7 +27,7 @@ pre-commit install
 ```bash
 gym dev test                                   # Run all NeMo Gym core tests
 gym env test                                   # Run all server tests
-gym env test --resource-server example_single_tool_call    # Test a single resources server
+gym env test --resources-server example_single_tool_call    # Test a single resources server
 ```
 
 **View Test Coverage**:
@@ -55,7 +55,7 @@ All contributions must pass these automated checks:
 
 **Test Requirements**:
 - At least one test per server you contribute
-- Tests must run using `gym env test --resource-server your_server`
+- Tests must run using `gym env test --resources-server your_server`
 - Use pytest for async testing patterns
 
 ### Build Docs CI Failures

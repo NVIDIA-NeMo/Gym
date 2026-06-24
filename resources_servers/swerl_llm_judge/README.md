@@ -58,7 +58,7 @@ Notes:
 gym env run \
     --config responses_api_agents/simple_agent/configs/simple_agent.yaml \
     --model-type openai_model \
-    --resource-server swerl_llm_judge
+    --resources-server swerl_llm_judge
 
 gym eval run --no-serve \
     --agent swerl_llm_judge_simple_agent \

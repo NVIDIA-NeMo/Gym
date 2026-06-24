@@ -70,7 +70,7 @@ grade.
 # Running servers
 gym env run \
     --model-type vllm_model \
-    --resource-server imo_gradingbench
+    --resources-server imo_gradingbench
 
 # Collecting rollouts (5-example smoke test)
 gym eval run --no-serve \

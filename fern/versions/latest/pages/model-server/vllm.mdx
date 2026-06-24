@@ -12,7 +12,7 @@ VLLMModel provides a Responses API to Chat Completions mapping middleware layer 
 **To use VLLMModel, just change the `responses_api_models/openai_model/configs/openai_model.yaml` in your config paths to `responses_api_models/vllm_model/configs/vllm_model.yaml`!**
 ```bash
 gym env run \
-    --resource-server example_multi_step \
+    --resources-server example_multi_step \
     --model-type vllm_model
 ```
 
@@ -117,7 +117,7 @@ vllm serve \
 In a second terminal on the same GPU node that was used to spin up the vLLM server, enter the NeMo Gym Python environment, and start the NeMo Gym servers.
 ```bash
 gym env run \
-    --resource-server example_multi_step \
+    --resources-server example_multi_step \
     --model-type vllm_model \
     --model-url http://0.0.0.0:10240/v1 \
     --model Qwen/Qwen3-4B-Thinking-2507 \

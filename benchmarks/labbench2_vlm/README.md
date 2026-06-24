@@ -83,7 +83,7 @@ After changing `example.jsonl`, regenerate its static validation metrics:
 
 ```bash
 .venv/bin/gym dataset collate \
-  --resource-server labbench2_vlm \
+  --resources-server labbench2_vlm \
   --config resources_servers/labbench2_vlm/configs/judge_model_openai.yaml \
   --config responses_api_models/openai_model/configs/openai_model.yaml \
   --mode example_validation \

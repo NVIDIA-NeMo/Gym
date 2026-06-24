@@ -15,22 +15,22 @@ For example_single_tool_call:
 ```bash
 gym env run \
     --model-type openai_model \
-    --resource-server example_single_tool_call
+    --resources-server example_single_tool_call
 ```
 
 For example_multi_step:
 ```bash
 gym env run \
     --model-type openai_model \
-    --resource-server example_multi_step
+    --resources-server example_multi_step
 ```
 
 To use both environments, add the YAML configs together as follows:
 ```bash
 gym env run \
     --model-type openai_model \
-    --resource-server example_single_tool_call \
-    --resource-server example_multi_step
+    --resources-server example_single_tool_call \
+    --resources-server example_multi_step
 ```
 
 ## Dataset Preparation

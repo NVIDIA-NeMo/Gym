@@ -37,7 +37,7 @@ judge's full text), and in research mode `rubric_score` plus
 # Running servers
 gym env run \
     --model-type vllm_model \
-    --resource-server frontierscience_judge
+    --resources-server frontierscience_judge
 
 # Collecting rollouts (5-example smoke test)
 gym eval run --no-serve \

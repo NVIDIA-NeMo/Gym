@@ -10,7 +10,7 @@ Example data provided in `data/example.jsonl` (system prompt only, no verifier_m
 
 ```bash
 gym env run \
-    --resource-server blackjack \
+    --resources-server blackjack \
     --model-type vllm_model
 ```
 

@@ -127,11 +127,11 @@ MODEL = _value_flag(
 MODEL_URL = _value_flag("model-url", "policy_base_url", "Model server base URL.")
 MODEL_API_KEY = _value_flag("model-api-key", "policy_api_key", "Model server API key.")
 
-# Shared flag: select a single resource server by name. Reused by `env test`, `env init`, and `env packages`.
-RESOURCE_SERVER = Flag(
-    register=lambda p: p.add_argument("--resource-server", metavar="NAME", help="Name of the resource server."),
+# Shared flag: select a single resources server by name. Reused by `env test`, `env init`, and `env packages`.
+RESOURCES_SERVER = Flag(
+    register=lambda p: p.add_argument("--resources-server", metavar="NAME", help="Name of the resources server."),
     translate_to_hydra=lambda args: (
-        [f"+entrypoint=resources_servers/{args.resource_server}"] if args.resource_server else []
+        [f"+entrypoint=resources_servers/{args.resources_server}"] if args.resources_server else []
     ),
 )
 
@@ -150,7 +150,7 @@ QUERY = Flag(
 # resolving to `<parent>/<server>/[<subdir>/]<flavor>.yaml`. A None default flavor falls back to the server name.
 _ASSETS = {
     "benchmark": ("benchmarks", "", "config"),
-    "resource-server": ("resources_servers", "configs", None),
+    "resources-server": ("resources_servers", "configs", None),
     "model-type": ("responses_api_models", "configs", None),
 }
 
@@ -223,7 +223,7 @@ def _asset_selector(flag: str) -> Flag:
 
 
 BENCHMARK = _asset_selector("benchmark")
-RESOURCE_SERVER_CONFIG = _asset_selector("resource-server")
+RESOURCES_SERVER_CONFIG = _asset_selector("resources-server")
 MODEL_TYPE = _asset_selector("model-type")
 
 # Shared flag: register extra root dirs to search for named components. Consumed by the asset selectors above
@@ -258,7 +258,7 @@ def _eval_run(args: argparse.Namespace, overrides: list[str]) -> None:
 
 def _env_test(args: argparse.Namespace, overrides: list[str]) -> None:
     # Run a single server's tests if +entrypoint was passed. No need to check for
-    # --resource-server because it is translated to +entrypoint in the flag definition.
+    # --resources-server because it is translated to +entrypoint in the flag definition.
 
     has_entrypoint = any(override.lstrip("+").split("=", 1)[0] == "entrypoint" for override in overrides)
     dispatch("nemo_gym.cli.env:test" if has_entrypoint else "nemo_gym.cli.env:test_all", overrides)
@@ -369,7 +369,7 @@ COMMANDS = {
         summary="Validate and collate the dataset.",
         flags=(
             CONFIG,
-            RESOURCE_SERVER_CONFIG,
+            RESOURCES_SERVER_CONFIG,
             SEARCH_DIR,
             _value_flag("mode", "mode", "Data preparation mode.", choices=("train_preparation", "example_validation")),
             _value_flag("output-dir", "output_dirpath", "Output directory for the prepared data."),
@@ -379,7 +379,7 @@ COMMANDS = {
     "env init": Command(
         target="nemo_gym.cli.env:init_resources_server",
         summary="Scaffold config for a new server, benchmark, or agent.",
-        flags=(RESOURCE_SERVER,),
+        flags=(RESOURCES_SERVER,),
     ),
     "env resolve": Command(
         target="nemo_gym.cli.env:dump_config",
@@ -388,9 +388,9 @@ COMMANDS = {
     ),
     "env packages": Command(
         target="nemo_gym.cli.env:pip_list",
-        summary="Print pip packages for the selected resource server.",
+        summary="Print pip packages for the selected resources server.",
         flags=(
-            RESOURCE_SERVER,
+            RESOURCES_SERVER,
             _bool_flag("outdated", "outdated", "List only outdated packages."),
             Flag(
                 register=lambda p: p.add_argument(
@@ -402,13 +402,13 @@ COMMANDS = {
     ),
     "env test": Command(
         target=_env_test,
-        summary="Test the resource server(s); runs all if no resource server is given.",
-        flags=(RESOURCE_SERVER,),
+        summary="Test the resources server(s); runs all if no resources server is given.",
+        flags=(RESOURCES_SERVER,),
     ),
     "env run": Command(
         target="nemo_gym.cli.env:run",
         summary="Start the servers.",
-        flags=(CONFIG, BENCHMARK, RESOURCE_SERVER_CONFIG, MODEL_TYPE, SEARCH_DIR, MODEL, MODEL_URL, MODEL_API_KEY),
+        flags=(CONFIG, BENCHMARK, RESOURCES_SERVER_CONFIG, MODEL_TYPE, SEARCH_DIR, MODEL, MODEL_URL, MODEL_API_KEY),
     ),
     "env status": Command(target="nemo_gym.cli.env:status", summary="Print the server status.", flags=(JSON,)),
     "eval prepare": Command(
@@ -422,7 +422,7 @@ COMMANDS = {
         flags=(
             CONFIG,
             BENCHMARK,
-            RESOURCE_SERVER_CONFIG,
+            RESOURCES_SERVER_CONFIG,
             MODEL_TYPE,
             SEARCH_DIR,
             Flag(

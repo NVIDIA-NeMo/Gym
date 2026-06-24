@@ -83,7 +83,7 @@ policy_model_name: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
 
 ```bash
 gym env run \
-    --resource-server reasoning_gym \
+    --resources-server reasoning_gym \
     --model-type vllm_model
 ```
 

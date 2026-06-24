@@ -92,7 +92,7 @@ vllm serve \
 ### Launch servers
 ```bash
 gym env run \
-    --resource-server newton_bench \
+    --resources-server newton_bench \
     --model-type vllm_model
 ```
 
@@ -107,7 +107,7 @@ gym eval run --no-serve \
 
 ## Running Tests
 ```bash
-gym env test --resource-server newton_bench
+gym env test --resources-server newton_bench
 ```
 
 ## Qwen/Qwen3-VL-8B-Thinking Evaluation Summary

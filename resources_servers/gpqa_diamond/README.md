@@ -80,7 +80,7 @@ Using a local Nemotron 3 model with `local_vllm_model`:
 gym env run \
     --config responses_api_agents/simple_agent/configs/simple_agent.yaml \
     --model-type local_vllm_model/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 \
-    --resource-server gpqa_diamond \
+    --resources-server gpqa_diamond \
     '++policy_model=${inherit_from:NVIDIA-Nemotron-3-Nano-30B-A3B-BF16}' \
     +simple_agent.responses_api_agents.simple_agent.resources_server.name=gpqa_diamond \
     ++NVIDIA-Nemotron-3-Nano-30B-A3B-BF16.responses_api_models.local_vllm_model.vllm_serve_kwargs.mamba_ssm_cache_dtype=float32 \
@@ -93,7 +93,7 @@ Generic example with `openai_model`:
 gym env run \
     --config responses_api_agents/simple_agent/configs/simple_agent.yaml \
     --model-type openai_model \
-    --resource-server gpqa_diamond \
+    --resources-server gpqa_diamond \
     +simple_agent.responses_api_agents.simple_agent.resources_server.name=gpqa_diamond
 
 gym eval run --no-serve \

@@ -55,7 +55,7 @@ python run.py --verbose \
 First run the VLMEvalKit server to install dependencies.
 ```bash
 gym env run \
-    --resource-server vlm_eval_kit \
+    --resources-server vlm_eval_kit \
     --model-type openai_model
 ```
 
@@ -77,7 +77,7 @@ WANDB_PROJECT=
 EXPERIMENT_NAME=vlmevalkit/gpt-4o-mini-20240718
 gym eval run \
     --model-type openai_model \
-    --resource-server vlm_eval_kit \
+    --resources-server vlm_eval_kit \
     --output results/$EXPERIMENT_NAME.jsonl \
     --split validation \
     --model gpt-4o-mini-2024-07-18 \

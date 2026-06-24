@@ -13,7 +13,7 @@ Spin up server:
 ```
 gym env run \
     --model-type openai_model \
-    --resource-server workplace_assistant
+    --resources-server workplace_assistant
 ```
 
 Collect trajectories:

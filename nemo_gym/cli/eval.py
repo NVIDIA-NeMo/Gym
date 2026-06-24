@@ -73,7 +73,7 @@ def _fuzzy_matches(query: str, *fields: str) -> bool:
 def _benchmark_extras(bench: BenchmarkConfig) -> tuple[str, list[str]]:
     """Resolve a benchmark's config to its `(domain, extra search terms)`.
 
-    `BenchmarkConfig` flattens away the resource server name, the resource server `domain`, and the
+    `BenchmarkConfig` flattens away the resources server name, the resources server `domain`, and the
     dataset names. We re-resolve the config with the same parser `BenchmarkConfig` uses (so chained
     `config_paths` / `_inherit_from` are applied) and read those fields back out for the domain column
     and richer `gym search` matching.
@@ -92,10 +92,10 @@ def _benchmark_extras(bench: BenchmarkConfig) -> tuple[str, list[str]]:
         if not isinstance(instance, (dict, DictConfig)):
             continue
 
-        resource_servers = instance.get("resources_servers")
-        if resource_servers:
+        resources_servers = instance.get("resources_servers")
+        if resources_servers:
             terms.append(instance_name)  # e.g. aime24_math_with_judge_resources_server
-            for rs_name, rs_config in resource_servers.items():
+            for rs_name, rs_config in resources_servers.items():
                 terms.append(rs_name)  # e.g. math_with_judge
                 found_domain = (rs_config or {}).get("domain")
                 if found_domain:
@@ -134,7 +134,7 @@ def list_benchmarks() -> None:
     extras = {name: _benchmark_extras(bench) for name, bench in benchmarks.items()}
 
     # `gym search <query>` reuses this command, narrowing the listing to fuzzy matches across the
-    # benchmark name, agent name, resource server name, dataset names, and domain.
+    # benchmark name, agent name, resources server name, dataset names, and domain.
     query = global_config_dict.get(QUERY_KEY_NAME)
     if query:
         benchmarks = {

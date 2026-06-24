@@ -11,7 +11,7 @@ python resources_servers/xlam_fc/generate_dataset.py
 ```bash
 gym env run \
     --model-type vllm_model \
-    --resource-server xlam_fc
+    --resources-server xlam_fc
 ```
 
 ```bash

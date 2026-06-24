@@ -124,7 +124,7 @@ apt install -y ./apptainer_1.3.1_amd64.deb
 
 ```bash
 gym env run \
-    --resource-server cvdp \
+    --resources-server cvdp \
     --model-type vllm_model
 ```
 
@@ -142,7 +142,7 @@ gym eval run --no-serve \
     --max-output-tokens 4096 \
     --temperature 0.2 \
     --top-p 0.7 \
-    --resource-server cvdp \
+    --resources-server cvdp \
     --model-type vllm_model \
     --resume
 ```

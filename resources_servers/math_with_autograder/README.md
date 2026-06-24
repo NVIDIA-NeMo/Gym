@@ -37,8 +37,8 @@ existing math_with_judge consumers.
 ```bash
 gym env run \
     --model-type vllm_model \
-    --resource-server math_with_autograder \
-    --resource-server math_with_autograder/judge_gptoss20b
+    --resources-server math_with_autograder \
+    --resources-server math_with_autograder/judge_gptoss20b
 ```
 
 The bundled `judge_gptoss20b.yaml` wires the autograder judge to

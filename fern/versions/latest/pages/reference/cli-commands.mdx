@@ -35,7 +35,7 @@ gym dataset collate           # validate and collate a dataset
 gym env init                  # scaffold a new resources server
 gym env resolve               # resolve and print the final merged config
 gym env packages              # list packages in a server's virtual environment
-gym env test                  # test resource server(s); all of them if none is given
+gym env test                  # test resources server(s); all of them if none is given
 gym env run                   # start the servers
 gym env status                # show running servers
 
@@ -57,7 +57,7 @@ These options are shared across many commands.
 | --- | --- |
 | `--config PATH` | Load a Gym config YAML. Repeatable. Maps to `+config_paths=[...]`. |
 | `--benchmark NAME` | Select a registered benchmark by name instead of a config path. |
-| `--resource-server NAME` | Select a registered resources server by name. |
+| `--resources-server NAME` | Select a registered resources server by name. |
 | `--model-type NAME` | Select a registered model server type by name (such as `openai_model` or `vllm_model`). |
 | `--search-dir DIR` | Extra root directory to search for named components. Repeatable. Lets you register your own benchmarks, resources servers, and models. |
 | `--json` | Emit machine-readable JSON instead of human-readable output (reporting commands only). |
@@ -65,7 +65,7 @@ These options are shared across many commands.
 | `-h`, `--help` | Show help for any group or command. |
 
 <Tip>
-The `--benchmark`, `--resource-server`, and `--model-type` selectors resolve a component name to its config file for you, so you do not need to know the project's directory layout. If you mistype a name, the CLI suggests the closest match. To point at a config file directly, use `--config <path>` instead.
+The `--benchmark`, `--resources-server`, and `--model-type` selectors resolve a component name to its config file for you, so you do not need to know the project's directory layout. If you mistype a name, the CLI suggests the closest match. To point at a config file directly, use `--config <path>` instead.
 </Tip>
 
 ### Hydra overrides (escape hatch)
@@ -276,7 +276,7 @@ Validate and collate a dataset, generating metrics and statistics. Replaces `ng_
 | Option | Description |
 | --- | --- |
 | `--config PATH` | Config file to load. Repeatable. |
-| `--resource-server NAME` | Load the named resources server config. |
+| `--resources-server NAME` | Load the named resources server config. |
 | `--search-dir DIR` | Extra root directory to search for named components. Repeatable. |
 | `--mode {train_preparation,example_validation}` | Use `train_preparation` to prepare train/validation datasets, or `example_validation` to validate example data for PR submission. |
 | `--output-dir` | Output directory for the prepared data. |
@@ -284,7 +284,7 @@ Validate and collate a dataset, generating metrics and statistics. Replaces `ng_
 
 ```bash
 gym dataset collate \
-    --resource-server example_multi_step \
+    --resources-server example_multi_step \
     --config responses_api_models/openai_model/configs/openai_model.yaml \
     --output-dir data/example_multi_step \
     --mode example_validation
@@ -302,10 +302,10 @@ Scaffold a new resources server with template files (config, app, tests, README,
 
 | Option | Description |
 | --- | --- |
-| `--resource-server NAME` | Name of the resources server to create. |
+| `--resources-server NAME` | Name of the resources server to create. |
 
 ```bash
-gym env init --resource-server my_server
+gym env init --resources-server my_server
 ```
 
 ### `gym env resolve`
@@ -326,16 +326,16 @@ Each server has its own isolated virtual environment. List the packages installe
 
 | Option | Description |
 | --- | --- |
-| `--resource-server NAME` | Name of the resources server. |
+| `--resources-server NAME` | Name of the resources server. |
 | `--outdated` | List only outdated packages. |
 | `--json` | Output the package list as JSON. |
 
 ```bash
-gym env packages --resource-server example_single_tool_call
+gym env packages --resources-server example_single_tool_call
 
 # Check for outdated packages
 gym env packages \
-    --resource-server example_single_tool_call \
+    --resources-server example_single_tool_call \
     --outdated
 ```
 
@@ -345,11 +345,11 @@ Test resource server(s) by running their pytest suite. If no resources server is
 
 | Option | Description |
 | --- | --- |
-| `--resource-server NAME` | Resources server to test. Omit to test all servers. |
+| `--resources-server NAME` | Resources server to test. Omit to test all servers. |
 
 ```bash
 # Test a single server
-gym env test --resource-server example_single_tool_call
+gym env test --resources-server example_single_tool_call
 
 # Test all servers
 gym env test
@@ -363,7 +363,7 @@ Start the NeMo Gym servers (agents, models, resources) defined by the provided c
 | --- | --- |
 | `--config PATH` | Config file to load. Repeatable. |
 | `--benchmark NAME` | Load the named benchmark config (start its servers). |
-| `--resource-server NAME` | Load the named resources server config. |
+| `--resources-server NAME` | Load the named resources server config. |
 | `--model-type NAME` | Load the named model server type config. |
 | `--search-dir DIR` | Extra root directory to search for named components. Repeatable. |
 | `--model`, `-m` | Served model identifier. See [Selecting the model server](#selecting-the-model-server). |
@@ -372,7 +372,7 @@ Start the NeMo Gym servers (agents, models, resources) defined by the provided c
 
 ```bash
 gym env run \
-    --resource-server example_single_tool_call \
+    --resources-server example_single_tool_call \
     --model-type openai_model
 
 # Start a benchmark's servers
@@ -437,7 +437,7 @@ Collate data, start the servers, and collect rollouts. This is the main evaluati
 | --- | --- |
 | `--config PATH` | Config file to load. Repeatable. |
 | `--benchmark NAME` | Load the named benchmark config. |
-| `--resource-server NAME` | Load the named resources server config. |
+| `--resources-server NAME` | Load the named resources server config. |
 | `--model-type NAME` | Load the named model server type config. |
 | `--search-dir DIR` | Extra root directory to search for named components. Repeatable. |
 | `--no-serve` | Collect against already-running servers instead of starting them. |
@@ -468,7 +468,7 @@ gym eval run --benchmark aime24 \
 # Against an already-running server, with a remote vLLM endpoint
 gym eval run --no-serve \
     --model-type openai_model \
-    --resource-server math_with_judge \
+    --resources-server math_with_judge \
     --output results/test_001.jsonl \
     --split validation \
     --model openai/gpt-oss-120b \
@@ -537,7 +537,7 @@ The legacy `ng_*` and `nemo_gym_*` console scripts are deprecated but still func
 | `ng_pip_list` | `gym env packages` |
 | `ng_init_resources_server` | `gym env init` |
 | `ng_test` | `gym env test` |
-| `ng_test_all` | `gym env test` (no `--resource-server`) |
+| `ng_test_all` | `gym env test` (no `--resources-server`) |
 | `ng_prepare_benchmark` | `gym eval prepare` |
 | `ng_e2e_collect_rollouts` | `gym eval run` |
 | `ng_collect_rollouts` | `gym eval run --no-serve` |
@@ -586,7 +586,7 @@ The most common Hydra overrides now have dedicated flags. Prefer flags; fall bac
 ng_run "+config_paths=[resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml,responses_api_models/openai_model/configs/openai_model.yaml]"
 # After:
 gym env run \
-    --resource-server example_single_tool_call \
+    --resources-server example_single_tool_call \
     --model-type openai_model
 
 # End-to-end rollout collection
@@ -598,7 +598,7 @@ ng_e2e_collect_rollouts "+config_paths=[${config_paths}]" \
 # After:
 gym eval run \
     --model-type openai_model \
-    --resource-server math_with_judge \
+    --resources-server math_with_judge \
     --output results/aime24.jsonl \
     --split validation
 

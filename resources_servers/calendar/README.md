@@ -18,7 +18,7 @@ The following is an example command for running this resources server along with
 ```bash
 gym env run \
     --model-type openai_model \
-    --resource-server calendar
+    --resources-server calendar
 ```
 
 ## Collecting rollouts

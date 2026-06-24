@@ -14,7 +14,7 @@ description: >-
 
 Use this skill when the user wants to run, understand, or lightly modify Nemo Gym reward profiling. Keep the answer oriented around the normal workflow:
 
-`gym env run` starts model/resource servers, `gym eval run --no-serve` writes rollout artifacts, and `gym eval profile` generates profiling output from those artifacts.
+`gym env run` starts model/resources servers, `gym eval run --no-serve` writes rollout artifacts, and `gym eval profile` generates profiling output from those artifacts.
 
 If the user is primarily debugging a failed job or stack trace, use the `nemo-gym-debugging` skill first.
 

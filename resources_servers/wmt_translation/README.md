@@ -72,7 +72,7 @@ For an end-to-end SLURM run with COMET enabled, see the
 # Running servers (BLEU-only locally; flip compute_comet=true on cluster)
 gym env run \
     --model-type vllm_model \
-    --resource-server wmt_translation \
+    --resources-server wmt_translation \
     ++wmt_translation.resources_servers.wmt_translation.compute_comet=false
 
 # Collecting rollouts (5-example smoke test)

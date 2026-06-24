@@ -68,7 +68,7 @@ parser name that matches your model's reasoning tokens (see `vllm serve
 # Running servers
 gym env run \
     --model-type vllm_model \
-    --resource-server math_proof_judgement
+    --resources-server math_proof_judgement
 
 # Collecting rollouts (5-example smoke test)
 gym eval run --no-serve \

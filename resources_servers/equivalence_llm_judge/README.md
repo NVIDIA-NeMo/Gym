@@ -52,7 +52,7 @@ equivalence_llm_judge_simple_agent:
 Spin up with a judge model and prompt:
 ```bash
 gym env run \
-  --resource-server equivalence_llm_judge \
+  --resources-server equivalence_llm_judge \
   --model-type openai_model \
   +equivalence_llm_judge.resources_servers.equivalence_llm_judge.judge_responses_create_params.max_output_tokens=256 \
   +equivalence_llm_judge.resources_servers.equivalence_llm_judge.judge_system_message="You are a careful arbiter." \

@@ -6,11 +6,11 @@ Evaluates model responses on the **MultiChallenge** benchmark using an LLM judge
 
 ```bash
 # 1. Run unit tests
-gym env test --resource-server multichallenge
+gym env test --resources-server multichallenge
 
 # 2. Start servers (in terminal 1)
 gym env run \
-  --resource-server multichallenge \
+  --resources-server multichallenge \
   --model-type vllm_model
 
 # 3. Collect rollouts on example data (in terminal 2)
@@ -89,7 +89,7 @@ gym eval run --no-serve \
 
 ```bash
 # Run all unit tests
-gym env test --resource-server multichallenge
+gym env test --resources-server multichallenge
 
 # Or run directly with pytest for more detail
 cd resources_servers/multichallenge
@@ -107,7 +107,7 @@ Tests cover:
 1. **Start servers**:
    ```bash
    gym env run \
-     --resource-server multichallenge \
+     --resources-server multichallenge \
      --model-type vllm_model
    ```
 

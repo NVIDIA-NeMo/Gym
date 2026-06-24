@@ -28,17 +28,17 @@ The example dataset includes various jailbreak attack patterns:
 1. Start the servers:
 ```bash
 gym env run \
-    --resource-server jailbreak_detection/jailbreak_detection_nemotron_combined_reward_tp8 \
+    --resources-server jailbreak_detection/jailbreak_detection_nemotron_combined_reward_tp8 \
     --model-type openai_model \
-    --resource-server jailbreak_detection/safety_judge_model
+    --resources-server jailbreak_detection/safety_judge_model
 ```
 
 2. Collect rollouts:
 ```bash
 gym eval run --no-serve \
-    --resource-server jailbreak_detection/jailbreak_detection_nemotron_combined_reward_tp8 \
+    --resources-server jailbreak_detection/jailbreak_detection_nemotron_combined_reward_tp8 \
     --model-type openai_model \
-    --resource-server jailbreak_detection/safety_judge_model \
+    --resources-server jailbreak_detection/safety_judge_model \
     --agent jailbreak_detection_simple_agent \
     --input resources_servers/jailbreak_detection/data/example.jsonl \
     --output results/jailbreak_detection_rollouts.jsonl

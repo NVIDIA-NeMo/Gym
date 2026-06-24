@@ -37,7 +37,7 @@ cd $NEMO_GYM_ROOT
 source .venv/bin/activate
 
 gym dataset collate \
-    --resource-server workplace_assistant \
+    --resources-server workplace_assistant \
     --config responses_api_models/vllm_model/configs/vllm_model_for_training.yaml \
     --output-dir data/workplace_assistant \
     --mode train_preparation \

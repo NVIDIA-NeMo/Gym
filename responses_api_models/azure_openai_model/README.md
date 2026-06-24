@@ -17,7 +17,7 @@ Set the API version. It usually looks something like "2024-10-21".
 ```bash
 gym env run \
     --model-type azure_openai_model \
-    --resource-server equivalence_llm_judge \
+    --resources-server equivalence_llm_judge \
     +policy_model.responses_api_models.azure_openai_model.default_query.api-version=<api_version>
 ```
 

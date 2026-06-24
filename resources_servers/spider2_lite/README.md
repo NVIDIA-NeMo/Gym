@@ -79,7 +79,7 @@ Each line must include either `gold_sql` (execute-and-compare) or `gold_result` 
 Validate example data:
 ```bash
 gym dataset collate \
-    --resource-server spider2_lite \
+    --resources-server spider2_lite \
     --output-dir /tmp/prepare \
     --mode example_validation
 ```

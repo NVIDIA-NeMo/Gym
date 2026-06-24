@@ -101,7 +101,7 @@ NeMo Gym uses local servers to coordinate your model, agent, and task verificati
 
 ```bash
 gym env run \
-    --resource-server mcqa \
+    --resources-server mcqa \
     --model-type openai_model
 ```
 

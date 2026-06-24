@@ -32,7 +32,7 @@ policy_model_name: gpt-5-2025-08-07  # or gpt-4.1-2025-04-14
 cd /path/to/Gym
 source .venv/bin/activate
 gym env run \
-    --resource-server verifif \
+    --resources-server verifif \
     --model-type openai_model
 ```
 

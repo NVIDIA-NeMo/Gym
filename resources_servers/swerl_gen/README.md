@@ -63,7 +63,7 @@ You need to have singularity installed. Image having singularity:
 gym env run \
     --config responses_api_agents/simple_agent/configs/simple_agent.yaml \
     --model-type openai_model \
-    --resource-server swerl_gen
+    --resources-server swerl_gen
 
 gym eval run --no-serve \
     --agent swerl_gen_simple_agent \

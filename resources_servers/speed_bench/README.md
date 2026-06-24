@@ -109,7 +109,7 @@ For an EAGLE3 / MTP setup with a paired draft model, see
 # your own model config to swap targets; just keep the speculative_config block).
 gym env run \
     --model-type local_vllm_model/Qwen/Qwen3-30B-A3B-Instruct-2507-ngram-specdec \
-    --resource-server speed_bench \
+    --resources-server speed_bench \
     --config responses_api_agents/speed_bench_agent/configs/speed_bench_agent.yaml \
     +policy_model=Qwen3-30B-A3B-Instruct-2507-ngram-specdec
 
@@ -129,7 +129,7 @@ when starting the upstream `vllm serve` process.
 ## Tests
 
 ```bash
-gym env test --resource-server speed_bench
+gym env test --resources-server speed_bench
 ```
 
 The unit tests cover the Prometheus parser, the running-delta math, the

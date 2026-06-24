@@ -36,7 +36,7 @@ ensure_bird_sql()
 ```bash
 gym env run \
     --model-type vllm_model \
-    --resource-server bird_sql
+    --resources-server bird_sql
 ```
 
 Requires `policy_base_url` / `policy_api_key` / `policy_model_name` in

@@ -28,7 +28,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for system diagrams and detailed field ma
 ```bash
 gym env run \
     --model-type openai_model \
-    --resource-server format_verification/freeform_formatting
+    --resources-server format_verification/freeform_formatting
 ```
 
 Collect rollouts:
@@ -45,7 +45,7 @@ gym eval run --no-serve \
 ```bash
 gym env run \
     --model-type openai_model \
-    --resource-server format_verification/citation_format
+    --resources-server format_verification/citation_format
 ```
 
 Collect rollouts:
@@ -64,7 +64,7 @@ gym eval run --no-serve \
 ```bash
 gym dataset collate \
     --config responses_api_models/vllm_model/configs/vllm_model_for_training.yaml \
-    --resource-server format_verification/freeform_formatting \
+    --resources-server format_verification/freeform_formatting \
     --output-dir data/format_verification_freeform/ \
     --mode train_preparation \
     --download
@@ -74,7 +74,7 @@ gym dataset collate \
 ```bash
 gym dataset collate \
     --config responses_api_models/vllm_model/configs/vllm_model_for_training.yaml \
-    --resource-server format_verification/citation_format \
+    --resources-server format_verification/citation_format \
     --output-dir data/format_verification_citation/ \
     --mode train_preparation \
     --download
@@ -82,7 +82,7 @@ gym dataset collate \
 
 ## Testing
 ```bash
-gym env test --resource-server format_verification
+gym env test --resources-server format_verification
 ```
 
 ## Licensing

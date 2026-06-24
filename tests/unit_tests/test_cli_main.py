@@ -250,7 +250,7 @@ class TestEnvTestResourceServerFlag:
         assert overrides == []
 
     def test_resource_server_name_translates_to_entrypoint(self, monkeypatch: MonkeyPatch) -> None:
-        target, overrides = _dispatch_for(monkeypatch, ["env", "test", "--resource-server", "gpqa"])
+        target, overrides = _dispatch_for(monkeypatch, ["env", "test", "--resources-server", "gpqa"])
         assert target == "nemo_gym.cli.env:test"
         assert overrides == ["+entrypoint=resources_servers/gpqa"]
 
@@ -486,14 +486,14 @@ class TestModelFlag:
 
 class TestEnvInitFlags:
     def test_resource_server_translates_to_entrypoint(self, monkeypatch: MonkeyPatch) -> None:
-        target, overrides = _dispatch_for(monkeypatch, ["env", "init", "--resource-server", "my_server"])
+        target, overrides = _dispatch_for(monkeypatch, ["env", "init", "--resources-server", "my_server"])
         assert target == "nemo_gym.cli.env:init_resources_server"
         assert overrides == ["+entrypoint=resources_servers/my_server"]
 
 
 class TestEnvPackagesFlags:
     def test_flags(self, monkeypatch: MonkeyPatch) -> None:
-        target, overrides = _dispatch_for(monkeypatch, ["env", "packages", "--resource-server", "gpqa", "--outdated"])
+        target, overrides = _dispatch_for(monkeypatch, ["env", "packages", "--resources-server", "gpqa", "--outdated"])
         assert target == "nemo_gym.cli.env:pip_list"
         assert set(overrides) == {
             "+entrypoint=resources_servers/gpqa",
@@ -539,12 +539,12 @@ class TestSearch:
 
     def test_env_packages_json_maps_to_uv_format(self, monkeypatch: MonkeyPatch) -> None:
         # env packages delegates to `uv pip list`, so --json maps onto its own --format=json rather than +json=true.
-        target, overrides = _dispatch_for(monkeypatch, ["env", "packages", "--resource-server", "mcqa", "--json"])
+        target, overrides = _dispatch_for(monkeypatch, ["env", "packages", "--resources-server", "mcqa", "--json"])
         assert target == "nemo_gym.cli.env:pip_list"
         assert set(overrides) == {"+entrypoint=resources_servers/mcqa", "+format=json"}
 
     def test_env_packages_without_json(self, monkeypatch: MonkeyPatch) -> None:
-        _, overrides = _dispatch_for(monkeypatch, ["env", "packages", "--resource-server", "mcqa"])
+        _, overrides = _dispatch_for(monkeypatch, ["env", "packages", "--resources-server", "mcqa"])
         assert overrides == ["+entrypoint=resources_servers/mcqa"]
 
 
@@ -592,7 +592,7 @@ class TestVerboseFlag:
 
 
 class TestAssetSelectors:
-    """Named selectors (--benchmark, --resource-server, --model-type) that resolve a name to a default config path.
+    """Named selectors (--benchmark, --resources-server, --model-type) that resolve a name to a default config path.
 
     Each example mirrors a real invocation from the docs/READMEs, so the sugar stays faithful to the documented
     config paths it replaces. The legacy `+config_paths=[...]` form each one is derived from is cited inline.
@@ -608,10 +608,10 @@ class TestAssetSelectors:
             # benchmarks/gpqa/README.md: ng_run "+config_paths=[benchmarks/gpqa/config.yaml]" (start a benchmark's servers)
             (["env", "run", "--benchmark", "gpqa"], "benchmarks/gpqa/config.yaml"),
             # README.md / quickstart.mdx: resources_servers/mcqa/configs/mcqa.yaml
-            (["env", "run", "--resource-server", "mcqa"], "resources_servers/mcqa/configs/mcqa.yaml"),
+            (["env", "run", "--resources-server", "mcqa"], "resources_servers/mcqa/configs/mcqa.yaml"),
             # model-server/vllm.mdx: resources_servers/example_multi_step/configs/example_multi_step.yaml
             (
-                ["env", "run", "--resource-server", "example_multi_step"],
+                ["env", "run", "--resources-server", "example_multi_step"],
                 "resources_servers/example_multi_step/configs/example_multi_step.yaml",
             ),
             # README.md / quickstart.mdx: responses_api_models/openai_model/configs/openai_model.yaml
@@ -632,7 +632,7 @@ class TestAssetSelectors:
         #   ng_run "+config_paths=[resources_servers/mcqa/configs/mcqa.yaml,
         #                          responses_api_models/openai_model/configs/openai_model.yaml]"
         target, overrides = _dispatch_for(
-            monkeypatch, ["env", "run", "--resource-server", "mcqa", "--model-type", "openai_model"]
+            monkeypatch, ["env", "run", "--resources-server", "mcqa", "--model-type", "openai_model"]
         )
         assert target == "nemo_gym.cli.env:run"
         paths, others = _split_overrides(overrides)
@@ -664,7 +664,7 @@ class TestAssetSelectors:
             [
                 "eval",
                 "run",
-                "--resource-server",
+                "--resources-server",
                 "math_with_judge",
                 "--model-type",
                 "openai_model",
@@ -694,7 +694,7 @@ class TestAssetSelectors:
             [
                 "dataset",
                 "collate",
-                "--resource-server",
+                "--resources-server",
                 "example_multi_step",
                 "--mode",
                 "example_validation",
@@ -713,7 +713,7 @@ class TestAssetSelectors:
     def test_resource_server_flavor_syntax(self, monkeypatch: MonkeyPatch) -> None:
         # `<server>/<flavor>` picks a named config inside the server's configs/ dir; math_with_judge ships several
         # flavoured configs (see reference/faq.mdx, which pairs a math_with_judge dataset flavour for profiling).
-        _, overrides = _dispatch_for(monkeypatch, ["eval", "run", "--resource-server", "math_with_judge/dapo17k"])
+        _, overrides = _dispatch_for(monkeypatch, ["eval", "run", "--resources-server", "math_with_judge/dapo17k"])
         assert overrides == [
             f"+config_paths=[{WORKING_DIR / 'resources_servers/math_with_judge/configs/dapo17k.yaml'}]"
         ]
@@ -731,7 +731,7 @@ class TestAssetSelectors:
         # _split_overrides asserts they coalesce into a single token.
         _, overrides = _dispatch_for(
             monkeypatch,
-            ["eval", "run", "--config", "extra.yaml", "--resource-server", "mcqa", "--model-type", "openai_model"],
+            ["eval", "run", "--config", "extra.yaml", "--resources-server", "mcqa", "--model-type", "openai_model"],
         )
         paths, others = _split_overrides(overrides)
         assert paths == {
@@ -754,7 +754,7 @@ class TestAssetSelectors:
     def test_unknown_flavor_error_points_at_configs_dir(self, monkeypatch: MonkeyPatch, capsys) -> None:
         # For a known server with an unknown flavor, the hint should point at that server's configs/ dir.
         monkeypatch.setattr(cli_main, "dispatch", lambda target, overrides: None)
-        monkeypatch.setattr(sys, "argv", ["gym", "env", "run", "--resource-server", "mcqa/nope"])
+        monkeypatch.setattr(sys, "argv", ["gym", "env", "run", "--resources-server", "mcqa/nope"])
         with pytest.raises(SystemExit):
             main()
         err = capsys.readouterr().err
@@ -803,7 +803,7 @@ class TestDidYouMean:
 
     def test_misspelled_component_flavor(self, monkeypatch: MonkeyPatch, capsys) -> None:
         err = self._run_expecting_exit(
-            monkeypatch, capsys, ["eval", "run", "--resource-server", "math_with_judge/dapo17"]
+            monkeypatch, capsys, ["eval", "run", "--resources-server", "math_with_judge/dapo17"]
         )
         assert "Did you mean `dapo17k`?" in err
 

@@ -9,8 +9,8 @@ It integrates with the NeMo Skills ToolManager to dynamically load and execute t
 The following are example commands for running this resources server with the simple agent and a vLLM model:
 ```bash
 gym env run \
-    --resource-server ns_tools \
-    --resource-server math_with_judge \
+    --resources-server ns_tools \
+    --resources-server math_with_judge \
     --model-type vllm_model \
     --model-url http://localhost:8000/v1 \
     --model Qwen/Qwen3-8B \
@@ -79,7 +79,7 @@ python prepare_dataset.py \
 To validate the example data and regenerate metrics:
 ```bash
 gym dataset collate \
-    --resource-server ns_tools \
+    --resources-server ns_tools \
     --config responses_api_models/openai_model/configs/openai_model.yaml \
     --output-dir data/ns_tools \
     --mode example_validation

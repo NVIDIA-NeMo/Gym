@@ -24,7 +24,7 @@ Use ``benchmarks/imo_proofbench/`` for the IMO-ProofBench dataset.
 ```bash
 gym env run \
     --model-type vllm_model \
-    --resource-server imo_proofbench_judge \
+    --resources-server imo_proofbench_judge \
     +judge_base_url=https://generativelanguage.googleapis.com/v1beta/openai \
     "+judge_api_key=$GEMINI_API_KEY" \
     +judge_model_name=gemini-2.5-pro

@@ -145,7 +145,7 @@ gym dataset download \
 Use `artifact_fpath` when the Hugging Face repo contains raw/arbitrary JSONL files rather than structured dataset splits. You cannot specify both `split` and `artifact_fpath`.
 
 # How To: Prepare and validate data for PR submission or RL training
-When you use `gym env init --resource-server example_multi_step` to initialize a resources server, you will get a config.yaml that looks like the below code block. The dataset information for training, validation, and example will be inside the scope of your agent config (e.g. under simple_agent) and is a list of dataset objects.
+When you use `gym env init --resources-server example_multi_step` to initialize a resources server, you will get a config.yaml that looks like the below code block. The dataset information for training, validation, and example will be inside the scope of your agent config (e.g. under simple_agent) and is a list of dataset objects.
 
 ```yaml
 example_multi_step_resources_server:
@@ -223,7 +223,7 @@ Each config.yaml in the resources server requires at least one agent with one ex
 For every PR that contributes data, we require common dataset statistics and sanity checks on the data itself. This process is also helpful to catch any simple issues before you ever train with NeMo RL. NeMo Gym provides a helper command gym dataset collate to do so.
 ```bash
 gym dataset collate \
-    --resource-server example_multi_step \
+    --resources-server example_multi_step \
     --config responses_api_models/openai_model/configs/openai_model.yaml \
     --output-dir data/example_multi_step \
     --mode example_validation
@@ -232,7 +232,7 @@ gym dataset collate \
 To download missing datasets automatically, add --download. By default, datasets are downloaded from Hugging Face:
 ```bash
 gym dataset collate \
-    --resource-server example_multi_step \
+    --resources-server example_multi_step \
     --config responses_api_models/openai_model/configs/openai_model.yaml \
     --output-dir data/example_multi_step \
     --mode train_preparation \
@@ -243,7 +243,7 @@ For NVIDIA internal users, you can download from GitLab instead:
 
 ```bash
 gym dataset collate \
-    --resource-server example_multi_step \
+    --resources-server example_multi_step \
     --config responses_api_models/openai_model/configs/openai_model.yaml \
     --output-dir data/example_multi_step \
     --mode train_preparation \
@@ -254,7 +254,7 @@ gym dataset collate \
 Run NeMo Gym servers the exact same way with the same configs!
 ```bash
 gym env run \
-    --resource-server example_multi_step \
+    --resources-server example_multi_step \
     --model-type openai_model
 ```
 
@@ -278,7 +278,7 @@ The `gym dataset collate` command will:
 The `gym dataset collate` command has 2 modes, one for actual train and validation set preparation, and one for example validation intended to sanity check your data format. You would typically run `--mode example_validation` when first contributing a resources server, and then run with `--mode train_preparation` when you actually go to train.
 ```bash
 gym dataset collate \
-    --resource-server example_multi_step \
+    --resources-server example_multi_step \
     --config responses_api_models/openai_model/configs/openai_model.yaml \
     --output-dir data/example_multi_step \
     --mode example_validation

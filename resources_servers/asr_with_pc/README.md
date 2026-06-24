@@ -52,7 +52,7 @@ workaround until the schema is extended.
 ```bash
 gym env run \
     --model-type vllm_model \
-    --resource-server asr_with_pc
+    --resources-server asr_with_pc
 ```
 
 ## Collecting rollouts (5-example smoke test)

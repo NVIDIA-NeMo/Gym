@@ -34,8 +34,8 @@ existing math_with_judge consumers (`aime24`, `aime25`, `gsm8k`,
 ```bash
 gym env run \
     --model-type vllm_model \
-    --resource-server physics_judge \
-    --resource-server physics_judge/judge_openai
+    --resources-server physics_judge \
+    --resources-server physics_judge/judge_openai
 ```
 
 The bundled `judge_openai.yaml` defaults the judge to `openai/gpt-oss-20b`

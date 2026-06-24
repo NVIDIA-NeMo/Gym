@@ -32,7 +32,7 @@ pass@k for each channel.
 ```bash
 gym env run \
     --model-type openai_model \
-    --resource-server hotpotqa_qa
+    --resources-server hotpotqa_qa
 ```
 
 ## Collecting rollouts

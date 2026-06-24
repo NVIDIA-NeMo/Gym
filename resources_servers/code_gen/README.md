@@ -26,7 +26,7 @@ We use the LiveCodeBench execution code.
 # Running the server
 gym env run \
     --model-type openai_model \
-    --resource-server code_gen
+    --resources-server code_gen
 
 # Collect rollouts from example problems
 gym eval run --no-serve \

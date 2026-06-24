@@ -25,7 +25,7 @@ starts are instant.
 # Running servers
 gym env run \
     --model-type vllm_model \
-    --resource-server bigcodebench
+    --resources-server bigcodebench
 
 # Collecting rollouts (5-example smoke test)
 gym eval run --no-serve \

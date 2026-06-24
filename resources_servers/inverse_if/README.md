@@ -6,11 +6,11 @@ Evaluates model responses on the **Inverse IF** (Instruction Following) benchmar
 
 ```bash
 # 1. Run unit tests
-gym env test --resource-server inverse_if
+gym env test --resources-server inverse_if
 
 # 2. Start servers (in terminal 1)
 gym env run \
-    --resource-server inverse_if \
+    --resources-server inverse_if \
     --model-type vllm_model
 
 # 3. Collect rollouts on example data (in terminal 2)
@@ -101,7 +101,7 @@ gym eval run --no-serve \
 
 ```bash
 # Run all unit tests
-gym env test --resource-server inverse_if
+gym env test --resources-server inverse_if
 
 # Or run directly with pytest
 cd resources_servers/inverse_if
@@ -119,7 +119,7 @@ Tests cover:
 1. **Start servers**:
    ```bash
    gym env run \
-       --resource-server inverse_if \
+       --resources-server inverse_if \
        --model-type vllm_model
    ```
 

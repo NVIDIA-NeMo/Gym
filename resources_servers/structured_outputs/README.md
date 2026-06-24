@@ -57,7 +57,7 @@ an OpenAI model:
 ```bash
 gym env run \
     --model-type openai_model \
-    --resource-server structured_outputs/structured_outputs_json
+    --resources-server structured_outputs/structured_outputs_json
 ```
 
 Then, text-output rollouts can be collected using a command such as:
@@ -76,7 +76,7 @@ emitted function call is the final answer, not an action to execute:
 ```bash
 gym env run \
     --model-type vllm_model \
-    --resource-server structured_outputs/structured_outputs_v4
+    --resources-server structured_outputs/structured_outputs_v4
 ```
 
 ```bash
@@ -100,7 +100,7 @@ You can prepare the data for training with:
 ```bash
 gym dataset collate \
     --config responses_api_models/openai_model/configs/openai_model.yaml \
-    --resource-server structured_outputs/structured_outputs_json \
+    --resources-server structured_outputs/structured_outputs_json \
     --output-dir data/structured_outputs \
     --mode train_preparation \
     --download
@@ -111,7 +111,7 @@ gym dataset collate \
 # prepare
 gym dataset collate \
     --config responses_api_models/vllm_model/configs/vllm_model_for_training.yaml \
-    --resource-server structured_outputs/structured_outputs_json_yaml_xml_v1 \
+    --resources-server structured_outputs/structured_outputs_json_yaml_xml_v1 \
     --output-dir data/structured_outputs/ \
     --mode train_preparation \
     --download
@@ -121,7 +121,7 @@ gym dataset collate \
 ```bash
 gym dataset collate \
     --config responses_api_models/vllm_model/configs/vllm_model_for_training.yaml \
-    --resource-server structured_outputs/structured_outputs_v3 \
+    --resources-server structured_outputs/structured_outputs_v3 \
     --output-dir data/structured_outputs_v3/ \
     --mode train_preparation \
     --download
@@ -142,7 +142,7 @@ Prepare the v4 training data with:
 ```bash
 gym dataset collate \
     --config responses_api_models/vllm_model/configs/vllm_model_for_training.yaml \
-    --resource-server structured_outputs/structured_outputs_v4 \
+    --resources-server structured_outputs/structured_outputs_v4 \
     --output-dir data/structured_outputs_v4_tool_call/ \
     --mode train_preparation \
     --download
@@ -167,7 +167,7 @@ Generation details and CLI examples are in
 
 # Testing
 ```
-gym env test --resource-server structured_outputs
+gym env test --resources-server structured_outputs
 ```
 
 # Licensing information
