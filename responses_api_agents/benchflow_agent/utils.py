@@ -115,10 +115,10 @@ class BenchFlowAgentUtils:
         messages.append(last_exchange["response"]["body"]["choices"][0]["message"])
 
         for message in messages:
-            if isinstance(message.get("content"), list) and message.get("role") in ("user", "system", "developer"):
-                for elem in message["content"]:
-                    if elem["type"] == "text":
-                        elem["type"] = "input_text"
+            if isinstance(message.get("content"), list):
+                message["content"] = "".join(elem["text"] for elem in message["content"])
+            elif message.get("content") is None:
+                message["content"] = ""
 
         converter = VLLMConverter(return_token_id_information=False)
         items = converter.chat_completions_messages_to_responses_items(messages)
