@@ -112,6 +112,7 @@ Your environment comes preinstalled with a comprehensive set of Python packages 
 - Ghostscript (PostScript/PDF processing)
 - FFmpeg (complete audio/video processing suite with all codecs)
 - Graphviz (graph visualization with DOT language)
+- TeX Live (full LaTeX toolchain: pdflatex, xelatex, lualatex, latexmk)
 - OpenJDK 21 JRE (Java runtime for Tabula and other Java-based tools)
 - GDAL/GEOS/Proj (geospatial data libraries and utilities)
 - Build tools: gcc, g++, cmake, pkg-config, make
