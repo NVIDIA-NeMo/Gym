@@ -37,7 +37,7 @@ from rich.table import Table
 from tqdm.auto import tqdm
 
 from nemo_gym import PARENT_DIR, ROOT_DIR
-from nemo_gym.cli_setup_command import run_command, setup_env_command
+from nemo_gym.cli.setup_command import run_command, setup_env_command
 from nemo_gym.config_types import BaseNeMoGymCLIConfig
 from nemo_gym.global_config import (
     DRY_RUN_KEY_NAME,
