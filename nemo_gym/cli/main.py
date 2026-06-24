@@ -285,7 +285,7 @@ def _dataset_download(args: argparse.Namespace, overrides: list[str]) -> None:
 
 # One-line help for each command group, shown in `gym --help`.
 GROUPS = {
-    "list": "List available components. As of now, only benchmarks are available.",
+    "list": "List available components (benchmarks, environments).",
     "dataset": "Manage datasets.",
     "env": "Develop and run environments.",
     "eval": "Run evaluations.",
@@ -295,6 +295,9 @@ GROUPS = {
 COMMANDS = {
     "list benchmarks": Command(
         target="nemo_gym.cli.eval:list_benchmarks", summary="List available benchmarks.", flags=(JSON,)
+    ),
+    "list environments": Command(
+        target="nemo_gym.cli.env:list_environments", summary="List available environments by name."
     ),
     "search": Command(
         target="nemo_gym.cli.eval:list_benchmarks",
