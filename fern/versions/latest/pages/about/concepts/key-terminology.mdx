@@ -59,11 +59,11 @@ The primary LLM being trained or evaluated - the "decision-making brain" you wan
 
 **Resources Server**
 
-The FastAPI service (one directory per environment under `resources_servers/`) that *is* the environment: it holds per-task state, exposes the environment's tools, and implements `verify()` to score a rollout into a reward. If the name "Resources Server" feels abstract, read it as "the environment + verifier service." Every benchmark or training environment has exactly one.
+The FastAPI service (under `resources_servers/`) that holds per-task state, exposes the environment's tools, and implements `verify()` to score a rollout into a reward — the verifier-and-state component of an environment. (In Gym an *environment* is a resources server together with an agent and dataset(s); see the `environments/` directory.) Every environment has exactly one resources server.
 
 **Agent Server (Responses API Agent)**
 
-The FastAPI service (under `responses_api_agents/`) that drives the model through a task - the harness that runs the multi-step / tool-calling loop against a resources server. `simple_agent` is the built-in default; bring your own for custom control flow.
+The FastAPI service (under `responses_api_agents/`) that drives the model through a task — the harness that runs the multi-step / tool-calling loop against a resources server. Gym ships several built-in harnesses (e.g. `simple_agent`, `aviary_agent`, and others under `responses_api_agents/`); pick whichever fits your control flow, or bring your own.
 
 **Model Server (Responses API Model)**
 
