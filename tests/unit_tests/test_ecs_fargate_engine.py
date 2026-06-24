@@ -46,7 +46,7 @@ _ENG = "nemo_gym.sandbox.providers.ecs_fargate.engine"
 class ClientError(Exception):
     """Local stand-in for ``botocore.exceptions.ClientError``.
 
-    CI's base venv has no boto3/botocore (it's the ``sandbox-ecs`` extra), so we
+    CI's base venv has no boto3/botocore (it's the ``sandbox`` extra), so we
     don't import it. engine.py only references ``ClientError`` via
     ``_require_aws_sdks()`` — which ``_patch_aws`` patches to return this class —
     so engine's ``except ClientError`` catches these instances unchanged.
@@ -65,7 +65,7 @@ class ClientError(Exception):
 def _clear_engine_module_state(request):
     """Reset process-global engine caches and stub the AWS SDK accessor.
 
-    CI's base venv has no boto3/botocore (it's the sandbox-ecs extra), so patch
+    CI's base venv has no boto3/botocore (it's the sandbox extra), so patch
     ``engine._require_aws_sdks`` to hand back mocks + the local fake ``ClientError``
     for every test — so engine's ``except ClientError`` catches the fakes the tests
     raise without real boto3. Tests needing specific clients override it via
@@ -168,7 +168,7 @@ def _attach_exec_client(sb: engine.EcsFargateSandbox, result: engine.ExecResult 
 
 
 def test_require_aws_sdks_returns_triple():
-    pytest.importorskip("boto3")  # real boto3/botocore only with the sandbox-ecs extra
+    pytest.importorskip("boto3")  # real boto3/botocore only with the sandbox extra
     from botocore.exceptions import ClientError as RealClientError
 
     boto3, config_cls, client_error = engine._require_aws_sdks()
