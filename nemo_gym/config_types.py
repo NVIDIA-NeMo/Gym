@@ -141,7 +141,29 @@ class ServerRefNotFoundError(ValueError):
     """A server cross-reference points to an instance that is not defined in the merged config."""
 
 
-class ConfigMissingValuesError(ValueError):
+class ConfigError(Exception):
+    """Base for user-facing configuration errors.
+
+    These represent actionable user mistakes (typos, missing files, malformed input) rather than
+    internal bugs. The CLI catches `ConfigError` and prints just the message — no traceback —
+    while still leaving them as ordinary exceptions so callers like `validate` can catch and
+    format them.
+    """
+
+
+class ConfigPathNotFoundError(ConfigError, FileNotFoundError):
+    """A `config_paths` entry could not be found in the cwd or the Gym install location."""
+
+
+class MalformedConfigPathsError(ConfigError, ValueError):
+    """`config_paths` was not a list of paths (e.g. a scalar string was passed)."""
+
+
+class NoServerInstancesError(ConfigError, ValueError):
+    """A run was requested but the merged config defines no server instances to start."""
+
+
+class ConfigMissingValuesError(ConfigError, ValueError):
     """One or more required config values are still unset (OmegaConf '???') after merging."""
 
 

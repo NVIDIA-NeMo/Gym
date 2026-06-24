@@ -30,9 +30,10 @@ from nemo_gym.cli.env import (
     RunConfig,
     RunHelper,
     _select_shard,
+    exit_cleanly_on_config_error,
     init_resources_server,
 )
-from nemo_gym.config_types import ResourcesServerInstanceConfig
+from nemo_gym.config_types import ConfigError, NoServerInstancesError, ResourcesServerInstanceConfig
 
 
 class TestSelectShard:
@@ -248,3 +249,34 @@ class TestRunHelperShutdownReap:
         assert a.wait.call_count == 1
         assert b.wait.call_count == 1
         assert runner._processes == {}
+
+
+class TestExitCleanlyOnConfigError:
+    """The CLI decorator turns ConfigError into a clean message + non-zero exit, not a traceback."""
+
+    def test_config_error_becomes_clean_exit(self) -> None:
+        @exit_cleanly_on_config_error
+        def boom():
+            raise NoServerInstancesError("nothing to run")
+
+        with raises(SystemExit) as exc_info:
+            boom()
+        assert exc_info.value.code == 1
+
+    def test_non_config_error_propagates(self) -> None:
+        @exit_cleanly_on_config_error
+        def boom():
+            raise RuntimeError("unexpected")
+
+        with raises(RuntimeError):
+            boom()
+
+    def test_success_passes_through(self) -> None:
+        @exit_cleanly_on_config_error
+        def ok():
+            return 42
+
+        assert ok() == 42
+
+    def test_config_error_base_catches_subclasses(self) -> None:
+        assert issubclass(NoServerInstancesError, ConfigError)
