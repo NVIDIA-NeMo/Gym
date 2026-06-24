@@ -53,6 +53,8 @@ class FakeEnv:
 
 
 class FakePromptAgent:
+    call_llm_responses: List[str] = []
+
     def __init__(self, **kwargs: Any) -> None:
         self.kwargs = kwargs
         self.reset_calls = []
@@ -78,12 +80,14 @@ class FakePromptAgent:
                 "top_p": self.kwargs["top_p"],
             }
         )
+        FakePromptAgent.call_llm_responses.append(response)
         assert obs["screenshot"] == b"not-black"
         return response, [{"action_type": "DONE"}]
 
 
 def _patch_client_for_fake_runtime(monkeypatch) -> None:
     FakeEnv.instances.clear()
+    FakePromptAgent.call_llm_responses.clear()
 
     def fake_load_attr(import_path: str):
         if import_path == "fake.FakeEnv":
@@ -156,6 +160,25 @@ def test_prompt_agent_runner_routes_native_agent_messages_to_policy_model(monkey
     assert calls[0]["payload"]["max_tokens"] == 123
     assert calls[0]["payload"]["temperature"] == 0.4
     assert calls[0]["payload"]["top_p"] is None
+
+
+def test_prompt_agent_runner_strips_thinking_before_native_agent_parse(monkeypatch) -> None:
+    _patch_client_for_fake_runtime(monkeypatch)
+
+    result = osworld_client.run_osworld_task(
+        {"id": "task-thinking", "instruction": "Strip thinking before native parse."},
+        model_fn=lambda *_args: "unused",
+        runner_name="prompt_agent_computer_13",
+        env_class_path="fake.FakeEnv",
+        agent_class_path="fake.FakePromptAgent",
+        messages_model_fn=lambda _messages, _payload: "<think>private reasoning</think>```DONE```",
+        sleep_after_execution=0,
+        task_timeout=10,
+    )
+
+    assert result.reward == 1.0
+    assert result.steps[0].model_text == "```DONE```"
+    assert FakePromptAgent.call_llm_responses == ["```DONE```"]
 
 
 @pytest.mark.parametrize(
