@@ -4,6 +4,10 @@
 # you can switch to `osworld @ git+https://github.com/xlang-ai/OSWorld.git@<commit>`.
 osworld @ git+https://github.com/JeffPengCoder/OSWorld.git@nv-gym
 docker==7.1.0
+# Keep requests aligned with nemo-gym's urllib3>=2.7.0 pin and prevent
+# RequestsDependencyWarning when transitive deps pull chardet 7.x.
+requests>=2.32.5
+chardet<6
 # Pin Ray to match the model server venv. Without this, ng_run can build the
 # two server venvs at different times and pull different Ray versions,
 # breaking cluster join with "Version mismatch: cluster has Ray X, this node
