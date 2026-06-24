@@ -385,6 +385,7 @@ class ApptainerProvider:
         env: dict[str, str] | None = None,
         timeout_s: int | float | None = None,
         user: str | int | None = None,
+        stdin: bytes | None = None,
     ) -> SandboxExecResult:
         """Run a command inside the instance.
 
@@ -392,6 +393,10 @@ class ApptainerProvider:
         - None            -> run as the default (launching) user.
         - "root" / 0      -> add --fakeroot (root inside the container).
         - other user/uid  -> --fakeroot + wrap in ``su`` to switch to that user.
+
+        ``stdin``, when given, is piped to the command's standard input. This is an
+        apptainer-provider extension to the base protocol, useful for feeding large
+        inputs (e.g. prompts) that would exceed the kernel's argv length limit.
         """
         inst = handle.raw
 
@@ -418,7 +423,7 @@ class ApptainerProvider:
         effective_timeout = timeout_s if timeout_s is not None else self._exec_config.default_timeout_s
 
         try:
-            code, out, err = await self._run(argv, timeout_s=effective_timeout)
+            code, out, err = await self._run(argv, timeout_s=effective_timeout, stdin=stdin)
         except TimeoutError as e:
             return SandboxExecResult(
                 stdout=None,
