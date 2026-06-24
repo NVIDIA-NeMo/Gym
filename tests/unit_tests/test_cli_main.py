@@ -892,7 +892,7 @@ class TestEnvRunByName:
 
     def test_model_flags_pass_through(self, monkeypatch: MonkeyPatch) -> None:
         self._patch_resolve(monkeypatch)
-        _, overrides = _dispatch_for(monkeypatch, ["env", "run", "--env", "alpha", "--model-name", "gpt"])
+        _, overrides = _dispatch_for(monkeypatch, ["env", "run", "--env", "alpha", "--model", "gpt"])
         assert "+config_paths=[environments/alpha/config.yaml]" in overrides
         assert "+policy_model_name=gpt" in overrides
 
