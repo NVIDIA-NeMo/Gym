@@ -18,7 +18,7 @@ import importlib
 from glob import glob
 from multiprocessing import Pool
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import rich
 from omegaconf import DictConfig, OmegaConf
@@ -160,17 +160,21 @@ class PrepareBenchmarkConfig(BaseNeMoGymCLIConfig):
     num_prepare_benchmark_processes: int = Field(
         default=1, description="Number of processes to parallelize benchmark preparation"
     )
+    prepare_script_args: Dict[str, Any] = Field(
+        default_factory=dict, description="Arguments forwarded to the benchmark's prepare() function"
+    )
 
 
 def _multiprocess_benchmark_prepare_fn(args):
     benchmark_config: BenchmarkConfig
     prepare_module_path: str
-    (benchmark_config, prepare_module_path) = args
+    prepare_script_args: Dict[str, Any]
+    (benchmark_config, prepare_module_path, prepare_script_args) = args
 
     print(f"Preparing benchmark: {benchmark_config.name}")
 
     module = importlib.import_module(prepare_module_path)
-    output_fpath = module.prepare(**benchmark_config.dataset.prepare_script_args)
+    output_fpath = module.prepare(**prepare_script_args)
     assert output_fpath.absolute() == benchmark_config.dataset.jsonl_fpath.absolute(), (
         f"Expected the actual prepared dataset output fpath to match the jsonl_fpath set in the config. Instead got {output_fpath=} jsonl_fpath={benchmark_config.dataset.jsonl_fpath}"
     )
@@ -185,7 +189,6 @@ def prepare_benchmark() -> None:
         )
     )
     prepare_benchmark_config = PrepareBenchmarkConfig.model_validate(global_config_dict)
-
     benchmarks_dict: Dict[str, BenchmarkConfig] = dict()
     for server_instance_name in global_config_dict:
         server_config = global_config_dict[server_instance_name]
@@ -193,7 +196,6 @@ def prepare_benchmark() -> None:
             continue
 
         inner_server_config = get_first_server_config_dict(global_config_dict, server_instance_name)
-
         datasets: List[BenchmarkDatasetConfig] = []
         for dataset in inner_server_config.get("datasets") or []:
             if dataset["type"] != "benchmark":
@@ -245,7 +247,7 @@ def prepare_benchmark() -> None:
             already_prepared.append(benchmark_config)
             continue
 
-        validated.append((benchmark_config, prepare_module_path))
+        validated.append((benchmark_config, prepare_module_path, dict(prepare_benchmark_config.prepare_script_args)))
 
     if already_prepared:
         already_prepared_str = "".join(f"- {bc.name}: {bc.dataset.jsonl_fpath}\n" for bc in already_prepared)
