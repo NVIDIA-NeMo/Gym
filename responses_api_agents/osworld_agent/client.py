@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
 from responses_api_agents.osworld_agent.action_parser import parse_actions, strip_thinking
+from responses_api_agents.osworld_agent.runner_registry import load_attr, resolve_runner_spec
 
 
 LOG = logging.getLogger("nemo_gym.osworld_agent.client")
@@ -40,7 +41,7 @@ _TERMINAL_ACTIONS = {"DONE", "FAIL"}
 class StepRecord:
     step: int
     model_text: str
-    actions: List[str]
+    actions: List[Any]
     reward: float
     done: bool
     info: Dict[str, Any] = field(default_factory=dict)
@@ -66,12 +67,33 @@ class RolloutResult:
 # be driven from a Ray actor.
 ObservationHistory = List[Dict[str, Any]]
 ModelFn = Callable[[str, str, ObservationHistory], str]
+MessagesModelFn = Callable[[List[Dict[str, Any]], Dict[str, Any]], str]
 
 
 def _b64(screenshot_bytes: Optional[bytes]) -> str:
     if not screenshot_bytes:
         return ""
     return base64.b64encode(screenshot_bytes).decode("ascii")
+
+
+def _is_terminal_action(action: Any) -> bool:
+    if isinstance(action, str) and action in _TERMINAL_ACTIONS:
+        return True
+    return isinstance(action, dict) and action.get("action_type") in _TERMINAL_ACTIONS
+
+
+def _flatten_actions(actions: Any) -> List[Any]:
+    if actions is None:
+        return []
+    if not isinstance(actions, list):
+        return [actions]
+    flattened: List[Any] = []
+    for action in actions:
+        if isinstance(action, list):
+            flattened.extend(_flatten_actions(action))
+        else:
+            flattened.append(action)
+    return flattened
 
 
 def run_osworld_task(
@@ -92,6 +114,17 @@ def run_osworld_task(
     mem_limit_mb: int = 16384,
     step_timeout: int = 60,  # advisory; per-action subprocess timeout (provider-dependent)
     task_timeout: int = 1800,  # wall-clock cap on the whole rollout
+    runner_name: str = "gym_pyautogui",
+    action_space: Optional[str] = None,
+    observation_type: Optional[str] = None,
+    env_class_path: Optional[str] = None,
+    agent_class_path: Optional[str] = None,
+    agent_kwargs: Optional[Dict[str, Any]] = None,
+    messages_model_fn: Optional[MessagesModelFn] = None,
+    policy_model_name: str = "",
+    policy_max_tokens: int = 1500,
+    policy_temperature: float = 1.0,
+    policy_top_p: Optional[float] = 0.9,
 ) -> RolloutResult:
     """Run a single OSWorld task and return a structured result.
 
@@ -114,16 +147,23 @@ def run_osworld_task(
     if mem_limit_mb > 0:
         os.environ["OSWORLD_APPTAINER_MEM_LIMIT"] = f"{mem_limit_mb}M"
 
-    from desktop_env.desktop_env import DesktopEnv  # noqa: PLC0415  (lazy)
-
     from responses_api_agents.osworld_agent.prompts import get_system_prompt
 
     if system_prompt is None:
         system_prompt = get_system_prompt(client_password)
 
+    runner_spec = resolve_runner_spec(
+        runner_name,
+        action_space=action_space,
+        observation_type=observation_type,
+        env_class_path=env_class_path,
+        agent_class_path=agent_class_path,
+        agent_kwargs=agent_kwargs,
+    )
+    env_cls = load_attr(runner_spec.env_class_path)
     instruction = task_config.get("instruction", "")
 
-    env: Optional[DesktopEnv] = None
+    env: Optional[Any] = None
     steps: List[StepRecord] = []
     obs_history: ObservationHistory = []
     error: Optional[str] = None
@@ -139,17 +179,46 @@ def run_osworld_task(
     _recording_started = False
 
     try:
-        env = DesktopEnv(
+        env = env_cls(
             provider_name=provider_name,
-            action_space="pyautogui",
+            action_space=runner_spec.action_space,
             screen_size=screen_size,
             headless=headless,
-            require_a11y_tree=require_a11y_tree,
+            require_a11y_tree=require_a11y_tree
+            or runner_spec.observation_type in {"a11y_tree", "screenshot_a11y_tree", "som"},
             os_type="Ubuntu",
             client_password=client_password,
             cache_dir=cache_dir,
         )
         env.reset(task_config=task_config)
+        native_agent = None
+        if runner_spec.kind == "prompt_agent":
+            if not runner_spec.agent_class_path:
+                raise ValueError(f"runner {runner_spec.name!r} requires agent_class_path")
+            if messages_model_fn is None:
+                raise ValueError(f"runner {runner_spec.name!r} requires messages_model_fn")
+            agent_cls = load_attr(runner_spec.agent_class_path)
+            native_agent = agent_cls(
+                platform="ubuntu",
+                model=policy_model_name or "policy_model",
+                max_tokens=policy_max_tokens,
+                top_p=policy_top_p,
+                temperature=policy_temperature,
+                action_space=runner_spec.action_space,
+                observation_type=runner_spec.observation_type,
+                max_trajectory_length=max_trajectory_length,
+                client_password=client_password,
+                **runner_spec.agent_kwargs,
+            )
+
+            def _call_llm(payload: Dict[str, Any]) -> str:
+                return messages_model_fn(payload["messages"], payload)
+
+            native_agent.call_llm = _call_llm
+            try:
+                native_agent.reset(LOG, vm_ip=getattr(env, "vm_ip", None))
+            except TypeError:
+                native_agent.reset(LOG)
         if _record_dir:
             try:
                 env.controller.start_recording()
@@ -453,15 +522,19 @@ def run_osworld_task(
             history_window = obs_history[-max_trajectory_length:] if max_trajectory_length else []
 
             try:
-                model_text = model_fn(system_prompt, instruction, history_window + [obs_entry])
+                if native_agent is not None:
+                    model_text, actions = native_agent.predict(instruction, obs)
+                    model_text = strip_thinking(model_text or "")
+                    actions = _flatten_actions(actions)
+                else:
+                    model_text = model_fn(system_prompt, instruction, history_window + [obs_entry])
+                    model_text = strip_thinking(model_text or "")
+                    actions = parse_actions(model_text)
             except Exception as exc:  # noqa: BLE001 — record + abort, don't crash the VM.
                 error = f"model_fn failed at step {step_idx}: {exc}"
                 LOG.exception("Model call failed at step %d", step_idx)
                 steps.append(StepRecord(step=step_idx, model_text="", actions=[], reward=0.0, done=False))
                 break
-
-            model_text = strip_thinking(model_text or "")
-            actions = parse_actions(model_text)
 
             if not actions:
                 # No parseable action — log the step and continue. The model
@@ -480,7 +553,7 @@ def run_osworld_task(
                 if done:
                     step_done = True
                     break
-                if action in _TERMINAL_ACTIONS:
+                if _is_terminal_action(action):
                     step_done = True
                     break
 

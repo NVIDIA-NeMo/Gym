@@ -47,6 +47,12 @@ osworld_simple_agent:
       max_tokens: 1500
       temperature: 1.0
       top_p: null  # null = skip the top_p kwarg entirely (some reasoning models reject it with HTTP 400). Set to e.g. 0.9 for permissive models that accept it.
+      runner_name: gym_pyautogui  # gym_pyautogui preserves the current Gym-built prompt path. Use prompt_agent or prompt_agent_computer_13 to route through OSWorld's native PromptAgent.
+      action_space: null          # null = runner default. Override to pyautogui/computer_13 for compatible runners.
+      observation_type: null      # null = runner default. Override to screenshot/a11y_tree/screenshot_a11y_tree/som for compatible runners.
+      env_class_path: null        # null = runner default DesktopEnv. Custom runners can point at an OSWorld custom env class.
+      agent_class_path: null      # null = runner default agent class.
+      agent_kwargs: {}            # extra kwargs merged into the runner's native mm_agent constructor.
       mem_limit_mb: 0           # 0 = no docker --memory limit. Set to e.g. 16384 (16 GB) to cap container memory. Note: with the apptainer provider, this may not work under enroot+fakeroot+no-systemd setups (cgroups limitations).
       step_timeout: 60          # per-action subprocess timeout
       task_timeout: 1800        # whole-rollout wall-clock cap; trips mask_sample=True
