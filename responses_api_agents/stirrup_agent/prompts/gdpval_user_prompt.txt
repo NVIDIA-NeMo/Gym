@@ -111,6 +111,7 @@ Your environment comes preinstalled with a comprehensive set of Python packages 
 - Poppler utilities (PDF tools such as `pdftotext`, `pdfimages`)
 - Ghostscript (PostScript/PDF processing)
 - FFmpeg (complete audio/video processing suite with all codecs)
+- ImageMagick (image conversion and manipulation via `convert`)
 - Graphviz (graph visualization with DOT language)
 - TeX Live (full LaTeX toolchain: pdflatex, xelatex, lualatex, latexmk)
 - OpenJDK 21 JRE (Java runtime for Tabula and other Java-based tools)
