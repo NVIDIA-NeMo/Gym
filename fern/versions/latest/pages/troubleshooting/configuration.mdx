@@ -16,13 +16,19 @@ See the [Configuration reference](/reference/configuration) for complete configu
 
 Errors that prevent servers from starting.
 
-### Missing Mandatory Value
+### Unset Required Config Value(s)
 
 ```
-omegaconf.errors.MissingMandatoryValue: Missing mandatory value: policy_api_key
+nemo_gym.config_types.ConfigMissingValuesError: 1 required config value(s) are unset (still '???') after merging:
+  - policy_api_key
+
+Provide each value via a CLI override, in env.yaml, or in a config you pass via config_paths.
+For example, on the command line:
+  ++policy_api_key=<value>
 ```
 
-**When**: A required variable (usually in `env.yaml`) is not defined.
+**When**: One or more required variables (usually in `env.yaml`) are left unset (`???`) after all
+config sources are merged. Every unset value is listed together in this single error.
 
 **Fix**: Add the missing value to `env.yaml`:
 
@@ -39,11 +45,12 @@ ng_run "+config_paths=[config.yaml]" +policy_api_key=sk-your-api-key
 ### Server Reference Not Found
 
 ```
-AssertionError: Could not find ResourcesServerRef(type='resources_servers', name='typo_weather') 
-in the list of available servers: [ResourcesServerRef(...), ...]
+nemo_gym.config_types.ServerRefNotFoundError: In server instance 'my_agent', field 'resources_server' references resources_servers/'typo_weather', which is not defined in the merged config.
+Did you mean: 'weather'?
 ```
 
-**When**: A server config references another server that doesn't exist or isn't loaded.
+**When**: A server config references another server that doesn't exist or isn't loaded. The error
+names the referencing instance/field and, when a similarly named server exists, suggests it.
 
 **Common causes**:
 - Typo in the server name

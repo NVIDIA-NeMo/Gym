@@ -70,6 +70,11 @@ UV_VENV_DIR_KEY_NAME = "uv_venv_dir"
 INHERIT_FROM_KEY_NAME = "_inherit_from"
 COPY_KEY_NAME = "_copy"
 DELETE_KEY_KEY_NAME = "_delete_key"
+
+# Sentinel returned by _recursive_index_dict_using_path when a referenced swap/copy/inherit path is
+# unset (a '???' leaf or ancestor). Distinct object so callers can branch on it without mistaking a
+# real config value (e.g. a literal "???" or a DictConfig) for "missing".
+_MISSING_REF = object()
 NEMO_GYM_LOG_DIR_KEY_NAME = "nemo_gym_log_dir"
 NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     CONFIG_PATHS_KEY_NAME,
@@ -421,16 +426,24 @@ For example, on the command line:
 
             path_to_swap = path_to_swap.split(".")
 
-            # Pop the swapped value
+            # Pop the swapped value. A '???' leaf or ancestor on the source path comes back as the
+            # _MISSING_REF sentinel (not a dict/str), so guard the .pop()/.merge() that would crash on it.
             dict_containing_key_to_swap = self._recursive_index_dict_using_path(
                 original_dict_config, path_to_swap[:-1]
             )
-            if is_swap:
+            if is_swap and dict_containing_key_to_swap is not _MISSING_REF:
                 # Pop with a default since multiple configs may refer to the same path
                 # We don't want to pop if it's just a copy
                 dict_containing_key_to_swap.pop(path_to_swap[-1], None)
 
             swapped_value = self._recursive_index_dict_using_path(frozen_dict_config, path_to_swap)
+
+            # If the source (leaf or an ancestor) is unset, the target inherits MISSING; skip the
+            # property-merge and _delete_key handling and let raise_on_missing_values report it.
+            if dict_containing_key_to_swap is _MISSING_REF or swapped_value is _MISSING_REF:
+                dict_config[k] = "???"
+                continue
+
             if is_swap_property or is_copy_property:
                 swapped_value = OmegaConf.merge(swapped_value, v)
 
@@ -443,7 +456,7 @@ For example, on the command line:
                 for key in keys_to_delete:
                     dict_config[k].pop(key)
 
-    def _recursive_index_dict_using_path(self, dict_config: DictConfig, path: List[str]) -> DictConfig:
+    def _recursive_index_dict_using_path(self, dict_config: DictConfig, path: List[str]) -> "DictConfig | object":
         for k in path:
             # Use _get_node so a referenced value that is unset ('???') can be detected without
             # resolving it (indexing a MISSING leaf would raise an opaque error). A genuinely
@@ -452,11 +465,12 @@ For example, on the command line:
             if node is None:
                 raise ValueError(f"Path specified does not exist in config: {path}")
 
-            # The referenced value (or an ancestor of it) is unset. Propagate MISSING so a swap/copy
-            # of it makes the target '???' too — then raise_on_missing_values reports it with an
-            # actionable message instead of surfacing an opaque interpolation error.
+            # The referenced value (or an ancestor of it) is unset. Return the _MISSING_REF sentinel
+            # so the caller makes the swap/copy/inherit target '???' too (instead of calling .pop()/
+            # OmegaConf.merge() on a bare string and crashing); raise_on_missing_values then reports
+            # it with an actionable message instead of an opaque interpolation error.
             if OmegaConf.is_missing(dict_config, k):
-                return "???"
+                return _MISSING_REF
 
             dict_config = dict_config[k]
 

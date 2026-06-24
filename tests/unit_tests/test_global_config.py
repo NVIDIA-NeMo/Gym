@@ -18,7 +18,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 from omegaconf import OmegaConf
-from pytest import MonkeyPatch, raises
+from pytest import MonkeyPatch, mark, raises
 
 import nemo_gym.global_config
 import nemo_gym.server_utils
@@ -549,6 +549,40 @@ class TestGlobalConfig:
         missing = parser.collect_missing_value_paths(config)
         assert "target" in missing
         assert "source.model" in missing
+
+    @mark.parametrize(
+        "target_value",
+        [
+            "${inherit_from:source.model}",  # string inherit, missing leaf
+            "${inherit_from:source.model.name}",  # string inherit, missing parent
+            "${copy:source.model.name}",  # string copy, missing parent
+            {"_copy": "source.model"},  # property copy, missing leaf
+            {"_copy": "source.model.name"},  # property copy, missing parent
+            {"_inherit_from": "source.model"},  # property inherit, missing leaf
+            {"_inherit_from": "source.model.name"},  # property inherit, missing parent
+        ],
+    )
+    def test_swap_copy_inherit_of_missing_value_does_not_crash(self, target_value) -> None:
+        # All four quadrants {string, property} x {missing leaf, missing parent}, for both copy and
+        # inherit_from: swapping a '???' source must not raise an opaque error (AttributeError from
+        # .pop() on a bare string, or OmegaConf.merge ValueError). The target inherits MISSING and is
+        # reported by the aggregated scan instead.
+        parser = GlobalConfigDictParser()
+        config = DictConfig({"target": target_value, "source": {"model": "???"}})
+
+        parser._recursively_swap_keys(config)  # must not raise
+
+        assert "target" in parser.collect_missing_value_paths(config)
+
+    def test_inherit_of_missing_surfaces_aggregated_error_not_opaque(self) -> None:
+        # End-to-end (swap -> raise_on_missing_values, the core of parse()): a property inherit of an
+        # unset value yields the friendly ConfigMissingValuesError, not an AttributeError/ValueError.
+        parser = GlobalConfigDictParser()
+        config = DictConfig({"target": {"_inherit_from": "source.model"}, "source": {"model": "???"}})
+
+        parser._recursively_swap_keys(config)
+        with raises(ConfigMissingValuesError):
+            parser.raise_on_missing_values(config)
 
     def test_missing_value_in_list_is_reported_not_crash(self) -> None:
         # A '???' as a list element (or inside a dict nested in a list) must not crash the swap; it is
