@@ -1,0 +1,34 @@
+---
+title: "Evaluation Tutorials"
+description: "Run benchmark-specific evaluation workflows with NeMo Gym."
+position: 1
+---
+
+Evaluation tutorials are hands-on walkthroughs for running a benchmark, collecting rollouts, and reading the outputs. They assume you already understand the basic concepts in [Evaluation](/about/concepts/evaluation) and the workflow in [Evaluation](/evaluation).
+
+## Choose a Benchmark
+
+Start with a benchmark that has:
+
+- A packaged resources server and config file
+- Example JSONL data for a smoke test
+- A clear verifier and headline metric
+- Dependencies that fit your local or cluster environment
+
+For the first tutorial, use EvalPlus. It is a coding benchmark for Python function completion, includes a five-example smoke-test dataset, and reports both base-test and plus-test verdicts.
+
+<Cards>
+
+<Card title="Evaluate EvalPlus" href="/evaluation-tutorials/evalplus">
+Run the EvalPlus coding benchmark and inspect rollout and aggregate metric outputs.
+</Card>
+
+<Card title="Environment List" href="/evaluation/environments">
+Browse the built-in benchmark and training environments.
+</Card>
+
+<Card title="Aggregate Metrics" href="/evaluation/aggregate-metrics">
+Understand the aggregate metrics written after rollout collection.
+</Card>
+
+</Cards>
