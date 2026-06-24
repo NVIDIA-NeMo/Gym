@@ -26,6 +26,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     MCPResourcesServer,
     MCPServerMetadata,
+    gym_tool,
 )
 from nemo_gym.server_utils import SESSION_ID_KEY
 
@@ -95,15 +96,15 @@ class ExampleMCPWeatherResourcesServer(MCPResourcesServer):
         }
         return ExampleMCPWeatherSeedSessionResponse(mcp=self.build_mcp_session_metadata(request))
 
-    def register_mcp_tools(self, mcp: Any) -> None:
-        @mcp.tool()
-        def get_weather(city: str) -> str:
-            """Get a deterministic weather report for a city."""
-            session_id = self.require_mcp_session_id()
-            state = self.session_id_to_state.setdefault(session_id, {"weather_calls": []})
-            weather = _weather_sentence(city)
-            state["weather_calls"].append({"city": city, "weather": weather})
-            return weather
+    @gym_tool
+    def get_weather(self, session_id: str, city: str) -> str:
+        """Get a deterministic weather report for a city."""
+        # session_id is injected by the base class (from the per-rollout MCP token); it is hidden from
+        # the tool's MCP input schema, so the model only sees `city`.
+        state = self.session_id_to_state.setdefault(session_id, {"weather_calls": []})
+        weather = _weather_sentence(city)
+        state["weather_calls"].append({"city": city, "weather": weather})
+        return weather
 
     async def verify(
         self,
@@ -116,8 +117,7 @@ class ExampleMCPWeatherResourcesServer(MCPResourcesServer):
         expected_city = body.expected_city.casefold()
 
         tool_call_seen = any(
-            str(call.get("city", "")).casefold() == expected_city
-            and call.get("weather") == expected_weather
+            str(call.get("city", "")).casefold() == expected_city and call.get("weather") == expected_weather
             for call in state["weather_calls"]
         )
         final_text = _extract_assistant_text(body)

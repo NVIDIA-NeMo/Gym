@@ -35,15 +35,13 @@ from resources_servers.example_mcp_weather.app import (
 
 
 class FakeMCP:
+    """Captures tools registered via the FastMCP-style ``add_tool`` API used by gym_tool."""
+
     def __init__(self):
         self.tools = {}
 
-    def tool(self):
-        def decorator(fn):
-            self.tools[fn.__name__] = fn
-            return fn
-
-        return decorator
+    def add_tool(self, fn, name=None, description=None):
+        self.tools[name or fn.__name__] = fn
 
 
 def _server() -> ExampleMCPWeatherResourcesServer:
@@ -97,13 +95,13 @@ async def test_verify_rewards_tool_call_from_same_session() -> None:
 
     fake_mcp = FakeMCP()
     server.register_mcp_tools(fake_mcp)
-    server._mcp_session_id_by_token[token] = "session-1"
 
     from nemo_gym.base_resources_server import _MCP_SESSION_TOKEN
 
+    # The auto-registered MCP wrapper takes only `city`; session_id is injected from the token.
     context_token = _MCP_SESSION_TOKEN.set(token)
     try:
-        assert fake_mcp.tools["get_weather"]("Paris") == "The weather in Paris is sunny and 72 F."
+        assert fake_mcp.tools["get_weather"](city="Paris") == "The weather in Paris is sunny and 72 F."
     finally:
         _MCP_SESSION_TOKEN.reset(context_token)
 
@@ -145,7 +143,7 @@ def test_mcp_tool_requires_valid_session_token() -> None:
     context_token = _MCP_SESSION_TOKEN.set("invalid-token")
     try:
         with pytest.raises(HTTPException) as exc_info:
-            fake_mcp.tools["get_weather"]("Paris")
+            fake_mcp.tools["get_weather"](city="Paris")
     finally:
         _MCP_SESSION_TOKEN.reset(context_token)
 

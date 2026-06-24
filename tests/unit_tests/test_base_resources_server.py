@@ -19,8 +19,12 @@ from fastapi import HTTPException, Request
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
+    BaseSeedSessionRequest,
+    BaseSeedSessionResponse,
     MCPResourcesServer,
+    MCPServerMetadata,
     SimpleResourcesServer,
+    gym_tool,
 )
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 
@@ -166,3 +170,102 @@ class TestMCPResourcesServer:
         assert resp.status_code != 421, "MCP endpoint rejected a non-loopback Host (DNS-rebinding protection)"
         assert resp.status_code == 200
         assert resp.json()["result"]["structuredContent"]["result"] == "pong"
+
+
+class _GymToolSeedResponse(BaseSeedSessionResponse):
+    mcp: MCPServerMetadata
+
+
+class _GymToolServer(MCPResourcesServer):
+    """Exercises the @gym_tool auto-registration: a session-bound tool and a stateless one."""
+
+    async def seed_session(self, request: Request, body: BaseSeedSessionRequest) -> _GymToolSeedResponse:
+        return _GymToolSeedResponse(mcp=self.build_mcp_session_metadata(request))
+
+    @gym_tool
+    def echo(self, session_id: str, text: str) -> str:
+        """Echo text tagged with the session id."""
+        return f"{session_id}:{text}"
+
+    @gym_tool
+    def add(self, a: int, b: int) -> int:
+        """Add two numbers (stateless — no session_id)."""
+        return a + b
+
+    async def verify(self, body):
+        pass
+
+
+def _gym_tool_server() -> _GymToolServer:
+    config = BaseResourcesServerConfig(host="", port=0, entrypoint="", name="test_gym_tool_server")
+    return _GymToolServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+
+class TestGymToolAutoRegistration:
+    def test_decorated_methods_auto_register_over_mcp_with_session_hidden(self) -> None:
+        pytest.importorskip("mcp")
+        from fastapi.testclient import TestClient
+
+        server = _gym_tool_server()
+        app = server.setup_webserver()
+        rpc_headers = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json"}
+
+        with TestClient(app, base_url="http://127.0.0.1:8000") as client:
+            token = client.post("/seed_session", json={}).json()["mcp"]["headers"]["X-NeMo-Gym-Session-Token"]
+
+            listing = client.post(
+                "/mcp",
+                headers=rpc_headers,
+                json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
+                follow_redirects=False,
+            )
+            tools = {t["name"]: t for t in listing.json()["result"]["tools"]}
+            assert set(tools) == {"echo", "add"}
+            # session_id is injected, never surfaced to the model
+            assert set(tools["echo"]["inputSchema"]["properties"]) == {"text"}
+            assert set(tools["add"]["inputSchema"]["properties"]) == {"a", "b"}
+            assert tools["echo"]["description"] == "Echo text tagged with the session id."
+
+            # the session-bound tool resolves session_id from the token
+            echoed = client.post(
+                "/mcp",
+                headers={**rpc_headers, "X-NeMo-Gym-Session-Token": token},
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": {"name": "echo", "arguments": {"text": "hi"}},
+                },
+                follow_redirects=False,
+            )
+            assert echoed.json()["result"]["structuredContent"]["result"].endswith(":hi")
+
+            # the stateless tool needs no token
+            summed = client.post(
+                "/mcp",
+                headers={**rpc_headers, "X-NeMo-Gym-Session-Token": token},
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "tools/call",
+                    "params": {"name": "add", "arguments": {"a": 2, "b": 3}},
+                },
+                follow_redirects=False,
+            )
+            assert summed.json()["result"]["structuredContent"]["result"] == 5
+
+    def test_rejects_reserved_tool_name(self) -> None:
+        pytest.importorskip("mcp")
+        server = _gym_tool_server()
+        with pytest.raises(ValueError, match="reserved endpoint name"):
+            server._register_gym_tool(MagicMock(), "aggregate_metrics", lambda **_: None)
+
+    def test_rejects_request_parameter(self) -> None:
+        pytest.importorskip("mcp")
+        server = _gym_tool_server()
+
+        def needs_request(request: Request, city: str) -> str:
+            return city
+
+        with pytest.raises(ValueError, match="must not take a 'request' parameter"):
+            server._register_gym_tool(MagicMock(), "bad_tool", needs_request)

@@ -12,10 +12,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import functools
+import inspect
 from abc import abstractmethod
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
-from typing import Any, Optional
+from typing import Any, Optional, get_type_hints
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request
@@ -35,6 +37,24 @@ from nemo_gym.server_utils import SESSION_ID_KEY, BaseRunServerInstanceConfig, B
 NEMO_GYM_MCP_SESSION_TOKEN_HEADER = "X-NeMo-Gym-Session-Token"
 NEMO_GYM_MCP_METADATA_KEY = "mcp"
 _MCP_SESSION_TOKEN: ContextVar[Optional[str]] = ContextVar("nemo_gym_mcp_session_token", default=None)
+
+# Names a @gym_tool method may not use, because they collide with the resources server's own
+# endpoints (and would silently shadow them on HTTP while still registering as MCP tools).
+RESERVED_MCP_TOOL_NAMES = frozenset({"verify", "seed_session", "aggregate_metrics", "mcp"})
+
+
+def gym_tool(fn):
+    """Mark a resources-server method as a tool to auto-expose over MCP.
+
+    The method is registered as an MCP tool named after the method, and its MCP input schema is
+    derived from the method's typed parameters. Declare a ``session_id: str`` parameter to receive
+    the per-rollout Gym session id; it is injected automatically (from the hidden session token) and
+    hidden from the tool's input schema. The method must NOT take a ``request`` parameter — there is
+    no FastAPI ``Request`` on the MCP path; use ``session_id`` instead. Both sync and async methods
+    are supported.
+    """
+    fn.__gym_tool__ = True
+    return fn
 
 
 class BaseResourcesServerConfig(BaseRunServerInstanceConfig):
@@ -186,9 +206,69 @@ class MCPResourcesServer(SimpleResourcesServer):
         app.mount(self.mcp_url_path, _MCPHeaderSessionMiddleware(mcp_app))
         return app
 
-    @abstractmethod
     def register_mcp_tools(self, mcp: Any) -> None:
-        pass
+        """Auto-register methods decorated with ``@gym_tool`` as MCP tools.
+
+        Subclasses can either rely on this default (just decorate tool methods with ``@gym_tool``) or
+        override it for full manual control. To add manual ``@mcp.tool()`` functions on top of the
+        auto-registered ones, call ``super().register_mcp_tools(mcp)`` first.
+        """
+        for name, func in inspect.getmembers(type(self), predicate=inspect.isfunction):
+            if getattr(func, "__gym_tool__", False):
+                self._register_gym_tool(mcp, name, getattr(self, name))
+
+    def _register_gym_tool(self, mcp: Any, name: str, method: Any) -> None:
+        """Register one bound ``@gym_tool`` method as an MCP tool.
+
+        Builds a wrapper whose signature mirrors the method's parameters minus ``session_id`` (so the
+        session id stays out of the model-visible input schema) and injects the resolved Gym session id
+        at call time. Enforces the ``@gym_tool`` constraints.
+        """
+        if name in RESERVED_MCP_TOOL_NAMES:
+            raise ValueError(
+                f"@gym_tool method {name!r} collides with a reserved endpoint name "
+                f"{sorted(RESERVED_MCP_TOOL_NAMES)}; rename the tool."
+            )
+
+        signature = inspect.signature(method)
+        hints = get_type_hints(method)
+        for param_name, param in signature.parameters.items():
+            if param_name == "request" or hints.get(param_name, param.annotation) is Request:
+                raise ValueError(
+                    f"@gym_tool method {name!r} must not take a 'request' parameter; there is no FastAPI "
+                    "Request on the MCP path. Declare a 'session_id: str' parameter to access the Gym session."
+                )
+
+        inject_session = "session_id" in signature.parameters
+
+        if inspect.iscoroutinefunction(method):
+
+            @functools.wraps(method)
+            async def wrapper(**kwargs: Any) -> Any:
+                if inject_session:
+                    kwargs["session_id"] = self.require_mcp_session_id()
+                return await method(**kwargs)
+        else:
+
+            @functools.wraps(method)
+            def wrapper(**kwargs: Any) -> Any:
+                if inject_session:
+                    kwargs["session_id"] = self.require_mcp_session_id()
+                return method(**kwargs)
+
+        # Mirror the method's parameters (with resolved annotations) minus session_id, so FastMCP builds
+        # the tool's input schema from real types even under ``from __future__ import annotations``.
+        visible_params = [
+            param.replace(annotation=hints.get(param_name, param.annotation))
+            for param_name, param in signature.parameters.items()
+            if param_name != "session_id"
+        ]
+        wrapper.__signature__ = signature.replace(
+            parameters=visible_params,
+            return_annotation=hints.get("return", signature.return_annotation),
+        )
+        wrapper.__annotations__ = {k: v for k, v in hints.items() if k != "session_id"}
+        mcp.add_tool(wrapper, name=name, description=(method.__doc__ or "").strip() or None)
 
     def build_mcp_session_metadata(self, request: Request) -> MCPServerMetadata:
         session_id = request.session.get(SESSION_ID_KEY)
