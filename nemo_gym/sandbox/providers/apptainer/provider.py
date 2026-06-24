@@ -191,6 +191,22 @@ def _is_runtime_failure(stderr: str) -> bool:
     return any(marker in low for marker in APPTAINER_RUNTIME_ERROR_MARKERS)
 
 
+def _coerce_binds(value: Any) -> list[str]:
+    """Normalize ``spec.provider_options['binds']`` into a list of bind strings.
+
+    Accepts a single ``"src:dst[:opts]"`` string or a list of them. These are
+    extra per-sandbox bind mounts, added on top of the staging mount and the
+    provider-level ``exec.default_binds``.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, (list, tuple)):
+        return [str(v) for v in value]
+    raise ApptainerCreateError(f"provider_options['binds'] must be a string or list, got {type(value).__name__}")
+
+
 class ApptainerProvider:
     """Sandbox provider backed by the local Apptainer CLI."""
 
@@ -256,8 +272,8 @@ class ApptainerProvider:
            mount_point = self._create_config.mount_point, generate a unique
            name = INSTANCE_NAME_PREFIX + uuid4().hex.
         4. Build argv: [binary, "instance", "start", <--bind staging:mount_point>,
-           <config default_binds>, <--env ...>, _resource_flags(spec.resources),
-           <extra_start_args>, image, name].
+           <config default_binds>, <spec.provider_options["binds"]>, <--env ...>,
+           _resource_flags(spec.resources), <extra_start_args>, image, name].
         5. await self._run(argv, timeout_s=self._create_config.start_timeout_s);
            on non-zero return, clean up the staging dir and raise
            ApptainerCreateError(stderr).
@@ -276,6 +292,9 @@ class ApptainerProvider:
         if image is None:
             raise ApptainerCreateError("spec.image is required for the apptainer provider")
 
+        # Extra per-sandbox bind mounts (validated before we allocate anything).
+        extra_binds = _coerce_binds(spec.provider_options.get("binds"))
+
         # host staging dir (bind-mounted in), mount point, unique name.
         mount_point = self._create_config.mount_point
         staging_dir = Path(
@@ -287,6 +306,8 @@ class ApptainerProvider:
         argv: list[str] = [self._binary, "instance", "start"]
         argv += ["--bind", f"{staging_dir}:{mount_point}"]
         for bind in self._exec_config.default_binds:
+            argv += ["--bind", bind]
+        for bind in extra_binds:
             argv += ["--bind", bind]
         for key, value in spec.env.items():
             argv += ["--env", f"{key}={value}"]

@@ -226,6 +226,55 @@ async def test_create_builds_argv_and_runs_probe(
     assert rec.calls[1]["timeout_s"] == 30
 
 
+async def test_create_extra_binds_from_provider_options(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    staging = tmp_path / "staging"
+    monkeypatch.setattr(apptainer_provider.tempfile, "mkdtemp", lambda prefix: str(staging.mkdir() or staging))
+
+    def responder(argv: list[str]) -> tuple[int, str, str]:
+        if "exec" in argv:
+            return (0, apptainer_provider.READY_PROBE_EXPECTED, "")
+        return (0, "", "")
+
+    provider, rec = _make_provider(monkeypatch, responder, exec={"default_binds": ["/data:/data"]})
+
+    spec = SandboxSpec(
+        image="docker://img",
+        provider_options={"binds": ["/host/a:/code/a", "/host/b:/code/b:ro"]},
+    )
+    await provider.create(spec)
+
+    start_argv = rec.calls[0]["argv"]
+    # staging + default_binds + the two per-sandbox binds are all present
+    assert _contains_seq(start_argv, ["--bind", f"{staging}:/sandbox"])
+    assert _contains_seq(start_argv, ["--bind", "/data:/data"])
+    assert _contains_seq(start_argv, ["--bind", "/host/a:/code/a"])
+    assert _contains_seq(start_argv, ["--bind", "/host/b:/code/b:ro"])
+
+
+async def test_create_extra_binds_accepts_single_string(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    staging = tmp_path / "staging"
+    monkeypatch.setattr(apptainer_provider.tempfile, "mkdtemp", lambda prefix: str(staging.mkdir() or staging))
+
+    def responder(argv: list[str]) -> tuple[int, str, str]:
+        if "exec" in argv:
+            return (0, apptainer_provider.READY_PROBE_EXPECTED, "")
+        return (0, "", "")
+
+    provider, rec = _make_provider(monkeypatch, responder)
+    await provider.create(SandboxSpec(image="docker://img", provider_options={"binds": "/host/x:/code/x"}))
+    assert _contains_seq(rec.calls[0]["argv"], ["--bind", "/host/x:/code/x"])
+
+
+async def test_create_extra_binds_invalid_type_raises(fake_binary: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    provider, _rec = _make_provider(monkeypatch, lambda argv: (0, "", ""))
+    with pytest.raises(apptainer_provider.ApptainerCreateError, match="must be a string or list"):
+        await provider.create(SandboxSpec(image="docker://img", provider_options={"binds": 123}))
+
+
 async def test_create_requires_image(fake_binary: str, monkeypatch: pytest.MonkeyPatch) -> None:
     provider, _rec = _make_provider(monkeypatch, lambda argv: (0, "", ""))
     with pytest.raises(apptainer_provider.ApptainerCreateError, match="image is required"):
