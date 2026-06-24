@@ -16,20 +16,14 @@ navigation:
         title: "Get Started"
         title-source: frontmatter
       - section: "Agent Server"
-        slug: agent-server
-        contents:
-          - page: Overview
-            path: ./latest/pages/agent-server/index.mdx
-            slug: ""
+        path: ./latest/pages/agent-server/index.mdx
+        contents: []
       - folder: ./latest/pages/model-server
         title: "Model Server"
         title-source: frontmatter
       - section: "Resources Server"
-        slug: resources-server
-        contents:
-          - page: Overview
-            path: ./latest/pages/resources-server/index.mdx
-            slug: ""
+        path: ./latest/pages/resources-server/index.mdx
+        contents: []
       - folder: ./latest/pages/data
         title: "Data"
         title-source: frontmatter
