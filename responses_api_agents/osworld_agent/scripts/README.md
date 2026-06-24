@@ -30,6 +30,10 @@ DRY_RUN=1 bash responses_api_agents/osworld_agent/scripts/run_native_prompt_agen
 bash responses_api_agents/osworld_agent/scripts/run_native_prompt_agent_smoke.sh
 ```
 
+The smoke script uses `uv run` by default, so a fresh Colossus checkout can
+build its `.venv` locally without activating it. Set `USE_UV_RUN=0` only when
+`ng_run` and `ng_collect_rollouts` are already on `PATH`.
+
 ## Mode A flow (using `bringup_local_host.sh`)
 
 ```bash
