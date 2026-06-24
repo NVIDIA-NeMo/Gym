@@ -160,10 +160,10 @@ a branch of a fork until the PR is merged upstream:
 - Fork: <https://github.com/JeffPengCoder/OSWorld>
 - Branch: [`nv-gym`](https://github.com/JeffPengCoder/OSWorld/tree/nv-gym)
 
-In `requirements.txt`:
+In `responses_api_agents/osworld_agent/pyproject.toml`:
 
 ```
--e git+https://github.com/JeffPengCoder/OSWorld.git@nv-gym
+osworld @ git+https://github.com/JeffPengCoder/OSWorld.git@nv-gym
 ```
 
 Once the upstream PR lands you can switch back to plain
