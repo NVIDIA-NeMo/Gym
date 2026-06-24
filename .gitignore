@@ -143,12 +143,15 @@ celerybeat.pid
 
 # Environments
 .env
+.colossus-runtime.env
 .venv
+env.yaml
 env/
 venv/
 ENV/
 env.bak/
 venv.bak/
+docker_vm_data/
 
 # VSCode project settings
 .vscode/
