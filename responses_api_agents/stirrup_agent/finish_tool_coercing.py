@@ -52,7 +52,7 @@ import json
 from typing import Annotated
 
 from pydantic import BaseModel, Field, field_validator
-from stirrup.constants import FINISH_TOOL_NAME
+from stirrup.constants import DEFAULT_FINISH_TOOL_NAME
 from stirrup.core.models import Tool, ToolResult, ToolUseCountMetadata
 from stirrup.tools.finish import _validating_finish_executor
 
@@ -89,7 +89,7 @@ class CoercingFinishParams(BaseModel):
 COERCING_FINISH_TOOL: Tool[CoercingFinishParams, ToolUseCountMetadata] = Tool[
     CoercingFinishParams, ToolUseCountMetadata
 ](
-    name=FINISH_TOOL_NAME,
+    name=DEFAULT_FINISH_TOOL_NAME,
     description=(
         "Signal task completion with a reason. Use when the task is finished "
         "or cannot proceed further. Note that you will need a separate turn "
