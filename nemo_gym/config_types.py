@@ -140,6 +140,10 @@ class ServerRefNotFoundError(ValueError):
     """A server cross-reference points to an instance that is not defined in the merged config."""
 
 
+class ConfigMissingValuesError(ValueError):
+    """One or more required config values are still unset (OmegaConf '???') after merging."""
+
+
 ########################################
 # Dataset configs for handling and upload/download
 ########################################
