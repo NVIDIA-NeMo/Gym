@@ -307,7 +307,7 @@ async def _run_stirrup_agent(
     model_base_url: str,
     model_name: str,
     api_key: str = "dummy",
-    max_turns: int = 100,
+    max_turns: int = 250,
     temperature: float = 0.6,
     max_tokens: int = 262144,
     reference_files: Optional[list] = None,
@@ -701,7 +701,7 @@ class StirrupAgentWrapperConfig(BaseResponsesAPIAgentConfig):
         description="Name of the task strategy to use (e.g. 'gdpval'). Must match a key in the task registry.",
     )
 
-    agent_max_turns: int = Field(default=100, description="Maximum turns for the Stirrup agent")
+    agent_max_turns: int = Field(default=250, description="Maximum turns for the Stirrup agent")
     concurrency: int = Field(default=32, description="Maximum concurrent runs")
     temperature: float = Field(default=0.6, description="Sampling temperature for the agent model")
 
