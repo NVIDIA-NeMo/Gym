@@ -128,7 +128,7 @@ class LiteLLMModelServer(SimpleModelServer):
     async def _check_proxy_version(self) -> None:
         """Verify the LiteLLM proxy is not running a known-compromised version."""
         base_url = re.sub(r"/v1/?$", "", self.config.openai_base_url.rstrip("/"))
-        health_url = f"{base_url}/health"
+        health_url = f"{base_url}/health/readiness/details"
         try:
             resp = await request("GET", health_url, _internal=True)
             data = await resp.json(content_type=None)
