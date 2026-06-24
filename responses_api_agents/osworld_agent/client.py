@@ -22,6 +22,7 @@ import base64
 import json
 import logging
 import os
+import sys
 import time
 import traceback
 from dataclasses import dataclass, field
@@ -94,6 +95,45 @@ def _flatten_actions(actions: Any) -> List[Any]:
         else:
             flattened.append(action)
     return flattened
+
+
+def _escape_prompt_agent_format_template(template: str) -> str:
+    """Escape prompt braces while preserving OSWorld's password placeholder."""
+    marker = "__NEMO_GYM_CLIENT_PASSWORD_PLACEHOLDER__"
+    return (
+        template.replace("{CLIENT_PASSWORD}", marker)
+        .replace("{", "{{")
+        .replace("}", "}}")
+        .replace(marker, "{CLIENT_PASSWORD}")
+    )
+
+
+def _patch_native_prompt_agent_templates(agent_cls: Any) -> None:
+    """Make upstream PromptAgent prompt templates safe for str.format().
+
+    OSWorld's computer_13 prompts contain JSON examples with literal braces,
+    then PromptAgent.__init__ calls `.format(CLIENT_PASSWORD=...)` on the
+    whole prompt. Patch the module constants once so JSON braces are not
+    interpreted as format fields.
+    """
+    if agent_cls.__module__ != "mm_agents.agent" or agent_cls.__name__ != "PromptAgent":
+        return
+    module = sys.modules.get(agent_cls.__module__)
+    if module is None or getattr(module, "_NEMO_GYM_PROMPT_FORMAT_SAFE", False):
+        return
+    for name in (
+        "SYS_PROMPT_IN_SCREENSHOT_OUT_ACTION",
+        "SYS_PROMPT_IN_A11Y_OUT_ACTION",
+        "SYS_PROMPT_IN_BOTH_OUT_ACTION",
+        "SYS_PROMPT_IN_SCREENSHOT_OUT_CODE",
+        "SYS_PROMPT_IN_A11Y_OUT_CODE",
+        "SYS_PROMPT_IN_BOTH_OUT_CODE",
+        "SYS_PROMPT_IN_SOM_OUT_TAG",
+    ):
+        prompt = getattr(module, name, None)
+        if isinstance(prompt, str):
+            setattr(module, name, _escape_prompt_agent_format_template(prompt))
+    setattr(module, "_NEMO_GYM_PROMPT_FORMAT_SAFE", True)
 
 
 def run_osworld_task(
@@ -198,6 +238,7 @@ def run_osworld_task(
             if messages_model_fn is None:
                 raise ValueError(f"runner {runner_spec.name!r} requires messages_model_fn")
             agent_cls = load_attr(runner_spec.agent_class_path)
+            _patch_native_prompt_agent_templates(agent_cls)
             native_agent = agent_cls(
                 platform="ubuntu",
                 model=policy_model_name or "policy_model",

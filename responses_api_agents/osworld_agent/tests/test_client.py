@@ -101,6 +101,24 @@ def _patch_client_for_fake_runtime(monkeypatch) -> None:
     monkeypatch.setenv("OSWORLD_COLD_BOOT_MIN_PNG_BYTES", "1")
 
 
+def test_prompt_agent_template_escape_preserves_json_and_password_placeholder() -> None:
+    template = """Password: {CLIENT_PASSWORD}
+{
+    "action_type": "click",
+    "x": 1
+}
+"""
+
+    escaped = osworld_client._escape_prompt_agent_format_template(template)
+
+    assert escaped.format(CLIENT_PASSWORD="pw") == """Password: pw
+{
+    "action_type": "click",
+    "x": 1
+}
+"""
+
+
 def test_gym_policy_runner_preserves_existing_pyautogui_flow(monkeypatch) -> None:
     _patch_client_for_fake_runtime(monkeypatch)
 
