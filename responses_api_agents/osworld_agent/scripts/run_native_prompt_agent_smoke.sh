@@ -32,6 +32,7 @@ LIMIT="${LIMIT:-1}"
 NUM_SAMPLES_IN_PARALLEL="${NUM_SAMPLES_IN_PARALLEL:-1}"
 START_NG_RUN="${START_NG_RUN:-1}"
 DRY_RUN="${DRY_RUN:-0}"
+USE_UV_RUN="${USE_UV_RUN:-1}"
 NG_RUN_WAIT_SECONDS="${NG_RUN_WAIT_SECONDS:-30}"
 MAX_OUTPUT_TOKENS="${MAX_OUTPUT_TOKENS:-16384}"
 TEMPERATURE="${TEMPERATURE:-1.0}"
@@ -45,15 +46,23 @@ echo "runner: ${RUNNER_NAME}"
 echo "input: ${INPUT_JSONL}"
 echo "output: ${OUTPUT_JSONL}"
 echo "limit: ${LIMIT}"
+echo "use uv run: ${USE_UV_RUN}"
 echo
 
+cmd_prefix=()
+if [[ "${USE_UV_RUN}" == "1" ]]; then
+    cmd_prefix=(uv run)
+fi
+
 ng_run_cmd=(
+    "${cmd_prefix[@]}"
     ng_run
     "+config_paths=[${CONFIG_PATHS}]"
     "++osworld_simple_agent.responses_api_agents.osworld_agent.runner_name=${RUNNER_NAME}"
 )
 
 collect_cmd=(
+    "${cmd_prefix[@]}"
     ng_collect_rollouts
     "+agent_name=${AGENT_NAME}"
     "+input_jsonl_fpath=${INPUT_JSONL}"
