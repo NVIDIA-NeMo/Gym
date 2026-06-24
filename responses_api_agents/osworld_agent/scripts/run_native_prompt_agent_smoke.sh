@@ -38,7 +38,9 @@ NG_COLLECT_BIN="${NG_COLLECT_BIN:-ng_collect_rollouts}"
 NG_STATUS_BIN="${NG_STATUS_BIN:-ng_status}"
 NG_RUN_WAIT_RETRIES="${NG_RUN_WAIT_RETRIES:-60}"
 NG_RUN_WAIT_INTERVAL_SECONDS="${NG_RUN_WAIT_INTERVAL_SECONDS:-3}"
-EXPECTED_SERVERS="${EXPECTED_SERVERS:-3}"
+# ng_status lists the registered Gym servers, not the head server. This
+# smoke starts osworld_simple_agent and policy_model, so the default is 2.
+EXPECTED_SERVERS="${EXPECTED_SERVERS:-2}"
 MAX_OUTPUT_TOKENS="${MAX_OUTPUT_TOKENS:-16384}"
 TEMPERATURE="${TEMPERATURE:-1.0}"
 CONFIG_PATHS="${CONFIG_PATHS:-responses_api_agents/osworld_agent/configs/osworld_agent.yaml,responses_api_agents/osworld_agent/configs/osworld_agent_native_prompt_agent.yaml,responses_api_models/openai_model/configs/openai_model.yaml}"
