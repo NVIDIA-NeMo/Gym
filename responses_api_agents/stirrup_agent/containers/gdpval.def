@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 Bootstrap: docker
-From: python:3.12-bookworm
+From: python:3.13-bookworm
 
 %labels
     Author NVIDIA NeMo-Gym
