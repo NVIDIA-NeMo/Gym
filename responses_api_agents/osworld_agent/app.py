@@ -24,7 +24,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 import ray
 from fastapi import Body
-from pydantic import ConfigDict
+from pydantic import ConfigDict, Field
 
 from nemo_gym.base_resources_server import (
     BaseRunRequest,
@@ -43,6 +43,7 @@ from nemo_gym.server_utils import (
     ServerClient,
     get_first_server_config_dict,
 )
+from responses_api_agents.osworld_agent.runner_registry import DEFAULT_RUNNER_NAME
 
 
 LOG = logging.getLogger("nemo_gym.osworld_agent")
@@ -74,6 +75,12 @@ class OSWorldAgentConfig(BaseResponsesAPIAgentConfig):
     mem_limit_mb: int = 16384  # cgroup memory cap for the VM container (~16 GB)
     step_timeout: int = 60  # per-action subprocess timeout (forwarded to provider; advisory in client.py)
     task_timeout: int = 1800  # whole-rollout wall-clock cap; trips mask_sample=True
+    runner_name: str = DEFAULT_RUNNER_NAME
+    action_space: Optional[str] = None
+    observation_type: Optional[str] = None
+    env_class_path: Optional[str] = None
+    agent_class_path: Optional[str] = None
+    agent_kwargs: Dict[str, Any] = Field(default_factory=dict)
 
 
 class OSWorldRunRequest(BaseRunRequest):
@@ -173,6 +180,37 @@ def _build_model_fn(
     return _call
 
 
+def _build_messages_model_fn(
+    *,
+    base_url: str,
+    model_name: str,
+    api_key: str,
+):
+    """Return a sync model caller for native OSWorld agents.
+
+    Native mm_agents such as PromptAgent construct their own OpenAI-style
+    messages. Gym still owns the actual policy endpoint, so this thin adapter
+    forwards those messages to the configured model server.
+    """
+    from openai import OpenAI  # noqa: PLC0415
+
+    client = OpenAI(base_url=base_url, api_key=api_key or "dummy")
+
+    def _call(messages: List[Dict[str, Any]], payload: Dict[str, Any]) -> str:
+        create_kwargs: Dict[str, Any] = {
+            "model": payload.get("model") or model_name,
+            "messages": messages,
+            "max_tokens": payload.get("max_tokens"),
+            "temperature": payload.get("temperature"),
+        }
+        if payload.get("top_p") is not None:
+            create_kwargs["top_p"] = payload["top_p"]
+        resp = client.chat.completions.create(**create_kwargs)
+        return resp.choices[0].message.content or ""
+
+    return _call
+
+
 def _format_observation(obs: Dict[str, Any], instruction: str, *, is_current: bool) -> List[Dict[str, Any]]:
     parts: List[Dict[str, Any]] = []
     if is_current:
@@ -210,15 +248,35 @@ def _run_osworld_task_remote(task_config: Dict[str, Any], runner_kwargs: Dict[st
     """
     from responses_api_agents.osworld_agent.client import run_osworld_task  # noqa: PLC0415
 
+    base_url = runner_kwargs.pop("base_url")
+    model_name = runner_kwargs.pop("model_name")
+    api_key = runner_kwargs.pop("api_key")
+    max_tokens = runner_kwargs.pop("max_tokens")
+    temperature = runner_kwargs.pop("temperature")
+    top_p = runner_kwargs.pop("top_p")
     model_fn = _build_model_fn(
-        base_url=runner_kwargs.pop("base_url"),
-        model_name=runner_kwargs.pop("model_name"),
-        api_key=runner_kwargs.pop("api_key"),
-        max_tokens=runner_kwargs.pop("max_tokens"),
-        temperature=runner_kwargs.pop("temperature"),
-        top_p=runner_kwargs.pop("top_p"),
+        base_url=base_url,
+        model_name=model_name,
+        api_key=api_key,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        top_p=top_p,
     )
-    result = run_osworld_task(task_config, model_fn=model_fn, **runner_kwargs)
+    messages_model_fn = _build_messages_model_fn(
+        base_url=base_url,
+        model_name=model_name,
+        api_key=api_key,
+    )
+    result = run_osworld_task(
+        task_config,
+        model_fn=model_fn,
+        messages_model_fn=messages_model_fn,
+        policy_model_name=model_name,
+        policy_max_tokens=max_tokens,
+        policy_temperature=temperature,
+        policy_top_p=top_p,
+        **runner_kwargs,
+    )
     return {
         "reward": result.reward,
         "score": result.score,
@@ -292,6 +350,12 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                 "max_tokens": self.config.max_tokens,
                 "temperature": temperature,
                 "top_p": top_p,
+                "runner_name": self.config.runner_name,
+                "action_space": self.config.action_space,
+                "observation_type": self.config.observation_type,
+                "env_class_path": self.config.env_class_path,
+                "agent_class_path": self.config.agent_class_path,
+                "agent_kwargs": self.config.agent_kwargs,
             }
 
             try:
