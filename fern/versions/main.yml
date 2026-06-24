@@ -18,7 +18,7 @@ navigation:
       - section: "Agent Server"
         slug: agent-server
         contents:
-          - page: Overview
+          - page: Rollout Lifecycle
             path: ./latest/pages/agent-server/index.mdx
             slug: ""
       - folder: ./latest/pages/model-server
@@ -27,7 +27,7 @@ navigation:
       - section: "Resources Server"
         slug: resources-server
         contents:
-          - page: Overview
+          - page: Example Resources Servers
             path: ./latest/pages/resources-server/index.mdx
             slug: ""
       - folder: ./latest/pages/data
