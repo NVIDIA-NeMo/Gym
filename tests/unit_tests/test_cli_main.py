@@ -571,6 +571,7 @@ class TestJsonFlag:
         "argv, expected_target",
         [
             (["list", "benchmarks", "--json"], "nemo_gym.cli.eval:list_benchmarks"),
+            (["list", "agents", "--json"], "nemo_gym.cli.agents:list_agents"),
             (["env", "status", "--json"], "nemo_gym.cli.env:status"),
         ],
     )
