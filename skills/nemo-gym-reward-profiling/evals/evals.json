@@ -1,0 +1,60 @@
+[
+  {
+    "id": "nemo-gym-reward-profiling-positive-001",
+    "question": "How do I run reward profiling on the math benchmark? I want pass@5 numbers.",
+    "expected_skill": "nemo-gym-reward-profiling",
+    "ground_truth": "The agent loads the nemo-gym-reward-profiling skill, walks through the ng_run / ng_collect_rollouts / ng_reward_profile sequence, sets num_repeats=5 for pass@5, and explains that ng_reward_profile is the step that writes the *_reward_profiling.jsonl.",
+    "expected_behavior": [
+      "The agent read nemo-gym-reward-profiling/SKILL.md before acting",
+      "The agent walked through the ng_run → ng_collect_rollouts → ng_reward_profile sequence",
+      "The agent set num_repeats=5 to match the pass@5 ask",
+      "The agent identified ng_reward_profile (not ng_collect_rollouts) as the step that produces the reward profiling JSONL"
+    ]
+  },
+  {
+    "id": "nemo-gym-reward-profiling-positive-002",
+    "question": "Can you explain what the *_materialized_inputs.jsonl file is and how it relates to rollouts.jsonl and the reward profile output?",
+    "expected_skill": "nemo-gym-reward-profiling",
+    "ground_truth": "The agent loads the nemo-gym-reward-profiling skill and explains materialized_inputs as the expanded collection inputs after repeat expansion plus agent defaults and task/rollout id assignment, rollouts.jsonl as one completed rollout per materialized input row, and *_reward_profiling.jsonl as one summarized profile row per original task with rollout_infos.",
+    "expected_behavior": [
+      "The agent read nemo-gym-reward-profiling/SKILL.md before acting",
+      "The agent explained that *_materialized_inputs.jsonl holds the expanded collection inputs after repeat expansion",
+      "The agent explained the role of _ng_task_index and _ng_rollout_index for keying analysis",
+      "The agent mentioned rollout_infos as the compact per-rollout info inside each task profile row"
+    ]
+  },
+  {
+    "id": "nemo-gym-reward-profiling-positive-003",
+    "question": "Rollout collection stopped early so I have partial output. How do I still run reward profiling on the rollouts that did complete?",
+    "expected_skill": "nemo-gym-reward-profiling",
+    "ground_truth": "The agent loads the nemo-gym-reward-profiling skill and uses ++allow_partial_rollouts=True on ng_reward_profile to profile only the completed rollouts and drop original input rows with no completed rollout.",
+    "expected_behavior": [
+      "The agent read nemo-gym-reward-profiling/SKILL.md before acting",
+      "The agent passed ++allow_partial_rollouts=True to ng_reward_profile",
+      "The agent confirmed that ng_reward_profile (not ng_collect_rollouts) is the step being modified",
+      "The agent noted the default is strict profiling"
+    ]
+  },
+  {
+    "id": "nemo-gym-reward-profiling-negative-001",
+    "question": "Add a new GSM8K-style benchmark to NeMo-Gym, including data prep and a verify() implementation.",
+    "expected_skill": null,
+    "should_trigger": false,
+    "ground_truth": "The agent should not activate the nemo-gym-reward-profiling skill for a benchmark integration task. It should use the add-benchmark skill instead.",
+    "expected_behavior": [
+      "The agent did not read or activate nemo-gym-reward-profiling/SKILL.md",
+      "The agent recognized this as a benchmark integration task"
+    ]
+  },
+  {
+    "id": "nemo-gym-reward-profiling-negative-002",
+    "question": "My ng_collect_rollouts crashed with a Ray actor stack trace and no rollouts.jsonl was written. Help me find the root cause.",
+    "expected_skill": null,
+    "should_trigger": false,
+    "ground_truth": "The agent should not activate the nemo-gym-reward-profiling skill for a failed-job debugging task. It should use the nemo-gym-debugging skill instead.",
+    "expected_behavior": [
+      "The agent did not read or activate nemo-gym-reward-profiling/SKILL.md",
+      "The agent recognized this as a debugging task and deferred to nemo-gym-debugging"
+    ]
+  }
+]
