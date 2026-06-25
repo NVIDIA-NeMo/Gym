@@ -140,6 +140,10 @@ class ServerRefNotFoundError(ValueError):
     """A server cross-reference points to an instance that is not defined in the merged config."""
 
 
+class ConfigMissingValuesError(ValueError):
+    """One or more required config values are still unset (OmegaConf '???') after merging."""
+
+
 ########################################
 # Dataset configs for handling and upload/download
 ########################################
@@ -152,7 +156,7 @@ class UploadJsonlDatasetGitlabConfig(BaseNeMoGymCLIConfig):
     Examples:
 
     ```bash
-    ng_upload_dataset_to_gitlab \
+    gym dataset upload --storage gitlab \
         +dataset_name=example_multi_step \
         +version=0.0.1 \
         +input_jsonl_fpath=data/train.jsonl
@@ -177,7 +181,7 @@ class DownloadJsonlDatasetGitlabConfig(JsonlDatasetGitlabIdentifer, BaseNeMoGymC
     Examples:
 
     ```bash
-    ng_download_dataset_from_gitlab \
+    gym dataset download --storage gitlab \
         +dataset_name=example_multi_step \
         +version=0.0.1 \
         +artifact_fpath=train.jsonl \
@@ -198,7 +202,7 @@ class DeleteJsonlDatasetGitlabConfig(BaseNeMoGymCLIConfig):
     Examples:
 
     ```bash
-    ng_delete_dataset_from_gitlab +dataset_name=old_dataset
+    gym dataset rm +dataset_name=old_dataset
     ```
     """
 
@@ -221,7 +225,7 @@ class BaseUploadJsonlDatasetHuggingFaceConfig(BaseNeMoGymCLIConfig):
 
     ```bash
     resource_config_path="resources_servers/example_multi_step/configs/example_multi_step.yaml"
-    ng_upload_dataset_to_hf \
+    gym dataset upload \
         +dataset_name=my_dataset \
         +input_jsonl_fpath=data/train.jsonl \
         +resource_config_path=${resource_config_path}
@@ -268,13 +272,13 @@ class UploadJsonlDatasetHuggingFaceConfig(BaseUploadJsonlDatasetHuggingFaceConfi
     Upload a JSONL dataset to HuggingFace Hub and automatically delete from GitLab after successful upload.
 
     This command always deletes the dataset from GitLab after uploading to HuggingFace.
-    Use `ng_upload_dataset_to_hf` if you want optional deletion control.
+    Use `gym dataset upload` if you want optional deletion control.
 
     Examples:
 
     ```bash
     resource_config_path="resources_servers/example_multi_step/configs/example_multi_step.yaml"
-    ng_gitlab_to_hf_dataset \
+    gym dataset migrate \
         +dataset_name=my_dataset \
         +input_jsonl_fpath=data/train.jsonl \
         +resource_config_path=${resource_config_path}
@@ -300,7 +304,7 @@ class UploadJsonlDatasetHuggingFaceMaybeDeleteConfig(BaseUploadJsonlDatasetHuggi
 
     ```bash
     resource_config_path="resources_servers/example_multi_step/configs/example_multi_step.yaml"
-    ng_upload_dataset_to_hf \
+    gym dataset upload \
         +dataset_name=my_dataset \
         +input_jsonl_fpath=data/train.jsonl \
         +resource_config_path=${resource_config_path} \
@@ -320,7 +324,7 @@ class DownloadJsonlDatasetHuggingFaceConfig(JsonlDatasetHuggingFaceIdentifer, Ba
     Examples:
 
     ```bash
-    ng_download_dataset_from_hf \
+    gym dataset download \
         +repo_id=NVIDIA/NeMo-Gym-Math-example_multi_step-v1 \
         +artifact_fpath=train.jsonl \
         +output_fpath=data/train.jsonl
@@ -406,6 +410,27 @@ class BenchmarkDatasetConfig(BaseModel):
 
 
 class Domain(str, Enum):
+    """The capability a resources server primarily evaluates or trains.
+
+    Pick the single domain that best fits the task. If several seem to apply, choose the most
+    specific one (e.g. prefer `math` or `coding` over `agent`); use `other` only when none
+    of the specific values fit. The values:
+
+    - `math`                  — mathematical problem solving (e.g. AIME, MATH, GSM8K).
+    - `coding`                — code generation, repair, or execution (e.g. SWE-bench, LiveCodeBench).
+    - `agent`                 — multi-step, tool-using / environment-interacting tasks (e.g. tau2,
+      workplace_assistant). Prefer a more specific value when the task is really math/coding/etc.
+    - `knowledge`             — factual or domain-knowledge question answering (e.g. GPQA, MMLU).
+    - `instruction_following` — adherence to explicit formatting/constraints (e.g. IFEval).
+    - `long_context`          — reasoning over long inputs (e.g. RULER, long-document QA).
+    - `safety`                — refusing harmful content / resisting jailbreaks & prompt injection.
+    - `games`                 — interactive game environments (e.g. blackjack, tetris).
+    - `translation`           — machine translation quality (e.g. WMT).
+    - `e2e`                   — end-to-end pipelines spanning multiple capabilities at once.
+    - `rlhf`                  — preference / reward-model / LLM-as-judge evaluations.
+    - `other`                 — catch-all when no specific domain above applies.
+    """
+
     MATH = "math"
     CODING = "coding"
     AGENT = "agent"

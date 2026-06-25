@@ -13,10 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import shutil
-import sys
 import tomllib
 from importlib import import_module
-from io import StringIO
 from pathlib import Path
 from subprocess import TimeoutExpired
 from unittest.mock import MagicMock, patch
@@ -26,13 +24,12 @@ from pytest import MonkeyPatch, raises
 
 import nemo_gym.global_config
 from nemo_gym import PARENT_DIR
-from nemo_gym.cli import (
+from nemo_gym.cli.env import (
     _FORCE_KILL_REAP_TIMEOUT_SEC,
     _GRACEFUL_SHUTDOWN_TIMEOUT_SEC,
     RunConfig,
     RunHelper,
     _select_shard,
-    display_help,
     init_resources_server,
 )
 from nemo_gym.config_types import ResourcesServerInstanceConfig
@@ -75,46 +72,16 @@ class TestCLI:
     def test_sanity(self) -> None:
         RunConfig(entrypoint="", name="")
 
-    def test_pyproject_scripts(self) -> None:
+    def test_pyproject_scripts_are_importable(self) -> None:
+        """Every console-script entry point must resolve to an importable callable."""
         pyproject_path = PARENT_DIR / "pyproject.toml"
         with pyproject_path.open("rb") as f:
             pyproject_data = tomllib.load(f)
 
-        project_scripts = pyproject_data["project"]["scripts"]
-
-        for script_name, import_path in project_scripts.items():
-            # Dedupe `nemo_gym_*` from `ng_*` commands
-            if not script_name.startswith("ng_"):
-                continue
-
-            # We only test `+h=true` and not `+help=true`
-            print(f"Running `{script_name} +h=true`")
-
+        for script_name, import_path in pyproject_data["project"]["scripts"].items():
             module, fn = import_path.split(":")
-            fn = getattr(import_module(module), fn)
-
-            with MonkeyPatch.context() as mp:
-                mp.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", OmegaConf.create({"h": True}))
-
-                text_trap = StringIO()
-                mp.setattr(sys, "stdout", text_trap)
-
-                with raises(SystemExit):
-                    fn()
-
-    def test_display_help_discovers_scripts(self) -> None:
-        with MonkeyPatch.context() as mp:
-            mp.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", OmegaConf.create({}))
-
-            text_trap = StringIO()
-            mp.setattr(sys, "stdout", text_trap)
-
-            display_help()
-
-            output = text_trap.getvalue()
-            assert "ng_help" in output
-            assert "ng_run" in output
-            assert "ng_collect_rollouts" in output
+            target = getattr(import_module(module), fn)
+            assert callable(target), f"{script_name} -> {import_path} is not callable"
 
     def test_init_resources_server_includes_domain(self) -> None:
         """Test that init_resources_server creates a config with the required domain field."""

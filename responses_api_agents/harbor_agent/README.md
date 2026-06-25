@@ -200,9 +200,9 @@ export APPTAINER_DOCKER_PASSWORD=<registry-password-or-token>
 Then start NeMo Gym:
 
 ```bash
-config_paths="responses_api_agents/harbor_agent/configs/harbor_agent.yaml,\
-responses_api_models/vllm_model/configs/vllm_model_for_training.yaml"
-ng_run "+config_paths=[${config_paths}]"
+gym env start \
+  --config responses_api_agents/harbor_agent/configs/harbor_agent.yaml \
+  --model-type vllm_model/vllm_model_for_training
 ```
 
 ### 6) Test Harbor agent
@@ -220,9 +220,10 @@ timestamped job directory containing per-trial outputs and a top-level
 ### 7) Collect rollouts
 
 ```bash
-ng_collect_rollouts +agent_name=harbor_agent \
-  +input_jsonl_fpath=responses_api_agents/harbor_agent/example/example_input.jsonl \
-  +output_jsonl_fpath=responses_api_agents/harbor_agent/example/example_output.jsonl
+gym eval run --no-serve \
+  --agent harbor_agent \
+  --input responses_api_agents/harbor_agent/example/example_input.jsonl \
+  --output responses_api_agents/harbor_agent/example/example_output.jsonl
 ```
 
 ### 8) View trajectories
@@ -288,26 +289,29 @@ policy_model_name: <served-model-name>
 Then follow the same Harbor-agent workflow with the Daytona config:
 
 ```bash
-config_paths="responses_api_agents/harbor_agent/configs/harbor_agent_daytona.yaml,\
-responses_api_models/vllm_model/configs/vllm_model.yaml"
-ng_run "+config_paths=[${config_paths}]"
+gym env start \
+  --config responses_api_agents/harbor_agent/configs/harbor_agent_daytona.yaml \
+  --model-type vllm_model
 ```
 
 Alternatively, pass those values as CLI overrides:
 
 ```bash
-ng_run "+config_paths=[${config_paths}]" \
-  +policy_base_url=<openai-compatible-base-url> \
-  +policy_api_key=<policy-api-key> \
-  +policy_model_name=<served-model-name>
+gym env start \
+  --config responses_api_agents/harbor_agent/configs/harbor_agent_daytona.yaml \
+  --model-type vllm_model \
+  --model-url <openai-compatible-base-url> \
+  --model-api-key <policy-api-key> \
+  --model <served-model-name>
 ```
 
 For five Terminal-Bench rollout inputs, use the checked-in input file:
 
 ```bash
-ng_collect_rollouts +agent_name=harbor_agent \
-  +input_jsonl_fpath=responses_api_agents/harbor_agent/example/terminal_bench_daytona_input.jsonl \
-  +output_jsonl_fpath=/tmp/harbor_daytona_terminal_bench_output.jsonl
+gym eval run --no-serve \
+  --agent harbor_agent \
+  --input responses_api_agents/harbor_agent/example/terminal_bench_daytona_input.jsonl \
+  --output /tmp/harbor_daytona_terminal_bench_output.jsonl
 ```
 
 Inspect the rollout and Harbor job directory:

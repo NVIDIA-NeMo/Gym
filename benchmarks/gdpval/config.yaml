@@ -65,6 +65,14 @@ gdpval_stirrup_agent:
       user_prompt_template: ${oc.env:USER_PROMPT_TEMPLATE,null}
       gdpval_container_path: ${oc.env:GDPVAL_CONTAINER_PATH,null}
       persist_deliverables_dir: ${oc.env:PERSIST_DELIVERABLES_DIR,output/gdpval/deliverables}
+      # Task-only execution mode. When true, runs each task and caches deliverables
+      # to persist_deliverables_dir but skips the judge /verify call (no reward).
+      # Requires persist_deliverables_dir to be an absolute path.
+      execute_only: ${oc.env:EXECUTE_ONLY,false}
+      # Judge-only mode. When true, skips agent execution and scores the
+      # deliverables already cached in persist_deliverables_dir via /verify.
+      # Mutually exclusive with execute_only.
+      judge_only: ${oc.env:JUDGE_ONLY,false}
       resources_server:
         type: resources_servers
         name: gdpval_resources_server
