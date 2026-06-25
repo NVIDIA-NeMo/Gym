@@ -212,10 +212,10 @@ class InstructionFollowingResourcesServer(SimpleResourcesServer):
             return sum(lst) / len(lst) if lst else 0.0
 
         return {
-            "prompt_strict_accuracy": _mean(prompt_strict),
-            "instruction_strict_accuracy": _mean(instruction_strict),
-            "prompt_loose_accuracy": _mean(prompt_loose),
-            "instruction_loose_accuracy": _mean(instruction_loose),
+            "prompt_strict_accuracy": _mean(prompt_strict) * 100.0,
+            "instruction_strict_accuracy": _mean(instruction_strict) * 100.0,
+            "prompt_loose_accuracy": _mean(prompt_loose) * 100.0,
+            "instruction_loose_accuracy": _mean(instruction_loose) * 100.0,
         }
 
 

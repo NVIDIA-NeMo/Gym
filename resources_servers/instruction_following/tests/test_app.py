@@ -241,7 +241,7 @@ class TestApp:
             "prompt_loose_accuracy",
             "instruction_loose_accuracy",
         }
-        assert metrics["prompt_strict_accuracy"] == 0.5
-        assert abs(metrics["instruction_strict_accuracy"] - 2 / 3) < 1e-9
-        assert metrics["prompt_loose_accuracy"] == 1.0
-        assert metrics["instruction_loose_accuracy"] == 1.0
+        assert metrics["prompt_strict_accuracy"] == 50.0
+        assert abs(metrics["instruction_strict_accuracy"] - 200 / 3) < 1e-9
+        assert metrics["prompt_loose_accuracy"] == 100.0
+        assert metrics["instruction_loose_accuracy"] == 100.0
