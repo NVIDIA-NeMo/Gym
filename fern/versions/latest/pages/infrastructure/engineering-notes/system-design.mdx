@@ -6,7 +6,7 @@ This section describes how NeMo Gym components interact during startup and execu
 
 ## Control Plane: Server Startup
 
-When you run `ng_run`, the system starts up in four phases:
+When you run `gym env start`, the system starts up in four phases:
 
 ```mermaid
 %%{init: {'theme': 'default', 'themeVariables': { 'lineColor': '#5c6bc0', 'primaryTextColor': '#333', 'primaryColor': '#e3f2fd', 'secondaryColor': '#f5f5f5'}}}%%
@@ -18,10 +18,12 @@ flowchart LR
 
 ### Phase 1: Parse CLI
 
-The `ng_run` command uses Hydra to parse command-line arguments. Users specify configuration files via `+config_paths`:
+The `gym env start` command uses Hydra to parse command-line arguments. Users specify configuration files via `--config`:
 
 ```bash
-ng_run "+config_paths=[resources_servers/math/configs/math.yaml, responses_api_models/openai_model/configs/openai_model.yaml]"
+gym env start \
+    --resources-server math \
+    --model-type openai_model
 ```
 
 ### Phase 2: Load and Merge Configs
@@ -45,7 +47,7 @@ Servers are started in two stages:
 ```mermaid
 %%{init: {'theme': 'default', 'themeVariables': { 'lineColor': '#5c6bc0', 'primaryTextColor': '#333'}}}%%
 flowchart TB
-    Main["Main Process<br/>ng_run"]
+    Main["Main Process<br/>gym env start"]
     Head["Head Server<br/>Port 11000"]
     Model["Model Server<br/>Own venv + port"]
     Agent["Agent Server<br/>Own venv + port"]
@@ -133,7 +135,7 @@ sequenceDiagram
 
 ## Data Plane: Rollout Collection
 
-When you run `ng_collect_rollouts`, the system collects training data by executing rollouts in parallel:
+When you run `gym eval run --no-serve`, the system collects training data by executing rollouts in parallel:
 
 ```mermaid
 %%{init: {'theme': 'default', 'themeVariables': { 'lineColor': '#5c6bc0', 'primaryTextColor': '#333'}}}%%
@@ -174,5 +176,5 @@ sequenceDiagram
 The client first queries the Head Server to discover server addresses from the global config, then reads input JSONL and dispatches prompts to the Agent. Completed rollouts are written to output JSONL.
 
 **Concurrency behavior differs by use case:**
-- **Standalone rollout collection** (`ng_collect_rollouts`): A semaphore gates concurrency via `num_samples_in_parallel` to control load.
+- **Standalone rollout collection** (`gym eval run --no-serve`): A semaphore gates concurrency via `num_samples_in_parallel` to control load.
 - **Training framework integration** (e.g., NeMo RL): All requests are sent without gating; the training framework manages concurrency externally.
