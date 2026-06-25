@@ -866,7 +866,7 @@ def dump_config():  # pragma: no cover
 
 @exit_cleanly_on_config_error
 def validate():  # pragma: no cover
-    """Validate a config without starting Ray or any server subprocess (friction #12).
+    """Validate a config without starting Ray or any server subprocess.
 
     Runs the full config parse — config_paths resolution (missing/malformed), server cross-reference
     validation, mandatory `???` values, and schema — then exits 0 (valid) or, via
