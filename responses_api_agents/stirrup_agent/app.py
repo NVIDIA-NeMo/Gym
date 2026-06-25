@@ -1059,9 +1059,7 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
                 execute_only_payload["response"] = response_clean.model_dump(mode="json")
                 if deliverables_dir is not None:
                     execute_only_payload["deliverables_dir"] = deliverables_dir
-                execute_only_payload.setdefault(
-                    "elapsed_seconds", float(response_metadata.get("elapsed_seconds", 0))
-                )
+                execute_only_payload.setdefault("elapsed_seconds", float(response_metadata.get("elapsed_seconds", 0)))
                 execute_only_payload["execute_only"] = True
                 return execute_only_payload
 
