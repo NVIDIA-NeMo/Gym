@@ -16,7 +16,7 @@ import asyncio
 import json
 import logging
 import re
-from typing import Any, List, Optional
+from typing import Any, List, Mapping, Optional, Tuple
 
 from fastapi import Request, Response
 from pydantic import ConfigDict, Field
@@ -161,6 +161,17 @@ class FinanceAgent(SimpleResponsesAPIAgent):
         response: Response,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
+        result, set_cookies = await self._responses(body, request.cookies)
+        for k, v in set_cookies.items():
+            response.set_cookie(k, v)
+        return result
+
+    async def _responses(
+        self,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        cookies: Optional[Mapping[str, str]] = None,
+    ) -> Tuple[NeMoGymResponse, dict]:
+        """Implementation of `/v1/responses`; `run` invokes this in-process."""
         body = body.model_copy(deep=True)
 
         if isinstance(body.input, str):
@@ -171,7 +182,7 @@ class FinanceAgent(SimpleResponsesAPIAgent):
         step = 0
         last_model_response: Optional[NeMoGymResponse] = None
         model_server_cookies = None
-        resources_server_cookies = request.cookies
+        resources_server_cookies = dict(cookies) if cookies else {}
 
         done_tools_set = set(self.config.done_tools)
         max_steps = self.config.max_steps
@@ -316,15 +327,16 @@ class FinanceAgent(SimpleResponsesAPIAgent):
                 tool_choice="auto",
             )
 
-        cookie_items = list(resources_server_cookies.items())
+        set_cookies: dict[str, str] = {}
+        for k, v in resources_server_cookies.items():
+            set_cookies[k] = v
         if model_server_cookies:
-            cookie_items.extend(model_server_cookies.items())
-        for k, v in cookie_items:
-            response.set_cookie(k, v)
+            for k, v in model_server_cookies.items():
+                set_cookies[k] = v
 
         last_model_response.output = new_outputs
         last_model_response.usage = usage
-        return last_model_response
+        return last_model_response, set_cookies
 
     async def run(self, request: Request, body: FinanceAgentRunRequest) -> FinanceAgentVerifyResponse:
         try:
@@ -359,17 +371,11 @@ class FinanceAgent(SimpleResponsesAPIAgent):
         await raise_for_status(seed_session_response)
         cookies = seed_session_response.cookies
 
-        response = await self.server_client.post(
-            server_name=self.config.name,
-            url_path="/v1/responses",
-            json=body.responses_create_params,
-            cookies=cookies,
-        )
-        await raise_for_status(response)
-        cookies = response.cookies
+        inproc_response, set_cookies = await self._responses(body.responses_create_params, cookies)
+        cookies = set_cookies
 
         verify_request = FinanceAgentVerifyRequest.model_validate(
-            body.model_dump() | {"response": await get_response_json(response)}
+            body.model_dump() | {"response": inproc_response.model_dump()}
         )
 
         verify_response = await self.server_client.post(

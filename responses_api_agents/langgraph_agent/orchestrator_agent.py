@@ -234,20 +234,18 @@ class OrchestratorAgent(LangGraphAgentAdapter):
         await raise_for_status(seed)
         cookies = seed.cookies
 
-        resp = await self.server_client.post(
-            server_name=self.config.name, url_path="/v1/responses", json=body.responses_create_params, cookies=cookies
-        )
-        await raise_for_status(resp)
+        inproc_resp, set_cookies = await self._responses(body.responses_create_params, cookies)
+        cookies = set_cookies
 
         verify_request = OrchestratorVerifyRequest.model_validate(
-            body.model_dump() | {"response": await get_response_json(resp)}
+            body.model_dump() | {"response": inproc_resp.model_dump()}
         )
 
         verify = await self.server_client.post(
             server_name=self.config.resources_server.name,
             url_path="/verify",
             json=verify_request.model_dump(),
-            cookies=resp.cookies,
+            cookies=cookies,
         )
         await raise_for_status(verify)
         return OrchestratorVerifyResponse.model_validate(await get_response_json(verify))

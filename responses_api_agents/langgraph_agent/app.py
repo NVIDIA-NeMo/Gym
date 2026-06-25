@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from abc import abstractmethod
-from typing import Any
+from typing import Any, Mapping, Optional, Tuple
 
 from fastapi import Body, Request, Response
 from pydantic import ConfigDict
@@ -58,17 +58,29 @@ class LangGraphAgentAdapter(SimpleResponsesAPIAgent):
     async def responses(
         self, request: Request, response: Response, body: NeMoGymResponseCreateParamsNonStreaming = Body()
     ) -> NeMoGymResponse:
-        initial_state = await self.get_initial_state(body, request.cookies)
+        result, set_cookies = await self._responses(body, request.cookies)
+        for k, v in set_cookies.items():
+            response.set_cookie(k, v)
+        return result
+
+    async def _responses(
+        self,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        cookies: Optional[Mapping[str, str]] = None,
+    ) -> Tuple[NeMoGymResponse, dict]:
+        """Implementation of `/v1/responses`; subclass `run` methods invoke this in-process."""
+        initial_state = await self.get_initial_state(body, dict(cookies) if cookies else {})
         final_state = await self.graph.ainvoke(initial_state)
 
+        set_cookies: dict[str, str] = {}
         if "cookies" in final_state:
             for k, v in final_state["cookies"].items():
-                response.set_cookie(k, v)
+                set_cookies[k] = v
 
         model_response = self.extract_model_response(final_state)
         outputs = self.extract_outputs(final_state)
         model_response.output = outputs
-        return model_response
+        return model_response, set_cookies
 
     async def run(self, request: Request, body: BaseRunRequest) -> BaseVerifyResponse:
         cookies = request.cookies
@@ -82,18 +94,16 @@ class LangGraphAgentAdapter(SimpleResponsesAPIAgent):
         await raise_for_status(seed)
         cookies = seed.cookies
 
-        resp = await self.server_client.post(
-            server_name=self.config.name, url_path="/v1/responses", json=body.responses_create_params, cookies=cookies
-        )
-        await raise_for_status(resp)
+        inproc_resp, set_cookies = await self._responses(body.responses_create_params, cookies)
+        cookies = set_cookies
 
-        verify_request_dict = body.model_dump() | {"response": await get_response_json(resp)}
+        verify_request_dict = body.model_dump() | {"response": inproc_resp.model_dump()}
 
         verify = await self.server_client.post(
             server_name=self.config.resources_server.name,
             url_path="/verify",
             json=verify_request_dict,
-            cookies=resp.cookies,
+            cookies=cookies,
         )
         await raise_for_status(verify)
         return BaseVerifyResponse.model_validate(await get_response_json(verify))

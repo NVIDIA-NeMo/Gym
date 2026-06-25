@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
-from typing import List
+from typing import List, Mapping, Optional, Tuple
 
 from fastapi import Request, Response
 from pydantic import ConfigDict, ValidationError
@@ -68,6 +68,17 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         response: Response,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
+        result, set_cookies = await self._responses(body, request.cookies)
+        for k, v in set_cookies.items():
+            response.set_cookie(k, v)
+        return result
+
+    async def _responses(
+        self,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        cookies: Optional[Mapping[str, str]] = None,
+    ) -> Tuple[NeMoGymResponse, dict]:
+        """Implementation of `/v1/responses`; `run` invokes this in-process."""
         body = body.model_copy(deep=True)
 
         if isinstance(body.input, str):
@@ -77,7 +88,9 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         usage = None
         step = 0
         model_server_cookies = None  # update the cookies on every model response
-        resources_server_cookies = request.cookies  # update the cookies on every resources server response
+        resources_server_cookies = (
+            dict(cookies) if cookies else {}
+        )  # update the cookies on every resources server response
 
         while True:
             step += 1
@@ -148,12 +161,13 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 break
 
         # Propogate any extra cookies necessary for downstream verification
+        set_cookies: dict[str, str] = {}
         for k, v in (*resources_server_cookies.items(), *model_server_cookies.items()):
-            response.set_cookie(k, v)
+            set_cookies[k] = v
 
         model_response.output = new_outputs
         model_response.usage = usage
-        return model_response
+        return model_response, set_cookies
 
     async def run(self, request: Request, body: SimpleAgentRunRequest) -> SimpleAgentVerifyResponse:
         cookies = request.cookies
@@ -179,24 +193,18 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         retries_left = self.config.llm_parse_retries
         while True:
             try:
-                response = await self.server_client.post(
-                    server_name=self.config.name,
-                    url_path="/v1/responses",
-                    json=body.responses_create_params,
-                    cookies=cookies,
-                )
-                await raise_for_status(response)
-                cookies = response.cookies
+                inproc_response, set_cookies = await self._responses(body.responses_create_params, cookies)
+                attempt_cookies = set_cookies
 
                 verify_request = SimpleAgentVerifyRequest.model_validate(
-                    body.model_dump() | {"response": await get_response_json(response)}
+                    body.model_dump() | {"response": inproc_response.model_dump()}
                 )
 
                 verify_response = await self.server_client.post(
                     server_name=self.config.resources_server.name,
                     url_path="/verify",
                     json=verify_request.model_dump(),
-                    cookies=cookies,
+                    cookies=attempt_cookies,
                 )
                 await raise_for_status(verify_response)
                 result = SimpleAgentVerifyResponse.model_validate(await get_response_json(verify_response))
