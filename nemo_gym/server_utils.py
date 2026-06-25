@@ -15,6 +15,7 @@
 import asyncio
 import atexit
 import json
+import re
 import resource
 import sys
 import time
@@ -63,6 +64,8 @@ from nemo_gym.global_config import (
     HEAD_SERVER_KEY_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
     RAY_HEAD_NODE_ADDRESS_KEY_NAME,
+    ROLLOUT_INDEX_KEY_NAME,
+    TASK_INDEX_KEY_NAME,
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
     get_first_server_config_dict,
@@ -767,3 +770,47 @@ def get_server_url(server_name: str) -> str:
     )
 
     return f"http://{model_server_config['host']}:{model_server_config['port']}"
+
+
+# Per-rollout capture correlation (shared protocol). A caller tags its model calls by setting
+# ROLLOUT_HEADER or using a /ng-rollout/<rollout_id>/v1 base_url. Producer: apply_rollout_prefix;
+# consumer: the capture middleware in observability.py.
+ROLLOUT_HEADER = "x-nemo-gym-rollout-id"
+ROLLOUT_PATH_PREFIX = "ng-rollout"
+
+_ROLLOUT_VERSION_SUFFIX_RE = re.compile(r"/v\d+/?$")
+
+
+def apply_rollout_prefix(base_url: str, rollout_id: Optional[str]) -> str:
+    """Tag a model-server base_url with a rollout id (OpenAI-compatible).
+
+    No-op when ``rollout_id`` is falsy. Inserts the prefix before a trailing ``/vN`` segment when
+    present, else appends it, so a caller can wrap an already-resolved base_url. The model server
+    strips the prefix before routing, so ``/v1/...`` is unchanged.
+    """
+    if not rollout_id:
+        return base_url
+    prefix = f"/{ROLLOUT_PATH_PREFIX}/{rollout_id}"
+    match = _ROLLOUT_VERSION_SUFFIX_RE.search(base_url)
+    if match:
+        return base_url[: match.start()] + prefix + base_url[match.start() :]
+    return base_url.rstrip("/") + prefix
+
+
+def rollout_id_from_run_body(body: Any) -> Optional[str]:
+    """Per-rollout capture id from a run-request's task/rollout indices (``None`` when absent).
+
+    Reads the canonical row keys (``_ng_task_index`` / ``_ng_rollout_index``) that
+    rollout_collection ships to an agent's ``/run``.
+    """
+    if hasattr(body, "model_dump"):
+        data = body.model_dump()
+    elif isinstance(body, dict):
+        data = body
+    else:
+        return None
+    task = data.get(TASK_INDEX_KEY_NAME)
+    rollout = data.get(ROLLOUT_INDEX_KEY_NAME)
+    if task is None or rollout is None:
+        return None
+    return f"{task}-{rollout}"
