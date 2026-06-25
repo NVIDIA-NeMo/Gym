@@ -64,6 +64,7 @@ class CompCodingRunRequest(BaseRunRequest):
 
 class CompCodingVerifyRequest(CompCodingRunRequest, BaseVerifyRequest):
     verifier_metadata: Optional[Dict[str, Any]] = None
+    target_language: Optional[str] = None
 
 
 class CompCodingVerifyResponse(BaseVerifyResponse):
@@ -149,7 +150,7 @@ class CompCodingResourcesServer(SimpleResourcesServer):
     async def verify(self, body: CompCodingVerifyRequest) -> CompCodingVerifyResponse:
         model_out = body.response.output_text
         difficulty = (body.verifier_metadata or {}).get("difficulty")
-        target_language = (body.verifier_metadata or {}).get("target_language")
+        target_language = body.target_language
 
         if not model_out or not model_out.strip():
             # A response existed but had no usable text -> model failure
