@@ -19,10 +19,16 @@ from responses_api_agents.osworld_agent import client as osworld_client
 
 
 class FakeController:
+    def __init__(self) -> None:
+        self.started = 0
+        self.ended_paths: List[str] = []
+
     def start_recording(self) -> None:
+        self.started += 1
         return None
 
-    def end_recording(self, _path: str) -> None:
+    def end_recording(self, path: str) -> None:
+        self.ended_paths.append(path)
         return None
 
 
@@ -202,6 +208,39 @@ def test_gym_policy_runner_preserves_existing_pyautogui_flow(monkeypatch) -> Non
     assert result.steps[0].actions == ["DONE"]
     assert FakeEnv.instances[0].kwargs["action_space"] == "pyautogui"
     assert FakeEnv.instances[0].actions == ["DONE"]
+
+
+def test_recording_can_be_limited_to_selected_task_ids(monkeypatch, tmp_path: Path) -> None:
+    _patch_client_for_fake_runtime(monkeypatch)
+    monkeypatch.setenv("OSWORLD_RECORD_VIDEO_DIR", str(tmp_path / "videos"))
+    selected_path = tmp_path / "selected_task_ids.txt"
+    selected_path.write_text("record-me\n", encoding="utf-8")
+    monkeypatch.setenv("OSWORLD_RECORD_VIDEO_TASK_IDS_FILE", str(selected_path))
+
+    def model_fn(_system: str, _instruction: str, _history: List[Dict[str, Any]]) -> str:
+        return "```DONE```"
+
+    selected = osworld_client.run_osworld_task(
+        {"id": "record-me", "instruction": "Finish the task."},
+        model_fn=model_fn,
+        env_class_path="fake.FakeEnv",
+        sleep_after_execution=0,
+        task_timeout=10,
+    )
+    skipped = osworld_client.run_osworld_task(
+        {"id": "skip-me", "instruction": "Finish the task."},
+        model_fn=model_fn,
+        env_class_path="fake.FakeEnv",
+        sleep_after_execution=0,
+        task_timeout=10,
+    )
+
+    assert selected.reward == 1.0
+    assert skipped.reward == 1.0
+    assert FakeEnv.instances[0].controller.started == 1
+    assert FakeEnv.instances[0].controller.ended_paths == [str(tmp_path / "videos" / "record-me.mp4")]
+    assert FakeEnv.instances[1].controller.started == 0
+    assert FakeEnv.instances[1].controller.ended_paths == []
 
 
 def test_prompt_agent_runner_routes_native_agent_messages_to_policy_model(monkeypatch) -> None:
@@ -402,6 +441,24 @@ def test_pointer_optional_parallel_patch_removes_web_tools(monkeypatch) -> None:
     assert gate_module._TOOL_DISPATCH == {"probe_bash": gate_module._TOOL_DISPATCH["probe_bash"]}
     assert [tool.schema["name"] for tool in planner_module.PLANNER_TOOLS] == ["submit_plan"]
     assert planner_module._TOOL_DISPATCH == {"submit_plan": planner_module._TOOL_DISPATCH["submit_plan"]}
+
+
+def test_pointer_anthropic_client_options_are_configurable(monkeypatch) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "env-key")
+    monkeypatch.setenv("POINTER_ANTHROPIC_MAX_RETRIES", "6")
+    monkeypatch.setenv("POINTER_ANTHROPIC_TIMEOUT_SECONDS", "45.5")
+
+    assert osworld_client._pointer_anthropic_client_options(
+        "https://inference-api.nvidia.com/",
+        api_key="client-key",
+    ) == {
+        "api_key": "client-key",
+        "base_url": "https://inference-api.nvidia.com",
+        "max_retries": 6,
+        "timeout": 45.5,
+    }
+
+    assert osworld_client._pointer_anthropic_client_options("https://inference-api.nvidia.com")["api_key"] == "env-key"
 
 
 def test_pointer_config_sync_uses_anthropic_provider_for_policy_endpoint(monkeypatch) -> None:

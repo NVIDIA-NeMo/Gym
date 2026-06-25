@@ -308,6 +308,17 @@ def _patch_pointer_optional_parallel_tools(disable_parallel_tools: bool) -> None
                 dispatch.pop(name, None)
 
 
+def _pointer_anthropic_client_options(base_url: str, api_key: Optional[str] = None) -> Dict[str, Any]:
+    """Anthropic SDK options for PointerAgent's InferenceHub path."""
+
+    return {
+        "api_key": api_key or os.environ.get("ANTHROPIC_API_KEY"),
+        "base_url": base_url.rstrip("/"),
+        "max_retries": int(os.environ.get("POINTER_ANTHROPIC_MAX_RETRIES", "4")),
+        "timeout": float(os.environ.get("POINTER_ANTHROPIC_TIMEOUT_SECONDS", "120")),
+    }
+
+
 def _patch_pointer_anthropic_client(base_url: str) -> None:
     """Make Pointer's Anthropic SDK client honor the configured base URL."""
 
@@ -332,11 +343,7 @@ def _patch_pointer_anthropic_client(base_url: str) -> None:
         if provider == pointer_utils.APIProvider.ANTHROPIC:
             from anthropic import Anthropic  # noqa: PLC0415
 
-            return Anthropic(
-                api_key=self.api_key or os.environ.get("ANTHROPIC_API_KEY"),
-                base_url=base_url.rstrip("/"),
-                max_retries=4,
-            )
+            return Anthropic(**_pointer_anthropic_client_options(base_url, self.api_key))
         return original(self, provider)
 
     pointer_llm_client.LLMClient._create_client = _create_client
@@ -357,11 +364,7 @@ def _patch_pointer_anthropic_client(base_url: str) -> None:
         from anthropic import Anthropic  # noqa: PLC0415
 
         if not hasattr(self, "_counting_client"):
-            self._counting_client = Anthropic(
-                api_key=os.environ.get("ANTHROPIC_API_KEY"),
-                base_url=base_url.rstrip("/"),
-                max_retries=4,
-            )
+            self._counting_client = Anthropic(**_pointer_anthropic_client_options(base_url))
         return self._counting_client
 
     pointer_context_manager.LLMContextManager._get_counting_client = _get_counting_client
@@ -370,6 +373,24 @@ def _patch_pointer_anthropic_client(base_url: str) -> None:
 def _safe_task_id(task_config: Dict[str, Any]) -> str:
     raw = str(task_config.get("id") or task_config.get("task_id") or "unknown")
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", raw)[:120] or "unknown"
+
+
+def _record_video_for_task(task_config: Dict[str, Any]) -> bool:
+    """Return whether this task is selected for opt-in VM video recording."""
+
+    task_ids_path = os.environ.get("OSWORLD_RECORD_VIDEO_TASK_IDS_FILE", "").strip()
+    if not task_ids_path:
+        return True
+
+    task_id = str(task_config.get("id") or task_config.get("task_id") or "unknown")
+    try:
+        with open(task_ids_path, encoding="utf-8") as fh:
+            selected_task_ids = {line.strip() for line in fh if line.strip() and not line.lstrip().startswith("#")}
+    except OSError:
+        LOG.exception("Failed to read OSWORLD_RECORD_VIDEO_TASK_IDS_FILE=%s; recording disabled for this task", task_ids_path)
+        return False
+
+    return task_id in selected_task_ids
 
 
 def _setup_pointer_task_logger(task_config: Dict[str, Any], task_results_dir: str) -> tuple[logging.Logger, logging.Handler]:
@@ -568,13 +589,18 @@ def run_osworld_task(
             )
             pointer_logger, pointer_log_handler = _setup_pointer_task_logger(task_config, pointer_task_dir)
             pointer_agent.reset(instruction, pointer_logger, pointer_task_dir)
-        if _record_dir:
+        if _record_dir and _record_video_for_task(task_config):
             try:
                 env.controller.start_recording()
                 _recording_started = True
                 LOG.info("Started VM recording → %s/<task_id>.mp4", _record_dir)
             except Exception:  # noqa: BLE001 — best-effort, recording is opt-in.
                 LOG.exception("start_recording() failed; continuing without recording")
+        elif _record_dir:
+            LOG.info(
+                "Skipping VM recording for task %s; not selected by OSWORLD_RECORD_VIDEO_TASK_IDS_FILE",
+                task_config.get("id") or task_config.get("task_id") or "unknown",
+            )
         # Opt-in: log every controller.execute_python_command request +
         # response from the VM's /execute endpoint as JSONL. The /execute
         # endpoint returns {status, output, error, returncode}; OSWorld's
