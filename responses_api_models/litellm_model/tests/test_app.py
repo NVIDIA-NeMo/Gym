@@ -150,11 +150,19 @@ class TestNormalizeToResponse:
 # -- Shared fixture: mock version check so existing tests don't make real HTTP calls --
 
 
+def _mock_health_response(payload=None, status: int = 200):
+    mock_resp = MagicMock()
+    mock_resp.status = status
+    mock_resp.ok = status < 400
+    if payload is None:
+        payload = {"litellm_version": "1.83.0"}
+    mock_resp.json = AsyncMock(return_value=payload)
+    return mock_resp
+
+
 @pytest.fixture
 def mock_safe_version():
-    mock_resp = MagicMock()
-    mock_resp.json = AsyncMock(return_value={"litellm_version": "1.83.0"})
-    with patch("responses_api_models.litellm_model.app.request", return_value=mock_resp):
+    with patch("responses_api_models.litellm_model.app.request", return_value=_mock_health_response()):
         yield
 
 
@@ -165,25 +173,64 @@ class TestVersionCheck:
     async def test_compromised_version_blocks_startup(self) -> None:
         """Proxy running a known-malware version raises RuntimeError."""
         server = _make_server()
-        mock_resp = MagicMock()
-        mock_resp.json = AsyncMock(return_value={"litellm_version": "1.82.7"})
+        mock_resp = _mock_health_response({"litellm_version": "1.82.7"})
         with patch("responses_api_models.litellm_model.app.request", return_value=mock_resp):
             with pytest.raises(RuntimeError, match="compromised"):
+                await server._check_proxy_version()
+
+    async def test_old_version_blocks_startup(self) -> None:
+        """Any proxy older than the minimum safe version is blocked."""
+        server = _make_server()
+        mock_resp = _mock_health_response({"litellm_version": "1.82.6"})
+        with patch("responses_api_models.litellm_model.app.request", return_value=mock_resp):
+            with pytest.raises(RuntimeError, match="minimum safe version"):
                 await server._check_proxy_version()
 
     async def test_safe_version_allows_startup(self) -> None:
         """Proxy running a clean version passes without raising."""
         server = _make_server()
-        mock_resp = MagicMock()
-        mock_resp.json = AsyncMock(return_value={"litellm_version": "1.83.0"})
-        with patch("responses_api_models.litellm_model.app.request", return_value=mock_resp):
+        mock_resp = _mock_health_response({"litellm_version": "v1.83.0-stable"})
+        with patch("responses_api_models.litellm_model.app.request", return_value=mock_resp) as mock_request:
             await server._check_proxy_version()
 
-    async def test_unreachable_proxy_logs_warning_only(self) -> None:
-        """Unreachable proxy logs a warning but does not block startup."""
+        mock_request.assert_awaited_once()
+        headers = mock_request.await_args.kwargs["headers"]
+        assert headers["Authorization"] == "Bearer dummy_key"
+        assert headers["x-litellm-key"] == "Bearer dummy_key"
+
+    async def test_missing_version_blocks_startup(self) -> None:
+        """A proxy response without version info fails closed."""
+        server = _make_server()
+        mock_resp = _mock_health_response({})
+        with patch("responses_api_models.litellm_model.app.request", return_value=mock_resp):
+            with pytest.raises(RuntimeError, match="did not report litellm_version"):
+                await server._check_proxy_version()
+
+    async def test_health_auth_error_blocks_startup(self) -> None:
+        """Auth failures on the version endpoint fail closed."""
+        server = _make_server()
+        mock_resp = _mock_health_response({"error": "unauthorized"}, status=401)
+        with patch("responses_api_models.litellm_model.app.request", return_value=mock_resp):
+            with pytest.raises(RuntimeError, match="Could not verify"):
+                await server._check_proxy_version()
+
+    async def test_unreachable_proxy_blocks_startup(self) -> None:
+        """Unreachable proxy fails closed because the version cannot be verified."""
         server = _make_server()
         with patch("responses_api_models.litellm_model.app.request", side_effect=Exception("connection refused")):
-            await server._check_proxy_version()  # must not raise
+            with pytest.raises(RuntimeError, match="Could not verify"):
+                await server._check_proxy_version()
+
+    async def test_lifespan_runs_version_check(self) -> None:
+        """Startup hook blocks the webserver before serving requests."""
+        server = _make_server()
+        app = server.setup_webserver()
+        mock_resp = _mock_health_response({"litellm_version": "1.82.7"})
+
+        with patch("responses_api_models.litellm_model.app.request", return_value=mock_resp):
+            with pytest.raises(RuntimeError, match="compromised"):
+                with TestClient(app):
+                    pass
 
 
 # -- Integration tests for the server -----------------------------------------
@@ -198,14 +245,14 @@ class TestLiteLLMModelServer:
         """Server handles native response format from LiteLLM (e.g. GPT-5.4)."""
         server = _make_server()
         app = server.setup_webserver()
-        client = TestClient(app)
 
         mock_data = deepcopy(NATIVE_RESPONSE)
 
         server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
         server._client.create_response = AsyncMock(return_value=mock_data)
 
-        resp = client.post("/v1/responses", json={"input": "hello"})
+        with TestClient(app) as client:
+            resp = client.post("/v1/responses", json={"input": "hello"})
         assert resp.status_code == 200
         body = resp.json()
         assert body["object"] == "response"
@@ -215,14 +262,14 @@ class TestLiteLLMModelServer:
         """Server normalizes chat.completion format from LiteLLM (e.g. Opus via Azure)."""
         server = _make_server()
         app = server.setup_webserver()
-        client = TestClient(app)
 
         mock_data = deepcopy(CHAT_COMPLETION_RESPONSE)
 
         server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
         server._client.create_response = AsyncMock(return_value=mock_data)
 
-        resp = client.post("/v1/responses", json={"input": "hello"})
+        with TestClient(app) as client:
+            resp = client.post("/v1/responses", json={"input": "hello"})
         assert resp.status_code == 200
         body = resp.json()
         assert body["object"] == "response"
@@ -232,7 +279,6 @@ class TestLiteLLMModelServer:
         """Server fixes reasoning.effort='none' before validation."""
         server = _make_server()
         app = server.setup_webserver()
-        client = TestClient(app)
 
         mock_data = deepcopy(NATIVE_RESPONSE)
         mock_data["reasoning"] = {"effort": "none"}
@@ -240,21 +286,22 @@ class TestLiteLLMModelServer:
         server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
         server._client.create_response = AsyncMock(return_value=mock_data)
 
-        resp = client.post("/v1/responses", json={"input": "hello"})
+        with TestClient(app) as client:
+            resp = client.post("/v1/responses", json={"input": "hello"})
         assert resp.status_code == 200
 
     async def test_chat_completions_passthrough(self) -> None:
         """chat_completions() is inherited from SimpleModelServer and works unchanged."""
         server = _make_server()
         app = server.setup_webserver()
-        client = TestClient(app)
 
         mock_chat_data = deepcopy(CHAT_COMPLETION_RESPONSE)
 
         server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
         server._client.create_chat_completion = AsyncMock(return_value=mock_chat_data)
 
-        resp = client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "hi"}]})
+        with TestClient(app) as client:
+            resp = client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "hi"}]})
         assert resp.status_code == 200
         body = resp.json()
         assert body["object"] == "chat.completion"
@@ -263,7 +310,6 @@ class TestLiteLLMModelServer:
         """Config model name is always used regardless of request body."""
         server = _make_server()
         app = server.setup_webserver()
-        client = TestClient(app)
 
         mock_data = deepcopy(NATIVE_RESPONSE)
         called_args = {}
@@ -276,5 +322,6 @@ class TestLiteLLMModelServer:
         server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
         server._client.create_response = AsyncMock(side_effect=mock_create_response)
 
-        client.post("/v1/responses", json={"input": "hello", "model": "wrong_model"})
+        with TestClient(app) as client:
+            client.post("/v1/responses", json={"input": "hello", "model": "wrong_model"})
         assert called_args.get("model") == "dummy_model"
