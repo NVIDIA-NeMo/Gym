@@ -34,7 +34,7 @@ from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 from ray import __version__ as ray_version
 from wandb import Run
 
-from nemo_gym import CACHE_DIR, PARENT_DIR, RESULTS_DIR, WORKING_DIR
+from nemo_gym import CACHE_DIR, RESULTS_DIR, WORKING_DIR, resolve_artifact
 from nemo_gym.config_types import (
     ConfigMissingValuesError,
     ServerInstanceConfig,
@@ -205,11 +205,8 @@ class GlobalConfigDictParser(BaseModel):
         duplicate_config_paths: List[str] = []
         # Just a careful note here that we explicitly mutate config_paths as it is being appended to
         for config_path in config_paths:
-            config_path = Path(config_path)
-            # Check cwd first for user's local configs, then install location
-            if not config_path.is_absolute():
-                cwd_path = Path.cwd() / config_path
-                config_path = cwd_path if cwd_path.exists() else PARENT_DIR / config_path
+            # Search cwd, NEMO_GYM_EXTRA_ROOTS, then install location.
+            config_path = resolve_artifact(config_path)
 
             extra_config = OmegaConf.load(config_path)
             for new_config_path in extra_config.get(CONFIG_PATHS_KEY_NAME) or []:
@@ -489,12 +486,11 @@ For example, on the command line:
         global_config_dict: DictConfig = OmegaConf.merge(initial_global_config_dict, global_config_dict)
 
         # Load the env.yaml config. We load it early so that people can use it to conveniently store config paths.
-        # Check cwd first for user's local env.yaml, then fall back to PARENT_DIR
+        # Search cwd, NEMO_GYM_EXTRA_ROOTS, then install location.
         if parse_config.dotenv_path:
             dotenv_path = parse_config.dotenv_path
         else:
-            cwd_env_yaml = Path.cwd() / "env.yaml"
-            dotenv_path = cwd_env_yaml if cwd_env_yaml.exists() else PARENT_DIR / "env.yaml"
+            dotenv_path = resolve_artifact("env.yaml")
 
         dotenv_extra_config = DictConfig({})
         if dotenv_path.exists() and not parse_config.skip_load_from_dotenv:

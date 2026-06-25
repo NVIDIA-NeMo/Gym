@@ -1256,7 +1256,7 @@ class TestGlobalConfig:
         cwd_dir = tmp_path / "cwd"
         cwd_dir.mkdir()
         monkeypatch.chdir(cwd_dir)
-        monkeypatch.setattr(nemo_gym.global_config, "PARENT_DIR", parent_dir)
+        monkeypatch.setattr(nemo_gym, "NEMO_GYM_ROOT_DIR", parent_dir)
 
         config_paths, extra_configs = parser.load_extra_config_paths(["my_config.yaml"])
         assert extra_configs[0]["my_key"] == "from_parent"
@@ -1270,7 +1270,7 @@ class TestGlobalConfig:
         monkeypatch.chdir(tmp_path)
         empty_parent = tmp_path / "empty_parent"
         empty_parent.mkdir()
-        monkeypatch.setattr(nemo_gym.global_config, "PARENT_DIR", empty_parent)
+        monkeypatch.setattr(nemo_gym, "NEMO_GYM_ROOT_DIR", empty_parent)
 
         parser = GlobalConfigDictParser()
         global_config_dict = parser.parse(GlobalConfigDictParserConfig(skip_load_from_cli=True))
@@ -1288,7 +1288,7 @@ class TestGlobalConfig:
         cwd_dir = tmp_path / "cwd"
         cwd_dir.mkdir()
         monkeypatch.chdir(cwd_dir)
-        monkeypatch.setattr(nemo_gym.global_config, "PARENT_DIR", parent_dir)
+        monkeypatch.setattr(nemo_gym, "NEMO_GYM_ROOT_DIR", parent_dir)
 
         parser = GlobalConfigDictParser()
         global_config_dict = parser.parse(GlobalConfigDictParserConfig(skip_load_from_cli=True))

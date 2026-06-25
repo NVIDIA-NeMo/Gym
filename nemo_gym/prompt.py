@@ -27,7 +27,7 @@ from typing import Dict, List, Optional
 import yaml
 from pydantic import BaseModel, Field
 
-from nemo_gym import PARENT_DIR
+from nemo_gym import resolve_artifact
 from nemo_gym.config_types import BaseNeMoGymCLIConfig
 from nemo_gym.global_config import GlobalConfigDictParserConfig, get_global_config_dict
 
@@ -40,18 +40,16 @@ class PromptConfig(BaseModel):
 
 
 def _resolve_path(path: str) -> Path:
-    """Resolve a path relative to the Gym root (PARENT_DIR), consistent with config_paths resolution."""
-    p = Path(path)
-    if not p.is_absolute():
-        p = PARENT_DIR / p
-    return p
+    """Resolve a prompt path against the artifact-root search list, consistent with config_paths."""
+    return resolve_artifact(path)
 
 
 @lru_cache(maxsize=64)
 def load_prompt_config(path: str) -> PromptConfig:
     """Load and validate a YAML prompt config file.
 
-    Relative paths are resolved against the Gym root directory (``PARENT_DIR``),
+    Relative paths are resolved against the artifact-root search list
+    (cwd, then ``NEMO_GYM_EXTRA_ROOTS``, then the Gym install location),
     consistent with how ``config_paths`` and other Gym paths are resolved.
 
     Returns a ``PromptConfig`` with required ``user`` and optional ``system`` fields.

@@ -144,6 +144,119 @@ error_on_almost_servers: true   # Exit on invalid configs (default: true)
 
 ---
 
+## Developing External Artifacts
+
+Three environment variables control where Gym searches for resources servers, model servers, agents, configs, `env.yaml`, prompts, rollout inputs, and benchmarks. Together they let you develop plugins in a separate repository without forking Gym or merging every iteration upstream.
+
+| Env var | Purpose | Default |
+|---|---|---|
+| `NEMO_GYM_EXTRA_ROOTS` | Colon-separated list of additional roots searched between `cwd` and the install location. | unset (no extra roots) |
+| `NEMO_GYM_ROOT` | Overrides the final fallback root. | The Gym install directory. |
+| `NEMO_GYM_ALLOW_ROOT_OVERRIDE` | When set (`1`, `true`, `yes`, or `on`), an artifact present in multiple roots resolves to the earliest match instead of raising. | unset — strict mode, collisions raise. |
+
+### Resolution order
+
+For every artifact reference, Gym searches in this order:
+
+1. Current working directory
+2. Each entry of `NEMO_GYM_EXTRA_ROOTS`, in listed order
+3. `NEMO_GYM_ROOT` (defaults to the install location)
+
+Inside each root, Gym uses the same layout it uses internally:
+
+```
+<root>/
+├── resources_servers/<name>/
+├── responses_api_models/<name>/
+├── responses_api_agents/<name>/
+└── benchmarks/<name>/
+```
+
+### Tutorial: develop a plugin in a separate repo
+
+Say you want a custom resources server and benchmark in your own repository without committing to Gym:
+
+```
+~/my-plugins/
+├── resources_servers/
+│   └── my_custom_judge/
+│       ├── app.py
+│       ├── requirements.txt
+│       └── configs/my_custom_judge.yaml
+├── benchmarks/
+│   └── my_custom_eval/
+│       ├── config.yaml
+│       └── prepare.py
+└── env.yaml
+```
+
+Point `NEMO_GYM_EXTRA_ROOTS` at the plugin repo and run `ng_*` from anywhere:
+
+```bash
+export NEMO_GYM_EXTRA_ROOTS=~/my-plugins
+
+ng_list_benchmarks                                       # finds my_custom_eval
+ng_prepare_benchmark "+config_paths=[benchmarks/my_custom_eval/config.yaml]"
+ng_run "+config_paths=[resources_servers/my_custom_judge/configs/my_custom_judge.yaml,
+                       responses_api_models/vllm_model/configs/vllm_model.yaml]"
+```
+
+Each artifact is resolved independently against the same search list, so plugins from different repos compose:
+
+```bash
+export NEMO_GYM_EXTRA_ROOTS=~/repo-A:~/repo-B
+```
+
+| Reference | Resolves under |
+|---|---|
+| `benchmarks/my_eval/config.yaml` | `~/repo-A` (if defined there) |
+| `resources_servers/my_judge/...` | `~/repo-B` (if defined there) |
+| `responses_api_models/vllm_model/...` | the Gym install (final fallback) |
+
+### Collision detection
+
+By default, if the same relative path (or the same benchmark name) is defined in more than one root, Gym raises `ArtifactCollisionError` listing every conflicting path:
+
+```text
+nemo_gym.ArtifactCollisionError: Artifact 'resources_servers/my_judge' is defined in multiple roots:
+  /home/user/my-plugins/resources_servers/my_judge
+  /opt/Gym/resources_servers/my_judge
+Set NEMO_GYM_ALLOW_ROOT_OVERRIDE=1 to use the earliest
+(cwd > NEMO_GYM_EXTRA_ROOTS > NEMO_GYM_ROOT), or remove the duplicate.
+```
+
+This catches accidental shadowing — for example, a stale local copy of a server you have since renamed upstream.
+
+<Note>
+Roots that resolve to the same canonical filesystem path (for example, running `ng_*` from inside the Gym tree where `cwd == NEMO_GYM_ROOT`, or a symlinked extra root pointing at Gym) are deduped before the collision check fires, so they never produce a false positive.
+
+</Note>
+
+### Override: opt into earliest-wins
+
+When you *want* a plugin to take precedence over an upstream artifact (for example, to test a local fork of a server in place of the shipped one), set `NEMO_GYM_ALLOW_ROOT_OVERRIDE`:
+
+```bash
+export NEMO_GYM_EXTRA_ROOTS=~/my-plugins
+export NEMO_GYM_ALLOW_ROOT_OVERRIDE=1
+
+ng_run "+config_paths=[resources_servers/my_judge/configs/my_judge.yaml]"
+# resolves to ~/my-plugins/resources_servers/my_judge — Gym's copy is shadowed
+```
+
+With the flag on, precedence is:
+
+1. Current working directory
+2. Earlier `NEMO_GYM_EXTRA_ROOTS` entries (in listed order)
+3. `NEMO_GYM_ROOT`
+
+<Tip>
+Use the override flag deliberately and locally — for example in a single shell session or experiment script. Leaving it set globally hides the protection that catches stale duplicates.
+
+</Tip>
+
+---
+
 ## Command Line Usage
 
 To run servers, use `ng_run`. NeMo Gym uses [Hydra](https://hydra.cc/) for configuration management.
