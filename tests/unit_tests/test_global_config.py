@@ -23,7 +23,13 @@ from pytest import MonkeyPatch, mark, raises
 import nemo_gym.global_config
 import nemo_gym.server_utils
 from nemo_gym import CACHE_DIR, WORKING_DIR
-from nemo_gym.config_types import ConfigMissingValuesError, ServerRefNotFoundError
+from nemo_gym.config_types import (
+    ConfigMissingValuesError,
+    ConfigPathNotFoundError,
+    MalformedConfigPathsError,
+    NoServerInstancesError,
+    ServerRefNotFoundError,
+)
 from nemo_gym.global_config import (
     DEFAULT_HEAD_SERVER_PORT,
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
@@ -1299,3 +1305,74 @@ class TestGlobalConfig:
 
         # Without the help override, this will SystemExit.
         GlobalConfigDictParser.parse_global_config_dict_from_cli(None)
+
+
+class TestConfigLoadErrors:
+    """Actionable, fail-fast errors for bad/malformed/empty config_paths (no raw traceback)."""
+
+    def test_load_extra_config_paths_missing_relative_lists_both_locations(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path
+    ) -> None:
+        cwd, parent = tmp_path / "cwd", tmp_path / "parent"
+        cwd.mkdir()
+        parent.mkdir()
+        monkeypatch.chdir(cwd)
+        monkeypatch.setattr(nemo_gym.global_config, "PARENT_DIR", parent)
+
+        parser = GlobalConfigDictParser()
+        with raises(ConfigPathNotFoundError) as exc_info:
+            parser.load_extra_config_paths(["missing/nope.yaml"])
+
+        message = str(exc_info.value)
+        assert "missing/nope.yaml" in message
+        assert str(cwd / "missing/nope.yaml") in message
+        assert str(parent / "missing/nope.yaml") in message
+        assert "spelled correctly" in message
+
+    def test_load_extra_config_paths_missing_dedups_when_cwd_is_install_root(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(nemo_gym.global_config, "PARENT_DIR", tmp_path)
+
+        parser = GlobalConfigDictParser()
+        with raises(ConfigPathNotFoundError) as exc_info:
+            parser.load_extra_config_paths(["missing/nope.yaml"])
+
+        assert str(exc_info.value).count("  - ") == 1
+
+    def test_load_extra_config_paths_missing_absolute_path(self, tmp_path: Path) -> None:
+        missing = tmp_path / "absent.yaml"
+        parser = GlobalConfigDictParser()
+        with raises(ConfigPathNotFoundError) as exc_info:
+            parser.load_extra_config_paths([str(missing)])
+
+        message = str(exc_info.value)
+        assert str(missing) in message
+        assert message.count("  - ") == 1
+
+    def test_parse_malformed_config_paths_raises_actionable_error(self) -> None:
+        parser = GlobalConfigDictParser()
+        parse_config = GlobalConfigDictParserConfig(
+            initial_global_config_dict=DictConfig({"config_paths": "not_a_list.yaml"}),
+            skip_load_from_cli=True,
+            skip_load_from_dotenv=True,
+        )
+        with raises(MalformedConfigPathsError) as exc_info:
+            parser.parse(parse_config)
+
+        message = str(exc_info.value)
+        assert "config_paths" in message
+        assert "list" in message
+
+    def test_raise_on_no_server_instances_raises_when_empty(self) -> None:
+        parser = GlobalConfigDictParser()
+        config = DictConfig({"config_paths": [], "head_server": {"port": 11000}})
+        with raises(NoServerInstancesError) as exc_info:
+            parser.raise_on_no_server_instances(config)
+        assert "gym env start" in str(exc_info.value)
+
+    def test_raise_on_no_server_instances_passes_with_a_server(self) -> None:
+        parser = GlobalConfigDictParser()
+        config = DictConfig({"my_server": {"resources_servers": {"x": {"entrypoint": "app.py", "domain": "other"}}}})
+        parser.raise_on_no_server_instances(config)

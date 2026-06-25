@@ -31,7 +31,7 @@ from rich.table import Table
 from tqdm.auto import tqdm
 
 from nemo_gym.benchmarks import BENCHMARKS_DIR, BenchmarkConfig, _load_benchmarks_from_config_paths
-from nemo_gym.cli.env import RunHelper
+from nemo_gym.cli.env import RunHelper, exit_cleanly_on_config_error
 from nemo_gym.config_types import BaseNeMoGymCLIConfig, BenchmarkDatasetConfig
 from nemo_gym.global_config import (
     JSON_OUTPUT_KEY_NAME,
@@ -334,6 +334,7 @@ def prepare_benchmark() -> None:
         list(tqdm(results, total=len(validated)))
 
 
+@exit_cleanly_on_config_error
 def e2e_rollout_collection():  # pragma: no cover
     global_config_dict = get_global_config_dict()
 
