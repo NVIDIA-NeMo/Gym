@@ -42,12 +42,12 @@ Inputs
   - seed input: expected_city (e.g., "Paris")
 
 Flow (the MCP endpoint and /verify share one session_id)
-  1) Agent -> ResourcesServer POST /seed_session {"expected_city": "Paris"}
+  1) Agent -> ResourcesServer POST /seed_session {"verifier_metadata": {"expected_city": "Paris"}}
      - returns hidden MCP metadata: a per-rollout X-NeMo-Gym-Session-Token bound to this session_id
   2) Agent writes a per-rollout mcp_config and launches Claude Code with --mcp-config
   3) Claude Code -> ResourcesServer POST /mcp  (tools/call get_weather, carrying the token header)
      - the tool resolves the token back to session_id and records the call
-  4) Agent -> ResourcesServer POST /verify {"expected_city": "Paris", "response": ...}
+  4) Agent -> ResourcesServer POST /verify {"verifier_metadata": {"expected_city": "Paris"}, "response": ...}
      - reward = 1.0 iff the tool was called in this session AND the answer contains the sentence
 ```
 
@@ -61,10 +61,10 @@ The base class `MCPResourcesServer` (in `nemo_gym/base_resources_server.py`) mou
 
 ```python
 # simplified
-from typing import Any
+from typing import Any, Optional
 
 from fastapi import Request
-from pydantic import Field
+from pydantic import ConfigDict, Field
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -88,7 +88,9 @@ class ExampleMCPWeatherResourcesServerConfig(BaseResourcesServerConfig):
 
 
 class ExampleMCPWeatherSeedSessionRequest(BaseSeedSessionRequest):
-    expected_city: str = "Paris"
+    model_config = ConfigDict(extra="allow")
+    # Task ground truth travels in verifier_metadata, e.g. {"expected_city": "Paris"}.
+    verifier_metadata: Optional[dict[str, Any]] = None
 
 
 # seed_session returns the MCP metadata under the `mcp` key
@@ -97,7 +99,8 @@ class ExampleMCPWeatherSeedSessionResponse(BaseSeedSessionResponse):
 
 
 class ExampleMCPWeatherVerifyRequest(BaseVerifyRequest):
-    expected_city: str = "Paris"
+    model_config = ConfigDict(extra="allow")
+    verifier_metadata: Optional[dict[str, Any]] = None
 
 
 class ExampleMCPWeatherResourcesServer(MCPResourcesServer):
@@ -108,7 +111,8 @@ class ExampleMCPWeatherResourcesServer(MCPResourcesServer):
         self, request: Request, body: ExampleMCPWeatherSeedSessionRequest
     ) -> ExampleMCPWeatherSeedSessionResponse:
         session_id = request.session[SESSION_ID_KEY]
-        self.session_id_to_state[session_id] = {"expected_city": body.expected_city, "weather_calls": []}
+        expected_city = (body.verifier_metadata or {}).get("expected_city", "Paris")
+        self.session_id_to_state[session_id] = {"expected_city": expected_city, "weather_calls": []}
         # build_mcp_session_metadata() mints a per-rollout token bound to this session_id
         return ExampleMCPWeatherSeedSessionResponse(mcp=self.build_mcp_session_metadata(request))
 
@@ -128,8 +132,9 @@ class ExampleMCPWeatherResourcesServer(MCPResourcesServer):
     ) -> BaseVerifyResponse:
         session_id = request.session[SESSION_ID_KEY]
         state = self.session_id_to_state.get(session_id, {"weather_calls": []})
-        expected_city = body.expected_city.casefold()
-        expected = _weather_sentence(body.expected_city)
+        expected_city_value = (body.verifier_metadata or {}).get("expected_city", "Paris")
+        expected_city = expected_city_value.casefold()
+        expected = _weather_sentence(expected_city_value)
         # reward iff the tool was called for this city in this session AND the final answer repeats it
         # (match case-insensitively, so a correct call/answer that used different casing still counts)
         tool_called = any(str(c.get("city", "")).casefold() == expected_city for c in state["weather_calls"])
@@ -146,7 +151,7 @@ if __name__ == "__main__":
 
 Writing a tool is just decorating a method:
 
-1. **`@gym_tool`** — mark a method and the base class auto-registers it as an MCP tool (name = method name), mounted at `/mcp` (Streamable HTTP). The MCP input schema is derived from the method's typed parameters. To receive the Gym session, declare a **`session_id: str`** parameter — it is injected from the per-rollout token and **hidden** from the tool's input schema (the model only sees the real args). Omit it for a stateless tool. A missing/invalid token raises `401`. Both sync and async methods work. Tool names may not collide with reserved endpoints (`verify`, `seed_session`, `aggregate_metrics`, `mcp`), and a tool must **not** take a `request` parameter (there is no FastAPI `Request` on the MCP path — use `session_id`).
+1. **`@gym_tool`** — mark a method and the base class auto-registers it as an MCP tool (name = method name), mounted at `/mcp` (Streamable HTTP). The MCP input schema is derived from the method's typed parameters. To receive the Gym session, declare a **`session_id: str`** parameter — it is injected from the per-rollout token and **hidden** from the tool's input schema (the model only sees the real args). Omit it for a stateless tool. A missing/invalid token raises `MCPSessionError`, which — because MCP runs over JSON-RPC — FastMCP surfaces to the client as a tool error (`isError: true`) on an HTTP 200 response, not an HTTP status code. Both sync and async methods work. Tool names may not collide with reserved endpoints (`verify`, `seed_session`, `aggregate_metrics`, `mcp`), and a tool must **not** take a `request` parameter (there is no FastAPI `Request` on the MCP path — use `session_id`).
 2. **`build_mcp_session_metadata(request)`** — call this from `seed_session` and return it under the response's `mcp` key. It mints the one-time `X-NeMo-Gym-Session-Token` bound to the current `session_id`.
 
 > Need full control (e.g. a hand-written `@mcp.tool()` with custom schema)? Override `register_mcp_tools(self, mcp)` — call `super().register_mcp_tools(mcp)` first to keep the auto-registered `@gym_tool` ones.
@@ -195,15 +200,22 @@ example_mcp_weather_claude_code_agent:
 
 ### Run it
 
+Put your key in a repo-root `env.yaml` (the config above interpolates `${anthropic_api_key}`):
+
+```yaml
+anthropic_api_key: sk-ant-...
+```
+
+Then start the servers:
+
 ```bash
-ng_run "+config_paths=[resources_servers/example_mcp_weather/configs/example_mcp_weather.yaml]" \
-       +anthropic_api_key=sk-ant-...
+gym env start --config resources_servers/example_mcp_weather/configs/example_mcp_weather.yaml
 ```
 
 Then collect rollouts against the `example` dataset and reward-profile as in the [quickstart](/get-started/quickstart). A correct rollout shows Claude Code calling `mcp__example_mcp_weather__get_weather` and a `reward` of `1.0`.
 
 <Tip>
-To watch the MCP round-trip without a full `ng_run`, start the Resources Server on its own and drive `/seed_session → /mcp tools/call → /verify` directly (a `requests.Session` preserves the session cookie). This is also the fastest way to confirm the endpoint is reachable from another host.
+To watch the MCP round-trip without a full `gym env start`, start the Resources Server on its own and drive `/seed_session → /mcp tools/call → /verify` directly (a `requests.Session` preserves the session cookie). This is also the fastest way to confirm the endpoint is reachable from another host.
 </Tip>
 
 ---

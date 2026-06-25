@@ -215,7 +215,7 @@ def _extract_instruction(body_input) -> tuple[str, Optional[str]]:
 class ClaudeCodeAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     # When model_server is set, ANTHROPIC_BASE_URL is resolved from the Gym model
-    # server's URL (requires the server to expose POST /v1/messages. None is pushed yet).
+    # server's URL (requires the server to expose POST /v1/messages).
     # When None, anthropic_base_url is used directly.
     model_server: Optional[ModelServerRef] = None
     concurrency: int = 32
@@ -230,9 +230,9 @@ class ClaudeCodeAgentConfig(BaseResponsesAPIAgentConfig):
     claude_code_version: Optional[str] = None
     thinking: Optional[str] = None
     max_thinking_tokens: Optional[int] = None
-    # Runtime capability knobs. The default (bare=True, no mcp_config/settings)
-    # reproduces the original isolated behavior: Claude Code skips auto-discovery
-    # of skills, hooks, plugins, MCP servers, auto memory, and CLAUDE.md.
+    # Runtime capability knobs. The default (bare=True, no mcp_config/settings) reproduces the original
+    # isolated behavior: Claude Code skips hooks, LSP, plugin sync, attribution, auto-memory, background
+    # prefetches, keychain reads, and CLAUDE.md auto-discovery (skills still resolve via /skill-name).
     bare: bool = True
     mcp_config: Optional[str] = None
     settings: Optional[str] = None
@@ -313,9 +313,10 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
     ) -> list[str]:
         """Construct the ``claude`` CLI argv from config.
 
-        ``--bare`` is only passed when ``config.bare`` is True; it disables auto-discovery of
-        skills, hooks, plugins, MCP servers, auto memory, and CLAUDE.md. Explicit capabilities
-        like ``--mcp-config`` are passed regardless of ``--bare`` since they are not auto-discovered.
+        ``--bare`` is only passed when ``config.bare`` is True; it skips hooks, LSP, plugin sync,
+        attribution, auto-memory, background prefetches, keychain reads, and CLAUDE.md auto-discovery
+        (skills still resolve via /skill-name). Explicit capabilities like ``--mcp-config`` are passed
+        regardless of ``--bare`` since they are not auto-discovered.
         """
         cmd = [
             "claude",

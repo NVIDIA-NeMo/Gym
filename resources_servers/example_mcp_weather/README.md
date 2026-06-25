@@ -9,10 +9,12 @@ This is the runnable companion to the [MCP Resources Server tutorial](https://gi
 
 ## Run with an agent (Claude Code)
 
+Put your key in a repo-root `env.yaml` (the config interpolates `${anthropic_api_key}`), then start the servers
+— the `claude_code_agent` runs `claude` with that key injected:
+
 ```bash
-# requires an Anthropic API key — the claude_code_agent runs `claude` with an injected key
-ng_run "+config_paths=[resources_servers/example_mcp_weather/configs/example_mcp_weather.yaml]" \
-       +anthropic_api_key=sk-ant-...
+# env.yaml:  anthropic_api_key: sk-ant-...
+gym env start --config resources_servers/example_mcp_weather/configs/example_mcp_weather.yaml
 ```
 
 Then collect rollouts against `data/example.jsonl` and reward-profile as in the
@@ -28,7 +30,7 @@ Start the server and drive the endpoint directly — a `requests.Session` preser
 import requests
 
 s = requests.Session()
-meta = s.post("http://127.0.0.1:<port>/seed_session", json={"expected_city": "Paris"}).json()["mcp"]
+meta = s.post("http://127.0.0.1:<port>/seed_session", json={"verifier_metadata": {"expected_city": "Paris"}}).json()["mcp"]
 token = meta["headers"]["X-NeMo-Gym-Session-Token"]
 
 # call the MCP tool over the mounted /mcp route, carrying the per-rollout token
@@ -42,7 +44,7 @@ s.post(
 # verify in the same session -> reward 1.0
 print(s.post("http://127.0.0.1:<port>/verify", json={
     "responses_create_params": {"input": [{"role": "user", "content": "use the weather tool"}]},
-    "expected_city": "Paris",
+    "verifier_metadata": {"expected_city": "Paris"},
     "response": {"id": "r", "created_at": 0, "model": "t", "object": "response", "output": [
         {"id": "m", "type": "message", "role": "assistant", "status": "completed",
          "content": [{"type": "output_text", "text": "The weather in Paris is sunny and 72 F.", "annotations": []}]}],
@@ -53,5 +55,5 @@ print(s.post("http://127.0.0.1:<port>/verify", json={
 ## Tests
 
 ```bash
-ng_test +entrypoint=resources_servers/example_mcp_weather
+gym env test --resources-server example_mcp_weather
 ```

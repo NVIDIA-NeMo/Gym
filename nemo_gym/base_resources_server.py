@@ -163,10 +163,11 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
 class MCPResourcesServer(SimpleResourcesServer):
     """SimpleResourcesServer variant that also exposes Gym-owned MCP tools.
 
-    Subclasses implement ``register_mcp_tools`` and call
-    ``build_mcp_session_metadata`` from ``seed_session``. MCP tools can then
-    call ``require_mcp_session_id`` to resolve the hidden per-rollout token to
-    the same Gym session id used by /seed_session and /verify.
+    Subclasses decorate tool methods with ``@gym_tool`` (the default ``register_mcp_tools``
+    auto-registers them; override only for manual control) and call ``build_mcp_session_metadata``
+    from ``seed_session`` to hand the agent a per-rollout token. A ``@gym_tool`` method receives the
+    Gym session by declaring a ``session_id`` parameter, which the base resolves from that token (a
+    stateless signed value) so tool calls share the session id used by /seed_session and /verify.
     """
 
     mcp_url_path: str = "/mcp"
