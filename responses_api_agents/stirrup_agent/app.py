@@ -723,6 +723,14 @@ class StirrupAgentWrapperConfig(BaseResponsesAPIAgentConfig):
         "When set, each task's artifacts land in <dir>/task_<task_id>/; the resources server "
         "reads deliverables_dir from the verify request to score them.",
     )
+    execute_only: bool = Field(
+        default=False,
+        description="Task-only execution mode. When True, the agent runs each task and persists "
+        "deliverables to persist_deliverables_dir, but skips the resources server /verify judge "
+        "call and the aggregate_metrics proxy. No judgement is made or sent and no reward is "
+        "produced; the cached deliverables on disk are the only output. Requires "
+        "persist_deliverables_dir to be set.",
+    )
     model_id: Optional[str] = Field(
         default=None,
         description="HuggingFace model ID (or local checkpoint path) used to load a tokenizer "
@@ -821,6 +829,19 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
                 f"persist_deliverables_dir must be an absolute path "
                 f"(got {self.config.persist_deliverables_dir!r}). Relative paths "
                 f"resolve differently in the agent vs. the resources server."
+            )
+        # Task-only mode is meaningless without a place to cache deliverables —
+        # nothing is judged or returned, so the persisted files are the sole output.
+        if self.config.execute_only and not self.config.persist_deliverables_dir:
+            raise ValueError(
+                "execute_only=True requires persist_deliverables_dir to be set so deliverables "
+                "are cached to disk (nothing is judged or returned otherwise)."
+            )
+        if self.config.execute_only:
+            print(
+                "Stirrup agent running in execute_only (task-only) mode: deliverables will be "
+                f"cached to {self.config.persist_deliverables_dir!r}; no judgement will be made or sent.",
+                flush=True,
             )
         print(f"Stirrup agent initialized with task={self.config.task!r}", flush=True)
 
@@ -1028,6 +1049,20 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
                     (Path(self.config.persist_deliverables_dir) / f"task_{task_id}" / repeat_name).absolute()
                 )
 
+            # Task-only execution mode: the deliverables are already cached to
+            # ``deliverables_dir`` by ``responses()``. Skip the /verify judge
+            # call entirely and return a judgement-free payload (no reward,
+            # no judge_response). Mirrors the verify_request_body shape so the
+            # rollout JSONL row still carries the response + deliverables_dir.
+            if self.config.execute_only:
+                execute_only_payload = dict(body_dict)
+                execute_only_payload["response"] = response_clean.model_dump(mode="json")
+                if deliverables_dir is not None:
+                    execute_only_payload["deliverables_dir"] = deliverables_dir
+                execute_only_payload.setdefault("elapsed_seconds", float(response_metadata.get("elapsed_seconds", 0)))
+                execute_only_payload["execute_only"] = True
+                return execute_only_payload
+
             verify_request_body = dict(body_dict)
             verify_request_body["response"] = response_clean.model_dump(mode="json")
             if deliverables_dir is not None:
@@ -1146,6 +1181,11 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
         this proxy those extras are lost because the framework dispatches
         ``/aggregate_metrics`` to the agent, not the resources server.
         """
+        # Task-only mode produces no rewards/judge votes, so there is nothing
+        # for the resources server to aggregate. Use the base (non-proxy)
+        # implementation to avoid a needless judge-server round trip.
+        if self.config.execute_only:
+            return await SimpleResponsesAPIAgent.aggregate_metrics(self, body)
         response = await self.server_client.post(
             server_name=self.config.resources_server.name,
             url_path="/aggregate_metrics",

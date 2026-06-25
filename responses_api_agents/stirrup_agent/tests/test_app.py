@@ -13,16 +13,23 @@
 # limitations under the License.
 import json
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from stirrup.core.models import AssistantMessage, TokenUsage, ToolCall
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.openai_utils import (
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseOutputMessage,
+    NeMoGymResponseOutputText,
+)
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.stirrup_agent.app import (
     StirrupAgentWrapper,
     StirrupAgentWrapperConfig,
+    StirrupRunRequest,
     _load_task_registry,
     get_task_strategy,
 )
@@ -32,6 +39,20 @@ from responses_api_agents.stirrup_agent.task_strategy import TaskStrategy
 
 
 STIRRUP_AGENT_DIR = Path(__file__).resolve().parent.parent
+
+
+def _make_config(*, execute_only: bool = False, persist_deliverables_dir=None) -> StirrupAgentWrapperConfig:
+    return StirrupAgentWrapperConfig(
+        host="0.0.0.0",
+        port=8080,
+        entrypoint="",
+        name="stirrup_agent",
+        task="gdpval",
+        model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
+        resources_server=ResourcesServerRef(type="resources_servers", name="gdpval_resources_server"),
+        execute_only=execute_only,
+        persist_deliverables_dir=persist_deliverables_dir,
+    )
 
 
 class TestTaskRegistry:
@@ -90,6 +111,69 @@ class TestApp:
         assert output_items[1].type == "function_call_output"
         assert output_items[1].call_id == "call_1"
         assert output_items[1].output == "ok"
+
+
+class TestExecuteOnlyMode:
+    def test_execute_only_requires_persist_dir(self) -> None:
+        """execute_only without a persist dir is useless — nothing is saved."""
+        config = _make_config(execute_only=True, persist_deliverables_dir=None)
+        with pytest.raises(ValueError, match="execute_only=True requires persist_deliverables_dir"):
+            StirrupAgentWrapper(config=config, server_client=MagicMock(spec=ServerClient))
+
+    @pytest.mark.asyncio
+    async def test_run_execute_only_skips_verify(self, tmp_path) -> None:
+        """In execute_only mode, run() must not POST /verify and must return a
+        judgement-free payload (no reward / judge_response) carrying the
+        response + deliverables_dir."""
+        config = _make_config(execute_only=True, persist_deliverables_dir=str(tmp_path))
+        server_client = MagicMock(spec=ServerClient)
+        # seed_session is the only legitimate POST; make it fail so the
+        # non-fatal except branch is exercised and we'd notice any /verify POST.
+        server_client.post = AsyncMock(side_effect=RuntimeError("no server in unit test"))
+        wrapper = StirrupAgentWrapper(config=config, server_client=server_client)
+
+        fake_response = NeMoGymResponse(
+            id="gdpval-task-1",
+            created_at=0,
+            model="policy",
+            object="response",
+            output=[
+                NeMoGymResponseOutputMessage(
+                    id="msg-1",
+                    content=[NeMoGymResponseOutputText(type="output_text", text="done", annotations=[])],
+                    role="assistant",
+                    status="completed",
+                    type="message",
+                )
+            ],
+            parallel_tool_calls=False,
+            tool_choice="auto",
+            tools=[],
+            metadata={"elapsed_seconds": "12.5"},
+        )
+
+        params = NeMoGymResponseCreateParamsNonStreaming(
+            input="ignored",
+            metadata={"task_id": "task-1", "prompt": "do the thing", "_ng_rollout_index": "0"},
+        )
+        body = StirrupRunRequest(responses_create_params=params, task_id="task-1", prompt="do the thing")
+        request = MagicMock()
+        request.cookies = {}
+
+        # ``responses`` is a pydantic-model method, so patch it on the class.
+        with patch.object(StirrupAgentWrapper, "responses", AsyncMock(return_value=fake_response)):
+            result = await wrapper.run(request, body)
+
+        # No /verify (or any non-seed) POST should have been issued.
+        for call in server_client.post.await_args_list:
+            assert call.kwargs.get("url_path") == "/seed_session"
+
+        assert result["execute_only"] is True
+        assert "reward" not in result
+        assert "judge_response" not in result
+        assert result["response"]["id"] == "gdpval-task-1"
+        assert result["deliverables_dir"].endswith(str(Path("task_task-1") / "repeat_0"))
+        assert result["elapsed_seconds"] == 12.5
 
 
 class TestExampleDataset:

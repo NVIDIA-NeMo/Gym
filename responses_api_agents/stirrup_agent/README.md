@@ -206,6 +206,40 @@ To give the agent web access (some GDPVal tasks benefit from fresh facts), set
 `TAVILY_API_KEY` in the environment. The agent automatically exposes `web_search` and
 `web_fetch` tools backed by the [Tavily Search API](https://tavily.com).
 
+### Task-Only Execution Mode
+
+Sometimes you want to *run* the tasks and keep their deliverables without judging
+them — e.g. to build a reference set for later pairwise comparison, to defer
+scoring to a separate pass, or to inspect raw model outputs. Set `execute_only:
+true` (or export `EXECUTE_ONLY=true` with the benchmark config) to do exactly
+that:
+
+- Each task runs through the Stirrup agent and its deliverables are cached to
+  `persist_deliverables_dir/task_<task_id>/repeat_<n>/` (the same layout used by
+  comparison mode's `reference_deliverables_dir`).
+- The judge `/verify` call is **skipped entirely** — no judgement is made or
+  sent, and no LLM-judge tokens are spent.
+- Each rollout row carries the `response`, the `deliverables_dir`, and
+  `execute_only: true`, but **no `reward`** and **no `judge_response`**.
+- `aggregate_metrics` returns baseline (reward-free) stats instead of proxying
+  to the judge server.
+
+`execute_only: true` **requires** `persist_deliverables_dir` to be set to an
+absolute path — without it nothing is saved and the mode is rejected at startup.
+
+```bash
+EXECUTE_ONLY=true \
+PERSIST_DELIVERABLES_DIR=/abs/path/to/output/gdpval/my-model \
+HF_TOKEN=... \
+ng_e2e_collect_rollouts \
+  "+config_paths=[responses_api_models/vllm_model/configs/vllm_model.yaml,benchmarks/gdpval/config.yaml]" \
+  ++split=benchmark \
+  ++output_jsonl_fpath=results/gdpval_execute_only.jsonl
+```
+
+The cached deliverables can later be scored with a separate rubric or
+comparison run by pointing the resources server at the same directory.
+
 ## Extending to New Tasks
 
 To add a benchmark `my_bench`:
