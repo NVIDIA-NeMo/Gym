@@ -237,3 +237,6 @@ env.yaml
 
 # Backup files
 *.backup
+
+# Claude Code agent runtime artifacts
+**/.claude_node/
