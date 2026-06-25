@@ -35,6 +35,7 @@ from nemo_gym.cli.env import (
     exit_cleanly_on_config_error,
     init_resources_server,
     list_environments,
+    validate,
 )
 from nemo_gym.config_types import ConfigError, NoServerInstancesError, ResourcesServerInstanceConfig
 from nemo_gym.registry import EnvironmentEntry
@@ -288,6 +289,26 @@ class TestExitCleanlyOnConfigError:
 
     def test_config_error_base_catches_subclasses(self) -> None:
         assert issubclass(NoServerInstancesError, ConfigError)
+
+
+class TestValidate:
+    def test_valid_config_prints_ok(self, monkeypatch: MonkeyPatch, capsys) -> None:
+        monkeypatch.setattr(nemo_gym.cli.env, "get_global_config_dict", lambda **k: OmegaConf.create({}))
+
+        validate()
+
+        assert "valid" in capsys.readouterr().out.lower()
+
+    def test_config_error_exits_nonzero(self, monkeypatch: MonkeyPatch) -> None:
+        # A ConfigError raised during the parse is turned into a clean exit(1), no traceback.
+        def _raise(**kwargs):
+            raise NoServerInstancesError("nothing configured to run")
+
+        monkeypatch.setattr(nemo_gym.cli.env, "get_global_config_dict", _raise)
+
+        with raises(SystemExit) as exc_info:
+            validate()
+        assert exc_info.value.code == 1
 
 
 class TestListEnvironments:

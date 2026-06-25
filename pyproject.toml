@@ -406,6 +406,9 @@ ng_delete_dataset_from_gitlab = "nemo_gym.cli.legacy:main"
 nemo_gym_dump_config = "nemo_gym.cli.legacy:main"
 ng_dump_config = "nemo_gym.cli.legacy:main"
 
+nemo_gym_validate = "nemo_gym.cli.legacy:main"
+ng_validate = "nemo_gym.cli.legacy:main"
+
 # Display help
 nemo_gym_help = "nemo_gym.cli.legacy:main"
 ng_help = "nemo_gym.cli.legacy:main"

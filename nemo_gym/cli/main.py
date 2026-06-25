@@ -397,6 +397,21 @@ COMMANDS = {
         summary="Resolve the final config from configs, flags, and overrides.",
         flags=(CONFIG,),
     ),
+    "env validate": Command(
+        target="nemo_gym.cli.env:validate",
+        summary="Validate a config (paths, cross-refs, ??? values, servers) fast — no Ray, no servers.",
+        flags=(
+            CONFIG,
+            BENCHMARK,
+            ENVIRONMENT,
+            RESOURCES_SERVER_CONFIG,
+            MODEL_TYPE,
+            SEARCH_DIR,
+            MODEL,
+            MODEL_URL,
+            MODEL_API_KEY,
+        ),
+    ),
     "env packages": Command(
         target="nemo_gym.cli.env:pip_list",
         summary="Print pip packages for the selected resources server.",
