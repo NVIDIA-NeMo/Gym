@@ -125,6 +125,7 @@ The agent reads its Hydra config at `configs/stirrup_gdpval.yaml`. Notable keys:
 | `resources_server` | required | Reference to the GDPVal resources server (which scores the deliverable via `/verify`). |
 | `gdpval_container_path` | `null` | Path to an Apptainer `.sif` (see below). |
 | `persist_deliverables_dir` | `null` | If set, each task's artifacts land in `<dir>/task_<task_id>/`. The resources server reads this dir to score the deliverable. |
+| `judge_only` | `false` | If true, skip task execution and score the deliverables already cached under `persist_deliverables_dir` (see [Judge-Only Mode](#judge-only-mode)). |
 | `model_id` | `null` | HF model id or local path used to load a tokenizer for dynamic output sizing. |
 | `completion_token_buffer` | `1000` | Safety margin (in tokens) reserved when sizing `max_completion_tokens` per call. |
 
@@ -159,6 +160,46 @@ default `1000` works in practice; raise it (e.g. 2000–5000) if you see
 sporadic HTTP 400 responses at the vLLM proxy.
 
 ## Advanced Features
+
+### Judge-Only Mode
+
+`judge_only` re-scores a set of deliverables that an earlier run already
+produced, **without** re-executing the (expensive) agent task. It is the
+counterpart to a plain execute-then-judge run: the agent loop is skipped
+entirely and only the resources server `/verify` step runs.
+
+How it works:
+
+- For each task, the agent locates the cached deliverable directory at
+  `persist_deliverables_dir/task_<task_id>/repeat_<rollout_index>/` — the same
+  layout a normal run writes when `persist_deliverables_dir` is set.
+- If the directory exists, a placeholder response is built and `/verify` is
+  called with `deliverables_dir` pointing at the cached files, so the judge
+  scores the on-disk deliverables (not fresh model output).
+- If no cached directory exists for a task, that task is reported as
+  **skipped** (terminal — re-dispatching it would not create the files) and
+  `/verify` is never called.
+
+Requirements / notes:
+
+- `persist_deliverables_dir` must be set (and absolute); it is the source of
+  the deliverables to score. The agent raises at startup otherwise.
+- Run judge-only over the same benchmark / `num_repeats` that produced the
+  cache so the `task_<id>/repeat_<n>` directories line up.
+
+Enable it via the config key or the `JUDGE_ONLY` env var honored by
+`benchmarks/gdpval/config.yaml`:
+
+```bash
+JUDGE_ONLY=true PERSIST_DELIVERABLES_DIR=/abs/path/to/cached/deliverables \
+  ng_e2e_collect_rollouts ...
+```
+
+or as a Hydra override:
+
+```bash
+++gdpval_stirrup_agent.responses_api_agents.stirrup_agent.judge_only=true
+```
 
 ### Apptainer Sandboxing
 
