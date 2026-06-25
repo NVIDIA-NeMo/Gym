@@ -28,7 +28,9 @@ from pydantic import BaseModel, Field
 from nemo_gym.base_responses_api_model import (
     BaseResponsesAPIModelConfig,
     Body,
+    RunTrajectory,
     SimpleResponsesAPIModel,
+    TokenIDBufferingMixin,
 )
 from nemo_gym.openai_utils import (
     RESPONSES_TO_TRAIN,
@@ -71,6 +73,8 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     api_key: str
     model: str
     return_token_id_information: bool
+    on_policy_temperature: float = 1.0
+    on_policy_top_p: float = 1.0
 
     uses_reasoning_parser: bool
     uses_interleaved_reasoning: bool = True
@@ -101,7 +105,7 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
         return super().model_post_init(context)
 
 
-class VLLMModel(SimpleResponsesAPIModel):
+class VLLMModel(TokenIDBufferingMixin, SimpleResponsesAPIModel):
     config: VLLMModelConfig
 
     def get_converter(self) -> "VLLMConverter":
@@ -114,8 +118,14 @@ class VLLMModel(SimpleResponsesAPIModel):
             uses_reasoning_parser=self.config.uses_reasoning_parser,
         )
 
+    def setup_webserver(self) -> FastAPI:
+        app = super().setup_webserver()
+        self.setup_token_id_buffering(app)
+        return app
+
     def model_post_init(self, context):
         self._post_init()
+        self._trajectory = RunTrajectory(self.token_id_buffer_dir())
         return super().model_post_init(context)
 
     def _post_init(self) -> None:
@@ -453,7 +463,15 @@ class VLLMModel(SimpleResponsesAPIModel):
         self, request: Request, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
     ) -> NeMoGymChatCompletion:
         body_dict = body.model_dump(exclude_unset=True)
+        body_dict.pop("stream", None)
+        body_dict.pop("stream_options", None)
         body_dict = self._preprocess_chat_completion_create_params(request, body_dict)
+
+        if getattr(request.state, "run_token", None) is not None:
+            body_dict["temperature"] = self.config.on_policy_temperature
+            body_dict["top_p"] = self.config.on_policy_top_p
+
+        self.attach_tokens_and_logprobs(request, body_dict.get("messages") or [])
 
         client = self._resolve_client(request)
 
@@ -568,6 +586,13 @@ class VLLMModel(SimpleResponsesAPIModel):
             # TODO add this when NeMo RL upgrades to vLLM 0.10.2 support for prompt token ids
             # chat_completion_dict.pop("prompt_token_ids")
             # choice_dict.pop("token_ids")
+
+        self.buffer_turn(
+            request,
+            body_dict.get("messages") or [],
+            choice_dict["message"],
+            self._converter.postprocess_assistant_message_dict,
+        )
 
         return NeMoGymChatCompletion.model_validate(chat_completion_dict)
 
