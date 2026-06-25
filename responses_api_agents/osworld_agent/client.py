@@ -142,7 +142,26 @@ def _inferencehub_anthropic_model(short_name: str) -> str:
     return short_name if short_name.startswith("azure/anthropic/") else f"azure/anthropic/{short_name}"
 
 
-def _configure_pointer_runtime(*, base_url: str, api_key: str, policy_model_name: str) -> None:
+def _normalize_anthropic_base_url(base_url: str) -> str:
+    """Return a root URL suitable for Anthropic SDK /v1 path construction."""
+
+    if not base_url:
+        return ""
+    normalized = base_url.rstrip("/")
+    for suffix in ("/v1/chat/completions", "/v1/messages", "/v1/responses", "/v1"):
+        if normalized.endswith(suffix):
+            return normalized[: -len(suffix)]
+    return normalized
+
+
+def _configure_pointer_runtime(
+    *,
+    base_url: str,
+    api_key: str,
+    policy_model_name: str,
+    use_policy_endpoint: bool = False,
+    disable_parallel_tools: bool = False,
+) -> str:
     """Configure OSWorld's PointerAgent for direct Anthropic-compatible calls.
 
     Pointer reads model names from environment variables when
@@ -151,18 +170,28 @@ def _configure_pointer_runtime(*, base_url: str, api_key: str, policy_model_name
     Gym policy config.
     """
 
-    if api_key:
+    if api_key and use_policy_endpoint:
         os.environ["ANTHROPIC_API_KEY"] = api_key
-    if base_url:
-        os.environ["ANTHROPIC_BASE_URL"] = base_url.rstrip("/")
+    anthropic_base_url = _normalize_anthropic_base_url(base_url)
+    if anthropic_base_url and use_policy_endpoint:
+        os.environ["ANTHROPIC_BASE_URL"] = anthropic_base_url
 
-    if base_url and "inference-api.nvidia.com" in base_url:
+    if disable_parallel_tools and not os.environ.get("PARALLEL_API_KEY"):
+        os.environ["PARALLEL_API_KEY"] = "__nemo_gym_parallel_tools_disabled__"
+        LOG.warning(
+            "PARALLEL_API_KEY is not set; disabling PointerAgent optional "
+            "web_search/web_fetch tools. Provide PARALLEL_API_KEY if those "
+            "tools are required for leaderboard-aligned runs."
+        )
+
+    if anthropic_base_url and "inference-api.nvidia.com" in anthropic_base_url:
         os.environ.setdefault("POINTER_GATE_AGENT_MODEL", _inferencehub_anthropic_model("claude-sonnet-4-6"))
         os.environ.setdefault("POINTER_PLANNER_AGENT_MODEL", _inferencehub_anthropic_model("claude-sonnet-4-6"))
         os.environ.setdefault("POINTER_VERIFIER_AGENT_MODEL", _inferencehub_anthropic_model("claude-sonnet-4-6"))
         os.environ.setdefault("POINTER_SUMMARIZATION_MODEL", _inferencehub_anthropic_model("claude-haiku-4-5"))
         if policy_model_name:
             os.environ["POINTER_EXECUTOR_AGENT_MODEL"] = policy_model_name
+    return anthropic_base_url
 
 
 def _sync_pointer_config(policy_model_name: str) -> None:
@@ -185,12 +214,45 @@ def _sync_pointer_config(policy_model_name: str) -> None:
         )
 
 
+def _patch_pointer_optional_parallel_tools(disable_parallel_tools: bool) -> None:
+    """Disable PointerAgent web tools when Parallel credentials are unavailable."""
+
+    if not disable_parallel_tools:
+        return
+    try:
+        from mm_agents.pointer import agent_feasibility_gate as gate_module  # type: ignore
+        from mm_agents.pointer import agent_planner as planner_module  # type: ignore
+    except Exception:  # noqa: BLE001 - pointer is an optional runtime dependency.
+        return
+
+    disabled_names = {"web_search", "web_fetch"}
+
+    def _tool_name(tool: Any) -> str:
+        schema = getattr(tool, "schema", {})
+        return schema.get("name", "") if isinstance(schema, dict) else ""
+
+    if hasattr(gate_module, "GATE_TOOLS"):
+        gate_module.GATE_TOOLS[:] = [
+            tool for tool in gate_module.GATE_TOOLS if _tool_name(tool) not in disabled_names
+        ]
+    if hasattr(planner_module, "PLANNER_TOOLS"):
+        planner_module.PLANNER_TOOLS[:] = [
+            tool for tool in planner_module.PLANNER_TOOLS if _tool_name(tool) not in disabled_names
+        ]
+    for module in (gate_module, planner_module):
+        dispatch = getattr(module, "_TOOL_DISPATCH", None)
+        if isinstance(dispatch, dict):
+            for name in disabled_names:
+                dispatch.pop(name, None)
+
+
 def _patch_pointer_anthropic_client(base_url: str) -> None:
     """Make Pointer's Anthropic SDK client honor the configured base URL."""
 
     if not base_url:
         return
     try:
+        from mm_agents.pointer import llm_context_manager as pointer_context_manager  # type: ignore
         from mm_agents.pointer import llm_client as pointer_llm_client  # type: ignore
         from mm_agents.pointer import utils as pointer_utils  # type: ignore
     except Exception:  # noqa: BLE001 - pointer is an optional runtime dependency.
@@ -216,6 +278,31 @@ def _patch_pointer_anthropic_client(base_url: str) -> None:
         return original(self, provider)
 
     pointer_llm_client.LLMClient._create_client = _create_client
+
+    original_counting = getattr(
+        pointer_context_manager.LLMContextManager,
+        "_nemo_gym_original_get_counting_client",
+        pointer_context_manager.LLMContextManager._get_counting_client,
+    )
+    if not hasattr(pointer_context_manager.LLMContextManager, "_nemo_gym_original_get_counting_client"):
+        setattr(
+            pointer_context_manager.LLMContextManager,
+            "_nemo_gym_original_get_counting_client",
+            original_counting,
+        )
+
+    def _get_counting_client(self: Any) -> Any:
+        from anthropic import Anthropic  # noqa: PLC0415
+
+        if not hasattr(self, "_counting_client"):
+            self._counting_client = Anthropic(
+                api_key=os.environ.get("ANTHROPIC_API_KEY"),
+                base_url=base_url.rstrip("/"),
+                max_retries=4,
+            )
+        return self._counting_client
+
+    pointer_context_manager.LLMContextManager._get_counting_client = _get_counting_client
 
 
 def _safe_task_id(task_config: Dict[str, Any]) -> str:
@@ -375,15 +462,22 @@ def run_osworld_task(
         elif runner_spec.kind == "pointer_agent":
             if not runner_spec.agent_class_path:
                 raise ValueError(f"runner {runner_spec.name!r} requires agent_class_path")
-            _configure_pointer_runtime(
+            pointer_kwargs = dict(runner_spec.agent_kwargs)
+            disable_parallel_tools = bool(
+                pointer_kwargs.pop("disable_parallel_tools", not os.environ.get("PARALLEL_API_KEY"))
+            )
+            use_policy_endpoint = bool(pointer_kwargs.pop("use_policy_endpoint", True))
+            anthropic_base_url = _configure_pointer_runtime(
                 base_url=policy_base_url,
                 api_key=policy_api_key,
                 policy_model_name=policy_model_name,
+                use_policy_endpoint=use_policy_endpoint,
+                disable_parallel_tools=disable_parallel_tools,
             )
             agent_cls = load_attr(runner_spec.agent_class_path)
             _sync_pointer_config(policy_model_name)
-            _patch_pointer_anthropic_client(policy_base_url)
-            pointer_kwargs = dict(runner_spec.agent_kwargs)
+            _patch_pointer_optional_parallel_tools(disable_parallel_tools)
+            _patch_pointer_anthropic_client(anthropic_base_url)
             pointer_agent = agent_cls(
                 env=env,
                 screen_size=screen_size,

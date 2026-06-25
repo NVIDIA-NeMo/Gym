@@ -9,6 +9,8 @@ Docker, QEMU, and model servers.
 from __future__ import annotations
 
 from pathlib import Path
+import sys
+from types import ModuleType
 from typing import Any, Dict, List
 
 import pytest
@@ -288,3 +290,64 @@ def test_pointer_agent_runner_uses_native_pointer_predict_loop(monkeypatch, tmp_
     assert pointer.predict_calls == 1
     assert pointer.log_usage_calls == 1
     assert (Path(pointer.reset_calls[0]["task_results_dir"]) / "pointer.log").exists()
+
+
+def test_pointer_agent_runner_sets_optional_parallel_placeholder_when_key_missing(monkeypatch, tmp_path) -> None:
+    _patch_client_for_fake_runtime(monkeypatch)
+    monkeypatch.setenv("OSWORLD_POINTER_RESULTS_DIR", str(tmp_path))
+    monkeypatch.delenv("PARALLEL_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+
+    result = osworld_client.run_osworld_task(
+        {"id": "task-pointer-ih", "instruction": "Use Pointer through InferenceHub."},
+        model_fn=lambda *_args: (_ for _ in ()).throw(AssertionError("pointer_agent should not use model_fn")),
+        runner_name="pointer_agent",
+        env_class_path="fake.FakeEnv",
+        agent_class_path="fake.FakePointerAgent",
+        policy_base_url="https://inference-api.nvidia.com/v1",
+        policy_api_key="test-key",
+        policy_model_name="azure/anthropic/claude-opus-4-7",
+        sleep_after_execution=0,
+        task_timeout=10,
+    )
+
+    assert result.reward == 1.0
+    assert result.finished is True
+    assert osworld_client.os.environ["ANTHROPIC_API_KEY"] == "test-key"
+    assert osworld_client.os.environ["ANTHROPIC_BASE_URL"] == "https://inference-api.nvidia.com"
+    assert osworld_client.os.environ["PARALLEL_API_KEY"] == "__nemo_gym_parallel_tools_disabled__"
+    pointer = FakePointerAgent.instances[0]
+    assert pointer.kwargs["provider_name"] == "anthropic"
+    assert "disable_parallel_tools" not in pointer.kwargs
+    assert "use_policy_endpoint" not in pointer.kwargs
+
+
+def test_pointer_optional_parallel_patch_removes_web_tools(monkeypatch) -> None:
+    class Tool:
+        def __init__(self, name: str) -> None:
+            self.schema = {"name": name}
+
+    mm_agents = ModuleType("mm_agents")
+    pointer_pkg = ModuleType("mm_agents.pointer")
+    gate_module = ModuleType("mm_agents.pointer.agent_feasibility_gate")
+    planner_module = ModuleType("mm_agents.pointer.agent_planner")
+
+    gate_module.GATE_TOOLS = [Tool("probe_bash"), Tool("web_search"), Tool("web_fetch")]
+    gate_module._TOOL_DISPATCH = {"probe_bash": object(), "web_search": object(), "web_fetch": object()}
+    planner_module.PLANNER_TOOLS = [Tool("submit_plan"), Tool("web_search")]
+    planner_module._TOOL_DISPATCH = {"submit_plan": object(), "web_search": object()}
+    pointer_pkg.agent_feasibility_gate = gate_module
+    pointer_pkg.agent_planner = planner_module
+
+    monkeypatch.setitem(sys.modules, "mm_agents", mm_agents)
+    monkeypatch.setitem(sys.modules, "mm_agents.pointer", pointer_pkg)
+    monkeypatch.setitem(sys.modules, "mm_agents.pointer.agent_feasibility_gate", gate_module)
+    monkeypatch.setitem(sys.modules, "mm_agents.pointer.agent_planner", planner_module)
+
+    osworld_client._patch_pointer_optional_parallel_tools(disable_parallel_tools=True)
+
+    assert [tool.schema["name"] for tool in gate_module.GATE_TOOLS] == ["probe_bash"]
+    assert gate_module._TOOL_DISPATCH == {"probe_bash": gate_module._TOOL_DISPATCH["probe_bash"]}
+    assert [tool.schema["name"] for tool in planner_module.PLANNER_TOOLS] == ["submit_plan"]
+    assert planner_module._TOOL_DISPATCH == {"submit_plan": planner_module._TOOL_DISPATCH["submit_plan"]}

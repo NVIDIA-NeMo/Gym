@@ -109,7 +109,9 @@ RUNNER_REGISTRY: Dict[str, RunnerSpec] = {
     ),
     # OSWorld-Verified leaderboard's "Pointer Agent w/ Opus 4.7" path. This
     # keeps Pointer's own planner/executor/verifier loop intact and only wraps
-    # it in Gym's rollout/evaluation envelope.
+    # it in Gym's rollout/evaluation envelope. Gym runtime glue maps policy
+    # endpoint settings into PointerAgent and can disable optional Parallel-
+    # backed web tools when no PARALLEL_API_KEY is available.
     "pointer_agent": RunnerSpec(
         name="pointer_agent",
         kind="pointer_agent",
