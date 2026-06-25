@@ -13,10 +13,11 @@ Two modes via `reward_mode` config:
 Canonical entry point is the benchmark at `benchmarks/gdpval/`:
 
 ```bash
-ng_prepare_benchmark "+config_paths=[benchmarks/gdpval/config.yaml]"
-ng_e2e_collect_rollouts \
-  "+config_paths=[responses_api_models/vllm_model/configs/vllm_model.yaml,benchmarks/gdpval/config.yaml]" \
-  ++split=benchmark
+gym eval prepare --benchmark gdpval
+gym eval run \
+  --model-type vllm_model \
+  --benchmark gdpval \
+  --split benchmark
 ```
 
 See `benchmarks/gdpval/README.md` for the full run recipe.

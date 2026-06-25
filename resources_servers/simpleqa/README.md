@@ -39,20 +39,20 @@ the reasoning trace is split off before the response reaches this server.
 ## Running servers
 
 ```bash
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
-resources_servers/simpleqa/configs/simpleqa.yaml"
-ng_run "+config_paths=[$config_paths]" \
+gym env start \
+    --model-type vllm_model \
+    --resources-server simpleqa \
     +simpleqa.resources_servers.simpleqa.judge_model_server.name=policy_model
 ```
 
 ## Collecting rollouts (5-example smoke test)
 
 ```bash
-ng_collect_rollouts \
-    +agent_name=simpleqa_simple_agent \
-    +input_jsonl_fpath=resources_servers/simpleqa/data/example.jsonl \
-    +output_jsonl_fpath=results/simpleqa_rollouts.jsonl \
-    +num_repeats=1
+gym eval run --no-serve \
+    --agent simpleqa_simple_agent \
+    --input resources_servers/simpleqa/data/example.jsonl \
+    --output results/simpleqa_rollouts.jsonl \
+    --num-repeats 1
 ```
 
 ## Data Format

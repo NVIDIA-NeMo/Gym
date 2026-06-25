@@ -11,17 +11,18 @@ Commands -
 Spin up server:
 
 ```
-config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
-resources_servers/workplace_assistant/configs/workplace_assistant.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --model-type openai_model \
+    --resources-server workplace_assistant
 ```
 
 Collect trajectories:
 ```
-ng_collect_rollouts +agent_name=workplace_assistant_simple_agent \
-    +input_jsonl_fpath=resources_servers/workplace_assistant/data/train.jsonl \
-    +output_jsonl_fpath=results/workplace_assistant_trajectory_collection.jsonl \
-   +limit=1
+gym eval run --no-serve \
+    --agent workplace_assistant_simple_agent \
+    --input resources_servers/workplace_assistant/data/train.jsonl \
+    --output results/workplace_assistant_trajectory_collection.jsonl \
+   --limit 1
 ```
 
 ## Generating Additional Training Data

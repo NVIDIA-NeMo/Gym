@@ -27,29 +27,28 @@ tavily_search_resources_server:
 
 Commands to Run
 ```
-ng_download_dataset_from_gitlab \
-    +dataset_name=tavily_search \
-    +version=0.0.1 \
-    +artifact_fpath=sft_samples_train.jsonl \
-    +output_fpath=resources_servers/tavily_search/data/sft_samples/sft_samples_train.jsonl
+gym dataset download --storage gitlab \
+    --name tavily_search \
+    --revision 0.0.1 \
+    --artifact sft_samples_train.jsonl \
+    --output resources_servers/tavily_search/data/sft_samples/sft_samples_train.jsonl
 
-ng_download_dataset_from_gitlab \
-    +dataset_name=tavily_search \
-    +version=0.0.1 \
-    +artifact_fpath=sft_samples_validation.jsonl \
-    +output_fpath=resources_servers/tavily_search/data/sft_samples/sft_samples_validation.jsonl
+gym dataset download --storage gitlab \
+    --name tavily_search \
+    --revision 0.0.1 \
+    --artifact sft_samples_validation.jsonl \
+    --output resources_servers/tavily_search/data/sft_samples/sft_samples_validation.jsonl
 
-config_paths="resources_servers/tavily_search/configs/tavily_search_judge_vllm_model.yaml,\
-responses_api_models/vllm_model/configs/vllm_model.yaml"
-
-ng_run "+config_paths=[${config_paths}]"
+gym env start \
+    --resources-server tavily_search/tavily_search_judge_vllm_model \
+    --model-type vllm_model
 ```
 
 
 ### Performance Metrics
 100*16 samples:
 - Acc: 0.3212
-- Time in ng_collect: 44 mins
+- Time in `gym eval run`: 44 mins
 
 
 # Licensing information

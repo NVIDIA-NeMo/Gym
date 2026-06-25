@@ -16,9 +16,7 @@ Create an `env.yaml` file in the Gym root directory to specifying `policy_base_u
 The following is an example command for running this resources server along with an OpenAI model:
 
 ```bash
-config_paths="responses_api_models/openai_model/configs/openai_model.yaml, \
-environments/calendar/config.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start --environment calendar --model-type openai_model
 ```
 
 ## Collecting rollouts
@@ -26,11 +24,11 @@ ng_run "+config_paths=[$config_paths]"
 Rollouts can be collected using the example dataset as follows:
 
 ```bash
-ng_collect_rollouts \
-    +agent_name=calendar_simple_agent \
-    +input_jsonl_fpath=environments/calendar/data/example.jsonl \
-    +output_jsonl_fpath=results/example_rollouts.jsonl \
-    +limit=5
+gym eval run --no-serve \
+    --agent calendar_simple_agent \
+    --input environments/calendar/data/example.jsonl \
+    --output results/example_rollouts.jsonl \
+    --limit 5
 ```
 
 The input JSONL file should contain entries with:
