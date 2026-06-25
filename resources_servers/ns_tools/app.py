@@ -102,10 +102,6 @@ class NSToolsRunRequest(BaseRunRequest):
     # Per-sample verifier selection (optional, falls back to default_verifier)
     verifier_type: Optional[str] = None
 
-    # Fields for math_with_judge verifier
-    question: Optional[str] = None
-    expected_answer: Optional[str] = None
-
 
 class NSToolsVerifyRequest(NSToolsRunRequest, BaseVerifyRequest):
     pass
