@@ -24,7 +24,7 @@ on:
   workflow_dispatch:
     inputs:
       release-ref:
-        description: Ref (SHA or branch name) to release
+        description: Commit SHA to release (must be a full 40-char SHA, not a branch name)
         required: true
         type: string
       dry-run:
@@ -35,11 +35,6 @@ on:
       create-gh-release:
         description: Create a GitHub release
         required: true
-        default: true
-        type: boolean
-      generate-changelog:
-        description: Generate changelog
-        required: false
         default: true
         type: boolean
       version-bump-branch:
@@ -76,7 +71,7 @@ jobs:
       !cancelled() && !failure()
       && !(needs.pre-flight.outputs.docs_only == 'true'
            || needs.pre-flight.outputs.is_deployment_workflow == 'true')
-    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_release_library.yml@v1.0.0
+    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_release_library.yml@v1.4.3
     with:
       release-ref: ${{ inputs.release-ref || github.sha }}
       python-package: nemo_gym
@@ -89,7 +84,6 @@ jobs:
       skip-test-wheel: true
       wheel-content-ignore: "W002,W004,W009"
       app-id: ${{ vars.BOT_ID }}
-      gh-release-use-changelog-builder: ${{ inputs.generate-changelog || false }}
       publish-docs: false
       run-on-version-tag-only: ${{ github.ref_name != 'main' }}
       gh-release-from-tag: ${{ inputs.gh-release-from-tag || '' }}

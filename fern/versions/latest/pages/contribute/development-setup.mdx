@@ -25,9 +25,9 @@ pre-commit install
 
 **Run NeMo Gym Tests**:
 ```bash
-ng_dev_test                                    # Run all NeMo Gym core tests
-ng_test_all                                    # Run all server tests
-ng_test +entrypoint=responses_api_agents/simple_agent  # Test single server
+gym dev test                                   # Run all NeMo Gym core tests
+gym env test                                   # Run all server tests
+gym env test --resources-server example_single_tool_call    # Test a single resources server
 ```
 
 **View Test Coverage**:
@@ -37,7 +37,7 @@ coverage html                                  # Generate HTML coverage report
 
 **Configuration Debugging**:
 ```bash
-ng_dump_config                                 # Dump config as NeMo Gym sees it
+gym env resolve                                # Dump config as NeMo Gym sees it
 ```
 
 ---
@@ -55,7 +55,7 @@ All contributions must pass these automated checks:
 
 **Test Requirements**:
 - At least one test per server you contribute
-- Tests must run using `ng_test +entrypoint=your_server_path`
+- Tests must run using `gym env test --resources-server your_server`
 - Use pytest for async testing patterns
 
 ### Build Docs CI Failures
@@ -242,12 +242,101 @@ pre-commit autoupdate             # Update hook versions
 
 ## Development Workflow
 
-1. **Create feature branch**: `git checkout -b feature/your-feature`
+For a small, self-contained change, open a single PR:
+
+1. **Create a feature branch**: `git checkout -b <username>/<feature>`
 2. **Make changes** with tests
-3. **Run local checks**: `ng_dev_test && pre-commit run --all-files`
+3. **Run local checks**: `gym dev test && pre-commit run --all-files`
 4. **Commit with signoff**: `git commit -s -S -m "Your message"`
-5. **Push and create PR**: Ensure all CI checks pass
+5. **Push and open a PR**: ensure all CI checks pass
 6. **Address review feedback** and iterate
+
+### Stacked Pull Requests
+
+For larger changes, NeMo Gym uses [GitHub Stacked PRs](https://github.github.com/gh-stack/): a chain of branches where each PR targets the branch below it, so each layer is reviewed as its own focused diff. See GitHub's [Stacked PRs overview](https://github.github.com/gh-stack/) for the concept and PR UI; the mechanics of the `gh stack` CLI in this repo follow.
+
+#### Prerequisites
+
+Install the [GitHub CLI](https://cli.github.com/) (`gh`) v2.0 or later, the `gh stack` extension, and the agent skill:
+
+```bash
+gh extension install github/gh-stack
+gh skill install github/gh-stack gh-stack   # vendored under .claude/skills/gh-stack/; this installs it for your agent
+```
+
+<Warning>
+`gh stack` requires OAuth — Personal Access Tokens are rejected during the private preview. If `gh auth status` shows a `github_pat_…` token, `submit`/`push`/`sync` fail with exit code 9. Re-authenticate with the web flow:
+
+```bash
+gh auth login   # GitHub.com → HTTPS → "Login with a web browser"
+```
+</Warning>
+
+A stack is created in the repo you push to, and that repo must have the preview enabled — push your branches to the remote that points at `NVIDIA-NeMo/Gym`. With multiple remotes, set the target once (or pass `--remote <name>` on each command) and enable conflict memory so commands do not prompt:
+
+```bash
+git config remote.pushDefault upstream   # the remote pointing at NVIDIA-NeMo/Gym
+git config rerere.enabled true
+```
+
+#### Create a Stack
+
+Build the stack bottom-up, one logical change per branch, where each branch depends on the one below it. Keep a contribution self-contained — land code together with its tests in a single PR — and stack genuinely dependent follow-ups (for example, documentation) on top.
+
+```bash
+# Bottom layer: the contribution (resources server, agent config, and its tests) as one branch.
+gh stack init -p <user>/my-env contribution
+git add resources_servers/my_env/
+git commit -s -m "feat: add my_env environment and tests"
+
+# Next layer: a follow-up that depends on the contribution above.
+gh stack add docs
+git add fern/versions/latest/pages/environment-tutorials/my-env.mdx
+git commit -s -m "docs: document my_env"
+
+# Push every branch and open a draft PR per layer (--auto titles them).
+gh stack submit --auto
+
+# Inspect the result (always --json; bare `view` opens a TUI).
+gh stack view --json
+```
+
+`submit` sets each PR's base to the branch below it and links them as a stack on GitHub. Run every `gh stack` command non-interactively: pass branch names to `init`/`add`/`checkout`, `--auto` to `submit`, and `--json` to `view`. Without these flags the commands prompt or open a TUI and hang.
+
+#### Update a Stack
+
+Make a change on the branch it belongs to, then rebase the layers above it:
+
+```bash
+gh stack down              # or: gh stack checkout <branch|pr-number>
+git add <files> && git commit -s -m "..."
+gh stack rebase --upstack  # replay the layers above onto the change
+gh stack push
+```
+
+After a PR merges, sync to fast-forward the trunk and rebase the rest of the stack:
+
+```bash
+gh stack sync --prune      # fetch, rebase, push, drop merged branches
+```
+
+On a rebase conflict (exit code 3), resolve the listed files, `git add` them, then `gh stack rebase --continue` (or `--abort`). Merging is done from the GitHub PR UI; CLI merge is not supported yet.
+
+#### Command Reference
+
+The vendored skill (`.claude/skills/gh-stack/SKILL.md`) carries the full reference, exit codes, and non-interactive rules for agents.
+
+| Task | Command |
+|------|---------|
+| Start a stack | `gh stack init -p <prefix> <branch>` |
+| Add a layer | `gh stack add <suffix>` |
+| Push and open PRs | `gh stack submit --auto` |
+| Inspect state | `gh stack view --json` |
+| Navigate | `gh stack up` / `down` / `top` / `bottom` |
+| Rebase after a lower-layer edit | `gh stack rebase --upstack` |
+| Sync after merges | `gh stack sync --prune` |
+
+See the [gh-stack documentation](https://github.github.com/gh-stack/) for the full feature set.
 
 ---
 

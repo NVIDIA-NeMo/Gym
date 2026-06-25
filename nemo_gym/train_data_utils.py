@@ -40,7 +40,6 @@ from nemo_gym.gitlab_utils import download_jsonl_dataset
 from nemo_gym.global_config import (
     HF_TOKEN_KEY_NAME,
     GlobalConfigDictParser,
-    GlobalConfigDictParserConfig,
     get_global_config_dict,
 )
 from nemo_gym.hf_utils import (
@@ -58,7 +57,7 @@ class TrainDataProcessorConfig(BaseNeMoGymCLIConfig):
     ```bash
     config_paths="resources_servers/example_multi_step/configs/example_multi_step.yaml,\\
     responses_api_models/openai_model/configs/openai_model.yaml"
-    ng_prepare_data "+config_paths=[${config_paths}]" \
+    gym dataset collate "+config_paths=[${config_paths}]" \
         +output_dirpath=data/example_multi_step \
         +mode=example_validation
     ```
@@ -410,10 +409,10 @@ class TrainDataProcessor(BaseModel):
             server_names_list_str += f"{server_str}{datasets_str}"
         print(f"In scope dataset types for `{config.mode}` mode: {in_scope_dataset_types}")
         print(
-            f"Found {len(agent_configs_with_data)} agent server instance configs with in-scope datasets:{server_names_list_str}"
+            f"Found {len(agent_configs_with_in_scope_datasets)} agent server instance configs with in-scope datasets:{server_names_list_str}"
         )
 
-        return agent_configs_with_data
+        return agent_configs_with_in_scope_datasets
 
     def load_datasets(
         self,
@@ -825,12 +824,14 @@ def validate_backend_credentials(backend: str) -> tuple[bool, str]:
     return True, ""
 
 
-def prepare_data():  # pragma: no cover
-    global_config_dict = get_global_config_dict(
-        global_config_dict_parser_config=GlobalConfigDictParserConfig(
-            initial_global_config_dict=GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
-        )
-    )
+# Backward-compatibility shim (CLI refactor): this CLI entry point moved to `nemo_gym.cli.dataset`.
+# Re-exported lazily to avoid a circular import; accessing it emits a DeprecationWarning.
+from nemo_gym.cli._compat import moved_attr_getter  # noqa: E402
 
-    data_processor = TrainDataProcessor()
-    data_processor.run(global_config_dict)
+
+__getattr__ = moved_attr_getter(
+    __name__,
+    {
+        "prepare_data": "nemo_gym.cli.dataset",
+    },
+)

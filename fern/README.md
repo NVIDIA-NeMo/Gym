@@ -25,7 +25,7 @@ npm install -g fern-api
 
 # 2. Provision your Fern account + CLI auth (one-time per machine).
 #    Walks you through the dashboard sign-in step before running `fern login`.
-make docs-login
+make docs-login   # or `make docs-login-remote` when working on a headless remote machine
 
 # 3. Build the API library reference and start the local dev server
 make docs           # http://localhost:3000
@@ -54,10 +54,9 @@ make docs-check
 fern/
 ├── fern.config.json          # Fern CLI org slug + version pin
 ├── package.json              # `npm run check|dev|generate|generate:library`
-├── docs.yml                  # Site config: instances, versions, redirects, libraries, theme
-├── main.css                  # NVIDIA-green theme overrides
-├── assets/                   # Logos, shared SVGs, page images
-├── components/               # BadgeLinks, CTAButtons, CustomFooter, Include, NavButton, NotebookViewer (TSX)
+├── docs.yml                  # Site config: instances, versions, redirects, libraries (`global-theme: nvidia`)
+├── assets/                   # Page images (logos/favicon/fonts come from the `nvidia` global theme)
+├── components/               # NavButton.tsx + co-located NavButton.css
 ├── versions/
 │   ├── main.yml              # Nav for the bleeding-edge train — paths point at ./latest/pages/
 │   ├── latest/pages/         # Bleeding-edge MDX content (edited on every PR; published at /main/...)
@@ -89,7 +88,7 @@ make docs-publish           # trigger the `Publish Fern Docs` workflow on origin
 make docs-generate-library  # standalone library regeneration (rarely needed; `make docs` runs it)
 ```
 
-For first-time-on-this-machine setup, see the [Quickstart](#quickstart) above — `make docs-login` walks through dashboard provisioning + `fern login` together.
+For first-time-on-this-machine setup, see the [Quickstart](#quickstart) above — `make docs-login` / `make docs-login-remote` walks through dashboard provisioning + `fern login` together.
 
 `make docs` first runs `fern docs md generate`, which populates `fern/product-docs/` from the `nemo_gym` package source declared in the `libraries:` block of `docs.yml`. Without it, a cold `fern docs dev` will fail with `Folder not found: ./product-docs/...`. Re-run only when the upstream Python source changes — for prose-only iteration after the first generation, `cd fern && npm run dev` is enough.
 
@@ -121,12 +120,11 @@ Use the bundled custom components in `components/`:
 
 | Component | Purpose |
 |---|---|
-| `<BadgeLinks ... />` | Header badge rows on landing pages (PyPI, license, GitHub, …) |
-| `<CTAButtons ... />` | Side-by-side CTA buttons on landing pages |
-| `<NavButton ... />` | Inline navigation buttons |
-| `<NotebookViewer ... />` | Embed a Jupyter notebook |
-| `<Include ... />` | Reuse an MDX snippet across pages |
-| `<CustomFooter />` | Wired in `docs.yml` `footer:`; **required** for NVIDIA legal/privacy compliance |
+| `<NavButton ... />` | Inline wayfinding pill button for tutorial back/prev/next links |
+
+Component-scoped CSS lives next to its TSX (e.g. `NavButton.css` next to `NavButton.tsx`) and is loaded via a sibling `import "./NavButton.css"` — keep new component styles co-located the same way.
+
+The footer, logos, favicon, fonts, brand colors, base CSS, and OneTrust JS are all inherited from the `nvidia` global theme published from [NVIDIA/fern-components](https://github.com/NVIDIA/fern-components) via `global-theme: nvidia` in `docs.yml`. Don't re-add `footer:`, `logo: { dark, light, height }`, `favicon:`, `css:`, `js:`, `colors:`, `layout:`, `theme:`, or `navbar-links:` here — change them upstream and re-upload the theme. The one exception is the `logo.right-text: NeMo Gym` override (the theme hardcodes "Documentation").
 
 Standard Fern components are also available — `<Note>`, `<Tip>`, `<Info>`, `<Warning>`, `<Cards>` / `<Card>`, `<Badge>`, etc. Don't use GitHub `> [!NOTE]` syntax — it does not render in MDX.
 
@@ -204,7 +202,7 @@ PR titles follow Conventional Commits (e.g. `docs(fern): add rollout collection 
 | Page 404 in preview | `slug:` missing/duplicated in the same section, or `position:` collision in an auto-discovered folder |
 | Broken-link warning for cross-version path | False positive in `fern docs dev`; the published site resolves it correctly |
 | `JSX expressions must have one parent element` | Wrap multi-element MDX content in `<>...</>` or a `<div>` |
-| Card badges have no spacing | Don't add inline styles — `main.css` `.fern-card .fern-docs-badge` rules handle it |
+| Card badges have no spacing | Don't add inline styles — the `nvidia` global theme handles `.fern-card .fern-docs-badge` spacing |
 | Old URL breaks | Add a `redirects:` entry in `docs.yml` |
 | Library reference missing after generation | Re-run `npm run generate:library`; check `libraries:` block in `docs.yml` matches the package source path |
 

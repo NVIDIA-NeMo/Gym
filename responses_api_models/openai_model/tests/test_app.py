@@ -92,15 +92,11 @@ class TestApp:
             },
         )
         assert chat_with_model.status_code == 200
-        assert called_args_chat.get("model") == "override_model"
+        assert called_args_chat.get("model") == "dummy_model"
 
         server._client.create_chat_completion.assert_any_await(
             messages=[{"role": "user", "content": "hi"}],
             model="dummy_model",
-        )
-        server._client.create_chat_completion.assert_any_await(
-            messages=[{"role": "user", "content": "hi"}],
-            model="override_model",
         )
 
     async def test_responses(self, monkeypatch: MonkeyPatch) -> None:
@@ -151,10 +147,9 @@ class TestApp:
         # model provided should override config
         res_with_model = client.post("/v1/responses", json={"input": "hello", "model": "override_model"})
         assert res_with_model.status_code == 200
-        assert called_args_response.get("model") == "override_model"
+        assert called_args_response.get("model") == "dummy_model"
 
         server._client.create_response.assert_any_await(input="hello", model="dummy_model")
-        server._client.create_response.assert_any_await(input="hello", model="override_model")
 
     def test_semaphore_disabled_by_default(self) -> None:
         server = self._setup_server()

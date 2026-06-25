@@ -46,10 +46,8 @@ environ["TOKENIZERS_PARALLELISM"] = "false"
 # Only override if not already set by the user.
 if "HF_DATASETS_CACHE" not in environ:
     environ["HF_DATASETS_CACHE"] = str(CACHE_DIR / "huggingface")
-if "TRANSFORMERS_CACHE" not in environ:
-    environ["TRANSFORMERS_CACHE"] = environ["HF_DATASETS_CACHE"]
-# TODO When `TRANSFORMERS_CACHE` is no longer supported in transformers>=5.0.0, migrate to `HF_HOME`
-# environ["HF_HOME"] = join(CACHE_DIR, "huggingface")
+if "HF_HOME" not in environ:
+    environ["HF_HOME"] = str(CACHE_DIR / "huggingface")
 
 
 OLD_PRINT = print

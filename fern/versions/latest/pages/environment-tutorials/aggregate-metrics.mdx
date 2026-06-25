@@ -9,7 +9,7 @@ After rollout collection, NeMo Gym computes **aggregate metrics** for each agent
 
 ## How It Works
 
-1. **Rollouts complete** — `ng_collect_rollouts` gathers verify responses (reward + custom fields) for every task/rollout pair.
+1. **Rollouts complete** — `gym eval run --no-serve` gathers verify responses (reward + custom fields) for every task/rollout pair.
 2. **Group by agent** — responses are partitioned by agent name.
 3. **Call `/aggregate_metrics`** — for each agent, the stripped verify responses are POSTed to the agent's `/aggregate_metrics` endpoint.
 4. **Compute stats** — per-task and overall statistics (`mean`, `max`, `min`, `median`, `std`) are computed for every numeric field. If the resources server overrides `compute_metrics()` or `get_key_metrics()`, those are called to add additional metrics.

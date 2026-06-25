@@ -30,19 +30,19 @@ PolyMath additions are at the metric-aggregation layer:
 ## Running servers
 
 ```bash
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
-resources_servers/polymath/configs/polymath.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --model-type vllm_model \
+    --resources-server polymath
 ```
 
 ## Collecting rollouts (5-example smoke test)
 
 ```bash
-ng_collect_rollouts \
-    +agent_name=polymath_simple_agent \
-    +input_jsonl_fpath=resources_servers/polymath/data/example.jsonl \
-    +output_jsonl_fpath=results/polymath_rollouts.jsonl \
-    +num_repeats=1
+gym eval run --no-serve \
+    --agent polymath_simple_agent \
+    --input resources_servers/polymath/data/example.jsonl \
+    --output results/polymath_rollouts.jsonl \
+    --num-repeats 1
 ```
 
 The server's vLLM endpoint should be started with

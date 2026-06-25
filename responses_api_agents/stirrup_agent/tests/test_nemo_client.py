@@ -44,6 +44,7 @@ def _make_response(content: str = "ok"):
     choice.message.content = content
     choice.message.tool_calls = []
     choice.message.reasoning_content = None
+    choice.message.reasoning = None
     response.choices = [choice]
     response.usage = MagicMock()
     response.usage.prompt_tokens = 10
