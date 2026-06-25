@@ -310,7 +310,7 @@ COMMANDS = {
             # GitLab stores it as `version`, HF as `revision`; emit both and let each backend keep its own.
             Flag(
                 register=lambda p: p.add_argument(
-                    "--revision", dest="revision", help="Dataset revision (version) to download."
+                    "--revision", dest="revision", help="Dataset revision (version) to upload."
                 ),
                 translate_to_hydra=lambda args: (
                     # we set both version and revision because GitLab and HF use different keys
