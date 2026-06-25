@@ -60,6 +60,8 @@ redirects:
     destination: "/nemo/gym/get-started/installation"
   - source: "/nemo/gym/how-to-faq.html"
     destination: "/nemo/gym/reference/faq"
+  - source: "/nemo/gym/main/evaluation-tutorials/adding-a-benchmark"
+    destination: "/nemo/gym/main/evaluation/adding-a-benchmark"
   - source: "/nemo/gym/infrastructure/aiohttp-vs-httpx.html"
     destination: "/nemo/gym/infrastructure/engineering-notes/aiohttp-vs-httpx"
   - source: "/nemo/gym/infrastructure/swe-rl-case-study.html"

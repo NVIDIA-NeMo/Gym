@@ -13,7 +13,20 @@ NeMo Gym supports skills in two different ways:
 
 ## Skill Example: BLADE Analysis
 
-The [BLADE analysis](https://github.com/NVIDIA-NeMo/Gym/tree/main/.codex/skills/nemo-gym-blade-analysis) skill is designed to turn NeMo Gym rollout artifacts into BLADE-style benchmark reports, model comparisons, and benchmark-improvement recommendations. Its workflow starts from rollout JSONL, aggregate metrics, reward profiles, configs, model names, repeat counts, and sampling settings. It then computes pass@1/pass@k, separates always-pass, sometimes-pass, never-pass, and missing rows, reads trajectories in order, assigns root-cause labels, and maps findings to concrete interventions.
+**BLADE** (Benchmark Level Analysis and Diagnostics Engine) is a post-evaluation analysis workflow built into Gym. It is a skill plus a structured package format that turns raw Gym rollout artifacts into human-readable benchmark reports. BLADE answers *why* a score changed, not just *what* the score is.
+
+<Info>
+BLADE does not run benchmarks or replace the verifier. It is strictly post-run analysis: it reads what `ng_collect_rollouts` produced and explains it.
+</Info>
+
+The [BLADE analysis skill](https://github.com/NVIDIA-NeMo/Gym/tree/main/.codex/skills/nemo-gym-blade-analysis) starts from rollout JSONL, aggregate metrics, reward profiles, configs, model names, repeat counts, and sampling settings. It then:
+
+- Computes pass@1 and pass@k
+- Separates always-pass, sometimes-pass, never-pass, and missing rows
+- Reads trajectories in order and assigns root-cause labels
+- Maps findings to concrete harness, training, data, or verifier interventions
+
+A BLADE-ready benchmark package is a validated directory that contains rollout data from two or more model runs, a benchmark-specific `SKILL.md`, and golden reports with anchor facts for calibration.
 
 BLADE-ready benchmark packages use three deliverables:
 
