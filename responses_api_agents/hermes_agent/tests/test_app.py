@@ -18,7 +18,7 @@ from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponseFunctionToolCall,
-    NeMoGymResponseOutputMessageForTraining,
+    NeMoGymResponseOutputMessage,
 )
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.hermes_agent.app import (
@@ -115,9 +115,12 @@ class TestTrajectoryToOutputItems:
         ]
         out = _trajectory_to_output_items(msgs, 1)
         assert len(out) == 1
-        assert isinstance(out[0], NeMoGymResponseOutputMessageForTraining)
+        # Plain item — base run() reconciles the server's buffered token IDs onto it.
+        assert type(out[0]) is NeMoGymResponseOutputMessage
 
-    def test_assistant_with_tokens(self) -> None:
+    def test_assistant_built_plain_ignoring_any_injected_token_ids(self) -> None:
+        # Token IDs are no longer read from hermes' messages (the fork patch is gone); the
+        # model server buffers them and base run() reattaches them.
         msgs = [
             {
                 "role": "assistant",
@@ -129,9 +132,8 @@ class TestTrajectoryToOutputItems:
         ]
         out = _trajectory_to_output_items(msgs, 0)
         assert len(out) == 1
-        assert isinstance(out[0], NeMoGymResponseOutputMessageForTraining)
-        assert out[0].generation_token_ids == [3, 4]
-        assert out[0].prompt_token_ids == [1, 2]
+        assert type(out[0]) is NeMoGymResponseOutputMessage
+        assert out[0].content[0].text == "answer"
 
     def test_assistant_with_tool_call_and_tool_result(self) -> None:
         msgs = [
@@ -144,7 +146,7 @@ class TestTrajectoryToOutputItems:
         ]
         out = _trajectory_to_output_items(msgs, 0)
         assert len(out) == 3
-        assert isinstance(out[0], NeMoGymResponseOutputMessageForTraining)
+        assert type(out[0]) is NeMoGymResponseOutputMessage
         assert isinstance(out[1], NeMoGymResponseFunctionToolCall)
         assert out[1].name == "terminal"
         assert out[1].arguments == '{"cmd":"ls"}'

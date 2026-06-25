@@ -1,0 +1,23 @@
+math_with_judge_codex_agent:
+  responses_api_agents:
+    codex_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: math_with_judge
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      concurrency: 8
+      command: codex
+      # overwritten by model server
+      model: nvidia/qwen/qwen3-next-80b-a3b-instruct
+      model_provider: nvinf
+      api_key_env: NVIDIA_API_KEY
+      wire_api: responses
+      env:
+        NVIDIA_API_KEY: dummy
+      timeout: 600
+      system_prompt: |
+        You are a precise math assistant. Run shell commands (python3) to compute or verify numeric
+        results instead of doing them by hand, then state the final answer as \boxed{answer}.

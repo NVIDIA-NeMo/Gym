@@ -28,14 +28,12 @@ from uuid import uuid4
 from fastapi import Request
 from pydantic import ConfigDict
 
-from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     Body,
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.global_config import get_first_server_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -48,7 +46,6 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
-from nemo_gym.server_utils import get_response_json, raise_for_status
 from responses_api_agents.claude_code_agent.setup_claude_code import ensure_claude_code
 
 
@@ -82,7 +79,6 @@ def parse_stream_json(stdout: str) -> tuple[list[Any], dict]:
             continue
 
     output_items: list[Any] = []
-    pending_calls: dict[str, dict] = {}
     buffered_think: str | None = None
     total_input = 0
     total_output = 0
@@ -124,13 +120,24 @@ def parse_stream_json(stdout: str) -> tuple[list[Any], dict]:
                     )
                 )
 
+            # emit each tool call now (in block order) so parallel calls stay in one turn for
+            # token-id segmentation. the matching output is emitted at tool_result time.
             for block in content:
                 if not isinstance(block, dict) or block.get("type") != "tool_use":
                     continue
                 call_id = block.get("id") or f"call-{uuid4().hex[:8]}"
                 input_data = block.get("input") or {}
                 arguments = json.dumps(input_data) if isinstance(input_data, dict) else str(input_data)
-                pending_calls[call_id] = {"name": block.get("name", ""), "call_id": call_id, "arguments": arguments}
+                output_items.append(
+                    NeMoGymResponseFunctionToolCall(
+                        arguments=arguments,
+                        call_id=call_id,
+                        name=block.get("name", ""),
+                        type="function_call",
+                        id=call_id,
+                        status="completed",
+                    )
+                )
 
         elif etype == "user":
             message = event.get("message", {})
@@ -142,18 +149,6 @@ def parse_stream_json(stdout: str) -> tuple[list[Any], dict]:
                 if not isinstance(block, dict) or block.get("type") != "tool_result":
                     continue
                 tool_id = block.get("tool_use_id", "")
-                call_info = pending_calls.pop(tool_id, None)
-                if call_info:
-                    output_items.append(
-                        NeMoGymResponseFunctionToolCall(
-                            arguments=call_info["arguments"],
-                            call_id=tool_id,
-                            name=call_info["name"],
-                            type="function_call",
-                            id=tool_id,
-                            status="completed",
-                        )
-                    )
                 result_content = block.get("content") or ""
                 if isinstance(result_content, list):
                     result_text = _extract_text(result_content)
@@ -205,9 +200,10 @@ def _extract_instruction(body_input) -> tuple[str, Optional[str]]:
 
 class ClaudeCodeAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
-    # When model_server is set, ANTHROPIC_BASE_URL is resolved from the Gym model
-    # server's URL (requires the server to expose POST /v1/messages. None is pushed yet).
-    # When None, anthropic_base_url is used directly.
+    # when model_server is set, ANTHROPIC_BASE_URL is resolved from the Gym model server's
+    # URL. the server must expose POST /v1/messages (see responses_api_models/
+    # claude_messages_model), which also lets Gym capture token IDs for training. when None,
+    # anthropic_base_url is used directly (e.g. the real Anthropic API, no token IDs).
     model_server: Optional[ModelServerRef] = None
     concurrency: int = 32
     model: str = "claude-sonnet-4-6"
@@ -229,16 +225,6 @@ class ClaudeCodeAgentConfig(BaseResponsesAPIAgentConfig):
     settings: Optional[str] = None
 
 
-class ClaudeCodeAgentRunRequest(BaseRunRequest):
-    model_config = ConfigDict(extra="allow")
-
-
-class ClaudeCodeAgentVerifyResponse(BaseVerifyResponse):
-    model_config = ConfigDict(extra="allow")
-    turns_used: int = 0
-    finished_naturally: bool = False
-
-
 class ClaudeCodeAgent(SimpleResponsesAPIAgent):
     config: ClaudeCodeAgentConfig
     sem: Semaphore = None
@@ -254,21 +240,10 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             LOG.warning("could not determine claude-code version: %s", exc)
 
     def _resolve_base_url(self) -> str:
-        if self.config.model_server:
-            cfg = get_first_server_config_dict(
-                self.server_client.global_config_dict,
-                self.config.model_server.name,
-            )
-            return self.server_client._build_server_base_url(cfg)
-        return self.config.anthropic_base_url or ""
+        # model-server URL resolved from the head server's config, else the external fallback.
+        return self.model_server_base_url() or self.config.anthropic_base_url or ""
 
     def _build_settings(self) -> dict[str, Any]:
-        """Settings written into the run's CLAUDE_CONFIG_DIR.
-
-        The base settings disable telemetry/attribution. When ``config.settings`` points at a
-        JSON file, its contents are layered on top: top-level keys override, and the ``env`` block
-        is shallow-merged so the telemetry defaults are preserved unless explicitly overridden.
-        """
         settings: dict[str, Any] = {
             "env": {
                 "CLAUDE_CODE_ATTRIBUTION_HEADER": "0",
@@ -283,24 +258,12 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         return settings
 
     def _setup_config_dir(self) -> Path:
-        """Create a per-run CLAUDE_CONFIG_DIR and stage settings into it.
-
-        The directory lives for the duration of a single ``_run_claude_code`` call and is the
-        staging seam for capabilities discovered from CLAUDE_CONFIG_DIR (e.g. skills under
-        ``<dir>/skills/``). The caller is responsible for removing it.
-        """
         claude_config_dir = Path.home() / ".claude_code_agent" / uuid4().hex
         claude_config_dir.mkdir(parents=True)
         (claude_config_dir / "settings.json").write_text(json.dumps(self._build_settings()))
         return claude_config_dir
 
     def _build_command(self, model: str, instruction: str, system_prompt: Optional[str] = None) -> list[str]:
-        """Construct the ``claude`` CLI argv from config.
-
-        ``--bare`` is only passed when ``config.bare`` is True; it disables auto-discovery of
-        skills, hooks, plugins, MCP servers, auto memory, and CLAUDE.md. Explicit capabilities
-        like ``--mcp-config`` are passed regardless of ``--bare`` since they are not auto-discovered.
-        """
         cmd = [
             "claude",
             "-p",
@@ -327,9 +290,11 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         cmd += ["--", instruction]
         return cmd
 
-    async def _run_claude_code(self, instruction: str, system_prompt: Optional[str] = None) -> tuple[str, str]:
-        """Run claude -p --output-format=stream-json and return (stdout, model_name)."""
-        base_url = self._resolve_base_url()
+    async def _run_claude_code(
+        self, instruction: str, system_prompt: Optional[str] = None, base_url: Optional[str] = None
+    ) -> tuple[str, str]:
+        if base_url is None:
+            base_url = self._resolve_base_url()
         # Keep full model name for local/custom endpoints; strip provider prefix for real Anthropic API.
         model = self.config.model if base_url else self.config.model.split("/")[-1]
         api_key = self.config.anthropic_api_key
@@ -388,7 +353,12 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         system_parts = [p for p in [self.config.system_prompt, input_system] if p]
         system_prompt = "\n\n".join(system_parts) if system_parts else None
 
-        stdout, model_name = await self._run_claude_code(user_message, system_prompt=system_prompt)
+        # point the CLI's model calls at the run-scoped model-server URL (when run() set a
+        # token). base run() buffers + reconciles the token IDs. the path is the correlator
+        # because cookies don't survive into the CLI subprocess.
+        base_url = self.harness_base_url(request, fallback=self.config.anthropic_base_url)
+
+        stdout, model_name = await self._run_claude_code(user_message, system_prompt=system_prompt, base_url=base_url)
         output_items, usage = parse_stream_json(stdout)
 
         if not any(
@@ -427,50 +397,8 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             ),
         )
 
-    async def run(self, request: Request, body: ClaudeCodeAgentRunRequest) -> ClaudeCodeAgentVerifyResponse:
-        async with self.sem:
-            cookies = request.cookies
-
-            seed_resp = await self.server_client.post(
-                server_name=self.config.resources_server.name,
-                url_path="/seed_session",
-                json=body.model_dump(),
-                cookies=cookies,
-            )
-            await raise_for_status(seed_resp)
-            cookies = seed_resp.cookies
-
-            agent_resp = await self.server_client.post(
-                server_name=self.config.name,
-                url_path="/v1/responses",
-                json=body.responses_create_params,
-                cookies=cookies,
-            )
-            await raise_for_status(agent_resp)
-            cookies = agent_resp.cookies
-            agent_resp_json = await get_response_json(agent_resp)
-
-            verify_resp = await self.server_client.post(
-                server_name=self.config.resources_server.name,
-                url_path="/verify",
-                json=body.model_dump() | {"response": agent_resp_json},
-                cookies=cookies,
-            )
-            await raise_for_status(verify_resp)
-            verify_json = await get_response_json(verify_resp)
-
-            gym_resp = NeMoGymResponse.model_validate(agent_resp_json)
-            turns = sum(
-                1
-                for item in gym_resp.output
-                if getattr(item, "type", None) == "message" and getattr(item, "role", None) == "assistant"
-            )
-            last = gym_resp.output[-1] if gym_resp.output else None
-            naturally = getattr(last, "type", None) == "message" and getattr(last, "role", None) == "assistant"
-
-            return ClaudeCodeAgentVerifyResponse.model_validate(
-                verify_json | {"turns_used": turns, "finished_naturally": naturally}
-            )
+    # run() is inherited from SimpleResponsesAPIAgent: it mints the run token, passes it to
+    # responses() via header, and reconciles the buffered token IDs onto the trajectory.
 
 
 if __name__ == "__main__":

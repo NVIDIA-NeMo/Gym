@@ -1,0 +1,32 @@
+math_with_judge_openclaw_agent:
+  responses_api_agents:
+    openclaw_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: math_with_judge
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      concurrency: 8
+      command: openclaw
+      thinking: "off"
+      model: nvinf/policy_model
+      timeout: 1800
+      system_prompt: |
+        You are a precise math assistant with an exec/terminal tool that runs shell commands.
+        You MUST verify every numeric result by running Python via your exec tool (use `python3 -c "..."`,
+        not `python`) before answering. Do not compute large values by hand. After the tool returns,
+        state your final answer as \boxed{answer}.
+      openclaw_config:
+        models:
+          providers:
+            nvinf:
+              api: openai-completions
+              baseUrl: http://placeholder/v1
+              apiKey: gym
+              models:
+              - id: policy_model
+                name: policy_model
+                api: openai-completions
+      openclaw_version: null

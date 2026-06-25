@@ -1,0 +1,18 @@
+policy_model:
+  responses_api_models:
+    claude_messages_model:
+      entrypoint: app.py
+      # vLLM (OpenAI-compatible) backend that serves the open model and emits token IDs.
+      base_url: ${policy_base_url}
+      api_key: ${policy_api_key}
+      model: ${policy_model_name}
+      # This server exists to capture token IDs for training, so default it on.
+      return_token_id_information: true
+      uses_reasoning_parser: true
+      uses_interleaved_reasoning: true
+      # Hard cap on output tokens — the claude CLI hardcodes max_tokens=32000, which leaves
+      # no room for the prompt in an open model's ~32k context. Clamp so a turn always fits.
+      max_output_tokens: 4096
+      chat_template_kwargs: null
+      extra_body: null
+      default_headers: {}

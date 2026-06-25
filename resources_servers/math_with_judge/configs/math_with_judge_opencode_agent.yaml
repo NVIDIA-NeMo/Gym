@@ -1,0 +1,28 @@
+math_with_judge_opencode_agent:
+  responses_api_agents:
+    opencode_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: math_with_judge
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      concurrency: 8
+      command: opencode
+      model: nvinf/policy_model
+      thinking: false
+      timeout: 600
+      system_prompt: |
+        You are a precise math assistant with a bash tool. Run python3 to compute or verify numeric
+        results instead of doing them by hand, then state the final answer as \boxed{answer}.
+      opencode_config:
+        provider:
+          nvinf:
+            npm: "@ai-sdk/openai-compatible"
+            options:
+              baseURL: http://placeholder/v1
+              apiKey: gym
+            models:
+              policy_model: {}
+      opencode_version: null

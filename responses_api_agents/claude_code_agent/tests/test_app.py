@@ -16,13 +16,16 @@
 import asyncio
 import json
 from pathlib import Path
+from typing import Optional
 from unittest.mock import MagicMock, patch
 
 import yaml
 
+from nemo_gym.base_responses_api_agent import RUN_TOKEN_HEADER, segment_turns
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
+    NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
 )
@@ -30,6 +33,7 @@ from nemo_gym.server_utils import ServerClient
 from responses_api_agents.claude_code_agent.app import (
     ClaudeCodeAgent,
     ClaudeCodeAgentConfig,
+    ModelServerRef,
     ResourcesServerRef,
     _extract_instruction,
     parse_stream_json,
@@ -334,6 +338,34 @@ class TestParseStreamJson:
         assert isinstance(items[1], NeMoGymResponseFunctionToolCall)
         assert isinstance(items[2], NeMoGymFunctionCallOutput)
 
+    def test_parallel_tool_calls_are_one_turn(self) -> None:
+        # parallel tool calls in one assistant turn must be emitted before their outputs, so
+        # token-id segmentation sees one turn (one generation), not one turn per call.
+        assistant_line = self._assistant(
+            [
+                {"type": "tool_use", "id": "a", "name": "Bash", "input": {"command": "ls"}},
+                {"type": "tool_use", "id": "b", "name": "Bash", "input": {"command": "pwd"}},
+            ]
+        )
+        user_line = _event(
+            "user",
+            message={
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "a", "content": "out-a"},
+                    {"type": "tool_result", "tool_use_id": "b", "content": "out-b"},
+                ]
+            },
+        )
+        items, _ = parse_stream_json(f"{assistant_line}\n{user_line}")
+        types = [type(i).__name__ for i in items]
+        assert types == [
+            "NeMoGymResponseFunctionToolCall",
+            "NeMoGymResponseFunctionToolCall",
+            "NeMoGymFunctionCallOutput",
+            "NeMoGymFunctionCallOutput",
+        ]
+        assert len(segment_turns(items)) == 1
+
     def test_malformed_lines_skipped(self) -> None:
         good = self._assistant([{"type": "text", "text": "ok"}])
         items, _ = parse_stream_json(f"not-json\n{good}\n{{bad")
@@ -344,6 +376,61 @@ class TestParseStreamJson:
         _, usage = parse_stream_json(result)
         assert usage["input_tokens"] == 100
         assert usage["output_tokens"] == 50
+
+
+class TestTokenIdWiring:
+    """responses() routes the CLI's model calls at the run-scoped URL when the base agent's
+    run() supplies a token via header. Reconciliation itself lives in the shared run() and is
+    covered in test_base_responses_api_agent.py."""
+
+    def _canned_stdout(self) -> str:
+        return "\n".join(
+            [
+                _event(
+                    "assistant",
+                    message={
+                        "content": [{"type": "text", "text": "4"}],
+                        "usage": {"input_tokens": 3, "output_tokens": 1},
+                    },
+                ),
+                _event("result", usage={"input_tokens": 3, "output_tokens": 1}),
+            ]
+        )
+
+    def _request(self, run_token: Optional[str]) -> MagicMock:
+        req = MagicMock()
+        req.headers = {RUN_TOKEN_HEADER: run_token} if run_token else {}
+        return req
+
+    def test_responses_routes_harness_through_run_scoped_url(self) -> None:
+        agent = _make_agent(model_server=ModelServerRef(type="responses_api_models", name="m"))
+        captured = {}
+
+        async def fake_run(instruction, system_prompt=None, base_url=None):
+            captured["base_url"] = base_url
+            return self._canned_stdout(), "fake"
+
+        # model_server_base_url is public (pydantic blocks instance setattr) -> patch on class.
+        with (
+            patch.object(agent, "_run_claude_code", fake_run),
+            patch.object(ClaudeCodeAgent, "model_server_base_url", lambda self: "http://model-server"),
+        ):
+            asyncio.run(agent.responses(self._request("TOK"), NeMoGymResponseCreateParamsNonStreaming(input="hi")))
+
+        assert captured["base_url"] == "http://model-server/runs/TOK"
+
+    def test_no_model_server_leaves_trajectory_plain(self) -> None:
+        agent = _make_agent()  # model_server is None -> real Anthropic, no token ids exist
+        captured = {}
+
+        async def fake_run(instruction, system_prompt=None, base_url=None):
+            captured["base_url"] = base_url
+            return self._canned_stdout(), "fake"
+
+        with patch.object(agent, "_run_claude_code", fake_run):
+            asyncio.run(agent.responses(self._request(None), NeMoGymResponseCreateParamsNonStreaming(input="hi")))
+
+        assert captured["base_url"] in (None, "")  # no model_server + no anthropic_base_url
 
 
 class TestConfigYaml:

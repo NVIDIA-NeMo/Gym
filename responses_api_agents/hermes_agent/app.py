@@ -26,14 +26,12 @@ import model_tools  # noqa: F401  # fail-fast if hermes-agent isn't installed
 from fastapi import Request
 from pydantic import ConfigDict
 
-from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     Body,
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.global_config import get_first_server_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -41,12 +39,11 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseInputTokensDetails,
-    NeMoGymResponseOutputMessageForTraining,
+    NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
-from nemo_gym.server_utils import get_response_json, raise_for_status
 
 
 def _trajectory_to_output_items(messages, n_input):
@@ -60,15 +57,12 @@ def _trajectory_to_output_items(messages, n_input):
             content = "".join(c.get("text", "") if isinstance(c, dict) else getattr(c, "text", "") for c in content)
         if role == "assistant":
             output_items.append(
-                NeMoGymResponseOutputMessageForTraining(
+                NeMoGymResponseOutputMessage(
                     id=f"msg-{len(output_items)}",
                     content=[NeMoGymResponseOutputText(type="output_text", text=content, annotations=[])],
                     role="assistant",
                     status="completed",
                     type="message",
-                    prompt_token_ids=item.get("prompt_token_ids") or [],
-                    generation_token_ids=item.get("generation_token_ids") or [],
-                    generation_log_probs=item.get("generation_log_probs") or [],
                 )
             )
             for tc in item.get("tool_calls") or []:
@@ -156,19 +150,10 @@ class HermesAgentConfig(BaseResponsesAPIAgentConfig):
     enabled_toolsets: Optional[list[str]] = None
     disabled_toolsets: Optional[list[str]] = None
     temperature: float = 1.0
+    top_p: float = 1.0
     terminal_backend: str = "local"
     terminal_timeout: int = 60
     system_prompt: Optional[str] = None
-
-
-class HermesAgentRunRequest(BaseRunRequest):
-    model_config = ConfigDict(extra="allow")
-
-
-class HermesAgentVerifyResponse(BaseVerifyResponse):
-    model_config = ConfigDict(extra="allow")
-    turns_used: int = 0
-    finished_naturally: bool = False
 
 
 class HermesAgent(SimpleResponsesAPIAgent):
@@ -178,19 +163,9 @@ class HermesAgent(SimpleResponsesAPIAgent):
 
     def model_post_init(self, __context: Any) -> None:
         self.sem = Semaphore(self.config.concurrency)
-        # hermes-agent reads these from env (cli.py / batch_runner.py); env vars are
-        # process-global, so multiple HermesAgent instances in one process share them
+        # process-global env vars: multiple instances in one process share them
         os.environ["TERMINAL_ENV"] = self.config.terminal_backend
         os.environ["TERMINAL_TIMEOUT"] = str(self.config.terminal_timeout)
-
-    def _resolve_model_base_url(self) -> str:
-        # aiagent builds its own openai client; resolve policy_model url
-        model_server_cfg = get_first_server_config_dict(
-            self.server_client.global_config_dict,
-            self.config.model_server.name,
-        )
-        base = self.server_client._build_server_base_url(model_server_cfg)
-        return f"{base}/v1"
 
     async def responses(
         self,
@@ -206,7 +181,8 @@ class HermesAgent(SimpleResponsesAPIAgent):
         user_message, history, input_system = _split_input_to_user_and_history(body.input)
         system_message = self.config.system_prompt or input_system
 
-        base_url = self._resolve_model_base_url()
+        # aiagent appends /chat/completions, so base_url is the /v1 root
+        base_url = self.harness_base_url(request).rstrip("/") + "/v1"
         model_name = str(self.config.model_server.name)
 
         agent = AIAgent(
@@ -234,6 +210,8 @@ class HermesAgent(SimpleResponsesAPIAgent):
             ctk = kw.setdefault("extra_body", {}).setdefault("chat_template_kwargs", {})
             ctk.setdefault("enable_thinking", True)
             ctk["truncate_history_thinking"] = False
+            kw["temperature"] = self.config.temperature
+            kw["top_p"] = self.config.top_p
             return kw
 
         agent._build_api_kwargs = _patched_build_api_kwargs
@@ -246,7 +224,6 @@ class HermesAgent(SimpleResponsesAPIAgent):
         )
 
         messages = result.get("messages") or []
-        # aiagent omits system from returned messages
         n_input = len(history) + 1
 
         output_items = _trajectory_to_output_items(messages, n_input)
@@ -260,27 +237,13 @@ class HermesAgent(SimpleResponsesAPIAgent):
                 "Hermes agent ended without an assistant message. Padding empty assistant message. This should not happen often, investigate: error=%r",
                 result.get("error"),
             )
-            last_valid = next(
-                (
-                    m
-                    for m in reversed(messages)
-                    if isinstance(m, dict) and m.get("role") == "assistant" and m.get("generation_token_ids")
-                ),
-                None,
-            )
-            pti = last_valid["prompt_token_ids"] if last_valid else [0]
-            gti = last_valid["generation_token_ids"] if last_valid else [0]
-            glp = (last_valid.get("generation_log_probs") if last_valid else None) or [0.0]
             output_items.append(
-                NeMoGymResponseOutputMessageForTraining(
+                NeMoGymResponseOutputMessage(
                     id=f"msg_{uuid4().hex}",
                     content=[NeMoGymResponseOutputText(text=result.get("error") or "", annotations=[])],
                     role="assistant",
                     status="completed",
                     type="message",
-                    prompt_token_ids=pti,
-                    generation_token_ids=gti,
-                    generation_log_probs=glp,
                 )
             )
 
@@ -301,51 +264,6 @@ class HermesAgent(SimpleResponsesAPIAgent):
                 total_tokens=0,
             ),
         )
-
-    async def run(self, request: Request, body: HermesAgentRunRequest) -> HermesAgentVerifyResponse:
-        async with self.sem:
-            cookies = request.cookies
-
-            seed_resp = await self.server_client.post(
-                server_name=self.config.resources_server.name,
-                url_path="/seed_session",
-                json=body.model_dump(),
-                cookies=cookies,
-            )
-            await raise_for_status(seed_resp)
-            cookies = seed_resp.cookies
-
-            agent_resp = await self.server_client.post(
-                server_name=self.config.name,
-                url_path="/v1/responses",
-                json=body.responses_create_params,
-                cookies=cookies,
-            )
-            await raise_for_status(agent_resp)
-            cookies = agent_resp.cookies
-            agent_resp_json = await get_response_json(agent_resp)
-
-            verify_resp = await self.server_client.post(
-                server_name=self.config.resources_server.name,
-                url_path="/verify",
-                json=body.model_dump() | {"response": agent_resp_json},
-                cookies=cookies,
-            )
-            await raise_for_status(verify_resp)
-            verify_json = await get_response_json(verify_resp)
-
-            gym_resp = NeMoGymResponse.model_validate(agent_resp_json)
-            turns = sum(
-                1
-                for item in gym_resp.output
-                if getattr(item, "type", None) == "message" and getattr(item, "role", None) == "assistant"
-            )
-            last = gym_resp.output[-1] if gym_resp.output else None
-            naturally = getattr(last, "type", None) == "message" and getattr(last, "role", None) == "assistant"
-
-            return HermesAgentVerifyResponse.model_validate(
-                verify_json | {"turns_used": turns, "finished_naturally": naturally}
-            )
 
 
 if __name__ == "__main__":

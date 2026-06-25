@@ -1,0 +1,30 @@
+math_with_judge_pi_agent:
+  responses_api_agents:
+    pi_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: math_with_judge
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      concurrency: 8
+      command: pi
+      model: nvinf/policy_model
+      timeout: 600
+      system_prompt: |
+        You are a precise math assistant with a bash tool. Run python3 to compute or verify numeric
+        results instead of doing them by hand, then state the final answer as \boxed{answer}.
+      models_config:
+        providers:
+          nvinf:
+            baseUrl: http://placeholder/v1
+            api: openai-completions
+            apiKey: gym
+            compat:
+              supportsDeveloperRole: false
+              supportsReasoningEffort: false
+            models:
+            - id: policy_model
+              reasoning: false
+      pi_version: null
