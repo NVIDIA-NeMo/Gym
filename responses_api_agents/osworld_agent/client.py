@@ -199,9 +199,12 @@ def _sync_pointer_config(policy_model_name: str) -> None:
 
     try:
         from mm_agents.pointer.config import config as pointer_config  # type: ignore
+        from mm_agents.pointer.utils import APIProvider as PointerAPIProvider  # type: ignore
     except Exception:  # noqa: BLE001 - pointer is optional outside runtime.
         return
 
+    if os.environ.get("ANTHROPIC_BASE_URL"):
+        pointer_config.provider = PointerAPIProvider.ANTHROPIC
     if policy_model_name:
         pointer_config.executor_model = policy_model_name
     if "inference-api.nvidia.com" in os.environ.get("ANTHROPIC_BASE_URL", ""):
