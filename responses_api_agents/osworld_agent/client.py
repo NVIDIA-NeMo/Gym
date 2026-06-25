@@ -19,9 +19,11 @@ trigger them.
 from __future__ import annotations
 
 import base64
+import datetime
 import json
 import logging
 import os
+import re
 import sys
 import time
 import traceback
@@ -136,6 +138,112 @@ def _patch_native_prompt_agent_templates(agent_cls: Any) -> None:
     setattr(module, "_NEMO_GYM_PROMPT_FORMAT_SAFE", True)
 
 
+def _inferencehub_anthropic_model(short_name: str) -> str:
+    return short_name if short_name.startswith("azure/anthropic/") else f"azure/anthropic/{short_name}"
+
+
+def _configure_pointer_runtime(*, base_url: str, api_key: str, policy_model_name: str) -> None:
+    """Configure OSWorld's PointerAgent for direct Anthropic-compatible calls.
+
+    Pointer reads model names from environment variables when
+    ``mm_agents.pointer.config`` is imported. Set them before loading the
+    agent so Colossus runs use the same API endpoint/model namespace as the
+    Gym policy config.
+    """
+
+    if api_key:
+        os.environ["ANTHROPIC_API_KEY"] = api_key
+    if base_url:
+        os.environ["ANTHROPIC_BASE_URL"] = base_url.rstrip("/")
+
+    if base_url and "inference-api.nvidia.com" in base_url:
+        os.environ.setdefault("POINTER_GATE_AGENT_MODEL", _inferencehub_anthropic_model("claude-sonnet-4-6"))
+        os.environ.setdefault("POINTER_PLANNER_AGENT_MODEL", _inferencehub_anthropic_model("claude-sonnet-4-6"))
+        os.environ.setdefault("POINTER_VERIFIER_AGENT_MODEL", _inferencehub_anthropic_model("claude-sonnet-4-6"))
+        os.environ.setdefault("POINTER_SUMMARIZATION_MODEL", _inferencehub_anthropic_model("claude-haiku-4-5"))
+        if policy_model_name:
+            os.environ["POINTER_EXECUTOR_AGENT_MODEL"] = policy_model_name
+
+
+def _sync_pointer_config(policy_model_name: str) -> None:
+    """Update Pointer's already-imported config singleton, if present."""
+
+    try:
+        from mm_agents.pointer.config import config as pointer_config  # type: ignore
+    except Exception:  # noqa: BLE001 - pointer is optional outside runtime.
+        return
+
+    if policy_model_name:
+        pointer_config.executor_model = policy_model_name
+    if "inference-api.nvidia.com" in os.environ.get("ANTHROPIC_BASE_URL", ""):
+        pointer_config.gate_model = os.environ.get("POINTER_GATE_AGENT_MODEL", pointer_config.gate_model)
+        pointer_config.planner_model = os.environ.get("POINTER_PLANNER_AGENT_MODEL", pointer_config.planner_model)
+        pointer_config.verifier_model = os.environ.get("POINTER_VERIFIER_AGENT_MODEL", pointer_config.verifier_model)
+        pointer_config.summarization_model = os.environ.get(
+            "POINTER_SUMMARIZATION_MODEL",
+            pointer_config.summarization_model,
+        )
+
+
+def _patch_pointer_anthropic_client(base_url: str) -> None:
+    """Make Pointer's Anthropic SDK client honor the configured base URL."""
+
+    if not base_url:
+        return
+    try:
+        from mm_agents.pointer import llm_client as pointer_llm_client  # type: ignore
+        from mm_agents.pointer import utils as pointer_utils  # type: ignore
+    except Exception:  # noqa: BLE001 - pointer is an optional runtime dependency.
+        return
+
+    original = getattr(
+        pointer_llm_client.LLMClient,
+        "_nemo_gym_original_create_client",
+        pointer_llm_client.LLMClient._create_client,
+    )
+    if not hasattr(pointer_llm_client.LLMClient, "_nemo_gym_original_create_client"):
+        setattr(pointer_llm_client.LLMClient, "_nemo_gym_original_create_client", original)
+
+    def _create_client(self: Any, provider: Any) -> Any:
+        if provider == pointer_utils.APIProvider.ANTHROPIC:
+            from anthropic import Anthropic  # noqa: PLC0415
+
+            return Anthropic(
+                api_key=self.api_key or os.environ.get("ANTHROPIC_API_KEY"),
+                base_url=base_url.rstrip("/"),
+                max_retries=4,
+            )
+        return original(self, provider)
+
+    pointer_llm_client.LLMClient._create_client = _create_client
+
+
+def _safe_task_id(task_config: Dict[str, Any]) -> str:
+    raw = str(task_config.get("id") or task_config.get("task_id") or "unknown")
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", raw)[:120] or "unknown"
+
+
+def _setup_pointer_task_logger(task_config: Dict[str, Any], task_results_dir: str) -> tuple[logging.Logger, logging.Handler]:
+    os.makedirs(task_results_dir, exist_ok=True)
+    logger_name = f"nemo_gym.osworld_agent.pointer.{_safe_task_id(task_config)}.{os.getpid()}"
+    task_logger = logging.getLogger(logger_name)
+    task_logger.setLevel(logging.INFO)
+    task_logger.propagate = False
+    handler = logging.FileHandler(os.path.join(task_results_dir, "pointer.log"), encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s [%(agent)s] %(message)s"))
+
+    class _PointerAgentFilter(logging.Filter):
+        def filter(self, record: logging.LogRecord) -> bool:
+            if not hasattr(record, "agent"):
+                record.agent = "pointer"
+            return True
+
+    handler.addFilter(_PointerAgentFilter())
+    task_logger.addHandler(handler)
+    setattr(handler, "_nemo_gym_logger", task_logger)
+    return task_logger, handler
+
+
 def run_osworld_task(
     task_config: Dict[str, Any],
     model_fn: ModelFn,
@@ -161,6 +269,8 @@ def run_osworld_task(
     agent_class_path: Optional[str] = None,
     agent_kwargs: Optional[Dict[str, Any]] = None,
     messages_model_fn: Optional[MessagesModelFn] = None,
+    policy_base_url: str = "",
+    policy_api_key: str = "",
     policy_model_name: str = "",
     policy_max_tokens: int = 1500,
     policy_temperature: float = 1.0,
@@ -232,6 +342,8 @@ def run_osworld_task(
         )
         env.reset(task_config=task_config)
         native_agent = None
+        pointer_agent = None
+        pointer_log_handler: Optional[logging.Handler] = None
         if runner_spec.kind == "prompt_agent":
             if not runner_spec.agent_class_path:
                 raise ValueError(f"runner {runner_spec.name!r} requires agent_class_path")
@@ -260,6 +372,33 @@ def run_osworld_task(
                 native_agent.reset(LOG, vm_ip=getattr(env, "vm_ip", None))
             except TypeError:
                 native_agent.reset(LOG)
+        elif runner_spec.kind == "pointer_agent":
+            if not runner_spec.agent_class_path:
+                raise ValueError(f"runner {runner_spec.name!r} requires agent_class_path")
+            _configure_pointer_runtime(
+                base_url=policy_base_url,
+                api_key=policy_api_key,
+                policy_model_name=policy_model_name,
+            )
+            agent_cls = load_attr(runner_spec.agent_class_path)
+            _sync_pointer_config(policy_model_name)
+            _patch_pointer_anthropic_client(policy_base_url)
+            pointer_kwargs = dict(runner_spec.agent_kwargs)
+            pointer_agent = agent_cls(
+                env=env,
+                screen_size=screen_size,
+                **pointer_kwargs,
+            )
+            pointer_results_base = os.environ.get(
+                "OSWORLD_POINTER_RESULTS_DIR",
+                os.path.join(cache_dir, "pointer_runs"),
+            )
+            pointer_task_dir = os.path.join(
+                pointer_results_base,
+                f"{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}-{_safe_task_id(task_config)}",
+            )
+            pointer_logger, pointer_log_handler = _setup_pointer_task_logger(task_config, pointer_task_dir)
+            pointer_agent.reset(instruction, pointer_logger, pointer_task_dir)
         if _record_dir:
             try:
                 env.controller.start_recording()
@@ -563,7 +702,11 @@ def run_osworld_task(
             history_window = obs_history[-max_trajectory_length:] if max_trajectory_length else []
 
             try:
-                if native_agent is not None:
+                if pointer_agent is not None:
+                    model_text, actions = pointer_agent.predict(obs)
+                    model_text = strip_thinking(model_text or "")
+                    actions = _flatten_actions(actions)
+                elif native_agent is not None:
                     model_text, actions = native_agent.predict(instruction, obs)
                     model_text = strip_thinking(model_text or "")
                     actions = _flatten_actions(actions)
@@ -572,8 +715,8 @@ def run_osworld_task(
                     model_text = strip_thinking(model_text or "")
                     actions = parse_actions(model_text)
             except Exception as exc:  # noqa: BLE001 — record + abort, don't crash the VM.
-                error = f"model_fn failed at step {step_idx}: {exc}"
-                LOG.exception("Model call failed at step %d", step_idx)
+                error = f"agent/model call failed at step {step_idx}: {exc}"
+                LOG.exception("Agent/model call failed at step %d", step_idx)
                 steps.append(StepRecord(step=step_idx, model_text="", actions=[], reward=0.0, done=False))
                 break
 
@@ -622,11 +765,25 @@ def run_osworld_task(
             error = f"env.evaluate() failed: {exc}"
             LOG.exception("Evaluator failed")
             final_score = 0.0
+        if pointer_agent is not None and hasattr(pointer_agent, "log_usage"):
+            try:
+                pointer_agent.log_usage()
+            except Exception:  # noqa: BLE001 - usage logging should not fail the rollout.
+                LOG.exception("PointerAgent.log_usage() failed")
 
     except Exception as exc:  # noqa: BLE001 — top-level guard so caller sees error not crash.
         error = f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}"
         LOG.exception("OSWorld rollout failed before evaluation")
     finally:
+        if "pointer_log_handler" in locals() and pointer_log_handler is not None:
+            try:
+                pointer_log_handler.flush()
+                pointer_log_handler.close()
+                pointer_logger = getattr(pointer_log_handler, "_nemo_gym_logger", None)
+                if pointer_logger is not None:
+                    pointer_logger.removeHandler(pointer_log_handler)
+            except Exception:
+                LOG.exception("Pointer log handler close raised")
         if _recording_started and env is not None:
             try:
                 os.makedirs(_record_dir, exist_ok=True)

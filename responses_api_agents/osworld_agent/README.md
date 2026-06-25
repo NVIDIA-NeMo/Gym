@@ -46,6 +46,12 @@ The unqualified `prompt_agent` mirrors OSWorld's default
 `<think>` / `<thinking>` blocks are stripped before execution so
 reasoning models work out of the box.
 
+For OSWorld-Verified leaderboard alignment with `Pointer Agent w/ Opus
+4.7`, use the `pointer_agent` runner. This path instantiates upstream
+`mm_agents.pointer.PointerAgent` and preserves its planner/executor/verifier
+loop; Gym only supplies the rollout envelope, endpoint/API credentials, and
+final reward packaging.
+
 ### What happens under the hood per rollout
 
 ```
@@ -501,7 +507,7 @@ that wires the agent to a model server and the datasets. Key fields
 | `concurrency`            | 4       | `asyncio.Semaphore` bound on concurrent `/run` calls                             |
 | `max_tokens`             | 1500    | Model max-tokens override (request value wins if present)                        |
 | `temperature` / `top_p`  | 1.0 / 0.9 | Same — request value wins                                                      |
-| `runner_name`            | gym_pyautogui | Runner contract. `gym_pyautogui` preserves the Gym-built prompt path; `prompt_agent` uses OSWorld's native `PromptAgent` defaults; explicit `prompt_agent_*` names select concrete observation/action combinations |
+| `runner_name`            | gym_pyautogui | Runner contract. `gym_pyautogui` preserves the Gym-built prompt path; `prompt_agent` uses OSWorld's native `PromptAgent` defaults; explicit `prompt_agent_*` names select concrete observation/action combinations; `pointer_agent` wraps OSWorld's native PointerAgent |
 | `action_space`           | null    | Optional override for compatible runners (`pyautogui` / `computer_13`)           |
 | `observation_type`       | null    | Optional override for compatible runners (`screenshot` / `a11y_tree` / `screenshot_a11y_tree` / `som`) |
 | `env_class_path`         | null    | Optional Python import path for a custom OSWorld environment class                |
@@ -534,6 +540,16 @@ also supports a lightweight a11y-only diagnostic mode via
 `require_a11y_tree=true` plus `OSWORLD_OMIT_SCREENSHOT_IN_OBS=1`; that
 mode blanks the screenshot from the Gym-built prompt but does not use
 OSWorld's native `PromptAgent` prompt templates.
+
+### Pointer Agent
+
+Use `responses_api_agents/osworld_agent/configs/osworld_agent_pointer.yaml`
+to run the OSWorld-Verified `Pointer Agent w/ Opus 4.7` path. This runner
+uses screenshot observations, `pyautogui` executable actions, and
+`desktop_env.desktop_env_pointer.DesktopEnv`. It expects an Anthropic-compatible
+Messages endpoint in `policy_base_url`; on Colossus this is currently
+`https://inference-api.nvidia.com` with model
+`azure/anthropic/claude-opus-4-7`.
 
 ### Override priority
 

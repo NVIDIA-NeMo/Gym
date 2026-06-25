@@ -23,6 +23,11 @@ dependencies = [
     # Once the upstream PR lands, switch this source back to xlang-ai/OSWorld.
     "osworld @ git+https://github.com/JeffPengCoder/OSWorld.git@nv-gym",
     "docker==7.1.0",
+    # Needed by OSWorld's mm_agents.pointer implementation.
+    "anthropic",
+    "boto3",
+    "parallel-web",
+    "requests-toolbelt~=1.0.0",
     # OSWorld currently pins requests<2.32; prevent RequestsDependencyWarning
     # when transitive deps pull chardet 7.x.
     "chardet<6",

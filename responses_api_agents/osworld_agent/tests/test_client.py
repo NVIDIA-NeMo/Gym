@@ -8,6 +8,7 @@ Docker, QEMU, and model servers.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Dict, List
 
 import pytest
@@ -85,15 +86,46 @@ class FakePromptAgent:
         return response, [{"action_type": "DONE"}]
 
 
+class FakePointerAgent:
+    instances: List["FakePointerAgent"] = []
+
+    def __init__(self, **kwargs: Any) -> None:
+        self.kwargs = kwargs
+        self.reset_calls = []
+        self.predict_calls = 0
+        self.log_usage_calls = 0
+        FakePointerAgent.instances.append(self)
+
+    def reset(self, instruction: str, task_logger: Any, task_results_dir: str) -> None:
+        self.reset_calls.append(
+            {
+                "instruction": instruction,
+                "task_logger": task_logger,
+                "task_results_dir": task_results_dir,
+            }
+        )
+
+    def predict(self, obs: Dict[str, Any]):
+        self.predict_calls += 1
+        assert obs["screenshot"] == b"not-black"
+        return "Pointer response", [{"action_type": "DONE"}]
+
+    def log_usage(self) -> None:
+        self.log_usage_calls += 1
+
+
 def _patch_client_for_fake_runtime(monkeypatch) -> None:
     FakeEnv.instances.clear()
     FakePromptAgent.call_llm_responses.clear()
+    FakePointerAgent.instances.clear()
 
     def fake_load_attr(import_path: str):
         if import_path == "fake.FakeEnv":
             return FakeEnv
         if import_path == "fake.FakePromptAgent":
             return FakePromptAgent
+        if import_path == "fake.FakePointerAgent":
+            return FakePointerAgent
         raise AssertionError(f"unexpected import path: {import_path}")
 
     monkeypatch.setattr(osworld_client, "load_attr", fake_load_attr)
@@ -223,3 +255,36 @@ def test_prompt_agent_runners_requiring_a11y_enable_env_a11y_tree(monkeypatch, r
 
     assert result.reward == 1.0
     assert FakeEnv.instances[0].kwargs["require_a11y_tree"] is True
+
+
+def test_pointer_agent_runner_uses_native_pointer_predict_loop(monkeypatch, tmp_path) -> None:
+    _patch_client_for_fake_runtime(monkeypatch)
+    monkeypatch.setenv("OSWORLD_POINTER_RESULTS_DIR", str(tmp_path))
+
+    result = osworld_client.run_osworld_task(
+        {"id": "task-pointer", "instruction": "Use Pointer."},
+        model_fn=lambda *_args: (_ for _ in ()).throw(AssertionError("pointer_agent should not use model_fn")),
+        runner_name="pointer_agent",
+        env_class_path="fake.FakeEnv",
+        agent_class_path="fake.FakePointerAgent",
+        agent_kwargs={"provider_name": "anthropic"},
+        policy_base_url="https://inference-api.nvidia.com",
+        policy_api_key="test-key",
+        policy_model_name="azure/anthropic/claude-opus-4-7",
+        sleep_after_execution=0,
+        task_timeout=10,
+    )
+
+    assert result.reward == 1.0
+    assert result.finished is True
+    assert result.steps[0].model_text == "Pointer response"
+    assert result.steps[0].actions == [{"action_type": "DONE"}]
+    assert FakeEnv.instances[0].kwargs["action_space"] == "pyautogui"
+    assert FakeEnv.instances[0].actions == [{"action_type": "DONE"}]
+    pointer = FakePointerAgent.instances[0]
+    assert pointer.kwargs["env"] is FakeEnv.instances[0]
+    assert pointer.kwargs["provider_name"] == "anthropic"
+    assert pointer.reset_calls[0]["instruction"] == "Use Pointer."
+    assert pointer.predict_calls == 1
+    assert pointer.log_usage_calls == 1
+    assert (Path(pointer.reset_calls[0]["task_results_dir"]) / "pointer.log").exists()
