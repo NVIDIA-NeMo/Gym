@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import base64
 import datetime
+import inspect
 import json
 import logging
 import os
@@ -332,6 +333,19 @@ def _setup_pointer_task_logger(task_config: Dict[str, Any], task_results_dir: st
     task_logger.addHandler(handler)
     setattr(handler, "_nemo_gym_logger", task_logger)
     return task_logger, handler
+
+
+def _evaluate_osworld_env(env: Any, eval_logger: logging.Logger) -> float:
+    """Call the OSWorld evaluator across DesktopEnv variants."""
+
+    evaluate = env.evaluate
+    try:
+        params = inspect.signature(evaluate).parameters
+    except (TypeError, ValueError):
+        params = {}
+    if not params:
+        return float(evaluate())
+    return float(evaluate(eval_logger))
 
 
 def run_osworld_task(
@@ -857,7 +871,8 @@ def run_osworld_task(
         # Let the VM settle before scoring, mirroring lib_run_single.py.
         time.sleep(2)
         try:
-            final_score = float(env.evaluate())
+            eval_logger = pointer_logger if pointer_agent is not None else LOG
+            final_score = _evaluate_osworld_env(env, eval_logger)
         except Exception as exc:  # noqa: BLE001
             error = f"env.evaluate() failed: {exc}"
             LOG.exception("Evaluator failed")
