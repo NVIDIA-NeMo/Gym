@@ -47,10 +47,14 @@ The unqualified `prompt_agent` mirrors OSWorld's default
 reasoning models work out of the box.
 
 For OSWorld-Verified leaderboard alignment with `Pointer Agent w/ Opus
-4.7`, use the `pointer_agent` runner. This path instantiates upstream
+4.7`, use the `pointer_agent` runner. It instantiates upstream
 `mm_agents.pointer.PointerAgent` and preserves its planner/executor/verifier
 loop; Gym only supplies the rollout envelope, endpoint/API credentials, and
-final reward packaging.
+final reward packaging. Upstream PointerAgent expects `PARALLEL_API_KEY` for
+its optional `web_search` / `web_fetch` tools. Gym still exposes this as
+`pointer_agent`: if no Parallel key is available, the adapter disables those
+optional web tools at runtime instead of exposing a separate transport-specific
+runner.
 
 ### What happens under the hood per rollout
 
@@ -544,12 +548,12 @@ OSWorld's native `PromptAgent` prompt templates.
 ### Pointer Agent
 
 Use `responses_api_agents/osworld_agent/configs/osworld_agent_pointer.yaml`
-to run the OSWorld-Verified `Pointer Agent w/ Opus 4.7` path. This runner
-uses screenshot observations, `pyautogui` executable actions, and
-`desktop_env.desktop_env_pointer.DesktopEnv`. It expects an Anthropic-compatible
-Messages endpoint in `policy_base_url`; on Colossus this is currently
-`https://inference-api.nvidia.com` with model
-`azure/anthropic/claude-opus-4-7`.
+to run the OSWorld-Verified `Pointer Agent w/ Opus 4.7` path. It uses
+screenshot observations, `pyautogui` executable actions, and
+`desktop_env.desktop_env_pointer.DesktopEnv`. If `PARALLEL_API_KEY` is present,
+PointerAgent keeps its upstream web-search/web-fetch tools. If it is absent,
+the Gym adapter removes those optional tools from PointerAgent's feasibility
+gate at runtime.
 
 ### Override priority
 

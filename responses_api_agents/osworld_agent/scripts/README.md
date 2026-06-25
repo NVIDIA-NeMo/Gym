@@ -119,6 +119,18 @@ LIMIT=4 \
 bash responses_api_agents/osworld_agent/scripts/run_multienv_osworld_agent.sh
 ```
 
+For the PointerAgent leaderboard-anchor path, use the same public
+`pointer_agent` runner. The Gym adapter routes the Anthropic-compatible model
+endpoint and handles missing optional Parallel web tools at runtime.
+
+```bash
+RUNNER_NAME=pointer_agent \
+POLICY_MODEL_NAME=azure/anthropic/claude-opus-4-7 \
+NUM_ENVS=4 \
+LIMIT=4 \
+bash responses_api_agents/osworld_agent/scripts/run_multienv_osworld_agent.sh
+```
+
 For a two-wave cleanup probe, use an input with at least 8 rows and set:
 
 ```bash
