@@ -58,6 +58,8 @@ class Tau2Config(BaseResponsesAPIAgentConfig):
     print_step_counts: bool = False
     # Tau2 default
     max_steps: int = 200
+    max_agent_steps: Optional[int] = None
+    turns_remaining_interval: int = 1
 
 
 class Tau2RunRequest(BaseRunRequest):
@@ -80,6 +82,8 @@ class Tau2VerifyResponse(Tau2RunRequest, BaseVerifyResponse):
     result: SimulationRun
     duration: float
     num_steps: int
+    agent_steps: Optional[int]
+    max_agent_steps: Optional[int]
     num_agent_calls: int
     min_prompt_tokens: Optional[float]
     min_completion_tokens: Optional[float]
@@ -148,16 +152,22 @@ class Tau2Agent(SimpleResponsesAPIAgent):
         } | extra_agent_args
 
         config.max_steps = self.config.max_steps
+        config.max_agent_steps = self.config.max_agent_steps
+        config.turns_remaining_interval = self.config.turns_remaining_interval
 
         result = await run_single_task(**body_dict)
 
-        messages_to_convert = []
-        for message in result.messages:
-            if message.role == "user" and message.tool_calls:
-                continue
-            elif message.role == "tool" and message.requestor == "user":
-                continue
-            messages_to_convert.append(message)
+        result_messages = result.messages or []
+        if result.agent_messages is not None:
+            messages_to_convert = result.agent_messages
+        else:
+            messages_to_convert = []
+            for message in result_messages:
+                if message.role == "user" and message.tool_calls:
+                    continue
+                elif message.role == "tool" and message.requestor == "user":
+                    continue
+                messages_to_convert.append(message)
 
         message_dicts = to_litellm_messages(messages_to_convert)
 
@@ -171,7 +181,7 @@ class Tau2Agent(SimpleResponsesAPIAgent):
         prompt_usages = []
         completion_usages = []
         num_agent_calls = 0
-        for message in result.messages:
+        for message in result_messages:
             if not message.role == "assistant":
                 continue
 
@@ -216,7 +226,9 @@ class Tau2Agent(SimpleResponsesAPIAgent):
             reward=result.reward_info.reward,
             result=result,
             duration=result.duration,
-            num_steps=len(result.messages),
+            num_steps=len(result_messages),
+            agent_steps=result.agent_steps,
+            max_agent_steps=result.max_agent_steps,
             num_agent_calls=num_agent_calls,
             min_prompt_tokens=min_prompt_tokens,
             min_completion_tokens=min_completion_tokens,
