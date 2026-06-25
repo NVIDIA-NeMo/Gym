@@ -43,7 +43,6 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.server_utils import (
-    ServerClient,
     get_first_server_config_dict,
 )
 from responses_api_agents.mini_swe_agent.utils import MiniSWEAgentUtils
@@ -104,7 +103,7 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
     async def run(self, body: MiniSWEAgentRunRequest) -> MiniSWEAgentVerifyResponse:
         async with self.sem:
             model_server_name = self.config.model_server.name
-            global_config_dict = ServerClient.load_from_global_config().global_config_dict
+            global_config_dict = self.server_client.global_config_dict
 
             model_server_config = get_first_server_config_dict(
                 global_config_dict,
