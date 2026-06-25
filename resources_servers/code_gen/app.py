@@ -150,7 +150,6 @@ class CompCodingResourcesServer(SimpleResourcesServer):
     async def verify(self, body: CompCodingVerifyRequest) -> CompCodingVerifyResponse:
         model_out = body.response.output_text
         difficulty = (body.verifier_metadata or {}).get("difficulty")
-        target_language = body.target_language
 
         if not model_out or not model_out.strip():
             # A response existed but had no usable text -> model failure
@@ -158,7 +157,6 @@ class CompCodingResourcesServer(SimpleResourcesServer):
                 **body.model_dump(),
                 reward=0.0,
                 difficulty=difficulty,
-                target_language=target_language,
             )
 
         tests = UnitTests.model_validate(body.verifier_metadata["unit_tests"])
@@ -171,7 +169,6 @@ class CompCodingResourcesServer(SimpleResourcesServer):
                 reward=0.0,
                 extracted_model_output=model_out,
                 difficulty=difficulty,
-                target_language=target_language,
             )
 
         # 4) run (no sandbox)
@@ -230,7 +227,6 @@ class CompCodingResourcesServer(SimpleResourcesServer):
             unit_tests_time_taken=unit_tests_time_taken,
             reasoning_format_violation_rate=1.0 if has_violation else 0.0,
             difficulty=difficulty,
-            target_language=target_language,
         )
 
 
