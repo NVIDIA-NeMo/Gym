@@ -46,6 +46,13 @@ from time import time
 from typing import Any, Dict, Iterator, List, Optional
 from uuid import uuid4
 
+# Types only — never the `anthropic` client. The client uses httpx (O(n^2) connection
+# pooling at high concurrency); all transport in Gym stays on aiohttp via server_utils.
+# MessageCreateParams (request) is a TypedDict used purely as a hint; NeMoGymAnthropicMessage
+# (response) is the BaseModel used to validate what we emit.
+from anthropic.types.message_create_params import MessageCreateParams
+
+from nemo_gym.anthropic_utils import NeMoGymAnthropicMessage
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -281,12 +288,17 @@ class AnthropicConverter:
     # Ingress: Anthropic Messages request  ->  NeMo Gym Responses
     ############################################################################
     def anthropic_request_to_responses(
-        self, anthropic_body: Dict[str, Any]
+        self, anthropic_body: MessageCreateParams
     ) -> NeMoGymResponseCreateParamsNonStreaming:
         """Inverse of ``responses_to_anthropic`` (the request direction).
 
         Parses an inbound Anthropic Messages request into Responses create params so it can be
         forwarded to a downstream Gym model server's ``/v1/responses``.
+
+        ``anthropic_body`` is hinted with the Anthropic SDK's native ``MessageCreateParams``
+        (a TypedDict union, so it accepts ``stream: true``). It's a type hint only — at runtime
+        the value is the raw request dict; we read fields defensively so the proxy stays
+        permissive toward unknown / future-beta fields the Claude Code CLI may send.
         """
         params: Dict[str, Any] = {"input": self._anthropic_messages_to_input_items(anthropic_body)}
 
@@ -459,6 +471,12 @@ class AnthropicConverter:
         Renders a downstream ``/v1/responses`` result as a complete Anthropic Messages response
         object (non-streaming shape). Token-id / logprob fields are intentionally dropped here;
         they are carried out-of-band by the ingress server's side channel.
+
+        The assembled object is validated by constructing ``NeMoGymAnthropicMessage`` (a thin
+        subclass of the Anthropic SDK's ``Message``) — catching malformed blocks / bad
+        stop_reason / missing fields at the boundary — then
+        returned as a JSON dict for the SSE synthesizer and the non-streaming JSON response.
+        ``exclude_none`` keeps the lean Anthropic shape (drops null SDK-only fields).
         """
         content: List[Dict[str, Any]] = []
         has_tool_use = False
@@ -475,19 +493,22 @@ class AnthropicConverter:
                 raise NotImplementedError(f"Unsupported Responses output item for Anthropic response: {item_type}")
 
         usage = response.usage.model_dump() if response.usage is not None else None
-        return {
-            "id": f"msg_{uuid4().hex}",
-            "type": "message",
-            "role": "assistant",
-            "model": model,
-            "content": content,
-            "stop_reason": self._stop_reason_from_response(response, has_tool_use),
-            "stop_sequence": None,
-            "usage": {
-                "input_tokens": (usage or {}).get("input_tokens", 0),
-                "output_tokens": (usage or {}).get("output_tokens", 0),
-            },
-        }
+        message = NeMoGymAnthropicMessage.model_validate(
+            {
+                "id": f"msg_{uuid4().hex}",
+                "type": "message",
+                "role": "assistant",
+                "model": model,
+                "content": content,
+                "stop_reason": self._stop_reason_from_response(response, has_tool_use),
+                "stop_sequence": None,
+                "usage": {
+                    "input_tokens": (usage or {}).get("input_tokens", 0),
+                    "output_tokens": (usage or {}).get("output_tokens", 0),
+                },
+            }
+        )
+        return message.model_dump(mode="json", exclude_none=True)
 
     def _iter_output_dicts(self, response: NeMoGymResponse) -> List[Dict[str, Any]]:
         items = []
@@ -694,12 +715,13 @@ class AnthropicConverter:
     def _reasoning_item_to_anthropic_blocks(self, item: Dict[str, Any]) -> List[Dict[str, Any]]:
         blocks = []
         for summary in item.get("summary", []):
+            # Anthropic's ThinkingBlock requires a signature; open-model backends don't
+            # produce one, so default to "" (the synthesized SSE never emits it anyway).
             block = {
                 "type": "thinking",
                 "thinking": summary["text"],
+                "signature": item.get("encrypted_content") or "",
             }
-            if item.get("encrypted_content"):
-                block["signature"] = item["encrypted_content"]
             blocks.append(block)
         return blocks
 

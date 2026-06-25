@@ -22,6 +22,8 @@ two directions against drift.
 
 import json
 
+from anthropic.types import Message
+
 from nemo_gym.anthropic_converter import AnthropicConverter
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 
@@ -72,6 +74,33 @@ class TestAnthropicRequestToResponses:
             {"max_tokens": 10, "messages": [{"role": "user", "content": "hi"}]}
         )
         assert params.instructions is None
+
+    def test_system_list_without_text_leaves_instructions_unset(self) -> None:
+        # A system list that contributes no usable text (empty-text blocks) yields no instructions.
+        params = _converter().anthropic_request_to_responses(
+            {
+                "system": [{"type": "text", "text": ""}],
+                "max_tokens": 10,
+                "messages": [{"role": "user", "content": "hi"}],
+            }
+        )
+        assert params.instructions is None
+
+    def test_system_role_message_passes_through(self) -> None:
+        # Anthropic allows a "system" role inside messages (distinct from the top-level system
+        # param); it is forwarded as a system input item rather than dropped or merged.
+        params = _converter().anthropic_request_to_responses(
+            {
+                "max_tokens": 10,
+                "messages": [
+                    {"role": "system", "content": "stay terse"},
+                    {"role": "user", "content": "hi"},
+                ],
+            }
+        )
+        assert params.input[0].role == "system"
+        assert params.input[0].content == "stay terse"
+        assert params.input[1].role == "user"
 
     def test_user_text_and_image_blocks(self) -> None:
         params = _converter().anthropic_request_to_responses(
@@ -313,6 +342,55 @@ class TestResponsesToAnthropicResponse:
         )
         out = conv.responses_to_anthropic_response(resp, model="m")
         assert out["usage"] == {"input_tokens": 0, "output_tokens": 0}
+
+    def test_reasoning_without_signature_defaults_to_empty(self) -> None:
+        # Open-model reasoning carries no Anthropic signature, but the typed Message build
+        # requires one — default it to "" rather than dropping the block or crashing.
+        conv, resp = self._response_from_anthropic(
+            {
+                "content": [{"type": "thinking", "thinking": "step"}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            }
+        )
+        out = conv.responses_to_anthropic_response(resp, model="m")
+        assert out["content"][0] == {"type": "thinking", "thinking": "step", "signature": ""}
+
+    def test_output_validates_as_anthropic_message(self) -> None:
+        # Regression guard: the builder must emit an object the Anthropic SDK accepts as a Message
+        # (this is what the internal Message.model_validate enforces on every response).
+        conv, resp = self._response_from_anthropic(
+            {
+                "content": [
+                    {"type": "text", "text": "hi"},
+                    {"type": "tool_use", "id": "toolu_1", "name": "f", "input": {"a": 1}},
+                ],
+                "stop_reason": "tool_use",
+                "usage": {"input_tokens": 2, "output_tokens": 3},
+            }
+        )
+        out = conv.responses_to_anthropic_response(resp, model="m")
+        message = Message.model_validate(out)  # raises if our output drifts from the SDK schema
+        assert message.stop_reason == "tool_use"
+        assert message.content[1].input == {"a": 1}
+
+    def test_empty_output_yields_empty_content(self) -> None:
+        # Defensive: a downstream response carrying no output items maps to empty content,
+        # which is still a valid Anthropic Message. (Realistic empty responses arrive as an
+        # empty message item and are rendered as a single empty text block instead — see
+        # TestSharedHelperBranches.test_empty_anthropic_content_yields_empty_message.)
+        conv, resp = self._response_from_anthropic(
+            {
+                "content": [{"type": "text", "text": "x"}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 1, "output_tokens": 0},
+            }
+        )
+        resp = resp.model_copy(update={"output": []})
+        out = conv.responses_to_anthropic_response(resp, model="m")
+        assert out["content"] == []
+        assert out["stop_reason"] == "end_turn"
+        Message.model_validate(out)  # empty content is still a valid Message
 
 
 class TestAnthropicResponseToSSE:
