@@ -415,10 +415,12 @@ class TestDatasetFlags:
 
 
 class TestEvalAggregateFlags:
-    def test_output_flag(self, monkeypatch: MonkeyPatch) -> None:
-        target, overrides = _dispatch_for(monkeypatch, ["eval", "aggregate", "-o", "out.jsonl"])
+    def test_aggregate_flags(self, monkeypatch: MonkeyPatch) -> None:
+        target, overrides = _dispatch_for(
+            monkeypatch, ["eval", "aggregate", "-i", "results/rollouts-*.jsonl", "-o", "out.jsonl"]
+        )
         assert target == "nemo_gym.cli.eval:aggregate_rollouts"
-        assert overrides == ["+output_jsonl_fpath=out.jsonl"]
+        assert set(overrides) == {"+input_glob=results/rollouts-*.jsonl", "+output_jsonl_fpath=out.jsonl"}
 
 
 class TestEvalProfileFlags:

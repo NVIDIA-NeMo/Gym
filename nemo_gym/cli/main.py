@@ -468,6 +468,12 @@ COMMANDS = {
         flags=(
             CONFIG,
             _value_flag(
+                "input-glob",
+                "input_glob",
+                "Glob (or comma-separated globs) matching the rollout shards to aggregate.",
+                aliases=("-i",),
+            ),
+            _value_flag(
                 "output",
                 "output_jsonl_fpath",
                 "Path for the merged rollouts and aggregate-metrics file.",
