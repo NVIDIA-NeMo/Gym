@@ -34,8 +34,8 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
-from nemo_gym.server_utils import ROLLOUT_HEADER, ROLLOUT_PATH_PREFIX
-from nemo_gym.trajectory_capture import CaptureStore
+from nemo_gym.server_utils import ROLLOUT_HEADER, ROLLOUT_PATH_PREFIX, rollout_id_from_run_body
+from nemo_gym.trajectory_capture import CaptureStore, aggregate_rollout_metrics, assemble_step_records
 
 
 logger = logging.getLogger(__name__)
@@ -338,3 +338,94 @@ def install_trajectory_capture(app: Any, config: Any) -> None:
     if store is None:
         return
     app.add_middleware(_CaptureMiddleware, store=store, config=config)
+
+
+# --- Consumer read: fold per-rollout capture into the rollout record (uniform across agents) ---
+def capture_dirs_from_config(global_config_dict: Any, env: Optional[dict[str, str]] = None) -> list[Path]:
+    """Candidate directories to read per-rollout captures from.
+
+    Collects ``$NEMO_GYM_TRAJECTORY_DIR`` (the shared sink) plus the resolved directory of every
+    observability-enabled model server in the global config (its ``trajectory_capture_dir``, else the
+    shared dir, else the per-server temp default). Deduped; existing dirs only. Best-effort.
+    """
+    environ = env if env is not None else os.environ
+    dirs: list[Path] = []
+    shared = environ.get("NEMO_GYM_TRAJECTORY_DIR")
+    if shared:
+        dirs.append(Path(shared))
+
+    # Normalize an OmegaConf config to plain containers so the walk below sees dict/list nodes.
+    try:
+        from omegaconf import DictConfig as _DictConfig
+        from omegaconf import OmegaConf
+
+        if isinstance(global_config_dict, _DictConfig):
+            global_config_dict = OmegaConf.to_container(global_config_dict, resolve=False)
+    except Exception:
+        pass
+
+    def _walk(node: Any) -> None:
+        if isinstance(node, dict):
+            if node.get("observability_enabled"):
+                resolved = node.get("trajectory_capture_dir") or shared or _default_capture_dir(
+                    node.get("name") or "model_server"
+                )
+                dirs.append(Path(resolved))
+            for value in node.values():
+                _walk(value)
+        elif isinstance(node, (list, tuple)):
+            for value in node:
+                _walk(value)
+
+    try:
+        _walk(global_config_dict)
+    except Exception:
+        logger.debug("Could not resolve capture dirs from the global config.", exc_info=True)
+
+    seen: set[Path] = set()
+    unique: list[Path] = []
+    for directory in dirs:
+        if directory not in seen and directory.exists():
+            seen.add(directory)
+            unique.append(directory)
+    return unique
+
+
+def _store_for_rollout(rollout_id: str, capture_dirs: list[Path]) -> Optional[CaptureStore]:
+    for directory in capture_dirs:
+        store = CaptureStore(directory)
+        if store.path_for(rollout_id).exists():
+            return store
+    return None
+
+
+def merge_capture_into_record(
+    record: dict[str, Any], capture_dirs: list[Path], *, include_payloads: bool = False
+) -> dict[str, Any]:
+    """Attach a rollout's captured model-call trajectory to its rollout record, in place.
+
+    Keyed by the rollout id derived from the record's task/rollout/attempt indices, so the attached
+    shape is identical for every agent harness. Adds
+    ``ng_trajectory_capture = {rollout_id, metrics, steps}`` where ``steps`` are typed StepRecords
+    (raw request/response excluded unless ``include_payloads`` -- they remain in the capture store).
+    No-op when no capture exists. The harness output + reward on the record are never modified: the
+    capture is authoritative for per-step model-call stats, the harness for reward.
+    """
+    if not capture_dirs:
+        return record
+    rollout_id = rollout_id_from_run_body(record)
+    if rollout_id is None:
+        return record
+    store = _store_for_rollout(rollout_id, capture_dirs)
+    if store is None:
+        return record
+    steps = assemble_step_records(store, rollout_id)
+    if not steps:
+        return record
+    exclude = None if include_payloads else {"request", "response"}
+    record["ng_trajectory_capture"] = {
+        "rollout_id": rollout_id,
+        "metrics": aggregate_rollout_metrics(store, rollout_id),
+        "steps": [step.model_dump(exclude=exclude) for step in steps],
+    }
+    return record
