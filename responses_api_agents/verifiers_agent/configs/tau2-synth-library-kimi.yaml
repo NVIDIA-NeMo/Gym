@@ -1,0 +1,23 @@
+verifiers_agent:
+  responses_api_agents:
+    verifiers_agent:
+      entrypoint: app.py
+      domain: agent
+      description: Prime Intellect tau2-synth library domain (customer-support tool-use). Used for reward profiling of Nemotron Nano v3.5.
+      value: Profile per-task difficulty for tau2-synth-library.
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model_name: ""
+      vf_env_id: tau2-synth
+      vf_env_args:
+        domain: library
+        user_model: openai/nvidia/moonshotai/kimi-k2.6
+        user_base_url: https://inference-api.nvidia.com/v1
+        user_api_key_var: OPENAI_API_KEY
+      group_size: 1
+      max_concurrent_generation: -1
+      max_concurrent_scoring: -1
+      max_tokens: 16384
+      temperature: 1.0
+      top_p: 1.0
