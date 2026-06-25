@@ -15,6 +15,9 @@
 name: Unit tests
 
 on:
+  push:
+    branches:
+      - "pull-request/[0-9]+"
   pull_request:
     types: [opened, synchronize, reopened, labeled, unlabeled]
   workflow_call:
