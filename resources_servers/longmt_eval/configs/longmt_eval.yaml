@@ -28,4 +28,4 @@ longmt_eval_simple_agent:
         type: example
         jsonl_fpath: resources_servers/longmt_eval/data/example.jsonl
         num_repeats: 1
-        license: Apache-2.0
+        license: Apache 2.0
