@@ -116,6 +116,25 @@ async def test_verify_rewards_tool_call_from_same_session() -> None:
 
 
 @pytest.mark.asyncio
+async def test_verify_accepts_differently_cased_city() -> None:
+    # A correct tool call that used different casing than the seed city must still be rewarded.
+    server = _server()
+    await server.seed_session(_request("session-1"), ExampleMCPWeatherSeedSessionRequest(expected_city="Paris"))
+    server.session_id_to_state["session-1"]["weather_calls"].append(
+        {"city": "PARIS", "weather": "The weather in PARIS is sunny and 72 F."}
+    )
+
+    result = await server.verify(
+        _request("session-1"),
+        _verify_request("Paris", "The weather in PARIS is sunny and 72 F."),
+    )
+
+    assert result.reward == 1.0
+    assert result.tool_call_seen is True
+    assert result.final_response_mentions_weather is True
+
+
+@pytest.mark.asyncio
 async def test_verify_rejects_tool_call_from_different_session() -> None:
     server = _server()
     await server.seed_session(_request("session-1"), ExampleMCPWeatherSeedSessionRequest(expected_city="Paris"))

@@ -116,12 +116,12 @@ class ExampleMCPWeatherResourcesServer(MCPResourcesServer):
         expected_weather = _weather_sentence(body.expected_city)
         expected_city = body.expected_city.casefold()
 
-        tool_call_seen = any(
-            str(call.get("city", "")).casefold() == expected_city and call.get("weather") == expected_weather
-            for call in state["weather_calls"]
-        )
+        # Match the city case-insensitively. The weather sentence is derived deterministically from the
+        # city, so a city match is sufficient; comparing the sentence exactly would spuriously reject a
+        # correct call that used different casing (e.g. get_weather("PARIS")).
+        tool_call_seen = any(str(call.get("city", "")).casefold() == expected_city for call in state["weather_calls"])
         final_text = _extract_assistant_text(body)
-        final_response_mentions_weather = expected_weather in final_text
+        final_response_mentions_weather = expected_weather.casefold() in final_text.casefold()
         reward = float(tool_call_seen and final_response_mentions_weather)
 
         return ExampleMCPWeatherVerifyResponse(
