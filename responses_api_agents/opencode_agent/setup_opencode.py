@@ -29,19 +29,18 @@ _OPENCODE_PKG = "opencode-ai"
 _NODE_VERSION = "22.15.0"
 _NODE_DIST_URL = f"https://nodejs.org/dist/v{_NODE_VERSION}/node-v{_NODE_VERSION}-linux-x64.tar.xz"
 _LOCAL_PREFIX = Path(__file__).parent / ".opencode_node"
-_NPM_RETRIES = 3
 
 
 def _npm_install(npm_bin: str, version: str | None) -> None:
     pkg = f"{_OPENCODE_PKG}@{version}" if version else f"{_OPENCODE_PKG}@latest"
-    for attempt in range(1, _NPM_RETRIES + 1):
+    for attempt in range(1, 4):
         try:
             subprocess.run([npm_bin, "install", "-g", pkg], check=True)
             return
         except subprocess.CalledProcessError:
-            if attempt == _NPM_RETRIES:
+            if attempt == 3:
                 raise
-            LOG.warning("npm install %s failed (attempt %d/%d), retrying", pkg, attempt, _NPM_RETRIES)
+            LOG.warning("npm install %s failed (attempt %d/3), retrying", pkg, attempt)
             time.sleep(2 * attempt)
 
 
