@@ -1,0 +1,91 @@
+---
+title: "Trajectory Capture"
+description: "Per-rollout, per-step model-call capture for evaluation and observability"
+position: 5
+---
+
+Trajectory capture records every model call a rollout makes — request, response, token stats, tool calls, and reasoning — directly inside the model server. It is **opt-in and off by default**: a server that does not enable it behaves exactly as before, and capture never alters the response returned to the caller.
+
+It is a model-server middleware (no standalone proxy) and is harness-agnostic: it works for any agent, including black-box CLI harnesses that route their inference through a Gym model server. The captured records share one schema across `/v1/responses`, `/v1/chat/completions`, and `/v1/messages`, so every benchmark and agent emits the same trajectory shape.
+
+## Terms
+
+| Term | Meaning |
+|------|---------|
+| **Trial** | A single attempt at completing a task. |
+| **Turn** | One round-trip interaction boundary between the agent and the external world within a trial. |
+| **Step** | One micro-cycle inside the agent's loop (model generates → tool runs → observation). Capture records the **model-call portion** of each step. |
+| **Trajectory** | The ordered sequence of step records produced during a trial. |
+
+## Enabling it
+
+Set `observability_enabled: true` on any model server config. Capture applies to `SimpleResponsesAPIModel` and its subclasses (vLLM, OpenAI, Azure OpenAI, ...).
+
+```yaml
+policy_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      observability_enabled: true                  # off by default
+      # trajectory_capture_dir: /data/trajectories  # optional; see below
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `observability_enabled` | `bool` | `false` | Capture per-rollout model-call trajectories. Opt-in. |
+| `trajectory_capture_dir` | `str` | `None` | Directory for per-rollout capture JSONL. Defaults to `$NEMO_GYM_TRAJECTORY_DIR`, else a per-server directory under the system temp dir. |
+
+Each rollout is written to its own append-only, fsynced JSONL file (`<rollout_id>.capture.jsonl`), so a box reaped mid-run cannot lose turns already written.
+
+## What is captured
+
+One record per model call, typed as `StepRecord` (Pydantic; JSONSchema via `StepRecord.model_json_schema()`). Field names align with OpenAI shapes. Failed calls are captured too.
+
+| Field | Description |
+|-------|-------------|
+| `trial_index`, `turn_index`, `step_index` | Position of the call. `step_index` is server-derived; `trial_index` / `turn_index` come from request headers (see [Correlation](#correlating-calls-to-a-rollout)). |
+| `tokens_in`, `tokens_out`, `tokens_reasoning`, `tokens_total` | Token accounting, aggregable to per-turn and per-trial totals. |
+| `request`, `response` | The full model-call request and response payloads. |
+| `tool_calls` | Structured tool calls (`name`, `arguments`, `call_id`). |
+| `reasoning_content` | Reasoning text as a structured field, not flattened into the response. |
+| `cache_hit`, `cached_tokens` | Prompt-cache hit/miss and cached-token count. |
+| `latency_total_ms` | Wall-clock latency of the model call. |
+| `error_category`, `status_code` | Normalized failure classification for non-2xx or raised calls. |
+| `model_server`, `dialect` | Which server produced the call, and which API shape (`responses` / `chat` / `messages`). |
+
+## Correlating calls to a rollout
+
+A caller attributes its model calls to a rollout in one of two OpenAI-compatible ways:
+
+1. **Header** — set `x-nemo-gym-rollout-id` (and optionally `x-nemo-gym-trial-index` / `x-nemo-gym-turn-index`). Use this when your client can set request headers.
+2. **URL prefix** — point the base URL at `/ng-rollout/<rollout_id>/v1` instead of `/v1`. The server strips the prefix before routing, so the standard `/v1/...` endpoints behave identically. Use this for clients that accept only a base URL (for example the Claude Code CLI, or an agent's embedded OpenAI client), where a header cannot be injected.
+
+Gym agents do not write correlation code by hand. The base agent resolves the model base URL with the prefix applied via `SimpleResponsesAPIAgent.resolve_model_base_url(name, request)`, and forwards the rollout id to its own `/v1/responses` via `rollout_call_kwargs(body)`. The rollout id is derived from the run-request's task and rollout indices.
+
+If no rollout id is supplied, calls are grouped under a default key and `trial_index` / `turn_index` are `None`.
+
+## Reading a captured trajectory
+
+```python
+from nemo_gym.trajectory_capture import (
+    CaptureStore,
+    aggregate_rollout_metrics,
+    assemble_rollout,
+    assemble_step_records,
+)
+
+store = CaptureStore("/data/trajectories")
+
+# Ordered per-step records (the per-trial trajectory).
+steps = assemble_step_records(store, rollout_id)
+
+# Per-rollout totals for the rollout record (tokens, latency, turns).
+totals = aggregate_rollout_metrics(store, rollout_id)
+
+# Eval-only NeMoGym output items (messages, tool calls, tool outputs).
+items = assemble_rollout(store, rollout_id)
+```
+
+## Scope
+
+Trajectory capture serves **evaluation and observability**. The assembled trajectory is the content view (messages, tool calls, reasoning); it intentionally does **not** surface token IDs or log-probs. On-policy token-ID trajectories for RL training are produced separately and consume this same capture — see [On-policy corrections](/contribute/rl-framework-integration/openai-compatible-http-server-on-policy-correction).

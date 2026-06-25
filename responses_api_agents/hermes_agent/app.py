@@ -35,7 +35,6 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.global_config import get_first_server_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -252,15 +251,6 @@ class HermesAgent(SimpleResponsesAPIAgent):
             _f.write(self._build_config())
         os.environ["HERMES_HOME"] = hermes_home
 
-    def _resolve_model_base_url(self) -> str:
-        # aiagent builds its own openai client; resolve policy_model url
-        model_server_cfg = get_first_server_config_dict(
-            self.server_client.global_config_dict,
-            self.config.model_server.name,
-        )
-        base = self.server_client._build_server_base_url(model_server_cfg)
-        return f"{base}/v1"
-
     async def responses(
         self,
         request: Request,
@@ -275,7 +265,8 @@ class HermesAgent(SimpleResponsesAPIAgent):
         user_message, history, input_system = _split_input_to_user_and_history(body.input)
         system_message = self.config.system_prompt or input_system
 
-        base_url = self._resolve_model_base_url()
+        # Per-rollout capture: the base resolver applies the URL prefix when run() set the header.
+        base_url = self.resolve_model_base_url(self.config.model_server.name, request)
         model_name = str(self.config.model_server.name)
 
         agent = AIAgent(
@@ -393,11 +384,13 @@ class HermesAgent(SimpleResponsesAPIAgent):
             await raise_for_status(seed_resp)
             cookies = seed_resp.cookies
 
+            # Forward the rollout id to our own /v1/responses so responses() tags the model calls.
             agent_resp = await self.server_client.post(
                 server_name=self.config.name,
                 url_path="/v1/responses",
                 json=body.responses_create_params,
                 cookies=cookies,
+                **self.rollout_call_kwargs(body),
             )
             await raise_for_status(agent_resp)
             cookies = agent_resp.cookies

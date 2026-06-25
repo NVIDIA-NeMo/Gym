@@ -14,11 +14,14 @@
 # limitations under the License.
 import inspect
 from abc import abstractmethod
+from typing import Optional
 
 from fastapi import Body, FastAPI, Request
 from fastapi.responses import StreamingResponse
+from pydantic import Field
 
 from nemo_gym.anthropic_converter import AnthropicConverter
+from nemo_gym.observability import install_trajectory_capture
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
@@ -33,7 +36,20 @@ _ANTHROPIC_CONVERTER = AnthropicConverter()
 
 
 class BaseResponsesAPIModelConfig(BaseRunServerInstanceConfig):
-    pass
+    observability_enabled: bool = Field(
+        default=False,
+        description=(
+            "Capture per-rollout model-call trajectories (token stats, tool calls, "
+            "messages, reasoning). Opt-in; off by default (per the #1483 contract)."
+        ),
+    )
+    trajectory_capture_dir: Optional[str] = Field(
+        default=None,
+        description=(
+            "Directory for per-rollout trajectory-capture JSONL. Defaults to $NEMO_GYM_TRAJECTORY_DIR, "
+            "else a per-server dir under the system temp dir."
+        ),
+    )
 
 
 class BaseResponsesAPIModel(BaseServer):
@@ -55,6 +71,11 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         # harnesses that require an Anthropic endpoint (e.g. the Claude Code CLI) target any
         # model server directly.
         app.post("/v1/messages")(self.messages)
+
+        # Opt-in per-rollout trajectory capture (off by default; enable via observability_enabled).
+        # An exchange-capturing middleware, independent of each server's handler signature; never
+        # alters the response.
+        install_trajectory_capture(app, self.config)
 
         return app
 
