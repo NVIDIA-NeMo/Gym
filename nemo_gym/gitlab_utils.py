@@ -66,7 +66,7 @@ def upload_jsonl_dataset(
     filename = Path(config.input_jsonl_fpath).name
     DownloadJsonlDatasetGitlabConfig
     print(f"""Download this artifact:
-ng_download_dataset_from_gitlab \\
+gym dataset download --storage gitlab \\
     +dataset_name={config.dataset_name} \\
     +version={config.version} \\
     +artifact_fpath={filename} \\

@@ -26,7 +26,7 @@ def dev_test():  # pragma: no cover
     Examples:
 
     ```bash
-    ng_dev_test
+    gym dev test
     ```
     """
     global_config_dict = get_global_config_dict()

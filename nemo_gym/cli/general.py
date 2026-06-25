@@ -36,10 +36,10 @@ class VersionConfig(BaseNeMoGymCLIConfig):
 
     ```bash
     # Display version information
-    ng_version
+    gym --version
 
     # Output as JSON
-    ng_version +json=true
+    gym --version --json
     ```
     """
 

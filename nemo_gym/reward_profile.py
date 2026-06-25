@@ -36,9 +36,9 @@ from nemo_gym.global_config import (
 
 class RewardProfileConfig(BaseNeMoGymCLIConfig):
     materialized_inputs_jsonl_fpath: str = Field(
-        description="The file path of the materialized inputs as output by ng_collect_rollouts."
+        description="The file path of the materialized inputs as output by `gym eval run`."
     )
-    rollouts_jsonl_fpath: str = Field(description="The file path of the rollouts as output by ng_collect_rollouts.")
+    rollouts_jsonl_fpath: str = Field(description="The file path of the rollouts as output by `gym eval run`.")
     allow_partial_rollouts: bool = Field(
         default=False,
         description="Allow reward profiling from partial rollout outputs by dropping input rows with no completed rollouts.",

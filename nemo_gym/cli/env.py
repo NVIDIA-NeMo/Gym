@@ -74,7 +74,7 @@ class RunConfig(BaseNeMoGymCLIConfig):
     ```bash
     config_paths="resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml,\\
     responses_api_models/openai_model/configs/openai_model.yaml"
-    ng_run "+config_paths=[${config_paths}]"
+    gym env start "+config_paths=[${config_paths}]"
     ```
     """
 
@@ -90,7 +90,7 @@ class TestConfig(RunConfig):
     Examples:
 
     ```bash
-    ng_test +entrypoint=resources_servers/example_single_tool_call
+    gym env test +entrypoint=resources_servers/example_single_tool_call
     ```
     """
 
@@ -410,7 +410,7 @@ def run(
     # Start servers with specific configs
     config_paths="resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml,\\
     responses_api_models/openai_model/configs/openai_model.yaml"
-    ng_run "+config_paths=[${config_paths}]"
+    gym env start "+config_paths=[${config_paths}]"
     ```
     """
     global_config_dict = get_global_config_dict(global_config_dict_parser_config=global_config_dict_parser_config)
@@ -446,7 +446,7 @@ def _validate_data_single(test_config: TestConfig) -> None:  # pragma: no cover
     ), f"""You must run the example data validation for the example data found at {example_fpath}.
 Your command should look something like the following (you should update this command with your actual server config path):
 ```bash
-ng_prepare_data "+config_paths=[{test_config._dir_path}/configs/{server_type_name}.yaml]" \\
+gym dataset collate "+config_paths=[{test_config._dir_path}/configs/{server_type_name}.yaml]" \\
     +output_dirpath=data/{server_type_name} \\
     +mode=example_validation
 ```
@@ -482,10 +482,10 @@ Your commands should look something like:
 # Server spinup
 example_multi_step_config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
 resources_servers/example_multi_step/configs/example_multi_step.yaml"
-ng_run "+config_paths=[${{example_multi_step_config_paths}}]"
+gym env start "+config_paths=[${{example_multi_step_config_paths}}]"
 
 # Collect the rollouts
-ng_collect_rollouts +agent_name=example_multi_step_simple_agent \
+gym eval run --no-serve +agent_name=example_multi_step_simple_agent \
     +input_jsonl_fpath=resources_servers/example_multi_step/data/example.jsonl \
     +output_jsonl_fpath=resources_servers/example_multi_step/data/example_rollouts.jsonl \
     +limit=null
@@ -537,7 +537,7 @@ class TestAllConfig(BaseNeMoGymCLIConfig):
     Examples:
 
     ```bash
-    ng_test_all
+    gym env test
     ```
     """
 
@@ -625,7 +625,7 @@ def test_all():  # pragma: no cover
             case _:
                 raise ValueError(
                     f"""Hit unrecognized exit code {return_code} while running tests for {dir_path}.
-You can rerun just these tests using `ng_test +entrypoint={dir_path}` or run detailed tests via `cd {dir_path} && source .venv/bin/activate && pytest`."""
+You can rerun just these tests using `gym env test +entrypoint={dir_path}` or run detailed tests via `cd {dir_path} && source .venv/bin/activate && pytest`."""
                 )
 
         try:
@@ -664,13 +664,13 @@ Data validation failed {_format_pct(len(data_validation_failed), len(dir_paths))
     if tests_failed or tests_missing:
         print(f"""You can rerun just the server with failed or missing tests like:
 ```bash
-ng_test +entrypoint={(tests_failed + tests_missing)[0]}
+gym env test +entrypoint={(tests_failed + tests_missing)[0]}
 ```
 """)
     if data_validation_failed:
         print(f"""You can rerun just the server with failed data validation like:
 ```bash
-ng_test +entrypoint={data_validation_failed[0]} +should_validate_data=true
+gym env test +entrypoint={data_validation_failed[0]} +should_validate_data=true
 ```
 """)
 
@@ -695,7 +695,7 @@ def init_resources_server():  # pragma: no cover
     Examples:
 
     ```bash
-    ng_init_resources_server +entrypoint=resources_servers/my_server
+    gym env init +entrypoint=resources_servers/my_server
     ```
     """
     config_dict = get_global_config_dict()
@@ -729,7 +729,7 @@ def init_resources_server():  # pragma: no cover
       verified: false                           # set true once the benchmark has been baselined and reviewed
 
 # Agent server config specifies the agent server to run and any additional components of the environment such as resources servers
-{server_type_name}_simple_agent:               # this agent instance's name — pass as +agent_name= to ng_collect_rollouts
+{server_type_name}_simple_agent:               # this agent instance's name — pass as --agent to gym eval run
   responses_api_agents:
     simple_agent:                               # built-in agent: runs the model with tool calls (up to max_steps); swap for your own agent dir
       entrypoint: app.py
@@ -820,7 +820,7 @@ def dump_config():  # pragma: no cover
     Examples:
 
     ```bash
-    ng_dump_config "+config_paths=[<config1>,<config2>]"
+    gym env resolve "+config_paths=[<config1>,<config2>]"
     ```
     """
     global_config_dict = get_global_config_dict(
@@ -871,7 +871,7 @@ def pip_list():  # pragma: no cover
     if not venv_path.exists():
         print(f"  Virtual environment not found at: {venv_path}")
         print("  Run tests or setup the server first using:")
-        print(f"  ng_test +entrypoint={config.entrypoint}")
+        print(f"  gym env test +entrypoint={config.entrypoint}")
         exit(1)
 
     pip_list_cmd = "uv pip list"

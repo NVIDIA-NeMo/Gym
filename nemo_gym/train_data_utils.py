@@ -57,7 +57,7 @@ class TrainDataProcessorConfig(BaseNeMoGymCLIConfig):
     ```bash
     config_paths="resources_servers/example_multi_step/configs/example_multi_step.yaml,\\
     responses_api_models/openai_model/configs/openai_model.yaml"
-    ng_prepare_data "+config_paths=[${config_paths}]" \
+    gym dataset collate "+config_paths=[${config_paths}]" \
         +output_dirpath=data/example_multi_step \
         +mode=example_validation
     ```

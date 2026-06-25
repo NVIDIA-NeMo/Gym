@@ -75,7 +75,7 @@ def upload_jsonl_dataset_to_hf_and_delete_gitlab_cli() -> None:  # pragma: no co
 
 
 def materialize_prompts_cli() -> None:  # pragma: no cover
-    """CLI entry point for ng_materialize_prompts."""
+    """CLI entry point for gym dataset render."""
     global_config_dict = get_global_config_dict(
         global_config_dict_parser_config=GlobalConfigDictParserConfig(
             initial_global_config_dict=GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,

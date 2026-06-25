@@ -191,7 +191,7 @@ class PrepareBenchmarkConfig(BaseNeMoGymCLIConfig):
     Examples:
 
     ```bash
-    ng_prepare_benchmark "+config_paths=[benchmarks/aime24/config.yaml]"
+    gym eval prepare --benchmark aime24
     ```
     """
 

@@ -151,7 +151,7 @@ class MaterializePromptsConfig(BaseNeMoGymCLIConfig):
     Examples:
 
     ```bash
-    ng_materialize_prompts \\
+    gym dataset render \\
         +input_jsonl_fpath=data/my_dataset.jsonl \\
         +prompt_config=/path/to/my_prompt.yaml \\
         +output_jsonl_fpath=my_dataset_materialized.jsonl
