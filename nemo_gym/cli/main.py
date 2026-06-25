@@ -136,7 +136,8 @@ RESOURCES_SERVER = Flag(
 )
 
 # Shared flag: emit machine-readable JSON instead of human output. Reused by reporting commands (version, list,
-# env status). The reserved `json` config key is read centrally via nemo_gym.cli.output.emit.
+# env status). Each command reads the reserved `json` config key ad hoc via
+# global_config_dict.get(JSON_OUTPUT_KEY_NAME) (see general.py, eval.py, env.py).
 JSON = _bool_flag("json", "json", "Output as JSON for programmatic use.")
 
 # Positional search query for `gym search`; surfaced to the listing command as the `query` config key.
