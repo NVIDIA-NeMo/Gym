@@ -19,6 +19,10 @@ opencode_agent:
       extra_args: []
       # written to opencode.json in the run dir
       opencode_config:
+        permission:
+          bash: allow
+          edit: allow
+          webfetch: allow
         provider:
           nvinf:
             npm: "@ai-sdk/openai-compatible"
@@ -27,4 +31,4 @@ opencode_agent:
               apiKey: ${nvidia_api_key}
             models:
               nvidia/qwen/qwen3-next-80b-a3b-instruct: {}
-      opencode_version: null
+      opencode_version: 1.17.11
