@@ -15,7 +15,7 @@
 from unittest.mock import MagicMock
 
 import pytest
-from fastapi import HTTPException, Request
+from fastapi import Request
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -23,6 +23,7 @@ from nemo_gym.base_resources_server import (
     BaseSeedSessionResponse,
     MCPResourcesServer,
     MCPServerMetadata,
+    MCPSessionError,
     SimpleResourcesServer,
     gym_tool,
 )
@@ -84,9 +85,16 @@ class TestMCPResourcesServer:
 
         assert metadata.server_name == "test_mcp_resources_server"
         assert metadata.url_path == "/mcp"
-        assert server._mcp_session_id_by_token[token] == "gym-session-1"
+        # The signed token round-trips back to the session id (no server-side storage).
+        from nemo_gym.base_resources_server import _MCP_SESSION_TOKEN
 
-    def test_missing_mcp_session_token_raises_401(self) -> None:
+        ctx = _MCP_SESSION_TOKEN.set(token)
+        try:
+            assert server.require_mcp_session_id() == "gym-session-1"
+        finally:
+            _MCP_SESSION_TOKEN.reset(ctx)
+
+    def test_missing_mcp_session_token_raises(self) -> None:
         pytest.importorskip("mcp")
         config = BaseResourcesServerConfig(host="", port=0, entrypoint="", name="test_mcp_resources_server")
 
@@ -99,12 +107,10 @@ class TestMCPResourcesServer:
 
         server = TestMCPServer(config=config, server_client=MagicMock(spec=ServerClient))
 
-        with pytest.raises(HTTPException) as exc_info:
+        with pytest.raises(MCPSessionError):
             server.require_mcp_session_id()
 
-        assert exc_info.value.status_code == 401
-
-    def test_invalid_mcp_session_token_raises_401(self) -> None:
+    def test_invalid_mcp_session_token_raises(self) -> None:
         pytest.importorskip("mcp")
         config = BaseResourcesServerConfig(host="", port=0, entrypoint="", name="test_mcp_resources_server")
 
@@ -121,12 +127,10 @@ class TestMCPResourcesServer:
 
         context_token = _MCP_SESSION_TOKEN.set("bad-token")
         try:
-            with pytest.raises(HTTPException) as exc_info:
+            with pytest.raises(MCPSessionError):
                 server.require_mcp_session_id()
         finally:
             _MCP_SESSION_TOKEN.reset(context_token)
-
-        assert exc_info.value.status_code == 401
 
     def test_mcp_endpoint_accepts_non_loopback_host(self) -> None:
         """Regression: the MCP SDK's default DNS-rebinding protection returns HTTP 421 for any

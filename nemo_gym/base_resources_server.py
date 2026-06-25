@@ -20,8 +20,10 @@ from contextvars import ContextVar
 from typing import Any, Optional, get_type_hints
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException, Request
-from pydantic import BaseModel, PrivateAttr
+from fastapi import FastAPI, Request
+from itsdangerous import BadSignature, URLSafeSerializer
+from pydantic import BaseModel
+from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import Headers
 from starlette.routing import Route
 
@@ -37,6 +39,19 @@ from nemo_gym.server_utils import SESSION_ID_KEY, BaseRunServerInstanceConfig, B
 NEMO_GYM_MCP_SESSION_TOKEN_HEADER = "X-NeMo-Gym-Session-Token"
 NEMO_GYM_MCP_METADATA_KEY = "mcp"
 _MCP_SESSION_TOKEN: ContextVar[Optional[str]] = ContextVar("nemo_gym_mcp_session_token", default=None)
+# Salt namespacing the signed MCP session token, so it can't be confused with another signer
+# that happens to share the same session-middleware secret.
+_MCP_TOKEN_SALT = "nemo-gym-mcp-session-token"
+
+
+class MCPSessionError(Exception):
+    """A Gym MCP tool call lacked a valid per-rollout session token.
+
+    Deliberately not an HTTP error: MCP runs over JSON-RPC, so FastMCP returns HTTP 200 and surfaces
+    this to the client as a tool error (``isError: true``). An HTTP status code raised here would
+    never reach the caller, so we raise a plain error with a clear message instead.
+    """
+
 
 # Names a @gym_tool method may not use, because they collide with the resources server's own
 # endpoints (and would silently shadow them on HTTP while still registering as MCP tools).
@@ -155,7 +170,6 @@ class MCPResourcesServer(SimpleResourcesServer):
     """
 
     mcp_url_path: str = "/mcp"
-    _mcp_session_id_by_token: dict[str, str] = PrivateAttr(default_factory=dict)
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -251,10 +265,12 @@ class MCPResourcesServer(SimpleResourcesServer):
         else:
 
             @functools.wraps(method)
-            def wrapper(**kwargs: Any) -> Any:
+            async def wrapper(**kwargs: Any) -> Any:
                 if inject_session:
                     kwargs["session_id"] = self.require_mcp_session_id()
-                return method(**kwargs)
+                # Offload blocking sync tools to a thread so they don't stall the event loop
+                # (which would otherwise block every concurrent rollout in this worker).
+                return await run_in_threadpool(method, **kwargs)
 
         # Mirror the method's parameters (with resolved annotations) minus session_id, so FastMCP builds
         # the tool's input schema from real types even under ``from __future__ import annotations``.
@@ -276,23 +292,23 @@ class MCPResourcesServer(SimpleResourcesServer):
             session_id = str(uuid4())
             request.session[SESSION_ID_KEY] = session_id
 
-        token = uuid4().hex
-        self._mcp_session_id_by_token[token] = session_id
         return MCPServerMetadata(
             server_name=self.config.name or self.__class__.__name__,
             url_path=self.mcp_url_path,
-            headers={NEMO_GYM_MCP_SESSION_TOKEN_HEADER: token},
+            headers={NEMO_GYM_MCP_SESSION_TOKEN_HEADER: self._mcp_token_serializer().dumps(session_id)},
         )
+
+    def _mcp_token_serializer(self) -> URLSafeSerializer:
+        # Stateless signed token: the session-middleware secret is derived deterministically from the
+        # server class + config name, so any worker can verify a token another worker signed. This needs
+        # no per-worker token storage (it works with num_workers > 1, and there is nothing to evict).
+        return URLSafeSerializer(self.get_session_middleware_key(), salt=_MCP_TOKEN_SALT)
 
     def require_mcp_session_id(self) -> str:
         token = _MCP_SESSION_TOKEN.get()
         if not token:
-            raise HTTPException(
-                status_code=401,
-                detail=f"Missing {NEMO_GYM_MCP_SESSION_TOKEN_HEADER} header for Gym MCP tool call.",
-            )
-
-        session_id = self._mcp_session_id_by_token.get(token)
-        if not session_id:
-            raise HTTPException(status_code=401, detail="Invalid Gym MCP session token.")
-        return session_id
+            raise MCPSessionError(f"Missing {NEMO_GYM_MCP_SESSION_TOKEN_HEADER} for Gym MCP tool call.")
+        try:
+            return self._mcp_token_serializer().loads(token)
+        except BadSignature as exc:
+            raise MCPSessionError("Invalid Gym MCP session token.") from exc

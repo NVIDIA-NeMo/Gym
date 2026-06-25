@@ -15,9 +15,10 @@
 from unittest.mock import MagicMock
 
 import pytest
-from fastapi import HTTPException, Request
+from fastapi import Request
 from fastapi.testclient import TestClient
 
+from nemo_gym.base_resources_server import MCPSessionError
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -98,10 +99,11 @@ async def test_verify_rewards_tool_call_from_same_session() -> None:
 
     from nemo_gym.base_resources_server import _MCP_SESSION_TOKEN
 
-    # The auto-registered MCP wrapper takes only `city`; session_id is injected from the token.
+    # The auto-registered MCP wrapper takes only `city` (session_id is injected from the token) and is
+    # async (sync tools are offloaded to a threadpool), so it must be awaited.
     context_token = _MCP_SESSION_TOKEN.set(token)
     try:
-        assert fake_mcp.tools["get_weather"](city="Paris") == "The weather in Paris is sunny and 72 F."
+        assert await fake_mcp.tools["get_weather"](city="Paris") == "The weather in Paris is sunny and 72 F."
     finally:
         _MCP_SESSION_TOKEN.reset(context_token)
 
@@ -152,7 +154,8 @@ async def test_verify_rejects_tool_call_from_different_session() -> None:
     assert result.tool_call_seen is False
 
 
-def test_mcp_tool_requires_valid_session_token() -> None:
+@pytest.mark.asyncio
+async def test_mcp_tool_requires_valid_session_token() -> None:
     server = _server()
     fake_mcp = FakeMCP()
     server.register_mcp_tools(fake_mcp)
@@ -161,12 +164,10 @@ def test_mcp_tool_requires_valid_session_token() -> None:
 
     context_token = _MCP_SESSION_TOKEN.set("invalid-token")
     try:
-        with pytest.raises(HTTPException) as exc_info:
-            fake_mcp.tools["get_weather"](city="Paris")
+        with pytest.raises(MCPSessionError):
+            await fake_mcp.tools["get_weather"](city="Paris")
     finally:
         _MCP_SESSION_TOKEN.reset(context_token)
-
-    assert exc_info.value.status_code == 401
 
 
 def test_streamable_http_mcp_endpoint_records_same_session() -> None:
