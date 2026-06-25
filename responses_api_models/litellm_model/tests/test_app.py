@@ -147,10 +147,53 @@ class TestNormalizeToResponse:
         assert result["output"][0]["content"][0]["text"] == ""
 
 
+# -- Shared fixture: mock version check so existing tests don't make real HTTP calls --
+
+
+@pytest.fixture
+def mock_safe_version():
+    mock_resp = MagicMock()
+    mock_resp.json = AsyncMock(return_value={"litellm_version": "1.83.0"})
+    with patch("responses_api_models.litellm_model.app.request", return_value=mock_resp):
+        yield
+
+
+# -- Version check tests ------------------------------------------------------
+
+
+class TestVersionCheck:
+    async def test_compromised_version_blocks_startup(self) -> None:
+        """Proxy running a known-malware version raises RuntimeError."""
+        server = _make_server()
+        mock_resp = MagicMock()
+        mock_resp.json = AsyncMock(return_value={"litellm_version": "1.82.7"})
+        with patch("responses_api_models.litellm_model.app.request", return_value=mock_resp):
+            with pytest.raises(RuntimeError, match="compromised"):
+                await server._check_proxy_version()
+
+    async def test_safe_version_allows_startup(self) -> None:
+        """Proxy running a clean version passes without raising."""
+        server = _make_server()
+        mock_resp = MagicMock()
+        mock_resp.json = AsyncMock(return_value={"litellm_version": "1.83.0"})
+        with patch("responses_api_models.litellm_model.app.request", return_value=mock_resp):
+            await server._check_proxy_version()
+
+    async def test_unreachable_proxy_logs_warning_only(self) -> None:
+        """Unreachable proxy logs a warning but does not block startup."""
+        server = _make_server()
+        with patch("responses_api_models.litellm_model.app.request", side_effect=Exception("connection refused")):
+            await server._check_proxy_version()  # must not raise
+
+
 # -- Integration tests for the server -----------------------------------------
 
 
 class TestLiteLLMModelServer:
+    @pytest.fixture(autouse=True)
+    def _mock_version(self, mock_safe_version):
+        pass
+
     async def test_responses_native_format(self) -> None:
         """Server handles native response format from LiteLLM (e.g. GPT-5.4)."""
         server = _make_server()
