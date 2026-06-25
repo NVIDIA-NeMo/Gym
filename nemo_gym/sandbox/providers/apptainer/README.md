@@ -16,14 +16,10 @@ where Docker is unavailable).
 - The **`apptainer` binary** must be installed and on `PATH`. The provider does **not**
   auto-install it; constructing the provider raises `RuntimeError` if it is missing.
   See the [Apptainer install guide](https://apptainer.org/docs/admin/main/installation.html).
-- A container **image**, supplied per sandbox as either:
-  - a local `.sif` file path, or
-  - a remote URI that Apptainer can pull: `docker://`, `oras://`, or `library://`.
-- A couple of features — **running commands as a different user** and **enforcing
-  CPU/memory limits** — only work if your machine's administrator has enabled Apptainer's
-  **`--fakeroot`** support (Linux user namespaces, and cgroups v2 delegation for limits).
-  On many HPC clusters this is on by default; where it isn't, those features are quietly
-  skipped. Everything else works without it. See [Limitations](#limitations).
+- A container **image**: a local `.sif`, a URI Apptainer can pull, or a bare Docker
+  image name such as `ubuntu:22.04`.
+- Running commands as a different user needs Apptainer **`--fakeroot`** support.
+  CPU/memory limits need cgroups delegation. See [Limitations](#limitations).
 
 ## Quick start
 
@@ -93,6 +89,7 @@ apptainer:
     mount_point: /sandbox
     start_timeout_s: 600
     extra_start_args: []
+    apply_resource_limits: true
   probe:
     command: printf apptainer-sandbox-ready
     expected_stdout: apptainer-sandbox-ready
@@ -108,6 +105,7 @@ Settings for starting the instance (`apptainer instance start`).
 | `mount_point` | `/sandbox` | Absolute path inside the container where the host staging dir is bind-mounted. Powers the file-transfer fast path. |
 | `start_timeout_s` | `600` | Max seconds to wait for `instance start` (`None` = no timeout). |
 | `extra_start_args` | `[]` | Extra raw flags appended to `instance start`. |
+| `apply_resource_limits` | `true` | Add CPU/memory cgroup flags from `SandboxSpec.resources`. |
 
 ### `exec` — `ApptainerExecConfig`
 
@@ -142,8 +140,8 @@ The spec is provider-neutral; the Apptainer provider uses these fields:
 
 | Field | Used for |
 |---|---|
-| `image` | Image source — local `.sif` path or remote `docker://` / `oras://` / `library://` URI. Required. |
-| `env` | Each entry becomes `--env KEY=VALUE` at instance start. |
+| `image` | Bare Docker image name, local `.sif` path, or URI Apptainer can pull. Required. |
+| `env` | Passed as `--env KEY=VALUE` at instance start and every `exec`. |
 | `workdir` | Default working directory for `exec` (applied as `--pwd`). |
 | `files` | Seed files written into the sandbox at `start()` (handled by the sandbox API via `upload`). |
 | `resources` | Mapped to cgroup flags (see below). |
@@ -231,6 +229,7 @@ are unaffected.
 | `gpu` (truthy) | `--nv` (NVIDIA passthrough) |
 | `disk_gib`, `gpu_type` | No direct Apptainer flag — ignored. |
 
+
 ### Status mapping
 
 `apptainer instance list --json` only lists *live* instances, so:
@@ -259,9 +258,8 @@ failed" rather than "the command exited 125".
   may not resolve. Prefer named users.
 - **`--fakeroot` on exec.** Whether `--fakeroot` works on `exec` into an instance that
   was started *without* fakeroot varies by Apptainer version and host configuration.
-- **Resource enforcement.** cgroup limits may require cgroups v2 delegation and/or
-  `--fakeroot` on the host; limits are best-effort and silently ignored where the host
-  can't enforce them.
+- **Resource enforcement.** CPU/memory cgroup flags require cgroups v2 delegation.
+  Disable them with `create.apply_resource_limits: false`.
 - **Runtime-failure detection is heuristic.** It keys off stderr markers, so a user
   command whose own output contains `FATAL:` could be misclassified as a sandbox error.
 

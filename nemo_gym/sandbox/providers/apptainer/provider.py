@@ -51,6 +51,7 @@ SANDBOX_RUNTIME_RETURN_CODE = 125
 # Best-effort stderr markers indicating apptainer itself (not the user's command)
 # failed to run the command. Apptainer prefixes its own fatal errors with "FATAL:".
 APPTAINER_RUNTIME_ERROR_MARKERS = ("fatal:", "no instance found", "instance not found", "does not exist")
+APPTAINER_MISSING_INSTANCE_MARKERS = ("no instance found", "instance not found", "does not exist")
 
 
 class ApptainerCreateError(SandboxCreateError):
@@ -90,6 +91,7 @@ class ApptainerCreateConfig:
     mount_point: str = DEFAULT_MOUNT_POINT
     start_timeout_s: float | None = 600
     extra_start_args: list[str] = field(default_factory=list)
+    apply_resource_limits: bool = True
 
     def __post_init__(self) -> None:
         if self.start_timeout_s is not None and self.start_timeout_s <= 0:
@@ -145,19 +147,34 @@ class _ApptainerInstance:
     staging_dir: Path  # the shared folder on the host
     mount_point: str  # where the folder shows up inside
     image: str  # what it was built from
+    env: dict[str, str] = field(default_factory=dict)
 
 
 def _resource_flags(resources: SandboxResources) -> list[str]:
     """Translate neutral resources into apptainer CLI flags."""
+    return _resource_limit_flags(resources) + _resource_passthrough_flags(resources)
+
+
+def _resource_limit_flags(resources: SandboxResources) -> list[str]:
     flags: list[str] = []
     if resources.cpu is not None:
         flags += ["--cpus", str(resources.cpu)]
     if resources.memory_mib is not None:
         flags += ["--memory", f"{resources.memory_mib}m"]
+    return flags
+
+
+def _resource_passthrough_flags(resources: SandboxResources) -> list[str]:
+    flags: list[str] = []
     if resources.gpu:
         flags.append("--nv")
-    # disk_gib / gpu_type have no direct apptainer flag; intentionally ignored.
     return flags
+
+
+def _resolve_image(image: str) -> str:
+    if "://" in image or image.startswith(("/", ".")) or image.endswith(".sif"):
+        return image
+    return f"docker://{image}"
 
 
 def _to_sandbox_status(state: str | None) -> SandboxStatus:
@@ -176,19 +193,31 @@ def _to_sandbox_status(state: str | None) -> SandboxStatus:
 
 def _path_under_mount(mount_point: str, path: str) -> str | None:
     """If `path` is inside the mount, return its path relative to the mount; else None."""
-    mp = mount_point.rstrip("/")
-    if path == mp:
+    if not path.startswith("/"):
+        return None
+    mp = posixpath.normpath(mount_point.rstrip("/") or "/")
+    normalized = posixpath.normpath(path)
+    if normalized == mp:
         return ""
-    prefix = mp + "/"
-    if path.startswith(prefix):
-        return path[len(prefix) :]
-    return None
+    try:
+        if posixpath.commonpath([mp, normalized]) != mp:
+            return None
+    except ValueError:
+        return None
+    if mp == "/":
+        return normalized.lstrip("/")
+    return normalized[len(mp) + 1 :]
 
 
 def _is_runtime_failure(stderr: str) -> bool:
     """Best-effort: did apptainer itself fail to run the command (vs the command failing)?"""
     low = stderr.lower()
     return any(marker in low for marker in APPTAINER_RUNTIME_ERROR_MARKERS)
+
+
+def _is_missing_instance(stderr: str) -> bool:
+    low = stderr.lower()
+    return any(marker in low for marker in APPTAINER_MISSING_INSTANCE_MARKERS)
 
 
 def _coerce_binds(value: Any) -> list[str]:
@@ -333,9 +362,9 @@ class ApptainerProvider:
         if spec.ttl_s is not None:
             LOGGER.warning("ttl_s is not supported by the apptainer provider; it will be ignored.")
 
-        image = spec.image
-        if image is None:
+        if spec.image is None:
             raise ApptainerCreateError("spec.image is required for the apptainer provider")
+        image = _resolve_image(spec.image)
 
         # Extra per-sandbox bind mounts (validated before we allocate anything).
         extra_binds = _coerce_binds(spec.provider_options.get("binds"))
@@ -356,8 +385,17 @@ class ApptainerProvider:
             argv += ["--bind", bind]
         for key, value in spec.env.items():
             argv += ["--env", f"{key}={value}"]
-        argv += _resource_flags(spec.resources)
-        argv += list(self._create_config.extra_start_args)
+        start_args = list(self._create_config.extra_start_args)
+        resource_limit_flags = _resource_limit_flags(spec.resources)
+        if resource_limit_flags and self._create_config.apply_resource_limits:
+            if "--fakeroot" in start_args:
+                LOGGER.warning(
+                    "Skipping apptainer CPU/memory resource flags because create.extra_start_args contains --fakeroot."
+                )
+            else:
+                argv += resource_limit_flags
+        argv += _resource_passthrough_flags(spec.resources)
+        argv += start_args
         argv += [image, name]
 
         # start the instance; clean up the staging dir on any failure.
@@ -376,7 +414,13 @@ class ApptainerProvider:
         handle = SandboxHandle(
             sandbox_id=name,
             provider_name=self.name,
-            raw=_ApptainerInstance(name=name, staging_dir=staging_dir, mount_point=mount_point, image=image),
+            raw=_ApptainerInstance(
+                name=name,
+                staging_dir=staging_dir,
+                mount_point=mount_point,
+                image=image,
+                env=dict(spec.env),
+            ),
         )
 
         # Verify the sandbox can actually run a command before handing it back.
@@ -469,8 +513,11 @@ class ApptainerProvider:
         flags: list[str] = []
         if cwd is not None:
             flags += ["--pwd", cwd]
+        merged_env = dict(getattr(inst, "env", {}))
         if env:
-            for key, value in env.items():
+            merged_env.update(env)
+        if merged_env:
+            for key, value in merged_env.items():
                 flags += ["--env", f"{key}={value}"]
 
         effective_command = command
@@ -500,12 +547,12 @@ class ApptainerProvider:
 
         if code != 0 and _is_runtime_failure(err):
             return SandboxExecResult(
-                stdout=out or None,
-                stderr=err or None,
+                stdout=out,
+                stderr=err,
                 return_code=SANDBOX_RUNTIME_RETURN_CODE,
                 error_type="sandbox",
             )
-        return SandboxExecResult(stdout=out or None, stderr=err or None, return_code=code, error_type=None)
+        return SandboxExecResult(stdout=out, stderr=err, return_code=code, error_type=None)
 
     async def upload_file(self, handle: SandboxHandle, source_path: Path, target_path: str) -> None:
         """Upload one host file into the sandbox.
@@ -589,7 +636,6 @@ class ApptainerProvider:
 
         for entry in instances:
             if entry.get("instance") == inst.name:
-                # apptainer's list output has no explicit state field for a listed (i.e. live) instance, so being present means it is running.
                 return _to_sandbox_status(entry.get("state") or "running")
 
         # Not listed -> it has been stopped (or never existed anymore).
@@ -609,7 +655,7 @@ class ApptainerProvider:
                 [self._binary, "instance", "stop", inst.name],
                 timeout_s=self._exec_config.default_timeout_s,
             )
-            if code != 0 and not _is_runtime_failure(err):
+            if code != 0 and not _is_missing_instance(err):
                 stop_error = RuntimeError(
                     f"apptainer instance stop failed (code={code}) for {inst.name!r}: {err.strip()}"
                 )
