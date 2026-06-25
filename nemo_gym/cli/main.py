@@ -44,6 +44,7 @@ class _GymArgumentParser(argparse.ArgumentParser):
         match = re.search(r"invalid choice: '([^']+)' \(choose from (.+)\)", message)
         if match:
             typo = match.group(1)
+            # Python < 3.12 quotes each choice ('a', 'b'); 3.12+ does not (a, b). Handle both.
             choices = re.findall(r"'([^']+)'", match.group(2))
             if not choices:
                 choices = [choice.strip() for choice in match.group(2).split(",")]
