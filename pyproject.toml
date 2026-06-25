@@ -239,6 +239,11 @@ sandbox = [
     # Updated: Sat May 16, 2026 with opensandbox>=0.1.9
     # License: Apache 2.0
     "opensandbox>=0.1.9",
+
+    # Daytona SDK: used by the Daytona sandbox provider for create/exec/delete and file operations.
+    # Updated: Wed May 27, 2026 with daytona>=0.179.0
+    # License: Apache 2.0 https://pypi.org/project/daytona/
+    "daytona>=0.179.0",
 ]
 
 # We include dev dependencies as an extra since technically each server module is a consumer (which means we cannot use dependency groups, which are intended to be within a project).
