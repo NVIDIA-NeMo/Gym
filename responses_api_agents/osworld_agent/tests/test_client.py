@@ -116,6 +116,12 @@ class FakePointerAgent:
         self.log_usage_calls += 1
 
 
+class FakePointerEnv(FakeEnv):
+    def evaluate(self, eval_logger: Any) -> float:
+        assert eval_logger is not None
+        return 1.0 if self.actions else 0.0
+
+
 def _patch_client_for_fake_runtime(monkeypatch) -> None:
     FakeEnv.instances.clear()
     FakePromptAgent.call_llm_responses.clear()
@@ -124,6 +130,8 @@ def _patch_client_for_fake_runtime(monkeypatch) -> None:
     def fake_load_attr(import_path: str):
         if import_path == "fake.FakeEnv":
             return FakeEnv
+        if import_path == "fake.FakePointerEnv":
+            return FakePointerEnv
         if import_path == "fake.FakePromptAgent":
             return FakePromptAgent
         if import_path == "fake.FakePointerAgent":
@@ -388,3 +396,25 @@ def test_pointer_config_sync_uses_anthropic_provider_for_policy_endpoint(monkeyp
     assert pointer_config.planner_model == "azure/anthropic/claude-sonnet-4-6"
     assert pointer_config.verifier_model == "azure/anthropic/claude-sonnet-4-6"
     assert pointer_config.summarization_model == "azure/anthropic/claude-haiku-4-5"
+
+
+def test_pointer_env_evaluate_receives_eval_logger(monkeypatch, tmp_path) -> None:
+    _patch_client_for_fake_runtime(monkeypatch)
+    monkeypatch.setenv("OSWORLD_POINTER_RESULTS_DIR", str(tmp_path))
+
+    result = osworld_client.run_osworld_task(
+        {"id": "task-pointer-eval", "instruction": "Evaluate through Pointer env."},
+        model_fn=lambda *_args: (_ for _ in ()).throw(AssertionError("pointer_agent should not use model_fn")),
+        runner_name="pointer_agent",
+        env_class_path="fake.FakePointerEnv",
+        agent_class_path="fake.FakePointerAgent",
+        policy_base_url="https://inference-api.nvidia.com/v1",
+        policy_api_key="test-key",
+        policy_model_name="azure/anthropic/claude-opus-4-7",
+        sleep_after_execution=0,
+        task_timeout=10,
+    )
+
+    assert result.reward == 1.0
+    assert result.score == 1.0
+    assert result.error is None
