@@ -108,6 +108,15 @@ class MyServer(SimpleResourcesServer):
 
 When a benchmark requires an external tool (compiler, runtime, etc.), auto-install it so users don't need manual setup.
 
+Security note: the auto-install pattern runs shell scripts and package managers
+(`brew`, `bash`, `apt`) and modifies `PATH` and `LD_LIBRARY_PATH` for the server
+process. Treat install scripts and downloaded tools as untrusted input: pin tool
+versions, verify checksums or signatures of downloaded artifacts before running
+them, and install into a gitignored local prefix rather than system-wide.
+NeMo-Gym does not isolate these operations, so run the server in an environment
+you control, such as a container or VM, to keep environment changes and any
+compromised install script contained.
+
 ### setup module (`setup_<tool>.py`)
 
 ```python
@@ -404,6 +413,13 @@ Handle these edge cases:
 ## Subprocess Execution with Ray
 
 For benchmarks that compile/run code:
+
+Security note: model output and dataset payloads are untrusted and may be
+adversarial. The `tempfile.TemporaryDirectory` below isolates files but is not a
+security sandbox, and NeMo-Gym does not currently sandbox executed code. Apply
+strict timeouts and CPU and memory limits, and run the server in an isolated,
+disposable environment that you control. Avoid running code-execution benchmarks
+on hosts with access to sensitive credentials or networks.
 
 ```python
 import ray
