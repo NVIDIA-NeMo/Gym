@@ -1191,6 +1191,65 @@ class TestGlobalConfig:
 
         assert expected_global_config_dict == actual_global_config_dict
 
+    def test_no_model_config_seeds_referenced_model_server_refs(self, monkeypatch: MonkeyPatch) -> None:
+        self._mock_versions_for_testing(monkeypatch)
+
+        monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
+        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+
+        exists_mock = MagicMock()
+        exists_mock.return_value = False
+        monkeypatch.setattr(nemo_gym.global_config.Path, "exists", exists_mock)
+
+        find_open_port_mock = MagicMock()
+        find_open_port_mock.return_value = 12345
+        monkeypatch.setattr(nemo_gym.global_config, "_find_open_port_using_range", find_open_port_mock)
+
+        hydra_main_mock = MagicMock()
+
+        def hydra_main_wrapper(fn):
+            config_dict = DictConfig(
+                {
+                    "example_agent": {
+                        "responses_api_agents": {
+                            "simple_agent": {
+                                "entrypoint": "app.py",
+                                "model_server": {
+                                    "type": "responses_api_models",
+                                    "name": "user_model",
+                                },
+                                "judge_model_server": {
+                                    "type": "responses_api_models",
+                                    "name": "judge_model",
+                                },
+                            }
+                        }
+                    }
+                }
+            )
+            return lambda: fn(config_dict)
+
+        hydra_main_mock.return_value = hydra_main_wrapper
+        monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
+
+        with raises(
+            ServerRefNotFoundError,
+            match="responses_api_models/'user_model', which is not defined in the merged config.",
+        ):
+            get_global_config_dict()
+
+        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+
+        global_config_dict = get_global_config_dict(
+            global_config_dict_parser_config=GlobalConfigDictParserConfig(
+                initial_global_config_dict=GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+            )
+        )
+
+        assert global_config_dict["user_model"]["responses_api_models"]["dummy_model"]["entrypoint"] == "app.py"
+        assert global_config_dict["judge_model"]["responses_api_models"]["dummy_model"]["entrypoint"] == "app.py"
+        assert global_config_dict["policy_model"]["responses_api_models"]["dummy_model"]["entrypoint"] == "app.py"
+
     def test_dummy_model_override(self, monkeypatch: MonkeyPatch) -> None:
         self._mock_versions_for_testing(monkeypatch)
 
