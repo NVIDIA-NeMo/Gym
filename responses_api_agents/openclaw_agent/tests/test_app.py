@@ -231,6 +231,12 @@ class TestBuildOpenclawConfig:
         assert cfg["extra"] == {"k": "v"}
         assert cfg["gateway"]["mode"] == "local"
 
+    def test_user_deny_cannot_drop_headless_deny(self) -> None:
+        agent = _make_agent(openclaw_config={"tools": {"deny": ["custom"]}})
+        cfg = agent._build_openclaw_config({})
+        assert "message" in cfg["tools"]["deny"]
+        assert "custom" in cfg["tools"]["deny"]
+
     def test_env_passthrough(self) -> None:
         agent = _make_agent(env={"NVIDIA_API_KEY": "k", "EMPTY": ""})
         env = agent._env(Path("/tmp/h"))

@@ -282,8 +282,8 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
 
     def _build_openclaw_config(self, base: dict[str, Any]) -> dict[str, Any]:
         cfg = copy.deepcopy(base)
-        self._merge_headless_tool_denies(cfg)
         self._deep_merge(cfg, copy.deepcopy(self.config.openclaw_config))
+        self._merge_headless_tool_denies(cfg)
         return cfg
 
     def _workspace_root(self) -> Path:
@@ -341,16 +341,18 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         env = self._env(home)
 
         try:
-            await self._run_exec(
+            code, _, stderr = await self._run_exec(
                 [*self.config.command_parts, "setup", "--non-interactive", "--accept-risk", "--mode", "local"],
                 cwd=str(work_dir),
                 env=env,
                 timeout=self.config.setup_timeout,
             )
+            if code:
+                LOG.warning("openclaw setup exited %d: %s", code, stderr)
 
             config_path = home / ".openclaw" / "openclaw.json"
             if not config_path.is_file():
-                raise RuntimeError(f"openclaw setup did not produce a config at {config_path}")
+                raise RuntimeError(f"openclaw setup did not produce a config at {config_path}: {stderr}")
             base_cfg = json.loads(config_path.read_text())
             config_path.write_text(json.dumps(self._build_openclaw_config(base_cfg), indent=2) + "\n")
 
@@ -374,16 +376,15 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                 LOG.warning("openclaw exited %d: %s", code, stderr[:500])
             LOG.debug("openclaw stdout (%d chars): %s", len(stdout), stdout[:2000])
 
+            fallback_items, usage = parse_openclaw_output(stdout)
             envelope = _decode_last_json_dict_suffix(stdout)
-            usage = parse_openclaw_output(stdout)[1]
 
-            # prefer the session file, try final text if not (shouldnt happen)
             output_items: list[Any] = []
             session_path = self._session_file(envelope)
             if session_path and session_path.is_file():
                 output_items = parse_openclaw_session(session_path.read_text(errors="replace"))
-            if not output_items and envelope is not None:
-                output_items = parse_openclaw_output(stdout)[0]
+            if not output_items:
+                output_items = fallback_items
             return output_items, usage, self.config.model
         finally:
             shutil.rmtree(work_dir, ignore_errors=True)
