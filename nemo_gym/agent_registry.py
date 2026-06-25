@@ -19,18 +19,19 @@ resources server [verifier and state] + model). This module maps an agent's shor
 directory name) to its config variant(s) so it can be enumerated by name (``gym list agents``) and
 classified by how it composes. Resolving an agent name to a config for *running* belongs to the
 config composer (via the CLI's generic asset selectors), so this module is intentionally
-discovery-only; it records whether the harness bundles its own environment or references a separate
-resources server.
+discovery-only. The ``self_contained`` flag records only what the agent's *own* config reveals about
+its resources-server wiring:
 
-- **References a separate resources server (Pattern A):** the config sets
-  ``responses_api_agents.<type>.resources_server``, so the harness is reusable and must be wired to a
-  *compatible* resources server + dataset (e.g. the ``simple_agent`` tool-use pattern). Harnesses
-  compose *within* a pattern, not across it; which harness↔resources-server pairings are actually
-  compatible is decided by the config composer's compatibility guard, NOT by this registry.
-- **Self-contained (Pattern B):** the harness bundles its own environment/framework or external LLM
-  loop (``agent_framework``; e.g. ``swe_agents``, ``harbor_agent``, ``verifiers_agent``,
-  ``claude_code_agent``, and ``gymnasium``-style agents that ship their own env) and runs with its
-  own config rather than wired to a separate environment.
+- **Wires a resources server itself (Pattern A, ``self_contained=False``):** the config sets
+  ``responses_api_agents.<type>.resources_server``, so the registry can see it pairs with a separate
+  resources server + dataset (e.g. the ``simple_agent`` tool-use pattern).
+- **Does not wire one in its own config (Pattern B, ``self_contained=True``):** the agent declares
+  its own ``agent_framework`` (e.g. ``swe_agents``), drives an external LLM loop (e.g.
+  ``claude_code_agent`` via its own model key), or ships only an entrypoint whose resources-server
+  pairing is supplied by a separate paired/benchmark config (e.g. ``gymnasium_agent`` + the
+  ``blackjack`` resources server). These agents are still composable — but *within* a type
+  (gymnasium↔gymnasium-style, simple_agent↔simple_agent-style), not across types. Which pairings are
+  actually compatible is the config composer's call, not inferable from the agent config alone.
 
 Discovery only reads config files; it never resolves interpolations or missing values and never
 starts servers, so it is safe to call when secrets/API keys referenced by a config are unset.
