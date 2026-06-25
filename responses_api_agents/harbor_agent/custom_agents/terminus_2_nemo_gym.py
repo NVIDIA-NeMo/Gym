@@ -133,13 +133,11 @@ class Terminus2NemoGym(Terminus2):
             if getattr(step, "source", None) != "agent":
                 continue
             metrics = getattr(step, "metrics", None)
-            if metrics is None:
-                continue
             try:
                 routed_experts = next(routed_experts_history)
             except StopIteration:
                 break
-            if routed_experts is None:
+            if metrics is None or routed_experts is None:
                 continue
             metrics_extra = metrics.extra or {}
             metrics_extra["routed_experts"] = routed_experts

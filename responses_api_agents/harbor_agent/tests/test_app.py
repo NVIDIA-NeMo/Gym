@@ -351,6 +351,32 @@ class TestApp:
         msg0 = response.response.output[0]
         assert msg0.routed_experts == routed_experts
 
+    async def test_run_preserves_empty_top_level_routed_experts(self):
+        fallback_routed_experts = [
+            [[0, 1]],
+            [[2, 3]],
+        ]
+        trajectory = _make_trajectory(
+            steps=[
+                _USER_STEP,
+                _make_step_agent(
+                    2,
+                    "Analysis: I will look at foo.py.\nPlan: Read the file.",
+                    prompt_token_ids=[100],
+                    completion_token_ids=[200],
+                    logprobs=[-0.01],
+                    metrics_extra={"routed_experts": fallback_routed_experts},
+                ),
+            ],
+        )
+        trajectory["steps"][1]["metrics"]["routed_experts"] = []
+        server = _make_server()
+        with _harbor_run_mocks(trajectory=trajectory):
+            response = await server.run(_make_run_request())
+
+        msg0 = response.response.output[0]
+        assert msg0.routed_experts == []
+
     async def test_run_without_token_details(self):
         server = _make_server()
         trial_result = {
