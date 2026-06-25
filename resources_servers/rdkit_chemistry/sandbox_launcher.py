@@ -211,7 +211,7 @@ def start_sandbox(
         python = os.path.join(venv_path, "bin", "python")
         pip = os.path.join(venv_path, "bin", "pip")
 
-        # ng_run creates all server venvs in parallel.  The ns_tools venv
+        # gym env start creates all server venvs in parallel.  The ns_tools venv
         # may not be ready yet when rdkit_chemistry starts — wait for it.
         _wait_for_venv(python)
 
@@ -298,13 +298,13 @@ def _run_startup_probe(port: int, timeout_s: float = _DEFAULT_STARTUP_PROBE_TIME
     logger.info("Sandbox startup probe passed on 127.0.0.1:%d", port)
 
 
-_VENV_TIMEOUT = 600.0  # ng_run venv creation can take several minutes
+_VENV_TIMEOUT = 600.0  # gym env start venv creation can take several minutes
 
 
 def _wait_for_venv(python: str) -> None:
     """Block until the venv's python binary exists and nemo_skills is importable.
 
-    ng_run creates all server venvs concurrently, so the ns_tools venv (which
+    gym env start creates all server venvs concurrently, so the ns_tools venv (which
     has nemo_skills) may still be installing when rdkit_chemistry starts.
     """
     deadline = time.monotonic() + _VENV_TIMEOUT
@@ -319,7 +319,7 @@ def _wait_for_venv(python: str) -> None:
         else:
             raise FileNotFoundError(
                 f"Sandbox venv python not found at {python} after {_VENV_TIMEOUT}s. "
-                "Ensure ns_tools is part of the ng_run config."
+                "Ensure ns_tools is part of the gym env start config."
             )
 
     phase = "nemo_skills"

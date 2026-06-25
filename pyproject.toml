@@ -338,87 +338,93 @@ Download = "https://github.com/NVIDIA-NeMo/Gym/releases"
 Homepage = "https://github.com/NVIDIA-NeMo/Gym"
 
 [project.scripts]
+
+gym = "nemo_gym.cli.main:main"
+ng = "nemo_gym.cli.main:main"
+
+########################## DEPRECATED COMMANDS ##########################
+
 # Run/test scripts for servers.
-nemo_gym_run = "nemo_gym.cli:run"
-ng_run = "nemo_gym.cli:run"
-nemo_gym_test = "nemo_gym.cli:test"
-ng_test = "nemo_gym.cli:test"
-nemo_gym_test_all = "nemo_gym.cli:test_all"
-ng_test_all = "nemo_gym.cli:test_all"
+nemo_gym_run = "nemo_gym.cli.legacy:main"
+ng_run = "nemo_gym.cli.legacy:main"
+nemo_gym_test = "nemo_gym.cli.legacy:main"
+ng_test = "nemo_gym.cli.legacy:main"
+nemo_gym_test_all = "nemo_gym.cli.legacy:main"
+ng_test_all = "nemo_gym.cli.legacy:main"
 
 # Development convenience aliases.
-nemo_gym_dev_test = "nemo_gym.cli:dev_test"
-ng_dev_test = "nemo_gym.cli:dev_test"
-nemo_gym_init_resources_server = "nemo_gym.cli:init_resources_server"
-ng_init_resources_server = "nemo_gym.cli:init_resources_server"
+nemo_gym_dev_test = "nemo_gym.cli.legacy:main"
+ng_dev_test = "nemo_gym.cli.legacy:main"
+nemo_gym_init_resources_server = "nemo_gym.cli.legacy:main"
+ng_init_resources_server = "nemo_gym.cli.legacy:main"
 
 # Benchmarks
-nemo_gym_list_benchmarks = "nemo_gym.benchmarks:list_benchmarks"
-ng_list_benchmarks = "nemo_gym.benchmarks:list_benchmarks"
-nemo_gym_prepare_benchmark = "nemo_gym.benchmarks:prepare_benchmark"
-ng_prepare_benchmark = "nemo_gym.benchmarks:prepare_benchmark"
+nemo_gym_list_benchmarks = "nemo_gym.cli.legacy:main"
+ng_list_benchmarks = "nemo_gym.cli.legacy:main"
+nemo_gym_prepare_benchmark = "nemo_gym.cli.legacy:main"
+ng_prepare_benchmark = "nemo_gym.cli.legacy:main"
 
 # Rollout collection
-nemo_gym_collect_rollouts = "nemo_gym.rollout_collection:collect_rollouts"
-ng_collect_rollouts = "nemo_gym.rollout_collection:collect_rollouts"
-nemo_gym_e2e_collect_rollouts = "nemo_gym.cli:e2e_rollout_collection"
-ng_e2e_collect_rollouts = "nemo_gym.cli:e2e_rollout_collection"
-nemo_gym_aggregate_rollouts = "nemo_gym.rollout_collection:aggregate_rollouts"
-ng_aggregate_rollouts = "nemo_gym.rollout_collection:aggregate_rollouts"
+nemo_gym_collect_rollouts = "nemo_gym.cli.legacy:main"
+ng_collect_rollouts = "nemo_gym.cli.legacy:main"
+nemo_gym_e2e_collect_rollouts = "nemo_gym.cli.legacy:main"
+ng_e2e_collect_rollouts = "nemo_gym.cli.legacy:main"
+nemo_gym_aggregate_rollouts = "nemo_gym.cli.legacy:main"
+ng_aggregate_rollouts = "nemo_gym.cli.legacy:main"
 
 # Prompt materialization
-nemo_gym_materialize_prompts = "nemo_gym.prompt:materialize_prompts_cli"
-ng_materialize_prompts = "nemo_gym.prompt:materialize_prompts_cli"
+nemo_gym_materialize_prompts = "nemo_gym.cli.legacy:main"
+ng_materialize_prompts = "nemo_gym.cli.legacy:main"
 
 # Reward profiling
-nemo_gym_reward_profile = "nemo_gym.reward_profile:reward_profile"
-ng_reward_profile = "nemo_gym.reward_profile:reward_profile"
+nemo_gym_reward_profile = "nemo_gym.cli.legacy:main"
+ng_reward_profile = "nemo_gym.cli.legacy:main"
 
 # Dataset management
-nemo_gym_upload_dataset_to_gitlab = "nemo_gym.gitlab_utils:upload_jsonl_dataset_cli"
-ng_upload_dataset_to_gitlab = "nemo_gym.gitlab_utils:upload_jsonl_dataset_cli"
-nemo_gym_download_dataset_from_gitlab = "nemo_gym.gitlab_utils:download_jsonl_dataset_cli"
-ng_download_dataset_from_gitlab = "nemo_gym.gitlab_utils:download_jsonl_dataset_cli"
-nemo_gym_prepare_data = "nemo_gym.train_data_utils:prepare_data"
-ng_prepare_data = "nemo_gym.train_data_utils:prepare_data"
+nemo_gym_upload_dataset_to_gitlab = "nemo_gym.cli.legacy:main"
+ng_upload_dataset_to_gitlab = "nemo_gym.cli.legacy:main"
+nemo_gym_download_dataset_from_gitlab = "nemo_gym.cli.legacy:main"
+ng_download_dataset_from_gitlab = "nemo_gym.cli.legacy:main"
+nemo_gym_prepare_data = "nemo_gym.cli.legacy:main"
+ng_prepare_data = "nemo_gym.cli.legacy:main"
 
 # HF dataset upload and download
-nemo_gym_upload_dataset_to_hf = "nemo_gym.dataset_orchestrator:upload_jsonl_dataset_to_hf_cli"
-ng_upload_dataset_to_hf = "nemo_gym.dataset_orchestrator:upload_jsonl_dataset_to_hf_cli"
-nemo_gym_download_dataset_from_hf = "nemo_gym.dataset_orchestrator:download_jsonl_dataset_from_hf_cli"
-ng_download_dataset_from_hf = "nemo_gym.dataset_orchestrator:download_jsonl_dataset_from_hf_cli"
+nemo_gym_upload_dataset_to_hf = "nemo_gym.cli.legacy:main"
+ng_upload_dataset_to_hf = "nemo_gym.cli.legacy:main"
+nemo_gym_download_dataset_from_hf = "nemo_gym.cli.legacy:main"
+ng_download_dataset_from_hf = "nemo_gym.cli.legacy:main"
 
 # Gitlab -> HF (upload then delete)
-nemo_gym_gitlab_to_hf_dataset = "nemo_gym.dataset_orchestrator:upload_jsonl_dataset_to_hf_and_delete_gitlab_cli"
-ng_gitlab_to_hf_dataset = "nemo_gym.dataset_orchestrator:upload_jsonl_dataset_to_hf_and_delete_gitlab_cli"
+nemo_gym_gitlab_to_hf_dataset = "nemo_gym.cli.legacy:main"
+ng_gitlab_to_hf_dataset = "nemo_gym.cli.legacy:main"
 
 # Manually delete from Gitlab
-nemo_gym_delete_dataset_from_gitlab = "nemo_gym.dataset_orchestrator:delete_jsonl_dataset_from_gitlab_cli"
-ng_delete_dataset_from_gitlab = "nemo_gym.dataset_orchestrator:delete_jsonl_dataset_from_gitlab_cli"
+nemo_gym_delete_dataset_from_gitlab = "nemo_gym.cli.legacy:main"
+ng_delete_dataset_from_gitlab = "nemo_gym.cli.legacy:main"
 
 # Configuration utils
-nemo_gym_dump_config = "nemo_gym.cli:dump_config"
-ng_dump_config = "nemo_gym.cli:dump_config"
+nemo_gym_dump_config = "nemo_gym.cli.legacy:main"
+ng_dump_config = "nemo_gym.cli.legacy:main"
 
 # Display help
-nemo_gym_help = "nemo_gym.cli:display_help"
-ng_help = "nemo_gym.cli:display_help"
+nemo_gym_help = "nemo_gym.cli.legacy:main"
+ng_help = "nemo_gym.cli.legacy:main"
 
 # Server status
-nemo_gym_status = "nemo_gym.cli:status"
-ng_status = "nemo_gym.cli:status"
+nemo_gym_status = "nemo_gym.cli.legacy:main"
+ng_status = "nemo_gym.cli.legacy:main"
 
 # Environment-specific uv pip list
-nemo_gym_pip_list = "nemo_gym.cli:pip_list"
-ng_pip_list = "nemo_gym.cli:pip_list"
+nemo_gym_pip_list = "nemo_gym.cli.legacy:main"
+ng_pip_list = "nemo_gym.cli.legacy:main"
 
 # Display version
-nemo_gym_version = "nemo_gym.cli:version"
-ng_version = "nemo_gym.cli:version"
+nemo_gym_version = "nemo_gym.cli.legacy:main"
+ng_version = "nemo_gym.cli.legacy:main"
 
 # Re-install Gym and dependencies
-nemo_gym_reinstall = "nemo_gym.cli:reinstall"
-ng_reinstall = "nemo_gym.cli:reinstall"
+nemo_gym_reinstall = "nemo_gym.cli.legacy:main"
+ng_reinstall = "nemo_gym.cli.legacy:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

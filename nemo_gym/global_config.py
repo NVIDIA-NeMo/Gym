@@ -12,6 +12,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import logging
+import sys
 from argparse import ArgumentParser
 from collections import defaultdict
 from copy import deepcopy
@@ -76,6 +78,9 @@ DELETE_KEY_KEY_NAME = "_delete_key"
 # real config value (e.g. a literal "???" or a DictConfig) for "missing".
 _MISSING_REF = object()
 NEMO_GYM_LOG_DIR_KEY_NAME = "nemo_gym_log_dir"
+VERBOSE_KEY_NAME = "verbose"
+JSON_OUTPUT_KEY_NAME = "json"
+QUERY_KEY_NAME = "query"
 NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     CONFIG_PATHS_KEY_NAME,
     ENTRYPOINT_KEY_NAME,
@@ -98,6 +103,9 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     INHERIT_FROM_KEY_NAME,
     COPY_KEY_NAME,
     NEMO_GYM_LOG_DIR_KEY_NAME,
+    VERBOSE_KEY_NAME,
+    JSON_OUTPUT_KEY_NAME,
+    QUERY_KEY_NAME,
 ]
 
 # Data keys
@@ -190,6 +198,12 @@ class GlobalConfigDictParser(BaseModel):
             config_list.append(cfg)
 
         inner_hydra_wrapper()
+
+        # Hydra installs a console log handler on stdout; move it to stderr so command stdout stays machine-readable
+        # (e.g. `gym ... --json`). Diagnostics belong on stderr; only the requested data goes to stdout.
+        for handler in logging.getLogger().handlers:
+            if isinstance(handler, logging.StreamHandler) and getattr(handler, "stream", None) is sys.stdout:
+                handler.setStream(sys.stderr)
 
         global_config_dict: DictConfig = config_list[0]
 
@@ -724,6 +738,7 @@ def get_global_config_dict(
 
         _GLOBAL_CONFIG_DICT = global_config_dict
 
+        _apply_verbosity(global_config_dict)
         return global_config_dict
 
     set_global_config_dict(
@@ -731,7 +746,16 @@ def get_global_config_dict(
         global_config_dict_parser_cls=global_config_dict_parser_cls,
     )
 
+    _apply_verbosity(_GLOBAL_CONFIG_DICT)
     return _GLOBAL_CONFIG_DICT
+
+
+def _apply_verbosity(global_config_dict: DictConfig) -> None:
+    """Set logging to DEBUG when `verbose` is in the config. Runs in the CLI process and, because the
+    config dict is forwarded to every spun-up server, in each server process too."""
+    if global_config_dict.get(VERBOSE_KEY_NAME):
+        logging.basicConfig(level=logging.DEBUG)
+        logging.getLogger().setLevel(logging.DEBUG)
 
 
 def set_global_config_dict(

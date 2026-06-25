@@ -86,23 +86,22 @@ For each GDPVal task, the agent:
 The canonical entry point for GDPVal is the benchmark at
 [`benchmarks/gdpval/`](../../benchmarks/gdpval/README.md), which composes this
 agent with the GDPVal resources server and supports
-`ng_prepare_benchmark` + `ng_e2e_collect_rollouts`:
+`gym eval prepare` + `gym eval run`:
 
 ```bash
 # 1. Prepare the GDPVal benchmark JSONL.
-ng_prepare_benchmark "+config_paths=[benchmarks/gdpval/config.yaml]"
+gym eval prepare --benchmark gdpval
 
 # 2. Collect rollouts end-to-end (servers spin up automatically).
-config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
-benchmarks/gdpval/config.yaml"
 JUDGE_API_KEY=... HF_TOKEN=... \
-ng_e2e_collect_rollouts \
-  "+config_paths=[${config_paths}]" \
-  ++split=benchmark \
-  ++output_jsonl_fpath=results/gdpval_rubric.jsonl \
-  ++policy_base_url=https://api.openai.com/v1 \
-  ++policy_api_key=$OPENAI_API_KEY \
-  ++policy_model_name=gpt-4.1-2025-04-14
+gym eval run \
+  --model-type openai_model \
+  --benchmark gdpval \
+  --split benchmark \
+  --output results/gdpval_rubric.jsonl \
+  --model-url https://api.openai.com/v1 \
+  --model-api-key $OPENAI_API_KEY \
+  --model gpt-4.1-2025-04-14
 ```
 
 Each output line contains `responses_create_params`, the full `response`, a
@@ -216,7 +215,7 @@ apptainer build gdpval.sif responses_api_agents/stirrup_agent/containers/gdpval.
 Then:
 
 ```yaml
-# env.yaml or ng_run override
+# env.yaml or gym env start override
 stirrup_agent:
   responses_api_agents:
     stirrup_agent:
@@ -229,10 +228,11 @@ Pairwise comparison vs. a reference model is built into the GDPVal resources
 server (`resources_servers/gdpval`). Drive it from the benchmark config:
 
 ```bash
-ng_e2e_collect_rollouts \
-  "+config_paths=[responses_api_models/vllm_model/configs/vllm_model.yaml,benchmarks/gdpval/config.yaml]" \
-  ++split=benchmark \
-  ++output_jsonl_fpath=results/gdpval_compare.jsonl \
+gym eval run \
+  --model-type vllm_model \
+  --benchmark gdpval \
+  --split benchmark \
+  --output results/gdpval_compare.jsonl \
   ++gdpval_resources_server.resources_servers.gdpval.reward_mode=comparison \
   ++gdpval_resources_server.resources_servers.gdpval.reference_deliverables_dir=output/gdpval/reference-model
 ```

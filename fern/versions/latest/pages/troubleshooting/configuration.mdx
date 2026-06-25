@@ -3,7 +3,7 @@ title: "Configuration Errors"
 description: ""
 position: 1
 ---
-These errors appear when running `ng_run` or `ng_collect_rollouts`. NeMo Gym validates configuration at startup before launching servers.
+These errors appear when running `gym env start` or `gym eval run --no-serve`. NeMo Gym validates configuration at startup before launching servers.
 
 <Note>
 See the [Configuration reference](/reference/configuration) for complete configuration syntax and options.
@@ -39,7 +39,9 @@ policy_api_key: sk-your-api-key
 Or pass via command line:
 
 ```bash
-ng_run "+config_paths=[config.yaml]" +policy_api_key=sk-your-api-key
+gym env start \
+    --config config.yaml \
+    --model-api-key sk-your-api-key
 ```
 
 ### Server Reference Not Found
@@ -54,15 +56,18 @@ names the referencing instance/field and, when a similarly named server exists, 
 
 **Common causes**:
 - Typo in the server name
-- Referenced server's config file not included in `+config_paths`
+- Referenced server's config file not included in the `--config` flags
 - Server defined in a different config file that wasn't loaded
 
 **Fix**: 
 1. Check server name spelling in your config
-2. Ensure all required config files are in `+config_paths`:
+2. Ensure all required config files are passed with `--config`:
 
 ```bash
-ng_run "+config_paths=[model.yaml,resource.yaml,agent.yaml]"
+gym env start \
+    --config model.yaml \
+    --config resource.yaml \
+    --config agent.yaml
 ```
 
 ---
@@ -104,7 +109,9 @@ error_on_almost_servers: false
 
 ```bash
 # Or via command line
-ng_run "+config_paths=[config.yaml]" +error_on_almost_servers=false
+gym env start \
+    --config config.yaml \
+    +error_on_almost_servers=false
 ```
 
 <Warning>

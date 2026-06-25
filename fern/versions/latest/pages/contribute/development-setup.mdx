@@ -25,9 +25,9 @@ pre-commit install
 
 **Run NeMo Gym Tests**:
 ```bash
-ng_dev_test                                    # Run all NeMo Gym core tests
-ng_test_all                                    # Run all server tests
-ng_test +entrypoint=responses_api_agents/simple_agent  # Test single server
+gym dev test                                   # Run all NeMo Gym core tests
+gym env test                                   # Run all server tests
+gym env test --resources-server example_single_tool_call    # Test a single resources server
 ```
 
 **View Test Coverage**:
@@ -37,7 +37,7 @@ coverage html                                  # Generate HTML coverage report
 
 **Configuration Debugging**:
 ```bash
-ng_dump_config                                 # Dump config as NeMo Gym sees it
+gym env resolve                                # Dump config as NeMo Gym sees it
 ```
 
 ---
@@ -55,7 +55,7 @@ All contributions must pass these automated checks:
 
 **Test Requirements**:
 - At least one test per server you contribute
-- Tests must run using `ng_test +entrypoint=your_server_path`
+- Tests must run using `gym env test --resources-server your_server`
 - Use pytest for async testing patterns
 
 ### Build Docs CI Failures
@@ -246,7 +246,7 @@ For a small, self-contained change, open a single PR:
 
 1. **Create a feature branch**: `git checkout -b <username>/<feature>`
 2. **Make changes** with tests
-3. **Run local checks**: `ng_dev_test && pre-commit run --all-files`
+3. **Run local checks**: `gym dev test && pre-commit run --all-files`
 4. **Commit with signoff**: `git commit -s -S -m "Your message"`
 5. **Push and open a PR**: ensure all CI checks pass
 6. **Address review feedback** and iterate

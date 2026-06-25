@@ -15,7 +15,7 @@
 """Prepare finance_sec_search benchmark with web_search tool included.
 
 Thin wrapper around prepare.prepare() — used by config_web_search.yaml
-so ng_prepare_benchmark produces the web_search variant.
+so gym eval prepare produces the web_search variant.
 """
 
 from pathlib import Path

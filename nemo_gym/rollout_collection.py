@@ -44,7 +44,6 @@ from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_pr
 from nemo_gym.server_utils import (
     GlobalAIOHTTPAsyncClientConfig,
     ServerClient,
-    get_global_config_dict,
     get_response_json,
     is_global_aiohttp_client_request_debug_enabled,
     is_global_aiohttp_client_setup,
@@ -128,7 +127,7 @@ class SharedRolloutCollectionConfig(BaseNeMoGymCLIConfig):
         description=(
             "Skip the post-rollout aggregate-metrics computation and file write. "
             "Used when sharding rollouts across multiple jobs that will be aggregated together "
-            "afterward by `ng_aggregate_rollouts`."
+            "afterward by `gym eval aggregate`."
         ),
     )
 
@@ -140,7 +139,7 @@ class E2ERolloutCollectionConfig(SharedRolloutCollectionConfig):
     Examples:
 
     ```bash
-    ng_collect_rollouts \
+    gym eval run \
         +output_jsonl_fpath=weather_rollouts.jsonl \
         +num_samples_in_parallel=10
     ```
@@ -157,7 +156,7 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
     Examples:
 
     ```bash
-    ng_collect_rollouts \
+    gym eval run --no-serve \
         +agent_name=example_single_tool_call_simple_agent \
         +input_jsonl_fpath=weather_query.jsonl \
         +output_jsonl_fpath=weather_rollouts.jsonl \
@@ -257,7 +256,7 @@ class RolloutCollectionHelper(BaseModel):
             validate_prompt_compatibility([row for _, _, row in raw_rows], prompt_cfg)
             raw_rows = [(idx, s, apply_prompt_to_row(row, prompt_cfg)) for idx, s, row in raw_rows]
 
-        # For ng_reward_profile to match rollouts to tasks
+        # For gym eval profile to match rollouts to tasks
         row_to_task_idx: Dict[str, int] = dict()
         task_idx_to_rollout_idx: Dict[int, int] = Counter()
         row_idxs_missing_agent_ref: List[int] = []
@@ -464,7 +463,7 @@ class RolloutCollectionHelper(BaseModel):
         if config.disable_aggregation:
             print(
                 "Skipping aggregate-metrics computation because disable_aggregation=True. "
-                "Run `ng_aggregate_rollouts` after all shards finish to compute the global metrics."
+                "Run `gym eval aggregate` after all shards finish to compute the global metrics."
             )
             aggregate_metrics_fpath = None
         else:
@@ -617,16 +616,9 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
         return server_client
 
 
-def collect_rollouts():  # pragma: no cover
-    config = RolloutCollectionConfig.model_validate(get_global_config_dict())
-    rch = RolloutCollectionHelper()
-
-    asyncio.run(rch.run_from_config(config))
-
-
 class RolloutAggregationConfig(BaseNeMoGymCLIConfig):
     """
-    Aggregate metrics across rollout shards produced by `ng_collect_rollouts +disable_aggregation=true`.
+    Aggregate metrics across rollout shards produced by `gym eval run --no-serve +disable_aggregation=true`.
 
     Reads every JSONL file matching `input_glob`, computes aggregate metrics by POSTing to each
     agent server's `/aggregate_metrics` endpoint over the global union of records, and writes a
@@ -636,7 +628,7 @@ class RolloutAggregationConfig(BaseNeMoGymCLIConfig):
     Examples:
 
     ```bash
-    ng_aggregate_rollouts \
+    gym eval aggregate \
         "+config_paths=[benchmarks/aime24/config.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]" \
         +input_glob='results/rollouts-rs*-chunk*.jsonl' \
         +output_jsonl_fpath=results/rollouts.jsonl
@@ -721,8 +713,15 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
         return aggregate_metrics_fpath
 
 
-def aggregate_rollouts():  # pragma: no cover
-    config = RolloutAggregationConfig.model_validate(get_global_config_dict())
-    rah = RolloutAggregationHelper()
+# Backward-compatibility shims (CLI refactor): these CLI entry points moved to `nemo_gym.cli.eval`.
+# Re-exported lazily to avoid a circular import; accessing them emits a DeprecationWarning.
+from nemo_gym.cli._compat import moved_attr_getter  # noqa: E402
 
-    asyncio.run(rah.run_from_config(config))
+
+__getattr__ = moved_attr_getter(
+    __name__,
+    {
+        "collect_rollouts": "nemo_gym.cli.eval",
+        "aggregate_rollouts": "nemo_gym.cli.eval",
+    },
+)

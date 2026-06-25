@@ -2,7 +2,7 @@
 name: nemo-gym-reward-profiling
 description: >-
   Use to help users get started with Nemo Gym reward profiling. Covers the basic
-  ng_run, ng_collect_rollouts, and ng_reward_profile workflow, repeated rollouts,
+  gym env start, gym eval run, and gym eval profile workflow, repeated rollouts,
   materialized inputs, rollout JSONL artifacts, task and rollout identity, output
   inspection, partial profiling, and rollout_infos. For failed jobs, prefer
   nemo-gym-debugging.
@@ -14,16 +14,16 @@ description: >-
 
 Use this skill when the user wants to run, understand, or lightly modify Nemo Gym reward profiling. Keep the answer oriented around the normal workflow:
 
-`ng_run` starts model/resource servers, `ng_collect_rollouts` writes rollout artifacts, and `ng_reward_profile` generates profiling output from those artifacts.
+`gym env start` starts model/resources servers, `gym eval run --no-serve` writes rollout artifacts, and `gym eval profile` generates profiling output from those artifacts.
 
-If the user is primarily debugging a failed job or stack trace, use `$nemo-gym-debugging` first.
+If the user is primarily debugging a failed job or stack trace, use the `nemo-gym-debugging` skill first.
 
 ## Basic Workflow
 
 1. Identify the environment config paths and input JSONL.
-2. Start Gym servers with `ng_run`.
-3. Collect rollouts with `ng_collect_rollouts`; this writes `rollouts.jsonl` and `*_materialized_inputs.jsonl`.
-4. Run `ng_reward_profile` on the materialized inputs and rollout JSONL to generate `*_reward_profiling.jsonl`.
+2. Start Gym servers with `gym env start`.
+3. Collect rollouts with `gym eval run --no-serve`; this writes `rollouts.jsonl` and `*_materialized_inputs.jsonl`.
+4. Run `gym eval profile` on the materialized inputs and rollout JSONL to generate `*_reward_profiling.jsonl`.
 5. Inspect line counts and profile rows.
 
 Repeated rollouts are the main profiling lever. `num_repeats=1` is valid, but per-task averages and variance are only meaningful with multiple rollouts per task.
@@ -48,6 +48,6 @@ Load references only when the user needs that detail:
 
 ## Practical Defaults
 
-- Treat `ng_reward_profile` as the reward profiling step; rollout collection does not write reward profile files.
+- Treat `gym eval profile` as the reward profiling step; rollout collection does not write reward profile files.
 - Run strict profiling by default. If rollout collection stopped early, use `++allow_partial_rollouts=True` to profile completed rollouts and drop original input rows with no completed rollout.
 - Trust the target checkout's CLI help and `nemo_gym/reward_profile.py` over memory if flags differ.

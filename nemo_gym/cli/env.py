@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,16 +12,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 import asyncio
 import json
 import os
-import platform
 import shlex
-import sys
-from copy import deepcopy
 from glob import glob
-from importlib.metadata import entry_points
-from importlib.metadata import version as md_version
 from os import makedirs
 from os.path import exists
 from pathlib import Path
@@ -32,27 +28,26 @@ from threading import Thread
 from time import sleep, time
 from typing import Dict, List, Optional, Tuple
 
-import psutil
 import rich
 import uvicorn
 from devtools import pprint
-from omegaconf import DictConfig, OmegaConf, open_dict
+from omegaconf import DictConfig, OmegaConf
 from pydantic import Field
 from rich.table import Table
 from tqdm.auto import tqdm
 
-from nemo_gym import PARENT_DIR, ROOT_DIR, __version__
-from nemo_gym.cli_setup_command import run_command, setup_env_command
+from nemo_gym import PARENT_DIR, ROOT_DIR
+from nemo_gym.cli.setup_command import run_command, setup_env_command
 from nemo_gym.config_types import BaseNeMoGymCLIConfig
 from nemo_gym.global_config import (
     DRY_RUN_KEY_NAME,
+    JSON_OUTPUT_KEY_NAME,
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
     NEMO_GYM_RESERVED_TOP_LEVEL_KEYS,
     GlobalConfigDictParserConfig,
     get_global_config_dict,
 )
-from nemo_gym.rollout_collection import E2ERolloutCollectionConfig, RolloutCollectionConfig, RolloutCollectionHelper
 from nemo_gym.server_status import StatusCommand
 from nemo_gym.server_utils import (
     HEAD_SERVER_KEY_NAME,
@@ -62,7 +57,6 @@ from nemo_gym.server_utils import (
     ServerStatus,
     initialize_ray,
 )
-from nemo_gym.train_data_utils import TrainDataProcessor
 
 
 # Grace period after SIGINT before escalating to SIGKILL. Kept short so Ctrl-C is responsive.
@@ -80,7 +74,7 @@ class RunConfig(BaseNeMoGymCLIConfig):
     ```bash
     config_paths="resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml,\\
     responses_api_models/openai_model/configs/openai_model.yaml"
-    ng_run "+config_paths=[${config_paths}]"
+    gym env start "+config_paths=[${config_paths}]"
     ```
     """
 
@@ -96,7 +90,7 @@ class TestConfig(RunConfig):
     Examples:
 
     ```bash
-    ng_test +entrypoint=resources_servers/example_single_tool_call
+    gym env test +entrypoint=resources_servers/example_single_tool_call
     ```
     """
 
@@ -416,7 +410,7 @@ def run(
     # Start servers with specific configs
     config_paths="resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml,\\
     responses_api_models/openai_model/configs/openai_model.yaml"
-    ng_run "+config_paths=[${config_paths}]"
+    gym env start "+config_paths=[${config_paths}]"
     ```
     """
     global_config_dict = get_global_config_dict(global_config_dict_parser_config=global_config_dict_parser_config)
@@ -426,69 +420,6 @@ def run(
     rh = RunHelper()
     rh.start(global_config_dict_parser_config)
     rh.run_forever()
-
-
-def e2e_rollout_collection():  # pragma: no cover
-    global_config_dict = get_global_config_dict()
-
-    # Ensure we have the right config first thing
-    e2e_rollout_collection_config = E2ERolloutCollectionConfig.model_validate(global_config_dict)
-
-    # Prepare data
-    data_processor_config_dict = deepcopy(global_config_dict)
-    with open_dict(data_processor_config_dict):
-        data_processor_config_dict["should_download"] = True
-        data_processor_config_dict["mode"] = "train_preparation"
-
-        output_fpath = Path(e2e_rollout_collection_config.output_jsonl_fpath)
-        data_process_output_dir = output_fpath.parent / "preprocessed_datasets"
-        data_processor_config_dict["output_dirpath"] = str(data_process_output_dir)
-
-    input_jsonl_fpath = data_process_output_dir / f"{e2e_rollout_collection_config.split}.jsonl"
-    should_skip_data_processing = (
-        e2e_rollout_collection_config.reuse_existing_data_preparation and input_jsonl_fpath.exists()
-    )
-    if not should_skip_data_processing:
-        if e2e_rollout_collection_config.reuse_existing_data_preparation:
-            print(
-                f"Even though the `reuse_existing_data_preparation=true` flag was set, we will still do data preparation since the final input jsonl fpath `{input_jsonl_fpath}` does not exist yet"
-            )
-
-        data_processor = TrainDataProcessor()
-        data_processor.run(data_processor_config_dict)
-    else:
-        print(
-            f"Skipping data preparation since `reuse_existing_data_preparation=true` and the final input jsonl fpath `{input_jsonl_fpath}` already exists"
-        )
-
-    # Convert to RolloutCollectionConfig
-    rollout_collection_config_dict = deepcopy(global_config_dict)
-    with open_dict(rollout_collection_config_dict):
-        assert input_jsonl_fpath.exists(), input_jsonl_fpath
-        rollout_collection_config_dict["input_jsonl_fpath"] = str(input_jsonl_fpath)
-
-    rollout_collection_config = RolloutCollectionConfig.model_validate(
-        OmegaConf.to_container(rollout_collection_config_dict)
-    )
-
-    rh = RunHelper()
-    rh.start(None)
-
-    rch = RolloutCollectionHelper()
-
-    print(
-        f"""Output artifacts:
-1. Preprocessed datasets: {data_processor_config_dict["output_dirpath"]}
-2. Dataset file used for rollout collection: {rollout_collection_config_dict["input_jsonl_fpath"]}
-3. Rollout collection results file: {output_fpath}
-"""
-    )
-    try:
-        asyncio.run(rch.run_from_config(rollout_collection_config))
-    except KeyboardInterrupt:
-        pass
-    finally:
-        rh.shutdown()
 
 
 def _validate_data_single(test_config: TestConfig) -> None:  # pragma: no cover
@@ -515,7 +446,7 @@ def _validate_data_single(test_config: TestConfig) -> None:  # pragma: no cover
     ), f"""You must run the example data validation for the example data found at {example_fpath}.
 Your command should look something like the following (you should update this command with your actual server config path):
 ```bash
-ng_prepare_data "+config_paths=[{test_config._dir_path}/configs/{server_type_name}.yaml]" \\
+gym dataset collate "+config_paths=[{test_config._dir_path}/configs/{server_type_name}.yaml]" \\
     +output_dirpath=data/{server_type_name} \\
     +mode=example_validation
 ```
@@ -551,10 +482,10 @@ Your commands should look something like:
 # Server spinup
 example_multi_step_config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
 resources_servers/example_multi_step/configs/example_multi_step.yaml"
-ng_run "+config_paths=[${{example_multi_step_config_paths}}]"
+gym env start "+config_paths=[${{example_multi_step_config_paths}}]"
 
 # Collect the rollouts
-ng_collect_rollouts +agent_name=example_multi_step_simple_agent \
+gym eval run --no-serve +agent_name=example_multi_step_simple_agent \
     +input_jsonl_fpath=resources_servers/example_multi_step/data/example.jsonl \
     +output_jsonl_fpath=resources_servers/example_multi_step/data/example_rollouts.jsonl \
     +limit=null
@@ -606,7 +537,7 @@ class TestAllConfig(BaseNeMoGymCLIConfig):
     Examples:
 
     ```bash
-    ng_test_all
+    gym env test
     ```
     """
 
@@ -694,7 +625,7 @@ def test_all():  # pragma: no cover
             case _:
                 raise ValueError(
                     f"""Hit unrecognized exit code {return_code} while running tests for {dir_path}.
-You can rerun just these tests using `ng_test +entrypoint={dir_path}` or run detailed tests via `cd {dir_path} && source .venv/bin/activate && pytest`."""
+You can rerun just these tests using `gym env test +entrypoint={dir_path}` or run detailed tests via `cd {dir_path} && source .venv/bin/activate && pytest`."""
                 )
 
         try:
@@ -733,13 +664,13 @@ Data validation failed {_format_pct(len(data_validation_failed), len(dir_paths))
     if tests_failed or tests_missing:
         print(f"""You can rerun just the server with failed or missing tests like:
 ```bash
-ng_test +entrypoint={(tests_failed + tests_missing)[0]}
+gym env test +entrypoint={(tests_failed + tests_missing)[0]}
 ```
 """)
     if data_validation_failed:
         print(f"""You can rerun just the server with failed data validation like:
 ```bash
-ng_test +entrypoint={data_validation_failed[0]} +should_validate_data=true
+gym env test +entrypoint={data_validation_failed[0]} +should_validate_data=true
 ```
 """)
 
@@ -757,24 +688,6 @@ Extra candidate paths:{_display_list_of_paths(extra_candidates)}"""
         exit(1)
 
 
-def dev_test():  # pragma: no cover
-    """
-    Run core NeMo Gym tests with coverage reporting (runs pytest with --cov flag).
-
-    Examples:
-
-    ```bash
-    ng_dev_test
-    ```
-    """
-    global_config_dict = get_global_config_dict()
-    # Just here for help
-    BaseNeMoGymCLIConfig.model_validate(global_config_dict)
-
-    proc = Popen("pytest --cov=. --durations=10", shell=True)
-    exit(proc.wait())
-
-
 def init_resources_server():  # pragma: no cover
     """
     Initialize a new resources server with template files and directory structure.
@@ -782,7 +695,7 @@ def init_resources_server():  # pragma: no cover
     Examples:
 
     ```bash
-    ng_init_resources_server +entrypoint=resources_servers/my_server
+    gym env init +entrypoint=resources_servers/my_server
     ```
     """
     config_dict = get_global_config_dict()
@@ -816,7 +729,7 @@ def init_resources_server():  # pragma: no cover
       verified: false                           # set true once the benchmark has been baselined and reviewed
 
 # Agent server config specifies the agent server to run and any additional components of the environment such as resources servers
-{server_type_name}_simple_agent:               # this agent instance's name — pass as +agent_name= to ng_collect_rollouts
+{server_type_name}_simple_agent:               # this agent instance's name — pass as --agent to gym eval run
   responses_api_agents:
     simple_agent:                               # built-in agent: runs the model with tool calls (up to max_steps); swap for your own agent dir
       entrypoint: app.py
@@ -907,7 +820,7 @@ def dump_config():  # pragma: no cover
     Examples:
 
     ```bash
-    ng_dump_config "+config_paths=[<config1>,<config2>]"
+    gym env resolve "+config_paths=[<config1>,<config2>]"
     ```
     """
     global_config_dict = get_global_config_dict(
@@ -922,39 +835,17 @@ def dump_config():  # pragma: no cover
     print(OmegaConf.to_yaml(global_config_dict, resolve=True))
 
 
-def display_help():
-    """
-    Display a list of available NeMo Gym CLI commands.
-
-    Examples:
-
-    ```bash
-    ng_help
-    ```
-    """
-    global_config_dict = get_global_config_dict()
-    # Just here for help
-    BaseNeMoGymCLIConfig.model_validate(global_config_dict)
-
-    eps = entry_points().select(group="console_scripts")
-    project_scripts = {ep.name: ep.value for ep in eps if ep.name.startswith(("nemo_gym_", "ng_"))}
-    rich.print("""Run a command with `+h=true` or `+help=true` to see more detailed information!
-
-[bold]Available CLI scripts[/bold]
------------------""")
-    for script in project_scripts:
-        if not script.startswith("ng_"):
-            continue
-
-        print(script)
-
-
 def status():  # pragma: no cover
     global_config_dict = get_global_config_dict()
     BaseNeMoGymCLIConfig.model_validate(global_config_dict)
 
     status_cmd = StatusCommand()
     servers = status_cmd.discover_servers()
+
+    if global_config_dict.get(JSON_OUTPUT_KEY_NAME, False):
+        print(json.dumps([server.model_dump(mode="json") for server in servers]))
+        return
+
     status_cmd.display_status(servers)
 
 
@@ -980,7 +871,7 @@ def pip_list():  # pragma: no cover
     if not venv_path.exists():
         print(f"  Virtual environment not found at: {venv_path}")
         print("  Run tests or setup the server first using:")
-        print(f"  ng_test +entrypoint={config.entrypoint}")
+        print(f"  gym env test +entrypoint={config.entrypoint}")
         exit(1)
 
     pip_list_cmd = "uv pip list"
@@ -1000,93 +891,3 @@ def pip_list():  # pragma: no cover
     proc = run_command(command, dir_path)
     return_code = proc.wait()
     exit(return_code)
-
-
-class VersionConfig(BaseNeMoGymCLIConfig):
-    """
-    Display gym version and system information.
-
-    Examples:
-
-    ```bash
-    # Display version information
-    ng_version
-
-    # Output as JSON
-    ng_version +json=true
-    ```
-    """
-
-    json_format: bool = Field(default=False, alias="json", description="Output in JSON format for programmatic use.")
-
-
-def version():  # pragma: no cover
-    """Display gym version and system information."""
-    global_config_dict = get_global_config_dict()
-    config = VersionConfig.model_validate(global_config_dict)
-
-    json_output = config.json_format
-
-    version_info = {
-        "nemo_gym": __version__,
-        "python": platform.python_version(),
-        "python_path": sys.executable,
-        "installation_path": str(PARENT_DIR),
-    }
-
-    key_deps = [
-        "openai",
-        "ray",
-    ]
-
-    dependencies = {dep: md_version(dep) for dep in key_deps}
-
-    version_info["dependencies"] = dependencies
-
-    # System info
-    version_info["system"] = {
-        "os": f"{platform.system()} {platform.release()}",
-        "platform": platform.platform(),
-        "architecture": platform.machine(),
-        "processor": platform.processor() or "unknown",
-        "cpus": os.cpu_count(),
-    }
-
-    # Memory info
-    mem = psutil.virtual_memory()
-    version_info["system"]["memory_gb"] = round(mem.total / (1024**3), 2)
-
-    # Output
-    if json_output:
-        print(json.dumps(version_info))
-    else:
-        output = f"""\
-NeMo Gym v{version_info["nemo_gym"]}
-Python {version_info["python"]} ({version_info["python_path"]})
-Installation: {version_info["installation_path"]}"""
-
-        if "dependencies" in version_info:
-            deps_lines = "\n".join(f"  {dep}: {ver}" for dep, ver in version_info["dependencies"].items())
-            sys_info = version_info["system"]
-            output += f"""
-
-Key Dependencies:
-{deps_lines}
-
-System:
-  OS: {sys_info["os"]}
-  Platform: {sys_info["platform"]}
-  Architecture: {sys_info["architecture"]}
-  Processor: {sys_info["processor"]}
-  CPUs: {sys_info["cpus"]}
-  Memory: {sys_info["memory_gb"]} GB"""
-
-        print(output)
-
-
-def reinstall():  # pragma: no cover
-    global_config_dict = get_global_config_dict()
-    # Just here for help
-    BaseNeMoGymCLIConfig.model_validate(global_config_dict)
-
-    Popen("uv sync --extra dev --group docs", shell=True).communicate()

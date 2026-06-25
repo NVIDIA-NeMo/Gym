@@ -156,7 +156,7 @@ class UploadJsonlDatasetGitlabConfig(BaseNeMoGymCLIConfig):
     Examples:
 
     ```bash
-    ng_upload_dataset_to_gitlab \
+    gym dataset upload --storage gitlab \
         +dataset_name=example_multi_step \
         +version=0.0.1 \
         +input_jsonl_fpath=data/train.jsonl
@@ -181,7 +181,7 @@ class DownloadJsonlDatasetGitlabConfig(JsonlDatasetGitlabIdentifer, BaseNeMoGymC
     Examples:
 
     ```bash
-    ng_download_dataset_from_gitlab \
+    gym dataset download --storage gitlab \
         +dataset_name=example_multi_step \
         +version=0.0.1 \
         +artifact_fpath=train.jsonl \
@@ -202,7 +202,7 @@ class DeleteJsonlDatasetGitlabConfig(BaseNeMoGymCLIConfig):
     Examples:
 
     ```bash
-    ng_delete_dataset_from_gitlab +dataset_name=old_dataset
+    gym dataset rm +dataset_name=old_dataset
     ```
     """
 
@@ -225,7 +225,7 @@ class BaseUploadJsonlDatasetHuggingFaceConfig(BaseNeMoGymCLIConfig):
 
     ```bash
     resource_config_path="resources_servers/example_multi_step/configs/example_multi_step.yaml"
-    ng_upload_dataset_to_hf \
+    gym dataset upload \
         +dataset_name=my_dataset \
         +input_jsonl_fpath=data/train.jsonl \
         +resource_config_path=${resource_config_path}
@@ -272,13 +272,13 @@ class UploadJsonlDatasetHuggingFaceConfig(BaseUploadJsonlDatasetHuggingFaceConfi
     Upload a JSONL dataset to HuggingFace Hub and automatically delete from GitLab after successful upload.
 
     This command always deletes the dataset from GitLab after uploading to HuggingFace.
-    Use `ng_upload_dataset_to_hf` if you want optional deletion control.
+    Use `gym dataset upload` if you want optional deletion control.
 
     Examples:
 
     ```bash
     resource_config_path="resources_servers/example_multi_step/configs/example_multi_step.yaml"
-    ng_gitlab_to_hf_dataset \
+    gym dataset migrate \
         +dataset_name=my_dataset \
         +input_jsonl_fpath=data/train.jsonl \
         +resource_config_path=${resource_config_path}
@@ -304,7 +304,7 @@ class UploadJsonlDatasetHuggingFaceMaybeDeleteConfig(BaseUploadJsonlDatasetHuggi
 
     ```bash
     resource_config_path="resources_servers/example_multi_step/configs/example_multi_step.yaml"
-    ng_upload_dataset_to_hf \
+    gym dataset upload \
         +dataset_name=my_dataset \
         +input_jsonl_fpath=data/train.jsonl \
         +resource_config_path=${resource_config_path} \
@@ -324,7 +324,7 @@ class DownloadJsonlDatasetHuggingFaceConfig(JsonlDatasetHuggingFaceIdentifer, Ba
     Examples:
 
     ```bash
-    ng_download_dataset_from_hf \
+    gym dataset download \
         +repo_id=NVIDIA/NeMo-Gym-Math-example_multi_step-v1 \
         +artifact_fpath=train.jsonl \
         +output_fpath=data/train.jsonl
