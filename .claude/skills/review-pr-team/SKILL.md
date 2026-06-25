@@ -16,6 +16,8 @@ allowed-tools:
   - Glob
   - Grep
   - Agent
+  - TeamCreate
+  - TeamDelete
   - SendMessage
   - TaskCreate
   - TaskList
@@ -37,13 +39,37 @@ Review a pull request using a coordinated team of specialized agents.
 
 ## Coordination model (this harness)
 
-This environment does **not** have `TeamCreate`/`TeamDelete`. Coordinate like this:
+### Side-panel layout (preferred when available)
+
+If `TeamCreate` appears in your available tools, use it — each teammate opens in its
+own tmux pane, giving the user a side-panel view with the leader on the left and
+agents on the right.
+
+**Requirements** (already configured in this repo's `.claude/settings.json`):
+```json
+{ "enableExperimentalFeatures": { "agentTeams": true }, "teammateMode": "tmux" }
+```
+
+With `TeamCreate` available:
+
+- **Spawn** each Wave 1 agent with `TeamCreate` (one call per agent). Each teammate
+  appears in its own pane. Pass the full prompt as the `initialMessage`.
+- **Communicate** with running teammates via `SendMessage` (by name or ID).
+- **Tear down** teammates after collation with `TeamDelete` (see Phase 7).
+- Agent findings arrive via `SendMessage` from the teammate back to the leader.
+
+### Background-task fallback (when TeamCreate is unavailable)
+
+If `TeamCreate` is NOT in your tool list, fall back to the `Agent` tool:
 
 - **Spawn** each wave-1 agent with the `Agent` tool using `run_in_background: true`
   and a stable `description`/name. You are notified when each finishes; its final
   message is the agent's findings (returned to you, not shown to the user).
 - **Continue / question** an already-spawned agent with `SendMessage` addressed to
   that agent's ID or name — its context is preserved.
+
+### Common to both modes
+
 - Use `TaskCreate` / `TaskUpdate` / `TaskList` to maintain a shared, visible task
   list so the user can follow progress. The leader (you) owns orchestration; agents
   do NOT poll — they report back on completion and you push follow-ups.
@@ -238,8 +264,13 @@ Set `challenge-findings` blockedBy all Wave 1 task IDs; `collate-review` blocked
 
 ### 2.2 Spawn agents
 
-Spawn all Wave 1 agents in a single message with multiple `Agent` calls
-(`run_in_background: true`, `subagent_type: "general-purpose"`), each with a unique name.
+**If `TeamCreate` is available** (side-panel mode): call `TeamCreate` once per agent,
+passing the full agent prompt as `initialMessage` and a short unique `name`. Each
+teammate opens in its own tmux pane. Spawn all Wave 1 agents before proceeding.
+
+**If `TeamCreate` is unavailable** (fallback): spawn all Wave 1 agents in a single
+message with multiple `Agent` calls (`run_in_background: true`,
+`subagent_type: "general-purpose"`), each with a unique `description`/name.
 
 ---
 
@@ -751,12 +782,17 @@ results for user review before posting as a PR comment.
 
 ## Phase 7: Teardown
 
-Send shutdown to each agent individually:
+**If `TeamCreate` was used**: call `TeamDelete` for each teammate by name/ID to close
+their panes. Then clean up the local review branch if the user wants:
+```bash
+git checkout $BASE_BRANCH && git branch -D pr-$PRNUM-team-review
+```
+
+**If `Agent` fallback was used**: send shutdown to each agent individually:
 ```
 SendMessage(to="<agent-name>", message={"type": "shutdown_request"})
 ```
-After all confirm, stop any remaining background tasks with `TaskStop` and clean up the
-local review branch if the user wants:
+After all confirm, stop any remaining background tasks with `TaskStop` and clean up:
 ```bash
 git checkout $BASE_BRANCH && git branch -D pr-$PRNUM-team-review
 ```
