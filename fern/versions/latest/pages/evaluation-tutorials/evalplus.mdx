@@ -1,0 +1,127 @@
+---
+title: "Evaluate EvalPlus"
+description: "Run the EvalPlus coding benchmark and inspect rollout and aggregate metric outputs."
+position: 2
+---
+
+EvalPlus evaluates Python function-completion ability. NeMo Gym's `evalplus` resources server sends HumanEval+ or MBPP+ prompts to an agent, extracts the model's Python code, runs EvalPlus base and plus tests, and returns reward and verdict fields for each task.
+
+Use this tutorial for a small, reproducible coding evaluation before scaling to a larger benchmark run.
+
+## What This Tutorial Runs
+
+This walkthrough uses:
+
+| Component | Value |
+|---|---|
+| Benchmark resources server | `resources_servers/evalplus` |
+| Config | `resources_servers/evalplus/configs/evalplus.yaml` |
+| Agent | `evalplus_simple_agent` |
+| Dataset | `resources_servers/evalplus/data/example.jsonl` |
+| Tasks | 5 HumanEval examples |
+| Main reward | `1.0` when the generated code passes EvalPlus plus tests |
+
+The config currently selects `dataset: humaneval`. The same resources server also supports MBPP+ through the `dataset` field.
+
+## Prerequisites
+
+Complete [Installation](/get-started/installation) and configure a model endpoint as shown in [Quickstart](/get-started/quickstart).
+
+EvalPlus executes generated Python code in the verifier. Run this tutorial in an environment where code execution is expected and isolated per the team's policy.
+
+<Note>
+
+When using a thinking model with vLLM, start vLLM with the appropriate reasoning parser so `<think>...</think>` text is stripped before EvalPlus extracts code.
+
+</Note>
+
+## Start Servers
+
+Run from the repository root:
+
+```bash
+environment_config="resources_servers/evalplus/configs/evalplus.yaml"
+model_config="responses_api_models/openai_model/configs/openai_model.yaml"
+
+ng_run "+config_paths=[${environment_config},${model_config}]"
+```
+
+This starts:
+
+- `evalplus`, the resources server
+- `evalplus_simple_agent`, the agent server
+- `policy_model`, the model server
+
+To use vLLM instead of the OpenAI-compatible model wrapper, switch `model_config`:
+
+```bash
+model_config="responses_api_models/vllm_model/configs/vllm_model.yaml"
+```
+
+## Collect Rollouts
+
+In a second terminal, activate the NeMo Gym environment and collect a five-task smoke test:
+
+```bash
+source .venv/bin/activate
+mkdir -p results
+
+ng_collect_rollouts \
+    +agent_name=evalplus_simple_agent \
+    +input_jsonl_fpath=resources_servers/evalplus/data/example.jsonl \
+    +output_jsonl_fpath=results/evalplus_rollouts.jsonl \
+    +limit=5 \
+    +num_repeats=1
+```
+
+This writes the rollout file and sidecar artifacts under `results/`, including:
+
+- `results/evalplus_rollouts.jsonl`
+- `results/evalplus_rollouts_materialized_inputs.jsonl`
+- `results/evalplus_rollouts_aggregate_metrics.json`
+
+## Inspect Rollouts
+
+Each rollout row contains the model response, extracted code, verifier verdicts, and reward. The most useful fields are:
+
+| Field | Meaning |
+|---|---|
+| `extracted_model_code` | Python code EvalPlus extracted from the model response. |
+| `base_status` | Whether the code passed the base HumanEval or MBPP tests. |
+| `plus_status` | Whether the code passed EvalPlus extra tests. |
+| `is_correct` | Boolean base-test verdict. |
+| `is_correct_plus` | Boolean plus-test verdict. |
+| `reward` | `1.0` when plus tests pass, otherwise `0.0`. |
+
+Use the rollout JSONL to debug individual failures. For example, compare `extracted_model_code` with the prompt in `responses_create_params.input` and the verifier verdicts.
+
+## Read Aggregate Metrics
+
+Use the aggregate metrics file for the top-level scorecard:
+
+```bash
+cat results/evalplus_rollouts_aggregate_metrics.json
+```
+
+For EvalPlus, compare base-test and plus-test metrics. A model can pass the base tests while failing the stricter plus tests, so treat plus-test performance as the stricter headline metric.
+
+## Scale the Run
+
+After the smoke test succeeds:
+
+1. Remove `+limit=5` to run the configured dataset.
+2. Increase `+num_repeats` for stochastic models.
+3. Keep the model, agent, dataset, sampling settings, and EvalPlus config fixed when comparing models.
+4. Save rollout JSONL, aggregate metrics, model ID, config files, and git SHA with the run notes.
+
+<Cards>
+
+<Card title="Aggregate Metrics" href="/evaluation/aggregate-metrics">
+Understand the `_aggregate_metrics.json` format.
+</Card>
+
+<Card title="Environment List" href="/evaluation/environment-list">
+Find other Eval benchmarks.
+</Card>
+
+</Cards>
