@@ -40,10 +40,15 @@ When using a thinking model with vLLM, start vLLM with the appropriate reasoning
 Run from the repository root:
 
 ```bash
-environment_config="resources_servers/evalplus/configs/evalplus.yaml"
-model_config="responses_api_models/openai_model/configs/openai_model.yaml"
+: "${NVIDIA_API_KEY:?Set NVIDIA_API_KEY before running this tutorial.}"
 
-ng_run "+config_paths=[${environment_config},${model_config}]"
+gym env start \
+    --resources-server evalplus \
+    --model-type vllm_model \
+    --model-url "https://integrate.api.nvidia.com/v1" \
+    --model "mistralai/mistral-medium-3.5-128b" \
+    '+policy_api_key=${oc.env:NVIDIA_API_KEY}' \
+    +policy_model.responses_api_models.vllm_model.uses_reasoning_parser=false
 ```
 
 This starts:
@@ -52,10 +57,16 @@ This starts:
 - `evalplus_simple_agent`, the agent server
 - `policy_model`, the model server
 
-To use vLLM instead of the OpenAI-compatible model wrapper, switch `model_config`:
+This example uses `vllm_model` as a Responses API to Chat Completions bridge against NVIDIA's OpenAI-compatible endpoint. To use an external vLLM server instead, point the same model wrapper at your vLLM endpoint:
 
 ```bash
-model_config="responses_api_models/vllm_model/configs/vllm_model.yaml"
+gym env start \
+    --resources-server evalplus \
+    --model-type vllm_model \
+    --model-url "http://0.0.0.0:10240/v1" \
+    --model-api-key "dummy_key" \
+    --model "<served-model-name>" \
+    +policy_model.responses_api_models.vllm_model.uses_reasoning_parser=false
 ```
 
 ## How Evaluation Works
@@ -66,7 +77,7 @@ The `evalplus` resources server contains the evaluation logic. During rollout co
 2. Runs it against EvalPlus base and plus tests via `check_correctness_remote`
 3. Returns `is_correct` (base tests), `is_correct_plus` (plus tests), and `reward=1.0` if plus tests pass
 
-`ng_collect_rollouts` then aggregates these per-task results into `pass@k` and `majority@k` metrics in `_aggregate_metrics.json`.
+`gym eval run --no-serve` then aggregates these per-task results into `pass@k` and `majority@k` metrics in `_aggregate_metrics.json`.
 
 Evaluation is not a separate step — it happens inside the resources server during rollout collection.
 
@@ -78,12 +89,12 @@ In a second terminal, activate the NeMo Gym environment and collect a five-task 
 source .venv/bin/activate
 mkdir -p results
 
-ng_collect_rollouts \
-    +agent_name=evalplus_simple_agent \
-    +input_jsonl_fpath=resources_servers/evalplus/data/example.jsonl \
-    +output_jsonl_fpath=results/evalplus_rollouts.jsonl \
-    +limit=5 \
-    +num_repeats=1
+gym eval run --no-serve \
+    --agent evalplus_simple_agent \
+    --input resources_servers/evalplus/data/example.jsonl \
+    --output results/evalplus_rollouts.jsonl \
+    --limit 5 \
+    --num-repeats 1
 ```
 
 This writes the rollout file and sidecar artifacts under `results/`, including:
@@ -128,7 +139,7 @@ The same setup works for evaluating an agent harness. Swap `evalplus_simple_agen
 | Model coding ability | `evalplus_simple_agent` (passthrough) |
 | Agent harness quality | Any agent wired to the `evalplus` resources server |
 
-The same `ng_collect_rollouts` command works in both cases — what changes is what the score reflects.
+The same `gym eval run --no-serve` command works in both cases — what changes is what the score reflects.
 
 ## Scale the Run
 

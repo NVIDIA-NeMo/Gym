@@ -186,7 +186,8 @@ After validation passes, run local proxy calibration:
 uv run python "${tool}" calibrate \
   --golden-report "${benchmark_dir}/golden_reports/model_a_golden_report.md" \
   --anchor-facts "${benchmark_dir}/golden_reports/model_a_anchor_facts.json" \
-  --shallow-report "${benchmark_dir}/golden_reports/model_a_shallow.md"
+  --shallow-report "${benchmark_dir}/golden_reports/model_a_shallow.md" \
+  --output-dir "${benchmark_dir}/golden_reports/calibration"
 ```
 
 The local proxy is a public fallback, not a replacement for official BLADE scoring when that infrastructure is available. Treat failures as review signals: weak anchor facts, shallow report too close to golden, missing evidence, or report sections that need more diagnostic detail.
