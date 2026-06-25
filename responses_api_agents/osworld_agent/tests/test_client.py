@@ -351,3 +351,40 @@ def test_pointer_optional_parallel_patch_removes_web_tools(monkeypatch) -> None:
     assert gate_module._TOOL_DISPATCH == {"probe_bash": gate_module._TOOL_DISPATCH["probe_bash"]}
     assert [tool.schema["name"] for tool in planner_module.PLANNER_TOOLS] == ["submit_plan"]
     assert planner_module._TOOL_DISPATCH == {"submit_plan": planner_module._TOOL_DISPATCH["submit_plan"]}
+
+
+def test_pointer_config_sync_uses_anthropic_provider_for_policy_endpoint(monkeypatch) -> None:
+    class FakeAPIProvider:
+        ANTHROPIC = "anthropic"
+        BEDROCK = "bedrock"
+
+    class FakePointerConfig:
+        provider = FakeAPIProvider.BEDROCK
+        executor_model = "claude-opus-4-7"
+        gate_model = "claude-sonnet-4-6"
+        planner_model = "claude-sonnet-4-6"
+        verifier_model = "claude-sonnet-4-6"
+        summarization_model = "claude-haiku-4-5"
+
+    config_module = ModuleType("mm_agents.pointer.config")
+    utils_module = ModuleType("mm_agents.pointer.utils")
+    config_module.config = FakePointerConfig()
+    utils_module.APIProvider = FakeAPIProvider
+
+    monkeypatch.setitem(sys.modules, "mm_agents.pointer.config", config_module)
+    monkeypatch.setitem(sys.modules, "mm_agents.pointer.utils", utils_module)
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://inference-api.nvidia.com")
+    monkeypatch.setenv("POINTER_GATE_AGENT_MODEL", "azure/anthropic/claude-sonnet-4-6")
+    monkeypatch.setenv("POINTER_PLANNER_AGENT_MODEL", "azure/anthropic/claude-sonnet-4-6")
+    monkeypatch.setenv("POINTER_VERIFIER_AGENT_MODEL", "azure/anthropic/claude-sonnet-4-6")
+    monkeypatch.setenv("POINTER_SUMMARIZATION_MODEL", "azure/anthropic/claude-haiku-4-5")
+
+    osworld_client._sync_pointer_config("azure/anthropic/claude-opus-4-7")
+
+    pointer_config = config_module.config
+    assert pointer_config.provider == FakeAPIProvider.ANTHROPIC
+    assert pointer_config.executor_model == "azure/anthropic/claude-opus-4-7"
+    assert pointer_config.gate_model == "azure/anthropic/claude-sonnet-4-6"
+    assert pointer_config.planner_model == "azure/anthropic/claude-sonnet-4-6"
+    assert pointer_config.verifier_model == "azure/anthropic/claude-sonnet-4-6"
+    assert pointer_config.summarization_model == "azure/anthropic/claude-haiku-4-5"
