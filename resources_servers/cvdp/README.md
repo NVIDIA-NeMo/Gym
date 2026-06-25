@@ -1,4 +1,4 @@
-# CVDP Benchmark 
+# CVDP Benchmark
 
 This resources server is for model evaluation purposes. It is reproducing [CVDP](https://github.com/NVlabs/cvdp_benchmark).
 
@@ -14,29 +14,114 @@ JSONL entry so the server is self-contained.
 
 Mirrors `repository.py` in the [CVDP source](https://github.com/NVlabs/cvdp_benchmark):
 
-1. Parse model response via `ModelHelpers.parse_model_response()`
+1. Obtain the candidate RTL: grade the files the agent wrote on disk (`rtl_files` in the verify request, agentic flow) when present, otherwise parse the model's text response via `ModelHelpers.parse_model_response()`
 2. Write harness files to temp workspace — applies image placeholder substitutions
 3. Write extracted RTL to `workdir/rtl/`
-4. For each service in `docker-compose.yml`, pull the Docker image as a cached SIF file and run via `apptainer exec` with `--bind` mounts for `rtl/`, `verif/`, `docs/`, `src/`, `rundir/`
+4. For each service in `docker-compose.yml`, pull the Docker image as a cached SIF file and run it through the Apptainer sandbox provider (`instance start` + `exec`) with `--bind` mounts for `rtl/`, `verif/`, `docs/`, `src/`, `rundir/`
 5. Exit code `0` across all services → reward `1.0`; any failure → reward `0.0`
+
+Code layout: `app.py` owns the HTTP `verify` contract and reward scoring; the sandbox execution (docker-compose → Apptainer translation, SIF cache, provider lifecycle) lives in `harness.py`'s `HarnessRunner`.
+
+> **Note:** Both the verification harness here and the agentic agent share the same `ApptainerProvider`. Because `apptainer instance start` launches a long-lived instance, the provider starts it in "daemonize" mode (captures output to temp files and waits only for the foreground process) so the call returns immediately instead of blocking until the instance exits. This is internal to `create()` — nothing to configure here. See the [provider README](../../nemo_gym/sandbox/providers/apptainer/README.md#why-create-runs-instance-start-in-daemonize-mode).
 
 ## Configuration
 
 
-| Field                     | Default                 | Description                                                                                       |
-| ------------------------- | ----------------------- | ------------------------------------------------------------------------------------------------- |
-| `oss_sim_image`           | `ghcr.io/hdl/sim/osvb`  | Container image for open-source simulation (Icarus)                                               |
-| `oss_pnr_image`           | `""`                    | Container image for place-and-route problems                                                      |
-| `eda_sim_image`           | `""`                    | Commercial EDA image (Cadence Xcelium etc.)                                                       |
-| `container_timeout`       | `600`                   | Seconds before an Apptainer run is killed                                                         |
-| `num_processes`           | `4`                     | Max concurrent Apptainer jobs                                                                     |
-| `sif_cache_dir`           | `~/.cache/nemo-gym/sif` | Directory for cached SIF images pulled from Docker registries                                     |
-| `harness_workspace_dir`   | `""`                    | Optional host directory where per-rollout temp workspaces are created (default: system temp)      |
+| Field                     | Default                 | Description                                                                                                                                                                                                                                                            |
+| ------------------------- | ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `oss_sim_image`           | `ghcr.io/hdl/sim/osvb`  | Container image for open-source simulation (Icarus)                                                                                                                                                                                                                    |
+| `oss_pnr_image`           | `""`                    | Container image for place-and-route problems                                                                                                                                                                                                                           |
+| `eda_sim_image`           | `""`                    | Commercial EDA image (Cadence Xcelium etc.)                                                                                                                                                                                                                            |
+| `container_timeout`       | `600`                   | Seconds before an Apptainer run is killed                                                                                                                                                                                                                              |
+| `num_processes`           | `4`                     | Max concurrent Apptainer jobs                                                                                                                                                                                                                                          |
+| `sif_cache_dir`           | `~/.cache/nemo-gym/sif` | Directory for cached SIF images pulled from Docker registries                                                                                                                                                                                                          |
+| `harness_workspace_dir`   | `""`                    | Optional host directory where per-rollout temp workspaces are created (default: system temp)                                                                                                                                                                           |
 | `container_tmp_bind_path` | `""`                    | If set, redirects in-container temp (e.g. `/tmp`) to per-rollout host storage and forces temp env vars (`TMPDIR`, `XCELIUM_TMPDIR`, `CDS_LOCK`, `JAVA_TOOL_OPTIONS`) — useful when default `/tmp` is too small or tools (Cadence/Java) write large temp/lock artifacts |
 
+
 **Note**: To run the commercial subset, pass the EDA image name in the yaml config file (/scratch/artij/Gym/resources_servers/cvdp/configs/cvdp.yaml).
+
 ```
 eda_sim_image: cvdp-cadence-verif:latest
+```
+
+## Agents
+
+There are two ways to drive this resources server:
+
+- **Non-agentic** (`cvdp_agent`, `responses_api_agents/cvdp_agent/app.py`, config `configs/cvdp_agent.yaml`): the model emits the RTL directly in its text response; the server parses it out and runs the harness.
+- **Agentic** (`cvdp_agent_agentic`, `responses_api_agents/cvdp_agent/agentic_app.py`, config `configs/cvdp_agent_agentic.yaml`): runs Claude Code **inside** the EDA sim container so it can edit files on disk and self-test with the in-container EDA tools, then reports the files it wrote back to the server as `rtl_files` for grading. See `[responses_api_agents/cvdp_agent/](../../responses_api_agents/cvdp_agent/)`.
+
+### Agentic agent settings (`configs/cvdp_agent_agentic.yaml`)
+
+
+| Field                | Default                   | Description                                                                                    |
+| -------------------- | ------------------------- | ---------------------------------------------------------------------------------------------- |
+| `model`              | `${anthropic_model_name}` | Claude model used inside the container                                                         |
+| `anthropic_api_key`  | `${anthropic_api_key}`    | API key for Claude (set via env.yaml)                                                          |
+| `anthropic_base_url` | `${anthropic_base_url}`   | Anthropic-compatible endpoint                                                                  |
+| `sim_image`          | `nvidia/cvdp-sim:v1.0.0`  | EDA sim image Claude runs inside (pulled/converted to a cached `.sif`)                         |
+| `sif_path`           | `null`                    | Explicit `.sif` to use instead of pulling `sim_image`                                          |
+| `sif_cache_dir`      | `""`                      | SIF cache dir (defaults to `~/.cache/nemo-gym/sif`)                                            |
+| `claude_node_dir`    | `""`                      | Host Node+Claude prefix to bind into the container (defaults to a built-in self-contained one) |
+| `container_workdir`  | `/code`                   | Workspace mount point + cwd + `HOME` inside the container                                      |
+| `max_turns`          | `30`                      | Max Claude Code turns                                                                          |
+| `timeout`            | `900`                     | Per-task wall-clock budget (seconds)                                                           |
+| `concurrency`        | `4`                       | Max concurrent agent runs                                                                      |
+| `max_context_tokens` | `1000000`                 | Sets `CLAUDE_CODE_MAX_CONTEXT_TOKENS` inside the container                                     |
+
+
+`system_prompt`, `allowed_tools`, `disallowed_tools`, and `claude_code_version` are inherited Claude Code knobs (leave `null` for defaults).
+
+Add the Claude settings to your repo-root `env.yaml`:
+
+```yaml
+anthropic_model_name: <claude-model>
+anthropic_api_key: <your-api-key>
+anthropic_base_url: https://api.anthropic.com
+```
+
+To run the agentic variant, swap the agent config in and target the agent by name (no separate model server — the agent calls Claude itself):
+
+```bash
+ng_run "+config_paths=[resources_servers/cvdp/configs/cvdp.yaml,responses_api_agents/cvdp_agent/configs/cvdp_agent_agentic.yaml]"
+
+ng_collect_rollouts \
+    +agent_name=cvdp_agent_agentic \
+    +input_jsonl_fpath=resources_servers/cvdp/data/<dataset>.jsonl \
+    +output_jsonl_fpath=results/rollouts.jsonl \
+    +num_repeats=5 \
+    +num_samples_in_parallel=4 \
+    "+config_paths=[resources_servers/cvdp/configs/cvdp.yaml,responses_api_agents/cvdp_agent/configs/cvdp_agent_agentic.yaml]"
+```
+
+## Build the Open-Source Simulation Image
+
+If you're using the CVDP v1.1.0 data (e.g. `data/example_agentic.jsonl`), build the open-source
+simulation image **once** before collecting rollouts. CVDP v1.1.0 uses a dedicated open-source
+simulation image for non-commercial simulation tasks:
+
+```bash
+cd /path/to/cvdp_benchmark
+docker build -f docker/Dockerfile.sim -t nvidia/cvdp-sim:v1.0.0 .
+```
+
+This image provides the default `OSS_SIM_IMAGE` environment used by dataset harnesses via
+`__OSS_SIM_IMAGE__`. CVDP v1.1.0 no longer uses the legacy third-party simulation images for this
+default open-source simulation flow. The build includes cocotb 2.0.1, pytest 8.3.2, Icarus Verilog
+v13_0, Yosys yosys-0.40, and Verilator v5.038.
+
+If you tag the image differently, set the matching value in `.env`:
+
+```bash
+OSS_SIM_IMAGE=nvidia/cvdp-sim:v1.0.0
+```
+
+Open-source place-and-route tasks still use the separate `OSS_PNR_IMAGE` setting, but in CVDP
+v1.1.0 its default points at the same `nvidia/cvdp-sim:v1.0.0` image:
+
+```bash
+OSS_PNR_IMAGE=nvidia/cvdp-sim:v1.0.0
 ```
 
 ## Download Dataset
@@ -113,6 +198,7 @@ pre-commit install
 ```
 
 To install apptainer:
+
 ```bash
 wget https://github.com/apptainer/apptainer/releases/download/v1.3.1/apptainer_1.3.1_amd64.deb                                               
 apt install -y ./apptainer_1.3.1_amd64.deb 
@@ -123,7 +209,7 @@ apt install -y ./apptainer_1.3.1_amd64.deb
 ### Step 1 — Start servers
 
 ```bash
-ng_run "+config_paths=[resources_servers/cvdp/configs/cvdp.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
+ng_run "+config_paths=[resources_servers/cvdp/configs/cvdp.yaml,responses_api_agents/cvdp_agent/configs/cvdp_agent.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
 ```
 
 ### Step 2 — Run rollout collection
@@ -138,7 +224,7 @@ ng_collect_rollouts \
     +num_repeats=5 \
     +num_samples_in_parallel=4 \
     "+responses_create_params={max_output_tokens: 4096, temperature: 0.2, top_p: 0.7}" \
-    "+config_paths=[resources_servers/cvdp/configs/cvdp.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
+    "+config_paths=[resources_servers/cvdp/configs/cvdp.yaml,responses_api_agents/cvdp_agent/configs/cvdp_agent.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
     "+resume_from_cache=True"
 ```
 
