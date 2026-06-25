@@ -1,0 +1,28 @@
+# MRCR — Nemotron-3-Super 128k-context variant.
+# Same data + grading as `config.yaml`, but `prepare_n3_128k.py` counts
+# tokens with the Nemotron-3-Super HF tokenizer and drops samples whose
+# tokenized conversation exceeds 131072 tokens.
+config_paths:
+  - resources_servers/mrcr/configs/mrcr.yaml
+
+mrcr_n3_128k_benchmark_resources_server:
+  _inherit_from: mrcr_resources_server
+
+mrcr_n3_128k_benchmark_simple_agent:
+  _inherit_from: mrcr_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: mrcr_n3_128k_benchmark_resources_server
+      datasets:
+      - name: mrcr_n3_128k
+        type: benchmark
+        jsonl_fpath: benchmarks/mrcr/data/mrcr_n3_128k_benchmark.jsonl
+        prompt_config: null
+        prepare_script: benchmarks/mrcr/prepare_n3_128k.py
+        # Rollouts per task for pass@k variance.
+        # NOTE: for `type: benchmark` datasets, `num_repeats` here is a
+        # placeholder — it only triggers row duplication for
+        # `type: train`/`validation`. To actually get N rollouts per task,
+        # pass `+num_repeats=N` on the `ng_collect_rollouts` CLI.
+        num_repeats: 1

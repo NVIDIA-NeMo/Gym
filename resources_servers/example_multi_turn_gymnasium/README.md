@@ -15,14 +15,16 @@ Example data provided in `data/example.jsonl`.
 ## Run
 
 ```bash
-ng_run "+config_paths=[resources_servers/example_multi_turn_gymnasium/configs/example_multi_turn_gymnasium.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
+gym env start \
+    --resources-server example_multi_turn_gymnasium \
+    --model-type vllm_model
 ```
 
 ## Collect rollouts
 
 ```bash
-ng_collect_rollouts \
-    +agent_name=example_multi_turn_gymnasium_agent \
-    +input_jsonl_fpath=resources_servers/example_multi_turn_gymnasium/data/example.jsonl \
-    +output_jsonl_fpath=results/example_multi_turn_rollouts.jsonl
+gym eval run --no-serve \
+    --agent example_multi_turn_gymnasium_agent \
+    --input resources_servers/example_multi_turn_gymnasium/data/example.jsonl \
+    --output results/example_multi_turn_rollouts.jsonl
 ```

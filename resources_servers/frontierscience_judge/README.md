@@ -1,7 +1,15 @@
 # FrontierScience Judge
 
-Single-pass LLM-judge resource server for free-form science olympiad answer
-grading. Mirrors NeMo Skills' `frontierscience-olympiad` benchmark
+Single-pass LLM-judge resource server for FrontierScience grading. It supports
+two modes:
+
+- `judge_mode: olympiad` for FrontierScience-Olympiad free-form answer
+  equivalence.
+- `judge_mode: research` for FrontierScience-Research 10-point rubric scoring,
+  with `reward = 1.0` when the parsed score is at least
+  `rubric_pass_score_threshold` (`7.0` by default).
+
+The default mode mirrors NeMo Skills' `frontierscience-olympiad` benchmark
 verification pipeline:
 
 - The judge sees the problem, attempted answer, and reference answer in a
@@ -14,26 +22,29 @@ verification pipeline:
   from the [FrontierScience paper](https://cdn.openai.com/pdf/2fcd284c-b468-4c21-8ee0-7a783933efcc/frontierscience-paper.pdf)
   page 13). The path is configurable via `judge_prompt_path` so other
   free-form-grading benchmarks can reuse this server with their own prompt.
+- Research mode uses `prompts/research_judge.yaml`, which asks the judge for
+  `Score: X/10` and `Judgement: YES/NO`.
 
 The judge is invoked once per attempt (no two-order A/B comparison). Output
 fields: `reward` (1.0 if `YES`, else 0.0), `verdict` (`YES`/`NO`/`null`),
 `extracted_answer` (the model's post-thinking text), `judge_output` (the
-judge's full text).
+judge's full text), and in research mode `rubric_score` plus
+`rubric_score_normalized`.
 
 ## Example usage
 
 ```bash
 # Running servers
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
-resources_servers/frontierscience_judge/configs/frontierscience_judge.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --model-type vllm_model \
+    --resources-server frontierscience_judge
 
 # Collecting rollouts (5-example smoke test)
-ng_collect_rollouts \
-    +agent_name=frontierscience_judge_simple_agent \
-    +input_jsonl_fpath=resources_servers/frontierscience_judge/data/example.jsonl \
-    +output_jsonl_fpath=results/frontierscience_judge_rollouts.jsonl \
-    +num_repeats=1
+gym eval run --no-serve \
+    --agent frontierscience_judge_simple_agent \
+    --input resources_servers/frontierscience_judge/data/example.jsonl \
+    --output results/frontierscience_judge_rollouts.jsonl \
+    --num-repeats 1
 ```
 
 The default `judge_model` config points at the public NVIDIA inference

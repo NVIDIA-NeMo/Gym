@@ -47,21 +47,23 @@ The dataset can be found at https://huggingface.co/datasets/nvidia/Nemotron-RL-i
 ### Usage
 
 ```bash
-config_paths="responses_api_agents/simple_agent/configs/simple_agent.yaml,\
-responses_api_models/openai_model/configs/openai_model.yaml,\
-resources_servers/instruction_following/configs/instruction_following.yaml"
-ng_run "+config_paths=[$config_paths]" "+simple_agent.responses_api_agents.simple_agent.resources_server.name=instruction_following"
+gym env start \
+    --config responses_api_agents/simple_agent/configs/simple_agent.yaml \
+    --model-type openai_model \
+    --resources-server instruction_following \
+    +simple_agent.responses_api_agents.simple_agent.resources_server.name=instruction_following
 
-ng_download_dataset_from_gitlab \
-    +dataset_name=instruction_following \
-    +version=0.0.1 \
-    +artifact_fpath=instruction_following.jsonl \
-    +output_fpath=data/instruction_following.jsonl
+gym dataset download --storage gitlab \
+    --name instruction_following \
+    --revision 0.0.1 \
+    --artifact instruction_following.jsonl \
+    --output data/instruction_following.jsonl
 
-ng_collect_rollouts \
-    +agent_name=simple_agent \
-    +input_jsonl_fpath=data/instruction_following.jsonl \
-    +output_jsonl_fpath=data/instruction_following_output.jsonl +limit=5
+gym eval run --no-serve \
+    --agent simple_agent \
+    --input data/instruction_following.jsonl \
+    --output data/instruction_following_output.jsonl \
+    --limit 5
 ```
 
 ### Rollout example
@@ -81,7 +83,7 @@ We run reward profiling with Qwen/Qwen3-30B-A3B-Instruct-2507. We evaluate the m
 ## Testing
 
 ```bash
-ng_test +entrypoint=resources_servers/instruction_following/
+gym env test --resources-server instruction_following
 ```
 
 
