@@ -17,6 +17,7 @@ import asyncio
 import json
 import os
 import shlex
+from functools import wraps
 from glob import glob
 from os import makedirs
 from os.path import exists
@@ -33,18 +34,20 @@ import uvicorn
 from devtools import pprint
 from omegaconf import DictConfig, OmegaConf
 from pydantic import Field
+from rich.markup import escape
 from rich.table import Table
 from tqdm.auto import tqdm
 
 from nemo_gym import PARENT_DIR, ROOT_DIR
 from nemo_gym.cli.setup_command import run_command, setup_env_command
-from nemo_gym.config_types import BaseNeMoGymCLIConfig
+from nemo_gym.config_types import BaseNeMoGymCLIConfig, ConfigError
 from nemo_gym.global_config import (
     DRY_RUN_KEY_NAME,
     JSON_OUTPUT_KEY_NAME,
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
     NEMO_GYM_RESERVED_TOP_LEVEL_KEYS,
+    GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
     get_global_config_dict,
 )
@@ -63,6 +66,26 @@ from nemo_gym.server_utils import (
 _GRACEFUL_SHUTDOWN_TIMEOUT_SEC: int = 1
 # Grace period after SIGKILL for the kernel to reap the child and avoid <defunct> entries.
 _FORCE_KILL_REAP_TIMEOUT_SEC: int = 2
+
+
+def exit_cleanly_on_config_error(fn):
+    """Decorator: turn user-facing ConfigError into a clean message + non-zero exit.
+
+    Config mistakes (missing/typo'd config_paths, malformed config_paths, nothing configured to
+    run) should fail fast with an actionable message, not a Python traceback. Unexpected errors
+    still propagate normally.
+    """
+
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except ConfigError as e:
+            # escape() so '[...]' in the message (e.g. config_paths examples) isn't eaten as rich markup.
+            rich.print(f"[red]Error:[/red] {escape(str(e))}")
+            raise SystemExit(1)
+
+    return wrapper
 
 
 class RunConfig(BaseNeMoGymCLIConfig):
@@ -123,6 +146,10 @@ class RunHelper:  # pragma: no cover
 
     def start(self, global_config_dict_parser_config: GlobalConfigDictParserConfig) -> None:
         global_config_dict = get_global_config_dict(global_config_dict_parser_config=global_config_dict_parser_config)
+
+        # Fail fast before starting Ray if nothing is configured to run (covers env run and the
+        # e2e rollout-collection path, which both start servers via this method).
+        GlobalConfigDictParser().raise_on_no_server_instances(global_config_dict)
 
         # Initialize Ray cluster in the main process
         # Note: This function will modify the global config dict - update `ray_head_node_address`
@@ -392,6 +419,7 @@ rpc_client.h:203: Failed to connect to GCS within 60 seconds. GCS may have been 
         return statuses
 
 
+@exit_cleanly_on_config_error
 def run(
     global_config_dict_parser_config: Optional[GlobalConfigDictParserConfig] = None,
 ):  # pragma: no cover
@@ -745,7 +773,7 @@ def init_resources_server():  # pragma: no cover
         jsonl_fpath: resources_servers/{server_type_name}/data/train.jsonl   # local data file for this split
         num_repeats: 1                          # times to repeat each example (e.g. for pass@k / mean@k)
         license: Apache 2.0                     # required for train/validation; must be an allowed license string
-        # to fetch this split from a registry instead, add gitlab_identifier: or huggingface_identifier:
+        # to fetch this split from a registry instead, add a source: block (type: gitlab | huggingface)
       - name: validation
         type: validation
         jsonl_fpath: resources_servers/{server_type_name}/data/validation.jsonl
