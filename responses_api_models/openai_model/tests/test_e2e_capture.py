@@ -216,3 +216,38 @@ def test_e2e_per_rollout_url_prefix(tmp_path):
     steps = assemble_step_records(CaptureStore(tmp_path), "task9-roll3")
     assert len(steps) == 1
     assert steps[0].dialect == "chat" and steps[0].tokens_total == 7
+
+
+def test_e2e_streaming_messages_is_captured_and_correlated(tmp_path):
+    """Claude Code always streams /v1/messages. Through the real server install path the SSE is
+    forwarded intact (status 200, text/event-stream) and the call is captured + correlated by the
+    /ng-rollout/<id> URL prefix -- the path the sandboxed CLI uses (it cannot inject headers)."""
+    server = _server(tmp_path)
+    app = server.setup_webserver()
+    client = TestClient(app)
+
+    server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+    server._client.create_response = AsyncMock(return_value=_response("hi from claude"))
+
+    r = client.post(
+        "/ng-rollout/task5-roll2/v1/messages",
+        json={
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 256,
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": True,
+        },
+    )
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/event-stream")  # stream preserved
+    assert "event:" in r.text and "data:" in r.text  # SSE content flowed through unbuffered
+
+    records = CaptureStore(tmp_path).read("task5-roll2")
+    assert len(records) == 1
+    assert records[0]["dialect"] == "messages" and records[0]["status_code"] == 200
+    assert records[0]["request"]["stream"] is True  # request captured
+    assert records[0]["response"] is None  # streamed SSE body intentionally not buffered
+
+    # the streaming call still surfaces as a correlated step record
+    steps = assemble_step_records(CaptureStore(tmp_path), "task5-roll2")
+    assert len(steps) == 1 and steps[0].dialect == "messages"
