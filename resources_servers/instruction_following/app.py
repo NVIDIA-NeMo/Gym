@@ -52,6 +52,7 @@ def _get_loose_perturbations(text: str) -> list:
     without last line, without first and last line), each duplicated with asterisks
     removed. Empty variants are excluded.
     """
+
     def remove_stars(s: str) -> str:
         return s.replace("*", "")
 
@@ -74,10 +75,10 @@ def _get_loose_perturbations(text: str) -> list:
 
 def _check_following_loose(instruction, text: str) -> bool:
     """Check instruction against native loose API or 8 perturbations."""
-    if hasattr(instruction, 'check_following_loose'):
+    if hasattr(instruction, "check_following_loose"):
         return instruction.check_following_loose(text)
     try:
-        return instruction.check_following(text, mode='loose')
+        return instruction.check_following(text, mode="loose")
     except TypeError:
         return any(instruction.check_following(p) for p in _get_loose_perturbations(text))
 
@@ -186,7 +187,6 @@ class InstructionFollowingResourcesServer(SimpleResourcesServer):
             follow_all_instructions_loose=all(is_following_list_loose),
             follow_instruction_list_loose=is_following_list_loose,
         )
-
 
     def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
         """Compute the four IFEval accuracy metrics over all verify responses.
