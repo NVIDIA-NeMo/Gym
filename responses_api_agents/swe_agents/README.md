@@ -221,6 +221,43 @@ apt install -y wget && cd /tmp && \
 apptainer --version
 ```
 
+### Download the SWE-bench Verified dataset
+
+The bundled `configs/swebench_openhands.yaml` validation dataset points at NeMo Gym's GitLab/MLflow dataset registry:
+
+```yaml
+jsonl_fpath: responses_api_agents/swe_agents/data/swebench_verified_for_sweagent_and_openhands.jsonl
+gitlab_identifier:
+  dataset_name: swebench_verified_for_sweagent_and_openhands
+  version: 0.0.1
+  artifact_fpath: swebench_verified_for_sweagent_and_openhands.jsonl
+```
+
+Download it with the GitLab dataset command, not the Hugging Face downloader:
+
+```bash
+ng_download_dataset_from_gitlab \
+    +dataset_name=swebench_verified_for_sweagent_and_openhands \
+    +version=0.0.1 \
+    +artifact_fpath=swebench_verified_for_sweagent_and_openhands.jsonl \
+    +output_fpath=responses_api_agents/swe_agents/data/swebench_verified_for_sweagent_and_openhands.jsonl
+```
+
+Or let `ng_prepare_data` fetch any missing datasets from the config:
+
+```bash
+config_paths="responses_api_agents/swe_agents/configs/swebench_openhands.yaml,\
+responses_api_models/vllm_model/configs/vllm_model.yaml"
+
+ng_prepare_data "+config_paths=[$config_paths]" \
+    +output_dirpath=data/swebench_openhands \
+    +mode=train_preparation \
+    +should_download=true \
+    +data_source=gitlab
+```
+
+The GitLab path requires the MLflow/GitLab registry credentials configured for your NeMo Gym environment. If those credentials are unavailable, ask your project admin for registry access or replace the config with a dataset you can access. `ng_download_dataset_from_hf` is only for configs that use `huggingface_identifier`, so it will not resolve this dataset name.
+
 ### Step 1 — configure the model
 
 In `env.yaml` at the NeMo-Gym root:
