@@ -55,12 +55,19 @@ def _contains_seq(haystack: list[str], needle: list[str]) -> bool:
     return any(haystack[i : i + len(needle)] == needle for i in range(len(haystack) - len(needle) + 1))
 
 
-def _make_handle(staging: Path, *, name: str = "nemo-gym-x", mount: str = "/sandbox") -> SandboxHandle:
+def _make_handle(
+    staging: Path,
+    *,
+    name: str = "nemo-gym-x",
+    mount: str = "/sandbox",
+    env: dict[str, str] | None = None,
+) -> SandboxHandle:
     inst = apptainer_provider._ApptainerInstance(
         name=name,
         staging_dir=staging,
         mount_point=mount,
         image="docker://img",
+        env=env or {},
     )
     return SandboxHandle(sandbox_id=name, provider_name="apptainer", raw=inst)
 
@@ -138,6 +145,13 @@ def test_resource_flags() -> None:
     assert apptainer_provider._resource_flags(SandboxResources()) == []
 
 
+def test_resolve_image() -> None:
+    resolve = apptainer_provider._resolve_image
+    assert resolve("ubuntu:22.04") == "docker://ubuntu:22.04"
+    assert resolve("oras://registry.example/image:tag") == "oras://registry.example/image:tag"
+    assert resolve("/tmp/image.sif") == "/tmp/image.sif"
+
+
 def test_to_sandbox_status() -> None:
     to_status = apptainer_provider._to_sandbox_status
     assert to_status("running") is SandboxStatus.RUNNING
@@ -154,6 +168,7 @@ def test_path_under_mount() -> None:
     assert under("/sandbox", "/sandbox/a/b.txt") == "a/b.txt"
     assert under("/sandbox", "/sandbox") == ""
     assert under("/sandbox/", "/sandbox/x") == "x"
+    assert under("/sandbox", "/sandbox/../outside.txt") is None
     assert under("/sandbox", "/etc/passwd") is None
 
 
@@ -193,7 +208,7 @@ async def test_create_builds_argv_and_runs_probe(
     )
 
     spec = SandboxSpec(
-        image="docker://ubuntu:22.04",
+        image="ubuntu:22.04",
         env={"FOO": "bar"},
         resources={"cpu": 2, "memory_mib": 1024, "gpu": 1},
         ttl_s=60,
@@ -207,6 +222,8 @@ async def test_create_builds_argv_and_runs_probe(
     assert handle.sandbox_id.startswith(apptainer_provider.INSTANCE_NAME_PREFIX)
     assert handle.raw.staging_dir == staging
     assert handle.raw.mount_point == "/sandbox"
+    assert handle.raw.image == "docker://ubuntu:22.04"
+    assert handle.raw.env == {"FOO": "bar"}
 
     start_argv = rec.calls[0]["argv"]
     assert start_argv[:3] == [FAKE_BINARY, "instance", "start"]
@@ -224,6 +241,27 @@ async def test_create_builds_argv_and_runs_probe(
     assert f"instance://{handle.sandbox_id}" in probe_argv
     assert probe_argv[-1] == apptainer_provider.READY_PROBE_COMMAND
     assert rec.calls[1]["timeout_s"] == 30
+
+
+@pytest.mark.parametrize("create_config", [{"apply_resource_limits": False}, {"extra_start_args": ["--fakeroot"]}])
+async def test_create_skips_cgroup_resource_limits(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, create_config: dict[str, Any]
+) -> None:
+    staging = tmp_path / "staging"
+    monkeypatch.setattr(apptainer_provider.tempfile, "mkdtemp", lambda prefix: str(staging.mkdir() or staging))
+
+    def responder(argv: list[str]) -> tuple[int, str, str]:
+        if "exec" in argv:
+            return (0, apptainer_provider.READY_PROBE_EXPECTED, "")
+        return (0, "", "")
+
+    provider, rec = _make_provider(monkeypatch, responder, create=create_config)
+    await provider.create(SandboxSpec(image="ubuntu:22.04", resources={"cpu": 2, "memory_mib": 1024, "gpu": 1}))
+
+    start_argv = rec.calls[0]["argv"]
+    assert "--cpus" not in start_argv
+    assert "--memory" not in start_argv
+    assert "--nv" in start_argv
 
 
 async def test_create_extra_binds_from_provider_options(
@@ -348,6 +386,31 @@ async def test_exec_normal_with_cwd_and_env(fake_binary: str, monkeypatch: pytes
     assert _contains_seq(argv, ["--env", "A=b"])
     assert argv[-4:] == ["instance://nemo-gym-x", "sh", "-c", "echo hi"]
     assert rec.calls[0]["timeout_s"] == 180  # default exec timeout
+
+
+async def test_exec_reapplies_create_env_and_overrides_call_env(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    provider, rec = _make_provider(monkeypatch, lambda argv: (0, "", ""))
+    handle = _make_handle(tmp_path, env={"A": "from-create", "B": "base"})
+
+    await provider.exec(handle, "env", env={"A": "from-call"})
+
+    argv = rec.calls[0]["argv"]
+    assert _contains_seq(argv, ["--env", "A=from-call"])
+    assert _contains_seq(argv, ["--env", "B=base"])
+    assert "A=from-create" not in argv
+
+
+async def test_exec_empty_streams_are_strings(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    provider, _rec = _make_provider(monkeypatch, lambda argv: (0, "", ""))
+    result = await provider.exec(_make_handle(tmp_path), "true")
+
+    assert result.return_code == 0
+    assert result.stdout == ""
+    assert result.stderr == ""
 
 
 @pytest.mark.parametrize(
@@ -599,6 +662,17 @@ async def test_close_real_failure_raises_but_cleans_up(
     staging = tmp_path / "staging"
     staging.mkdir()
     provider, _rec = _make_provider(monkeypatch, lambda argv: (1, "", "permission denied"))
+    with pytest.raises(RuntimeError, match="stop failed"):
+        await provider.close(_make_handle(staging))
+    assert not staging.exists()
+
+
+async def test_close_fatal_permission_denied_raises(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    provider, _rec = _make_provider(monkeypatch, lambda argv: (1, "", "FATAL: permission denied"))
     with pytest.raises(RuntimeError, match="stop failed"):
         await provider.close(_make_handle(staging))
     assert not staging.exists()
