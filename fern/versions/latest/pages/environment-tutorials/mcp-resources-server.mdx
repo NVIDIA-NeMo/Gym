@@ -55,7 +55,7 @@ Flow (the MCP endpoint and /verify share one session_id)
 
 ## Implementation
 
-The base class `MCPResourcesServer` (in `nemo_gym/base_resources_server.py`) mounts the MCP endpoint and manages the per-rollout token. You implement two things: `register_mcp_tools()` (your tools) and `seed_session()` (return the MCP metadata so the agent can connect).
+The base class `MCPResourcesServer` (in `nemo_gym/base_resources_server.py`) mounts the MCP endpoint and manages the per-rollout token. You write a **`@gym_tool` method** (your tool), a `seed_session()` that returns the MCP metadata so the agent can connect, and a `verify()` that scores the rollout.
 
 **File ([`resources_servers/example_mcp_weather/app.py`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/example_mcp_weather/app.py)):**
 
@@ -128,10 +128,13 @@ class ExampleMCPWeatherResourcesServer(MCPResourcesServer):
     ) -> BaseVerifyResponse:
         session_id = request.session[SESSION_ID_KEY]
         state = self.session_id_to_state.get(session_id, {"weather_calls": []})
+        expected_city = body.expected_city.casefold()
         expected = _weather_sentence(body.expected_city)
-        tool_called = any(call.get("weather") == expected for call in state["weather_calls"])
-        # ... extract the agent's final text and check it contains `expected` ...
-        reward = float(tool_called and answer_mentions_weather)
+        # reward iff the tool was called for this city in this session AND the final answer repeats it
+        # (match case-insensitively, so a correct call/answer that used different casing still counts)
+        tool_called = any(str(c.get("city", "")).casefold() == expected_city for c in state["weather_calls"])
+        final_text = _extract_assistant_text(body)  # join the assistant message text from body.response
+        reward = float(tool_called and expected.casefold() in final_text.casefold())
         return BaseVerifyResponse(**body.model_dump(), reward=reward)
 
 
