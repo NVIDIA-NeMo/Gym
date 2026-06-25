@@ -57,6 +57,7 @@ class FakeEnv:
 
 class FakePromptAgent:
     call_llm_responses: List[str] = []
+    next_actions: List[Any] = [{"action_type": "DONE"}]
 
     def __init__(self, **kwargs: Any) -> None:
         self.kwargs = kwargs
@@ -85,7 +86,7 @@ class FakePromptAgent:
         )
         FakePromptAgent.call_llm_responses.append(response)
         assert obs["screenshot"] == b"not-black"
-        return response, [{"action_type": "DONE"}]
+        return response, list(self.next_actions)
 
 
 class FakePointerAgent:
@@ -125,6 +126,7 @@ class FakePointerEnv(FakeEnv):
 def _patch_client_for_fake_runtime(monkeypatch) -> None:
     FakeEnv.instances.clear()
     FakePromptAgent.call_llm_responses.clear()
+    FakePromptAgent.next_actions = [{"action_type": "DONE"}]
     FakePointerAgent.instances.clear()
 
     def fake_load_attr(import_path: str):
@@ -159,6 +161,24 @@ def test_prompt_agent_template_escape_preserves_json_and_password_placeholder() 
     "x": 1
 }
 """
+
+
+def test_prompt_agent_computer_13_action_normalization() -> None:
+    assert osworld_client._normalize_prompt_agent_computer_13_action(
+        {"action_type": "LEFT_CLICK", "x": 753, "varies": 45}
+    ) == {"action_type": "CLICK", "parameters": {"x": 753, "y": 45, "button": "left"}}
+
+    assert osworld_client._normalize_prompt_agent_computer_13_action(
+        {"action_type": "TYPE", "parameters": {"text": "hello"}}
+    ) == {"action_type": "TYPING", "parameters": {"text": "hello"}}
+
+    assert osworld_client._normalize_prompt_agent_computer_13_action(
+        {"action_type": "CLICK", "parameters": {"click_type": "RIGHT", "x": 1, "y": 2}}
+    ) == {"action_type": "CLICK", "parameters": {"x": 1, "y": 2, "button": "right"}}
+
+    assert osworld_client._normalize_prompt_agent_computer_13_action(
+        {"action_type": "TRIPLE_CLICK", "parameters": {"x": 1, "y": 2}}
+    ) == {"action_type": "CLICK", "parameters": {"x": 1, "y": 2, "button": "left", "num_clicks": 3}}
 
 
 def test_gym_policy_runner_preserves_existing_pyautogui_flow(monkeypatch) -> None:
@@ -220,6 +240,29 @@ def test_prompt_agent_runner_routes_native_agent_messages_to_policy_model(monkey
     assert calls[0]["payload"]["max_tokens"] == 123
     assert calls[0]["payload"]["temperature"] == 0.4
     assert calls[0]["payload"]["top_p"] is None
+
+
+def test_prompt_agent_runner_normalizes_computer_13_actions(monkeypatch) -> None:
+    _patch_client_for_fake_runtime(monkeypatch)
+    FakePromptAgent.next_actions = [{"action_type": "LEFT_CLICK", "x": 753, "varies": 45}]
+
+    result = osworld_client.run_osworld_task(
+        {"id": "task-normalize", "instruction": "Normalize native PromptAgent action."},
+        model_fn=lambda *_args: "unused",
+        runner_name="prompt_agent_computer_13",
+        env_class_path="fake.FakeEnv",
+        agent_class_path="fake.FakePromptAgent",
+        messages_model_fn=lambda _messages, _payload: "native response",
+        max_steps=1,
+        sleep_after_execution=0,
+        task_timeout=10,
+    )
+
+    assert result.error is None
+    assert result.steps[0].actions == [{"action_type": "CLICK", "parameters": {"x": 753, "y": 45, "button": "left"}}]
+    assert FakeEnv.instances[0].actions == [
+        {"action_type": "CLICK", "parameters": {"x": 753, "y": 45, "button": "left"}}
+    ]
 
 
 def test_prompt_agent_runner_strips_thinking_before_native_agent_parse(monkeypatch) -> None:

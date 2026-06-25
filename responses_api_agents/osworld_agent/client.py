@@ -100,6 +100,64 @@ def _flatten_actions(actions: Any) -> List[Any]:
     return flattened
 
 
+def _normalize_prompt_agent_computer_13_action(action: Any) -> Any:
+    """Normalize native PromptAgent computer_13 actions for DesktopEnv.
+
+    OSWorld's PromptAgent prompt and parser are permissive: they return JSON
+    actions directly, while DesktopEnv's PythonController accepts a narrower
+    schema. Keep the compatibility shim in the Gym adapter so upstream OSWorld
+    can continue to evolve independently.
+    """
+    if not isinstance(action, dict):
+        return action
+
+    normalized = dict(action)
+    action_type = str(normalized.get("action_type", "")).upper()
+    if action_type in _TERMINAL_ACTIONS or action_type == "WAIT":
+        return action
+    parameters = normalized.get("parameters")
+    if isinstance(parameters, dict):
+        params = dict(parameters)
+    else:
+        params = {key: value for key, value in normalized.items() if key != "action_type"}
+
+    aliases = {
+        "LEFT_CLICK": "CLICK",
+        "MOUSE_MOVE": "MOVE_TO",
+        "TYPE": "TYPING",
+        "KEY": "PRESS",
+    }
+    action_type = aliases.get(action_type, action_type)
+
+    click_type = params.pop("click_type", None)
+    if isinstance(click_type, str):
+        click_type = click_type.upper()
+        if click_type == "RIGHT" and action_type == "CLICK":
+            params.setdefault("button", "right")
+        elif click_type == "MIDDLE" and action_type == "CLICK":
+            params.setdefault("button", "middle")
+        elif click_type == "LEFT" and action_type in {"CLICK", "MOUSE_DOWN", "MOUSE_UP"}:
+            params.setdefault("button", "left")
+        elif click_type == "WHEEL_UP":
+            action_type = "SCROLL"
+            params.setdefault("dy", 1)
+        elif click_type == "WHEEL_DOWN":
+            action_type = "SCROLL"
+            params.setdefault("dy", -1)
+
+    if action_type == "CLICK":
+        params.setdefault("button", "left")
+    elif action_type == "TRIPLE_CLICK":
+        action_type = "CLICK"
+        params.setdefault("button", "left")
+        params.setdefault("num_clicks", 3)
+
+    if "varies" in params and "y" not in params:
+        params["y"] = params.pop("varies")
+
+    return {"action_type": action_type, "parameters": params}
+
+
 def _escape_prompt_agent_format_template(template: str) -> str:
     """Escape prompt braces while preserving OSWorld's password placeholder."""
     marker = "__NEMO_GYM_CLIENT_PASSWORD_PLACEHOLDER__"
@@ -821,6 +879,8 @@ def run_osworld_task(
                     model_text, actions = native_agent.predict(instruction, obs)
                     model_text = strip_thinking(model_text or "")
                     actions = _flatten_actions(actions)
+                    if runner_spec.action_space == "computer_13":
+                        actions = [_normalize_prompt_agent_computer_13_action(action) for action in actions]
                 else:
                     model_text = model_fn(system_prompt, instruction, history_window + [obs_entry])
                     model_text = strip_thinking(model_text or "")
@@ -842,7 +902,12 @@ def run_osworld_task(
             step_reward = 0.0
             step_info: Dict[str, Any] = {}
             for action in actions:
-                obs, reward, done, info = env.step(action, sleep_after_execution)
+                try:
+                    obs, reward, done, info = env.step(action, sleep_after_execution)
+                except Exception as exc:  # noqa: BLE001 - record bad model/controller actions.
+                    error = f"env.step() failed at step {step_idx}: {exc}"
+                    LOG.exception("Environment step failed at step %d for action %r", step_idx, action)
+                    break
                 step_reward += float(reward or 0.0)
                 step_info = info if isinstance(info, dict) else {"info": info}
                 if done:
@@ -866,6 +931,8 @@ def run_osworld_task(
 
             if step_done:
                 finished = True
+                break
+            if error:
                 break
 
         # Let the VM settle before scoring, mirroring lib_run_single.py.
