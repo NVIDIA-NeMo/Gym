@@ -8,6 +8,7 @@ Host-prep helpers plus a native `PromptAgent` smoke runner.
 | [`bringup_remote_host.sh`](bringup_remote_host.sh) | **Mode B** — controller runs locally, but the docker VM host is a **separate** machine reached via SSH | passwordless-SSH check · same apt installs over SSH · stages `Ubuntu.qcow2` via rsync · `docker pull happysixd/osworld-docker` on the remote · pre-flight verify (kvm + image + ports free on the remote) |
 | [`setup_colossus_runtime.sh`](setup_colossus_runtime.sh) | Colossus git checkout setup for Mode A | creates `~/osworld-run` runtime dirs · symlinks repo `env.yaml` and `docker_vm_data/Ubuntu.qcow2` to private assets · writes `.colossus-runtime.env` · verifies git / uv / docker / KVM / env / qcow2 without committing secrets or large files |
 | [`run_native_prompt_agent_smoke.sh`](run_native_prompt_agent_smoke.sh) | Quick functional smoke for OSWorld's native `mm_agents.agent.PromptAgent` path | starts `ng_run` with `osworld_agent_native_prompt_agent.yaml`, collects one rollout from `data/example.jsonl`, and prints a compact reward/step/error summary |
+| [`run_multienv_osworld_agent.sh`](run_multienv_osworld_agent.sh) | OSWorld-style multi-environment runner through Gym | starts `ng_run`, waits for the agent/model servers, then runs `ng_collect_rollouts` with `NUM_ENVS` mapped to `+num_samples_in_parallel`; optionally records per-task VM mp4s |
 
 The host-prep scripts stop short of cloning the repo, running `uv sync`, or
 prestaging `Ubuntu.qcow2`. For Colossus runs, clone this repo first, keep
@@ -101,6 +102,38 @@ LIMIT=null \
 # Print the ng_run and ng_collect_rollouts commands without starting servers.
 DRY_RUN=1 \
   bash responses_api_agents/osworld_agent/scripts/run_native_prompt_agent_smoke.sh
+```
+
+## Multi-Env OSWorld Agent
+
+Use `run_multienv_osworld_agent.sh` when you want the OSWorld-style
+`run_multienv_*.py` behavior through Gym. `NUM_ENVS` is the number of parallel
+DesktopEnv instances. `LIMIT` is the total number of rows to collect from the
+input JSONL, not the concurrency.
+
+```bash
+RUNNER_NAME=prompt_agent \
+POLICY_MODEL_NAME=nvidia/minimaxai/minimax-m3 \
+NUM_ENVS=4 \
+LIMIT=4 \
+bash responses_api_agents/osworld_agent/scripts/run_multienv_osworld_agent.sh
+```
+
+For a two-wave cleanup probe, use an input with at least 8 rows and set:
+
+```bash
+NUM_ENVS=4 LIMIT=8 MAX_STEPS=3 \
+bash responses_api_agents/osworld_agent/scripts/run_multienv_osworld_agent.sh
+```
+
+That runs at most four envs at once, then launches the next wave after earlier
+envs finish and tear down. If the default `data/example.jsonl` only contains
+five rows, `LIMIT=8` still collects only those five rows. To force two waves
+from a four-row slice, repeat the limited slice:
+
+```bash
+NUM_ENVS=4 LIMIT=4 NUM_REPEATS=2 MAX_STEPS=3 \
+bash responses_api_agents/osworld_agent/scripts/run_multienv_osworld_agent.sh
 ```
 
 ## Mode B flow (using `bringup_remote_host.sh`)
