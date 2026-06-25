@@ -378,13 +378,15 @@ def test_classify_exception_branches():
     assert _classify_exception(ValueError("x")) == "exception"
 
 
-def test_header_int():
-    from nemo_gym.observability import _header_int
+def test_scope_header_parsing():
+    from nemo_gym.observability import _scope_header, _scope_header_int
 
-    request = SimpleNamespace(headers={"good": "3", "bad": "nope"})
-    assert _header_int(request, "good") == 3
-    assert _header_int(request, "bad") is None  # not an int
-    assert _header_int(request, "missing") is None  # absent
+    scope = {"headers": [(b"good", b"3"), (b"bad", b"nope")]}
+    assert _scope_header(scope, "good") == "3"
+    assert _scope_header(scope, "missing") is None
+    assert _scope_header_int(scope, "good") == 3
+    assert _scope_header_int(scope, "bad") is None  # not an int
+    assert _scope_header_int(scope, "missing") is None  # absent
 
 
 # --- capture-store dir resolution + init failure ---
@@ -591,3 +593,32 @@ def test_base_agent_resolve_model_base_url_and_call_kwargs(monkeypatch):
     )
     assert kwargs == {"headers": {"x-nemo-gym-rollout-id": "5-2"}}
     assert SimpleResponsesAPIAgent.rollout_call_kwargs(fake_self, {}) == {}
+
+
+def test_capture_streams_sse_and_records_metadata(tmp_path):
+    """SSE/streaming responses (e.g. stream:true /v1/messages) are forwarded unchanged (the stream
+    is preserved) and recorded with request + metadata; the streamed body is not buffered."""
+    from fastapi.responses import StreamingResponse
+
+    app = FastAPI()
+
+    @app.post("/v1/messages")
+    async def _stream(body: dict = Body()) -> StreamingResponse:
+        async def gen():
+            yield b"event: a\n"
+            yield b'data: {"x": 1}\n\n'
+
+        return StreamingResponse(gen(), media_type="text/event-stream")
+
+    config = SimpleNamespace(observability_enabled=True, trajectory_capture_dir=str(tmp_path), name="srv")
+    install_trajectory_capture(app, config)
+    client = TestClient(app)
+
+    r = client.post("/v1/messages", json={"stream": True}, headers={"x-nemo-gym-rollout-id": "rs"})
+    assert r.status_code == 200 and "data: " in r.text  # stream content intact
+
+    records = CaptureStore(tmp_path).read("rs")
+    assert len(records) == 1
+    assert records[0]["dialect"] == "messages" and records[0]["status_code"] == 200
+    assert records[0]["request"] == {"stream": True}
+    assert records[0]["response"] is None  # streamed SSE body intentionally not buffered

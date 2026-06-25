@@ -53,6 +53,10 @@ One record per model call, typed as `StepRecord` (Pydantic; JSONSchema via `Step
 | `error_category`, `status_code` | Normalized failure classification for non-2xx or raised calls. |
 | `model_server`, `dialect` | Which server produced the call, and which API shape (`responses` / `chat` / `messages`). |
 
+### Streaming responses
+
+The middleware is pure-ASGI: it forwards response chunks downstream unchanged, so it composes with streaming (SSE) responses — for example the Claude Code CLI's `stream: true` `/v1/messages` calls pass through unaltered. Streamed bodies are **not** buffered, so for a streamed call `response` (and the response-derived `tokens_*` / `tool_calls`) is `null`, while `request`, correlation, `latency_total_ms`, and `status_code` are still recorded. Non-streamed calls capture the full response as usual.
+
 ## Correlating calls to a rollout
 
 A caller attributes its model calls to a rollout in one of two OpenAI-compatible ways:
