@@ -14,6 +14,7 @@
 # limitations under the License.
 import logging
 import sys
+import types
 
 import pytest
 from pytest import MonkeyPatch
@@ -421,6 +422,68 @@ class TestEvalAggregateFlags:
         )
         assert target == "nemo_gym.cli.eval:aggregate_rollouts"
         assert set(overrides) == {"+input_glob=results/rollouts-*.jsonl", "+output_jsonl_fpath=out.jsonl"}
+
+
+class TestDispatch:
+    """Exercise the real `dispatch` (every router test above stubs it), so argv rewriting and
+    module/attribute resolution are actually covered."""
+
+    def test_dispatch_imports_target_and_rewrites_argv(self, monkeypatch: MonkeyPatch) -> None:
+        # Direct unit test of dispatch (no parser): it splits "module:func", imports the module,
+        # resolves the attribute, rewrites sys.argv to argv[0] + overrides, then calls the target.
+        # A synthetic module registered in sys.modules keeps this decoupled from any real target.
+        captured: dict = {}
+
+        def recorder() -> None:
+            captured["argv"] = list(sys.argv)
+
+        fake_module = types.ModuleType("my_module.my_submodule")
+        fake_module.my_function = recorder
+        monkeypatch.setitem(sys.modules, "my_module.my_submodule", fake_module)
+        # argv starts with the parsed command tokens; dispatch must drop them but keep argv[0].
+        monkeypatch.setattr(sys, "argv", ["my_command", "subcommand", "--some-flag", "some-value"])
+        cli_main.dispatch("my_module.my_submodule:my_function", ["+a=1", "+b=2"])
+        assert captured["argv"] == ["my_command", "+a=1", "+b=2"]
+
+    def test_main_to_dispatch_end_to_end(self, monkeypatch: MonkeyPatch) -> None:
+        # Drive dispatch from main() with only the leaf target stubbed: the target string is split,
+        # the module is imported, the attribute is resolved, and sys.argv is rewritten for real.
+        # Mix `--flag` asset selectors (translated and coalesced into +config_paths) with raw
+        # `+`/`++` Hydra passthroughs.
+        captured: dict = {}
+
+        def recorder() -> None:
+            captured["argv"] = list(sys.argv)
+
+        monkeypatch.setattr("nemo_gym.cli.eval.e2e_rollout_collection", recorder)
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "gym",
+                "eval",
+                "run",
+                "--benchmark",
+                "aime24",
+                "--model-type",
+                "openai_model",
+                "++responses_create_params.reasoning.effort=low",
+                "+wandb_project=gym-dev",
+            ],
+        )
+        main()
+        # dispatch drops the parsed command tokens, keeping argv[0] and the resolved overrides.
+        assert captured["argv"][0] == "gym"
+        config_paths, others = _split_overrides(captured["argv"][1:])
+        assert any(p.endswith("benchmarks/aime24/config.yaml") for p in config_paths)
+        assert any(p.endswith("responses_api_models/openai_model/configs/openai_model.yaml") for p in config_paths)
+        assert others == {"++responses_create_params.reasoning.effort=low", "+wandb_project=gym-dev"}
+
+    def test_dispatch_raises_on_unresolvable_attribute(self, monkeypatch: MonkeyPatch) -> None:
+        # A typo in a Command target must surface as a resolution error, not silently no-op.
+        monkeypatch.setattr(sys, "argv", ["gym"])
+        with pytest.raises(AttributeError):
+            cli_main.dispatch("nemo_gym.cli.eval:no_such_function", [])
 
 
 class TestEvalProfileFlags:
