@@ -373,7 +373,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             ]
             code, stdout, stderr = await self._run_exec(cmd, cwd=str(work_dir), env=env, timeout=self.config.timeout)
             if code:
-                LOG.warning("openclaw exited %d: %s", code, stderr[:500])
+                LOG.warning("openclaw exited %d: %s", code, stderr)
             LOG.debug("openclaw stdout (%d chars): %s", len(stdout), stdout[:2000])
 
             fallback_items, usage = parse_openclaw_output(stdout)
