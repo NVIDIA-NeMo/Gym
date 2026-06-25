@@ -35,9 +35,14 @@ NUM_SAMPLES_IN_PARALLEL="${NUM_SAMPLES_IN_PARALLEL:-${NUM_ENVS}}"
 START_NG_RUN="${START_NG_RUN:-1}"
 DRY_RUN="${DRY_RUN:-0}"
 RECORD_VIDEO="${RECORD_VIDEO:-1}"
+VIDEO_SAMPLE_PER="${VIDEO_SAMPLE_PER:-100}"
+VIDEO_SAMPLE_COUNT="${VIDEO_SAMPLE_COUNT:-4}"
+VIDEO_SAMPLE_SEED="${VIDEO_SAMPLE_SEED:-${RUN_TAG}}"
+VIDEO_SAMPLE_TASK_IDS_FILE="${VIDEO_SAMPLE_TASK_IDS_FILE:-${RUN_DIR}/video_task_ids.txt}"
 NG_RUN_BIN="${NG_RUN_BIN:-ng_run}"
 NG_COLLECT_BIN="${NG_COLLECT_BIN:-ng_collect_rollouts}"
 NG_STATUS_BIN="${NG_STATUS_BIN:-ng_status}"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
 NG_RUN_WAIT_RETRIES="${NG_RUN_WAIT_RETRIES:-80}"
 NG_RUN_WAIT_INTERVAL_SECONDS="${NG_RUN_WAIT_INTERVAL_SECONDS:-3}"
 EXPECTED_SERVERS="${EXPECTED_SERVERS:-2}"
@@ -49,9 +54,85 @@ MAX_STEPS="${MAX_STEPS:-}"
 
 mkdir -p "${RUN_DIR}" "$(dirname "${OUTPUT_JSONL}")"
 
-if [[ "${RECORD_VIDEO}" == "1" ]]; then
+if [[ "${RECORD_VIDEO}" == "1" || "${RECORD_VIDEO}" == "sample" ]]; then
     export OSWORLD_RECORD_VIDEO_DIR="${OSWORLD_RECORD_VIDEO_DIR:-${RUN_DIR}/videos}"
     mkdir -p "${OSWORLD_RECORD_VIDEO_DIR}"
+fi
+
+if [[ "${RECORD_VIDEO}" == "sample" ]]; then
+    export OSWORLD_RECORD_VIDEO_TASK_IDS_FILE="${VIDEO_SAMPLE_TASK_IDS_FILE}"
+    "${PYTHON_BIN}" - <<'PY' "${INPUT_JSONL}" "${LIMIT}" "${VIDEO_SAMPLE_PER}" "${VIDEO_SAMPLE_COUNT}" "${VIDEO_SAMPLE_SEED}" "${VIDEO_SAMPLE_TASK_IDS_FILE}" "${RUN_DIR}/video_sample_manifest.json"
+import json
+import random
+import sys
+from pathlib import Path
+
+input_jsonl, limit_s, per_s, count_s, seed, out_txt, out_json = sys.argv[1:]
+per = int(per_s)
+count = int(count_s)
+if per <= 0:
+    raise SystemExit("VIDEO_SAMPLE_PER must be > 0")
+if count < 0:
+    raise SystemExit("VIDEO_SAMPLE_COUNT must be >= 0")
+
+rows = []
+with open(input_jsonl, encoding="utf-8") as fh:
+    for line in fh:
+        if line.strip():
+            rows.append(json.loads(line))
+
+if limit_s != "null":
+    rows = rows[: int(limit_s)]
+
+rng = random.Random(seed)
+selected = []
+blocks = []
+for start in range(0, len(rows), per):
+    block = rows[start : start + per]
+    indexed_ids = []
+    for offset, row in enumerate(block):
+        metadata = row.get("verifier_metadata") or {}
+        task = metadata.get("osworld_task") or {}
+        task_id = metadata.get("task_id") or task.get("id") or task.get("task_id")
+        if task_id:
+            indexed_ids.append((start + offset, str(task_id)))
+    picked = rng.sample(indexed_ids, min(count, len(indexed_ids))) if indexed_ids else []
+    picked.sort(key=lambda item: item[0])
+    selected.extend(task_id for _idx, task_id in picked)
+    blocks.append(
+        {
+            "start_row": start + 1,
+            "end_row": start + len(block),
+            "eligible": len(indexed_ids),
+            "selected": [task_id for _idx, task_id in picked],
+        }
+    )
+
+out_txt_path = Path(out_txt)
+out_txt_path.parent.mkdir(parents=True, exist_ok=True)
+out_txt_path.write_text("\n".join(selected) + ("\n" if selected else ""), encoding="utf-8")
+
+Path(out_json).write_text(
+    json.dumps(
+        {
+            "input_jsonl": input_jsonl,
+            "limit": None if limit_s == "null" else int(limit_s),
+            "sample_per": per,
+            "sample_count": count,
+            "seed": seed,
+            "total_rows": len(rows),
+            "selected_count": len(selected),
+            "task_ids_file": str(out_txt_path),
+            "blocks": blocks,
+        },
+        indent=2,
+        ensure_ascii=False,
+    )
+    + "\n",
+    encoding="utf-8",
+)
+print(f"video sample task ids: {out_txt_path} ({len(selected)} selected)")
+PY
 fi
 
 cat > "${RUN_DIR}/run.env" <<EOF
@@ -70,6 +151,10 @@ MAX_OUTPUT_TOKENS=${MAX_OUTPUT_TOKENS}
 TEMPERATURE=${TEMPERATURE}
 RECORD_VIDEO=${RECORD_VIDEO}
 OSWORLD_RECORD_VIDEO_DIR=${OSWORLD_RECORD_VIDEO_DIR:-}
+VIDEO_SAMPLE_PER=${VIDEO_SAMPLE_PER}
+VIDEO_SAMPLE_COUNT=${VIDEO_SAMPLE_COUNT}
+VIDEO_SAMPLE_SEED=${VIDEO_SAMPLE_SEED}
+OSWORLD_RECORD_VIDEO_TASK_IDS_FILE=${OSWORLD_RECORD_VIDEO_TASK_IDS_FILE:-}
 EOF
 
 echo "=== OSWorld multienv agent run ==="
@@ -88,8 +173,11 @@ fi
 if [[ -n "${POLICY_MODEL_NAME}" ]]; then
     echo "model:       ${POLICY_MODEL_NAME}"
 fi
-if [[ "${RECORD_VIDEO}" == "1" ]]; then
+if [[ "${RECORD_VIDEO}" == "1" || "${RECORD_VIDEO}" == "sample" ]]; then
     echo "video dir:   ${OSWORLD_RECORD_VIDEO_DIR}"
+fi
+if [[ "${RECORD_VIDEO}" == "sample" ]]; then
+    echo "video sample:${OSWORLD_RECORD_VIDEO_TASK_IDS_FILE} (${VIDEO_SAMPLE_COUNT}/${VIDEO_SAMPLE_PER}, seed=${VIDEO_SAMPLE_SEED})"
 fi
 echo
 
@@ -192,7 +280,7 @@ echo "--- collecting rollouts ---"
 
 echo
 echo "--- multienv result summary ---"
-python - <<'PY' "${OUTPUT_JSONL}"
+"${PYTHON_BIN}" - <<'PY' "${OUTPUT_JSONL}"
 import json
 import sys
 from pathlib import Path
@@ -223,6 +311,9 @@ PY
 
 echo
 echo "Run dir: ${RUN_DIR}"
-if [[ "${RECORD_VIDEO}" == "1" ]]; then
+if [[ "${RECORD_VIDEO}" == "1" || "${RECORD_VIDEO}" == "sample" ]]; then
     echo "Videos:  ${OSWORLD_RECORD_VIDEO_DIR}"
+fi
+if [[ "${RECORD_VIDEO}" == "sample" ]]; then
+    echo "Video sample task ids: ${OSWORLD_RECORD_VIDEO_TASK_IDS_FILE}"
 fi
