@@ -115,6 +115,9 @@ class TokenIDLogProbTypedDictMixin(TypedDict):
     routed_experts: NotRequired[RoutedExperts]
 
 
+class GenerationRecord(TokenIDLogProbMixin):
+    pass
+
 ########################################
 # Responses API inputs
 ########################################
@@ -290,6 +293,21 @@ class NeMoGymResponseCreateParamsNonStreaming(BaseModel):
 NeMoGymResponseOutputItem = NeMoGymResponseInputItem
 
 
+def to_training_item(
+    item: NeMoGymResponseOutputItem,
+    prompt_token_ids: List[int],
+    generation_token_ids: List[int],
+    generation_log_probs: List[float],
+) -> NeMoGymResponseOutputItem:
+    train_cls = RESPONSES_TO_TRAIN[type(item)]
+    return train_cls(
+        **item.model_dump(),
+        prompt_token_ids=prompt_token_ids,
+        generation_token_ids=generation_token_ids,
+        generation_log_probs=generation_log_probs,
+    )
+
+
 class NeMoGymResponseInputTokensDetails(ResponseInputTokensDetails):
     pass
 
@@ -452,7 +470,8 @@ class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
     top_p: Optional[float] = None
     user: Optional[str] = None
     web_search_options: Optional[WebSearchOptions] = None
-    stream: Optional[Literal[False]] = None
+    # model server generates non-streaming by buffering token IDs and re-emits the result as SSE.
+    stream: Optional[bool] = None
 
     # Disallow deprecated args
     # function_call: FunctionCall
