@@ -449,7 +449,7 @@ Collate data, start the servers, and collect rollouts. This is the main evaluati
 | `--input`, `-i` | Input tasks JSONL file. |
 | `--output`, `-o` | Output rollouts JSONL file. |
 | `--limit` | Maximum number of tasks to run. |
-| `--num-repeats` | Number of rollouts per task (for mean@k metrics). |
+| `--num-repeats` | Rollouts per task (for mean@k metrics). Pass an int to apply to every task, or a dict keyed by `agent_ref.name` for per-agent counts (e.g. `'{simple_agent: 32, swe_agent: 1}'`) when one input file mixes agents. In dict form, the special key `_default` is the fallback for agents not explicitly listed; without it, any unlisted row's agent raises a single consolidated error. |
 | `--prompt-config` | Prompt template YAML to apply. |
 | `--concurrency` | Maximum number of concurrent samples. |
 | `--split` | Dataset split to use (`train`, `validation`, or `benchmark`). |
@@ -479,6 +479,13 @@ gym eval run --no-serve \
     --model-api-key dummy_key \
     --temperature 1.0 \
     --top-p 1.0
+
+# Per-agent repeats: one input file pins different agents per row via agent_ref.name
+gym eval run --no-serve \
+    --model-type openai_model \
+    --input mixed_agents.jsonl \
+    --output results/mixed_rollouts.jsonl \
+    --num-repeats '{agent_alpha: 4, agent_beta: 1, _default: 1}'
 ```
 
 ### `gym eval aggregate`
