@@ -3307,6 +3307,81 @@ class TestVLLMConverter:
         assert captured_kwargs["new_param"] == "value"
 
 
+def _make_required_prefix_token_ids_model(send_required_prefix_token_ids_dynamo: bool = False) -> VLLMModel:
+    config = VLLMModelConfig(
+        host="0.0.0.0",
+        port=8080,
+        entrypoint="",
+        name="vllm_model",
+        base_url="http://localhost:9999/v1",
+        api_key="dummy_key",  # pragma: allowlist secret
+        model="dummy-model",
+        return_token_id_information=False,
+        uses_reasoning_parser=False,
+        uses_interleaved_reasoning=False,
+        send_required_prefix_token_ids_dynamo=send_required_prefix_token_ids_dynamo,
+    )
+    return VLLMModel(config=config, server_client=MagicMock(spec=ServerClient))
+
+
+class TestRequiredPrefixTokenIdsDynamo:
+    def test_default_keeps_gym_token_fields(self) -> None:
+        model = _make_required_prefix_token_ids_model()
+        body = {
+            "model": "dummy-model",
+            "messages": [
+                {"role": "user", "content": "hello"},
+                {
+                    "role": "assistant",
+                    "content": "first",
+                    "prompt_token_ids": [1, 2],
+                    "generation_token_ids": [3, 4],
+                    "generation_log_probs": [0.1, 0.2],
+                },
+            ],
+        }
+
+        result = model._preprocess_chat_completion_create_params(MagicMock(), body)
+
+        assert "required_prefix_token_ids" not in result
+        assert result["messages"][1]["prompt_token_ids"] == [1, 2]
+        assert result["messages"][1]["generation_token_ids"] == [3, 4]
+        assert "required_prefix_token_ids" not in result["messages"][1]
+
+    def test_dynamo_flag_rewrites_token_ids_per_message(self) -> None:
+        model = _make_required_prefix_token_ids_model(send_required_prefix_token_ids_dynamo=True)
+        body = {
+            "model": "dummy-model",
+            "messages": [
+                {"role": "user", "content": "hello"},
+                {
+                    "role": "assistant",
+                    "content": "first",
+                    "prompt_token_ids": [1, 2],
+                    "generation_token_ids": [3, 4],
+                    "generation_log_probs": [0.1, 0.2],
+                },
+                {"role": "user", "content": "again"},
+                {
+                    "role": "assistant",
+                    "content": "second",
+                    "prompt_token_ids": [10],
+                    "generation_token_ids": [11],
+                    "generation_log_probs": [0.3],
+                },
+            ],
+        }
+
+        result = model._preprocess_chat_completion_create_params(MagicMock(), body)
+
+        assert "required_prefix_token_ids" not in result
+        assert result["messages"][1]["required_prefix_token_ids"] == [1, 2, 3, 4]
+        assert result["messages"][3]["required_prefix_token_ids"] == [10, 11]
+        assert "prompt_token_ids" not in result["messages"][1]
+        assert "generation_token_ids" not in result["messages"][1]
+        assert result["messages"][1]["generation_log_probs"] == [0.1, 0.2]
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Audio sidechannel splice (metadata.audio_data → user-message content block)
 #

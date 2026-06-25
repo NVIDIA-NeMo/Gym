@@ -88,6 +88,11 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     extra_body: Optional[Dict[str, Any]] = None
 
     default_headers: Dict[str, str] = Field(default_factory=dict)
+
+    # Dynamo consumes token-prefix splicing at message granularity. When enabled,
+    # rewrite Gym's training token fields into Dynamo's message-level extension.
+    send_required_prefix_token_ids_dynamo: bool = False
+
     # Optional prefix for resolving relative ``metadata.audio_path`` (or
     # entries in ``metadata.audio_paths``) against. Absolute paths are used
     # as-is. When unset, relative paths raise. Audio is always inlined as a
@@ -446,6 +451,18 @@ class VLLMModel(SimpleResponsesAPIModel):
             else:
                 # No user message found — create one with just the audio blocks.
                 body_dict.setdefault("messages", []).append({"role": "user", "content": list(audio_blocks)})
+
+        if self.config.send_required_prefix_token_ids_dynamo:
+            # NeMo-RL's vLLM worker still derives request-level
+            # `required_prefix_token_ids` from these per-message fields:
+            # https://github.com/NVIDIA-NeMo/RL/blob/d9ba460fa63e0e079fd18eb207e1febf6485b5e2/nemo_rl/models/generation/vllm/vllm_worker_async.py#L350-L360
+            # Dynamo uses a message-level extension instead, so avoid sending
+            # both representations on the Dynamo path.
+            for message in body_dict.get("messages", []):
+                if "prompt_token_ids" in message and "generation_token_ids" in message:
+                    message["required_prefix_token_ids"] = list(message.pop("prompt_token_ids")) + list(
+                        message.pop("generation_token_ids")
+                    )
 
         return body_dict
 
