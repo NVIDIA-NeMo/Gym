@@ -419,9 +419,11 @@ def assemble_step_records(store: CaptureStore, rollout_id: str, run_id: Optional
     return [build_step_record(ex, step_index=i, run_id=run_id) for i, ex in enumerate(store.read(rollout_id))]
 
 
-def aggregate_rollout_metrics(store: CaptureStore, rollout_id: str) -> dict[str, Any]:
-    """Per-rollout token / latency / turn totals, for the existing per-rollout record (#1483)."""
-    steps = assemble_step_records(store, rollout_id)
+def aggregate_step_records(steps: list[StepRecord]) -> dict[str, Any]:
+    """Per-rollout token / latency / turn totals from already-assembled StepRecords (#1483).
+
+    Pure (no IO) so callers that already hold the steps don't re-read the capture file.
+    """
 
     def _sum(attr: str) -> Optional[float]:
         values = [getattr(s, attr) for s in steps if getattr(s, attr) is not None]
@@ -437,3 +439,8 @@ def aggregate_rollout_metrics(store: CaptureStore, rollout_id: str) -> dict[str,
         "num_turns": len(turns) if turns else (len(steps) or None),
         "num_steps": len(steps),
     }
+
+
+def aggregate_rollout_metrics(store: CaptureStore, rollout_id: str) -> dict[str, Any]:
+    """Per-rollout token / latency / turn totals, for the existing per-rollout record (#1483)."""
+    return aggregate_step_records(assemble_step_records(store, rollout_id))
