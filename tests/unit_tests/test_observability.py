@@ -722,3 +722,25 @@ def test_merge_capture_noop_without_capture(tmp_path):
     assert "ng_trajectory_capture" not in rec
     merge_capture_into_record(rec, [])  # no dirs
     assert "ng_trajectory_capture" not in rec
+
+
+def test_aggregate_step_records_sums_and_counts():
+    from nemo_gym.trajectory_capture import StepRecord, aggregate_step_records
+
+    steps = [
+        StepRecord(step_index=0, turn_index=0, tokens_in=10, tokens_out=5, tokens_total=15, latency_total_ms=2.0),
+        StepRecord(step_index=1, turn_index=1, tokens_in=20, tokens_out=3, tokens_total=23, latency_total_ms=1.0),
+    ]
+    agg = aggregate_step_records(steps)
+    assert (agg["tokens_in"], agg["tokens_out"], agg["tokens_total"]) == (30, 8, 38)
+    assert agg["latency_total_ms"] == 3.0 and agg["num_turns"] == 2 and agg["num_steps"] == 2
+    # empty -> all-None totals but a well-formed shape (num_steps 0)
+    assert aggregate_step_records([]) == {
+        "tokens_in": None,
+        "tokens_out": None,
+        "tokens_reasoning": None,
+        "tokens_total": None,
+        "latency_total_ms": None,
+        "num_turns": None,
+        "num_steps": 0,
+    }

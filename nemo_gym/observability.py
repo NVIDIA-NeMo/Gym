@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from nemo_gym.server_utils import ROLLOUT_HEADER, ROLLOUT_PATH_PREFIX, rollout_id_from_run_body
-from nemo_gym.trajectory_capture import CaptureStore, aggregate_rollout_metrics, assemble_step_records
+from nemo_gym.trajectory_capture import CaptureStore, aggregate_step_records, assemble_step_records
 
 
 logger = logging.getLogger(__name__)
@@ -300,7 +300,11 @@ class _CaptureMiddleware:
             await self._app(scope, _receive, _send)
         except Exception as exc:
             _record(
-                self._store, scope, dialect, self._config, bytes(request_body),
+                self._store,
+                scope,
+                dialect,
+                self._config,
+                bytes(request_body),
                 rollout_id=rollout_id,
                 response_body=None,
                 status_code=None,
@@ -318,7 +322,11 @@ class _CaptureMiddleware:
                 response_body = None
         status = state["status"]
         _record(
-            self._store, scope, dialect, self._config, bytes(request_body),
+            self._store,
+            scope,
+            dialect,
+            self._config,
+            bytes(request_body),
             rollout_id=rollout_id,
             response_body=response_body,
             status_code=status,
@@ -367,8 +375,10 @@ def capture_dirs_from_config(global_config_dict: Any, env: Optional[dict[str, st
     def _walk(node: Any) -> None:
         if isinstance(node, dict):
             if node.get("observability_enabled"):
-                resolved = node.get("trajectory_capture_dir") or shared or _default_capture_dir(
-                    node.get("name") or "model_server"
+                resolved = (
+                    node.get("trajectory_capture_dir")
+                    or shared
+                    or _default_capture_dir(node.get("name") or "model_server")
                 )
                 dirs.append(Path(resolved))
             for value in node.values():
@@ -425,7 +435,7 @@ def merge_capture_into_record(
     exclude = None if include_payloads else {"request", "response"}
     record["ng_trajectory_capture"] = {
         "rollout_id": rollout_id,
-        "metrics": aggregate_rollout_metrics(store, rollout_id),
+        "metrics": aggregate_step_records(steps),  # reuse steps already read above (no second read)
         "steps": [step.model_dump(exclude=exclude) for step in steps],
     }
     return record
