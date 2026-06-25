@@ -51,6 +51,7 @@ from nemo_gym.global_config import (
     GlobalConfigDictParserConfig,
     get_global_config_dict,
 )
+from nemo_gym.registry import discover_environments
 from nemo_gym.server_status import StatusCommand
 from nemo_gym.server_utils import (
     HEAD_SERVER_KEY_NAME,
@@ -861,6 +862,50 @@ def dump_config():  # pragma: no cover
     BaseNeMoGymCLIConfig.model_validate(global_config_dict)
 
     print(OmegaConf.to_yaml(global_config_dict, resolve=True))
+
+
+def list_environments() -> None:
+    """List the environments available under environments/, by short name.
+
+    Examples:
+
+    ```bash
+    gym list environments
+    gym list environments --json
+    ```
+    """
+    global_config_dict = get_global_config_dict(
+        global_config_dict_parser_config=GlobalConfigDictParserConfig(
+            initial_global_config_dict=GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+        )
+    )
+    BaseNeMoGymCLIConfig.model_validate(global_config_dict)
+
+    environments = discover_environments()
+
+    if global_config_dict.get(JSON_OUTPUT_KEY_NAME, False):
+        print(
+            json.dumps(
+                [
+                    {"name": name, "domain": env.domain, "description": env.description}
+                    for name, env in environments.items()
+                ]
+            )
+        )
+        return
+
+    if not environments:
+        rich.print("[yellow]No environments found.[/yellow]")
+        return
+
+    table = Table(title=f"Available environments in NeMo Gym ({len(environments)})")
+    table.add_column("Environment")
+    table.add_column("Domain")
+    table.add_column("Description")
+    for name, environment in environments.items():
+        table.add_row(name, environment.domain or "", environment.description or "")
+
+    rich.print(table)
 
 
 def status():  # pragma: no cover
