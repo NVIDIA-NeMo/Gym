@@ -31,7 +31,7 @@ mcqa_simple_agent:
       - name: validation
         type: validation
         jsonl_fpath: resources_servers/mcqa/data/validation.jsonl
-        # Unified dataset source. `type` selects the backend (gitlab | huggingface); here the split
+        # Unified dataset source. `type` selects the backend; here the split
         # is pulled from the HuggingFace Hub. `artifact_fpath` is optional for huggingface sources.
         source:
           type: huggingface
