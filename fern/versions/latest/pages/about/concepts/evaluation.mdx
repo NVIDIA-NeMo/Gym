@@ -10,13 +10,15 @@ position: 1.6
 
 **Read first**: [Environments](/about/concepts/environments) — what an environment is and how it decomposes into dataset, agent harness, verifier, and state.
 
+For the end-to-end workflow, see [Evaluation](/evaluation).
+
 </Info>
 
 ## What is Evaluation?
 
 Evaluation is the entire process of running an agent on tasks, scoring the results and measuring performance. It exists to guide improvements to the AI pipeline — evaluation scores give information on what's working, what's not, and where to focus next.
 
-Model performance has many different dimensions, and evaluation can be used to measure them: from the model's accuracy, or any other similar definition of inteligence, to the quality of its tool calling, the confidence in operating in a specific environment, and even latency or token usage.
+Model performance has many different dimensions, and evaluation can be used to measure them: from the model's accuracy, or any other similar definition of intelligence, to the quality of its tool calling, the confidence in operating in a specific environment, and even latency or token usage.
 
 The process of evaluating entails different components. For example: to evaluate how accurate a coding agent is at fixing bugs, the following are needed:
 - The model (in Gym, accessed by deploying the **model server**)
@@ -24,14 +26,6 @@ The process of evaluating entails different components. For example: to evaluate
 - A set of real bugs to test against (the dataset, integrated into the **environment** in the **resources server**)
 - A sandbox with the code repository for the agent to work in (**state**, that exists in an **environment** in the **resources server**)
 - A test suite to check if the fix actually works (**verifier**, contained in the **environment**)
-
-## Environments vs Benchmarks
-
-An **environment** is the executable task setup: dataset, resources server, verifier, state, tools, and the agent interaction pattern. It defines what the agent can do and how each attempt is scored.
-
-A **benchmark** is a repeatable evaluation built on top of an environment. It fixes the dataset, the metrics being tracked and the comparison protocol, so different models or harnesses can be compared fairly.
-
-Not every environment is a benchmark. Some environments are used mainly for training data or harness development. Conversely, a benchmark may use one environment with a fixed split, or a curated subset of an environment selected for a specific capability.
 
 ## Environments vs Benchmarks
 
