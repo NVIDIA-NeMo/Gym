@@ -27,4 +27,4 @@ pi_agent:
             models:
             - id: nvidia/qwen/qwen3-next-80b-a3b-instruct
               reasoning: false
-      pi_version: null
+      pi_version: 0.80.2

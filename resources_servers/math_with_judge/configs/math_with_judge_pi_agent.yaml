@@ -22,6 +22,7 @@ math_with_judge_pi_agent:
       concurrency: 8
       command: pi
       model: nvinf/nvidia/qwen/qwen3-next-80b-a3b-instruct
+      pi_version: 0.80.2
       timeout: 600
       system_prompt: |
         You are a precise math assistant with a bash tool. Run python3 to compute or verify numeric

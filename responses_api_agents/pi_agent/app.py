@@ -207,7 +207,7 @@ class PiAgent(SimpleResponsesAPIAgent):
         return root
 
     def _env(self, home: Path) -> dict[str, str]:
-        env = {**os.environ, "HOME": str(home)}
+        env = {**os.environ, "HOME": str(home), "PI_SKIP_VERSION_CHECK": "1", "PI_TELEMETRY": "0"}
         env.update({k: v for k, v in self.config.env.items() if v})
         return env
 
