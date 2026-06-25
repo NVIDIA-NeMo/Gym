@@ -90,6 +90,10 @@ totals = aggregate_rollout_metrics(store, rollout_id)
 items = assemble_rollout(store, rollout_id)
 ```
 
+## In the rollout record
+
+When rollouts are collected with capture enabled, `rollout_collection` folds each rollout's captured trajectory into its record as `ng_trajectory_capture = {rollout_id, metrics, steps}` — the **same shape for every agent harness** (raw request/response are excluded; they remain in the capture store). The capture is authoritative for per-step model-call stats; the harness output and reward on the record are untouched. Resume re-dispatch attempts are keyed separately via an `-a<n>` rollout-id suffix, so a retry's trajectory stays distinct from the prior attempt's.
+
 ## Scope
 
 Trajectory capture serves **evaluation and observability**. The assembled trajectory is the content view (messages, tool calls, reasoning); it intentionally does **not** surface token IDs or log-probs. On-policy token-ID trajectories for RL training are produced separately and consume this same capture — see [On-policy corrections](/contribute/rl-framework-integration/openai-compatible-http-server-on-policy-correction).

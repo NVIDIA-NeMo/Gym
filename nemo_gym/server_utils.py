@@ -60,6 +60,7 @@ from nemo_gym.config_types import (
     BaseServerConfig,
 )
 from nemo_gym.global_config import (
+    ATTEMPT_INDEX_KEY_NAME,
     DRY_RUN_KEY_NAME,
     HEAD_SERVER_KEY_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
@@ -801,7 +802,10 @@ def rollout_id_from_run_body(body: Any) -> Optional[str]:
     """Per-rollout capture id from a run-request's task/rollout indices (``None`` when absent).
 
     Reads the canonical row keys (``_ng_task_index`` / ``_ng_rollout_index``) that
-    rollout_collection ships to an agent's ``/run``.
+    rollout_collection ships to an agent's ``/run``. When a resume re-dispatch attempt is present
+    (``_ng_attempt_index`` > 0), an ``-a<n>`` suffix is appended so a retry's captured trajectory
+    stays separable from the prior attempt; the first attempt (0) keeps the bare ``<task>-<rollout>``
+    key for backward compatibility.
     """
     if hasattr(body, "model_dump"):
         data = body.model_dump()
@@ -813,4 +817,11 @@ def rollout_id_from_run_body(body: Any) -> Optional[str]:
     rollout = data.get(ROLLOUT_INDEX_KEY_NAME)
     if task is None or rollout is None:
         return None
-    return f"{task}-{rollout}"
+    rollout_id = f"{task}-{rollout}"
+    attempt = data.get(ATTEMPT_INDEX_KEY_NAME)
+    try:
+        if attempt is not None and int(attempt) > 0:
+            rollout_id = f"{rollout_id}-a{int(attempt)}"
+    except (TypeError, ValueError):
+        pass
+    return rollout_id
