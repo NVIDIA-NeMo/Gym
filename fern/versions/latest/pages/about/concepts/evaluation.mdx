@@ -6,18 +6,9 @@ position: 1.6
 
 <Info>
 
-<<<<<<< HEAD
-This page covers the basic concepts of model evaluation. For the practical workflow, artifacts, and metrics used in NeMo Gym runs, read the full [Evaluation](/evaluation) section.
-
-=======
->>>>>>> 0dbfe164 (improving text from codex)
 **Goal**: Understand what evaluation is, how to evaluate agents and models, and what makes a good evaluation.
 
-This page covers the basic concepts of model evaluation. For the practical workflow, artifacts, and metrics used in NeMo Gym runs, read the full [Evaluation](/evaluation) section next.
-
 **Read first**: [Environments](/about/concepts/environments) — what an environment is and how it decomposes into dataset, agent harness, verifier, and state.
-
-**Read next**: [Evaluation](/evaluation) — how to run repeatable evaluations and interpret the outputs.
 
 </Info>
 
@@ -33,7 +24,6 @@ The process of evaluating entails different components. For example: to evaluate
 - A set of real bugs to test against (the dataset, integrated into the **environment** in the **resources server**)
 - A sandbox with the code repository for the agent to work in (**state**, that exists in an **environment** in the **resources server**)
 - A test suite to check if the fix actually works (**verifier**, contained in the **environment**)
-<<<<<<< HEAD
 
 ## Environments vs Benchmarks
 
@@ -42,8 +32,6 @@ An **environment** is the executable task setup: dataset, resources server, veri
 A **benchmark** is a repeatable evaluation built on top of an environment. It fixes the dataset, the metrics being tracked and the comparison protocol, so different models or harnesses can be compared fairly.
 
 Not every environment is a benchmark. Some environments are used mainly for training data or harness development. Conversely, a benchmark may use one environment with a fixed split, or a curated subset of an environment selected for a specific capability.
-=======
->>>>>>> 0dbfe164 (improving text from codex)
 
 ## Environments vs Benchmarks
 
