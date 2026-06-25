@@ -17,7 +17,6 @@ from pathlib import Path
 from pytest import raises
 
 from nemo_gym.agent_registry import (
-    AGENTS_DIR,
     AgentEntry,
     AgentNotComposableError,
     AgentNotFoundError,
@@ -223,4 +222,4 @@ class TestRealAgents:
     def test_agent_entry_is_hashable(self) -> None:
         entry = AgentEntry(name="a", path=Path("a"), config_paths=(Path("a/configs/a.yaml"),), self_contained=True)
         assert {entry: 1}[entry] == 1
-        assert entry.path == AGENTS_DIR / "a" or True  # AGENTS_DIR import exercised
+        assert entry.variants == {"a": Path("a/configs/a.yaml")}

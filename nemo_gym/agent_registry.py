@@ -22,13 +22,13 @@ environment or references a separate resources server.
 
 - **References a separate resources server (Pattern A):** the config sets
   ``responses_api_agents.<type>.resources_server``, so the harness is reusable and must be wired to a
-  *compatible* resources server + dataset (e.g. the ``simple_agent`` tool-use pattern, the
-  ``gymnasium`` pattern). Harnesses compose *within* a pattern, not across it; which
-  harness↔resources-server pairings are actually compatible is decided by the config composer's
-  compatibility guard, NOT by this registry.
+  *compatible* resources server + dataset (e.g. the ``simple_agent`` tool-use pattern). Harnesses
+  compose *within* a pattern, not across it; which harness↔resources-server pairings are actually
+  compatible is decided by the config composer's compatibility guard, NOT by this registry.
 - **Self-contained (Pattern B):** the harness bundles its own environment/framework or external LLM
   loop (``agent_framework``; e.g. ``swe_agents``, ``harbor_agent``, ``verifiers_agent``,
-  ``claude_code_agent``) and runs with its own config rather than wired to a separate environment.
+  ``claude_code_agent``, and ``gymnasium``-style agents that ship their own env) and runs with its
+  own config rather than wired to a separate environment.
 
 Discovery only reads config files; it never resolves interpolations or missing values and never
 starts servers, so it is safe to call when secrets/API keys referenced by a config are unset.

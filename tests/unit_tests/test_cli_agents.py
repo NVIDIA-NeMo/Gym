@@ -75,12 +75,3 @@ class TestListAgents:
         assert by_name["simple_agent"]["pattern"] == "A (composable)"
         assert by_name["swe_agents"]["self_contained"] is True
         assert by_name["swe_agents"]["variants"] == ["swebench_openhands"]
-
-    def test_query_filters(self, capsys) -> None:
-        with (
-            patch("nemo_gym.cli.agents.get_global_config_dict", return_value=_mock_global_config({"query": "swe"})),
-            patch("nemo_gym.cli.agents.discover_agents", return_value=_AGENTS),
-        ):
-            list_agents()
-        out = capsys.readouterr().out
-        assert "swe_agents" in out and "simple_agent" not in out

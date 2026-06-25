@@ -21,15 +21,9 @@ from nemo_gym.agent_registry import discover_agents
 from nemo_gym.config_types import BaseNeMoGymCLIConfig
 from nemo_gym.global_config import (
     JSON_OUTPUT_KEY_NAME,
-    QUERY_KEY_NAME,
     GlobalConfigDictParserConfig,
     get_global_config_dict,
 )
-
-
-def _fuzzy_matches(query: str, *fields: str) -> bool:
-    needle = query.lower()
-    return any(needle in (field or "").lower() for field in fields)
 
 
 def list_agents() -> None:
@@ -49,12 +43,6 @@ def list_agents() -> None:
 
     agents = discover_agents()
 
-    query = global_config_dict.get(QUERY_KEY_NAME)
-    if query:
-        agents = {
-            name: entry for name, entry in agents.items() if _fuzzy_matches(query, name, entry.description or "")
-        }
-
     if global_config_dict.get(JSON_OUTPUT_KEY_NAME, False):
         payload = [
             {
@@ -70,7 +58,7 @@ def list_agents() -> None:
         return
 
     if not agents:
-        rich.print("No agents found." if not query else f"No agents match {query!r}.")
+        rich.print("No agents found.")
         return
 
     table = Table(title="NeMo Gym agents")
